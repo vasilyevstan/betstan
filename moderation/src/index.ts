@@ -5,7 +5,7 @@ import EventResultListener from "./event/listener/EventResultListener";
 import PlaceBetListener from "./event/listener/PlaceBetListener";
 
 const startUp = async () => {
-  console.log("Starting...");
+  console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
   }

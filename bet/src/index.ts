@@ -8,7 +8,7 @@ import SettleSlipRowListener from "./event/listener/SettleSlipRowListener";
 import SettleSlipListener from "./event/listener/SettleSlipListener";
 
 const startUp = async () => {
-  console.log("Starting...");
+  console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
   }

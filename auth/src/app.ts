@@ -10,7 +10,6 @@ import { newUser } from "./route/NewUser";
 
 const app = express();
 app.set("trust proxy", true);
-// app.use(logger);
 app.use(json());
 app.use(
   cookieSession({
