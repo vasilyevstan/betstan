@@ -1,6 +1,8 @@
 FROM node:18-alpine
-WORKDIR /app
-COPY package.json .
-RUN npm install --omit=dev
-COPY . .
-CMD [ "npm", "run", "dev" ]
+ENV CI=true
+ENV WDS_SOCKET_PORT=0
+WORKDIR /usr/app
+COPY package*.json ./
+RUN npm install
+COPY ./ ./
+CMD ["npm", "start"]
