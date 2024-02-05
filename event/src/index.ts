@@ -6,7 +6,7 @@ import EventResultListener from "./messaging/listener/EventResultListener";
 import EventVisibilityListener from "./messaging/listener/EventVisibilityListener";
 
 const startUp = async () => {
-  console.log("Starting...");
+  console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
   }

@@ -3,12 +3,8 @@ import { app } from "./app";
 import OddsClickedListener from "./event/listener/OddsClickedListener";
 import mongoose from "mongoose";
 
-// app.post("/api/slip", (req: Request, res) => {
-//   console.log(req.body);
-//   res.sendStatus(200);
-// });
-
 const startUp = async () => {
+  console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
   }

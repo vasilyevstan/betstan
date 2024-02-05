@@ -15,7 +15,6 @@ spec:
       containers:
         - name: gaming-moderation
           image: stanvasilyev/gaming_moderation
-          # image: us.gcr.io/gaming-node-js-course/gaming_auth
           env:
             - name: MONGO_URI
               value: "mongodb://gaming-moderation-mongo-srv:27017/gaming_moderation"
