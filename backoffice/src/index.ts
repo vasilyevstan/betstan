@@ -4,7 +4,7 @@ import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 
 const startUp = async () => {
-  console.log("Starting...");
+  console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
   }
