@@ -71,5 +71,6 @@ build:
 manifests:
   rawYaml:
     - ./infra/k8s/*.yaml
+    - ./infra/k8s-dev/*.yaml
 deploy:
   kubectl: {}
