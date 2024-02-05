@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-bet-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-bet-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-bet-mongo
+    spec:
+      containers:
+        - name: gaming-bet-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-bet-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-bet-mongo
+  ports:
+    - name: gaming-bet-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

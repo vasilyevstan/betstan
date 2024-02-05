@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-backoffice-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-backoffice-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-backoffice-mongo
+    spec:
+      containers:
+        - name: gaming-backoffice-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-backoffice-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-backoffice-mongo
+  ports:
+    - name: gaming-backoffice-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

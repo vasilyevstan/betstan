@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-backoffice-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-backoffice
+  template:
+    metadata:
+      labels:
+        app: gaming-backoffice
+    spec:
+      containers:
+        - name: gaming-backoffice
+          image: stanvasilyev/gaming_backoffice
+          # image: us.gcr.io/gaming-node-js-course/gaming_auth
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-backoffice-mongo-srv:27017/gaming_backoffice"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-backoffice-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-backoffice
+  ports:
+    - name: gaming-backoffice
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

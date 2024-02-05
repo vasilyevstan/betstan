@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-slip-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-slip-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-slip-mongo
+    spec:
+      containers:
+        - name: gaming-slip-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-slip-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-slip-mongo
+  ports:
+    - name: gaming-slip-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-slip-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-slip
+  template:
+    metadata:
+      labels:
+        app: gaming-slip
+    spec:
+      containers:
+        - name: gaming-slip
+          image: stanvasilyev/gaming_slip
+          # image: us.gcr.io/gaming-node-js-course/gaming_auth
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-slip-mongo-srv:27017/gaming_slip"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-slip-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-slip
+  ports:
+    - name: gaming-slip
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-bet-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-bet
+  template:
+    metadata:
+      labels:
+        app: gaming-bet
+    spec:
+      containers:
+        - name: gaming-bet
+          image: stanvasilyev/gaming_bet
+          # image: us.gcr.io/gaming-node-js-course/gaming_auth
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-bet-mongo-srv:27017/gaming_bet"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-bet-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-bet
+  ports:
+    - name: gaming-bet
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

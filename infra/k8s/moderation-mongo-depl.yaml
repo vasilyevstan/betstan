@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-moderation-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-moderation-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-moderation-mongo
+    spec:
+      containers:
+        - name: gaming-moderation-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-moderation-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-moderation-mongo
+  ports:
+    - name: gaming-moderation-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

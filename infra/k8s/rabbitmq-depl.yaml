@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-rabbitmq-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-rabbitmq
+  template:
+    metadata:
+      labels:
+        app: gaming-rabbitmq
+    spec:
+      containers:
+        - name: gaming-rabbitmq
+          image: rabbitmq:3.12.10-management
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-rabbitmq-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-rabbitmq
+  ports:
+    - name: gaming-rabbitmq-port
+      protocol: TCP
+      port: 5672
+      targetPort: 5672
+    - name: gaming-rabbitmq-mgmt-port
+      protocol: TCP
+      port: 15672
+      targetPort: 15672

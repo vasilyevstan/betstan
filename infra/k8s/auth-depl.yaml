@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-auth-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-auth
+  template:
+    metadata:
+      labels:
+        app: gaming-auth
+    spec:
+      containers:
+        - name: gaming-auth
+          image: stanvasilyev/gaming_auth
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-auth-mongo-srv:27017/gaming_auth"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-auth-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-auth
+  ports:
+    - name: gaming-auth
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

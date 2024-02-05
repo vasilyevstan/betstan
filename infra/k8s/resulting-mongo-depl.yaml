@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-resulting-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-resulting-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-resulting-mongo
+    spec:
+      containers:
+        - name: gaming-resulting-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-resulting-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-resulting-mongo
+  ports:
+    - name: gaming-resulting-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

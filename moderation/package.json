@@ -1,0 +1,19 @@
+{
+  "name": "moderation",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "ts-node-dev src/index",
+    "dev": "ts-node-dev src/index"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@betstan/common": "^1.0.46",
+    "mongoose": "^8.0.4",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.3"
+  }
+}
