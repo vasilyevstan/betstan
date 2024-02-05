@@ -21,7 +21,7 @@ const Header = ({currentUser}) => {
      const greetings = (currentUser) ? `welcome, ${currentUser.email}` : '';
 
     return <nav className="navbar navbar-light sticky-top bg-dark bg-gradient" style={{ height: '75px'}}> 
-        <Link className="navbar-brand mb-0 h1" to='/'>Betstan</Link>
+        <Link className="navbar-brand mb-0 h1" to='/'>BetStan</Link>
         {greetings}
 
         <div className="d-flex justify-content-end">
