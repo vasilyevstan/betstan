@@ -5,9 +5,9 @@ const Header = ({currentUser}) => {
    
 
     const links = [
+        { label: 'Backoffice', href: '/backoffice', options: ' '},
         !currentUser && { label: 'Create account', href: '/signup'},
         !currentUser && { label: 'Log in', href: '/login'},
-        currentUser && { label: 'Backoffice', href: '/backoffice', options: ' '},
         currentUser && { label: 'My bets', href: '/bets', options: ''},
          currentUser && { label: 'Log out', href: '/logout'}
      ]
