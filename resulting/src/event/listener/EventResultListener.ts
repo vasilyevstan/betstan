@@ -27,13 +27,6 @@ class EventResultListener extends AListener<IEventResultEvent> {
         ? data.away
         : "draw";
 
-    // console.log("bets to validate", bets);
-    // console.log(
-    //   "event result by product",
-    //   oneCrossTwoResult,
-    //   correctScoreResult
-    // );
-
     const settleSlipRowPublisher = new SettleSlipRowPublisher(
       messengerWrapper.connection
     );
@@ -44,50 +37,51 @@ class EventResultListener extends AListener<IEventResultEvent> {
     );
     await settleSlipPublisher.init();
 
-    bets.map(async (bet) => {
+    for (const bet of bets) {
       let betLost = false;
       let settledRows = 0;
 
-      bet.rows.map(async (row) => {
-        if (row.eventId !== data.eventId) {
-          if (row.result === ResultingStatus.ROW_WIN) settledRows++;
+      for (const row of bet.rows) {
+        try {
+          if (row.eventId !== data.eventId) {
+            if (row.result === ResultingStatus.ROW_WIN) settledRows++;
+            continue;
+          }
 
-          return;
+          settledRows++;
+
+          if (row.result !== ResultingStatus.ROW_NO_RESULT) continue;
+
+          switch (row.productName) {
+            case "1X2":
+              if (row.oddsName == oneCrossTwoResult) {
+                row.result = ResultingStatus.ROW_WIN;
+              } else {
+                row.result = ResultingStatus.ROW_LOSS;
+                betLost = true;
+              }
+              break;
+            case "Correct Score":
+              if (row.oddsName === correctScoreResult) {
+                row.result = ResultingStatus.ROW_WIN;
+              } else {
+                row.result = ResultingStatus.ROW_LOSS;
+                betLost = true;
+              }
+              break;
+          }
+
+          await settleSlipRowPublisher.publish({
+            data: {
+              slipId: bet.slipId,
+              slipRowId: row.id,
+              result: row.result,
+            },
+          });
+        } catch (error) {
+          console.error("Error processing row:", error);
         }
-
-        settledRows++;
-
-        if (row.result !== ResultingStatus.ROW_NO_RESULT) return;
-
-        switch (row.productName) {
-          case "1X2":
-            if (row.oddsName == oneCrossTwoResult) {
-              row.result = ResultingStatus.ROW_WIN;
-            } else {
-              row.result = ResultingStatus.ROW_LOSS;
-              betLost = true;
-            }
-            break;
-          case "Correct Score":
-            if (row.oddsName === correctScoreResult) {
-              row.result = ResultingStatus.ROW_WIN;
-            } else {
-              row.result = ResultingStatus.ROW_LOSS;
-              betLost = true;
-            }
-            break;
-        }
-
-        settleSlipRowPublisher.publish({
-          data: {
-            slipId: bet.slipId,
-            slipRowId: row.id,
-            result: row.result,
-          },
-        });
-      });
-
-      console.log("settled rows", settledRows, bet.rows.length, betLost);
+      }
 
       if (settledRows === bet.rows.length && !betLost) {
         bet.status = ResultingStatus.BET_WIN;
@@ -95,20 +89,23 @@ class EventResultListener extends AListener<IEventResultEvent> {
         bet.status = ResultingStatus.BET_LOSS;
       }
 
-      if (bet.isModified()) {
-        // console.log("bet was modified", bet.id);
-        await bet.save();
+      try {
+        if (bet.isModified()) {
+          await bet.save();
 
-        if (bet.status !== ResultingStatus.BET_APPROVED) {
-          settleSlipPublisher.publish({
-            data: {
-              slipId: bet.slipId,
-              result: bet.status,
-            },
-          });
+          if (bet.status !== ResultingStatus.BET_APPROVED) {
+            await settleSlipPublisher.publish({
+              data: {
+                slipId: bet.slipId,
+                result: bet.status,
+              },
+            });
+          }
         }
+      } catch (error) {
+        console.error("Error saving bet:", error);
       }
-    });
+    }
 
     this.channel.ack(msg);
   }
