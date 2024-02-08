@@ -3,9 +3,9 @@ import axios from 'axios'
 import EventList from './pages/event/EventList'
 import Header from './Header'
 import { Route, Routes } from 'react-router-dom';
-import SignUp from './pages/auth/NewUser';
-import SignOut from './pages/auth/LogOut';
-import SignIn from './pages/auth/LogIn';
+import NewUser from './pages/auth/NewUser';
+import LogOut from './pages/auth/LogOut';
+import LogIn from './pages/auth/LogIn';
 import Backoffice from './pages/account/Backoffice'
 import MyBets from './pages/account/MyBets'
 import Slip from './pages/Slip';
@@ -57,9 +57,9 @@ const App = () => {
             <div className="col">
                 <Routes>
                     <Route path='/' element={<EventList sliprefresh={slipRefresh} /> } />
-                    <Route path='/signup' element={<SignUp callback={elementCallback} />}  />
-                    <Route path='/logout' element={<SignOut callback={elementCallback} />}  />
-                    <Route path='/login' element={<SignIn callback={elementCallback} />}  />
+                    <Route path='/signup' element={<NewUser callback={elementCallback} />}  />
+                    <Route path='/logout' element={<LogOut callback={elementCallback} />}  />
+                    <Route path='/login' element={<LogIn callback={elementCallback} />}  />
                     <Route path='/backoffice' element={<Backoffice key={backOfficeKeyValue} refresh={backOfficeRefresh} />}  />
                     <Route path='/bets' element={<MyBets />}  />
                     <Route path="*" element={<EventList sliprefresh={slipRefresh} />} />

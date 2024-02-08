@@ -4,9 +4,13 @@ import axios from "axios";
 const Handle1X2 = ({eventId, product, sliprefresh, resulted }) => {
 
   const handleClick = async (productId, oddsId) => {
-    await axios.post('/api/event/odds', {productId, oddsId, eventId});
+    try {
+      await axios.post('/api/event/odds', {productId, oddsId, eventId});
 
-    sliprefresh();
+      sliprefresh();
+    } catch (error) {
+      // ignore
+    }
   }
 
 // console.log('in 1x2', product);

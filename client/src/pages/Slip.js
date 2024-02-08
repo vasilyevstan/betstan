@@ -7,10 +7,13 @@ const HandleSlip = ({sliprefresh, statsrefresh, currentUser}) => {
     const [wager, setWager] = useState({});
 
     const fetchSlip = async () => {
-        const res = await axios.get('/api/slip');
+        try {
+            const res = await axios.get('/api/slip');
 
-        setSlip(res.data);
-        // console.log('Slip', res.data);
+            setSlip(res.data);
+        } catch (error) {
+            // ignore
+          }
     }
 
     useEffect(() => {
@@ -27,9 +30,13 @@ const HandleSlip = ({sliprefresh, statsrefresh, currentUser}) => {
         const slipId = event.currentTarget.getAttribute("slipid");
         const slipRowId = event.currentTarget.getAttribute("sliprowid");
         
-        await axios.post('/api/slip/row', { slipId, slipRowId });
+        try {
+            await axios.post('/api/slip/row', { slipId, slipRowId });
 
-        sliprefresh();
+            sliprefresh();
+        } catch (error) {
+            // ignore
+        }
     }
 
     const cleanSlip = async (event) => {
@@ -37,9 +44,13 @@ const HandleSlip = ({sliprefresh, statsrefresh, currentUser}) => {
         event.preventDefault();
         const slipId = event.currentTarget.getAttribute("slipid");
 
-        await axios.post('/api/slip/row/clean', { slipId });
+        try {
+            await axios.post('/api/slip/row/clean', { slipId });
 
-        sliprefresh();
+            sliprefresh();
+        } catch (error) {
+            // ignore
+        }
     }
 
     const placeBet = async (event) => {
@@ -49,10 +60,15 @@ const HandleSlip = ({sliprefresh, statsrefresh, currentUser}) => {
         const wager = event.currentTarget.getAttribute("wager");
 
         if (wager > 0) {
-            await axios.post('/api/slip/bet', { slipId, wager });
 
-            sliprefresh();
-            statsrefresh();
+            try {
+                await axios.post('/api/slip/bet', { slipId, wager });
+
+                sliprefresh();
+                statsrefresh();
+            } catch (error) {
+                // ignore
+            }
         }
     }
 

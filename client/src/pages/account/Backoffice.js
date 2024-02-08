@@ -9,9 +9,13 @@ const HandleBackoffice = ({refresh}) => {
     const [newEventAway, setNewEventAway] = useState('');
 
     const fetchEvents = async () => {
-        const res = await axios.get('/api/backoffice');
+        try {
+          const res = await axios.get('/api/backoffice');
 
-        setEvents(res.data);
+          setEvents(res.data);
+        } catch (error) {
+          // ignore
+        }
     }
 
     useEffect(() => {

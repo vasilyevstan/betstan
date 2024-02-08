@@ -2,7 +2,7 @@ import express from "express";
 import { json } from "body-parser";
 import { ListllEvents } from "./route/ListAllEvents";
 import { EventOddsClicked } from "./route/EventOddsClicked";
-import { currentUser, errorHandler } from "@betstan/common";
+import { BadRequestError, currentUser, errorHandler } from "@betstan/common";
 import cookieSession from "cookie-session";
 
 const cors = require("cors");
@@ -21,6 +21,10 @@ app.use(currentUser);
 
 app.use(ListllEvents);
 app.use(EventOddsClicked);
+
+app.all("*", async (req, res, next) => {
+  throw new BadRequestError("");
+});
 
 app.use(errorHandler);
 

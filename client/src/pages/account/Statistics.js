@@ -7,9 +7,13 @@ const HandleUserStatistics = () => {
     const [betsForStats, setBetsForStats] = useState({});
 
     const fetchBets = async () => {
+      try {
         const res = await axios.get('/api/bet/stats');
 
         setBetsForStats(res.data);
+      } catch (error) {
+        // ignore
+      }
     }
 
     useEffect(() => {
