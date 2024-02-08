@@ -8,9 +8,13 @@ const HandleMyBetsList = () => {
     const [bets, setBets] = useState({});
 
     const fetchBets = async () => {
+      try {
         const res = await axios.get('/api/bet');
 
         setBets(res.data);
+      } catch (error) {
+        // ignore
+      }
     }
 
     useEffect(() => {

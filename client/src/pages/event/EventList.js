@@ -7,9 +7,13 @@ const HandleEventList = ({sliprefresh}) => {
     const [events, setEvents] = useState({});
 
     const fetchEvents = async () => {
-        const res = await axios.get('/api/event');
+        try {
+            const res = await axios.get('/api/event');
 
-        setEvents(res.data);
+            setEvents(res.data);
+        } catch (error) {
+            // ignore
+          }
     }
 
     useEffect(() => {
