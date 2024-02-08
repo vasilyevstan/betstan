@@ -112,5 +112,3 @@ class EventResultListener extends AListener<IEventResultEvent> {
 }
 
 export default EventResultListener;
-
-// [gaming-resulting] Recieved: {"data":{"userId":"659f143572631e10e435467b","userName":"ytrewq","slipId":"65bcc94431583acf96bf75f3","wager":"2","rows":[{"eventId":"65bcc939a4e51980b196297e","eventName":"stan - not stan","oddsId":"58432aeb-2a36-4d9b-b562-e89c7f540c7f","oddsValue":4.54,"oddsName":"draw","productName":"1X2","productId":"951c83d7-6eb0-4956-8e96-c1c3e59cc5c0","timestamp":"2024-02-02T10:51:48.402Z","id":"65bcc94431583acf96bf75f4"},{"eventId":"65bcc939a4e51980b196297e","eventName":"stan - not stan","oddsId":"31583356-04f1-48f0-82ba-1c576e8b85ab","oddsValue":1.85,"oddsName":"6 - 4","productName":"Correct Score","productId":"47369489-456b-45c8-9f54-6d84c5739234","timestamp":"2024-02-02T10:51:48.961Z","id":"65bcc94431583acf96bf75fa"}]},"timestamp":"2024-02-02T10:51:53.016Z","sender":"slip_place_bet"} from queue slip:bet
