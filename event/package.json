@@ -11,7 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@betstan/common": "^1.0.46",
+    "@betstan/common": "^1.0.51",
     "@faker-js/faker": "^8.2.0",
     "@types/amqplib": "^0.10.4",
     "@types/cookie-session": "^2.0.48",
