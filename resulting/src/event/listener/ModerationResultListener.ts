@@ -18,6 +18,7 @@ class PlaceBetListener extends AListener<IModerationResultEvent> {
     const bet = await Bet.findOne({ slipId: data.slipId });
 
     if (!bet) {
+      this.channel.nack(msg, undefined, true);
       return;
       // throw new Error("No bet exists");
     }
