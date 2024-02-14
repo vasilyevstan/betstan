@@ -19,6 +19,7 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
 
     if (!bet) {
       // do not ack, handle concurrency
+      this.channel.nack(msg, undefined, true);
       return;
     }
 

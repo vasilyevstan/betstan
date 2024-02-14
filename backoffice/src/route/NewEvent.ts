@@ -11,6 +11,11 @@ router.post(
   async (req: Request, res: Response) => {
     const { home, away } = req.body;
 
+    if (!home || !away) {
+      res.send({});
+      return;
+    }
+
     const event = new Event({
       eventId: new mongoose.Types.ObjectId().toHexString(),
       name: `${home} - ${away}`,
