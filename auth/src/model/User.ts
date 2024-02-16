@@ -10,6 +10,10 @@ const userSchema = new Schema({
     type: String,
     required: true,
   },
+  timestamp: {
+    type: String,
+    required: false,
+  },
 });
 
 userSchema.pre("save", async function (done) {
