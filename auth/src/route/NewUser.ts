@@ -26,7 +26,11 @@ router.post(
       throw new BadRequestError("Email is in use");
     }
 
-    const user = await User.create({ email, password });
+    const user = await User.create({
+      email,
+      password,
+      timestamp: new Date().toISOString(),
+    });
     await user.save();
 
     // generate jwt
