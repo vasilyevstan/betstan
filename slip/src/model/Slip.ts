@@ -55,5 +55,6 @@ const slipSchema = new Schema({
 });
 
 const Slip = model("Slip", slipSchema);
+const SlipArchive = model("SlipArchive", slipSchema);
 
-export { Slip };
+export { Slip, SlipArchive };

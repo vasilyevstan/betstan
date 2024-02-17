@@ -88,5 +88,6 @@ const betSchema = new Schema({
 });
 
 const Bet = model("Bet", betSchema);
+const BetArchive = model("BetArchive", betSchema);
 
-export { Bet };
+export { Bet, BetArchive };
