@@ -6,7 +6,7 @@ import {
   ResultingStatus,
   messengerWrapper,
 } from "@betstan/common";
-import { Bet } from "../../model/Bet";
+import { Bet, BetArchive } from "../../model/Bet";
 import SettleSlipRowPublisher from "../publisher/SettleSlipRowPublisher";
 import SettleSlipPublisher from "../publisher/SettleSlipPublisher";
 
@@ -99,6 +99,16 @@ class EventResultListener extends AListener<IEventResultEvent> {
                 slipId: bet.slipId,
                 result: bet.status,
               },
+            });
+
+            const completedBets = await Bet.find({
+              status: bet.status,
+            }).lean();
+            completedBets.forEach(async (completedBet) => {
+              const archivedBet = new BetArchive(completedBet);
+              await archivedBet.save();
+
+              await Bet.deleteOne({ _id: completedBet._id });
             });
           }
         }
