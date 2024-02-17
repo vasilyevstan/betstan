@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { Slip } from "../model/Slip";
+import { Slip, SlipArchive } from "../model/Slip";
 import { SlipStatus, currentUser, messengerWrapper } from "@betstan/common";
 import PlaceBetEventPublisher from "../event/publisher/PlaceBetEventPublisher";
 
@@ -55,6 +55,16 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
         };
       }),
     },
+  });
+
+  const completedSlips = await Slip.find({
+    status: SlipStatus.COMPLETE,
+  }).lean();
+  completedSlips.forEach((completedSlip) => {
+    const archivedSlip = new SlipArchive(completedSlip);
+    archivedSlip.save();
+
+    Slip.deleteOne({ _id: completedSlip._id });
   });
 
   return res.sendStatus(200);
