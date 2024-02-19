@@ -11,7 +11,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
   const event = await Event.findOne({ eventId: eventId });
 
   if (!event) {
-    res.sendStatus(400).send({ message: "No event id" });
+    res.status(400).send({ message: "No event id" });
     return;
   }
 
