@@ -17,8 +17,6 @@ router.post(
   ],
   validateRequest,
   async (req: Request, res: Response) => {
-    console.log("body", body);
-
     const { email, password } = req.body;
     const existingUser = await User.findOne({ email });
 
@@ -38,6 +36,7 @@ router.post(
       {
         id: user.id,
         email: user.email,
+        timestamp: new Date(),
       },
       process.env.JWT_KEY!
     );
