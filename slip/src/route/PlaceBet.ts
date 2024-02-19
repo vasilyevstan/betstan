@@ -9,21 +9,21 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
   const { slipId, wager } = req.body;
 
   if (!req.currentUser) {
-    return res.sendStatus(400).send({ message: "must login first" });
+    return res.status(400).send({ message: "must login first" });
   }
 
   const slip = await Slip.findById(slipId);
 
   if (!slip) {
-    return res.sendStatus(400).send({ message: "slip does not exist" });
+    return res.status(400).send({ message: "slip does not exist" });
   }
 
   if (slip.userId != req.currentUser.id) {
-    return res.sendStatus(500).send({ message: "Forbidden" });
+    return res.status(500).send({ message: "Forbidden" });
   }
 
   if (!wager || wager < 0 || isNaN(wager)) {
-    return res.sendStatus(400).send({ message: "Wager must be a number" });
+    return res.status(400).send({ message: "Wager must be a number" });
   }
 
   // check for concurrency
