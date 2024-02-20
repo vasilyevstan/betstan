@@ -21,9 +21,9 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
     const correctScoreResult = data.homeScore + " - " + data.awayScore;
     const oneCrossTwoResult =
-      data.homeScore > data.awayScore
+      Number(data.homeScore) > Number(data.awayScore)
         ? data.home
-        : data.homeScore < data.awayScore
+        : Number(data.homeScore) < Number(data.awayScore)
         ? data.away
         : "draw";
 
