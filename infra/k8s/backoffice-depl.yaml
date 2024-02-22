@@ -15,6 +15,10 @@ spec:
       containers:
         - name: gaming-backoffice
           image: stanvasilyev/gaming_backoffice
+          livenessProbe:
+            initialDelaySeconds: 180
+            tcpSocket:
+              port: 3000
           # image: us.gcr.io/gaming-node-js-course/gaming_auth
           env:
             - name: MONGO_URI

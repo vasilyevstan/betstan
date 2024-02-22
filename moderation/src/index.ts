@@ -30,6 +30,40 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+
+    process.on("uncaughtException", async function (err) {
+      console.log("logging general error", err);
+      try {
+        await mongoose.connection.close();
+        await mongoose.disconnect();
+        await messengerWrapper.connection.close();
+        process.exit(1);
+      } catch (err) {
+        console.log("error inside error", err);
+      }
+    });
+
+    process.on("SIGINT", async () => {
+      try {
+        await mongoose.connection.close();
+        await mongoose.disconnect();
+        await messengerWrapper.connection.close();
+        process.exit(0);
+      } catch (err) {
+        console.log("error closing connections", err);
+      }
+    });
+
+    process.on("SIGTERM", async () => {
+      try {
+        await mongoose.connection.close();
+        await mongoose.disconnect();
+        await messengerWrapper.connection.close();
+        process.exit(0);
+      } catch (err) {
+        console.log("Error closing conection", err);
+      }
+    });
   } catch (err) {
     console.log(err);
   }

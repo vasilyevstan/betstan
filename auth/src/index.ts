@@ -17,8 +17,44 @@ const startUp = async () => {
     throw new Error();
   }
 
-  app.listen(3000, () => {
+  const server = app.listen(3000, () => {
     console.log("Listening on 3000");
+  });
+
+  process.on("uncaughtException", async function (err) {
+    console.log("logging general error", err);
+    try {
+      await mongoose.connection.close();
+      await mongoose.disconnect();
+
+      server.close();
+
+      process.exit(1);
+    } catch (err) {
+      console.log("error inside error", err);
+    }
+  });
+
+  process.on("SIGINT", async () => {
+    try {
+      await mongoose.connection.close();
+      await mongoose.disconnect();
+      server.close();
+      process.exit(0);
+    } catch (err) {
+      console.log("error closing connections", err);
+    }
+  });
+
+  process.on("SIGTERM", async () => {
+    try {
+      await mongoose.connection.close();
+      await mongoose.disconnect();
+      server.close();
+      process.exit(0);
+    } catch (err) {
+      console.log("Error closing conection", err);
+    }
   });
 };
 
