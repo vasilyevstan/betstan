@@ -16,7 +16,8 @@ spec:
         - name: gaming-backoffice
           image: stanvasilyev/gaming_backoffice
           livenessProbe:
-            initialDelaySeconds: 180
+            initialDelaySeconds: 1800
+            periodSeconds: 900
             tcpSocket:
               port: 3000
           # image: us.gcr.io/gaming-node-js-course/gaming_auth
