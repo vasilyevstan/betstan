@@ -15,6 +15,10 @@ spec:
       containers:
         - name: gaming-slip
           image: stanvasilyev/gaming_slip
+          livenessProbe:
+            initialDelaySeconds: 180
+            tcpSocket:
+              port: 3000
           # image: us.gcr.io/gaming-node-js-course/gaming_auth
           env:
             - name: MONGO_URI
