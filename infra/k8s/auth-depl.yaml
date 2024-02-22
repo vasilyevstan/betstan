@@ -16,7 +16,8 @@ spec:
         - name: gaming-auth
           image: stanvasilyev/gaming_auth
           livenessProbe:
-            initialDelaySeconds: 180
+            initialDelaySeconds: 1800
+            periodSeconds: 900
             tcpSocket:
               port: 3000
           env:
