@@ -15,11 +15,6 @@ spec:
       containers:
         - name: gaming-bet
           image: stanvasilyev/gaming_bet
-          livenessProbe:
-            initialDelaySeconds: 1800
-            periodSeconds: 900
-            tcpSocket:
-              port: 3000
           # image: us.gcr.io/gaming-node-js-course/gaming_auth
           env:
             - name: MONGO_URI
