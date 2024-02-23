@@ -70,6 +70,7 @@ const startUp = async () => {
   });
 
   process.on("SIGINT", async () => {
+    console.log("Received sigint command");
     try {
       await mongoose.connection.close();
       await mongoose.disconnect();
@@ -82,6 +83,7 @@ const startUp = async () => {
   });
 
   process.on("SIGTERM", async () => {
+    console.log("Received sigterm command");
     try {
       await mongoose.connection.close();
       await mongoose.disconnect();

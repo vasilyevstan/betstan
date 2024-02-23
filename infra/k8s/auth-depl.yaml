@@ -15,6 +15,11 @@ spec:
       containers:
         - name: gaming-auth
           image: stanvasilyev/gaming_auth
+          livenessProbe:
+            initialDelaySeconds: 1800
+            periodSeconds: 900
+            tcpSocket:
+              port: 3000
           env:
             - name: MONGO_URI
               value: "mongodb://gaming-auth-mongo-srv:27017/gaming_auth"
