@@ -28,6 +28,7 @@ router.post(
       email,
       password,
       timestamp: new Date().toISOString(),
+      lastLogin: new Date().toISOString(),
     });
     await user.save();
 
