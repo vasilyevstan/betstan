@@ -14,6 +14,10 @@ const userSchema = new Schema({
     type: String,
     required: false,
   },
+  lastLogin: {
+    type: String,
+    required: false,
+  },
 });
 
 userSchema.pre("save", async function (done) {

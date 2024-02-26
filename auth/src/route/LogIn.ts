@@ -42,6 +42,9 @@ router.post(
       jwt: userJwt,
     };
 
+    existingUser.set({ lastLogin: new Date().toISOString() });
+    await existingUser.save();
+
     res.status(200).send(existingUser);
   }
 );
