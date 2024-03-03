@@ -4,8 +4,19 @@ import { User } from "../model/User";
 import { Password } from "../service/Password";
 import jwt from "jsonwebtoken";
 import { BadRequestError, validateRequest } from "@betstan/common";
+import { LoginAttempt } from "../model/LoginAttempt";
 
 const router = express.Router();
+
+const logLoginAttempt = async (req: Request, email: string) => {
+  const loginAttempt = new LoginAttempt({
+    email,
+    timestamp: new Date().toISOString(),
+    origin: req.headers["x-forwarded-for"] || req.socket.remoteAddress,
+  });
+
+  await loginAttempt.save();
+};
 
 router.post(
   "/api/auth/login",
@@ -20,10 +31,12 @@ router.post(
     const existingUser = await User.findOne({ email });
 
     if (!existingUser) {
+      logLoginAttempt(req, email);
       throw new BadRequestError("Invalid credentials");
     }
 
     if (!(await Password.compare(existingUser.password, password))) {
+      logLoginAttempt(req, email);
       throw new BadRequestError("Invalid credentials");
     }
 
