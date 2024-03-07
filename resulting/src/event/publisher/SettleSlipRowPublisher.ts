@@ -1,9 +1,4 @@
-import {
-  APublisher,
-  IPlaceBetEvent,
-  ISettleSlipRowEvent,
-  QueueNames,
-} from "@betstan/common";
+import { APublisher, ISettleSlipRowEvent, QueueNames } from "@betstan/common";
 
 class SettleSlipRowPublisher extends APublisher<ISettleSlipRowEvent> {
   serviceName: string = "resulting_settle_slip_row";

@@ -43,14 +43,14 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
       for (const row of bet.rows) {
         try {
-          if (row.eventId !== data.eventId) {
-            if (row.result === ResultingStatus.ROW_WIN) settledRows++;
+          if (row.result !== ResultingStatus.ROW_NO_RESULT) {
+            settledRows++;
             continue;
           }
 
-          settledRows++;
-
-          if (row.result !== ResultingStatus.ROW_NO_RESULT) continue;
+          if (row.eventId !== data.eventId) {
+            continue;
+          }
 
           switch (row.productName) {
             case "1X2":
@@ -69,7 +69,12 @@ class EventResultListener extends AListener<IEventResultEvent> {
                 betLost = true;
               }
               break;
+            default:
+              // ignore - the product does not exist
+              continue;
           }
+
+          settledRows++;
 
           await settleSlipRowPublisher.publish({
             data: {
@@ -117,7 +122,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
       }
     }
 
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 
