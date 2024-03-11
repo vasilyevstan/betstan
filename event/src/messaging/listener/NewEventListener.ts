@@ -17,7 +17,12 @@ class NewEventListener extends AListener<INewEventEvent> {
     }
 
     // in the future all events and products must come from backoffice
-    const newEvent = new EventTemplate(data.id, data.home, data.away);
+    const newEvent = new EventTemplate(
+      data.id,
+      data.home,
+      data.away,
+      data.time
+    );
     const persistedEvent = await Event.create(newEvent);
     await persistedEvent.save();
 

@@ -8,13 +8,14 @@ const router = express.Router();
 
 const EVENT_COUNT = 24;
 
-const events: EventTemplate[] = [];
-const initEvents = () => {
+const initEvents = (): EventTemplate[] => {
+  const events: EventTemplate[] = [];
+
   for (let i = 0; i < EVENT_COUNT; i++) {
     events.push(new EventTemplate());
   }
 
-  // console.log(events);
+  return events;
 };
 
 router.get("/api/event", async (req: Request, res: Response) => {
@@ -23,7 +24,7 @@ router.get("/api/event", async (req: Request, res: Response) => {
 
   if (dbEvents.length === 0) {
     console.log("Generating events");
-    initEvents();
+    const events = initEvents();
 
     // temporary, events must come from the backoffice
     const publisher = new NewEventPublisher(messengerWrapper.connection);

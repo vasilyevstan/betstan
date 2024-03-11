@@ -9,12 +9,17 @@ class EventTemplate {
   time: Date;
   products: Product[] = [];
 
-  constructor(eventId?: string, homeTeam?: string, awayTeam?: string) {
+  constructor(
+    eventId?: string,
+    homeTeam?: string,
+    awayTeam?: string,
+    time?: string
+  ) {
     const home = homeTeam ? homeTeam : faker.location.city();
     const away = awayTeam ? awayTeam : faker.location.city();
     this.eventId = eventId ? eventId : faker.string.uuid();
     this.name = `${home} - ${away}`;
-    this.time = faker.date.anytime();
+    this.time = time ? new Date(time) : faker.date.soon();
     this.products.push(new Product1X2(home, away));
     this.products.push(new CorrectScore(home, away));
   }
