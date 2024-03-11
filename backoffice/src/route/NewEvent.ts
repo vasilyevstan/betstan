@@ -16,10 +16,13 @@ router.post(
       return;
     }
 
+    // all custom events will "run" in 30 minutes
+    const eventTime = new Date(new Date().getTime() + 30 * 60 * 1000);
+
     const event = new Event({
       eventId: new mongoose.Types.ObjectId().toHexString(),
       name: `${home} - ${away}`,
-      time: new Date().toISOString(),
+      time: eventTime.toISOString(),
       home: home,
       away: away,
       status: EventStatus.NO_RESULT,
