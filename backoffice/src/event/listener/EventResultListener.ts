@@ -10,24 +10,35 @@ import {
 import { Event } from "../../model/Event";
 
 class EventResultListener extends AListener<IEventResultEvent> {
-  serviceName: string = "event_result";
+  serviceName: string = "backoffice_result_set";
   queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
 
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 
+    if (event.sender === this.serviceName) {
+      // ignoring selfinflicted message
+      this.ack(msg);
+      return;
+    }
+
     const storedEvent = await Event.findOne({ eventId: data.eventId });
 
     if (!storedEvent) {
       console.log("event not found", event);
-      this.channel.ack(msg);
+      this.ack(msg);
       return;
     }
 
-    storedEvent.status = EventStatus.RESULTED;
-    storedEvent.visibility = EventVisibility.OFFLINE;
+    storedEvent.set({
+      homeResult: data.homeScore,
+      awayResult: data.awayScore,
+      status: EventStatus.RESULTED,
+      visibility: EventVisibility.OFFLINE,
+    });
+
     await storedEvent.save();
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 

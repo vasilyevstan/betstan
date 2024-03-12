@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-gamemaster-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-gamemaster-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-gamemaster-mongo
+    spec:
+      containers:
+        - name: gaming-gamemaster-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-gamemaster-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-gamemaster-mongo
+  ports:
+    - name: gaming-gamemaster-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-gamemaster-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-gamemaster
+  template:
+    metadata:
+      labels:
+        app: gaming-gamemaster
+    spec:
+      containers:
+        - name: gaming-gamemaster
+          image: stanvasilyev/gaming_gamemaster
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-gamemaster-mongo-srv:27017/gaming_gamemaster"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-gamemaster-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-gamemaster
+  ports:
+    - name: gaming-gamemaster
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
