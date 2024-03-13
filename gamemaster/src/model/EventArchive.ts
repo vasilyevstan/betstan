@@ -1,7 +1,7 @@
 import { EventStatus } from "@betstan/common";
 import { Schema, model } from "mongoose";
 
-const eventSchema = new Schema({
+const eventArchiveSchema = new Schema({
   eventId: {
     type: String,
     required: true,
@@ -34,6 +34,6 @@ const eventSchema = new Schema({
   },
 });
 
-const EventArchive = model("EventArchive", eventSchema);
+const EventArchive = model("EventArchive", eventArchiveSchema);
 
 export { EventArchive };

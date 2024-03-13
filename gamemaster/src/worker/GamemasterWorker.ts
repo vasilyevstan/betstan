@@ -14,72 +14,72 @@ const getRandomResult = () => {
   return Math.floor(Math.random() * (MAX_SCORE - MIN_SCORE + 1) + MIN_SCORE);
 };
 
-const doWork = async () => {
-  // console.log("checking if there are events to result", new Date());
-  const eventsToResult = await Event.find({
-    status: EventStatus.NO_RESULT,
-    time: { $lt: new Date() },
-  });
+export class GamemasterWorker {
+  async checkEventsOnce() {
+    // console.log("checking if there are events to result", new Date());
+    const eventsToResult = await Event.find({
+      status: EventStatus.NO_RESULT,
+      time: { $lt: new Date() },
+    });
 
-  eventsToResult.map(async (event) => {
-    const resultSetPublisher = new ResultSetPublisher(
-      messengerWrapper.connection
-    );
-    await resultSetPublisher.init();
+    eventsToResult.map(async (event) => {
+      const resultSetPublisher = new ResultSetPublisher(
+        messengerWrapper.connection
+      );
+      await resultSetPublisher.init();
 
-    const homeResult = getRandomResult();
-    const awayResult = getRandomResult();
+      const homeResult = getRandomResult();
+      const awayResult = getRandomResult();
 
-    resultSetPublisher.publish({
-      data: {
+      resultSetPublisher.publish({
+        data: {
+          eventId: event.eventId,
+          homeScore: homeResult,
+          awayScore: awayResult,
+          home: event.home,
+          away: event.away,
+        },
+      });
+
+      event.set({ homeResult, awayResult, status: EventStatus.RESULTED });
+      await event.save();
+
+      // archive event
+      const archivedEvent = new EventArchive({
         eventId: event.eventId,
-        homeScore: getRandomResult(),
-        awayScore: getRandomResult(),
+        time: event.time,
         home: event.home,
         away: event.away,
-      },
-    });
-
-    event.set({ homeResult, awayResult, status: EventStatus.RESULTED });
-    await event.save();
-
-    // archive event
-    const eventsToArchive = await Event.find({
-      status: EventStatus.RESULTED,
-    }).lean();
-
-    eventsToArchive.forEach(async (eventToArchive) => {
-      const archivedEvent = new EventArchive(eventToArchive);
+        status: event.status,
+        homeResult: event.homeResult,
+        awayResult: event.awayResult,
+      });
       await archivedEvent.save();
-      await Event.deleteOne({ _id: eventToArchive._id });
+      await event.deleteOne();
+      // await Event.deleteOne({ _id: event._id });
+
+      // publish event that will create a new event
+      const newEventPublisher = new NewEventPublisher(
+        messengerWrapper.connection
+      );
+      await newEventPublisher.init();
+
+      const home = faker.location.city();
+      const away = faker.location.city();
+
+      newEventPublisher.publish({
+        data: {
+          id: faker.string.uuid(),
+          name: `${home} - ${away}`,
+          time: faker.date.soon().toISOString(),
+          home,
+          away,
+        },
+      });
     });
-
-    // publish event that will create a new event
-    const newEventPublisher = new NewEventPublisher(
-      messengerWrapper.connection
-    );
-    await newEventPublisher.init();
-
-    const home = faker.location.city();
-    const away = faker.location.city();
-
-    newEventPublisher.publish({
-      data: {
-        id: faker.string.uuid(),
-        name: `${home} - ${away}`,
-        time: faker.date.soon().toISOString(),
-        home,
-        away,
-      },
-    });
-  });
-};
-
-export class GamemasterWorker {
-  // doWork: boolean = true;
+  }
 
   work() {
-    setInterval(doWork, POLLING_INTERVAL);
-    // while (this.doWork) {}
+    setInterval(this.checkEventsOnce, POLLING_INTERVAL);
   }
 }

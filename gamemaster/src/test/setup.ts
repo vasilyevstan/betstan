@@ -13,6 +13,10 @@ beforeAll(async () => {
   const mongoUri = mongo.getUri();
 
   await mongoose.connect(mongoUri, {});
+
+  mongoose.connection.on("error", (e) => {
+    console.log(e);
+  });
 });
 
 beforeEach(async () => {
