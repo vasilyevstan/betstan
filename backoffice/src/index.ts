@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { app } from "./app";
 import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
+import EventResultListener from "./event/listener/EventResultListener";
 
 const startUp = async () => {
   console.log("Starting up...");
@@ -20,6 +21,12 @@ const startUp = async () => {
     const newEventListener = new NewEventListener(messengerWrapper.connection);
     await newEventListener.init();
     newEventListener.listen();
+
+    const eventResultListener = new EventResultListener(
+      messengerWrapper.connection
+    );
+    await eventResultListener.init();
+    eventResultListener.listen();
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");

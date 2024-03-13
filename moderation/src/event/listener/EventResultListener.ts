@@ -16,7 +16,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
     await resulted.save();
 
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 

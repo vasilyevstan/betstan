@@ -66,6 +66,14 @@ build:
             dest: .
       docker:
         dockerfile: Dockerfile
+    - image: stanvasilyev/gaming_gamemaster
+      context: gamemaster
+      sync:
+        manual:
+          - src: "src/**/*.ts"
+            dest: .
+      docker:
+        dockerfile: Dockerfile
   local:
     push: false
 manifests:

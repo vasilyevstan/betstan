@@ -51,10 +51,8 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
     });
 
     if (!resulted) {
-      console.log("event was not resulted");
       moderationStatus = ModerationStatus.APPROVED;
     } else {
-      console.log("event was resulted");
       moderationStatus = ModerationStatus.DECLINED;
     }
 
@@ -69,7 +67,7 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
       },
     });
 
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 

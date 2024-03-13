@@ -20,7 +20,7 @@ const initEvents = (): EventTemplate[] => {
 
 router.get("/api/event", async (req: Request, res: Response) => {
   // check if db has events
-  let dbEvents = await Event.find();
+  let dbEvents = await Event.find().sort({ time: 1 });
 
   if (dbEvents.length === 0) {
     console.log("Generating events");
