@@ -6,7 +6,7 @@ import { messengerWrapper } from "@betstan/common";
 
 const router = express.Router();
 
-const EVENT_COUNT = 24;
+const EVENT_COUNT = 9;
 
 const initEvents = (): EventTemplate[] => {
   const events: EventTemplate[] = [];
