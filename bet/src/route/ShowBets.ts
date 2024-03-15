@@ -9,7 +9,7 @@ router.get("/api/bet", async (req: Request, res: Response) => {
   } else {
     const bets = await Bet.find({
       userId: req.currentUser.id,
-    });
+    }).sort({ timestamp: -1 });
 
     res.send(bets);
   }
