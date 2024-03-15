@@ -106,15 +106,12 @@ class EventResultListener extends AListener<IEventResultEvent> {
               },
             });
 
-            const completedBets = await Bet.find({
-              status: bet.status,
-            }).lean();
-            completedBets.forEach(async (completedBet) => {
-              const archivedBet = new BetArchive(completedBet);
-              await archivedBet.save();
+            const jsonBet: Partial<typeof Bet.prototype> = bet.toJSON();
+            delete jsonBet["_id"];
+            const archivedBet = new BetArchive(jsonBet);
+            await archivedBet.save();
 
-              await Bet.deleteOne({ _id: completedBet._id });
-            });
+            await bet.deleteOne();
           }
         }
       } catch (error) {
