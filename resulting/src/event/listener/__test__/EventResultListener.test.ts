@@ -6,7 +6,7 @@ import {
   ResultingStatus,
   messengerWrapper,
 } from "@betstan/common";
-import { Bet } from "../../../model/Bet";
+import { Bet, BetArchive } from "../../../model/Bet";
 import SettleSlipRowPublisher from "../../publisher/SettleSlipRowPublisher";
 import SettleSlipPublisher from "../../publisher/SettleSlipPublisher";
 
@@ -147,7 +147,7 @@ it("checks that win result for the bet was set", async () => {
 
   await listener.onMessage(data, message);
 
-  const updatedBet = await Bet.findById(bets[0].id);
+  const updatedBet = await BetArchive.findOne();
 
   expect(listener.ack).toHaveBeenCalled();
   expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
@@ -164,11 +164,9 @@ it("checks that loss result for the bet was set", async () => {
 
   const data = getData(1, 3, eventId, bets[0].rows[0].oddsName, "Other team");
 
-  // const originalBet = await Bet.findById(bet.id);
-
   await listener.onMessage(data, message);
 
-  const updatedBet = await Bet.findById(bets[0].id);
+  const updatedBet = await BetArchive.findOne();
 
   expect(listener.ack).toHaveBeenCalled();
   expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
@@ -188,7 +186,7 @@ it("checks that bet is not resolved if the bet product does not exist", async ()
 
   await listener.onMessage(data, message);
 
-  const updatedBet = await Bet.findById(bets[0].id);
+  const updatedBet = await Bet.findOne();
 
   expect(listener.ack).toHaveBeenCalled();
   expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
@@ -206,13 +204,16 @@ it("bet with multiple slip rows eventually won", async () => {
     const eventId = bets[0].rows[i].eventId;
     const data = getData(3, 1, eventId, bets[0].rows[i].oddsName, "Other team");
     await listener.onMessage(data, message);
-    const updatedBet = await Bet.findById(bets[0].id);
+    const updatedBet = await Bet.findOne();
 
-    expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-    expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
     if (i < bets[0].rows.length - 1) {
+      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
+      expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
       expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
     } else {
+      const updatedBet = await BetArchive.findOne();
+      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
+      expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
       expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
     }
     expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
@@ -246,11 +247,14 @@ it("there are 20 bets in the system but only one is resolved", async () => {
     await listener.onMessage(data, message);
     const updatedBet = await Bet.findById(bets[winningBetIndex].id);
 
-    expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-    expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
     if (i < bets[winningBetIndex].rows.length - 1) {
+      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
+      expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
       expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
     } else {
+      const updatedBet = await BetArchive.findOne();
+      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
+      expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
       expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
     }
     expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
