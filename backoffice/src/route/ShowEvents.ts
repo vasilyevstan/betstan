@@ -4,7 +4,7 @@ import { Event } from "../model/Event";
 const router = express.Router();
 
 router.get("/api/backoffice", async (req: Request, res: Response) => {
-  const events = await Event.find({});
+  const events = await Event.find().sort({ time: 1 });
 
   res.send(events);
 });
