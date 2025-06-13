@@ -6,19 +6,58 @@ on:
       - master
     paths:
       - "bet/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'prod'
+
+env:
+  RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  IMAGE_NAME: stanvasilyev/gaming_bet
+  DEPLOYMENT_NAME: gaming-bet-depl
+  CONTAINER_NAME: gaming-bet
+  
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v2
-      - run: cd bet && docker build -t stanvasilyev/gaming_bet .
-      - run: docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      - run: docker push stanvasilyev/gaming_bet
-      - uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-      - run: doctl kubernetes cluster kubeconfig save betstan-cluster
-      - run: kubectl rollout restart deployment gaming-bet-depl
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Docker login to Docker Hub
+      run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+    - name: Build and push Docker image
+      run: |
+        cd auth
+        docker build -t $IMAGE_NAME:${{ github.sha }} .
+        docker push $IMAGE_NAME:${{ github.sha }}
+
+    - name: Azure login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Set AKS context
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.CLUSTER_NAME }}
+
+    - name: Create or update Docker Hub pull secret
+      run: |
+        kubectl create secret docker-registry dockerhub \
+          --docker-username=${{ secrets.DOCKER_USERNAME }} \
+          --docker-password=${{ secrets.DOCKER_PASSWORD }} \
+          --docker-server=https://index.docker.io/v1/ \
+          --namespace=default \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Restart deployment with new image
+      run: |
+        kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+          ${{ env.CONTAINER_NAME }}=$IMAGE_NAME:${{ github.sha }}
