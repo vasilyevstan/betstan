@@ -18,6 +18,14 @@
 
 set -euo pipefail
 
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "ERROR: Required command '$cmd' is not installed or not in PATH." >&2
+    exit 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Configuration — change these if you want a different region / sizes
 # ---------------------------------------------------------------------------
@@ -26,8 +34,6 @@ LOCATION="eastus"
 CLUSTER_NAME="betstan-aks"
 NODE_COUNT=2
 NODE_VM_SIZE="Standard_B2s"   # 2 vCPU / 4 GB — cost-effective for a start
-ACR_NAME=""                    # leave empty — we use Docker Hub instead of ACR
-SUBSCRIPTION_ID=""             # leave empty — auto-detected from current login
 APP_NAME="betstan-github-sp"   # Azure AD service principal name
 
 echo ""
@@ -35,6 +41,13 @@ echo "=================================================="
 echo " betstan.xyz — AKS Provisioning Script"
 echo "=================================================="
 echo ""
+
+# ---------------------------------------------------------------------------
+# 0. Verify required tools exist
+# ---------------------------------------------------------------------------
+require_cmd az
+require_cmd kubectl
+require_cmd helm
 
 # ---------------------------------------------------------------------------
 # 1. Verify login & pick subscription
@@ -66,14 +79,21 @@ echo "  Done."
 # ---------------------------------------------------------------------------
 echo ""
 echo "[3/9] Creating AKS cluster '$CLUSTER_NAME' (this takes ~5 minutes)..."
-az aks create \
+if az aks show \
   --resource-group "$RESOURCE_GROUP" \
   --name "$CLUSTER_NAME" \
-  --node-count "$NODE_COUNT" \
-  --node-vm-size "$NODE_VM_SIZE" \
-  --enable-managed-identity \
-  --generate-ssh-keys \
-  --output none
+  --output none >/dev/null 2>&1; then
+  echo "  AKS cluster already exists — skipping create."
+else
+  az aks create \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$CLUSTER_NAME" \
+    --node-count "$NODE_COUNT" \
+    --node-vm-size "$NODE_VM_SIZE" \
+    --enable-managed-identity \
+    --generate-ssh-keys \
+    --output none
+fi
 echo "  Done."
 
 # ---------------------------------------------------------------------------
@@ -142,11 +162,39 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "[8/9] Creating service principal '$APP_NAME' for GitHub Actions..."
-SP_JSON=$(az ad sp create-for-rbac \
-  --name "$APP_NAME" \
-  --role contributor \
-  --scopes "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP" \
-  --sdk-auth)
+SP_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+EXISTING_SP_APP_ID=$(az ad sp list \
+  --display-name "$APP_NAME" \
+  --query '[0].appId' \
+  -o tsv 2>/dev/null || true)
+
+if [[ -n "$EXISTING_SP_APP_ID" ]]; then
+  echo "  Service principal already exists — resetting credentials."
+  EXISTING_ASSIGNMENT_ID=$(az role assignment list \
+    --assignee "$EXISTING_SP_APP_ID" \
+    --scope "$SP_SCOPE" \
+    --query "[?roleDefinitionName=='Contributor'] | [0].id" \
+    -o tsv 2>/dev/null || true)
+
+  if [[ -z "$EXISTING_ASSIGNMENT_ID" ]]; then
+    az role assignment create \
+      --assignee "$EXISTING_SP_APP_ID" \
+      --role contributor \
+      --scope "$SP_SCOPE" \
+      --output none
+  fi
+
+  SP_JSON=$(az ad sp credential reset \
+    --id "$EXISTING_SP_APP_ID" \
+    --query "{clientId: appId, clientSecret: password, subscriptionId: '$SUBSCRIPTION_ID', tenantId: tenant}" \
+    -o json)
+else
+  SP_JSON=$(az ad sp create-for-rbac \
+    --name "$APP_NAME" \
+    --role contributor \
+    --scopes "$SP_SCOPE" \
+    --sdk-auth)
+fi
 echo "  Service principal created."
 
 # ---------------------------------------------------------------------------
