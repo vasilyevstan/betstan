@@ -37,5 +37,9 @@ jobs:
 
     - name: Apply Kubernetes manifests
       run: |
+        # Apply cert-manager ClusterIssuer first (CRDs installed by provision.sh)
+        kubectl apply -f infra/k8s-prod/cert-issuer.yaml
+        # Apply core services
         kubectl apply -f infra/k8s
-        kubectl apply -f infra/k8s-prod
+        # Apply prod-specific ingress (TLS + domain)
+        kubectl apply -f infra/k8s-prod/ingress-srv.yaml
