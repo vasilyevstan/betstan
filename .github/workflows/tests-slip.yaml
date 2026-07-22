@@ -1,0 +1,13 @@
+name: tests-slip
+
+on:
+  pull_request:
+    paths:
+      - "slip/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - run: cd slip && npm install && npm run test:ci

@@ -1,8 +1,9 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: gaming-slip-mongo-depl
 spec:
+  serviceName: gaming-slip-mongo-srv
   replicas: 1
   selector:
     matchLabels:
@@ -15,6 +16,18 @@ spec:
       containers:
         - name: gaming-slip-mongo
           image: mongo
+          volumeMounts:
+            - name: gaming-slip-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-slip-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
