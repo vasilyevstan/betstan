@@ -15,23 +15,30 @@ const getRandomResult = () => {
 };
 
 export class GamemasterWorker {
+  private resultSetPublisher!: ResultSetPublisher;
+  private newEventPublisher!: NewEventPublisher;
+
+  async init() {
+    this.resultSetPublisher = new ResultSetPublisher(
+      messengerWrapper.connection
+    );
+    await this.resultSetPublisher.init();
+
+    this.newEventPublisher = new NewEventPublisher(messengerWrapper.connection);
+    await this.newEventPublisher.init();
+  }
+
   async checkEventsOnce() {
-    // console.log("checking if there are events to result", new Date());
     const eventsToResult = await Event.find({
       status: EventStatus.NO_RESULT,
       time: { $lt: new Date() },
     });
 
-    eventsToResult.map(async (event) => {
-      const resultSetPublisher = new ResultSetPublisher(
-        messengerWrapper.connection
-      );
-      await resultSetPublisher.init();
-
+    for (const event of eventsToResult) {
       const homeResult = getRandomResult();
       const awayResult = getRandomResult();
 
-      resultSetPublisher.publish({
+      this.resultSetPublisher.publish({
         data: {
           eventId: event.eventId,
           homeScore: homeResult,
@@ -56,18 +63,11 @@ export class GamemasterWorker {
       });
       await archivedEvent.save();
       await event.deleteOne();
-      // await Event.deleteOne({ _id: event._id });
-
-      // publish event that will create a new event
-      const newEventPublisher = new NewEventPublisher(
-        messengerWrapper.connection
-      );
-      await newEventPublisher.init();
 
       const home = faker.location.city();
       const away = faker.location.city();
 
-      newEventPublisher.publish({
+      this.newEventPublisher.publish({
         data: {
           id: faker.string.uuid(),
           name: `${home} - ${away}`,
@@ -76,10 +76,10 @@ export class GamemasterWorker {
           away,
         },
       });
-    });
+    }
   }
 
   work() {
-    setInterval(this.checkEventsOnce, POLLING_INTERVAL);
+    setInterval(this.checkEventsOnce.bind(this), POLLING_INTERVAL);
   }
 }

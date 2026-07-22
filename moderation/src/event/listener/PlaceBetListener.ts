@@ -1,13 +1,23 @@
 import { ConsumeMessage } from "amqplib";
 import { AListener, IPlaceBetEvent, QueueNames } from "@betstan/common";
 import { Bet } from "../../model/Bet";
-import { ModerationStatus } from "@betstan/common";
+import { ModerationStatus, messengerWrapper } from "@betstan/common";
 import BetModerationResultPublisher from "../publisher/BetModerationResultPublisher";
 import { Resulted } from "../../model/Resulted";
 
 class PlaceBetListener extends AListener<IPlaceBetEvent> {
   serviceName: string = "moderation_place_bet";
   queue: QueueNames.SLIP_BET = QueueNames.SLIP_BET;
+
+  private publisher!: BetModerationResultPublisher;
+
+  async init() {
+    await super.init();
+    this.publisher = new BetModerationResultPublisher(
+      messengerWrapper.connection
+    );
+    await this.publisher.init();
+  }
 
   async onMessage(event: IPlaceBetEvent, msg: ConsumeMessage) {
     const { data } = event;
@@ -41,9 +51,6 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
     await bet.save();
 
     // here be some fancy logic to validate the bet
-    const publisher = new BetModerationResultPublisher(this.connection);
-    await publisher.init();
-
     let moderationStatus: ModerationStatus;
 
     const resulted = await Resulted.findOne({
@@ -60,7 +67,7 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
     bet.moderationTimestamp = new Date().toISOString();
     await bet.save();
 
-    publisher.publish({
+    this.publisher.publish({
       data: {
         slipId: data.slipId,
         result: moderationStatus,

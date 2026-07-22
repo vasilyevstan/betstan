@@ -18,7 +18,6 @@ const startUp = async () => {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
 
-    const channel = await messengerWrapper.getChannel();
     const newEventListener = new NewEventListener(messengerWrapper.connection);
     await newEventListener.init();
     newEventListener.listen();
@@ -72,8 +71,9 @@ const startUp = async () => {
   }
 };
 
-const gameMasterWorker = () => {
+const gameMasterWorker = async () => {
   const gameMaster = new GamemasterWorker();
+  await gameMaster.init();
   gameMaster.work();
 };
 

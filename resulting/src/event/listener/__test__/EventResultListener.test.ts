@@ -342,3 +342,21 @@ it("there are 20 bets in the system but only one is resolved", async () => {
 
 //   expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
 // }, 1000000);
+
+it("publishers are initialised once during listener.init(), not on every message", async () => {
+  const { listener, bets, message } = await setup("1X2", 1);
+
+  // Publishers should have been initialised exactly once — during listener.init() in setup().
+  expect(SettleSlipRowPublisher.prototype.init).toHaveBeenCalledTimes(1);
+  expect(SettleSlipPublisher.prototype.init).toHaveBeenCalledTimes(1);
+
+  jest.clearAllMocks();
+
+  // Fire the same message twice — no additional init calls should occur.
+  const data = getData(3, 0, bets[0].rows[0].eventId, bets[0].rows[0].oddsName, "Other team");
+  await listener.onMessage(data, message);
+  await listener.onMessage(data, message);
+
+  expect(SettleSlipRowPublisher.prototype.init).not.toHaveBeenCalled();
+  expect(SettleSlipPublisher.prototype.init).not.toHaveBeenCalled();
+});

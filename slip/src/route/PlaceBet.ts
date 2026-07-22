@@ -5,6 +5,15 @@ import PlaceBetEventPublisher from "../event/publisher/PlaceBetEventPublisher";
 
 const router = express.Router();
 
+let _publisher: PlaceBetEventPublisher | null = null;
+const getPublisher = async (): Promise<PlaceBetEventPublisher> => {
+  if (!_publisher) {
+    _publisher = new PlaceBetEventPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.post("/api/slip/bet", async (req: Request, res: Response) => {
   const { slipId, wager } = req.body;
 
@@ -32,8 +41,7 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
   await slip.save();
 
   // archive slip
-  const publisher = new PlaceBetEventPublisher(messengerWrapper.connection);
-  await publisher.init();
+  const publisher = await getPublisher();
 
   publisher.publish({
     data: {
