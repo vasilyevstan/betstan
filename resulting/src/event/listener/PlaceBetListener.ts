@@ -19,7 +19,7 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
       userId: data.userId,
       slipId: data.slipId,
       wager: data.wager,
-      timestamp: event.timestamp,
+      timestamp: event.timestamp ?? new Date().toISOString(),
       moderationTimestamp: "",
       resultingTimestamp: "",
       rows: data.rows.map((row) => {

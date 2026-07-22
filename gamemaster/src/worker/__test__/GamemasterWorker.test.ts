@@ -8,6 +8,13 @@ import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
 import { EventArchive } from "../../model/EventArchive";
 import { GamemasterWorker } from "../GamemasterWorker";
 
+// Give each publisher its own init spy so they don't share the inherited
+// APublisher.prototype.init mock and toHaveBeenCalledTimes assertions work correctly.
+beforeAll(() => {
+  jest.spyOn(ResultSetPublisher.prototype, "init").mockResolvedValue(undefined);
+  jest.spyOn(NewEventPublisher.prototype, "init").mockResolvedValue(undefined);
+});
+
 const futureDate = new Date(new Date().getTime() + 30000);
 const pastDate = new Date(new Date().getTime() - 30000);
 

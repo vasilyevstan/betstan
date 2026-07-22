@@ -10,6 +10,17 @@ import { Bet, BetArchive } from "../../../model/Bet";
 import SettleSlipRowPublisher from "../../publisher/SettleSlipRowPublisher";
 import SettleSlipPublisher from "../../publisher/SettleSlipPublisher";
 
+// Give each publisher its own init spy so they don't share the inherited
+// APublisher.prototype.init mock and toHaveBeenCalledTimes assertions work correctly.
+beforeAll(() => {
+  jest
+    .spyOn(SettleSlipRowPublisher.prototype, "init")
+    .mockResolvedValue(undefined);
+  jest
+    .spyOn(SettleSlipPublisher.prototype, "init")
+    .mockResolvedValue(undefined);
+});
+
 const setup = async (
   productName: string,
   slipRowsAmount: number,
