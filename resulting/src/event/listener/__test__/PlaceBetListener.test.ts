@@ -2,12 +2,11 @@ import mongoose from "mongoose";
 import { ConsumeMessage } from "amqplib";
 import {
   IPlaceBetEvent,
-  ModerationStatus,
+  ResultingStatus,
   messengerWrapper,
 } from "@betstan/common";
 import { Bet } from "../../../model/Bet";
 import PlaceBetListener from "../PlaceBetListener";
-import BetModerationResultPublisher from "../../publisher/BetModerationResultPublisher";
 
 const createMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -41,13 +40,13 @@ const createEventData = (): IPlaceBetEvent => ({
     userId: new mongoose.Types.ObjectId().toHexString(),
     userName: "testUser",
     slipId: new mongoose.Types.ObjectId().toHexString(),
-    wager: 10,
+    wager: 20,
     rows: [
       {
         eventId: new mongoose.Types.ObjectId().toHexString(),
         eventName: "Test Match",
         oddsId: new mongoose.Types.ObjectId().toHexString(),
-        oddsValue: 1.5,
+        oddsValue: 2.0,
         oddsName: "Home",
         productName: "1X2",
         productId: new mongoose.Types.ObjectId().toHexString(),
@@ -64,7 +63,7 @@ const setup = async () => {
   return { listener };
 };
 
-it("moderated bet is saved with approved status when event has no result", async () => {
+it("places bet event creates a new bet with BET_PENDING status", async () => {
   const { listener } = await setup();
   const message = createMessage();
   const data = createEventData();
@@ -73,22 +72,33 @@ it("moderated bet is saved with approved status when event has no result", async
 
   const savedBet = await Bet.findOne({ slipId: data.data.slipId });
   expect(savedBet).not.toBeNull();
-  expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+  expect(savedBet!.status).toEqual(ResultingStatus.BET_PENDING);
+  expect(savedBet!.userId).toEqual(data.data.userId);
+  expect(savedBet!.wager).toEqual(data.data.wager);
   expect(listener.ack).toHaveBeenCalled();
-  expect(BetModerationResultPublisher.prototype.publish).toHaveBeenCalled();
 });
 
-it("publisher is initialised once during listener.init(), not on every message", async () => {
+it("all slip rows are saved with ROW_NO_RESULT status", async () => {
   const { listener } = await setup();
+  const message = createMessage();
+  const data = createEventData();
 
-  // Publisher should have been initialised exactly once — during listener.init() in setup().
-  expect(BetModerationResultPublisher.prototype.init).toHaveBeenCalledTimes(1);
+  await listener.onMessage(data, message);
 
-  jest.clearAllMocks();
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.rows).toHaveLength(1);
+  expect(savedBet!.rows[0].result).toEqual(ResultingStatus.ROW_NO_RESULT);
+  expect(savedBet!.rows[0].eventId).toEqual(data.data.rows[0].eventId);
+});
 
-  // Fire the same message twice — no additional init calls should occur.
-  await listener.onMessage(createEventData(), createMessage());
-  await listener.onMessage(createEventData(), createMessage());
+it("multiple place bet events each create a separate bet", async () => {
+  const { listener } = await setup();
+  const message = createMessage();
 
-  expect(BetModerationResultPublisher.prototype.init).not.toHaveBeenCalled();
+  await listener.onMessage(createEventData(), message);
+  await listener.onMessage(createEventData(), message);
+
+  const bets = await Bet.find({});
+  expect(bets).toHaveLength(2);
 });

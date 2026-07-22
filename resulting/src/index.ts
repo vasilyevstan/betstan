@@ -17,7 +17,6 @@ const startUp = async () => {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
 
-    const channel = await messengerWrapper.getChannel();
     const listener = new PlaceBetListener(messengerWrapper.connection);
     await listener.init();
     listener.listen();
