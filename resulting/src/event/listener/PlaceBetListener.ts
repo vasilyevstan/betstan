@@ -41,7 +41,7 @@ class PlaceBetListener extends AListener<IPlaceBetEvent> {
 
     await bet.save();
 
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 
