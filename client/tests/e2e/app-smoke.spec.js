@@ -14,8 +14,9 @@ test('signup submit does not crash UI', async ({ page }) => {
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/signup', { waitUntil: 'domcontentloaded' });
-  await page.getByLabel('Email Address').fill(`qa+${Date.now()}@betstan.xyz`);
-  await page.getByLabel('Password').fill('Password123!Password123!');
+  const inputs = page.locator('input');
+  await inputs.nth(0).fill(`qa+${Date.now()}@betstan.xyz`);
+  await inputs.nth(1).fill('Password123!Password123!');
   await page.getByRole('button', { name: 'Sign Up' }).click();
 
   await expect(page.locator('body')).not.toContainText("Cannot read properties of undefined (reading 'map')");
@@ -27,11 +28,11 @@ test('login submit does not crash UI', async ({ page }) => {
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
-  await page.getByLabel('Email Address').fill('qa-invalid@betstan.xyz');
-  await page.getByLabel('Password').fill('invalid-password');
+  const inputs = page.locator('input');
+  await inputs.nth(0).fill('qa-invalid@betstan.xyz');
+  await inputs.nth(1).fill('invalid-password');
   await page.getByRole('button', { name: 'Sign Up' }).click();
 
   await expect(page.locator('body')).not.toContainText("Cannot read properties of undefined (reading 'map')");
   expect(pageErrors).toEqual([]);
 });
-

@@ -19,15 +19,12 @@ check_nodes_ready() {
 }
 
 check_default_pods_ready() {
-  local bad
-  bad="$(kubectl get pods -n default --no-headers | awk '
-    {
-      split($2, a, "/");
-      if ($3 != "Running" || a[1] != a[2]) bad++
-    }
-    END {print bad+0}
-  ')"
-  [[ "$bad" -eq 0 ]]
+  local deploy_bad sts_bad
+  deploy_bad="$(kubectl get deploy -n default -o jsonpath='{range .items[*]}{.metadata.name} {.status.readyReplicas} {.spec.replicas}{"\n"}{end}' \
+    | awk '$2 != $3 {c++} END {print c+0}')"
+  sts_bad="$(kubectl get sts -n default -o jsonpath='{range .items[*]}{.metadata.name} {.status.readyReplicas} {.spec.replicas}{"\n"}{end}' \
+    | awk '$2 != $3 {c++} END {print c+0}')"
+  [[ "$deploy_bad" -eq 0 && "$sts_bad" -eq 0 ]]
 }
 
 check_https_domain() {
@@ -55,8 +52,8 @@ for i in $(seq 1 "$MAX_LOOPS"); do
   fi
 
   if ! check_default_pods_ready; then
-    echo "default namespace has non-ready pods"
-    kubectl get pods -n default
+    echo "default namespace workloads are not fully ready"
+    kubectl get deploy,sts -n default
     sleep "$SLEEP_SECONDS"
     continue
   fi
@@ -86,4 +83,3 @@ done
 
 echo "validation-loop status=FAILED"
 exit 1
-
