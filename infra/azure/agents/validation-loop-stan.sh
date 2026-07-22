@@ -10,6 +10,7 @@ MAX_LOOPS="${MAX_LOOPS:-6}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-20}"
 DOMAIN="${DOMAIN:-www.betstan.xyz}"
 E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:3000}"
+CERT_NAME="${CERT_NAME:-betstan-tls}"
 
 check_nodes_ready() {
   local total ready
@@ -33,7 +34,7 @@ check_https_domain() {
 
 check_certificate_ready() {
   local ready
-  ready="$(kubectl get certificate -n default betstan-tls -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  ready="$(kubectl get certificate -n default "$CERT_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
   [[ "$ready" == "True" ]]
 }
 
@@ -59,7 +60,7 @@ for i in $(seq 1 "$MAX_LOOPS"); do
   fi
 
   if ! check_certificate_ready; then
-    echo "certificate betstan-tls is not ready"
+    echo "certificate $CERT_NAME is not ready"
     kubectl get certificate,order,challenge -n default
     sleep "$SLEEP_SECONDS"
     continue
