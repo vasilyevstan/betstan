@@ -5,6 +5,15 @@ import { EventStatus, messengerWrapper } from "@betstan/common";
 
 const router = express.Router();
 
+let _publisher: ResultSetPublisher | null = null;
+const getPublisher = async (): Promise<ResultSetPublisher> => {
+  if (!_publisher) {
+    _publisher = new ResultSetPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.post("/api/backoffice/result", async (req: Request, res: Response) => {
   let { eventId, homeResult, awayResult } = req.body;
 
@@ -34,8 +43,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
 
   await event.save();
 
-  const publisher = new ResultSetPublisher(messengerWrapper.connection);
-  await publisher.init();
+  const publisher = await getPublisher();
 
   publisher.publish({
     data: {

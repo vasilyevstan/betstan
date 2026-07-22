@@ -18,6 +18,15 @@ const initEvents = (): EventTemplate[] => {
   return events;
 };
 
+let _publisher: NewEventPublisher | null = null;
+const getPublisher = async (): Promise<NewEventPublisher> => {
+  if (!_publisher) {
+    _publisher = new NewEventPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.get("/api/event", async (req: Request, res: Response) => {
   // check if db has events
   let dbEvents = await Event.find().sort({ time: 1 });
@@ -27,8 +36,7 @@ router.get("/api/event", async (req: Request, res: Response) => {
     const events = initEvents();
 
     // temporary, events must come from the backoffice
-    const publisher = new NewEventPublisher(messengerWrapper.connection);
-    await publisher.init();
+    const publisher = await getPublisher();
 
     events.forEach(async (event) => {
       const newEvent = await Event.create(event);

@@ -14,6 +14,21 @@ class EventResultListener extends AListener<IEventResultEvent> {
   serviceName: string = "resulting_result";
   queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
 
+  private settleSlipRowPublisher!: SettleSlipRowPublisher;
+  private settleSlipPublisher!: SettleSlipPublisher;
+
+  async init() {
+    await super.init();
+    this.settleSlipRowPublisher = new SettleSlipRowPublisher(
+      messengerWrapper.connection
+    );
+    await this.settleSlipRowPublisher.init();
+    this.settleSlipPublisher = new SettleSlipPublisher(
+      messengerWrapper.connection
+    );
+    await this.settleSlipPublisher.init();
+  }
+
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 
@@ -26,16 +41,6 @@ class EventResultListener extends AListener<IEventResultEvent> {
         : Number(data.homeScore) < Number(data.awayScore)
         ? data.away
         : "draw";
-
-    const settleSlipRowPublisher = new SettleSlipRowPublisher(
-      messengerWrapper.connection
-    );
-    await settleSlipRowPublisher.init();
-
-    const settleSlipPublisher = new SettleSlipPublisher(
-      messengerWrapper.connection
-    );
-    await settleSlipPublisher.init();
 
     for (const bet of bets) {
       let betLost = false;
@@ -76,7 +81,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
           settledRows++;
 
-          await settleSlipRowPublisher.publish({
+          await this.settleSlipRowPublisher.publish({
             data: {
               slipId: bet.slipId,
               slipRowId: row.id,
@@ -99,7 +104,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
           await bet.save();
 
           if (bet.status !== ResultingStatus.BET_APPROVED) {
-            await settleSlipPublisher.publish({
+            await this.settleSlipPublisher.publish({
               data: {
                 slipId: bet.slipId,
                 result: bet.status,
