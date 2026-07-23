@@ -130,7 +130,10 @@ jobs:
 
   coverage-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
+      max-parallel: 3
       matrix:
         include:
           - service: auth
@@ -158,10 +161,20 @@ jobs:
         working-directory: ./${{ matrix.service }}
         run: npm ci
 
+      - name: Cache mongodb-memory-server binary
+        if: ${{ matrix.service != 'client' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mms-${{ runner.os }}-${{ hashFiles(format('{0}/package-lock.json', matrix.service)) }}
+          restore-keys: |
+            mms-${{ runner.os }}-
+
       - name: Run coverage
         working-directory: ./${{ matrix.service }}
         env:
           CI: "true"
+          MONGOMS_DOWNLOAD_DIR: ~/.cache/mongodb-binaries
         run: |
           if [ "${{ matrix.service }}" = "client" ]; then
             npm test -- --watchAll=false --passWithNoTests --coverage --coverageReporters=json-summary \
