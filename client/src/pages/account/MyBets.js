@@ -10,8 +10,8 @@ const HandleMyBetsList = () => {
     const fetchBets = async () => {
       try {
         const res = await axios.get('/api/bet');
-
-        setBets(res.data);
+        const data = res.data;
+        setBets(data && typeof data === 'object' ? data : {});
       } catch (error) {
         // ignore
       }
@@ -21,29 +21,33 @@ const HandleMyBetsList = () => {
         fetchBets();
     }, []);
     
-    const renderedBets = Object.values(bets).map(bet => {
+    const renderedBets = Object.values(bets ?? {}).map(bet => {
       let totalOdds = 1;
 
-      const rowHeader = <div className="card-subtitle row" key={bet._id + '_row_header'}>
-        <div className="col">Event</div>
-        <div className="col">Product</div>
-        <div className="col">Selection</div>
-        <div className="col">Odds</div>
+      const rowHeader = <div className="card-subtitle row my-bets-row my-bets-row--header" key={bet._id + '_row_header'}>
+        <div className="col-5 col-md-4">Event</div>
+        <div className="col-3 col-md-3">Product</div>
+        <div className="col-2 col-md-3">Selection</div>
+        <div className="col-2 col-md-2 text-end">Odds</div>
       </div>
 
-      const renderedRows = bet.rows.map(row => {
+      const renderedRows = (bet.rows ?? []).map(row => {
         totalOdds = totalOdds * row.oddsValue;
-        const rowColor = row.status === 'WIN' ? ' text-success' : row.status === 'LOSS' ? ' text-danger' : ''
+        const rowColor = row.status === 'WIN' ? ' text-success' : row.status === 'LOSS' ? ' text-danger' : '';
 
-        return <div className="row" key={row._id}>
-          <div className={"col" + rowColor}>{row.eventName}</div>
-          <div className={"col" + rowColor}>{row.productName}</div>
-          <div className={"col" + rowColor}>{row.oddsName}</div>
-          <div className={"col" + rowColor}>{row.oddsValue}</div>
+        return <div className="row my-bets-row" key={row._id}>
+          <div className={"col-5 col-md-4" + rowColor}>{row.eventName}</div>
+          <div className={"col-3 col-md-3" + rowColor}>{row.productName}</div>
+          <div className={"col-2 col-md-3" + rowColor}>{row.oddsName}</div>
+          <div className={"col-2 col-md-2 text-end" + rowColor}>{row.oddsValue}</div>
         </div>
       });
 
-      const betFooter = <div className="card-body" key={bet._id + '_footer'}>Wager: {bet.wager} Total odds: {totalOdds.toFixed(2)} Possible win: {(totalOdds * bet.wager).toFixed(2)} Stanbucks</div>
+      const betFooter = <div className="card-body my-bets-footer" key={bet._id + '_footer'}>
+        <span>Wager: {bet.wager}</span>
+        <span>Total odds: {totalOdds.toFixed(2)}</span>
+        <span>Possible win: {(totalOdds * bet.wager).toFixed(2)} Stanbucks</span>
+      </div>
 
       const betTime = format(bet.timestamp, "MMMM do, yyyy H:mm");
 
@@ -72,11 +76,11 @@ const HandleMyBetsList = () => {
 
       // const betStatusColor = bet.status === 'PENDING' ? 'text-warning' : bet.status === 'CONFIRMED' ? 'text-info' : bet.status === 'DECLINED' ? 'text-danger' : 'text-success'
 
-      return <div className="card" style={{marginBottom: '5px'}} key={bet._id}>
+      return <div className="card mb-2 my-bets-card" key={bet._id}>
               <div className="card-body">
-                  <h5 className="card-title d-flex justify-content-between">
+                  <h5 className="card-title d-flex justify-content-between align-items-start gap-2">
                     <div>{betTime}</div>
-                    <div className={betStatusColor}>{bet.status}</div>
+                    <div className={`my-bets-status ${betStatusColor}`}>{bet.status}</div>
                   </h5>
                   <div>{rowHeader}{renderedRows}</div>
               </div>

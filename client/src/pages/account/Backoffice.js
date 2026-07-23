@@ -11,8 +11,8 @@ const HandleBackoffice = ({refresh}) => {
     const fetchEvents = async () => {
         try {
           const res = await axios.get('/api/backoffice');
-
-          setEvents(res.data);
+          const data = res.data;
+          setEvents(data && typeof data === 'object' ? data : {});
         } catch (error) {
           // ignore
         }
@@ -69,42 +69,55 @@ const HandleBackoffice = ({refresh}) => {
       refresh();
     }
     
-    const newEvent = <div className="card" key='new_event'>
+    const newEvent = <div className="card backoffice-create" key='new_event'>
       <div className="card-body">
-              <h5 className="card-title">Create new event</h5>
-              <div className="row">
-                <input value={newEventHome} style={{marginRight: '5px'}} className="col" onChange={e => setNewEventHome(e.target.value)} placeholder={'Home team'} />
-                <input value={newEventAway} style={{marginRight: '5px'}} className="col" onChange={e => setNewEventAway(e.target.value)} placeholder={'Away team'} />
-                <button className={"col btn btn-success" }  onClick={(e) => createNewEvent(e)}>Create</button>
+              <h5 className="card-title mb-3">Create new event</h5>
+              <div className="row g-2">
+                <div className="col-12 col-md">
+                  <input value={newEventHome} className="form-control" onChange={e => setNewEventHome(e.target.value)} placeholder={'Home team'} />
+                </div>
+                <div className="col-12 col-md">
+                  <input value={newEventAway} className="form-control" onChange={e => setNewEventAway(e.target.value)} placeholder={'Away team'} />
+                </div>
+                <div className="col-12 col-md-auto d-grid">
+                  <button className={"btn btn-success backoffice-action backoffice-action--create"} onClick={(e) => createNewEvent(e)}>Create</button>
+                </div>
               </div>
         </div>
     </div>
 
-    const renderedEvents = Object.values(events).map(event => {
+    const renderedEvents = Object.values(events ?? {}).map(event => {
       eventValues.push({id: event.eventId, home: event.homeResult, away: event.awayResult});
 
       const buttonOptions = event.status === "RESULT" ? ' btn-secondary disabled' : ' btn-danger';
       // const inputOption = event.status === "RESULT" ? ' readonly' : ' ';
 
-      return <div className="card" key={event.eventId}>
+      return <div className="card backoffice-event" key={event.eventId}>
         <div className="card-body">
-              <h5 className="card-title">{event.name}</h5>
-              <div className="row">
-                <input style={{marginRight: '5px'}} className="col" eventid={event.eventId} onChange={e => setHomeResult(e, e.target.value)} placeholder={event.home + ' result'} defaultValue={event.homeResult} />
-                <input style={{marginRight: '5px'}} className="col" eventid={event.eventId} onChange={e => setAwayResult(e, e.target.value)} placeholder={event.away + ' result'} defaultValue={event.awayResult} />
-                <button eventid={event.eventId} className={"col btn" + buttonOptions }  onClick={(e) => setResults(e)}>Set results</button>
+              <h5 className="card-title mb-3">{event.name}</h5>
+              <div className="row g-2">
+                <div className="col-12 col-md">
+                  <input className="form-control" eventid={event.eventId} onChange={e => setHomeResult(e, e.target.value)} placeholder={event.home + ' result'} defaultValue={event.homeResult} />
+                </div>
+                <div className="col-12 col-md">
+                  <input className="form-control" eventid={event.eventId} onChange={e => setAwayResult(e, e.target.value)} placeholder={event.away + ' result'} defaultValue={event.awayResult} />
+                </div>
+                <div className="col-12 col-md-auto d-grid">
+                  <button eventid={event.eventId} className={"btn backoffice-action" + buttonOptions } onClick={(e) => setResults(e)}>Set results</button>
+                </div>
               </div>
               
-              <div className="row">
-                <div style={{marginRight: '5px'}} className='col'>Event is: </div>
-                <div style={{marginRight: '5px'}} className='col'>{event.visibility}</div>
-                <button eventid={event.eventId} className={"col btn btn-warning"}  onClick={(e) => setVisibility(e)}>Change</button>
+              <div className="row g-2 mt-1 align-items-center">
+                <div className='col-12 col-md'>Event is: <strong>{event.visibility}</strong></div>
+                <div className="col-12 col-md-auto d-grid">
+                  <button eventid={event.eventId} className={"btn btn-warning backoffice-action backoffice-action--warn"} onClick={(e) => setVisibility(e)}>Change</button>
+                </div>
               </div>
         </div>
       </div>
     });
 
-    return <div className="flex-wrap"> {newEvent}{renderedEvents} </div>;
+    return <div className="backoffice-board"> {newEvent}{renderedEvents} </div>;
 };
 
 
