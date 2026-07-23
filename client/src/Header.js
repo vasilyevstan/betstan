@@ -3,7 +3,6 @@ import { Link, useLocation } from 'react-router-dom';
 
 const Header = ({ currentUser, uiVariant, theme }) => {
     const location = useLocation();
-    const variants = ['v1', 'v2', 'v3'];
     const themeOptions = ['dark', 'light'];
     const isV2 = uiVariant === 'v2';
 
@@ -36,10 +35,6 @@ const Header = ({ currentUser, uiVariant, theme }) => {
     });
 
     const logoLink = linkTo('/', { ui: uiVariant, theme });
-    const variantLink = (variant) => ({
-       pathname: location.pathname,
-       search: buildSearch({ ui: variant }),
-    });
     const themeLink = (nextTheme) => ({
        pathname: location.pathname,
        search: buildSearch({ theme: nextTheme }),
@@ -61,17 +56,6 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                    <span className="text-uppercase navbar-meta__badge">Mode {theme}</span>
                </div>
                <div className="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
-                   <div className="btn-group ui-switcher" role="group" aria-label="Prototype variant switcher">
-                       {variants.map((variant) => (
-                           <Link
-                               key={variant}
-                               to={variantLink(variant)}
-                               className={`btn btn-sm ${uiVariant === variant ? 'btn-primary' : 'btn-shell'}`}
-                           >
-                               {variant.toUpperCase()}
-                           </Link>
-                       ))}
-                   </div>
                    <div className="btn-group ui-switcher" role="group" aria-label="Theme switcher">
                        {themeOptions.map((themeOption) => (
                            <Link
