@@ -252,7 +252,58 @@ body {
 }
 
 .scoreboard .stat-card .card-body {
-  row-gap: 0.35rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.25rem 3.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.72rem 0.82rem;
+}
+
+.scoreboard .stat-card {
+  background: color-mix(in srgb, var(--surface-soft) 94%, var(--surface-elevated));
+  border-color: color-mix(in srgb, var(--border-subtle) 88%, var(--accent) 12%);
+  box-shadow: 0 10px 20px rgba(4, 10, 26, 0.1);
+}
+
+.scoreboard .stat-card:hover {
+  border-color: color-mix(in srgb, var(--border-subtle) 72%, var(--accent) 28%);
+}
+
+.stat-row__user,
+.stat-row__count,
+.stat-row__wager {
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.stat-row__user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-row__count,
+.stat-row__wager {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat-row--header {
+  font-size: 0.7rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.stat-row--header .stat-row__wager,
+.stat-row--header .stat-row__count {
+  justify-self: end;
+}
+
+.scoreboard--v1 .stat-row__user,
+.scoreboard--v2 .stat-row__user,
+.scoreboard--v3 .stat-row__user {
+  font-weight: 600;
 }
 
 .my-bets-card {
