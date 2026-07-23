@@ -33,7 +33,7 @@ jobs:
 
     - name: Build and push Docker image
       run: |
-        cd auth
+        cd client
         docker build -t $IMAGE_NAME:${{ github.sha }} .
         docker push $IMAGE_NAME:${{ github.sha }}
 
