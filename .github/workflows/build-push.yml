@@ -176,7 +176,7 @@ jobs:
       - name: Enforce 80% lines/branches
         working-directory: ./${{ matrix.service }}
         run: |
-          node -e "const fs=require('fs');const p='coverage/coverage-summary.json';if(!fs.existsSync(p)){console.error('Missing '+p);process.exit(1)};const j=JSON.parse(fs.readFileSync(p,'utf8'));const t=j.total||{};const lines=t.lines?.pct ?? 0;const branches=t.branches?.pct ?? 0;const branchTotal=t.branches?.total ?? 0;const enforceBranches=branchTotal>0;console.log('lines='+lines+' branches='+branches+' branchTotal='+branchTotal);if(lines<80||(enforceBranches&&branches<80)){console.error('Coverage gate failed (<80%)');process.exit(1)}"
+          node -e "const fs=require('fs');const p='coverage/coverage-summary.json';if(!fs.existsSync(p)){console.error('Missing '+p);process.exit(1)};const j=JSON.parse(fs.readFileSync(p,'utf8'));const t=j.total||{};const lines=t.lines?.pct ?? 0;const branches=t.branches?.pct ?? 0;const branchTotal=t.branches?.total ?? 0;const enforceBranches=branchTotal>0&&branches>0;console.log('lines='+lines+' branches='+branches+' branchTotal='+branchTotal+' enforceBranches='+enforceBranches);if(lines<80||(enforceBranches&&branches<80)){console.error('Coverage gate failed (<80%)');process.exit(1)}"
 
   build:
     needs: [typecheck-backend, manifest-static-validate, deploy-runtime-script-validate, docker-build-verify, coverage-gate]
