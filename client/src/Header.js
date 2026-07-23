@@ -39,7 +39,9 @@ const Header = ({ currentUser, uiVariant, theme }) => {
        pathname: location.pathname,
        search: buildSearch({ theme: nextTheme }),
     });
-    const brandSource = isV2 ? '/brand/betstan-v2-mark.svg' : '/brand/betstan-wordmark.svg';
+    const brandSource = theme === 'dark'
+        ? (isV2 ? '/brand/betstan-v2-mark-dark.svg' : '/brand/betstan-wordmark-dark.svg')
+        : (isV2 ? '/brand/betstan-v2-mark-light.svg' : '/brand/betstan-wordmark-light.svg');
 
     return <nav className={`navbar navbar-expand-lg sticky-top app-navbar${isV2 ? ' app-navbar--v2' : ''} ${theme === 'light' ? 'navbar-light' : 'navbar-dark'}`}> 
        <div className="container-fluid">
@@ -50,10 +52,8 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                <span className="navbar-toggler-icon"></span>
            </button>
            <div className="collapse navbar-collapse justify-content-between" id="betstan-navbar">
-               <div className="navbar-text small text-secondary py-2 py-lg-0 d-flex flex-column flex-lg-row gap-1 gap-lg-3 navbar-meta">
+               <div className="navbar-text small text-secondary py-2 py-lg-0 navbar-meta">
                    <span>{greetings}</span>
-                   <span className="text-uppercase navbar-meta__badge">UI {uiVariant}</span>
-                   <span className="text-uppercase navbar-meta__badge">Mode {theme}</span>
                </div>
                <div className="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
                    <div className="btn-group ui-switcher" role="group" aria-label="Theme switcher">
