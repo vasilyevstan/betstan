@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "ts-node-dev --transpile-only src/index",
+    "start": "ts-node-dev src/index",
     "dev": "ts-node-dev src/index",
     "test": "jest --watchAll --no-cache",
     "test:ci": "jest"
