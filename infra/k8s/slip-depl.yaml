@@ -23,7 +23,7 @@ spec:
           # image: us.gcr.io/gaming-node-js-course/gaming_auth
           env:
             - name: MONGO_URI
-              value: "mongodb://gaming-mongo-srv:27017/gaming_slip"
+              value: "mongodb://gaming-slip-mongo-srv:27017/gaming_slip"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
             - name: CLIENT_ID
