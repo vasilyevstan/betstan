@@ -3,7 +3,6 @@
 - `provisioning-stan.sh` — runs full AKS provisioning flow.
 - `deploy-stan.sh` — applies Kubernetes manifests to AKS.
 - `troubleshoot-stan.sh` — prints cluster/workload/ingress diagnostics.
-- `recreate-nodes-stan.sh` — reimages/recreates the AKS node pool when the cluster is stuck and pod restarts aren't enough.
 - `cost-ops-stan.sh` — stop/start/scale controls for cost management.
 - `qa-e2e-stan.sh` — runs Playwright browser smoke tests.
 - `dns-check-stan.sh` — compares public DNS answer with ingress external IP.

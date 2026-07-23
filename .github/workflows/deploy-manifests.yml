@@ -35,23 +35,6 @@ jobs:
         resource-group: ${{ env.RESOURCE_GROUP }}
         cluster-name: ${{ env.CLUSTER_NAME }}
 
-    - name: Remove applications from the cluster
-      run: |
-        # The topology has been fully rolled back to the pre-consolidation
-        # (known-good) state of one MongoDB StatefulSet per service. The single
-        # shared `gaming-mongo` instance introduced by the consolidation must be
-        # removed; it is not covered by any current manifest, and `kubectl apply`
-        # never prunes resources whose manifests were deleted (idempotent).
-        kubectl delete statefulset gaming-mongo-depl --ignore-not-found
-        kubectl delete service gaming-mongo-srv --ignore-not-found
-        kubectl delete pvc gaming-mongo-data-gaming-mongo-depl-0 --ignore-not-found
-        # The application is currently down and the reverted manifests are
-        # unchanged, so `kubectl apply` alone would be a no-op and would NOT
-        # restart the failed pods. Remove the application Deployments so the
-        # apply below recreates them fresh. Per-service MongoDB StatefulSets and
-        # their PVCs are intentionally left intact to preserve data.
-        kubectl delete deployments -l 'app in (gaming-auth,gaming-bet,gaming-event,gaming-gamemaster,gaming-moderation,gaming-resulting,gaming-slip,gaming-backoffice,gaming-client)' --ignore-not-found
-
     - name: Apply Kubernetes manifests
       run: |
         # Apply cert-manager ClusterIssuer first (CRDs installed by provision.sh)
