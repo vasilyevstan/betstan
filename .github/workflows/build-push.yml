@@ -42,13 +42,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
-
-      - name: Validate Kubernetes manifests (client dry-run)
+      - name: Validate Kubernetes manifests (offline static checks)
         run: |
-          kubectl apply --dry-run=client --validate=false -f infra/k8s
-          kubectl apply --dry-run=client --validate=false -f infra/k8s-prod
+          ruby - <<'RUBY'
+          require "yaml"
+
+          paths = Dir["infra/k8s/**/*.yaml"] + Dir["infra/k8s-prod/**/*.yaml"]
+          errors = []
+
+          paths.each do |path|
+            docs = YAML.load_stream(File.read(path))
+            docs.each_with_index do |doc, idx|
+              next if doc.nil?
+
+              unless doc.is_a?(Hash)
+                errors << "#{path} doc##{idx + 1}: document is not a YAML mapping"
+                next
+              end
+
+              %w[apiVersion kind metadata].each do |key|
+                errors << "#{path} doc##{idx + 1}: missing #{key}" unless doc.key?(key)
+              end
+
+              if doc["metadata"].is_a?(Hash)
+                errors << "#{path} doc##{idx + 1}: missing metadata.name" unless doc["metadata"].key?("name")
+              else
+                errors << "#{path} doc##{idx + 1}: metadata must be a mapping"
+              end
+            end
+          rescue Psych::SyntaxError => e
+            errors << "#{path}: YAML syntax error: #{e.message}"
+          end
+
+          if errors.any?
+            warn(errors.join("\n"))
+            exit 1
+          end
+
+          puts "Validated #{paths.size} manifest files."
+          RUBY
 
   deploy-runtime-script-validate:
     runs-on: ubuntu-latest
