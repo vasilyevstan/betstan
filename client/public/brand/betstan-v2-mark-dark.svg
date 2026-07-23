@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="56" viewBox="0 0 300 56" fill="none">
+  <g>
+    <rect x="2" y="4" width="46" height="46" rx="11" fill="url(#brandGradient)" />
+    <path d="M16 34.5V19.5h8.6c2.9 0 5 1.8 5 4.2 0 1.6-.9 2.8-2.3 3.4 1.8.6 3 1.9 3 4 0 2.8-2.4 4.8-5.8 4.8H16Zm4.9-7.4h3.2c1.1 0 1.9-.7 1.9-1.7 0-1-.8-1.6-1.9-1.6h-3.2v3.3Zm0 4.7h3.7c1.3 0 2.1-.8 2.1-1.8 0-1.1-.8-1.8-2.1-1.8h-3.7v3.6Z" fill="white"/>
+    <path d="M35.5 15.7 39 12.2M31 12h5.2" stroke="white" stroke-width="1.5" stroke-linecap="round" opacity=".9"/>
+  </g>
+  <g fill="currentColor" font-family="Inter, Arial, sans-serif">
+    <text x="60" y="28" font-size="20" font-weight="800" letter-spacing="0.07em" fill="#F8FBFF">BETSTAN</text>
+    <text x="60" y="43" font-size="10" font-weight="600" letter-spacing="0.18em" opacity=".78" fill="#C0D3E6">DEMO PROJECT</text>
+  </g>
+  <defs>
+    <linearGradient id="brandGradient" x1="4" y1="6" x2="48" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4DB5AD"/>
+      <stop offset=".55" stop-color="#3F9F94"/>
+      <stop offset="1" stop-color="#2F8078"/>
+    </linearGradient>
+  </defs>
+</svg>

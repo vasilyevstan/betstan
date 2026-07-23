@@ -68,12 +68,9 @@ body {
   height: 2.35rem;
 }
 
-.navbar-light .brand-wordmark {
-  filter: none;
-}
-
+.navbar-light .brand-wordmark,
 .navbar-dark .brand-wordmark {
-  filter: brightness(0) invert(1);
+  filter: none;
 }
 
 .nav-icon {
@@ -652,6 +649,23 @@ body {
   border-color: rgba(47, 128, 120, 0.22);
 }
 
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1 {
+  background: #dbeaf4;
+  border-color: #afcde1;
+  color: #153147;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1:hover {
+  background: #c6deec;
+  border-color: #8fb7d0;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1.product-button--selected {
+  background: #b8dce0;
+  border-color: #86bfc1;
+  color: #103135;
+}
+
 :root[data-bs-theme='light'] .ui-variant-v2 {
   --surface-base: #ebf1f9;
   --surface-soft: #f7fbff;
@@ -715,6 +729,23 @@ body {
   background: #c4f2e8;
   border-color: #7dcab8;
   color: #123f36;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3 {
+  background: #efe3ff;
+  border-color: #d6b8f3;
+  color: #392255;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3:hover {
+  background: #e1ccfb;
+  border-color: #c398ea;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3.product-button--selected {
+  background: #d7baf7;
+  border-color: #af7fe6;
+  color: #241236;
 }
 
 :root[data-bs-theme='light'] .ui-variant-v3 {
