@@ -52,10 +52,8 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                <span className="navbar-toggler-icon"></span>
            </button>
            <div className="collapse navbar-collapse justify-content-between" id="betstan-navbar">
-               <div className="navbar-text small text-secondary py-2 py-lg-0 d-flex flex-column flex-lg-row gap-1 gap-lg-3 navbar-meta">
+               <div className="navbar-text small text-secondary py-2 py-lg-0 navbar-meta">
                    <span>{greetings}</span>
-                   <span className="text-uppercase navbar-meta__badge">UI {uiVariant}</span>
-                   <span className="text-uppercase navbar-meta__badge">Mode {theme}</span>
                </div>
                <div className="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
                    <div className="btn-group ui-switcher" role="group" aria-label="Theme switcher">
