@@ -81,5 +81,6 @@ CI runs three separate workflows (`.github/workflows/tests-resulting.yaml`, `tes
 
 ## Known issues & workarounds
 
+- Backend services run in production via `ts-node-dev` (`npm start`). The `start` scripts use `--transpile-only` so the TypeScript type-checker does **not** run at runtime. This cuts each service's memory from ~384 MB to ~205 MB, which is essential for fitting all 8 services + shared MongoDB + RabbitMQ onto the single cost-optimized AKS node (~4 GB). Without it the node over-commits and pods OOM/CrashLoop. Type-checking still runs in CI via `jest`/`ts-jest` and `npx tsc --noEmit`.
 - The `common/` git submodule has no registered URL in `.gitmodules`. CI emits a warning (`fatal: No url found for submodule path 'common'`) but this does not affect the build.
 - GitHub Actions workflows still use `actions/checkout@v2` (Node 20), which triggers a deprecation warning on current runners. Upgrading to `@v4` would silence it.
