@@ -24,12 +24,11 @@ const HandleSlip = ({ sliprefresh, statsrefresh, currentUser, uiVariant }) => {
 
     if (slipRows.length === 0) {
         return currentUser ? <div className={`card card-body empty-state-card slip-board slip-board--${uiVariant}`}>
-            <div className="slip-board__title">Bet Ticket</div>
-            <div className="slip-board__empty-main">Make your slip!</div>
-            <small className="text-secondary">Pick odds from live events to compose your ticket.</small>
+            <div className="slip-board__title">BET SLIP</div>
+            <small className="text-secondary">Pick odds from events to compose your slip.</small>
         </div> :
         <div className={`card card-body empty-state-card slip-board slip-board--${uiVariant}`}>
-            <div className="slip-board__title">Bet Ticket</div>
+            <div className="slip-board__title">BET SLIP</div>
             <div className="slip-board__empty-main">Login and bet!</div>
             <small className="text-secondary">Sign in to track selections and place slips.</small>
         </div>;
@@ -108,7 +107,7 @@ const HandleSlip = ({ sliprefresh, statsrefresh, currentUser, uiVariant }) => {
     </div>
 
     return <div className={`slip-board slip-board--${uiVariant}`}>
-        <div className="slip-board__title">Bet Ticket</div>
+        <div className="slip-board__title">BET SLIP</div>
         {renderedSlip}
         {oddAndPossibleWin}
         {wagerAndBet}
