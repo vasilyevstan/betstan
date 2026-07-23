@@ -43,3 +43,5 @@ jobs:
         kubectl apply -f infra/k8s
         # Apply prod-specific ingress (TLS + domain)
         kubectl apply -f infra/k8s-prod/ingress-srv.yaml
+        # Apply prod HTTPS fallback ingress for immediate trusted cert validation
+        kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml

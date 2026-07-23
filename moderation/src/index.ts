@@ -35,7 +35,6 @@ const startUp = async () => {
       try {
         await mongoose.connection.close();
         await mongoose.disconnect();
-        await messengerWrapper.connection.close();
         process.exit(1);
       } catch (err) {
         console.log("error inside error", err);
@@ -47,7 +46,6 @@ const startUp = async () => {
       try {
         await mongoose.connection.close();
         await mongoose.disconnect();
-        await messengerWrapper.connection.close();
         process.exit(0);
       } catch (err) {
         console.log("error closing connections", err);
@@ -59,7 +57,6 @@ const startUp = async () => {
       try {
         await mongoose.connection.close();
         await mongoose.disconnect();
-        await messengerWrapper.connection.close();
         process.exit(0);
       } catch (err) {
         console.log("Error closing conection", err);

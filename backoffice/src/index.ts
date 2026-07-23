@@ -43,7 +43,6 @@ const startUp = async () => {
       await mongoose.connection.close();
       await mongoose.disconnect();
       // await channel.close();
-      await messengerWrapper.connection.close();
 
       server.close();
 
@@ -58,7 +57,6 @@ const startUp = async () => {
     try {
       await mongoose.connection.close();
       await mongoose.disconnect();
-      await messengerWrapper.connection.close();
       server.close();
       process.exit(0);
     } catch (err) {
@@ -71,7 +69,6 @@ const startUp = async () => {
     try {
       await mongoose.connection.close();
       await mongoose.disconnect();
-      await messengerWrapper.connection.close();
       server.close();
       process.exit(0);
     } catch (err) {

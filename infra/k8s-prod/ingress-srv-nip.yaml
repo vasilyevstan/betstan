@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: gaming-ingress-service
+  name: gaming-ingress-service-nip
   annotations:
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
@@ -10,10 +10,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - www.betstan.xyz
-      secretName: betstan-tls
+        - 48.206.235.122.nip.io
+      secretName: betstan-nip-tls
   rules:
-    - host: www.betstan.xyz
+    - host: 48.206.235.122.nip.io
       http:
         paths:
           - path: /api/auth/?(.*)
@@ -53,15 +53,6 @@ spec:
                   number: 3000
           - path: /?(.*)
             pathType: ImplementationSpecific
-            backend:
-              service:
-                name: gaming-client-srv
-                port:
-                  number: 3000
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
             backend:
               service:
                 name: gaming-client-srv
