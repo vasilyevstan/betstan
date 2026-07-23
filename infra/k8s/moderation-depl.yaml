@@ -17,7 +17,7 @@ spec:
           image: stanvasilyev/gaming_moderation
           env:
             - name: MONGO_URI
-              value: "mongodb://gaming-moderation-mongo-srv:27017/gaming_moderation"
+              value: "mongodb://gaming-mongo-srv:27017/gaming_moderation"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
             - name: CLIENT_ID
