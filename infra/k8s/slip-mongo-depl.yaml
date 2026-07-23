@@ -1,44 +1,44 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: gaming-mongo-depl
+  name: gaming-slip-mongo-depl
 spec:
-  serviceName: gaming-mongo-srv
+  serviceName: gaming-slip-mongo-srv
   replicas: 1
   selector:
     matchLabels:
-      app: gaming-mongo
+      app: gaming-slip-mongo
   template:
     metadata:
       labels:
-        app: gaming-mongo
+        app: gaming-slip-mongo
     spec:
       containers:
-        - name: gaming-mongo
+        - name: gaming-slip-mongo
           image: mongo
           volumeMounts:
-            - name: gaming-mongo-data
+            - name: gaming-slip-mongo-data
               mountPath: /data/db
   volumeClaimTemplates:
     - metadata:
-        name: gaming-mongo-data
+        name: gaming-slip-mongo-data
       spec:
         accessModes:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 8Gi
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: gaming-mongo-srv
+  name: gaming-slip-mongo-srv
 spec:
   type: ClusterIP
   selector:
-    app: gaming-mongo
+    app: gaming-slip-mongo
   ports:
-    - name: gaming-mongo-port
+    - name: gaming-slip-mongo-port
       protocol: TCP
       port: 27017
       targetPort: 27017

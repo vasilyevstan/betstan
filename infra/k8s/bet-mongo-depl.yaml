@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gaming-bet-mongo-depl
+spec:
+  serviceName: gaming-bet-mongo-srv
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-bet-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-bet-mongo
+    spec:
+      containers:
+        - name: gaming-bet-mongo
+          image: mongo
+          volumeMounts:
+            - name: gaming-bet-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-bet-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-bet-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-bet-mongo
+  ports:
+    - name: gaming-bet-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gaming-moderation-mongo-depl
+spec:
+  serviceName: gaming-moderation-mongo-srv
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-moderation-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-moderation-mongo
+    spec:
+      containers:
+        - name: gaming-moderation-mongo
+          image: mongo
+          volumeMounts:
+            - name: gaming-moderation-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-moderation-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-moderation-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-moderation-mongo
+  ports:
+    - name: gaming-moderation-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017
