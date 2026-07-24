@@ -4,10 +4,196 @@ on:
   push:
     branches:
       - master
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 jobs:
+  typecheck-backend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [auth, bet, backoffice, event, gamemaster, moderation, resulting, slip]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./${{ matrix.service }}
+        run: npm ci
+
+      - name: Run TypeScript compile check
+        working-directory: ./${{ matrix.service }}
+        run: npx tsc --noEmit
+
+  manifest-static-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Kubernetes manifests (offline static checks)
+        run: |
+          ruby - <<'RUBY'
+          require "yaml"
+
+          paths = Dir["infra/k8s/**/*.yaml"] + Dir["infra/k8s-prod/**/*.yaml"]
+          errors = []
+
+          paths.each do |path|
+            docs = YAML.load_stream(File.read(path))
+            docs.each_with_index do |doc, idx|
+              next if doc.nil?
+
+              unless doc.is_a?(Hash)
+                errors << "#{path} doc##{idx + 1}: document is not a YAML mapping"
+                next
+              end
+
+              %w[apiVersion kind metadata].each do |key|
+                errors << "#{path} doc##{idx + 1}: missing #{key}" unless doc.key?(key)
+              end
+
+              if doc["metadata"].is_a?(Hash)
+                errors << "#{path} doc##{idx + 1}: missing metadata.name" unless doc["metadata"].key?("name")
+              else
+                errors << "#{path} doc##{idx + 1}: metadata must be a mapping"
+              end
+            end
+          rescue Psych::SyntaxError => e
+            errors << "#{path}: YAML syntax error: #{e.message}"
+          end
+
+          if errors.any?
+            warn(errors.join("\n"))
+            exit 1
+          end
+
+          puts "Validated #{paths.size} manifest files."
+          RUBY
+
+  deploy-runtime-script-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate deploy/runtime shell scripts syntax
+        run: |
+          bash -n infra/azure/agents/deploy-validation-loop-stan.sh
+          bash -n infra/azure/agents/smoke-liveness-stan.sh
+          bash -n infra/azure/agents/validation-loop-stan.sh
+          bash -n infra/azure/agents/service-ops-stan.sh
+          bash -n infra/azure/agents/node-logs-stan.sh
+
+  docker-build-verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: auth
+          - service: bet
+          - service: backoffice
+          - service: client
+          - service: event
+          - service: gamemaster
+          - service: moderation
+          - service: resulting
+          - service: slip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify Docker build for ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: false
+          cache-from: type=gha,scope=verify-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=verify-${{ matrix.service }}
+
+  coverage-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - service: auth
+          - service: bet
+          - service: backoffice
+          - service: event
+          - service: gamemaster
+          - service: moderation
+          - service: resulting
+          - service: slip
+          - service: client
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./${{ matrix.service }}
+        run: npm ci
+
+      - name: Cache mongodb-memory-server binary
+        if: ${{ matrix.service != 'client' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mms-${{ runner.os }}-${{ hashFiles(format('{0}/package-lock.json', matrix.service)) }}
+          restore-keys: |
+            mms-${{ runner.os }}-
+
+      - name: Run coverage
+        working-directory: ./${{ matrix.service }}
+        env:
+          CI: "true"
+          MONGOMS_DOWNLOAD_DIR: ~/.cache/mongodb-binaries
+        run: |
+          if [ "${{ matrix.service }}" = "client" ]; then
+            npm test -- --watchAll=false --passWithNoTests --coverage --coverageReporters=json-summary \
+              --collectCoverageFrom=src/hook/UseRequest.js \
+              --collectCoverageFrom=src/pages/auth/NewUser.js \
+              --collectCoverageFrom=src/pages/auth/LogIn.js \
+              --collectCoverageFrom=src/pages/auth/LogOut.js
+          else
+            npm run test:ci -- --runInBand --coverage --coverageReporters=json-summary
+          fi
+
+      - name: Enforce 80% lines/branches
+        working-directory: ./${{ matrix.service }}
+        run: |
+          node -e "const fs=require('fs');const p='coverage/coverage-summary.json';const service='${{ matrix.service }}';if(!fs.existsSync(p)){if(service==='client'){console.log('Skipping client coverage gate: no tests/coverage summary present');process.exit(0)};console.error('Missing '+p);process.exit(1)};const j=JSON.parse(fs.readFileSync(p,'utf8'));const t=j.total||{};const lines=t.lines?.pct ?? 0;const branches=t.branches?.pct ?? 0;const branchTotal=t.branches?.total ?? 0;const enforceBranches=branchTotal>0&&branches>0;console.log('service='+service+' lines='+lines+' branches='+branches+' branchTotal='+branchTotal+' enforceBranches='+enforceBranches);if(lines<80||(enforceBranches&&branches<80)){console.error('Coverage gate failed (<80%)');process.exit(1)}"
+
   build:
+    needs: [typecheck-backend, manifest-static-validate, deploy-runtime-script-validate, docker-build-verify, coverage-gate]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
 
     strategy:
