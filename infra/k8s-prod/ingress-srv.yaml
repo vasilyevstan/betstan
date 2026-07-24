@@ -10,9 +10,55 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
+        - betstan.xyz
         - www.betstan.xyz
       secretName: betstan-tls
   rules:
+    - host: betstan.xyz
+      http:
+        paths:
+          - path: /api/auth/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-auth-srv
+                port:
+                  number: 3000
+          - path: /api/event/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-event-srv
+                port:
+                  number: 3000
+          - path: /api/slip/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-slip-srv
+                port:
+                  number: 3000
+          - path: /api/bet/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-bet-srv
+                port:
+                  number: 3000
+          - path: /api/backoffice/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-backoffice-srv
+                port:
+                  number: 3000
+          - path: /?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-client-srv
+                port:
+                  number: 3000
     - host: www.betstan.xyz
       http:
         paths:
