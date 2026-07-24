@@ -4,10 +4,27 @@ on:
   push:
     branches:
       - master
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 jobs:
+  ingress-routing-guard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate prod ingress host/path safety
+        run: |
+          chmod +x infra/azure/agents/ingress-routing-guard-stan.sh
+          ./infra/azure/agents/ingress-routing-guard-stan.sh
+
   build:
+    if: github.event_name != 'pull_request'
+    needs: [ingress-routing-guard]
     runs-on: ubuntu-latest
 
     strategy:
