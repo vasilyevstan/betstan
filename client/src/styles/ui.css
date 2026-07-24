@@ -68,12 +68,9 @@ body {
   height: 2.35rem;
 }
 
-.navbar-light .brand-wordmark {
-  filter: none;
-}
-
+.navbar-light .brand-wordmark,
 .navbar-dark .brand-wordmark {
-  filter: brightness(0) invert(1);
+  filter: none;
 }
 
 .nav-icon {
@@ -255,7 +252,58 @@ body {
 }
 
 .scoreboard .stat-card .card-body {
-  row-gap: 0.35rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.25rem 3.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.72rem 0.82rem;
+}
+
+.scoreboard .stat-card {
+  background: color-mix(in srgb, var(--surface-soft) 94%, var(--surface-elevated));
+  border-color: color-mix(in srgb, var(--border-subtle) 88%, var(--accent) 12%);
+  box-shadow: 0 10px 20px rgba(4, 10, 26, 0.1);
+}
+
+.scoreboard .stat-card:hover {
+  border-color: color-mix(in srgb, var(--border-subtle) 72%, var(--accent) 28%);
+}
+
+.stat-row__user,
+.stat-row__count,
+.stat-row__wager {
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.stat-row__user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-row__count,
+.stat-row__wager {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat-row--header {
+  font-size: 0.7rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.stat-row--header .stat-row__wager,
+.stat-row--header .stat-row__count {
+  justify-self: end;
+}
+
+.scoreboard--v1 .stat-row__user,
+.scoreboard--v2 .stat-row__user,
+.scoreboard--v3 .stat-row__user {
+  font-weight: 600;
 }
 
 .my-bets-card {
@@ -652,6 +700,23 @@ body {
   border-color: rgba(47, 128, 120, 0.22);
 }
 
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1 {
+  background: #dbeaf4;
+  border-color: #afcde1;
+  color: #153147;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1:hover {
+  background: #c6deec;
+  border-color: #8fb7d0;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v1 .product-button--v1.product-button--selected {
+  background: #b8dce0;
+  border-color: #86bfc1;
+  color: #103135;
+}
+
 :root[data-bs-theme='light'] .ui-variant-v2 {
   --surface-base: #ebf1f9;
   --surface-soft: #f7fbff;
@@ -715,6 +780,23 @@ body {
   background: #c4f2e8;
   border-color: #7dcab8;
   color: #123f36;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3 {
+  background: #efe3ff;
+  border-color: #d6b8f3;
+  color: #392255;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3:hover {
+  background: #e1ccfb;
+  border-color: #c398ea;
+}
+
+:root[data-bs-theme='light'] .ui-variant-v3 .product-button--v3.product-button--selected {
+  background: #d7baf7;
+  border-color: #af7fe6;
+  color: #241236;
 }
 
 :root[data-bs-theme='light'] .ui-variant-v3 {

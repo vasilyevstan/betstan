@@ -5,7 +5,7 @@ import NewEventListener from "./event/listener/NewEventListener";
 import { GamemasterWorker } from "./worker/GamemasterWorker";
 import EventResultListener from "./event/listener/EventResultListener";
 
-const startUp = async () => {
+const bootstrap = async () => {
   console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
@@ -30,6 +30,10 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+
+    const gameMaster = new GamemasterWorker();
+    await gameMaster.init();
+    gameMaster.work();
 
     process.on("uncaughtException", async function (err) {
       console.log("logging general error", err);
@@ -64,15 +68,9 @@ const startUp = async () => {
       }
     });
   } catch (err) {
-    console.log(err);
+    console.log("Bootstrap failed", err);
+    process.exit(1);
   }
 };
 
-const gameMasterWorker = async () => {
-  const gameMaster = new GamemasterWorker();
-  await gameMaster.init();
-  gameMaster.work();
-};
-
-startUp();
-gameMasterWorker();
+bootstrap();
