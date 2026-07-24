@@ -1,28 +1,48 @@
 name: deploy-manifests
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - 'infra/**'
+  workflow_run:
+    workflows: ["build-push"]
+    types: [completed]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'prod'
+
 env:
   RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
   CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  APP_DOMAIN: ${{ vars.APP_DOMAIN || '48.206.235.122.nip.io' }}
+  APP_CERT_NAME: ${{ vars.APP_CERT_NAME || 'betstan-nip-tls' }}
+  APP_E2E_BASE_URL: ${{ vars.APP_E2E_BASE_URL || '' }}
+  DEPLOY_VALIDATION_ATTEMPTS: ${{ vars.DEPLOY_VALIDATION_ATTEMPTS || '3' }}
+  DEPLOY_VALIDATION_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_SLEEP_SECONDS || '30' }}
+  DEPLOY_VALIDATION_MAX_LOOPS: ${{ vars.DEPLOY_VALIDATION_MAX_LOOPS || '3' }}
+  DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS || '20' }}
 
 jobs:
   deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'master'
+      )
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-master
+      cancel-in-progress: false
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    - name: Resolve deploy image tag
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_run" ]; then
+          echo "IMAGE_TAG=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_ENV"
+        else
+          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+        fi
 
     - name: Azure Login
       uses: azure/login@v1
@@ -35,13 +55,66 @@ jobs:
         resource-group: ${{ env.RESOURCE_GROUP }}
         cluster-name: ${{ env.CLUSTER_NAME }}
 
+    - name: DB safety guardrails
+      run: |
+        set -euo pipefail
+        mongo_pvc_count="$(kubectl get pvc -n default --no-headers 2>/dev/null | awk '/mongo/ {c++} END {print c+0}')"
+        if [ "$mongo_pvc_count" -lt 8 ]; then
+          echo "Expected at least 8 mongo PVCs, found $mongo_pvc_count. Aborting deploy to avoid unsafe DB state."
+          exit 1
+        fi
+        kubectl get pvc -n default --no-headers | awk '/mongo/ {print $1, $2, $3}'
+
     - name: Apply Kubernetes manifests
       run: |
         # Apply cert-manager ClusterIssuer first (CRDs installed by provision.sh)
         kubectl apply -f infra/k8s-prod/cert-issuer.yaml
         # Apply core services
         kubectl apply -f infra/k8s
+        # Pin workload images to the commit that passed build-push
+        kubectl set image deployment/gaming-auth-depl gaming-auth=stanvasilyev/gaming_auth:${IMAGE_TAG}
+        kubectl set image deployment/gaming-bet-depl gaming-bet=stanvasilyev/gaming_bet:${IMAGE_TAG}
+        kubectl set image deployment/gaming-backoffice-depl gaming-backoffice=stanvasilyev/gaming_backoffice:${IMAGE_TAG}
+        kubectl set image deployment/gaming-client-depl gaming-client=stanvasilyev/gaming_client:${IMAGE_TAG}
+        kubectl set image deployment/gaming-event-depl gaming-event=stanvasilyev/gaming_event:${IMAGE_TAG}
+        kubectl set image deployment/gaming-gamemaster-depl gaming-gamemaster=stanvasilyev/gaming_gamemaster:${IMAGE_TAG}
+        kubectl set image deployment/gaming-moderation-depl gaming-moderation=stanvasilyev/gaming_moderation:${IMAGE_TAG}
+        kubectl set image deployment/gaming-resulting-depl gaming-resulting=stanvasilyev/gaming_resulting:${IMAGE_TAG}
+        kubectl set image deployment/gaming-slip-depl gaming-slip=stanvasilyev/gaming_slip:${IMAGE_TAG}
         # Apply prod-specific ingress (TLS + domain)
         kubectl apply -f infra/k8s-prod/ingress-srv.yaml
         # Apply prod HTTPS fallback ingress for immediate trusted cert validation
         kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml
+
+    - name: Verify deployment rollouts
+      run: |
+        kubectl rollout status deployment/gaming-auth-depl --timeout=5m
+        kubectl rollout status deployment/gaming-bet-depl --timeout=5m
+        kubectl rollout status deployment/gaming-backoffice-depl --timeout=5m
+        kubectl rollout status deployment/gaming-client-depl --timeout=5m
+        kubectl rollout status deployment/gaming-event-depl --timeout=5m
+        kubectl rollout status deployment/gaming-gamemaster-depl --timeout=5m
+        kubectl rollout status deployment/gaming-moderation-depl --timeout=5m
+        kubectl rollout status deployment/gaming-resulting-depl --timeout=5m
+        kubectl rollout status deployment/gaming-slip-depl --timeout=5m
+
+    - name: Post-deploy validation loop
+      id: post_deploy_validation
+      run: ./infra/azure/agents/deploy-validation-loop-stan.sh
+      env:
+        DOMAIN: ${{ env.APP_DOMAIN }}
+        CERT_NAME: ${{ env.APP_CERT_NAME }}
+        E2E_BASE_URL: ${{ env.APP_E2E_BASE_URL }}
+        MAX_ATTEMPTS: ${{ env.DEPLOY_VALIDATION_ATTEMPTS }}
+        SLEEP_SECONDS: ${{ env.DEPLOY_VALIDATION_SLEEP_SECONDS }}
+        VALIDATION_MAX_LOOPS: ${{ env.DEPLOY_VALIDATION_MAX_LOOPS }}
+        VALIDATION_SLEEP_SECONDS: ${{ env.DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS }}
+        OUTPUT_DIR: artifacts/deploy-validation
+
+    - name: Upload deploy diagnostics
+      if: always() && steps.post_deploy_validation.outcome == 'failure'
+      uses: actions/upload-artifact@v4
+      with:
+        name: deploy-validation-diagnostics-${{ github.run_id }}
+        path: artifacts/deploy-validation
+        if-no-files-found: ignore
