@@ -1,5 +1,6 @@
 # Azure operation agents (`*-stan`)
 
+- `pre-commit-infra-check-stan.sh` — scans infra changes for secrets patterns, validates ingress routing, warns on public IPs and staged artifacts. Run before every `git push` on infra/workflow changes.
 - `provisioning-stan.sh` — runs full AKS provisioning flow.
 - `deploy-stan.sh` — applies Kubernetes manifests to AKS.
 - `troubleshoot-stan.sh` — prints cluster/workload/ingress diagnostics.
@@ -10,11 +11,14 @@
 - `mismatch-diagnostic-stan.sh` — traces event-service vs gamemaster event-stream mismatches for a specific event.
 - `pr-validation-stan.sh` — inspects the latest build-push validation run for a PR and classifies failing jobs.
 - `pr-merge-safety-stan.sh` — wraps PR validation and gives a conservative merge-safe/split recommendation.
+- `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
+- `rollback-readiness-stan.sh` — emits explicit rollback go/no-go based on current health, queue pressure, and rollout history.
 - `node-logs-stan.sh` — node-level health/events + pod error-log extraction.
 - `service-ops-stan.sh` — service/deployment/endpoints readiness + restart/error diagnostics.
 - `smoke-liveness-stan.sh` — ingress + homepage + auth API + endpoint liveness checks.
 - `deploy-validation-loop-stan.sh` — retries smoke+functional validation and captures diagnostics artifacts on failure.
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
+- `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
 - `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
@@ -25,6 +29,36 @@
 - `stage-soak-validation-stan.sh` — 24h-style looped stage validation (smoke + service ops + node checks).
 
 All scripts assume `az`, `kubectl`, and required auth/context are already set.
+
+## Required validation sequence for production changes
+
+```
+pre-commit-infra-check-stan.sh   ← run before git push on any infra/workflow change
+    ↓
+ingress-routing-guard-stan.sh    ← runs automatically in CI on every PR to master
+    ↓
+MERGE to master
+    ↓
+post-merge-verification-stan.sh  ← run immediately after every production merge
+    ↓
+rollback-readiness-stan.sh       ← run before taking any rollback action
+```
+
+See `infra/azure/LESSONS_LEARNED.md` for the full set of operational rules.
+
+## Pre-commit infra check
+
+Run before pushing any branch that touches infra, k8s manifests, or CI workflows:
+
+```bash
+./infra/azure/agents/pre-commit-infra-check-stan.sh
+```
+
+The check:
+- scans all agent scripts and workflows for hard-coded secrets patterns;
+- validates the prod ingress routing guard passes;
+- warns if `artifacts/` is staged for commit;
+- warns about hard-coded public IPs in k8s manifests.
 
 Suggested execution order:
 1. `provisioning-stan.sh`
@@ -91,6 +125,36 @@ The merge-safety agent:
 - recommends merge only when the latest validation is green,
 - otherwise recommends splitting deploy-recovery work from coverage/test-harness fixes.
 
+## Post-merge production verification
+
+Use this after merging to `master` to avoid false confidence from merge success alone:
+
+```bash
+PR=50 ./infra/azure/agents/post-merge-verification-stan.sh
+# or
+MERGE_SHA=<merge-commit-sha> ./infra/azure/agents/post-merge-verification-stan.sh
+```
+
+The script validates:
+- successful `build-push` and `deploy-manifests` runs for the exact merged commit;
+- deployment/statefulset readiness in AKS;
+- API health for both `www.betstan.xyz` and `betstan.xyz`;
+- RabbitMQ required queues have active consumers.
+
+## Rollback readiness gate
+
+Use this before taking rollback action in production:
+
+```bash
+./infra/azure/agents/rollback-readiness-stan.sh
+# optional provenance check
+TARGET_SHA=<candidate-sha> ./infra/azure/agents/rollback-readiness-stan.sh
+```
+
+The script outputs:
+- `rollback_readiness=GO` when safety preconditions are met;
+- `rollback_readiness=NO_GO` with concrete reasons when rollback would be risky.
+
 ## GoDaddy `A www` error fix (`Invalid data provided for record data`)
 
 Use this sequence in GoDaddy DNS management:
@@ -113,6 +177,7 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - `deploy-manifests` runs only after successful `build-push` on `master` and deploys that exact SHA image set.
 - Deploy workflow blocks when mongo PVC count is unexpectedly low, avoiding deployment against unsafe DB storage state.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.
+- `build-push` now includes `ingress-routing-guard-stan.sh` so PRs fail if prod ingress misses required host/api routes.
 
 ## Deploy validation loop settings
 
