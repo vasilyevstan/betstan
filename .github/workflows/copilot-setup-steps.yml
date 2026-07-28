@@ -1,0 +1,49 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            auth/package-lock.json
+            bet/package-lock.json
+            backoffice/package-lock.json
+            client/package-lock.json
+            event/package-lock.json
+            gamemaster/package-lock.json
+            moderation/package-lock.json
+            resulting/package-lock.json
+            slip/package-lock.json
+
+      - name: Install service dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in auth bet backoffice client event gamemaster moderation resulting slip; do
+            echo "Installing dependencies in ${dir}"
+            (cd "${dir}" && npm ci)
+          done
+
+      - name: Install Playwright browsers for client checks
+        working-directory: client
+        run: npx playwright install --with-deps chromium
