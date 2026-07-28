@@ -23,12 +23,12 @@
 - `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
 - `decommission-stage-rg-stan.sh` — deletes the entire stage resource group to remove stage costs.
-- `reconcile-nodepool-profile-stan.sh` — enforces `Standard_B4ms` + autoscaler `1..3` profile (safe-by-default, optional cutover).
+- `reconcile-nodepool-profile-stan.sh` — creates or validates the `Standard_B4as_v2` + Managed 64 GiB OS disk profile and reconciles autoscaler `1..3`; it refuses workload cutover and legacy pool deletion.
 - `deploy-stage-shared-db-stan.sh` — stage-only deploy with shared Mongo cutover (connection-string-only service changes).
 - `revert-stage-legacy-mongo-stan.sh` — rollback stage from shared Mongo back to per-service Mongo services.
 - `stage-soak-validation-stan.sh` — 24h-style looped stage validation (smoke + service ops + node checks).
 
-All scripts assume `az`, `kubectl`, and required auth/context are already set.
+Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
 
 ## Required validation sequence for production changes
 
@@ -141,6 +141,19 @@ The script validates:
 - API health for both `www.betstan.xyz` and `betstan.xyz`;
 - RabbitMQ required queues have active consumers.
 
+### RabbitMQ replacement recovery
+
+RabbitMQ is an ephemeral Deployment. After its broker pod is replaced, restart every backend deployment sequentially so each service redeclares its queues and consumers:
+
+```bash
+for deployment in auth bet backoffice event gamemaster moderation resulting slip; do
+  kubectl rollout restart "deployment/gaming-${deployment}-depl"
+  kubectl rollout status "deployment/gaming-${deployment}-depl" --timeout=5m
+done
+```
+
+Verify all 17 queues have consumers before considering recovery complete.
+
 ## Rollback readiness gate
 
 Use this before taking rollback action in production:
@@ -236,12 +249,40 @@ Use these operations to park and restore stage safely:
 JWT_KEY='<stage-jwt-secret>' ./infra/azure/agents/provision-stage-stan.sh
 ```
 
-Profile reconciliation helper:
+Profile reconciliation helper (Azure profile only):
 
 ```bash
-# Safe mode (prints/aligns profile, no workload move)
+# Defaults to Standard_B4as_v2, Managed 64 GiB, autoscaler 1..3
 ./infra/azure/agents/reconcile-nodepool-profile-stan.sh
-
-# Execute cutover + remove legacy pool
-EXECUTE_CUTOVER=true DELETE_LEGACY_POOL=true ./infra/azure/agents/reconcile-nodepool-profile-stan.sh
 ```
+
+The reconciler creates a missing target pool, validates an existing pool's immutable profile, reconciles its autoscaler settings, and prints the Azure node-pool profile JSON. It does not obtain Kubernetes credentials or move workloads. Setting `EXECUTE_CUTOVER=true` or `DELETE_LEGACY_POOL=true` fails nonzero intentionally; workload migration and pool deletion require the manual gate below.
+
+Exact production reconciliation (profile check/update only; no workload cutover):
+
+```bash
+RESOURCE_GROUP=betstan-rg \
+CLUSTER_NAME=betstan-aks \
+TARGET_POOL_NAME=nodepool4 \
+TARGET_VM_SIZE=Standard_B4as_v2 \
+TARGET_OS_DISK_TYPE=Managed \
+TARGET_OS_DISK_SIZE_GB=64 \
+TARGET_MIN_COUNT=1 \
+TARGET_MAX_COUNT=3 \
+./infra/azure/agents/reconcile-nodepool-profile-stan.sh
+```
+
+An existing target pool must already match the requested VM size, OS disk type, and OS disk size; immutable-profile mismatches fail instead of being reported as aligned.
+
+### Manual node-pool migration gate
+
+Before deleting a legacy node pool:
+
+1. Take and verify consistent snapshots of all eight Mongo PVCs.
+2. Roll out stateless workloads sequentially, waiting for readiness before each next rollout.
+3. Move Mongo StatefulSets one at a time so each RWO volume detaches, reattaches, and becomes healthy before the next move.
+4. Explicitly reconnect backend services after any RabbitMQ replacement, using the sequential recovery procedure above, and verify queue consumers.
+5. Repeat application health, RabbitMQ queue/consumer, and node filesystem/free-space checks (including `DiskPressure`) after every migration step.
+6. Delete the legacy pool manually only after all repeated checks remain healthy.
+
+Do not use `Standard_B4ms` with a 30 GiB Ephemeral OS disk for this workload. Concurrent image pulls exhausted that trial pool's OS filesystem, caused `DiskPressure`, and evicted two pods.

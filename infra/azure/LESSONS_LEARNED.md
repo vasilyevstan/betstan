@@ -18,9 +18,18 @@ The required pattern is:
 Script: `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
 
 ### Stable production baseline
-- VM size: `Standard_B4ms` (2 vCPU, 16 GiB RAM).
+- Exactly one System pool: `nodepool4`.
+- VM size: `Standard_B4as_v2`.
+- OS disk: Managed, 64 GiB.
+- Current node count: 1.
 - Autoscaler bounds: `min=1, max=3`.
 - `Standard_B2s` is too small for the full service set on a single node.
+
+### Data-disk attachment limits constrain VM selection
+`Standard_E2ads_v5` supports only four data-disk attachments. The stable topology has eight per-service Mongo PVC disks, so that VM size cannot host the workload on one node.
+
+### Do not use a 30 GiB Ephemeral OS disk for this workload
+A trial `Standard_B4ms` pool with a 30 GiB Ephemeral OS disk failed when concurrent image pulls exhausted the node OS filesystem. The node entered `DiskPressure` and evicted two pods, so the trial pool was deleted. Keep the Managed 64 GiB baseline and roll application services out sequentially.
 
 ---
 
@@ -54,6 +63,13 @@ Consolidation to a shared Mongo instance was tested in stage, produced complicat
 Do not promote the shared-DB path to production without a complete stage soak cycle first.
 
 Stage test scripts when revisiting: `infra/azure/agents/deploy-stage-shared-db-stan.sh` and `infra/azure/agents/stage-soak-validation-stan.sh`.
+
+---
+
+## Messaging Recovery
+
+### Restart backends after RabbitMQ replacement
+RabbitMQ runs as an ephemeral Deployment. Replacing its broker can leave queue declarations and consumers absent until clients reconnect. Restart all backend deployments sequentially after replacement so they redeclare all 17 queues and consumers, then verify consumer presence before declaring recovery complete.
 
 ---
 

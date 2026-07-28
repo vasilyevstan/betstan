@@ -67,36 +67,76 @@ jobs:
 
     - name: Apply Kubernetes manifests
       run: |
+        set -euo pipefail
         # Apply cert-manager ClusterIssuer first (CRDs installed by provision.sh)
         kubectl apply -f infra/k8s-prod/cert-issuer.yaml
-        # Apply core services
-        kubectl apply -f infra/k8s
-        # Pin workload images to the commit that passed build-push
-        kubectl set image deployment/gaming-auth-depl gaming-auth=stanvasilyev/gaming_auth:${IMAGE_TAG}
-        kubectl set image deployment/gaming-bet-depl gaming-bet=stanvasilyev/gaming_bet:${IMAGE_TAG}
-        kubectl set image deployment/gaming-backoffice-depl gaming-backoffice=stanvasilyev/gaming_backoffice:${IMAGE_TAG}
-        kubectl set image deployment/gaming-client-depl gaming-client=stanvasilyev/gaming_client:${IMAGE_TAG}
-        kubectl set image deployment/gaming-event-depl gaming-event=stanvasilyev/gaming_event:${IMAGE_TAG}
-        kubectl set image deployment/gaming-gamemaster-depl gaming-gamemaster=stanvasilyev/gaming_gamemaster:${IMAGE_TAG}
-        kubectl set image deployment/gaming-moderation-depl gaming-moderation=stanvasilyev/gaming_moderation:${IMAGE_TAG}
-        kubectl set image deployment/gaming-resulting-depl gaming-resulting=stanvasilyev/gaming_resulting:${IMAGE_TAG}
-        kubectl set image deployment/gaming-slip-depl gaming-slip=stanvasilyev/gaming_slip:${IMAGE_TAG}
+
+        # Apply shared infrastructure without changing app Deployments.
+        while IFS= read -r -d '' manifest; do
+          kubectl apply -f "$manifest"
+        done < <(
+          find infra/k8s -maxdepth 1 -type f \
+            \( -name '*.yaml' -o -name '*.yml' \) \
+            ! -name 'auth-depl.yaml' \
+            ! -name 'bet-depl.yaml' \
+            ! -name 'backoffice-depl.yaml' \
+            ! -name 'client-depl.yaml' \
+            ! -name 'event-depl.yaml' \
+            ! -name 'gamemaster-depl.yaml' \
+            ! -name 'moderation-depl.yaml' \
+            ! -name 'resulting-depl.yaml' \
+            ! -name 'slip-depl.yaml' \
+            -print0
+        )
+
+        # Apply and roll out one app at a time to avoid concurrent image pulls.
+        rollouts=(
+          'auth-depl.yaml|gaming-auth-depl|gaming-auth|stanvasilyev/gaming_auth'
+          'bet-depl.yaml|gaming-bet-depl|gaming-bet|stanvasilyev/gaming_bet'
+          'backoffice-depl.yaml|gaming-backoffice-depl|gaming-backoffice|stanvasilyev/gaming_backoffice'
+          'client-depl.yaml|gaming-client-depl|gaming-client|stanvasilyev/gaming_client'
+          'event-depl.yaml|gaming-event-depl|gaming-event|stanvasilyev/gaming_event'
+          'gamemaster-depl.yaml|gaming-gamemaster-depl|gaming-gamemaster|stanvasilyev/gaming_gamemaster'
+          'moderation-depl.yaml|gaming-moderation-depl|gaming-moderation|stanvasilyev/gaming_moderation'
+          'resulting-depl.yaml|gaming-resulting-depl|gaming-resulting|stanvasilyev/gaming_resulting'
+          'slip-depl.yaml|gaming-slip-depl|gaming-slip|stanvasilyev/gaming_slip'
+        )
+        for rollout in "${rollouts[@]}"; do
+          IFS='|' read -r manifest deployment container image <<< "$rollout"
+          manifest_path="infra/k8s/${manifest}"
+          # Each app file contains a Deployment followed by its Service.
+          {
+            kubectl set image \
+              -f <(sed -n '1,/^---[[:space:]]*$/p' "$manifest_path") \
+              "${container}=${image}:${IMAGE_TAG}" --local -o yaml
+            sed -n '/^---[[:space:]]*$/,$p' "$manifest_path"
+          } | kubectl apply -f -
+          kubectl rollout status "deployment/${deployment}" --timeout=5m
+        done
+
         # Apply prod-specific ingress (TLS + domain)
         kubectl apply -f infra/k8s-prod/ingress-srv.yaml
         # Apply prod HTTPS fallback ingress for immediate trusted cert validation
         kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml
 
-    - name: Verify deployment rollouts
+    - name: Confirm final deployment readiness
       run: |
-        kubectl rollout status deployment/gaming-auth-depl --timeout=5m
-        kubectl rollout status deployment/gaming-bet-depl --timeout=5m
-        kubectl rollout status deployment/gaming-backoffice-depl --timeout=5m
-        kubectl rollout status deployment/gaming-client-depl --timeout=5m
-        kubectl rollout status deployment/gaming-event-depl --timeout=5m
-        kubectl rollout status deployment/gaming-gamemaster-depl --timeout=5m
-        kubectl rollout status deployment/gaming-moderation-depl --timeout=5m
-        kubectl rollout status deployment/gaming-resulting-depl --timeout=5m
-        kubectl rollout status deployment/gaming-slip-depl --timeout=5m
+        set -euo pipefail
+        deployments=(
+          gaming-auth-depl
+          gaming-bet-depl
+          gaming-backoffice-depl
+          gaming-client-depl
+          gaming-event-depl
+          gaming-gamemaster-depl
+          gaming-moderation-depl
+          gaming-resulting-depl
+          gaming-slip-depl
+        )
+        for deployment in "${deployments[@]}"; do
+          kubectl wait --for=condition=Available "deployment/${deployment}" --timeout=1m
+        done
+        kubectl get deployments "${deployments[@]}"
 
     - name: Post-deploy validation loop
       id: post_deploy_validation
