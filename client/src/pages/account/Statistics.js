@@ -41,19 +41,19 @@ const HandleUserStatistics = ({ uiVariant }) => {
 
     const renderedStats = stats.map(stat => {
       return <div className="card stat-card mb-2" key={stat.userId}>
-        <div className="card-body row stat-row">
-          <div className="col-6">{stat.user}</div>
-          <div className="col-3 text-end">{stat.betamount}</div>
-          <div className="col-3 text-end fw-semibold">{stat.wageramount}</div>
+        <div className="card-body stat-row">
+          <div className="stat-row__user">{stat.user}</div>
+          <div className="stat-row__count">{stat.betamount}</div>
+          <div className="stat-row__wager fw-semibold">{stat.wageramount}</div>
         </div>
       </div>
     })
 
     const statHeader = <div className="card stat-card mb-2" key="stat_header">
-    <div className="card-body row stat-row stat-row--header text-secondary">
-      <div className="col-6">User</div>
-      <div className="col-3 text-end">Bets</div>
-      <div className="col-3 text-end">Wager</div>
+    <div className="card-body stat-row stat-row--header text-secondary">
+      <div className="stat-row__user">User</div>
+      <div className="stat-row__count">Bets</div>
+      <div className="stat-row__wager">Wager</div>
     </div>
   </div>
     

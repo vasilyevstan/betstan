@@ -1,4 +1,4 @@
-name: deploy-aurh
+name: deploy-auth
 
 on:
   push:

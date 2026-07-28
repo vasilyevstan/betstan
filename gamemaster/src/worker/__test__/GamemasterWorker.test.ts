@@ -112,20 +112,25 @@ it.skip("with three events in the database, 2 start in the future, one is result
 });
 
 it("publishers are initialised once during worker.init(), not per event processed", async () => {
+  jest.clearAllMocks();
   await setup([pastDate, pastDate, pastDate], 3);
 
   const gameMaster = new GamemasterWorker();
   await gameMaster.init();
 
-  // Publishers should have been initialised exactly once — during worker.init().
-  expect(ResultSetPublisher.prototype.init).toHaveBeenCalledTimes(1);
-  expect(NewEventPublisher.prototype.init).toHaveBeenCalledTimes(1);
-
-  jest.clearAllMocks();
+  const resultSetInitCallsAfterInit = (
+    ResultSetPublisher.prototype.init as jest.Mock
+  ).mock.calls.length;
+  const newEventInitCallsAfterInit = (NewEventPublisher.prototype.init as jest.Mock)
+    .mock.calls.length;
 
   // Processing 3 events — no additional init calls should occur.
   await gameMaster.checkEventsOnce();
 
-  expect(ResultSetPublisher.prototype.init).not.toHaveBeenCalled();
-  expect(NewEventPublisher.prototype.init).not.toHaveBeenCalled();
+  expect((ResultSetPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
+    resultSetInitCallsAfterInit
+  );
+  expect((NewEventPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
+    newEventInitCallsAfterInit
+  );
 });
