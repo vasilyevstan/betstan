@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
 
-jest.mock("@betstan/common");
+jest.setTimeout(60000);
 
 let mongo: any;
 

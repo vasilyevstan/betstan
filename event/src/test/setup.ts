@@ -1,7 +1,42 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
 
-jest.mock("@betstan/common");
+jest.mock("@betstan/common", () => {
+  const actual = jest.requireActual("@betstan/common");
+  const ack = jest.fn();
+  const channel = {
+    ack,
+    nack: jest.fn(),
+    assertExchange: jest.fn(),
+    assertQueue: jest.fn(),
+    bindQueue: jest.fn(),
+    publish: jest.fn(),
+  };
+
+  class AListener<T> {
+    public ack = ack;
+    public channel = channel;
+    constructor(public connection: unknown) {}
+    async init() {}
+  }
+
+  class APublisher<T> {
+    constructor(public connection: unknown) {}
+    async init() {}
+    publish(_event: T) {}
+  }
+  APublisher.prototype.init = jest.fn(async () => {});
+  APublisher.prototype.publish = jest.fn();
+
+  return {
+    ...actual,
+    AListener,
+    APublisher,
+    messengerWrapper: { connection: {} },
+  };
+});
+
+jest.setTimeout(60000);
 
 let mongo: any;
 

@@ -6,6 +6,7 @@ import {
   messengerWrapper,
 } from "@betstan/common";
 import { Bet } from "../../../model/Bet";
+import { Resulted } from "../../../model/Resulted";
 import PlaceBetListener from "../PlaceBetListener";
 import BetModerationResultPublisher from "../../publisher/BetModerationResultPublisher";
 
@@ -91,4 +92,28 @@ it("publisher is initialised once during listener.init(), not on every message",
   await listener.onMessage(createEventData(), createMessage());
 
   expect(BetModerationResultPublisher.prototype.init).not.toHaveBeenCalled();
+});
+
+it("moderated bet is declined when one of the events is already resulted", async () => {
+  const { listener } = await setup();
+  const message = createMessage();
+  const data = createEventData();
+
+  await Resulted.create({
+    eventId: data.data.rows[0].eventId,
+    timestamp: new Date().toISOString(),
+  });
+
+  await listener.onMessage(data, message);
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(listener.ack).toHaveBeenCalled();
+  expect(BetModerationResultPublisher.prototype.publish).toHaveBeenCalledWith({
+    data: {
+      slipId: data.data.slipId,
+      result: ModerationStatus.DECLINED,
+    },
+  });
 });

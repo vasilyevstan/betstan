@@ -68,12 +68,12 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
   const completedSlips = await Slip.find({
     status: SlipStatus.COMPLETE,
   }).lean();
-  completedSlips.forEach(async (completedSlip) => {
+  for (const completedSlip of completedSlips) {
     const archivedSlip = new SlipArchive(completedSlip);
     await archivedSlip.save();
 
     await Slip.deleteOne({ _id: completedSlip._id });
-  });
+  }
 
   return res.sendStatus(200);
 });

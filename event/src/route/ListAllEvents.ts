@@ -38,9 +38,9 @@ router.get("/api/event", async (req: Request, res: Response) => {
     // temporary, events must come from the backoffice
     const publisher = await getPublisher();
 
-    events.forEach(async (event) => {
+    for (const event of events) {
       const newEvent = await Event.create(event);
-      newEvent.save();
+      await newEvent.save();
 
       // propagate events to backoffice service -- temporary
       publisher.publish({
@@ -52,7 +52,7 @@ router.get("/api/event", async (req: Request, res: Response) => {
           away: event.products[0].odds[2].name,
         },
       });
-    });
+    }
 
     dbEvents = await Event.find();
   }
