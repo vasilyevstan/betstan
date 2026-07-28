@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gaming-shared-mongo-depl
+spec:
+  serviceName: gaming-shared-mongo-srv
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-shared-mongo
+  template:
+    metadata:
+      labels:
+        app: gaming-shared-mongo
+    spec:
+      containers:
+        - name: gaming-shared-mongo
+          image: mongo
+          volumeMounts:
+            - name: gaming-shared-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-shared-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-shared-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-shared-mongo
+  ports:
+    - name: gaming-shared-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017

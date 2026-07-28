@@ -11,6 +11,8 @@ SLEEP_SECONDS="${SLEEP_SECONDS:-20}"
 DOMAIN="${DOMAIN:-www.betstan.xyz}"
 E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:3000}"
 CERT_NAME="${CERT_NAME:-betstan-tls}"
+INGRESS_NAMESPACE="${INGRESS_NAMESPACE:-ingress-nginx}"
+INGRESS_SERVICE="${INGRESS_SERVICE:-ingress-nginx-controller}"
 
 check_nodes_ready() {
   local total ready
@@ -38,6 +40,18 @@ check_certificate_ready() {
   [[ "$ready" == "True" ]]
 }
 
+run_service_ops() {
+  "$ROOT_DIR/infra/azure/agents/service-ops-stan.sh"
+}
+
+run_node_ops() {
+  "$ROOT_DIR/infra/azure/agents/node-logs-stan.sh"
+}
+
+check_ingress_lb() {
+  kubectl get svc "$INGRESS_SERVICE" -n "$INGRESS_NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
 run_e2e() {
   (cd "$ROOT_DIR/client" && E2E_BASE_URL="$E2E_BASE_URL" npx playwright test --config=playwright.config.js)
 }
@@ -55,6 +69,15 @@ for i in $(seq 1 "$MAX_LOOPS"); do
   if ! check_default_pods_ready; then
     echo "default namespace workloads are not fully ready"
     kubectl get deploy,sts -n default
+    run_service_ops || true
+    sleep "$SLEEP_SECONDS"
+    continue
+  fi
+
+  if ! check_ingress_lb; then
+    echo "ingress service does not have a valid external IPv4"
+    kubectl get svc -n "$INGRESS_NAMESPACE" "$INGRESS_SERVICE" -o wide
+    run_node_ops || true
     sleep "$SLEEP_SECONDS"
     continue
   fi
@@ -74,6 +97,7 @@ for i in $(seq 1 "$MAX_LOOPS"); do
 
   if ! run_e2e; then
     echo "e2e suite failed"
+    run_service_ops || true
     sleep "$SLEEP_SECONDS"
     continue
   fi

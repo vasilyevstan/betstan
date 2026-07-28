@@ -10,6 +10,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  manifest-static-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Kubernetes manifest YAML syntax
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          directories = %w[infra/k8s infra/k8s-prod infra/k8s-stage]
+          files = directories.flat_map do |directory|
+            Dir.glob(File.join(directory, "**", "*.{yaml,yml}"))
+          end.sort
+
+          failed = false
+          files.each do |file|
+            begin
+              YAML.load_stream(File.read(file))
+            rescue Psych::SyntaxError => error
+              warn "#{file}: #{error.message}"
+              failed = true
+            end
+          end
+
+          abort "Kubernetes manifest YAML syntax validation failed" if failed
+          puts "Validated #{files.length} Kubernetes manifest YAML files"
+          RUBY
+
   ingress-routing-guard:
     runs-on: ubuntu-latest
 
@@ -22,9 +53,29 @@ jobs:
           chmod +x infra/azure/agents/ingress-routing-guard-stan.sh
           ./infra/azure/agents/ingress-routing-guard-stan.sh
 
+  deploy-runtime-script-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate deploy/runtime shell scripts syntax
+        run: |
+          bash -n infra/azure/agents/deploy-validation-loop-stan.sh
+          bash -n infra/azure/agents/smoke-liveness-stan.sh
+          bash -n infra/azure/agents/validation-loop-stan.sh
+          bash -n infra/azure/agents/service-ops-stan.sh
+          bash -n infra/azure/agents/node-logs-stan.sh
+          bash -n infra/azure/agents/ingress-routing-guard-stan.sh
+          bash -n infra/azure/agents/reconcile-nodepool-profile-stan.sh
+          bash -n infra/azure/agents/pre-commit-infra-check-stan.sh
+          bash -n infra/azure/agents/post-merge-verification-stan.sh
+          bash -n infra/azure/agents/rollback-readiness-stan.sh
+
   build:
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate]
     if: github.event_name != 'pull_request'
-    needs: [ingress-routing-guard]
     runs-on: ubuntu-latest
 
     strategy:

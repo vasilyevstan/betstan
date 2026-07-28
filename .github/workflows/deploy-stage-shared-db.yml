@@ -1,0 +1,45 @@
+name: deploy-stage-shared-db
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+      run_e2e:
+        description: "Run Playwright E2E after deploy"
+        required: false
+        default: "false"
+
+env:
+  STAGE_RESOURCE_GROUP: ${{ secrets.STAGE_RESOURCE_GROUP || 'betstan-rg-stage' }}
+  STAGE_CLUSTER_NAME: ${{ secrets.STAGE_CLUSTER_NAME || 'betstan-aks-stage' }}
+
+jobs:
+  deploy-stage:
+    if: github.ref_name != 'master'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-stage-shared-db
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login (stage)
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.STAGE_AZURE_CREDENTIALS }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Deploy stage with shared DB
+        env:
+          RESOURCE_GROUP: ${{ env.STAGE_RESOURCE_GROUP }}
+          CLUSTER_NAME: ${{ env.STAGE_CLUSTER_NAME }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          RUN_E2E: ${{ github.event.inputs.run_e2e }}
+        run: ./infra/azure/agents/deploy-stage-shared-db-stan.sh
