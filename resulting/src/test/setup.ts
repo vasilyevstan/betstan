@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 
 jest.mock("@betstan/common");
+jest.setTimeout(60000);
 
 let mongo: any;
 

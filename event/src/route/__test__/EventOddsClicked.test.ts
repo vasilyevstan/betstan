@@ -70,3 +70,29 @@ it("returns 400 when required fields are missing", async () => {
     .send({ eventId: "test-event-id" })
     .expect(400);
 });
+
+it("returns 200 when selecting odds multiple times for the same event", async () => {
+  await createEvent();
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      productId: "product-1",
+      oddsId: "odds-1",
+      data: "present",
+    })
+    .expect(200);
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      productId: "product-1",
+      oddsId: "odds-2",
+      data: "present",
+    })
+    .expect(200);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).toHaveBeenCalledTimes(2);
+});

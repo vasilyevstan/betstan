@@ -15,7 +15,7 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
     const userId = event.data.userId;
 
     if (!userId) {
-      this.channel.ack(msg);
+      this.ack(msg);
       return;
     }
 
@@ -53,7 +53,7 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
     }
 
     await slip.save();
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 
