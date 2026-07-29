@@ -6,6 +6,7 @@ on:
       - master
   pull_request:
     branches:
+      - dev
       - master
   workflow_dispatch:
 
@@ -123,8 +124,8 @@ jobs:
               --collectCoverageFrom=src/hook/UseRequest.js \
               --collectCoverageFrom=src/pages/auth/NewUser.js \
               --collectCoverageFrom=src/pages/auth/LogIn.js \
-              --collectCoverageFrom=src/pages/auth/LogOut.js \
-            || echo "client_no_tests=true" >> "$GITHUB_ENV"
+              --collectCoverageFrom=src/pages/auth/LogOut.js
+            npm run build
           else
             npm run test:ci -- --runInBand --coverage --coverageReporters=json-summary
           fi
@@ -133,7 +134,6 @@ jobs:
         working-directory: ./${{ matrix.service }}
         run: |
           node -e "
-            if (process.env.client_no_tests === 'true') { console.log('Skipping gate: client has no tests'); process.exit(0); }
             const fs = require('fs');
             const p = 'coverage/coverage-summary.json';
             if (!fs.existsSync(p)) { console.error('Missing ' + p); process.exit(1); }
@@ -144,7 +144,7 @@ jobs:
             const branches = t.branches?.pct ?? 0;
             console.log('lines=' + lines + ' branches=' + branches + ' branchTotal=' + branchTotal);
             if (lines < 80) { console.error('Line coverage gate failed (<80%)'); process.exit(1); }
-            if (branchTotal > 0 && branches > 0 && branches < 80) { console.error('Branch coverage gate failed (<80%)'); process.exit(1); }
+            if (branchTotal > 0 && branches < 80) { console.error('Branch coverage gate failed (<80%)'); process.exit(1); }
           "
 
   build:
