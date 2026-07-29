@@ -251,6 +251,24 @@ body {
   font-weight: 600;
 }
 
+.scoreboard__table {
+  background: color-mix(in srgb, var(--surface-soft) 94%, var(--surface-elevated));
+  border-color: color-mix(in srgb, var(--border-subtle) 88%, var(--accent) 12%);
+  overflow: hidden;
+}
+
+.scoreboard .stat-row {
+  display: grid;
+  grid-template-columns: 1.6rem minmax(0, 1fr) 3rem 3.5rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.62rem 0.82rem;
+}
+
+.scoreboard .stat-row + .stat-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
 .scoreboard .stat-card .card-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 3.25rem 3.75rem;
@@ -269,11 +287,19 @@ body {
   border-color: color-mix(in srgb, var(--border-subtle) 72%, var(--accent) 28%);
 }
 
+.stat-row__rank,
 .stat-row__user,
 .stat-row__count,
 .stat-row__wager {
   min-width: 0;
   line-height: 1.2;
+}
+
+.stat-row__rank {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  opacity: 0.45;
+  text-align: center;
 }
 
 .stat-row__user {
@@ -293,6 +319,7 @@ body {
   font-size: 0.7rem;
   letter-spacing: 0.11em;
   text-transform: uppercase;
+  opacity: 0.6;
 }
 
 .stat-row--header .stat-row__wager,
@@ -605,7 +632,7 @@ body {
   color: #effffc;
 }
 
-.ui-variant-v2 .scoreboard .stat-card {
+.ui-variant-v2 .scoreboard__table {
   border-left: 3px solid var(--accent);
 }
 
@@ -871,15 +898,6 @@ body {
   letter-spacing: 0.09em;
 }
 
-.stat-row {
-  align-items: center;
-}
-
-.stat-row--header {
-  font-size: 0.78rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
 
 .btn-primary {
   background-color: var(--accent);

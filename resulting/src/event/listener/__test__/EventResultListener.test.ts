@@ -354,6 +354,64 @@ it("there are 20 bets in the system but only one is resolved", async () => {
 //   expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
 // }, 1000000);
 
+it("1X2 draw: bet wins when oddsName is 'draw' and scores are equal", async () => {
+  const { listener, bets, message } = await setup("1X2", 1);
+
+  const eventId = bets[0].rows[0].eventId;
+  // Override oddsName to "draw" so the draw branch is taken and the row wins
+  bets[0].rows[0].oddsName = "draw";
+  await bets[0].save();
+
+  const data = getData(2, 2, eventId, "Home team", "Away team");
+
+  await listener.onMessage(data, message);
+
+  const updatedBet = await BetArchive.findOne();
+
+  expect(listener.ack).toHaveBeenCalled();
+  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
+});
+
+it("Correct Score: bet wins when oddsName matches the final score", async () => {
+  const { listener, bets, message } = await setup("Correct Score", 1);
+
+  const eventId = bets[0].rows[0].eventId;
+  bets[0].rows[0].oddsName = "2 - 1";
+  await bets[0].save();
+
+  const data = getData(2, 1, eventId, "Home", "Away");
+
+  await listener.onMessage(data, message);
+
+  const updatedBet = await BetArchive.findOne();
+
+  expect(listener.ack).toHaveBeenCalled();
+  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
+});
+
+it("Correct Score: bet loses when oddsName does not match the final score", async () => {
+  const { listener, bets, message } = await setup("Correct Score", 1);
+
+  const eventId = bets[0].rows[0].eventId;
+  bets[0].rows[0].oddsName = "0 - 0";
+  await bets[0].save();
+
+  const data = getData(3, 1, eventId, "Home", "Away");
+
+  await listener.onMessage(data, message);
+
+  const updatedBet = await BetArchive.findOne();
+
+  expect(listener.ack).toHaveBeenCalled();
+  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_LOSS);
+  expect(updatedBet!.status).toEqual(ResultingStatus.BET_LOSS);
+  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
+});
+
 it("publishers are initialised once during listener.init(), not on every message", async () => {
   jest.clearAllMocks();
   const { listener, bets, message } = await setup("1X2", 1);
