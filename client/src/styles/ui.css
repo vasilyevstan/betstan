@@ -679,11 +679,7 @@ body {
 }
 
 .ui-variant-v2 .navbar-meta {
-  opacity: 0.82;
-}
-
-.ui-variant-v2 .navbar-meta__badge {
-  opacity: 0.76;
+  opacity: 0.88;
 }
 
 .ui-variant-v2 .app-navbar--v2 .navbar-brand {
@@ -894,8 +890,41 @@ body {
   font-size: 0.72rem;
 }
 
-.navbar-meta__badge {
-  letter-spacing: 0.09em;
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0.55rem 0.2rem 0.2rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.user-chip__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 80%, transparent);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.user-chip__name {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--accent) 80%, currentColor);
+  letter-spacing: 0.01em;
+  max-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 
