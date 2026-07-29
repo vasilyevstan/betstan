@@ -2,6 +2,7 @@ import { ConsumeMessage } from "amqplib";
 import {
   AListener,
   IEventResultEvent,
+  ISettleSlipRowEvent,
   QueueNames,
   ResultingStatus,
   messengerWrapper,
@@ -59,6 +60,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
           switch (row.productName) {
             case "1X2":
+              row.winningSelection = oneCrossTwoResult;
               if (row.oddsName == oneCrossTwoResult) {
                 row.result = ResultingStatus.ROW_WIN;
               } else {
@@ -67,6 +69,7 @@ class EventResultListener extends AListener<IEventResultEvent> {
               }
               break;
             case "Correct Score":
+              row.winningSelection = correctScoreResult;
               if (row.oddsName === correctScoreResult) {
                 row.result = ResultingStatus.ROW_WIN;
               } else {
@@ -81,12 +84,17 @@ class EventResultListener extends AListener<IEventResultEvent> {
 
           settledRows++;
 
+          const settleRowData: ISettleSlipRowEvent["data"] & {
+            winningSelection?: string;
+          } = {
+            slipId: bet.slipId,
+            slipRowId: row.id,
+            result: row.result,
+            winningSelection: row.winningSelection || "",
+          };
+
           await this.settleSlipRowPublisher.publish({
-            data: {
-              slipId: bet.slipId,
-              slipRowId: row.id,
-              result: row.result,
-            },
+            data: settleRowData,
           });
         } catch (error) {
           console.error("Error processing row:", error);

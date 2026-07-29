@@ -59,7 +59,7 @@ router.post(
 
     const publisher = await getPublisher();
 
-    publisher.publish({
+    const eventPayload = {
       data: {
         userId: req.currentUser ? req.currentUser.id : "",
         eventId: event.eventId,
@@ -69,8 +69,11 @@ router.post(
         oddsName: selectedOdds.name as string,
         productName: selectedProduct.name,
         productId: selectedProduct.id,
+        eventTime: event.time.toISOString(),
       },
-    });
+    };
+
+    publisher.publish(eventPayload);
 
     res.sendStatus(200);
   }

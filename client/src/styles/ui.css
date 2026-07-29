@@ -310,6 +310,31 @@ body {
   background: var(--surface-soft);
 }
 
+.my-bets-board {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.my-bets-toolbar {
+  background: color-mix(in srgb, var(--surface-soft) 94%, var(--surface-elevated));
+  border-color: color-mix(in srgb, var(--border-subtle) 86%, var(--accent) 14%);
+}
+
+.my-bets-filter {
+  border-color: var(--border-subtle);
+  color: var(--text-main);
+}
+
+.my-bets-search {
+  min-width: min(100%, 22rem);
+  flex: 1 1 18rem;
+}
+
+.my-bets-select {
+  width: auto;
+  min-width: 9.5rem;
+}
+
 .my-bets-row {
   padding: 0.35rem 0;
   border-bottom: 1px solid var(--border-subtle);
@@ -327,6 +352,12 @@ body {
   text-transform: uppercase;
 }
 
+.my-bets-event-time {
+  margin-top: 0.12rem;
+  font-size: 0.74rem;
+  color: var(--text-subtle);
+}
+
 .my-bets-footer {
   display: flex;
   flex-wrap: wrap;
@@ -340,6 +371,20 @@ body {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.my-bets-expand {
+  border-color: var(--border-subtle);
+  color: var(--text-subtle);
+}
+
+.my-bets-expand:hover {
+  border-color: color-mix(in srgb, var(--border-subtle) 70%, var(--accent) 30%);
+  color: var(--text-main);
+}
+
+.my-bets-load-more {
+  font-weight: 700;
 }
 
 .backoffice-board {
