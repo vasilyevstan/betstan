@@ -13,9 +13,13 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
 
   async onMessage(event: IEventOddsSelectedEvent, msg: ConsumeMessage) {
     const userId = event.data.userId;
+    const dataWithEventTime = event.data as IEventOddsSelectedEvent["data"] & {
+      eventTime?: string;
+    };
+    const rowTimestamp = dataWithEventTime.eventTime || event.timestamp;
 
     if (!userId) {
-      this.channel.ack(msg);
+      this.ack(msg);
       return;
     }
 
@@ -31,13 +35,13 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
         timestamp: new Date().toISOString(),
         rows: [
           {
-            timestamp: event.timestamp,
+            timestamp: rowTimestamp,
             ...event.data,
           },
         ],
       });
     } else {
-      const newRow = { timestamp: event.timestamp, ...event.data };
+      const newRow = { timestamp: rowTimestamp, ...event.data };
 
       // check if that odds already in the list
       let hasDuplicate = false;
@@ -53,7 +57,7 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
     }
 
     await slip.save();
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 

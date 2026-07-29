@@ -14,6 +14,9 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
 
   async onMessage(event: ISettleSlipRowEvent, msg: ConsumeMessage) {
     const { data } = event;
+    const dataWithWinningSelection = data as ISettleSlipRowEvent["data"] & {
+      winningSelection?: string;
+    };
 
     const bet = await Bet.findOne({ slipId: data.slipId });
 
@@ -26,6 +29,7 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
     const row = bet.rows.find((row) => row.id === data.slipRowId);
 
     if (!row) {
+      this.channel.ack(msg);
       return;
     }
 
@@ -34,6 +38,7 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
     } else {
       row.status = SlipRowStatus.LOSS;
     }
+    row.winningSelection = dataWithWinningSelection.winningSelection || "";
 
     await bet.save();
 

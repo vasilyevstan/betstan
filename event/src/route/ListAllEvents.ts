@@ -18,6 +18,15 @@ const initEvents = (): EventTemplate[] => {
   return events;
 };
 
+let _publisher: NewEventPublisher | null = null;
+const getPublisher = async (): Promise<NewEventPublisher> => {
+  if (!_publisher) {
+    _publisher = new NewEventPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.get("/api/event", async (req: Request, res: Response) => {
   // check if db has events
   let dbEvents = await Event.find().sort({ time: 1 });
@@ -27,12 +36,11 @@ router.get("/api/event", async (req: Request, res: Response) => {
     const events = initEvents();
 
     // temporary, events must come from the backoffice
-    const publisher = new NewEventPublisher(messengerWrapper.connection);
-    await publisher.init();
+    const publisher = await getPublisher();
 
-    events.forEach(async (event) => {
+    for (const event of events) {
       const newEvent = await Event.create(event);
-      newEvent.save();
+      await newEvent.save();
 
       // propagate events to backoffice service -- temporary
       publisher.publish({
@@ -44,7 +52,7 @@ router.get("/api/event", async (req: Request, res: Response) => {
           away: event.products[0].odds[2].name,
         },
       });
-    });
+    }
 
     dbEvents = await Event.find();
   }

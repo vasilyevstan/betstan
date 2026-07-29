@@ -43,11 +43,11 @@ class EventResultListener extends AListener<IEventResultEvent> {
       status: EventStatus.RESULTED,
     }).lean();
 
-    eventsToArchive.forEach(async (eventToArchive) => {
+    for (const eventToArchive of eventsToArchive) {
       const archivedEvent = new EventArchive(eventToArchive);
       await archivedEvent.save();
       await Event.deleteOne({ _id: eventToArchive._id });
-    });
+    }
 
     this.ack(msg);
   }

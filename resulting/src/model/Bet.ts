@@ -72,6 +72,11 @@ const betSchema = new Schema({
         type: String,
         required: true,
       },
+      winningSelection: {
+        type: String,
+        required: false,
+        default: "",
+      },
       resultingTimestamp: {
         type: String,
         required: false,

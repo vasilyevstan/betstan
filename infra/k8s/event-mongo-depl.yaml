@@ -1,8 +1,9 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: gaming-event-mongo-depl
 spec:
+  serviceName: gaming-event-mongo-srv
   replicas: 1
   selector:
     matchLabels:
@@ -15,6 +16,18 @@ spec:
       containers:
         - name: gaming-event-mongo
           image: mongo
+          volumeMounts:
+            - name: gaming-event-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-event-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

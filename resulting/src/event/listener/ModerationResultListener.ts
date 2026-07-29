@@ -30,7 +30,7 @@ class PlaceBetListener extends AListener<IModerationResultEvent> {
     }
     await bet.save();
 
-    this.channel.ack(msg);
+    this.ack(msg);
   }
 }
 

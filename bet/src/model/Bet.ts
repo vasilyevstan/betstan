@@ -68,6 +68,11 @@ const betSchema = new Schema({
         type: String,
         required: true,
       },
+      winningSelection: {
+        type: String,
+        required: false,
+        default: "",
+      },
       id: {
         type: String,
         required: true,

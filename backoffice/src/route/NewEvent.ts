@@ -6,6 +6,15 @@ import mongoose from "mongoose";
 
 const router = express.Router();
 
+let _publisher: NewEventPublisher | null = null;
+const getPublisher = async (): Promise<NewEventPublisher> => {
+  if (!_publisher) {
+    _publisher = new NewEventPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.post(
   "/api/backoffice/new_event",
   async (req: Request, res: Response) => {
@@ -30,8 +39,7 @@ router.post(
 
     await event.save();
 
-    const publisher = new NewEventPublisher(messengerWrapper.connection);
-    await publisher.init();
+    const publisher = await getPublisher();
 
     publisher.publish({
       data: {

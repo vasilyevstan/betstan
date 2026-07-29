@@ -15,7 +15,7 @@
     "setupFilesAfterEnv": [
       "./src/test/setup.ts"
     ]
-  },  
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -33,5 +33,8 @@
     "mongodb-memory-server": "^9.1.7",
     "supertest": "^6.3.3",
     "ts-jest": "^29.1.1"
-}
+  },
+  "allowScripts": {
+    "mongodb-memory-server@9.1.7": true
+  }
 }

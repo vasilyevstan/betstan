@@ -11,6 +11,15 @@ import EventOddsSelectedPublisher from "../messaging/publisher/EventOddsSelected
 
 const router = express.Router();
 
+let _publisher: EventOddsSelectedPublisher | null = null;
+const getPublisher = async (): Promise<EventOddsSelectedPublisher> => {
+  if (!_publisher) {
+    _publisher = new EventOddsSelectedPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.post(
   "/api/event/odds",
   // requireAuth,
@@ -48,12 +57,9 @@ router.post(
       return next(new BadRequestError("Odds does not exist"));
     }
 
-    const publisher = new EventOddsSelectedPublisher(
-      messengerWrapper.connection
-    );
-    await publisher.init();
+    const publisher = await getPublisher();
 
-    publisher.publish({
+    const eventPayload = {
       data: {
         userId: req.currentUser ? req.currentUser.id : "",
         eventId: event.eventId,
@@ -63,8 +69,11 @@ router.post(
         oddsName: selectedOdds.name as string,
         productName: selectedProduct.name,
         productId: selectedProduct.id,
+        eventTime: event.time.toISOString(),
       },
-    });
+    };
+
+    publisher.publish(eventPayload);
 
     res.sendStatus(200);
   }

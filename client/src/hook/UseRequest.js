@@ -5,6 +5,24 @@ import { useState } from 'react';
     // method nust be equal  to get, post, patch
     const [errors, setErrors] = useState(null);
 
+    const buildErrorMessages = (error) => {
+        const responseErrors = error?.response?.data?.errors;
+        if (Array.isArray(responseErrors) && responseErrors.length > 0) {
+            return responseErrors.map((entry) => entry?.msg || entry?.message || 'Request failed');
+        }
+
+        const responseMessage = error?.response?.data?.message;
+        if (typeof responseMessage === 'string' && responseMessage.trim()) {
+            return [responseMessage];
+        }
+
+        if (typeof error?.message === 'string' && error.message.trim()) {
+            return [error.message];
+        }
+
+        return ['Request failed'];
+    };
+
     const doRequest = async (props = {}) => {
         try {
             setErrors(null);
@@ -15,13 +33,12 @@ import { useState } from 'react';
             }
             return response.data;
         } catch (err) {
-            console.log(err);
-            console.log(err.response.data.errors);
+            const messages = buildErrorMessages(err);
             setErrors(
                 <div className="alert alert-danger">
                     <h4>Ooops...</h4>
                     <ul className="my-0">
-                        {err.response.data.errors.map(err => <li key={err.msg}>{err.msg}</li>)}
+                        {messages.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}
                     </ul>
                 </div>
             )

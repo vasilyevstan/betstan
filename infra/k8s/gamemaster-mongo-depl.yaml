@@ -1,8 +1,9 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: gaming-gamemaster-mongo-depl
 spec:
+  serviceName: gaming-gamemaster-mongo-srv
   replicas: 1
   selector:
     matchLabels:
@@ -15,6 +16,18 @@ spec:
       containers:
         - name: gaming-gamemaster-mongo
           image: mongo
+          volumeMounts:
+            - name: gaming-gamemaster-mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: gaming-gamemaster-mongo-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

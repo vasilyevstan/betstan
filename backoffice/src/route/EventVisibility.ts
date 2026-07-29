@@ -5,6 +5,15 @@ import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublishe
 
 const router = express.Router();
 
+let _publisher: EventVisibilityPublisher | null = null;
+const getPublisher = async (): Promise<EventVisibilityPublisher> => {
+  if (!_publisher) {
+    _publisher = new EventVisibilityPublisher(messengerWrapper.connection);
+    await _publisher.init();
+  }
+  return _publisher;
+};
+
 router.post(
   "/api/backoffice/event_visibility",
   async (req: Request, res: Response) => {
@@ -31,8 +40,7 @@ router.post(
     event.visibility = newEventVisibility;
     await event.save();
 
-    const publisher = new EventVisibilityPublisher(messengerWrapper.connection);
-    await publisher.init();
+    const publisher = await getPublisher();
 
     publisher.publish({
       data: {

@@ -17,7 +17,6 @@ const startUp = async () => {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
 
-    const channel = await messengerWrapper.getChannel();
     const listener = new PlaceBetListener(messengerWrapper.connection);
     await listener.init();
     listener.listen();
@@ -43,7 +42,6 @@ const startUp = async () => {
         await mongoose.connection.close();
         await mongoose.disconnect();
         // await channel.close();
-        await messengerWrapper.connection.close();
 
         process.exit(1);
       } catch (err) {
@@ -56,7 +54,6 @@ const startUp = async () => {
       try {
         await mongoose.connection.close();
         await mongoose.disconnect();
-        await messengerWrapper.connection.close();
         process.exit(0);
       } catch (err) {
         console.log("error closing connections", err);
@@ -68,7 +65,6 @@ const startUp = async () => {
       try {
         await mongoose.connection.close();
         await mongoose.disconnect();
-        await messengerWrapper.connection.close();
         process.exit(0);
       } catch (err) {
         console.log("Error closing conection", err);
