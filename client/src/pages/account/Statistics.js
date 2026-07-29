@@ -39,36 +39,36 @@ const HandleUserStatistics = ({ uiVariant }) => {
       return userStat;
     });
 
-    const renderedStats = stats.map(stat => {
-      return <div className="card stat-card mb-2" key={stat.userId}>
-        <div className="card-body stat-row">
-          <div className="stat-row__user">{stat.user}</div>
-          <div className="stat-row__count">{stat.betamount}</div>
-          <div className="stat-row__wager fw-semibold">{stat.wageramount}</div>
+    stats.sort((a, b) => b.betamount - a.betamount);
+
+    const displayName = (email) => {
+      if (!email) return '—';
+      const local = email.split('@')[0];
+      return local.length > 16 ? local.slice(0, 16) + '…' : local;
+    };
+
+    const renderedStats = stats.map((stat, idx) => {
+      return <div className="stat-row" key={stat.userId}>
+        <div className="stat-row__rank text-secondary">{idx + 1}</div>
+        <div className="stat-row__user" title={stat.user}>{displayName(stat.user)}</div>
+        <div className="stat-row__count">{stat.betamount}</div>
+        <div className="stat-row__wager fw-semibold">{stat.wageramount}</div>
+      </div>
+    });
+
+    return (
+      <div className={`flex-wrap scoreboard scoreboard--${uiVariant}`}>
+        <div className="card scoreboard__table">
+          <div className="stat-row stat-row--header text-secondary">
+            <div className="stat-row__rank"></div>
+            <div className="stat-row__user">User</div>
+            <div className="stat-row__count">Bets</div>
+            <div className="stat-row__wager">Wager</div>
+          </div>
+          {renderedStats}
         </div>
       </div>
-    })
-
-    const statHeader = <div className="card stat-card mb-2" key="stat_header">
-    <div className="card-body stat-row stat-row--header text-secondary">
-      <div className="stat-row__user">User</div>
-      <div className="stat-row__count">Bets</div>
-      <div className="stat-row__wager">Wager</div>
-    </div>
-  </div>
-    
-
-      // return <div className="card" style={{marginBottom: '5px'}} key={bet.id}>
-      //     <div className="card-body">
-      //         <h5 className="card-title d-flex justify-content-between">
-      //           <div>{betTime}</div>
-      //           <div className={betStatusColor}>{bet.status}</div>
-      //         </h5>
-      //         <div>{rowHeader}{renderedRows}</div>
-      //     </div>
-      // </div>
-
-    return <div className={`flex-wrap scoreboard scoreboard--${uiVariant}`}> {statHeader}{renderedStats} </div>;
+    );
 };
 
 export default HandleUserStatistics;
