@@ -404,7 +404,8 @@ else
   echo "  Then add an A record in GoDaddy: www → <that IP>"
 fi
 echo ""
-echo "After setting secrets, push any commit to master to trigger the full"
-echo "build + deploy pipeline. HTTPS will activate automatically once DNS"
-echo "propagates (usually within 10 minutes)."
+echo "After setting secrets, push a branch and open a PR to master to trigger"
+echo "the full build + deploy pipeline. Never commit directly to master —"
+echo "always go via a branch and PR. HTTPS will activate automatically once"
+echo "DNS propagates (usually within 10 minutes)."
 echo ""
