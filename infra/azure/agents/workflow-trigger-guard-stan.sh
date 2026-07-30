@@ -73,6 +73,9 @@ require_literal "$deploy_workflow" \
   'github.event.workflow_run.head_sha' \
   "exact-SHA deployment"
 require_literal "$deploy_workflow" \
+  'run-name: deploy-manifests ${{ github.event.workflow_run.head_sha || github.sha }}' \
+  "SHA-specific deploy run name"
+require_literal "$deploy_workflow" \
   'contents: read' \
   "read-only GitHub token permissions"
 

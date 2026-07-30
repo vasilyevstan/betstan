@@ -57,6 +57,7 @@ Before deployment:
 - run `ingress-routing-guard-stan.sh`;
 - confirm at least eight Mongo PVCs exist and are bound;
 - check production health and rollback readiness;
+- for an auth rollback, run `rollback-readiness-stan.sh` with the exact target SHA and honor its normalized-account compatibility result;
 - ensure no unresolved workflow or manifest conflict exists.
 
 During deployment:
