@@ -1,11 +1,6 @@
 name: deploy-slip
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "slip/**"
   workflow_dispatch:
     inputs:
       environment:

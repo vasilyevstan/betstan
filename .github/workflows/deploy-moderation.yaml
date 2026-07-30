@@ -1,11 +1,6 @@
 name: deploy-moderation
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "moderation/**"
   workflow_dispatch:
     inputs:
       environment:

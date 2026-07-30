@@ -1,11 +1,6 @@
 name: deploy-bet
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "bet/**"
   workflow_dispatch:
     inputs:
       environment:

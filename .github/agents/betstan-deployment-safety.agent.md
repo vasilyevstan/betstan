@@ -34,7 +34,7 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 ## Build and image provenance
 
 - A green PR validates infrastructure safety but does not mean production was deployed.
-- Inventory every production-capable workflow before reasoning about triggers. The repository contains centralized and legacy per-service deploy workflows; do not assume only `build-push` and `deploy-manifests` can mutate production.
+- Inventory every production-capable workflow before reasoning about triggers. The centralized chain deploys automatically; legacy per-service workflows are manual-only but can still mutate production.
 - Before merge or direct push, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `build-push` run must produce immutable images tagged with its exact commit SHA.
 - Treat a manual dispatch or rerun of `build-push` on `master` as a production deployment action because its successful completion triggers `deploy-manifests`.

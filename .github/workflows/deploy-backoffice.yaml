@@ -1,11 +1,6 @@
 name: deploy-backoffice
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "backoffice/**"
   workflow_dispatch:
     inputs:
       environment:
