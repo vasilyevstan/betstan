@@ -9,7 +9,7 @@ Use this flow:
 1. Make normal changes on a feature, fix, or operations branch and integrate them into `dev`.
 2. Validate the complete `dev` branch.
 3. Promote production only with an up-to-date pull request from `dev` to `master`.
-4. Require the trusted `branch-policy` and `pr-quality-gates` statuses on the PR's current merge snapshot to pass.
+4. Require the trusted, base-scoped `branch-policy/master` and `pr-quality-gates/master` statuses on both the promotion head and current merge snapshot to pass.
 5. Before merging a promotion, obtain explicit approval for the exact head SHA and every production-capable workflow the diff will trigger.
 6. After a squash promotion, immediately merge the new `master` commit back into `dev`.
 
@@ -28,7 +28,7 @@ Do not require a new check before its trusted workflow exists on `dev`, the repo
 1. Merge the trusted workflow and publisher into `dev` under the currently enforced checks.
 2. Trigger a fresh PR snapshot (or dispatch `branch-policy.yml` with its PR number), verify the new statuses come from the expected workflow IDs, and only then replace branch-protection contexts or disable the retired workflow identity.
 
-The trusted publisher binds both required statuses to the PR's current head SHA, base SHA, repository, and unique test-merge SHA. A status on a reusable branch-head SHA is not a promotion gate.
+The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 
 Before proposing a production promotion:
 

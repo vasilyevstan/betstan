@@ -11,14 +11,21 @@ gh() {
   if [[ "$1 $2" == "pr view" ]]; then
     if [[ "$*" == *"number,title,state"* ]]; then
       printf '%s\n' \
-        "{\"number\":63,\"title\":\"policy\",\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefName\":\"feature/policy\",\"headRefOid\":\"$HEAD_SHA\",\"headRepository\":{\"nameWithOwner\":\"example/repo\"},\"baseRefName\":\"dev\",\"baseRefOid\":\"$BASE_SHA\",\"potentialMergeCommit\":{\"oid\":\"$MERGE_SHA\"},\"url\":\"https://example.invalid/pr/63\"}"
+        "{\"number\":63,\"title\":\"policy\",\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefName\":\"dev\",\"headRefOid\":\"$HEAD_SHA\",\"headRepository\":{\"nameWithOwner\":\"example/repo\"},\"baseRefName\":\"master\",\"baseRefOid\":\"$BASE_SHA\",\"potentialMergeCommit\":{\"oid\":\"$MERGE_SHA\"},\"url\":\"https://example.invalid/pr/63\"}"
     else
       printf '%s\n' \
         "{\"headRefOid\":\"$HEAD_SHA\",\"baseRefOid\":\"$BASE_SHA\",\"potentialMergeCommit\":{\"oid\":\"$MERGE_SHA\"}}"
     fi
-  elif [[ "$1" == "api" && "$2" == *"/commits/$MERGE_SHA/status" ]]; then
+  elif [[ "$1" == "api" &&
+    ( "$2" == *"/commits/$MERGE_SHA/status" || "$2" == *"/commits/$HEAD_SHA/status" ) ]]; then
+    local branch_run_id=101
+    local quality_run_id=102
+    if [[ "$2" == *"/commits/$HEAD_SHA/status" ]]; then
+      branch_run_id="${STUB_HEAD_BRANCH_RUN_ID:-101}"
+      quality_run_id="${STUB_HEAD_QUALITY_RUN_ID:-102}"
+    fi
     printf '%s\n' \
-      "{\"statuses\":[{\"context\":\"branch-policy\",\"state\":\"${STUB_BRANCH_STATE:-success}\",\"target_url\":\"https://example.invalid/actions/runs/101\",\"avatar_url\":\"https://avatars.example.invalid/in/${STUB_STATUS_APP_ID:-15368}?v=4\"},{\"context\":\"pr-quality-gates\",\"state\":\"success\",\"target_url\":\"https://example.invalid/actions/runs/102\",\"avatar_url\":\"https://avatars.example.invalid/in/15368?v=4\"}]}"
+      "{\"statuses\":[{\"context\":\"branch-policy/master\",\"state\":\"${STUB_BRANCH_STATE:-success}\",\"target_url\":\"https://example.invalid/actions/runs/$branch_run_id\",\"avatar_url\":\"https://avatars.example.invalid/in/${STUB_STATUS_APP_ID:-15368}?v=4\"},{\"context\":\"pr-quality-gates/master\",\"state\":\"success\",\"target_url\":\"https://example.invalid/actions/runs/$quality_run_id\",\"avatar_url\":\"https://avatars.example.invalid/in/15368?v=4\"}]}"
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/branch-policy.yml" ]]; then
     echo "201"
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/production-build.yml" ]]; then
@@ -72,6 +79,12 @@ fi
 if STUB_STATUS_APP_ID="999" REPO=example/repo \
   "$VALIDATOR" 63 >/dev/null 2>&1; then
   echo "validator accepted an untrusted status app" >&2
+  exit 1
+fi
+
+if STUB_HEAD_QUALITY_RUN_ID=999 REPO=example/repo \
+  "$VALIDATOR" 63 >/dev/null 2>&1; then
+  echo "validator accepted a head status from a different quality run" >&2
   exit 1
 fi
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Purpose: validate trusted required statuses for a PR's exact current merge snapshot.
+# Purpose: validate trusted required statuses for a PR's exact head and merge snapshots.
 # Usage:
 #   ./infra/azure/agents/pr-validation-stan.sh 41
 #   PR=41 ./infra/azure/agents/pr-validation-stan.sh
@@ -19,10 +19,11 @@ fi
 
 tmp_meta="$(mktemp)"
 tmp_statuses="$(mktemp)"
+tmp_head_statuses="$(mktemp)"
 tmp_required="$(mktemp)"
 tmp_run="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_meta" "$tmp_statuses" "$tmp_required" "$tmp_run"
+  rm -f "$tmp_meta" "$tmp_statuses" "$tmp_head_statuses" "$tmp_required" "$tmp_run"
 }
 trap cleanup EXIT
 
@@ -56,7 +57,7 @@ print(f"headRepository={(meta.get('headRepository') or {}).get('nameWithOwner', 
 print(f"mergeSnapshot={(meta.get('potentialMergeCommit') or {}).get('oid', '')}")
 PY
 
-read -r head_sha base_sha merge_sha <<<"$(
+read -r head_sha base_sha merge_sha base_ref <<<"$(
   python3 - "$tmp_meta" <<'PY'
 import json
 import sys
@@ -66,10 +67,11 @@ print(
     meta.get("headRefOid", ""),
     meta.get("baseRefOid", ""),
     (meta.get("potentialMergeCommit") or {}).get("oid", ""),
+    meta.get("baseRefName", ""),
 )
 PY
 )"
-[[ -n "$head_sha" && -n "$base_sha" && -n "$merge_sha" ]] || {
+[[ -n "$head_sha" && -n "$base_sha" && -n "$merge_sha" && -n "$base_ref" ]] || {
   echo "PR head, base, or merge snapshot SHA is missing" >&2
   exit 1
 }
@@ -88,7 +90,7 @@ PY
 
 section "required merge-snapshot statuses"
 gh api "repos/$REPO/commits/$merge_sha/status" > "$tmp_statuses"
-if ! python3 - "$tmp_statuses" "$tmp_required" "$TRUSTED_STATUS_APP_ID" <<'PY'
+if ! python3 - "$tmp_statuses" "$tmp_required" "$TRUSTED_STATUS_APP_ID" "$base_ref" <<'PY'
 import json
 import re
 import sys
@@ -96,13 +98,14 @@ import sys
 response = json.load(open(sys.argv[1], encoding="utf-8"))
 required_path = sys.argv[2]
 trusted_status_app_id = sys.argv[3]
+base_ref = sys.argv[4]
 required = {
-    "branch-policy": {
+    f"branch-policy/{base_ref}": {
         "workflow_file": "branch-policy.yml",
         "events": "pull_request_target,workflow_run,workflow_dispatch",
         "require_head_sha": "no",
     },
-    "pr-quality-gates": {
+    f"pr-quality-gates/{base_ref}": {
         "workflow_file": "production-build.yml",
         "events": "pull_request",
         "require_head_sha": "yes",
@@ -158,9 +161,60 @@ then
   exit 1
 fi
 
+if [[ "$base_ref" == "master" ]]; then
+  section "required head-snapshot statuses"
+  gh api "repos/$REPO/commits/$head_sha/status" > "$tmp_head_statuses"
+  if ! python3 - "$tmp_head_statuses" "$tmp_required" \
+    "$TRUSTED_STATUS_APP_ID" <<'PY'
+import json
+import re
+import sys
+
+response = json.load(open(sys.argv[1], encoding="utf-8"))
+required_runs = {}
+with open(sys.argv[2], encoding="utf-8") as handle:
+    for line in handle:
+        context, run_id, *_ = line.rstrip("\n").split("\t")
+        required_runs[context] = run_id
+trusted_status_app_id = sys.argv[3]
+statuses = response.get("statuses") or []
+failed = False
+
+for context, expected_run_id in required_runs.items():
+    matches = [status for status in statuses if status.get("context") == context]
+    if not matches:
+        print(f"{context}\tMISSING\t\t")
+        failed = True
+        continue
+
+    status = matches[0]
+    state = status.get("state") or ""
+    target_url = status.get("target_url") or ""
+    avatar_url = status.get("avatar_url") or ""
+    app_match = re.search(r"/in/(\d+)(?:\?|$)", avatar_url)
+    run_match = re.search(r"/actions/runs/(\d+)(?:/|$)", target_url)
+    app_id = app_match.group(1) if app_match else ""
+    run_id = run_match.group(1) if run_match else ""
+    print(f"{context}\t{state}\tapp_id={app_id}\t{target_url}")
+    if (
+        state != "success"
+        or app_id != trusted_status_app_id
+        or run_id != expected_run_id
+    ):
+        failed = True
+
+sys.exit(1 if failed else 0)
+PY
+  then
+    echo "required head statuses do not match the trusted merge snapshot" >&2
+    exit 1
+  fi
+fi
+
 section "trusted workflow provenance"
 quality_status_run_id="$(
-  awk -F $'\t' '$1 == "pr-quality-gates" { print $2 }' "$tmp_required"
+  awk -F $'\t' -v context="pr-quality-gates/$base_ref" \
+    '$1 == context { print $2 }' "$tmp_required"
 )"
 [[ -n "$quality_status_run_id" ]] || {
   echo "trusted quality status run ID is missing" >&2
@@ -215,7 +269,7 @@ if run.get("status") != "completed" or run.get("conclusion") != "success":
 if require_head_sha == "yes" and run.get("head_sha") != head_sha:
     failures.append("workflow run belongs to a different head SHA")
 
-if context == "branch-policy" and run.get("event") == "workflow_run":
+if context.startswith("branch-policy/") and run.get("event") == "workflow_run":
     relation_matches = (
         run.get("display_title") == f"branch-policy PR {quality_status_run_id}"
     )

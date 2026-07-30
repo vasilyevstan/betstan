@@ -120,8 +120,14 @@ async function main() {
       sha,
     })),
     [
-      { context: "branch-policy", state: "success", sha: MERGE_SHA },
-      { context: "pr-quality-gates", state: "success", sha: MERGE_SHA },
+      { context: "branch-policy/master", state: "success", sha: HEAD_SHA },
+      { context: "branch-policy/master", state: "success", sha: MERGE_SHA },
+      { context: "pr-quality-gates/master", state: "success", sha: HEAD_SHA },
+      {
+        context: "pr-quality-gates/master",
+        state: "success",
+        sha: MERGE_SHA,
+      },
     ],
   );
 
@@ -141,12 +147,28 @@ async function main() {
   assert(invalid.messages.some((message) => message.startsWith("FAILED:")));
 
   const changedWorkflow = await execute({ headBlob: "changed-blob" });
-  assert.equal(changedWorkflow.statuses[1].state, "failure");
+  assert.equal(changedWorkflow.statuses[2].state, "failure");
+  assert.equal(changedWorkflow.statuses[3].state, "failure");
 
   const qualityCompletion = await execute({ eventName: "workflow_run" });
   assert.deepEqual(
-    qualityCompletion.statuses.map(({ context, state }) => ({ context, state })),
-    [{ context: "pr-quality-gates", state: "success" }],
+    qualityCompletion.statuses.map(({ context, state, sha }) => ({
+      context,
+      state,
+      sha,
+    })),
+    [
+      {
+        context: "pr-quality-gates/master",
+        state: "success",
+        sha: HEAD_SHA,
+      },
+      {
+        context: "pr-quality-gates/master",
+        state: "success",
+        sha: MERGE_SHA,
+      },
+    ],
   );
 
   const staleEvent = pull({

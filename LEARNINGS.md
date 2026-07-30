@@ -79,7 +79,7 @@ cd resulting && npm ci && npm run test:ci
 
 - Never commit or push directly to `master`.
 - Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
-- Promotion requires statuses bound to the current PR head, base, repository, and unique merge snapshot. A branch-name run or reusable head-SHA status can be stale or unrelated.
+- Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
