@@ -5,10 +5,8 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    # Do not overlap this username-capable pod with the previous email-only version.
+    type: Recreate
   selector:
     matchLabels:
       app: gaming-auth

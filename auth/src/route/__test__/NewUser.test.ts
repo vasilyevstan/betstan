@@ -19,13 +19,17 @@ it("creates an account with a non-email username", async () => {
   expect(user?.identifierNormalized).toEqual("stan_1");
 });
 
-it("continues to accept an email-shaped username", async () => {
+it.each([
+  "test@test.com",
+  "Pelé@example.com",
+  '"quoted local"@example.com',
+])("continues to accept the email %s", async (email) => {
   const response = await request(app)
     .post("/api/auth/new")
-    .send({ email: "test@test.com", password: "password" })
+    .send({ email, password: "password" })
     .expect(201);
 
-  expect(response.body.email).toEqual("test@test.com");
+  expect(response.body.email).toEqual(email);
 });
 
 it.each([

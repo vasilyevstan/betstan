@@ -3,6 +3,8 @@ type PublicUserSource = {
   email: string;
 };
 
+export const usernamePattern = /^[A-Za-z0-9][A-Za-z0-9._%+@-]*$/;
+
 export const normalizeIdentifier = (identifier: string) =>
   identifier.trim().toLowerCase();
 
