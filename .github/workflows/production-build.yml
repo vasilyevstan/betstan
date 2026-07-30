@@ -1,4 +1,4 @@
-name: build-push
+name: production-build
 
 on:
   push:
@@ -8,9 +8,62 @@ on:
     branches:
       - dev
       - master
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact master commit SHA approved for emergency build/deploy
+        required: true
+        type: string
+
+env:
+  IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.approved_sha || github.sha }}
+
+permissions:
+  contents: read
 
 jobs:
+  authorize-manual-production:
+    name: authorize-manual-production
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.run_attempt > 1)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout master history
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Validate approved SHA
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            APPROVED_SHA="$GITHUB_SHA"
+          fi
+          [ "$GITHUB_REF_NAME" = "master" ] || {
+            echo "Emergency production builds and reruns must use master" >&2
+            exit 1
+          }
+          git cat-file -e "${APPROVED_SHA}^{commit}"
+          git merge-base --is-ancestor "$APPROVED_SHA" origin/master || {
+            echo "Approved SHA is not in master history" >&2
+            exit 1
+          }
+          [ "$(git rev-parse "${APPROVED_SHA}^{commit}")" = "$APPROVED_SHA" ] || {
+            echo "Use the complete immutable commit SHA" >&2
+            exit 1
+          }
+          [ "$APPROVED_SHA" = "$GITHUB_SHA" ] || {
+            echo "Manual production build SHA must equal the selected master tip $GITHUB_SHA" >&2
+            exit 1
+          }
+
   manifest-static-validate:
     runs-on: ubuntu-latest
 
@@ -69,12 +122,23 @@ jobs:
           bash -n infra/azure/agents/service-ops-stan.sh
           bash -n infra/azure/agents/node-logs-stan.sh
           bash -n infra/azure/agents/ingress-routing-guard-stan.sh
+          bash -n infra/azure/agents/branch-policy-guard-stan.sh
+          bash -n infra/azure/agents/test-branch-policy-guard-stan.sh
+          bash -n infra/azure/agents/production-workflow-inventory-stan.sh
+          bash -n infra/azure/agents/test-production-workflow-inventory-stan.sh
+          bash -n infra/azure/agents/test-pr-validation-stan.sh
+          bash -n infra/azure/agents/test-workflow-run-provenance-stan.sh
+          node --check .github/scripts/publish-pr-policy.js
+          node --check .github/scripts/test-publish-pr-policy.js
           bash -n infra/azure/agents/reconcile-nodepool-profile-stan.sh
           bash -n infra/azure/agents/pre-commit-infra-check-stan.sh
           bash -n infra/azure/agents/post-merge-verification-stan.sh
           bash -n infra/azure/agents/rollback-readiness-stan.sh
-          bash -n infra/azure/agents/workflow-trigger-guard-stan.sh
-          bash -n infra/azure/agents/workflow-run-provenance-stan.sh
+          ./infra/azure/agents/test-branch-policy-guard-stan.sh
+          ./infra/azure/agents/test-production-workflow-inventory-stan.sh
+          ./infra/azure/agents/test-pr-validation-stan.sh
+          ./infra/azure/agents/test-workflow-run-provenance-stan.sh
+          node .github/scripts/test-publish-pr-policy.js
 
   workflow-trigger-guard:
     runs-on: ubuntu-latest
@@ -83,7 +147,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate production workflow triggers
+      - name: Validate trusted production workflow chain
         run: ./infra/azure/agents/workflow-trigger-guard-stan.sh
 
   coverage-gate:
@@ -159,10 +223,47 @@ jobs:
             if (branchTotal > 0 && branches < 80) { console.error('Branch coverage gate failed (<80%)'); process.exit(1); }
           "
 
-  build:
+  pr-quality-gates:
+    name: pr-quality-gates
+    if: always() && github.event_name == 'pull_request'
     needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, coverage-gate]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    steps:
+      - name: Require every validation gate
+        env:
+          MANIFEST_RESULT: ${{ needs.manifest-static-validate.result }}
+          INGRESS_RESULT: ${{ needs.ingress-routing-guard.result }}
+          SCRIPT_RESULT: ${{ needs.deploy-runtime-script-validate.result }}
+          WORKFLOW_RESULT: ${{ needs.workflow-trigger-guard.result }}
+          COVERAGE_RESULT: ${{ needs.coverage-gate.result }}
+        run: |
+          for result in "$MANIFEST_RESULT" "$INGRESS_RESULT" "$SCRIPT_RESULT" "$WORKFLOW_RESULT" "$COVERAGE_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "required validation result=$result" >&2
+              exit 1
+            fi
+          done
+
+  build:
+    needs: [authorize-manual-production, manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, coverage-gate]
+    if: >
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.manifest-static-validate.result == 'success' &&
+      needs.ingress-routing-guard.result == 'success' &&
+      needs.deploy-runtime-script-validate.result == 'success' &&
+      needs.workflow-trigger-guard.result == 'success' &&
+      needs.coverage-gate.result == 'success' &&
+      (
+        (
+          github.event_name != 'workflow_dispatch' &&
+          github.run_attempt == 1
+        ) ||
+        needs.authorize-manual-production.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ (github.event_name == 'workflow_dispatch' || github.run_attempt > 1) && 'production-emergency' || 'production-automatic' }}
 
     strategy:
       matrix:
@@ -189,6 +290,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.IMAGE_TAG }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -207,6 +310,6 @@ jobs:
           push: true
           tags: |
             ${{ matrix.image }}:latest
-            ${{ matrix.image }}:${{ github.sha }}
+            ${{ matrix.image }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}

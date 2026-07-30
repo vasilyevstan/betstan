@@ -214,7 +214,7 @@ done
 kubectl get deploy -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}' > "$images_file" || true
 
 if [[ "$target_sha_valid" == true ]]; then
-  for workflow in build-push deploy-manifests; do
+  for workflow in production-build production-deploy; do
     if ! provenance="$(
       REPO="$REPO" WORKFLOW="$workflow" TARGET_SHA="$TARGET_SHA" \
         "$PROVENANCE_SCRIPT" 2>/dev/null
