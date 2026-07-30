@@ -41,7 +41,7 @@ pre-commit-infra-check-stan.sh   ← run before git push on any infra/workflow c
     ↓
 feature/hotfix branch → dev      ← normal integration path
     ↓
-branch-policy + quality gates    ← exact current PR merge snapshot
+branch-policy + quality gates    ← matching head and merge snapshots
     ↓
 dev → master promotion PR       ← explicit exact-SHA production approval
     ↓
@@ -132,12 +132,12 @@ Use the merge-safety agent when you want a conservative yes/no recommendation:
 
 The validation agent:
 - binds the current PR head SHA, base SHA, and unique test-merge SHA;
-- accepts only statuses published by GitHub Actions on that merge snapshot;
+- accepts only base-scoped statuses published by GitHub Actions on both snapshots;
 - verifies the exact trusted workflow IDs, events, and PR relations behind both required statuses.
 
 The merge-safety agent:
 - rejects unsupported branch pairs;
-- runs exact current merge-snapshot validation;
+- requires matching trusted runs on the current head and merge snapshots;
 - recommends a `dev` merge only when validation is green;
 - requires `APPROVED_SHA` and `APPROVED_WORKFLOWS` before recommending a production promotion.
 
@@ -203,7 +203,7 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - `production-build` runs on `master` and tags each image with the exact approved SHA.
 - `production-build` pull requests into `dev` or `master` run the full quality gates.
 - `branch-policy` permits normal branches into `dev` and only `dev` into `master`.
-- Required statuses are published on the PR's unique current merge snapshot, not a reusable branch-head SHA.
+- Promotion statuses are base-scoped and published on both the current head and unique merge snapshot; validation requires both copies to point to the same trusted runs.
 - `production-deploy` runs only after successful `production-build` on `master` and deploys that exact SHA image set.
 - Emergency manual dispatch is limited to the central workflows, requires a full master SHA, and pauses at the reviewer-protected `production-emergency` environment.
 - Retired central and per-service workflow identities remain disabled so historical runs cannot be rerun.

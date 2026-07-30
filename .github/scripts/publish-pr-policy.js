@@ -1,7 +1,8 @@
 "use strict";
 
-const BRANCH_CONTEXT = "branch-policy";
-const QUALITY_CONTEXT = "pr-quality-gates";
+const BRANCH_CONTEXT_PREFIX = "branch-policy";
+const QUALITY_CONTEXT_PREFIX = "pr-quality-gates";
+const QUALITY_JOB = "pr-quality-gates";
 const QUALITY_WORKFLOW = "production-build.yml";
 const QUALITY_WORKFLOW_PATH = `.github/workflows/${QUALITY_WORKFLOW}`;
 
@@ -231,7 +232,7 @@ async function qualityDecision({
     per_page: 100,
   });
   const aggregate = jobsResponse.data.jobs.find(
-    (job) => job.name === QUALITY_CONTEXT,
+    (job) => job.name === QUALITY_JOB,
   );
   if (
     !aggregate ||
@@ -273,6 +274,12 @@ async function publishStatus(
     description,
     target_url: targetUrl,
   });
+}
+
+function statusTargets(pull) {
+  return pull.baseRef === "master"
+    ? [pull.headSha, pull.mergeSha]
+    : [pull.mergeSha];
 }
 
 function eventPullIdentity(eventPull) {
@@ -343,29 +350,36 @@ module.exports = async function publishPrPolicy({ github, context, core }) {
       candidateRun: item.candidateRun,
       fallbackUrl: policyRunUrl,
     });
+    const branchContext = `${BRANCH_CONTEXT_PREFIX}/${pull.baseRef}`;
+    const qualityContext = `${QUALITY_CONTEXT_PREFIX}/${pull.baseRef}`;
+    const targets = statusTargets(pull);
 
     if (context.eventName !== "workflow_run") {
+      for (const target of targets) {
+        await publishStatus(
+          github,
+          owner,
+          repo,
+          target,
+          branchContext,
+          branch.allowed ? "success" : "failure",
+          `PR #${pull.number}: ${branch.description}`,
+          policyRunUrl,
+        );
+      }
+    }
+    for (const target of targets) {
       await publishStatus(
         github,
         owner,
         repo,
-        pull.mergeSha,
-        BRANCH_CONTEXT,
-        branch.allowed ? "success" : "failure",
-        `PR #${pull.number}: ${branch.description}`,
-        policyRunUrl,
+        target,
+        qualityContext,
+        quality.state,
+        quality.description,
+        quality.targetUrl,
       );
     }
-    await publishStatus(
-      github,
-      owner,
-      repo,
-      pull.mergeSha,
-      QUALITY_CONTEXT,
-      quality.state,
-      quality.description,
-      quality.targetUrl,
-    );
 
     const finalPull = pullIdentity(
       (

@@ -75,9 +75,10 @@ require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted qu
 require_literal "$branch_workflow" "pr_number:" "trusted bootstrap refresh input"
 require_literal "$branch_workflow" "statuses: write" "status publication permission"
 require_literal "$branch_workflow" "publish-pr-policy.js" "trusted policy publisher"
-require_literal "$policy_script" 'const BRANCH_CONTEXT = "branch-policy"' "stable branch context"
-require_literal "$policy_script" 'const QUALITY_CONTEXT = "pr-quality-gates"' "stable quality context"
+require_literal "$policy_script" 'const BRANCH_CONTEXT_PREFIX = "branch-policy"' "stable branch context"
+require_literal "$policy_script" 'const QUALITY_CONTEXT_PREFIX = "pr-quality-gates"' "stable quality context"
 require_literal "$policy_script" "pull.mergeSha" "unique PR merge snapshot status"
+require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion head and merge statuses"
 require_literal "$policy_script" "assertExpectedPull(finalPull, pull)" "final stale-event check"
 require_literal "$policy_script" "relation.base?.sha === pull.baseSha" "exact base snapshot relation"
 

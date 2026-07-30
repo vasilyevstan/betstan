@@ -12,7 +12,7 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
 - Never commit or push directly to `master`.
 - Normal changes enter `dev`, either directly or through a focused pull request.
 - Only an up-to-date `dev` branch may open a pull request into `master`.
-- A production promotion requires green trusted `branch-policy` and `pr-quality-gates` statuses on its current unique merge snapshot.
+- A production promotion requires green trusted `branch-policy/master` and `pr-quality-gates/master` statuses on both its current head and unique merge snapshot.
 - Before promotion, identify the exact head SHA and every production-capable workflow triggered by the diff. Require explicit approval covering that exact set.
 - Manual central production workflow dispatches are approval-gated through `production-emergency` and require an exact full master SHA. Legacy per-service deploy workflows are not manually dispatchable.
 - After a squash promotion, immediately merge `master` back into `dev` and verify `master` is an ancestor of `dev`.

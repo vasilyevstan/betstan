@@ -90,7 +90,7 @@ pre-commit-infra-check-stan.sh   ← before pushing branch
     ↓
 feature/hotfix branch → dev      ← normal integration
     ↓
-branch-policy + quality gates    ← exact current PR merge snapshot
+branch-policy + quality gates    ← matching head and merge snapshots
     ↓
 dev → master promotion PR       ← exact-SHA production approval required
     ↓
