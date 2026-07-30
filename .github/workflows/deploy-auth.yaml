@@ -1,11 +1,6 @@
 name: deploy-auth
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - 'auth/**'
   workflow_dispatch:
     inputs:
       environment:

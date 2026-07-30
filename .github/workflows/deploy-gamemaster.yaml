@@ -1,11 +1,6 @@
 name: deploy-gamemaster
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "gamemaster/**"
   workflow_dispatch:
     inputs:
       environment:

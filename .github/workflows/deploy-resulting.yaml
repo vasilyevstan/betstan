@@ -1,11 +1,6 @@
 name: deploy-resulting
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "resulting/**"
   workflow_dispatch:
     inputs:
       environment:

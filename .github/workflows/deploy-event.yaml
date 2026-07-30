@@ -1,11 +1,6 @@
 name: deploy-event
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - "event/**"
   workflow_dispatch:
     inputs:
       environment:
