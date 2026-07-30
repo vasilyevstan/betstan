@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { body } from "express-validator";
+import { body, oneOf } from "express-validator";
 import { User } from "../model/User";
 import jwt from "jsonwebtoken";
 import { validateRequest, BadRequestError } from "@betstan/common";
@@ -7,10 +7,10 @@ import {
   isDuplicateKeyError,
   normalizeIdentifier,
   toPublicUser,
+  usernamePattern,
 } from "../service/Identifier";
 
 const router = express.Router();
-const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._%+@-]*$/;
 
 type NewUserBody = {
   email: string;
@@ -22,16 +22,21 @@ router.post(
   [
     body("email")
       .isString()
-      .withMessage("Username must be text")
+      .withMessage("Username or email must be text")
       .bail()
       .trim()
-      .isLength({ min: 3, max: 40 })
-      .withMessage("Username must be between 3 and 40 characters")
-      .bail()
-      .matches(identifierPattern)
-      .withMessage(
-        "Username may contain letters, numbers, dots, underscores, hyphens, +, %, and @"
-      ),
+      .isLength({ min: 3, max: 254 })
+      .withMessage("Username or email must be between 3 and 254 characters"),
+    oneOf(
+      [
+        body("email").isEmail(),
+        body("email").isLength({ max: 40 }).matches(usernamePattern),
+      ],
+      {
+        message:
+          "Enter a valid email or a username containing letters, numbers, dots, underscores, hyphens, +, %, or @",
+      }
+    ),
     body("password")
       .isString()
       .withMessage("Password must be provided")
