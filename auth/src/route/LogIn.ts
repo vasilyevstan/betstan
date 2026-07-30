@@ -1,14 +1,17 @@
 import express, { Request, Response } from "express";
-import { body } from "express-validator";
+import { body, oneOf } from "express-validator";
 import { User } from "../model/User";
 import { Password } from "../service/Password";
 import jwt from "jsonwebtoken";
 import { BadRequestError, validateRequest } from "@betstan/common";
 import { LoginAttempt } from "../model/LoginAttempt";
-import { normalizeIdentifier, toPublicUser } from "../service/Identifier";
+import {
+  normalizeIdentifier,
+  toPublicUser,
+  usernamePattern,
+} from "../service/Identifier";
 
 const router = express.Router();
-const identifierPattern = /^[\x21-\x7E]+$/;
 
 type LoginBody = {
   email: string;
@@ -34,10 +37,14 @@ router.post(
       .bail()
       .trim()
       .isLength({ min: 3, max: 254 })
-      .withMessage("Username or email must be between 3 and 254 characters")
-      .bail()
-      .matches(identifierPattern)
-      .withMessage("Username or email cannot contain spaces"),
+      .withMessage("Username or email must be between 3 and 254 characters"),
+    oneOf(
+      [
+        body("email").isEmail(),
+        body("email").isLength({ max: 40 }).matches(usernamePattern),
+      ],
+      { message: "Enter a valid username or email" }
+    ),
     body("password")
       .isString()
       .withMessage("Password must be provided")

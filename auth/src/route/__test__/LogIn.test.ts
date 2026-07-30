@@ -40,6 +40,23 @@ it("continues to log in a legacy email record", async () => {
     .expect(200);
 });
 
+it.each(["Pelé@example.com", '"quoted local"@example.com'])(
+  "continues to log in a legacy %s email record",
+  async (email) => {
+    await User.create({
+      email,
+      password: "password",
+      timestamp: new Date().toISOString(),
+      lastLogin: new Date().toISOString(),
+    });
+
+    await request(app)
+      .post("/api/auth/login")
+      .send({ email, password: "password" })
+      .expect(200);
+  }
+);
+
 it.each([
   ["an object identifier", { $gt: "" }],
   ["an array identifier", ["testuser"]],
