@@ -1,4 +1,5 @@
 import React from 'react';
+import '@testing-library/jest-dom';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import NewUser from './NewUser';
@@ -18,28 +19,44 @@ describe('NewUser page', () => {
     jest.clearAllMocks();
   });
 
-  it('submits signup form using UseRequest', () => {
+  it('renders and submits an accessible account creation form', () => {
     const doRequest = jest.fn();
     UseRequest.mockReturnValue({
       doRequest,
       errors: null,
     });
 
-    const { container } = render(
-      <MemoryRouter>
+    render(
+      <MemoryRouter initialEntries={['/signup?ui=v2&theme=light']}>
         <NewUser callback={jest.fn()} />
       </MemoryRouter>
     );
 
-    const inputs = container.querySelectorAll('input');
-    fireEvent.change(inputs[0], { target: { value: 'new@betstan.xyz' } });
-    fireEvent.change(inputs[1], { target: { value: 'Password123!Password123!' } });
+    expect(screen.getByRole('heading', { name: 'Create an account' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign Up' }));
+    const identifier = screen.getByLabelText('Username');
+    const password = screen.getByLabelText('Password');
+    expect(identifier).toHaveAttribute('autocomplete', 'username');
+    expect(identifier).toHaveAttribute('minlength', '3');
+    expect(identifier).toHaveAttribute('maxlength', '40');
+    expect(password).toHaveAttribute('autocomplete', 'new-password');
+
+    fireEvent.change(identifier, { target: { value: 'new-user' } });
+    fireEvent.change(password, { target: { value: 'Password123!' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+
     expect(doRequest).toHaveBeenCalledTimes(1);
+    expect(UseRequest).toHaveBeenLastCalledWith(expect.objectContaining({
+      body: {
+        email: 'new-user',
+        password: 'Password123!',
+      },
+    }));
+    expect(screen.getByRole('link', { name: 'Log in' }))
+      .toHaveAttribute('href', '/login?ui=v2&theme=light');
   });
 
-  it('navigates home and triggers callback on successful signup', () => {
+  it('preserves the selected UI and triggers callback on successful signup', () => {
     const callback = jest.fn();
     let hookConfig;
     UseRequest.mockImplementation((config) => {
@@ -48,14 +65,17 @@ describe('NewUser page', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/signup?ui=v3&theme=dark']}>
         <NewUser callback={callback} />
       </MemoryRouter>
     );
 
     hookConfig.onSuccess();
 
-    expect(mockNavigate).toHaveBeenCalledWith('/');
+    expect(mockNavigate).toHaveBeenCalledWith({
+      pathname: '/',
+      search: '?ui=v3&theme=dark',
+    });
     expect(callback).toHaveBeenCalledTimes(1);
   });
 });

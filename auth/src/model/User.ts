@@ -6,6 +6,10 @@ const userSchema = new Schema({
     type: String,
     required: true,
   },
+  identifierNormalized: {
+    type: String,
+    required: false,
+  },
   password: {
     type: String,
     required: true,
@@ -17,6 +21,25 @@ const userSchema = new Schema({
   lastLogin: {
     type: String,
     required: false,
+  },
+});
+
+userSchema.index(
+  { identifierNormalized: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      identifierNormalized: { $type: "string" },
+    },
+  }
+);
+
+userSchema.set("toJSON", {
+  transform: (_document, returnedObject) => {
+    delete returnedObject.password;
+    delete returnedObject.identifierNormalized;
+    delete returnedObject.__v;
+    return returnedObject;
   },
 });
 

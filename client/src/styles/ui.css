@@ -7,6 +7,7 @@
   --text-main: #f8fbff;
   --text-subtle: #a4b5d6;
   --accent: #4fa79f;
+  --accent-contrast: #071520;
   --positive: #5bd4a4;
   --warning: #f4c26e;
   --danger: #ff7c8f;
@@ -24,6 +25,7 @@
   --text-main: #121b2f;
   --text-subtle: #61708d;
   --accent: #2f8078;
+  --accent-contrast: #ffffff;
   --positive: #178f61;
   --warning: #bd7a17;
   --danger: #cc2f4d;
@@ -226,24 +228,166 @@ body {
 }
 
 .auth-card {
-  max-width: 520px;
+  width: min(100%, 30rem);
+  margin-inline: auto;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--border-subtle) 72%, var(--accent) 28%);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--surface-soft) 96%, var(--accent) 4%), var(--surface-soft));
+  box-shadow: var(--shadow-elevated);
+}
+
+.auth-card .card-body {
+  padding: clamp(1.25rem, 4vw, 2.25rem);
+}
+
+.auth-card__header {
+  margin-bottom: 1.6rem;
+  text-align: center;
+}
+
+.auth-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  margin-bottom: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, transparent);
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.auth-card__icon img {
+  width: 1.5rem;
+  height: 1.5rem;
+  filter: brightness(0) invert(1);
+}
+
+:root[data-bs-theme='light'] .auth-card__icon img {
+  filter: none;
+}
+
+.auth-card__title {
+  margin: 0;
+  font-size: clamp(1.45rem, 4vw, 1.8rem);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+}
+
+.auth-card__subtitle {
+  max-width: 23rem;
+  margin: 0.55rem auto 0;
+  color: var(--text-subtle);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.auth-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.auth-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.auth-label {
+  color: var(--text-main);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.auth-control {
+  min-height: 3rem;
+  border-color: color-mix(in srgb, var(--border-subtle) 78%, var(--accent) 22%);
+  background: color-mix(in srgb, var(--surface-elevated) 88%, transparent);
+  color: var(--text-main);
+  font-size: 1rem;
+}
+
+.auth-control:focus {
+  border-color: var(--accent);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.auth-field__hint {
+  color: var(--text-subtle);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.auth-errors:empty {
+  display: none;
+}
+
+.auth-errors .alert {
+  margin: 0;
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-soft));
+  color: var(--text-main);
+  font-size: 0.82rem;
+}
+
+.auth-errors .alert h4 {
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
 }
 
 .auth-card .auth-submit {
-  border-color: rgba(77, 181, 173, 0.58);
-  background: linear-gradient(135deg, #11202f, #0b151f);
-  color: #e8fffb;
-  box-shadow: 0 10px 18px rgba(2, 10, 18, 0.24);
+  min-height: 3rem;
+  border-color: var(--accent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 88%, #ffffff),
+    var(--accent)
+  );
+  color: var(--accent-contrast);
+  font-weight: 750;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .auth-card .auth-submit:hover {
-  border-color: rgba(77, 181, 173, 0.82);
-  background: linear-gradient(135deg, #152536, #0f1c27);
-  color: #ffffff;
+  border-color: color-mix(in srgb, var(--accent) 84%, #ffffff);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 78%, #ffffff),
+    color-mix(in srgb, var(--accent) 92%, #000000)
+  );
+  color: var(--accent-contrast);
+  transform: translateY(-1px);
 }
 
 .auth-card .auth-submit:focus-visible {
-  box-shadow: 0 0 0 0.2rem rgba(77, 181, 173, 0.24), 0 10px 18px rgba(2, 10, 18, 0.24);
+  box-shadow:
+    0 0 0 0.2rem color-mix(in srgb, var(--accent) 28%, transparent),
+    0 10px 22px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.auth-card__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: 1.35rem;
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-subtle);
+  font-size: 0.84rem;
+}
+
+.auth-card__link {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.auth-card__link:hover {
+  color: color-mix(in srgb, var(--accent) 78%, var(--text-main));
+  text-decoration: underline;
 }
 
 .empty-state-card {

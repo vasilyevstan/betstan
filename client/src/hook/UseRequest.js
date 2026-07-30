@@ -35,8 +35,8 @@ import { useState } from 'react';
         } catch (err) {
             const messages = buildErrorMessages(err);
             setErrors(
-                <div className="alert alert-danger">
-                    <h4>Ooops...</h4>
+                <div className="alert alert-danger" role="alert">
+                    <h4>Please check your details</h4>
                     <ul className="my-0">
                         {messages.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}
                     </ul>

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { app } from "./app";
+import { User } from "./model/User";
 
 const startUp = async () => {
   if (!process.env.JWT_KEY) {
@@ -12,6 +13,7 @@ const startUp = async () => {
 
   try {
     await mongoose.connect(process.env.MONGO_URI);
+    await User.init();
     console.log("Connected to database");
   } catch (err) {
     throw new Error();
