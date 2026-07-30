@@ -73,6 +73,17 @@ jobs:
           bash -n infra/azure/agents/pre-commit-infra-check-stan.sh
           bash -n infra/azure/agents/post-merge-verification-stan.sh
           bash -n infra/azure/agents/rollback-readiness-stan.sh
+          bash -n infra/azure/agents/workflow-trigger-guard-stan.sh
+
+  workflow-trigger-guard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate production workflow triggers
+        run: ./infra/azure/agents/workflow-trigger-guard-stan.sh
 
   coverage-gate:
     runs-on: ubuntu-latest
@@ -148,7 +159,7 @@ jobs:
           "
 
   build:
-    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, coverage-gate]
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, coverage-gate]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
 

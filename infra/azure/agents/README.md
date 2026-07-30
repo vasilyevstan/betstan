@@ -19,6 +19,7 @@
 - `deploy-validation-loop-stan.sh` — retries smoke+functional validation and captures diagnostics artifacts on failure.
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
 - `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
+- `workflow-trigger-guard-stan.sh` — blocks untrusted workflow-run deployments and automatic legacy service deploys.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
 - `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
@@ -189,6 +190,7 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - `build-push` runs on `master` and tags each image with `${GITHUB_SHA}`.
 - `build-push` pull requests run `ingress-routing-guard-stan.sh` and block unsafe ingress host/path edits before merge.
 - `deploy-manifests` runs only after successful `build-push` on `master` and deploys that exact SHA image set.
+- `deploy-manifests` rejects pull-request and foreign-repository workflow runs before any production secret or runner is exposed.
 - Legacy per-service `deploy-*.yaml` workflows are manual-only fallbacks and require explicit approval for the exact workflow and SHA.
 - Deploy workflow blocks when mongo PVC count is unexpectedly low, avoiding deployment against unsafe DB storage state.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.
