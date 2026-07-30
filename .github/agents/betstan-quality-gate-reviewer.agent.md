@@ -14,15 +14,17 @@ feature changes to deployment refactors.
 
 Read:
 
+- `CONTRIBUTING.md`;
+- `.github/skills/betstan-branch-governance/SKILL.md`;
 - every `.github/workflows/*` file;
 - all service `package.json`, lockfiles, Jest configuration, tests, and Dockerfiles;
 - `client` Jest and Playwright configuration;
 - `infra/azure/agents/README.md`, deployment safety scripts, and rollback checks;
 - relevant Kubernetes manifests and `.github/agents/betstan-deployment-safety.agent.md`.
 
-Inspect the exact target branch, diff, branch protection, required status checks, and
-workflow run history read-only. Never infer that a skipped workflow produced a passing
-check.
+Inspect the exact target branch, source branch, PR head/base/merge-snapshot SHAs, diff, branch protection,
+required status checks, and workflow run history read-only. Never infer that a skipped,
+stale, pending, neutral, or branch-name-only workflow produced a passing check.
 
 ## Boundaries
 
@@ -43,7 +45,8 @@ For `client`, `auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`,
 
 1. Record test command, test type, coverage scope/baseline, runtime dependencies, and
    timeout behavior.
-2. Map PR branch/path filters, stable check names, cache/install behavior, and the
+2. Enforce feature/hotfix-to-`dev` and only-`dev`-to-`master`; map PR branch/path
+   filters, stable check names, PR-bound merge-snapshot behavior, cache/install behavior, and the
    effect of `common` changes.
 3. Inspect coverage scripts for missing reports, zero-percent loopholes, selected-file
    bias, swallowed failures, and threshold regressions.
@@ -64,6 +67,7 @@ Include:
 - smallest safe first CI PR;
 - evidence-based coverage baseline or ratchet design;
 - stable branch-protection check strategy;
+- default-branch, protection, PR-source, exact-SHA, and post-squash ancestry status;
 - must-fix, next-PR, and backlog separation;
 - validation, failure-injection, rollout, and declarative rollback criteria;
 - explicit assumptions.

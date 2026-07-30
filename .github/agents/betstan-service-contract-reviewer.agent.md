@@ -17,7 +17,7 @@ Read the current versions of:
 - every affected service's `package.json`, `src/app.*`, and `src/index.*`;
 - affected routes, models, publishers, listeners, tests, and Dockerfiles;
 - `client/src/App.js`, `client/src/Header.js`, and affected pages;
-- `.github/workflows/build-push.yml` and affected test/deploy workflows;
+- `.github/workflows/production-build.yml` and affected test/deploy workflows;
 - relevant `infra/k8s*` manifests;
 - the installed `@betstan/common` declarations or package contents when `common/` is
   absent. State the exact package version and never assume unavailable source.
@@ -67,5 +67,4 @@ Include:
 - unit, integration, contract, and end-to-end tests;
 - unresolved assumptions.
 
-Do not report style issues or speculative risks without an executable failure path.
 Do not report style issues or speculative risks without an executable failure path.

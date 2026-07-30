@@ -2,7 +2,7 @@
 
 ## Repository overview
 
-`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities are published as the `@betstan/common` npm package (hosted on npmjs.org, currently `1.0.54`). The `common/` directory in the repo is a git submodule.
+`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities are published as the `@betstan/common` npm package. The orphaned `common` gitlink was removed; do not recreate it without a valid, intentional submodule configuration.
 
 ---
 
@@ -35,11 +35,7 @@
 ## Testing conventions
 
 ### Setup file (`src/test/setup.ts`)
-All three services that have tests (`resulting`, `moderation`, `gamemaster`) share the same setup pattern:
-- `jest.mock("@betstan/common")` — **auto-mocks the entire common module** (including `AListener` and `APublisher`).
-- `beforeAll` — starts an in-memory MongoDB instance.
-- `beforeEach` — calls `jest.clearAllMocks()` (resets call counts but keeps spy implementations) and wipes all MongoDB collections.
-- `afterAll` — stops the in-memory Mongo.
+Backend services generally use an in-memory MongoDB instance, clear mocks and collections between tests, and stop Mongo in `afterAll`. Read each service's setup instead of assuming they are identical. Listener tests that need `AListener.channel` must use a concrete factory mock; a bare `jest.mock("@betstan/common")` can leave listener state undefined.
 
 ### Shared mock prototype trap
 Because `@betstan/common` is auto-mocked, `APublisher.prototype.init` becomes a single `jest.fn()`. **All publisher classes that extend `APublisher` without defining their own `init` inherit the same mock function.** This means:
@@ -72,14 +68,26 @@ timestamp: event.timestamp ?? new Date().toISOString(),
 
 ```bash
 # Per service (replace "resulting" with the service directory name)
-cd resulting && npm install && npm run test:ci
+cd resulting && npm ci && npm run test:ci
 ```
 
-CI runs three separate workflows (`.github/workflows/tests-resulting.yaml`, `tests-moderation.yaml`, `tests-gamemaster.yaml`), each executing `npm install && npm run test:ci` in the corresponding service directory.
+`production-build.yml` runs coverage gates for every backend service and the client on pull requests into `dev` or `master`. Per-service `tests-*.yaml` workflows provide additional path-scoped feedback.
 
 ---
 
-## Known issues & workarounds
+## Branch and delivery governance
 
-- The `common/` git submodule has no registered URL in `.gitmodules`. CI emits a warning (`fatal: No url found for submodule path 'common'`) but this does not affect the build.
-- GitHub Actions workflows still use `actions/checkout@v2` (Node 20), which triggers a deprecation warning on current runners. Upgrading to `@v4` would silence it.
+- Never commit or push directly to `master`.
+- Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
+- Promotion requires statuses bound to the current PR head, base, repository, and unique merge snapshot. A branch-name run or reusable head-SHA status can be stale or unrelated.
+- Skipped, stale, pending, neutral, or unrelated runs are not green gates.
+- A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
+- Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
+
+## Resolved failures and durable rules
+
+- An orphaned `common` gitlink without `.gitmodules` broke checkout cleanup. It was removed because services consume `@betstan/common` from npm.
+- Per-service workflows use `actions/checkout@v4`; do not reintroduce `checkout@v2`.
+- Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
+- An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
+- Coverage instrumentation can report `branches=0` with a non-zero branch total. Keep line coverage mandatory and apply the branch threshold only when a meaningful branch percentage exists.

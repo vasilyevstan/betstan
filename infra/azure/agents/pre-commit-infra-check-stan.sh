@@ -23,6 +23,13 @@ fail() {
   errors=$((errors + 1))
 }
 
+current_branch="${BRANCH_NAME:-$(git branch --show-current 2>/dev/null || true)}"
+if [[ "$current_branch" == "master" ]]; then
+  echo "ERROR: direct work on master is forbidden; switch to dev or a branch based on dev" >&2
+  echo "RESULT=BLOCKED"
+  exit 1
+fi
+
 # ── 1. Check staged files for common secrets patterns ────────────────────────
 echo "=== scanning staged/modified infra files for secrets patterns ==="
 

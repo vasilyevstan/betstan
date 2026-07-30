@@ -1,14 +1,16 @@
-name: deploy-manifests
-run-name: deploy-manifests ${{ github.event.workflow_run.head_sha || github.sha }}
+name: production-deploy
+run-name: deploy ${{ github.event.workflow_run.head_sha || inputs.approved_sha }}
 
 on:
   workflow_run:
-    workflows: ["build-push"]
+    workflows: ["production-build"]
     types: [completed]
   workflow_dispatch:
-
-permissions:
-  contents: read
+    inputs:
+      approved_sha:
+        description: Exact built master commit SHA approved for emergency deployment
+        required: true
+        type: string
 
 env:
   RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
@@ -21,20 +23,87 @@ env:
   DEPLOY_VALIDATION_MAX_LOOPS: ${{ vars.DEPLOY_VALIDATION_MAX_LOOPS || '3' }}
   DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS || '20' }}
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
+  authorize-manual-production:
+    name: authorize-manual-production
+    if: github.event_name == 'workflow_dispatch' || github.run_attempt > 1
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+    - name: Checkout master history
+      uses: actions/checkout@v4
+      with:
+        ref: master
+        fetch-depth: 0
+
+    - name: Validate approved SHA and build provenance
+      env:
+        APPROVED_SHA: ${{ inputs.approved_sha }}
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+          [ "$GITHUB_REF_NAME" = "master" ] || {
+            echo "Emergency production deploys must be dispatched from master" >&2
+            exit 1
+          }
+        else
+          APPROVED_SHA="${{ github.event.workflow_run.head_sha }}"
+        fi
+        git cat-file -e "${APPROVED_SHA}^{commit}"
+        git merge-base --is-ancestor "$APPROVED_SHA" origin/master || {
+          echo "Approved SHA is not in master history" >&2
+          exit 1
+        }
+        [ "$(git rev-parse "${APPROVED_SHA}^{commit}")" = "$APPROVED_SHA" ] || {
+          echo "Use the complete immutable commit SHA" >&2
+          exit 1
+        }
+        conclusion="$(
+          gh run list --repo "$REPO" --workflow production-build.yml \
+            --commit "$APPROVED_SHA" --limit 20 \
+            --json event,status,conclusion \
+            --jq '[.[] | select((.event == "push" or .event == "workflow_dispatch") and .status == "completed")][0].conclusion // ""'
+        )"
+        [ "$conclusion" = "success" ] || {
+          echo "No successful approved build found for SHA $APPROVED_SHA" >&2
+          exit 1
+        }
+
   deploy:
+    needs: [authorize-manual-production]
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      always() &&
       (
-        github.event.workflow_run.conclusion == 'success' &&
         (
-          github.event.workflow_run.event == 'push' ||
-          github.event.workflow_run.event == 'workflow_dispatch'
-        ) &&
-        github.event.workflow_run.head_repository.full_name == github.repository &&
-        github.event.workflow_run.head_branch == 'master'
+          (
+            github.event_name == 'workflow_dispatch' ||
+            github.run_attempt > 1
+          ) &&
+          needs.authorize-manual-production.result == 'success'
+        ) ||
+        (
+          github.run_attempt == 1 &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          (
+            github.event.workflow_run.event == 'push' ||
+            github.event.workflow_run.event == 'workflow_dispatch'
+          )
+        )
       )
     runs-on: ubuntu-latest
+    environment:
+      name: ${{ (github.event_name == 'workflow_dispatch' || github.run_attempt > 1) && 'production-emergency' || 'production-automatic' }}
     concurrency:
       group: deploy-master
       cancel-in-progress: false
@@ -43,15 +112,70 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+        ref: ${{ github.event.workflow_run.head_sha || inputs.approved_sha }}
+
+    - name: Validate upstream workflow identity
+      if: github.event_name == 'workflow_run'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+      run: |
+        set -euo pipefail
+        trusted_workflow_id="$(
+          gh api "repos/$REPO/actions/workflows/production-build.yml" --jq '.id'
+        )"
+        read -r workflow_id workflow_path event head_sha head_branch head_repository status conclusion <<<"$(
+          gh api "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID" \
+            --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion] | @tsv'
+        )"
+        [ "$workflow_id" = "$trusted_workflow_id" ]
+        [ "$workflow_path" = ".github/workflows/production-build.yml" ]
+        [ "$event" = "push" ] || [ "$event" = "workflow_dispatch" ]
+        [ "$head_sha" = "${{ github.event.workflow_run.head_sha }}" ]
+        [ "$head_branch" = "master" ]
+        [ "$head_repository" = "$REPO" ]
+        [ "$status" = "completed" ]
+        [ "$conclusion" = "success" ]
 
     - name: Resolve deploy image tag
       run: |
         if [ "${{ github.event_name }}" = "workflow_run" ]; then
           echo "IMAGE_TAG=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_RUN_ID=${{ github.event.workflow_run.id }}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_EVENT=${{ github.event.workflow_run.event }}" >> "$GITHUB_ENV"
         else
-          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${{ inputs.approved_sha }}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_RUN_ID=manual" >> "$GITHUB_ENV"
+          echo "UPSTREAM_EVENT=workflow_dispatch" >> "$GITHUB_ENV"
         fi
+
+    - name: Reject stale automatic deploy
+      if: github.event_name == 'workflow_run' && github.run_attempt == 1
+      run: |
+        set -euo pipefail
+        git fetch origin master
+        current_master="$(git rev-parse origin/master)"
+        [ "$IMAGE_TAG" = "$current_master" ] || {
+          echo "Refusing stale automatic deploy image_sha=$IMAGE_TAG current_master=$current_master" >&2
+          exit 1
+        }
+
+    - name: Record deploy provenance
+      run: |
+        mkdir -p artifacts/deploy-provenance
+        printf '%s\n' \
+          "image_sha=$IMAGE_TAG" \
+          "upstream_run_id=$UPSTREAM_RUN_ID" \
+          "upstream_event=$UPSTREAM_EVENT" \
+          > artifacts/deploy-provenance/provenance.txt
+
+    - name: Upload deploy provenance
+      uses: actions/upload-artifact@v4
+      with:
+        name: deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+        path: artifacts/deploy-provenance/provenance.txt
+        if-no-files-found: error
 
     - name: Azure Login
       uses: azure/login@v1
@@ -144,6 +268,14 @@ jobs:
         )
         for deployment in "${deployments[@]}"; do
           kubectl wait --for=condition=Available "deployment/${deployment}" --timeout=1m
+          images="$(
+            kubectl get deployment "$deployment" \
+              -o jsonpath='{.spec.template.spec.containers[*].image}'
+          )"
+          grep -Eq "(^|[[:space:]])[^[:space:]]+:${IMAGE_TAG}([[:space:]]|$)" <<<"$images" || {
+            echo "$deployment does not use exact image SHA $IMAGE_TAG: $images" >&2
+            exit 1
+          }
         done
         kubectl get deployments "${deployments[@]}"
 
@@ -169,6 +301,6 @@ jobs:
       if: always() && steps.post_deploy_validation.outcome == 'failure'
       uses: actions/upload-artifact@v4
       with:
-        name: deploy-validation-diagnostics-${{ github.run_id }}
+        name: deploy-validation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
         path: artifacts/deploy-validation
         if-no-files-found: ignore

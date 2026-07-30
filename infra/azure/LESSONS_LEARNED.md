@@ -47,7 +47,7 @@ If the apex host block is missing, requests to `betstan.xyz/api/*` fall through 
 - `/api/backoffice/?(.*)`
 
 Guard script: `infra/azure/agents/ingress-routing-guard-stan.sh`  
-This guard runs in CI on every PR targeting `master` (`build-push.yml`).
+This guard runs in CI on pull requests targeting `dev` or `master` (`production-build.yml`).
 
 ### Always validate with Host headers — not raw IPs
 A check against the raw ingress IP (`http://<IP>/api/...`) can return 200 even when the host-based routing is broken.  
@@ -75,27 +75,34 @@ RabbitMQ runs as an ephemeral Deployment. Replacing its broker can leave queue d
 
 ## CI/CD and Branch Safety
 
-### Branch commits are safe; master merge triggers production
-- Commits to any branch do **not** trigger a production deploy.
-- Merge to `master` triggers `build-push` → `deploy-manifests` automatically.
-- Review all infra changes with `pre-commit-infra-check-stan.sh` before pushing a branch.
+### Dev integration is safe; only a dev promotion reaches production
+- Never commit or push directly to `master`.
+- Normal changes enter `dev`; direct pushes to `dev` are allowed, though focused PRs are preferred.
+- Only an up-to-date pull request from `dev` may target `master`.
+- A merge to `master` triggers `production-build` → `production-deploy` automatically.
+- Review all infra changes with `pre-commit-infra-check-stan.sh` before pushing.
+- After a squash promotion, immediately merge the new `master` commit back into `dev`.
+- Manual emergency deployment uses only the central workflows, a full approved master SHA, and the reviewer-protected `production-emergency` environment.
 
 ### Required validation sequence for production changes
 ```
 pre-commit-infra-check-stan.sh   ← before pushing branch
     ↓
-ingress-routing-guard-stan.sh    ← in CI on PR (auto-runs)
+feature/hotfix branch → dev      ← normal integration
     ↓
-MERGE to master
+branch-policy + quality gates    ← exact current PR merge snapshot
+    ↓
+dev → master promotion PR       ← exact-SHA production approval required
     ↓
 post-merge-verification-stan.sh  ← required after every production merge
+    ↓
+master → dev synchronization     ← required after squash promotion
     ↓
 rollback-readiness-stan.sh       ← required before any rollback action
 ```
 
-### Do not merge infra/k8s/deploy changes on an active hotfix branch
-Merging with outstanding conflicts on an infra branch can push stale manifest versions to production.  
-Always rebase or merge master into the branch, resolve conflicts, and verify CI passes before merging.
+### Do not promote stale infra/k8s/deploy changes
+A stale `dev` promotion can push old manifest versions to production. Merge `master` into `dev`, resolve conflicts, and require exact-SHA CI before promotion.
 
 ---
 
