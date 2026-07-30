@@ -159,6 +159,13 @@ then
 fi
 
 section "trusted workflow provenance"
+quality_status_run_id="$(
+  awk -F $'\t' '$1 == "pr-quality-gates" { print $2 }' "$tmp_required"
+)"
+[[ -n "$quality_status_run_id" ]] || {
+  echo "trusted quality status run ID is missing" >&2
+  exit 1
+}
 while IFS=$'\t' read -r context run_id workflow_file expected_events require_head_sha; do
   [[ -n "${run_id:-}" ]] || continue
   trusted_workflow_id="$(
@@ -167,7 +174,7 @@ while IFS=$'\t' read -r context run_id workflow_file expected_events require_hea
   gh api "repos/$REPO/actions/runs/$run_id" > "$tmp_run"
   if ! python3 - "$tmp_run" "$context" "$trusted_workflow_id" \
     "$workflow_file" "$expected_events" "$require_head_sha" \
-    "$PR_NUMBER" "$head_sha" "$base_sha" <<'PY'
+    "$PR_NUMBER" "$head_sha" "$base_sha" "$quality_status_run_id" <<'PY'
 import json
 import sys
 
@@ -181,6 +188,7 @@ import sys
     pr_number,
     head_sha,
     base_sha,
+    quality_status_run_id,
 ) = sys.argv[1:]
 run = json.load(open(run_file, encoding="utf-8"))
 allowed_events = set(expected_events.split(","))
@@ -207,7 +215,11 @@ if run.get("status") != "completed" or run.get("conclusion") != "success":
 if require_head_sha == "yes" and run.get("head_sha") != head_sha:
     failures.append("workflow run belongs to a different head SHA")
 
-if run.get("event") == "workflow_dispatch":
+if context == "branch-policy" and run.get("event") == "workflow_run":
+    relation_matches = (
+        run.get("display_title") == f"branch-policy PR {quality_status_run_id}"
+    )
+elif run.get("event") == "workflow_dispatch":
     relation_matches = run.get("display_title") == f"branch-policy PR {pr_number}"
 else:
     relation_matches = any(

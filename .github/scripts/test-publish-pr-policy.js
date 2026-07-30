@@ -50,6 +50,7 @@ async function execute({
   eventPull = pull(),
   run = workflowRun(),
   headBlob = "trusted-blob",
+  eventName = "pull_request_target",
 } = {}) {
   const statuses = [];
   const messages = [];
@@ -96,8 +97,11 @@ async function execute({
     setFailed: (message) => messages.push(`FAILED: ${message}`),
   };
   const context = {
-    eventName: "pull_request_target",
-    payload: { pull_request: eventPull },
+    eventName,
+    payload:
+      eventName === "workflow_run"
+        ? { workflow_run: run }
+        : { pull_request: eventPull },
     repo: { owner: "example", repo: "repo" },
     runId: 101,
     serverUrl: "https://example.invalid",
@@ -138,6 +142,12 @@ async function main() {
 
   const changedWorkflow = await execute({ headBlob: "changed-blob" });
   assert.equal(changedWorkflow.statuses[1].state, "failure");
+
+  const qualityCompletion = await execute({ eventName: "workflow_run" });
+  assert.deepEqual(
+    qualityCompletion.statuses.map(({ context, state }) => ({ context, state })),
+    [{ context: "pr-quality-gates", state: "success" }],
+  );
 
   const staleEvent = pull({
     head: {

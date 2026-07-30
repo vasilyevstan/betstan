@@ -344,16 +344,18 @@ module.exports = async function publishPrPolicy({ github, context, core }) {
       fallbackUrl: policyRunUrl,
     });
 
-    await publishStatus(
-      github,
-      owner,
-      repo,
-      pull.mergeSha,
-      BRANCH_CONTEXT,
-      branch.allowed ? "success" : "failure",
-      `PR #${pull.number}: ${branch.description}`,
-      policyRunUrl,
-    );
+    if (context.eventName !== "workflow_run") {
+      await publishStatus(
+        github,
+        owner,
+        repo,
+        pull.mergeSha,
+        BRANCH_CONTEXT,
+        branch.allowed ? "success" : "failure",
+        `PR #${pull.number}: ${branch.description}`,
+        policyRunUrl,
+      );
+    }
     await publishStatus(
       github,
       owner,
@@ -382,6 +384,7 @@ module.exports = async function publishPrPolicy({ github, context, core }) {
     core.info(
       `pr=${pull.number} merge_sha=${pull.mergeSha} ` +
         `branch=${branch.allowed ? "success" : "failure"} ` +
+        `branch_published=${context.eventName !== "workflow_run"} ` +
         `quality=${quality.state} reason=${quality.reason}`,
     );
     failed ||= !branch.allowed || quality.state === "failure";
