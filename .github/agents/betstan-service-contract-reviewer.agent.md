@@ -68,4 +68,4 @@ Include:
 - unresolved assumptions.
 
 Do not report style issues or speculative risks without an executable failure path.
-
+Do not report style issues or speculative risks without an executable failure path.
