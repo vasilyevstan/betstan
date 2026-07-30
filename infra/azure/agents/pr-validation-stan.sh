@@ -10,6 +10,7 @@ REPO="${REPO:-vasilyevstan/betstan}"
 PR_NUMBER="${1:-${PR:-}}"
 EXPECTED_HEAD_SHA="${EXPECTED_HEAD_SHA:-}"
 EXPECTED_BASE_SHA="${EXPECTED_BASE_SHA:-}"
+TRUSTED_STATUS_APP_ID="${TRUSTED_STATUS_APP_ID:-15368}"
 
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
@@ -87,13 +88,14 @@ PY
 
 section "required merge-snapshot statuses"
 gh api "repos/$REPO/commits/$merge_sha/status" > "$tmp_statuses"
-if ! python3 - "$tmp_statuses" "$tmp_required" <<'PY'
+if ! python3 - "$tmp_statuses" "$tmp_required" "$TRUSTED_STATUS_APP_ID" <<'PY'
 import json
 import re
 import sys
 
 response = json.load(open(sys.argv[1], encoding="utf-8"))
 required_path = sys.argv[2]
+trusted_status_app_id = sys.argv[3]
 required = {
     "branch-policy": {
         "workflow_file": "branch-policy.yml",
@@ -120,12 +122,14 @@ for context, spec in required.items():
     status = matches[0]
     state = status.get("state") or ""
     target_url = status.get("target_url") or ""
-    creator = (status.get("creator") or {}).get("login") or ""
-    print(f"{context}\t{state}\t{creator}\t{target_url}")
+    avatar_url = status.get("avatar_url") or ""
+    app_match = re.search(r"/in/(\d+)(?:\?|$)", avatar_url)
+    app_id = app_match.group(1) if app_match else ""
+    print(f"{context}\t{state}\tapp_id={app_id}\t{target_url}")
     if state != "success":
         failed = True
-    if creator != "github-actions[bot]":
-        print(f"{context}: unexpected status creator {creator!r}", file=sys.stderr)
+    if app_id != trusted_status_app_id:
+        print(f"{context}: unexpected status app ID {app_id!r}", file=sys.stderr)
         failed = True
 
     run_match = re.search(r"/actions/runs/(\d+)(?:/|$)", target_url)

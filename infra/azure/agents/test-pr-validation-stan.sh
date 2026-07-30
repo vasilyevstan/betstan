@@ -18,7 +18,7 @@ gh() {
     fi
   elif [[ "$1" == "api" && "$2" == *"/commits/$MERGE_SHA/status" ]]; then
     printf '%s\n' \
-      "{\"statuses\":[{\"context\":\"branch-policy\",\"state\":\"${STUB_BRANCH_STATE:-success}\",\"target_url\":\"https://example.invalid/actions/runs/101\",\"creator\":{\"login\":\"${STUB_CREATOR:-github-actions[bot]}\"}},{\"context\":\"pr-quality-gates\",\"state\":\"success\",\"target_url\":\"https://example.invalid/actions/runs/102\",\"creator\":{\"login\":\"github-actions[bot]\"}}]}"
+      "{\"statuses\":[{\"context\":\"branch-policy\",\"state\":\"${STUB_BRANCH_STATE:-success}\",\"target_url\":\"https://example.invalid/actions/runs/101\",\"avatar_url\":\"https://avatars.example.invalid/in/${STUB_STATUS_APP_ID:-15368}?v=4\"},{\"context\":\"pr-quality-gates\",\"state\":\"success\",\"target_url\":\"https://example.invalid/actions/runs/102\",\"avatar_url\":\"https://avatars.example.invalid/in/15368?v=4\"}]}"
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/branch-policy.yml" ]]; then
     echo "201"
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/production-build.yml" ]]; then
@@ -63,9 +63,9 @@ if STUB_RUN_BASE_SHA="4444444444444444444444444444444444444444" \
   exit 1
 fi
 
-if STUB_CREATOR="untrusted-user" REPO=example/repo \
+if STUB_STATUS_APP_ID="999" REPO=example/repo \
   "$VALIDATOR" 63 >/dev/null 2>&1; then
-  echo "validator accepted an untrusted status creator" >&2
+  echo "validator accepted an untrusted status app" >&2
   exit 1
 fi
 
