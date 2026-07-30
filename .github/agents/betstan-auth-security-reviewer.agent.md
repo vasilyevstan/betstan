@@ -71,4 +71,3 @@ Finish with:
 
 Never treat a generic best practice as a vulnerability without repository-specific
 evidence.
-
