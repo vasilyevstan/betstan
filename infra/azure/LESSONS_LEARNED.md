@@ -137,4 +137,4 @@ Checks deployments, statefulsets, pod status, endpoints, restart counts, and rec
 Confirms workflow runs succeeded for the exact merge SHA, validates API on both hosts, checks workload readiness, and confirms RabbitMQ consumer presence.
 
 ### Use `rollback-readiness-stan.sh` before taking rollback action
-Emits `rollback_readiness=GO` or `NO_GO` with explicit reasons. Checks production baseline health, queue pressure, rollout history depth, and optionally validates target-SHA workflow provenance.
+Emits `rollback_readiness=GO` or `NO_GO` with explicit reasons. Checks production baseline health, queue pressure, rollout history depth, target-SHA workflow provenance, and whether normalized auth accounts are compatible with the requested rollback target.

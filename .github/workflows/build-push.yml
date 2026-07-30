@@ -74,6 +74,7 @@ jobs:
           bash -n infra/azure/agents/post-merge-verification-stan.sh
           bash -n infra/azure/agents/rollback-readiness-stan.sh
           bash -n infra/azure/agents/workflow-trigger-guard-stan.sh
+          bash -n infra/azure/agents/workflow-run-provenance-stan.sh
 
   workflow-trigger-guard:
     runs-on: ubuntu-latest

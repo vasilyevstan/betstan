@@ -20,6 +20,7 @@
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
 - `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
 - `workflow-trigger-guard-stan.sh` — blocks untrusted workflow-run deployments and automatic legacy service deploys.
+- `workflow-run-provenance-stan.sh` — resolves successful build/deploy runs that verifiably used an exact SHA.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
 - `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
@@ -160,14 +161,18 @@ Verify all 17 queues have consumers before considering recovery complete.
 Use this before taking rollback action in production:
 
 ```bash
-./infra/azure/agents/rollback-readiness-stan.sh
-# optional provenance check
 TARGET_SHA=<candidate-sha> ./infra/azure/agents/rollback-readiness-stan.sh
 ```
 
 The script outputs:
 - `rollback_readiness=GO` when safety preconditions are met;
 - `rollback_readiness=NO_GO` with concrete reasons when rollback would be risky.
+
+When `TARGET_SHA` points to an auth version that cannot log in normalized identifiers,
+the gate queries the production auth database. Any normalized account blocks a full
+rollback. Once a different auth image is active, the incompatible target remains
+blocked even while the count is zero, preventing signup from racing the check. Keep
+the current auth image and roll back only compatible services, or forward-fix.
 
 ## GoDaddy `A www` error fix (`Invalid data provided for record data`)
 

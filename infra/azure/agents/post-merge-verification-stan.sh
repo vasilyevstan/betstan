@@ -15,6 +15,7 @@ HOSTS="${HOSTS:-www.betstan.xyz,betstan.xyz}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-20}"
 RABBIT_SELECTOR="${RABBIT_SELECTOR:-app=gaming-rabbitmq}"
 REQUIRED_QUEUES="${REQUIRED_QUEUES:-event_new_event,gamemaster_new_event,event_result,bet_place_bet}"
+PROVENANCE_SCRIPT="${PROVENANCE_SCRIPT:-infra/azure/agents/workflow-run-provenance-stan.sh}"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -57,22 +58,11 @@ fi
 echo "merge_sha=$MERGE_SHA"
 
 for workflow in ${WORKFLOWS//,/ }; do
-  run_json="$(mktemp)"
-  add_tmp "$run_json"
-  gh run list --repo "$REPO" --workflow "$workflow" --commit "$MERGE_SHA" --limit 1 --json databaseId,status,conclusion,url > "$run_json"
-  read -r run_id run_status run_conclusion run_url <<<"$(python3 - "$run_json" <<'PY'
-import json,sys
-runs=json.load(open(sys.argv[1]))
-if not runs:
-  print("", "", "", "")
-else:
-  run=runs[0]
-  print(run.get("databaseId",""), run.get("status",""), run.get("conclusion",""), run.get("url",""))
-PY
-)"
-  [[ -n "$run_id" ]] || fail "workflow '$workflow' not found for commit $MERGE_SHA"
-  [[ "$run_status" == "completed" ]] || fail "workflow '$workflow' status is $run_status"
-  [[ "$run_conclusion" == "success" ]] || fail "workflow '$workflow' conclusion is $run_conclusion"
+  provenance="$(
+    REPO="$REPO" WORKFLOW="$workflow" TARGET_SHA="$MERGE_SHA" \
+      "$PROVENANCE_SCRIPT"
+  )" || fail "workflow '$workflow' lacks a verifiable successful run for $MERGE_SHA"
+  read -r run_id run_status run_conclusion run_url <<<"$provenance"
   echo "workflow_ok=$workflow run_id=$run_id url=$run_url"
 done
 
