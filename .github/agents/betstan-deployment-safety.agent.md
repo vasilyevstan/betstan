@@ -37,6 +37,7 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 - Inventory every production-capable workflow before reasoning about triggers. The centralized chain deploys automatically; legacy per-service workflows are manual-only but can still mutate production.
 - Before merge or direct push, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `build-push` run must produce immutable images tagged with its exact commit SHA.
+- Require `deploy-manifests` to accept only successful `push` or `workflow_dispatch` build runs from this repository's `master`; a source branch name alone is not a trust boundary.
 - Treat a manual dispatch or rerun of `build-push` on `master` as a production deployment action because its successful completion triggers `deploy-manifests`.
 - Treat manual dispatch or rerun of any legacy per-service `deploy-*.yaml` workflow as a production action. Do not invoke one unless the user approved that exact workflow and SHA.
 - Prefer the centralized `build-push` to `deploy-manifests` chain only after confirming it is the current authoritative path. Never silently invoke a legacy workflow as a fallback.
