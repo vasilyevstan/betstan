@@ -10,6 +10,7 @@ REPO="${REPO:-vasilyevstan/betstan}"
 PR_NUMBER="${1:-${PR:-}}"
 EXPECTED_HEAD_SHA="${EXPECTED_HEAD_SHA:-}"
 EXPECTED_BASE_SHA="${EXPECTED_BASE_SHA:-}"
+TRUSTED_STATUS_APP_ID="${TRUSTED_STATUS_APP_ID:-15368}"
 
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
@@ -87,13 +88,14 @@ PY
 
 section "required merge-snapshot statuses"
 gh api "repos/$REPO/commits/$merge_sha/status" > "$tmp_statuses"
-if ! python3 - "$tmp_statuses" "$tmp_required" <<'PY'
+if ! python3 - "$tmp_statuses" "$tmp_required" "$TRUSTED_STATUS_APP_ID" <<'PY'
 import json
 import re
 import sys
 
 response = json.load(open(sys.argv[1], encoding="utf-8"))
 required_path = sys.argv[2]
+trusted_status_app_id = sys.argv[3]
 required = {
     "branch-policy": {
         "workflow_file": "branch-policy.yml",
@@ -120,12 +122,14 @@ for context, spec in required.items():
     status = matches[0]
     state = status.get("state") or ""
     target_url = status.get("target_url") or ""
-    creator = (status.get("creator") or {}).get("login") or ""
-    print(f"{context}\t{state}\t{creator}\t{target_url}")
+    avatar_url = status.get("avatar_url") or ""
+    app_match = re.search(r"/in/(\d+)(?:\?|$)", avatar_url)
+    app_id = app_match.group(1) if app_match else ""
+    print(f"{context}\t{state}\tapp_id={app_id}\t{target_url}")
     if state != "success":
         failed = True
-    if creator != "github-actions[bot]":
-        print(f"{context}: unexpected status creator {creator!r}", file=sys.stderr)
+    if app_id != trusted_status_app_id:
+        print(f"{context}: unexpected status app ID {app_id!r}", file=sys.stderr)
         failed = True
 
     run_match = re.search(r"/actions/runs/(\d+)(?:/|$)", target_url)
@@ -155,6 +159,13 @@ then
 fi
 
 section "trusted workflow provenance"
+quality_status_run_id="$(
+  awk -F $'\t' '$1 == "pr-quality-gates" { print $2 }' "$tmp_required"
+)"
+[[ -n "$quality_status_run_id" ]] || {
+  echo "trusted quality status run ID is missing" >&2
+  exit 1
+}
 while IFS=$'\t' read -r context run_id workflow_file expected_events require_head_sha; do
   [[ -n "${run_id:-}" ]] || continue
   trusted_workflow_id="$(
@@ -163,7 +174,7 @@ while IFS=$'\t' read -r context run_id workflow_file expected_events require_hea
   gh api "repos/$REPO/actions/runs/$run_id" > "$tmp_run"
   if ! python3 - "$tmp_run" "$context" "$trusted_workflow_id" \
     "$workflow_file" "$expected_events" "$require_head_sha" \
-    "$PR_NUMBER" "$head_sha" "$base_sha" <<'PY'
+    "$PR_NUMBER" "$head_sha" "$base_sha" "$quality_status_run_id" <<'PY'
 import json
 import sys
 
@@ -177,6 +188,7 @@ import sys
     pr_number,
     head_sha,
     base_sha,
+    quality_status_run_id,
 ) = sys.argv[1:]
 run = json.load(open(run_file, encoding="utf-8"))
 allowed_events = set(expected_events.split(","))
@@ -203,7 +215,11 @@ if run.get("status") != "completed" or run.get("conclusion") != "success":
 if require_head_sha == "yes" and run.get("head_sha") != head_sha:
     failures.append("workflow run belongs to a different head SHA")
 
-if run.get("event") == "workflow_dispatch":
+if context == "branch-policy" and run.get("event") == "workflow_run":
+    relation_matches = (
+        run.get("display_title") == f"branch-policy PR {quality_status_run_id}"
+    )
+elif run.get("event") == "workflow_dispatch":
     relation_matches = run.get("display_title") == f"branch-policy PR {pr_number}"
 else:
     relation_matches = any(
