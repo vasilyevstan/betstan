@@ -138,6 +138,11 @@ jobs:
         done
         kubectl get deployments "${deployments[@]}"
 
+    - name: Install E2E test dependencies
+      run: |
+        cd client && npm ci
+        npx playwright install --with-deps chromium
+
     - name: Post-deploy validation loop
       id: post_deploy_validation
       run: ./infra/azure/agents/deploy-validation-loop-stan.sh
