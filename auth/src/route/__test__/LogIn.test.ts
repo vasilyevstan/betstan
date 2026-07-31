@@ -1,61 +1,92 @@
 import request from "supertest";
 import { app } from "../../app";
+import { User } from "../../model/User";
 
-const createUser = async () => {
+const createUser = async (identifier = "test@test.com") => {
   await request(app)
     .post("/api/auth/new")
-    .send({ email: "test@test.com", password: "password" })
+    .send({ email: identifier, password: "password" })
     .expect(201);
 };
 
-it("returns 200 on successful login", async () => {
-  await createUser();
+it("logs in with a non-email username regardless of case", async () => {
+  await createUser("Stan_1");
 
   const response = await request(app)
     .post("/api/auth/login")
-    .send({ email: "test@test.com", password: "password" })
+    .send({ email: "stan_1", password: "password" })
     .expect(200);
 
+  expect(response.body).toEqual({
+    id: expect.any(String),
+    email: "Stan_1",
+  });
+  expect(response.body.password).toBeUndefined();
+  expect(response.body.identifierNormalized).toBeUndefined();
   expect(response.get("Set-Cookie")).toBeDefined();
 });
 
-it("returns 400 with an invalid email", async () => {
-  await request(app)
-    .post("/api/auth/login")
-    .send({ email: "not-an-email", password: "password" })
-    .expect(400);
-});
-
-it("returns 400 with missing password", async () => {
-  await request(app)
-    .post("/api/auth/login")
-    .send({ email: "test@test.com" })
-    .expect(400);
-});
-
-it("returns 400 when email does not exist", async () => {
-  await request(app)
-    .post("/api/auth/login")
-    .send({ email: "nonexistent@test.com", password: "password" })
-    .expect(400);
-});
-
-it("returns 400 with wrong password", async () => {
-  await createUser();
+it("continues to log in a legacy email record", async () => {
+  await User.create({
+    email: "Legacy@Test.com",
+    password: "password",
+    timestamp: new Date().toISOString(),
+    lastLogin: new Date().toISOString(),
+  });
 
   await request(app)
     .post("/api/auth/login")
-    .send({ email: "test@test.com", password: "wrongpassword" })
-    .expect(400);
-});
-
-it("sets a cookie after successful login", async () => {
-  await createUser();
-
-  const response = await request(app)
-    .post("/api/auth/login")
-    .send({ email: "test@test.com", password: "password" })
+    .send({ email: "Legacy@Test.com", password: "password" })
     .expect(200);
+});
 
-  expect(response.get("Set-Cookie")).toBeDefined();
+it.each(["Pelé@example.com", '"quoted local"@example.com'])(
+  "continues to log in a legacy %s email record",
+  async (email) => {
+    await User.create({
+      email,
+      password: "password",
+      timestamp: new Date().toISOString(),
+      lastLogin: new Date().toISOString(),
+    });
+
+    await request(app)
+      .post("/api/auth/login")
+      .send({ email, password: "password" })
+      .expect(200);
+  }
+);
+
+it.each([
+  ["an object identifier", { $gt: "" }],
+  ["an array identifier", ["testuser"]],
+  ["an identifier containing spaces", "test user"],
+])("returns 400 with %s", async (_description, email) => {
+  await request(app)
+    .post("/api/auth/login")
+    .send({ email, password: "password" })
+    .expect(400);
+});
+
+it("returns 400 with a missing password", async () => {
+  await request(app)
+    .post("/api/auth/login")
+    .send({ email: "testuser" })
+    .expect(400);
+});
+
+it("returns 400 when the username does not exist", async () => {
+  await request(app)
+    .post("/api/auth/login")
+    .send({ email: "missing-user", password: "password" })
+    .expect(400);
+});
+
+it("returns 400 with the wrong password", async () => {
+  await createUser("testuser");
+
+  await request(app)
+    .post("/api/auth/login")
+    .send({ email: "testuser", password: "wrongpassword" })
+    .expect(400);
 });

@@ -15,7 +15,10 @@ const Header = ({ currentUser, uiVariant, theme }) => {
      ]
      .filter(Boolean);
 
-    const greetings = (currentUser) ? `welcome, ${currentUser.email}` : '';
+    const displayName = currentUser
+        ? (currentUser.email.split('@')[0].slice(0, 16))
+        : '';
+    const initial = displayName ? displayName[0].toUpperCase() : '';
     const buildSearch = (updates = {}) => {
        const params = new URLSearchParams(location.search);
        Object.entries(updates).forEach(([key, value]) => {
@@ -52,8 +55,13 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                <span className="navbar-toggler-icon"></span>
            </button>
            <div className="collapse navbar-collapse justify-content-between" id="betstan-navbar">
-               <div className="navbar-text small text-secondary py-2 py-lg-0 navbar-meta">
-                   <span>{greetings}</span>
+               <div className="py-2 py-lg-0 navbar-meta">
+                   {currentUser && (
+                       <div className="user-chip" title={currentUser.email}>
+                           <span className="user-chip__avatar">{initial}</span>
+                           <span className="user-chip__name">{displayName}</span>
+                       </div>
+                   )}
                </div>
                <div className="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
                    <div className="btn-group ui-switcher" role="group" aria-label="Theme switcher">

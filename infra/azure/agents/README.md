@@ -9,8 +9,12 @@
 - `dns-check-stan.sh` — compares public DNS answer with ingress external IP.
 - `health-check-stan.sh` — reusable per-service AKS health checks with node/log/SSH diagnostics.
 - `mismatch-diagnostic-stan.sh` — traces event-service vs gamemaster event-stream mismatches for a specific event.
-- `pr-validation-stan.sh` — inspects the latest build-push validation run for a PR and classifies failing jobs.
-- `pr-merge-safety-stan.sh` — wraps PR validation and gives a conservative merge-safe/split recommendation.
+- `branch-policy-guard-stan.sh` — enforces feature/hotfix-to-dev and only-dev-to-master PR pairs.
+- `test-branch-policy-guard-stan.sh` — tests accepted and rejected branch pairs.
+- `test-workflow-run-provenance-stan.sh` — rejects wrong-SHA artifacts and untrusted build/deploy workflow runs.
+- `production-workflow-inventory-stan.sh` — derives the exact production workflow set matched by a promotion diff.
+- `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
+- `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
 - `rollback-readiness-stan.sh` — emits explicit rollback go/no-go based on current health, queue pressure, and rollout history.
 - `node-logs-stan.sh` — node-level health/events + pod error-log extraction.
@@ -35,11 +39,15 @@ Scripts assume the CLIs and authentication required by their operations are alre
 ```
 pre-commit-infra-check-stan.sh   ← run before git push on any infra/workflow change
     ↓
-ingress-routing-guard-stan.sh    ← runs automatically in CI on every PR to master
+feature/hotfix branch → dev      ← normal integration path
     ↓
-MERGE to master
+branch-policy + quality gates    ← matching head and merge snapshots
+    ↓
+dev → master promotion PR       ← explicit exact-SHA production approval
     ↓
 post-merge-verification-stan.sh  ← run immediately after every production merge
+    ↓
+master → dev synchronization     ← required after a squash promotion
     ↓
 rollback-readiness-stan.sh       ← run before taking any rollback action
 ```
@@ -103,7 +111,14 @@ The script:
 
 ## PR validation and merge safety
 
-Use the PR validation agent when you need to inspect the latest build-push run for a branch:
+Use the branch guard to validate an intended PR pair:
+
+```bash
+BASE_REF=dev HEAD_REF=feature/example ./infra/azure/agents/branch-policy-guard-stan.sh
+BASE_REF=master HEAD_REF=dev ./infra/azure/agents/branch-policy-guard-stan.sh
+```
+
+Use the PR validation agent to inspect trusted required checks for the PR's exact head SHA:
 
 ```bash
 ./infra/azure/agents/pr-validation-stan.sh 41
@@ -116,27 +131,28 @@ Use the merge-safety agent when you want a conservative yes/no recommendation:
 ```
 
 The validation agent:
-- prints PR metadata and the latest workflow run,
-- lists all jobs and flags failed ones,
-- classifies common failure patterns such as test timeouts, open handles, listener mock errors, and mongodb cache issues.
+- binds the current PR head SHA, base SHA, and unique test-merge SHA;
+- accepts only base-scoped statuses published by GitHub Actions on both snapshots;
+- verifies the exact trusted workflow IDs, events, and PR relations behind both required statuses.
 
 The merge-safety agent:
-- runs validation,
-- recommends merge only when the latest validation is green,
-- otherwise recommends splitting deploy-recovery work from coverage/test-harness fixes.
+- rejects unsupported branch pairs;
+- requires matching trusted runs on the current head and merge snapshots;
+- recommends a `dev` merge only when validation is green;
+- requires `APPROVED_SHA` and `APPROVED_WORKFLOWS` before recommending a production promotion.
 
 ## Post-merge production verification
 
-Use this after merging to `master` to avoid false confidence from merge success alone:
+Use this after an approved `dev`-to-`master` promotion to avoid false confidence from merge success alone:
 
 ```bash
 PR=50 ./infra/azure/agents/post-merge-verification-stan.sh
 # or
-MERGE_SHA=<merge-commit-sha> ./infra/azure/agents/post-merge-verification-stan.sh
+ALLOW_SHA_ONLY=1 MERGE_SHA=<merge-commit-sha> ./infra/azure/agents/post-merge-verification-stan.sh
 ```
 
 The script validates:
-- successful `build-push` and `deploy-manifests` runs for the exact merged commit;
+- successful `production-build` and `production-deploy` runs for the exact merged commit;
 - deployment/statefulset readiness in AKS;
 - API health for both `www.betstan.xyz` and `betstan.xyz`;
 - RabbitMQ required queues have active consumers.
@@ -159,8 +175,6 @@ Verify all 17 queues have consumers before considering recovery complete.
 Use this before taking rollback action in production:
 
 ```bash
-./infra/azure/agents/rollback-readiness-stan.sh
-# optional provenance check
 TARGET_SHA=<candidate-sha> ./infra/azure/agents/rollback-readiness-stan.sh
 ```
 
@@ -186,12 +200,16 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 
 ## CI/CD and data-safety posture
 
-- `build-push` runs on `master` and tags each image with `${GITHUB_SHA}`.
-- `build-push` pull requests run `ingress-routing-guard-stan.sh` and block unsafe ingress host/path edits before merge.
-- `deploy-manifests` runs only after successful `build-push` on `master` and deploys that exact SHA image set.
+- `production-build` runs on `master` and tags each image with the exact approved SHA.
+- `production-build` pull requests into `dev` or `master` run the full quality gates.
+- `branch-policy` permits normal branches into `dev` and only `dev` into `master`.
+- Promotion statuses are base-scoped and published on both the current head and unique merge snapshot; validation requires both copies to point to the same trusted runs.
+- `production-deploy` runs only after successful `production-build` on `master` and deploys that exact SHA image set.
+- Emergency manual dispatch is limited to the central workflows, requires a full master SHA, and pauses at the reviewer-protected `production-emergency` environment.
+- Retired central and per-service workflow identities remain disabled so historical runs cannot be rerun.
 - Deploy workflow blocks when mongo PVC count is unexpectedly low, avoiding deployment against unsafe DB storage state.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.
-- `build-push` now includes `ingress-routing-guard-stan.sh` so PRs fail if prod ingress misses required host/api routes.
+- `production-build` includes `ingress-routing-guard-stan.sh` so PRs fail if prod ingress misses required host/api routes.
 
 ## Deploy validation loop settings
 
@@ -213,7 +231,7 @@ Operator guidance:
   - `context.txt` (reason + effective inputs)
   - `kubectl-nodes.txt`, `kubectl-events.txt`, `kubectl-default-workloads.txt`
   - `service-ops.txt`, `node-logs.txt`
-- In GitHub Actions (`deploy-manifests`), these files are uploaded by `Upload deploy diagnostics` when the job fails.
+- In GitHub Actions (`production-deploy`), these files are uploaded by `Upload deploy diagnostics` when the job fails.
 
 ## Stage-only shared DB test flow (no production touch)
 

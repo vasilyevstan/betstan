@@ -108,3 +108,34 @@ it("when event is resulted and moved to archive", async () => {
   expect(archievedEvent?.status).toEqual(EventStatus.RESULTED);
   expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
 });
+
+it("acknowledges self-emitted result events without changing stored events", async () => {
+  const { listener, events, message } = await setup();
+  const data = {
+    ...getData(3, 0, events[0].eventId, "Team 1", "Team 2"),
+    sender: listener.serviceName,
+  };
+
+  await listener.onMessage(data, message);
+
+  expect(await Event.countDocuments()).toEqual(1);
+  expect(await EventArchive.countDocuments()).toEqual(0);
+  expect(listener.ack).toHaveBeenCalledWith(message);
+});
+
+it("acknowledges result events when the stored event is missing", async () => {
+  const { listener, message } = await setup();
+  const data = getData(
+    3,
+    0,
+    new mongoose.Types.ObjectId().toHexString(),
+    "Missing",
+    "Event"
+  );
+
+  await listener.onMessage(data, message);
+
+  expect(await Event.countDocuments()).toEqual(1);
+  expect(await EventArchive.countDocuments()).toEqual(0);
+  expect(listener.ack).toHaveBeenCalledWith(message);
+});
