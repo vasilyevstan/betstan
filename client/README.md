@@ -29,6 +29,14 @@ Your app is ready to be deployed!
 
 See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
 
+### Container runtime
+
+The production Docker image builds the locked dependencies with `npm ci`, runs
+`npm run build`, and serves only the generated static files through Nginx on
+port 3000. Nginx provides SPA route fallback, gzip compression, no-cache HTML,
+and long-lived immutable caching for hashed assets. API requests are routed by
+the Kubernetes ingress rather than proxied by the client container.
+
 ### `npm run eject`
 
 **Note: this is a one-way operation. Once you `eject`, you can't go back!**
