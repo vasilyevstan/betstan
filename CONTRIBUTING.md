@@ -13,11 +13,11 @@ Use this flow:
 5. Before merging a promotion, obtain explicit approval for the exact head SHA and every production-capable workflow the diff will trigger.
 6. After a squash promotion, immediately merge the new `master` commit back into `dev`.
 
-Direct pushes to `dev` are allowed, but focused pull requests are preferred for reviewable changes. Pull requests into `master` from any branch other than `dev` are forbidden.
+Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
 ## Production safety
 
-Merging to `master` can build and deploy production. Manual `production-build` and `production-deploy` dispatches or reruns are emergency operations: they require an exact full SHA from protected `master` and approval through the `production-emergency` environment. The retired workflow identities remain disabled so historical runs cannot be rerun.
+Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.
 
 Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, staged, and untracked work.
 
