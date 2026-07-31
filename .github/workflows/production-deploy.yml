@@ -18,9 +18,9 @@ env:
   BUILD_RUN_ID: ${{ inputs.build_run_id }}
   RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
   CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
-  APP_DOMAIN: ${{ vars.APP_DOMAIN || '48.206.235.122.nip.io' }}
-  APP_CERT_NAME: ${{ vars.APP_CERT_NAME || 'betstan-nip-tls' }}
-  APP_E2E_BASE_URL: ${{ vars.APP_E2E_BASE_URL || '' }}
+  APP_DOMAIN: ${{ vars.APP_DOMAIN || 'betstan.xyz' }}
+  APP_CERT_NAME: ${{ vars.APP_CERT_NAME || 'betstan-tls' }}
+  APP_E2E_BASE_URL: ${{ vars.APP_E2E_BASE_URL || 'https://betstan.xyz' }}
   DEPLOY_VALIDATION_ATTEMPTS: ${{ vars.DEPLOY_VALIDATION_ATTEMPTS || '3' }}
   DEPLOY_VALIDATION_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_SLEEP_SECONDS || '30' }}
   DEPLOY_VALIDATION_MAX_LOOPS: ${{ vars.DEPLOY_VALIDATION_MAX_LOOPS || '3' }}

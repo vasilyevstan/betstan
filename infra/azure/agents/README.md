@@ -214,9 +214,9 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 ## Deploy validation loop settings
 
 `deploy-validation-loop-stan.sh` supports:
-- `DOMAIN` (default `48.206.235.122.nip.io`)
-- `CERT_NAME` (default `betstan-nip-tls`)
-- `E2E_BASE_URL` (auto-derived from ingress IP when empty)
+- `DOMAIN` (default `betstan.xyz`)
+- `CERT_NAME` (default `betstan-tls`)
+- `E2E_BASE_URL` (default `https://<DOMAIN>`)
 - `MAX_ATTEMPTS`, `SLEEP_SECONDS`
 - `VALIDATION_MAX_LOOPS`, `VALIDATION_SLEEP_SECONDS`
 - `OUTPUT_DIR` (defaults to `artifacts/deploy-validation`)
