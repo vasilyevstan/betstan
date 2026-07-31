@@ -90,6 +90,9 @@ require_literal "$deploy_workflow" "image_provenance_stan.py" "immutable image p
 require_literal "$deploy_workflow" '[[ "$image_id" =~ @sha256:[0-9a-f]{64}$ ]]' "serving OCI image ID verification"
 require_literal "$deploy_workflow" 'deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}' "attempt-specific provenance"
 require_literal "$deploy_workflow" 'deploy-validation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}' "attempt-specific diagnostics"
+require_literal "$deploy_workflow" "APP_E2E_BASE_URL:" "explicit browser validation target"
+require_literal "$deploy_workflow" "https://betstan.xyz" "public HTTPS browser validation target"
+reject_literal "$deploy_workflow" "APP_E2E_BASE_URL: \${{ vars.APP_E2E_BASE_URL || '' }}" "empty browser validation fallback"
 
 require_literal "$branch_workflow" "pull_request_target:" "trusted PR metadata event"
 require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted quality completion event"

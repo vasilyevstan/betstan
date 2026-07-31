@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import UseRequest from "../../hook/UseRequest";
 import AuthPanel from "./AuthPanel";
+import authCopy from "./authCopy.json";
 
 const HandleLogIn = ({callback}) => {
   const [identifier, setIdentifier] = useState('');
@@ -30,7 +31,7 @@ const HandleLogIn = ({callback}) => {
   return (
     <AuthPanel
       icon="/icons/login.svg"
-      title="Log in to your account"
+      title={authCopy.login.title}
       subtitle="Enter your username or email and password to continue."
       footer={(
         <>
@@ -76,7 +77,7 @@ const HandleLogIn = ({callback}) => {
           />
         </div>
         <div className="auth-errors" aria-live="polite">{errors}</div>
-        <button className="btn auth-submit w-100" type="submit">Log in</button>
+        <button className="btn auth-submit w-100" type="submit">{authCopy.login.submit}</button>
       </form>
     </AuthPanel>
   );

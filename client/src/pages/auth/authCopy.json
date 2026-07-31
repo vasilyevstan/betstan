@@ -1,0 +1,10 @@
+{
+  "login": {
+    "title": "Log in to your account",
+    "submit": "Log in"
+  },
+  "signup": {
+    "title": "Create an account",
+    "submit": "Create account"
+  }
+}
