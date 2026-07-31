@@ -23,10 +23,10 @@ Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, stag
 
 ## Trusted-check bootstrap
 
-Do not require a new check before its trusted publisher exists on protected `master`, the repository's default branch. Roll out check changes in two phases:
+Do not change the protected quality workflow before its exact Git blob is authorized by the trusted publisher on the default branch. Roll out quality-workflow changes in two phases:
 
-1. Merge the trusted workflow and publisher into `dev` under the currently enforced checks.
-2. Trigger a fresh PR snapshot (or dispatch `branch-policy.yml` with its PR number), verify the new statuses come from the expected workflow IDs, and only then replace branch-protection contexts or disable the retired workflow identity.
+1. Add only the intended workflow blob SHA to `APPROVED_QUALITY_WORKFLOW_BLOBS`, merge that policy change through `dev`, and promote it to protected `master`.
+2. Merge the exact workflow update through `dev`, remove the one-use authorization before promotion, and verify fresh statuses come from the expected workflow IDs.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 
