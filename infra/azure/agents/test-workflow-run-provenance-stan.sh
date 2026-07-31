@@ -11,14 +11,14 @@ gh() {
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/production-deploy.yml" ]]; then
     echo "301"
   elif [[ "$1 $2" == "run list" && "$*" == *"production-build.yml"* ]]; then
-    printf '[{"databaseId":201,"event":"push","headSha":"%s","status":"completed","conclusion":"success","url":"https://example.invalid/runs/201"}]\n' "$TARGET_SHA"
+    printf '[{"databaseId":201,"event":"push","headSha":"%s","status":"completed","conclusion":"failure","url":"https://example.invalid/runs/201"}]\n' "$TARGET_SHA"
   elif [[ "$1 $2" == "run list" && "$*" == *"production-deploy.yml"* ]]; then
-    printf '[{"databaseId":301,"displayTitle":"deploy %s","event":"workflow_run","headSha":"%s","status":"completed","conclusion":"success","url":"https://example.invalid/runs/301"}]\n' "$TARGET_SHA" "$TARGET_SHA"
-  elif [[ "$1" == "api" && "$2" == *"/actions/runs/201" ]]; then
-    printf '{"id":201,"workflow_id":%s,"path":".github/workflows/production-build.yml","event":"push","head_sha":"%s","status":"completed","conclusion":"success","html_url":"https://example.invalid/runs/201"}\n' \
-      "${STUB_BUILD_WORKFLOW_ID:-201}" "$TARGET_SHA"
-  elif [[ "$1" == "api" && "$2" == *"/actions/runs/301" ]]; then
-    printf '{"id":301,"workflow_id":301,"path":".github/workflows/production-deploy.yml","display_title":"deploy %s","event":"workflow_run","run_attempt":1,"status":"completed","conclusion":"success","html_url":"https://example.invalid/runs/301"}\n' "$TARGET_SHA"
+    printf '[{"databaseId":301,"displayTitle":"deploy %s","event":"workflow_dispatch","headSha":"%s","status":"completed","conclusion":"failure","url":"https://example.invalid/runs/301"}]\n' "$TARGET_SHA" "$TARGET_SHA"
+  elif [[ "$1" == "api" && "$2" == *"/actions/runs/201/attempts/1" ]]; then
+    printf '{"id":201,"workflow_id":%s,"path":".github/workflows/production-build.yml","event":"push","head_sha":"%s","run_attempt":%s,"status":"completed","conclusion":"success","html_url":"https://example.invalid/runs/201"}\n' \
+      "${STUB_BUILD_WORKFLOW_ID:-201}" "$TARGET_SHA" "${STUB_FIRST_BUILD_ATTEMPT:-1}"
+  elif [[ "$1" == "api" && "$2" == *"/actions/runs/301/attempts/1" ]]; then
+    printf '{"id":301,"workflow_id":301,"path":".github/workflows/production-deploy.yml","display_title":"deploy %s","event":"workflow_dispatch","run_attempt":1,"status":"completed","conclusion":"success","html_url":"https://example.invalid/runs/301"}\n' "$TARGET_SHA"
   elif [[ "$1 $2" == "run download" ]]; then
     local directory=""
     while [[ $# -gt 0 ]]; do
@@ -29,8 +29,11 @@ gh() {
       shift
     done
     [[ -n "$directory" ]] || return 1
-    printf 'image_sha=%s\nupstream_run_id=201\nupstream_event=push\n' \
+    printf 'image_sha=%s\nupstream_run_id=201\nupstream_event=push\nupstream_run_attempt=1\n' \
       "${STUB_IMAGE_SHA:-$TARGET_SHA}" > "$directory/provenance.txt"
+    for _ in $(seq 1 9); do
+      printf 'service\timage\timage-ref\tsha256:digest\n'
+    done > "$directory/images.tsv"
   else
     echo "unexpected gh invocation: $*" >&2
     return 1
@@ -55,6 +58,13 @@ if STUB_BUILD_WORKFLOW_ID=999 REPO=example/repo \
   WORKFLOW=production-deploy TARGET_SHA="$TARGET_SHA" \
   "$PROVENANCE" >/dev/null 2>&1; then
   echo "provenance accepted an untrusted upstream build workflow" >&2
+  exit 1
+fi
+
+if STUB_FIRST_BUILD_ATTEMPT=2 REPO=example/repo \
+  WORKFLOW=production-deploy TARGET_SHA="$TARGET_SHA" \
+  "$PROVENANCE" >/dev/null 2>&1; then
+  echo "provenance accepted a rerun production build" >&2
   exit 1
 fi
 

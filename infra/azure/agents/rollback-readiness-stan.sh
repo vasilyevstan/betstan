@@ -169,7 +169,8 @@ if [[ -n "$TARGET_SHA" && "$target_sha_valid" == true && "$auth_names_valid" == 
       add_failure "no ready auth pods found for selector: $AUTH_POD_SELECTOR"
     else
       for serving_auth_image in "${serving_auth_images[@]}"; do
-        if [[ "$serving_auth_image" != "$expected_auth_image" ]]; then
+        if [[ "$serving_auth_image" != "$expected_auth_image" &&
+          ! "$serving_auth_image" =~ ^${expected_auth_image}@sha256:[0-9a-f]{64}$ ]]; then
           incompatible_serving_image=true
         fi
       done
