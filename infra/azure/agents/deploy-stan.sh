@@ -11,7 +11,12 @@ cd "$ROOT_DIR"
 kubectl apply -f infra/k8s-prod/cert-issuer.yaml
 kubectl apply -f infra/k8s
 kubectl apply -f infra/k8s-prod/ingress-srv.yaml
-kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml
+kubectl delete \
+  ingress/gaming-ingress-service-nip \
+  certificate/betstan-nip-tls \
+  secret/betstan-nip-tls \
+  --namespace default \
+  --ignore-not-found
 
 kubectl get pods -n default
-kubectl get ingress gaming-ingress-service gaming-ingress-service-nip
+kubectl get ingress gaming-ingress-service

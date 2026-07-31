@@ -45,12 +45,21 @@ If the apex host block is missing, requests to `betstan.xyz/api/*` fall through 
 - `/api/slip/?(.*)`
 - `/api/bet/?(.*)`
 - `/api/backoffice/?(.*)`
+- `/?(.*)` for the client SPA
 
 Guard script: `infra/azure/agents/ingress-routing-guard-stan.sh`  
 This guard runs in CI on pull requests targeting `dev` or `master` (`production-build.yml`).
 
+### Expose production only through canonical HTTPS hosts
+Production ingress must contain only the `betstan.xyz` and `www.betstan.xyz`
+host rules and must redirect HTTP to HTTPS. Do not retain a hostless rule or a
+temporary `nip.io` ingress: either route allows users and API clients to bypass
+the canonical TLS entry point.
+
 ### Always validate with Host headers — not raw IPs
-A check against the raw ingress IP (`http://<IP>/api/...`) can return 200 even when the host-based routing is broken.  
+A check against the raw ingress IP (`http://<IP>/api/...`) can hide broken
+host-based routing and should return the ingress default 404 rather than the
+application.
 Use domain-based checks: `curl https://www.betstan.xyz/api/event` **and** `curl https://betstan.xyz/api/event`.
 
 ---
