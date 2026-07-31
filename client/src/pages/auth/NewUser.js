@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import UseRequest from "../../hook/UseRequest";
 import AuthPanel from "./AuthPanel";
+import authCopy from "./authCopy.json";
 
 const HandleNewUser = ({ callback }) => {
   const [identifier, setIdentifier] = useState('');
@@ -30,7 +31,7 @@ const HandleNewUser = ({ callback }) => {
   return (
     <AuthPanel
       icon="/icons/signup.svg"
-      title="Create an account"
+      title={authCopy.signup.title}
       subtitle="Choose a username and password to get started."
       footer={(
         <>
@@ -87,7 +88,7 @@ const HandleNewUser = ({ callback }) => {
           </span>
         </div>
         <div className="auth-errors" aria-live="polite">{errors}</div>
-        <button className="btn auth-submit w-100" type="submit">Create account</button>
+        <button className="btn auth-submit w-100" type="submit">{authCopy.signup.submit}</button>
       </form>
     </AuthPanel>
   );

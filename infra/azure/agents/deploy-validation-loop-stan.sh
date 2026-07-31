@@ -5,11 +5,9 @@ set -euo pipefail
 # Runs layered checks with retries and captures diagnostics on failures.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-INGRESS_NAMESPACE="${INGRESS_NAMESPACE:-ingress-nginx}"
-INGRESS_SERVICE="${INGRESS_SERVICE:-ingress-nginx-controller}"
-DOMAIN="${DOMAIN:-48.206.235.122.nip.io}"
-CERT_NAME="${CERT_NAME:-betstan-nip-tls}"
-E2E_BASE_URL="${E2E_BASE_URL:-}"
+DOMAIN="${DOMAIN:-betstan.xyz}"
+CERT_NAME="${CERT_NAME:-betstan-tls}"
+E2E_BASE_URL="${E2E_BASE_URL:-https://${DOMAIN}}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 VALIDATION_MAX_LOOPS="${VALIDATION_MAX_LOOPS:-3}"
@@ -42,15 +40,6 @@ if ! is_positive_int "$VALIDATION_SLEEP_SECONDS"; then
   VALIDATION_SLEEP_SECONDS=20
 fi
 
-if [[ -z "$E2E_BASE_URL" ]]; then
-  INGRESS_IP="$(kubectl get svc "$INGRESS_SERVICE" -n "$INGRESS_NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
-  if [[ -n "${INGRESS_IP:-}" ]]; then
-    E2E_BASE_URL="http://${INGRESS_IP}"
-  else
-    E2E_BASE_URL="https://${DOMAIN}"
-  fi
-fi
-
 capture_diagnostics() {
   local attempt="$1"
   local reason="$2"
@@ -77,7 +66,7 @@ capture_diagnostics() {
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   echo "=== deploy-validation attempt ${attempt}/${MAX_ATTEMPTS} ==="
 
-  if "$ROOT_DIR/infra/azure/agents/smoke-liveness-stan.sh"; then
+  if BASE_URL="$E2E_BASE_URL" "$ROOT_DIR/infra/azure/agents/smoke-liveness-stan.sh"; then
     if DOMAIN="$DOMAIN" CERT_NAME="$CERT_NAME" E2E_BASE_URL="$E2E_BASE_URL" MAX_LOOPS="$VALIDATION_MAX_LOOPS" SLEEP_SECONDS="$VALIDATION_SLEEP_SECONDS" \
       "$ROOT_DIR/infra/azure/agents/validation-loop-stan.sh"; then
       echo "deploy_validation_status=PASS"
