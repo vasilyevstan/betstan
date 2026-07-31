@@ -67,15 +67,13 @@ runs = json.load(open(runs_file, encoding="utf-8"))
 expected_title = f"deploy {target_sha}"
 
 for run in runs:
-    if run.get("status") != "completed" or run.get("conclusion") != "success":
-        continue
     if workflow == "production-build":
-        if run.get("event") not in {"push", "workflow_dispatch"}:
+        if run.get("event") != "push":
             continue
         if run.get("headSha") != target_sha:
             continue
     else:
-        if run.get("event") not in {"workflow_run", "workflow_dispatch"}:
+        if run.get("event") != "workflow_dispatch":
             continue
         if run.get("displayTitle") != expected_title:
             continue
@@ -85,7 +83,7 @@ PY
 while IFS= read -r run_id; do
   [[ -n "$run_id" ]] || continue
   metadata_file="$tmp_dir/run-$run_id.json"
-  gh api "repos/$REPO/actions/runs/$run_id" > "$metadata_file"
+  gh api "repos/$REPO/actions/runs/$run_id/attempts/1" > "$metadata_file"
 
   if ! python3 - "$metadata_file" "$trusted_workflow_id" \
     ".github/workflows/$workflow_file" "$WORKFLOW" "$target_sha_full" <<'PY'
@@ -103,14 +101,16 @@ valid = (
 if workflow == "production-build":
     valid = (
         valid
-        and run.get("event") in {"push", "workflow_dispatch"}
+        and run.get("event") == "push"
         and run.get("head_sha") == target_sha
+        and run.get("run_attempt") == 1
     )
 else:
     valid = (
         valid
-        and run.get("event") in {"workflow_run", "workflow_dispatch"}
+        and run.get("event") == "workflow_dispatch"
         and run.get("display_title") == f"deploy {target_sha}"
+        and run.get("run_attempt") == 1
     )
 sys.exit(0 if valid else 1)
 PY
@@ -136,21 +136,26 @@ PY
       continue
     fi
     provenance_file="$artifact_dir/provenance.txt"
+    images_file="$artifact_dir/images.tsv"
     [[ -f "$provenance_file" ]] || continue
+    [[ -f "$images_file" ]] || continue
     deployed_sha="$(sed -n 's/^image_sha=//p' "$provenance_file")"
     upstream_run_id="$(sed -n 's/^upstream_run_id=//p' "$provenance_file")"
+    upstream_event="$(sed -n 's/^upstream_event=//p' "$provenance_file")"
+    upstream_attempt="$(sed -n 's/^upstream_run_attempt=//p' "$provenance_file")"
     [[ "$deployed_sha" == "$target_sha_full" ]] || continue
+    [[ "$run_event" == "workflow_dispatch" ]] || continue
+    [[ "$upstream_run_id" =~ ^[0-9]+$ ]] || continue
+    [[ "$upstream_event" == "push" ]] || continue
+    [[ "$upstream_attempt" == "1" ]] || continue
+    [[ "$(wc -l < "$images_file" | tr -d ' ')" == "9" ]] || continue
 
-    if [[ "$upstream_run_id" == "manual" ]]; then
-      [[ "$run_event" == "workflow_dispatch" ]] || continue
-    else
-      [[ "$upstream_run_id" =~ ^[0-9]+$ ]] || continue
-      upstream_file="$tmp_dir/upstream-$upstream_run_id.json"
-      gh api "repos/$REPO/actions/runs/$upstream_run_id" > "$upstream_file"
-      trusted_build_id="$(
-        gh api "repos/$REPO/actions/workflows/production-build.yml" --jq '.id'
-      )"
-      if ! python3 - "$upstream_file" "$trusted_build_id" "$target_sha_full" <<'PY'
+    upstream_file="$tmp_dir/upstream-$upstream_run_id.json"
+    gh api "repos/$REPO/actions/runs/$upstream_run_id/attempts/1" > "$upstream_file"
+    trusted_build_id="$(
+      gh api "repos/$REPO/actions/workflows/production-build.yml" --jq '.id'
+    )"
+    if ! python3 - "$upstream_file" "$trusted_build_id" "$target_sha_full" <<'PY'
 import json
 import sys
 
@@ -158,16 +163,16 @@ run = json.load(open(sys.argv[1], encoding="utf-8"))
 valid = (
     str(run.get("workflow_id", "")) == sys.argv[2]
     and run.get("path") == ".github/workflows/production-build.yml"
-    and run.get("event") in {"push", "workflow_dispatch"}
+    and run.get("event") == "push"
     and run.get("head_sha") == sys.argv[3]
     and run.get("status") == "completed"
     and run.get("conclusion") == "success"
+    and run.get("run_attempt") == 1
 )
 sys.exit(0 if valid else 1)
 PY
-      then
-        continue
-      fi
+    then
+      continue
     fi
   fi
 

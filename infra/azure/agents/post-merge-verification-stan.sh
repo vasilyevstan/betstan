@@ -15,6 +15,7 @@ REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-20}"
 RABBIT_SELECTOR="${RABBIT_SELECTOR:-app=gaming-rabbitmq}"
 REQUIRED_QUEUES="${REQUIRED_QUEUES:-event_new_event,gamemaster_new_event,event_result,bet_place_bet}"
 ALLOW_SHA_ONLY="${ALLOW_SHA_ONLY:-0}"
+PROVENANCE_SCRIPT="${PROVENANCE_SCRIPT:-infra/azure/agents/workflow-run-provenance-stan.sh}"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -71,82 +72,41 @@ fi
 
 echo "merge_sha=$MERGE_SHA"
 
-build_json="$(mktemp)"
-add_tmp "$build_json"
-gh run list --repo "$REPO" --workflow production-build.yml --commit "$MERGE_SHA" --limit 20 \
-  --json databaseId,event,headSha,status,conclusion,url > "$build_json"
-read -r build_run_id build_status build_conclusion build_url <<<"$(
-  python3 - "$build_json" "$MERGE_SHA" <<'PY'
-import json, sys
-
-runs = json.load(open(sys.argv[1]))
-sha = sys.argv[2]
-matches = [
-    run
-    for run in runs
-    if run.get("headSha") == sha
-    and run.get("event") in {"push", "workflow_dispatch"}
-]
-if not matches:
-    print("", "", "", "", "")
-else:
-    run = matches[0]
-    print(
-        run.get("databaseId", ""),
-        run.get("status", ""),
-        run.get("conclusion", ""),
-        run.get("url", ""),
-    )
-PY
-)"
-[[ -n "$build_run_id" ]] || fail "production-build not found for exact SHA $MERGE_SHA"
-[[ "$build_status" == "completed" && "$build_conclusion" == "success" ]] ||
-  fail "production-build run $build_run_id is not completed successfully"
+[[ -x "$PROVENANCE_SCRIPT" ]] || fail "provenance script is not executable: $PROVENANCE_SCRIPT"
+if ! build_provenance="$(
+  REPO="$REPO" WORKFLOW=production-build TARGET_SHA="$MERGE_SHA" \
+    "$PROVENANCE_SCRIPT"
+)"; then
+  fail "production-build lacks successful first-attempt provenance for $MERGE_SHA"
+fi
+IFS=$'\t' read -r build_run_id build_status build_conclusion build_url <<<"$build_provenance"
 echo "workflow_ok=production-build run_id=$build_run_id url=$build_url"
 
-deploy_json="$(mktemp)"
-add_tmp "$deploy_json"
-gh run list --repo "$REPO" --workflow production-deploy.yml --limit 100 \
-  --json databaseId,attempt,displayTitle,event,status,conclusion,url > "$deploy_json"
-read -r deploy_run_id deploy_attempt deploy_status deploy_conclusion deploy_url <<<"$(
-  python3 - "$deploy_json" "$MERGE_SHA" <<'PY'
-import json, sys
-
-runs = json.load(open(sys.argv[1]))
-title = f"deploy {sys.argv[2]}"
-matches = [run for run in runs if run.get("displayTitle") == title]
-if not matches:
-    print("", "", "", "")
-else:
-    run = matches[0]
-    print(
-        run.get("databaseId", ""),
-        run.get("attempt", ""),
-        run.get("status", ""),
-        run.get("conclusion", ""),
-        run.get("url", ""),
-    )
-PY
-)"
-[[ -n "$deploy_run_id" ]] || fail "production-deploy provenance run not found for exact SHA $MERGE_SHA"
-[[ "$deploy_status" == "completed" && "$deploy_conclusion" == "success" ]] ||
-  fail "production-deploy run $deploy_run_id is not completed successfully"
+if ! deploy_provenance="$(
+  REPO="$REPO" WORKFLOW=production-deploy TARGET_SHA="$MERGE_SHA" \
+    "$PROVENANCE_SCRIPT"
+)"; then
+  fail "production-deploy lacks successful first-attempt provenance for $MERGE_SHA"
+fi
+IFS=$'\t' read -r deploy_run_id deploy_status deploy_conclusion deploy_url <<<"$deploy_provenance"
 echo "workflow_ok=production-deploy run_id=$deploy_run_id url=$deploy_url"
 
 provenance_dir="$(mktemp -d)"
 add_tmp "$provenance_dir"
 gh run download "$deploy_run_id" --repo "$REPO" \
-  --name "deploy-provenance-${deploy_run_id}-${deploy_attempt}" --dir "$provenance_dir"
+  --name "deploy-provenance-${deploy_run_id}-1" --dir "$provenance_dir"
 provenance_file="$provenance_dir/provenance.txt"
+images_file="$provenance_dir/images.tsv"
 [[ -f "$provenance_file" ]] || fail "deploy provenance artifact is missing"
+[[ -f "$images_file" ]] || fail "deploy image provenance artifact is missing"
 deployed_sha="$(sed -n 's/^image_sha=//p' "$provenance_file")"
 upstream_run_id="$(sed -n 's/^upstream_run_id=//p' "$provenance_file")"
 [[ "$deployed_sha" == "$MERGE_SHA" ]] ||
   fail "deploy provenance SHA $deployed_sha does not match expected $MERGE_SHA"
-if [[ -n "$PR_NUMBER" ]]; then
-  [[ "$upstream_run_id" == "$build_run_id" ]] ||
-    fail "deploy run used upstream build $upstream_run_id, expected $build_run_id"
-fi
+[[ "$upstream_run_id" == "$build_run_id" ]] ||
+  fail "deploy run used upstream build $upstream_run_id, expected $build_run_id"
+[[ "$(wc -l < "$images_file" | tr -d ' ')" == "9" ]] ||
+  fail "deploy image provenance must contain exactly nine services"
 echo "deploy_provenance=PASS image_sha=$deployed_sha upstream_run_id=$upstream_run_id"
 
 echo "=== workload readiness ==="
@@ -159,16 +119,44 @@ bad_deploys="$(kubectl get deploy -n "$NAMESPACE" -o jsonpath='{range .items[*]}
 bad_sts="$(kubectl get sts -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.readyReplicas}{"\t"}{.status.replicas}{"\n"}{end}' | awk '$2 != $3')"
 [[ -z "$bad_sts" ]] || fail "unready statefulsets:\n$bad_sts"
 
-for service in auth backoffice bet client event gamemaster moderation resulting slip; do
+while IFS=$'\t' read -r service _repository image_ref digest; do
   deployment="gaming-${service}-depl"
-  images="$(
-    kubectl get deployment "$deployment" -n "$NAMESPACE" \
-      -o jsonpath='{.spec.template.spec.containers[*].image}'
+  container="gaming-${service}"
+  deployed_ref="$(
+    kubectl get deployment "$deployment" -n "$NAMESPACE" -o json |
+      python3 -c '
+import json
+import sys
+
+container = sys.argv[1]
+document = json.load(sys.stdin)
+matches = [
+    item["image"]
+    for item in document["spec"]["template"]["spec"]["containers"]
+    if item["name"] == container
+]
+print(matches[0] if len(matches) == 1 else "")
+' "$container"
   )"
-  grep -Eq "(^|[[:space:]])[^[:space:]]+:${MERGE_SHA}([[:space:]]|$)" <<<"$images" ||
-    fail "deployment $deployment does not use exact image SHA $MERGE_SHA: $images"
-  echo "image_ok deployment=$deployment sha=$MERGE_SHA"
-done
+  [[ "$deployed_ref" == "$image_ref" ]] ||
+    fail "deployment $deployment uses $deployed_ref, expected $image_ref"
+
+  pod_image_ids="$(
+    kubectl get pods -n "$NAMESPACE" -l "app=${container}" \
+      -o jsonpath='{range .items[*].status.containerStatuses[*]}{.name}{"\t"}{.ready}{"\t"}{.imageID}{"\n"}{end}'
+  )"
+  matching_pods=0
+  while IFS=$'\t' read -r pod_container pod_ready image_id; do
+    if [[ "$pod_container" == "$container" &&
+      "$pod_ready" == "true" &&
+      "$image_id" =~ @sha256:[0-9a-f]{64}$ ]]; then
+      matching_pods=$((matching_pods + 1))
+    fi
+  done <<<"$pod_image_ids"
+  [[ "$matching_pods" -ge 1 ]] ||
+    fail "deployment $deployment has no ready pod with a content-addressed image ID"
+  echo "image_ok deployment=$deployment ref=$image_ref"
+done < "$images_file"
 
 tmp_body="$(mktemp)"
 add_tmp "$tmp_body"

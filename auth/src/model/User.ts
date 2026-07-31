@@ -36,10 +36,12 @@ userSchema.index(
 
 userSchema.set("toJSON", {
   transform: (_document, returnedObject) => {
-    delete returnedObject.password;
-    delete returnedObject.identifierNormalized;
-    delete returnedObject.__v;
-    return returnedObject;
+    return {
+      _id: returnedObject._id,
+      email: returnedObject.email,
+      timestamp: returnedObject.timestamp,
+      lastLogin: returnedObject.lastLogin,
+    };
   },
 });
 

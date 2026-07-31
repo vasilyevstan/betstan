@@ -5,10 +5,6 @@ const QUALITY_CONTEXT_PREFIX = "pr-quality-gates";
 const QUALITY_JOB = "pr-quality-gates";
 const QUALITY_WORKFLOW = "production-build.yml";
 const QUALITY_WORKFLOW_PATH = `.github/workflows/${QUALITY_WORKFLOW}`;
-// Remove this one-use authorization after the exact workflow blob reaches master.
-const APPROVED_QUALITY_WORKFLOW_BLOBS = new Set([
-  "8c6df3ddf1f9cca0a551efc74012a9435b2d0295",
-]);
 
 const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -177,10 +173,7 @@ async function qualityDecision({
     };
   }
 
-  if (
-    trustedBlob !== headBlob &&
-    !APPROVED_QUALITY_WORKFLOW_BLOBS.has(headBlob)
-  ) {
+  if (trustedBlob !== headBlob) {
     return {
       state: "failure",
       description: `PR #${pull.number} changes the trusted quality workflow`,
