@@ -194,11 +194,24 @@ grep -Fq 'shape-flex-min: "10"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
 grep -Fq 'shape-flex-max: "10"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
 
 for dockerfile in "$OCI_DIR/build/Dockerfile.backend" "$OCI_DIR/build/Dockerfile.client"; do
-  if grep -E '^FROM[[:space:]]+[^$@[:space:]][^@[:space:]]*([[:space:]]|$)' "$dockerfile"; then
-    fail "OCI Dockerfile contains an unpinned base image: $dockerfile"
-  fi
+  while IFS= read -r base_image; do
+    [[ "$base_image" == \$* || "$base_image" =~ @sha256:[0-9a-f]{64}$ ]] ||
+      fail "OCI Dockerfile contains an unpinned base image: $dockerfile"
+  done < <(
+    awk '
+      toupper($1) == "FROM" {
+        image = 2
+        if ($image ~ /^--platform=/) {
+          image += 1
+        }
+        print $image
+      }
+    ' "$dockerfile"
+  )
   grep -Eq '^ARG [A-Z_]+_IMAGE=[^[:space:]]+@sha256:[0-9a-f]{64}$' "$dockerfile" ||
     fail "OCI Dockerfile image ARG is not digest-pinned: $dockerfile"
+  grep -Fq 'FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build' "$dockerfile" ||
+    fail "OCI Dockerfile must compile architecture-independent assets on BUILDPLATFORM: $dockerfile"
 done
 grep -R -n -E 'image:[[:space:]]+[^[:space:]#]+:(latest|main|master|dev)([[:space:]#]|$)' \
   "$OCI_DIR" "$ROOT_DIR/.github/workflows/oci-"*.yml >/dev/null 2>&1 &&
