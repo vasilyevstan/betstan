@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   offline-contract:
-    name: oci-offline-contract
+    name: oci-validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
