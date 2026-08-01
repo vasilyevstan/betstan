@@ -28,10 +28,10 @@ fi
 
 oci_prepare_private_dir "$OUTPUT_DIR"
 services=(auth bet backoffice client event gamemaster moderation resulting slip)
+repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"
 
 for service in "${services[@]}"; do
-  repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_${service}"
-  tag="${repository}:oci-${SOURCE_SHA}"
+  tag="${repository}:oci-${service}-${SOURCE_SHA}"
   metadata="$OUTPUT_DIR/${service}.metadata.json"
   provenance="$OUTPUT_DIR/${service}.env"
   if [[ "$PUSH_IMAGES" == "1" ]]; then

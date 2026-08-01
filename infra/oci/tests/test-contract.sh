@@ -91,12 +91,12 @@ index=1
 for service in "${services[@]}"; do
   digit="$index"
   digest="$(printf '%064d' "$digit")"
-  repository="fixture.invalid/namespace/betstan_${service}"
+  repository="fixture.invalid/namespace/betstan_images"
   cat > "$WORK_DIR/provenance/${service}.env" <<ENV
 service=${service}
 repository=${repository}
 source_sha=1111111111111111111111111111111111111111
-tag=${repository}:oci-1111111111111111111111111111111111111111
+tag=${repository}:oci-${service}-1111111111111111111111111111111111111111
 digest=sha256:${digest}
 platform_digest=sha256:${digest}
 image_ref=${repository}@sha256:${digest}
@@ -214,6 +214,17 @@ for dockerfile in "$OCI_DIR/build/Dockerfile.backend" "$OCI_DIR/build/Dockerfile
     fail "OCI Dockerfile must compile architecture-independent assets on BUILDPLATFORM: $dockerfile"
 done
 verify_images="$OCI_DIR/scripts/verify-images.sh"
+build_images="$OCI_DIR/scripts/build-images.sh"
+grep -Fq 'repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"' \
+  "$build_images" ||
+  fail "OCI builds must share one repository so common layers stay inside the Free Tier allowance"
+grep -Fq 'tag="${repository}:oci-${service}-${SOURCE_SHA}"' "$build_images" ||
+  fail "shared OCI repository tags must bind the service and exact source SHA"
+inventory="$OCI_DIR/scripts/inventory.sh"
+grep -Fq '[$prefix + "_images"]' "$inventory" ||
+  fail "OCI inventory must allow only the shared image repository"
+grep -Fq 'select(.image_count != 9)' "$inventory" ||
+  fail "OCI inventory must require all nine exact application images"
 grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_images" ||
   fail "OCI application boot verification must run the ARM64 images"
 if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then
