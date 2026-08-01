@@ -219,6 +219,8 @@ grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_ima
 if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then
   fail "OCI build verification dependencies must use the runner native platform"
 fi
+grep -Fq 'docker exec --user rabbitmq "$rabbit" rabbitmq-diagnostics -q ping' "$verify_images" ||
+  fail "RabbitMQ readiness verification must run as the image user"
 grep -R -n -E 'image:[[:space:]]+[^[:space:]#]+:(latest|main|master|dev)([[:space:]#]|$)' \
   "$OCI_DIR" "$ROOT_DIR/.github/workflows/oci-"*.yml >/dev/null 2>&1 &&
   fail "OCI path contains a mutable image tag"

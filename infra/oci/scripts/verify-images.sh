@@ -122,7 +122,7 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
         grep -qx 1; then
       mongo_ready=1
     fi
-    if docker exec "$rabbit" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+    if docker exec --user rabbitmq "$rabbit" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
       rabbit_ready=1
     fi
     [[ "$mongo_ready" == "1" && "$rabbit_ready" == "1" ]] && break
