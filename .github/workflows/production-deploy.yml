@@ -25,6 +25,8 @@ env:
   DEPLOY_VALIDATION_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_SLEEP_SECONDS || '30' }}
   DEPLOY_VALIDATION_MAX_LOOPS: ${{ vars.DEPLOY_VALIDATION_MAX_LOOPS || '3' }}
   DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS: ${{ vars.DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS || '20' }}
+  SHARED_MONGO_LOCK_TOKEN: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+  SHARED_MONGO_LOCK_OPERATION: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
 
 permissions:
   actions: read
@@ -136,13 +138,12 @@ jobs:
 
       - name: DB safety guardrails
         run: |
-          set -euo pipefail
-          mongo_pvc_count="$(kubectl get pvc -n default --no-headers 2>/dev/null | awk '/mongo/ {c++} END {print c+0}')"
-          if [ "$mongo_pvc_count" -lt 8 ]; then
-            echo "Expected at least 8 mongo PVCs, found $mongo_pvc_count. Aborting deploy to avoid unsafe DB state."
-            exit 1
-          fi
-          kubectl get pvc -n default --no-headers | awk '/mongo/ {print $1, $2, $3}'
+          NAMESPACE=default \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$IMAGE_TAG" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
+          ./infra/azure/agents/shared-mongo-topology-guard-stan.sh
 
       - name: Apply Kubernetes manifests and immutable images
         run: |
@@ -283,3 +284,14 @@ jobs:
           name: deploy-validation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/deploy-validation
           if-no-files-found: ignore
+
+      - name: Release database operation lock
+        if: always()
+        run: |
+          if [[ -x ./infra/azure/agents/shared-mongo-operation-lock-stan.sh ]]; then
+            NAMESPACE=default \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$IMAGE_TAG" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
+          fi

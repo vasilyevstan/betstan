@@ -1,3 +1,4 @@
+# Rollback-only; normal deployment must not apply this manifest.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

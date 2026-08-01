@@ -53,16 +53,16 @@ The established baseline is:
 - `Standard_B4as_v2`;
 - Managed 64 GiB OS disk;
 - one current node, autoscaler `1..3`;
-- eight per-service Mongo StatefulSets and eight attached persistent disks;
+- one retained auth Mongo StatefulSet/PVC hosting eight logical databases after validated cutover;
 - Standard Load Balancer with required ingress and outbound public IPs;
 - both `betstan.xyz` and `www.betstan.xyz`.
 
 Do not:
 
 - use the rejected B4ms/30 GiB Ephemeral profile;
-- use a SKU with fewer than eight data-disk slots;
+- attach a ninth disk during shared-Mongo migration;
 - reduce to the known-undersized B2s profile;
-- consolidate Mongo in production without a new stage experiment and explicit approval;
+- run shared-Mongo migration or cleanup without exact-SHA approval and verified recovery artifacts;
 - delete either required public IP or the Load Balancer;
 - delete resources directly inside the AKS-managed resource group when an AKS/Kubernetes operation owns their lifecycle.
 
@@ -74,20 +74,21 @@ Do not:
    - Run the most specific existing read-only agent instead of reproducing its logic.
 
 2. **Protect**
-   - Before node/disk migration, require application-consistent snapshots of all eight Mongo disks.
+   - Before shared-Mongo migration, require verified logical backups and application-consistent recovery copies for all eight source databases.
    - Verify rollback target, disk mapping, live image SHA, ingress address, and RabbitMQ state.
    - Use `rollback-readiness-stan.sh`; respect `NO_GO`.
 
 3. **Change**
+   - Serialize deployment, migration, cleanup, and rollback with the shared-Mongo operation lock.
    - Replace AKS VM sizes through a new nodepool; in-place size changes are unsupported.
    - Move stateless workloads sequentially.
-   - Move Mongo StatefulSets one at a time so each RWO disk detaches, reattaches, and becomes ready.
+   - Preserve the retained auth Mongo disk identity; move or restore it only through an approved recovery procedure.
    - Avoid concurrent application image pulls.
    - Keep the old pool until repeated health gates pass.
 
 4. **Verify**
    - Require all Deployments and StatefulSets ready.
-   - Require all eight Mongo PVCs bound.
+   - Require the topology guard to confirm one retained auth Mongo PVC and no legacy Mongo PVCs after cutover.
    - Check node pressure, filesystem use, OOMs, restarts, and events.
    - Validate APIs through both public hostnames, not only a raw ingress IP.
    - Verify RabbitMQ queues, consumers, and backlog.

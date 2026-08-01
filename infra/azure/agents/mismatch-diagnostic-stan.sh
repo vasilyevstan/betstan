@@ -8,6 +8,8 @@ set -euo pipefail
 #   EVENT_NAME='North Nikkoside - Hermanview' SINCE=8h ./infra/azure/agents/mismatch-diagnostic-stan.sh
 
 NAMESPACE="${NAMESPACE:-default}"
+MONGO_POD="${MONGO_POD:-}"
+TOPOLOGY_CONFIGMAP="${TOPOLOGY_CONFIGMAP:-gaming-mongo-topology}"
 SINCE="${SINCE:-8h}"
 EVENT_NAME="${EVENT_NAME:-}"
 EVENT_ID="${EVENT_ID:-}"
@@ -41,14 +43,40 @@ event_projection_js() {
   printf '{eventId:1,name:1,time:1,status:1,visibility:1,_id:0}'
 }
 
+mongo_pod_for_db() {
+  local db_name="$1"
+  if [[ -n "$MONGO_POD" ]]; then
+    echo "$MONGO_POD"
+    return
+  fi
+
+  local topology_mode
+  topology_mode="$(
+    kubectl get configmap "$TOPOLOGY_CONFIGMAP" -n "$NAMESPACE" \
+      -o jsonpath='{.data.mode}' 2>/dev/null || true
+  )"
+  if [[ "$topology_mode" == "shared" || "$db_name" == "gaming_auth" ]]; then
+    echo "gaming-auth-mongo-depl-0"
+    return
+  fi
+  if [[ -z "$topology_mode" || "$topology_mode" == "legacy" ]]; then
+    local service="${db_name#gaming_}"
+    service="${service//_/-}"
+    echo "gaming-${service}-mongo-depl-0"
+    return
+  fi
+
+  echo "ERROR: unsupported Mongo topology mode: $topology_mode" >&2
+  return 1
+}
+
 mongosh_find_one() {
   local db_name="$1"
   local collection="$2"
   local filter="$3"
   local projection="$4"
   local pod_name
-  pod_name="gaming-${db_name#gaming_}"
-  pod_name="${pod_name//_/-}-mongo-depl-0"
+  pod_name="$(mongo_pod_for_db "$db_name")"
   kubectl exec -n "$NAMESPACE" "$pod_name" -- \
     mongosh --quiet --eval "db.getSiblingDB(\"$db_name\").$collection.findOne($filter, $projection)"
 }
@@ -59,8 +87,7 @@ mongosh_find_many() {
   local filter="$3"
   local projection="$4"
   local pod_name
-  pod_name="gaming-${db_name#gaming_}"
-  pod_name="${pod_name//_/-}-mongo-depl-0"
+  pod_name="$(mongo_pod_for_db "$db_name")"
   kubectl exec -n "$NAMESPACE" "$pod_name" -- \
     mongosh --quiet --eval "db.getSiblingDB(\"$db_name\").$collection.find($filter, $projection).sort({time:1}).toArray()"
 }

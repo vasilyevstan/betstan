@@ -1,27 +1,28 @@
+# Rollback-only; normal deployment must not apply this manifest.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: gaming-backoffice-mongo-depl
+  name: gaming-event-mongo-depl
 spec:
-  serviceName: gaming-backoffice-mongo-srv
+  serviceName: gaming-event-mongo-srv
   replicas: 1
   selector:
     matchLabels:
-      app: gaming-backoffice-mongo
+      app: gaming-event-mongo
   template:
     metadata:
       labels:
-        app: gaming-backoffice-mongo
+        app: gaming-event-mongo
     spec:
       containers:
-        - name: gaming-backoffice-mongo
+        - name: gaming-event-mongo
           image: mongo
           volumeMounts:
-            - name: gaming-backoffice-mongo-data
+            - name: gaming-event-mongo-data
               mountPath: /data/db
   volumeClaimTemplates:
     - metadata:
-        name: gaming-backoffice-mongo-data
+        name: gaming-event-mongo-data
       spec:
         accessModes:
           - ReadWriteOnce
@@ -32,13 +33,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: gaming-backoffice-mongo-srv
+  name: gaming-event-mongo-srv
 spec:
   type: ClusterIP
   selector:
-    app: gaming-backoffice-mongo
+    app: gaming-event-mongo
   ports:
-    - name: gaming-backoffice-mongo-port
+    - name: gaming-event-mongo-port
       protocol: TCP
       port: 27017
       targetPort: 27017
