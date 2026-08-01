@@ -213,6 +213,12 @@ for dockerfile in "$OCI_DIR/build/Dockerfile.backend" "$OCI_DIR/build/Dockerfile
   grep -Fq 'FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build' "$dockerfile" ||
     fail "OCI Dockerfile must compile architecture-independent assets on BUILDPLATFORM: $dockerfile"
 done
+verify_images="$OCI_DIR/scripts/verify-images.sh"
+grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_images" ||
+  fail "OCI application boot verification must run the ARM64 images"
+if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then
+  fail "OCI build verification dependencies must use the runner native platform"
+fi
 grep -R -n -E 'image:[[:space:]]+[^[:space:]#]+:(latest|main|master|dev)([[:space:]#]|$)' \
   "$OCI_DIR" "$ROOT_DIR/.github/workflows/oci-"*.yml >/dev/null 2>&1 &&
   fail "OCI path contains a mutable image tag"

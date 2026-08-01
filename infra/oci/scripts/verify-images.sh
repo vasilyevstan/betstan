@@ -109,10 +109,10 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
   trap cleanup EXIT
   started=()
   docker network create "$network" >/dev/null
-  docker run -d --platform linux/arm64 --name "$mongo" --network "$network" \
+  docker run -d --name "$mongo" --network "$network" \
     --network-alias mongo \
     docker.io/library/mongo@sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1 >/dev/null
-  docker run -d --platform linux/arm64 --name "$rabbit" --network "$network" \
+  docker run -d --name "$rabbit" --network "$network" \
     --network-alias rabbitmq \
     docker.io/library/rabbitmq@sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b >/dev/null
   mongo_ready=0
@@ -128,8 +128,10 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
     [[ "$mongo_ready" == "1" && "$rabbit_ready" == "1" ]] && break
     sleep 2
   done
-  [[ "$mongo_ready" == "1" && "$rabbit_ready" == "1" ]] ||
-    oci_die "ARM64 Mongo/RabbitMQ verification dependencies did not become ready"
+  [[ "$mongo_ready" == "1" ]] ||
+    oci_die "Mongo verification dependency did not become ready"
+  [[ "$rabbit_ready" == "1" ]] ||
+    oci_die "RabbitMQ verification dependency did not become ready"
 
   while IFS=$'\t' read -r service _repository image_ref _digest _platform_digest; do
     container="betstan-oci-${service}-${work_id}"
