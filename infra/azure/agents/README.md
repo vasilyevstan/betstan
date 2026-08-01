@@ -12,7 +12,7 @@
 - `branch-policy-guard-stan.sh` — enforces feature/hotfix-to-dev and only-dev-to-master PR pairs.
 - `test-branch-policy-guard-stan.sh` — tests accepted and rejected branch pairs.
 - `test-workflow-run-provenance-stan.sh` — rejects wrong-SHA artifacts and untrusted build/deploy workflow runs.
-- `production-workflow-inventory-stan.sh` — derives the exact production workflow set matched by a promotion diff.
+- `production-workflow-inventory-stan.sh` — derives and validates the exact Azure-only or complete governed Azure-plus-OCI production workflow set matched by a promotion diff.
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
@@ -220,6 +220,7 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - Promotion statuses are base-scoped and published on both the current head and unique merge snapshot; validation requires both copies to point to the same trusted runs.
 - `production-deploy` runs only after successful `production-build` on `master` and deploys that exact SHA image set.
 - Emergency manual dispatch is limited to the central workflows, requires a full master SHA, and pauses at the reviewer-protected `production-emergency` environment.
+- OCI deployment is not active yet. Governance accepts the OCI identities only as one complete four-workflow set using the exact reviewer-gated `oci-build`, `oci-infrastructure`, `oci-production`, and `oci-migration` environments with strict trigger, exact-SHA, and first-attempt contracts; activation still requires that set to merge together and repository/environment lock-down to complete.
 - Retired central and per-service workflow identities remain disabled so historical runs cannot be rerun.
 - Deploy workflow requires the validated shared-Mongo marker, one ready auth Mongo StatefulSet/PVC, no legacy Mongo StatefulSets/PVCs, and all eight exact shared URIs.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.
