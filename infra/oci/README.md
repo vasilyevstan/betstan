@@ -20,7 +20,10 @@ load balancer.
 - OCIR repository layer storage must remain at or below
   `OCI_REGISTRY_MAX_BYTES=500000000`.
 - Frankfurt OCIR does not currently support repository-level immutability.
-  The repositories are precreated privately. The CI policy grants
+  One private `${OCI_IMAGE_PREFIX}_images` repository is precreated so the
+  eight backend images share their identical Node layers instead of charging
+  the Free Tier allowance for those layers eight times. Service-specific,
+  exact-SHA tags remain independently digest-pinned. The CI policy grants
   `manage repos` only in the dedicated compartment and only when
   `target.repo.name=/betstan_*/`; it does not cover other repositories or
   root-compartment repository creation. The protected build has no deletion

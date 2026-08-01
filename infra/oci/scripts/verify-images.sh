@@ -34,7 +34,8 @@ for file in "$PROVENANCE_DIR"/*.env; do
   seen_services+="$service "
   [[ "$source_sha" == "$SOURCE_SHA" ]] || oci_die "source SHA mismatch for $service"
   [[ "$platform" == "linux/arm64" ]] || oci_die "platform mismatch for $service"
-  [[ "$tag" == "${repository}:oci-${SOURCE_SHA}" ]] || oci_die "non-exact OCI tag for $service"
+  [[ "$tag" == "${repository}:oci-${service}-${SOURCE_SHA}" ]] ||
+    oci_die "non-exact OCI tag for $service"
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || oci_die "invalid digest for $service"
   [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     oci_die "invalid linux/arm64 platform digest for $service"
@@ -42,7 +43,7 @@ for file in "$PROVENANCE_DIR"/*.env; do
   [[ "$repository" != *docker.io/stanvasilyev* ]] || oci_die "OCI provenance points at Docker Hub"
   if [[ -n "${OCI_REGISTRY_HOST:-}" || -n "${OCI_REGISTRY_NAMESPACE:-}" || -n "${OCI_IMAGE_PREFIX:-}" ]]; then
     oci_require_vars OCI_REGISTRY_HOST OCI_REGISTRY_NAMESPACE OCI_IMAGE_PREFIX
-    expected_repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_${service}"
+    expected_repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"
     [[ "$repository" == "$expected_repository" ]] ||
       oci_die "image repository differs from the approved OCIR path for $service"
   fi
