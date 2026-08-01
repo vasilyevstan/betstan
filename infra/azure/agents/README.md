@@ -253,19 +253,22 @@ Repository merge does not migrate production. The final manifests intentionally
 cannot be applied by the normal deployment workflow until the migration marker
 is validated.
 
-1. Run `consolidate-production-mongo-stan.sh preflight` from the exact approved
-   SHA.
-2. Pause writers, drain RabbitMQ, create eight verified recovery copies, and run
-   `migrate`.
-3. Validate data, metadata, all eight application mappings, APIs, and queues.
-4. Run `cleanup` with the explicit seven-volume deletion confirmation.
-5. Retain the external recovery artifacts for seven days.
-
 The rollback-only manifests are under `infra/k8s/legacy-mongo/` and are never
 part of normal `kubectl apply -f infra/k8s`.
 
 The operator requires a clean exact-SHA checkout and a private backup directory
-outside the repository:
+outside the repository. Set `NAMESPACE` explicitly when it is not `default`.
+
+| Operation | Required starting evidence | Exact confirmations | Successful result |
+|---|---|---|---|
+| `plan` | Repository mapping only | None | Sanitized eight-database/seven-resource map |
+| `preflight` | Full approved SHA, clean checkout, live legacy topology, private backup directory | None | Read-only compatibility and capacity pass |
+| `migrate` | No conflicting journal, or same safely resumable early transition | `CONFIRM_MAINTENANCE=writers-paused`, `CONFIRM_RECOVERY_COPIES=verified-eight-recovery-copies` | `transition/awaiting-cleanup` |
+| `cleanup` | Exact `transition/awaiting-cleanup`, verified backups and applications | `CONFIRM_APPLICATION_VALIDATED=shared-mongo-application-validation-passed`, `CONFIRM_DELETE_LEGACY_MONGO=delete-seven-legacy-mongo-volumes` | `shared/complete` and final topology guard pass |
+| `rollback` | Supported exact transition phase or `shared/complete`, plus rollback readiness | `CONFIRM_ROLLBACK=restore-seven-legacy-databases` | `legacy/rollback-complete` |
+| `unlock` | Proven stale lock with matching migration ID and SHA | `CONFIRM_UNLOCK=remove-stale-migration-lock` | Matching lock released; topology unchanged |
+
+Run preflight first:
 
 ```bash
 APPROVED_SHA=<full-master-sha> \
@@ -288,11 +291,62 @@ CONFIRM_DELETE_LEGACY_MONGO=delete-seven-legacy-mongo-volumes \
 ./infra/azure/agents/consolidate-production-mongo-stan.sh cleanup
 ```
 
-Never put `BACKUP_DIR` inside the repository. `cleanup` is immediate after
-application validation; it is not a soak gate. Destructive operations acquire the persistent `gaming-mongo-migration-lock`
-ConfigMap through a resource-versioned compare-and-swap. If an operator process
-is killed and leaves it active, inspect the journal and workloads first, then
-release only the matching stale lock with:
+For migration rollback, first run the transition-aware readiness gate, then the
+operator:
+
+```bash
+TARGET_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+MIGRATION_BACKUP_DIR=<private-absolute-path> \
+./infra/azure/agents/rollback-readiness-stan.sh
+
+APPROVED_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+BACKUP_DIR=<private-absolute-path> \
+CONFIRM_ROLLBACK=restore-seven-legacy-databases \
+./infra/azure/agents/consolidate-production-mongo-stan.sh rollback
+```
+
+### Journal phases and interrupted operations
+
+| Phase | Rollback source of truth |
+|---|---|
+| `backing-up`, `preparing-target`, `restoring`, `switching` | Legacy data; do not reverse-copy partial shared data |
+| `validating-applications`, `awaiting-cleanup` | Shared data may contain new writes; reverse-copy before switching |
+| `rollback-copying` | Resume verified reverse copy with applications stopped |
+| `rollback-data-restored` | Legacy restore is complete; do not reverse-copy again |
+| `shared/complete` | Recreate legacy stores and reverse-copy current shared data |
+| `legacy/rollback-complete` | Use a new migration ID and fresh backups before retrying migration |
+
+Resume only with the same full SHA, migration ID, private backup directory, and
+verified checksums. Never reuse backups from a completed rollback or another
+migration.
+
+Never put `BACKUP_DIR` inside the repository. Backup archives, signatures,
+checksums, and cleanup PVC/PV journals are private recovery artifacts, not
+source files.
+
+`cleanup` is immediate after application validation; it is not a soak gate. It
+still requires complete data, metadata, application, API, queue, and exact
+resource validation. Retain verified external recovery artifacts for seven
+days.
+
+Issue #85 tracks two remaining fail-closed runtime reads. Until it is resolved,
+independently require a successful topology journal read or explicit NotFound
+immediately before `migrate`, and explicit NotFound for every journaled legacy
+PV after `cleanup`. An authorization, timeout, transport, or other API error is
+`NO_GO`, even when the operator process exits successfully.
+
+### Lock recovery
+
+Destructive operations and normal deployment acquire the persistent
+`gaming-mongo-migration-lock` ConfigMap through resource-versioned
+compare-and-swap. API errors are unknown state, not absence. A release failure
+fails an otherwise successful operation.
+
+If an operator process is killed and leaves the lock active, inspect the
+journal, holder, workloads, and process first. Release only the matching stale
+lock:
 
 ```bash
 APPROVED_SHA=<full-master-sha> \
@@ -300,6 +354,15 @@ MIGRATION_ID=<approved-id> \
 CONFIRM_UNLOCK=remove-stale-migration-lock \
 ./infra/azure/agents/consolidate-production-mongo-stan.sh unlock
 ```
+
+### Script portability and offline validation
+
+- Keep operational shell scripts compatible with macOS Bash 3.2; avoid
+  `mapfile`, associative arrays, and other Bash 4-only features.
+- Test GNU and BSD command variants. Probe a platform's successful form first;
+  a failed command that emits partial stdout can corrupt fallback output.
+- Use Ruby YAML parsing for offline manifest syntax. `kubectl apply
+  --dry-run=client` may still contact the configured API server for discovery.
 
 ## Stage lifecycle and cost controls
 

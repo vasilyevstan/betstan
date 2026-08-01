@@ -10,7 +10,8 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
 ## Required flow
 
 - Never commit or push directly to `master`.
-- Normal changes enter `dev`, either directly or through a focused pull request.
+- Normal changes enter `dev` through a focused pull request; never push directly
+  to protected `dev`.
 - Only an up-to-date `dev` branch may open a pull request into `master`.
 - A production promotion requires green trusted `branch-policy/master` and `pr-quality-gates/master` statuses on both its current head and unique merge snapshot.
 - Before promotion, identify the exact head SHA and every production-capable workflow triggered by the diff. Require explicit approval covering that exact set.

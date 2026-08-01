@@ -6,6 +6,7 @@ OPERATOR="$ROOT_DIR/infra/azure/agents/consolidate-production-mongo-stan.sh"
 LOCK_SCRIPT="$ROOT_DIR/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
 ROLLBACK_READINESS="$ROOT_DIR/infra/azure/agents/rollback-readiness-stan.sh"
 SIGNATURE_SCRIPT="$ROOT_DIR/infra/azure/agents/mongo-database-signature-stan.js"
+MIGRATION_AGENT="$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md"
 MONGO_TEST_IMAGE="${MONGO_TEST_IMAGE:-mongo:7}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 
@@ -51,6 +52,19 @@ grep -Fq '"$lock_script" acquire' "$ROOT_DIR/infra/azure/agents/deploy-stan.sh" 
   fail "direct deploy does not acquire the database operation lock"
 [[ -x "$LOCK_SCRIPT" ]] ||
   fail "shared database operation lock helper is missing"
+[[ -f "$MIGRATION_AGENT" ]] ||
+  fail "shared database migration agent is missing"
+for required_reference in \
+  'disable-model-invocation: true' \
+  'consolidate-production-mongo-stan.sh' \
+  'shared-mongo-operation-lock-stan.sh' \
+  'shared-mongo-topology-guard-stan.sh' \
+  'rollback-readiness-stan.sh' \
+  'READY_FOR_CLEANUP' \
+  'MIGRATION_COMPLETE'; do
+  grep -Fq "$required_reference" "$MIGRATION_AGENT" ||
+    fail "migration agent is missing required reference: $required_reference"
+done
 
 retired_paths=(
   "$ROOT_DIR/.github/workflows/deploy-stage-shared-db.yml"

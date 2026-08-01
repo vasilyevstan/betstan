@@ -14,6 +14,8 @@ Before analyzing cost, read:
 - `infra/azure/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
+- `infra/azure/agents/shared-mongo-topology-guard-stan.sh`
+- `infra/azure/agents/consolidate-production-mongo-stan.sh`
 - the current Azure provisioning and deployment workflows relevant to the request
 
 Treat live read-only inventory as current truth and repository documentation as the intended recoverable state. Call out any mismatch instead of silently choosing one.
@@ -44,6 +46,19 @@ Unless the user explicitly requests a separate experimental scenario, preserve:
 - one Mongo process hosting eight logical databases after validated consolidation.
 
 `Standard_B4as_v2` with a Managed 64 GiB OS disk is the established baseline. A 30 GiB Ephemeral OS disk caused image-pull `DiskPressure` and pod eviction. Cost analysis must inspect the live migration state instead of assuming either eight legacy disks or one retained disk.
+
+### Shared-Mongo accounting
+
+- Read the live topology journal and inventory actual PVC/PV attachment and
+  reclamation state.
+- In `legacy` mode, price every live per-service disk.
+- In `transition`, price every live disk plus temporary snapshots, backup
+  storage, restore workspace, and overlap.
+- Count the seven-disk steady-state saving only after `shared/complete`, exact
+  cleanup, and PV reclamation are verified.
+- Keep seven-day recovery artifacts and their operations separate from the
+  steady-state baseline.
+- Treat API errors as unknown inventory, not zero-cost resource absence.
 
 ## Required research method
 

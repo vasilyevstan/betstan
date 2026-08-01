@@ -17,6 +17,7 @@ Before operating, read:
 - `.github/skills/betstan-branch-governance/SKILL.md`
 - `infra/azure/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
+- `.github/agents/betstan-mongo-migration.agent.md` for any shared-Mongo work
 - the specific `infra/azure/agents/*-stan.sh` scripts relevant to the task
 - `.github/workflows/production-deploy.yml` when a deployment may be involved
 
@@ -29,6 +30,8 @@ Do not assume an old conversation, branch, or plan reflects current production. 
 - Never inspect or touch unrelated tenant resources.
 - Never mutate Azure, Kubernetes, DNS, GitHub, secrets, or git history without explicit approval for that operation.
 - Treat deletion, nodepool replacement, disk restore, cluster stop/start, DNS changes, merge, deployment, and rollback as separate approval gates.
+- Route shared-Mongo preflight, migration, cleanup, rollback, and stale-lock
+  recovery through the dedicated migration agent and repository operator.
 - Never commit or push directly to `master`. Production changes may reach it only through an up-to-date pull request from `dev`.
 - For a `dev`-to-`master` promotion, workflow dispatch/rerun, deployment, or rollback, require explicit approval for the exact target SHA and every production-capable workflow the action will trigger. Generic approval to "deploy" is insufficient.
 - Before production promotion, evaluate workflow branch/path filters for the exact diff and report the complete production trigger set. Do not proceed when approval covers only part of that set.
@@ -47,13 +50,15 @@ Do not assume an old conversation, branch, or plan reflects current production. 
 
 ## Stable production baseline
 
-The established baseline is:
+The infrastructure baseline is:
 
 - one System pool named `nodepool4`;
 - `Standard_B4as_v2`;
 - Managed 64 GiB OS disk;
 - one current node, autoscaler `1..3`;
-- one retained auth Mongo StatefulSet/PVC hosting eight logical databases after validated cutover;
+- a journal-dependent database topology: eight legacy Mongo PVCs before
+  migration, a protected transition state during migration, and one retained
+  auth Mongo PVC only after validated cleanup;
 - Standard Load Balancer with required ingress and outbound public IPs;
 - both `betstan.xyz` and `www.betstan.xyz`.
 
@@ -63,6 +68,7 @@ Do not:
 - attach a ninth disk during shared-Mongo migration;
 - reduce to the known-undersized B2s profile;
 - run shared-Mongo migration or cleanup without exact-SHA approval and verified recovery artifacts;
+- treat a Kubernetes/API error as proof that a journal, lock, PVC, or PV is absent;
 - delete either required public IP or the Load Balancer;
 - delete resources directly inside the AKS-managed resource group when an AKS/Kubernetes operation owns their lifecycle.
 
@@ -70,19 +76,25 @@ Do not:
 
 1. **Baseline**
    - Confirm Azure login and exact scope without printing identifiers.
+   - Set the namespace explicitly for every Kubernetes operation.
    - Check cluster provisioning/power state, nodepool profile, nodes, pods, Deployments, StatefulSets, PVCs, events, ingress, and queue state.
    - Run the most specific existing read-only agent instead of reproducing its logic.
 
 2. **Protect**
    - Before shared-Mongo migration, require verified logical backups and application-consistent recovery copies for all eight source databases.
+   - Read the exact topology journal and operation lock; unknown state is `NO_GO`.
    - Verify rollback target, disk mapping, live image SHA, ingress address, and RabbitMQ state.
    - Use `rollback-readiness-stan.sh`; respect `NO_GO`.
 
 3. **Change**
    - Serialize deployment, migration, cleanup, and rollback with the shared-Mongo operation lock.
+   - Never substitute ad hoc `mongodump`, `mongorestore`, URI, or deletion
+     commands for the consolidation operator.
    - Replace AKS VM sizes through a new nodepool; in-place size changes are unsupported.
    - Move stateless workloads sequentially.
    - Preserve the retained auth Mongo disk identity; move or restore it only through an approved recovery procedure.
+   - Expand the bound auth PVC online; do not treat the immutable StatefulSet
+     claim template as proof of current PVC capacity.
    - Avoid concurrent application image pulls.
    - Keep the old pool until repeated health gates pass.
 
