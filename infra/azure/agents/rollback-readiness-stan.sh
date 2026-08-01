@@ -71,8 +71,8 @@ validate_transition_backup_dir() {
     add_failure "MIGRATION_BACKUP_DIR must be outside the repository"
   fi
   permissions="$(
-    stat -f '%Lp' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
-      stat -c '%a' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
+    stat -c '%a' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
+      stat -f '%Lp' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
       true
   )"
   if ! [[ "$permissions" =~ ^[0-7]{3,4}$ ]] ||
