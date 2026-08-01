@@ -66,10 +66,17 @@ jobs:
       OCI_CPU_MAX_PERCENT: "90"
       OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
       OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
-      HOME: ${{ runner.temp }}/oci-home
-      KUBECONFIG: ${{ runner.temp }}/oci-home/.kube/config
 
     steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
       - name: Checkout approved master commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
