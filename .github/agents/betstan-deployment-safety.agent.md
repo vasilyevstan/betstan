@@ -41,14 +41,14 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 - A green PR validates infrastructure safety but does not mean production was deployed.
 - A repository merge does not migrate databases. Migration requires a separate
   exact-SHA operator approval and live journal.
-- Inventory every production-capable workflow before reasoning about triggers. `production-build` and `production-deploy` are the only active production workflow identities.
+- Inventory every production-capable workflow before reasoning about triggers. `production-build` and `production-deploy` are the only active production workflow identities today. OCI remains inactive until all four governed OCI identities (`oci-infrastructure`, `oci-migrate`, `oci-production-build`, and `oci-production-deploy`) merge together and their environments and repository controls are locked down.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
-- Use only the `production-build` to `production-deploy` chain. Never invoke a retired workflow as a fallback.
+- Until OCI activation and lock-down are explicitly complete, use only the `production-build` to `production-deploy` chain. Never invoke a retired workflow as a fallback.
 - Deploy only a SHA whose required build completed successfully on `master`.
 - Do not deploy `latest` as the source of truth.
 - Verify every application Deployment uses the intended SHA after rollout.
