@@ -20,11 +20,12 @@ load balancer.
 - OCIR repository layer storage must remain at or below
   `OCI_REGISTRY_MAX_BYTES=500000000`.
 - Frankfurt OCIR does not currently support repository-level immutability.
-  The repositories are precreated privately, and the CI user has only
-  `REPOSITORY_INSPECT`, `REPOSITORY_READ`, and `REPOSITORY_UPDATE` in the
-  dedicated compartment, with no repository create/delete/manage permission.
-  The build fails unless every exact-SHA tag is proven absent before its
-  single first-attempt push.
+  The repositories are precreated privately. The CI policy grants
+  `manage repos` only in the dedicated compartment and only when
+  `target.repo.name=/betstan_*/`; it does not cover other repositories or
+  root-compartment repository creation. The protected build has no deletion
+  path and fails unless every exact-SHA tag is proven absent before its single
+  first-attempt push.
 - OCI CLI execution is fail-closed on the reviewed `3.90.0` client version.
 - There is no paid shape, enhanced-cluster, NAT gateway, extra node, extra
   Mongo, or alternate load-balancer fallback.
