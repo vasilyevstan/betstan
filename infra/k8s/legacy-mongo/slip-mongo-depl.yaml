@@ -1,27 +1,28 @@
+# Rollback-only; normal deployment must not apply this manifest.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: gaming-event-mongo-depl
+  name: gaming-slip-mongo-depl
 spec:
-  serviceName: gaming-event-mongo-srv
+  serviceName: gaming-slip-mongo-srv
   replicas: 1
   selector:
     matchLabels:
-      app: gaming-event-mongo
+      app: gaming-slip-mongo
   template:
     metadata:
       labels:
-        app: gaming-event-mongo
+        app: gaming-slip-mongo
     spec:
       containers:
-        - name: gaming-event-mongo
+        - name: gaming-slip-mongo
           image: mongo
           volumeMounts:
-            - name: gaming-event-mongo-data
+            - name: gaming-slip-mongo-data
               mountPath: /data/db
   volumeClaimTemplates:
     - metadata:
-        name: gaming-event-mongo-data
+        name: gaming-slip-mongo-data
       spec:
         accessModes:
           - ReadWriteOnce
@@ -32,13 +33,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: gaming-event-mongo-srv
+  name: gaming-slip-mongo-srv
 spec:
   type: ClusterIP
   selector:
-    app: gaming-event-mongo
+    app: gaming-slip-mongo
   ports:
-    - name: gaming-event-mongo-port
+    - name: gaming-slip-mongo-port
       protocol: TCP
       port: 27017
       targetPort: 27017

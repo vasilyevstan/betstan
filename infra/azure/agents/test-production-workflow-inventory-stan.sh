@@ -43,4 +43,6 @@ YAML
 
 assert_set "production-build,production-deploy,rogue-production"
 
+"$ROOT_DIR/infra/azure/agents/test-shared-mongo-consolidation-stan.sh"
+
 echo "production_workflow_inventory_tests=PASS"

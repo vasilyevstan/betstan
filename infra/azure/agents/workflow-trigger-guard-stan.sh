@@ -47,6 +47,7 @@ retired=(
   .github/workflows/deploy-moderation.yaml
   .github/workflows/deploy-resulting.yaml
   .github/workflows/deploy-slip.yaml
+  .github/workflows/deploy-stage-shared-db.yml
 )
 for file in "${retired[@]}"; do
   [[ ! -e "$file" ]] || fail "retired workflow identity still exists: $file"
@@ -87,6 +88,10 @@ require_literal "$deploy_workflow" '[ "$workflow_path" = ".github/workflows/prod
 require_literal "$deploy_workflow" "production-emergency" "protected emergency environment"
 require_literal "$deploy_workflow" 'run-name: deploy ${{ inputs.approved_sha }}' "SHA-specific deploy run name"
 require_literal "$deploy_workflow" "image_provenance_stan.py" "immutable image provenance validation"
+require_literal "$deploy_workflow" "shared-mongo-topology-guard-stan.sh" "validated shared-Mongo topology guard"
+require_literal "$deploy_workflow" "shared-mongo-operation-lock-stan.sh acquire" "database operation lock acquisition"
+require_literal "$deploy_workflow" "shared-mongo-operation-lock-stan.sh release" "database operation lock release"
+require_literal "$deploy_workflow" "Release database operation lock" "always-run database lock cleanup"
 require_literal "$deploy_workflow" '[[ "$image_id" =~ @sha256:[0-9a-f]{64}$ ]]' "serving OCI image ID verification"
 require_literal "$deploy_workflow" 'deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}' "attempt-specific provenance"
 require_literal "$deploy_workflow" 'deploy-validation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}' "attempt-specific diagnostics"

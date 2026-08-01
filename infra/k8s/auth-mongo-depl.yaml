@@ -27,6 +27,8 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
+            # The migration operator expands the existing bound PVC online.
+            # Keep this immutable StatefulSet claim template unchanged.
             storage: 1Gi
 ---
 apiVersion: v1
@@ -39,6 +41,20 @@ spec:
     app: gaming-auth-mongo
   ports:
     - name: gaming-auth-mongo-port
+      protocol: TCP
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-shared-mongo-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-auth-mongo
+  ports:
+    - name: gaming-shared-mongo-port
       protocol: TCP
       port: 27017
       targetPort: 27017

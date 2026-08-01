@@ -36,14 +36,14 @@ Unless the user explicitly requests a separate experimental scenario, preserve:
 - autoscaler bounds `1..3`;
 - at least 4 vCPU and 16 GiB RAM;
 - Linux x64 compatibility and Premium I/O;
-- at least eight data-disk attachments;
+- enough data-disk attachments for the observed live topology;
 - Managed OS disk of at least 64 GiB;
-- eight per-service Mongo persistent disks;
+- one retained auth Mongo persistent disk after validated consolidation;
 - Standard Load Balancer and the ingress/outbound public IPs;
 - native metric alerts and action group;
-- per-service Mongo topology.
+- one Mongo process hosting eight logical databases after validated consolidation.
 
-`Standard_B4as_v2` with a Managed 64 GiB OS disk is the established baseline. A 30 GiB Ephemeral OS disk caused image-pull `DiskPressure` and pod eviction. A two-vCPU SKU with only four disk slots cannot host all eight Mongo disks.
+`Standard_B4as_v2` with a Managed 64 GiB OS disk is the established baseline. A 30 GiB Ephemeral OS disk caused image-pull `DiskPressure` and pod eviction. Cost analysis must inspect the live migration state instead of assuming either eight legacy disks or one retained disk.
 
 ## Required research method
 
@@ -63,7 +63,7 @@ Unless the user explicitly requests a separate experimental scenario, preserve:
    - Reject a candidate when any safety constraint is unknown or unmet.
 
 4. **Price the whole stack**
-   - Include compute, OS disk, all Mongo disks, Standard SSD operations, Load Balancer base and processed data, public IPs, alerts, and bandwidth.
+   - Include compute, OS disk, every currently live Mongo disk, Standard SSD operations, Load Balancer base and processed data, public IPs, alerts, and bandwidth.
    - Keep autoscaler capacity above one node separate from the normal baseline.
    - Exclude temporary snapshots from steady state but report their current and migration cost separately.
 

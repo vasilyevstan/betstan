@@ -1,27 +1,28 @@
+# Rollback-only; normal deployment must not apply this manifest.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: gaming-resulting-mongo-depl
+  name: gaming-gamemaster-mongo-depl
 spec:
-  serviceName: gaming-resulting-mongo-srv
+  serviceName: gaming-gamemaster-mongo-srv
   replicas: 1
   selector:
     matchLabels:
-      app: gaming-resulting-mongo
+      app: gaming-gamemaster-mongo
   template:
     metadata:
       labels:
-        app: gaming-resulting-mongo
+        app: gaming-gamemaster-mongo
     spec:
       containers:
-        - name: gaming-resulting-mongo
+        - name: gaming-gamemaster-mongo
           image: mongo
           volumeMounts:
-            - name: gaming-resulting-mongo-data
+            - name: gaming-gamemaster-mongo-data
               mountPath: /data/db
   volumeClaimTemplates:
     - metadata:
-        name: gaming-resulting-mongo-data
+        name: gaming-gamemaster-mongo-data
       spec:
         accessModes:
           - ReadWriteOnce
@@ -32,13 +33,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: gaming-resulting-mongo-srv
+  name: gaming-gamemaster-mongo-srv
 spec:
   type: ClusterIP
   selector:
-    app: gaming-resulting-mongo
+    app: gaming-gamemaster-mongo
   ports:
-    - name: gaming-resulting-mongo-port
+    - name: gaming-gamemaster-mongo-port
       protocol: TCP
       port: 27017
       targetPort: 27017

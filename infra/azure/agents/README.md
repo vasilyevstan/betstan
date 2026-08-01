@@ -2,7 +2,7 @@
 
 - `pre-commit-infra-check-stan.sh` — scans infra changes for secrets patterns, validates ingress routing, warns on public IPs and staged artifacts. Run before every `git push` on infra/workflow changes.
 - `provisioning-stan.sh` — runs full AKS provisioning flow.
-- `deploy-stan.sh` — applies Kubernetes manifests to AKS.
+- `deploy-stan.sh` — applies Kubernetes manifests only after the shared-Mongo topology guard passes.
 - `troubleshoot-stan.sh` — prints cluster/workload/ingress diagnostics.
 - `cost-ops-stan.sh` — stop/start/scale controls for cost management.
 - `qa-e2e-stan.sh` — runs Playwright browser smoke tests.
@@ -23,14 +23,15 @@
 - `deploy-validation-loop-stan.sh` — retries smoke+functional validation and captures diagnostics artifacts on failure.
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
 - `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
+- `shared-mongo-topology-guard-stan.sh` — blocks normal deployment unless the validated one-Mongo topology and eight shared URIs are live.
+- `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock.
+- `consolidate-production-mongo-stan.sh` — exact-SHA preflight, migrate, cleanup, and rollback operator for the seven-database move into auth Mongo.
+- `test-shared-mongo-consolidation-stan.sh` — validates manifests/mappings and runs a synthetic eight-database dump/restore parity test.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
 - `park-stage-stan.sh` — stops stage AKS compute while keeping the stage resource group.
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
 - `decommission-stage-rg-stan.sh` — deletes the entire stage resource group to remove stage costs.
 - `reconcile-nodepool-profile-stan.sh` — creates or validates the `Standard_B4as_v2` + Managed 64 GiB OS disk profile and reconciles autoscaler `1..3`; it refuses workload cutover and legacy pool deletion.
-- `deploy-stage-shared-db-stan.sh` — stage-only deploy with shared Mongo cutover (connection-string-only service changes).
-- `revert-stage-legacy-mongo-stan.sh` — rollback stage from shared Mongo back to per-service Mongo services.
-- `stage-soak-validation-stan.sh` — 24h-style looped stage validation (smoke + service ops + node checks).
 
 Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
 
@@ -68,7 +69,7 @@ The check:
 - warns if `artifacts/` is staged for commit;
 - warns about hard-coded public IPs in k8s manifests.
 
-Suggested execution order:
+Suggested execution order for an already validated production topology:
 1. `provisioning-stan.sh`
 2. `deploy-stan.sh`
 3. `dns-check-stan.sh`
@@ -178,6 +179,19 @@ Use this before taking rollback action in production:
 TARGET_SHA=<candidate-sha> ./infra/azure/agents/rollback-readiness-stan.sh
 ```
 
+During an interrupted shared-Mongo migration, bind readiness to the exact
+journal and private backup directory:
+
+```bash
+TARGET_SHA=<full-migration-sha> \
+MIGRATION_ID=<approved-id> \
+MIGRATION_BACKUP_DIR=<private-absolute-path> \
+./infra/azure/agents/rollback-readiness-stan.sh
+```
+
+Transition readiness also requires the database operation lock to be released.
+Then run the consolidation operator's `rollback` operation.
+
 The script outputs:
 - `rollback_readiness=GO` when safety preconditions are met;
 - `rollback_readiness=NO_GO` with concrete reasons when rollback would be risky.
@@ -207,7 +221,7 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - `production-deploy` runs only after successful `production-build` on `master` and deploys that exact SHA image set.
 - Emergency manual dispatch is limited to the central workflows, requires a full master SHA, and pauses at the reviewer-protected `production-emergency` environment.
 - Retired central and per-service workflow identities remain disabled so historical runs cannot be rerun.
-- Deploy workflow blocks when mongo PVC count is unexpectedly low, avoiding deployment against unsafe DB storage state.
+- Deploy workflow requires the validated shared-Mongo marker, one ready auth Mongo StatefulSet/PVC, no legacy Mongo StatefulSets/PVCs, and all eight exact shared URIs.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.
 - `production-build` includes `ingress-routing-guard-stan.sh` so PRs fail if prod ingress misses required host/api routes.
 
@@ -233,22 +247,59 @@ Operator guidance:
   - `service-ops.txt`, `node-logs.txt`
 - In GitHub Actions (`production-deploy`), these files are uploaded by `Upload deploy diagnostics` when the job fails.
 
-## Stage-only shared DB test flow (no production touch)
+## Shared Mongo migration flow
 
-Current status: this path is **parked/deferred**. Active topology remains per-service Mongo instances.
+Repository merge does not migrate production. The final manifests intentionally
+cannot be applied by the normal deployment workflow until the migration marker
+is validated.
 
-1. Provision stage:
-   - `JWT_KEY='<stage-jwt-secret>' ./infra/azure/agents/provision-stage-stan.sh`
-2. Deploy and migrate to shared DB in stage:
-   - `./infra/azure/agents/deploy-stage-shared-db-stan.sh`
-3. Run soak loop for 24h:
-   - `SOAK_HOURS=24 INTERVAL_SECONDS=600 ./infra/azure/agents/stage-soak-validation-stan.sh`
-4. If instability/saturation appears, rollback stage:
-   - `./infra/azure/agents/revert-stage-legacy-mongo-stan.sh`
+1. Run `consolidate-production-mongo-stan.sh preflight` from the exact approved
+   SHA.
+2. Pause writers, drain RabbitMQ, create eight verified recovery copies, and run
+   `migrate`.
+3. Validate data, metadata, all eight application mappings, APIs, and queues.
+4. Run `cleanup` with the explicit seven-volume deletion confirmation.
+5. Retain the external recovery artifacts for seven days.
 
-Branch workflow:
-- Use `.github/workflows/deploy-stage-shared-db.yml` from a non-`master` branch.
-- Production promotion remains manual and requires explicit user go-ahead.
+The rollback-only manifests are under `infra/k8s/legacy-mongo/` and are never
+part of normal `kubectl apply -f infra/k8s`.
+
+The operator requires a clean exact-SHA checkout and a private backup directory
+outside the repository:
+
+```bash
+APPROVED_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+BACKUP_DIR=<private-absolute-path> \
+./infra/azure/agents/consolidate-production-mongo-stan.sh preflight
+
+APPROVED_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+BACKUP_DIR=<private-absolute-path> \
+CONFIRM_MAINTENANCE=writers-paused \
+CONFIRM_RECOVERY_COPIES=verified-eight-recovery-copies \
+./infra/azure/agents/consolidate-production-mongo-stan.sh migrate
+
+APPROVED_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+BACKUP_DIR=<private-absolute-path> \
+CONFIRM_APPLICATION_VALIDATED=shared-mongo-application-validation-passed \
+CONFIRM_DELETE_LEGACY_MONGO=delete-seven-legacy-mongo-volumes \
+./infra/azure/agents/consolidate-production-mongo-stan.sh cleanup
+```
+
+Never put `BACKUP_DIR` inside the repository. `cleanup` is immediate after
+application validation; it is not a soak gate. Destructive operations acquire the persistent `gaming-mongo-migration-lock`
+ConfigMap through a resource-versioned compare-and-swap. If an operator process
+is killed and leaves it active, inspect the journal and workloads first, then
+release only the matching stale lock with:
+
+```bash
+APPROVED_SHA=<full-master-sha> \
+MIGRATION_ID=<approved-id> \
+CONFIRM_UNLOCK=remove-stale-migration-lock \
+./infra/azure/agents/consolidate-production-mongo-stan.sh unlock
+```
 
 ## Stage lifecycle and cost controls
 
@@ -297,7 +348,7 @@ An existing target pool must already match the requested VM size, OS disk type, 
 
 Before deleting a legacy node pool:
 
-1. Take and verify consistent snapshots of all eight Mongo PVCs.
+1. Take and verify consistent snapshots of every currently attached Mongo PVC.
 2. Roll out stateless workloads sequentially, waiting for readiness before each next rollout.
 3. Move Mongo StatefulSets one at a time so each RWO volume detaches, reattaches, and becomes healthy before the next move.
 4. Explicitly reconnect backend services after any RabbitMQ replacement, using the sequential recovery procedure above, and verify queue consumers.

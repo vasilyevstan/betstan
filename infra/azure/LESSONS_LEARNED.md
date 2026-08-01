@@ -26,7 +26,9 @@ Script: `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
 - `Standard_B2s` is too small for the full service set on a single node.
 
 ### Data-disk attachment limits constrain VM selection
-`Standard_E2ads_v5` supports only four data-disk attachments. The stable topology has eight per-service Mongo PVC disks, so that VM size cannot host the workload on one node.
+Before shared-Mongo cutover, all eight data-disk attachments are occupied. Do
+not try to attach a ninth migration disk. The supported migration expands and
+reuses the auth Mongo PVC, then removes the seven non-auth PVCs after validation.
 
 ### Do not use a 30 GiB Ephemeral OS disk for this workload
 A trial `Standard_B4ms` pool with a 30 GiB Ephemeral OS disk failed when concurrent image pulls exhausted the node OS filesystem. The node entered `DiskPressure` and evicted two pods, so the trial pool was deleted. Keep the Managed 64 GiB baseline and roll application services out sequentially.
@@ -66,12 +68,22 @@ Use domain-based checks: `curl https://www.betstan.xyz/api/event` **and** `curl 
 
 ## Database Topology
 
-### Per-service Mongo is the stable topology
-Each microservice has its own dedicated Mongo StatefulSet and ClusterIP service.  
-Consolidation to a shared Mongo instance was tested in stage, produced complications, and is **deferred**.  
-Do not promote the shared-DB path to production without a complete stage soak cycle first.
+### One retained auth Mongo hosts all logical databases
+The target topology is one `gaming-auth-mongo-depl` StatefulSet and PVC, exposed
+to applications through `gaming-shared-mongo-srv`. The eight logical database
+names remain unchanged.
 
-Stage test scripts when revisiting: `infra/azure/agents/deploy-stage-shared-db-stan.sh` and `infra/azure/agents/stage-soak-validation-stan.sh`.
+Normal deployment is blocked until
+`shared-mongo-topology-guard-stan.sh` confirms that the exact migration is
+validated, the seven legacy StatefulSets/PVCs are gone, all eight Deployments
+use the shared endpoint, and only the auth Mongo PVC remains.
+
+Use `consolidate-production-mongo-stan.sh` for preflight, migration, cleanup, or
+rollback. Cutover requires stopped writers, drained queues, verified logical and
+storage recovery copies, full database parity, and exact deletion allowlists.
+The migration and cleanup operations are separate commands so application
+validation can complete before immediate legacy-volume deletion; there is no
+soak period.
 
 ---
 
@@ -123,7 +135,8 @@ Stage can be rebuilt from scratch using `infra/azure/agents/provision-stage-stan
 
 ### Stage is isolated — never share secrets with production
 Stage uses a separate `STAGE_AZURE_CREDENTIALS` and `STAGE_RESOURCE_GROUP` secret.  
-The stage workflow (`deploy-stage-shared-db.yml`) is blocked from running on `master` (`if: github.ref_name != 'master'`).
+The retired shared-database stage workflow must not be restored or used as a
+production migration fallback.
 
 ---
 

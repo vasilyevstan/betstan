@@ -59,16 +59,17 @@ Before deployment:
 - run `pre-commit-infra-check-stan.sh`;
 - validate manifest YAML offline;
 - run `ingress-routing-guard-stan.sh`;
-- confirm at least eight Mongo PVCs exist and are bound;
+- require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
 
 During deployment:
 
+- hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
 - apply shared infrastructure without causing intermediate untagged application rollouts;
 - apply SHA-pinned application Deployments sequentially;
 - wait for each rollout before pulling the next image;
-- preserve all Mongo StatefulSets and PVCs;
+- preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation;
 - avoid concurrent image pulls that can exhaust the node OS filesystem;
 - keep production and stage secrets/resources isolated.
 
@@ -76,7 +77,7 @@ After deployment:
 
 - verify the exact merge/build/deploy SHA chain;
 - require every Deployment and StatefulSet ready;
-- require all eight Mongo PVCs bound;
+- require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
 - test `betstan.xyz` and `www.betstan.xyz`;
 - confirm API responses have the expected JSON shape, not merely HTTP 200;
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
@@ -125,9 +126,12 @@ A Running broker with missing consumers is not healthy production.
 
 ## Stage boundaries
 
-Shared-Mongo and stage workflows are deferred experiments, not production topology.
+The retained auth Mongo is the only supported final database topology.
 
-- Never promote stage/shared-Mongo behavior implicitly.
+- Never use the retired stage shared-Mongo workflow or scripts as a production fallback.
+- Never run normal deployment before the exact migration journal is validated.
+- Never force-release the database operation lock without matching its operation ID and exact SHA.
+- Migration cleanup may delete only the exact seven allowlisted legacy StatefulSets, Services, and PVCs.
 - Keep stage credentials and resources separate.
 - Do not run stage workflows on `master`.
 

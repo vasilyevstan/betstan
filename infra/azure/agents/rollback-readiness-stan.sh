@@ -23,6 +23,14 @@ AUTH_POD_SELECTOR="${AUTH_POD_SELECTOR:-app=gaming-auth}"
 AUTH_CONTAINER="${AUTH_CONTAINER:-gaming-auth}"
 AUTH_IMAGE_REPOSITORY="${AUTH_IMAGE_REPOSITORY:-stanvasilyev/gaming_auth}"
 PROVENANCE_SCRIPT="${PROVENANCE_SCRIPT:-infra/azure/agents/workflow-run-provenance-stan.sh}"
+TOPOLOGY_CONFIGMAP="${TOPOLOGY_CONFIGMAP:-gaming-mongo-topology}"
+LOCK_CONFIGMAP="${LOCK_CONFIGMAP:-gaming-mongo-migration-lock}"
+MIGRATION_ID="${MIGRATION_ID:-}"
+MIGRATION_BACKUP_DIR="${MIGRATION_BACKUP_DIR:-}"
+EXPECTED_DATABASES=(
+  gaming_auth gaming_bet gaming_backoffice gaming_event
+  gaming_gamemaster gaming_moderation gaming_resulting gaming_slip
+)
 
 failures_file="$(mktemp)"
 images_file="$(mktemp)"
@@ -41,6 +49,38 @@ add_failure() {
   printf '%s\n' "$*" >> "$failures_file"
 }
 
+checksum_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    shasum -a 256 "$file" | awk '{print $1}'
+  fi
+}
+
+validate_transition_backup_dir() {
+  if [[ "$MIGRATION_BACKUP_DIR" != /* || ! -d "$MIGRATION_BACKUP_DIR" ]]; then
+    add_failure "MIGRATION_BACKUP_DIR must be an existing absolute directory"
+    return
+  fi
+  local backup_real repo_real permissions
+  backup_real="$(cd "$MIGRATION_BACKUP_DIR" && pwd -P)"
+  repo_real="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$repo_real" &&
+    ("$backup_real" == "$repo_real" || "$backup_real" == "$repo_real/"*) ]]; then
+    add_failure "MIGRATION_BACKUP_DIR must be outside the repository"
+  fi
+  permissions="$(
+    stat -c '%a' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
+      stat -f '%Lp' "$MIGRATION_BACKUP_DIR" 2>/dev/null ||
+      true
+  )"
+  if ! [[ "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+    ((10#$permissions % 100 != 0)); then
+    add_failure "MIGRATION_BACKUP_DIR must not grant group or other permissions"
+  fi
+}
+
 for bin in gh git kubectl curl awk python3; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     add_failure "required binary missing: $bin"
@@ -52,6 +92,105 @@ if [[ -s "$failures_file" ]]; then
   echo "reasons:"
   cat "$failures_file"
   exit 1
+fi
+
+topology_error="$(mktemp)"
+add_tmp "$topology_error"
+if ! topology_state="$(
+  kubectl get configmap "$TOPOLOGY_CONFIGMAP" -n "$NAMESPACE" \
+    -o jsonpath='{.data.mode}|{.data.phase}|{.data.migration-id}|{.data.source-sha}' \
+    2>"$topology_error"
+)"; then
+  if grep -Eqi 'not[ -]?found' "$topology_error"; then
+    topology_state=""
+  else
+    add_failure "unable to read the shared-Mongo topology journal"
+    topology_state=""
+  fi
+fi
+IFS='|' read -r topology_mode topology_phase topology_migration_id topology_source_sha <<<"$topology_state"
+
+if [[ "$topology_mode" == "transition" ]]; then
+  case "$topology_phase" in
+    backing-up | preparing-target | restoring | switching | \
+    validating-applications | awaiting-cleanup | rollback-copying | rollback-data-restored)
+      ;;
+    *)
+      add_failure "unsupported shared-Mongo migration rollback phase: ${topology_phase:-missing}"
+      ;;
+  esac
+  [[ "$MIGRATION_ID" == "$topology_migration_id" && -n "$MIGRATION_ID" ]] ||
+    add_failure "MIGRATION_ID must match the active migration journal"
+  [[ "$TARGET_SHA" == "$topology_source_sha" && "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    add_failure "TARGET_SHA must equal the migration journal source SHA"
+  validate_transition_backup_dir
+
+  lock_error="$(mktemp)"
+  add_tmp "$lock_error"
+  if ! lock_state="$(
+    kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" \
+      -o jsonpath='{.data.state}' 2>"$lock_error"
+  )"; then
+    if grep -Eqi 'not[ -]?found' "$lock_error"; then
+      lock_state=""
+    else
+      add_failure "unable to read the database operation lock"
+      lock_state=""
+    fi
+  fi
+  [[ "$lock_state" == "released" ]] ||
+    add_failure "database operation lock must be released before rollback"
+
+  case "$topology_phase" in
+    validating-applications | awaiting-cleanup | rollback-copying | rollback-data-restored)
+      if [[ "$MIGRATION_BACKUP_DIR" == /* && -d "$MIGRATION_BACKUP_DIR" ]]; then
+        migration_manifest="$MIGRATION_BACKUP_DIR/$MIGRATION_ID-manifest.tsv"
+        if [[ ! -f "$migration_manifest" ||
+          "$(wc -l <"$migration_manifest" | tr -d ' ')" != "8" ]]; then
+          add_failure "migration backup manifest must contain eight databases"
+        else
+          for expected_database in "${EXPECTED_DATABASES[@]}"; do
+            if [[ "$(awk -F '\t' -v database="$expected_database" \
+              '$1 == database { count++ } END { print count + 0 }' \
+              "$migration_manifest")" != "1" ]]; then
+              add_failure "migration backup manifest must contain exactly one $expected_database entry"
+            fi
+          done
+          while IFS=$'\t' read -r database archive_name expected_checksum; do
+            if ! [[ "$database" =~ ^gaming_[a-z]+$ ]] ||
+              [[ "$archive_name" != "$MIGRATION_ID-$database.archive.gz" ]]; then
+              add_failure "invalid migration backup mapping"
+              continue
+            fi
+            archive="$MIGRATION_BACKUP_DIR/$archive_name"
+            if [[ ! -s "$archive" ]]; then
+              add_failure "migration backup archive is missing for $database"
+            elif [[ "$(checksum_file "$archive")" != "$expected_checksum" ]]; then
+              add_failure "migration backup checksum mismatch for $database"
+            fi
+          done <"$migration_manifest"
+        fi
+      fi
+      ;;
+  esac
+
+  if [[ -s "$failures_file" ]]; then
+    echo "rollback_readiness=NO_GO"
+    echo "reasons:"
+    cat "$failures_file"
+    exit 1
+  fi
+  echo "rollback_readiness=GO mode=migration-transition phase=$topology_phase"
+  echo "rollback_operator=infra/azure/agents/consolidate-production-mongo-stan.sh"
+  exit 0
+fi
+
+if [[ "$topology_mode" == "shared" ]]; then
+  if ! NAMESPACE="$NAMESPACE" ./infra/azure/agents/shared-mongo-topology-guard-stan.sh; then
+    add_failure "shared Mongo topology guard failed"
+  fi
+elif [[ -n "$topology_mode" && "$topology_mode" != "legacy" ]]; then
+  add_failure "unsupported shared-Mongo topology mode: $topology_mode"
 fi
 
 target_sha_valid=true
