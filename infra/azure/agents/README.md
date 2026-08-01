@@ -12,7 +12,7 @@
 - `branch-policy-guard-stan.sh` — enforces feature/hotfix-to-dev and only-dev-to-master PR pairs.
 - `test-branch-policy-guard-stan.sh` — tests accepted and rejected branch pairs.
 - `test-workflow-run-provenance-stan.sh` — rejects wrong-SHA artifacts and untrusted build/deploy workflow runs.
-- `production-workflow-inventory-stan.sh` — derives and validates the exact Azure-only or complete governed Azure-plus-OCI production workflow set matched by a promotion diff.
+- `production-workflow-inventory-stan.sh` — derives and validates the exact governed Azure-plus-OCI production workflow set matched by a promotion diff.
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.

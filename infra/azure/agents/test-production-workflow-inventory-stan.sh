@@ -174,7 +174,7 @@ azure_set="production-build,production-deploy"
 full_set="oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
 
 reset_fixtures
-assert_pass "$azure_set"
+assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 
 reset_fixtures
 write_complete_oci_set
@@ -183,7 +183,7 @@ assert_pass "$full_set"
 reset_fixtures
 write_complete_oci_set
 rm "$tmp_dir/oci-migrate.yml"
-assert_fail "partial OCI set" "expected production-build,production-deploy or"
+assert_fail "partial OCI set" "expected $full_set; found"
 
 reset_fixtures
 write_complete_oci_set

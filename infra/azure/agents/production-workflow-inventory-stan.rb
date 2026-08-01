@@ -11,8 +11,7 @@ OCI_WORKFLOWS = %w[
   oci-production-build
   oci-production-deploy
 ].freeze
-CURRENT_SET = AZURE_WORKFLOWS.sort.freeze
-FUTURE_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
+REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
   "oci-infrastructure" => "oci-infrastructure",
   "oci-migrate" => "oci-migration",
@@ -268,17 +267,15 @@ names = Dir.glob(File.join(directory, "*.{yml,yaml}")).each_with_object([]) do |
 end
 
 names = names.sort.uniq
-unless names == CURRENT_SET || names == FUTURE_SET
+unless names == REQUIRED_SET
   fail_inventory(
-    "expected #{CURRENT_SET.join(",")} or #{FUTURE_SET.join(",")}; found #{names.join(",")}"
+    "expected #{REQUIRED_SET.join(",")}; found #{names.join(",")}"
   )
 end
 
-if names == FUTURE_SET
-  OCI_WORKFLOWS.each do |name|
-    file, document, content = documents.fetch(name)
-    validate_oci_workflow!(name, file, document, content)
-  end
+OCI_WORKFLOWS.each do |name|
+  file, document, content = documents.fetch(name)
+  validate_oci_workflow!(name, file, document, content)
 end
 
 puts names
