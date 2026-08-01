@@ -1,0 +1,207 @@
+name: oci-infrastructure
+run-name: oci-infrastructure ${{ inputs.approved_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA approved for OCI infrastructure reconciliation
+        required: true
+        type: string
+      confirmation:
+        description: Type PROVISION OCI ZERO COST
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    environment:
+      name: oci-infrastructure
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_COMPARTMENT_NAME: ${{ vars.OCI_COMPARTMENT_NAME }}
+      OCI_AVAILABILITY_DOMAIN: ${{ vars.OCI_AVAILABILITY_DOMAIN }}
+      OCI_CLUSTER_NAME: ${{ vars.OCI_CLUSTER_NAME }}
+      OCI_NODE_POOL_NAME: ${{ vars.OCI_NODE_POOL_NAME }}
+      OCI_VCN_NAME: ${{ vars.OCI_VCN_NAME }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_KUBERNETES_VERSION: ${{ vars.OCI_KUBERNETES_VERSION }}
+      OCI_NODE_IMAGE_OCID: ${{ vars.OCI_NODE_IMAGE_OCID }}
+      OCI_NODE_SHAPE: VM.Standard.A1.Flex
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
+      OCI_WORKER_SUBNET_CIDR: ${{ vars.OCI_WORKER_SUBNET_CIDR || '10.42.16.0/20' }}
+      OCI_LB_SUBNET_CIDR: ${{ vars.OCI_LB_SUBNET_CIDR || '10.42.32.0/24' }}
+      OCI_PODS_CIDR: ${{ vars.OCI_PODS_CIDR || '10.244.0.0/16' }}
+      OCI_SERVICES_CIDR: ${{ vars.OCI_SERVICES_CIDR || '10.96.0.0/16' }}
+      OCI_LB_NAME: ${{ vars.OCI_LB_NAME || 'betstan-oci-ingress' }}
+      OCI_A1_OCPUS: ${{ vars.OCI_A1_OCPUS }}
+      OCI_A1_MEMORY_GB: ${{ vars.OCI_A1_MEMORY_GB }}
+      OCI_BOOT_VOLUME_GB: ${{ vars.OCI_BOOT_VOLUME_GB }}
+      OCI_MONGO_VOLUME_GB: ${{ vars.OCI_MONGO_VOLUME_GB }}
+      OCI_LB_MIN_MBPS: ${{ vars.OCI_LB_MIN_MBPS }}
+      OCI_LB_MAX_MBPS: ${{ vars.OCI_LB_MAX_MBPS }}
+      OCI_EXPECTED_MONTHLY_COST: ${{ vars.OCI_EXPECTED_MONTHLY_COST }}
+      OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_INGRESS_NGINX_CHART_VERSION: ${{ vars.OCI_INGRESS_NGINX_CHART_VERSION || '4.15.1' }}
+      OCI_INGRESS_NGINX_CHART_SHA256: ${{ vars.OCI_INGRESS_NGINX_CHART_SHA256 || '3eff0bd18151d6e6b1c441463410571443dda1ac78292cb189346628de784f0c' }}
+      OCI_CERT_MANAGER_CHART_VERSION: ${{ vars.OCI_CERT_MANAGER_CHART_VERSION || 'v1.21.1' }}
+      OCI_CERT_MANAGER_CHART_SHA256: ${{ vars.OCI_CERT_MANAGER_CHART_SHA256 || 'c27101f3f3e2349fb4a9e704316105bf7b52ad73b8c8257d3498ef7f2f6a4adc' }}
+      OCI_CERT_MANAGER_CONTROLLER_DIGEST: ${{ vars.OCI_CERT_MANAGER_CONTROLLER_DIGEST || 'sha256:416a2d76870d996460e62bd7f521bf14fa017be9e3e904aab92163a331fcb61a' }}
+      OCI_CERT_MANAGER_WEBHOOK_DIGEST: ${{ vars.OCI_CERT_MANAGER_WEBHOOK_DIGEST || 'sha256:d8b3961b51c8c7320633f8208dc46bf88aa13804d0f7cbe48a096b2c523cee42' }}
+      OCI_CERT_MANAGER_CAINJECTOR_DIGEST: ${{ vars.OCI_CERT_MANAGER_CAINJECTOR_DIGEST || 'sha256:ccf6b919ec0500745a47a910118f834f9636d0aac1ff221245cd2557ed8c7c98' }}
+      OCI_CERT_MANAGER_ACMESOLVER_DIGEST: ${{ vars.OCI_CERT_MANAGER_ACMESOLVER_DIGEST || 'sha256:dbc7cc1354f603918e7c5af7f55a0a620537394452c93a565bde75c6f48e8837' }}
+      OCI_CERT_MANAGER_STARTUP_DIGEST: ${{ vars.OCI_CERT_MANAGER_STARTUP_DIGEST || 'sha256:d8ab6416e6e7303a86fa0a8daa82c94a8001f21c9d78eb2e7db20534e5d07ae8' }}
+      PROVENANCE_DIR: artifacts/oci-infrastructure
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout approved master commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact current master dispatch
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$CONFIRMATION" = "PROVISION OCI ZERO COST" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          mkdir -p "$HOME/.kube"
+          chmod 700 "$HOME" "$HOME/.kube"
+
+      - name: Install OCI CLI with read-only identity call
+        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          command: iam region-subscription list
+          query: 'data[?"is-home-region" == `true`]."region-name"'
+          silent: true
+
+      - name: Zero-cost preflight and cloud reconciliation
+        id: cloud
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/preflight.sh
+          ./infra/oci/scripts/provision.sh cloud
+          source artifacts/oci-infrastructure/provenance.env
+          echo "::add-mask::$cluster_ocid"
+          echo "::add-mask::$endpoint_nsg_ocid"
+          printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+          printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile expired GitHub runner rules
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.cloud.outputs.endpoint_nsg_ocid }}
+        run: ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+
+      - name: Authorize current runner IPv4
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.cloud.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/oci-infrastructure/runner-rule.env
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact cluster OCID
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.cloud.outputs.cluster_ocid }}
+
+      - name: Install pinned cluster add-ons and verify 10 Mbps load balancer
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        run: ./infra/oci/scripts/provision.sh addons
+
+      - name: Upload exact infrastructure provenance and sanitized inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-infrastructure-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-infrastructure/provenance.env
+            artifacts/oci-infrastructure/inventory.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Revoke exact runner rule
+        if: always()
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/oci-infrastructure/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$HOME"

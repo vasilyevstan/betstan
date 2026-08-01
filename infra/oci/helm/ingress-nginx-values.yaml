@@ -1,0 +1,35 @@
+controller:
+  replicaCount: 1
+  image:
+    tag: v1.12.1
+    digest: sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b
+  admissionWebhooks:
+    enabled: true
+    patch:
+      image:
+        tag: v1.5.2
+        digest: sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea
+      nodeSelector:
+        kubernetes.io/arch: arm64
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
+    annotations:
+      oci.oraclecloud.com/load-balancer-type: "lb"
+      oci.oraclecloud.com/oci-network-security-groups: "__OCI_LB_NSG_OCID__"
+      service.beta.kubernetes.io/oci-load-balancer-name: "__OCI_LB_NAME__"
+      service.beta.kubernetes.io/oci-load-balancer-security-list-management-mode: "None"
+      service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "10"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+  nodeSelector:
+    kubernetes.io/arch: arm64
+defaultBackend:
+  enabled: false

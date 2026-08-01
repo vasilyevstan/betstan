@@ -1,0 +1,303 @@
+name: oci-production-deploy
+run-name: oci-deploy ${{ inputs.approved_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA approved for OCI deployment
+        required: true
+        type: string
+      build_run_id:
+        description: Successful first-attempt oci-production-build run ID
+        required: true
+        type: string
+      infrastructure_run_id:
+        description: Successful first-attempt oci-infrastructure run ID
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY OCI EXACT SHA
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_AVAILABILITY_DOMAIN: ${{ vars.OCI_AVAILABILITY_DOMAIN }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
+      OCI_BOOT_VOLUME_GB: ${{ vars.OCI_BOOT_VOLUME_GB }}
+      OCI_MONGO_VOLUME_GB: ${{ vars.OCI_MONGO_VOLUME_GB }}
+      OCI_A1_OCPUS: ${{ vars.OCI_A1_OCPUS }}
+      OCI_A1_MEMORY_GB: ${{ vars.OCI_A1_MEMORY_GB }}
+      OCI_LB_MIN_MBPS: ${{ vars.OCI_LB_MIN_MBPS }}
+      OCI_LB_MAX_MBPS: ${{ vars.OCI_LB_MAX_MBPS }}
+      OCI_EXPECTED_MONTHLY_COST: ${{ vars.OCI_EXPECTED_MONTHLY_COST }}
+      OCI_CERT_EMAIL: ${{ vars.OCI_CERT_EMAIL }}
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_CPU_MAX_PERCENT: "90"
+      OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
+      OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout approved master commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact SHA and trusted upstream runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$CONFIRMATION" = "DEPLOY OCI EXACT SHA" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+
+          build_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id')"
+          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
+            gh api "repos/$REPOSITORY/actions/runs/$BUILD_RUN_ID/attempts/1" \
+              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          )"
+          [ "$workflow_id" = "$build_workflow_id" ]
+          [ "$workflow_path" = ".github/workflows/oci-production-build.yml" ]
+          [ "$event" = "workflow_run" ]
+          [ "$head_sha" = "$SOURCE_SHA" ]
+          [ "$head_branch" = "master" ]
+          [ "$repository" = "$REPOSITORY" ]
+          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+
+          infra_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-infrastructure.yml" --jq '.id')"
+          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
+            gh api "repos/$REPOSITORY/actions/runs/$INFRASTRUCTURE_RUN_ID/attempts/1" \
+              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          )"
+          [ "$workflow_id" = "$infra_workflow_id" ]
+          [ "$workflow_path" = ".github/workflows/oci-infrastructure.yml" ]
+          [ "$event" = "workflow_dispatch" ]
+          [ "$head_sha" = "$SOURCE_SHA" ]
+          [ "$head_branch" = "master" ]
+          [ "$repository" = "$REPOSITORY" ]
+          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+          mkdir -p "$HOME/.kube" artifacts/build artifacts/infrastructure artifacts/oci-deploy
+          chmod 700 "$HOME" "$HOME/.kube"
+
+      - name: Download exact OCI image provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Download exact OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Verify immutable image and infrastructure provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          PROVENANCE_DIR=artifacts/build \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/oci-deploy/images.tsv \
+          VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          echo "::add-mask::$cluster_ocid"
+          echo "::add-mask::$endpoint_nsg_ocid"
+          printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+          printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
+
+      - name: Install OCI CLI with read-only identity call
+        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          command: ce cluster get --cluster-id ${{ steps.provenance.outputs.cluster_ocid }}
+          query: 'data.{type:type,state:"lifecycle-state"}'
+          silent: true
+
+      - name: Reconcile expired and authorize current runner IPv4
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/oci-deploy/runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact cluster OCID
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Install browser validation dependencies
+        run: |
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Deploy immutable images sequentially
+        id: apply
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_JWT_KEY: ${{ secrets.OCI_JWT_KEY }}
+          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
+          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
+          IMAGE_PROVENANCE_FILE: artifacts/oci-deploy/images.tsv
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          OUTPUT_DIR: artifacts/oci-deploy
+        run: ./infra/oci/scripts/deploy.sh
+
+      - name: Run complete OCI deploy validation loop
+        id: health
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          IMAGE_PROVENANCE_FILE: artifacts/oci-deploy/images.tsv
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/oci-deploy/rabbitmq-baseline.txt
+          OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OUTPUT_DIR: artifacts/oci-deploy-validation
+        run: ./infra/oci/agents/deploy-validation-loop-stan.sh
+
+      - name: Capture sanitized deployment diagnostics
+        if: always() && (steps.apply.outcome == 'failure' || steps.health.outcome == 'failure')
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+        run: |
+          mkdir -p artifacts/oci-deploy-validation/final
+          ./infra/oci/agents/service-ops-stan.sh \
+            > artifacts/oci-deploy-validation/final/service-ops.txt 2>&1 || true
+          ./infra/oci/agents/node-logs-stan.sh \
+            > artifacts/oci-deploy-validation/final/node-logs.txt 2>&1 || true
+
+      - name: Upload sanitized diagnostics on failure
+        if: always() && (steps.apply.outcome == 'failure' || steps.health.outcome == 'failure')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-deploy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-deploy-validation
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload exact deployment provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-deploy/provenance.txt
+            artifacts/oci-deploy/images.tsv
+            artifacts/oci-deploy/rabbitmq-baseline.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Revoke exact runner rule
+        if: always()
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/oci-deploy/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: |
+          rm -rf "$HOME"
+          rm -f artifacts/oci-deploy/rendered.yaml

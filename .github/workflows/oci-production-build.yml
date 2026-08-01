@@ -1,0 +1,131 @@
+name: oci-production-build
+run-name: oci-build ${{ github.event.workflow_run.head_sha }}
+
+on:
+  workflow_run:
+    workflows: ["production-build"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-build-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.run_attempt == 1 &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: oci-build
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+
+    steps:
+      - name: Checkout exact upstream source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Verify trusted production-build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "${{ github.event.workflow_run.head_repository.full_name }}" = "$REPOSITORY" ]
+          trusted_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/production-build.yml" --jq '.id')"
+          read -r workflow_id workflow_path event head_sha head_branch head_repository status conclusion run_attempt <<<"$(
+            gh api "repos/$REPOSITORY/actions/runs/$UPSTREAM_RUN_ID/attempts/1" \
+              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          )"
+          [ "$workflow_id" = "$trusted_workflow_id" ]
+          [ "$workflow_path" = ".github/workflows/production-build.yml" ]
+          [ "$event" = "push" ]
+          [ "$head_sha" = "$SOURCE_SHA" ]
+          [ "$head_branch" = "master" ]
+          [ "$head_repository" = "$REPOSITORY" ]
+          [ "$status" = "completed" ]
+          [ "$conclusion" = "success" ]
+          [ "$run_attempt" = "1" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ] || {
+            echo "Refusing a stale OCI build that is no longer current master" >&2
+            exit 1
+          }
+
+      - name: Set up QEMU for ARM64 verification
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build and push exact ARM64 OCI images
+        env:
+          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
+          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
+          OUTPUT_DIR: artifacts/oci-image-provenance
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$SOURCE_SHA" PLATFORM=linux/arm64 PUSH_IMAGES=1 \
+            ./infra/oci/scripts/build-images.sh
+
+      - name: Verify remote digests and boot emitted JavaScript
+        env:
+          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
+          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$OCI_REGISTRY_AUTH_TOKEN" |
+            docker login "$OCI_REGISTRY_HOST" \
+              --username "$OCI_REGISTRY_USERNAME" --password-stdin >/dev/null
+          PROVENANCE_DIR=artifacts/oci-image-provenance \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$GITHUB_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/oci-image-provenance/images.tsv \
+          VERIFY_REMOTE=1 BOOT_IMAGES=1 \
+            ./infra/oci/scripts/verify-images.sh
+
+      - name: Record exact build chain
+        run: |
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "upstream_workflow=production-build" \
+            "upstream_run_id=$UPSTREAM_RUN_ID" \
+            "upstream_run_attempt=1" \
+            "build_run_id=$GITHUB_RUN_ID" \
+            "build_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "platform=linux/arm64" \
+            > artifacts/oci-image-provenance/build-chain.txt
+
+      - name: Upload immutable OCI image provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-image-provenance-${{ env.SOURCE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-image-provenance
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove registry session
+        if: always()
+        run: docker logout "$OCI_REGISTRY_HOST" >/dev/null 2>&1 || true

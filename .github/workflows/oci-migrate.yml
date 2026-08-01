@@ -1,0 +1,344 @@
+name: oci-migrate
+run-name: oci-migrate ${{ inputs.approved_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA approved for one-time Azure-to-OCI copy
+        required: true
+        type: string
+      deploy_run_id:
+        description: Successful first-attempt oci-production-deploy run ID
+        required: true
+        type: string
+      infrastructure_run_id:
+        description: Successful first-attempt oci-infrastructure run ID
+        required: true
+        type: string
+      confirmation:
+        description: Type MIGRATE AZURE DATA TO OCI
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: oci-migration
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_AVAILABILITY_DOMAIN: ${{ vars.OCI_AVAILABILITY_DOMAIN }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
+      OCI_BOOT_VOLUME_GB: ${{ vars.OCI_BOOT_VOLUME_GB }}
+      OCI_MONGO_VOLUME_GB: ${{ vars.OCI_MONGO_VOLUME_GB }}
+      OCI_A1_OCPUS: ${{ vars.OCI_A1_OCPUS }}
+      OCI_A1_MEMORY_GB: ${{ vars.OCI_A1_MEMORY_GB }}
+      OCI_LB_MIN_MBPS: ${{ vars.OCI_LB_MIN_MBPS }}
+      OCI_LB_MAX_MBPS: ${{ vars.OCI_LB_MAX_MBPS }}
+      OCI_EXPECTED_MONTHLY_COST: ${{ vars.OCI_EXPECTED_MONTHLY_COST }}
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_CPU_MAX_PERCENT: "90"
+      OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
+      OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+      OCI_MIGRATION_AGE_RECIPIENT: ${{ vars.OCI_MIGRATION_AGE_RECIPIENT }}
+      AZURE_RESOURCE_GROUP: ${{ vars.OCI_MIGRATION_AZURE_RESOURCE_GROUP }}
+      AZURE_CLUSTER_NAME: ${{ vars.OCI_MIGRATION_AZURE_CLUSTER_NAME }}
+      AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 }}
+      AZURE_EXPECTED_CLUSTER_SERVER_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_SERVER_SHA256 }}
+      AZURE_WATCHDOG_KUBECTL_IMAGE: ${{ vars.AZURE_WATCHDOG_KUBECTL_IMAGE }}
+
+    steps:
+      - name: Initialize isolated cloud paths
+        run: |
+          {
+            echo "AZURE_CONFIG_DIR=$RUNNER_TEMP/azure-home/.azure"
+            echo "AZURE_KUBECONFIG=$RUNNER_TEMP/azure-home/kubeconfig"
+            echo "OCI_KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          mkdir -p \
+            "$RUNNER_TEMP/azure-home/.azure" \
+            "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 \
+            "$RUNNER_TEMP/azure-home" \
+            "$RUNNER_TEMP/azure-home/.azure" \
+            "$RUNNER_TEMP/oci-home" \
+            "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout approved master commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact SHA and trusted deploy/infrastructure runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$CONFIRMATION" = "MIGRATE AZURE DATA TO OCI" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+
+          deploy_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-deploy.yml" --jq '.id')"
+          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
+            gh api "repos/$REPOSITORY/actions/runs/$DEPLOY_RUN_ID/attempts/1" \
+              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          )"
+          [ "$workflow_id" = "$deploy_workflow_id" ]
+          [ "$workflow_path" = ".github/workflows/oci-production-deploy.yml" ]
+          [ "$event" = "workflow_dispatch" ]
+          [ "$head_sha" = "$SOURCE_SHA" ] && [ "$head_branch" = "master" ]
+          [ "$repository" = "$REPOSITORY" ]
+          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+
+          infra_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-infrastructure.yml" --jq '.id')"
+          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
+            gh api "repos/$REPOSITORY/actions/runs/$INFRASTRUCTURE_RUN_ID/attempts/1" \
+              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          )"
+          [ "$workflow_id" = "$infra_workflow_id" ]
+          [ "$workflow_path" = ".github/workflows/oci-infrastructure.yml" ]
+          [ "$event" = "workflow_dispatch" ]
+          [ "$head_sha" = "$SOURCE_SHA" ] && [ "$head_branch" = "master" ]
+          [ "$repository" = "$REPOSITORY" ]
+          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+          mkdir -p artifacts/deploy artifacts/infrastructure artifacts/oci-migration
+          mkdir -p "$(dirname "$AZURE_KUBECONFIG")" "$(dirname "$OCI_KUBECONFIG")"
+          chmod 700 "$(dirname "$AZURE_KUBECONFIG")" "$(dirname "$OCI_KUBECONFIG")"
+
+      - name: Download exact deployment provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-deploy-provenance-${{ inputs.deploy_run_id }}-1
+          path: artifacts/deploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.deploy_run_id }}
+
+      - name: Download exact infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Verify downloaded provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          grep -Fx "source_sha=$SOURCE_SHA" artifacts/deploy/provenance.txt
+          grep -Fx "deployment_run_id=$DEPLOY_RUN_ID" artifacts/deploy/provenance.txt
+          grep -Fx "deployment_run_attempt=1" artifacts/deploy/provenance.txt
+          expected_images_hash="$(sed -n 's/^image_provenance_sha256=//p' artifacts/deploy/provenance.txt)"
+          actual_images_hash="$(sha256sum artifacts/deploy/images.tsv | awk '{print $1}')"
+          [ "$actual_images_hash" = "$expected_images_hash" ]
+          expected_queue_hash="$(sed -n 's/^rabbitmq_baseline_sha256=//p' artifacts/deploy/provenance.txt)"
+          actual_queue_hash="$(sha256sum artifacts/deploy/rabbitmq-baseline.txt | awk '{print $1}')"
+          [ "$actual_queue_hash" = "$expected_queue_hash" ]
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          grep -Fx "cluster_fingerprint=$cluster_fingerprint" artifacts/deploy/provenance.txt
+          echo "::add-mask::$cluster_ocid"
+          echo "::add-mask::$endpoint_nsg_ocid"
+          printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+          printf 'cluster_fingerprint=%s\n' "$cluster_fingerprint" >> "$GITHUB_OUTPUT"
+          printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
+
+      - name: Install age
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends age
+
+      - name: Azure login for migration source only
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        with:
+          creds: ${{ secrets.OCI_MIGRATION_AZURE_CREDENTIALS }}
+
+      - name: Configure isolated Azure kubeconfig
+        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+          KUBECONFIG: ${{ env.AZURE_KUBECONFIG }}
+        with:
+          resource-group: ${{ env.AZURE_RESOURCE_GROUP }}
+          cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
+          admin: false
+
+      - name: Verify Azure cluster fingerprint
+        id: azure
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        run: |
+          set -euo pipefail
+          resource_id="$(az aks show --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_CLUSTER_NAME" --query id -o tsv)"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          printf 'resource_id_hash=%s\n' "$actual_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Install OCI CLI with read-only cluster call
+        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          command: ce cluster get --cluster-id ${{ steps.provenance.outputs.cluster_ocid }}
+          query: 'data.{type:type,state:"lifecycle-state"}'
+          silent: true
+
+      - name: Reconcile expired and authorize current runner IPv4
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/oci-migration/runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure isolated OCI kubeconfig
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Stream encrypted databases and restore exact signatures
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.cluster_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.cluster_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure.outputs.resource_id_hash }}
+          OCI_MIGRATION_AGE_IDENTITY: ${{ secrets.OCI_MIGRATION_AGE_IDENTITY }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ runner.temp }}/oci-migration-ciphertext
+          JOURNAL_FILE: artifacts/oci-migration/journal.tsv
+        run: ./infra/oci/scripts/migrate-from-azure.sh
+
+      - name: Install browser validation dependencies
+        run: |
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Rerun complete OCI health after migration
+        id: health
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          IMAGE_PROVENANCE_FILE: artifacts/deploy/images.tsv
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OUTPUT_DIR: artifacts/oci-migration/validation
+        run: ./infra/oci/agents/deploy-validation-loop-stan.sh
+
+      - name: Upload sanitized migration journal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-migration-journal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-migration/journal.tsv
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload sanitized health diagnostics on failure
+        if: always() && steps.health.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-migration-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-migration/validation
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Revoke exact OCI runner rule
+        if: always()
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/oci-migration/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Remove cloud client state and ciphertext
+        if: always()
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        run: |
+          az logout >/dev/null 2>&1 || true
+          rm -rf \
+            "${{ runner.temp }}/azure-home" \
+            "${{ runner.temp }}/oci-home" \
+            "${{ runner.temp }}/oci-migration-ciphertext"

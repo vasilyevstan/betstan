@@ -1,0 +1,145 @@
+{
+  "context": {
+    "cluster_fingerprint": "fixture-cluster",
+    "expected_cluster_fingerprint": "fixture-cluster",
+    "compartment_fingerprint": "fixture-compartment",
+    "expected_compartment_fingerprint": "fixture-compartment",
+    "namespace": "betstan-oci",
+    "expected_namespace": "betstan-oci",
+    "kube_provenance": true
+  },
+  "thresholds": {
+    "memory_percent": 70,
+    "disk_percent": 70,
+    "cpu_percent": 90
+  },
+  "node": {
+    "count": 1,
+    "ready": true,
+    "architecture": "arm64",
+    "instance_type": "VM.Standard.A1.Flex",
+    "memory_pressure": false,
+    "disk_pressure": false,
+    "pid_pressure": false,
+    "network_unavailable": false,
+    "memory_percent": 55,
+    "disk_percent": 45,
+    "cpu_percent": 40
+  },
+  "workloads": [
+    {"kind": "Deployment", "name": "gaming-auth-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-bet-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-backoffice-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-client-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-event-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-gamemaster-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-moderation-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-resulting-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-slip-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-rabbitmq-depl", "desired": 1, "ready": 1},
+    {"kind": "StatefulSet", "name": "gaming-auth-mongo-depl", "desired": 1, "ready": 1}
+  ],
+  "platform_workloads": [
+    {
+      "identity": "ingress-nginx/ingress-nginx-controller",
+      "desired": 1,
+      "ready": 1,
+      "architecture": "arm64",
+      "image": "registry.k8s.io/ingress-nginx/controller:v1.15.1@sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1"
+    },
+    {
+      "identity": "cert-manager/cert-manager",
+      "desired": 1,
+      "ready": 1,
+      "architecture": "arm64",
+      "image": "quay.io/jetstack/cert-manager-controller:v1.21.1@sha256:416a2d76870d996460e62bd7f521bf14fa017be9e3e904aab92163a331fcb61a"
+    },
+    {
+      "identity": "cert-manager/cert-manager-webhook",
+      "desired": 1,
+      "ready": 1,
+      "architecture": "arm64",
+      "image": "quay.io/jetstack/cert-manager-webhook:v1.21.1@sha256:d8b3961b51c8c7320633f8208dc46bf88aa13804d0f7cbe48a096b2c523cee42"
+    },
+    {
+      "identity": "cert-manager/cert-manager-cainjector",
+      "desired": 1,
+      "ready": 1,
+      "architecture": "arm64",
+      "image": "quay.io/jetstack/cert-manager-cainjector:v1.21.1@sha256:ccf6b919ec0500745a47a910118f834f9636d0aac1ff221245cd2557ed8c7c98"
+    }
+  ],
+  "pods": [
+    {"name": "auth", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "bet", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "backoffice", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "client", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "event", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "gamemaster", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "moderation", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "resulting", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "slip", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "rabbitmq", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "mongo", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""}
+  ],
+  "mongo": {
+    "statefulset_count": 1,
+    "pvc_count": 1,
+    "pvc_bound": true,
+    "pvc_gib": 50,
+    "logical_databases": [
+      "gaming_auth",
+      "gaming_bet",
+      "gaming_backoffice",
+      "gaming_event",
+      "gaming_gamemaster",
+      "gaming_moderation",
+      "gaming_resulting",
+      "gaming_slip"
+    ]
+  },
+  "services": [
+    {"name": "gaming-auth-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-bet-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-backoffice-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-client-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-event-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-gamemaster-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-moderation-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-resulting-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-slip-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-rabbitmq-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-auth-mongo-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true}
+  ],
+  "rabbitmq": {
+    "queue_count": 17,
+    "baseline_match": true,
+    "all_consumers": true,
+    "backlog": 0
+  },
+  "ingress": {
+    "load_balancer_service_count": 1,
+    "ipv4_match": true,
+    "certificate_ready": true,
+    "https_trusted": true,
+    "http_redirect": true
+  },
+  "application": {
+    "homepage_marker": true,
+    "api_json": true,
+    "e2e": true
+  },
+  "images": {
+    "all_immutable": true,
+    "all_digest_match": true
+  },
+  "inventory": {
+    "expected_monthly_cost": 0,
+    "unexpected_billable": false,
+    "lb_type": "lb",
+    "lb_shape": "flexible",
+    "lb_min_mbps": 10,
+    "lb_max_mbps": 10
+  }
+}
