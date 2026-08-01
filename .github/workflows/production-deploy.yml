@@ -200,7 +200,12 @@ jobs:
           done
 
           kubectl apply -f infra/k8s-prod/ingress-srv.yaml
-          kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml
+          kubectl delete \
+            ingress/gaming-ingress-service-nip \
+            certificate/betstan-nip-tls \
+            secret/betstan-nip-tls \
+            --namespace default \
+            --ignore-not-found
 
       - name: Confirm exact deployed images and readiness
         run: |

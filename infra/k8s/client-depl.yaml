@@ -17,25 +17,42 @@ spec:
       labels:
         app: gaming-client
     spec:
+      securityContext:
+        fsGroup: 101
+        runAsGroup: 101
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: gaming-client
           image: stanvasilyev/gaming_client
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
           readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
             initialDelaySeconds: 5
             periodSeconds: 5
-            tcpSocket:
-              port: 3000
           livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
             initialDelaySeconds: 30
             periodSeconds: 30
-            tcpSocket:
-              port: 3000
-          env:
-            - name: JWT_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: jwt-secret
-                  key: JWT_KEY
+          volumeMounts:
+            - name: nginx-tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
 ---
 apiVersion: v1
 kind: Service

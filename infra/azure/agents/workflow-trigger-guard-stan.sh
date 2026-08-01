@@ -93,6 +93,10 @@ require_literal "$deploy_workflow" 'deploy-validation-diagnostics-${{ github.run
 require_literal "$deploy_workflow" "APP_E2E_BASE_URL:" "explicit browser validation target"
 require_literal "$deploy_workflow" "https://betstan.xyz" "public HTTPS browser validation target"
 reject_literal "$deploy_workflow" "APP_E2E_BASE_URL: \${{ vars.APP_E2E_BASE_URL || '' }}" "empty browser validation fallback"
+require_literal "$deploy_workflow" "ingress/gaming-ingress-service-nip" "legacy ingress cleanup"
+require_literal "$deploy_workflow" "certificate/betstan-nip-tls" "legacy certificate cleanup"
+require_literal "$deploy_workflow" "secret/betstan-nip-tls" "legacy TLS secret cleanup"
+reject_literal "$deploy_workflow" "kubectl apply -f infra/k8s-prod/ingress-srv-nip.yaml" "legacy public ingress application"
 
 require_literal "$branch_workflow" "pull_request_target:" "trusted PR metadata event"
 require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted quality completion event"
