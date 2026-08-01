@@ -41,10 +41,7 @@ nat_gateways="$(oci_normalize_list_json "$nat_gateways")"
 repositories="$(oci_normalize_list_json "$repositories" items)"
 buckets="$(oci_normalize_list_json "$buckets")"
 expected_repositories="$(
-  jq -cn --arg prefix "$OCI_IMAGE_PREFIX" '[
-    "auth", "bet", "backoffice", "client", "event", "gamemaster",
-    "moderation", "resulting", "slip"
-  ] | map($prefix + "_" + .)'
+  jq -cn --arg prefix "$OCI_IMAGE_PREFIX" '[$prefix + "_images"]'
 )"
 
 inventory="$(
@@ -176,6 +173,7 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
     .registry_layers_size_bytes <= $registry_max and
     ([.registry_repositories[].name] | sort) ==
       (.expected_registry_repositories | sort) and
+    ([.registry_repositories[] | select(.image_count != 9)] | length) == 0 and
     ([.registry_repositories[] | select(
       .public != false or (.immutable != true and .immutable != null)
     )] | length) == 0 and
