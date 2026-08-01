@@ -62,54 +62,8 @@ fi
 }
 
 workflow_set="$(
-  ruby -ryaml - "$WORKFLOW_DIR" <<'RUBY'
-directory = ARGV.fetch(0)
-
-names = Dir.glob(File.join(directory, "*.{yml,yaml}")).each_with_object([]) do |file, result|
-  content = File.read(file)
-  document = YAML.safe_load(content, aliases: true) || {}
-  triggers = document["on"] || document[true] || {}
-  next unless triggers.is_a?(Hash)
-
-  push_master = false
-  if triggers.key?("push")
-    push = triggers["push"]
-    push_master =
-      if push.nil?
-        true
-      elsif push.is_a?(Hash)
-        branches = push["branches"]
-        branches.nil? || Array(branches).include?("master")
-      else
-        true
-      end
-  end
-
-  workflow_run = triggers["workflow_run"]
-  chained_production =
-    workflow_run.is_a?(Hash) &&
-    Array(workflow_run["workflows"]).include?("production-build")
-
-  production_capable = content.match?(
-    %r{
-      production-(?:automatic|emergency)|
-      infra/k8s-prod|
-      docker/build-push-action|
-      kubectl\s+(?:apply|set\ image)|
-      deploy-stan\.sh|
-      secrets\.(?:AZURE_CREDENTIALS|RESOURCE_GROUP|CLUSTER_NAME)\b
-    }x
-  )
-  manual_production = triggers.key?("workflow_dispatch")
-
-  next unless production_capable &&
-    (push_master || chained_production || manual_production)
-
-  result << (document["name"] || File.basename(file, File.extname(file)))
-end
-
-puts names.sort.uniq
-RUBY
+  ruby "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
+    "$WORKFLOW_DIR"
 )"
 
 grep -qx "production-build" <<<"$workflow_set" || {

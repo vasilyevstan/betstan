@@ -119,7 +119,10 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-[[ "$workflow_set" == "production-build,production-deploy" ]] ||
+azure_workflow_set="production-build,production-deploy"
+oci_workflow_set="oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
+[[ "$workflow_set" == "$azure_workflow_set" ||
+  "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 
 echo "workflow_trigger_guard=PASS retired_workflows=${#retired[@]}"
