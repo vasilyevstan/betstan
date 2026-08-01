@@ -26,7 +26,9 @@ Script: `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
 - `Standard_B2s` is too small for the full service set on a single node.
 
 ### Data-disk attachment limits constrain VM selection
-`Standard_E2ads_v5` supports only four data-disk attachments. The stable topology has eight per-service Mongo PVC disks, so that VM size cannot host the workload on one node.
+Before shared-Mongo cutover, all eight data-disk attachments are occupied. Do
+not try to attach a ninth migration disk. The supported migration expands and
+reuses the auth Mongo PVC, then removes the seven non-auth PVCs after validation.
 
 ### Do not use a 30 GiB Ephemeral OS disk for this workload
 A trial `Standard_B4ms` pool with a 30 GiB Ephemeral OS disk failed when concurrent image pulls exhausted the node OS filesystem. The node entered `DiskPressure` and evicted two pods, so the trial pool was deleted. Keep the Managed 64 GiB baseline and roll application services out sequentially.
@@ -66,12 +68,79 @@ Use domain-based checks: `curl https://www.betstan.xyz/api/event` **and** `curl 
 
 ## Database Topology
 
-### Per-service Mongo is the stable topology
-Each microservice has its own dedicated Mongo StatefulSet and ClusterIP service.  
-Consolidation to a shared Mongo instance was tested in stage, produced complications, and is **deferred**.  
-Do not promote the shared-DB path to production without a complete stage soak cycle first.
+### Topology is journal-dependent
+The supported final topology is one `gaming-auth-mongo-depl` StatefulSet and
+PVC, exposed through `gaming-shared-mongo-srv`, with all eight logical database
+names unchanged. Do not assume that final topology before live evidence:
 
-Stage test scripts when revisiting: `infra/azure/agents/deploy-stage-shared-db-stan.sh` and `infra/azure/agents/stage-soak-validation-stan.sh`.
+- no journal or `legacy/rollback-complete`: the legacy databases are the source
+  of truth;
+- `transition/*`: migration or rollback is incomplete and normal deployment is
+  blocked;
+- `shared/complete`: cleanup and the final topology guard have passed.
+
+`shared-mongo-topology-guard-stan.sh` requires the validated marker, one ready
+auth Mongo PVC of the required capacity, no seven legacy StatefulSets/PVCs, and
+all eight exact shared URIs.
+
+### Use one operator and one operation lock
+Use `consolidate-production-mongo-stan.sh` for preflight, migration, cleanup,
+rollback, and stale-lock recovery. Do not replace it with ad hoc dump, restore,
+URI, manifest, or deletion commands.
+
+Migration, cleanup, rollback, and deployment share the persistent
+`gaming-mongo-migration-lock`. Acquisition and release use resource-versioned
+compare-and-swap. A lock release error fails an otherwise successful operation,
+and a stale lock may be released only when its operation ID and source SHA
+match. Kubernetes/API read errors mean unknown state, never NotFound.
+
+### A complete write freeze includes pod termination
+RabbitMQ must have zero ready and unacknowledged messages before applications
+stop. Scale-to-zero is complete only when every backend Deployment has zero
+desired, available, and ready replicas and no matching pods remain. Starting a
+backup while terminating pods can still write is not a consistent snapshot.
+
+### Restore semantics must remove destination-only collections
+`mongorestore --drop` drops collections present in the archive; it does not
+remove destination-only collections. Before forward or reverse restore, drop
+only the exact named destination database, then restore its exact namespace and
+compare canonical data and metadata signatures.
+
+Counts alone are insufficient. Signatures cover collection hashes, indexes,
+validators, options, collations, views, capped/time-series metadata, and
+collection presence. Cleanup rejects missing, empty, duplicate, unknown, or
+structurally mismatched databases.
+
+### Rollback behavior depends on the journal phase
+- In `backing-up`, `preparing-target`, `restoring`, and `switching`, legacy data
+  remains authoritative. Do not overwrite it from a partial shared target.
+- In `validating-applications`, `awaiting-cleanup`, `rollback-copying`, or
+  `shared/complete`, shared applications may have written. Preserve those
+  writes by reverse-copying before switching to legacy.
+- In `rollback-data-restored`, do not repeat the destructive reverse copy.
+- After `legacy/rollback-complete`, use a fresh migration ID and fresh backups;
+  never reuse stale artifacts.
+
+Backup and cleanup journals must be exact, private, written atomically, and
+bound to the migration ID and full source SHA.
+
+### Bound PVC capacity and claim templates are different
+The retained auth PVC is expanded online after StorageClass expansion is
+verified. The StatefulSet claim template remains at its immutable original
+request and is not evidence of the bound PVC's current capacity. Do not
+recreate the StatefulSet merely to change that template, especially while its
+Mongo image is unpinned.
+
+### No soak still requires complete validation
+Migration and cleanup are separate commands. There is no soak period, but
+cleanup starts only after data/metadata parity, all application mappings,
+representative application behavior, APIs, and queues pass. Cleanup deletes
+only the seven exact allowlisted StatefulSets, Services, and PVCs and waits for
+their journaled PVs to be reclaimed.
+
+The live legacy volumes are deleted immediately after validation. Verified
+logical and storage recovery artifacts remain private and retained for seven
+days.
 
 ---
 
@@ -86,9 +155,12 @@ RabbitMQ runs as an ephemeral Deployment. Replacing its broker can leave queue d
 
 ### Dev integration is safe; only a dev promotion reaches production
 - Never commit or push directly to `master`.
-- Normal changes enter `dev`; direct pushes to `dev` are allowed, though focused PRs are preferred.
+- Normal changes enter `dev` through focused pull requests; do not push directly
+  to protected `dev`.
 - Only an up-to-date pull request from `dev` may target `master`.
-- A merge to `master` triggers `production-build` → `production-deploy` automatically.
+- A merge to `master` starts the protected `production-build` path. Production
+  deployment is a separate exact-SHA `production-deploy` dispatch after a
+  successful approved build; production never deploys automatically.
 - Review all infra changes with `pre-commit-infra-check-stan.sh` before pushing.
 - After a squash promotion, immediately merge the new `master` commit back into `dev`.
 - Manual emergency deployment uses only the central workflows, a full approved master SHA, and the reviewer-protected `production-emergency` environment.
@@ -123,7 +195,8 @@ Stage can be rebuilt from scratch using `infra/azure/agents/provision-stage-stan
 
 ### Stage is isolated — never share secrets with production
 Stage uses a separate `STAGE_AZURE_CREDENTIALS` and `STAGE_RESOURCE_GROUP` secret.  
-The stage workflow (`deploy-stage-shared-db.yml`) is blocked from running on `master` (`if: github.ref_name != 'master'`).
+The retired shared-database stage workflow must not be restored or used as a
+production migration fallback.
 
 ---
 

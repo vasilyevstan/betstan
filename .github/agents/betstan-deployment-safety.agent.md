@@ -21,6 +21,7 @@ Before changing or assessing deployment behavior, read:
 - `infra/azure/agents/pre-commit-infra-check-stan.sh`
 - `infra/azure/agents/post-merge-verification-stan.sh`
 - `infra/azure/agents/rollback-readiness-stan.sh`
+- `.github/agents/betstan-mongo-migration.agent.md`
 
 Inspect the current git graph and remote default branch. Do not infer that a merged PR is missing merely because its old head differs from a newer `master`; use `git merge-base --is-ancestor` and inspect the current tree.
 
@@ -38,11 +39,15 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 ## Build and image provenance
 
 - A green PR validates infrastructure safety but does not mean production was deployed.
+- A repository merge does not migrate databases. Migration requires a separate
+  exact-SHA operator approval and live journal.
 - Inventory every production-capable workflow before reasoning about triggers. `production-build` and `production-deploy` are the only active production workflow identities.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
+- Do not change the trusted `production-build.yml` as part of a database
+  topology change unless its workflow-blob bootstrap is separately approved.
 - Use only the `production-build` to `production-deploy` chain. Never invoke a retired workflow as a fallback.
 - Deploy only a SHA whose required build completed successfully on `master`.
 - Do not deploy `latest` as the source of truth.
@@ -59,16 +64,20 @@ Before deployment:
 - run `pre-commit-infra-check-stan.sh`;
 - validate manifest YAML offline;
 - run `ingress-routing-guard-stan.sh`;
-- confirm at least eight Mongo PVCs exist and are bound;
+- require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
+- return `NO_GO` when the topology journal is in `transition`; normal deployment
+  must not race migration, cleanup, or rollback;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
 
 During deployment:
 
+- hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
+- treat lock acquisition or release failure as deployment failure;
 - apply shared infrastructure without causing intermediate untagged application rollouts;
 - apply SHA-pinned application Deployments sequentially;
 - wait for each rollout before pulling the next image;
-- preserve all Mongo StatefulSets and PVCs;
+- preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation;
 - avoid concurrent image pulls that can exhaust the node OS filesystem;
 - keep production and stage secrets/resources isolated.
 
@@ -76,7 +85,7 @@ After deployment:
 
 - verify the exact merge/build/deploy SHA chain;
 - require every Deployment and StatefulSet ready;
-- require all eight Mongo PVCs bound;
+- require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
 - test `betstan.xyz` and `www.betstan.xyz`;
 - confirm API responses have the expected JSON shape, not merely HTTP 200;
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
@@ -117,7 +126,11 @@ A Running broker with missing consumers is not healthy production.
 
 ## Rollback
 
-- Run `rollback-readiness-stan.sh` before taking rollback action.
+- Distinguish ordinary application rollback from shared-Mongo migration
+  rollback. Use the dedicated migration agent and consolidation operator when
+  the topology journal is `transition` or when legacy databases must be
+  recreated.
+- Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
 - Prefer application rollback over disk restore when data integrity is healthy.
 - Restore Mongo snapshots only when integrity checks justify it.
@@ -125,9 +138,14 @@ A Running broker with missing consumers is not healthy production.
 
 ## Stage boundaries
 
-Shared-Mongo and stage workflows are deferred experiments, not production topology.
+The retained auth Mongo is the only supported final database topology.
 
-- Never promote stage/shared-Mongo behavior implicitly.
+- Never use the retired stage shared-Mongo workflow or scripts as a production fallback.
+- Never run normal deployment before the exact migration journal is validated.
+- Never force-release the database operation lock without matching its operation ID and exact SHA.
+- Never interpret a Kubernetes/API read failure as NotFound or an unlocked
+  state.
+- Migration cleanup may delete only the exact seven allowlisted legacy StatefulSets, Services, and PVCs.
 - Keep stage credentials and resources separate.
 - Do not run stage workflows on `master`.
 

@@ -14,6 +14,8 @@ Before analyzing cost, read:
 - `infra/azure/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
+- `infra/azure/agents/shared-mongo-topology-guard-stan.sh`
+- `infra/azure/agents/consolidate-production-mongo-stan.sh`
 - the current Azure provisioning and deployment workflows relevant to the request
 
 Treat live read-only inventory as current truth and repository documentation as the intended recoverable state. Call out any mismatch instead of silently choosing one.
@@ -36,14 +38,27 @@ Unless the user explicitly requests a separate experimental scenario, preserve:
 - autoscaler bounds `1..3`;
 - at least 4 vCPU and 16 GiB RAM;
 - Linux x64 compatibility and Premium I/O;
-- at least eight data-disk attachments;
+- enough data-disk attachments for the observed live topology;
 - Managed OS disk of at least 64 GiB;
-- eight per-service Mongo persistent disks;
+- one retained auth Mongo persistent disk after validated consolidation;
 - Standard Load Balancer and the ingress/outbound public IPs;
 - native metric alerts and action group;
-- per-service Mongo topology.
+- one Mongo process hosting eight logical databases after validated consolidation.
 
-`Standard_B4as_v2` with a Managed 64 GiB OS disk is the established baseline. A 30 GiB Ephemeral OS disk caused image-pull `DiskPressure` and pod eviction. A two-vCPU SKU with only four disk slots cannot host all eight Mongo disks.
+`Standard_B4as_v2` with a Managed 64 GiB OS disk is the established baseline. A 30 GiB Ephemeral OS disk caused image-pull `DiskPressure` and pod eviction. Cost analysis must inspect the live migration state instead of assuming either eight legacy disks or one retained disk.
+
+### Shared-Mongo accounting
+
+- Read the live topology journal and inventory actual PVC/PV attachment and
+  reclamation state.
+- In `legacy` mode, price every live per-service disk.
+- In `transition`, price every live disk plus temporary snapshots, backup
+  storage, restore workspace, and overlap.
+- Count the seven-disk steady-state saving only after `shared/complete`, exact
+  cleanup, and PV reclamation are verified.
+- Keep seven-day recovery artifacts and their operations separate from the
+  steady-state baseline.
+- Treat API errors as unknown inventory, not zero-cost resource absence.
 
 ## Required research method
 
@@ -63,7 +78,7 @@ Unless the user explicitly requests a separate experimental scenario, preserve:
    - Reject a candidate when any safety constraint is unknown or unmet.
 
 4. **Price the whole stack**
-   - Include compute, OS disk, all Mongo disks, Standard SSD operations, Load Balancer base and processed data, public IPs, alerts, and bandwidth.
+   - Include compute, OS disk, every currently live Mongo disk, Standard SSD operations, Load Balancer base and processed data, public IPs, alerts, and bandwidth.
    - Keep autoscaler capacity above one node separate from the normal baseline.
    - Exclude temporary snapshots from steady state but report their current and migration cost separately.
 

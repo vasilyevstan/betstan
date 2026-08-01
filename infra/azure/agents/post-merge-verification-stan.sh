@@ -109,6 +109,8 @@ upstream_run_id="$(sed -n 's/^upstream_run_id=//p' "$provenance_file")"
   fail "deploy image provenance must contain exactly nine services"
 echo "deploy_provenance=PASS image_sha=$deployed_sha upstream_run_id=$upstream_run_id"
 
+NAMESPACE="$NAMESPACE" ./infra/azure/agents/shared-mongo-topology-guard-stan.sh
+
 echo "=== workload readiness ==="
 kubectl get deploy -n "$NAMESPACE"
 kubectl get sts -n "$NAMESPACE"
