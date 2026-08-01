@@ -1,0 +1,23 @@
+name: oci-validate
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - master
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-contract:
+    name: oci-validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run OCI offline contract
+        run: ./infra/oci/tests/test-contract.sh

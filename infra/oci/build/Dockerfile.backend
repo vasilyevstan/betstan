@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+ARG NODE_IMAGE=docker.io/library/node:20.19.4-alpine3.22@sha256:df02558528d3d3d0d621f112e232611aecfee7cbc654f6b375765f72bb262799
+
+FROM ${NODE_IMAGE} AS build
+ARG SERVICE
+WORKDIR /app
+COPY ${SERVICE}/package.json ${SERVICE}/package-lock.json ./
+RUN npm ci
+COPY ${SERVICE}/ ./
+COPY infra/oci/build/tsconfig.production.json ./tsconfig.production.json
+RUN ./node_modules/.bin/tsc --project tsconfig.production.json
+
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY --from=build --chown=node:node /app/dist ./dist
+USER node
+EXPOSE 3000
+ENTRYPOINT ["node", "dist/index.js"]
