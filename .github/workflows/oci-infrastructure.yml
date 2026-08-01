@@ -72,10 +72,17 @@ jobs:
       OCI_CERT_MANAGER_ACMESOLVER_DIGEST: ${{ vars.OCI_CERT_MANAGER_ACMESOLVER_DIGEST || 'sha256:dbc7cc1354f603918e7c5af7f55a0a620537394452c93a565bde75c6f48e8837' }}
       OCI_CERT_MANAGER_STARTUP_DIGEST: ${{ vars.OCI_CERT_MANAGER_STARTUP_DIGEST || 'sha256:d8ab6416e6e7303a86fa0a8daa82c94a8001f21c9d78eb2e7db20534e5d07ae8' }}
       PROVENANCE_DIR: artifacts/oci-infrastructure
-      HOME: ${{ runner.temp }}/oci-home
-      KUBECONFIG: ${{ runner.temp }}/oci-home/.kube/config
 
     steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
       - name: Checkout approved master commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
