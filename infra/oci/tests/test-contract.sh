@@ -352,6 +352,13 @@ for variable in OCI_CLI_USER OCI_CLI_TENANCY OCI_CLI_FINGERPRINT OCI_CLI_KEY_CON
   grep -Fq "$variable:" "$capacity_workflow" ||
     fail "official OCI CLI mapping missing from oci-capacity-acquire.yml: $variable"
 done
+grep -Fq 'echo "$RUNNER_TEMP/oci-capacity-home/.local/bin" >> "$GITHUB_PATH"' \
+  "$capacity_workflow" ||
+  fail "capacity workflow does not expose the isolated OCI CLI installation on PATH"
+for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
+  grep -Fq 'echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"' "$workflow" ||
+    fail "isolated OCI CLI installation is not on PATH in $(basename "$workflow")"
+done
 ! grep -Eq 'AZURE_|azure/' "$infra_workflow" "$deploy_workflow" ||
   fail "Azure credentials leaked into OCI infrastructure/deployment"
 

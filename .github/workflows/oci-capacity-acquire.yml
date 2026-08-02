@@ -59,6 +59,7 @@ jobs:
             echo "HOME=$RUNNER_TEMP/oci-capacity-home"
             echo "WORK_DIR=$RUNNER_TEMP/oci-capacity-work"
           } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-capacity-home/.local/bin" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/oci-capacity-home" "$RUNNER_TEMP/oci-capacity-work"
           chmod 700 "$RUNNER_TEMP/oci-capacity-home" "$RUNNER_TEMP/oci-capacity-work"
 

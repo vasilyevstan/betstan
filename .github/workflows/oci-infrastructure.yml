@@ -97,6 +97,7 @@ jobs:
             echo "HOME=$RUNNER_TEMP/oci-home"
             echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
           } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
           mkdir -p "$RUNNER_TEMP/oci-home/.kube"
           chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
 
