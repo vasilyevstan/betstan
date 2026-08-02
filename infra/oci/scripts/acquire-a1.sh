@@ -11,6 +11,7 @@ REPORT_FILE="$WORK_DIR/capacity-report.json"
 USER_DATA_FILE="$WORK_DIR/cloud-init.yaml"
 SSH_PUBLIC_KEY_FILE="$WORK_DIR/k3s-ssh.pub"
 ERROR_FILE="$WORK_DIR/launch-error.log"
+OUTPUT_FILE="$WORK_DIR/launch-output.log"
 OCI_CAPACITY_RUN_NUMBER="${OCI_CAPACITY_RUN_NUMBER:-1}"
 
 cleanup() {
@@ -91,21 +92,7 @@ shape_config="$(
     --argjson memory "$memory_gb" \
     '{ocpus:$ocpus,memoryInGBs:$memory}'
 )"
-vnic_details="$(
-  jq -cn \
-    --arg subnet "$subnet_id" \
-    --arg nsg "$nsg_id" \
-    --argjson tags "$tags" '
-      {
-        subnetId: $subnet,
-        assignPublicIp: true,
-        assignPrivateDnsRecord: true,
-        nsgIds: [$nsg],
-        displayName: "betstan-k3s-primary",
-        freeformTags: $tags
-      }
-    '
-)"
+nsg_ids="$(jq -cn --arg nsg "$nsg_id" '[$nsg]')"
 agent_config='{
   "isManagementDisabled": false,
   "areAllPluginsDisabled": false,
@@ -116,34 +103,42 @@ agent_config='{
 }'
 
 set +e
-instance_id="$(
-  oci compute instance launch \
-    --compartment-id "$OCI_COMPARTMENT_OCID" \
-    --availability-domain "$availability_domain" \
-    --shape "$OCI_NODE_SHAPE" \
-    --shape-config "$shape_config" \
-    --source-details "$source_details" \
-    --create-vnic-details "$vnic_details" \
-    --display-name "$OCI_K3S_INSTANCE_NAME" \
-    --hostname-label betstank3s \
-    --freeform-tags "$tags" \
-    --ssh-authorized-keys-file "$SSH_PUBLIC_KEY_FILE" \
-    --user-data-file "$USER_DATA_FILE" \
-    --is-pv-encryption-in-transit-enabled true \
-    --agent-config "$agent_config" \
-    --wait-for-state RUNNING \
-    --wait-interval-seconds 15 \
-    --max-wait-seconds 900 \
-    --query 'data.id' \
-    --raw-output 2>"$ERROR_FILE"
-)"
+oci compute instance launch \
+  --compartment-id "$OCI_COMPARTMENT_OCID" \
+  --availability-domain "$availability_domain" \
+  --shape "$OCI_NODE_SHAPE" \
+  --shape-config "$shape_config" \
+  --source-details "$source_details" \
+  --subnet-id "$subnet_id" \
+  --assign-public-ip true \
+  --assign-private-dns-record true \
+  --nsg-ids "$nsg_ids" \
+  --vnic-display-name betstan-k3s-primary \
+  --display-name "$OCI_K3S_INSTANCE_NAME" \
+  --hostname-label betstank3s \
+  --freeform-tags "$tags" \
+  --ssh-authorized-keys-file "$SSH_PUBLIC_KEY_FILE" \
+  --user-data-file "$USER_DATA_FILE" \
+  --is-pv-encryption-in-transit-enabled true \
+  --agent-config "$agent_config" \
+  --wait-for-state RUNNING \
+  --wait-interval-seconds 15 \
+  --max-wait-seconds 900 \
+  --query 'data.id' \
+  --raw-output >"$OUTPUT_FILE" 2>"$ERROR_FILE"
 launch_status=$?
 set -e
 
 if [[ "$launch_status" != "0" ]]; then
+  launch_error="$(
+    {
+      cat "$OUTPUT_FILE"
+      cat "$ERROR_FILE"
+    } | oci_redact
+  )"
   if grep -Eiq \
       'OutOfHostCapacity|OUT_OF_HOST_CAPACITY|out of host capacity' \
-      "$ERROR_FILE"; then
+      <<<"$launch_error"; then
     PROVENANCE_DIR="$PROVENANCE_DIR" "$SCRIPT_DIR/reconcile-capacity.sh" cleanup >/dev/null
     oci_capacity_output instance_acquired false
     oci_capacity_output acquisition_status CAPACITY_UNAVAILABLE
@@ -151,10 +146,12 @@ if [[ "$launch_status" != "0" ]]; then
       "capacity_acquisition=CAPACITY_UNAVAILABLE report=$reported_status memory_gb=$memory_gb"
     exit 0
   fi
-  redacted="$(oci_redact < "$ERROR_FILE")"
-  oci_die "A1 launch failed with a non-capacity error: $redacted"
+  [[ -n "$launch_error" ]] ||
+    launch_error="OCI CLI exited with status $launch_status without diagnostics"
+  oci_die "A1 launch failed with a non-capacity error: $launch_error"
 fi
 
+instance_id="$(<"$OUTPUT_FILE")"
 oci_require_ocid_value="$instance_id"
 [[ "$oci_require_ocid_value" =~ ^ocid1\.instance\.oc[0-9]*\..+ ]] ||
   oci_die "OCI launch did not return an instance OCID"

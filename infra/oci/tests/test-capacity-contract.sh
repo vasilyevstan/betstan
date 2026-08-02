@@ -133,6 +133,10 @@ JSON
     }'
     ;;
   compute/instance/launch)
+    if [[ "$OCI_FAKE_SCENARIO" == "stdout-fatal" ]]; then
+      echo "No such option: --fixture"
+      exit 2
+    fi
     if [[ "$OCI_FAKE_SCENARIO" == "fatal" ]]; then
       echo "NotAuthorizedOrNotFound" >&2
       exit 1
@@ -252,6 +256,18 @@ grep -Fq 'acquisition_status=CAPACITY_UNAVAILABLE' "$output_file" ||
   fail "a no-capacity cycle must make exactly one real launch attempt"
 grep -qv -- '--fault-domain' "$FAKE_LOG" ||
   fail "capacity acquisition pinned a fault domain"
+grep -Fq -- '--subnet-id ocid1.subnet.oc1..fixture' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the prepared worker subnet"
+grep -Fq -- '--assign-public-ip true' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the reviewed ephemeral public IP"
+grep -Fq -- '--assign-private-dns-record true' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the primary VNIC DNS record"
+grep -Fq -- '--nsg-ids' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the prepared worker NSG"
+grep -Fq -- '--vnic-display-name betstan-k3s-primary' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the reviewed primary VNIC name"
+! grep -Fq -- '--create-vnic-details' "$FAKE_LOG" ||
+  fail "capacity acquisition uses the unsupported --create-vnic-details option"
 
 rm -f "$FAKE_STATE" "$FAKE_LOG"
 output_file="$TEST_DIR/acquired-output"
@@ -314,5 +330,16 @@ if OCI_FAKE_SCENARIO=fatal \
   "$OCI_DIR/scripts/acquire-a1.sh" >/dev/null 2>&1; then
   fail "non-capacity OCI failure was treated as retryable"
 fi
+
+rm -f "$FAKE_STATE" "$FAKE_LOG"
+stdout_fatal_log="$TEST_DIR/stdout-fatal.log"
+if OCI_FAKE_SCENARIO=stdout-fatal \
+  WORK_DIR="$TEST_DIR/stdout-fatal-work" \
+  PROVENANCE_DIR="$TEST_DIR/stdout-fatal-provenance" \
+  "$OCI_DIR/scripts/acquire-a1.sh" >"$stdout_fatal_log" 2>&1; then
+  fail "OCI CLI parser failure was treated as retryable"
+fi
+grep -Fq 'No such option: --fixture' "$stdout_fatal_log" ||
+  fail "OCI CLI stdout failure diagnostics were discarded"
 
 echo "oci_capacity_contract=PASS"
