@@ -46,7 +46,7 @@ oci_capacity_profiles_json() {
 import json
 import sys
 
-allowed = {6, 8, 10, 12}
+allowed = {12}
 result = []
 for raw in sys.argv[1].split(","):
     value = raw.strip()
@@ -71,6 +71,7 @@ oci_capacity_tags() {
     --arg contract "$OCI_CAPACITY_CONTRACT_VERSION" \
     '{
       "betstan-managed": "true",
+      "provider": "oci",
       "betstan-managed-by": $managed_by,
       "betstan-runtime": "k3s",
       "betstan-contract": $contract,
@@ -130,6 +131,7 @@ oci_capacity_validate_instance() {
        $instance."lifecycle-state" == "STARTING" or
        $instance."lifecycle-state" == "RUNNING") and
       $instance."freeform-tags"."betstan-managed" == "true" and
+      $instance."freeform-tags".provider == "oci" and
       $instance."freeform-tags"."betstan-managed-by" == $managed_by and
       $instance."freeform-tags"."betstan-runtime" == "k3s" and
       $instance."freeform-tags"."betstan-contract" == $contract and
