@@ -103,13 +103,13 @@ JSON
     if [[ "$OCI_FAKE_SCENARIO" == "duplicate" ]]; then
       cat <<'JSON'
 {"data":[
-{"id":"ocid1.instance.oc1..fixture1","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}},
-{"id":"ocid1.instance.oc1..fixture2","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-2","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}
+{"id":"ocid1.instance.oc1..fixture1","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}},
+{"id":"ocid1.instance.oc1..fixture2","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-2","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}
 ]}
 JSON
     elif [[ -f "$OCI_FAKE_STATE" ]]; then
       cat <<'JSON'
-{"data":[{"id":"ocid1.instance.oc1..fixture","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}]}
+{"data":[{"id":"ocid1.instance.oc1..fixture","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}]}
 JSON
     else
       echo '{"data":[]}'
@@ -225,11 +225,19 @@ export OCI_CAPACITY_RUN_NUMBER=1
 
 # shellcheck source=../scripts/capacity-common.sh
 source "$OCI_DIR/scripts/capacity-common.sh"
-[[ "$(OCI_A1_MEMORY_PROFILES=12,10,8 oci_capacity_profiles_json)" == "[12,10,8]" ]] ||
-  fail "validated memory profile order changed"
-if OCI_A1_MEMORY_PROFILES=12,7 oci_capacity_profiles_json >/dev/null 2>&1; then
+[[ "$(OCI_A1_MEMORY_PROFILES=12 oci_capacity_profiles_json)" == "[12]" ]] ||
+  fail "validated memory profile changed"
+if OCI_A1_MEMORY_PROFILES=12,10 oci_capacity_profiles_json >/dev/null 2>&1; then
   fail "unvalidated memory profile was accepted"
 fi
+jq -e '
+  ."betstan-managed" == "true" and
+  .provider == "oci" and
+  ."betstan-managed-by" == "oci-capacity-acquire" and
+  ."betstan-runtime" == "k3s" and
+  ."expected-monthly-cost" == "0"
+' <<<"$(oci_capacity_tags)" >/dev/null ||
+  fail "capacity resources do not carry the finalization ownership tags"
 if (OCI_FAKE_SCENARIO=quota-missing-ad oci_capacity_require_quota) >/dev/null 2>&1; then
   fail "quota policy without A1 availability-domain grants was accepted"
 fi
