@@ -84,18 +84,24 @@ jobs:
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           printf 'SOURCE_SHA=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
 
-      - name: Install OCI CLI with capacity identity
-        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+      - name: Install pinned OCI CLI and verify capacity identity
         env:
           OCI_CLI_USER: ${{ vars.OCI_CAPACITY_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CAPACITY_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CAPACITY_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-        with:
-          command: iam region-subscription list
-          query: 'data[?"is-home-region" == `true`]."region-name"'
-          silent: true
+          OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/install-cli.sh
+          home_region="$(
+            oci iam region-subscription list \
+              --tenancy-id "$OCI_CLI_TENANCY" \
+              --query "$OCI_HOME_REGION_QUERY" \
+              --raw-output
+          )"
+          [ "$home_region" = "$OCI_CLI_REGION" ]
 
       - name: Attempt one reconciled Free Tier placement
         id: acquire
