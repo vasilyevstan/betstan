@@ -17,6 +17,8 @@ WATCHDOG_MINUTES="${WATCHDOG_MINUTES:-20}"
 QUEUE_DRAIN_ATTEMPTS="${QUEUE_DRAIN_ATTEMPTS:-30}"
 QUEUE_DRAIN_SLEEP_SECONDS="${QUEUE_DRAIN_SLEEP_SECONDS:-10}"
 MIGRATION_ID="${MIGRATION_ID:-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
+OCI_RUNTIME_MODE="$(oci_runtime_mode)"
+OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$AZURE_KUBECONFIG" && -f "$OCI_KUBECONFIG" ]] ||
@@ -66,9 +68,28 @@ validate_kubeconfig() {
       oci_die "$provider Kubernetes API server fingerprint mismatch"
   fi
   if [[ -n "$cluster_ocid" ]]; then
-    jq -e --arg cluster "$cluster_ocid" '
-      [.users[].user.exec.args[]? | select(. == $cluster)] | length == 1
-    ' <<<"$config" >/dev/null || oci_die "OCI kubeconfig does not contain the exact cluster OCID"
+    if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
+      jq -e --arg cluster "$cluster_ocid" '
+        [.users[].user.exec.args[]? | select(. == $cluster)] | length == 1
+      ' <<<"$config" >/dev/null ||
+        oci_die "OCI kubeconfig does not contain the exact cluster OCID"
+    else
+      [[ "$server" =~ ^https://127\.0\.0\.1:[0-9]+$ ]] ||
+        oci_die "k3s kubeconfig does not use the local Bastion tunnel"
+      node="$(
+        kubectl --kubeconfig "$kubeconfig" \
+          get node "$OCI_K3S_NODE_NAME" \
+          -o json
+      )"
+      jq -e --arg provider_id "oci://${cluster_ocid}" '
+        .spec.providerID == $provider_id and
+        .metadata.labels."kubernetes.io/arch" == "arm64" and
+        ([.status.conditions[] | select(
+          .type == "Ready" and .status == "True"
+        )] | length) == 1
+      ' <<<"$node" >/dev/null ||
+        oci_die "k3s node identity differs from infrastructure provenance"
+    fi
   fi
 }
 

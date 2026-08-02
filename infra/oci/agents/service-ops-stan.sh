@@ -11,16 +11,29 @@ INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-}"
 SINCE="${SINCE:-30m}"
 oci_require_vars INFRA_PROVENANCE_FILE
 [[ -f "$INFRA_PROVENANCE_FILE" ]] || oci_die "infrastructure provenance file is missing"
-unset cluster_ocid cluster_fingerprint namespace
+unset runtime_mode cluster_ocid cluster_fingerprint
+unset instance_ocid instance_fingerprint namespace
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
 [[ "$namespace" == "$NAMESPACE" ]] || oci_die "diagnostic namespace differs from provenance"
-[[ "$(oci_fingerprint "$cluster_ocid")" == "$cluster_fingerprint" ]] ||
-  oci_die "diagnostic cluster fingerprint mismatch"
 kubeconfig_json="$(kubectl config view --raw --minify -o json)"
-jq -e --arg cluster "$cluster_ocid" \
-  '[.users[].user.exec.args[]? | select(. == $cluster)] | length == 1' \
-  <<<"$kubeconfig_json" >/dev/null || oci_die "diagnostics refuse the current kubecontext"
+if [[ "$runtime_mode" == "oke" ]]; then
+  [[ "$(oci_fingerprint "$cluster_ocid")" == "$cluster_fingerprint" ]] ||
+    oci_die "diagnostic cluster fingerprint mismatch"
+  jq -e --arg cluster "$cluster_ocid" \
+    '[.users[].user.exec.args[]? | select(. == $cluster)] | length == 1' \
+    <<<"$kubeconfig_json" >/dev/null ||
+    oci_die "diagnostics refuse the current OKE context"
+else
+  [[ "$runtime_mode" == "k3s" ]] || oci_die "diagnostic runtime is invalid"
+  [[ "$(oci_fingerprint "$instance_ocid")" == "$instance_fingerprint" ]] ||
+    oci_die "diagnostic instance fingerprint mismatch"
+  jq -e '
+    (.clusters[0].cluster.server // "") |
+    test("^https://127\\.0\\.0\\.1:[0-9]+$")
+  ' <<<"$kubeconfig_json" >/dev/null ||
+    oci_die "diagnostics refuse a non-Bastion k3s context"
+fi
 
 {
   echo "=== workload readiness ==="

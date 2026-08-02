@@ -11,6 +11,7 @@ OUTPUT_FILE="${OUTPUT_FILE:-${3:-$OCI_ROOT_DIR/artifacts/oci-rendered.yaml}}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 OCI_PUBLIC_HOST="${OCI_PUBLIC_HOST:-}"
 OCI_CERT_EMAIL="${OCI_CERT_EMAIL:-}"
+OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}"
 WORK_DIR="${WORK_DIR:-$(dirname "$OUTPUT_FILE")/.oci-render-work}"
 
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "image provenance TSV is required"
@@ -36,12 +37,20 @@ cleanup_render_work() {
 }
 trap cleanup_render_work EXIT
 raw_manifest="$WORK_DIR/kustomize.yaml"
-kubectl kustomize --load-restrictor=LoadRestrictionsNone "$OCI_DIR/k8s" > "$raw_manifest"
+if [[ "$(oci_runtime_mode)" == "k3s" ]]; then
+  [[ "$OCI_K3S_NODE_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    oci_die "OCI_K3S_NODE_NAME is not a valid Kubernetes node name"
+  kustomize_root="$OCI_DIR/k8s/overlays/k3s"
+else
+  kustomize_root="$OCI_DIR/k8s"
+fi
+kubectl kustomize --load-restrictor=LoadRestrictionsNone "$kustomize_root" > "$raw_manifest"
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 ruby -ryaml - "$raw_manifest" "$IMAGE_PROVENANCE_FILE" "$OUTPUT_FILE" \
-  "$OCI_K8S_NAMESPACE" "$OCI_PUBLIC_HOST" "$OCI_CERT_EMAIL" "$OCI_MONGO_VOLUME_OCID" <<'RUBY'
-raw_file, images_file, output_file, namespace, public_host, cert_email, volume_ocid = ARGV
+  "$OCI_K8S_NAMESPACE" "$OCI_PUBLIC_HOST" "$OCI_CERT_EMAIL" \
+  "$OCI_MONGO_VOLUME_OCID" "$OCI_K3S_NODE_NAME" <<'RUBY'
+raw_file, images_file, output_file, namespace, public_host, cert_email, volume_ocid, node_name = ARGV
 images = {}
 File.readlines(images_file, chomp: true).reject(&:empty?).each do |line|
   service, _repository, image_ref, digest, platform_digest = line.split("\t", 5)
@@ -70,6 +79,7 @@ replace = lambda do |value|
       .gsub("__OCI_PUBLIC_HOST__", public_host)
       .gsub("__OCI_CERT_EMAIL__", cert_email)
       .gsub("__OCI_MONGO_VOLUME_OCID__", volume_ocid)
+      .gsub("__OCI_K3S_NODE_NAME__", node_name)
   else
     value
   end
