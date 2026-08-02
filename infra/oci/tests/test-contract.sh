@@ -370,6 +370,10 @@ grep -Fq '"oci-cli==${OCI_CLI_VERSION}"' "$cli_installer" ||
   fail "OCI CLI package installation is not pinned to OCI_CLI_VERSION"
 grep -Fq 'python3 -m pip install' "$cli_installer" ||
   fail "OCI CLI installer does not use the runner's explicit Python 3"
+! grep -R --include='*.sh' -F -- '--network-security-group-id' "$OCI_DIR/scripts" >/dev/null ||
+  fail "OCI scripts use the unsupported NSG rule argument --network-security-group-id"
+grep -Fq -- '--nsg-id "$nsg_id"' "$OCI_DIR/scripts/provision.sh" ||
+  fail "OCI network reconciliation does not use the supported NSG rule argument"
 ! grep -Eq 'AZURE_|azure/' "$infra_workflow" "$deploy_workflow" ||
   fail "Azure credentials leaked into OCI infrastructure/deployment"
 
