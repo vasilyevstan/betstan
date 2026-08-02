@@ -22,7 +22,7 @@ oci_is_positive_int "$OCI_RUNNER_RULE_TTL_MINUTES" ||
 cleanup_stale() {
   local now rules stale_ids
   now="$(date -u +%s)"
-  rules="$(oci network nsg rules list --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all)"
+  rules="$(oci network nsg rules list --nsg-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all)"
   rules="$(oci_normalize_list_json "$rules")"
   stale_ids="$(
     jq -r --argjson now "$now" '
@@ -38,13 +38,13 @@ cleanup_stale() {
       [[ -n "$rule_id" ]] || continue
       ids="$(jq -cn --arg id "$rule_id" '[$id]')"
       oci network nsg rules remove \
-        --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" \
+        --nsg-id "$OCI_ENDPOINT_NSG_OCID" \
         --security-rule-ids "$ids" --force >/dev/null
     done <<<"$stale_ids"
   fi
   remaining="$(
     oci network nsg rules list \
-      --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
+      --nsg-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
   )"
   remaining="$(oci_normalize_list_json "$remaining")"
   jq -e --argjson now "$now" '
@@ -82,7 +82,7 @@ description="betstan-github-runner run=${GITHUB_RUN_ID} attempt=1 expires=${expi
 cidr="${RUNNER_PUBLIC_IPV4}/32"
 existing="$(
   oci network nsg rules list \
-    --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
+    --nsg-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
 )"
 existing="$(oci_normalize_list_json "$existing")"
 rule_id="$(
@@ -113,7 +113,7 @@ if [[ -z "$rule_id" ]]; then
   )"
   result="$(
     oci network nsg rules add \
-      --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" \
+      --nsg-id "$OCI_ENDPOINT_NSG_OCID" \
       --security-rules "$rules"
   )"
   rule_id="$(jq -r '.data."security-rules"[0].id // empty' <<<"$result")"
@@ -126,7 +126,7 @@ rollback_unrecorded_rule() {
   if [[ "$status" -ne 0 && -n "${rule_id:-}" ]]; then
     ids="$(jq -cn --arg id "$rule_id" '[$id]')"
     oci network nsg rules remove \
-      --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" \
+      --nsg-id "$OCI_ENDPOINT_NSG_OCID" \
       --security-rule-ids "$ids" --force >/dev/null 2>&1 || true
   fi
   exit "$status"

@@ -93,7 +93,7 @@ ensure_nsg_rule() {
   local existing
   existing="$(
     oci network nsg rules list \
-      --network-security-group-id "$nsg_id" --all
+      --nsg-id "$nsg_id" --all
   )"
   existing="$(oci_normalize_list_json "$existing")"
   if jq -e --arg description "$description" --argjson expected "$rule_json" '
@@ -117,7 +117,7 @@ ensure_nsg_rule() {
     <<<"$existing" >/dev/null ||
     oci_die "managed NSG rule differs from the approved contract: $description"
   oci network nsg rules add \
-    --network-security-group-id "$nsg_id" \
+    --nsg-id "$nsg_id" \
     --security-rules "[$rule_json]" >/dev/null
 }
 
@@ -127,7 +127,7 @@ assert_nsg_rule_set() {
   local rules
   rules="$(
     oci network nsg rules list \
-      --network-security-group-id "$nsg_id" \
+      --nsg-id "$nsg_id" \
       --all
   )"
   rules="$(oci_normalize_list_json "$rules")"

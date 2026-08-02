@@ -18,7 +18,7 @@ oci_require_ocid OCI_ENDPOINT_NSG_OCID
 
 rules="$(
   oci network nsg rules list \
-    --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
+    --nsg-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
 )"
 rules="$(oci_normalize_list_json "$rules")"
 match_count="$(
@@ -30,7 +30,7 @@ match_count="$(
 if [[ "$match_count" == "1" ]]; then
   ids="$(jq -cn --arg id "$OCI_RUNNER_RULE_ID" '[$id]')"
   oci network nsg rules remove \
-    --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" \
+    --nsg-id "$OCI_ENDPOINT_NSG_OCID" \
     --security-rule-ids "$ids" --force >/dev/null
 elif [[ "$match_count" != "0" ]]; then
   oci_die "runner rule identity is ambiguous; refusing broad NSG cleanup"
@@ -38,7 +38,7 @@ fi
 
 remaining="$(
   oci network nsg rules list \
-    --network-security-group-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
+    --nsg-id "$OCI_ENDPOINT_NSG_OCID" --direction INGRESS --all
 )"
 remaining="$(oci_normalize_list_json "$remaining")"
 jq -e --arg id "$OCI_RUNNER_RULE_ID" '[.data[]? | select(.id == $id)] | length == 0' \
