@@ -295,6 +295,7 @@ infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
+cli_installer="$OCI_DIR/scripts/install-cli.sh"
 
 grep -Fq 'workflow_run:' "$build_workflow"
 grep -Fq 'workflows: ["production-build"]' "$build_workflow"
@@ -359,6 +360,16 @@ for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"' "$workflow" ||
     fail "isolated OCI CLI installation is not on PATH in $(basename "$workflow")"
 done
+for workflow in "$capacity_workflow" "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
+  grep -Fq './infra/oci/scripts/install-cli.sh' "$workflow" ||
+    fail "pinned OCI CLI installer missing from $(basename "$workflow")"
+  ! grep -Fq 'oracle-actions/run-oci-cli-command' "$workflow" ||
+    fail "opaque OCI CLI action remains in $(basename "$workflow")"
+done
+grep -Fq '"oci-cli==${OCI_CLI_VERSION}"' "$cli_installer" ||
+  fail "OCI CLI package installation is not pinned to OCI_CLI_VERSION"
+grep -Fq 'python3 -m pip install' "$cli_installer" ||
+  fail "OCI CLI installer does not use the runner's explicit Python 3"
 ! grep -Eq 'AZURE_|azure/' "$infra_workflow" "$deploy_workflow" ||
   fail "Azure credentials leaked into OCI infrastructure/deployment"
 
