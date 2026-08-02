@@ -181,33 +181,40 @@ jobs:
           fi
           printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
 
-      - name: Install OCI CLI with read-only identity call
-        if: env.OCI_RUNTIME_MODE == 'oke'
-        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
-        env:
-          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
-          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
-          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
-          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
-          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-        with:
-          command: ce cluster get --cluster-id ${{ steps.provenance.outputs.cluster_ocid }}
-          query: 'data.{type:type,state:"lifecycle-state"}'
-          silent: true
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
 
-      - name: Install OCI CLI with k3s identity call
-        if: env.OCI_RUNTIME_MODE == 'k3s'
-        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+      - name: Verify OKE identity
+        if: env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-        with:
-          command: compute instance get --instance-id ${{ steps.provenance.outputs.instance_ocid }}
-          query: 'data.{shape:shape,state:"lifecycle-state"}'
-          silent: true
+          OCI_CLUSTER_OCID: ${{ steps.provenance.outputs.cluster_ocid }}
+        run: |
+          set -euo pipefail
+          oci ce cluster get \
+            --cluster-id "$OCI_CLUSTER_OCID" \
+            --query 'data.{type:type,state:"lifecycle-state"}' \
+            >/dev/null
+
+      - name: Verify k3s identity
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.provenance.outputs.instance_ocid }}
+        run: |
+          set -euo pipefail
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' \
+            >/dev/null
 
       - name: Reconcile expired and authorize current runner IPv4
         if: env.OCI_RUNTIME_MODE == 'oke'
