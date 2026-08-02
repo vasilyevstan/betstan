@@ -166,7 +166,7 @@ oci_capacity_require_home_region() {
 }
 
 oci_capacity_require_quota() {
-  local quotas quota_id quota statements total
+  local quotas quota_id quota statements total ads availability_domain limit
   quotas="$(
     oci limits quota list \
       --compartment-id "$OCI_TENANCY_OCID" \
@@ -188,6 +188,8 @@ oci_capacity_require_quota() {
     "zero compute-core quotas in compartment $OCI_COMPARTMENT_NAME" \
     "zero compute-memory quotas in compartment $OCI_COMPARTMENT_NAME" \
     "zero block-storage quotas in compartment $OCI_COMPARTMENT_NAME" \
+    "set compute-core quota standard-a1-core-count to 2 in compartment $OCI_COMPARTMENT_NAME where request.region = $OCI_REGION" \
+    "set compute-memory quota standard-a1-memory-count to 12 in compartment $OCI_COMPARTMENT_NAME where request.region = $OCI_REGION" \
     "set compute-core quota standard-a1-core-regional-count to 2 in compartment $OCI_COMPARTMENT_NAME where request.region = $OCI_REGION" \
     "set compute-memory quota standard-a1-memory-regional-count to 12 in compartment $OCI_COMPARTMENT_NAME where request.region = $OCI_REGION" \
     "set block-storage quota volume-count to 2 in compartment $OCI_COMPARTMENT_NAME where request.region = $OCI_REGION" \
@@ -215,6 +217,31 @@ oci_capacity_require_quota() {
         oci_die "effective regional A1 memory quota is not exactly 12 GB"
     fi
   done
+
+  ads="$(oci_capacity_availability_domains)"
+  jq -e 'length > 0' <<<"$ads" >/dev/null ||
+    oci_die "no availability domains were discovered for quota validation"
+  while IFS= read -r availability_domain; do
+    for limit in standard-a1-core-count standard-a1-memory-count; do
+      quota="$(
+        oci limits resource-availability get \
+          --service-name compute \
+          --limit-name "$limit" \
+          --compartment-id "$OCI_COMPARTMENT_OCID" \
+          --availability-domain "$availability_domain"
+      )"
+      total="$(
+        jq -r '(.data.available // 0) + (.data.used // 0)' <<<"$quota"
+      )"
+      if [[ "$limit" == "standard-a1-core-count" ]]; then
+        [[ "$total" == "2" || "$total" == "2.0" ]] ||
+          oci_die "effective A1 core quota is not exactly 2 in $availability_domain"
+      else
+        [[ "$total" == "12" || "$total" == "12.0" ]] ||
+          oci_die "effective A1 memory quota is not exactly 12 GB in $availability_domain"
+      fi
+    done
+  done < <(jq -r '.[]' <<<"$ads")
 }
 
 oci_capacity_single_id() {
