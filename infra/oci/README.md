@@ -100,10 +100,11 @@ fixtures.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.
-4. Arm `oci-capacity-acquire` only after the quota, IAM, network, registry,
-   and zero-cost gates pass. It checks every Frankfurt AD every five minutes,
-   makes at most one real launch attempt per run, and permanently stops
-   launching after one valid managed VM exists.
+4. Set the repository-scoped variable `OCI_CAPACITY_CATCHER_ENABLED=true`
+   only after the quota, IAM, network, registry, and zero-cost gates pass.
+   The `oci-capacity-acquire` workflow checks every Frankfurt AD every five
+   minutes, makes at most one real launch attempt per run, and permanently
+   stops launching after one valid managed VM exists.
 5. Dispatch `oci-infrastructure` with phase `finalize` after acquisition.
    `scripts/configure-k3s-access.sh` opens ephemeral Bastion access and
    `scripts/finalize-k3s.sh` mounts the Mongo volume, installs ingress-nginx

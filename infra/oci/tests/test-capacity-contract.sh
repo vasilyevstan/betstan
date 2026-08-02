@@ -59,7 +59,8 @@ JSON
 JSON
     ;;
   limits/quota/get)
-    cat <<'JSON'
+    if [[ "$OCI_FAKE_SCENARIO" == "quota-missing-ad" ]]; then
+      cat <<'JSON'
 {"data":{"name":"betstan-free-tier-hard-limit","lifecycle-state":"ACTIVE","statements":[
 "zero compute quotas in compartment betstan-oci",
 "zero compute-core quotas in compartment betstan-oci",
@@ -71,10 +72,28 @@ JSON
 "set block-storage quota total-storage-gb to 100 in compartment betstan-oci where request.region = eu-frankfurt-1"
 ]}}
 JSON
+    else
+      cat <<'JSON'
+{"data":{"name":"betstan-free-tier-hard-limit","lifecycle-state":"ACTIVE","statements":[
+"zero compute quotas in compartment betstan-oci",
+"zero compute-core quotas in compartment betstan-oci",
+"zero compute-memory quotas in compartment betstan-oci",
+"zero block-storage quotas in compartment betstan-oci",
+"set compute-core quota standard-a1-core-count to 2 in compartment betstan-oci where request.region = eu-frankfurt-1",
+"set compute-memory quota standard-a1-memory-count to 12 in compartment betstan-oci where request.region = eu-frankfurt-1",
+"set compute-core quota standard-a1-core-regional-count to 2 in compartment betstan-oci where request.region = eu-frankfurt-1",
+"set compute-memory quota standard-a1-memory-regional-count to 12 in compartment betstan-oci where request.region = eu-frankfurt-1",
+"set block-storage quota volume-count to 2 in compartment betstan-oci where request.region = eu-frankfurt-1",
+"set block-storage quota total-storage-gb to 100 in compartment betstan-oci where request.region = eu-frankfurt-1"
+]}}
+JSON
+    fi
     ;;
   limits/resource-availability/get)
     limit="$(arg_value --limit-name "$@")"
-    if [[ "$limit" == "standard-a1-core-regional-count" ]]; then
+    if [[ "$OCI_FAKE_SCENARIO" == "quota-zero-ad" && "$limit" != *-regional-* ]]; then
+      echo '{"data":{"available":0,"used":0}}'
+    elif [[ "$limit" == *-core-* ]]; then
       echo '{"data":{"available":2,"used":0}}'
     else
       echo '{"data":{"available":12,"used":0}}'
@@ -210,6 +229,12 @@ source "$OCI_DIR/scripts/capacity-common.sh"
   fail "validated memory profile order changed"
 if OCI_A1_MEMORY_PROFILES=12,7 oci_capacity_profiles_json >/dev/null 2>&1; then
   fail "unvalidated memory profile was accepted"
+fi
+if (OCI_FAKE_SCENARIO=quota-missing-ad oci_capacity_require_quota) >/dev/null 2>&1; then
+  fail "quota policy without A1 availability-domain grants was accepted"
+fi
+if (OCI_FAKE_SCENARIO=quota-zero-ad oci_capacity_require_quota) >/dev/null 2>&1; then
+  fail "zero effective A1 availability-domain quota was accepted"
 fi
 
 cloud_init="$TEST_DIR/cloud-init.yaml"
