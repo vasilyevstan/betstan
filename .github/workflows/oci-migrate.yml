@@ -81,6 +81,7 @@ jobs:
             echo "AZURE_KUBECONFIG=$RUNNER_TEMP/azure-home/kubeconfig"
             echo "OCI_KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
           } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
           mkdir -p \
             "$RUNNER_TEMP/azure-home/.azure" \
             "$RUNNER_TEMP/oci-home/.kube"
