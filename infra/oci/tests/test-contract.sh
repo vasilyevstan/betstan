@@ -73,6 +73,7 @@ puts "oci_yaml_parse=PASS files=#{files.length}"
 RUBY
 
 OFFLINE=1 \
+OCI_RUNTIME_MODE=oke \
 OCI_A1_OCPUS=2 \
 OCI_A1_MEMORY_GB=12 \
 OCI_NODE_SHAPE=VM.Standard.A1.Flex \
@@ -117,6 +118,7 @@ OCI_MONGO_VOLUME_OCID=ocid1.volume.oc1.fixture.fixturevalue
 ENV
 
 IMAGE_PROVENANCE_FILE="$WORK_DIR/images.tsv" \
+OCI_RUNTIME_MODE=oke \
 INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
 OUTPUT_FILE="$WORK_DIR/rendered.yaml" \
 WORK_DIR="$WORK_DIR/render-work" \
@@ -164,7 +166,42 @@ abort "expected one OCI ingress" unless by_kind.fetch("Ingress").length == 1
 puts "oci_rendered_topology=PASS"
 RUBY
 
-kustomization="$OCI_DIR/k8s/kustomization.yaml"
+OCI_RUNTIME_MODE=k3s \
+OCI_K3S_NODE_NAME=betstan-k3s \
+IMAGE_PROVENANCE_FILE="$WORK_DIR/images.tsv" \
+INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
+OUTPUT_FILE="$WORK_DIR/rendered-k3s.yaml" \
+WORK_DIR="$WORK_DIR/render-k3s-work" \
+OCI_K8S_NAMESPACE=betstan-oci \
+OCI_PUBLIC_HOST=203.0.113.10.nip.io \
+OCI_CERT_EMAIL=fixture@example.invalid \
+  "$OCI_DIR/scripts/render-manifests.sh" >/dev/null
+ruby -ryaml - "$WORK_DIR/rendered-k3s.yaml" <<'RUBY'
+documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+volume = documents.find {
+  |document| document["kind"] == "PersistentVolume" &&
+    document.dig("metadata", "name") == "gaming-auth-mongo-data"
+}
+abort "k3s Mongo PV contains an OCI CSI source" if volume.dig("spec", "csi")
+abort "k3s Mongo PV lacks the stable local path" unless volume.dig(
+  "spec", "local", "path"
+) == "/var/lib/betstan/mongo"
+node_values = volume.dig(
+  "spec", "nodeAffinity", "required", "nodeSelectorTerms", 0,
+  "matchExpressions", 0, "values"
+)
+abort "k3s Mongo PV lacks exact node affinity" unless node_values == ["betstan-k3s"]
+mongo = documents.find {
+  |document| document["kind"] == "StatefulSet" &&
+    document.dig("metadata", "name") == "gaming-auth-mongo-depl"
+}
+abort "k3s Mongo fsGroup differs" unless mongo.dig(
+  "spec", "template", "spec", "securityContext", "fsGroup"
+) == 999
+puts "oci_k3s_rendered_topology=PASS"
+RUBY
+
+kustomization="$OCI_DIR/k8s/base/kustomization.yaml"
 for manifest in \
   auth-depl.yaml bet-depl.yaml backoffice-depl.yaml client-depl.yaml \
   event-depl.yaml gamemaster-depl.yaml moderation-depl.yaml \
@@ -253,6 +290,7 @@ for workflow in "$ROOT_DIR/.github/workflows"/oci-*.yml; do
 done
 
 build_workflow="$ROOT_DIR/.github/workflows/oci-production-build.yml"
+capacity_workflow="$ROOT_DIR/.github/workflows/oci-capacity-acquire.yml"
 infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
@@ -268,6 +306,18 @@ grep -Fq 'exact OCI tag already exists; refusing overwrite' "$OCI_DIR/scripts/bu
 grep -Fq 'group: oci-build-${{ github.event.workflow_run.head_sha }}' "$build_workflow"
 ! grep -Eq 'OCI_CLI_|OCI_CI_PRIVATE_KEY_PEM' "$build_workflow" ||
   fail "OCI build workflow receives an API signing key"
+
+grep -Fq 'schedule:' "$capacity_workflow"
+grep -Fq 'cron: "*/5 * * * *"' "$capacity_workflow"
+grep -Fq 'workflow_dispatch:' "$capacity_workflow"
+grep -Fq 'github.run_attempt == 1' "$capacity_workflow"
+grep -Fq "vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'" "$capacity_workflow"
+grep -Fq 'group: oci-control-plane' "$capacity_workflow"
+grep -Fq 'name: oci-capacity-acquire' "$capacity_workflow"
+grep -Fq 'OCI_CAPACITY_PRIVATE_KEY_PEM' "$capacity_workflow"
+! grep -Eq 'OCI_CI_PRIVATE_KEY_PEM|OCI_REGISTRY_|OCI_JWT_|AZURE_|azure/' \
+  "$capacity_workflow" ||
+  fail "capacity workflow receives credentials outside its dedicated identity"
 
 for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'workflow_dispatch:' "$workflow"
@@ -298,6 +348,10 @@ for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
       fail "official OCI CLI mapping missing from $(basename "$workflow"): $variable"
   done
 done
+for variable in OCI_CLI_USER OCI_CLI_TENANCY OCI_CLI_FINGERPRINT OCI_CLI_KEY_CONTENT OCI_CLI_REGION; do
+  grep -Fq "$variable:" "$capacity_workflow" ||
+    fail "official OCI CLI mapping missing from oci-capacity-acquire.yml: $variable"
+done
 ! grep -Eq 'AZURE_|azure/' "$infra_workflow" "$deploy_workflow" ||
   fail "Azure credentials leaked into OCI infrastructure/deployment"
 
@@ -312,6 +366,11 @@ done < <(
 grep -Fq 'OCI_A1_OCPUS=2' "$OCI_DIR/config/free-tier.env.example"
 grep -Fq 'OCI_CLI_VERSION=3.90.0' "$OCI_DIR/config/free-tier.env.example"
 grep -Fq 'OCI_A1_MEMORY_GB=12' "$OCI_DIR/config/free-tier.env.example"
+grep -Fq 'OCI_A1_MEMORY_PROFILES=12' "$OCI_DIR/config/free-tier.env.example"
+grep -Fq 'OCI_RUNTIME_MODE=oke' "$OCI_DIR/config/free-tier.env.example"
+grep -Fq 'OCI_K3S_VERSION=v1.34.9+k3s1' "$OCI_DIR/config/free-tier.env.example"
+grep -Fq 'OCI_K3S_BINARY_SHA256=c782d6bb71eb2eb30f034aaddabb480294f9fdae5a7bca49ac5e3e0f66b96ea5' \
+  "$OCI_DIR/config/free-tier.env.example"
 grep -Fq 'OCI_MONGO_VOLUME_GB=50' "$OCI_DIR/config/free-tier.env.example"
 grep -Fq 'OCI_EXPECTED_MONTHLY_COST=0' "$OCI_DIR/config/free-tier.env.example"
 grep -Fq 'OCI_REGISTRY_MAX_BYTES=500000000' "$OCI_DIR/config/free-tier.env.example"
@@ -322,12 +381,18 @@ grep -Fq 'OCI_CERT_MANAGER_CHART_SHA256=c27101f3f3e2349fb4a9e704316105bf7b52ad73
 grep -Fq 'VM.Standard.A1.Flex' "$OCI_DIR/scripts/provision.sh"
 grep -Fq -- '--type BASIC_CLUSTER' "$OCI_DIR/scripts/provision.sh"
 grep -Fq 'compute-capacity-report create' "$OCI_DIR/scripts/preflight.sh"
+grep -Fq 'compute compute-capacity-report create' "$OCI_DIR/scripts/capacity-report.sh"
+grep -Fq 'oci compute instance launch' "$OCI_DIR/scripts/acquire-a1.sh"
+! grep -Fq -- '--fault-domain' "$OCI_DIR/scripts/acquire-a1.sh" ||
+  fail "capacity acquisition must let OCI choose the fault domain"
 if grep -R -n -E 'nat-gateway create|--type ENHANCED_CLUSTER|VM\.Standard\.(E|D|B|X|GPU)' \
   "$OCI_DIR/scripts" >/dev/null 2>&1; then
   fail "OCI scripts contain a paid infrastructure fallback"
 fi
 
 "$OCI_DIR/agents/test-health-contract-stan.sh"
+"$OCI_DIR/tests/test-capacity-contract.sh"
+"$OCI_DIR/tests/test-k3s-runtime-contract.sh"
 
 git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
   fail "production-build.yml was modified"

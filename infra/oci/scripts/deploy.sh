@@ -23,12 +23,20 @@ oci_require_vars \
   OCI_JWT_KEY OCI_REGISTRY_HOST OCI_REGISTRY_USERNAME OCI_REGISTRY_AUTH_TOKEN \
   OCI_K8S_NAMESPACE OCI_CERT_EMAIL OCI_COMPARTMENT_OCID
 
-unset source_sha cluster_ocid cluster_fingerprint compartment_ocid ingress_ipv4 public_host
+unset source_sha runtime_mode infrastructure_finalized
+unset cluster_ocid cluster_fingerprint instance_ocid instance_fingerprint
+unset compartment_ocid ingress_ipv4 public_host lb_ocid k3s_node_name
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
 [[ "${source_sha:-}" == "$SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
-oci_require_vars cluster_ocid cluster_fingerprint compartment_ocid ingress_ipv4 public_host
+oci_require_vars \
+  runtime_mode infrastructure_finalized compartment_ocid ingress_ipv4 \
+  public_host
+[[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
+  oci_die "infrastructure provenance runtime mismatch"
+[[ "$infrastructure_finalized" == "true" ]] ||
+  oci_die "infrastructure provenance is not finalized"
 [[ "$node_shape" == "VM.Standard.A1.Flex" && "$node_ocpus" == "2" &&
    "$node_memory_gb" == "12" && "$mongo_volume_gb" == "50" &&
    "$lb_min_mbps" == "10" && "$lb_max_mbps" == "10" &&
@@ -36,26 +44,57 @@ oci_require_vars cluster_ocid cluster_fingerprint compartment_ocid ingress_ipv4 
   oci_die "infrastructure provenance violates approved Free Tier constants"
 [[ "$compartment_ocid" == "$OCI_COMPARTMENT_OCID" ]] ||
   oci_die "infrastructure provenance compartment mismatch"
-[[ "$(oci_fingerprint "$cluster_ocid")" == "$cluster_fingerprint" ]] ||
-  oci_die "infrastructure cluster fingerprint mismatch"
 oci_validate_public_ipv4 "$ingress_ipv4" || oci_die "provenance ingress address is not public IPv4"
 [[ "$public_host" == "${ingress_ipv4}.nip.io" ]] ||
   oci_die "public host is not derived from the provenance IPv4"
 
-cluster="$(oci ce cluster get --cluster-id "$cluster_ocid")"
-[[ "$(jq -r '.data."compartment-id"' <<<"$cluster")" == "$compartment_ocid" ]] ||
-  oci_die "live cluster compartment does not match infrastructure provenance"
-[[ "$(jq -r '.data.type' <<<"$cluster")" == "BASIC_CLUSTER" ]] ||
-  oci_die "live cluster is not OKE Basic"
-
 kubeconfig_json="$(kubectl config view --raw --minify -o json)"
-jq -e --arg cluster "$cluster_ocid" '
-  [.users[].user.exec.args[]? | select(. == $cluster)] | length == 1
-' <<<"$kubeconfig_json" >/dev/null || oci_die "kubeconfig was not generated from the exact cluster OCID"
 cluster_server="$(jq -r '.clusters[0].cluster.server // empty' <<<"$kubeconfig_json")"
-provider_endpoint="$(jq -r '.data.endpoints."public-endpoint" // empty' <<<"$cluster")"
-[[ -n "$cluster_server" && "$cluster_server" == *"$provider_endpoint"* ]] ||
-  oci_die "kubeconfig API endpoint does not match OCI cluster provenance"
+if [[ "$runtime_mode" == "oke" ]]; then
+  oci_require_vars cluster_ocid cluster_fingerprint
+  [[ "$(oci_fingerprint "$cluster_ocid")" == "$cluster_fingerprint" ]] ||
+    oci_die "infrastructure cluster fingerprint mismatch"
+  cluster="$(oci ce cluster get --cluster-id "$cluster_ocid")"
+  [[ "$(jq -r '.data."compartment-id"' <<<"$cluster")" == "$compartment_ocid" ]] ||
+    oci_die "live cluster compartment does not match infrastructure provenance"
+  [[ "$(jq -r '.data.type' <<<"$cluster")" == "BASIC_CLUSTER" ]] ||
+    oci_die "live cluster is not OKE Basic"
+  jq -e --arg cluster "$cluster_ocid" '
+    [.users[].user.exec.args[]? | select(. == $cluster)] | length == 1
+  ' <<<"$kubeconfig_json" >/dev/null ||
+    oci_die "kubeconfig was not generated from the exact cluster OCID"
+  provider_endpoint="$(jq -r '.data.endpoints."public-endpoint" // empty' <<<"$cluster")"
+  [[ -n "$cluster_server" && "$cluster_server" == *"$provider_endpoint"* ]] ||
+    oci_die "kubeconfig API endpoint does not match OCI cluster provenance"
+  runtime_fingerprint="$cluster_fingerprint"
+else
+  oci_require_vars instance_ocid instance_fingerprint lb_ocid k3s_node_name
+  [[ "$(oci_fingerprint "$instance_ocid")" == "$instance_fingerprint" ]] ||
+    oci_die "infrastructure instance fingerprint mismatch"
+  [[ "$cluster_server" =~ ^https://127\.0\.0\.1:[0-9]+$ ]] ||
+    oci_die "k3s kubeconfig does not use the local Bastion tunnel"
+  instance="$(oci compute instance get --instance-id "$instance_ocid")"
+  jq -e \
+    --arg compartment "$compartment_ocid" \
+    --arg sha "$SOURCE_SHA" '
+      .data."compartment-id" == $compartment and
+      .data."lifecycle-state" == "RUNNING" and
+      .data.shape == "VM.Standard.A1.Flex" and
+      .data."freeform-tags"."betstan-runtime" == "k3s" and
+      .data."freeform-tags"."source-sha" == $sha
+    ' <<<"$instance" >/dev/null ||
+    oci_die "live k3s instance differs from infrastructure provenance"
+  node="$(kubectl get node "$k3s_node_name" -o json)"
+  jq -e --arg provider_id "oci://${instance_ocid}" '
+    .spec.providerID == $provider_id and
+    .metadata.labels."kubernetes.io/arch" == "arm64" and
+    ([.status.conditions[] | select(
+      .type == "Ready" and .status == "True"
+    )] | length) == 1
+  ' <<<"$node" >/dev/null ||
+    oci_die "k3s node identity or readiness differs from provenance"
+  runtime_fingerprint="$instance_fingerprint"
+fi
 
 oci_prepare_private_dir "$OUTPUT_DIR"
 OCI_PUBLIC_HOST="$public_host" \
@@ -197,10 +236,19 @@ awk 'NF >= 4 {print $1}' <<<"$queue_state" | sort > "$OUTPUT_DIR/rabbitmq-baseli
 
 apply_documents 'Ingress:^gaming-oci-ingress$'
 
-live_ingress_ip="$(
-  kubectl get service ingress-nginx-controller -n ingress-nginx \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-)"
+if [[ "$runtime_mode" == "oke" ]]; then
+  live_ingress_ip="$(
+    kubectl get service ingress-nginx-controller -n ingress-nginx \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  )"
+else
+  lb="$(oci lb load-balancer get --load-balancer-id "$lb_ocid")"
+  live_ingress_ip="$(
+    jq -r '
+      [.data."ip-addresses"[]? | select(."is-public" == true)][0]."ip-address" // empty
+    ' <<<"$lb"
+  )"
+fi
 [[ "$live_ingress_ip" == "$ingress_ipv4" ]] ||
   oci_die "Kubernetes ingress IPv4 differs from infrastructure provenance"
 
@@ -232,7 +280,13 @@ load_balancer_count="$(
   kubectl get services -A -o json |
     jq '[.items[] | select(.spec.type == "LoadBalancer")] | length'
 )"
-[[ "$load_balancer_count" == "1" ]] || oci_die "cluster must expose exactly one LoadBalancer service"
+if [[ "$runtime_mode" == "oke" ]]; then
+  [[ "$load_balancer_count" == "1" ]] ||
+    oci_die "OKE cluster must expose exactly one LoadBalancer service"
+else
+  [[ "$load_balancer_count" == "0" ]] ||
+    oci_die "k3s must not expose a Kubernetes LoadBalancer service"
+fi
 public_data_services="$(
   kubectl get services -n "$OCI_K8S_NAMESPACE" -o json |
     jq '[.items[] | select(
@@ -243,7 +297,8 @@ public_data_services="$(
 
 {
   printf 'source_sha=%s\n' "$SOURCE_SHA"
-  printf 'cluster_fingerprint=%s\n' "$cluster_fingerprint"
+  printf 'runtime_mode=%s\n' "$runtime_mode"
+  printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
   printf 'image_provenance_sha256=%s\n' "$(oci_sha256 < "$IMAGE_PROVENANCE_FILE")"
   printf 'rendered_manifest_sha256=%s\n' "$(oci_sha256 < "$RENDERED_FILE")"
   printf 'rabbitmq_baseline_sha256=%s\n' "$(oci_sha256 < "$OUTPUT_DIR/rabbitmq-baseline.txt")"

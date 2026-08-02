@@ -1,0 +1,134 @@
+name: oci-capacity-acquire
+run-name: oci-capacity-acquire ${{ inputs.approved_sha || 'scheduled-master' }}
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Optional exact current master SHA for an audited manual attempt
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    if: >-
+      github.run_attempt == 1 &&
+      github.repository == 'vasilyevstan/betstan' &&
+      vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-capacity-acquire
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_RUNTIME_MODE: k3s
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_COMPARTMENT_NAME: ${{ vars.OCI_COMPARTMENT_NAME }}
+      OCI_CAPACITY_QUOTA_NAME: ${{ vars.OCI_CAPACITY_QUOTA_NAME }}
+      OCI_VCN_NAME: ${{ vars.OCI_VCN_NAME }}
+      OCI_K3S_INSTANCE_NAME: ${{ vars.OCI_K3S_INSTANCE_NAME }}
+      OCI_K3S_IMAGE_OCID: ${{ vars.OCI_K3S_IMAGE_OCID }}
+      OCI_K3S_VERSION: ${{ vars.OCI_K3S_VERSION }}
+      OCI_K3S_BINARY_SHA256: ${{ vars.OCI_K3S_BINARY_SHA256 }}
+      OCI_K3S_SSH_PUBLIC_KEY: ${{ vars.OCI_K3S_SSH_PUBLIC_KEY }}
+      OCI_NODE_SHAPE: VM.Standard.A1.Flex
+      OCI_A1_OCPUS: "2"
+      OCI_A1_MEMORY_GB: "12"
+      OCI_A1_MEMORY_PROFILES: ${{ vars.OCI_A1_MEMORY_PROFILES || '12' }}
+      OCI_BOOT_VOLUME_GB: "50"
+      OCI_EXPECTED_MONTHLY_COST: "0"
+      OCI_CAPACITY_RUN_ID: ${{ github.run_id }}
+      OCI_CAPACITY_RUN_NUMBER: ${{ github.run_number }}
+      PROVENANCE_DIR: artifacts/oci-capacity
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-capacity-home"
+            echo "WORK_DIR=$RUNNER_TEMP/oci-capacity-work"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/oci-capacity-home" "$RUNNER_TEMP/oci-capacity-work"
+          chmod 700 "$RUNNER_TEMP/oci-capacity-home" "$RUNNER_TEMP/oci-capacity-work"
+
+      - name: Checkout approved or scheduled master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact current master execution
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          if [ -z "$SOURCE_SHA" ]; then
+            SOURCE_SHA="$(git rev-parse HEAD)"
+          fi
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          printf 'SOURCE_SHA=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+
+      - name: Install OCI CLI with capacity identity
+        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CAPACITY_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CAPACITY_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CAPACITY_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          command: iam region-subscription list
+          query: 'data[?"is-home-region" == `true`]."region-name"'
+          silent: true
+
+      - name: Attempt one reconciled Free Tier placement
+        id: acquire
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CAPACITY_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CAPACITY_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CAPACITY_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/acquire-a1.sh | tee "$RUNNER_TEMP/capacity-result.log"
+          status="$(
+            sed -n 's/^capacity_acquisition=\([^ ]*\).*/\1/p' \
+              "$RUNNER_TEMP/capacity-result.log" | tail -1
+          )"
+          [ -n "$status" ]
+          {
+            echo "### OCI Always Free capacity"
+            echo
+            echo "Result: \`$status\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload successful acquisition provenance
+        if: steps.acquire.outputs.instance_acquired == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-capacity-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-capacity/provenance.env
+            artifacts/oci-capacity/inventory.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$HOME" "$WORK_DIR"

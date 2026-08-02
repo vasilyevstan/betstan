@@ -11,6 +11,10 @@ PROVENANCE_FILE="${PROVENANCE_FILE:-$PROVENANCE_DIR/provenance.env}"
 INVENTORY_FILE="${INVENTORY_FILE:-$PROVENANCE_DIR/inventory.json}"
 SOURCE_SHA="${SOURCE_SHA:-${GITHUB_SHA:-}}"
 OCI_MONGO_VPUS_PER_GB="${OCI_MONGO_VPUS_PER_GB:-0}"
+OCI_RUNTIME_MODE="$(oci_runtime_mode)"
+OCI_BASTION_NAME="${OCI_BASTION_NAME:-${OCI_CLUSTER_NAME:-betstan-oci}-bastion}"
+OCI_BASTION_DEFAULT_CLIENT_CIDR="${OCI_BASTION_DEFAULT_CLIENT_CIDR:-192.0.2.1/32}"
+OCI_BASTION_MAX_SESSION_TTL="${OCI_BASTION_MAX_SESSION_TTL:-10800}"
 
 [[ "$MODE" == "cloud" || "$MODE" == "addons" ]] ||
   oci_die "usage: provision.sh [cloud|addons]"
@@ -18,12 +22,22 @@ OCI_MONGO_VPUS_PER_GB="${OCI_MONGO_VPUS_PER_GB:-0}"
 oci_require_cli_version
 oci_require_command jq
 oci_require_vars \
-  OCI_COMPARTMENT_OCID OCI_COMPARTMENT_NAME OCI_REGION OCI_AVAILABILITY_DOMAIN \
-  OCI_CLUSTER_NAME OCI_NODE_POOL_NAME OCI_VCN_NAME OCI_K8S_NAMESPACE \
-  OCI_KUBERNETES_VERSION OCI_NODE_IMAGE_OCID OCI_VCN_CIDR \
+  OCI_COMPARTMENT_OCID OCI_COMPARTMENT_NAME OCI_REGION \
+  OCI_CLUSTER_NAME OCI_VCN_NAME OCI_K8S_NAMESPACE OCI_VCN_CIDR \
   OCI_WORKER_SUBNET_CIDR OCI_LB_SUBNET_CIDR OCI_PODS_CIDR OCI_SERVICES_CIDR \
   OCI_A1_OCPUS OCI_A1_MEMORY_GB OCI_BOOT_VOLUME_GB OCI_MONGO_VOLUME_GB \
   OCI_LB_MIN_MBPS OCI_LB_MAX_MBPS OCI_EXPECTED_MONTHLY_COST OCI_LB_NAME
+if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
+  oci_require_vars \
+    OCI_AVAILABILITY_DOMAIN OCI_NODE_POOL_NAME OCI_KUBERNETES_VERSION \
+    OCI_NODE_IMAGE_OCID
+else
+  oci_require_vars OCI_BASTION_NAME OCI_BASTION_DEFAULT_CLIENT_CIDR
+  [[ "$OCI_BASTION_DEFAULT_CLIENT_CIDR" == "192.0.2.1/32" ]] ||
+    oci_die "OCI Bastion must use the reviewed non-routable default client CIDR"
+  [[ "$OCI_BASTION_MAX_SESSION_TTL" == "10800" ]] ||
+    oci_die "OCI_BASTION_MAX_SESSION_TTL must be 10800"
+fi
 oci_require_value OCI_A1_OCPUS 2
 oci_require_value OCI_A1_MEMORY_GB 12
 oci_require_value OCI_MONGO_VOLUME_GB 50
@@ -106,6 +120,26 @@ ensure_nsg_rule() {
     --network-security-group-id "$nsg_id" \
     --security-rules "[$rule_json]" >/dev/null
 }
+
+assert_nsg_rule_set() {
+  local nsg_id="$1"
+  local expected="$2"
+  local rules
+  rules="$(
+    oci network nsg rules list \
+      --network-security-group-id "$nsg_id" \
+      --all
+  )"
+  rules="$(oci_normalize_list_json "$rules")"
+  jq -e --argjson expected "$expected" '
+    ([.data[]?.description] | sort) == ($expected | sort)
+  ' <<<"$rules" >/dev/null ||
+    oci_die "managed NSG contains an unexpected or missing rule"
+}
+
+if [[ "$MODE" == "addons" && "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+  exec "$SCRIPT_DIR/finalize-k3s.sh"
+fi
 
 if [[ "$MODE" == "cloud" ]]; then
   "$SCRIPT_DIR/preflight.sh"
@@ -220,46 +254,69 @@ if [[ "$MODE" == "cloud" ]]; then
     nsg_ids["$role"]="$id"
   done
 
-  ensure_nsg_rule "${nsg_ids[endpoint]}" "workers-to-api-6443" "$(
-    jq -cn --arg source "${nsg_ids[worker]}" '{
-      direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
-      source:$source, isStateless:false, description:"workers-to-api-6443",
-      tcpOptions:{destinationPortRange:{min:6443,max:6443}}
-    }'
-  )"
-  ensure_nsg_rule "${nsg_ids[endpoint]}" "endpoint-to-workers" "$(
-    jq -cn --arg destination "${nsg_ids[worker]}" '{
-      direction:"EGRESS", protocol:"all", destinationType:"NETWORK_SECURITY_GROUP",
-      destination:$destination, isStateless:false, description:"endpoint-to-workers"
-    }'
-  )"
-  ensure_nsg_rule "${nsg_ids[worker]}" "endpoint-to-kubelet-10250" "$(
-    jq -cn --arg source "${nsg_ids[endpoint]}" '{
-      direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
-      source:$source, isStateless:false, description:"endpoint-to-kubelet-10250",
-      tcpOptions:{destinationPortRange:{min:10250,max:10250}}
-    }'
-  )"
-  ensure_nsg_rule "${nsg_ids[worker]}" "endpoint-to-nodeports" "$(
-    jq -cn --arg source "${nsg_ids[endpoint]}" '{
-      direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
-      source:$source, isStateless:false, description:"endpoint-to-nodeports",
-      tcpOptions:{destinationPortRange:{min:30000,max:32767}}
-    }'
-  )"
-  ensure_nsg_rule "${nsg_ids[worker]}" "worker-internal" "$(
-    jq -cn --arg source "${nsg_ids[worker]}" '{
-      direction:"INGRESS", protocol:"all", sourceType:"NETWORK_SECURITY_GROUP",
-      source:$source, isStateless:false, description:"worker-internal"
-    }'
-  )"
-  ensure_nsg_rule "${nsg_ids[worker]}" "lb-to-nodeports" "$(
-    jq -cn --arg source "${nsg_ids[lb]}" '{
-      direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
-      source:$source, isStateless:false, description:"lb-to-nodeports",
-      tcpOptions:{destinationPortRange:{min:30000,max:32767}}
-    }'
-  )"
+  if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
+    ensure_nsg_rule "${nsg_ids[endpoint]}" "workers-to-api-6443" "$(
+      jq -cn --arg source "${nsg_ids[worker]}" '{
+        direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
+        source:$source, isStateless:false, description:"workers-to-api-6443",
+        tcpOptions:{destinationPortRange:{min:6443,max:6443}}
+      }'
+    )"
+    ensure_nsg_rule "${nsg_ids[endpoint]}" "endpoint-to-workers" "$(
+      jq -cn --arg destination "${nsg_ids[worker]}" '{
+        direction:"EGRESS", protocol:"all", destinationType:"NETWORK_SECURITY_GROUP",
+        destination:$destination, isStateless:false, description:"endpoint-to-workers"
+      }'
+    )"
+    ensure_nsg_rule "${nsg_ids[worker]}" "endpoint-to-kubelet-10250" "$(
+      jq -cn --arg source "${nsg_ids[endpoint]}" '{
+        direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
+        source:$source, isStateless:false, description:"endpoint-to-kubelet-10250",
+        tcpOptions:{destinationPortRange:{min:10250,max:10250}}
+      }'
+    )"
+    ensure_nsg_rule "${nsg_ids[worker]}" "endpoint-to-nodeports" "$(
+      jq -cn --arg source "${nsg_ids[endpoint]}" '{
+        direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
+        source:$source, isStateless:false, description:"endpoint-to-nodeports",
+        tcpOptions:{destinationPortRange:{min:30000,max:32767}}
+      }'
+    )"
+    ensure_nsg_rule "${nsg_ids[worker]}" "worker-internal" "$(
+      jq -cn --arg source "${nsg_ids[worker]}" '{
+        direction:"INGRESS", protocol:"all", sourceType:"NETWORK_SECURITY_GROUP",
+        source:$source, isStateless:false, description:"worker-internal"
+      }'
+    )"
+    ensure_nsg_rule "${nsg_ids[worker]}" "lb-to-nodeports" "$(
+      jq -cn --arg source "${nsg_ids[lb]}" '{
+        direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
+        source:$source, isStateless:false, description:"lb-to-nodeports",
+        tcpOptions:{destinationPortRange:{min:30000,max:32767}}
+      }'
+    )"
+  else
+    for port in 22 6443; do
+      ensure_nsg_rule "${nsg_ids[worker]}" "bastion-to-worker-${port}" "$(
+        jq -cn --arg source "$OCI_WORKER_SUBNET_CIDR" --argjson port "$port" '{
+          direction:"INGRESS", protocol:"6", sourceType:"CIDR_BLOCK",
+          source:$source, isStateless:false,
+          description:("bastion-to-worker-" + ($port|tostring)),
+          tcpOptions:{destinationPortRange:{min:$port,max:$port}}
+        }'
+      )"
+    done
+    for port in 30080 30443; do
+      ensure_nsg_rule "${nsg_ids[worker]}" "lb-to-nodeport-${port}" "$(
+        jq -cn --arg source "${nsg_ids[lb]}" --argjson port "$port" '{
+          direction:"INGRESS", protocol:"6", sourceType:"NETWORK_SECURITY_GROUP",
+          source:$source, isStateless:false,
+          description:("lb-to-nodeport-" + ($port|tostring)),
+          tcpOptions:{destinationPortRange:{min:$port,max:$port}}
+        }'
+      )"
+    done
+  fi
   ensure_nsg_rule "${nsg_ids[worker]}" "worker-internet-egress" '{
     "direction":"EGRESS","protocol":"all","destinationType":"CIDR_BLOCK",
     "destination":"0.0.0.0/0","isStateless":false,"description":"worker-internet-egress"
@@ -274,13 +331,42 @@ if [[ "$MODE" == "cloud" ]]; then
       }'
     )"
   done
-  ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-worker-nodeports" "$(
-    jq -cn --arg destination "${nsg_ids[worker]}" '{
-      direction:"EGRESS", protocol:"6", destinationType:"NETWORK_SECURITY_GROUP",
-      destination:$destination, isStateless:false, description:"lb-to-worker-nodeports",
-      tcpOptions:{destinationPortRange:{min:30000,max:32767}}
-    }'
-  )"
+  if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
+    ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-worker-nodeports" "$(
+      jq -cn --arg destination "${nsg_ids[worker]}" '{
+        direction:"EGRESS", protocol:"6", destinationType:"NETWORK_SECURITY_GROUP",
+        destination:$destination, isStateless:false, description:"lb-to-worker-nodeports",
+        tcpOptions:{destinationPortRange:{min:30000,max:32767}}
+      }'
+    )"
+  else
+    for port in 30080 30443; do
+      ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-worker-${port}" "$(
+        jq -cn --arg destination "${nsg_ids[worker]}" --argjson port "$port" '{
+          direction:"EGRESS", protocol:"6", destinationType:"NETWORK_SECURITY_GROUP",
+          destination:$destination, isStateless:false,
+          description:("lb-to-worker-" + ($port|tostring)),
+          tcpOptions:{destinationPortRange:{min:$port,max:$port}}
+        }'
+      )"
+    done
+  fi
+  if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+    assert_nsg_rule_set "${nsg_ids[endpoint]}" '[]'
+    assert_nsg_rule_set "${nsg_ids[worker]}" '[
+      "bastion-to-worker-22",
+      "bastion-to-worker-6443",
+      "lb-to-nodeport-30080",
+      "lb-to-nodeport-30443",
+      "worker-internet-egress"
+    ]'
+    assert_nsg_rule_set "${nsg_ids[lb]}" '[
+      "world-to-lb-80",
+      "world-to-lb-443",
+      "lb-to-worker-30080",
+      "lb-to-worker-30443"
+    ]'
+  fi
 
   security_list_ids="$(jq -cn --arg id "$security_list_id" '[$id]')"
   declare -A subnet_ids=()
@@ -321,6 +407,80 @@ if [[ "$MODE" == "cloud" ]]; then
       oci_die "existing $role subnet differs from the approved public/restricted contract"
     subnet_ids["$role"]="$id"
   done
+
+  if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+    bastions="$(
+      oci bastion bastion list \
+        --compartment-id "$OCI_COMPARTMENT_OCID" \
+        --all
+    )"
+    bastion_id="$(single_id "$bastions" "$OCI_BASTION_NAME" name)"
+    bastion_cidrs="$(jq -cn --arg cidr "$OCI_BASTION_DEFAULT_CLIENT_CIDR" '[$cidr]')"
+    if [[ -z "$bastion_id" ]]; then
+      oci bastion bastion create \
+        --bastion-type STANDARD \
+        --compartment-id "$OCI_COMPARTMENT_OCID" \
+        --name "$OCI_BASTION_NAME" \
+        --target-subnet-id "${subnet_ids[worker]}" \
+        --client-cidr-list "$bastion_cidrs" \
+        --max-session-ttl "$OCI_BASTION_MAX_SESSION_TTL" \
+        --freeform-tags "$tags" \
+        --wait-for-state SUCCEEDED \
+        --max-wait-seconds 600 >/dev/null
+      bastions="$(
+        oci bastion bastion list \
+          --compartment-id "$OCI_COMPARTMENT_OCID" \
+          --all
+      )"
+      bastion_id="$(single_id "$bastions" "$OCI_BASTION_NAME" name)"
+    fi
+    [[ -n "$bastion_id" ]] ||
+      oci_die "OCI Bastion creation did not return the managed bastion"
+    bastion="$(oci bastion bastion get --bastion-id "$bastion_id")"
+    jq -e \
+      --arg subnet "${subnet_ids[worker]}" \
+      --arg cidr "$OCI_BASTION_DEFAULT_CLIENT_CIDR" \
+      --argjson ttl "$OCI_BASTION_MAX_SESSION_TTL" '
+        .data."lifecycle-state" == "ACTIVE" and
+        .data."target-subnet-id" == $subnet and
+        .data."max-session-ttl-in-seconds" == $ttl and
+        (.data."client-cidr-block-allow-list" | sort) == ([$cidr] | sort)
+      ' <<<"$bastion" >/dev/null ||
+      oci_die "existing OCI Bastion differs from the reviewed k3s access contract"
+
+    {
+      printf 'source_sha=%q\n' "$SOURCE_SHA"
+      printf 'infrastructure_run_id=%q\n' "${GITHUB_RUN_ID:-local}"
+      printf 'infrastructure_run_attempt=%q\n' "${GITHUB_RUN_ATTEMPT:-1}"
+      printf 'infrastructure_finalized=%q\n' "false"
+      printf 'runtime_mode=%q\n' "$OCI_RUNTIME_MODE"
+      printf 'network_prepared=%q\n' "true"
+      printf 'region=%q\n' "$OCI_REGION"
+      printf 'compartment_ocid=%q\n' "$OCI_COMPARTMENT_OCID"
+      printf 'vcn_ocid=%q\n' "$vcn_id"
+      printf 'vcn_fingerprint=%q\n' "$(oci_fingerprint "$vcn_id")"
+      printf 'worker_nsg_ocid=%q\n' "${nsg_ids[worker]}"
+      printf 'lb_nsg_ocid=%q\n' "${nsg_ids[lb]}"
+      printf 'worker_subnet_ocid=%q\n' "${subnet_ids[worker]}"
+      printf 'lb_subnet_ocid=%q\n' "${subnet_ids[lb]}"
+      printf 'bastion_ocid=%q\n' "$bastion_id"
+      printf 'bastion_fingerprint=%q\n' "$(oci_fingerprint "$bastion_id")"
+      printf 'namespace=%q\n' "$OCI_K8S_NAMESPACE"
+      printf 'lb_name=%q\n' "$OCI_LB_NAME"
+      printf 'node_shape=%q\n' "VM.Standard.A1.Flex"
+      printf 'node_ocpus=%q\n' "$OCI_A1_OCPUS"
+      printf 'node_memory_gb=%q\n' "$OCI_A1_MEMORY_GB"
+      printf 'boot_volume_gb=%q\n' "$OCI_BOOT_VOLUME_GB"
+      printf 'mongo_volume_gb=%q\n' "$OCI_MONGO_VOLUME_GB"
+      printf 'lb_min_mbps=%q\n' "$OCI_LB_MIN_MBPS"
+      printf 'lb_max_mbps=%q\n' "$OCI_LB_MAX_MBPS"
+      printf 'expected_monthly_cost=%q\n' "$OCI_EXPECTED_MONTHLY_COST"
+    } > "$PROVENANCE_FILE"
+    chmod 600 "$PROVENANCE_FILE"
+    INVENTORY_MODE=preflight OUTPUT_FILE="$INVENTORY_FILE" "$SCRIPT_DIR/inventory.sh"
+    oci_log "oci_k3s_network_prepare=PASS compute_created=0"
+    exit 0
+  fi
 
   clusters="$(oci ce cluster list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
   cluster_id="$(single_id "$clusters" "$OCI_CLUSTER_NAME" name)"
@@ -448,6 +608,9 @@ if [[ "$MODE" == "cloud" ]]; then
     printf 'source_sha=%q\n' "$SOURCE_SHA"
     printf 'infrastructure_run_id=%q\n' "${GITHUB_RUN_ID:-local}"
     printf 'infrastructure_run_attempt=%q\n' "${GITHUB_RUN_ATTEMPT:-1}"
+    printf 'runtime_mode=%q\n' "oke"
+    printf 'network_prepared=%q\n' "true"
+    printf 'infrastructure_finalized=%q\n' "false"
     printf 'region=%q\n' "$OCI_REGION"
     printf 'compartment_ocid=%q\n' "$OCI_COMPARTMENT_OCID"
     printf 'cluster_ocid=%q\n' "$cluster_id"
@@ -591,9 +754,10 @@ jq -e --arg ip "$ingress_ipv4" --argjson min "$OCI_LB_MIN_MBPS" --argjson max "$
   ([.data."ip-addresses"[]."ip-address" | select(. == $ip)] | length) == 1
 ' <<<"$lb" >/dev/null || oci_die "OCI load balancer shape or ingress IPv4 violates provenance"
 
-grep -v -E '^(lb_ocid|ingress_ipv4|public_host|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
+grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
   "$PROVENANCE_FILE" > "$work_dir/provenance.env"
 {
+  printf 'infrastructure_finalized=%q\n' "true"
   printf 'lb_ocid=%q\n' "$lb_ocid"
   printf 'ingress_ipv4=%q\n' "$ingress_ipv4"
   printf 'public_host=%q\n' "${ingress_ipv4}.nip.io"

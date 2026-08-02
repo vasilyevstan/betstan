@@ -1,0 +1,30 @@
+controller:
+  replicaCount: 1
+  image:
+    tag: v1.12.1
+    digest: sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b
+  admissionWebhooks:
+    enabled: true
+    patch:
+      image:
+        tag: v1.5.2
+        digest: sha256:e8825994b7a2c7497375a9b945f386506ca6a3eda80b89b74ef2db743f66a5ea
+      nodeSelector:
+        kubernetes.io/arch: arm64
+  service:
+    type: NodePort
+    externalTrafficPolicy: Cluster
+    nodePorts:
+      http: 30080
+      https: 30443
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+  nodeSelector:
+    kubernetes.io/arch: arm64
+defaultBackend:
+  enabled: false

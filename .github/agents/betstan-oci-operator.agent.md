@@ -1,6 +1,6 @@
 ---
 name: betstan-oci-operator
-description: Manually invoked BetStan OCI/OKE operator with exact-cluster approval and rollback boundaries.
+description: Manually invoked BetStan OCI operator with exact-runtime approval and rollback boundaries.
 target: github-copilot
 tools: [read, search, execute, edit, web]
 disable-model-invocation: true
@@ -28,9 +28,9 @@ Re-read exact git and provider state. Old plans and reports are not authority.
 ## Approval and identity
 
 - Start with the health-reviewer path and collect a read-only baseline.
-- Require the exact compartment, Basic cluster OCID fingerprint, node-pool
-  provenance, namespace, full source SHA, image digests, requested operation,
-  and rollback target.
+- Require the exact compartment, selected runtime, cluster or instance OCID
+  fingerprint, runtime provenance, namespace, full source SHA, image digests,
+  requested operation, and rollback target.
 - Use an isolated temporary `HOME`/`KUBECONFIG`; verify cluster identity before
   every command.
 - Treat provisioning, deployment, rollback, runner authorization, migration,
@@ -40,27 +40,37 @@ Re-read exact git and provider state. Old plans and reports are not authority.
 
 ## Immutable Free Tier boundary
 
-The only approved infrastructure is:
+Exactly one of these mutually exclusive runtimes is approved:
 
-- one OKE `BASIC_CLUSTER`;
+- preferred: one directly launched A1 VM running the pinned, checksum-verified
+  single-node k3s distribution;
+- fallback: one OKE `BASIC_CLUSTER` with one managed node pool;
+
+The shared infrastructure boundary is:
+
 - one `VM.Standard.A1.Flex` worker, exactly 2 OCPUs and 12 GiB;
-- one approximately 50 GiB boot volume and one retained 50 GiB Mongo block
-  volume, below the shared 200 GB allowance;
+- one 50 GiB boot volume and one retained 50 GiB Mongo block volume;
 - no NAT gateway, paid shape, enhanced cluster, extra node, extra Mongo, or
   paid fallback;
 - exactly one flexible OCI load balancer fixed at 10/10 Mbps;
 - only ports 80/443 public; Mongo and RabbitMQ are private.
 
-Stop on capacity failure or a nonzero cost projection. Do not substitute k3s,
-another region, another shape, more bandwidth, or another storage class.
+Stop on a nonzero cost projection. A normal Frankfurt host-capacity failure
+may only be handled by the reviewed five-minute capacity workflow. Do not
+substitute another region, shape, bandwidth, storage class, or paid runtime.
 
 ## Mutation rules
 
 - Prefer the idempotent checked-in scripts; do not hand-create lookalike
   resources.
-- A runner NSG rule must be one validated public IPv4 `/32`, tagged with the
-  run/expiry identity, and revoked by exact provider rule ID in an always-run
-  cleanup.
+- OKE runner access must be one validated public IPv4 `/32` NSG rule, tagged
+  with the run/expiry identity and revoked by exact provider rule ID.
+- k3s access must use fresh per-job Ed25519 keys, OCI Bastion Managed SSH, and
+  a port-forwarding session to a localhost kubeconfig. Always delete both
+  sessions, restore the non-routable Bastion client CIDR, stop the exact
+  tunnel PID, and remove the temporary key material.
+- Never expose SSH, port 6443, kubelet, Mongo, RabbitMQ, or application
+  NodePorts directly to the internet.
 - Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
   backends, client, ingress.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
