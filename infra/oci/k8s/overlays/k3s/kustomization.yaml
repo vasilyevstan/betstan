@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      version: v1
+      kind: PersistentVolume
+      name: gaming-auth-mongo-data
+    patch: |-
+      - op: remove
+        path: /spec/csi
+      - op: add
+        path: /spec/local
+        value:
+          path: /var/lib/betstan/mongo
+      - op: add
+        path: /spec/nodeAffinity
+        value:
+          required:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - __OCI_K3S_NODE_NAME__
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: gaming-auth-mongo-depl
+    patch: |-
+      - op: add
+        path: /spec/template/spec/securityContext
+        value:
+          fsGroup: 999
+          fsGroupChangePolicy: OnRootMismatch

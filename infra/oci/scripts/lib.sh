@@ -62,6 +62,13 @@ oci_is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+oci_runtime_mode() {
+  local mode="${OCI_RUNTIME_MODE:-}"
+  [[ "$mode" == "oke" || "$mode" == "k3s" ]] ||
+    oci_die "OCI_RUNTIME_MODE must be exactly 'oke' or 'k3s'"
+  printf '%s' "$mode"
+}
+
 oci_prepare_private_dir() {
   local directory="$1"
   mkdir -p "$directory"

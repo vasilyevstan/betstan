@@ -37,11 +37,15 @@ oci_require_value OCI_MEMORY_MAX_PERCENT 70
 oci_require_value OCI_DISK_MAX_PERCENT 70
 [[ "$OCI_CPU_MAX_PERCENT" == "90" ]] || oci_die "OCI_CPU_MAX_PERCENT must be 90"
 
-unset source_sha cluster_ocid cluster_fingerprint compartment_ocid namespace ingress_ipv4 public_host lb_ocid
+unset source_sha runtime_mode cluster_ocid cluster_fingerprint
+unset instance_ocid instance_fingerprint k3s_node_name
+unset compartment_ocid namespace ingress_ipv4 public_host lb_ocid
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
-oci_require_vars cluster_ocid cluster_fingerprint compartment_ocid namespace ingress_ipv4 public_host lb_ocid
+oci_require_vars runtime_mode compartment_ocid namespace ingress_ipv4 public_host lb_ocid
+[[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
+  oci_die "health runtime differs from infrastructure provenance"
 [[ "$source_sha" == "$OCI_EXPECTED_SOURCE_SHA" ]] ||
   oci_die "health source SHA differs from infrastructure provenance"
 [[ "${OCI_PUBLIC_URL%/}" == "https://${public_host}" && "$public_host" == "${ingress_ipv4}.nip.io" ]] ||
@@ -52,8 +56,17 @@ oci_require_vars cluster_ocid cluster_fingerprint compartment_ocid namespace ing
    "$expected_monthly_cost" == "0" ]] ||
   oci_die "health provenance violates approved Free Tier constants"
 [[ "$namespace" == "$OCI_K8S_NAMESPACE" ]] || oci_die "namespace differs from infrastructure provenance"
-[[ "$(oci_fingerprint "$cluster_ocid")" == "$cluster_fingerprint" ]] ||
-  oci_die "cluster fingerprint differs from infrastructure provenance"
+if [[ "$runtime_mode" == "oke" ]]; then
+  oci_require_vars cluster_ocid cluster_fingerprint
+  runtime_ocid="$cluster_ocid"
+  expected_runtime_fingerprint="$cluster_fingerprint"
+else
+  oci_require_vars instance_ocid instance_fingerprint k3s_node_name
+  runtime_ocid="$instance_ocid"
+  expected_runtime_fingerprint="$instance_fingerprint"
+fi
+[[ "$(oci_fingerprint "$runtime_ocid")" == "$expected_runtime_fingerprint" ]] ||
+  oci_die "runtime fingerprint differs from infrastructure provenance"
 
 oci_prepare_private_dir "$OUTPUT_DIR"
 rm -rf "$WORK_DIR"
@@ -104,11 +117,15 @@ pvcs_json="$WORK_DIR/pvcs.json"
 lb_json="$WORK_DIR/lb.json"
 inventory_json="$WORK_DIR/inventory.json"
 
-oci ce cluster get --cluster-id "$cluster_ocid" > "$cluster_json"
+if [[ "$runtime_mode" == "oke" ]]; then
+  oci ce cluster get --cluster-id "$cluster_ocid" > "$cluster_json"
+else
+  oci compute instance get --instance-id "$instance_ocid" > "$cluster_json"
+fi
 kubectl config view --raw --minify -o json > "$kubeconfig_json"
 kubectl get nodes -o json > "$nodes_json"
 node_name="$(jq -r '.items[0].metadata.name // empty' "$nodes_json")"
-[[ -n "$node_name" ]] || oci_die "OKE worker node is missing"
+[[ -n "$node_name" ]] || oci_die "Kubernetes worker node is missing"
 kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes > "$metrics_json"
 kubectl get --raw "/api/v1/nodes/${node_name}/proxy/stats/summary" > "$summary_json"
 kubectl get deployments -n "$OCI_K8S_NAMESPACE" -o json > "$deployments_json"
@@ -122,16 +139,29 @@ kubectl get persistentvolumeclaims -n "$OCI_K8S_NAMESPACE" -o json > "$pvcs_json
 oci lb load-balancer get --load-balancer-id "$lb_ocid" > "$lb_json"
 INVENTORY_MODE=complete OUTPUT_FILE="$inventory_json" "$OCI_DIR/scripts/inventory.sh" >/dev/null
 
-kube_provenance="$(
-  jq -r --arg cluster "$cluster_ocid" '
-    ([.users[].user.exec.args[]? | select(. == $cluster)] | length == 1)
-  ' "$kubeconfig_json"
-)"
 configured_server="$(jq -r '.clusters[0].cluster.server // empty' "$kubeconfig_json")"
-provider_endpoint="$(jq -r '.data.endpoints."public-endpoint" // empty' "$cluster_json")"
-if [[ -z "$configured_server" || -z "$provider_endpoint" ||
-      "$configured_server" != *"$provider_endpoint"* ]]; then
-  kube_provenance=false
+if [[ "$runtime_mode" == "oke" ]]; then
+  kube_provenance="$(
+    jq -r --arg cluster "$cluster_ocid" '
+      ([.users[].user.exec.args[]? | select(. == $cluster)] | length == 1)
+    ' "$kubeconfig_json"
+  )"
+  provider_endpoint="$(jq -r '.data.endpoints."public-endpoint" // empty' "$cluster_json")"
+  if [[ -z "$configured_server" || -z "$provider_endpoint" ||
+        "$configured_server" != *"$provider_endpoint"* ]]; then
+    kube_provenance=false
+  fi
+else
+  kube_provenance="$(
+    jq -r --arg node "$k3s_node_name" --arg provider_id "oci://${instance_ocid}" '
+      (.items | length) == 1 and
+      .items[0].metadata.name == $node and
+      .items[0].spec.providerID == $provider_id
+    ' "$nodes_json"
+  )"
+  if [[ ! "$configured_server" =~ ^https://127\.0\.0\.1:[0-9]+$ ]]; then
+    kube_provenance=false
+  fi
 fi
 live_compartment="$(jq -r '.data."compartment-id"' "$cluster_json")"
 
@@ -185,7 +215,7 @@ print(json.dumps({
     "disk_percent": round(disk_percent, 2),
 }))
 PY
-)" || oci_die "unable to calculate fail-closed OKE resource thresholds"
+)" || oci_die "unable to calculate fail-closed Kubernetes resource thresholds"
 
 workloads="$(
   jq -s '
@@ -349,8 +379,14 @@ load_balancer_service_count="$(
     jq '[.items[] | select(.spec.type == "LoadBalancer")] | length'
 )"
 live_ingress_ip="$(
-  kubectl get service ingress-nginx-controller -n ingress-nginx \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  if [[ "$runtime_mode" == "oke" ]]; then
+    kubectl get service ingress-nginx-controller -n ingress-nginx \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  else
+    jq -r '
+      [.data."ip-addresses"[]? | select(."is-public" == true)][0]."ip-address" // empty
+    ' "$lb_json"
+  fi
 )"
 ipv4_match=false
 provider_lb_ip_match="$(
@@ -361,10 +397,14 @@ provider_lb_ip_match="$(
 [[ "$live_ingress_ip" == "$ingress_ipv4" && "$provider_lb_ip_match" == "true" ]] &&
   ipv4_match=true
 
-lb_type="$(
-  kubectl get service ingress-nginx-controller -n ingress-nginx -o json |
-    jq -r '.metadata.annotations["oci.oraclecloud.com/load-balancer-type"] // empty'
-)"
+if [[ "$runtime_mode" == "oke" ]]; then
+  lb_type="$(
+    kubectl get service ingress-nginx-controller -n ingress-nginx -o json |
+      jq -r '.metadata.annotations["oci.oraclecloud.com/load-balancer-type"] // empty'
+  )"
+else
+  lb_type=lb
+fi
 lb_shape="$(jq -r '.data."shape-name"' "$lb_json")"
 lb_min="$(jq -r '.data."shape-details"."minimum-bandwidth-in-mbps"' "$lb_json")"
 lb_max="$(jq -r '.data."shape-details"."maximum-bandwidth-in-mbps"' "$lb_json")"
@@ -379,8 +419,9 @@ all_immutable="$(
 all_digest_match="$(jq -r 'all(.digest_match == true)' <<<"$pods")"
 
 jq -n \
+  --arg runtime_mode "$runtime_mode" \
   --arg cluster_fingerprint "$(oci_fingerprint "$(jq -r '.data.id' "$cluster_json")")" \
-  --arg expected_cluster_fingerprint "$cluster_fingerprint" \
+  --arg expected_cluster_fingerprint "$expected_runtime_fingerprint" \
   --arg compartment_fingerprint "$(oci_fingerprint "$live_compartment")" \
   --arg expected_compartment_fingerprint "$(oci_fingerprint "$compartment_ocid")" \
   --arg namespace "$OCI_K8S_NAMESPACE" \
@@ -416,6 +457,7 @@ jq -n \
   --argjson cpu_threshold "$OCI_CPU_MAX_PERCENT" \
   '{
     context: {
+      runtime_mode: $runtime_mode,
       cluster_fingerprint: $cluster_fingerprint,
       expected_cluster_fingerprint: $expected_cluster_fingerprint,
       compartment_fingerprint: $compartment_fingerprint,

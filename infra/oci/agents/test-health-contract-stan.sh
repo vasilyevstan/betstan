@@ -12,6 +12,12 @@ mkdir -p "$WORK_DIR/bin"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 OCI_HEALTH_FIXTURE_FILE="$HEALTHY" "$HEALTH" | grep -qx DEPLOYED_HEALTHY
+jq '
+  .context.runtime_mode="k3s" |
+  .ingress.load_balancer_service_count=0
+' "$HEALTHY" > "$WORK_DIR/healthy-k3s.json"
+OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/healthy-k3s.json" \
+  "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 
 run_failure() {
   local name="$1"
@@ -53,6 +59,17 @@ run_failure consumer-loss '.rabbitmq.all_consumers=false' queue-consumers
 run_failure resource-breach '.node.memory_percent=71' memory-threshold
 run_failure wrong-lb-shape '.inventory.lb_shape="100Mbps"' lb-shape
 run_failure wrong-lb-bandwidth '.inventory.lb_max_mbps=20' lb-bandwidth
+
+jq '
+  .context.runtime_mode="k3s" |
+  .ingress.load_balancer_service_count=1
+' "$HEALTHY" > "$WORK_DIR/k3s-load-balancer-service.json"
+if OCI_HEALTH_FIXTURE_FILE="$WORK_DIR/k3s-load-balancer-service.json" \
+    "$HEALTH" >"$WORK_DIR/k3s-load-balancer-service.out" 2>&1; then
+  echo "k3s LoadBalancer service fixture unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq 'code=load-balancer-count' "$WORK_DIR/k3s-load-balancer-service.out"
 
 cat > "$WORK_DIR/bin/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -103,4 +120,4 @@ if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_API=1 \
 fi
 grep -Eq 'API returned (non-JSON content|invalid JSON)' "$WORK_DIR/smoke-bad.out"
 
-echo "oci_health_fixture_contract=PASS scenarios=20"
+echo "oci_health_fixture_contract=PASS scenarios=22"

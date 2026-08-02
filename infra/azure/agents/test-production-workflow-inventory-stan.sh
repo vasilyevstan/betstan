@@ -28,6 +28,40 @@ YAML
 }
 
 write_complete_oci_set() {
+  cat > "$tmp_dir/oci-capacity-acquire.yml" <<'YAML'
+name: oci-capacity-acquire
+run-name: oci-capacity-acquire ${{ inputs.approved_sha || 'scheduled-master' }}
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        type: string
+jobs:
+  acquire:
+    if: github.run_attempt == 1 && vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: oci-capacity-acquire
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_sha }}
+      - env:
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CAPACITY_PRIVATE_KEY_PEM }}
+        run: |
+          [ "$GITHUB_REF_NAME" = "master" ]
+          source_sha="${{ inputs.approved_sha }}"
+          if [ -z "$source_sha" ]; then
+            source_sha="$(git rev-parse HEAD)"
+          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin master:refs/remotes/origin/master
+          [ "$source_sha" = "$(git rev-parse origin/master)" ]
+          oci compute compute-capacity-report create
+YAML
+
   cat > "$tmp_dir/oci-production-build.yml" <<'YAML'
 name: oci-production-build
 on:
@@ -171,7 +205,7 @@ assert_fail() {
 }
 
 azure_set="production-build,production-deploy"
-full_set="oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
+full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
 
 reset_fixtures
 assert_fail "Azure-only set" "expected $full_set; found $azure_set"
@@ -187,9 +221,14 @@ assert_fail "partial OCI set" "expected $full_set; found"
 
 reset_fixtures
 write_complete_oci_set
+rm "$tmp_dir/oci-capacity-acquire.yml"
+assert_fail "partial OCI set without capacity acquisition" "expected $full_set; found"
+
+reset_fixtures
+write_complete_oci_set
 sed -i.bak 's/name: oci-infrastructure/name: oci-platform/' "$tmp_dir/oci-infrastructure.yml"
 rm "$tmp_dir/oci-infrastructure.yml.bak"
-assert_fail "renamed OCI identity" "found oci-migrate,oci-platform"
+assert_fail "renamed OCI identity" "found oci-capacity-acquire,oci-migrate,oci-platform"
 
 reset_fixtures
 cat > "$tmp_dir/rogue-production.yml" <<'YAML'
@@ -245,6 +284,43 @@ write_complete_oci_set
 sed -i.bak '/github.run_attempt == 1/d' "$tmp_dir/oci-infrastructure.yml"
 rm "$tmp_dir/oci-infrastructure.yml.bak"
 assert_fail "missing run-attempt guard" "must reject rerun attempts"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/github.run_attempt == 1/d' "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "missing capacity run-attempt guard" "must reject rerun attempts"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-capacity-acquire.yml" <<'PY'
+from pathlib import Path
+path = Path(__import__("sys").argv[1])
+text = path.read_text()
+start = text.index("  workflow_dispatch:\n")
+end = text.index("jobs:\n", start)
+path.write_text(text[:start] + text[end:])
+PY
+assert_fail "schedule-only capacity workflow" "must have schedule and workflow_dispatch only"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak "s/vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'/true/" \
+  "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "capacity workflow without kill switch" "must retain the explicit activation kill switch"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's#\*/5 \* \* \* \*#*/10 * * * *#' "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "capacity workflow with unreviewed cadence" "must use the reviewed five-minute schedule"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/GITHUB_REF_NAME/d' "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "non-master capacity workflow" "must reject non-master executions"
 
 reset_fixtures
 write_complete_oci_set

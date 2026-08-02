@@ -1,5 +1,5 @@
 name: oci-infrastructure
-run-name: oci-infrastructure ${{ inputs.approved_sha }}
+run-name: oci-infrastructure ${{ inputs.phase }} ${{ inputs.approved_sha }}
 
 on:
   workflow_dispatch:
@@ -12,8 +12,17 @@ on:
         description: Type PROVISION OCI ZERO COST
         required: true
         type: string
+      phase:
+        description: Prepare free networking or finalize an acquired k3s instance
+        required: true
+        default: prepare
+        type: choice
+        options:
+          - prepare
+          - finalize
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -30,6 +39,7 @@ jobs:
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
       OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
@@ -44,6 +54,13 @@ jobs:
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
       OCI_KUBERNETES_VERSION: ${{ vars.OCI_KUBERNETES_VERSION }}
       OCI_NODE_IMAGE_OCID: ${{ vars.OCI_NODE_IMAGE_OCID }}
+      OCI_K3S_IMAGE_OCID: ${{ vars.OCI_K3S_IMAGE_OCID }}
+      OCI_K3S_VERSION: ${{ vars.OCI_K3S_VERSION }}
+      OCI_K3S_BINARY_SHA256: ${{ vars.OCI_K3S_BINARY_SHA256 }}
+      OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
+      OCI_BASTION_NAME: ${{ vars.OCI_BASTION_NAME || 'betstan-oke-bastion' }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_BASTION_MAX_SESSION_TTL: "10800"
       OCI_NODE_SHAPE: VM.Standard.A1.Flex
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
       OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
@@ -128,12 +145,18 @@ jobs:
           ./infra/oci/scripts/preflight.sh
           ./infra/oci/scripts/provision.sh cloud
           source artifacts/oci-infrastructure/provenance.env
-          echo "::add-mask::$cluster_ocid"
-          echo "::add-mask::$endpoint_nsg_ocid"
-          printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
-          printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          if [ "$runtime_mode" = "oke" ]; then
+            echo "::add-mask::$cluster_ocid"
+            echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          else
+            echo "::add-mask::$bastion_ocid"
+            printf 'bastion_ocid=%s\n' "$bastion_ocid" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Reconcile expired GitHub runner rules
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -144,6 +167,7 @@ jobs:
         run: ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
 
       - name: Authorize current runner IPv4
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -159,6 +183,7 @@ jobs:
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
       - name: Configure kubectl from exact cluster OCID
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -170,6 +195,7 @@ jobs:
           cluster: ${{ steps.cloud.outputs.cluster_ocid }}
 
       - name: Install pinned cluster add-ons and verify 10 Mbps load balancer
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -177,6 +203,102 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
         run: ./infra/oci/scripts/provision.sh addons
+
+      - name: Download trusted k3s acquisition provenance
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/oci-capacity
+          found=false
+          while IFS= read -r run_id; do
+            run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            jq -e \
+              --arg sha "$SOURCE_SHA" \
+              '.head_sha == $sha and
+               .run_attempt == 1 and
+               .status == "completed" and
+               .conclusion == "success" and
+               (.event == "schedule" or .event == "workflow_dispatch") and
+               .path == ".github/workflows/oci-capacity-acquire.yml"' \
+              <<<"$run_json" >/dev/null || continue
+            artifact_name="oci-capacity-provenance-${run_id}-1"
+            artifact_count="$(
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ] || continue
+            gh run download "$run_id" \
+              --name "$artifact_name" \
+              --dir artifacts/oci-capacity
+            found=true
+            break
+          done < <(
+            gh run list \
+              --workflow oci-capacity-acquire.yml \
+              --branch master \
+              --status success \
+              --limit 100 \
+              --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$SOURCE_SHA\") | .databaseId"
+          )
+          [ "$found" = true ]
+          test -s artifacts/oci-capacity/provenance.env
+          source artifacts/oci-capacity/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$shape" = "VM.Standard.A1.Flex" ]
+          [ "$ocpus" = "2" ]
+          [ "$memory_gb" = "12" ]
+          [ "$boot_volume_gb" = "50" ]
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          INFRA_PROVENANCE_FILE: artifacts/oci-infrastructure/provenance.env
+          ACQUISITION_PROVENANCE_FILE: artifacts/oci-capacity/provenance.env
+          SESSION_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Finalize k3s storage, add-ons, and OCI load balancer
+        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          NETWORK_PROVENANCE_FILE: artifacts/oci-infrastructure/provenance.env
+          ACQUISITION_PROVENANCE_FILE: artifacts/oci-capacity/provenance.env
+          K3S_ACCESS_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
+        run: ./infra/oci/scripts/finalize-k3s.sh
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Upload exact infrastructure provenance and sanitized inventory
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -189,7 +311,7 @@ jobs:
           retention-days: 30
 
       - name: Revoke exact runner rule
-        if: always()
+        if: always() && inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}

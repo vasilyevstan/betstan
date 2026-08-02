@@ -60,16 +60,22 @@ def require(condition, code, message):
 
 def validate(snapshot):
     context = snapshot.get("context", {})
-    require(context.get("kube_provenance") is True, "wrong-context", "kubeconfig does not contain exact OKE provenance")
+    runtime_mode = context.get("runtime_mode", "oke")
+    require(runtime_mode in {"oke", "k3s"}, "runtime-mode", "runtime mode is not approved")
+    require(
+        context.get("kube_provenance") is True,
+        "wrong-context",
+        "kubeconfig does not contain exact runtime provenance",
+    )
     require(
         context.get("cluster_fingerprint") == context.get("expected_cluster_fingerprint"),
         "wrong-cluster",
-        "cluster fingerprint differs from infrastructure provenance",
+        "runtime fingerprint differs from infrastructure provenance",
     )
     require(
         context.get("compartment_fingerprint") == context.get("expected_compartment_fingerprint"),
         "wrong-compartment",
-        "cluster compartment differs from infrastructure provenance",
+        "runtime compartment differs from infrastructure provenance",
     )
     require(
         context.get("namespace") == context.get("expected_namespace"),
@@ -78,13 +84,13 @@ def validate(snapshot):
     )
 
     node = snapshot.get("node", {})
-    require(node.get("count") == 1, "wrong-node-count", "expected exactly one OKE worker")
-    require(node.get("ready") is True, "node-not-ready", "OKE worker is not Ready")
-    require(node.get("architecture") == "arm64", "wrong-architecture", "OKE worker is not ARM64")
+    require(node.get("count") == 1, "wrong-node-count", "expected exactly one Kubernetes worker")
+    require(node.get("ready") is True, "node-not-ready", "Kubernetes worker is not Ready")
+    require(node.get("architecture") == "arm64", "wrong-architecture", "Kubernetes worker is not ARM64")
     require(
         node.get("instance_type") == "VM.Standard.A1.Flex",
         "wrong-node-shape",
-        "OKE worker is not VM.Standard.A1.Flex",
+        "Kubernetes worker is not VM.Standard.A1.Flex",
     )
     for condition in ("memory_pressure", "disk_pressure", "pid_pressure", "network_unavailable"):
         require(node.get(condition) is False, "node-pressure", f"node condition is unsafe: {condition}")
@@ -189,7 +195,12 @@ def validate(snapshot):
     require(int(rabbit.get("backlog", -1)) == 0, "queue-backlog", "RabbitMQ has unexpected backlog")
 
     ingress = snapshot.get("ingress", {})
-    require(ingress.get("load_balancer_service_count") == 1, "load-balancer-count", "expected one LoadBalancer service")
+    expected_lb_services = 1 if runtime_mode == "oke" else 0
+    require(
+        ingress.get("load_balancer_service_count") == expected_lb_services,
+        "load-balancer-count",
+        "Kubernetes LoadBalancer service count differs from the runtime contract",
+    )
     require(ingress.get("ipv4_match") is True, "ingress-ip", "ingress IPv4 differs from OCI provenance")
     require(ingress.get("certificate_ready") is True, "certificate", "TLS certificate is not Ready")
     require(ingress.get("https_trusted") is True, "https-trust", "HTTPS endpoint is not trusted")

@@ -6,6 +6,7 @@ directory = ARGV.fetch(0)
 
 AZURE_WORKFLOWS = %w[production-build production-deploy].freeze
 OCI_WORKFLOWS = %w[
+  oci-capacity-acquire
   oci-infrastructure
   oci-migrate
   oci-production-build
@@ -13,6 +14,7 @@ OCI_WORKFLOWS = %w[
 ].freeze
 REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
+  "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
   "oci-migrate" => "oci-migration",
   "oci-production-build" => "oci-build",
@@ -132,6 +134,70 @@ def validate_manual_oci_workflow!(name, document, content)
   )
 end
 
+def validate_scheduled_oci_workflow!(name, document, content)
+  triggers = workflow_triggers(document)
+  expected_triggers = ["schedule", "workflow_dispatch"]
+  unless triggers.keys.sort == expected_triggers
+    fail_inventory("#{name} must have schedule and workflow_dispatch only")
+  end
+
+  schedules = triggers["schedule"]
+  unless schedules.is_a?(Array) &&
+         schedules.length == 1 &&
+         schedules[0].is_a?(Hash) &&
+         schedules[0]["cron"] == "*/5 * * * *"
+    fail_inventory("#{name} must use the reviewed five-minute schedule")
+  end
+
+  dispatch = triggers["workflow_dispatch"]
+  inputs = dispatch.is_a?(Hash) ? dispatch["inputs"] : nil
+  approved_sha = inputs.is_a?(Hash) ? inputs["approved_sha"] : nil
+  unless approved_sha.is_a?(Hash)
+    fail_inventory("#{name} must define the optional approved_sha dispatch input")
+  end
+
+  require_content(
+    content,
+    %r{run-name:\s*.*\$\{\{\s*inputs\.approved_sha\s*},
+    "#{name} run name must identify a manual approved SHA"
+  )
+  require_content(
+    content,
+    %r{ref:\s*\$\{\{\s*inputs\.approved_sha\s*\}\}},
+    "#{name} must check out inputs.approved_sha when manually dispatched"
+  )
+  require_content(
+    content,
+    /github\.run_attempt\s*==\s*1/,
+    "#{name} must reject rerun attempts"
+  )
+  require_content(
+    content,
+    /vars\.OCI_CAPACITY_CATCHER_ENABLED\s*==\s*['"]true['"]/,
+    "#{name} must retain the explicit activation kill switch"
+  )
+  require_content(
+    content,
+    /(?:GITHUB_REF_NAME["'}\s=]+master|github\.ref_name\s*==\s*['"]master['"])/,
+    "#{name} must reject non-master executions"
+  )
+  require_content(
+    content,
+    /\^\[0-9a-f\]\{40\}\$/,
+    "#{name} must validate a complete lowercase SHA"
+  )
+  require_content(
+    content,
+    %r{origin/master},
+    "#{name} must bind the source SHA to current master"
+  )
+  reject_content(
+    content,
+    /\$\{\{\s*github\.sha\s*\}\}/,
+    "#{name} must not use the workflow github.sha"
+  )
+end
+
 def validate_oci_workflow!(name, file, document, content)
   expected_file = "#{name}.yml"
   unless File.basename(file) == expected_file
@@ -191,6 +257,8 @@ def validate_oci_workflow!(name, file, document, content)
       /github\.run_attempt\s*==\s*1/,
       "#{name} must reject downstream rerun attempts"
     )
+  elsif name == "oci-capacity-acquire"
+    validate_scheduled_oci_workflow!(name, document, content)
   else
     validate_manual_oci_workflow!(name, document, content)
   end
@@ -259,9 +327,10 @@ names = Dir.glob(File.join(directory, "*.{yml,yaml}")).each_with_object([]) do |
     }ix
   ) || OCI_WORKFLOWS.include?(name)
   manual_production = triggers.key?("workflow_dispatch")
+  scheduled_production = triggers.key?("schedule")
 
   next unless production_capable &&
-              (push_master || chained_production || manual_production)
+              (push_master || chained_production || manual_production || scheduled_production)
 
   result << name
 end

@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 INVENTORY_MODE="${INVENTORY_MODE:-${1:-preflight}}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
+OCI_RUNTIME_MODE="$(oci_runtime_mode)"
 [[ "$INVENTORY_MODE" == "preflight" || "$INVENTORY_MODE" == "complete" ]] ||
   oci_die "INVENTORY_MODE must be preflight or complete"
 oci_require_cli_version
@@ -28,6 +29,15 @@ boot_volumes="$(
 load_balancers="$(oci lb load-balancer list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 network_load_balancers="$(oci nlb network-load-balancer list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 nat_gateways="$(oci network nat-gateway list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
+internet_gateways="$(oci network internet-gateway list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
+service_gateways="$(oci network service-gateway list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
+public_ips="$(
+  oci network public-ip list \
+    --scope REGION \
+    --compartment-id "$OCI_COMPARTMENT_OCID" \
+    --all
+)"
+bastions="$(oci bastion bastion list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 repositories="$(oci artifacts container repository list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 buckets="$(oci os bucket list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 clusters="$(oci_normalize_list_json "$clusters")"
@@ -38,6 +48,10 @@ boot_volumes="$(oci_normalize_list_json "$boot_volumes")"
 load_balancers="$(oci_normalize_list_json "$load_balancers")"
 network_load_balancers="$(oci_normalize_list_json "$network_load_balancers" items)"
 nat_gateways="$(oci_normalize_list_json "$nat_gateways")"
+internet_gateways="$(oci_normalize_list_json "$internet_gateways")"
+service_gateways="$(oci_normalize_list_json "$service_gateways")"
+public_ips="$(oci_normalize_list_json "$public_ips")"
+bastions="$(oci_normalize_list_json "$bastions")"
 repositories="$(oci_normalize_list_json "$repositories" items)"
 buckets="$(oci_normalize_list_json "$buckets")"
 expected_repositories="$(
@@ -54,13 +68,19 @@ inventory="$(
     --argjson load_balancers "$load_balancers" \
     --argjson network_load_balancers "$network_load_balancers" \
     --argjson nat_gateways "$nat_gateways" \
+    --argjson internet_gateways "$internet_gateways" \
+    --argjson service_gateways "$service_gateways" \
+    --argjson public_ips "$public_ips" \
+    --argjson bastions "$bastions" \
     --argjson repositories "$repositories" \
     --argjson buckets "$buckets" \
     --argjson expected_repositories "$expected_repositories" \
     --arg mode "$INVENTORY_MODE" \
+    --arg runtime_mode "$OCI_RUNTIME_MODE" \
     --argjson expected_cost "$OCI_EXPECTED_MONTHLY_COST" '
       {
         mode: $mode,
+        runtime_mode: $runtime_mode,
         expected_monthly_cost: $expected_cost,
         clusters: [
           $clusters.data[]?
@@ -82,7 +102,19 @@ inventory="$(
         instances: [
           $instances.data[]?
           | select(."lifecycle-state" != "TERMINATED")
-          | {name: ."display-name", shape, state: ."lifecycle-state"}
+          | {
+              name: ."display-name",
+              shape,
+              ocpus: (."shape-config".ocpus // 0),
+              memory_gb: (."shape-config"."memory-in-gbs" // 0),
+              runtime: (."freeform-tags"."betstan-runtime" // ""),
+              managed: (
+                ."freeform-tags"["betstan-managed"] == "true" and
+                ."freeform-tags".provider == "oci" and
+                ."freeform-tags"["expected-monthly-cost"] == "0"
+              ),
+              state: ."lifecycle-state"
+            }
         ],
         block_volumes: [
           $volumes.data[]?
@@ -122,6 +154,34 @@ inventory="$(
         nat_gateway_count: ([
           $nat_gateways.data[]? | select(."lifecycle-state" != "TERMINATED")
         ] | length),
+        internet_gateway_count: ([
+          $internet_gateways.data[]? | select(."lifecycle-state" != "TERMINATED")
+        ] | length),
+        service_gateway_count: ([
+          $service_gateways.data[]? | select(."lifecycle-state" != "TERMINATED")
+        ] | length),
+        reserved_public_ips: [
+          $public_ips.data[]?
+          | select(."lifecycle-state" != "TERMINATED")
+          | {
+              lifetime,
+              assigned: (."assigned-entity-id" != null),
+              scope
+            }
+        ],
+        bastions: [
+          $bastions.data[]?
+          | select(."lifecycle-state" != "DELETED")
+          | {
+              name,
+              state: ."lifecycle-state",
+              managed: (
+                ."freeform-tags"["betstan-managed"] == "true" and
+                ."freeform-tags".provider == "oci" and
+                ."freeform-tags"["expected-monthly-cost"] == "0"
+              )
+            }
+        ],
         registry_repositories: [
           $repositories.data.items[]?
           | {
@@ -153,13 +213,19 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
   --argjson registry_max "$OCI_REGISTRY_MAX_BYTES" '
     .expected_monthly_cost == 0 and
     .nat_gateway_count == 0 and
+    .service_gateway_count == 0 and
+    .internet_gateway_count <= 1 and
+    (.reserved_public_ips | length) == 0 and
     .network_load_balancer_count == 0 and
     ([.clusters[] | select(.type != "BASIC_CLUSTER")] | length) == 0 and
     ([.node_pools[] | select(
       .shape != "VM.Standard.A1.Flex" or .size != 1 or
       .ocpus != $ocpus or .memory_gb != $memory
     )] | length) == 0 and
-    ([.instances[] | select(.shape != "VM.Standard.A1.Flex")] | length) == 0 and
+    ([.instances[] | select(
+      .shape != "VM.Standard.A1.Flex" or
+      .ocpus != $ocpus or .memory_gb != $memory
+    )] | length) == 0 and
     ([.block_volumes[] | select(.vpus_per_gb != 0)] | length) == 0 and
     (.load_balancers | length) <= 1 and
     ([.load_balancers[] | select(
@@ -181,18 +247,54 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
   ' <<<"$inventory" >/dev/null ||
   oci_die "OCI inventory violates the approved zero-cost allowlist"
 
-if [[ "$INVENTORY_MODE" == "complete" ]]; then
-  jq -e --argjson boot "$OCI_BOOT_VOLUME_GB" --argjson mongo "$OCI_MONGO_VOLUME_GB" '
-    (.clusters | length) == 1 and
-    (.node_pools | length) == 1 and
-    (.instances | length) == 1 and
-    (.block_volumes | length) == 1 and
-    .block_volumes[0].size_gb == $mongo and
-    (.boot_volumes | length) == 1 and
-    .boot_volumes[0].size_gb == $boot and
-    (.load_balancers | length) == 1
+if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+  jq -e '
+    (.clusters | length) == 0 and
+    (.node_pools | length) == 0 and
+    ([.instances[] | select(
+      .runtime != "k3s" or .managed != true
+    )] | length) == 0 and
+    ([.bastions[] | select(.managed != true)] | length) == 0 and
+    (.bastions | length) <= 1
   ' <<<"$inventory" >/dev/null ||
-    oci_die "OCI inventory is incomplete or contains an unexpected resource count"
+    oci_die "OCI inventory mixes OKE and direct-k3s resources"
+else
+  jq -e '
+    ([.instances[] | select(.runtime == "k3s")] | length) == 0 and
+    (.bastions | length) == 0
+  ' <<<"$inventory" >/dev/null ||
+    oci_die "OCI inventory mixes direct-k3s resources into OKE mode"
+fi
+
+if [[ "$INVENTORY_MODE" == "complete" ]]; then
+  if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+    jq -e --argjson boot "$OCI_BOOT_VOLUME_GB" --argjson mongo "$OCI_MONGO_VOLUME_GB" '
+      (.clusters | length) == 0 and
+      (.node_pools | length) == 0 and
+      (.instances | length) == 1 and
+      .instances[0].runtime == "k3s" and
+      .instances[0].managed == true and
+      (.block_volumes | length) == 1 and
+      .block_volumes[0].size_gb == $mongo and
+      (.boot_volumes | length) == 1 and
+      .boot_volumes[0].size_gb == $boot and
+      (.load_balancers | length) == 1
+      and (.bastions | length) == 1
+    ' <<<"$inventory" >/dev/null ||
+      oci_die "OCI k3s inventory is incomplete or contains an unexpected resource count"
+  else
+    jq -e --argjson boot "$OCI_BOOT_VOLUME_GB" --argjson mongo "$OCI_MONGO_VOLUME_GB" '
+      (.clusters | length) == 1 and
+      (.node_pools | length) == 1 and
+      (.instances | length) == 1 and
+      (.block_volumes | length) == 1 and
+      .block_volumes[0].size_gb == $mongo and
+      (.boot_volumes | length) == 1 and
+      .boot_volumes[0].size_gb == $boot and
+      (.load_balancers | length) == 1
+    ' <<<"$inventory" >/dev/null ||
+      oci_die "OCI OKE inventory is incomplete or contains an unexpected resource count"
+  fi
 fi
 
 if [[ -n "$OUTPUT_FILE" ]]; then

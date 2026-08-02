@@ -41,6 +41,7 @@ jobs:
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
       OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
@@ -49,6 +50,9 @@ jobs:
       OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
       OCI_AVAILABILITY_DOMAIN: ${{ vars.OCI_AVAILABILITY_DOMAIN }}
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_K3S_IMAGE_OCID: ${{ vars.OCI_K3S_IMAGE_OCID }}
+      OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
       OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
@@ -162,13 +166,22 @@ jobs:
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
-          echo "::add-mask::$cluster_ocid"
-          echo "::add-mask::$endpoint_nsg_ocid"
-          printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
-          printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$infrastructure_finalized" = "true" ]
+          if [ "$runtime_mode" = "oke" ]; then
+            echo "::add-mask::$cluster_ocid"
+            echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          else
+            echo "::add-mask::$instance_ocid"
+            echo "::add-mask::$bastion_ocid"
+            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+          fi
           printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
 
       - name: Install OCI CLI with read-only identity call
+        if: env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -181,7 +194,22 @@ jobs:
           query: 'data.{type:type,state:"lifecycle-state"}'
           silent: true
 
+      - name: Install OCI CLI with k3s identity call
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        uses: oracle-actions/run-oci-cli-command@368cc7991534d1b8074846d10e1d84ac4c0d1a28 # v1.3.2
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          command: compute instance get --instance-id ${{ steps.provenance.outputs.instance_ocid }}
+          query: 'data.{shape:shape,state:"lifecycle-state"}'
+          silent: true
+
       - name: Reconcile expired and authorize current runner IPv4
+        if: env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -198,6 +226,7 @@ jobs:
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
       - name: Configure kubectl from exact cluster OCID
+        if: env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -207,6 +236,25 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
         with:
           cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Install browser validation dependencies
         run: |
@@ -283,7 +331,7 @@ jobs:
           retention-days: 30
 
       - name: Revoke exact runner rule
-        if: always()
+        if: always() && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -295,6 +343,18 @@ jobs:
           if [ -f "$RULE_STATE_FILE" ]; then
             ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
           fi
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Remove isolated OCI client state
         if: always()
