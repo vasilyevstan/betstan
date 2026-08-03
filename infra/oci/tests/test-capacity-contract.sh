@@ -6,6 +6,7 @@ OCI_DIR="$ROOT_DIR/infra/oci"
 TEST_DIR="$(mktemp -d "$ROOT_DIR/.oci-capacity-test.XXXXXX")"
 FAKE_BIN="$TEST_DIR/bin"
 FAKE_STATE="$TEST_DIR/instance-created"
+FAKE_TAG_STATE="$TEST_DIR/instance-tags-updated"
 FAKE_LOG="$TEST_DIR/oci.log"
 
 cleanup() {
@@ -103,13 +104,13 @@ JSON
     if [[ "$OCI_FAKE_SCENARIO" == "duplicate" ]]; then
       cat <<'JSON'
 {"data":[
-{"id":"ocid1.instance.oc1..fixture1","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}},
-{"id":"ocid1.instance.oc1..fixture2","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-2","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}
+{"id":"ocid1.instance.oc1..fixture1","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12.0},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0","source-sha":"0000000000000000000000000000000000000000","acquisition-run-id":"stale"}},
+{"id":"ocid1.instance.oc1..fixture2","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-2","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12.0},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0","source-sha":"0000000000000000000000000000000000000000","acquisition-run-id":"stale"}}
 ]}
 JSON
     elif [[ -f "$OCI_FAKE_STATE" ]]; then
       cat <<'JSON'
-{"data":[{"id":"ocid1.instance.oc1..fixture","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0"}}]}
+{"data":[{"id":"ocid1.instance.oc1..fixture","display-name":"betstan-k3s-node","availability-domain":"fixture:EU-FRANKFURT-1-AD-1","image-id":"ocid1.image.oc1..fixture","shape":"VM.Standard.A1.Flex","shape-config":{"ocpus":2,"memory-in-gbs":12.0},"lifecycle-state":"RUNNING","freeform-tags":{"betstan-managed":"true","provider":"oci","betstan-managed-by":"oci-capacity-acquire","betstan-runtime":"k3s","betstan-contract":"1","expected-monthly-cost":"0","source-sha":"0000000000000000000000000000000000000000","acquisition-run-id":"stale"}}]}
 JSON
     else
       echo '{"data":[]}'
@@ -173,11 +174,40 @@ JSON
     echo "ocid1.instance.oc1..fixture"
     ;;
   compute/instance/get)
-    if [[ "$OCI_FAKE_SCENARIO" == "terminated" ]]; then
+    query="$(arg_value --query "$@")"
+    if [[ "$query" == 'data."freeform-tags"' ]]; then
+      [[ -f "$OCI_FAKE_TAG_STATE" ]] || exit 1
+      jq -cn \
+        --arg sha "$SOURCE_SHA" \
+        --arg run "$OCI_CAPACITY_RUN_ID" '
+          {
+            "betstan-managed": "true",
+            provider: "oci",
+            "betstan-managed-by": "oci-capacity-acquire",
+            "betstan-runtime": "k3s",
+            "betstan-contract": "1",
+            "expected-monthly-cost": "0",
+            "source-sha": $sha,
+            "acquisition-run-id": $run
+          }
+        '
+    elif [[ "$OCI_FAKE_SCENARIO" == "terminated" ]]; then
       echo "TERMINATED"
     else
       echo "RUNNING"
     fi
+    ;;
+  compute/instance/update)
+    tags="$(arg_value --freeform-tags "$@")"
+    jq -e \
+      --arg sha "$SOURCE_SHA" \
+      --arg run "$OCI_CAPACITY_RUN_ID" '
+        ."source-sha" == $sha and
+        ."acquisition-run-id" == $run and
+        ."expected-monthly-cost" == "0"
+      ' <<<"$tags" >/dev/null
+    touch "$OCI_FAKE_TAG_STATE"
+    echo '{"data":{"lifecycle-state":"RUNNING"}}'
     ;;
   compute/boot-volume-attachment/list)
     arg_value --availability-domain "$@" >/dev/null
@@ -213,6 +243,7 @@ chmod +x "$FAKE_BIN/oci"
 export PATH="$FAKE_BIN:$PATH"
 export OCI_FAKE_LOG="$FAKE_LOG"
 export OCI_FAKE_STATE="$FAKE_STATE"
+export OCI_FAKE_TAG_STATE="$FAKE_TAG_STATE"
 export OCI_RUNTIME_MODE=k3s
 export OCI_REGION=eu-frankfurt-1
 export OCI_CLI_VERSION=3.90.0
@@ -289,7 +320,7 @@ jq -e '
 ' "$TEST_DIR/report.json" >/dev/null ||
   fail "capacity report did not cover every fixture AD"
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 output_file="$TEST_DIR/no-capacity-output"
 OCI_FAKE_SCENARIO=no-capacity \
 GITHUB_OUTPUT="$output_file" \
@@ -317,7 +348,7 @@ grep -Fq 'bootVolumeVpusPerGB' "$FAKE_LOG" ||
 ! grep -Fq -- '--create-vnic-details' "$FAKE_LOG" ||
   fail "capacity acquisition uses the unsupported --create-vnic-details option"
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 output_file="$TEST_DIR/acquired-output"
 OCI_FAKE_SCENARIO=available \
 GITHUB_OUTPUT="$output_file" \
@@ -326,6 +357,8 @@ PROVENANCE_DIR="$TEST_DIR/acquired-provenance" \
   "$OCI_DIR/scripts/acquire-a1.sh" >/dev/null
 grep -Fq 'acquisition_status=ACQUIRED' "$output_file" ||
   fail "successful launch did not publish ACQUIRED"
+grep -Fq 'compute instance update' "$FAKE_LOG" ||
+  fail "successful acquisition did not bind the instance to current provenance"
 grep -Fq -- '--wait-for-state RUNNING --wait-for-state TERMINATED' "$FAKE_LOG" ||
   fail "capacity acquisition does not stop waiting when OCI terminates a launch"
 [[ -s "$TEST_DIR/acquired-provenance/provenance.env" ]] ||
@@ -353,6 +386,7 @@ jq -e '
   "$TEST_DIR/acquired-provenance/inventory.json" >/dev/null ||
   fail "successful launch inventory violates zero-cost singleton contract"
 launch_count="$(grep -c 'compute instance launch' "$FAKE_LOG")"
+tag_update_count="$(grep -c 'compute instance update' "$FAKE_LOG")"
 
 second_output="$TEST_DIR/already-output"
 OCI_FAKE_SCENARIO=available \
@@ -366,8 +400,18 @@ grep -Fq 'instance_acquired=true' "$second_output" ||
   fail "existing managed instance did not republish trusted provenance"
 [[ "$(grep -c 'compute instance launch' "$FAKE_LOG")" == "$launch_count" ]] ||
   fail "existing managed instance allowed another launch request"
+[[ "$(grep -c 'compute instance update' "$FAKE_LOG")" == "$((tag_update_count + 1))" ]] ||
+  fail "existing managed instance was not rebound to current provenance"
+bash -u -c '
+  source "$1"
+  [[ "$source_sha" == "$2" && "$acquisition_run_id" == "$3" ]]
+' _ \
+  "$TEST_DIR/already-provenance/provenance.env" \
+  "$SOURCE_SHA" \
+  "$OCI_CAPACITY_RUN_ID" ||
+  fail "existing managed instance provenance is not bound to the current run"
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=terminated \
   WORK_DIR="$TEST_DIR/terminated-work" \
   PROVENANCE_DIR="$TEST_DIR/terminated-provenance" \
@@ -375,7 +419,7 @@ if OCI_FAKE_SCENARIO=terminated \
   fail "internally terminated A1 launch was accepted"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=duplicate \
   WORK_DIR="$TEST_DIR/duplicate-work" \
   PROVENANCE_DIR="$TEST_DIR/duplicate-provenance" \
@@ -386,7 +430,7 @@ if [[ -f "$FAKE_LOG" ]] && grep -Fq 'compute instance launch' "$FAKE_LOG"; then
   fail "duplicate managed instances reached the launch API"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=fatal \
   WORK_DIR="$TEST_DIR/fatal-work" \
   PROVENANCE_DIR="$TEST_DIR/fatal-provenance" \
@@ -394,7 +438,7 @@ if OCI_FAKE_SCENARIO=fatal \
   fail "non-capacity OCI failure was treated as retryable"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
 stdout_fatal_log="$TEST_DIR/stdout-fatal.log"
 if OCI_FAKE_SCENARIO=stdout-fatal \
   WORK_DIR="$TEST_DIR/stdout-fatal-work" \

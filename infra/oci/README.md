@@ -76,6 +76,11 @@ Additional account-derived variables are intentionally required:
   `AZURE_EXPECTED_CLUSTER_SERVER_SHA256`, and
   `AZURE_WATCHDOG_KUBECTL_IMAGE` for migration only
 
+The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
+and `VOLUME_DELETE` in the deployment compartment for boot-volume
+reconciliation. OCI authorizes boot-volume operations with `VOLUME_*`
+permissions; `boot-volumes` is not an individual IAM resource type.
+
 ## Offline validation
 
 ```bash
