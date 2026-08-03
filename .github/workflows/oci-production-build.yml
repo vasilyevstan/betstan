@@ -1,5 +1,5 @@
 name: oci-production-build
-run-name: oci-build ${{ github.event.workflow_run.head_sha }}
+run-name: oci-build ${{ github.event.workflow_run.head_sha }} upstream-${{ github.event.workflow_run.id }}
 
 on:
   workflow_run:
@@ -34,6 +34,8 @@ jobs:
       OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
       OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      REUSE_SOURCE_SHA: ${{ vars.OCI_REUSE_SOURCE_SHA }}
+      REUSE_BUILD_RUN_ID: ${{ vars.OCI_REUSE_BUILD_RUN_ID }}
 
     steps:
       - name: Checkout exact upstream source
@@ -71,6 +73,94 @@ jobs:
             exit 1
           }
 
+      - name: Select immutable image source
+        id: image_source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mode=build
+          if [ -n "$REUSE_SOURCE_SHA" ] || [ -n "$REUSE_BUILD_RUN_ID" ]; then
+            [[ "$REUSE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$REUSE_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [ "$REUSE_SOURCE_SHA" != "$SOURCE_SHA" ]
+            git cat-file -e "${REUSE_SOURCE_SHA}^{commit}"
+            git merge-base --is-ancestor "$REUSE_SOURCE_SHA" "$SOURCE_SHA"
+            set +e
+            ./infra/oci/scripts/compare-image-inputs.sh \
+              "$REUSE_SOURCE_SHA" "$SOURCE_SHA"
+            input_diff_status=$?
+            set -e
+            if [ "$input_diff_status" = "0" ]; then
+              trusted_workflow_id="$(
+                gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" \
+                  --jq '.id'
+              )"
+              reuse_run="$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$REUSE_BUILD_RUN_ID/attempts/1"
+              )"
+              jq -e \
+                --argjson workflow_id "$trusted_workflow_id" \
+                --arg sha "$REUSE_SOURCE_SHA" \
+                --arg repository "$REPOSITORY" \
+                '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-build.yml" and
+                  .event == "workflow_run" and
+                  .head_sha == $sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repository and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .run_attempt == 1
+                ' <<<"$reuse_run" >/dev/null
+              artifact_name="oci-image-provenance-${REUSE_SOURCE_SHA}-${REUSE_BUILD_RUN_ID}-1"
+              artifact_count="$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$REUSE_BUILD_RUN_ID/artifacts" |
+                  jq \
+                    --arg name "$artifact_name" \
+                    '[.artifacts[] | select(
+                      .name == $name and .expired == false
+                    )] | length'
+              )"
+              [ "$artifact_count" = "1" ]
+              mkdir -p artifacts/reuse-source
+              gh run download "$REUSE_BUILD_RUN_ID" \
+                --name "$artifact_name" \
+                --dir artifacts/reuse-source
+              grep -Fxq "source_sha=$REUSE_SOURCE_SHA" \
+                artifacts/reuse-source/build-chain.txt
+              grep -Fxq "build_run_id=$REUSE_BUILD_RUN_ID" \
+                artifacts/reuse-source/build-chain.txt
+              grep -Fxq "build_run_attempt=1" \
+                artifacts/reuse-source/build-chain.txt
+              reuse_upstream_run_id="$(
+                awk -F= '$1 == "upstream_run_id" {print $2}' \
+                  artifacts/reuse-source/build-chain.txt
+              )"
+              [[ "$reuse_upstream_run_id" =~ ^[1-9][0-9]*$ ]]
+              reuse_display_title="$(jq -r '.display_title' <<<"$reuse_run")"
+              if [ "$reuse_display_title" != "oci-build $REUSE_SOURCE_SHA" ]; then
+                [ "$reuse_display_title" = \
+                  "oci-build $REUSE_SOURCE_SHA upstream-$reuse_upstream_run_id" ]
+              fi
+              mode=reuse
+            elif [ "$input_diff_status" = "1" ]; then
+              echo "Configured reusable image inputs differ from current master." >&2
+              echo "Clear OCI_REUSE_SOURCE_SHA and OCI_REUSE_BUILD_RUN_ID, then obtain a fresh full-build approval." >&2
+              exit 1
+            else
+              echo "Unable to compare reusable image inputs." >&2
+              exit "$input_diff_status"
+            fi
+          fi
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+          printf 'reuse_source_sha=%s\n' "$REUSE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          printf 'reuse_build_run_id=%s\n' "$REUSE_BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU for ARM64 verification
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
         with:
@@ -79,15 +169,44 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      - name: Build and push exact ARM64 OCI images
+      - name: Verify reusable ARM64 image provenance
+        if: steps.image_source.outputs.mode == 'reuse'
+        env:
+          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
+          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$OCI_REGISTRY_AUTH_TOKEN" |
+            docker login "$OCI_REGISTRY_HOST" \
+              --username "$OCI_REGISTRY_USERNAME" --password-stdin >/dev/null
+          PROVENANCE_DIR=artifacts/reuse-source \
+          SOURCE_SHA="$REUSE_SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$REUSE_BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/reuse-source/images.tsv \
+          VERIFY_REMOTE=1 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+          docker logout "$OCI_REGISTRY_HOST" >/dev/null
+
+      - name: Publish exact ARM64 OCI images
         env:
           OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
           OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
           OUTPUT_DIR: artifacts/oci-image-provenance
+          IMAGE_MODE: ${{ steps.image_source.outputs.mode }}
         run: |
           set -euo pipefail
-          SOURCE_SHA="$SOURCE_SHA" PLATFORM=linux/arm64 PUSH_IMAGES=1 \
-            ./infra/oci/scripts/build-images.sh
+          if [ "$IMAGE_MODE" = "reuse" ]; then
+            SOURCE_SHA="$SOURCE_SHA" \
+            REUSE_SOURCE_SHA="$REUSE_SOURCE_SHA" \
+            REUSE_BUILD_RUN_ID="$REUSE_BUILD_RUN_ID" \
+            REUSE_PROVENANCE_DIR=artifacts/reuse-source \
+            PLATFORM=linux/arm64 \
+              ./infra/oci/scripts/reuse-images.sh
+          else
+            SOURCE_SHA="$SOURCE_SHA" PLATFORM=linux/arm64 PUSH_IMAGES=1 \
+              ./infra/oci/scripts/build-images.sh
+          fi
 
       - name: Verify remote digests and boot emitted JavaScript
         env:
@@ -107,6 +226,8 @@ jobs:
             ./infra/oci/scripts/verify-images.sh
 
       - name: Record exact build chain
+        env:
+          IMAGE_MODE: ${{ steps.image_source.outputs.mode }}
         run: |
           printf '%s\n' \
             "source_sha=$SOURCE_SHA" \
@@ -115,8 +236,15 @@ jobs:
             "upstream_run_attempt=1" \
             "build_run_id=$GITHUB_RUN_ID" \
             "build_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "image_mode=$IMAGE_MODE" \
             "platform=linux/arm64" \
             > artifacts/oci-image-provenance/build-chain.txt
+          if [ "$IMAGE_MODE" = "reuse" ]; then
+            printf '%s\n' \
+              "reuse_source_sha=$REUSE_SOURCE_SHA" \
+              "reuse_build_run_id=$REUSE_BUILD_RUN_ID" \
+              >> artifacts/oci-image-provenance/build-chain.txt
+          fi
 
       - name: Upload immutable OCI image provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

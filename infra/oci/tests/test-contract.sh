@@ -252,11 +252,18 @@ for dockerfile in "$OCI_DIR/build/Dockerfile.backend" "$OCI_DIR/build/Dockerfile
 done
 verify_images="$OCI_DIR/scripts/verify-images.sh"
 build_images="$OCI_DIR/scripts/build-images.sh"
+reuse_images="$OCI_DIR/scripts/reuse-images.sh"
+compare_image_inputs="$OCI_DIR/scripts/compare-image-inputs.sh"
 grep -Fq 'repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"' \
   "$build_images" ||
   fail "OCI builds must share one repository so common layers stay inside the Free Tier allowance"
 grep -Fq 'tag="${repository}:oci-${service}-${SOURCE_SHA}"' "$build_images" ||
   fail "shared OCI repository tags must bind the service and exact source SHA"
+grep -Fq -- '--prefer-index=false' "$reuse_images" ||
+  fail "unchanged OCI images are not reused by immutable digest"
+grep -Fq 'oci_(die|log|require_command|require_vars|prepare_private_dir)' \
+  "$compare_image_inputs" ||
+  fail "OCI image input comparison omits the transitive build library contract"
 inventory="$OCI_DIR/scripts/inventory.sh"
 grep -Fq '[$prefix + "_images"]' "$inventory" ||
   fail "OCI inventory must allow only the shared image repository"
@@ -304,6 +311,11 @@ grep -Fq 'environment:' "$build_workflow"
 grep -Fq 'name: oci-build' "$build_workflow"
 grep -Fq 'docker login "$OCI_REGISTRY_HOST"' "$build_workflow"
 grep -Fq 'exact OCI tag already exists; refusing overwrite' "$OCI_DIR/scripts/build-images.sh"
+grep -Fq 'OCI_REUSE_SOURCE_SHA' "$build_workflow"
+grep -Fq 'OCI_REUSE_BUILD_RUN_ID' "$build_workflow"
+grep -Fq 'compare-image-inputs.sh' "$build_workflow"
+grep -Fq 'reuse-images.sh' "$build_workflow"
+grep -Fq 'upstream-${{ github.event.workflow_run.id }}' "$build_workflow"
 grep -Fq 'group: oci-build-${{ github.event.workflow_run.head_sha }}' "$build_workflow"
 ! grep -Eq 'OCI_CLI_|OCI_CI_PRIVATE_KEY_PEM' "$build_workflow" ||
   fail "OCI build workflow receives an API signing key"
@@ -444,6 +456,7 @@ if grep -R -n -E 'nat-gateway create|--type ENHANCED_CLUSTER|VM\.Standard\.(E|D|
 fi
 
 "$OCI_DIR/agents/test-health-contract-stan.sh"
+"$OCI_DIR/tests/test-image-reuse-contract.sh"
 "$OCI_DIR/tests/test-capacity-contract.sh"
 "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
 
