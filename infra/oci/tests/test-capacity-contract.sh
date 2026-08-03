@@ -160,14 +160,27 @@ JSON
       echo "NotAuthorizedOrNotFound" >&2
       exit 1
     fi
-    if [[ "$OCI_FAKE_SCENARIO" != "available" ]]; then
+    if [[ "$OCI_FAKE_SCENARIO" != "available" && "$OCI_FAKE_SCENARIO" != "terminated" ]]; then
       echo "OutOfHostCapacity: out of host capacity" >&2
       exit 1
     fi
+    source_details="$(arg_value --source-details "$@")"
+    jq -e '
+      .bootVolumeSizeInGBs == 50 and
+      .bootVolumeVpusPerGB == 10
+    ' <<<"$source_details" >/dev/null
     touch "$OCI_FAKE_STATE"
     echo "ocid1.instance.oc1..fixture"
     ;;
+  compute/instance/get)
+    if [[ "$OCI_FAKE_SCENARIO" == "terminated" ]]; then
+      echo "TERMINATED"
+    else
+      echo "RUNNING"
+    fi
+    ;;
   compute/boot-volume-attachment/list)
+    arg_value --availability-domain "$@" >/dev/null
     if [[ -f "$OCI_FAKE_STATE" ]]; then
       echo '{"data":[{"boot-volume-id":"ocid1.bootvolume.oc1..fixture","lifecycle-state":"ATTACHED"}]}'
     else
@@ -178,7 +191,7 @@ JSON
     echo '{"data":[]}'
     ;;
   bv/boot-volume/get)
-    echo '{"data":{"id":"ocid1.bootvolume.oc1..fixture","size-in-gbs":50,"lifecycle-state":"AVAILABLE"}}'
+    echo '{"data":{"id":"ocid1.bootvolume.oc1..fixture","size-in-gbs":50,"vpus-per-gb":10,"lifecycle-state":"AVAILABLE"}}'
     ;;
   bv/boot-volume/update)
     echo '{"data":{"id":"ocid1.bootvolume.oc1..fixture"}}'
@@ -299,6 +312,8 @@ grep -Fq -- '--nsg-ids' "$FAKE_LOG" ||
   fail "capacity acquisition omitted the prepared worker NSG"
 grep -Fq -- '--vnic-display-name betstan-k3s-primary' "$FAKE_LOG" ||
   fail "capacity acquisition omitted the reviewed primary VNIC name"
+grep -Fq 'bootVolumeVpusPerGB' "$FAKE_LOG" ||
+  fail "capacity acquisition omitted the Always Free Balanced boot profile"
 ! grep -Fq -- '--create-vnic-details' "$FAKE_LOG" ||
   fail "capacity acquisition uses the unsupported --create-vnic-details option"
 
@@ -311,6 +326,8 @@ PROVENANCE_DIR="$TEST_DIR/acquired-provenance" \
   "$OCI_DIR/scripts/acquire-a1.sh" >/dev/null
 grep -Fq 'acquisition_status=ACQUIRED' "$output_file" ||
   fail "successful launch did not publish ACQUIRED"
+grep -Fq -- '--wait-for-state RUNNING --wait-for-state TERMINATED' "$FAKE_LOG" ||
+  fail "capacity acquisition does not stop waiting when OCI terminates a launch"
 [[ -s "$TEST_DIR/acquired-provenance/provenance.env" ]] ||
   fail "successful launch omitted exact provenance"
 bash -u -c '
@@ -324,10 +341,15 @@ bash -u -c '
   [[ "$image_ocid" == ocid1.image.* ]]
   [[ "$shape" == "VM.Standard.A1.Flex" ]]
   [[ "$ocpus" == "2" && "$memory_gb" == "12" ]]
+  [[ "$boot_volume_vpus_per_gb" == "10" ]]
   [[ -n "$private_ip" && -n "$public_ip" ]]
 ' _ "$TEST_DIR/acquired-provenance/provenance.env" ||
   fail "successful launch provenance lacks the canonical k3s finalization fields"
-jq -e '.instance_count == 1 and .expected_monthly_cost == 0' \
+jq -e '
+  .instance_count == 1 and
+  .boot_volume_vpus_per_gb == 10 and
+  .expected_monthly_cost == 0
+' \
   "$TEST_DIR/acquired-provenance/inventory.json" >/dev/null ||
   fail "successful launch inventory violates zero-cost singleton contract"
 launch_count="$(grep -c 'compute instance launch' "$FAKE_LOG")"
@@ -344,6 +366,14 @@ grep -Fq 'instance_acquired=true' "$second_output" ||
   fail "existing managed instance did not republish trusted provenance"
 [[ "$(grep -c 'compute instance launch' "$FAKE_LOG")" == "$launch_count" ]] ||
   fail "existing managed instance allowed another launch request"
+
+rm -f "$FAKE_STATE" "$FAKE_LOG"
+if OCI_FAKE_SCENARIO=terminated \
+  WORK_DIR="$TEST_DIR/terminated-work" \
+  PROVENANCE_DIR="$TEST_DIR/terminated-provenance" \
+  "$OCI_DIR/scripts/acquire-a1.sh" >/dev/null 2>&1; then
+  fail "internally terminated A1 launch was accepted"
+fi
 
 rm -f "$FAKE_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=duplicate \

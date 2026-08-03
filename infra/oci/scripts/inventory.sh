@@ -129,7 +129,12 @@ inventory="$(
         boot_volumes: [
           $boot_volumes.data[]?
           | select(."lifecycle-state" != "TERMINATED")
-          | {name: ."display-name", size_gb: ."size-in-gbs", state: ."lifecycle-state"}
+          | {
+              name: ."display-name",
+              size_gb: ."size-in-gbs",
+              vpus_per_gb: ."vpus-per-gb",
+              state: ."lifecycle-state"
+            }
         ],
         load_balancers: [
           $load_balancers.data[]?
@@ -210,6 +215,7 @@ inventory="$(
 
 jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
   --argjson lb_min "$OCI_LB_MIN_MBPS" --argjson lb_max "$OCI_LB_MAX_MBPS" \
+  --argjson boot_vpus "$OCI_BOOT_VOLUME_VPUS_PER_GB" \
   --argjson registry_max "$OCI_REGISTRY_MAX_BYTES" '
     .expected_monthly_cost == 0 and
     .nat_gateway_count == 0 and
@@ -227,6 +233,7 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
       .ocpus != $ocpus or .memory_gb != $memory
     )] | length) == 0 and
     ([.block_volumes[] | select(.vpus_per_gb != 0)] | length) == 0 and
+    ([.boot_volumes[] | select(.vpus_per_gb != $boot_vpus)] | length) == 0 and
     (.load_balancers | length) <= 1 and
     ([.load_balancers[] | select(
       .shape != "flexible" or

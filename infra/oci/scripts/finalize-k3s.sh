@@ -82,7 +82,8 @@ network_prepared_value="${network_prepared:-}"
 
 unset source_sha runtime_mode region compartment_ocid instance_ocid
 unset instance_fingerprint availability_domain image_ocid shape ocpus memory_gb
-unset boot_volume_gb boot_volume_ocid vnic_ocid subnet_ocid private_ip public_ip
+unset boot_volume_gb boot_volume_vpus_per_gb boot_volume_ocid
+unset vnic_ocid subnet_ocid private_ip public_ip
 # shellcheck disable=SC1090
 source "$ACQUISITION_PROVENANCE_FILE"
 acquisition_source_sha="${source_sha:-}"
@@ -97,6 +98,7 @@ acquisition_shape="${shape:-}"
 acquisition_ocpus="${ocpus:-}"
 acquisition_memory_gb="${memory_gb:-}"
 acquisition_boot_volume_gb="${boot_volume_gb:-}"
+acquisition_boot_volume_vpus="${boot_volume_vpus_per_gb:-}"
 acquisition_boot_volume_ocid="${boot_volume_ocid:-}"
 acquisition_vnic_ocid="${vnic_ocid:-}"
 acquisition_subnet_ocid="${subnet_ocid:-}"
@@ -114,7 +116,8 @@ for required_value in \
   "$acquisition_instance_ocid" "$acquisition_instance_fingerprint" \
   "$acquisition_ad" "$acquisition_image_ocid" "$acquisition_shape" \
   "$acquisition_ocpus" "$acquisition_memory_gb" \
-  "$acquisition_boot_volume_gb" "$acquisition_boot_volume_ocid" \
+  "$acquisition_boot_volume_gb" "$acquisition_boot_volume_vpus" \
+  "$acquisition_boot_volume_ocid" \
   "$acquisition_vnic_ocid" "$acquisition_subnet_ocid" \
   "$acquisition_private_ip" "$acquisition_public_ip"; do
   [[ -n "$required_value" ]] ||
@@ -139,7 +142,8 @@ done
 [[ "$acquisition_shape" == "VM.Standard.A1.Flex" &&
     "$acquisition_ocpus" == "2" &&
     "$acquisition_memory_gb" == "12" &&
-    "$acquisition_boot_volume_gb" == "50" ]] ||
+    "$acquisition_boot_volume_gb" == "50" &&
+    "$acquisition_boot_volume_vpus" == "$OCI_BOOT_VOLUME_VPUS_PER_GB" ]] ||
   oci_die "acquisition provenance violates the approved A1 profile"
 [[ "$acquisition_image_ocid" == "$OCI_K3S_IMAGE_OCID" ]] ||
   oci_die "acquisition image differs from OCI_K3S_IMAGE_OCID"
@@ -197,12 +201,14 @@ jq -e \
 boot_volume="$(oci bv boot-volume get --boot-volume-id "$acquisition_boot_volume_ocid")"
 jq -e \
   --arg ad "$acquisition_ad" \
-  --argjson size "$OCI_BOOT_VOLUME_GB" '
+  --argjson size "$OCI_BOOT_VOLUME_GB" \
+  --argjson vpus "$OCI_BOOT_VOLUME_VPUS_PER_GB" '
     .data."availability-domain" == $ad and
     .data."size-in-gbs" == $size and
+    .data."vpus-per-gb" == $vpus and
     .data."lifecycle-state" == "AVAILABLE"
   ' <<<"$boot_volume" >/dev/null ||
-  oci_die "live boot volume differs from the approved 50 GB contract"
+  oci_die "live boot volume differs from the approved 50 GB Balanced contract"
 
 node_json="$(kubectl get node "$OCI_K3S_NODE_NAME" -o json)"
 jq -e \
@@ -744,6 +750,7 @@ oci_prepare_private_dir "$PROVENANCE_DIR"
   printf 'node_ocpus=%q\n' "2"
   printf 'node_memory_gb=%q\n' "12"
   printf 'boot_volume_gb=%q\n' "$OCI_BOOT_VOLUME_GB"
+  printf 'boot_volume_vpus_per_gb=%q\n' "$OCI_BOOT_VOLUME_VPUS_PER_GB"
   printf 'mongo_volume_gb=%q\n' "$OCI_MONGO_VOLUME_GB"
   printf 'lb_min_mbps=%q\n' "$OCI_LB_MIN_MBPS"
   printf 'lb_max_mbps=%q\n' "$OCI_LB_MAX_MBPS"

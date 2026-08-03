@@ -99,6 +99,7 @@ cat > "$WORK_DIR/responses/boot-volumes.json" <<'JSON'
 {"data":[{
   "display-name":"betstan-boot",
   "size-in-gbs":50,
+  "vpus-per-gb":10,
   "lifecycle-state":"AVAILABLE"
 }]}
 JSON
