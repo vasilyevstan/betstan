@@ -83,7 +83,7 @@ network_prepared_value="${network_prepared:-}"
 unset source_sha runtime_mode region compartment_ocid instance_ocid
 unset instance_fingerprint availability_domain image_ocid shape ocpus memory_gb
 unset boot_volume_gb boot_volume_vpus_per_gb boot_volume_ocid
-unset vnic_ocid subnet_ocid private_ip public_ip
+unset vnic_ocid subnet_ocid private_ip public_ip target_ssh_public_key_sha256
 # shellcheck disable=SC1090
 source "$ACQUISITION_PROVENANCE_FILE"
 acquisition_source_sha="${source_sha:-}"
@@ -104,6 +104,7 @@ acquisition_vnic_ocid="${vnic_ocid:-}"
 acquisition_subnet_ocid="${subnet_ocid:-}"
 acquisition_private_ip="${private_ip:-}"
 acquisition_public_ip="${public_ip:-}"
+acquisition_target_ssh_public_key_sha256="${target_ssh_public_key_sha256:-}"
 
 for required_value in \
   "$network_source_sha" "$network_runtime_mode" "$network_region" \
@@ -119,7 +120,8 @@ for required_value in \
   "$acquisition_boot_volume_gb" "$acquisition_boot_volume_vpus" \
   "$acquisition_boot_volume_ocid" \
   "$acquisition_vnic_ocid" "$acquisition_subnet_ocid" \
-  "$acquisition_private_ip" "$acquisition_public_ip"; do
+  "$acquisition_private_ip" "$acquisition_public_ip" \
+  "$acquisition_target_ssh_public_key_sha256"; do
   [[ -n "$required_value" ]] ||
     oci_die "infrastructure or acquisition provenance is incomplete"
 done
@@ -147,6 +149,8 @@ done
   oci_die "acquisition provenance violates the approved A1 profile"
 [[ "$acquisition_image_ocid" == "$OCI_K3S_IMAGE_OCID" ]] ||
   oci_die "acquisition image differs from OCI_K3S_IMAGE_OCID"
+[[ "$acquisition_target_ssh_public_key_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "acquisition target SSH public-key fingerprint is invalid"
 oci_validate_public_ipv4 "$acquisition_public_ip" ||
   oci_die "acquisition provenance lacks a globally routable instance IPv4"
 
@@ -333,38 +337,45 @@ jq -e \
   ' <<<"$attachment" >/dev/null ||
   oci_die "Mongo volume attachment differs from the approved contract"
 
-unset managed_session_id bastion_endpoint private_key known_hosts
-unset instance_private_ip os_user
+unset target_private_key target_known_hosts instance_private_ip os_user
+unset local_ssh_port ssh_tunnel_pid
 # shellcheck disable=SC1090
 source "$K3S_ACCESS_STATE_FILE"
 for access_value in \
-  "${managed_session_id:-}" "${bastion_endpoint:-}" "${private_key:-}" \
-  "${known_hosts:-}" "${instance_private_ip:-}" "${os_user:-}"; do
+  "${target_private_key:-}" "${target_known_hosts:-}" \
+  "${instance_private_ip:-}" "${os_user:-}" "${local_ssh_port:-}" \
+  "${ssh_tunnel_pid:-}"; do
   [[ -n "$access_value" ]] ||
     oci_die "k3s access state is incomplete"
 done
 [[ "$instance_private_ip" == "$acquisition_private_ip" ]] ||
   oci_die "k3s access state targets an unexpected private IP"
-[[ -f "$private_key" ]] ||
-  oci_die "ephemeral Bastion SSH private key is missing"
-[[ "$bastion_endpoint" =~ ^[A-Za-z0-9.-]+$ ]] ||
-  oci_die "Bastion endpoint is invalid"
-[[ "$instance_private_ip" =~ ^[0-9.]+$ ]] ||
-  oci_die "instance private IP is invalid"
+[[ -f "$target_private_key" ]] ||
+  oci_die "target SSH private key is missing"
+[[ -f "$target_known_hosts" ]] ||
+  oci_die "target SSH known-hosts file is missing"
+[[ "$local_ssh_port" =~ ^[1-9][0-9]{3,4}$ ]] ||
+  oci_die "target SSH local port is invalid"
+(( local_ssh_port >= 1024 && local_ssh_port <= 65535 )) ||
+  oci_die "target SSH local port is invalid"
+kill -0 "$ssh_tunnel_pid" 2>/dev/null ||
+  oci_die "target SSH Bastion tunnel is not running"
 [[ "$os_user" == "ubuntu" ]] ||
   oci_die "unexpected k3s operating-system user"
 
-printf -v quoted_private_key '%q' "$private_key"
-printf -v quoted_known_hosts '%q' "$known_hosts"
-proxy_command="ssh -i $quoted_private_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$quoted_known_hosts -W %h:%p -p 22 ${managed_session_id}@${bastion_endpoint}"
 ssh \
-  -i "$private_key" \
+  -i "$target_private_key" \
+  -p "$local_ssh_port" \
   -o BatchMode=yes \
+  -o CheckHostIP=no \
   -o ConnectTimeout=10 \
+  -o HostKeyAlias="$acquisition_instance_ocid" \
+  -o IdentitiesOnly=yes \
+  -o PasswordAuthentication=no \
+  -o PreferredAuthentications=publickey \
   -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$known_hosts" \
-  -o "ProxyCommand=$proxy_command" \
-  "${os_user}@${instance_private_ip}" \
+  -o UserKnownHostsFile="$target_known_hosts" \
+  "${os_user}@127.0.0.1" \
   "bash -s -- '$OCI_MONGO_DEVICE'" <<'REMOTE'
 set -euo pipefail
 device="$1"
@@ -746,6 +757,8 @@ oci_prepare_private_dir "$PROVENANCE_DIR"
   printf 'namespace=%q\n' "$OCI_K8S_NAMESPACE"
   printf 'k3s_node_name=%q\n' "$OCI_K3S_NODE_NAME"
   printf 'k3s_version=%q\n' "$OCI_K3S_VERSION"
+  printf 'target_ssh_public_key_sha256=%q\n' \
+    "$acquisition_target_ssh_public_key_sha256"
   printf 'node_shape=%q\n' "VM.Standard.A1.Flex"
   printf 'node_ocpus=%q\n' "2"
   printf 'node_memory_gb=%q\n' "12"

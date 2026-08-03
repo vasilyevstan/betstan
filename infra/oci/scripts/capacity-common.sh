@@ -11,6 +11,7 @@ oci_capacity_require_contract() {
   oci_assert_repository_root
   oci_require_command jq
   oci_require_command python3
+  oci_require_command ssh-keygen
   oci_require_vars \
     OCI_REGION OCI_TENANCY_OCID OCI_COMPARTMENT_OCID OCI_COMPARTMENT_NAME \
     OCI_CAPACITY_QUOTA_NAME OCI_VCN_NAME OCI_K3S_INSTANCE_NAME \
@@ -33,8 +34,7 @@ oci_capacity_require_contract() {
     oci_die "OCI_K3S_VERSION must be a pinned k3s release"
   [[ "$OCI_K3S_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
     oci_die "OCI_K3S_BINARY_SHA256 must be a lowercase SHA256"
-  [[ "$OCI_K3S_SSH_PUBLIC_KEY" =~ ^ssh-(ed25519|rsa)[[:space:]][A-Za-z0-9+/=]+([[:space:]].*)?$ ]] ||
-    oci_die "OCI_K3S_SSH_PUBLIC_KEY must be an SSH public key"
+  oci_ssh_ed25519_public_key_sha256 "$OCI_K3S_SSH_PUBLIC_KEY" >/dev/null
   oci_require_ocid OCI_TENANCY_OCID
   oci_require_ocid OCI_COMPARTMENT_OCID
   oci_require_ocid OCI_K3S_IMAGE_OCID

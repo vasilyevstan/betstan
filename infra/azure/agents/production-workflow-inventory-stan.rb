@@ -152,8 +152,8 @@ def validate_scheduled_oci_workflow!(name, document, content)
   dispatch = triggers["workflow_dispatch"]
   inputs = dispatch.is_a?(Hash) ? dispatch["inputs"] : nil
   approved_sha = inputs.is_a?(Hash) ? inputs["approved_sha"] : nil
-  unless approved_sha.is_a?(Hash)
-    fail_inventory("#{name} must define the optional approved_sha dispatch input")
+  unless approved_sha.is_a?(Hash) && approved_sha["required"] == true
+    fail_inventory("#{name} must require the approved_sha dispatch input")
   end
 
   require_content(
@@ -174,7 +174,12 @@ def validate_scheduled_oci_workflow!(name, document, content)
   require_content(
     content,
     /vars\.OCI_CAPACITY_CATCHER_ENABLED\s*==\s*['"]true['"]/,
-    "#{name} must retain the explicit activation kill switch"
+    "#{name} schedule must retain the explicit activation kill switch"
+  )
+  require_content(
+    content,
+    /github\.event_name\s*==\s*['"]workflow_dispatch['"]/,
+    "#{name} must permit an audited manual attempt independently of scheduling"
   )
   require_content(
     content,

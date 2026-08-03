@@ -37,10 +37,11 @@ on:
   workflow_dispatch:
     inputs:
       approved_sha:
+        required: true
         type: string
 jobs:
   acquire:
-    if: github.run_attempt == 1 && vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'
+    if: github.run_attempt == 1 && ((github.event_name == 'schedule' && vars.OCI_CAPACITY_CATCHER_ENABLED == 'true') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment:
       name: oci-capacity-acquire
@@ -305,10 +306,24 @@ assert_fail "schedule-only capacity workflow" "must have schedule and workflow_d
 
 reset_fixtures
 write_complete_oci_set
+sed -i.bak '/required: true/d' "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "optional manual capacity SHA" "must require the approved_sha dispatch input"
+
+reset_fixtures
+write_complete_oci_set
 sed -i.bak "s/vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'/true/" \
   "$tmp_dir/oci-capacity-acquire.yml"
 rm "$tmp_dir/oci-capacity-acquire.yml.bak"
-assert_fail "capacity workflow without kill switch" "must retain the explicit activation kill switch"
+assert_fail "capacity workflow without kill switch" "schedule must retain the explicit activation kill switch"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak "s/ || github.event_name == 'workflow_dispatch'//" \
+  "$tmp_dir/oci-capacity-acquire.yml"
+rm "$tmp_dir/oci-capacity-acquire.yml.bak"
+assert_fail "capacity workflow without manual bypass" \
+  "must permit an audited manual attempt independently of scheduling"
 
 reset_fixtures
 write_complete_oci_set

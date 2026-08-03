@@ -14,6 +14,10 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$FAKE_BIN"
+ssh-keygen -q -t ed25519 -N "" -C fixture-target -f "$TEST_DIR/target-key"
+ssh-keygen -q -t ed25519 -N "" -C fixture-mismatch -f "$TEST_DIR/mismatch-key"
+fixture_target_public_key="$(cat "$TEST_DIR/target-key.pub")"
+fixture_mismatch_public_key="$(cat "$TEST_DIR/mismatch-key.pub")"
 
 fail() {
   printf 'capacity contract failure: %s\n' "$*" >&2
@@ -191,6 +195,27 @@ JSON
             "acquisition-run-id": $run
           }
         '
+    elif [[ "$query" == "data" ]]; then
+      jq -cn --arg target_key "$OCI_FAKE_LAUNCH_SSH_PUBLIC_KEY" '{
+        id: "ocid1.instance.oc1..fixture",
+        "display-name": "betstan-k3s-node",
+        "availability-domain": "fixture:EU-FRANKFURT-1-AD-1",
+        "image-id": "ocid1.image.oc1..fixture",
+        shape: "VM.Standard.A1.Flex",
+        "shape-config": {ocpus: 2, "memory-in-gbs": 12.0},
+        "lifecycle-state": "RUNNING",
+        metadata: {ssh_authorized_keys: $target_key},
+        "freeform-tags": {
+          "betstan-managed": "true",
+          provider: "oci",
+          "betstan-managed-by": "oci-capacity-acquire",
+          "betstan-runtime": "k3s",
+          "betstan-contract": "1",
+          "expected-monthly-cost": "0",
+          "source-sha": "0000000000000000000000000000000000000000",
+          "acquisition-run-id": "stale"
+        }
+      }'
     elif [[ "$OCI_FAKE_SCENARIO" == "terminated" ]]; then
       echo "TERMINATED"
     else
@@ -256,7 +281,8 @@ export OCI_K3S_INSTANCE_NAME=betstan-k3s-node
 export OCI_K3S_IMAGE_OCID=ocid1.image.oc1..fixture
 export OCI_K3S_VERSION=v1.34.9+k3s1
 export OCI_K3S_BINARY_SHA256=c782d6bb71eb2eb30f034aaddabb480294f9fdae5a7bca49ac5e3e0f66b96ea5
-export OCI_K3S_SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyKeyForContractTests fixture"
+export OCI_K3S_SSH_PUBLIC_KEY="$fixture_target_public_key"
+export OCI_FAKE_LAUNCH_SSH_PUBLIC_KEY="$fixture_target_public_key"
 export OCI_NODE_SHAPE=VM.Standard.A1.Flex
 export OCI_A1_OCPUS=2
 export OCI_A1_MEMORY_GB=12
@@ -269,6 +295,15 @@ export OCI_CAPACITY_RUN_NUMBER=1
 
 # shellcheck source=../scripts/capacity-common.sh
 source "$OCI_DIR/scripts/capacity-common.sh"
+target_ssh_public_key_sha256="$(
+  oci_ssh_ed25519_public_key_sha256 "$OCI_K3S_SSH_PUBLIC_KEY"
+)"
+if (
+  OCI_K3S_SSH_PUBLIC_KEY="ssh-rsa AAAAB3NzaFixtureOnlyKey fixture"
+  oci_capacity_require_contract
+) >/dev/null 2>&1; then
+  fail "capacity acquisition accepted an RSA target SSH key"
+fi
 [[ "$(OCI_A1_MEMORY_PROFILES=12 oci_capacity_profiles_json)" == "[12]" ]] ||
   fail "validated memory profile changed"
 if OCI_A1_MEMORY_PROFILES=12,10 oci_capacity_profiles_json >/dev/null 2>&1; then
@@ -375,8 +410,11 @@ bash -u -c '
   [[ "$shape" == "VM.Standard.A1.Flex" ]]
   [[ "$ocpus" == "2" && "$memory_gb" == "12" ]]
   [[ "$boot_volume_vpus_per_gb" == "10" ]]
+  [[ "$target_ssh_public_key_sha256" == "$2" ]]
   [[ -n "$private_ip" && -n "$public_ip" ]]
-' _ "$TEST_DIR/acquired-provenance/provenance.env" ||
+' _ \
+  "$TEST_DIR/acquired-provenance/provenance.env" \
+  "$target_ssh_public_key_sha256" ||
   fail "successful launch provenance lacks the canonical k3s finalization fields"
 jq -e '
   .instance_count == 1 and
@@ -402,6 +440,12 @@ grep -Fq 'instance_acquired=true' "$second_output" ||
   fail "existing managed instance allowed another launch request"
 [[ "$(grep -c 'compute instance update' "$FAKE_LOG")" == "$((tag_update_count + 1))" ]] ||
   fail "existing managed instance was not rebound to current provenance"
+if OCI_FAKE_SCENARIO=available \
+    OCI_K3S_SSH_PUBLIC_KEY="$fixture_mismatch_public_key" \
+    PROVENANCE_DIR="$TEST_DIR/mismatched-key-provenance" \
+      "$OCI_DIR/scripts/reconcile-capacity.sh" record >/dev/null 2>&1; then
+  fail "existing managed instance was rebound to a different target SSH key"
+fi
 bash -u -c '
   source "$1"
   [[ "$source_sha" == "$2" && "$acquisition_run_id" == "$3" ]]

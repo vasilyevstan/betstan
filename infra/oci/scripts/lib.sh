@@ -59,6 +59,18 @@ oci_fingerprint() {
   printf '%s' "$1" | oci_sha256
 }
 
+oci_ssh_ed25519_public_key_sha256() {
+  local public_key="$1" key_material
+  [[ "$public_key" != *$'\n'* &&
+     "$public_key" =~ ^ssh-ed25519[[:space:]]+([A-Za-z0-9+/=]+)([[:space:]].*)?$ ]] ||
+    oci_die "SSH public key must be a single-line ED25519 public key"
+  key_material="${BASH_REMATCH[1]}"
+  printf '%s\n' "$public_key" |
+    ssh-keygen -l -E sha256 -f - >/dev/null 2>&1 ||
+    oci_die "SSH public key is not a valid ED25519 key"
+  printf 'ssh-ed25519 %s' "$key_material" | oci_sha256
+}
+
 oci_is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }

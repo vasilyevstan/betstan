@@ -263,7 +263,7 @@ jobs:
           [ "$boot_volume_gb" = "50" ]
           [ "$boot_volume_vpus_per_gb" = "10" ]
 
-      - name: Open ephemeral OCI Bastion access to k3s
+      - name: Open ephemeral OCI Bastion access and finalize k3s
         if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -271,30 +271,35 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
           INFRA_PROVENANCE_FILE: artifacts/oci-infrastructure/provenance.env
+          NETWORK_PROVENANCE_FILE: artifacts/oci-infrastructure/provenance.env
           ACQUISITION_PROVENANCE_FILE: artifacts/oci-capacity/provenance.env
           SESSION_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
+          K3S_ACCESS_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: |
           set -euo pipefail
+          cleanup_on_exit() {
+            status=$?
+            trap - EXIT
+            set +e
+            ./infra/oci/scripts/configure-k3s-access.sh cleanup
+            cleanup_status=$?
+            if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+              status=$cleanup_status
+            fi
+            exit "$status"
+          }
+          trap cleanup_on_exit EXIT
           RUNNER_PUBLIC_IPV4="$(
             curl --fail --silent --show-error --max-time 15 https://api.ipify.org
           )"
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
-
-      - name: Finalize k3s storage, add-ons, and OCI load balancer
-        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
-        env:
-          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
-          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
-          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
-          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
-          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          NETWORK_PROVENANCE_FILE: artifacts/oci-infrastructure/provenance.env
-          ACQUISITION_PROVENANCE_FILE: artifacts/oci-capacity/provenance.env
-          K3S_ACCESS_STATE_FILE: artifacts/oci-infrastructure/k3s-access.env
-        run: ./infra/oci/scripts/finalize-k3s.sh
+          unset OCI_K3S_SSH_PRIVATE_KEY
+          ./infra/oci/scripts/finalize-k3s.sh
 
       - name: Close ephemeral OCI Bastion access
         if: always() && inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
