@@ -120,4 +120,48 @@ if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_API=1 \
 fi
 grep -Eq 'API returned (non-JSON content|invalid JSON)' "$WORK_DIR/smoke-bad.out"
 
-echo "oci_health_fixture_contract=PASS scenarios=22"
+cat > "$WORK_DIR/bin/playwright" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'playwright-ran\n' >> "${STUB_PLAYWRIGHT_LOG:?}"
+STUB
+chmod +x "$WORK_DIR/bin/playwright"
+: > "$WORK_DIR/playwright.log"
+
+OCI_HEALTH_FIXTURE_FILE="$HEALTHY" \
+OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+OCI_PUBLIC_CHECKS_ALREADY_PASSED=1 \
+OCI_E2E_ALREADY_PASSED=1 \
+MAX_LOOPS=1 \
+SLEEP_SECONDS=1 \
+OUTPUT_DIR="$WORK_DIR/cluster-only" \
+  "$OCI_DIR/agents/validation-loop-stan.sh" |
+  grep -q 'oci_validation_loop=PASS'
+[[ ! -s "$WORK_DIR/playwright.log" ]] ||
+  { echo "cluster-only validation executed browser code" >&2; exit 1; }
+
+PATH="$WORK_DIR/bin:$PATH" \
+PLAYWRIGHT_BIN="$WORK_DIR/bin/playwright" \
+STUB_PLAYWRIGHT_LOG="$WORK_DIR/playwright.log" \
+OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
+MAX_LOOPS=1 \
+SLEEP_SECONDS=1 \
+OUTPUT_DIR="$WORK_DIR/public-only" \
+  "$OCI_DIR/agents/validation-loop-stan.sh" |
+  grep -q 'oci_validation_loop=PASS'
+grep -Fq 'playwright-ran' "$WORK_DIR/playwright.log" ||
+  { echo "public-only validation skipped browser checks" >&2; exit 1; }
+
+if OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+    OCI_PUBLIC_CHECKS_ALREADY_PASSED=1 \
+    OCI_E2E_ALREADY_PASSED=1 \
+    OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
+    MAX_LOOPS=1 \
+    SLEEP_SECONDS=1 \
+      "$OCI_DIR/agents/validation-loop-stan.sh" >/dev/null 2>&1; then
+  echo "validation loop accepted skipping both public and cluster checks" >&2
+  exit 1
+fi
+
+echo "oci_health_fixture_contract=PASS scenarios=25"

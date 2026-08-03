@@ -59,7 +59,13 @@ case "$*" in
   "bastion bastion list "*) response=bastions.json ;;
   "artifacts container repository list "*) response=repositories.json ;;
   "os bucket list "*) response=buckets.json ;;
-  "bastion session delete "*) exit 0 ;;
+  "bastion session delete "*)
+    if [[ -n "${MOCK_OCI_FAIL_SESSION_ID:-}" &&
+          "$*" == *"$MOCK_OCI_FAIL_SESSION_ID"* ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   "bastion bastion update "*) exit 0 ;;
   *) echo "unexpected mock OCI command: $*" >&2; exit 1 ;;
 esac
@@ -212,20 +218,37 @@ import time
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 time.sleep(300)
 ' &
-tunnel_pid=$!
+ssh_tunnel_pid=$!
+python3 -c '
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+time.sleep(300)
+' &
+api_tunnel_pid=$!
 access_work="$WORK_DIR/access"
 key_dir="$access_work/bastion-keys"
 mkdir -p "$key_dir"
-touch "$key_dir/id_ed25519"
+touch \
+  "$key_dir/bastion_id_ed25519" \
+  "$key_dir/target_id_ed25519" \
+  "$key_dir/target_known_hosts"
 state_file="$WORK_DIR/access.env"
 kubeconfig_file="$WORK_DIR/kubeconfig"
 touch "$kubeconfig_file"
 {
   printf 'bastion_ocid=%q\n' 'ocid1.bastion.oc1.fixture'
-  printf 'managed_session_id=%q\n' 'ocid1.bastionsession.oc1.managed'
-  printf 'pf_session_id=%q\n' 'ocid1.bastionsession.oc1.forward'
-  printf 'tunnel_pid=%q\n' "$tunnel_pid"
+  printf 'ssh_session_id=%q\n' 'ocid1.bastionsession.oc1.ssh'
+  printf 'api_session_id=%q\n' 'ocid1.bastionsession.oc1.api'
+  printf 'ssh_tunnel_pid=%q\n' "$ssh_tunnel_pid"
+  printf 'api_tunnel_pid=%q\n' "$api_tunnel_pid"
   printf 'key_dir=%q\n' "$key_dir"
+  printf 'target_private_key=%q\n' "$key_dir/target_id_ed25519"
+  printf 'target_known_hosts=%q\n' "$key_dir/target_known_hosts"
+  printf 'instance_private_ip=%q\n' '10.42.28.31'
+  printf 'os_user=%q\n' 'ubuntu'
+  printf 'local_ssh_port=%q\n' '12222'
 } > "$state_file"
 : > "$WORK_DIR/oci.log"
 PATH="$WORK_DIR/bin:$PATH" \
@@ -236,24 +259,108 @@ SESSION_STATE_FILE="$state_file" \
 WORK_DIR="$access_work" \
 KUBECONFIG="$kubeconfig_file" \
   "$OCI_DIR/scripts/configure-k3s-access.sh" cleanup >/dev/null
-! kill -0 "$tunnel_pid" 2>/dev/null ||
-  fail "k3s access cleanup left the exact tunnel process running"
-wait "$tunnel_pid" 2>/dev/null || true
+! kill -0 "$ssh_tunnel_pid" 2>/dev/null ||
+  fail "k3s access cleanup left the exact SSH tunnel process running"
+! kill -0 "$api_tunnel_pid" 2>/dev/null ||
+  fail "k3s access cleanup left the exact API tunnel process running"
+wait "$ssh_tunnel_pid" 2>/dev/null || true
+wait "$api_tunnel_pid" 2>/dev/null || true
 [[ ! -e "$state_file" && ! -e "$key_dir" && ! -e "$kubeconfig_file" ]] ||
   fail "k3s access cleanup left session state, kubeconfig, or ephemeral keys"
-grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.forward' \
+grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.api' \
   "$WORK_DIR/oci.log" ||
-  fail "k3s access cleanup did not delete the port-forwarding session"
-grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.managed' \
+  fail "k3s access cleanup did not delete the API port-forwarding session"
+grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.ssh' \
   "$WORK_DIR/oci.log" ||
-  fail "k3s access cleanup did not delete the managed SSH session"
+  fail "k3s access cleanup did not delete the SSH port-forwarding session"
 grep -Fq '192.0.2.1/32' "$WORK_DIR/oci.log" ||
   fail "k3s access cleanup did not restore the non-routable Bastion CIDR"
+PATH="$WORK_DIR/bin:$PATH" \
+MOCK_OCI_LOG="$WORK_DIR/oci.log" \
+MOCK_OCI_RESPONSES="$WORK_DIR/responses" \
+OCI_CLI_VERSION=3.90.0 \
+SESSION_STATE_FILE="$state_file" \
+WORK_DIR="$access_work" \
+KUBECONFIG="$kubeconfig_file" \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" cleanup >/dev/null ||
+  fail "k3s access cleanup is not idempotent after partial or prior cleanup"
+
+retry_key_dir="$access_work/retry-keys"
+mkdir -p "$retry_key_dir"
+touch "$retry_key_dir/target_id_ed25519" "$kubeconfig_file"
+{
+  printf 'bastion_ocid=%q\n' 'ocid1.bastion.oc1.fixture'
+  printf 'ssh_session_id=%q\n' ''
+  printf 'ssh_session_name=%q\n' ''
+  printf 'api_session_id=%q\n' 'ocid1.bastionsession.oc1.retry'
+  printf 'api_session_name=%q\n' ''
+  printf 'ssh_tunnel_pid=%q\n' ''
+  printf 'api_tunnel_pid=%q\n' ''
+  printf 'key_dir=%q\n' "$retry_key_dir"
+} > "$state_file"
+if PATH="$WORK_DIR/bin:$PATH" \
+    MOCK_OCI_LOG="$WORK_DIR/oci.log" \
+    MOCK_OCI_RESPONSES="$WORK_DIR/responses" \
+    MOCK_OCI_FAIL_SESSION_ID=ocid1.bastionsession.oc1.retry \
+    OCI_CLI_VERSION=3.90.0 \
+    SESSION_STATE_FILE="$state_file" \
+    WORK_DIR="$access_work" \
+    KUBECONFIG="$kubeconfig_file" \
+      "$OCI_DIR/scripts/configure-k3s-access.sh" cleanup >/dev/null 2>&1; then
+  fail "k3s access cleanup hid a remote session-deletion failure"
+fi
+[[ -f "$state_file" && ! -e "$retry_key_dir" && ! -e "$kubeconfig_file" ]] ||
+  fail "failed remote cleanup did not preserve retry state and remove key material"
+PATH="$WORK_DIR/bin:$PATH" \
+MOCK_OCI_LOG="$WORK_DIR/oci.log" \
+MOCK_OCI_RESPONSES="$WORK_DIR/responses" \
+OCI_CLI_VERSION=3.90.0 \
+SESSION_STATE_FILE="$state_file" \
+WORK_DIR="$access_work" \
+KUBECONFIG="$kubeconfig_file" \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" cleanup >/dev/null ||
+  fail "k3s access cleanup could not retry from preserved state"
+[[ ! -e "$state_file" ]] ||
+  fail "successful remote cleanup retry retained stale state"
+
 grep -Fq 'OCI_BASTION_SESSION_TTL="${OCI_BASTION_SESSION_TTL:-10800}"' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s Bastion sessions do not match the protected workflow ceiling"
+[[ "$(grep -Fc 'bastion session create-port-forwarding' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh")" == "2" ]] ||
+  fail "k3s access does not create separate SSH and API port-forwarding sessions"
+! grep -Fq 'create-managed-ssh' "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access still uses managed SSH, which is unsupported on Ubuntu A1"
+grep -Fq '.data."ssh-metadata".command' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not derive the Bastion endpoint from session metadata"
+grep -Fq 'OCI_K3S_SSH_PRIVATE_KEY' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not require the retained target SSH private key"
+grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH="${OCI_K3S_RETAIN_TARGET_SSH:-false}"' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not revoke target SSH by default"
+grep -Fq 'release_target_ssh' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not remove the retained target key after kubeconfig retrieval"
+grep -Fq '(( OCI_BASTION_SESSION_TTL >= 1800 ))' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not enforce the OCI Bastion minimum session TTL"
 
 finalizer="$OCI_DIR/scripts/finalize-k3s.sh"
+for access_field in \
+  target_private_key target_known_hosts instance_private_ip os_user \
+  local_ssh_port ssh_tunnel_pid; do
+  grep -Fq "printf '$access_field=%q" \
+    "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+    fail "k3s access state does not write $access_field"
+  grep -Fq "\${${access_field}:-}" "$finalizer" ||
+    fail "k3s finalizer does not require access-state field $access_field"
+done
+! grep -Eq 'managed_session_id|ProxyCommand=' "$finalizer" ||
+  fail "k3s finalizer still depends on managed SSH"
+grep -Fq '"${os_user}@127.0.0.1"' "$finalizer" ||
+  fail "k3s finalizer does not use the local target SSH forward"
 grep -Fq -- '--shape-name flexible' "$finalizer" ||
   fail "k3s finalizer does not create a flexible OCI load balancer"
 grep -Fq -- '--health-checker-protocol TCP' "$finalizer" ||
