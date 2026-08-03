@@ -141,6 +141,18 @@ fixtures.
    stop both exact tunnel PIDs, and remove ephemeral keys. Cleanup failure is
    a deployment failure.
 
+The protected `oci-build` environment can define `OCI_REUSE_SOURCE_SHA` and
+`OCI_REUSE_BUILD_RUN_ID` for a prior successful first-attempt OCI build.
+`oci-production-build` reuses those verified immutable ARM64 digests only when
+the prior commit is an ancestor and `.dockerignore`, all nine service trees,
+`infra/oci/build`, and `scripts/build-images.sh` are unchanged. Any changed
+image input uses the normal build path only after the reuse variables are
+cleared and a fresh environment approval is obtained. Reuse creates new
+exact-SHA tags without uploading duplicate layers and records both build runs
+in provenance. The comparison also fingerprints the exact `lib.sh` functions
+called by `build-images.sh`; unrelated infrastructure helpers do not force a
+rebuild, while any transitive image-recipe change fails closed.
+
 For OKE fallback, set `OCI_RUNTIME_MODE=oke`; the existing Basic-cluster,
 runner-NSG, and managed-node-pool flow remains available.
 
