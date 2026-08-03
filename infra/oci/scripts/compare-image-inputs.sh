@@ -57,20 +57,64 @@ extract_lib_contract() {
   local ref="$1"
   git -C "$ROOT_DIR" show "${ref}:infra/oci/scripts/lib.sh" |
     awk '
-      /^OCI_ROOT_DIR=/ {
+      /^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{$/ {
+        in_function = 1
+        capture = ($0 ~ /^oci_(die|log|require_command|require_vars|prepare_private_dir)\(\) \{$/)
+        if (capture) {
+          print
+        }
+        next
+      }
+      in_function {
+        if (capture) {
+          print
+        }
+        if ($0 == "}") {
+          in_function = 0
+          capture = 0
+        }
+        next
+      }
+      /^[[:space:]]*$/ || /^#!/ || /^[[:space:]]*#/ {
+        next
+      }
+      /^[A-Z][A-Z0-9_]*=/ {
         print
         next
       }
-      /^oci_(die|log|require_command|require_vars|prepare_private_dir)\(\) \{$/ {
-        capture = 1
+      {
+        print "unexpected top-level image library statement: " $0 > "/dev/stderr"
+        invalid = 1
       }
-      capture {
-        print
-      }
-      capture && $0 == "}" {
-        capture = 0
+      END {
+        if (in_function || invalid) {
+          exit 2
+        }
       }
     '
+}
+
+validate_lib_contract() {
+  local contract="$1"
+  local function_name unexpected
+  for function_name in \
+    oci_die oci_log oci_require_command oci_require_vars oci_prepare_private_dir; do
+    grep -Fqx "${function_name}() {" "$contract" || {
+      echo "ERROR: image library contract is missing $function_name" >&2
+      return 2
+    }
+  done
+  unexpected="$(
+    grep -Eo 'oci_[a-z0-9_]+' "$contract" |
+      sort -u |
+      grep -Ev \
+        '^(oci_die|oci_log|oci_require_command|oci_require_vars|oci_prepare_private_dir)$' \
+      || true
+  )"
+  [[ -z "$unexpected" ]] || {
+    echo "ERROR: image library contract has an untracked helper dependency: $unexpected" >&2
+    return 2
+  }
 }
 
 extract_lib_contract "$BASE_SHA" > "$base_contract" || {
@@ -85,6 +129,8 @@ extract_lib_contract "$TARGET_SHA" > "$target_contract" || {
   echo "ERROR: image library contract is incomplete" >&2
   exit 2
 }
+validate_lib_contract "$base_contract" || exit 2
+validate_lib_contract "$target_contract" || exit 2
 cmp -s "$base_contract" "$target_contract" || exit 1
 
 echo "oci_image_inputs=UNCHANGED base=$BASE_SHA target=$TARGET_SHA"

@@ -23,16 +23,31 @@ env_value() {
   ' "$file"
 }
 
-require_absent_image_tag() {
+inspect_image_tag_digest() {
   local tag="$1"
   local inspect_error="$2"
-  if docker buildx imagetools inspect "$tag" >"$inspect_error" 2>&1; then
-    oci_die "exact OCI tag already exists; refusing overwrite for $tag"
+  local output status
+  set +e
+  output="$(
+    docker buildx imagetools inspect "$tag" \
+      --format '{{json .Manifest.Digest}}' \
+      2>"$inspect_error"
+  )"
+  status=$?
+  set -e
+  if [[ "$status" == "0" ]]; then
+    rm -f "$inspect_error"
+    output="${output//\"/}"
+    [[ "$output" =~ ^sha256:[0-9a-f]{64}$ ]] || return 20
+    printf '%s\n' "$output"
+    return 0
   fi
-  if ! grep -Eiq '404|manifest unknown|name unknown|not found' "$inspect_error"; then
-    oci_die "unable to prove the exact OCI tag is absent for $tag"
+  if grep -Eiq '404|manifest unknown|name unknown|not found' "$inspect_error"; then
+    rm -f "$inspect_error"
+    return 10
   fi
-  rm -f "$inspect_error"
+  cat "$inspect_error" >&2
+  return 20
 }
 
 SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
@@ -124,24 +139,45 @@ for expected_service in "${services[@]}"; do
 
   new_tag="${repository}:oci-${expected_service}-${SOURCE_SHA}"
   inspect_error="$OUTPUT_DIR/${expected_service}.tag-inspect.log"
-  require_absent_image_tag "$new_tag" "$inspect_error"
-  printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$expected_service" "$repository" "$artifact_digest" \
+  set +e
+  observed_digest="$(inspect_image_tag_digest "$new_tag" "$inspect_error")"
+  inspect_status=$?
+  set -e
+  case "$inspect_status" in
+    0)
+      [[ "$observed_digest" == "$artifact_digest" ]] ||
+        oci_die "existing exact OCI tag has an unexpected digest for $expected_service"
+      action=existing
+      ;;
+    10)
+      action=create
+      ;;
+    *)
+      oci_die "unable to validate the exact OCI tag for $expected_service"
+      ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$action" "$expected_service" "$repository" "$artifact_digest" \
     "$artifact_platform_digest" "$artifact_image_ref" \
     >> "$plan_file"
 done
 
-while IFS=$'\t' read -r service service_repository digest platform_digest image_ref; do
+while IFS=$'\t' read -r action service service_repository digest platform_digest image_ref; do
   new_tag="${service_repository}:oci-${service}-${SOURCE_SHA}"
-  docker buildx imagetools create \
-    --prefer-index=false \
-    --tag "$new_tag" \
-    "$image_ref"
+  if [[ "$action" == "create" ]]; then
+    docker buildx imagetools create \
+      --prefer-index=false \
+      --tag "$new_tag" \
+      "$image_ref"
+  fi
+  set +e
   observed_digest="$(
-    docker buildx imagetools inspect "$new_tag" \
-      --format '{{json .Manifest.Digest}}' |
-      tr -d '"'
+    inspect_image_tag_digest "$new_tag" "$OUTPUT_DIR/${service}.created-tag-inspect.log"
   )"
+  inspect_status=$?
+  set -e
+  [[ "$inspect_status" == "0" ]] ||
+    oci_die "unable to verify reused tag after publication for $service"
   [[ "$observed_digest" == "$digest" ]] ||
     oci_die "reused tag digest differs from approved provenance for $service"
   {

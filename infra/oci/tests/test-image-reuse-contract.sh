@@ -6,6 +6,8 @@ OCI_DIR="$ROOT_DIR/infra/oci"
 WORK_DIR="$OCI_DIR/tests/.image-reuse-work"
 OLD_SHA=1111111111111111111111111111111111111111
 NEW_SHA=2222222222222222222222222222222222222222
+RETRY_SHA=3333333333333333333333333333333333333333
+MISMATCH_SHA=4444444444444444444444444444444444444444
 OLD_RUN_ID=1234
 NEW_RUN_ID=5678
 
@@ -55,6 +57,14 @@ case "${1:-} ${2:-}" in
         tag="${6:?}"
         source_ref="${7:?}"
         digest="${source_ref##*@}"
+        if [[ -n "${MOCK_DOCKER_FAIL_TAG:-}" &&
+              "$tag" == *"$MOCK_DOCKER_FAIL_TAG"* ]]; then
+          failure_marker="${MOCK_DOCKER_STATE:?}/failure-injected"
+          if [[ ! -f "$failure_marker" ]]; then
+            touch "$failure_marker"
+            exit 42
+          fi
+        fi
         printf '%s\n' "$digest" > "${MOCK_DOCKER_STATE:?}/$(tag_key "$tag")"
         ;;
       *)
@@ -122,16 +132,57 @@ for service in "${services[@]}"; do
   grep -Fxq "reuse_build_run_id=$OLD_RUN_ID" "$provenance"
 done
 
-auth_tag="${repository}:oci-auth-${NEW_SHA}"
+if PATH="$WORK_DIR/bin:$PATH" \
+    MOCK_DOCKER_LOG="$WORK_DIR/docker.log" \
+    MOCK_DOCKER_STATE="$WORK_DIR/state" \
+    MOCK_DOCKER_FAIL_TAG="oci-event-${RETRY_SHA}" \
+    SOURCE_SHA="$RETRY_SHA" \
+    REUSE_SOURCE_SHA="$OLD_SHA" \
+    REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
+    REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
+    OUTPUT_DIR="$WORK_DIR/retry-first" \
+    PLATFORM=linux/arm64 \
+    OCI_REGISTRY_HOST=fixture.invalid \
+    OCI_REGISTRY_NAMESPACE=namespace \
+    OCI_IMAGE_PREFIX=betstan \
+    OCI_REGISTRY_USERNAME=fixture \
+    OCI_REGISTRY_AUTH_TOKEN=fixture \
+    "$OCI_DIR/scripts/reuse-images.sh" >/dev/null 2>&1; then
+  fail "injected mid-publication failure unexpectedly succeeded"
+fi
+PATH="$WORK_DIR/bin:$PATH" \
+MOCK_DOCKER_LOG="$WORK_DIR/docker.log" \
+MOCK_DOCKER_STATE="$WORK_DIR/state" \
+MOCK_DOCKER_FAIL_TAG="oci-event-${RETRY_SHA}" \
+SOURCE_SHA="$RETRY_SHA" \
+REUSE_SOURCE_SHA="$OLD_SHA" \
+REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
+REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
+OUTPUT_DIR="$WORK_DIR/retry-second" \
+PLATFORM=linux/arm64 \
+OCI_REGISTRY_HOST=fixture.invalid \
+OCI_REGISTRY_NAMESPACE=namespace \
+OCI_IMAGE_PREFIX=betstan \
+OCI_REGISTRY_USERNAME=fixture \
+OCI_REGISTRY_AUTH_TOKEN=fixture \
+GITHUB_RUN_ID="$NEW_RUN_ID" \
+GITHUB_RUN_ATTEMPT=1 \
+  "$OCI_DIR/scripts/reuse-images.sh" >/dev/null
+for service in "${services[@]}"; do
+  [[ -s "$WORK_DIR/retry-second/${service}.env" ]] ||
+    fail "retry did not recover provenance for $service"
+done
+
+auth_tag="${repository}:oci-auth-${MISMATCH_SHA}"
 auth_key="$(printf '%s' "$auth_tag" | cksum | awk '{print $1}')"
-printf '%s\n' "sha256:$(printf '%064d' 1)" > "$WORK_DIR/state/$auth_key"
+printf '%s\n' "sha256:$(printf '%064d' 99)" > "$WORK_DIR/state/$auth_key"
 create_count_before="$(
   grep -c '^buildx imagetools create --prefer-index=false --tag ' "$WORK_DIR/docker.log"
 )"
 if PATH="$WORK_DIR/bin:$PATH" \
     MOCK_DOCKER_LOG="$WORK_DIR/docker.log" \
     MOCK_DOCKER_STATE="$WORK_DIR/state" \
-    SOURCE_SHA="$NEW_SHA" \
+    SOURCE_SHA="$MISMATCH_SHA" \
     REUSE_SOURCE_SHA="$OLD_SHA" \
     REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
     REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
@@ -143,7 +194,7 @@ if PATH="$WORK_DIR/bin:$PATH" \
     OCI_REGISTRY_USERNAME=fixture \
     OCI_REGISTRY_AUTH_TOKEN=fixture \
     "$OCI_DIR/scripts/reuse-images.sh" >/dev/null 2>&1; then
-  fail "reuse accepted an existing exact target tag"
+  fail "reuse accepted an existing exact target tag with a mismatched digest"
 fi
 create_count_after="$(
   grep -c '^buildx imagetools create --prefer-index=false --tag ' "$WORK_DIR/docker.log"
@@ -207,7 +258,10 @@ IMAGE_INPUT_REPOSITORY_ROOT="$input_repo" \
 
 cat >> "$input_repo/infra/oci/scripts/lib.sh" <<'LIB'
 oci_log() {
-  printf 'changed: %s\n' "$*"
+  oci_log_delegate "$*"
+}
+oci_log_delegate() {
+  printf 'delegated: %s\n' "$*"
 }
 LIB
 git -C "$input_repo" add infra/oci/scripts/lib.sh
@@ -216,7 +270,7 @@ input_transitive="$(git -C "$input_repo" rev-parse HEAD)"
 if IMAGE_INPUT_REPOSITORY_ROOT="$input_repo" \
     "$OCI_DIR/scripts/compare-image-inputs.sh" \
     "$input_unrelated" "$input_transitive" >/dev/null 2>&1; then
-  fail "transitive build library change was accepted for image reuse"
+  fail "untracked transitive build helper was accepted for image reuse"
 fi
 
 echo "oci_image_reuse_contract=PASS"

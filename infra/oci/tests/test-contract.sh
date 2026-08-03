@@ -264,6 +264,8 @@ grep -Fq -- '--prefer-index=false' "$reuse_images" ||
 grep -Fq 'oci_(die|log|require_command|require_vars|prepare_private_dir)' \
   "$compare_image_inputs" ||
   fail "OCI image input comparison omits the transitive build library contract"
+grep -Fq 'untracked helper dependency' "$compare_image_inputs" ||
+  fail "OCI image input comparison does not enforce a closed helper dependency set"
 inventory="$OCI_DIR/scripts/inventory.sh"
 grep -Fq '[$prefix + "_images"]' "$inventory" ||
   fail "OCI inventory must allow only the shared image repository"
@@ -315,6 +317,7 @@ grep -Fq 'OCI_REUSE_SOURCE_SHA' "$build_workflow"
 grep -Fq 'OCI_REUSE_BUILD_RUN_ID' "$build_workflow"
 grep -Fq 'compare-image-inputs.sh' "$build_workflow"
 grep -Fq 'reuse-images.sh' "$build_workflow"
+grep -Fq 'for reuse_attempt in 1 2 3' "$build_workflow"
 grep -Fq 'upstream-${{ github.event.workflow_run.id }}' "$build_workflow"
 grep -Fq 'group: oci-build-${{ github.event.workflow_run.head_sha }}' "$build_workflow"
 ! grep -Eq 'OCI_CLI_|OCI_CI_PRIVATE_KEY_PEM' "$build_workflow" ||

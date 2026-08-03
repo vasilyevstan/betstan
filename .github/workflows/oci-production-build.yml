@@ -197,12 +197,23 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$IMAGE_MODE" = "reuse" ]; then
-            SOURCE_SHA="$SOURCE_SHA" \
-            REUSE_SOURCE_SHA="$REUSE_SOURCE_SHA" \
-            REUSE_BUILD_RUN_ID="$REUSE_BUILD_RUN_ID" \
-            REUSE_PROVENANCE_DIR=artifacts/reuse-source \
-            PLATFORM=linux/arm64 \
-              ./infra/oci/scripts/reuse-images.sh
+            reuse_complete=false
+            for reuse_attempt in 1 2 3; do
+              attempt_output="artifacts/oci-image-reuse-attempt-${reuse_attempt}"
+              if SOURCE_SHA="$SOURCE_SHA" \
+                  REUSE_SOURCE_SHA="$REUSE_SOURCE_SHA" \
+                  REUSE_BUILD_RUN_ID="$REUSE_BUILD_RUN_ID" \
+                  REUSE_PROVENANCE_DIR=artifacts/reuse-source \
+                  OUTPUT_DIR="$attempt_output" \
+                  PLATFORM=linux/arm64 \
+                    ./infra/oci/scripts/reuse-images.sh; then
+                mv "$attempt_output" "$OUTPUT_DIR"
+                reuse_complete=true
+                break
+              fi
+              sleep $((reuse_attempt * 10))
+            done
+            [ "$reuse_complete" = "true" ]
           else
             SOURCE_SHA="$SOURCE_SHA" PLATFORM=linux/arm64 PUSH_IMAGES=1 \
               ./infra/oci/scripts/build-images.sh
