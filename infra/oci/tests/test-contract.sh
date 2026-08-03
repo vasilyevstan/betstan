@@ -336,7 +336,7 @@ grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
 grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
   fail "infrastructure finalization does not clear the target SSH secret before use"
 ! grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH' "$deploy_workflow" "$migrate_workflow" ||
-  fail "deployment or migration retains target SSH after kubeconfig retrieval"
+  fail "deployment or migration retains target SSH key material after API forwarding"
 for workflow in "$deploy_workflow" "$migrate_workflow"; do
   public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
   dependency_line="$(grep -n -m1 'name: Install browser validation dependencies' \

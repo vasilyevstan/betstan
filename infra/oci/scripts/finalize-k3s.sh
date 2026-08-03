@@ -214,7 +214,7 @@ jq -e \
   ' <<<"$boot_volume" >/dev/null ||
   oci_die "live boot volume differs from the approved 50 GB Balanced contract"
 
-node_json="$(kubectl get node "$OCI_K3S_NODE_NAME" -o json)"
+node_json="$(kubectl --request-timeout=15s get node "$OCI_K3S_NODE_NAME" -o json)"
 jq -e \
   --arg version "$OCI_K3S_VERSION" \
   --arg instance "$acquisition_instance_ocid" '
@@ -227,7 +227,8 @@ jq -e \
   ' <<<"$node_json" >/dev/null ||
   oci_die "k3s node identity, architecture, version, or readiness is invalid"
 for forbidden_addon in traefik servicelb local-path-provisioner; do
-  if kubectl get deployment "$forbidden_addon" -n kube-system >/dev/null 2>&1; then
+  if kubectl --request-timeout=15s \
+      get deployment "$forbidden_addon" -n kube-system >/dev/null 2>&1; then
     oci_die "bundled k3s addon must remain disabled: $forbidden_addon"
   fi
 done
@@ -681,7 +682,10 @@ helm upgrade --install cert-manager "$cert_chart" \
   --wait \
   --timeout 15m
 
-ingress_service="$(kubectl get service ingress-nginx-controller -n ingress-nginx -o json)"
+ingress_service="$(
+  kubectl --request-timeout=15s \
+    get service ingress-nginx-controller -n ingress-nginx -o json
+)"
 jq -e '
   .spec.type == "NodePort" and
   ([.spec.ports[] | select(

@@ -35,26 +35,18 @@ delete_session() {
     --max-wait-seconds 300 >/dev/null
 }
 
-release_target_ssh() {
+release_target_ssh_key() {
   local failed=0
-  if stop_tunnel "$ssh_tunnel_pid"; then
-    ssh_tunnel_pid=""
-  else
-    failed=1
-  fi
-  if delete_session "$ssh_session_id"; then
-    ssh_session_id=""
-    ssh_session_name=""
-  else
-    failed=1
-  fi
   rm -f -- \
     "$target_private_key" \
     "$target_public_key" \
     "$target_known_hosts" || failed=1
+  target_private_key=""
+  target_public_key=""
+  target_known_hosts=""
   write_session_state
   [[ "$failed" == "0" ]] ||
-    oci_die "target SSH access could not be fully revoked"
+    oci_die "target SSH key material could not be fully removed"
 }
 
 reset_bastion_allowlist() {
@@ -163,8 +155,6 @@ write_session_state() {
     printf 'bastion_ocid=%q\n' "$bastion_ocid"
     printf 'ssh_session_id=%q\n' "$ssh_session_id"
     printf 'ssh_session_name=%q\n' "$ssh_session_name"
-    printf 'api_session_id=%q\n' "$api_session_id"
-    printf 'api_session_name=%q\n' "$api_session_name"
     printf 'ssh_tunnel_pid=%q\n' "$ssh_tunnel_pid"
     printf 'api_tunnel_pid=%q\n' "$api_tunnel_pid"
     printf 'key_dir=%q\n' "$key_dir"
@@ -189,6 +179,7 @@ stop_tunnel() {
 }
 
 cleanup_access() {
+  # Keep legacy API-session fields readable so interrupted pre-upgrade runs can be revoked.
   local ssh_session_id="" api_session_id=""
   local ssh_session_name="" api_session_name=""
   local ssh_tunnel_pid="" api_tunnel_pid=""
@@ -216,6 +207,7 @@ cleanup_access() {
   rm -f -- "$KUBECONFIG" || failed=1
   rm -f -- \
     "${SESSION_STATE_FILE}.tmp" \
+    "$WORK_DIR/target-api-tunnel.log" \
     "$WORK_DIR/bastion-api-tunnel.log" \
     "$WORK_DIR/bastion-ssh-tunnel.log" || failed=1
   if [[ -n "$key_dir" && "$key_dir" == "$WORK_DIR/"* ]]; then
@@ -374,13 +366,11 @@ target_public_key="${target_private_key}.pub"
 bastion_known_hosts="$key_dir/bastion_known_hosts"
 target_known_hosts="$key_dir/target_known_hosts"
 ssh_session_id=""
-api_session_id=""
 ssh_tunnel_pid=""
 api_tunnel_pid=""
 bastion_endpoint=""
 run_identity="${GITHUB_RUN_ID:-local-$PPID}-${GITHUB_RUN_ATTEMPT:-1}"
 ssh_session_name="betstan-k3s-ssh-${run_identity}"
-api_session_name="betstan-k3s-api-${run_identity}"
 write_session_state
 trap cleanup_open_failure EXIT
 
@@ -488,39 +478,15 @@ grep -Fq "server: https://127.0.0.1:${OCI_K3S_LOCAL_API_PORT}" "$KUBECONFIG" ||
 KUBECONFIG="$KUBECONFIG" kubectl config view --raw --minify >/dev/null ||
   oci_die "retrieved k3s kubeconfig is invalid"
 
-oci bastion session create-port-forwarding \
-  --bastion-id "$bastion_ocid" \
-  --display-name "$api_session_name" \
-  --key-type PUB \
-  --ssh-public-key-file "$bastion_public_key" \
-  --session-ttl "$OCI_BASTION_SESSION_TTL" \
-  --target-resource-id "$instance_ocid" \
-  --target-private-ip "$instance_private_ip" \
-  --target-port 6443 \
-  --wait-for-state SUCCEEDED \
-  --max-wait-seconds 600 >/dev/null
-api_session_id="$(
-  wait_active_session_id "$bastion_ocid" "$api_session_name"
-)"
-api_endpoint="$(session_endpoint "$api_session_id" 6443)"
-[[ "$api_endpoint" == "$bastion_endpoint" ]] ||
-  oci_die "OCI Bastion sessions returned different service endpoints"
-write_session_state
-
 ssh \
-  -i "$bastion_private_key" \
+  "${target_ssh_options[@]}" \
   -N \
-  -L "127.0.0.1:${OCI_K3S_LOCAL_API_PORT}:${instance_private_ip}:6443" \
-  -o BatchMode=yes \
+  -L "127.0.0.1:${OCI_K3S_LOCAL_API_PORT}:127.0.0.1:6443" \
   -o ExitOnForwardFailure=yes \
-  -o IdentitiesOnly=yes \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
-  -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$bastion_known_hosts" \
-  -p 22 \
-  "${api_session_id}@${bastion_endpoint}" \
-  >"$WORK_DIR/bastion-api-tunnel.log" 2>&1 &
+  "${OCI_K3S_OS_USER}@127.0.0.1" \
+  >"$WORK_DIR/target-api-tunnel.log" 2>&1 &
 api_tunnel_pid=$!
 write_session_state
 
@@ -528,7 +494,8 @@ tunnel_ready=0
 for _ in $(seq 1 60); do
   kill -0 "$api_tunnel_pid" 2>/dev/null ||
     oci_die "k3s API Bastion tunnel process exited"
-  if KUBECONFIG="$KUBECONFIG" kubectl get --raw=/readyz >/dev/null 2>&1; then
+  if KUBECONFIG="$KUBECONFIG" \
+      kubectl --request-timeout=10s get --raw=/readyz >/dev/null 2>&1; then
     tunnel_ready=1
     break
   fi
@@ -537,7 +504,7 @@ done
 [[ "$tunnel_ready" == "1" ]] ||
   oci_die "k3s API is unavailable through OCI Bastion"
 if [[ "$OCI_K3S_RETAIN_TARGET_SSH" == "false" ]]; then
-  release_target_ssh
+  release_target_ssh_key
 fi
 trap - EXIT
-oci_log "k3s_access=PASS transport=oci-bastion-port-forwarding"
+oci_log "k3s_access=PASS transport=oci-bastion-target-ssh-loopback"

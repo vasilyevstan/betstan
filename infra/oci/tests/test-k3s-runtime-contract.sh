@@ -240,7 +240,6 @@ touch "$kubeconfig_file"
 {
   printf 'bastion_ocid=%q\n' 'ocid1.bastion.oc1.fixture'
   printf 'ssh_session_id=%q\n' 'ocid1.bastionsession.oc1.ssh'
-  printf 'api_session_id=%q\n' 'ocid1.bastionsession.oc1.api'
   printf 'ssh_tunnel_pid=%q\n' "$ssh_tunnel_pid"
   printf 'api_tunnel_pid=%q\n' "$api_tunnel_pid"
   printf 'key_dir=%q\n' "$key_dir"
@@ -267,12 +266,11 @@ wait "$ssh_tunnel_pid" 2>/dev/null || true
 wait "$api_tunnel_pid" 2>/dev/null || true
 [[ ! -e "$state_file" && ! -e "$key_dir" && ! -e "$kubeconfig_file" ]] ||
   fail "k3s access cleanup left session state, kubeconfig, or ephemeral keys"
-grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.api' \
-  "$WORK_DIR/oci.log" ||
-  fail "k3s access cleanup did not delete the API port-forwarding session"
 grep -Fq 'bastion session delete --session-id ocid1.bastionsession.oc1.ssh' \
   "$WORK_DIR/oci.log" ||
   fail "k3s access cleanup did not delete the SSH port-forwarding session"
+[[ "$(grep -Fc 'bastion session delete' "$WORK_DIR/oci.log")" == "1" ]] ||
+  fail "k3s access cleanup deleted an unexpected Bastion session"
 grep -Fq '192.0.2.1/32' "$WORK_DIR/oci.log" ||
   fail "k3s access cleanup did not restore the non-routable Bastion CIDR"
 PATH="$WORK_DIR/bin:$PATH" \
@@ -290,10 +288,8 @@ mkdir -p "$retry_key_dir"
 touch "$retry_key_dir/target_id_ed25519" "$kubeconfig_file"
 {
   printf 'bastion_ocid=%q\n' 'ocid1.bastion.oc1.fixture'
-  printf 'ssh_session_id=%q\n' ''
+  printf 'ssh_session_id=%q\n' 'ocid1.bastionsession.oc1.retry'
   printf 'ssh_session_name=%q\n' ''
-  printf 'api_session_id=%q\n' 'ocid1.bastionsession.oc1.retry'
-  printf 'api_session_name=%q\n' ''
   printf 'ssh_tunnel_pid=%q\n' ''
   printf 'api_tunnel_pid=%q\n' ''
   printf 'key_dir=%q\n' "$retry_key_dir"
@@ -327,8 +323,8 @@ grep -Fq 'OCI_BASTION_SESSION_TTL="${OCI_BASTION_SESSION_TTL:-10800}"' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s Bastion sessions do not match the protected workflow ceiling"
 [[ "$(grep -Fc 'bastion session create-port-forwarding' \
-  "$OCI_DIR/scripts/configure-k3s-access.sh")" == "2" ]] ||
-  fail "k3s access does not create separate SSH and API port-forwarding sessions"
+  "$OCI_DIR/scripts/configure-k3s-access.sh")" == "1" ]] ||
+  fail "k3s access must create exactly one SSH port-forwarding session"
 ! grep -Fq 'create-managed-ssh' "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access still uses managed SSH, which is unsupported on Ubuntu A1"
 grep -Fq '.data."ssh-metadata".command' \
@@ -339,10 +335,22 @@ grep -Fq 'OCI_K3S_SSH_PRIVATE_KEY' \
   fail "k3s access does not require the retained target SSH private key"
 grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH="${OCI_K3S_RETAIN_TARGET_SSH:-false}"' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
-  fail "k3s access does not revoke target SSH by default"
-grep -Fq 'release_target_ssh' \
+  fail "k3s access does not remove the target key by default"
+grep -Fq 'release_target_ssh_key' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
-  fail "k3s access does not remove the retained target key after kubeconfig retrieval"
+  fail "k3s access does not remove the target key after API forwarding"
+grep -Fq -- \
+  '-L "127.0.0.1:${OCI_K3S_LOCAL_API_PORT}:127.0.0.1:6443"' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s API does not use the target SSH loopback forward"
+grep -Fq 'kubectl --request-timeout=10s get --raw=/readyz' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s API readiness does not have a bounded request timeout"
+! grep -Eq 'iptables|netfilter|ufw' "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access mutates the target host firewall"
+! grep -Eq 'ControlMaster|ControlPersist' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s API tunnel leaves a reusable SSH control channel"
 grep -Fq '(( OCI_BASTION_SESSION_TTL >= 1800 ))' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access does not enforce the OCI Bastion minimum session TTL"
@@ -361,6 +369,8 @@ done
   fail "k3s finalizer still depends on managed SSH"
 grep -Fq '"${os_user}@127.0.0.1"' "$finalizer" ||
   fail "k3s finalizer does not use the local target SSH forward"
+grep -Fq 'kubectl --request-timeout=15s get node' "$finalizer" ||
+  fail "k3s finalizer node lookup does not have a bounded request timeout"
 grep -Fq -- '--shape-name flexible' "$finalizer" ||
   fail "k3s finalizer does not create a flexible OCI load balancer"
 grep -Fq -- '--health-checker-protocol TCP' "$finalizer" ||
