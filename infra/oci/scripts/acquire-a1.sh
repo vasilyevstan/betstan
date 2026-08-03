@@ -77,12 +77,13 @@ tags="$(oci_capacity_tags)"
 source_details="$(
   jq -cn \
     --arg image "$OCI_K3S_IMAGE_OCID" \
-    --argjson size "$OCI_BOOT_VOLUME_GB" '
+    --argjson size "$OCI_BOOT_VOLUME_GB" \
+    --argjson vpus "$OCI_BOOT_VOLUME_VPUS_PER_GB" '
       {
         sourceType: "image",
         imageId: $image,
         bootVolumeSizeInGBs: $size,
-        bootVolumeVpusPerGB: 0
+        bootVolumeVpusPerGB: $vpus
       }
     '
 )"
@@ -122,6 +123,7 @@ oci compute instance launch \
   --is-pv-encryption-in-transit-enabled true \
   --agent-config "$agent_config" \
   --wait-for-state RUNNING \
+  --wait-for-state TERMINATED \
   --wait-interval-seconds 15 \
   --max-wait-seconds 900 \
   --query 'data.id' \
@@ -155,6 +157,14 @@ instance_id="$(<"$OUTPUT_FILE")"
 oci_require_ocid_value="$instance_id"
 [[ "$oci_require_ocid_value" =~ ^ocid1\.instance\.oc[0-9]*\..+ ]] ||
   oci_die "OCI launch did not return an instance OCID"
+instance_state="$(
+  oci compute instance get \
+    --instance-id "$instance_id" \
+    --query 'data."lifecycle-state"' \
+    --raw-output
+)"
+[[ "$instance_state" == "RUNNING" ]] ||
+  oci_die "managed A1 launch entered $instance_state before RUNNING"
 
 PROVENANCE_DIR="$PROVENANCE_DIR" "$SCRIPT_DIR/reconcile-capacity.sh" record
 oci_capacity_output acquisition_status ACQUIRED
