@@ -66,7 +66,7 @@ record_instance() {
   local managed instance instance_id state network vcn_id subnet_id nsg_id
   local attachments attachment_count boot_volume_id boot_volume
   local vnic_attachments vnic_attachment_count vnic_id vnic public_ip private_ip
-  local tags instance_fingerprint memory_gb boot_gb ad
+  local tags instance_fingerprint memory_gb boot_gb boot_vpus ad
 
   managed="$(oci_capacity_managed_instances)"
   [[ "$(jq '.data | length' <<<"$managed")" == "1" ]] ||
@@ -87,10 +87,12 @@ record_instance() {
 
   network="$(oci_capacity_discover_network)"
   IFS=$'\t' read -r vcn_id subnet_id nsg_id <<<"$network"
+  ad="$(jq -r '."availability-domain"' <<<"$instance")"
 
   attachments="$(
     oci compute boot-volume-attachment list \
       --compartment-id "$OCI_COMPARTMENT_OCID" \
+      --availability-domain "$ad" \
       --instance-id "$instance_id" \
       --all
   )"
@@ -107,8 +109,11 @@ record_instance() {
   )"
   boot_volume="$(oci bv boot-volume get --boot-volume-id "$boot_volume_id")"
   boot_gb="$(jq -r '.data."size-in-gbs"' <<<"$boot_volume")"
+  boot_vpus="$(jq -r '.data."vpus-per-gb"' <<<"$boot_volume")"
   [[ "$boot_gb" == "$OCI_BOOT_VOLUME_GB" ]] ||
     oci_die "managed instance boot volume violates the 50 GB contract"
+  [[ "$boot_vpus" == "$OCI_BOOT_VOLUME_VPUS_PER_GB" ]] ||
+    oci_die "managed instance boot volume violates the Balanced performance contract"
   tags="$(oci_capacity_tags)"
   oci bv boot-volume update \
     --boot-volume-id "$boot_volume_id" \
@@ -149,7 +154,6 @@ record_instance() {
     oci_die "managed instance private IPv4 is invalid"
 
   memory_gb="$(jq -r '."shape-config"."memory-in-gbs"' <<<"$instance")"
-  ad="$(jq -r '."availability-domain"' <<<"$instance")"
   instance_fingerprint="$(oci_fingerprint "$instance_id")"
   oci_prepare_private_dir "$PROVENANCE_DIR"
   {
@@ -181,6 +185,7 @@ record_instance() {
     printf 'a1_memory_gb=%q\n' "$memory_gb"
     printf 'memory_gb=%q\n' "$memory_gb"
     printf 'boot_volume_gb=%q\n' "$boot_gb"
+    printf 'boot_volume_vpus_per_gb=%q\n' "$boot_vpus"
     printf 'node_image_ocid=%q\n' "$OCI_K3S_IMAGE_OCID"
     printf 'image_ocid=%q\n' "$OCI_K3S_IMAGE_OCID"
     printf 'k3s_version=%q\n' "$OCI_K3S_VERSION"
@@ -198,6 +203,7 @@ record_instance() {
     --argjson ocpus "$OCI_A1_OCPUS" \
     --argjson memory "$memory_gb" \
     --argjson boot "$boot_gb" \
+    --argjson boot_vpus "$boot_vpus" \
     '{
       expected_monthly_cost: 0,
       runtime: $runtime,
@@ -208,7 +214,8 @@ record_instance() {
       ocpus: $ocpus,
       memory_gb: $memory,
       boot_volume_count: 1,
-      boot_volume_gb: $boot
+      boot_volume_gb: $boot,
+      boot_volume_vpus_per_gb: $boot_vpus
     }' > "$INVENTORY_FILE"
   chmod 600 "$INVENTORY_FILE"
   oci_capacity_output instance_acquired true

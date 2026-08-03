@@ -261,6 +261,7 @@ jobs:
           [ "$ocpus" = "2" ]
           [ "$memory_gb" = "12" ]
           [ "$boot_volume_gb" = "50" ]
+          [ "$boot_volume_vpus_per_gb" = "10" ]
 
       - name: Open ephemeral OCI Bastion access to k3s
         if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'

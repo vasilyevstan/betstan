@@ -2,6 +2,7 @@
 
 OCI_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OCI_DIR="$OCI_ROOT_DIR/infra/oci"
+OCI_BOOT_VOLUME_VPUS_PER_GB=10
 
 oci_die() {
   printf 'ERROR: %s\n' "$*" >&2
