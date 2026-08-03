@@ -37,8 +37,8 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   Mongo, or alternate load-balancer fallback.
 - Only the OCI load balancer exposes ports 80/443. In k3s mode, ingress-nginx
   uses fixed NodePorts 30080/30443 and the Kubernetes API is reachable only
-  through short-lived OCI Bastion sessions. Mongo and RabbitMQ remain
-  `ClusterIP`.
+  through a short-lived OCI Bastion SSH session and a target-loopback tunnel.
+  Mongo and RabbitMQ remain `ClusterIP`.
 - The Kustomize overlay explicitly lists nine application manifests,
   RabbitMQ, and `auth-mongo-depl.yaml`. It never traverses
   `infra/k8s/legacy-mongo`.
@@ -67,7 +67,8 @@ The GitHub environments use the variables and secrets approved in the plan:
   `OCI_K3S_SSH_PRIVATE_KEY` as a protected secret in `oci-infrastructure`,
   `oci-production`, and `oci-migration`. The private key is exposed only to
   each workflow's k3s access-opening step, is checked against acquisition
-  provenance, and is deleted as soon as target SSH is no longer required.
+  provenance, and is deleted after the API tunnel is established unless
+  infrastructure finalization still requires target SSH.
 
 Additional account-derived variables are intentionally required:
 
@@ -119,9 +120,11 @@ fixtures.
    Keep the variable `false` for an isolated manual attempt; a manual dispatch
    requires the exact current master SHA and does not enable scheduled runs.
 5. Dispatch `oci-infrastructure` with phase `finalize` after acquisition.
-   `scripts/configure-k3s-access.sh` opens separate ephemeral Bastion
-   port-forwarding sessions for target SSH and the k3s API. This avoids
-   Managed SSH, which OCI Bastion does not support for Ubuntu on Ampere A1.
+   `scripts/configure-k3s-access.sh` opens one ephemeral Bastion
+   port-forwarding session to target SSH, then tunnels the k3s API through
+   the target loopback interface. This avoids both Managed SSH, which OCI
+   Bastion does not support for Ubuntu on Ampere A1, and the OCI Ubuntu host
+   firewall that rejects direct non-SSH input.
    `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
    ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
    load balancer.
@@ -134,9 +137,9 @@ fixtures.
    isolated kubeconfigs, an Azure expiry watchdog, a bounded write freeze,
    age-encrypted streams, exact database signatures, and unconditional Azure
    replica restoration.
-9. Delete the exact Bastion sessions, restore the non-routable client CIDR,
-   stop the exact tunnel PID, and remove ephemeral keys. Cleanup failure is a
-   deployment failure.
+9. Delete the exact Bastion session, restore the non-routable client CIDR,
+   stop both exact tunnel PIDs, and remove ephemeral keys. Cleanup failure is
+   a deployment failure.
 
 For OKE fallback, set `OCI_RUNTIME_MODE=oke`; the existing Basic-cluster,
 runner-NSG, and managed-node-pool flow remains available.
