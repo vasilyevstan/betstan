@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       approved_sha:
-        description: Optional exact current master SHA for an audited manual attempt
+        description: Exact current master SHA for an audited manual attempt
+        required: true
         type: string
 
 permissions:
@@ -22,7 +23,16 @@ jobs:
     if: >-
       github.run_attempt == 1 &&
       github.repository == 'vasilyevstan/betstan' &&
-      vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'
+      (
+        (
+          github.event_name == 'schedule' &&
+          vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.approved_sha != ''
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:

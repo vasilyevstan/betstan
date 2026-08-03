@@ -34,6 +34,8 @@ jobs:
     if: github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    outputs:
+      public_url: ${{ steps.provenance.outputs.public_url }}
     environment:
       name: oci-production
     env:
@@ -253,6 +255,7 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           SESSION_STATE_FILE: artifacts/oci-deploy/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
@@ -263,12 +266,6 @@ jobs:
           )"
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
-
-      - name: Install browser validation dependencies
-        run: |
-          cd client
-          npm ci
-          npx playwright install --with-deps chromium
 
       - name: Deploy immutable images sequentially
         id: apply
@@ -286,7 +283,7 @@ jobs:
           OUTPUT_DIR: artifacts/oci-deploy
         run: ./infra/oci/scripts/deploy.sh
 
-      - name: Run complete OCI deploy validation loop
+      - name: Run protected OCI cluster validation loop
         id: health
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -299,6 +296,8 @@ jobs:
           OCI_RABBITMQ_BASELINE_FILE: artifacts/oci-deploy/rabbitmq-baseline.txt
           OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
+          OCI_E2E_ALREADY_PASSED: "1"
           OUTPUT_DIR: artifacts/oci-deploy-validation
         run: ./infra/oci/agents/deploy-validation-loop-stan.sh
 
@@ -369,3 +368,53 @@ jobs:
         run: |
           rm -rf "$HOME"
           rm -f artifacts/oci-deploy/rendered.yaml
+
+  public-validate:
+    needs: deploy
+    if: github.run_attempt == 1 && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    steps:
+      - name: Checkout exact deployed commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate public-check identity
+        env:
+          SOURCE_SHA: ${{ inputs.approved_sha }}
+          OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          [[ "$OCI_PUBLIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+
+      - name: Install browser validation dependencies
+        run: |
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run public OCI validation without cloud credentials
+        env:
+          OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+          OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
+          MAX_LOOPS: "3"
+          SLEEP_SECONDS: "20"
+          OUTPUT_DIR: artifacts/oci-public-validation
+        run: ./infra/oci/agents/validation-loop-stan.sh
+
+      - name: Upload public validation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-public-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-public-validation
+          if-no-files-found: ignore
+          retention-days: 14

@@ -62,6 +62,12 @@ The GitHub environments use the variables and secrets approved in the plan:
 - Registry authentication is direct `docker login` with
   `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_AUTH_TOKEN`. The build workflow
   never receives an OCI API signing key.
+- Direct k3s uses one unencrypted ED25519 host key pair. Store only
+  `OCI_K3S_SSH_PUBLIC_KEY` in `oci-capacity-acquire`; store
+  `OCI_K3S_SSH_PRIVATE_KEY` as a protected secret in `oci-infrastructure`,
+  `oci-production`, and `oci-migration`. The private key is exposed only to
+  each workflow's k3s access-opening step, is checked against acquisition
+  provenance, and is deleted as soon as target SSH is no longer required.
 
 Additional account-derived variables are intentionally required:
 
@@ -110,10 +116,15 @@ fixtures.
    The `oci-capacity-acquire` workflow checks every Frankfurt AD every five
    minutes, makes at most one real launch attempt per run, and permanently
    stops launching after one valid managed VM exists.
+   Keep the variable `false` for an isolated manual attempt; a manual dispatch
+   requires the exact current master SHA and does not enable scheduled runs.
 5. Dispatch `oci-infrastructure` with phase `finalize` after acquisition.
-   `scripts/configure-k3s-access.sh` opens ephemeral Bastion access and
-   `scripts/finalize-k3s.sh` mounts the Mongo volume, installs ingress-nginx
-   and cert-manager, and reconciles the fixed 10/10 Mbps OCI load balancer.
+   `scripts/configure-k3s-access.sh` opens separate ephemeral Bastion
+   port-forwarding sessions for target SSH and the k3s API. This avoids
+   Managed SSH, which OCI Bastion does not support for Ubuntu on Ampere A1.
+   `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
+   ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
+   load balancer.
 6. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.

@@ -324,6 +324,37 @@ for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'workflow_dispatch:' "$workflow"
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
+  [[ "$(grep -Fc \
+    'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+    "$workflow")" == "1" ]] ||
+    fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
+done
+! grep -Fq 'OCI_K3S_SSH_PRIVATE_KEY' "$capacity_workflow" ||
+  fail "capacity acquisition must receive only the target SSH public key"
+grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
+  fail "infrastructure finalization does not retain target SSH within its access step"
+grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
+  fail "infrastructure finalization does not clear the target SSH secret before use"
+! grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH' "$deploy_workflow" "$migrate_workflow" ||
+  fail "deployment or migration retains target SSH after kubeconfig retrieval"
+for workflow in "$deploy_workflow" "$migrate_workflow"; do
+  public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
+  dependency_line="$(grep -n -m1 'name: Install browser validation dependencies' \
+    "$workflow" | cut -d: -f1)"
+  last_secret_line="$(grep -n 'secrets\.' "$workflow" | tail -1 | cut -d: -f1)"
+  [[ -n "$public_job_line" && -n "$dependency_line" &&
+      -n "$last_secret_line" &&
+      "$dependency_line" -gt "$public_job_line" &&
+      "$last_secret_line" -lt "$public_job_line" ]] ||
+    fail "browser dependencies share a job with cloud credentials: $(basename "$workflow")"
+  grep -Fq 'persist-credentials: false' "$workflow" ||
+    fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
+  grep -Fq 'OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"' "$workflow" ||
+    fail "public validation is not isolated from cluster checks: $(basename "$workflow")"
+  grep -Fq 'OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"' "$workflow" ||
+    fail "protected validation still executes package code: $(basename "$workflow")"
+  grep -Fq 'OCI_E2E_ALREADY_PASSED: "1"' "$workflow" ||
+    fail "protected validation still executes browser code: $(basename "$workflow")"
 done
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"

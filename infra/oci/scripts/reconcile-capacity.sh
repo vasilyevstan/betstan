@@ -67,7 +67,8 @@ record_instance() {
   local attachments attachment_count boot_volume_id boot_volume
   local vnic_attachments vnic_attachment_count vnic_id vnic public_ip private_ip
   local tags merged_tags live_tags instance_fingerprint memory_gb boot_gb
-  local boot_vpus ad
+  local boot_vpus ad target_ssh_public_key_sha256
+  local live_target_ssh_public_key_sha256
 
   managed="$(oci_capacity_managed_instances)"
   [[ "$(jq '.data | length' <<<"$managed")" == "1" ]] ||
@@ -82,9 +83,20 @@ record_instance() {
       --wait-for-state RUNNING \
       --max-wait-seconds 900 >/dev/null ||
       oci_die "managed A1 instance did not reach RUNNING"
-    instance="$(oci compute instance get --instance-id "$instance_id" --query data)"
-    oci_capacity_validate_instance "$instance"
   fi
+  instance="$(oci compute instance get --instance-id "$instance_id" --query data)"
+  oci_capacity_validate_instance "$instance"
+  target_ssh_public_key_sha256="$(
+    oci_ssh_ed25519_public_key_sha256 "$OCI_K3S_SSH_PUBLIC_KEY"
+  )"
+  live_target_ssh_public_key_sha256="$(
+    oci_ssh_ed25519_public_key_sha256 "$(
+      jq -r '.metadata.ssh_authorized_keys // empty' <<<"$instance"
+    )"
+  )"
+  [[ "$live_target_ssh_public_key_sha256" == \
+     "$target_ssh_public_key_sha256" ]] ||
+    oci_die "managed instance target SSH key differs from acquisition configuration"
 
   network="$(oci_capacity_discover_network)"
   IFS=$'\t' read -r vcn_id subnet_id nsg_id <<<"$network"
@@ -221,6 +233,7 @@ record_instance() {
     printf 'image_ocid=%q\n' "$OCI_K3S_IMAGE_OCID"
     printf 'k3s_version=%q\n' "$OCI_K3S_VERSION"
     printf 'k3s_binary_sha256=%q\n' "$OCI_K3S_BINARY_SHA256"
+    printf 'target_ssh_public_key_sha256=%q\n' "$target_ssh_public_key_sha256"
     printf 'acquisition_run_id=%q\n' "${OCI_CAPACITY_RUN_ID:-local}"
     printf 'expected_monthly_cost=%q\n' 0
   } > "$PROVENANCE_FILE"
