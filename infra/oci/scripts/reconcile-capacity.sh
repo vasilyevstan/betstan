@@ -66,7 +66,8 @@ record_instance() {
   local managed instance instance_id state network vcn_id subnet_id nsg_id
   local attachments attachment_count boot_volume_id boot_volume
   local vnic_attachments vnic_attachment_count vnic_id vnic public_ip private_ip
-  local tags instance_fingerprint memory_gb boot_gb boot_vpus ad
+  local tags merged_tags live_tags instance_fingerprint memory_gb boot_gb
+  local boot_vpus ad
 
   managed="$(oci_capacity_managed_instances)"
   [[ "$(jq '.data | length' <<<"$managed")" == "1" ]] ||
@@ -115,6 +116,28 @@ record_instance() {
   [[ "$boot_vpus" == "$OCI_BOOT_VOLUME_VPUS_PER_GB" ]] ||
     oci_die "managed instance boot volume violates the Balanced performance contract"
   tags="$(oci_capacity_tags)"
+  merged_tags="$(
+    jq -c --argjson required "$tags" '."freeform-tags" + $required' \
+      <<<"$instance"
+  )"
+  oci compute instance update \
+    --instance-id "$instance_id" \
+    --freeform-tags "$merged_tags" \
+    --force \
+    --wait-for-state RUNNING \
+    --max-wait-seconds 300 >/dev/null
+  live_tags="$(
+    oci compute instance get \
+      --instance-id "$instance_id" \
+      --query 'data."freeform-tags"' \
+      --output json
+  )"
+  jq -e --argjson expected "$tags" '
+    . as $actual
+    | ($expected | to_entries)
+    | all(.[]; $actual[.key] == .value)
+  ' <<<"$live_tags" >/dev/null ||
+    oci_die "managed instance tags do not match the current acquisition contract"
   oci bv boot-volume update \
     --boot-volume-id "$boot_volume_id" \
     --freeform-tags "$tags" \
@@ -153,7 +176,15 @@ record_instance() {
   [[ "$private_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     oci_die "managed instance private IPv4 is invalid"
 
-  memory_gb="$(jq -r '."shape-config"."memory-in-gbs"' <<<"$instance")"
+  memory_gb="$(
+    jq -r '
+      ."shape-config"."memory-in-gbs"
+      | if type == "number" and . == floor
+        then floor
+        else error("instance memory is not an integer number of GiB")
+        end
+    ' <<<"$instance"
+  )"
   instance_fingerprint="$(oci_fingerprint "$instance_id")"
   oci_prepare_private_dir "$PROVENANCE_DIR"
   {
