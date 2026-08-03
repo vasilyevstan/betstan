@@ -66,7 +66,8 @@ record_instance() {
   local managed instance instance_id state network vcn_id subnet_id nsg_id
   local attachments attachment_count boot_volume_id boot_volume
   local vnic_attachments vnic_attachment_count vnic_id vnic public_ip private_ip
-  local tags merged_tags live_tags instance_fingerprint memory_gb boot_gb
+  local tags merged_tags live_tags live_boot_tags
+  local instance_fingerprint memory_gb boot_gb
   local boot_vpus ad target_ssh_public_key_sha256
   local live_target_ssh_public_key_sha256
 
@@ -150,10 +151,28 @@ record_instance() {
     | all(.[]; $actual[.key] == .value)
   ' <<<"$live_tags" >/dev/null ||
     oci_die "managed instance tags do not match the current acquisition contract"
-  oci bv boot-volume update \
-    --boot-volume-id "$boot_volume_id" \
-    --freeform-tags "$tags" \
-    --force >/dev/null
+  if ! jq -e --argjson expected "$tags" '
+      .data."freeform-tags" as $actual
+      | ($expected | to_entries)
+      | all(.[]; $actual[.key] == .value)
+    ' <<<"$boot_volume" >/dev/null; then
+    oci bv boot-volume update \
+      --boot-volume-id "$boot_volume_id" \
+      --freeform-tags "$tags" \
+      --force >/dev/null
+  fi
+  live_boot_tags="$(
+    oci bv boot-volume get \
+      --boot-volume-id "$boot_volume_id" \
+      --query 'data."freeform-tags"' \
+      --output json
+  )"
+  jq -e --argjson expected "$tags" '
+    . as $actual
+    | ($expected | to_entries)
+    | all(.[]; $actual[.key] == .value)
+  ' <<<"$live_boot_tags" >/dev/null ||
+    oci_die "managed boot volume tags do not match the current acquisition contract"
 
   vnic_attachments="$(
     oci compute vnic-attachment list \

@@ -7,6 +7,7 @@ TEST_DIR="$(mktemp -d "$ROOT_DIR/.oci-capacity-test.XXXXXX")"
 FAKE_BIN="$TEST_DIR/bin"
 FAKE_STATE="$TEST_DIR/instance-created"
 FAKE_TAG_STATE="$TEST_DIR/instance-tags-updated"
+FAKE_BOOT_TAG_STATE="$TEST_DIR/boot-tags-current"
 FAKE_LOG="$TEST_DIR/oci.log"
 
 cleanup() {
@@ -175,6 +176,7 @@ JSON
       .bootVolumeVpusPerGB == 10
     ' <<<"$source_details" >/dev/null
     touch "$OCI_FAKE_STATE"
+    touch "$OCI_FAKE_BOOT_TAG_STATE"
     echo "ocid1.instance.oc1..fixture"
     ;;
   compute/instance/get)
@@ -246,9 +248,50 @@ JSON
     echo '{"data":[]}'
     ;;
   bv/boot-volume/get)
-    echo '{"data":{"id":"ocid1.bootvolume.oc1..fixture","size-in-gbs":50,"vpus-per-gb":10,"lifecycle-state":"AVAILABLE"}}'
+    query="$(arg_value --query "$@" || true)"
+    if [[ -f "$OCI_FAKE_BOOT_TAG_STATE" ]]; then
+      tag_sha="$SOURCE_SHA"
+      tag_run="$OCI_CAPACITY_RUN_ID"
+    else
+      tag_sha=0000000000000000000000000000000000000000
+      tag_run=stale
+    fi
+    boot_tags="$(
+      jq -cn --arg sha "$tag_sha" --arg run "$tag_run" '{
+        "betstan-managed": "true",
+        provider: "oci",
+        "betstan-managed-by": "oci-capacity-acquire",
+        "betstan-runtime": "k3s",
+        "betstan-contract": "1",
+        "expected-monthly-cost": "0",
+        "source-sha": $sha,
+        "acquisition-run-id": $run
+      }'
+    )"
+    if [[ "$query" == 'data."freeform-tags"' ]]; then
+      printf '%s\n' "$boot_tags"
+    else
+      jq -cn --argjson tags "$boot_tags" '{
+        data: {
+          id: "ocid1.bootvolume.oc1..fixture",
+          "size-in-gbs": 50,
+          "vpus-per-gb": 10,
+          "lifecycle-state": "AVAILABLE",
+          "freeform-tags": $tags
+        }
+      }'
+    fi
     ;;
   bv/boot-volume/update)
+    tags="$(arg_value --freeform-tags "$@")"
+    jq -e \
+      --arg sha "$SOURCE_SHA" \
+      --arg run "$OCI_CAPACITY_RUN_ID" '
+        ."source-sha" == $sha and
+        ."acquisition-run-id" == $run and
+        ."expected-monthly-cost" == "0"
+      ' <<<"$tags" >/dev/null
+    touch "$OCI_FAKE_BOOT_TAG_STATE"
     echo '{"data":{"id":"ocid1.bootvolume.oc1..fixture"}}'
     ;;
   compute/vnic-attachment/list)
@@ -269,6 +312,7 @@ export PATH="$FAKE_BIN:$PATH"
 export OCI_FAKE_LOG="$FAKE_LOG"
 export OCI_FAKE_STATE="$FAKE_STATE"
 export OCI_FAKE_TAG_STATE="$FAKE_TAG_STATE"
+export OCI_FAKE_BOOT_TAG_STATE="$FAKE_BOOT_TAG_STATE"
 export OCI_RUNTIME_MODE=k3s
 export OCI_REGION=eu-frankfurt-1
 export OCI_CLI_VERSION=3.90.0
@@ -355,7 +399,7 @@ jq -e '
 ' "$TEST_DIR/report.json" >/dev/null ||
   fail "capacity report did not cover every fixture AD"
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 output_file="$TEST_DIR/no-capacity-output"
 OCI_FAKE_SCENARIO=no-capacity \
 GITHUB_OUTPUT="$output_file" \
@@ -383,7 +427,7 @@ grep -Fq 'bootVolumeVpusPerGB' "$FAKE_LOG" ||
 ! grep -Fq -- '--create-vnic-details' "$FAKE_LOG" ||
   fail "capacity acquisition uses the unsupported --create-vnic-details option"
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 output_file="$TEST_DIR/acquired-output"
 OCI_FAKE_SCENARIO=available \
 GITHUB_OUTPUT="$output_file" \
@@ -425,8 +469,12 @@ jq -e '
   fail "successful launch inventory violates zero-cost singleton contract"
 launch_count="$(grep -c 'compute instance launch' "$FAKE_LOG")"
 tag_update_count="$(grep -c 'compute instance update' "$FAKE_LOG")"
+boot_tag_update_count="$(grep -c 'bv boot-volume update' "$FAKE_LOG" || true)"
+[[ "$boot_tag_update_count" == "0" ]] ||
+  fail "fresh acquisition attempted a no-op boot-volume tag update"
 
 second_output="$TEST_DIR/already-output"
+rm -f "$FAKE_BOOT_TAG_STATE"
 OCI_FAKE_SCENARIO=available \
 GITHUB_OUTPUT="$second_output" \
 WORK_DIR="$TEST_DIR/already-work" \
@@ -440,6 +488,8 @@ grep -Fq 'instance_acquired=true' "$second_output" ||
   fail "existing managed instance allowed another launch request"
 [[ "$(grep -c 'compute instance update' "$FAKE_LOG")" == "$((tag_update_count + 1))" ]] ||
   fail "existing managed instance was not rebound to current provenance"
+[[ "$(grep -c 'bv boot-volume update' "$FAKE_LOG")" == "$((boot_tag_update_count + 1))" ]] ||
+  fail "stale managed boot-volume tags were not rebound to current provenance"
 if OCI_FAKE_SCENARIO=available \
     OCI_K3S_SSH_PUBLIC_KEY="$fixture_mismatch_public_key" \
     PROVENANCE_DIR="$TEST_DIR/mismatched-key-provenance" \
@@ -455,7 +505,7 @@ bash -u -c '
   "$OCI_CAPACITY_RUN_ID" ||
   fail "existing managed instance provenance is not bound to the current run"
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=terminated \
   WORK_DIR="$TEST_DIR/terminated-work" \
   PROVENANCE_DIR="$TEST_DIR/terminated-provenance" \
@@ -463,7 +513,7 @@ if OCI_FAKE_SCENARIO=terminated \
   fail "internally terminated A1 launch was accepted"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=duplicate \
   WORK_DIR="$TEST_DIR/duplicate-work" \
   PROVENANCE_DIR="$TEST_DIR/duplicate-provenance" \
@@ -474,7 +524,7 @@ if [[ -f "$FAKE_LOG" ]] && grep -Fq 'compute instance launch' "$FAKE_LOG"; then
   fail "duplicate managed instances reached the launch API"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 if OCI_FAKE_SCENARIO=fatal \
   WORK_DIR="$TEST_DIR/fatal-work" \
   PROVENANCE_DIR="$TEST_DIR/fatal-provenance" \
@@ -482,7 +532,7 @@ if OCI_FAKE_SCENARIO=fatal \
   fail "non-capacity OCI failure was treated as retryable"
 fi
 
-rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_LOG"
+rm -f "$FAKE_STATE" "$FAKE_TAG_STATE" "$FAKE_BOOT_TAG_STATE" "$FAKE_LOG"
 stdout_fatal_log="$TEST_DIR/stdout-fatal.log"
 if OCI_FAKE_SCENARIO=stdout-fatal \
   WORK_DIR="$TEST_DIR/stdout-fatal-work" \
