@@ -373,6 +373,18 @@ grep -Fq 'kubectl --request-timeout=15s get node' "$finalizer" ||
   fail "k3s finalizer node lookup does not have a bounded request timeout"
 grep -Fq -- '--shape-name flexible' "$finalizer" ||
   fail "k3s finalizer does not create a flexible OCI load balancer"
+grep -Fq '(.data."attachment-type" | ascii_downcase) == "paravirtualized"' \
+  "$finalizer" ||
+  fail "k3s finalizer does not normalize OCI attachment type casing"
+jq -e '
+  (.data."attachment-type" | ascii_downcase) == "paravirtualized"
+' <<< '{"data":{"attachment-type":"paravirtualized"}}' >/dev/null ||
+  fail "provider-reported lowercase paravirtualized attachment was rejected"
+if jq -e '
+    (.data."attachment-type" | ascii_downcase) == "paravirtualized"
+  ' <<< '{"data":{"attachment-type":"iscsi"}}' >/dev/null; then
+  fail "non-paravirtualized attachment type was accepted"
+fi
 grep -Fq -- '--health-checker-protocol TCP' "$finalizer" ||
   fail "k3s finalizer does not use TCP load balancer health checks"
 grep -Fq 'ensure_listener betstan-http 80 betstan-http' "$finalizer" ||
