@@ -105,6 +105,11 @@ ensure_nsg_rule() {
       and (($matches[0]."source-type" // null) == ($expected.sourceType // null))
       and (($matches[0].destination // null) == ($expected.destination // null))
       and (($matches[0]."destination-type" // null) == ($expected.destinationType // null))
+      and (($matches[0]."is-stateless" // null) == ($expected.isStateless // null))
+      and (($matches[0]."tcp-options"."source-port-range".min // null) ==
+        ($expected.tcpOptions.sourcePortRange.min // null))
+      and (($matches[0]."tcp-options"."source-port-range".max // null) ==
+        ($expected.tcpOptions.sourcePortRange.max // null))
       and (($matches[0]."tcp-options"."destination-port-range".min // null) ==
         ($expected.tcpOptions.destinationPortRange.min // null))
       and (($matches[0]."tcp-options"."destination-port-range".max // null) ==
@@ -340,6 +345,20 @@ if [[ "$MODE" == "cloud" ]]; then
         tcpOptions:{destinationPortRange:{min:$port,max:$port}}
       }'
     )"
+    # Keep the public response leg independently allowlisted. The initiating
+    # listener rule remains stateful, while this exact source-port rule avoids
+    # making successful SYN-ACK delivery depend only on tracked return state.
+    ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-world-return-${port}" "$(
+      jq -cn --argjson port "$port" '{
+        direction:"EGRESS", protocol:"6", destinationType:"CIDR_BLOCK",
+        destination:"0.0.0.0/0", isStateless:false,
+        description:("lb-to-world-return-" + ($port|tostring)),
+        tcpOptions:{
+          sourcePortRange:{min:$port,max:$port},
+          destinationPortRange:{min:1024,max:65535}
+        }
+      }'
+    )"
   done
   if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
     ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-worker-nodeports" "$(
@@ -369,6 +388,20 @@ if [[ "$MODE" == "cloud" ]]; then
           tcpOptions:{destinationPortRange:{min:$port,max:$port}}
         }'
       )"
+      # A backend SYN-ACK returns from the fixed NodePort to an ephemeral load
+      # balancer port. Allow that leg explicitly so a healthy node response is
+      # not dependent only on the load balancer's tracked egress state.
+      ensure_nsg_rule "${nsg_ids[lb]}" "worker-to-lb-return-${port}" "$(
+        jq -cn --arg source "$OCI_WORKER_SUBNET_CIDR" --argjson port "$port" '{
+          direction:"INGRESS", protocol:"6", sourceType:"CIDR_BLOCK",
+          source:$source, isStateless:false,
+          description:("worker-to-lb-return-" + ($port|tostring)),
+          tcpOptions:{
+            sourcePortRange:{min:$port,max:$port},
+            destinationPortRange:{min:1024,max:65535}
+          }
+        }'
+      )"
     done
   fi
   if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
@@ -385,10 +418,14 @@ if [[ "$MODE" == "cloud" ]]; then
     assert_nsg_rule_set "${nsg_ids[lb]}" '[
       "world-to-lb-80",
       "world-to-lb-443",
+      "lb-to-world-return-80",
+      "lb-to-world-return-443",
       "lb-to-worker-30080",
       "lb-to-worker-30443",
       "lb-to-worker-subnet-30080",
-      "lb-to-worker-subnet-30443"
+      "lb-to-worker-subnet-30443",
+      "worker-to-lb-return-30080",
+      "worker-to-lb-return-30443"
     ]'
   fi
 
