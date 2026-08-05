@@ -42,9 +42,25 @@ grep -Fq -- "--arg destination \"\$OCI_WORKER_SUBNET_CIDR\"" "$provisioner" ||
 grep -Fq "description:(\"lb-to-worker-subnet-\" + (\$port|tostring))" \
   "$provisioner" ||
   fail "k3s load-balancer NSG lacks exact subnet-to-worker rules"
+grep -Fq "description:(\"lb-to-world-return-\" + (\$port|tostring))" \
+  "$provisioner" ||
+  fail "k3s load-balancer NSG lacks explicit public return rules"
+grep -Fq "description:(\"worker-to-lb-return-\" + (\$port|tostring))" \
+  "$provisioner" ||
+  fail "k3s load-balancer NSG lacks explicit backend return rules"
+grep -Fq "sourcePortRange:{min:\$port,max:\$port}" "$provisioner" ||
+  fail "k3s load-balancer return rules do not bind their source ports"
+grep -Fq 'destinationPortRange:{min:1024,max:65535}' "$provisioner" ||
+  fail "k3s load-balancer return rules do not bind ephemeral destinations"
+grep -Fq '"is-stateless" // null' "$provisioner" ||
+  fail "managed NSG reconciliation does not verify statefulness"
+grep -Fq '"source-port-range".min // null' "$provisioner" ||
+  fail "managed NSG reconciliation does not verify source-port bounds"
 for description in \
   lb-subnet-to-nodeport-30080 lb-subnet-to-nodeport-30443 \
-  lb-to-worker-subnet-30080 lb-to-worker-subnet-30443; do
+  lb-to-worker-subnet-30080 lb-to-worker-subnet-30443 \
+  lb-to-world-return-80 lb-to-world-return-443 \
+  worker-to-lb-return-30080 worker-to-lb-return-30443; do
   grep -Fq "\"$description\"" "$provisioner" ||
     fail "k3s exact NSG rule set omits $description"
 done
