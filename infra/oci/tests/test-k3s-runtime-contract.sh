@@ -31,6 +31,23 @@ grep -Fq 'https: 30443' "$OCI_DIR/helm/ingress-nginx-k3s-values.yaml" ||
   fail "k3s HTTPS NodePort differs"
 ! grep -Fq 'type: LoadBalancer' "$OCI_DIR/helm/ingress-nginx-k3s-values.yaml" ||
   fail "k3s Kubernetes assets create a LoadBalancer service"
+provisioner="$OCI_DIR/scripts/provision.sh"
+grep -Fq -- "--arg source \"\$OCI_LB_SUBNET_CIDR\"" "$provisioner" ||
+  fail "k3s worker NSG lacks the dedicated load-balancer subnet path"
+grep -Fq "description:(\"lb-subnet-to-nodeport-\" + (\$port|tostring))" \
+  "$provisioner" ||
+  fail "k3s worker NSG lacks exact subnet-to-NodePort rules"
+grep -Fq -- "--arg destination \"\$OCI_WORKER_SUBNET_CIDR\"" "$provisioner" ||
+  fail "k3s load-balancer NSG lacks the dedicated worker subnet path"
+grep -Fq "description:(\"lb-to-worker-subnet-\" + (\$port|tostring))" \
+  "$provisioner" ||
+  fail "k3s load-balancer NSG lacks exact subnet-to-worker rules"
+for description in \
+  lb-subnet-to-nodeport-30080 lb-subnet-to-nodeport-30443 \
+  lb-to-worker-subnet-30080 lb-to-worker-subnet-30443; do
+  grep -Fq "\"$description\"" "$provisioner" ||
+    fail "k3s exact NSG rule set omits $description"
+done
 grep -Fq 'path: /var/lib/betstan/mongo' "$OCI_DIR/k8s/overlays/k3s/kustomization.yaml" ||
   fail "k3s Mongo local PV path differs"
 grep -Fq '__OCI_K3S_NODE_NAME__' "$OCI_DIR/k8s/overlays/k3s/kustomization.yaml" ||
