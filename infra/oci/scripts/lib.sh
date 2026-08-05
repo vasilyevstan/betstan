@@ -168,6 +168,32 @@ oci_normalize_list_json() {
   printf '%s\n' "$response"
 }
 
+oci_rabbitmq_queue_rows() {
+  awk '
+    /^[[:space:]]*$/ { next }
+    NF == 4 &&
+      $1 == "name" &&
+      $2 == "messages_ready" &&
+      $3 == "messages_unacknowledged" &&
+      $4 == "consumers" {
+        if (header_seen) {
+          exit 2
+        }
+        header_seen = 1
+        next
+      }
+    NF != 4 ||
+      $2 !~ /^[0-9]+$/ ||
+      $3 !~ /^[0-9]+$/ ||
+      $4 !~ /^[0-9]+$/ {
+        exit 2
+      }
+    {
+      print $1 "\t" $2 "\t" $3 "\t" $4
+    }
+  '
+}
+
 oci_assert_repository_root() {
   [[ -f "$OCI_ROOT_DIR/CONTRIBUTING.md" && -d "$OCI_ROOT_DIR/infra/k8s" ]] ||
     oci_die "unable to identify the BetStan repository root"

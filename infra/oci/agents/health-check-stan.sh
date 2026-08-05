@@ -355,14 +355,16 @@ queue_output="$(
   kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
     rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers
 )"
-queue_count="$(awk 'NF >= 4 {count++} END {print count+0}' <<<"$queue_output")"
-queue_backlog="$(awk 'NF >= 4 {sum += $2 + $3} END {print sum+0}' <<<"$queue_output")"
+queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_output")" ||
+  oci_die "RabbitMQ queue output is malformed"
+queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$queue_rows")"
+queue_backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$queue_rows")"
 all_consumers=true
-awk 'NF >= 4 && $4 < 1 {bad=1} END {exit bad}' <<<"$queue_output" || all_consumers=false
+awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows" || all_consumers=false
 queue_baseline_match=false
 if [[ -n "${OCI_RABBITMQ_BASELINE_FILE:-}" ]]; then
   [[ -f "$OCI_RABBITMQ_BASELINE_FILE" ]] || oci_die "RabbitMQ baseline file is missing"
-  observed_names="$(awk 'NF >= 4 {print $1}' <<<"$queue_output" | sort)"
+  observed_names="$(awk '{print $1}' <<<"$queue_rows" | sort)"
   expected_names="$(sort "$OCI_RABBITMQ_BASELINE_FILE")"
   [[ "$observed_names" == "$expected_names" ]] && queue_baseline_match=true
 elif [[ "$queue_count" == "17" ]]; then
