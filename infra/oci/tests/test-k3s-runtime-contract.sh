@@ -117,6 +117,11 @@ cat > "$WORK_DIR/responses/load-balancers.json" <<'JSON'
     "minimum-bandwidth-in-mbps":10,
     "maximum-bandwidth-in-mbps":10
   },
+  "ip-addresses":[{
+    "ip-address":"192.0.2.10",
+    "is-public":true,
+    "reserved-ip":null
+  }],
   "freeform-tags":{
     "betstan-managed":"true",
     "provider":"oci",
@@ -138,7 +143,13 @@ cat > "$WORK_DIR/responses/service-gateways.json" <<'JSON'
 {"data":[]}
 JSON
 cat > "$WORK_DIR/responses/public-ips.json" <<'JSON'
-{"data":[]}
+{"data":[{
+  "ip-address":"192.0.2.10",
+  "lifecycle-state":"ASSIGNED",
+  "lifetime":"RESERVED",
+  "assigned-entity-id":"ocid1.privateip.oc1..fixture",
+  "scope":"REGION"
+}]}
 JSON
 cat > "$WORK_DIR/responses/bastions.json" <<'JSON'
 {"data":[{
@@ -196,6 +207,53 @@ jq -e '
 ' "$WORK_DIR/k3s-inventory.json" >/dev/null ||
   fail "valid direct-k3s inventory was rejected"
 
+cat > "$WORK_DIR/responses/public-ips.json" <<'JSON'
+{"data":[{
+  "ip-address":"192.0.2.11",
+  "lifecycle-state":"ASSIGNED",
+  "lifetime":"RESERVED",
+  "assigned-entity-id":"ocid1.privateip.oc1..unrelated",
+  "scope":"REGION"
+}]}
+JSON
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/unrelated-reserved-ip-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "unrelated reserved public IP was accepted"
+fi
+
+cat > "$WORK_DIR/responses/public-ips.json" <<'JSON'
+{"data":[{
+  "ip-address":"192.0.2.10",
+  "lifecycle-state":"ASSIGNED",
+  "lifetime":"RESERVED",
+  "assigned-entity-id":"ocid1.privateip.oc1..fixture",
+  "scope":"REGION"
+},{
+  "ip-address":"192.0.2.11",
+  "lifecycle-state":"ASSIGNED",
+  "lifetime":"RESERVED",
+  "assigned-entity-id":"ocid1.privateip.oc1..extra",
+  "scope":"REGION"
+}]}
+JSON
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/extra-reserved-ip-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "extra reserved public IP was accepted"
+fi
+
+cat > "$WORK_DIR/responses/public-ips.json" <<'JSON'
+{"data":[{
+  "ip-address":"192.0.2.10",
+  "lifecycle-state":"ASSIGNED",
+  "lifetime":"RESERVED",
+  "assigned-entity-id":"ocid1.privateip.oc1..fixture",
+  "scope":"REGION"
+}]}
+JSON
 cat > "$WORK_DIR/responses/clusters.json" <<'JSON'
 {"data":[{
   "name":"unexpected-oke",

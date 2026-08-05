@@ -149,6 +149,10 @@ inventory="$(
                 ."freeform-tags".provider == "oci" and
                 ."freeform-tags"["expected-monthly-cost"] == "0"
               ),
+              public_ip_count: ([
+                ."ip-addresses"[]?
+                | select(."is-public" == true)
+              ] | length),
               state: ."lifecycle-state"
             }
         ],
@@ -168,10 +172,20 @@ inventory="$(
         reserved_public_ips: [
           $public_ips.data[]?
           | select(."lifecycle-state" != "TERMINATED")
+          | . as $public_ip
           | {
               lifetime,
               assigned: (."assigned-entity-id" != null),
-              scope
+              scope,
+              load_balancer_owned: (
+                ([
+                  $load_balancers.data[]?
+                  | select(."lifecycle-state" != "DELETED")
+                  | ."ip-addresses"[]?
+                  | select(."is-public" == true)
+                  | ."ip-address"
+                ] | index($public_ip."ip-address")) != null
+              )
             }
         ],
         bastions: [
@@ -221,7 +235,12 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
     .nat_gateway_count == 0 and
     .service_gateway_count == 0 and
     .internet_gateway_count <= 1 and
-    (.reserved_public_ips | length) == 0 and
+    ([.reserved_public_ips[] | select(
+      .lifetime != "RESERVED" or .assigned != true or
+      .scope != "REGION" or .load_balancer_owned != true
+    )] | length) == 0 and
+    (.reserved_public_ips | length) ==
+      ([.load_balancers[].public_ip_count] | add // 0) and
     .network_load_balancer_count == 0 and
     ([.clusters[] | select(.type != "BASIC_CLUSTER")] | length) == 0 and
     ([.node_pools[] | select(
@@ -238,6 +257,7 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
     ([.load_balancers[] | select(
       .shape != "flexible" or
       .managed != true or
+      .public_ip_count != 1 or
       .minimum_mbps != $lb_min or .maximum_mbps != $lb_max
     )] | length) == 0 and
     (([.block_volumes[].size_gb] | add // 0) +
