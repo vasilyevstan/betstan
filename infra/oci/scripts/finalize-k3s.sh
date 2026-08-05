@@ -407,15 +407,15 @@ else
   printf '%s\n' "$fstab_entry" | sudo tee -a /etc/fstab >/dev/null
 fi
 sudo mkdir -p "$mount_path"
-if mountpoint -q "$mount_path"; then
-  [[ "$(findmnt -n -o UUID --target "$mount_path")" == "$uuid" ]] ||
+if sudo mountpoint -q "$mount_path"; then
+  [[ "$(sudo findmnt -n -o UUID --target "$mount_path")" == "$uuid" ]] ||
     { echo "Mongo path is mounted from an unexpected volume" >&2; exit 1; }
 else
   sudo mount "$mount_path"
 fi
 sudo chown 999:999 "$mount_path"
 sudo chmod 0700 "$mount_path"
-sudo test "$(findmnt -n -o FSTYPE --target "$mount_path")" = ext4
+sudo test "$(sudo findmnt -n -o FSTYPE --target "$mount_path")" = ext4
 sudo systemctl is-active --quiet k3s
 REMOTE
 
