@@ -262,8 +262,23 @@ load_balancer_declarations="$(
   fail "OCI assets must declare exactly one LoadBalancer service"
 grep -Fq 'oci.oraclecloud.com/load-balancer-type: "lb"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
 grep -Fq 'oci-load-balancer-security-list-management-mode: "None"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
-grep -Fq 'digest: sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b' \
-  "$OCI_DIR/helm/ingress-nginx-values.yaml"
+for ingress_values in \
+  "$OCI_DIR/helm/ingress-nginx-values.yaml" \
+  "$OCI_DIR/helm/ingress-nginx-k3s-values.yaml"; do
+  grep -Fq 'tag: v1.15.1' "$ingress_values" ||
+    fail "ingress-nginx does not support strict ACME challenge paths"
+  grep -Fq 'digest: sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1' \
+    "$ingress_values" ||
+    fail "ingress-nginx digest differs from the reviewed multi-architecture image"
+  ! grep -Eq "strict-validate-path-type:[[:space:]]*['\"]?false" "$ingress_values" ||
+    fail "ingress-nginx strict path validation was disabled"
+done
+grep -Fq '"gaming-auth-mongo": "sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1"' \
+  "$OCI_DIR/agents/health-check-stan.sh" ||
+  fail "Mongo health identity differs from the requested immutable index"
+grep -Fq '"gaming-rabbitmq": "sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b"' \
+  "$OCI_DIR/agents/health-check-stan.sh" ||
+  fail "RabbitMQ health identity differs from the requested immutable index"
 grep -Fq 'shape-flex-min: "10"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
 grep -Fq 'shape-flex-max: "10"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
 
