@@ -156,6 +156,23 @@ abort "resource requests/limits missing" unless workloads.all? {
     |container| container.dig("resources", "requests") && container.dig("resources", "limits")
   }
 }
+backend_names = %w[
+  gaming-auth-depl gaming-bet-depl gaming-backoffice-depl gaming-event-depl
+  gaming-gamemaster-depl gaming-moderation-depl gaming-resulting-depl
+  gaming-slip-depl
+]
+backends = by_kind.fetch("Deployment").select {
+  |deployment| backend_names.include?(deployment.dig("metadata", "name"))
+}
+abort "eight backend deployments required" unless backends.length == 8
+abort "backend numeric non-root identity differs" unless backends.all? {
+  |deployment| deployment.dig(
+    "spec", "template", "spec", "containers", 0, "securityContext"
+  ).then {
+    |context| context["runAsNonRoot"] == true &&
+      context["runAsUser"] == 1000 && context["runAsGroup"] == 1000
+  }
+}
 mongo = by_kind.fetch("StatefulSet").first
 abort "base StatefulSet claim template survived OCI patch" if mongo.dig("spec", "volumeClaimTemplates")
 abort "Mongo does not use the explicit 50Gi claim" unless mongo.dig(
