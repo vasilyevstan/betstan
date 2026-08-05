@@ -26,6 +26,13 @@ PYTHONPYCACHEPREFIX="$WORK_DIR/pycache" \
   python3 -m py_compile "$OCI_DIR/agents/health-contract.py"
 node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
+grep -Fq "getByRole('link', { name: 'BetStan', exact: true })" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not use the accessible BetStan brand"
+if grep -Fq "locator('body')).toContainText('BetStan')" \
+    "$OCI_DIR/agents/oci-live-smoke.spec.js"; then
+  fail "OCI browser check still relies on image alt text appearing in body text"
+fi
 
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"
