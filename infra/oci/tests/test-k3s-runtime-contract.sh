@@ -451,5 +451,11 @@ grep -Fq 'ensure_listener betstan-https 443 betstan-https' "$finalizer" ||
   fail "k3s finalizer lacks the exact HTTPS listener"
 grep -Fq 'UUID=$uuid' "$finalizer" ||
   fail "k3s finalizer does not persist the Mongo mount by UUID"
+grep -Fq 'if sudo mountpoint -q "$mount_path"; then' "$finalizer" ||
+  fail "k3s finalizer checks the protected Mongo mount without privilege"
+grep -Fq 'sudo findmnt -n -o UUID --target "$mount_path"' "$finalizer" ||
+  fail "k3s finalizer cannot validate the protected Mongo mount UUID"
+grep -Fq 'sudo findmnt -n -o FSTYPE --target "$mount_path"' "$finalizer" ||
+  fail "k3s finalizer cannot validate the protected Mongo filesystem"
 
 echo "oci_k3s_runtime_contract=PASS"
