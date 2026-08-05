@@ -216,23 +216,26 @@ rabbit_pod="$(
 )"
 [[ -n "$rabbit_pod" ]] || oci_die "RabbitMQ pod is missing after rollout"
 rabbit_baseline_ready=0
+queue_rows=""
 for _ in $(seq 1 60); do
   queue_state="$(
     kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
       rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers \
       2>/dev/null || true
   )"
-  queue_count="$(awk 'NF >= 4 {count++} END {print count+0}' <<<"$queue_state")"
-  if [[ "$queue_count" == "17" ]] &&
-      awk 'NF >= 4 && $4 < 1 {bad=1} END {exit bad}' <<<"$queue_state"; then
-    rabbit_baseline_ready=1
-    break
+  if queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_state")"; then
+    queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$queue_rows")"
+    if [[ "$queue_count" == "17" ]] &&
+        awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows"; then
+      rabbit_baseline_ready=1
+      break
+    fi
   fi
   sleep 5
 done
 [[ "$rabbit_baseline_ready" == "1" ]] ||
   oci_die "RabbitMQ did not establish the expected 17-consumer baseline"
-awk 'NF >= 4 {print $1}' <<<"$queue_state" | sort > "$OUTPUT_DIR/rabbitmq-baseline.txt"
+awk '{print $1}' <<<"$queue_rows" | sort > "$OUTPUT_DIR/rabbitmq-baseline.txt"
 
 apply_documents 'Ingress:^gaming-oci-ingress$'
 

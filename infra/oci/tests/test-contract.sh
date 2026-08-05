@@ -33,6 +33,26 @@ source "$OCI_DIR/scripts/lib.sh"
   fail "empty OCI array response was not normalized"
 [[ "$(oci_normalize_list_json "" items)" == '{"data":{"items":[]}}' ]] ||
   fail "empty OCI items response was not normalized"
+queue_fixture="$(
+  printf '%s\n' \
+    'name messages_ready messages_unacknowledged consumers' \
+    'event_new_event 0 0 1' \
+    'bet_place_bet 2 1 3'
+)"
+queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_fixture")" ||
+  fail "RabbitMQ queue output with a header was rejected"
+[[ "$(awk 'NF {count++} END {print count+0}' <<<"$queue_rows")" == "2" ]] ||
+  fail "RabbitMQ header was counted as a queue"
+[[ "$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$queue_rows")" == "3" ]] ||
+  fail "RabbitMQ normalized backlog differs"
+[[ "$(awk '{sum += $4} END {print sum+0}' <<<"$queue_rows")" == "4" ]] ||
+  fail "RabbitMQ normalized consumer count differs"
+if oci_rabbitmq_queue_rows <<<'name messages_ready messages_unacknowledged consumers extra' >/dev/null; then
+  fail "malformed RabbitMQ queue output was accepted"
+fi
+if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
+  fail "duplicate RabbitMQ queue headers were accepted"
+fi
 redacted="$(
   printf '%s\n' \
     'Authorization: Bearer header-secret' \
