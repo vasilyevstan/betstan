@@ -464,6 +464,14 @@ grep -Fq 'kubectl --request-timeout=15s get node' "$finalizer" ||
   fail "k3s finalizer node lookup does not have a bounded request timeout"
 grep -Fq -- '--shape-name flexible' "$finalizer" ||
   fail "k3s finalizer does not create a flexible OCI load balancer"
+grep -Fq 'lb_dataplane_contract="explicit-return-v1"' "$finalizer" ||
+  fail "k3s load balancer lacks the one-time data-plane contract marker"
+grep -Fq 'oci lb load-balancer update-load-balancer-shape' "$finalizer" ||
+  fail "k3s load balancer lacks the supported in-place data-plane refresh"
+grep -Fq -- '--shape-details "$shape_details"' "$finalizer" ||
+  fail "k3s data-plane refresh does not retain the exact 10/10 shape details"
+grep -Fq '.data."freeform-tags"."source-sha" == $sha' "$finalizer" ||
+  fail "k3s load balancer tags are not rebound to the exact infrastructure SHA"
 grep -Fq '(.data."attachment-type" | ascii_downcase) == "paravirtualized"' \
   "$finalizer" ||
   fail "k3s finalizer does not normalize OCI attachment type casing"
