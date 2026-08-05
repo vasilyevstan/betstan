@@ -315,6 +315,16 @@ if [[ "$MODE" == "cloud" ]]; then
           tcpOptions:{destinationPortRange:{min:$port,max:$port}}
         }'
       )"
+      # Keep the regional LB data path bounded when a backend connection does
+      # not retain the source NSG identity.
+      ensure_nsg_rule "${nsg_ids[worker]}" "lb-subnet-to-nodeport-${port}" "$(
+        jq -cn --arg source "$OCI_LB_SUBNET_CIDR" --argjson port "$port" '{
+          direction:"INGRESS", protocol:"6", sourceType:"CIDR_BLOCK",
+          source:$source, isStateless:false,
+          description:("lb-subnet-to-nodeport-" + ($port|tostring)),
+          tcpOptions:{destinationPortRange:{min:$port,max:$port}}
+        }'
+      )"
     done
   fi
   ensure_nsg_rule "${nsg_ids[worker]}" "worker-internet-egress" '{
@@ -349,6 +359,16 @@ if [[ "$MODE" == "cloud" ]]; then
           tcpOptions:{destinationPortRange:{min:$port,max:$port}}
         }'
       )"
+      # Mirror the dedicated-subnet path on egress without opening any other
+      # worker port or external destination.
+      ensure_nsg_rule "${nsg_ids[lb]}" "lb-to-worker-subnet-${port}" "$(
+        jq -cn --arg destination "$OCI_WORKER_SUBNET_CIDR" --argjson port "$port" '{
+          direction:"EGRESS", protocol:"6", destinationType:"CIDR_BLOCK",
+          destination:$destination, isStateless:false,
+          description:("lb-to-worker-subnet-" + ($port|tostring)),
+          tcpOptions:{destinationPortRange:{min:$port,max:$port}}
+        }'
+      )"
     done
   fi
   if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
@@ -358,13 +378,17 @@ if [[ "$MODE" == "cloud" ]]; then
       "bastion-to-worker-6443",
       "lb-to-nodeport-30080",
       "lb-to-nodeport-30443",
+      "lb-subnet-to-nodeport-30080",
+      "lb-subnet-to-nodeport-30443",
       "worker-internet-egress"
     ]'
     assert_nsg_rule_set "${nsg_ids[lb]}" '[
       "world-to-lb-80",
       "world-to-lb-443",
       "lb-to-worker-30080",
-      "lb-to-worker-30443"
+      "lb-to-worker-30443",
+      "lb-to-worker-subnet-30080",
+      "lb-to-worker-subnet-30443"
     ]'
   fi
 
