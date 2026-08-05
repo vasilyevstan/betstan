@@ -331,7 +331,7 @@ jq -e \
     .data."instance-id" == $instance and
     .data."volume-id" == $volume and
     .data.device == $device and
-    .data."attachment-type" == "PARAVIRTUALIZED" and
+    (.data."attachment-type" | ascii_downcase) == "paravirtualized" and
     .data."is-read-only" == false and
     .data."is-shareable" == false and
     .data."lifecycle-state" == "ATTACHED"
