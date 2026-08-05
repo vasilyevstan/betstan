@@ -437,22 +437,15 @@ lb_ocid="$(
     [.data[]? | select(."lifecycle-state" != "DELETED")][0].id // empty
   ' <<<"$load_balancers"
 )"
-lb_dataplane_contract="explicit-return-v1"
-lb_tags="$(
-  jq -c \
-    --arg contract "$lb_dataplane_contract" \
-    '. + {"betstan-dataplane-contract": $contract}' \
-    <<<"$tags"
-)"
-shape_details="$(
-  jq -cn \
-    --argjson min "$OCI_LB_MIN_MBPS" \
-    --argjson max "$OCI_LB_MAX_MBPS" \
-    '{minimumBandwidthInMbps:$min,maximumBandwidthInMbps:$max}'
-)"
 if [[ -z "$lb_ocid" ]]; then
   subnet_ids="$(jq -cn --arg id "$network_lb_subnet_ocid" '[$id]')"
   nsg_ids="$(jq -cn --arg id "$network_lb_nsg_ocid" '[$id]')"
+  shape_details="$(
+    jq -cn \
+      --argjson min "$OCI_LB_MIN_MBPS" \
+      --argjson max "$OCI_LB_MAX_MBPS" \
+      '{minimumBandwidthInMbps:$min,maximumBandwidthInMbps:$max}'
+  )"
   oci lb load-balancer create \
     --compartment-id "$OCI_COMPARTMENT_OCID" \
     --display-name "$OCI_LB_NAME" \
@@ -461,7 +454,7 @@ if [[ -z "$lb_ocid" ]]; then
     --subnet-ids "$subnet_ids" \
     --nsg-ids "$nsg_ids" \
     --is-private false \
-    --freeform-tags "$lb_tags" \
+    --freeform-tags "$tags" \
     --wait-for-state SUCCEEDED \
     --max-wait-seconds 1200 >/dev/null
   load_balancers="$(
@@ -481,38 +474,9 @@ fi
 [[ -n "$lb_ocid" ]] ||
   oci_die "OCI load balancer creation did not return the managed load balancer"
 load_balancer="$(oci lb load-balancer get --load-balancer-id "$lb_ocid")"
-if ! jq -e \
-    --arg contract "$lb_dataplane_contract" \
-    '.data."freeform-tags"."betstan-dataplane-contract" == $contract' \
-    <<<"$load_balancer" >/dev/null; then
-  # Reconcile the retained 10/10 profile through the provider's supported
-  # in-place shape operation exactly once. This preserves the LB, address,
-  # topology, and zero-cost limits while refreshing both managed data-plane
-  # hosts after the explicit return-path contract becomes active.
-  oci lb load-balancer update-load-balancer-shape \
-    --load-balancer-id "$lb_ocid" \
-    --shape-name flexible \
-    --shape-details "$shape_details" \
-    --force \
-    --wait-for-state SUCCEEDED \
-    --max-wait-seconds 1200 >/dev/null
-fi
-if ! jq -e --argjson expected "$lb_tags" \
-    '.data."freeform-tags" == $expected' \
-    <<<"$load_balancer" >/dev/null; then
-  oci lb load-balancer update \
-    --load-balancer-id "$lb_ocid" \
-    --freeform-tags "$lb_tags" \
-    --force \
-    --wait-for-state SUCCEEDED \
-    --max-wait-seconds 1200 >/dev/null
-fi
-load_balancer="$(oci lb load-balancer get --load-balancer-id "$lb_ocid")"
 jq -e \
   --arg subnet "$network_lb_subnet_ocid" \
   --arg nsg "$network_lb_nsg_ocid" \
-  --arg sha "$SOURCE_SHA" \
-  --arg dataplane_contract "$lb_dataplane_contract" \
   --argjson min "$OCI_LB_MIN_MBPS" \
   --argjson max "$OCI_LB_MAX_MBPS" '
     .data."lifecycle-state" == "ACTIVE" and
@@ -524,9 +488,7 @@ jq -e \
     (.data."network-security-group-ids" | sort) == ([$nsg] | sort) and
     .data."freeform-tags"."betstan-managed" == "true" and
     .data."freeform-tags"."betstan-runtime" == "k3s" and
-    .data."freeform-tags"."expected-monthly-cost" == "0" and
-    .data."freeform-tags"."source-sha" == $sha and
-    .data."freeform-tags"."betstan-dataplane-contract" == $dataplane_contract
+    .data."freeform-tags"."expected-monthly-cost" == "0"
   ' <<<"$load_balancer" >/dev/null ||
   oci_die "OCI load balancer differs from the approved public 10/10 Mbps contract"
 
