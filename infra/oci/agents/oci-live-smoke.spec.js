@@ -6,7 +6,7 @@ test('OCI signup, logout, login, and navigation journey', async ({ page }) => {
   const password = `Oc1-${suffix}`.slice(0, 20);
 
   await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('body')).toContainText('BetStan');
+  await expect(page.getByRole('link', { name: 'BetStan', exact: true })).toBeVisible();
   await page.getByTitle('Create account').click();
   await page.getByLabel('Username', { exact: true }).fill(username);
   await page.getByLabel('Password', { exact: true }).fill(password);
