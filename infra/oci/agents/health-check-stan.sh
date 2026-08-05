@@ -264,8 +264,8 @@ import sys
 
 pods = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = {
-    "gaming-auth-mongo": "sha256:c319ea11661a662ce212de699b01dc08891e4c95e8c7a058d366d70eb3804782",
-    "gaming-rabbitmq": "sha256:c571b0e76ec0f56e64b36c962d8ff7c04854031974ccde763844087df75b245c",
+    "gaming-auth-mongo": "sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1",
+    "gaming-rabbitmq": "sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b",
 }
 with open(sys.argv[2], encoding="utf-8") as handle:
     for row in csv.reader(handle, delimiter="\t"):
