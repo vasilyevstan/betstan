@@ -7,6 +7,8 @@ MAX_LOOPS="${MAX_LOOPS:-3}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-20}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/artifacts/oci-validation-loop}"
 OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-}"
+OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-}"
+OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 PLAYWRIGHT_BIN="${PLAYWRIGHT_BIN:-$ROOT_DIR/client/node_modules/.bin/playwright}"
 OCI_PUBLIC_CHECKS_ALREADY_PASSED="${OCI_PUBLIC_CHECKS_ALREADY_PASSED:-0}"
 OCI_E2E_ALREADY_PASSED="${OCI_E2E_ALREADY_PASSED:-0}"
@@ -20,8 +22,8 @@ OCI_CLUSTER_CHECKS_ALREADY_PASSED="${OCI_CLUSTER_CHECKS_ALREADY_PASSED:-0}"
   echo "NO_GO validation_reason=SLEEP_SECONDS must be positive" >&2
   exit 1
 }
-[[ -n "$OCI_PUBLIC_URL" ]] || {
-  echo "NO_GO validation_reason=OCI_PUBLIC_URL is required" >&2
+[[ -n "$OCI_PUBLIC_URL" && -n "$OCI_REDIRECT_URL" && -n "$OCI_DIAGNOSTIC_URL" ]] || {
+  echo "NO_GO validation_reason=canonical, redirect, and diagnostic URLs are required" >&2
   exit 1
 }
 for value in \
@@ -49,6 +51,8 @@ for attempt in $(seq 1 "$MAX_LOOPS"); do
   if [[ "$OCI_PUBLIC_CHECKS_ALREADY_PASSED" == "1" ]]; then
     public_ok=true
   elif OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
+      OCI_REDIRECT_URL="$OCI_REDIRECT_URL" \
+      OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
       OUTPUT_DIR="$OUTPUT_DIR/smoke-${attempt}" \
       "$OCI_DIR/agents/smoke-liveness-stan.sh"; then
     if [[ -x "$PLAYWRIGHT_BIN" ]] && (
@@ -64,6 +68,8 @@ for attempt in $(seq 1 "$MAX_LOOPS"); do
   if [[ "$public_ok" == "true" ]]; then
     if [[ "$OCI_CLUSTER_CHECKS_ALREADY_PASSED" == "1" ]] ||
         OCI_PUBLIC_CHECKS_ALREADY_PASSED=1 OCI_E2E_ALREADY_PASSED=1 \
+          OCI_REDIRECT_URL="$OCI_REDIRECT_URL" \
+          OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
           OUTPUT_DIR="$OUTPUT_DIR/health-${attempt}" \
           "$OCI_DIR/agents/health-check-stan.sh"; then
       echo "oci_validation_loop=PASS"

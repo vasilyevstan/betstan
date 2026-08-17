@@ -17,11 +17,15 @@ Before changing or assessing deployment behavior, read:
 - `.github/workflows/branch-policy.yml`
 - `.github/workflows/production-deploy.yml`
 - `infra/azure/LESSONS_LEARNED.md`
+- `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/pre-commit-infra-check-stan.sh`
 - `infra/azure/agents/post-merge-verification-stan.sh`
 - `infra/azure/agents/rollback-readiness-stan.sh`
 - `.github/agents/betstan-mongo-migration.agent.md`
+- `.github/agents/betstan-migration-recovery.agent.md`
+- `.github/agents/betstan-domain-ingress.agent.md`
+- `.github/agents/betstan-azure-retirement.agent.md`
 
 Inspect the current git graph and remote default branch. Do not infer that a merged PR is missing merely because its old head differs from a newer `master`; use `git merge-base --is-ancestor` and inspect the current tree.
 
@@ -41,14 +45,21 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 - A green PR validates infrastructure safety but does not mean production was deployed.
 - A repository merge does not migrate databases. Migration requires a separate
   exact-SHA operator approval and live journal.
-- Inventory every production-capable workflow before reasoning about triggers. `production-build` and `production-deploy` are the only active production workflow identities today. OCI remains inactive until all four governed OCI identities (`oci-infrastructure`, `oci-migrate`, `oci-production-build`, and `oci-production-deploy`) merge together and their environments and repository controls are locked down.
+- Inventory every production-capable workflow before reasoning about triggers.
+  OCI is the operational service primary and is active; that statement is not
+  evidence that Azure data cutover or retirement is complete. The governed set includes `production-build`,
+  `production-deploy`, `oci-production-build`, `oci-production-deploy`,
+  `oci-infrastructure`, `oci-capacity-acquire`, `oci-migrate`, and the
+  stop-only `oci-migration-recovery`; use the checked-in inventory as
+  authority when it changes.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
-- Until OCI activation and lock-down are explicitly complete, use only the `production-build` to `production-deploy` chain. Never invoke a retired workflow as a fallback.
+- Never invoke a retired workflow as a fallback. Azure deployment remains a
+  separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.
 - Do not deploy `latest` as the source of truth.
 - Verify every application Deployment uses the intended SHA after rollout.
@@ -86,7 +97,8 @@ After deployment:
 - verify the exact merge/build/deploy SHA chain;
 - require every Deployment and StatefulSet ready;
 - require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
-- test `betstan.xyz` and `www.betstan.xyz`;
+- test canonical `betstan.xyz`, permanent `www` redirects, and the diagnostic
+  OCI host;
 - confirm API responses have the expected JSON shape, not merely HTTP 200;
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
 - upload diagnostics when validation fails;
@@ -94,12 +106,15 @@ After deployment:
 
 ## Ingress safety
 
-Both public hosts must contain the complete API route set. A host omission can route API calls to the client catch-all and return HTML with HTTP 200.
+The canonical apex and diagnostic OCI host must contain the complete API
+route set. Both schemes on `www` must permanently redirect to the apex while
+preserving path and query. A route omission can return client HTML with HTTP
+200.
 
 Never:
 
 - validate only the raw ingress IP;
-- remove one host's routes because the other host works;
+- remove canonical or diagnostic API routes because the other host works;
 - weaken the ingress guard to make CI pass.
 
 ## RabbitMQ and deployment recovery
@@ -134,7 +149,10 @@ A Running broker with missing consumers is not healthy production.
 - Require a known target SHA with successful build/deployment provenance.
 - Prefer application rollback over disk restore when data integrity is healthy.
 - Restore Mongo snapshots only when integrity checks justify it.
-- Never delete a current nodepool, disk, snapshot, or deployment history needed for rollback until the replacement has passed repeated health gates.
+- Never delete a current nodepool, disk, snapshot, or deployment history
+  needed for rollback until the replacement has passed repeated health gates.
+  The explicitly approved cross-cloud replacement has no old-OCI backup:
+  after target mutation, recovery keeps OCI offline and retries from Azure.
 
 ## Stage boundaries
 
@@ -166,3 +184,6 @@ State one of:
 - `NO_GO`: list the concrete blocking evidence and safest next action.
 
 Never equate `SAFE_TO_REVIEW` with permission to merge or `SAFE_TO_MERGE_DEV` with production approval.
+Never stop at a generic `NO_GO`: distinguish an approval wait from a hang,
+bound diagnostics, classify the failure, and identify the exact safe recovery
+or forward action.

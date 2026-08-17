@@ -4,598 +4,2336 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=migration-common.sh
+source "$SCRIPT_DIR/migration-common.sh"
 
-SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
+MODE="${1:-replace}"
+SOURCE_SHA="${SOURCE_SHA:-}"
+REPLACE_OCI_DATA="${REPLACE_OCI_DATA:-false}"
 AZURE_KUBECONFIG="${AZURE_KUBECONFIG:-}"
 OCI_KUBECONFIG="${OCI_KUBECONFIG:-}"
-OCI_RABBITMQ_BASELINE_FILE="${OCI_RABBITMQ_BASELINE_FILE:-}"
 AZURE_NAMESPACE="${AZURE_NAMESPACE:-default}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
-WORK_DIR="${WORK_DIR:-$OCI_ROOT_DIR/artifacts/oci-migration/work}"
+OCI_RABBITMQ_BASELINE_FILE="${OCI_RABBITMQ_BASELINE_FILE:-}"
+RUNNER_TEMP="${RUNNER_TEMP:-}"
+WORK_DIR="${WORK_DIR:-${RUNNER_TEMP:+$RUNNER_TEMP/oci-migration-transport}}"
 JOURNAL_FILE="${JOURNAL_FILE:-$OCI_ROOT_DIR/artifacts/oci-migration/journal.tsv}"
-WATCHDOG_MINUTES="${WATCHDOG_MINUTES:-20}"
-QUEUE_DRAIN_ATTEMPTS="${QUEUE_DRAIN_ATTEMPTS:-30}"
-QUEUE_DRAIN_SLEEP_SECONDS="${QUEUE_DRAIN_SLEEP_SECONDS:-10}"
+SUMMARY_FILE="${SUMMARY_FILE:-$OCI_ROOT_DIR/artifacts/oci-migration/phase.env}"
 MIGRATION_ID="${MIGRATION_ID:-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
+OWNER_RUN_ID="${GITHUB_RUN_ID:-local}"
+OWNER_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+REPOSITORY="${GITHUB_REPOSITORY:-}"
+AZURE_CLUSTER_FINGERPRINT="${AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256:-}"
+AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="${AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256:-}"
+OCI_CLUSTER_FINGERPRINT="${OCI_EXPECTED_CLUSTER_FINGERPRINT:-}"
+AZURE_EXPECTED_CLUSTER_SERVER_SHA256="${AZURE_EXPECTED_CLUSTER_SERVER_SHA256:-}"
+OCI_EXPECTED_CLUSTER_OCID="${OCI_EXPECTED_CLUSTER_OCID:-}"
 OCI_RUNTIME_MODE="$(oci_runtime_mode)"
 OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}"
+STATE_CONFIGMAP="${MIGRATION_STATE_CONFIGMAP:-betstan-oci-migration-journal}"
+LOCK_CONFIGMAP="${MIGRATION_LOCK_CONFIGMAP:-betstan-oci-migration-lock}"
+COMMAND_TIMEOUT_SECONDS="${MIGRATION_COMMAND_TIMEOUT_SECONDS:-120}"
+STREAM_TIMEOUT_SECONDS="${MIGRATION_STREAM_TIMEOUT_SECONDS:-900}"
+MONGO_VALIDATION_TIMEOUT_SECONDS="${MIGRATION_MONGO_VALIDATION_TIMEOUT_SECONDS:-600}"
+QUEUE_DRAIN_ATTEMPTS="${QUEUE_DRAIN_ATTEMPTS:-30}"
+QUEUE_DRAIN_SLEEP_SECONDS="${QUEUE_DRAIN_SLEEP_SECONDS:-10}"
+RUNNER_CAPACITY_MULTIPLIER="${RUNNER_CAPACITY_MULTIPLIER:-2}"
+RUNNER_CAPACITY_RESERVE_BYTES="${RUNNER_CAPACITY_RESERVE_BYTES:-2147483648}"
+SIGNATURE_SCRIPT="$SCRIPT_DIR/mongo-canonical-signature.js"
+STATE_HELPER="$SCRIPT_DIR/migration-state.py"
 
-[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
-[[ -f "$AZURE_KUBECONFIG" && -f "$OCI_KUBECONFIG" ]] ||
-  oci_die "isolated Azure and OCI kubeconfig files are required"
-[[ -f "$OCI_RABBITMQ_BASELINE_FILE" ]] ||
-  oci_die "verified OCI RabbitMQ baseline file is required"
-[[ "$AZURE_KUBECONFIG" != "$OCI_KUBECONFIG" ]] ||
-  oci_die "Azure and OCI kubeconfigs must not be merged"
-oci_is_positive_int "$WATCHDOG_MINUTES" || oci_die "WATCHDOG_MINUTES must be positive"
-(( WATCHDOG_MINUTES <= 30 )) || oci_die "Azure watchdog deadline may not exceed 30 minutes"
-oci_is_positive_int "$QUEUE_DRAIN_ATTEMPTS" || oci_die "QUEUE_DRAIN_ATTEMPTS must be positive"
-oci_is_positive_int "$QUEUE_DRAIN_SLEEP_SECONDS" || oci_die "QUEUE_DRAIN_SLEEP_SECONDS must be positive"
-oci_require_command kubectl
-oci_require_command jq
-oci_require_command age
-oci_require_cli_version
-oci_require_vars \
-  OCI_MIGRATION_AGE_RECIPIENT OCI_MIGRATION_AGE_IDENTITY \
-  AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 AZURE_EXPECTED_CLUSTER_SERVER_SHA256 \
-  AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256 OCI_EXPECTED_CLUSTER_OCID \
-  OCI_EXPECTED_CLUSTER_FINGERPRINT AZURE_WATCHDOG_KUBECTL_IMAGE
-[[ "$AZURE_WATCHDOG_KUBECTL_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] ||
-  oci_die "AZURE_WATCHDOG_KUBECTL_IMAGE must be immutable"
-[[ "$AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256" == "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]] ||
-  oci_die "Azure cluster resource ID fingerprint mismatch"
-[[ "$(oci_fingerprint "$OCI_EXPECTED_CLUSTER_OCID")" == "$OCI_EXPECTED_CLUSTER_FINGERPRINT" ]] ||
-  oci_die "OCI cluster fingerprint mismatch"
+APP_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip client)
+BACKEND_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip)
+DATABASE_MAPPINGS=(
+  "auth|gaming_auth|gaming-auth-mongo-depl|gaming-auth-mongo-depl-0|gaming-auth-mongo-data-gaming-auth-mongo-depl-0"
+  "bet|gaming_bet|gaming-bet-mongo-depl|gaming-bet-mongo-depl-0|gaming-bet-mongo-data-gaming-bet-mongo-depl-0"
+  "backoffice|gaming_backoffice|gaming-backoffice-mongo-depl|gaming-backoffice-mongo-depl-0|gaming-backoffice-mongo-data-gaming-backoffice-mongo-depl-0"
+  "event|gaming_event|gaming-event-mongo-depl|gaming-event-mongo-depl-0|gaming-event-mongo-data-gaming-event-mongo-depl-0"
+  "gamemaster|gaming_gamemaster|gaming-gamemaster-mongo-depl|gaming-gamemaster-mongo-depl-0|gaming-gamemaster-mongo-data-gaming-gamemaster-mongo-depl-0"
+  "moderation|gaming_moderation|gaming-moderation-mongo-depl|gaming-moderation-mongo-depl-0|gaming-moderation-mongo-data-gaming-moderation-mongo-depl-0"
+  "resulting|gaming_resulting|gaming-resulting-mongo-depl|gaming-resulting-mongo-depl-0|gaming-resulting-mongo-data-gaming-resulting-mongo-depl-0"
+  "slip|gaming_slip|gaming-slip-mongo-depl|gaming-slip-mongo-depl-0|gaming-slip-mongo-data-gaming-slip-mongo-depl-0"
+)
 
-azure_kubectl=(kubectl --kubeconfig "$AZURE_KUBECONFIG")
-oci_kubectl=(kubectl --kubeconfig "$OCI_KUBECONFIG")
-app_services=(auth bet backoffice event gamemaster moderation resulting slip client)
-databases=(gaming_auth gaming_bet gaming_backoffice gaming_event gaming_gamemaster gaming_moderation gaming_resulting gaming_slip)
-legacy_services=(auth bet backoffice event gamemaster moderation resulting slip)
+state_initialized=0
+state_boundary=0
+state_recovery=0
+fencing_token=""
+operation_success=0
+oci_frozen=0
+disposable_container=""
+disposable_volume=""
+cleanup_running=0
+transport_dir=""
+signature_dir=""
+state_dir=""
+identity_file=""
+azure_baseline=""
+oci_baseline=""
+target_mongo_pod=""
+target_mongo_image=""
+target_runtime_signature=""
+last_committed_phase=""
+
+state_boundary_text() {
+  [[ "$state_boundary" == "1" ]] && printf true || printf false
+}
+
+state_recovery_text() {
+  [[ "$state_recovery" == "1" ]] && printf true || printf false
+}
+
+simulate() {
+  local output="${MIGRATION_SIMULATION_OUTPUT:?MIGRATION_SIMULATION_OUTPUT is required}"
+  local fail_at="${MIGRATION_FAIL_AT:-}"
+  local partial="${MIGRATION_SIMULATE_PARTIAL_RETRY:-0}"
+  local boundary=false
+  local recovery=false
+  local oci_state=baseline
+  local point database service
+  local points=(
+    azure-start azure-provisioning azure-freeze source-queue-drain runner-capacity
+    archive-capture corrupt-archive disposable-validation cancellation hang
+    target-queue-drain oci-freeze
+  )
+  mkdir -p "$(dirname "$output")"
+  for point in "${points[@]}"; do
+    if [[ "$fail_at" == "$point" ]]; then
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$point" \
+        "destructive_boundary=$boundary" \
+        "recovery_required=$recovery" \
+        "oci_state=$oci_state" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+    fi
+  done
+  boundary=true
+  oci_state=closed
+  for point in post-boundary-cancellation post-boundary-hang; do
+    if [[ "$fail_at" == "$point" ]]; then
+      recovery=true
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$point" \
+        "destructive_boundary=$boundary" \
+        "recovery_required=$recovery" \
+        "oci_state=$oci_state" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+    fi
+  done
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r service database _sts _pod _pvc <<<"$mapping"
+    for point in "before-drop-$database" "after-drop-$database" \
+      "before-restore-$database" "after-restore-$database"; do
+      if [[ "$fail_at" == "$point" ]]; then
+        recovery=true
+        printf '%s\n' \
+          "result=failed" \
+          "failure_point=$point" \
+          "destructive_boundary=$boundary" \
+          "recovery_required=$recovery" \
+          "oci_state=$oci_state" \
+          "azure_apps=frozen" \
+          "azure_stopped=true" >"$output"
+        return 97
+      fi
+    done
+  done
+  for point in \
+    rabbitmq-recreate restart-auth restart-client mongo-write-lock \
+    rabbitmq-write-lock protected-health public-health; do
+    if [[ "$fail_at" == "$point" ]]; then
+      recovery=true
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$point" \
+        "destructive_boundary=$boundary" \
+        "recovery_required=$recovery" \
+        "oci_state=closed" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+    fi
+  done
+  case "$fail_at" in
+    cutover-committed)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-locked" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    mongo-write-unlocked)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-mongo-writable" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    rabbitmq-write-unlocked)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-writable" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    retry-after-cutover)
+      printf '%s\n' \
+        "result=forbidden" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=forward-only" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 98
+      ;;
+  esac
+  printf '%s\n' \
+    "result=success" \
+    "partial_retry=$partial" \
+    "destructive_boundary=true" \
+    "recovery_required=false" \
+    "oci_state=healthy" \
+    "exact_database_count=8" \
+    "azure_apps=frozen" \
+    "azure_stopped=true" >"$output"
+}
+
+if [[ "${MIGRATION_SIMULATION:-0}" == "1" ]]; then
+  simulate
+  exit $?
+fi
+
+provider_namespace() {
+  if [[ "$1" == "azure" ]]; then
+    printf '%s' "$AZURE_NAMESPACE"
+  else
+    printf '%s' "$OCI_K8S_NAMESPACE"
+  fi
+}
+
+provider_kubeconfig() {
+  if [[ "$1" == "azure" ]]; then
+    printf '%s' "$AZURE_KUBECONFIG"
+  else
+    printf '%s' "$OCI_KUBECONFIG"
+  fi
+}
+
+kube_raw() {
+  local provider="$1"
+  local classification="$2"
+  local timeout_seconds="$3"
+  local attempts="$4"
+  shift 4
+  migration_raw "$classification" "$timeout_seconds" "$attempts" \
+    kubectl --kubeconfig "$(provider_kubeconfig "$provider")" "$@"
+}
+
+kube_run() {
+  local provider="$1"
+  local classification="$2"
+  local timeout_seconds="$3"
+  local attempts="$4"
+  shift 4
+  migration_run "$classification" "$timeout_seconds" "$attempts" \
+    kubectl --kubeconfig "$(provider_kubeconfig "$provider")" "$@"
+}
+
+kube_capture() {
+  local provider="$1"
+  local classification="$2"
+  local timeout_seconds="$3"
+  local attempts="$4"
+  shift 4
+  migration_maybe_heartbeat
+  migration_raw "$classification" "$timeout_seconds" "$attempts" \
+    kubectl --kubeconfig "$(provider_kubeconfig "$provider")" "$@"
+  local status=$?
+  migration_maybe_heartbeat 1
+  return "$status"
+}
+
+state_file() {
+  printf '%s/%s-%s.json' "$state_dir" "$1" "$2"
+}
+
+state_fetch_cm() {
+  local provider="$1"
+  local kind="$2"
+  local name file error_file error
+  if [[ "$kind" == "journal" ]]; then
+    name="$STATE_CONFIGMAP"
+  else
+    name="$LOCK_CONFIGMAP"
+  fi
+  file="$(state_file "$provider" "$kind")"
+  error_file="${file}.error"
+  if kube_raw "$provider" state-read 30 2 \
+      get configmap "$name" -n "$(provider_namespace "$provider")" -o json \
+      >"$file" 2>"$error_file"; then
+    rm -f "$error_file"
+    printf 'present'
+    return 0
+  fi
+  error="$(cat "$error_file")"
+  rm -f "$file" "$error_file"
+  if [[ "$error" == *NotFound* || "$error" == *"not found"* ]]; then
+    printf 'missing'
+    return 0
+  fi
+  migration_die "unable to read $provider migration $kind"
+}
+
+state_compare_kind() {
+  migration_raw state-compare 30 1 python3 "$STATE_HELPER" compare \
+    "$(state_file azure "$1")" "$(state_file oci "$1")"
+}
+
+state_reconcile_kind() {
+  local kind="$1"
+  if state_compare_kind "$kind" >/dev/null 2>&1; then
+    return 0
+  fi
+  migration_raw state-reconcile 30 1 \
+    python3 "$STATE_HELPER" reconcile \
+      --kind "$kind" \
+      "$(state_file azure "$kind")" \
+      "$(state_file oci "$kind")" |
+    kube_raw oci state-reconcile 30 1 replace -f - >/dev/null
+  local statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]] ||
+    migration_die "unsafe or failed $kind mirror reconciliation"
+  [[ "$(state_fetch_cm oci "$kind")" == "present" ]] ||
+    migration_die "reconciled OCI $kind disappeared"
+  state_compare_kind "$kind"
+}
+
+state_value() {
+  migration_raw state-value 30 1 python3 "$STATE_HELPER" value \
+    "$(state_file azure journal)" "$1"
+}
+
+state_lock_value() {
+  migration_raw state-value 30 1 python3 "$STATE_HELPER" value \
+    "$(state_file azure lock)" "$1"
+}
+
+state_optional_value() {
+  migration_raw state-value 30 1 jq -r \
+    --arg key "$1" '.data[$key] // empty' "$(state_file azure journal)"
+}
+
+state_monotonic_epoch() {
+  local previous="$1"
+  local now
+  now="$(migration_epoch)"
+  [[ "$previous" =~ ^[0-9]+$ ]] ||
+    migration_die "journal heartbeat is invalid"
+  if (( now <= previous )); then
+    now=$((previous + 1))
+  fi
+  printf '%s' "$now"
+}
+
+state_create_one() {
+  local provider="$1"
+  local kind="$2"
+  shift 2
+  local name namespace arguments=() value
+  if [[ "$kind" == "journal" ]]; then
+    name="$STATE_CONFIGMAP"
+  else
+    name="$LOCK_CONFIGMAP"
+  fi
+  namespace="$(provider_namespace "$provider")"
+  for value in "$@"; do
+    arguments+=(--set "$value")
+  done
+  migration_raw state-document 30 1 \
+    python3 "$STATE_HELPER" create \
+      --name "$name" --namespace "$namespace" "${arguments[@]}" |
+    kube_raw "$provider" state-create 30 1 create -f -
+  local statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]]
+}
+
+state_replace_one() {
+  local provider="$1"
+  local kind="$2"
+  shift 2
+  local file arguments=() item
+  file="$(state_file "$provider" "$kind")"
+  for item in "$@"; do
+    arguments+=("$item")
+  done
+  migration_raw state-document 30 1 \
+    python3 "$STATE_HELPER" mutate "$file" "${arguments[@]}" |
+    kube_raw "$provider" state-cas 30 1 replace -f -
+  local statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]]
+}
+
+state_checkpoint_one() {
+  local provider="$1"
+  local kind="$2"
+  local checkpoint="$3"
+  migration_raw state-checkpoint 30 1 \
+    cp "$(state_file "$provider" "$kind")" "$checkpoint"
+}
+
+state_restore_one() {
+  local provider="$1"
+  local kind="$2"
+  local checkpoint="$3"
+  shift 3
+  local current status arguments=() item
+  status="$(state_fetch_cm "$provider" "$kind")"
+  [[ "$status" == "present" ]] || return 1
+  current="$(state_file "$provider" "$kind")"
+  if migration_raw state-compare 30 1 \
+      python3 "$STATE_HELPER" compare "$checkpoint" "$current" \
+      >/dev/null 2>&1; then
+    return 0
+  fi
+  for item in "$@"; do
+    arguments+=(--expect-target "$item")
+  done
+  migration_raw state-document 30 1 \
+    python3 "$STATE_HELPER" mirror "$checkpoint" "$current" "${arguments[@]}" |
+    kube_raw "$provider" state-cas-rollback 30 1 replace -f -
+  local statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]]
+}
+
+state_read_all() {
+  local azure_journal oci_journal azure_lock oci_lock
+  azure_journal="$(state_fetch_cm azure journal)"
+  oci_journal="$(state_fetch_cm oci journal)"
+  azure_lock="$(state_fetch_cm azure lock)"
+  oci_lock="$(state_fetch_cm oci lock)"
+  printf '%s|%s|%s|%s' \
+    "$azure_journal" "$oci_journal" "$azure_lock" "$oci_lock"
+}
+
+state_validate_contract() {
+  [[ "$(state_value schema-version)" == "1" &&
+    "$(state_lock_value schema-version)" == "1" &&
+    "$(state_value owner-workflow)" == ".github/workflows/oci-migrate.yml" &&
+    "$(state_value journal-id)" == "$(state_lock_value journal-id)" &&
+    "$(state_value migration-id)" == "$(state_lock_value migration-id)" &&
+    "$(state_value owner-run-id)" == "$(state_lock_value owner-run-id)" &&
+    "$(state_value owner-run-attempt)" == "$(state_lock_value owner-run-attempt)" &&
+    "$(state_value fencing-token)" == "$(state_lock_value fencing-token)" ]] ||
+    migration_die "journal and lock identity contract differs"
+}
+
+state_reconcile_existing() {
+  state_reconcile_kind journal
+  state_reconcile_kind lock
+  state_read_all >/dev/null
+
+  local journal_phase journal_fence journal_migration journal_owner journal_attempt
+  local lock_fence lock_migration lock_owner lock_attempt lock_state provider
+  journal_phase="$(state_value phase)"
+  journal_fence="$(state_value fencing-token)"
+  journal_migration="$(state_value migration-id)"
+  journal_owner="$(state_value owner-run-id)"
+  journal_attempt="$(state_value owner-run-attempt)"
+  lock_fence="$(state_lock_value fencing-token)"
+  lock_migration="$(state_lock_value migration-id)"
+  lock_owner="$(state_lock_value owner-run-id)"
+  lock_attempt="$(state_lock_value owner-run-attempt)"
+  lock_state="$(state_lock_value state)"
+
+  if [[ "$journal_phase" == "lock-taken-over" &&
+    "$journal_fence" =~ ^[1-9][0-9]*$ &&
+    "$lock_fence" =~ ^[1-9][0-9]*$ &&
+    "$journal_fence" -eq $((lock_fence + 1)) ]]; then
+    state_compare_kind lock
+    for provider in azure oci; do
+      state_replace_one "$provider" lock \
+        --expect "migration-id=$lock_migration" \
+        --expect "owner-run-id=$lock_owner" \
+        --expect "owner-run-attempt=$lock_attempt" \
+        --expect "fencing-token=$lock_fence" \
+        --expect "state=$lock_state" \
+        --set "migration-id=$journal_migration" \
+        --set "owner-run-id=$journal_owner" \
+        --set "owner-run-attempt=$journal_attempt" \
+        --set "fencing-token=$journal_fence" \
+        --set "state=active" >/dev/null ||
+        migration_die "interrupted takeover lock could not be completed"
+    done
+  fi
+
+  state_read_all >/dev/null
+  state_reconcile_kind lock
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+}
+
+state_recover_partial_creation() {
+  local presence="$1"
+  local file kind provider first_file=""
+  local old_migration old_owner old_attempt old_fence old_journal expected_journal
+  local document_source document_azure document_oci document_sequence
+  local document_phase document_boundary document_recovery
+  for provider in azure oci; do
+    for kind in journal lock; do
+      file="$(state_file "$provider" "$kind")"
+      if [[ -f "$file" ]]; then
+        first_file="$file"
+        break 2
+      fi
+    done
+  done
+  [[ -n "$first_file" ]] ||
+    migration_die "partial migration state has no readable document"
+  old_migration="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" migration-id)"
+  old_owner="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" owner-run-id)"
+  old_attempt="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" owner-run-attempt)"
+  old_fence="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" fencing-token)"
+  old_journal="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" journal-id)"
+  migration_safe_id "$old_migration" &&
+    migration_is_positive_int "$old_owner" &&
+    migration_is_positive_int "$old_attempt" &&
+    [[ "$old_fence" == "1" ]] ||
+    migration_die "partial initial state identity is invalid"
+  expected_journal="$(
+    printf '%s|%s|%s|%s' \
+      "$SOURCE_SHA" "$AZURE_CLUSTER_FINGERPRINT" \
+      "$OCI_CLUSTER_FINGERPRINT" "$old_migration" |
+      migration_sha256
+  )"
+  [[ "$old_journal" == "$expected_journal" ]] ||
+    migration_die "partial initial journal ID differs"
+  [[ "$old_owner" != "$OWNER_RUN_ID" ]] ||
+    migration_die "current run cannot repair its own partial state"
+  owner_run_is_conclusively_inactive "$old_owner" "$old_attempt" ||
+    migration_die "partial initial state owner is not conclusively inactive"
+
+  for provider in azure oci; do
+    for kind in journal lock; do
+      file="$(state_file "$provider" "$kind")"
+      [[ -f "$file" ]] || continue
+      [[ "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" schema-version)" == "1" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" journal-id)" == "$old_journal" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" migration-id)" == "$old_migration" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" owner-run-id)" == "$old_owner" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" owner-run-attempt)" == "$old_attempt" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" fencing-token)" == "1" ]] ||
+        migration_die "partial initial state documents disagree"
+      if [[ "$kind" == "journal" ]]; then
+        document_source="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" original-source-sha)"
+        document_azure="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" azure-cluster-fingerprint)"
+        document_oci="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" oci-cluster-fingerprint)"
+        document_sequence="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" sequence)"
+        document_phase="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" phase)"
+        document_boundary="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" destructive-boundary)"
+        document_recovery="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" recovery-required)"
+        [[ "$document_source" == "$SOURCE_SHA" &&
+          "$document_azure" == "$AZURE_CLUSTER_FINGERPRINT" &&
+          "$document_oci" == "$OCI_CLUSTER_FINGERPRINT" &&
+          "$document_sequence" == "0" &&
+          "$document_phase" == "initialized" &&
+          "$document_boundary" == "false" &&
+          "$document_recovery" == "false" ]] ||
+          migration_die "partial journal is beyond safe initial creation"
+      else
+        [[ "$(migration_raw state-value 30 1 \
+            python3 "$STATE_HELPER" value "$file" state)" == "active" ]] ||
+          migration_die "partial lock is not an initial active lock"
+      fi
+    done
+  done
+
+  for provider in azure oci; do
+    kube_raw "$provider" state-create-recovery 30 2 \
+      delete configmap "$STATE_CONFIGMAP" "$LOCK_CONFIGMAP" \
+      -n "$(provider_namespace "$provider")" --ignore-not-found >/dev/null
+  done
+  [[ "$(state_read_all)" == "missing|missing|missing|missing" ]] ||
+    migration_die "partial initial state cleanup did not converge"
+  migration_log "partial_initial_state_recovered=$presence"
+}
+
+owner_run_is_conclusively_inactive() {
+  local run_id="$1"
+  local attempt="$2"
+  local document status
+  if [[ -n "${MIGRATION_OWNER_RUN_FIXTURE:-}" ]]; then
+    document="$(cat "$MIGRATION_OWNER_RUN_FIXTURE")"
+  else
+    [[ "$REPOSITORY" == */* ]] ||
+      migration_die "GITHUB_REPOSITORY is required for stale-lock inspection"
+    document="$(
+      migration_raw github-run-read 45 2 \
+        gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/$attempt"
+    )" || migration_die "owner run state is unknown; stale lock is retained"
+  fi
+  migration_raw github-run-identity 30 1 jq -e \
+    --argjson id "$run_id" \
+    --argjson attempt "$attempt" \
+    --arg repository "$REPOSITORY" '
+      .id == $id and
+      .run_attempt == $attempt and
+      .path == ".github/workflows/oci-migrate.yml" and
+      .head_branch == "master" and
+      (.head_repository.full_name == $repository or $repository == "")
+    ' <<<"$document" >/dev/null ||
+    migration_die "stale lock owner does not identify the exact migration workflow"
+  status="$(migration_raw github-run-status 30 1 jq -r '.status' <<<"$document")"
+  case "$status" in
+    completed)
+      return 0
+      ;;
+    queued | in_progress | waiting | pending | requested)
+      return 1
+      ;;
+    *)
+      migration_die "stale lock owner has an unknown run state: $status"
+      ;;
+  esac
+}
+
+state_new_documents() {
+  local journal_id="$1"
+  local fence="$2"
+  local now="$3"
+  local azure_hash oci_hash
+  azure_hash="$(printf '%s' "$azure_baseline" | migration_sha256)"
+  oci_hash="$(printf '%s' "$oci_baseline" | migration_sha256)"
+  local journal_values=(
+    "schema-version=1"
+    "journal-id=$journal_id"
+    "original-source-sha=$SOURCE_SHA"
+    "migration-id=$MIGRATION_ID"
+    "owner-run-id=$OWNER_RUN_ID"
+    "owner-run-attempt=$OWNER_RUN_ATTEMPT"
+    "owner-workflow=.github/workflows/oci-migrate.yml"
+    "fencing-token=$fence"
+    "sequence=0"
+    "phase=initialized"
+    "heartbeat-epoch=$now"
+    "destructive-boundary=false"
+    "recovery-required=false"
+    "azure-cluster-fingerprint=$AZURE_CLUSTER_FINGERPRINT"
+    "oci-cluster-fingerprint=$OCI_CLUSTER_FINGERPRINT"
+    "azure-baseline=$azure_baseline"
+    "azure-baseline-sha256=$azure_hash"
+    "oci-baseline=$oci_baseline"
+    "oci-baseline-sha256=$oci_hash"
+    "signature-manifest-sha256="
+    "transfer-manifest-sha256="
+    "mongo-write-lock=false"
+    "rabbitmq-write-lock=false"
+  )
+  local lock_values=(
+    "schema-version=1"
+    "journal-id=$journal_id"
+    "migration-id=$MIGRATION_ID"
+    "owner-run-id=$OWNER_RUN_ID"
+    "owner-run-attempt=$OWNER_RUN_ATTEMPT"
+    "fencing-token=$fence"
+    "state=active"
+  )
+  if ! state_create_one azure journal "${journal_values[@]}" ||
+      ! state_create_one oci journal "${journal_values[@]}" ||
+      ! state_create_one azure lock "${lock_values[@]}" ||
+      ! state_create_one oci lock "${lock_values[@]}"; then
+    local provider kind name rollback_failed=0
+    for provider in azure oci; do
+      for kind in journal lock; do
+        if [[ "$kind" == "journal" ]]; then
+          name="$STATE_CONFIGMAP"
+        else
+          name="$LOCK_CONFIGMAP"
+        fi
+        kube_raw "$provider" state-create-rollback 30 2 \
+          delete configmap "$name" -n "$(provider_namespace "$provider")" \
+          --ignore-not-found >/dev/null || rollback_failed=1
+      done
+    done
+    [[ "$rollback_failed" == "0" ]] ||
+      migration_die "mirrored state creation failed and metadata rollback was incomplete"
+    migration_die "unable to create both mirrored journal and lock ConfigMaps"
+  fi
+}
+
+state_takeover() {
+  local preserve_recovery="$1"
+  local old_migration old_run old_attempt old_fence old_sequence old_heartbeat
+  local journal_id now
+  old_migration="$(state_value migration-id)"
+  old_run="$(state_value owner-run-id)"
+  old_attempt="$(state_value owner-run-attempt)"
+  old_fence="$(state_value fencing-token)"
+  old_sequence="$(state_value sequence)"
+  old_heartbeat="$(state_value heartbeat-epoch)"
+  journal_id="$(state_value journal-id)"
+  [[ "$old_fence" =~ ^[1-9][0-9]*$ &&
+    "$old_sequence" =~ ^[0-9]+$ ]] ||
+    migration_die "existing journal fencing or sequence is invalid"
+  now="$(state_monotonic_epoch "$old_heartbeat")"
+  fencing_token=$((old_fence + 1))
+
+  case "$(state_lock_value state)" in
+    active)
+      if ! owner_run_is_conclusively_inactive "$old_run" "$old_attempt"; then
+        migration_die "migration lock owner is active; takeover is forbidden"
+      fi
+      ;;
+    released)
+      ;;
+    *)
+      migration_die "migration lock state is invalid"
+      ;;
+  esac
+
+  local provider transaction_failed=0 rollback_failed=0
+  for provider in azure oci; do
+    state_checkpoint_one "$provider" journal \
+      "$state_dir/takeover-${provider}-journal.json"
+    state_checkpoint_one "$provider" lock \
+      "$state_dir/takeover-${provider}-lock.json"
+  done
+  for provider in azure oci; do
+    state_replace_one "$provider" journal \
+      --expect "migration-id=$old_migration" \
+      --expect "owner-run-id=$old_run" \
+      --expect "owner-run-attempt=$old_attempt" \
+      --expect "fencing-token=$old_fence" \
+      --expect "sequence=$old_sequence" \
+      --set "migration-id=$MIGRATION_ID" \
+      --set "owner-run-id=$OWNER_RUN_ID" \
+      --set "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+      --set "fencing-token=$fencing_token" \
+      --set "sequence=$((old_sequence + 1))" \
+      --set "phase=lock-taken-over" \
+      --set "heartbeat-epoch=$now" || {
+        transaction_failed=1
+        break
+      }
+    state_replace_one "$provider" lock \
+      --expect "journal-id=$journal_id" \
+      --expect "migration-id=$old_migration" \
+      --expect "owner-run-id=$old_run" \
+      --expect "owner-run-attempt=$old_attempt" \
+      --expect "fencing-token=$old_fence" \
+      --set "migration-id=$MIGRATION_ID" \
+      --set "owner-run-id=$OWNER_RUN_ID" \
+      --set "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+      --set "fencing-token=$fencing_token" \
+      --set "state=active" || {
+        transaction_failed=1
+        break
+      }
+  done
+  if [[ "$transaction_failed" == "1" ]]; then
+    for provider in azure oci; do
+      state_restore_one "$provider" journal \
+        "$state_dir/takeover-${provider}-journal.json" \
+        "migration-id=$MIGRATION_ID" \
+        "owner-run-id=$OWNER_RUN_ID" \
+        "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "fencing-token=$fencing_token" \
+        "sequence=$((old_sequence + 1))" \
+        "phase=lock-taken-over" || rollback_failed=1
+      state_restore_one "$provider" lock \
+        "$state_dir/takeover-${provider}-lock.json" \
+        "migration-id=$MIGRATION_ID" \
+        "owner-run-id=$OWNER_RUN_ID" \
+        "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "fencing-token=$fencing_token" \
+        "state=active" || rollback_failed=1
+    done
+    [[ "$rollback_failed" == "0" ]] ||
+      migration_die "stale-lock takeover failed and CAS rollback was incomplete"
+    migration_die "stale-lock takeover compare-and-swap failed"
+  fi
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+  state_boundary="$(state_value destructive-boundary)"
+  state_recovery="$(state_value recovery-required)"
+  if [[ "$preserve_recovery" != "true" ]]; then
+    state_boundary=0
+    state_recovery=0
+  fi
+}
+
+state_acquire() {
+  local presence now journal_id lock_state existing_sha existing_azure existing_oci
+  local existing_phase
+  presence="$(state_read_all)"
+  now="$(migration_epoch)"
+  case "$presence" in
+    missing\|missing\|missing\|missing)
+      journal_id="$(
+        printf '%s|%s|%s|%s' \
+          "$SOURCE_SHA" "$AZURE_CLUSTER_FINGERPRINT" \
+          "$OCI_CLUSTER_FINGERPRINT" "$MIGRATION_ID" |
+          migration_sha256
+      )"
+      fencing_token=1
+      state_new_documents "$journal_id" "$fencing_token" "$now"
+      ;;
+    present\|present\|present\|present)
+      state_reconcile_existing
+      existing_phase="$(state_value phase)"
+      case "$existing_phase" in
+        cutover-committed | completed | cutover-forward-recovery)
+          migration_die \
+            "OCI cutover is committed; retrying from Azure is permanently forbidden"
+          ;;
+      esac
+      existing_sha="$(state_value original-source-sha)"
+      existing_azure="$(state_value azure-cluster-fingerprint)"
+      existing_oci="$(state_value oci-cluster-fingerprint)"
+      [[ "$existing_sha" == "$SOURCE_SHA" ]] ||
+        migration_die "existing journal original SHA differs from this exact retry"
+      [[ "$existing_azure" == "$AZURE_CLUSTER_FINGERPRINT" &&
+        "$existing_oci" == "$OCI_CLUSTER_FINGERPRINT" ]] ||
+        migration_die "live cluster fingerprints differ from the mirrored journal"
+      local expected_azure_baseline_hash expected_oci_baseline_hash
+      expected_azure_baseline_hash="$(
+        printf '%s' "$(state_value azure-baseline)" | migration_sha256
+      )"
+      expected_oci_baseline_hash="$(
+        printf '%s' "$(state_value oci-baseline)" | migration_sha256
+      )"
+      [[ "$(state_value azure-baseline-sha256)" == "$expected_azure_baseline_hash" ]] ||
+        migration_die "Azure baseline hash differs from the mirrored journal"
+      [[ "$(state_value oci-baseline-sha256)" == "$expected_oci_baseline_hash" ]] ||
+        migration_die "OCI baseline hash differs from the mirrored journal"
+      lock_state="$(state_lock_value state)"
+      if [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
+            "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
+            "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" &&
+            "$lock_state" == "active" ]]; then
+        fencing_token="$(state_value fencing-token)"
+      else
+        state_takeover "$(state_value recovery-required)"
+      fi
+      azure_baseline="$(state_value azure-baseline)"
+      oci_baseline="$(state_value oci-baseline)"
+      ;;
+    *)
+      state_recover_partial_creation "$presence"
+      journal_id="$(
+        printf '%s|%s|%s|%s' \
+          "$SOURCE_SHA" "$AZURE_CLUSTER_FINGERPRINT" \
+          "$OCI_CLUSTER_FINGERPRINT" "$MIGRATION_ID" |
+          migration_sha256
+      )"
+      fencing_token=1
+      state_new_documents "$journal_id" "$fencing_token" "$now"
+      ;;
+  esac
+  state_initialized=1
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+  state_boundary="$(state_value destructive-boundary)"
+  state_recovery="$(state_value recovery-required)"
+  last_committed_phase="$(state_value phase)"
+  [[ "$state_boundary" == "true" ]] && state_boundary=1 || state_boundary=0
+  [[ "$state_recovery" == "true" ]] && state_recovery=1 || state_recovery=0
+  printf 'timestamp\tsequence\tphase\tfencing_token\tdestructive_boundary\trecovery_required\n' \
+    >"$JOURNAL_FILE"
+}
+
+state_load_owned() {
+  local presence
+  presence="$(state_read_all)"
+  [[ "$presence" == "present|present|present|present" ]] ||
+    migration_die "mirrored migration state is unavailable"
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+  [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
+    "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
+    "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" ]] ||
+    migration_die "migration state is fenced by another run"
+  fencing_token="$(state_value fencing-token)"
+  [[ "$(state_lock_value fencing-token)" == "$fencing_token" ]] ||
+    migration_die "migration lock fencing token differs from journal"
+  state_initialized=1
+  state_boundary="$(state_value destructive-boundary)"
+  state_recovery="$(state_value recovery-required)"
+  last_committed_phase="$(state_value phase)"
+  [[ "$state_boundary" == "true" ]] && state_boundary=1 || state_boundary=0
+  [[ "$state_recovery" == "true" ]] && state_recovery=1 || state_recovery=0
+  azure_baseline="$(state_value azure-baseline)"
+  oci_baseline="$(state_value oci-baseline)"
+  printf 'timestamp\tsequence\tphase\tfencing_token\tdestructive_boundary\trecovery_required\n' \
+    >"$JOURNAL_FILE"
+}
+
+state_assert_fence() {
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+  [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
+    "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
+    "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" &&
+    "$(state_value fencing-token)" == "$fencing_token" &&
+    "$(state_lock_value migration-id)" == "$MIGRATION_ID" &&
+    "$(state_lock_value owner-run-id)" == "$OWNER_RUN_ID" &&
+    "$(state_lock_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" &&
+    "$(state_lock_value fencing-token)" == "$fencing_token" &&
+    "$(state_lock_value state)" == "active" ]] ||
+    migration_die "migration process is fenced by a newer owner"
+}
+
+migration_heartbeat() {
+  local requested_now="${1:-$(migration_epoch)}"
+  [[ "$state_initialized" == "1" ]] || return 0
+  local sequence phase previous_heartbeat now provider
+  local transaction_failed=0 rollback_failed=0
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_validate_contract
+  sequence="$(state_value sequence)"
+  phase="$(state_value phase)"
+  previous_heartbeat="$(state_value heartbeat-epoch)"
+  now="$requested_now"
+  if (( now <= previous_heartbeat )); then
+    now=$((previous_heartbeat + 1))
+  fi
+  for provider in azure oci; do
+    state_checkpoint_one "$provider" journal \
+      "$state_dir/heartbeat-${provider}-journal.json"
+  done
+  for provider in azure oci; do
+    state_replace_one "$provider" journal \
+      --expect "migration-id=$MIGRATION_ID" \
+      --expect "owner-run-id=$OWNER_RUN_ID" \
+      --expect "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+      --expect "fencing-token=$fencing_token" \
+      --expect "sequence=$sequence" \
+      --expect "phase=$phase" \
+      --set "heartbeat-epoch=$now" || {
+        transaction_failed=1
+        break
+      }
+  done
+  if [[ "$transaction_failed" == "1" ]]; then
+    for provider in azure oci; do
+      state_restore_one "$provider" journal \
+        "$state_dir/heartbeat-${provider}-journal.json" \
+        "migration-id=$MIGRATION_ID" \
+        "owner-run-id=$OWNER_RUN_ID" \
+        "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "fencing-token=$fencing_token" \
+        "sequence=$sequence" \
+        "phase=$phase" \
+        "heartbeat-epoch=$now" || rollback_failed=1
+    done
+    [[ "$rollback_failed" == "0" ]] ||
+      migration_die "heartbeat mirror update failed and CAS rollback was incomplete"
+    migration_die "heartbeat mirror compare-and-swap failed"
+  fi
+}
+
+state_advance() {
+  local phase="$1"
+  local boundary="$2"
+  local recovery="$3"
+  shift 3
+  local old_sequence old_heartbeat now provider item
+  local transaction_failed=0 rollback_failed=0
+  local arguments=()
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+  old_sequence="$(state_value sequence)"
+  old_heartbeat="$(state_value heartbeat-epoch)"
+  now="$(state_monotonic_epoch "$old_heartbeat")"
+  arguments=(
+    --expect "migration-id=$MIGRATION_ID"
+    --expect "owner-run-id=$OWNER_RUN_ID"
+    --expect "owner-run-attempt=$OWNER_RUN_ATTEMPT"
+    --expect "fencing-token=$fencing_token"
+    --expect "sequence=$old_sequence"
+    --set "sequence=$((old_sequence + 1))"
+    --set "phase=$phase"
+    --set "heartbeat-epoch=$now"
+    --set "destructive-boundary=$boundary"
+    --set "recovery-required=$recovery"
+  )
+  for item in "$@"; do
+    arguments+=(--set "$item")
+  done
+  for provider in azure oci; do
+    state_checkpoint_one "$provider" journal \
+      "$state_dir/advance-${provider}-journal.json"
+  done
+  for provider in azure oci; do
+    state_replace_one "$provider" journal "${arguments[@]}" || {
+      transaction_failed=1
+      break
+    }
+  done
+  if [[ "$transaction_failed" == "1" ]]; then
+    for provider in azure oci; do
+      state_restore_one "$provider" journal \
+        "$state_dir/advance-${provider}-journal.json" \
+        "migration-id=$MIGRATION_ID" \
+        "owner-run-id=$OWNER_RUN_ID" \
+        "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "fencing-token=$fencing_token" \
+        "sequence=$((old_sequence + 1))" \
+        "phase=$phase" || rollback_failed=1
+    done
+    [[ "$rollback_failed" == "0" ]] ||
+      migration_die "phase mirror update failed and CAS rollback was incomplete"
+    migration_die "phase mirror compare-and-swap failed: $phase"
+  fi
+  last_committed_phase="$phase"
+  state_boundary=0
+  state_recovery=0
+  [[ "$boundary" == "true" ]] && state_boundary=1
+  [[ "$recovery" == "true" ]] && state_recovery=1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(migration_iso8601)" "$((old_sequence + 1))" "$phase" \
+    "$fencing_token" "$boundary" "$recovery" >>"$JOURNAL_FILE"
+  migration_failure_hook "$phase"
+}
+
+state_release() {
+  local provider transaction_failed=0 rollback_failed=0
+  state_read_all >/dev/null
+  state_compare_kind lock
+  state_validate_contract
+  for provider in azure oci; do
+    state_checkpoint_one "$provider" lock \
+      "$state_dir/release-${provider}-lock.json"
+  done
+  for provider in azure oci; do
+    state_replace_one "$provider" lock \
+      --expect "migration-id=$MIGRATION_ID" \
+      --expect "owner-run-id=$OWNER_RUN_ID" \
+      --expect "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+      --expect "fencing-token=$fencing_token" \
+      --expect "state=active" \
+      --set "state=released" || {
+        transaction_failed=1
+        break
+      }
+  done
+  if [[ "$transaction_failed" == "1" ]]; then
+    for provider in azure oci; do
+      state_restore_one "$provider" lock \
+        "$state_dir/release-${provider}-lock.json" \
+        "migration-id=$MIGRATION_ID" \
+        "owner-run-id=$OWNER_RUN_ID" \
+        "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "fencing-token=$fencing_token" \
+        "state=released" || rollback_failed=1
+    done
+    [[ "$rollback_failed" == "0" ]] ||
+      migration_die "lock release failed and CAS rollback was incomplete"
+    migration_die "lock release compare-and-swap failed"
+  fi
+}
+
+state_write_summary() {
+  state_read_all >/dev/null
+  state_compare_kind journal
+  migration_raw state-summary 30 1 \
+    python3 "$STATE_HELPER" summary "$(state_file azure journal)" \
+    >"$SUMMARY_FILE"
+}
 
 validate_kubeconfig() {
   local provider="$1"
-  local kubeconfig="$2"
-  local expected_server_hash="$3"
-  local cluster_ocid="${4:-}"
-  local config server server_hash
-  config="$(kubectl --kubeconfig "$kubeconfig" config view --raw --minify -o json)"
-  server="$(jq -r '.clusters[0].cluster.server // empty' <<<"$config")"
-  [[ "$server" == https://* ]] || oci_die "$provider kubeconfig has no HTTPS server"
-  server_hash="$(oci_fingerprint "$server")"
+  local expected_server_hash="$2"
+  local expected_runtime_id="${3:-}"
+  local config server node
+  config="$(
+    kube_capture "$provider" kubeconfig-read 30 2 \
+      config view --raw --minify -o json
+  )"
+  server="$(migration_raw kubeconfig-json 30 1 jq -r \
+    '.clusters[0].cluster.server // empty' <<<"$config")"
+  [[ "$server" == https://* ]] ||
+    migration_die "$provider kubeconfig has no HTTPS API server"
   if [[ -n "$expected_server_hash" ]]; then
-    [[ "$server_hash" == "$expected_server_hash" ]] ||
-      oci_die "$provider Kubernetes API server fingerprint mismatch"
+    [[ "$(migration_fingerprint "$server")" == "$expected_server_hash" ]] ||
+      migration_die "$provider API server fingerprint mismatch"
   fi
-  if [[ -n "$cluster_ocid" ]]; then
+  if [[ -n "$expected_runtime_id" ]]; then
     if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
-      jq -e --arg cluster "$cluster_ocid" '
-        [.users[].user.exec.args[]? | select(. == $cluster)] | length == 1
-      ' <<<"$config" >/dev/null ||
-        oci_die "OCI kubeconfig does not contain the exact cluster OCID"
+      migration_raw kubeconfig-identity 30 1 jq -e \
+        --arg runtime "$expected_runtime_id" '
+          [.users[].user.exec.args[]? | select(. == $runtime)] | length == 1
+        ' <<<"$config" >/dev/null ||
+        migration_die "OCI kubeconfig does not identify the exact runtime"
     else
       [[ "$server" =~ ^https://127\.0\.0\.1:[0-9]+$ ]] ||
-        oci_die "k3s kubeconfig does not use the local Bastion tunnel"
-      node="$(
-        kubectl --kubeconfig "$kubeconfig" \
-          get node "$OCI_K3S_NODE_NAME" \
-          -o json
-      )"
-      jq -e --arg provider_id "oci://${cluster_ocid}" '
-        .spec.providerID == $provider_id and
-        .metadata.labels."kubernetes.io/arch" == "arm64" and
-        ([.status.conditions[] | select(
-          .type == "Ready" and .status == "True"
-        )] | length) == 1
-      ' <<<"$node" >/dev/null ||
-        oci_die "k3s node identity differs from infrastructure provenance"
+        migration_die "k3s kubeconfig must use the local Bastion tunnel"
+      node="$(kube_capture oci node-identity 30 2 \
+        get node "$OCI_K3S_NODE_NAME" -o json)"
+      migration_raw node-identity 30 1 jq -e \
+        --arg provider_id "oci://${expected_runtime_id}" '
+          .spec.providerID == $provider_id and
+          .metadata.labels."kubernetes.io/arch" == "arm64" and
+          ([.status.conditions[] | select(
+            .type == "Ready" and .status == "True"
+          )] | length) == 1
+        ' <<<"$node" >/dev/null ||
+        migration_die "k3s node identity differs from provenance"
     fi
   fi
 }
 
-validate_kubeconfig azure "$AZURE_KUBECONFIG" "$AZURE_EXPECTED_CLUSTER_SERVER_SHA256"
-validate_kubeconfig oci "$OCI_KUBECONFIG" "" "$OCI_EXPECTED_CLUSTER_OCID"
-"${azure_kubectl[@]}" get namespace "$AZURE_NAMESPACE" >/dev/null
-"${oci_kubectl[@]}" get namespace "$OCI_K8S_NAMESPACE" >/dev/null
-
-oci_prepare_private_dir "$WORK_DIR"
-oci_prepare_private_dir "$(dirname "$JOURNAL_FILE")"
-chmod 700 "$(dirname "$JOURNAL_FILE")"
-replicas_file="$WORK_DIR/azure-replicas.tsv"
-target_replicas_file="$WORK_DIR/oci-replicas.tsv"
-cipher_dir="$WORK_DIR/ciphertext"
-signatures_dir="$WORK_DIR/signatures"
-mkdir -p "$cipher_dir" "$signatures_dir"
-chmod 700 "$cipher_dir" "$signatures_dir"
-
-azure_lock="betstan-oci-migration-lock"
-oci_lock="betstan-oci-migration-lock"
-watchdog_name="betstan-azure-expiry-watchdog"
-source_restored=0
-target_restored=0
-watchdog_armed=0
-
-if "${azure_kubectl[@]}" get job "$watchdog_name" -n "$AZURE_NAMESPACE" >/dev/null 2>&1 ||
-   "${azure_kubectl[@]}" get configmap "$watchdog_name" -n "$AZURE_NAMESPACE" >/dev/null 2>&1 ||
-   "${azure_kubectl[@]}" get clusterrole "$watchdog_name" >/dev/null 2>&1; then
-  oci_die "stale Azure migration watchdog exists; inspect restoration before cleanup"
-fi
-
-record_replicas() {
-  local -n command_ref=$1
-  local namespace="$2"
-  local output="$3"
-  : > "$output"
-  local service replicas
-  for service in "${app_services[@]}"; do
-    replicas="$("${command_ref[@]}" get deployment "gaming-${service}-depl" -n "$namespace" \
+baseline_capture() {
+  local provider="$1"
+  local ingress service replicas result
+  ingress="$(kube_capture "$provider" baseline-read 30 2 \
+    get deployment ingress-nginx-controller -n ingress-nginx \
+    -o jsonpath='{.spec.replicas}')"
+  [[ "$ingress" =~ ^[0-9]+$ ]] || migration_die "invalid $provider ingress baseline"
+  result="ingress=$ingress"
+  if [[ "$provider" == "oci" ]]; then
+    replicas="$(kube_capture oci baseline-read 30 2 \
+      get deployment gaming-rabbitmq-depl -n "$OCI_K8S_NAMESPACE" \
       -o jsonpath='{.spec.replicas}')"
-    [[ "$replicas" =~ ^[0-9]+$ ]] || oci_die "invalid replica count for $service"
-    printf '%s\t%s\n' "$service" "$replicas" >> "$output"
+    [[ "$replicas" =~ ^[0-9]+$ ]] || migration_die "invalid OCI RabbitMQ baseline"
+    result="$result,rabbitmq=$replicas"
+  fi
+  for service in "${APP_SERVICES[@]}"; do
+    replicas="$(kube_capture "$provider" baseline-read 30 2 \
+      get deployment "gaming-${service}-depl" \
+      -n "$(provider_namespace "$provider")" \
+      -o jsonpath='{.spec.replicas}')"
+    [[ "$replicas" =~ ^[0-9]+$ ]] ||
+      migration_die "invalid $provider replica baseline for $service"
+    result="$result,$service=$replicas"
   done
+  printf '%s' "$result"
 }
 
-restore_replicas() {
-  local -n command_ref=$1
-  local namespace="$2"
-  local input="$3"
-  local service replicas
-  while IFS=$'\t' read -r service replicas; do
-    [[ -n "$service" && "$replicas" =~ ^[0-9]+$ ]] || oci_die "invalid recorded replica state"
-    "${command_ref[@]}" scale deployment "gaming-${service}-depl" -n "$namespace" \
-      --replicas "$replicas" >/dev/null
-    if (( replicas > 0 )); then
-      "${command_ref[@]}" rollout status deployment/"gaming-${service}-depl" \
-        -n "$namespace" --timeout=8m
+baseline_value() {
+  local baseline="$1"
+  local key="$2"
+  local entry old_ifs="$IFS"
+  IFS=,
+  for entry in $baseline; do
+    if [[ "${entry%%=*}" == "$key" ]]; then
+      IFS="$old_ifs"
+      printf '%s' "${entry#*=}"
+      return 0
     fi
-  done < "$input"
-}
-
-wait_for_no_pods() {
-  local -n command_ref=$1
-  local namespace="$2"
-  local selector="$3"
-  local count
-  for _ in $(seq 1 60); do
-    count="$("${command_ref[@]}" get pods -n "$namespace" -l "$selector" -o json |
-      jq '.items | length')"
-    [[ "$count" == "0" ]] && return 0
-    sleep 5
   done
+  IFS="$old_ifs"
   return 1
 }
 
-delete_watchdog() {
-  "${azure_kubectl[@]}" delete job "$watchdog_name" -n "$AZURE_NAMESPACE" --ignore-not-found >/dev/null || true
-  "${azure_kubectl[@]}" delete configmap "$watchdog_name" -n "$AZURE_NAMESPACE" --ignore-not-found >/dev/null || true
-  "${azure_kubectl[@]}" delete serviceaccount "$watchdog_name" -n "$AZURE_NAMESPACE" --ignore-not-found >/dev/null || true
-  "${azure_kubectl[@]}" delete clusterrolebinding "$watchdog_name" --ignore-not-found >/dev/null || true
-  "${azure_kubectl[@]}" delete clusterrole "$watchdog_name" --ignore-not-found >/dev/null || true
-  watchdog_armed=0
+wait_deployment_zero() {
+  local provider="$1"
+  local namespace="$2"
+  local deployment="$3"
+  local selector="$4"
+  local attempt state desired available ready pods
+  for attempt in $(seq 1 60); do
+    state="$(kube_capture "$provider" workload-read 30 2 \
+      get deployment "$deployment" -n "$namespace" \
+      -o jsonpath='{.spec.replicas}|{.status.availableReplicas}|{.status.readyReplicas}')"
+    IFS='|' read -r desired available ready <<<"$state"
+    available="${available:-0}"
+    ready="${ready:-0}"
+    pods="$(
+      kube_capture "$provider" pod-read 30 2 \
+        get pods -n "$namespace" -l "$selector" -o json |
+        migration_raw pod-count 30 1 jq '.items | length'
+    )"
+    if [[ "$desired" == "0" && "$available" == "0" &&
+          "$ready" == "0" && "$pods" == "0" ]]; then
+      return 0
+    fi
+    migration_sleep 5
+  done
+  migration_die "$provider deployment did not reach zero: $deployment"
 }
 
-release_lock() {
-  local -n command_ref=$1
+scale_deployment() {
+  local provider="$1"
   local namespace="$2"
-  local name="$3"
-  local lock_json
-  lock_json="$("${command_ref[@]}" get configmap "$name" -n "$namespace" -o json 2>/dev/null)" ||
+  local deployment="$3"
+  local replicas="$4"
+  kube_run "$provider" workload-scale "$COMMAND_TIMEOUT_SECONDS" 2 \
+    scale deployment "$deployment" -n "$namespace" --replicas "$replicas" >/dev/null
+}
+
+freeze_ingress() {
+  local provider="$1"
+  scale_deployment "$provider" ingress-nginx ingress-nginx-controller 0
+  wait_deployment_zero "$provider" ingress-nginx ingress-nginx-controller \
+    app.kubernetes.io/component=controller
+}
+
+freeze_applications() {
+  local provider="$1"
+  local namespace service
+  namespace="$(provider_namespace "$provider")"
+  for service in "${APP_SERVICES[@]}"; do
+    scale_deployment "$provider" "$namespace" "gaming-${service}-depl" 0
+  done
+  for service in "${APP_SERVICES[@]}"; do
+    wait_deployment_zero "$provider" "$namespace" "gaming-${service}-depl" \
+      "app=gaming-${service}"
+  done
+}
+
+rabbit_queue_rows() {
+  local provider="$1"
+  local namespace pod output
+  namespace="$(provider_namespace "$provider")"
+  pod="$(kube_capture "$provider" rabbitmq-pod 30 2 \
+    get pods -n "$namespace" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$pod" ]] || migration_die "$provider RabbitMQ pod is missing"
+  output="$(kube_capture "$provider" rabbitmq-queues 60 2 \
+    exec -n "$namespace" "$pod" -- \
+    rabbitmqctl list_queues --quiet \
+      name messages_ready messages_unacknowledged consumers)"
+  oci_rabbitmq_queue_rows <<<"$output" ||
+    migration_die "$provider RabbitMQ queue output is malformed"
+}
+
+drain_queues() {
+  local provider="$1"
+  local attempt rows names expected count backlog bad_consumers
+  expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
+  for attempt in $(seq 1 "$QUEUE_DRAIN_ATTEMPTS"); do
+    rows="$(rabbit_queue_rows "$provider")"
+    count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+    names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
+    [[ "$count" == "17" && "$names" == "$expected" ]] ||
+      migration_die "$provider RabbitMQ topology differs from the exact 17-queue baseline"
+    backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+    bad_consumers="$(
+      awk '($2 != 0 || $3 != 0) && $4 < 1 {bad++} END {print bad+0}' <<<"$rows"
+    )"
+    [[ "$bad_consumers" == "0" ]] ||
+      migration_die "$provider RabbitMQ has queued messages without consumers"
+    [[ "$backlog" == "0" ]] && return 0
+    migration_sleep "$QUEUE_DRAIN_SLEEP_SECONDS"
+  done
+  migration_die "$provider RabbitMQ did not drain before the bounded deadline"
+}
+
+applications_are_zero() {
+  local provider="$1"
+  local namespace service replicas
+  namespace="$(provider_namespace "$provider")"
+  for service in "${APP_SERVICES[@]}"; do
+    replicas="$(kube_capture "$provider" workload-read 30 2 \
+      get deployment "gaming-${service}-depl" -n "$namespace" \
+      -o jsonpath='{.spec.replicas}')"
+    [[ "$replicas" == "0" ]] || return 1
+  done
+}
+
+verify_frozen_source_queues() {
+  local rows count backlog names expected
+  rows="$(rabbit_queue_rows azure)"
+  count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+  backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+  [[ "$backlog" == "0" ]] ||
+    migration_die "frozen Azure retry source has a RabbitMQ backlog"
+  if [[ "$count" == "17" ]]; then
+    names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
+    expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
+    [[ "$names" == "$expected" ]] ||
+      migration_die "frozen Azure retry queue names differ"
+  else
+    [[ "$count" == "0" ]] ||
+      migration_die "frozen Azure retry has a partial RabbitMQ topology"
+  fi
+}
+
+mongo_eval() {
+  local provider="$1"
+  local pod="$2"
+  local script="$3"
+  kube_capture "$provider" mongo-read "$COMMAND_TIMEOUT_SECONDS" 2 \
+    exec -n "$(provider_namespace "$provider")" "$pod" -- \
+    mongosh --quiet --eval "$script"
+}
+
+target_write_lock_status() {
+  mongo_eval oci "$target_mongo_pod" '
+    print(db.getSiblingDB("admin").currentOp().fsyncLock === true);
+  '
+}
+
+lock_target_writes() {
+  local result
+  [[ "$(target_write_lock_status)" == "false" ]] ||
+    migration_die "OCI Mongo write lock was already active unexpectedly"
+  result="$(mongo_eval oci "$target_mongo_pod" '
+    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsync:1,lock:true})));
+  ')"
+  migration_raw mongo-write-lock 30 1 jq -e \
+    '.ok == 1 and .lockCount >= 1' <<<"$result" >/dev/null ||
+    migration_die "OCI Mongo could not enter read-only cutover validation"
+  [[ "$(target_write_lock_status)" == "true" ]] ||
+    migration_die "OCI Mongo write lock is not active"
+  state_advance target-write-locked true true "mongo-write-lock=true"
+}
+
+unlock_target_writes() {
+  local result
+  if [[ "$(target_write_lock_status)" == "false" ]]; then
     return 0
-  jq -e --arg migration "$MIGRATION_ID" --arg sha "$SOURCE_SHA" '
-    .data["migration-id"] == $migration and .data["source-sha"] == $sha
-  ' <<<"$lock_json" >/dev/null || return 1
-  "${command_ref[@]}" delete configmap "$name" -n "$namespace" >/dev/null
+  fi
+  result="$(mongo_eval oci "$target_mongo_pod" '
+    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsyncUnlock:1})));
+  ')"
+  migration_raw mongo-write-unlock 30 1 jq -e \
+    '.ok == 1 and .lockCount == 0' <<<"$result" >/dev/null ||
+    migration_die "OCI Mongo write lock could not be released"
+  [[ "$(target_write_lock_status)" == "false" ]] ||
+    migration_die "OCI Mongo remained write-locked after activation"
 }
 
-restore_azure() {
-  local failed=0
-  if [[ -f "$replicas_file" && -f "$WORK_DIR/azure-ingress-replicas" ]]; then
-    restore_replicas azure_kubectl "$AZURE_NAMESPACE" "$replicas_file" || failed=1
-    ingress_replicas="$(cat "$WORK_DIR/azure-ingress-replicas")"
-    "${azure_kubectl[@]}" scale deployment ingress-nginx-controller -n ingress-nginx \
-      --replicas "$ingress_replicas" >/dev/null || failed=1
-    if (( ingress_replicas > 0 )); then
-      "${azure_kubectl[@]}" rollout status deployment/ingress-nginx-controller \
-        -n ingress-nginx --timeout=8m || failed=1
-    fi
-    if [[ "$failed" == "0" ]]; then
-      source_restored=1
-      return 0
-    fi
+unlock_target_writes_for_retry() {
+  target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$target_mongo_pod" ]] ||
+    migration_die "OCI Mongo pod is unavailable for retry preparation"
+  if [[ "$(target_write_lock_status)" == "true" ]]; then
+    unlock_target_writes
+    state_advance retry-write-lock-released true true \
+      "mongo-write-lock=false"
   fi
-  return 1
 }
 
-restore_oci() {
-  local failed=0
-  if [[ -f "$target_replicas_file" && -f "$WORK_DIR/oci-ingress-replicas" ]]; then
-    restore_replicas oci_kubectl "$OCI_K8S_NAMESPACE" "$target_replicas_file" || failed=1
-    oci_ingress_replicas="$(cat "$WORK_DIR/oci-ingress-replicas")"
-    "${oci_kubectl[@]}" scale deployment ingress-nginx-controller -n ingress-nginx \
-      --replicas "$oci_ingress_replicas" >/dev/null || failed=1
-    if (( oci_ingress_replicas > 0 )); then
-      "${oci_kubectl[@]}" rollout status deployment/ingress-nginx-controller \
-        -n ingress-nginx --timeout=8m || failed=1
+rabbitmq_write_permission() {
+  local pod output
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$pod" ]] ||
+    migration_die "OCI RabbitMQ pod is missing for permission validation"
+  output="$(kube_capture oci rabbitmq-permissions 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl list_user_permissions guest)"
+  awk '
+    $1 == "/" && NF == 4 { print $3; found++ }
+    END { if (found != 1) exit 1 }
+  ' <<<"$output" ||
+    migration_die "OCI RabbitMQ guest permissions are malformed"
+}
+
+lock_rabbitmq_writes() {
+  local pod
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  kube_run oci rabbitmq-write-lock 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl set_permissions -p / guest '.*' '^$' '.*' >/dev/null
+  [[ "$(rabbitmq_write_permission)" == "^$" ]] ||
+    migration_die "OCI RabbitMQ publish permission remained enabled"
+  state_advance messaging-write-locked true true \
+    "mongo-write-lock=true" "rabbitmq-write-lock=true"
+}
+
+unlock_rabbitmq_writes() {
+  local pod
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  kube_run oci rabbitmq-write-unlock 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl set_permissions -p / guest '.*' '.*' '.*' >/dev/null
+  [[ "$(rabbitmq_write_permission)" == ".*" ]] ||
+    migration_die "OCI RabbitMQ publish permission was not restored"
+}
+
+mongo_runtime() {
+  mongo_eval "$1" "$2" '
+    const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
+    if (result.ok !== 1) throw new Error("FCV read failed");
+    print(JSON.stringify({
+      version:db.version(),
+      majorMinor:db.version().split(".").slice(0,2).join("."),
+      fcv:result.featureCompatibilityVersion.version
+    }));
+  '
+}
+
+mongo_non_system_databases() {
+  mongo_eval "$1" "$2" '
+    const system=new Set(["admin","config","local"]);
+    const result=db.adminCommand({listDatabases:1,nameOnly:true});
+    print(JSON.stringify(
+      result.databases.map(item=>item.name).filter(name=>!system.has(name)).sort()
+    ));
+  '
+}
+
+deployment_mongo_uri() {
+  local provider="$1"
+  local service="$2"
+  kube_capture "$provider" deployment-mapping 30 2 \
+    get deployment "gaming-${service}-depl" \
+    -n "$(provider_namespace "$provider")" -o json |
+    migration_raw deployment-mapping 30 1 jq -r \
+      --arg container "gaming-${service}" '
+        [
+          .spec.template.spec.containers[] |
+          select(.name == $container) |
+          .env[]? |
+          select(.name == "MONGO_URI") |
+          .value
+        ] |
+        if length == 1 then .[0] else "" end
+      '
+}
+
+expected_database_json() {
+  printf '%s\n' "${DATABASE_MAPPINGS[@]}" |
+    awk -F'|' '{print $2}' |
+    LC_ALL=C sort |
+    migration_raw database-json 30 1 jq -Rsc \
+      'split("\n") | map(select(length > 0))'
+}
+
+mongo_signature_kube() {
+  local provider="$1"
+  local pod="$2"
+  local database="$3"
+  local output="$4"
+  local script_file="$signature_dir/${database}.script.js"
+  {
+    printf 'const DB_NAME = "%s";\n' "$database"
+    cat "$SIGNATURE_SCRIPT"
+  } >"$script_file"
+  kube_raw "$provider" mongo-signature "$MONGO_VALIDATION_TIMEOUT_SECONDS" 2 \
+    exec -i -n "$(provider_namespace "$provider")" "$pod" -- \
+    mongosh --quiet <"$script_file" >"$output"
+  [[ -s "$output" ]] || migration_die "empty canonical signature for $database"
+  migration_raw signature-json 30 1 jq -e . "$output" >/dev/null ||
+    migration_die "invalid canonical signature for $database"
+  rm -f "$script_file"
+}
+
+mongo_signature_docker() {
+  local database="$1"
+  local output="$2"
+  local script_file="$signature_dir/${database}.disposable.js"
+  {
+    printf 'const DB_NAME = "%s";\n' "$database"
+    cat "$SIGNATURE_SCRIPT"
+  } >"$script_file"
+  migration_raw disposable-signature "$MONGO_VALIDATION_TIMEOUT_SECONDS" 2 \
+    docker exec -i "$disposable_container" mongosh --quiet \
+    <"$script_file" >"$output"
+  [[ -s "$output" ]] || migration_die "empty disposable signature for $database"
+  migration_raw signature-json 30 1 jq -e . "$output" >/dev/null ||
+    migration_die "invalid disposable signature for $database"
+  rm -f "$script_file"
+}
+
+validate_source_topology() {
+  local statefulsets expected_count=0 mapping service database sts pod pvc
+  local sts_json pod_json claim phase runtime digest non_system expected_json
+  local runtime_reference="" digest_reference="" source_pvcs target_statefulsets
+  local expected_uri actual_uri
+  statefulsets="$(kube_capture azure source-statefulsets 30 2 \
+    get statefulsets -n "$AZURE_NAMESPACE" -o json)"
+  expected_count="$(
+    migration_raw source-statefulsets 30 1 jq '
+      [.items[] | select(.metadata.name | test(
+        "^gaming-(auth|bet|backoffice|event|gamemaster|moderation|resulting|slip)-mongo-depl$"
+      ))] | length
+    ' <<<"$statefulsets"
+  )"
+  [[ "$expected_count" == "8" ]] ||
+    migration_die "Azure must contain all eight exact Mongo StatefulSets"
+  [[ "$(migration_raw source-statefulsets 30 1 jq \
+    '[.items[] | select(.metadata.name | test("mongo"))] | length' \
+    <<<"$statefulsets")" == "8" ]] ||
+    migration_die "Azure contains an unknown Mongo StatefulSet"
+  source_pvcs="$(kube_capture azure source-pvcs 30 2 \
+    get persistentvolumeclaims -n "$AZURE_NAMESPACE" -o json)"
+  [[ "$(migration_raw source-pvcs 30 1 jq \
+    '[.items[] | select(.metadata.name | test("mongo-data"))] | length' \
+    <<<"$source_pvcs")" == "8" ]] ||
+    migration_die "Azure must contain exactly eight Mongo PVCs"
+
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r service database sts pod pvc <<<"$mapping"
+    expected_uri="mongodb://gaming-${service}-mongo-srv:27017/${database}"
+    actual_uri="$(deployment_mongo_uri azure "$service")"
+    [[ "$actual_uri" == "$expected_uri" ]] ||
+      migration_die "Azure application/database mapping differs for $service"
+    sts_json="$(kube_capture azure source-statefulset 30 2 \
+      get statefulset "$sts" -n "$AZURE_NAMESPACE" -o json)"
+    migration_raw source-statefulset 30 1 jq -e \
+      --arg pod "$pod" --arg pvc "$pvc" '
+        .spec.replicas == 1 and
+        (.status.readyReplicas // 0) == 1 and
+        (.spec.volumeClaimTemplates | length) == 1 and
+        (.spec.template.spec.containers | length) == 1 and
+        .spec.template.spec.containers[0].volumeMounts[0].mountPath == "/data/db"
+      ' <<<"$sts_json" >/dev/null ||
+      migration_die "Azure Mongo StatefulSet mapping is invalid: $sts"
+    phase="$(kube_capture azure source-pvc 30 2 \
+      get pvc "$pvc" -n "$AZURE_NAMESPACE" -o jsonpath='{.status.phase}')"
+    [[ "$phase" == "Bound" ]] || migration_die "Azure PVC is not Bound: $pvc"
+    claim="$(kube_capture azure source-pod 30 2 \
+      get pod "$pod" -n "$AZURE_NAMESPACE" \
+      -o jsonpath='{.spec.volumes[?(@.name=="'"${sts%-depl}"'-data")].persistentVolumeClaim.claimName}')"
+    [[ "$claim" == "$pvc" ]] ||
+      migration_die "Azure Mongo pod/PVC mapping differs for $database"
+    pod_json="$(kube_capture azure source-pod 30 2 \
+      get pod "$pod" -n "$AZURE_NAMESPACE" -o json)"
+    migration_raw source-pod 30 1 jq -e '
+      ([.status.conditions[] | select(.type == "Ready" and .status == "True")] | length) == 1
+    ' <<<"$pod_json" >/dev/null ||
+      migration_die "Azure Mongo pod is not Ready: $pod"
+    digest="$(migration_raw source-pod 30 1 jq -r \
+      '.status.containerStatuses[0].imageID // empty' <<<"$pod_json")"
+    [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]] ||
+      migration_die "Azure Mongo image digest is not immutable: $pod"
+    if [[ -z "$digest_reference" ]]; then
+      digest_reference="$digest"
+    else
+      [[ "$digest" == "$digest_reference" ]] ||
+        migration_die "Azure Mongo image digests differ"
     fi
-    if [[ "$failed" == "0" ]]; then
-      target_restored=1
+    runtime="$(mongo_runtime azure "$pod")"
+    migration_raw mongo-runtime 30 1 jq -e \
+      '.majorMinor != null and .fcv != null' <<<"$runtime" >/dev/null ||
+      migration_die "Azure Mongo version/FCV is unreadable: $pod"
+    if [[ -z "$runtime_reference" ]]; then
+      runtime_reference="$(migration_raw mongo-runtime 30 1 jq -c \
+        '{majorMinor,fcv}' <<<"$runtime")"
+    else
+      [[ "$(migration_raw mongo-runtime 30 1 jq -c \
+        '{majorMinor,fcv}' <<<"$runtime")" == "$runtime_reference" ]] ||
+        migration_die "Azure Mongo version/FCV differs across sources"
+    fi
+    non_system="$(mongo_non_system_databases azure "$pod")"
+    expected_json="$(migration_raw database-json 30 1 jq -cn --arg database "$database" \
+      '[$database]')"
+    [[ "$non_system" == "$expected_json" ]] ||
+      migration_die "Azure source inventory is not exact for $database"
+  done
+
+  target_statefulsets="$(kube_capture oci target-statefulsets 30 2 \
+    get statefulsets -n "$OCI_K8S_NAMESPACE" -o json)"
+  [[ "$(migration_raw target-statefulsets 30 1 jq \
+    '[.items[] | select(.metadata.name | test("mongo"))] | length' \
+    <<<"$target_statefulsets")" == "1" ]] ||
+    migration_die "OCI target must contain exactly one Mongo StatefulSet"
+  migration_raw target-statefulsets 30 1 jq -e '
+    [.items[] | select(
+      .metadata.name == "gaming-auth-mongo-depl" and
+      .spec.replicas == 1 and
+      (.status.readyReplicas // 0) == 1
+    )] | length == 1
+  ' <<<"$target_statefulsets" >/dev/null ||
+    migration_die "OCI target Mongo StatefulSet is not exactly ready"
+  [[ "$(kube_capture oci target-pvc 30 2 \
+    get pvc gaming-auth-mongo-data -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.status.phase}')" == "Bound" ]] ||
+    migration_die "OCI target Mongo PVC is not Bound"
+  target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$target_mongo_pod" ]] || migration_die "OCI Mongo pod is missing"
+  target_mongo_image="$(kube_capture oci target-image 30 2 \
+    get statefulset gaming-auth-mongo-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  [[ "$target_mongo_image" =~ @sha256:[0-9a-f]{64}$ ]] ||
+    migration_die "OCI Mongo image must be digest-pinned"
+  digest="$(kube_capture oci target-image 30 2 \
+    get pod "$target_mongo_pod" -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.status.containerStatuses[0].imageID}')"
+  [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]] ||
+    migration_die "OCI running Mongo image digest is not immutable"
+  target_runtime_signature="$(mongo_runtime oci "$target_mongo_pod")"
+  [[ "$(migration_raw mongo-runtime 30 1 jq -c \
+    '{majorMinor,fcv}' <<<"$target_runtime_signature")" == "$runtime_reference" ]] ||
+    migration_die "Azure and OCI Mongo major version/FCV differ"
+  non_system="$(mongo_non_system_databases oci "$target_mongo_pod")"
+  migration_raw target-inventory 30 1 jq -e \
+    --argjson expected "$(expected_database_json)" '
+      all(.[]; $expected | index(.) != null)
+    ' <<<"$non_system" >/dev/null ||
+    migration_die "OCI contains a non-allowlisted application database"
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r service database _sts _pod _pvc <<<"$mapping"
+    expected_uri="mongodb://gaming-shared-mongo-srv:27017/${database}"
+    actual_uri="$(deployment_mongo_uri oci "$service")"
+    [[ "$actual_uri" == "$expected_uri" ]] ||
+      migration_die "OCI application/database mapping differs for $service"
+  done
+}
+
+verify_source_mongo_stays_ready() {
+  local mapping _service _database sts _pod _pvc ready replicas
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service _database sts _pod _pvc <<<"$mapping"
+    replicas="$(kube_capture azure source-mongo-read 30 2 \
+      get statefulset "$sts" -n "$AZURE_NAMESPACE" -o jsonpath='{.spec.replicas}')"
+    ready="$(kube_capture azure source-mongo-read 30 2 \
+      get statefulset "$sts" -n "$AZURE_NAMESPACE" \
+      -o jsonpath='{.status.readyReplicas}')"
+    [[ "$replicas" == "1" && "$ready" == "1" ]] ||
+      migration_die "Azure Mongo StatefulSet changed during freeze: $sts"
+  done
+}
+
+freeze_azure() {
+  local already_frozen=0
+  applications_are_zero azure && already_frozen=1
+  freeze_ingress azure
+  migration_failure_hook azure-freeze
+  if [[ "$already_frozen" == "1" ]]; then
+    verify_frozen_source_queues
+  else
+    drain_queues azure
+  fi
+  migration_failure_hook source-queue-drain
+  freeze_applications azure
+  verify_source_mongo_stays_ready
+}
+
+database_size_bytes() {
+  local provider="$1"
+  local pod="$2"
+  local database="$3"
+  mongo_eval "$provider" "$pod" "
+    const result=db.getSiblingDB('${database}').stats(1);
+    if (result.ok !== 1) throw new Error('stats failed');
+    print(Math.ceil(
+      (result.dataSize || 0) + (result.indexSize || result.totalIndexSize || 0)
+    ));
+  "
+}
+
+runner_capacity_gate() {
+  local total=0 mapping _service database _sts pod _pvc bytes available required
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts pod _pvc <<<"$mapping"
+    bytes="$(database_size_bytes azure "$pod" "$database")"
+    [[ "$bytes" =~ ^[0-9]+$ ]] ||
+      migration_die "invalid source size for $database"
+    total=$((total + bytes))
+  done
+  available="$(
+    migration_raw runner-capacity 30 1 df -Pk "$WORK_DIR" |
+      awk 'NR == 2 {print $4 * 1024}'
+  )"
+  [[ "$available" =~ ^[0-9]+$ ]] ||
+    migration_die "runner free capacity is unreadable"
+  required=$((total * RUNNER_CAPACITY_MULTIPLIER + RUNNER_CAPACITY_RESERVE_BYTES))
+  (( available >= required )) ||
+    migration_die "runner capacity gate rejected all-eight encrypted transport staging"
+  printf '%s' "$required" >"$WORK_DIR/disposable-capacity-bytes"
+  migration_failure_hook runner-capacity
+}
+
+capture_transfers() {
+  local manifest="$WORK_DIR/transfer-manifest.tsv"
+  local signature_manifest="$WORK_DIR/signature-manifest.tsv"
+  local mapping _service database _sts pod _pvc signature archive
+  local cipher_hash signature_hash
+  : >"$manifest"
+  : >"$signature_manifest"
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts pod _pvc <<<"$mapping"
+    signature="$signature_dir/${database}.source.json"
+    archive="$transport_dir/${database}.archive.gz.age"
+    mongo_signature_kube azure "$pod" "$database" "$signature"
+    migration_maybe_heartbeat 1
+    kube_raw azure mongo-transport "$STREAM_TIMEOUT_SECONDS" 1 \
+      exec -n "$AZURE_NAMESPACE" "$pod" -- \
+      mongodump --quiet --archive --gzip --db "$database" |
+      migration_raw transport-encryption "$STREAM_TIMEOUT_SECONDS" 1 \
+        age --encrypt --recipient "$OCI_MIGRATION_AGE_RECIPIENT" \
+        --output "$archive"
+    local statuses=("${PIPESTATUS[@]}")
+    [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" && -s "$archive" ]] ||
+      migration_die "encrypted compressed transport capture failed for $database"
+    migration_maybe_heartbeat 1
+    cipher_hash="$(migration_sha256 <"$archive")"
+    signature_hash="$(migration_sha256 <"$signature")"
+    printf '%s\t%s\t%s\n' "$database" "$cipher_hash" "$signature_hash" >>"$manifest"
+    printf '%s\t%s\n' "$database" "$signature_hash" >>"$signature_manifest"
+  done
+  [[ "$(wc -l <"$manifest" | tr -d ' ')" == "8" ]] ||
+    migration_die "transport manifest does not contain all eight databases"
+  state_advance source-captured "$(state_boundary_text)" "$(state_recovery_text)" \
+    "transfer-manifest-sha256=$(migration_sha256 <"$manifest")" \
+    "signature-manifest-sha256=$(migration_sha256 <"$signature_manifest")"
+  migration_failure_hook archive-capture
+}
+
+wait_disposable_mongo() {
+  local attempt
+  for attempt in $(seq 1 60); do
+    if migration_raw disposable-ping 30 1 \
+      docker exec "$disposable_container" mongosh --quiet \
+      --eval 'quit(db.adminCommand({ping:1}).ok === 1 ? 0 : 1)' \
+      >/dev/null 2>&1; then
       return 0
     fi
+    migration_sleep 2
+  done
+  migration_die "disposable isolated Mongo did not become ready"
+}
+
+validate_transfers_disposable() {
+  local mapping _service database _sts _pod _pvc archive expected actual
+  local disposable_runtime expected_runtime
+  disposable_container="betstan-oci-transfer-${OWNER_RUN_ID}-${OWNER_RUN_ATTEMPT}"
+  disposable_container="${disposable_container:0:63}"
+  disposable_volume="${disposable_container}-data"
+  migration_run disposable-image 300 2 docker pull "$target_mongo_image" >/dev/null
+  migration_run disposable-volume 60 1 \
+    docker volume create "$disposable_volume" >/dev/null
+  migration_run disposable-start 60 1 \
+    docker run -d --name "$disposable_container" \
+    --network none \
+    --mount "type=volume,src=$disposable_volume,dst=/data/db" \
+    "$target_mongo_image" >/dev/null
+  wait_disposable_mongo
+  disposable_runtime="$(migration_raw disposable-runtime 30 1 \
+    docker exec "$disposable_container" mongosh --quiet --eval '
+      const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
+      print(JSON.stringify({
+        majorMinor:db.version().split(".").slice(0,2).join("."),
+        fcv:result.featureCompatibilityVersion.version
+      }));
+    ' | migration_raw disposable-runtime-json 30 1 jq -c .)"
+  expected_runtime="$(migration_raw mongo-runtime 30 1 jq -c \
+    '{majorMinor,fcv}' <<<"$target_runtime_signature")"
+  [[ "$disposable_runtime" == "$expected_runtime" ]] ||
+    migration_die "disposable Mongo version/FCV differs from OCI target"
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
+    archive="$transport_dir/${database}.archive.gz.age"
+    expected="$signature_dir/${database}.source.json"
+    actual="$signature_dir/${database}.disposable.json"
+    migration_maybe_heartbeat 1
+    migration_raw transport-decryption "$STREAM_TIMEOUT_SECONDS" 1 \
+      age --decrypt --identity "$identity_file" "$archive" |
+      migration_raw disposable-restore "$STREAM_TIMEOUT_SECONDS" 1 \
+        docker exec -i "$disposable_container" \
+        mongorestore --quiet --archive --gzip --stopOnError \
+          --nsInclude="${database}.*"
+    local statuses=("${PIPESTATUS[@]}")
+    [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]] ||
+      migration_die "disposable restore rejected transport for $database"
+    mongo_signature_docker "$database" "$actual"
+    cmp -s "$expected" "$actual" ||
+      migration_die "disposable canonical equality failed for $database"
+  done
+  [[ "$(migration_raw disposable-inventory 30 1 \
+    docker exec "$disposable_container" mongosh --quiet --eval '
+      const system=new Set(["admin","config","local"]);
+      const result=db.adminCommand({listDatabases:1,nameOnly:true});
+      print(JSON.stringify(
+        result.databases.map(item=>item.name).filter(name=>!system.has(name)).sort()
+      ));
+    ')" == "$(expected_database_json)" ]] ||
+    migration_die "disposable database inventory is not exact"
+  migration_failure_hook corrupt-archive
+  migration_failure_hook disposable-validation
+  migration_run disposable-delete 60 2 docker rm -f "$disposable_container" >/dev/null
+  disposable_container=""
+  migration_run disposable-volume-delete 60 2 \
+    docker volume rm "$disposable_volume" >/dev/null
+  disposable_volume=""
+  state_advance transfers-disposable-validated \
+    "$(state_boundary_text)" "$(state_recovery_text)"
+}
+
+freeze_oci() {
+  local already_frozen=0
+  local rabbit_replicas rows backlog
+  applications_are_zero oci && already_frozen=1
+  oci_frozen=1
+  freeze_ingress oci
+  if [[ "$already_frozen" == "1" ]]; then
+    rabbit_replicas="$(kube_capture oci workload-read 30 2 \
+      get deployment gaming-rabbitmq-depl -n "$OCI_K8S_NAMESPACE" \
+      -o jsonpath='{.spec.replicas}')"
+    if [[ "$rabbit_replicas" != "0" ]]; then
+      rows="$(rabbit_queue_rows oci)"
+      backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+      [[ "$backlog" == "0" ]] ||
+        migration_die "closed OCI retry has a RabbitMQ backlog"
+    fi
+  else
+    drain_queues oci
   fi
-  return 1
+  migration_failure_hook target-queue-drain
+  freeze_applications oci
+  if [[ "$(kube_capture oci workload-read 30 2 \
+    get deployment gaming-rabbitmq-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.replicas}')" != "0" ]]; then
+    rows="$(rabbit_queue_rows oci)"
+    backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+    [[ "$backlog" == "0" ]] || migration_die "OCI RabbitMQ backlog is not zero"
+  fi
+  state_advance oci-writers-frozen \
+    "$(state_boundary_text)" "$(state_recovery_text)"
+  migration_failure_hook oci-freeze
+}
+
+drop_target_databases() {
+  local inventory mapping _service database _sts _pod _pvc result
+  inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
+  migration_raw target-inventory 30 1 jq -e \
+    --argjson expected "$(expected_database_json)" '
+      all(.[]; $expected | index(.) != null)
+    ' <<<"$inventory" >/dev/null ||
+    migration_die "OCI contains a non-allowlisted database before destructive replacement"
+  state_advance destructive-boundary true true
+  migration_failure_hook post-boundary-cancellation
+  migration_failure_hook post-boundary-hang
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
+    state_assert_fence
+    migration_failure_hook "before-drop-$database"
+    result="$(mongo_eval oci "$target_mongo_pod" \
+      "print(JSON.stringify(db.getSiblingDB('${database}').dropDatabase()));")"
+    migration_raw drop-result 30 1 jq -e '.ok == 1' <<<"$result" >/dev/null ||
+      migration_die "OCI database drop did not succeed: $database"
+    [[ "$(mongo_eval oci "$target_mongo_pod" "
+      print(db.adminCommand({listDatabases:1,nameOnly:true}).databases
+        .some(item=>item.name==='${database}'));
+    ")" == "false" ]] ||
+      migration_die "OCI database remains visible after drop: $database"
+    state_advance "dropped-$database" true true
+    migration_failure_hook "after-drop-$database"
+  done
+}
+
+restore_target_databases() {
+  local mapping _service database _sts _pod _pvc archive
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
+    archive="$transport_dir/${database}.archive.gz.age"
+    state_assert_fence
+    migration_failure_hook "before-restore-$database"
+    migration_maybe_heartbeat 1
+    migration_raw transport-decryption "$STREAM_TIMEOUT_SECONDS" 1 \
+      age --decrypt --identity "$identity_file" "$archive" |
+      kube_raw oci target-restore "$STREAM_TIMEOUT_SECONDS" 1 \
+        exec -i -n "$OCI_K8S_NAMESPACE" "$target_mongo_pod" -- \
+        mongorestore --quiet --archive --gzip --stopOnError \
+          --nsInclude="${database}.*"
+    local statuses=("${PIPESTATUS[@]}")
+    [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]] ||
+      migration_die "OCI restore failed for $database"
+    state_advance "restored-$database" true true
+    migration_failure_hook "after-restore-$database"
+  done
+}
+
+verify_target_exact() {
+  local inventory mapping _service database _sts _pod _pvc expected actual
+  local signature_hash source_aggregate target_aggregate
+  local signature_args=()
+  local target_manifest="$WORK_DIR/target-signature-manifest.tsv"
+  : >"$target_manifest"
+  inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
+  [[ "$inventory" == "$(expected_database_json)" ]] ||
+    migration_die "OCI application database inventory is not the exact eight-name set"
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
+    expected="$signature_dir/${database}.source.json"
+    actual="$signature_dir/${database}.target.json"
+    mongo_signature_kube oci "$target_mongo_pod" "$database" "$actual"
+    cmp -s "$expected" "$actual" ||
+      migration_die "OCI DB/collection/document/index/validator/options equality failed: $database"
+    signature_hash="$(migration_sha256 <"$actual")"
+    signature_args+=("signature-$database=$signature_hash")
+    printf '%s\t%s\n' "$database" "$signature_hash" >>"$target_manifest"
+  done
+  source_aggregate="$(state_value signature-manifest-sha256)"
+  target_aggregate="$(migration_sha256 <"$target_manifest")"
+  [[ "$source_aggregate" =~ ^[0-9a-f]{64}$ &&
+    "$target_aggregate" == "$source_aggregate" ]] ||
+    migration_die "aggregate source/target signature parity failed"
+  state_advance target-exactly-validated true true \
+    "database-count=8" \
+    "logical-parity=true" \
+    "target-signature-manifest-sha256=$target_aggregate" \
+    "${signature_args[@]}"
+}
+
+restore_oci_baseline() {
+  local service replicas ingress rabbit
+  rabbit="$(baseline_value "$oci_baseline" rabbitmq)"
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl "$rabbit"
+  if (( rabbit > 0 )); then
+    kube_run oci rabbitmq-rollout 600 1 \
+      rollout status deployment/gaming-rabbitmq-depl \
+      -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  fi
+  for service in "${APP_SERVICES[@]}"; do
+    replicas="$(baseline_value "$oci_baseline" "$service")"
+    scale_deployment oci "$OCI_K8S_NAMESPACE" "gaming-${service}-depl" "$replicas"
+    if (( replicas > 0 )); then
+      kube_run oci workload-rollout 600 1 \
+        rollout status "deployment/gaming-${service}-depl" \
+        -n "$OCI_K8S_NAMESPACE" --timeout=9m
+    fi
+  done
+  ingress="$(baseline_value "$oci_baseline" ingress)"
+  scale_deployment oci ingress-nginx ingress-nginx-controller "$ingress"
+  if (( ingress > 0 )); then
+    kube_run oci ingress-rollout 600 1 \
+      rollout status deployment/ingress-nginx-controller \
+      -n ingress-nginx --timeout=9m
+  fi
+  oci_frozen=0
+}
+
+close_oci() {
+  freeze_ingress oci
+  freeze_applications oci
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
+  wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
+    app=gaming-rabbitmq
+  oci_frozen=1
+}
+
+recreate_rabbitmq_and_restart() {
+  local service replicas ingress rows count names expected backlog bad
+  state_assert_fence
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
+  wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
+    app=gaming-rabbitmq
+  replicas="$(baseline_value "$oci_baseline" rabbitmq)"
+  [[ "$replicas" == "1" ]] ||
+    migration_die "OCI RabbitMQ baseline must be exactly one replica"
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 1
+  kube_run oci rabbitmq-rollout 600 1 \
+    rollout status deployment/gaming-rabbitmq-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  state_advance rabbitmq-recreated true true "rabbitmq-write-lock=false"
+  migration_failure_hook rabbitmq-recreate
+
+  for service in "${BACKEND_SERVICES[@]}" client; do
+    state_assert_fence
+    replicas="$(baseline_value "$oci_baseline" "$service")"
+    [[ "$replicas" =~ ^[1-9][0-9]*$ ]] ||
+      migration_die "OCI successful baseline requires active $service replicas"
+    scale_deployment oci "$OCI_K8S_NAMESPACE" "gaming-${service}-depl" "$replicas"
+    kube_run oci workload-rollout 600 1 \
+      rollout status "deployment/gaming-${service}-depl" \
+      -n "$OCI_K8S_NAMESPACE" --timeout=9m
+    state_advance "restarted-$service" true true
+    migration_failure_hook "restart-$service"
+  done
+
+  rows="$(rabbit_queue_rows oci)"
+  count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+  names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
+  expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
+  backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+  bad="$(awk '$4 < 1 {bad++} END {print bad+0}' <<<"$rows")"
+  [[ "$count" == "17" && "$names" == "$expected" &&
+    "$backlog" == "0" && "$bad" == "0" ]] ||
+    migration_die "OCI RabbitMQ is not exact after sequential consumer restart"
+  lock_rabbitmq_writes
+
+  ingress="$(baseline_value "$oci_baseline" ingress)"
+  [[ "$ingress" =~ ^[1-9][0-9]*$ ]] ||
+    migration_die "OCI ingress baseline must be active for validation"
+  state_assert_fence
+  scale_deployment oci ingress-nginx ingress-nginx-controller "$ingress"
+  kube_run oci ingress-rollout 600 1 \
+    rollout status deployment/ingress-nginx-controller \
+    -n ingress-nginx --timeout=9m
+  state_advance awaiting-protected-health true true
+}
+
+verify_final_exact_state() {
+  local mapping _service database _sts _pod _pvc actual expected
+  local service replicas desired ingress rows names expected_names count backlog bad
+  local inventory ingress_state
+  target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+    -o jsonpath='{.items[0].metadata.name}')"
+  inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
+  [[ "$inventory" == "$(expected_database_json)" ]] ||
+    migration_die "final OCI database inventory is not exact"
+  mkdir -p "$signature_dir"
+  for mapping in "${DATABASE_MAPPINGS[@]}"; do
+    IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
+    actual="$signature_dir/${database}.final.json"
+    mongo_signature_kube oci "$target_mongo_pod" "$database" "$actual"
+    expected="$(state_value "signature-$database")"
+    [[ -n "$expected" && "$(migration_sha256 <"$actual")" == "$expected" ]] ||
+      migration_die "final canonical signature differs for $database"
+  done
+  for service in "${APP_SERVICES[@]}"; do
+    replicas="$(baseline_value "$oci_baseline" "$service")"
+    desired="$(kube_capture oci final-workload 30 2 \
+      get deployment "gaming-${service}-depl" -n "$OCI_K8S_NAMESPACE" \
+      -o jsonpath='{.spec.replicas}|{.status.availableReplicas}')"
+    [[ "$desired" == "$replicas|$replicas" ]] ||
+      migration_die "final OCI deployment replicas differ: $service"
+  done
+  ingress="$(baseline_value "$oci_baseline" ingress)"
+  ingress_state="$(kube_capture oci final-ingress 30 2 \
+    get deployment ingress-nginx-controller -n ingress-nginx \
+    -o jsonpath='{.spec.replicas}|{.status.availableReplicas}')"
+  [[ "$ingress_state" == "$ingress|$ingress" ]] ||
+    migration_die "final OCI ingress replicas differ"
+  rows="$(rabbit_queue_rows oci)"
+  names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
+  expected_names="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
+  count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+  backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+  bad="$(awk '$4 < 1 {bad++} END {print bad+0}' <<<"$rows")"
+  [[ "$count" == "17" && "$names" == "$expected_names" &&
+    "$backlog" == "0" && "$bad" == "0" ]] ||
+    migration_die "final OCI RabbitMQ state differs"
+}
+
+ensure_azure_frozen() {
+  freeze_ingress azure
+  freeze_applications azure
+  verify_source_mongo_stays_ready
 }
 
 cleanup() {
   local status="$1"
+  [[ "$cleanup_running" == "0" ]] || exit "$status"
+  cleanup_running=1
   trap - EXIT INT TERM
   set +e
-  if [[ "$source_restored" != "1" ]]; then
-    restore_azure
+  local cleanup_failed=0
+  local current_phase=""
+  if [[ -n "$disposable_container" ]]; then
+    migration_raw disposable-delete 60 2 \
+      docker rm -f "$disposable_container" >/dev/null 2>&1 ||
+      cleanup_failed=1
   fi
-  if [[ "$target_restored" != "1" && -f "$target_replicas_file" ]]; then
-    restore_oci
+  if [[ -n "$disposable_volume" ]]; then
+    migration_raw disposable-volume-delete 60 2 \
+      docker volume rm "$disposable_volume" >/dev/null 2>&1 ||
+      cleanup_failed=1
   fi
-  if [[ "$watchdog_armed" == "1" && "$source_restored" == "1" ]]; then
-    delete_watchdog
+  if [[ "$operation_success" != "1" && "$state_initialized" == "1" ]]; then
+    current_phase="${last_committed_phase:-$(state_value phase 2>/dev/null || true)}"
+    if [[ "$state_boundary" == "1" ]]; then
+      case "$current_phase" in
+        cutover-committed | cutover-forward-recovery)
+          ensure_azure_frozen || cleanup_failed=1
+          state_advance cutover-forward-recovery true false ||
+            cleanup_failed=1
+          ;;
+        completed)
+          ensure_azure_frozen || cleanup_failed=1
+          ;;
+        *)
+          close_oci || cleanup_failed=1
+          ensure_azure_frozen || cleanup_failed=1
+          state_advance recovery-required true true || cleanup_failed=1
+          ;;
+      esac
+    else
+      local baseline_restore_failed=0
+      if [[ "$oci_frozen" == "1" ]]; then
+        restore_oci_baseline || baseline_restore_failed=1
+      fi
+      ensure_azure_frozen || baseline_restore_failed=1
+      if [[ "$baseline_restore_failed" == "0" ]]; then
+        state_advance failed-before-destructive-boundary false false ||
+          cleanup_failed=1
+        state_release || cleanup_failed=1
+      else
+        close_oci || cleanup_failed=1
+        state_advance pre-destructive-recovery-required false true ||
+          cleanup_failed=1
+        cleanup_failed=1
+      fi
+    fi
+    state_write_summary || cleanup_failed=1
   fi
-  release_lock azure_kubectl "$AZURE_NAMESPACE" "$azure_lock" >/dev/null 2>&1 || true
-  release_lock oci_kubectl "$OCI_K8S_NAMESPACE" "$oci_lock" >/dev/null 2>&1 || true
   rm -rf "$WORK_DIR"
+  if [[ "$cleanup_failed" == "1" && "$status" == "0" ]]; then
+    status=1
+  fi
   exit "$status"
 }
-trap 'cleanup $?' EXIT
-trap 'cleanup 130' INT
-trap 'cleanup 143' TERM
 
-"${azure_kubectl[@]}" create configmap "$azure_lock" -n "$AZURE_NAMESPACE" \
-  --from-literal="migration-id=$MIGRATION_ID" \
-  --from-literal="source-sha=$SOURCE_SHA" >/dev/null
-"${oci_kubectl[@]}" create configmap "$oci_lock" -n "$OCI_K8S_NAMESPACE" \
-  --from-literal="migration-id=$MIGRATION_ID" \
-  --from-literal="source-sha=$SOURCE_SHA" >/dev/null
-
-record_replicas azure_kubectl "$AZURE_NAMESPACE" "$replicas_file"
-record_replicas oci_kubectl "$OCI_K8S_NAMESPACE" "$target_replicas_file"
-ingress_replicas="$(
-  "${azure_kubectl[@]}" get deployment ingress-nginx-controller -n ingress-nginx \
-    -o jsonpath='{.spec.replicas}'
-)"
-[[ "$ingress_replicas" =~ ^[0-9]+$ ]] || oci_die "invalid Azure ingress replica count"
-printf '%s' "$ingress_replicas" > "$WORK_DIR/azure-ingress-replicas"
-oci_ingress_replicas="$(
-  "${oci_kubectl[@]}" get deployment ingress-nginx-controller -n ingress-nginx \
-    -o jsonpath='{.spec.replicas}'
-)"
-[[ "$oci_ingress_replicas" =~ ^[0-9]+$ ]] || oci_die "invalid OCI ingress replica count"
-printf '%s' "$oci_ingress_replicas" > "$WORK_DIR/oci-ingress-replicas"
-
-azure_statefulsets="$("${azure_kubectl[@]}" get statefulsets -n "$AZURE_NAMESPACE" -o json)"
-legacy_count="$(
-  jq '[.items[] | select(.metadata.name | test("^gaming-(auth|bet|backoffice|event|gamemaster|moderation|resulting|slip)-mongo-depl$"))] | length' \
-    <<<"$azure_statefulsets"
-)"
-all_mongo_count="$(jq '[.items[] | select(.metadata.name | test("mongo"))] | length' <<<"$azure_statefulsets")"
-[[ "$legacy_count" == "$all_mongo_count" ]] ||
-  oci_die "Azure contains an unknown Mongo StatefulSet"
-if [[ "$legacy_count" == "8" ]]; then
-  source_topology=legacy
-elif [[ "$legacy_count" == "1" ]] &&
-  "${azure_kubectl[@]}" get statefulset gaming-auth-mongo-depl -n "$AZURE_NAMESPACE" >/dev/null 2>&1; then
-  source_topology=shared
-else
-  oci_die "Azure Mongo topology is mixed or unknown"
-fi
-
-target_mongo_count="$(
-  "${oci_kubectl[@]}" get statefulsets -n "$OCI_K8S_NAMESPACE" -o json |
-    jq '[.items[] | select(.metadata.name | test("mongo"))] | length'
-)"
-[[ "$target_mongo_count" == "1" ]] || oci_die "OCI target must contain exactly one Mongo StatefulSet"
-"${oci_kubectl[@]}" get statefulset gaming-auth-mongo-depl -n "$OCI_K8S_NAMESPACE" >/dev/null ||
-  oci_die "OCI target does not contain the active auth Mongo StatefulSet"
-{
-  printf '# migration_id=%s\n' "$MIGRATION_ID"
-  printf '# source_sha=%s\n' "$SOURCE_SHA"
-  printf '# source_topology=%s\n' "$source_topology"
-  printf '# azure_replica_state_sha256=%s\n' "$(oci_sha256 < "$replicas_file")"
-  printf '# oci_replica_state_sha256=%s\n' "$(oci_sha256 < "$target_replicas_file")"
-} > "$JOURNAL_FILE"
-
-source_pod_for_database() {
-  local database="$1"
-  local service="${database#gaming_}"
-  if [[ "$source_topology" == "shared" ]]; then
-    printf 'gaming-auth-mongo-depl-0'
-  else
-    printf 'gaming-%s-mongo-depl-0' "$service"
+validate_inputs() {
+  [[ "$MODE" == "replace" || "$MODE" == "finalize-success" ||
+    "$MODE" == "fail-closed" || "$MODE" == "status" ]] ||
+    migration_die "usage: $0 {replace|finalize-success|fail-closed|status}"
+  [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    migration_die "SOURCE_SHA must be a complete lowercase commit SHA"
+  [[ "$REPLACE_OCI_DATA" == "true" ]] ||
+    migration_die "REPLACE_OCI_DATA must be exactly true"
+  migration_safe_id "$MIGRATION_ID" ||
+    migration_die "MIGRATION_ID is invalid"
+  [[ "$OWNER_RUN_ID" == "local" || "$OWNER_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+    migration_die "owner run ID is invalid"
+  [[ "$OWNER_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
+    migration_die "owner run attempt is invalid"
+  [[ -n "$RUNNER_TEMP" && -n "$WORK_DIR" ]] ||
+    migration_die "RUNNER_TEMP and an ephemeral WORK_DIR are required"
+  mkdir -p "$WORK_DIR"
+  WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+  case "$WORK_DIR/" in
+    "$(cd "$RUNNER_TEMP" && pwd -P)/"*) ;;
+    *) migration_die "transport WORK_DIR must remain under RUNNER_TEMP" ;;
+  esac
+  [[ -f "$AZURE_KUBECONFIG" && -f "$OCI_KUBECONFIG" &&
+    "$AZURE_KUBECONFIG" != "$OCI_KUBECONFIG" ]] ||
+    migration_die "isolated Azure and OCI kubeconfigs are required"
+  [[ -f "$OCI_RABBITMQ_BASELINE_FILE" ]] ||
+    migration_die "verified exact RabbitMQ baseline is required"
+  [[ "$(LC_ALL=C sort -u "$OCI_RABBITMQ_BASELINE_FILE" | wc -l | tr -d ' ')" == "17" ]] ||
+    migration_die "RabbitMQ baseline must contain exactly 17 unique queues"
+  migration_is_positive_int "$COMMAND_TIMEOUT_SECONDS" ||
+    migration_die "command timeout must be positive"
+  migration_is_positive_int "$STREAM_TIMEOUT_SECONDS" ||
+    migration_die "stream timeout must be positive"
+  migration_is_positive_int "$MONGO_VALIDATION_TIMEOUT_SECONDS" ||
+    migration_die "Mongo validation timeout must be positive"
+  migration_is_positive_int "$QUEUE_DRAIN_ATTEMPTS" ||
+    migration_die "queue drain attempts must be positive"
+  migration_is_positive_int "$QUEUE_DRAIN_SLEEP_SECONDS" ||
+    migration_die "queue drain sleep must be positive"
+  migration_is_positive_int "$RUNNER_CAPACITY_MULTIPLIER" ||
+    migration_die "runner capacity multiplier must be positive"
+  migration_is_positive_int "$RUNNER_CAPACITY_RESERVE_BYTES" ||
+    migration_die "runner capacity reserve must be positive"
+  [[ "$AZURE_CLUSTER_FINGERPRINT" =~ ^[0-9a-f]{64}$ &&
+    "$OCI_CLUSTER_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] ||
+    migration_die "cluster fingerprints are required"
+  [[ "$AZURE_CLUSTER_FINGERPRINT" == "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]] ||
+    migration_die "Azure resource fingerprint differs from the approved cluster"
+  local actual_oci_fingerprint
+  actual_oci_fingerprint="$(migration_fingerprint "$OCI_EXPECTED_CLUSTER_OCID")"
+  [[ "$actual_oci_fingerprint" == "$OCI_CLUSTER_FINGERPRINT" ]] ||
+    migration_die "OCI runtime fingerprint differs from provenance"
+  [[ -f "$SIGNATURE_SCRIPT" && -x "$STATE_HELPER" &&
+    -x "$MIGRATION_BOUNDED_COMMAND" ]] ||
+    migration_die "migration helpers are unavailable"
+  local command_name
+  for command_name in kubectl jq python3 gh cmp awk sort; do
+    migration_require_command "$command_name"
+  done
+  if [[ "$MODE" == "replace" ]]; then
+    migration_require_command age
+    migration_require_command docker
+    oci_require_vars OCI_MIGRATION_AGE_RECIPIENT OCI_MIGRATION_AGE_IDENTITY
+    [[ "$OCI_MIGRATION_AGE_RECIPIENT" == age1* ]] ||
+      migration_die "age recipient is invalid"
+  fi
+  umask 077
+  transport_dir="$WORK_DIR/transfers"
+  signature_dir="$WORK_DIR/signatures"
+  state_dir="$WORK_DIR/state"
+  identity_file="$WORK_DIR/age-identity.txt"
+  mkdir -p "$transport_dir" "$signature_dir" "$state_dir" \
+    "$(dirname "$JOURNAL_FILE")" "$(dirname "$SUMMARY_FILE")"
+  chmod 700 "$WORK_DIR" "$transport_dir" "$signature_dir" "$state_dir"
+  if [[ "$MODE" == "replace" ]]; then
+    printf '%s\n' "$OCI_MIGRATION_AGE_IDENTITY" >"$identity_file"
+    chmod 600 "$identity_file"
   fi
 }
 
-mongo_compatibility() {
-  local kubeconfig="$1"
-  local namespace="$2"
-  local pod="$3"
-  kubectl --kubeconfig "$kubeconfig" exec -n "$namespace" "$pod" -- \
-    mongosh --quiet --eval '
-      const fcv=db.adminCommand({getParameter:1,featureCompatibilityVersion:1})
-        .featureCompatibilityVersion.version;
-      const version=db.version();
-      print(JSON.stringify({version:version,majorMinor:version.split(".").slice(0,2).join("."),fcv:fcv}));
-    '
+main() {
+  validate_inputs
+  trap 'cleanup $?' EXIT
+  trap 'cleanup 130' INT
+  trap 'cleanup 143' TERM
+
+  validate_kubeconfig azure "$AZURE_EXPECTED_CLUSTER_SERVER_SHA256"
+  validate_kubeconfig oci "" "$OCI_EXPECTED_CLUSTER_OCID"
+  kube_run azure namespace-read 30 2 get namespace "$AZURE_NAMESPACE" >/dev/null
+  kube_run oci namespace-read 30 2 get namespace "$OCI_K8S_NAMESPACE" >/dev/null
+
+  case "$MODE" in
+    replace)
+      validate_source_topology
+      azure_baseline="$(baseline_capture azure)"
+      oci_baseline="$(baseline_capture oci)"
+      state_acquire
+      state_advance azure-inspected \
+        "$(state_boundary_text)" "$(state_recovery_text)"
+      freeze_azure
+      state_advance azure-writers-frozen \
+        "$(state_boundary_text)" "$(state_recovery_text)"
+      runner_capacity_gate
+      capture_transfers
+      validate_transfers_disposable
+      freeze_oci
+      unlock_target_writes_for_retry
+      drop_target_databases
+      restore_target_databases
+      verify_target_exact
+      lock_target_writes
+      recreate_rabbitmq_and_restart
+      state_write_summary
+      rm -rf "$WORK_DIR"
+      operation_success=1
+      trap - EXIT INT TERM
+      migration_log \
+        "oci_migration_replace=PASS databases=8 azure_writers=frozen state=awaiting-protected-health"
+      ;;
+    finalize-success)
+      state_load_owned
+      ensure_azure_frozen
+      target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+        get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+        -o jsonpath='{.items[0].metadata.name}')"
+      [[ -n "$target_mongo_pod" ]] ||
+        migration_die "OCI Mongo pod is missing for cutover finalization"
+      case "$(state_value phase)" in
+        awaiting-protected-health)
+          [[ "$(state_optional_value mongo-write-lock)" == "true" &&
+            "$(target_write_lock_status)" == "true" &&
+            "$(state_optional_value rabbitmq-write-lock)" == "true" &&
+            "$(rabbitmq_write_permission)" == "^$" ]] ||
+            migration_die "OCI data or messaging writes were enabled before parity certification"
+          verify_final_exact_state
+          state_advance cutover-committed true false \
+            "mongo-write-lock=true" "rabbitmq-write-lock=true"
+          ;;
+        cutover-committed | cutover-forward-recovery)
+          ;;
+        completed)
+          [[ "$(target_write_lock_status)" == "false" &&
+            "$(rabbitmq_write_permission)" == ".*" ]] ||
+            migration_die "completed cutover retained a write lock"
+          if [[ "$(state_lock_value state)" == "active" ]]; then
+            state_release
+          else
+            [[ "$(state_lock_value state)" == "released" ]] ||
+              migration_die "completed cutover lock state is invalid"
+          fi
+          state_write_summary
+          rm -rf "$WORK_DIR"
+          operation_success=1
+          trap - EXIT INT TERM
+          migration_log \
+            "oci_migration_finalize=PASS databases=8 recovery_required=false"
+          exit 0
+          ;;
+        *)
+          migration_die "migration is not in a forward finalization phase"
+          ;;
+      esac
+      unlock_target_writes
+      migration_failure_hook mongo-write-unlocked
+      unlock_rabbitmq_writes
+      migration_failure_hook rabbitmq-write-unlocked
+      state_advance completed true false \
+        "mongo-write-lock=false" "rabbitmq-write-lock=false"
+      state_release
+      state_write_summary
+      rm -rf "$WORK_DIR"
+      operation_success=1
+      trap - EXIT INT TERM
+      migration_log \
+        "oci_migration_finalize=PASS databases=8 recovery_required=false"
+      ;;
+    fail-closed)
+      state_load_owned
+      if [[ "$state_boundary" == "1" ]]; then
+        case "$(state_value phase)" in
+          cutover-committed | cutover-forward-recovery)
+            ensure_azure_frozen
+            state_advance cutover-forward-recovery true false
+            ;;
+          completed)
+            ensure_azure_frozen
+            ;;
+          *)
+            close_oci
+            ensure_azure_frozen
+            state_advance recovery-required true true
+            ;;
+        esac
+      else
+        restore_oci_baseline
+        ensure_azure_frozen
+        state_advance failed-before-destructive-boundary false false
+        if [[ "$(state_lock_value state)" == "active" ]]; then
+          state_release
+        fi
+      fi
+      state_write_summary
+      rm -rf "$WORK_DIR"
+      operation_success=1
+      trap - EXIT INT TERM
+      migration_log \
+        "oci_migration_fail_closed=PASS destructive_boundary=$state_boundary"
+      ;;
+    status)
+      state_load_owned
+      state_write_summary
+      rm -rf "$WORK_DIR"
+      operation_success=1
+      trap - EXIT INT TERM
+      ;;
+  esac
 }
 
-target_preflight_pod="$(
-  "${oci_kubectl[@]}" get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
-    -o jsonpath='{.items[0].metadata.name}'
-)"
-[[ -n "$target_preflight_pod" ]] || oci_die "OCI Mongo pod is missing during migration preflight"
-target_compatibility="$(mongo_compatibility "$OCI_KUBECONFIG" "$OCI_K8S_NAMESPACE" "$target_preflight_pod")"
-jq -e '.majorMinor != null and .fcv != null' <<<"$target_compatibility" >/dev/null ||
-  oci_die "unable to read OCI Mongo version/FCV"
-target_version_fcv="$(jq -c '{majorMinor,fcv}' <<<"$target_compatibility")"
-source_compatibility_reference=""
-
-largest_database_bytes=0
-for database in "${databases[@]}"; do
-  source_pod="$(source_pod_for_database "$database")"
-  database_exists="$(
-    "${azure_kubectl[@]}" exec -n "$AZURE_NAMESPACE" "$source_pod" -- \
-      mongosh --quiet --eval "
-        print(db.adminCommand({listDatabases:1}).databases.some(d=>d.name==='${database}'));
-      "
-  )"
-  [[ "$database_exists" == "true" ]] || oci_die "Azure source database is missing: $database"
-  source_compatibility="$(mongo_compatibility "$AZURE_KUBECONFIG" "$AZURE_NAMESPACE" "$source_pod")"
-  jq -e '.majorMinor != null and .fcv != null' <<<"$source_compatibility" >/dev/null ||
-    oci_die "unable to read Azure Mongo version/FCV"
-  source_version_fcv="$(jq -c '{majorMinor,fcv}' <<<"$source_compatibility")"
-  if [[ -z "$source_compatibility_reference" ]]; then
-    source_compatibility_reference="$source_version_fcv"
-  else
-    [[ "$source_version_fcv" == "$source_compatibility_reference" ]] ||
-      oci_die "Azure Mongo sources do not share a compatible version/FCV"
-  fi
-  [[ "$source_version_fcv" == "$target_version_fcv" ]] ||
-    oci_die "Azure and OCI Mongo major version/FCV are incompatible"
-  bytes="$(
-    "${azure_kubectl[@]}" exec -n "$AZURE_NAMESPACE" "$source_pod" -- \
-      mongosh --quiet --eval "print(db.getSiblingDB('${database}').stats().dataSize || 0)"
-  )"
-  [[ "$bytes" =~ ^[0-9]+$ ]] || oci_die "unable to determine source size for $database"
-  (( bytes > largest_database_bytes )) && largest_database_bytes="$bytes"
-done
-available_bytes="$(df -Pk "$WORK_DIR" | awk 'NR==2 {print $4 * 1024}')"
-(( available_bytes > largest_database_bytes * 2 )) ||
-  oci_die "runner has insufficient free disk for encrypted one-database staging"
-{
-  printf '# azure_mongo_compatibility_sha256=%s\n' \
-    "$(printf '%s' "$source_compatibility_reference" | oci_sha256)"
-  printf '# oci_mongo_compatibility_sha256=%s\n' \
-    "$(printf '%s' "$target_compatibility" | oci_sha256)"
-} >> "$JOURNAL_FILE"
-
-watchdog_script="$WORK_DIR/restore-azure.sh"
-{
-  printf '#!/bin/sh\nset -eu\nsleep %s\n' "$((WATCHDOG_MINUTES * 60))"
-  while IFS=$'\t' read -r service replicas; do
-    printf 'kubectl scale deployment %q -n %q --replicas %q\n' \
-      "gaming-${service}-depl" "$AZURE_NAMESPACE" "$replicas"
-  done < "$replicas_file"
-  printf 'kubectl scale deployment ingress-nginx-controller -n ingress-nginx --replicas %q\n' "$ingress_replicas"
-} > "$watchdog_script"
-chmod 700 "$watchdog_script"
-
-watchdog_manifest="$WORK_DIR/watchdog.yaml"
-cat > "$watchdog_manifest" <<YAML
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ${watchdog_name}
-  namespace: ${AZURE_NAMESPACE}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: ${watchdog_name}
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/scale"]
-    verbs: ["get", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: ${watchdog_name}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: ${watchdog_name}
-subjects:
-  - kind: ServiceAccount
-    name: ${watchdog_name}
-    namespace: ${AZURE_NAMESPACE}
-YAML
-"${azure_kubectl[@]}" apply -f "$watchdog_manifest" >/dev/null
-"${azure_kubectl[@]}" create configmap "$watchdog_name" -n "$AZURE_NAMESPACE" \
-  --from-file=restore.sh="$watchdog_script" --dry-run=client -o yaml |
-  "${azure_kubectl[@]}" apply -f - >/dev/null
-cat > "$WORK_DIR/watchdog-job.yaml" <<YAML
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ${watchdog_name}
-  namespace: ${AZURE_NAMESPACE}
-spec:
-  backoffLimit: 2
-  template:
-    spec:
-      restartPolicy: OnFailure
-      serviceAccountName: ${watchdog_name}
-      containers:
-        - name: watchdog
-          image: ${AZURE_WATCHDOG_KUBECTL_IMAGE}
-          command: ["/bin/sh", "/watchdog/restore.sh"]
-          volumeMounts:
-            - name: script
-              mountPath: /watchdog
-              readOnly: true
-      volumes:
-        - name: script
-          configMap:
-            name: ${watchdog_name}
-            defaultMode: 0500
-YAML
-"${azure_kubectl[@]}" apply -f "$WORK_DIR/watchdog-job.yaml" >/dev/null
-watchdog_armed=1
-
-"${azure_kubectl[@]}" scale deployment ingress-nginx-controller -n ingress-nginx --replicas 0 >/dev/null
-wait_for_no_pods azure_kubectl ingress-nginx app.kubernetes.io/component=controller ||
-  oci_die "Azure ingress pods did not stop before the freeze"
-
-rabbit_pod="$(
-  "${azure_kubectl[@]}" get pods -n "$AZURE_NAMESPACE" -l app=gaming-rabbitmq \
-    -o jsonpath='{.items[0].metadata.name}'
-)"
-[[ -n "$rabbit_pod" ]] || oci_die "Azure RabbitMQ pod is missing"
-drained=0
-queue_state_recorded=0
-for _ in $(seq 1 "$QUEUE_DRAIN_ATTEMPTS"); do
-  queue_state="$(
-    "${azure_kubectl[@]}" exec -n "$AZURE_NAMESPACE" "$rabbit_pod" -- \
-      rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers
-  )"
-  queue_count="$(awk 'NF >= 4 {count++} END {print count+0}' <<<"$queue_state")"
-  [[ "$queue_count" == "17" ]] || oci_die "Azure RabbitMQ queue set is incomplete"
-  azure_queue_names="$(awk 'NF >= 4 {print $1}' <<<"$queue_state" | sort)"
-  expected_queue_names="$(sort "$OCI_RABBITMQ_BASELINE_FILE")"
-  [[ "$azure_queue_names" == "$expected_queue_names" ]] ||
-    oci_die "Azure RabbitMQ queue set differs from exact OCI application baseline"
-  if [[ "$queue_state_recorded" == "0" ]]; then
-    initial_backlog="$(awk 'NF >= 4 {sum += $2 + $3} END {print sum+0}' <<<"$queue_state")"
-    initial_consumers="$(awk 'NF >= 4 {sum += $4} END {print sum+0}' <<<"$queue_state")"
-    {
-      printf '# azure_queue_count=%s\n' "$queue_count"
-      printf '# azure_queue_backlog=%s\n' "$initial_backlog"
-      printf '# azure_queue_consumers=%s\n' "$initial_consumers"
-    } >> "$JOURNAL_FILE"
-    queue_state_recorded=1
-  fi
-  if ! awk 'NF >= 4 && ($2 != 0 || $3 != 0) && $4 < 1 {bad=1} END {exit bad}' <<<"$queue_state"; then
-    oci_die "Azure RabbitMQ has queued messages without a consumer"
-  fi
-  if awk 'NF >= 4 && ($2 != 0 || $3 != 0) {bad=1} END {exit bad}' <<<"$queue_state"; then
-    drained=1
-    break
-  fi
-  sleep "$QUEUE_DRAIN_SLEEP_SECONDS"
-done
-[[ "$drained" == "1" ]] || oci_die "Azure RabbitMQ queues did not drain before the bounded deadline"
-
-for service in "${app_services[@]}"; do
-  "${azure_kubectl[@]}" scale deployment "gaming-${service}-depl" -n "$AZURE_NAMESPACE" --replicas 0 >/dev/null
-done
-for service in "${app_services[@]}"; do
-  wait_for_no_pods azure_kubectl "$AZURE_NAMESPACE" "app=gaming-${service}" ||
-    oci_die "Azure application pods did not stop: $service"
-done
-
-mongo_signature() {
-  local kubeconfig="$1"
-  local namespace="$2"
-  local pod="$3"
-  local database="$4"
-  kubectl --kubeconfig "$kubeconfig" exec -n "$namespace" "$pod" -- \
-    mongosh --quiet --eval "
-      const d=db.getSiblingDB('${database}');
-      const infos=d.getCollectionInfos().sort((a,b)=>a.name.localeCompare(b.name));
-      const collections=infos.map(i=>({
-        info:i,
-        indexes:d.getCollection(i.name).getIndexes().sort((a,b)=>a.name.localeCompare(b.name))
-      }));
-      print(JSON.stringify({dbHash:d.runCommand({dbHash:1}),collections:collections}));
-    "
-}
-
-printf 'database\tciphertext_sha256\tsource_signature_sha256\ttarget_signature_sha256\n' >> "$JOURNAL_FILE"
-for database in "${databases[@]}"; do
-  source_pod="$(source_pod_for_database "$database")"
-  source_signature="$signatures_dir/${database}.source.json"
-  ciphertext="$cipher_dir/${database}.age"
-  mongo_signature "$AZURE_KUBECONFIG" "$AZURE_NAMESPACE" "$source_pod" "$database" > "$source_signature"
-  "${azure_kubectl[@]}" exec -n "$AZURE_NAMESPACE" "$source_pod" -- \
-    mongodump --quiet --db "$database" --archive |
-    age --encrypt --recipient "$OCI_MIGRATION_AGE_RECIPIENT" --output "$ciphertext"
-  [[ -s "$ciphertext" ]] || oci_die "encrypted archive is empty for $database"
-done
-
-restore_azure
-delete_watchdog
-
-"${oci_kubectl[@]}" scale deployment ingress-nginx-controller -n ingress-nginx --replicas 0 >/dev/null
-wait_for_no_pods oci_kubectl ingress-nginx app.kubernetes.io/component=controller ||
-  oci_die "OCI ingress pods did not stop before target restore"
-for service in "${app_services[@]}"; do
-  "${oci_kubectl[@]}" scale deployment "gaming-${service}-depl" -n "$OCI_K8S_NAMESPACE" --replicas 0 >/dev/null
-done
-for service in "${app_services[@]}"; do
-  wait_for_no_pods oci_kubectl "$OCI_K8S_NAMESPACE" "app=gaming-${service}" ||
-    oci_die "OCI application pods did not stop before restore: $service"
-done
-
-target_pod="$(
-  "${oci_kubectl[@]}" get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
-    -o jsonpath='{.items[0].metadata.name}'
-)"
-[[ -n "$target_pod" ]] || oci_die "OCI Mongo pod is missing"
-
-for database in "${databases[@]}"; do
-  ciphertext="$cipher_dir/${database}.age"
-  source_signature="$signatures_dir/${database}.source.json"
-  target_signature="$signatures_dir/${database}.target.json"
-  "${oci_kubectl[@]}" exec -n "$OCI_K8S_NAMESPACE" "$target_pod" -- \
-    mongosh --quiet --eval "db.getSiblingDB('${database}').dropDatabase()" >/dev/null
-  age --decrypt --identity <(printf '%s\n' "$OCI_MIGRATION_AGE_IDENTITY") "$ciphertext" |
-    "${oci_kubectl[@]}" exec -i -n "$OCI_K8S_NAMESPACE" "$target_pod" -- \
-      mongorestore --quiet --archive
-  mongo_signature "$OCI_KUBECONFIG" "$OCI_K8S_NAMESPACE" "$target_pod" "$database" > "$target_signature"
-  source_hash="$(oci_sha256 < "$source_signature")"
-  target_hash="$(oci_sha256 < "$target_signature")"
-  [[ "$source_hash" == "$target_hash" ]] || oci_die "database signature mismatch after restore: $database"
-  cipher_hash="$(oci_sha256 < "$ciphertext")"
-  printf '%s\t%s\t%s\t%s\n' "$database" "$cipher_hash" "$source_hash" "$target_hash" >> "$JOURNAL_FILE"
-  rm -f "$ciphertext" "$source_signature" "$target_signature"
-done
-
-restore_oci || oci_die "OCI application or ingress replicas failed to restore"
-
-target_databases="$(
-  "${oci_kubectl[@]}" exec -n "$OCI_K8S_NAMESPACE" "$target_pod" -- \
-    mongosh --quiet --eval 'print(JSON.stringify(db.adminCommand({listDatabases:1}).databases.map(d=>d.name).sort()))'
-)"
-for database in "${databases[@]}"; do
-  jq -e --arg database "$database" 'index($database) != null' <<<"$target_databases" >/dev/null ||
-    oci_die "restored OCI database is missing: $database"
-done
-
-rabbit_pod="$(
-  "${oci_kubectl[@]}" get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
-    -o jsonpath='{.items[0].metadata.name}'
-)"
-queue_state="$(
-  "${oci_kubectl[@]}" exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
-    rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers
-)"
-observed_queue_names="$(awk 'NF >= 4 {print $1}' <<<"$queue_state" | sort)"
-expected_queue_names="$(sort "$OCI_RABBITMQ_BASELINE_FILE")"
-[[ "$observed_queue_names" == "$expected_queue_names" ]] ||
-  oci_die "OCI RabbitMQ queue names differ from deployment baseline"
-awk 'NF >= 4 && ($2 != 0 || $3 != 0 || $4 < 1) {bad=1} END {exit bad}' <<<"$queue_state" ||
-  oci_die "OCI RabbitMQ consumers/backlog are unhealthy after migration"
-
-rm -rf "$WORK_DIR"
-trap - EXIT INT TERM
-release_lock azure_kubectl "$AZURE_NAMESPACE" "$azure_lock" ||
-  oci_die "Azure migration lock identity changed before release"
-release_lock oci_kubectl "$OCI_K8S_NAMESPACE" "$oci_lock" ||
-  oci_die "OCI migration lock identity changed before release"
-oci_log "oci_migration=PASS databases=8 azure_restored=1 plaintext_archives=0"
+main

@@ -1,19 +1,52 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: betstan-oci-canonical-tls
+spec:
+  secretName: betstan-oci-canonical-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  privateKey:
+    rotationPolicy: Always
+  renewBefore: 720h
+  dnsNames:
+    - __OCI_CANONICAL_HOST__
+    - __OCI_REDIRECT_HOST__
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: betstan-oci-tls
+spec:
+  secretName: betstan-oci-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  privateKey:
+    rotationPolicy: Always
+  renewBefore: 720h
+  dnsNames:
+    - __OCI_DIAGNOSTIC_HOST__
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: gaming-oci-ingress
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/use-regex: "true"
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - __OCI_PUBLIC_HOST__
+        - __OCI_CANONICAL_HOST__
+      secretName: betstan-oci-canonical-tls
+    - hosts:
+        - __OCI_DIAGNOSTIC_HOST__
       secretName: betstan-oci-tls
   rules:
-    - host: __OCI_PUBLIC_HOST__
+    - host: __OCI_CANONICAL_HOST__
       http:
         paths:
           - path: /api/auth/?(.*)
@@ -53,6 +86,76 @@ spec:
                   number: 3000
           - path: /?(.*)
             pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-client-srv
+                port:
+                  number: 3000
+    - host: __OCI_DIAGNOSTIC_HOST__
+      http:
+        paths:
+          - path: /api/auth/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-auth-srv
+                port:
+                  number: 3000
+          - path: /api/event/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-event-srv
+                port:
+                  number: 3000
+          - path: /api/slip/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-slip-srv
+                port:
+                  number: 3000
+          - path: /api/bet/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-bet-srv
+                port:
+                  number: 3000
+          - path: /api/backoffice/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-backoffice-srv
+                port:
+                  number: 3000
+          - path: /?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-client-srv
+                port:
+                  number: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gaming-oci-www-redirect
+  annotations:
+    nginx.ingress.kubernetes.io/permanent-redirect: https://__OCI_CANONICAL_HOST__$request_uri
+    nginx.ingress.kubernetes.io/permanent-redirect-code: "308"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - __OCI_REDIRECT_HOST__
+      secretName: betstan-oci-canonical-tls
+  rules:
+    - host: __OCI_REDIRECT_HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 name: gaming-client-srv

@@ -176,6 +176,61 @@ jobs:
           [ "${{ inputs.approved_sha }}" = "$(git rev-parse origin/master)" ]
           echo migrate
 YAML
+
+  cat > "$tmp_dir/oci-migration-recovery.yml" <<'YAML'
+name: oci-migration-recovery
+on:
+  workflow_run:
+    workflows: ["oci-migrate"]
+    types: [completed]
+    branches: [master]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+concurrency:
+  group: azure-migration-recovery
+  cancel-in-progress: true
+jobs:
+  recover:
+    if: >-
+      github.run_attempt == 1 &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'schedule' &&
+          vars.OCI_MIGRATION_RECOVERY_ENABLED == 'true'
+        ) ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.run_attempt == 1
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: azure-migration-recovery
+    env:
+      RECOVERY_ENABLED: ${{ vars.OCI_MIGRATION_RECOVERY_ENABLED || 'false' }}
+      RECOVERY_ARM_UNTIL_EPOCH: ${{ vars.OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_MIGRATION_RECOVERY_CREDENTIALS }}
+      - run: |
+          git fetch origin master:refs/remotes/origin/master
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ]
+          [ $((RECOVERY_ARM_UNTIL_EPOCH - 1)) -le 86400 ]
+          az aks show --name betstan-aks
+          az aks stop --name betstan-aks
+YAML
 }
 
 assert_pass() {
@@ -206,7 +261,7 @@ assert_fail() {
 }
 
 azure_set="production-build,production-deploy"
-full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
+full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,production-build,production-deploy"
 
 reset_fixtures
 assert_fail "Azure-only set" "expected $full_set; found $azure_set"
@@ -222,6 +277,11 @@ assert_fail "partial OCI set" "expected $full_set; found"
 
 reset_fixtures
 write_complete_oci_set
+rm "$tmp_dir/oci-migration-recovery.yml"
+assert_fail "partial OCI set without migration recovery" "expected $full_set; found"
+
+reset_fixtures
+write_complete_oci_set
 rm "$tmp_dir/oci-capacity-acquire.yml"
 assert_fail "partial OCI set without capacity acquisition" "expected $full_set; found"
 
@@ -229,7 +289,7 @@ reset_fixtures
 write_complete_oci_set
 sed -i.bak 's/name: oci-infrastructure/name: oci-platform/' "$tmp_dir/oci-infrastructure.yml"
 rm "$tmp_dir/oci-infrastructure.yml.bak"
-assert_fail "renamed OCI identity" "found oci-capacity-acquire,oci-migrate,oci-platform"
+assert_fail "renamed OCI identity" "found oci-capacity-acquire,oci-migrate,oci-migration-recovery,oci-platform"
 
 reset_fixtures
 cat > "$tmp_dir/rogue-production.yml" <<'YAML'
@@ -273,6 +333,46 @@ write_complete_oci_set
 sed -i.bak '/environment:/,+1d' "$tmp_dir/oci-migrate.yml"
 rm "$tmp_dir/oci-migrate.yml.bak"
 assert_fail "missing protected environment" "must use reviewer-gated oci-migration"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/environment:/,+1d' "$tmp_dir/oci-migration-recovery.yml"
+rm "$tmp_dir/oci-migration-recovery.yml.bak"
+assert_fail "missing recovery protected environment" \
+  "must use reviewer-gated azure-migration-recovery"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/AZURE_MIGRATION_RECOVERY_CREDENTIALS/OCI_MIGRATION_AZURE_CREDENTIALS/' \
+  "$tmp_dir/oci-migration-recovery.yml"
+rm "$tmp_dir/oci-migration-recovery.yml.bak"
+assert_fail "recovery with broad migration credential" \
+  "must use the dedicated Azure stop-only credential"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/az aks stop/i\
+          az aks start --name betstan-aks' "$tmp_dir/oci-migration-recovery.yml"
+rm "$tmp_dir/oci-migration-recovery.yml.bak"
+assert_fail "recovery with Azure start permission" \
+  "must never start, create, resize, or delete Azure compute"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "s/vars.OCI_MIGRATION_RECOVERY_ENABLED == 'true'/true/" \
+  "$tmp_dir/oci-migration-recovery.yml"
+rm "$tmp_dir/oci-migration-recovery.yml.bak"
+assert_fail "recovery schedule without activation guard" \
+  "schedule must retain the explicit false-by-default activation guard"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/86400/172800/' "$tmp_dir/oci-migration-recovery.yml"
+rm "$tmp_dir/oci-migration-recovery.yml.bak"
+assert_fail "recovery schedule with unbounded arm deadline" \
+  "schedule arm deadline must be bounded to one day"
 
 reset_fixtures
 write_complete_oci_set

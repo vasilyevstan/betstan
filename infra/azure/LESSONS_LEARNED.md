@@ -37,9 +37,16 @@ A trial `Standard_B4ms` pool with a 30 GiB Ephemeral OS disk failed when concurr
 
 ## Ingress and Routing
 
-### Ingress must cover both the apex domain and www
-Both `betstan.xyz` and `www.betstan.xyz` must have host-specific rule blocks with **all** API paths.  
-If the apex host block is missing, requests to `betstan.xyz/api/*` fall through to the client catch-all and return HTML instead of JSON — this looks like "no events" or silent service failures.
+### Canonical ingress must cover every API path
+The current OCI-primary contract serves all API paths on `betstan.xyz` and
+redirects both `www` schemes to the apex. The diagnostic OCI host mirrors the
+apex routes. Historical Azure manifests served both hosts directly; their
+static guard remains relevant only until Azure retirement or future explicit
+recreation.
+
+If a serving host block is missing, `/api/*` can fall through to the client
+catch-all and return HTML instead of JSON. This looks like missing data or a
+silent service failure.
 
 **Required paths in each host block:**
 - `/api/auth/?(.*)`
@@ -53,16 +60,16 @@ Guard script: `infra/azure/agents/ingress-routing-guard-stan.sh`
 This guard runs in CI on pull requests targeting `dev` or `master` (`production-build.yml`).
 
 ### Expose production only through canonical HTTPS hosts
-Production ingress must contain only the `betstan.xyz` and `www.betstan.xyz`
-host rules and must redirect HTTP to HTTPS. Do not retain a hostless rule or a
-temporary `nip.io` ingress: either route allows users and API clients to bypass
-the canonical TLS entry point.
+Production must expose trusted `https://betstan.xyz`; `www` redirects to it.
+OCI retains only its provenance-derived `nip.io` diagnostic host. Do not
+retain a hostless rule or treat the diagnostic endpoint as canonical.
 
 ### Always validate with Host headers — not raw IPs
 A check against the raw ingress IP (`http://<IP>/api/...`) can hide broken
 host-based routing and should return the ingress default 404 rather than the
 application.
-Use domain-based checks: `curl https://www.betstan.xyz/api/event` **and** `curl https://betstan.xyz/api/event`.
+Use domain-based checks: validate the `www` redirect and request
+`https://betstan.xyz/api/event` as JSON.
 
 ---
 

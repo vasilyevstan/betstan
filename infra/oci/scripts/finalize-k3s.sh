@@ -15,6 +15,8 @@ SOURCE_SHA="${SOURCE_SHA:-${GITHUB_SHA:-}}"
 OCI_MONGO_VPUS_PER_GB="${OCI_MONGO_VPUS_PER_GB:-0}"
 OCI_MONGO_DEVICE="${OCI_MONGO_DEVICE:-/dev/oracleoci/oraclevdb}"
 OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}"
+OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
+OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 oci_assert_repository_root
 [[ "$(oci_runtime_mode)" == "k3s" ]] ||
@@ -52,6 +54,10 @@ oci_require_value OCI_LB_MIN_MBPS 10
 oci_require_value OCI_LB_MAX_MBPS 10
 oci_require_value OCI_EXPECTED_MONTHLY_COST 0
 oci_require_value OCI_MONGO_VPUS_PER_GB 0
+[[ "$OCI_CANONICAL_HOST" == "betstan.xyz" ]] ||
+  oci_die "OCI_CANONICAL_HOST must be betstan.xyz"
+[[ "$OCI_REDIRECT_HOST" == "www.${OCI_CANONICAL_HOST}" ]] ||
+  oci_die "OCI_REDIRECT_HOST must be the canonical www host"
 
 for digest_name in \
   OCI_CERT_MANAGER_CONTROLLER_DIGEST OCI_CERT_MANAGER_WEBHOOK_DIGEST \
@@ -757,7 +763,10 @@ oci_prepare_private_dir "$PROVENANCE_DIR"
   printf 'mongo_volume_attachment_ocid=%q\n' "$attachment_id"
   printf 'lb_ocid=%q\n' "$lb_ocid"
   printf 'ingress_ipv4=%q\n' "$lb_public_ip"
-  printf 'public_host=%q\n' "${lb_public_ip}.nip.io"
+  printf 'public_host=%q\n' "$OCI_CANONICAL_HOST"
+  printf 'canonical_host=%q\n' "$OCI_CANONICAL_HOST"
+  printf 'redirect_host=%q\n' "$OCI_REDIRECT_HOST"
+  printf 'diagnostic_host=%q\n' "${lb_public_ip}.nip.io"
   printf 'namespace=%q\n' "$OCI_K8S_NAMESPACE"
   printf 'k3s_node_name=%q\n' "$OCI_K3S_NODE_NAME"
   printf 'k3s_version=%q\n' "$OCI_K3S_VERSION"

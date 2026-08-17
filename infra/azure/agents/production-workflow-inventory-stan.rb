@@ -9,6 +9,7 @@ OCI_WORKFLOWS = %w[
   oci-capacity-acquire
   oci-infrastructure
   oci-migrate
+  oci-migration-recovery
   oci-production-build
   oci-production-deploy
 ].freeze
@@ -17,6 +18,7 @@ PROTECTED_ENVIRONMENTS = {
   "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
   "oci-migrate" => "oci-migration",
+  "oci-migration-recovery" => "azure-migration-recovery",
   "oci-production-build" => "oci-build",
   "oci-production-deploy" => "oci-production"
 }.freeze
@@ -139,6 +141,117 @@ def validate_scheduled_oci_workflow!(name, document, content)
   expected_triggers = ["schedule", "workflow_dispatch"]
   unless triggers.keys.sort == expected_triggers
     fail_inventory("#{name} must have schedule and workflow_dispatch only")
+  end
+
+  def validate_migration_recovery_workflow!(name, document, content)
+    triggers = workflow_triggers(document)
+    expected_triggers = ["schedule", "workflow_dispatch", "workflow_run"]
+    unless triggers.keys.sort == expected_triggers
+      fail_inventory(
+        "#{name} must have workflow_run, schedule, and workflow_dispatch only"
+      )
+    end
+
+    schedules = triggers["schedule"]
+    unless schedules.is_a?(Array) &&
+           schedules.length == 1 &&
+           schedules[0].is_a?(Hash) &&
+           schedules[0]["cron"] == "*/15 * * * *"
+      fail_inventory("#{name} must use the reviewed bounded fifteen-minute schedule")
+    end
+
+    workflow_run = triggers["workflow_run"]
+    workflows = workflow_run.is_a?(Hash) ? Array(workflow_run["workflows"]) : []
+    types = workflow_run.is_a?(Hash) ? Array(workflow_run["types"]) : []
+    branches = workflow_run.is_a?(Hash) ? Array(workflow_run["branches"]) : []
+    unless workflows == ["oci-migrate"] &&
+           types == ["completed"] &&
+           branches == ["master"]
+      fail_inventory(
+        "#{name} must run only after completed master oci-migrate workflows"
+      )
+    end
+
+    require_content(
+      content,
+      /vars\.OCI_MIGRATION_RECOVERY_ENABLED\s*==\s*['"]true['"]/,
+      "#{name} schedule must retain the explicit false-by-default activation guard"
+    )
+    require_content(
+      content,
+      /vars\.OCI_MIGRATION_RECOVERY_ENABLED\s*\|\|\s*['"]false['"]/,
+      "#{name} must default the recovery activation guard to false"
+    )
+    require_content(
+      content,
+      /OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH/,
+      "#{name} schedule must require an explicit bounded arm deadline"
+    )
+    require_content(
+      content,
+      /86400/,
+      "#{name} schedule arm deadline must be bounded to one day"
+    )
+    require_content(
+      content,
+      /github\.event_name\s*==\s*['"]workflow_dispatch['"]/,
+      "#{name} must retain an independently approved manual trigger"
+    )
+    require_content(
+      content,
+      /github\.event\.workflow_run\.head_branch\s*==\s*['"]master['"]/,
+      "#{name} must reject non-master migration completions"
+    )
+    require_content(
+      content,
+      /github\.event\.workflow_run\.head_repository\.full_name\s*==\s*github\.repository/,
+      "#{name} must reject migration completions from another repository"
+    )
+    require_content(
+      content,
+      /github\.event\.workflow_run\.run_attempt\s*==\s*1/,
+      "#{name} must inspect only first-attempt migrations"
+    )
+    require_content(
+      content,
+      /actions:\s*write/,
+      "#{name} needs only the explicit Actions cancellation permission"
+    )
+    require_content(
+      content,
+      /group:\s*azure-migration-recovery/,
+      "#{name} must collapse duplicate recovery attempts"
+    )
+    require_content(
+      content,
+      /cancel-in-progress:\s*true/,
+      "#{name} must collapse duplicate recovery attempts"
+    )
+    require_content(
+      content,
+      /secrets\.AZURE_MIGRATION_RECOVERY_CREDENTIALS/,
+      "#{name} must use the dedicated Azure stop-only credential"
+    )
+    reject_content(
+      content,
+      /secrets\.OCI_MIGRATION_AZURE_CREDENTIALS/,
+      "#{name} must not receive the broader migration credential"
+    )
+    reject_content(
+      content,
+      /OCI_CI_PRIVATE_KEY_PEM|OCI_K3S_SSH_PRIVATE_KEY|OCI_MIGRATION_AGE_IDENTITY/,
+      "#{name} must not receive OCI data-plane credentials"
+    )
+    reject_content(
+      content,
+      /\baz\s+aks\s+(?:start|create|update|delete)\b|\baz\s+aks\s+nodepool\b/i,
+      "#{name} must never start, create, resize, or delete Azure compute"
+    )
+    reject_content(
+      content,
+      /\boci\s+(?:ce|compute|os|bv|lb|network|container|artifacts)\b/i,
+      "#{name} must not access OCI"
+    )
   end
 
   schedules = triggers["schedule"]
@@ -264,11 +377,13 @@ def validate_oci_workflow!(name, file, document, content)
     )
   elsif name == "oci-capacity-acquire"
     validate_scheduled_oci_workflow!(name, document, content)
+  elsif name == "oci-migration-recovery"
+    validate_migration_recovery_workflow!(name, document, content)
   else
     validate_manual_oci_workflow!(name, document, content)
   end
 
-  return if name == "oci-migrate"
+  return if ["oci-migrate", "oci-migration-recovery"].include?(name)
 
   validate_non_migration_secrets!(name, content)
   reject_content(

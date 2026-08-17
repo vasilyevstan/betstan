@@ -15,6 +15,8 @@ OCI_RUNTIME_MODE="$(oci_runtime_mode)"
 OCI_BASTION_NAME="${OCI_BASTION_NAME:-${OCI_CLUSTER_NAME:-betstan-oci}-bastion}"
 OCI_BASTION_DEFAULT_CLIENT_CIDR="${OCI_BASTION_DEFAULT_CLIENT_CIDR:-192.0.2.1/32}"
 OCI_BASTION_MAX_SESSION_TTL="${OCI_BASTION_MAX_SESSION_TTL:-10800}"
+OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
+OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 [[ "$MODE" == "cloud" || "$MODE" == "addons" ]] ||
   oci_die "usage: provision.sh [cloud|addons]"
@@ -46,6 +48,10 @@ oci_require_value OCI_LB_MAX_MBPS 10
 oci_require_value OCI_EXPECTED_MONTHLY_COST 0
 [[ "$OCI_MONGO_VPUS_PER_GB" == "0" ]] ||
   oci_die "Mongo block volume must use the zero-VPU lower-cost profile"
+[[ "$OCI_CANONICAL_HOST" == "betstan.xyz" ]] ||
+  oci_die "OCI_CANONICAL_HOST must be betstan.xyz"
+[[ "$OCI_REDIRECT_HOST" == "www.${OCI_CANONICAL_HOST}" ]] ||
+  oci_die "OCI_REDIRECT_HOST must be the canonical www host"
 
 oci_prepare_private_dir "$PROVENANCE_DIR"
 tags="$(jq -cn --arg sha "$SOURCE_SHA" '{
@@ -815,13 +821,16 @@ jq -e --arg ip "$ingress_ipv4" --argjson min "$OCI_LB_MIN_MBPS" --argjson max "$
   ([.data."ip-addresses"[]."ip-address" | select(. == $ip)] | length) == 1
 ' <<<"$lb" >/dev/null || oci_die "OCI load balancer shape or ingress IPv4 violates provenance"
 
-grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
+grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|canonical_host|redirect_host|diagnostic_host|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
   "$PROVENANCE_FILE" > "$work_dir/provenance.env"
 {
   printf 'infrastructure_finalized=%q\n' "true"
   printf 'lb_ocid=%q\n' "$lb_ocid"
   printf 'ingress_ipv4=%q\n' "$ingress_ipv4"
-  printf 'public_host=%q\n' "${ingress_ipv4}.nip.io"
+  printf 'public_host=%q\n' "$OCI_CANONICAL_HOST"
+  printf 'canonical_host=%q\n' "$OCI_CANONICAL_HOST"
+  printf 'redirect_host=%q\n' "$OCI_REDIRECT_HOST"
+  printf 'diagnostic_host=%q\n' "${ingress_ipv4}.nip.io"
   printf 'ingress_nginx_chart_version=%q\n' "$OCI_INGRESS_NGINX_CHART_VERSION"
   printf 'ingress_nginx_chart_sha256=%q\n' "$OCI_INGRESS_NGINX_CHART_SHA256"
   printf 'cert_manager_chart_version=%q\n' "$OCI_CERT_MANAGER_CHART_VERSION"

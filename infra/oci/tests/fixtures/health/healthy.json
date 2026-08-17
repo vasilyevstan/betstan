@@ -122,8 +122,14 @@
     "load_balancer_service_count": 1,
     "ipv4_match": true,
     "certificate_ready": true,
+    "canonical_certificate_ready": true,
+    "diagnostic_certificate_ready": true,
+    "cluster_issuer_ready": true,
     "https_trusted": true,
-    "http_redirect": true
+    "http_redirect": true,
+    "www_redirect": true,
+    "diagnostic_https_trusted": true,
+    "dns_match": true
   },
   "application": {
     "homepage_marker": true,

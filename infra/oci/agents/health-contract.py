@@ -203,8 +203,30 @@ def validate(snapshot):
     )
     require(ingress.get("ipv4_match") is True, "ingress-ip", "ingress IPv4 differs from OCI provenance")
     require(ingress.get("certificate_ready") is True, "certificate", "TLS certificate is not Ready")
+    require(
+        ingress.get("canonical_certificate_ready") is True,
+        "canonical-certificate",
+        "canonical apex/www certificate or SAN set is not Ready",
+    )
+    require(
+        ingress.get("diagnostic_certificate_ready") is True,
+        "diagnostic-certificate",
+        "diagnostic nip.io certificate is not Ready",
+    )
+    require(
+        ingress.get("cluster_issuer_ready") is True,
+        "cluster-issuer",
+        "production Let's Encrypt ClusterIssuer is not Ready",
+    )
     require(ingress.get("https_trusted") is True, "https-trust", "HTTPS endpoint is not trusted")
     require(ingress.get("http_redirect") is True, "http-redirect", "HTTP does not redirect safely to HTTPS")
+    require(ingress.get("www_redirect") is True, "www-redirect", "www does not redirect safely to the apex")
+    require(
+        ingress.get("diagnostic_https_trusted") is True,
+        "diagnostic-https",
+        "diagnostic HTTPS endpoint is not trusted",
+    )
+    require(ingress.get("dns_match") is True, "canonical-dns", "canonical DNS differs from OCI provenance")
 
     application = snapshot.get("application", {})
     require(application.get("homepage_marker") is True, "homepage", "homepage marker is missing")
