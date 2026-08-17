@@ -18,7 +18,9 @@ Read the current versions of:
 - `CONTRIBUTING.md`
 - `.github/skills/betstan-branch-governance/SKILL.md`
 - `infra/oci/README.md`
+- `infra/oci/LESSONS_LEARNED.md`
 - `.github/agents/betstan-oci-health-reviewer.agent.md`
+- `.github/agents/betstan-domain-ingress.agent.md`
 - all `infra/oci/scripts/*.sh` relevant to the operation;
 - all `infra/oci/agents/*-stan.sh` relevant to validation;
 - the exact OCI workflow responsible for the operation.
@@ -65,20 +67,28 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   resources.
 - OKE runner access must be one validated public IPv4 `/32` NSG rule, tagged
   with the run/expiry identity and revoked by exact provider rule ID.
-- k3s access must use fresh per-job Ed25519 keys, OCI Bastion Managed SSH, and
-  a port-forwarding session to a localhost kubeconfig. Always delete both
-  sessions, restore the non-routable Bastion client CIDR, stop the exact
-  tunnel PID, and remove the temporary key material.
+- k3s access must use fresh per-job Ed25519 keys, one OCI Bastion
+  port-forwarding session to target SSH, and a target-loopback tunnel from
+  SSH to `127.0.0.1:6443`. Direct Bastion-to-6443 and Managed SSH are not the
+  supported A1 path. Always delete the session, restore the non-routable
+  Bastion client CIDR, stop the exact tunnel PIDs, and remove temporary keys.
 - Never expose SSH, port 6443, kubelet, Mongo, RabbitMQ, or application
   NodePorts directly to the internet.
 - Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
   backends, client, ingress.
 - Preserve the retained Mongo volume and refuse legacy Mongo manifests.
 - Never receive or use Azure credentials. Cross-cloud data work is exclusive
-  to `.github/workflows/oci-migrate.yml` and its migration script.
-- Never change canonical DNS or stop/delete Azure.
+  to the protected migration and stop-only recovery workflows and their
+  dedicated agents.
+- Canonical ingress/TLS changes belong to the domain-ingress agent. Azure
+  stop and deletion are separate migration-recovery and retirement approval
+  boundaries.
 - Never destroy dedicated OCI resources merely because a health check failed;
   deletion requires a separate exact-resource approval.
+- Provider deletion is asynchronous. Wait for terminal state and accounting.
+- Normalize documented case-insensitive OCI enums before comparison.
+- Reconcile supported LB listeners, backend sets, and health before proposing
+  replacement. Unsupported same-shape refresh operations are prohibited.
 
 ## Verification and reporting
 
@@ -91,4 +101,5 @@ sanitized evidence, rollback state, remaining risk, and one of:
 - `NO_GO`: a concrete identity, Free Tier, cleanup, or health invariant failed.
 
 Never equate successful OCI CLI output or manifest apply with a healthy
-deployment.
+deployment. A `NO_GO` must include bounded sanitized diagnostics, a failure
+classification, and the exact safe next action.

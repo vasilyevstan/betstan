@@ -76,6 +76,8 @@ jobs:
       OCI_LB_MIN_MBPS: ${{ vars.OCI_LB_MIN_MBPS }}
       OCI_LB_MAX_MBPS: ${{ vars.OCI_LB_MAX_MBPS }}
       OCI_EXPECTED_MONTHLY_COST: ${{ vars.OCI_EXPECTED_MONTHLY_COST }}
+      OCI_CANONICAL_HOST: ${{ vars.OCI_CANONICAL_HOST || 'betstan.xyz' }}
+      OCI_REDIRECT_HOST: ${{ vars.OCI_REDIRECT_HOST || 'www.betstan.xyz' }}
       OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
       OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
       OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}

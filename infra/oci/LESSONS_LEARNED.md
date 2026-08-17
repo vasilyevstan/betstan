@@ -1,0 +1,77 @@
+# OCI production lessons
+
+These rules summarize proven BetStan OCI failure modes. Re-read live provider,
+GitHub, DNS, and Kubernetes state before applying them; old run IDs and
+conversation summaries are not authority.
+
+## Identity and approvals
+
+- Bind every mutation to one full current source SHA and one internally
+  consistent build, capacity, infrastructure, deploy, or migration chain.
+- A protected-environment approval wait is an active workflow state, not a
+  hang. Never rerun or cancel it to bypass review.
+- Recovery uses the interrupted migration journal SHA and fencing generation.
+  Do not replace it with a newer `master` SHA.
+- Only one mutation-producing release or migration workflow may run at once.
+
+## OCI provider behavior
+
+- OCI deletion and registry layer reclamation are asynchronous. Wait for
+  terminal provider state and accounting instead of assuming a successful
+  delete response completed the operation.
+- Normalize documented case-insensitive provider enums before comparing them.
+  OCI has returned values such as `paravirtualized` in lowercase.
+- A healthy load-balancer control plane does not prove a healthy data plane.
+  Use repeated HTTP and HTTPS probes plus backend evidence.
+- Do not invent unsupported load-balancer refresh operations. Reconcile
+  listeners, backend sets, and health first. A full one-at-a-time replacement
+  requires exact ownership evidence and separate approval.
+- Direct Bastion forwarding to k3s port 6443 is blocked by the OCI Ubuntu host
+  firewall. Use one Bastion session to target SSH and a target-loopback tunnel
+  to `127.0.0.1:6443`.
+
+## Canonical production routing
+
+- `https://betstan.xyz` is canonical. Both schemes on `www.betstan.xyz`
+  permanently redirect to the apex while preserving path and query.
+- The IP-derived `nip.io` host is diagnostic only and cannot substitute for
+  canonical DNS, routing, or trusted TLS health.
+- Verify A records against exact load-balancer provenance, reject unexpected
+  AAAA records, require trusted certificate SANs, and test API JSON shapes.
+  HTTP 200 with client HTML on an API path is a routing failure.
+
+## Azure-to-OCI replacement
+
+- OCI is primary. Azure is a frozen source only during the approved
+  maintenance migration.
+- The approved migration is an exact logical replacement with no retained
+  backup. Once OCI target mutation begins, previous OCI data is unrecoverable.
+- No retained backup or old-OCI rollback exists.
+- Keep Azure disks until OCI database signatures and full application health
+  pass. After destructive failure, keep OCI closed and retry the complete
+  replacement from Azure; never expose mixed data.
+- A stale heartbeat does not authorize blind lock deletion. Verify the owner
+  run is conclusively inactive, both cluster locks and fingerprints agree, and
+  the fencing generation is advanced atomically.
+- A recovery watchdog may freeze applications and stop/deallocate Azure. It
+  must never start Azure, reopen OCI, delete data, or tear down resources.
+
+## Azure cost and retirement
+
+- AKS control-plane power fields can disagree with VMSS instance power. Use
+  instance view and Cost Management to determine running compute.
+- A stopped AKS cluster still incurs disk, load-balancer, public-IP, snapshot,
+  and monitoring charges.
+- Azure retirement is complete only after the AKS and managed resource groups,
+  VMs/VMSS, disks, snapshots, load balancers, public IPs, alerts, and temporary
+  identities are absent. CLI acceptance is not resource absence.
+- Delayed historical charges are not current resources. Continue bounded
+  Cost Management checks until no new BetStan usage appears.
+
+## Decision quality
+
+- Never return a blind `NO_GO`. Collect bounded sanitized diagnostics,
+  classify the failure as transient, partial, stale identity, approval wait,
+  automation defect, or safety invariant, and name the exact safe next action.
+- When a new failure class is proven, add a regression fixture and update the
+  owning agent before retrying production.

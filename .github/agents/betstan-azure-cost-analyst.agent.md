@@ -12,6 +12,7 @@ You are BetStan's Azure cost analyst. Research the exact deployed footprint, com
 Before analyzing cost, read:
 
 - `infra/azure/LESSONS_LEARNED.md`
+- `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/reconcile-nodepool-profile-stan.sh`
 - `infra/azure/agents/shared-mongo-topology-guard-stan.sh`
@@ -109,6 +110,25 @@ When modeling AKS stop/start:
 - Warn that stopping releases capacity, so a later start is not guaranteed.
 - Warn that Mongo data persists but RabbitMQ is ephemeral and can require queue recovery.
 - Do not treat reservations or savings plans as scaling down with stopped hours.
+
+## OCI-primary retirement accounting
+
+OCI is primary. When Azure is used temporarily as a frozen migration source:
+
+- distinguish AKS control-plane `powerState` from VMSS instance-view power;
+  the underlying VM state and Cost Management compute meter decide whether
+  compute is running;
+- separately price temporary extraction compute and the stopped footprint;
+- inventory the primary resource group, AKS-managed resource group, VM/VMSS,
+  OS/data disks, snapshots, load balancer, public IPs, alerts, action group,
+  registry, workspaces, and backup vaults;
+- require resource absence after retirement, not only accepted delete calls;
+- search for detached/orphaned disks, snapshots, IPs, and managed groups;
+- keep delayed historical charges distinct from new post-deletion usage and
+  continue bounded Cost Management checks until no new BetStan usage appears.
+
+Never treat stopped AKS as zero spend. Never recommend recreating Azure
+automatically after retirement.
 
 Reference values from the 2026-07-28 research, to be refreshed before future decisions:
 

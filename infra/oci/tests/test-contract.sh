@@ -34,6 +34,36 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 
+lessons="$OCI_DIR/LESSONS_LEARNED.md"
+[[ -f "$lessons" ]] || fail "OCI lessons file is missing"
+for lesson in \
+    "approval wait is an active workflow state" \
+    "OCI deletion and registry layer reclamation are asynchronous" \
+    "target-loopback tunnel" \
+    "No retained backup or old-OCI rollback exists" \
+    "Never return a blind \`NO_GO\`"; do
+    grep -Fq "$lesson" "$lessons" ||
+      fail "OCI lessons omit required recovery guidance: $lesson"
+done
+for agent in \
+    betstan-migration-recovery \
+    betstan-domain-ingress \
+    betstan-azure-retirement; do
+    agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
+    [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
+    grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
+      fail "recovery agent does not read OCI lessons: $agent"
+done
+grep -Fq "A run waiting for environment approval is active, not hung" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent can misclassify approval waits"
+grep -Fq "https://betstan.xyz" \
+    "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
+    fail "domain ingress agent lacks the canonical host"
+grep -Fq "A successful delete command alone is not" \
+    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
+    fail "Azure retirement agent trusts delete acceptance"
+
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"
 [[ "$(oci_normalize_list_json "")" == '{"data":[]}' ]] ||
@@ -142,6 +172,11 @@ VERIFY_REMOTE=0 BOOT_IMAGES=0 \
 cat > "$WORK_DIR/infrastructure.env" <<'ENV'
 source_sha=1111111111111111111111111111111111111111
 OCI_MONGO_VOLUME_OCID=ocid1.volume.oc1.fixture.fixturevalue
+ingress_ipv4=203.0.113.10
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=203.0.113.10.nip.io
 ENV
 
 IMAGE_PROVENANCE_FILE="$WORK_DIR/images.tsv" \
@@ -150,7 +185,8 @@ INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
 OUTPUT_FILE="$WORK_DIR/rendered.yaml" \
 WORK_DIR="$WORK_DIR/render-work" \
 OCI_K8S_NAMESPACE=betstan-oci \
-OCI_PUBLIC_HOST=203.0.113.10.nip.io \
+OCI_CANONICAL_HOST=betstan.xyz \
+OCI_REDIRECT_HOST=www.betstan.xyz \
 OCI_CERT_EMAIL=fixture@example.invalid \
   "$OCI_DIR/scripts/render-manifests.sh" >/dev/null
 
@@ -206,9 +242,39 @@ abort "Mongo does not use the explicit 50Gi claim" unless mongo.dig(
   "spec", "template", "spec", "volumes", 0, "persistentVolumeClaim", "claimName"
 ) == "gaming-auth-mongo-data"
 abort "legacy Mongo rendered" if File.read(ARGV.fetch(0)).include?("legacy-mongo")
-abort "expected one OCI ingress" unless by_kind.fetch("Ingress").length == 1
+abort "expected canonical and redirect OCI ingresses" unless by_kind.fetch("Ingress").length == 2
+abort "expected canonical and diagnostic certificates" unless by_kind.fetch("Certificate").length == 2
+ingress_hosts = by_kind.fetch("Ingress").flat_map {
+  |ingress| ingress.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
+}.sort
+abort "OCI ingress host set differs" unless ingress_hosts ==
+  %w[203.0.113.10.nip.io betstan.xyz www.betstan.xyz]
+canonical_certificate = by_kind.fetch("Certificate").find {
+  |certificate| certificate.dig("metadata", "name") == "betstan-oci-canonical-tls"
+}
+abort "canonical certificate SAN set differs" unless canonical_certificate.dig(
+  "spec", "dnsNames"
+).sort == %w[betstan.xyz www.betstan.xyz]
+redirect = by_kind.fetch("Ingress").find {
+  |ingress| ingress.dig("metadata", "name") == "gaming-oci-www-redirect"
+}
+abort "www redirect target differs" unless redirect.dig(
+  "metadata", "annotations", "nginx.ingress.kubernetes.io/permanent-redirect"
+) == 'https://betstan.xyz$request_uri'
 puts "oci_rendered_topology=PASS"
 RUBY
+grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not apply both TLS Certificate resources"
+grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not apply canonical/diagnostic and www redirect ingresses"
+grep -Fq 'certificate was not issued by Let' \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
+  fail "OCI public smoke does not verify the served certificate issuer"
+grep -Fq 'certificate expires within seven days' \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
+  fail "OCI public smoke does not verify served certificate expiry"
 
 OCI_RUNTIME_MODE=k3s \
 OCI_K3S_NODE_NAME=betstan-k3s \
@@ -217,7 +283,8 @@ INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
 OUTPUT_FILE="$WORK_DIR/rendered-k3s.yaml" \
 WORK_DIR="$WORK_DIR/render-k3s-work" \
 OCI_K8S_NAMESPACE=betstan-oci \
-OCI_PUBLIC_HOST=203.0.113.10.nip.io \
+OCI_CANONICAL_HOST=betstan.xyz \
+OCI_REDIRECT_HOST=www.betstan.xyz \
 OCI_CERT_EMAIL=fixture@example.invalid \
   "$OCI_DIR/scripts/render-manifests.sh" >/dev/null
 ruby -ryaml - "$WORK_DIR/rendered-k3s.yaml" <<'RUBY'
@@ -341,14 +408,14 @@ grep -R -n -E 'image:[[:space:]]+[^[:space:]#]+:(latest|main|master|dev)([[:spac
   "$OCI_DIR" "$ROOT_DIR/.github/workflows/oci-"*.yml >/dev/null 2>&1 &&
   fail "OCI path contains a mutable image tag"
 
-grep -R -n -E '\baz\b|AKS|azure\.com|betstan\.xyz|www\.betstan\.xyz' \
+grep -R -n -E '\baz\b|AKS|azure\.com|AZURE_' \
   "$OCI_DIR/agents" \
   --exclude='test-health-contract-stan.sh' \
   --exclude='oci-live-smoke.spec.js' >/dev/null 2>&1 &&
-  fail "OCI health agents contain an Azure or canonical-DNS dependency"
+  fail "OCI health agents contain an Azure dependency"
 for script in "$OCI_DIR/scripts"/*.sh; do
   [[ "$(basename "$script")" == "migrate-from-azure.sh" ]] && continue
-  grep -Eiq '\baz\b|AKS|AZURE_|azure\.com|betstan\.xyz|www\.betstan\.xyz' "$script" &&
+  grep -Eiq '\baz\b|AKS|AZURE_|azure\.com' "$script" &&
     fail "non-migration OCI script contains an Azure dependency: $script"
 done
 for workflow in "$ROOT_DIR/.github/workflows"/oci-*.yml; do

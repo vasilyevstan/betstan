@@ -18,6 +18,7 @@ Before assessing or operating, read:
 - `CONTRIBUTING.md`
 - `.github/skills/betstan-branch-governance/SKILL.md`
 - `infra/azure/LESSONS_LEARNED.md`
+- `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `infra/azure/agents/consolidate-production-mongo-stan.sh`
 - `infra/azure/agents/shared-mongo-operation-lock-stan.sh`
@@ -51,6 +52,12 @@ are not evidence of the live topology or current journal phase.
 Use `consolidate-production-mongo-stan.sh` for `plan`, `preflight`, `migrate`,
 `cleanup`, `rollback`, and `unlock`. Do not hand-run dump, restore, URI switch,
 legacy manifest application, or resource deletion commands as a substitute.
+
+This agent owns only in-AKS legacy-to-shared Mongo consolidation. The
+cross-cloud Azure-to-OCI exact replacement is owned by
+`.github/agents/betstan-migration-recovery.agent.md` and
+`.github/workflows/oci-migrate.yml`. Do not apply this agent's retained-backup
+or reverse-copy model to that explicitly approved no-backup replacement.
 
 Use:
 

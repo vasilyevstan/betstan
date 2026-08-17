@@ -16,8 +16,11 @@ Before operating, read:
 - `CONTRIBUTING.md`
 - `.github/skills/betstan-branch-governance/SKILL.md`
 - `infra/azure/LESSONS_LEARNED.md`
+- `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
 - `.github/agents/betstan-mongo-migration.agent.md` for any shared-Mongo work
+- `.github/agents/betstan-migration-recovery.agent.md` for cross-cloud cutover
+- `.github/agents/betstan-azure-retirement.agent.md` for final deletion
 - the specific `infra/azure/agents/*-stan.sh` scripts relevant to the task
 - `.github/workflows/production-deploy.yml` when a deployment may be involved
 
@@ -143,6 +146,22 @@ If the user explicitly approves stop/start:
 - warn that a later start may fail in a constrained region;
 - after start, run full workload, ingress, PVC, and RabbitMQ recovery checks;
 - never promise an exact availability time.
+
+For the approved OCI-primary extraction:
+
+- start only the existing `betstan-aks`; never create a replacement cluster
+  or node pool when its failed provisioning state cannot recover;
+- immediately freeze Azure ingress and ordinary workloads while retaining the
+  eight source Mongo StatefulSets;
+- never redirect production traffic to Azure;
+- keep the source disks until exact OCI data and application validation pass;
+- let the stop-only recovery workflow deallocate a hung extraction, but never
+  let it start or delete Azure;
+- after successful cutover, defer deletion to the Azure-retirement agent.
+
+RabbitMQ is ephemeral after AKS restart. Re-declare and inspect it only as
+needed to prove writers are frozen; its queue contents are not a substitute
+for the Mongo source.
 
 ## Incident reporting
 

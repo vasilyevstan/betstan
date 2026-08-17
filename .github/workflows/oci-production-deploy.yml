@@ -36,6 +36,8 @@ jobs:
     timeout-minutes: 120
     outputs:
       public_url: ${{ steps.provenance.outputs.public_url }}
+      redirect_url: ${{ steps.provenance.outputs.redirect_url }}
+      diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}
     environment:
       name: oci-production
     env:
@@ -67,6 +69,8 @@ jobs:
       OCI_LB_MAX_MBPS: ${{ vars.OCI_LB_MAX_MBPS }}
       OCI_EXPECTED_MONTHLY_COST: ${{ vars.OCI_EXPECTED_MONTHLY_COST }}
       OCI_CERT_EMAIL: ${{ vars.OCI_CERT_EMAIL }}
+      OCI_CANONICAL_HOST: ${{ vars.OCI_CANONICAL_HOST || 'betstan.xyz' }}
+      OCI_REDIRECT_HOST: ${{ vars.OCI_REDIRECT_HOST || 'www.betstan.xyz' }}
       OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
       OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
       OCI_CPU_MAX_PERCENT: "90"
@@ -171,6 +175,10 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$public_host" = "$OCI_CANONICAL_HOST" ]
+          [ "$canonical_host" = "$OCI_CANONICAL_HOST" ]
+          [ "$redirect_host" = "$OCI_REDIRECT_HOST" ]
+          [ "$diagnostic_host" = "${ingress_ipv4}.nip.io" ]
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
@@ -182,6 +190,8 @@ jobs:
             printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
           fi
           printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
+          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
+          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         run: ./infra/oci/scripts/install-cli.sh
@@ -296,6 +306,8 @@ jobs:
           OCI_RABBITMQ_BASELINE_FILE: artifacts/oci-deploy/rabbitmq-baseline.txt
           OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
           OCI_E2E_ALREADY_PASSED: "1"
           OUTPUT_DIR: artifacts/oci-deploy-validation
@@ -388,12 +400,16 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.approved_sha }}
           OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
-          [[ "$OCI_PUBLIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+          [ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]
+          [ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]
+          [[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
 
       - name: Install browser validation dependencies
         run: |
@@ -404,6 +420,8 @@ jobs:
       - name: Run public OCI validation without cloud credentials
         env:
           OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           MAX_LOOPS: "3"
           SLEEP_SECONDS: "20"

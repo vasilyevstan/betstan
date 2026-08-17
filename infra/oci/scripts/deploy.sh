@@ -11,6 +11,8 @@ INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-${3:-}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-deploy}"
 RENDERED_FILE="${RENDERED_FILE:-$OUTPUT_DIR/rendered.yaml}"
 OCI_CERT_EMAIL="${OCI_CERT_EMAIL:-}"
+OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
+OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "verified image provenance TSV is required"
@@ -25,14 +27,15 @@ oci_require_vars \
 
 unset source_sha runtime_mode infrastructure_finalized
 unset cluster_ocid cluster_fingerprint instance_ocid instance_fingerprint
-unset compartment_ocid ingress_ipv4 public_host lb_ocid k3s_node_name
+unset compartment_ocid ingress_ipv4 public_host canonical_host redirect_host diagnostic_host
+unset lb_ocid k3s_node_name
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
 [[ "${source_sha:-}" == "$SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
 oci_require_vars \
   runtime_mode infrastructure_finalized compartment_ocid ingress_ipv4 \
-  public_host
+  public_host canonical_host redirect_host diagnostic_host
 [[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
   oci_die "infrastructure provenance runtime mismatch"
 [[ "$infrastructure_finalized" == "true" ]] ||
@@ -45,8 +48,15 @@ oci_require_vars \
 [[ "$compartment_ocid" == "$OCI_COMPARTMENT_OCID" ]] ||
   oci_die "infrastructure provenance compartment mismatch"
 oci_validate_public_ipv4 "$ingress_ipv4" || oci_die "provenance ingress address is not public IPv4"
-[[ "$public_host" == "${ingress_ipv4}.nip.io" ]] ||
-  oci_die "public host is not derived from the provenance IPv4"
+[[ "$OCI_CANONICAL_HOST" == "betstan.xyz" &&
+   "$OCI_REDIRECT_HOST" == "www.${OCI_CANONICAL_HOST}" ]] ||
+  oci_die "deployment canonical hosts differ from the reviewed contract"
+[[ "$public_host" == "$OCI_CANONICAL_HOST" &&
+   "$canonical_host" == "$OCI_CANONICAL_HOST" &&
+   "$redirect_host" == "$OCI_REDIRECT_HOST" ]] ||
+  oci_die "public hosts differ from infrastructure provenance"
+[[ "$diagnostic_host" == "${ingress_ipv4}.nip.io" ]] ||
+  oci_die "diagnostic host is not derived from the provenance IPv4"
 
 kubeconfig_json="$(kubectl config view --raw --minify -o json)"
 cluster_server="$(jq -r '.clusters[0].cluster.server // empty' <<<"$kubeconfig_json")"
@@ -97,7 +107,8 @@ else
 fi
 
 oci_prepare_private_dir "$OUTPUT_DIR"
-OCI_PUBLIC_HOST="$public_host" \
+OCI_CANONICAL_HOST="$canonical_host" \
+OCI_REDIRECT_HOST="$redirect_host" \
 OCI_CERT_EMAIL="$OCI_CERT_EMAIL" \
 OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
 IMAGE_PROVENANCE_FILE="$IMAGE_PROVENANCE_FILE" \
@@ -237,7 +248,8 @@ done
   oci_die "RabbitMQ did not establish the expected 17-consumer baseline"
 awk '{print $1}' <<<"$queue_rows" | sort > "$OUTPUT_DIR/rabbitmq-baseline.txt"
 
-apply_documents 'Ingress:^gaming-oci-ingress$'
+apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'
+apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'
 
 if [[ "$runtime_mode" == "oke" ]]; then
   live_ingress_ip="$(
@@ -306,6 +318,9 @@ public_data_services="$(
   printf 'rendered_manifest_sha256=%s\n' "$(oci_sha256 < "$RENDERED_FILE")"
   printf 'rabbitmq_baseline_sha256=%s\n' "$(oci_sha256 < "$OUTPUT_DIR/rabbitmq-baseline.txt")"
   printf 'public_host=%s\n' "$public_host"
+  printf 'canonical_host=%s\n' "$canonical_host"
+  printf 'redirect_host=%s\n' "$redirect_host"
+  printf 'diagnostic_host=%s\n' "$diagnostic_host"
   printf 'deployment_run_id=%s\n' "${GITHUB_RUN_ID:-local}"
   printf 'deployment_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT:-1}"
 } > "$OUTPUT_DIR/provenance.txt"
