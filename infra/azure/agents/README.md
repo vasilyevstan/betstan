@@ -220,7 +220,13 @@ If `dns-check-stan.sh` prints `status=MATCH`, DNS is pointing to current ingress
 - Promotion statuses are base-scoped and published on both the current head and unique merge snapshot; validation requires both copies to point to the same trusted runs.
 - `production-deploy` runs only after successful `production-build` on `master` and deploys that exact SHA image set.
 - Emergency manual dispatch is limited to the central workflows, requires a full master SHA, and pauses at the reviewer-protected `production-emergency` environment.
-- OCI deployment is not active yet. Governance accepts the OCI identities only as one complete four-workflow set using the exact reviewer-gated `oci-build`, `oci-infrastructure`, `oci-production`, and `oci-migration` environments with strict trigger, exact-SHA, and first-attempt contracts; activation still requires that set to merge together and repository/environment lock-down to complete.
+- OCI is primary production at `https://betstan.xyz`. `www.betstan.xyz`
+  redirects to the apex and the `nip.io` endpoint is diagnostic only. Azure
+  deployment remains a separately approved recreation path and must never
+  redirect production away from OCI implicitly.
+- The Azure-to-OCI workflow is an exact logical replacement with a persisted
+  phase/heartbeat contract and stop-only recovery. Azure remains the source
+  until OCI passes; post-migration retirement is separately gated.
 - Retired central and per-service workflow identities remain disabled so historical runs cannot be rerun.
 - Deploy workflow requires the validated shared-Mongo marker, one ready auth Mongo StatefulSet/PVC, no legacy Mongo StatefulSets/PVCs, and all eight exact shared URIs.
 - Deploy workflow now runs `deploy-validation-loop-stan.sh` as required post-rollout gate and uploads diagnostics artifacts on failure.

@@ -18,6 +18,8 @@ SNAPSHOT_FILE="$OUTPUT_DIR/snapshot.json"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-}"
 OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-}"
+OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-}"
+OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 OCI_EXPECTED_SOURCE_SHA="${OCI_EXPECTED_SOURCE_SHA:-}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 OCI_MEMORY_MAX_PERCENT="${OCI_MEMORY_MAX_PERCENT:-70}"
@@ -28,7 +30,9 @@ oci_require_command kubectl
 oci_require_cli_version
 oci_require_command jq
 oci_require_command python3
-oci_require_vars INFRA_PROVENANCE_FILE IMAGE_PROVENANCE_FILE OCI_PUBLIC_URL OCI_EXPECTED_SOURCE_SHA
+oci_require_vars \
+  INFRA_PROVENANCE_FILE IMAGE_PROVENANCE_FILE OCI_PUBLIC_URL OCI_REDIRECT_URL \
+  OCI_DIAGNOSTIC_URL OCI_EXPECTED_SOURCE_SHA
 [[ "$OCI_EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "OCI_EXPECTED_SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$INFRA_PROVENANCE_FILE" && -f "$IMAGE_PROVENANCE_FILE" ]] ||
@@ -39,17 +43,26 @@ oci_require_value OCI_DISK_MAX_PERCENT 70
 
 unset source_sha runtime_mode cluster_ocid cluster_fingerprint
 unset instance_ocid instance_fingerprint k3s_node_name
-unset compartment_ocid namespace ingress_ipv4 public_host lb_ocid
+unset compartment_ocid namespace ingress_ipv4 public_host canonical_host
+unset redirect_host diagnostic_host lb_ocid
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
-oci_require_vars runtime_mode compartment_ocid namespace ingress_ipv4 public_host lb_ocid
+oci_require_vars \
+  runtime_mode compartment_ocid namespace ingress_ipv4 public_host \
+  canonical_host redirect_host diagnostic_host lb_ocid
 [[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
   oci_die "health runtime differs from infrastructure provenance"
 [[ "$source_sha" == "$OCI_EXPECTED_SOURCE_SHA" ]] ||
   oci_die "health source SHA differs from infrastructure provenance"
-[[ "${OCI_PUBLIC_URL%/}" == "https://${public_host}" && "$public_host" == "${ingress_ipv4}.nip.io" ]] ||
-  oci_die "health public URL differs from exact ingress provenance"
+[[ "$public_host" == "$canonical_host" &&
+   "${OCI_PUBLIC_URL%/}" == "https://${canonical_host}" &&
+   "${OCI_REDIRECT_URL%/}" == "https://${redirect_host}" &&
+   "${OCI_DIAGNOSTIC_URL%/}" == "https://${diagnostic_host}" &&
+   "$canonical_host" == "betstan.xyz" &&
+   "$redirect_host" == "www.${canonical_host}" &&
+   "$diagnostic_host" == "${ingress_ipv4}.nip.io" ]] ||
+  oci_die "health URLs differ from exact canonical ingress provenance"
 [[ "$node_shape" == "VM.Standard.A1.Flex" && "$node_ocpus" == "2" &&
    "$node_memory_gb" == "12" && "$mongo_volume_gb" == "50" &&
    "$lb_min_mbps" == "10" && "$lb_max_mbps" == "10" &&
@@ -79,7 +92,10 @@ trap cleanup EXIT
 public_ok=false
 if [[ "${OCI_PUBLIC_CHECKS_ALREADY_PASSED:-0}" == "1" ]]; then
   public_ok=true
-elif OCI_PUBLIC_URL="$OCI_PUBLIC_URL" OUTPUT_DIR="$WORK_DIR/smoke" \
+elif OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
+  OCI_REDIRECT_URL="$OCI_REDIRECT_URL" \
+  OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
+  OUTPUT_DIR="$WORK_DIR/smoke" \
   "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null; then
   public_ok=true
 fi
@@ -110,6 +126,8 @@ deployments_json="$WORK_DIR/deployments.json"
 statefulsets_json="$WORK_DIR/statefulsets.json"
 ingress_deployments_json="$WORK_DIR/ingress-deployments.json"
 cert_deployments_json="$WORK_DIR/cert-deployments.json"
+certificates_json="$WORK_DIR/certificates.json"
+cluster_issuer_json="$WORK_DIR/cluster-issuer.json"
 pods_json="$WORK_DIR/pods.json"
 services_json="$WORK_DIR/services.json"
 slices_json="$WORK_DIR/slices.json"
@@ -132,6 +150,8 @@ kubectl get deployments -n "$OCI_K8S_NAMESPACE" -o json > "$deployments_json"
 kubectl get statefulsets -n "$OCI_K8S_NAMESPACE" -o json > "$statefulsets_json"
 kubectl get deployments -n ingress-nginx -o json > "$ingress_deployments_json"
 kubectl get deployments -n cert-manager -o json > "$cert_deployments_json"
+kubectl get certificates -n "$OCI_K8S_NAMESPACE" -o json > "$certificates_json"
+kubectl get clusterissuer letsencrypt-prod -o json > "$cluster_issuer_json"
 kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json > "$pods_json"
 kubectl get services -n "$OCI_K8S_NAMESPACE" -o json > "$services_json"
 kubectl get endpointslices.discovery.k8s.io -n "$OCI_K8S_NAMESPACE" -o json > "$slices_json"
@@ -371,11 +391,40 @@ elif [[ "$queue_count" == "17" ]]; then
   queue_baseline_match=true
 fi
 
-certificate_ready="$(
-  kubectl get certificate betstan-oci-tls -n "$OCI_K8S_NAMESPACE" \
-    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true
+canonical_certificate_ready="$(
+  jq -r --arg canonical "$canonical_host" --arg redirect "$redirect_host" '
+    [.items[] | select(
+      .metadata.name == "betstan-oci-canonical-tls" and
+      .spec.issuerRef.kind == "ClusterIssuer" and
+      .spec.issuerRef.name == "letsencrypt-prod" and
+      (.spec.dnsNames | sort) == ([$canonical, $redirect] | sort) and
+      ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1
+    )] | length == 1
+  ' "$certificates_json"
 )"
-[[ "$certificate_ready" == "True" ]] && certificate_ready=true || certificate_ready=false
+diagnostic_certificate_ready="$(
+  jq -r --arg diagnostic "$diagnostic_host" '
+    [.items[] | select(
+      .metadata.name == "betstan-oci-tls" and
+      .spec.issuerRef.kind == "ClusterIssuer" and
+      .spec.issuerRef.name == "letsencrypt-prod" and
+      .spec.dnsNames == [$diagnostic] and
+      ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1
+    )] | length == 1
+  ' "$certificates_json"
+)"
+cluster_issuer_ready="$(
+  jq -r '
+    .metadata.name == "letsencrypt-prod" and
+    .spec.acme.server == "https://acme-v02.api.letsencrypt.org/directory" and
+    ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1
+  ' "$cluster_issuer_json"
+)"
+certificate_ready=false
+[[ "$canonical_certificate_ready" == "true" &&
+   "$diagnostic_certificate_ready" == "true" &&
+   "$cluster_issuer_ready" == "true" ]] &&
+  certificate_ready=true
 load_balancer_service_count="$(
   kubectl get services -A -o json |
     jq '[.items[] | select(.spec.type == "LoadBalancer")] | length'
@@ -446,6 +495,9 @@ jq -n \
   --argjson lb_count "$load_balancer_service_count" \
   --argjson ipv4_match "$ipv4_match" \
   --argjson certificate_ready "$certificate_ready" \
+  --argjson canonical_certificate_ready "$canonical_certificate_ready" \
+  --argjson diagnostic_certificate_ready "$diagnostic_certificate_ready" \
+  --argjson cluster_issuer_ready "$cluster_issuer_ready" \
   --argjson public_ok "$public_ok" \
   --argjson e2e_ok "$e2e_ok" \
   --argjson all_immutable "$all_immutable" \
@@ -495,8 +547,14 @@ jq -n \
       load_balancer_service_count: $lb_count,
       ipv4_match: $ipv4_match,
       certificate_ready: $certificate_ready,
+      canonical_certificate_ready: $canonical_certificate_ready,
+      diagnostic_certificate_ready: $diagnostic_certificate_ready,
+      cluster_issuer_ready: $cluster_issuer_ready,
       https_trusted: $public_ok,
-      http_redirect: $public_ok
+      http_redirect: $public_ok,
+      www_redirect: $public_ok,
+      diagnostic_https_trusted: $public_ok,
+      dns_match: $public_ok
     },
     application: {
       homepage_marker: $public_ok,

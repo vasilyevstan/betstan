@@ -1,7 +1,15 @@
-# BetStan OCI Always Free deployment
+# BetStan OCI Always Free production
 
-This directory is an additive Oracle Cloud Infrastructure path. It does not
-replace the Azure deployment, alter canonical DNS, or reuse Azure credentials.
+OCI is BetStan's primary production path. The canonical URL is
+`https://betstan.xyz`; `www.betstan.xyz` redirects permanently to the apex,
+and the load-balancer-derived `nip.io` host remains diagnostic. Azure
+deployment automation remains available for an explicitly approved future
+recreation, but no Azure workload may replace or alter OCI implicitly.
+
+This directory is the Oracle Cloud Infrastructure production path. Migration
+does not alter canonical DNS or reuse Azure credentials outside its protected
+source-only workflow. Azure remains the frozen recovery source until the OCI
+replacement passes; Azure deletion is a later operation outside this path.
 The preferred target is one directly launched `VM.Standard.A1.Flex` VM
 (2 OCPUs, 12 GiB) running pinned single-node k3s, one 50 GiB Mongo block
 volume, and one 10/10 Mbps flexible load balancer. The existing OKE Basic path
@@ -13,9 +21,9 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   `OCI_COMPARTMENT_OCID`; resources are never discovered by name alone.
 - Runtime selection is explicit. Scripts never fall from k3s to OKE or from
   OKE to k3s.
-- The tenancy home region, pinned runtime image, pinned Kubernetes
-  distribution, and migration watchdog image are required inputs. Scripts
-  stop rather than guessing region-specific or potentially billable values.
+- The tenancy home region, pinned runtime image, and pinned Kubernetes
+  distribution are required inputs. Scripts stop rather than guessing
+  region-specific or potentially billable values.
 - `OCI_A1_OCPUS=2`, `OCI_A1_MEMORY_GB=12`,
   `OCI_MONGO_VOLUME_GB=50`, `OCI_LB_MIN_MBPS=10`,
   `OCI_LB_MAX_MBPS=10`, and `OCI_EXPECTED_MONTHLY_COST=0` are immutable
@@ -39,6 +47,10 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   uses fixed NodePorts 30080/30443 and the Kubernetes API is reachable only
   through a short-lived OCI Bastion SSH session and a target-loopback tunnel.
   Mongo and RabbitMQ remain `ClusterIP`.
+- The apex and `www` A records must equal exact load-balancer provenance and
+  must not have a conflicting AAAA record. Canonical and diagnostic
+  certificates must be trusted and Ready before migration or deployment is
+  healthy.
 - The Kustomize overlay explicitly lists nine application manifests,
   RabbitMQ, and `auth-mongo-depl.yaml`. It never traverses
   `infra/k8s/legacy-mongo`.
@@ -55,7 +67,8 @@ kubeconfigs in the repository.
 The GitHub environments use the variables and secrets approved in the plan:
 
 - Environments: `oci-build`, `oci-capacity-acquire`,
-  `oci-infrastructure`, `oci-production`, `oci-migration`.
+  `oci-infrastructure`, `oci-production`, `oci-migration`, and the stop-only
+  `azure-migration-recovery`.
 - OCI CLI mapping:
   `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_FINGERPRINT`,
   `OCI_CLI_KEY_CONTENT`, and `OCI_CLI_REGION`.
@@ -79,9 +92,35 @@ Additional account-derived variables are intentionally required:
 - `OCI_KUBERNETES_VERSION`
 - `OCI_NODE_IMAGE_OCID`
 - `OCI_CERT_EMAIL`
+- `OCI_CANONICAL_HOST=betstan.xyz`
+- `OCI_REDIRECT_HOST=www.betstan.xyz`
 - `AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256`,
-  `AZURE_EXPECTED_CLUSTER_SERVER_SHA256`, and
-  `AZURE_WATCHDOG_KUBECTL_IMAGE` for migration only
+  `AZURE_EXPECTED_CLUSTER_SERVER_SHA256` for migration only
+- `AZURE_MIGRATION_RECOVERY_RESOURCE_GROUP`,
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_NAME`,
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_RESOURCE_ID_SHA256`, and
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_SERVER_SHA256` for stop-only recovery
+- `OCI_MIGRATION_RECOVERY_SOURCE_SHA`, `OCI_MIGRATION_RECOVERY_RUN_ID`,
+  `OCI_MIGRATION_RECOVERY_RUN_ATTEMPT`,
+  `OCI_MIGRATION_RECOVERY_MIGRATION_ID`, and
+  `OCI_MIGRATION_RECOVERY_FENCING_GENERATION` for the exact interrupted
+  migration journal
+
+`azure-migration-recovery` uses only
+`AZURE_MIGRATION_RECOVERY_CREDENTIALS`. That identity may read the exact
+cluster and migration ConfigMaps, scale the known Azure ingress/application
+deployments to zero, stop `betstan-aks`, and cancel only a conclusively stale
+exact migration run. It cannot start, create, resize, delete, or access OCI.
+The schedule remains inert unless
+`OCI_MIGRATION_RECOVERY_ENABLED=true`; manual dispatch remains reviewer-gated.
+An armed schedule also requires
+`OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH` to be in the future and no more than
+24 hours away.
+`OCI_MIGRATION_STALE_HEARTBEAT_SECONDS` defaults to the bounded 3600-second
+window so protected and public validation are not mistaken for a hung run.
+The expected SHA, run, attempt, migration ID, and fencing generation must be
+set immediately after dispatch and before approving `oci-migration`; recovery
+checks those values against both the workflow run and Azure journal.
 
 The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
 and `VOLUME_DELETE` in the deployment compartment for boot-volume
@@ -97,7 +136,8 @@ permissions; `boot-volumes` is not an individual IAM resource type.
 
 The tests parse every OCI YAML file, check every shell script with `bash -n`,
 render the explicit overlay with sanitized fixture provenance, verify one
-Mongo/PVC/load balancer, verify the k3s local-PV and Bastion cleanup
+Mongo/PVC/load balancer, canonical/redirect/diagnostic ingress and certificate
+contracts, verify the k3s local-PV and Bastion cleanup
 contracts, reject mixed OKE/k3s inventory, mutable application images, and
 legacy Mongo, check credential separation, and exercise health failure
 fixtures.
@@ -131,12 +171,31 @@ fixtures.
 6. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.
-7. `agents/deploy-validation-loop-stan.sh` must pass before the deployment is
-   healthy.
-8. `scripts/migrate-from-azure.sh` is the only cross-cloud path. It uses
-   isolated kubeconfigs, an Azure expiry watchdog, a bounded write freeze,
-   age-encrypted streams, exact database signatures, and unconditional Azure
-   replica restoration.
+7. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
+   `www` redirect, diagnostic TLS, API, browser, cluster, and zero-cost checks
+   before the deployment is healthy.
+8. Dispatch `oci-migrate` only with the exact current master SHA, successful
+   first-attempt build/infrastructure/deploy run IDs,
+   `replace_oci_data=true`, and the destructive confirmation. The workflow
+   synchronously starts only the existing `betstan-aks`, freezes Azure
+   ingress/applications while preserving all eight Mongo StatefulSets, and
+   mirrors a monotonic heartbeat/fencing journal to Azure and OCI.
+   `scripts/migrate-from-azure.sh` keeps all eight compressed, age-encrypted
+   transfer archives only on ephemeral runner storage, validates them in an
+   isolated disposable Mongo, then drops and exactly replaces the eight
+   allowlisted OCI databases. It verifies canonical data and metadata
+   signatures, recreates the 17-queue RabbitMQ topology, restarts consumers
+   sequentially, then locks Mongo and RabbitMQ publishes while protected and
+   public health run. Finalization rechecks parity under both locks, records
+   `cutover-committed`, and only then enables writes.
+   A pre-destructive failure restores OCI workload baselines. Any later
+   pre-commit failure keeps OCI closed and marks `recovery-required`; a later
+   full retry clears partial application databases and starts again from
+   frozen Azure. A post-commit interruption is retried only forward through
+   idempotent write unlock and completion; retry from Azure is permanently
+   forbidden because OCI may already have accepted writes. No path reopens
+   Azure writers, retains a data artifact, or rolls back to the previous OCI
+   data.
 9. Delete the exact Bastion session, restore the non-routable client CIDR,
    stop both exact tunnel PIDs, and remove ephemeral keys. Cleanup failure is
    a deployment failure.
@@ -156,9 +215,24 @@ rebuild, while any transitive image-recipe change fails closed.
 For OKE fallback, set `OCI_RUNTIME_MODE=oke`; the existing Basic-cluster,
 runner-NSG, and managed-node-pool flow remains available.
 
-## Account-specific blockers
+## Recovery and retirement
 
-Oracle must physically accept an A1 launch in Frankfurt before k3s
-finalization can run. Until then there is no OCI public application IP. The
-scripts fail with a named missing variable or provider invariant instead of
-fabricating capacity or a public endpoint.
+Read `LESSONS_LEARNED.md` before operating. A waiting environment approval is
+not a hang. Recovery uses the journal SHA and fencing generation, not a newer
+default branch. Provider deletion is asynchronous, and successful CLI output
+does not prove terminal state.
+
+Azure is started only as a frozen data source for the protected migration.
+After exact data parity and repeated OCI canonical health pass, the separately
+approved Azure-retirement operation removes AKS and all associated billable
+resources. Repository and GitHub configuration remain the only future Azure
+recreation source.
+
+Run `infra/azure/agents/retire-production-stan.sh plan` only with the exact
+successful migration run, attempt, ID, SHA, diagnostic URL, cluster-resource
+fingerprint, and a private absolute state directory. Review its 28-resource
+inventory digest, then pass that digest and exact confirmation to `execute`.
+The operator deletes AKS first, resumes asynchronous deletion by fenced phase,
+removes only the two exact resource groups, and verifies subscription-wide
+absence twice. It reports resource retirement separately from delayed Cost
+Management completion.

@@ -5,7 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       approved_sha:
-        description: Exact current master SHA approved for one-time Azure-to-OCI copy
+        description: Exact current master SHA approved for destructive Azure-to-OCI replacement
+        required: true
+        type: string
+      build_run_id:
+        description: Successful first-attempt oci-production-build run ID
         required: true
         type: string
       deploy_run_id:
@@ -16,8 +20,13 @@ on:
         description: Successful first-attempt oci-infrastructure run ID
         required: true
         type: string
+      replace_oci_data:
+        description: Destructively replace all allowlisted OCI application databases
+        required: true
+        default: false
+        type: boolean
       confirmation:
-        description: Type MIGRATE AZURE DATA TO OCI
+        description: Type REPLACE OCI DATA FROM AZURE
         required: true
         type: string
 
@@ -31,17 +40,21 @@ concurrency:
 
 jobs:
   migrate:
-    if: github.run_attempt == 1
+    if: github.run_attempt == 1 && inputs.replace_oci_data == true
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     outputs:
       public_url: ${{ steps.provenance.outputs.public_url }}
+      redirect_url: ${{ steps.provenance.outputs.redirect_url }}
+      diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}
     environment:
       name: oci-migration
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
       DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      REPLACE_OCI_DATA: ${{ inputs.replace_oci_data }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -54,6 +67,8 @@ jobs:
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
       OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
       OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
       OCI_BOOT_VOLUME_GB: ${{ vars.OCI_BOOT_VOLUME_GB }}
@@ -73,74 +88,95 @@ jobs:
       AZURE_CLUSTER_NAME: ${{ vars.OCI_MIGRATION_AZURE_CLUSTER_NAME }}
       AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 }}
       AZURE_EXPECTED_CLUSTER_SERVER_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_SERVER_SHA256 }}
-      AZURE_WATCHDOG_KUBECTL_IMAGE: ${{ vars.AZURE_WATCHDOG_KUBECTL_IMAGE }}
 
     steps:
-      - name: Initialize isolated cloud paths
+      - name: Initialize isolated migration paths
         run: |
           {
             echo "AZURE_CONFIG_DIR=$RUNNER_TEMP/azure-home/.azure"
             echo "AZURE_KUBECONFIG=$RUNNER_TEMP/azure-home/kubeconfig"
             echo "OCI_KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+            echo "MIGRATION_WORK_DIR=$RUNNER_TEMP/oci-migration-transport"
           } >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
           mkdir -p \
             "$RUNNER_TEMP/azure-home/.azure" \
-            "$RUNNER_TEMP/oci-home/.kube"
+            "$RUNNER_TEMP/oci-home/.kube" \
+            artifacts/build \
+            artifacts/deploy \
+            artifacts/infrastructure \
+            artifacts/oci-migration
           chmod 700 \
             "$RUNNER_TEMP/azure-home" \
             "$RUNNER_TEMP/azure-home/.azure" \
             "$RUNNER_TEMP/oci-home" \
             "$RUNNER_TEMP/oci-home/.kube"
 
-      - name: Checkout approved master commit
+      - name: Checkout approved current master commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
 
-      - name: Validate exact SHA and trusted deploy/infrastructure runs
+      - name: Validate exact SHA and first-attempt build infrastructure deploy provenance
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
-          [ "$CONFIRMATION" = "MIGRATE AZURE DATA TO OCI" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$REPLACE_OCI_DATA" = "true" ]
+          [ "$CONFIRMATION" = "REPLACE OCI DATA FROM AZURE" ]
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
 
-          deploy_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-deploy.yml" --jq '.id')"
-          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
-            gh api "repos/$REPOSITORY/actions/runs/$DEPLOY_RUN_ID/attempts/1" \
-              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
-          )"
-          [ "$workflow_id" = "$deploy_workflow_id" ]
-          [ "$workflow_path" = ".github/workflows/oci-production-deploy.yml" ]
-          [ "$event" = "workflow_dispatch" ]
-          [ "$head_sha" = "$SOURCE_SHA" ] && [ "$head_branch" = "master" ]
-          [ "$repository" = "$REPOSITORY" ]
-          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+          validate_run() {
+            local workflow_file="$1"
+            local run_id="$2"
+            local expected_event="$3"
+            local workflow_id
+            workflow_id="$(
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 45 --attempts 2 \
+                --classification github-workflow-read -- \
+                gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" --jq '.id'
+            )"
+            read -r observed_workflow path event head_sha head_branch repository status conclusion attempt <<<"$(
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 45 --attempts 2 \
+                --classification github-run-read -- \
+                gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            )"
+            [ "$observed_workflow" = "$workflow_id" ]
+            [ "$path" = ".github/workflows/$workflow_file" ]
+            [ "$event" = "$expected_event" ]
+            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_branch" = "master" ]
+            [ "$repository" = "$REPOSITORY" ]
+            [ "$status" = "completed" ]
+            [ "$conclusion" = "success" ]
+            [ "$attempt" = "1" ]
+          }
+          validate_run oci-production-build.yml "$BUILD_RUN_ID" workflow_run
+          validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch
+          validate_run oci-production-deploy.yml "$DEPLOY_RUN_ID" workflow_dispatch
 
-          infra_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-infrastructure.yml" --jq '.id')"
-          read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
-            gh api "repos/$REPOSITORY/actions/runs/$INFRASTRUCTURE_RUN_ID/attempts/1" \
-              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
-          )"
-          [ "$workflow_id" = "$infra_workflow_id" ]
-          [ "$workflow_path" = ".github/workflows/oci-infrastructure.yml" ]
-          [ "$event" = "workflow_dispatch" ]
-          [ "$head_sha" = "$SOURCE_SHA" ] && [ "$head_branch" = "master" ]
-          [ "$repository" = "$REPOSITORY" ]
-          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
-          mkdir -p artifacts/deploy artifacts/infrastructure artifacts/oci-migration
-          mkdir -p "$(dirname "$AZURE_KUBECONFIG")" "$(dirname "$OCI_KUBECONFIG")"
-          chmod 700 "$(dirname "$AZURE_KUBECONFIG")" "$(dirname "$OCI_KUBECONFIG")"
+      - name: Download exact build provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
 
       - name: Download exact deployment provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -160,19 +196,31 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.infrastructure_run_id }}
 
-      - name: Verify downloaded provenance
+      - name: Verify immutable build deploy and infrastructure chain
         id: provenance
         run: |
           set -euo pipefail
+          grep -Fx "source_sha=$SOURCE_SHA" artifacts/build/build-chain.txt
+          grep -Fx "build_run_id=$BUILD_RUN_ID" artifacts/build/build-chain.txt
+          grep -Fx "build_run_attempt=1" artifacts/build/build-chain.txt
+          PROVENANCE_DIR=artifacts/build \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/oci-migration/build-images.tsv \
+          VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+
           grep -Fx "source_sha=$SOURCE_SHA" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_id=$DEPLOY_RUN_ID" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_attempt=1" artifacts/deploy/provenance.txt
+          cmp -s artifacts/oci-migration/build-images.tsv artifacts/deploy/images.tsv
           expected_images_hash="$(sed -n 's/^image_provenance_sha256=//p' artifacts/deploy/provenance.txt)"
-          actual_images_hash="$(sha256sum artifacts/deploy/images.tsv | awk '{print $1}')"
-          [ "$actual_images_hash" = "$expected_images_hash" ]
+          [ "$(sha256sum artifacts/deploy/images.tsv | awk '{print $1}')" = "$expected_images_hash" ]
           expected_queue_hash="$(sed -n 's/^rabbitmq_baseline_sha256=//p' artifacts/deploy/provenance.txt)"
-          actual_queue_hash="$(sha256sum artifacts/deploy/rabbitmq-baseline.txt | awk '{print $1}')"
-          [ "$actual_queue_hash" = "$expected_queue_hash" ]
+          [ "$(sha256sum artifacts/deploy/rabbitmq-baseline.txt | awk '{print $1}')" = "$expected_queue_hash" ]
+
+          # shellcheck disable=SC1091
           source artifacts/infrastructure/provenance.env
           [ "$source_sha" = "$SOURCE_SHA" ]
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
@@ -181,11 +229,16 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$canonical_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [[ "$diagnostic_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
           grep -Fx "runtime_mode=$runtime_mode" artifacts/deploy/provenance.txt
           if [ "$runtime_mode" = "oke" ]; then
             runtime_ocid="$cluster_ocid"
             runtime_fingerprint="$cluster_fingerprint"
             echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
           else
             runtime_ocid="$instance_ocid"
             runtime_fingerprint="$instance_fingerprint"
@@ -195,23 +248,98 @@ jobs:
           {
             printf 'runtime_ocid=%s\n' "$runtime_ocid"
             printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
-            if [ "$runtime_mode" = "oke" ]; then
-              printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid"
-            fi
             printf 'public_url=https://%s\n' "$public_host"
+            printf 'redirect_url=https://%s\n' "$redirect_host"
+            printf 'diagnostic_url=https://%s\n' "$diagnostic_host"
           } >> "$GITHUB_OUTPUT"
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "build_run_id=$BUILD_RUN_ID" \
+            "build_run_attempt=1" \
+            "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID" \
+            "infrastructure_run_attempt=1" \
+            "deploy_run_id=$DEPLOY_RUN_ID" \
+            "deploy_run_attempt=1" \
+            "runtime_fingerprint=$runtime_fingerprint" \
+            "public_host=$public_host" \
+            "canonical_host=$canonical_host" \
+            "redirect_host=$redirect_host" \
+            "diagnostic_host=$diagnostic_host" \
+            "build_images_sha256=$(sha256sum artifacts/oci-migration/build-images.tsv | awk '{print $1}')" \
+            "rabbitmq_baseline_sha256=$expected_queue_hash" \
+            > artifacts/oci-migration/provenance.env
 
-      - name: Install age
+      - name: Install bounded migration dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends age
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 300 --attempts 2 \
+            --classification apt-index -- sudo apt-get update -qq
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 300 --attempts 2 \
+            --classification apt-install -- \
+            sudo apt-get install -y --no-install-recommends age
 
-      - name: Azure login for migration source only
+      - name: Login to Azure migration source
+        id: azure_login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         env:
           HOME: ${{ runner.temp }}/azure-home
         with:
           creds: ${{ secrets.OCI_MIGRATION_AZURE_CREDENTIALS }}
+
+      - name: Synchronously start only the exact existing betstan-aks cluster
+        id: azure_start
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        run: |
+          set -euo pipefail
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          before="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-cluster-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          resource_id="$(jq -r '.id // empty' <<<"$before")"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          {
+            echo "resource_id_hash=$actual_hash"
+            echo "touched=true"
+          } >> "$GITHUB_OUTPUT"
+          [ "$(jq -r '.provisioningState // empty' <<<"$before")" = "Succeeded" ]
+          power="$(jq -r '.powerState.code // empty' <<<"$before")"
+          [ "$power" = "Running" ] || [ "$power" = "Stopped" ]
+          if [ "$power" = "Stopped" ]; then
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 1500 --attempts 1 \
+              --classification azure-cluster-start -- \
+              az aks start \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --only-show-errors
+          fi
+          after="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-cluster-start-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
+          [ "$(jq -r '.powerState.code' <<<"$after")" = "Running" ]
+          printf '%s\n' \
+            "start_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            "cluster_name=betstan-aks" \
+            "cluster_resource_id_sha256=$actual_hash" \
+            "provisioning_state=Succeeded" \
+            "power_state=Running" \
+            > artifacts/oci-migration/azure-start.env
 
       - name: Configure isolated Azure kubeconfig
         uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
@@ -222,17 +350,6 @@ jobs:
           resource-group: ${{ env.AZURE_RESOURCE_GROUP }}
           cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
           admin: false
-
-      - name: Verify Azure cluster fingerprint
-        id: azure
-        env:
-          HOME: ${{ runner.temp }}/azure-home
-        run: |
-          set -euo pipefail
-          resource_id="$(az aks show --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_CLUSTER_NAME" --query id -o tsv)"
-          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
-          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
-          printf 'resource_id_hash=%s\n' "$actual_hash" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         env:
@@ -250,11 +367,11 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
         run: |
-          set -euo pipefail
-          oci ce cluster get \
-            --cluster-id "$OCI_CLUSTER_OCID" \
-            --query 'data.{type:type,state:"lifecycle-state"}' \
-            >/dev/null
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 60 --attempts 2 \
+            --classification oci-runtime-read -- \
+            oci ce cluster get --cluster-id "$OCI_CLUSTER_OCID" \
+              --query 'data.{type:type,state:"lifecycle-state"}'
 
       - name: Verify k3s identity
         if: env.OCI_RUNTIME_MODE == 'k3s'
@@ -267,11 +384,11 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_INSTANCE_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
         run: |
-          set -euo pipefail
-          oci compute instance get \
-            --instance-id "$OCI_INSTANCE_OCID" \
-            --query 'data.{shape:shape,state:"lifecycle-state"}' \
-            >/dev/null
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 60 --attempts 2 \
+            --classification oci-runtime-read -- \
+            oci compute instance get --instance-id "$OCI_INSTANCE_OCID" \
+              --query 'data.{shape:shape,state:"lifecycle-state"}'
 
       - name: Reconcile expired and authorize current runner IPv4
         if: env.OCI_RUNTIME_MODE == 'oke'
@@ -287,7 +404,9 @@ jobs:
         run: |
           set -euo pipefail
           ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
-          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
@@ -327,9 +446,11 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
-      - name: Stream encrypted databases and restore exact signatures
+      - name: Destructively replace OCI data from the frozen Azure source
+        id: replace
         env:
           HOME: ${{ runner.temp }}/oci-home
+          GH_TOKEN: ${{ github.token }}
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
@@ -337,14 +458,31 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
           OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
-          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure.outputs.resource_id_hash }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure_start.outputs.resource_id_hash }}
           OCI_MIGRATION_AGE_IDENTITY: ${{ secrets.OCI_MIGRATION_AGE_IDENTITY }}
           OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
-          WORK_DIR: ${{ runner.temp }}/oci-migration-ciphertext
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
           JOURNAL_FILE: artifacts/oci-migration/journal.tsv
-        run: ./infra/oci/scripts/migrate-from-azure.sh
+          SUMMARY_FILE: artifacts/oci-migration/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh replace
 
-      - name: Rerun protected OCI cluster health after migration
+      - name: Retry fail-closed handling after replacement failure
+        if: always() && steps.replace.outcome == 'failure'
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure_start.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+
+      - name: Run exact protected OCI health
         id: health
         env:
           HOME: ${{ runner.temp }}/oci-home
@@ -359,28 +497,141 @@ jobs:
           OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
           OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
           OCI_E2E_ALREADY_PASSED: "1"
-          OUTPUT_DIR: artifacts/oci-migration/validation
+          OUTPUT_DIR: ${{ runner.temp }}/oci-migration-health
         run: ./infra/oci/agents/deploy-validation-loop-stan.sh
 
-      - name: Upload sanitized migration journal
+      - name: Fail closed after protected-health failure
+        if: always() && steps.replace.outcome == 'success' && steps.health.outcome == 'failure'
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure_start.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+
+      - name: Stop Azure after an unsuccessful protected migration
+        if: >-
+          always() &&
+          steps.azure_start.outputs.touched == 'true' &&
+          (steps.replace.outcome != 'success' || steps.health.outcome != 'success')
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        run: |
+          set -euo pipefail
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          before="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-cluster-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          resource_id="$(jq -r '.id // empty' <<<"$before")"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          power="$(jq -r '.powerState.code' <<<"$before")"
+          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 1200 --attempts 1 \
+              --classification azure-cluster-stop -- \
+              az aks stop \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --only-show-errors
+          else
+            [ "$power" = "Stopped" ]
+          fi
+          after="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-cluster-stop-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
+          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
+          printf '%s\n' \
+            "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            "cluster_name=betstan-aks" \
+            "cluster_resource_id_sha256=$actual_hash" \
+            "provisioning_state=Succeeded" \
+            "power_state=Stopped" \
+            > artifacts/oci-migration/azure-stop.env
+
+      - name: Upload sanitized migration phase and provenance
+        id: phase_artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: oci-migration-journal-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/oci-migration/journal.tsv
+          name: oci-migration-phase-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-migration/journal.tsv
+            artifacts/oci-migration/phase.env
+            artifacts/oci-migration/provenance.env
+            artifacts/oci-migration/azure-start.env
+            artifacts/oci-migration/azure-stop.env
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Upload sanitized health diagnostics on failure
-        if: always() && steps.health.outcome == 'failure'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oci-migration-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/oci-migration/validation
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: Fail closed after any post-health phase artifact failure
+        id: post_health_close
+        if: >-
+          always() &&
+          failure() &&
+          steps.replace.outcome == 'success' &&
+          steps.health.outcome == 'success'
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure_start.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh fail-closed
 
       - name: Revoke exact OCI runner rule
         if: always() && env.OCI_RUNTIME_MODE == 'oke'
@@ -411,16 +662,113 @@ jobs:
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
-      - name: Remove cloud client state and ciphertext
+      - name: Retry fail-closed transition after access cleanup failure
+        if: >-
+          always() &&
+          failure() &&
+          steps.replace.outcome == 'success' &&
+          steps.health.outcome == 'success' &&
+          steps.post_health_close.outcome != 'success'
+        env:
+          HOME: ${{ runner.temp }}/oci-home
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure_start.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+
+      - name: Last-resort Azure stop after any migration-job failure
+        if: always() && failure() && steps.azure_start.outputs.touched == 'true'
+        env:
+          HOME: ${{ runner.temp }}/azure-home
+        run: |
+          set -euo pipefail
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          cluster="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-cluster-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          resource_id="$(jq -r '.id // empty' <<<"$cluster")"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          power="$(jq -r '.powerState.code' <<<"$cluster")"
+          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 1200 --attempts 1 \
+              --classification azure-cluster-stop -- \
+              az aks stop \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --only-show-errors
+          else
+            [ "$power" = "Stopped" ]
+          fi
+          after="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-cluster-stop-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
+          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
+          printf '%s\n' \
+            "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            "cluster_name=betstan-aks" \
+            "cluster_resource_id_sha256=$actual_hash" \
+            "provisioning_state=Succeeded" \
+            "power_state=Stopped" \
+            > artifacts/oci-migration/azure-stop.env
+
+      - name: Remove isolated migration client state and transports
         if: always()
         env:
           HOME: ${{ runner.temp }}/azure-home
         run: |
           az logout >/dev/null 2>&1 || true
           rm -rf \
-            "${{ runner.temp }}/azure-home" \
-            "${{ runner.temp }}/oci-home" \
-            "${{ runner.temp }}/oci-migration-ciphertext"
+            "$RUNNER_TEMP/azure-home" \
+            "$RUNNER_TEMP/oci-home" \
+            "$RUNNER_TEMP/oci-migration-transport" \
+            "$RUNNER_TEMP/oci-migration-health"
 
   public-validate:
     needs: migrate
@@ -441,12 +789,16 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.approved_sha }}
           OCI_PUBLIC_URL: ${{ needs.migrate.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.migrate.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.migrate.outputs.diagnostic_url }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
-          [[ "$OCI_PUBLIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+          [ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]
+          [ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]
+          [[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
 
       - name: Install browser validation dependencies
         run: |
@@ -454,20 +806,647 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
-      - name: Run public OCI validation without cloud credentials
+      - name: Run full public OCI validation without cloud credentials
         env:
           OCI_PUBLIC_URL: ${{ needs.migrate.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.migrate.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.migrate.outputs.diagnostic_url }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           MAX_LOOPS: "3"
           SLEEP_SECONDS: "20"
-          OUTPUT_DIR: artifacts/oci-public-validation
+          OUTPUT_DIR: ${{ runner.temp }}/oci-public-validation
         run: ./infra/oci/agents/validation-loop-stan.sh
 
-      - name: Upload public validation diagnostics
-        if: failure()
+      - name: Remove public validation output
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-public-validation"
+
+  finalize:
+    needs: [migrate, public-validate]
+    if: always() && needs.migrate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: oci-migration
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      REPLACE_OCI_DATA: ${{ inputs.replace_oci_data }}
+      PUBLIC_VALIDATION_RESULT: ${{ needs.public-validate.result }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_MIGRATION_AGE_RECIPIENT: ${{ vars.OCI_MIGRATION_AGE_RECIPIENT }}
+      AZURE_RESOURCE_GROUP: ${{ vars.OCI_MIGRATION_AZURE_RESOURCE_GROUP }}
+      AZURE_CLUSTER_NAME: ${{ vars.OCI_MIGRATION_AZURE_CLUSTER_NAME }}
+      AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 }}
+      AZURE_EXPECTED_CLUSTER_SERVER_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_SERVER_SHA256 }}
+
+    steps:
+      - name: Initialize isolated finalization paths
+        run: |
+          {
+            echo "AZURE_CONFIG_DIR=$RUNNER_TEMP/azure-finalize/.azure"
+            echo "AZURE_KUBECONFIG=$RUNNER_TEMP/azure-finalize/kubeconfig"
+            echo "OCI_KUBECONFIG=$RUNNER_TEMP/oci-finalize/.kube/config"
+            echo "MIGRATION_WORK_DIR=$RUNNER_TEMP/oci-migration-finalize"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-finalize/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/azure-finalize/.azure" \
+            "$RUNNER_TEMP/oci-finalize/.kube" \
+            artifacts/deploy \
+            artifacts/infrastructure \
+            artifacts/oci-migration-final
+          chmod 700 "$RUNNER_TEMP/azure-finalize" "$RUNNER_TEMP/oci-finalize"
+
+      - name: Checkout exact current master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Revalidate exact finalization identity
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$REPLACE_OCI_DATA" = "true" ]
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+
+      - name: Download exact deployment provenance for finalization
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-deploy-provenance-${{ inputs.deploy_run_id }}-1
+          path: artifacts/deploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.deploy_run_id }}
+
+      - name: Download exact infrastructure provenance for finalization
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Verify finalization provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          grep -Fx "source_sha=$SOURCE_SHA" artifacts/deploy/provenance.txt
+          grep -Fx "deployment_run_id=$DEPLOY_RUN_ID" artifacts/deploy/provenance.txt
+          grep -Fx "deployment_run_attempt=1" artifacts/deploy/provenance.txt
+          # shellcheck disable=SC1091
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$canonical_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [[ "$diagnostic_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+          if [ "$runtime_mode" = "oke" ]; then
+            runtime_ocid="$cluster_ocid"
+            runtime_fingerprint="$cluster_fingerprint"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+            echo "::add-mask::$endpoint_nsg_ocid"
+          else
+            runtime_ocid="$instance_ocid"
+            runtime_fingerprint="$instance_fingerprint"
+          fi
+          echo "::add-mask::$runtime_ocid"
+          {
+            printf 'runtime_ocid=%s\n' "$runtime_ocid"
+            printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to Azure source for mirrored final state
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        env:
+          HOME: ${{ runner.temp }}/azure-finalize
+        with:
+          creds: ${{ secrets.OCI_MIGRATION_AZURE_CREDENTIALS }}
+
+      - name: Verify Azure is still the exact running frozen source
+        id: azure
+        env:
+          HOME: ${{ runner.temp }}/azure-finalize
+        run: |
+          set -euo pipefail
+          cluster="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-cluster-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          resource_id="$(jq -r '.id // empty' <<<"$cluster")"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          [ "$(jq -r '.provisioningState' <<<"$cluster")" = "Succeeded" ]
+          [ "$(jq -r '.powerState.code' <<<"$cluster")" = "Running" ]
+          printf 'resource_id_hash=%s\n' "$actual_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Configure finalization Azure kubeconfig
+        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        env:
+          HOME: ${{ runner.temp }}/azure-finalize
+          KUBECONFIG: ${{ env.AZURE_KUBECONFIG }}
+        with:
+          resource-group: ${{ env.AZURE_RESOURCE_GROUP }}
+          cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
+          admin: false
+
+      - name: Install pinned finalization OCI CLI
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Authorize finalization runner IPv4
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/oci-migration-final/runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure finalization OCI kubeconfig
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.runtime_ocid }}
+
+      - name: Open finalization Bastion access
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/oci-migration-final/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-finalize
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Finalize success or enforce post-boundary closure
+        id: transition
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration-final/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration-final/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLIC_VALIDATION_RESULT" = "success" ]; then
+            for attempt in 1 2 3; do
+              if ./infra/oci/scripts/migrate-from-azure.sh finalize-success; then
+                exit 0
+              fi
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            exit 1
+          else
+            ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+          fi
+
+      - name: Fail closed if final success transition itself fails
+        if: always() && steps.transition.outcome == 'failure'
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration-final/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration-final/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+
+      - name: Always stop and deallocate exact Azure source with evidence
+        id: azure_stop
+        if: always()
+        env:
+          HOME: ${{ runner.temp }}/azure-finalize
+        run: |
+          set -euo pipefail
+          [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          before="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-cluster-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          resource_id="$(jq -r '.id // empty' <<<"$before")"
+          actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
+          [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          [ "$(jq -r '.provisioningState' <<<"$before")" = "Succeeded" ]
+          power="$(jq -r '.powerState.code' <<<"$before")"
+          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 1200 --attempts 1 \
+              --classification azure-cluster-stop -- \
+              az aks stop \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --only-show-errors
+          else
+            [ "$power" = "Stopped" ]
+          fi
+          after="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-cluster-stop-read -- \
+              az aks show \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --name "$AZURE_CLUSTER_NAME" \
+                --output json
+          )"
+          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
+          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
+          printf '%s\n' \
+            "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            "cluster_name=betstan-aks" \
+            "cluster_resource_id_sha256=$actual_hash" \
+            "provisioning_state=Succeeded" \
+            "aks_power_state=Stopped" \
+            "vmss_instances_deallocated=true" \
+            > artifacts/oci-migration-final/azure-stop.env
+
+      - name: Upload sanitized final phase and Azure stop evidence
+        id: final_artifact
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: oci-migration-public-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/oci-public-validation
+          name: oci-migration-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-migration-final/journal.tsv
+            artifacts/oci-migration-final/phase.env
+            artifacts/oci-migration-final/azure-stop.env
+            artifacts/oci-migration-final/emergency-closure.env
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
+
+      - name: Emergency-close OCI if final evidence or Azure stop fails
+        if: >-
+          always() &&
+          (
+            steps.azure_stop.outcome == 'failure' ||
+            steps.final_artifact.outcome == 'failure'
+          )
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          GH_TOKEN: ${{ github.token }}
+          OCI_EXPECTED_CLUSTER_OCID: ${{ steps.provenance.outputs.runtime_ocid }}
+          OCI_EXPECTED_CLUSTER_FINGERPRINT: ${{ steps.provenance.outputs.runtime_fingerprint }}
+          AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.azure.outputs.resource_id_hash }}
+          OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
+          WORK_DIR: ${{ env.MIGRATION_WORK_DIR }}
+          JOURNAL_FILE: artifacts/oci-migration-final/journal.tsv
+          SUMMARY_FILE: artifacts/oci-migration-final/phase.env
+          MIGRATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          set +e
+          ./infra/oci/scripts/migrate-from-azure.sh fail-closed
+          mirrored_close_status=$?
+          set -e
+          if [ "$mirrored_close_status" = "0" ]; then
+            exit 0
+          fi
+          services=(auth bet backoffice event gamemaster moderation resulting slip client)
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 120 --attempts 2 \
+            --classification emergency-ingress-close -- \
+            kubectl --kubeconfig "$KUBECONFIG" \
+              scale deployment ingress-nginx-controller \
+              -n ingress-nginx --replicas 0
+          for service in "${services[@]}"; do
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 120 --attempts 2 \
+              --classification emergency-writer-close -- \
+              kubectl --kubeconfig "$KUBECONFIG" \
+                scale deployment "gaming-${service}-depl" \
+                -n "$OCI_K8S_NAMESPACE" --replicas 0
+          done
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 120 --attempts 2 \
+            --classification emergency-queue-close -- \
+            kubectl --kubeconfig "$KUBECONFIG" \
+              scale deployment gaming-rabbitmq-depl \
+              -n "$OCI_K8S_NAMESPACE" --replicas 0
+          for _ in $(seq 1 60); do
+            open_replicas="$(
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 30 --attempts 2 \
+                --classification emergency-writer-read -- \
+                kubectl --kubeconfig "$KUBECONFIG" \
+                  get deployments -n "$OCI_K8S_NAMESPACE" -o json |
+                ./infra/oci/scripts/bounded-command.py \
+                  --timeout-seconds 30 --attempts 1 \
+                  --classification emergency-writer-count -- \
+                  jq '[.items[] | select(
+                  (.metadata.name == "gaming-rabbitmq-depl" or
+                   (.metadata.name | test("^gaming-(auth|bet|backoffice|event|gamemaster|moderation|resulting|slip|client)-depl$"))) and
+                  ((.spec.replicas // 0) != 0 or
+                   (.status.availableReplicas // 0) != 0)
+                )] | length'
+            )"
+            ingress_open="$(
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 30 --attempts 2 \
+                --classification emergency-ingress-read -- \
+                kubectl --kubeconfig "$KUBECONFIG" \
+                  get deployment ingress-nginx-controller -n ingress-nginx \
+                  -o jsonpath='{.spec.replicas}|{.status.availableReplicas}'
+            )"
+            if [ "$open_replicas" = "0" ] &&
+              { [ "$ingress_open" = "0|" ] || [ "$ingress_open" = "0|0" ]; }; then
+              printf '%s\n' \
+                "closure_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+                "ingress_replicas=0" \
+                "writer_replicas=0" \
+                "rabbitmq_replicas=0" \
+                > artifacts/oci-migration-final/emergency-closure.env
+              exit 0
+            fi
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 10 --attempts 1 \
+              --classification emergency-close-wait -- sleep 5
+          done
+          echo "OCI did not close after finalization control-plane failure" >&2
+          exit 1
+
+      - name: Revoke finalization runner rule
+        id: revoke
+        if: always() && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/oci-migration-final/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Close finalization Bastion access
+        id: bastion_cleanup
+        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          HOME: ${{ runner.temp }}/oci-finalize
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/oci-migration-final/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-finalize
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Emergency-close OCI after access cleanup failure
+        if: >-
+          always() &&
+          (
+            steps.revoke.outcome == 'failure' ||
+            steps.bastion_cleanup.outcome == 'failure'
+          )
+        env:
+          KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          services=(auth bet backoffice event gamemaster moderation resulting slip client)
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 120 --attempts 2 \
+            --classification emergency-ingress-close -- \
+            kubectl --kubeconfig "$KUBECONFIG" \
+              scale deployment ingress-nginx-controller \
+              -n ingress-nginx --replicas 0
+          for service in "${services[@]}"; do
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 120 --attempts 2 \
+              --classification emergency-writer-close -- \
+              kubectl --kubeconfig "$KUBECONFIG" \
+                scale deployment "gaming-${service}-depl" \
+                -n "$OCI_K8S_NAMESPACE" --replicas 0
+          done
+          ./infra/oci/scripts/bounded-command.py \
+            --timeout-seconds 120 --attempts 2 \
+            --classification emergency-queue-close -- \
+            kubectl --kubeconfig "$KUBECONFIG" \
+              scale deployment gaming-rabbitmq-depl \
+              -n "$OCI_K8S_NAMESPACE" --replicas 0
+
+      - name: Remove isolated finalization state
+        id: final_client_cleanup
+        if: always()
+        env:
+          HOME: ${{ runner.temp }}/azure-finalize
+        run: |
+          az logout >/dev/null 2>&1 || true
+          rm -rf \
+            "$RUNNER_TEMP/azure-finalize" \
+            "$RUNNER_TEMP/oci-finalize" \
+            "$RUNNER_TEMP/oci-migration-finalize" \
+            "$RUNNER_TEMP/betstan-k3s-finalize"
+
+      - name: Build sanitized successful migration summary
+        id: success_summary
+        if: >-
+          always() &&
+          env.PUBLIC_VALIDATION_RESULT == 'success' &&
+          steps.transition.outcome == 'success' &&
+          steps.azure_stop.outcome == 'success' &&
+          steps.final_artifact.outcome == 'success' &&
+          steps.revoke.outcome != 'failure' &&
+          steps.bastion_cleanup.outcome != 'failure' &&
+          steps.final_client_cleanup.outcome == 'success'
+        run: |
+          set -euo pipefail
+          phase_file=artifacts/oci-migration-final/phase.env
+          stop_file=artifacts/oci-migration-final/azure-stop.env
+          [ -f "$phase_file" ]
+          [ -f "$stop_file" ]
+
+          get_phase_field() {
+            local key="$1"
+            local value
+            value="$(awk -F= -v key="$key" '
+              $1 == key {
+                print substr($0, index($0, "=") + 1)
+                count++
+              }
+              END {
+                if (count != 1) exit 1
+              }
+            ' "$phase_file")"
+            printf '%s' "$value"
+          }
+
+          migration_id="$(get_phase_field migration-id)"
+          source_sha="$(get_phase_field original-source-sha)"
+          run_id="$(get_phase_field owner-run-id)"
+          run_attempt="$(get_phase_field owner-run-attempt)"
+          journal_generation="$(get_phase_field fencing-token)"
+          journal_sequence="$(get_phase_field sequence)"
+          journal_heartbeat_epoch="$(get_phase_field heartbeat-epoch)"
+          journal_phase="$(get_phase_field phase)"
+          boundary="$(get_phase_field destructive-boundary)"
+          recovery_required="$(get_phase_field recovery-required)"
+          database_count="$(get_phase_field database-count)"
+          logical_parity="$(get_phase_field logical-parity)"
+          source_signatures="$(get_phase_field signature-manifest-sha256)"
+          target_signatures="$(get_phase_field target-signature-manifest-sha256)"
+          azure_cluster_fingerprint="$(get_phase_field azure-cluster-fingerprint)"
+          final_journal_sha256="$(sha256sum "$phase_file" | awk '{print $1}')"
+
+          [[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [ "$migration_id" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$run_id" = "$GITHUB_RUN_ID" ]
+          [ "$run_attempt" = "$GITHUB_RUN_ATTEMPT" ]
+          [[ "$journal_generation" =~ ^[1-9][0-9]*$ ]]
+          [[ "$journal_sequence" =~ ^[1-9][0-9]*$ ]]
+          [[ "$journal_heartbeat_epoch" =~ ^[1-9][0-9]*$ ]]
+          [ "$journal_phase" = "completed" ]
+          [ "$boundary" = "true" ]
+          [ "$recovery_required" = "false" ]
+          [ "$database_count" = "8" ]
+          [ "$logical_parity" = "true" ]
+          [[ "$source_signatures" =~ ^[0-9a-f]{64}$ ]]
+          [ "$target_signatures" = "$source_signatures" ]
+          [[ "$azure_cluster_fingerprint" =~ ^[0-9a-f]{64}$ ]]
+          [ "$azure_cluster_fingerprint" = \
+            "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          [[ "$final_journal_sha256" =~ ^[0-9a-f]{64}$ ]]
+          grep -Fxq "provisioning_state=Succeeded" "$stop_file"
+          grep -Fxq "cluster_resource_id_sha256=$azure_cluster_fingerprint" \
+            "$stop_file"
+          grep -Fxq "aks_power_state=Stopped" "$stop_file"
+          grep -Fxq "vmss_instances_deallocated=true" "$stop_file"
+
+          mkdir -p artifacts/oci-migration-success
+          printf '%s\n' \
+            "schema=betstan.oci-migration-success.v1" \
+            "migration_id=$migration_id" \
+            "source_sha=$source_sha" \
+            "github_run_id=$run_id" \
+            "github_run_attempt=$run_attempt" \
+            "terminal_phase=DEPLOYED_HEALTHY" \
+            "terminal_status=DEPLOYED_HEALTHY" \
+            "journal_generation=$journal_generation" \
+            "fencing_generation=$journal_generation" \
+            "journal_sequence=$journal_sequence" \
+            "journal_heartbeat_epoch=$journal_heartbeat_epoch" \
+            "final_journal_sha256=$final_journal_sha256" \
+            "artifact_run_binding=${run_id}-${run_attempt}" \
+            "destructive_boundary_crossed=true" \
+            "database_count=8" \
+            "logical_source_target_parity=true" \
+            "source_signature_aggregate_sha256=$source_signatures" \
+            "target_signature_aggregate_sha256=$target_signatures" \
+            "oci_reopened_healthy=true" \
+            "azure_writers_frozen=true" \
+            "azure_cluster_resource_id_sha256=$azure_cluster_fingerprint" \
+            "aks_power_state=Stopped" \
+            "vmss_instances_deallocated=true" \
+            "azure_cluster_stopped_deallocated=true" \
+            > artifacts/oci-migration-success/migration-summary.env
+
+      - name: Upload successful migration retirement provenance
+        if: steps.success_summary.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-migration-success/migration-summary.env
+          if-no-files-found: error
+          retention-days: 90

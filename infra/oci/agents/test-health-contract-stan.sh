@@ -54,6 +54,12 @@ run_failure oom-kill '.pods[0].last_reason="OOMKilled"' pod-failure-reason
 run_failure node-pressure '.node.memory_pressure=true' node-pressure
 run_failure invalid-api-json '.application.api_json=false' api-json
 run_failure certificate-failure '.ingress.certificate_ready=false' certificate
+run_failure canonical-certificate-failure '.ingress.canonical_certificate_ready=false' canonical-certificate
+run_failure diagnostic-certificate-failure '.ingress.diagnostic_certificate_ready=false' diagnostic-certificate
+run_failure cluster-issuer-failure '.ingress.cluster_issuer_ready=false' cluster-issuer
+run_failure www-redirect-failure '.ingress.www_redirect=false' www-redirect
+run_failure diagnostic-https-failure '.ingress.diagnostic_https_trusted=false' diagnostic-https
+run_failure canonical-dns-failure '.ingress.dns_match=false' canonical-dns
 run_failure queue-loss '.rabbitmq.queue_count=16' queue-count
 run_failure consumer-loss '.rabbitmq.all_consumers=false' queue-consumers
 run_failure resource-breach '.node.memory_percent=71' memory-threshold
@@ -87,8 +93,23 @@ while [[ $# -gt 0 ]]; do
     *) url="$1"; shift ;;
   esac
 done
-if [[ "$url" == http://* ]]; then
-  printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: https://203.0.113.10.nip.io/\r\n\r\n' > "$headers"
+if [[ "$url" == http://betstan.xyz/* ]]; then
+  location="https://betstan.xyz/${url#http://betstan.xyz/}"
+  printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: %s\r\n\r\n' "$location" > "$headers"
+  : > "$output"
+  printf '308'
+elif [[ "$url" == http://www.betstan.xyz/* || "$url" == https://www.betstan.xyz/* ]]; then
+  path="${url#*://www.betstan.xyz/}"
+  if [[ "${STUB_BAD_REDIRECT:-0}" == "1" ]]; then
+    printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: https://www.betstan.xyz/%s\r\n\r\n' "$path" > "$headers"
+  else
+    printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: https://betstan.xyz/%s\r\n\r\n' "$path" > "$headers"
+  fi
+  : > "$output"
+  printf '308'
+elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
+  location="https://203.0.113.10.nip.io/${url#http://203.0.113.10.nip.io/}"
+  printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: %s\r\n\r\n' "$location" > "$headers"
   : > "$output"
   printf '308'
 elif [[ "$url" == */api/* ]]; then
@@ -109,16 +130,104 @@ fi
 STUB
 chmod +x "$WORK_DIR/bin/curl"
 
-PATH="$WORK_DIR/bin:$PATH" OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+cat > "$WORK_DIR/bin/dig" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+record_type="${2:-}"
+if [[ "$record_type" == "A" ]]; then
+  if [[ "${STUB_BAD_DNS:-0}" == "1" ]]; then
+    printf '198.51.100.20\n'
+  else
+    printf '203.0.113.10\n'
+  fi
+elif [[ "$record_type" == "AAAA" && "${STUB_AAAA:-0}" == "1" ]]; then
+  printf '2001:db8::10\n'
+fi
+STUB
+chmod +x "$WORK_DIR/bin/dig"
+
+cat > "$WORK_DIR/bin/openssl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+operation="${1:-}"
+shift || true
+case "$operation" in
+  s_client)
+    [[ "${STUB_UNTRUSTED_CERT:-0}" != "1" ]] || exit 1
+    printf '%s\n' 'fixture-certificate'
+    ;;
+  x509)
+    output=""
+    mode=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -out) output="$2"; shift 2 ;;
+        -issuer|-text|-checkend) mode="$1"; shift ;;
+        -in) shift 2 ;;
+        -noout) shift ;;
+        *) shift ;;
+      esac
+    done
+    case "$mode" in
+      -issuer)
+        if [[ "${STUB_WRONG_ISSUER:-0}" == "1" ]]; then
+          printf '%s\n' 'issuer=O = Fixture CA'
+        else
+          printf '%s\n' "issuer=C = US, O = Let's Encrypt, CN = R12"
+        fi
+        ;;
+      -text)
+        if [[ "${STUB_WRONG_SAN:-0}" == "1" ]]; then
+          printf '%s\n' 'X509v3 Subject Alternative Name: DNS:wrong.example'
+        else
+          printf '%s\n' \
+            'X509v3 Subject Alternative Name: DNS:betstan.xyz, DNS:www.betstan.xyz, DNS:203.0.113.10.nip.io'
+        fi
+        ;;
+      -checkend)
+        [[ "${STUB_EXPIRING_CERT:-0}" != "1" ]]
+        ;;
+      *)
+        [[ -n "$output" ]] || exit 1
+        cat > "$output"
+        ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$WORK_DIR/bin/openssl"
+
+PATH="$WORK_DIR/bin:$PATH" \
+  OCI_PUBLIC_URL=https://betstan.xyz \
+  OCI_REDIRECT_URL=https://www.betstan.xyz \
+  OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
   OUTPUT_DIR="$WORK_DIR/smoke-good" "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null
 if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_API=1 \
-  OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+  OCI_PUBLIC_URL=https://betstan.xyz \
+  OCI_REDIRECT_URL=https://www.betstan.xyz \
+  OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
   OUTPUT_DIR="$WORK_DIR/smoke-bad" "$OCI_DIR/agents/smoke-liveness-stan.sh" \
   >"$WORK_DIR/smoke-bad.out" 2>&1; then
   echo "invalid API command stub unexpectedly passed" >&2
   exit 1
 fi
 grep -Eq 'API returned (non-JSON content|invalid JSON)' "$WORK_DIR/smoke-bad.out"
+for failure_mode in \
+  STUB_BAD_DNS STUB_AAAA STUB_BAD_REDIRECT STUB_UNTRUSTED_CERT \
+  STUB_WRONG_ISSUER STUB_WRONG_SAN STUB_EXPIRING_CERT; do
+  if env PATH="$WORK_DIR/bin:$PATH" "$failure_mode=1" \
+      OCI_PUBLIC_URL=https://betstan.xyz \
+      OCI_REDIRECT_URL=https://www.betstan.xyz \
+      OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+      OUTPUT_DIR="$WORK_DIR/smoke-${failure_mode}" \
+      "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null 2>&1; then
+    echo "$failure_mode unexpectedly passed canonical smoke validation" >&2
+    exit 1
+  fi
+done
 
 cat > "$WORK_DIR/bin/playwright" <<'STUB'
 #!/usr/bin/env bash
@@ -129,7 +238,9 @@ chmod +x "$WORK_DIR/bin/playwright"
 : > "$WORK_DIR/playwright.log"
 
 OCI_HEALTH_FIXTURE_FILE="$HEALTHY" \
-OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+OCI_PUBLIC_URL=https://betstan.xyz \
+OCI_REDIRECT_URL=https://www.betstan.xyz \
+OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
 OCI_PUBLIC_CHECKS_ALREADY_PASSED=1 \
 OCI_E2E_ALREADY_PASSED=1 \
 MAX_LOOPS=1 \
@@ -143,7 +254,9 @@ OUTPUT_DIR="$WORK_DIR/cluster-only" \
 PATH="$WORK_DIR/bin:$PATH" \
 PLAYWRIGHT_BIN="$WORK_DIR/bin/playwright" \
 STUB_PLAYWRIGHT_LOG="$WORK_DIR/playwright.log" \
-OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+OCI_PUBLIC_URL=https://betstan.xyz \
+OCI_REDIRECT_URL=https://www.betstan.xyz \
+OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
 OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
 MAX_LOOPS=1 \
 SLEEP_SECONDS=1 \
@@ -153,7 +266,9 @@ OUTPUT_DIR="$WORK_DIR/public-only" \
 grep -Fq 'playwright-ran' "$WORK_DIR/playwright.log" ||
   { echo "public-only validation skipped browser checks" >&2; exit 1; }
 
-if OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
+if OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
     OCI_PUBLIC_CHECKS_ALREADY_PASSED=1 \
     OCI_E2E_ALREADY_PASSED=1 \
     OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
@@ -164,4 +279,4 @@ if OCI_PUBLIC_URL=https://203.0.113.10.nip.io \
   exit 1
 fi
 
-echo "oci_health_fixture_contract=PASS scenarios=25"
+echo "oci_health_fixture_contract=PASS scenarios=38"

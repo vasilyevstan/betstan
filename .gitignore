@@ -4,3 +4,5 @@ readme.txt
 updateCommonLib.sh
 # Runtime diagnostic artifacts
 artifacts/
+infra/azure/agents/.retirement-fixture-work/
+infra/oci/tests/.migration-recovery-work/

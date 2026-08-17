@@ -34,6 +34,61 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 
+lessons="$OCI_DIR/LESSONS_LEARNED.md"
+[[ -f "$lessons" ]] || fail "OCI lessons file is missing"
+for lesson in \
+    "approval wait is an active workflow state" \
+    "OCI deletion and registry layer reclamation are asynchronous" \
+    "target-loopback tunnel" \
+    "No retained backup or old-OCI rollback exists" \
+    "Never return a blind \`NO_GO\`"; do
+    grep -Fq "$lesson" "$lessons" ||
+      fail "OCI lessons omit required recovery guidance: $lesson"
+done
+for agent in \
+    betstan-migration-recovery \
+    betstan-domain-ingress \
+    betstan-azure-retirement; do
+    agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
+    [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
+    grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
+      fail "recovery agent does not read OCI lessons: $agent"
+done
+grep -Fq "A run waiting for environment approval is active, not hung" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent can misclassify approval waits"
+grep -Fq "After \`cutover-committed\`, never retry from Azure" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent can roll back a committed cutover"
+grep -Fq "https://betstan.xyz" \
+    "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
+    fail "domain ingress agent lacks the canonical host"
+grep -Fq "A successful delete command alone is not" \
+    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
+    fail "Azure retirement agent trusts delete acceptance"
+retirement_operator="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
+[[ -x "$retirement_operator" ]] ||
+  fail "checked-in Azure retirement operator is missing or not executable"
+for retirement_contract in \
+    'oci-migration-success-provenance-${MIGRATION_RUN_ID}-${MIGRATION_RUN_ATTEMPT}' \
+    'terminal_phase DEPLOYED_HEALTHY' \
+    'destructive_boundary_crossed true' \
+    'logical_source_target_parity true' \
+    'azure_cluster_stopped_deallocated true' \
+    'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
+    'az aks delete' \
+    'wait_for_cluster_absence' \
+    'validate_inventory_subset "$CURRENT_INVENTORY_FILE"' \
+    'verify_subscription_absence' \
+    'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'; do
+    grep -Fq "$retirement_contract" "$retirement_operator" ||
+      fail "Azure retirement operator omits contract: $retirement_contract"
+done
+! grep -Eq 'az (ad|role)|gh secret (delete|set)|oci |kubectl ' \
+  "$retirement_operator" ||
+  fail "Azure retirement operator crosses identity, OCI, or Kubernetes boundaries"
+"$ROOT_DIR/infra/azure/agents/test-retire-production-stan.sh"
+
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"
 [[ "$(oci_normalize_list_json "")" == '{"data":[]}' ]] ||
@@ -142,6 +197,11 @@ VERIFY_REMOTE=0 BOOT_IMAGES=0 \
 cat > "$WORK_DIR/infrastructure.env" <<'ENV'
 source_sha=1111111111111111111111111111111111111111
 OCI_MONGO_VOLUME_OCID=ocid1.volume.oc1.fixture.fixturevalue
+ingress_ipv4=203.0.113.10
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=203.0.113.10.nip.io
 ENV
 
 IMAGE_PROVENANCE_FILE="$WORK_DIR/images.tsv" \
@@ -150,7 +210,8 @@ INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
 OUTPUT_FILE="$WORK_DIR/rendered.yaml" \
 WORK_DIR="$WORK_DIR/render-work" \
 OCI_K8S_NAMESPACE=betstan-oci \
-OCI_PUBLIC_HOST=203.0.113.10.nip.io \
+OCI_CANONICAL_HOST=betstan.xyz \
+OCI_REDIRECT_HOST=www.betstan.xyz \
 OCI_CERT_EMAIL=fixture@example.invalid \
   "$OCI_DIR/scripts/render-manifests.sh" >/dev/null
 
@@ -206,9 +267,39 @@ abort "Mongo does not use the explicit 50Gi claim" unless mongo.dig(
   "spec", "template", "spec", "volumes", 0, "persistentVolumeClaim", "claimName"
 ) == "gaming-auth-mongo-data"
 abort "legacy Mongo rendered" if File.read(ARGV.fetch(0)).include?("legacy-mongo")
-abort "expected one OCI ingress" unless by_kind.fetch("Ingress").length == 1
+abort "expected canonical and redirect OCI ingresses" unless by_kind.fetch("Ingress").length == 2
+abort "expected canonical and diagnostic certificates" unless by_kind.fetch("Certificate").length == 2
+ingress_hosts = by_kind.fetch("Ingress").flat_map {
+  |ingress| ingress.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
+}.sort
+abort "OCI ingress host set differs" unless ingress_hosts ==
+  %w[203.0.113.10.nip.io betstan.xyz www.betstan.xyz]
+canonical_certificate = by_kind.fetch("Certificate").find {
+  |certificate| certificate.dig("metadata", "name") == "betstan-oci-canonical-tls"
+}
+abort "canonical certificate SAN set differs" unless canonical_certificate.dig(
+  "spec", "dnsNames"
+).sort == %w[betstan.xyz www.betstan.xyz]
+redirect = by_kind.fetch("Ingress").find {
+  |ingress| ingress.dig("metadata", "name") == "gaming-oci-www-redirect"
+}
+abort "www redirect target differs" unless redirect.dig(
+  "metadata", "annotations", "nginx.ingress.kubernetes.io/permanent-redirect"
+) == 'https://betstan.xyz$request_uri'
 puts "oci_rendered_topology=PASS"
 RUBY
+grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not apply both TLS Certificate resources"
+grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not apply canonical/diagnostic and www redirect ingresses"
+grep -Fq 'certificate was not issued by Let' \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
+  fail "OCI public smoke does not verify the served certificate issuer"
+grep -Fq 'certificate expires within seven days' \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
+  fail "OCI public smoke does not verify served certificate expiry"
 
 OCI_RUNTIME_MODE=k3s \
 OCI_K3S_NODE_NAME=betstan-k3s \
@@ -217,7 +308,8 @@ INFRA_PROVENANCE_FILE="$WORK_DIR/infrastructure.env" \
 OUTPUT_FILE="$WORK_DIR/rendered-k3s.yaml" \
 WORK_DIR="$WORK_DIR/render-k3s-work" \
 OCI_K8S_NAMESPACE=betstan-oci \
-OCI_PUBLIC_HOST=203.0.113.10.nip.io \
+OCI_CANONICAL_HOST=betstan.xyz \
+OCI_REDIRECT_HOST=www.betstan.xyz \
 OCI_CERT_EMAIL=fixture@example.invalid \
   "$OCI_DIR/scripts/render-manifests.sh" >/dev/null
 ruby -ryaml - "$WORK_DIR/rendered-k3s.yaml" <<'RUBY'
@@ -341,18 +433,26 @@ grep -R -n -E 'image:[[:space:]]+[^[:space:]#]+:(latest|main|master|dev)([[:spac
   "$OCI_DIR" "$ROOT_DIR/.github/workflows/oci-"*.yml >/dev/null 2>&1 &&
   fail "OCI path contains a mutable image tag"
 
-grep -R -n -E '\baz\b|AKS|azure\.com|betstan\.xyz|www\.betstan\.xyz' \
+grep -R -n -E '\baz\b|AKS|azure\.com|AZURE_' \
   "$OCI_DIR/agents" \
   --exclude='test-health-contract-stan.sh' \
   --exclude='oci-live-smoke.spec.js' >/dev/null 2>&1 &&
-  fail "OCI health agents contain an Azure or canonical-DNS dependency"
+  fail "OCI health agents contain an Azure dependency"
 for script in "$OCI_DIR/scripts"/*.sh; do
-  [[ "$(basename "$script")" == "migrate-from-azure.sh" ]] && continue
-  grep -Eiq '\baz\b|AKS|AZURE_|azure\.com|betstan\.xyz|www\.betstan\.xyz' "$script" &&
+  case "$(basename "$script")" in
+    migrate-from-azure.sh | recover-azure-migration.sh)
+      continue
+      ;;
+  esac
+  grep -Eiq '\baz\b|AKS|AZURE_|azure\.com' "$script" &&
     fail "non-migration OCI script contains an Azure dependency: $script"
 done
 for workflow in "$ROOT_DIR/.github/workflows"/oci-*.yml; do
-  [[ "$(basename "$workflow")" == "oci-migrate.yml" ]] && continue
+  case "$(basename "$workflow")" in
+    oci-migrate.yml | oci-migration-recovery.yml)
+      continue
+      ;;
+  esac
   grep -Eq 'AZURE_|azure/login|azure/aks-set-context' "$workflow" &&
     fail "Azure credential/reference exists outside OCI migration: $workflow"
 done
@@ -362,6 +462,7 @@ capacity_workflow="$ROOT_DIR/.github/workflows/oci-capacity-acquire.yml"
 infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
+recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 
@@ -398,11 +499,17 @@ for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'workflow_dispatch:' "$workflow"
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
+done
+for workflow in "$infra_workflow" "$deploy_workflow"; do
   [[ "$(grep -Fc \
     'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
     "$workflow")" == "1" ]] ||
     fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
 done
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$migrate_workflow")" == "2" ]] ||
+  fail "migration SSH key must be scoped to migration and finalization access steps"
 ! grep -Fq 'OCI_K3S_SSH_PRIVATE_KEY' "$capacity_workflow" ||
   fail "capacity acquisition must receive only the target SSH public key"
 grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
@@ -413,13 +520,27 @@ grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
   fail "deployment or migration retains target SSH key material after API forwarding"
 for workflow in "$deploy_workflow" "$migrate_workflow"; do
   public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
+  next_job_line="$(awk -v start="$public_job_line" '
+    NR > start && /^  [A-Za-z0-9_-]+:/ {print NR; exit}
+  ' "$workflow")"
+  [[ -n "$next_job_line" ]] || next_job_line=$(( $(wc -l <"$workflow") + 1 ))
   dependency_line="$(grep -n -m1 'name: Install browser validation dependencies' \
     "$workflow" | cut -d: -f1)"
-  last_secret_line="$(grep -n 'secrets\.' "$workflow" | tail -1 | cut -d: -f1)"
+  public_secrets="$(
+    sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
+      grep -c 'secrets\.' || true
+  )"
+  public_cloud_credentials="$(
+    sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
+      grep -Ec \
+        'OCI_CLI_|OCI_CI_PRIVATE_KEY|AZURE_CONFIG|azure/login|aks-set-context|configure-kubectl-oke' ||
+      true
+  )"
   [[ -n "$public_job_line" && -n "$dependency_line" &&
-      -n "$last_secret_line" &&
       "$dependency_line" -gt "$public_job_line" &&
-      "$last_secret_line" -lt "$public_job_line" ]] ||
+      "$dependency_line" -lt "$next_job_line" &&
+      "$public_secrets" == "0" &&
+      "$public_cloud_credentials" == "0" ]] ||
     fail "browser dependencies share a job with cloud credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
@@ -435,12 +556,70 @@ grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq 'name: oci-migration' "$migrate_workflow"
-grep -Fq 'MIGRATE AZURE DATA TO OCI' "$migrate_workflow"
+grep -Fq 'REPLACE OCI DATA FROM AZURE' "$migrate_workflow"
+grep -Fq 'replace_oci_data:' "$migrate_workflow"
+grep -Fq 'inputs.replace_oci_data == true' "$migrate_workflow"
+grep -Fq 'build_run_id:' "$migrate_workflow"
+grep -Fq 'redirect_url: ${{ steps.provenance.outputs.redirect_url }}' "$migrate_workflow"
+grep -Fq 'diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}' "$migrate_workflow"
+grep -Fq 'OCI_REDIRECT_URL:' "$migrate_workflow"
+grep -Fq 'OCI_DIAGNOSTIC_URL:' "$migrate_workflow"
+grep -Fq '[ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]' "$migrate_workflow"
+grep -Fq '[ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]' "$migrate_workflow"
+grep -Fq '[[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]' \
+  "$migrate_workflow"
+grep -Fq 'name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}' \
+  "$migrate_workflow"
+grep -Fq 'path: artifacts/oci-migration-success/migration-summary.env' "$migrate_workflow"
+grep -Fq 'schema=betstan.oci-migration-success.v1' "$migrate_workflow"
+grep -Fq 'terminal_phase=DEPLOYED_HEALTHY' "$migrate_workflow"
+grep -Fq 'terminal_status=DEPLOYED_HEALTHY' "$migrate_workflow"
+grep -Fq 'journal_heartbeat_epoch=' "$migrate_workflow"
+grep -Fq 'fencing_generation=' "$migrate_workflow"
+grep -Fq 'artifact_run_binding=${run_id}-${run_attempt}' "$migrate_workflow"
+grep -Fq 'destructive_boundary_crossed=true' "$migrate_workflow"
+grep -Fq 'database_count=8' "$migrate_workflow"
+grep -Fq 'logical_source_target_parity=true' "$migrate_workflow"
+grep -Fq 'oci_reopened_healthy=true' "$migrate_workflow"
+grep -Fq 'azure_writers_frozen=true' "$migrate_workflow"
+grep -Fq 'azure_cluster_stopped_deallocated=true' "$migrate_workflow"
+public_job_line="$(grep -n -m1 '^  public-validate:' "$migrate_workflow" | cut -d: -f1)"
+terminal_summary_line="$(
+  grep -n -m1 'terminal_status=DEPLOYED_HEALTHY' "$migrate_workflow" |
+    cut -d: -f1
+)"
+[[ "$terminal_summary_line" -gt "$public_job_line" ]] ||
+  fail "terminal migration success provenance is emitted before public validation"
 grep -Fq 'OCI_MIGRATION_AZURE_CREDENTIALS' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AGE_IDENTITY' "$migrate_workflow"
+grep -Fq 'az aks start' "$migrate_workflow"
+grep -Fq 'az aks stop' "$migrate_workflow"
+! grep -Eq 'az aks (create|update|delete)|az aks nodepool' "$migrate_workflow" ||
+  fail "migration workflow can create, resize, or delete Azure compute"
 grep -Fq 'if: always()' "$infra_workflow"
 grep -Fq 'if: always()' "$deploy_workflow"
 grep -Fq 'if: always()' "$migrate_workflow"
+
+grep -Fq 'name: oci-migration-recovery' "$recovery_workflow"
+grep -Fq 'workflows: ["oci-migrate"]' "$recovery_workflow"
+grep -Fq 'cron: "*/15 * * * *"' "$recovery_workflow"
+grep -Fq 'workflow_dispatch:' "$recovery_workflow"
+grep -Fq "vars.OCI_MIGRATION_RECOVERY_ENABLED == 'true'" "$recovery_workflow"
+grep -Fq "vars.OCI_MIGRATION_RECOVERY_ENABLED || 'false'" "$recovery_workflow"
+grep -Fq 'OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH' "$recovery_workflow"
+grep -Fq '86400' "$recovery_workflow"
+grep -Fq 'name: azure-migration-recovery' "$recovery_workflow"
+grep -Fq 'AZURE_MIGRATION_RECOVERY_CREDENTIALS' "$recovery_workflow"
+grep -Fq 'group: azure-migration-recovery' "$recovery_workflow"
+grep -Fq 'cancel-in-progress: true' "$recovery_workflow"
+grep -Fq 'actions: write' "$recovery_workflow"
+grep -Fq 'az aks stop' "$recovery_workflow"
+! grep -Eq \
+  'OCI_MIGRATION_AZURE_CREDENTIALS|OCI_CI_PRIVATE_KEY_PEM|OCI_K3S_SSH_PRIVATE_KEY|OCI_MIGRATION_AGE_IDENTITY' \
+  "$recovery_workflow" ||
+  fail "stop-only recovery receives migration or OCI credentials"
+! grep -Eq 'az aks (start|create|update|delete)|az aks nodepool' "$recovery_workflow" ||
+  fail "stop-only recovery can start, create, resize, or delete Azure compute"
 
 grep -Fq 'pull_request:' "$validate_workflow"
 ! grep -Eq 'workflow_dispatch:|workflow_run:|^[[:space:]]+push:' "$validate_workflow" ||
@@ -521,6 +700,7 @@ fi
 "$OCI_DIR/tests/test-image-reuse-contract.sh"
 "$OCI_DIR/tests/test-capacity-contract.sh"
 "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
+"$OCI_DIR/tests/test-migration-recovery-contract.sh"
 
 git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
   fail "production-build.yml was modified"
