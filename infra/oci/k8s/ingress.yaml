@@ -142,8 +142,7 @@ kind: Ingress
 metadata:
   name: gaming-oci-www-redirect
   annotations:
-    nginx.ingress.kubernetes.io/permanent-redirect: https://__OCI_CANONICAL_HOST__$request_uri
-    nginx.ingress.kubernetes.io/permanent-redirect-code: "308"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   tls:
