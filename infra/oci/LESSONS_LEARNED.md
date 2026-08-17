@@ -60,6 +60,10 @@ conversation summaries are not authority.
 
 - AKS control-plane power fields can disagree with VMSS instance power. Use
   instance view and Cost Management to determine running compute.
+- A stopped legacy AKS control plane can report `Failed`/`Deallocated` instead
+  of `Succeeded`/`Stopped`. Accept that combination only as the exact
+  pre-start or already-deallocated state, then require `Succeeded`/`Running`
+  after start and independently prove VMSS deallocation after stop.
 - A stopped AKS cluster still incurs disk, load-balancer, public-IP, snapshot,
   and monitoring charges.
 - Azure retirement is complete only after the AKS and managed resource groups,
