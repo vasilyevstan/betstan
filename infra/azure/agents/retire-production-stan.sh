@@ -595,7 +595,7 @@ else
     --name "$vmss_name" \
     --expand instanceView -o json |
     jq -e '
-      length >= 1 and
+      type == "array" and
       all(.[]; any(.instanceView.statuses[]?;
         .code == "PowerState/deallocated"))
     ' >/dev/null ||
