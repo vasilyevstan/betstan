@@ -11,7 +11,7 @@ migration_die() {
 }
 
 migration_log() {
-  printf '%s\n' "$*"
+  printf '%s\n' "$*" >&2
 }
 
 migration_require_command() {
@@ -63,7 +63,7 @@ migration_maybe_heartbeat() {
   if [[ "$force" == "1" ]] ||
       (( now - MIGRATION_LAST_HEARTBEAT_EPOCH >=
         MIGRATION_HEARTBEAT_INTERVAL_SECONDS )); then
-    migration_heartbeat "$now"
+    migration_heartbeat "$now" >&2
     MIGRATION_LAST_HEARTBEAT_EPOCH="$now"
   fi
 }

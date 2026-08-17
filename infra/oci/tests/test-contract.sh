@@ -57,12 +57,37 @@ done
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
+grep -Fq "After \`cutover-committed\`, never retry from Azure" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent can roll back a committed cutover"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"
 grep -Fq "A successful delete command alone is not" \
     "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
     fail "Azure retirement agent trusts delete acceptance"
+retirement_operator="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
+[[ -x "$retirement_operator" ]] ||
+  fail "checked-in Azure retirement operator is missing or not executable"
+for retirement_contract in \
+    'oci-migration-success-provenance-${MIGRATION_RUN_ID}-${MIGRATION_RUN_ATTEMPT}' \
+    'terminal_phase DEPLOYED_HEALTHY' \
+    'destructive_boundary_crossed true' \
+    'logical_source_target_parity true' \
+    'azure_cluster_stopped_deallocated true' \
+    'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
+    'az aks delete' \
+    'wait_for_cluster_absence' \
+    'validate_inventory_subset "$CURRENT_INVENTORY_FILE"' \
+    'verify_subscription_absence' \
+    'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'; do
+    grep -Fq "$retirement_contract" "$retirement_operator" ||
+      fail "Azure retirement operator omits contract: $retirement_contract"
+done
+! grep -Eq 'az (ad|role)|gh secret (delete|set)|oci |kubectl ' \
+  "$retirement_operator" ||
+  fail "Azure retirement operator crosses identity, OCI, or Kubernetes boundaries"
+"$ROOT_DIR/infra/azure/agents/test-retire-production-stan.sh"
 
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"

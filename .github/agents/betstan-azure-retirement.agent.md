@@ -16,7 +16,8 @@ production system.
 - `.github/workflows/oci-migrate.yml`
 - `.github/agents/betstan-migration-recovery.agent.md`
 - `.github/agents/betstan-azure-cost-analyst.agent.md`
-- the exact checked-in Azure retirement script and migration provenance
+- `infra/azure/agents/retire-production-stan.sh`
+- the exact migration success provenance
 
 ## Destructive gate
 
@@ -36,7 +37,9 @@ delete Azure while migration or OCI validation is incomplete.
 
 ## Retirement sequence
 
-Use exact resource IDs and the checked-in operator. Delete the AKS cluster,
+Use exact resource IDs and `retire-production-stan.sh`. Run `plan`, bind the
+destructive confirmation to its exact inventory digest, then run `execute`.
+Delete the AKS cluster,
 wait for its managed resource group, then remove the primary BetStan resource
 group contents, historical snapshots, load balancer/IPs, disks, alerts,
 action group, and temporary migration/recovery identities and secrets.
@@ -47,7 +50,9 @@ subscription contains no BetStan AKS, VM/VMSS, disks, snapshots, load
 balancers, IPs, gateways, registries, workspaces, vaults, alerts, action
 groups, or orphaned managed group.
 
-Return `AZURE_RETIRED` only after resource absence and repeated Cost Management
-checks show no new BetStan usage. A successful delete command alone is not
+The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
+subscription-wide resource absence; delayed Cost Management verification
+remains pending. Return `AZURE_RETIRED` only after later ActualCost and
+AmortizedCost checks show no new BetStan usage. A successful delete command alone is not
 completion. Otherwise return `NO_GO` with bounded evidence and the exact safe
 next action.

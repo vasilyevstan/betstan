@@ -100,6 +100,11 @@ Additional account-derived variables are intentionally required:
   `AZURE_MIGRATION_RECOVERY_CLUSTER_NAME`,
   `AZURE_MIGRATION_RECOVERY_CLUSTER_RESOURCE_ID_SHA256`, and
   `AZURE_MIGRATION_RECOVERY_CLUSTER_SERVER_SHA256` for stop-only recovery
+- `OCI_MIGRATION_RECOVERY_SOURCE_SHA`, `OCI_MIGRATION_RECOVERY_RUN_ID`,
+  `OCI_MIGRATION_RECOVERY_RUN_ATTEMPT`,
+  `OCI_MIGRATION_RECOVERY_MIGRATION_ID`, and
+  `OCI_MIGRATION_RECOVERY_FENCING_GENERATION` for the exact interrupted
+  migration journal
 
 `azure-migration-recovery` uses only
 `AZURE_MIGRATION_RECOVERY_CREDENTIALS`. That identity may read the exact
@@ -113,6 +118,9 @@ An armed schedule also requires
 24 hours away.
 `OCI_MIGRATION_STALE_HEARTBEAT_SECONDS` defaults to the bounded 3600-second
 window so protected and public validation are not mistaken for a hung run.
+The expected SHA, run, attempt, migration ID, and fencing generation must be
+set immediately after dispatch and before approving `oci-migration`; recovery
+checks those values against both the workflow run and Azure journal.
 
 The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
 and `VOLUME_DELETE` in the deployment compartment for boot-volume
@@ -177,12 +185,17 @@ fixtures.
    isolated disposable Mongo, then drops and exactly replaces the eight
    allowlisted OCI databases. It verifies canonical data and metadata
    signatures, recreates the 17-queue RabbitMQ topology, restarts consumers
-   sequentially, and requires protected plus public health before finalizing.
+   sequentially, then locks Mongo and RabbitMQ publishes while protected and
+   public health run. Finalization rechecks parity under both locks, records
+   `cutover-committed`, and only then enables writes.
    A pre-destructive failure restores OCI workload baselines. Any later
-   failure keeps OCI closed and marks `recovery-required`; a later full retry
-   clears partial application databases and starts again from frozen Azure.
-   No path reopens Azure writers, retains a data artifact, or rolls back to
-   the previous OCI data.
+   pre-commit failure keeps OCI closed and marks `recovery-required`; a later
+   full retry clears partial application databases and starts again from
+   frozen Azure. A post-commit interruption is retried only forward through
+   idempotent write unlock and completion; retry from Azure is permanently
+   forbidden because OCI may already have accepted writes. No path reopens
+   Azure writers, retains a data artifact, or rolls back to the previous OCI
+   data.
 9. Delete the exact Bastion session, restore the non-routable client CIDR,
    stop both exact tunnel PIDs, and remove ephemeral keys. Cleanup failure is
    a deployment failure.
@@ -214,3 +227,12 @@ After exact data parity and repeated OCI canonical health pass, the separately
 approved Azure-retirement operation removes AKS and all associated billable
 resources. Repository and GitHub configuration remain the only future Azure
 recreation source.
+
+Run `infra/azure/agents/retire-production-stan.sh plan` only with the exact
+successful migration run, attempt, ID, SHA, diagnostic URL, cluster-resource
+fingerprint, and a private absolute state directory. Review its 28-resource
+inventory digest, then pass that digest and exact confirmation to `execute`.
+The operator deletes AKS first, resumes asynchronous deletion by fenced phase,
+removes only the two exact resource groups, and verifies subscription-wide
+absence twice. It reports resource retirement separately from delayed Cost
+Management completion.

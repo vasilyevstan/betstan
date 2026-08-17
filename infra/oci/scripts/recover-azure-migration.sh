@@ -17,6 +17,11 @@ STARTUP_GRACE_SECONDS="${MIGRATION_STARTUP_GRACE_SECONDS:-600}"
 RESULT_FILE="${RECOVERY_RESULT_FILE:-recovery-result.env}"
 EVIDENCE_FILE="${RECOVERY_EVIDENCE_FILE:-recovery-evidence.env}"
 COMMAND_TIMEOUT_SECONDS="${RECOVERY_COMMAND_TIMEOUT_SECONDS:-120}"
+EXPECTED_SOURCE_SHA="${EXPECTED_SOURCE_SHA:-}"
+EXPECTED_OWNER_RUN_ID="${EXPECTED_OWNER_RUN_ID:-}"
+EXPECTED_OWNER_RUN_ATTEMPT="${EXPECTED_OWNER_RUN_ATTEMPT:-}"
+EXPECTED_MIGRATION_ID="${EXPECTED_MIGRATION_ID:-}"
+EXPECTED_FENCING_GENERATION="${EXPECTED_FENCING_GENERATION:-}"
 APP_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip client)
 
 write_result() {
@@ -29,14 +34,24 @@ write_result() {
     "safe_to_stop=$safe_to_stop" \
     "defer=$defer" \
     "reason=$reason" \
-    "cancelled_run_id=$cancelled_run_id" >"$RESULT_FILE"
+    "cancelled_run_id=$cancelled_run_id" \
+    "source_sha=$EXPECTED_SOURCE_SHA" \
+    "owner_run_id=$EXPECTED_OWNER_RUN_ID" \
+    "owner_run_attempt=$EXPECTED_OWNER_RUN_ATTEMPT" \
+    "migration_id=$EXPECTED_MIGRATION_ID" \
+    "fencing_generation=$EXPECTED_FENCING_GENERATION" >"$RESULT_FILE"
   printf '%s\n' \
     "timestamp=$(migration_iso8601)" \
     "cluster_fingerprint=$AZURE_CLUSTER_FINGERPRINT" \
     "safe_to_stop=$safe_to_stop" \
     "defer=$defer" \
     "reason=$reason" \
-    "cancelled_run_id=$cancelled_run_id" >"$EVIDENCE_FILE"
+    "cancelled_run_id=$cancelled_run_id" \
+    "source_sha=$EXPECTED_SOURCE_SHA" \
+    "owner_run_id=$EXPECTED_OWNER_RUN_ID" \
+    "owner_run_attempt=$EXPECTED_OWNER_RUN_ATTEMPT" \
+    "migration_id=$EXPECTED_MIGRATION_ID" \
+    "fencing_generation=$EXPECTED_FENCING_GENERATION" >"$EVIDENCE_FILE"
 }
 
 simulate() {
@@ -80,6 +95,18 @@ validate_inputs() {
     migration_die "startup grace must be positive"
   migration_is_positive_int "$COMMAND_TIMEOUT_SECONDS" ||
     migration_die "recovery command timeout must be positive"
+  [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    migration_die "exact migration journal SHA is required"
+  migration_is_positive_int "$EXPECTED_OWNER_RUN_ID" ||
+    migration_die "exact migration owner run ID is required"
+  migration_is_positive_int "$EXPECTED_OWNER_RUN_ATTEMPT" ||
+    migration_die "exact migration owner run attempt is required"
+  [[ "$EXPECTED_MIGRATION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+    migration_die "exact migration ID is required"
+  migration_is_positive_int "$EXPECTED_FENCING_GENERATION" ||
+    migration_die "exact fencing generation is required"
+  [[ "$EXPECTED_MIGRATION_ID" == "${EXPECTED_OWNER_RUN_ID}-${EXPECTED_OWNER_RUN_ATTEMPT}" ]] ||
+    migration_die "migration ID differs from its exact owner run"
   local command_name
   for command_name in kubectl gh jq python3; do
     migration_require_command "$command_name"
@@ -143,6 +170,66 @@ active_runs_json() {
     gh api "repos/$REPOSITORY/actions/workflows/oci-migrate.yml/runs?branch=master&per_page=20"
 }
 
+validate_expected_completed_journal() {
+  local state_file lock_file state_presence lock_presence
+  local state_schema lock_schema journal_id lock_journal_id lock_state
+  local owner_workflow source_sha state_owner state_attempt state_migration
+  local state_fence state_fingerprint lock_owner lock_attempt lock_migration lock_fence
+  state_file="$(dirname "$RESULT_FILE")/azure-journal.json"
+  lock_file="$(dirname "$RESULT_FILE")/azure-lock.json"
+  state_presence="$(read_configmap "$STATE_CONFIGMAP" "$state_file")"
+  lock_presence="$(read_configmap "$LOCK_CONFIGMAP" "$lock_file")"
+  [[ "$state_presence" == "present" && "$lock_presence" == "present" ]] ||
+    migration_die "exact completed migration journal is unavailable"
+  state_schema="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["schema-version"]' "$state_file")"
+  lock_schema="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["schema-version"]' "$lock_file")"
+  journal_id="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["journal-id"]' "$state_file")"
+  lock_journal_id="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["journal-id"]' "$lock_file")"
+  lock_state="$(migration_raw recovery-state 30 1 jq -r \
+    '.data.state' "$lock_file")"
+  owner_workflow="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["owner-workflow"]' "$state_file")"
+  source_sha="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["original-source-sha"]' "$state_file")"
+  state_owner="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["owner-run-id"]' "$state_file")"
+  state_attempt="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["owner-run-attempt"]' "$state_file")"
+  state_migration="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["migration-id"]' "$state_file")"
+  state_fence="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["fencing-token"]' "$state_file")"
+  state_fingerprint="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["azure-cluster-fingerprint"]' "$state_file")"
+  lock_owner="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["owner-run-id"]' "$lock_file")"
+  lock_attempt="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["owner-run-attempt"]' "$lock_file")"
+  lock_migration="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["migration-id"]' "$lock_file")"
+  lock_fence="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["fencing-token"]' "$lock_file")"
+  [[ "$state_schema" == "1" && "$lock_schema" == "1" &&
+    "$journal_id" == "$lock_journal_id" &&
+    "$owner_workflow" == ".github/workflows/oci-migrate.yml" &&
+    "$source_sha" == "$EXPECTED_SOURCE_SHA" &&
+    "$state_owner" == "$EXPECTED_OWNER_RUN_ID" &&
+    "$state_attempt" == "$EXPECTED_OWNER_RUN_ATTEMPT" &&
+    "$state_migration" == "$EXPECTED_MIGRATION_ID" &&
+    "$state_fence" == "$EXPECTED_FENCING_GENERATION" &&
+    "$state_fingerprint" == "$AZURE_CLUSTER_FINGERPRINT" &&
+    "$lock_owner" == "$EXPECTED_OWNER_RUN_ID" &&
+    "$lock_attempt" == "$EXPECTED_OWNER_RUN_ATTEMPT" &&
+    "$lock_migration" == "$EXPECTED_MIGRATION_ID" &&
+    "$lock_fence" == "$EXPECTED_FENCING_GENERATION" &&
+    ("$lock_state" == "active" || "$lock_state" == "released") ]] ||
+    migration_die "completed migration journal identity or fence differs"
+}
+
 run_age_seconds() {
   local timestamp="$1"
   python3 - "$timestamp" <<'PY'
@@ -185,6 +272,7 @@ inspect_active_runs() {
   local state_owner lock_owner state_attempt lock_attempt state_migration lock_migration
   local state_fence lock_fence lock_state state_fingerprint journal_id lock_journal_id
   local phase sequence boundary recovery_required owner_workflow state_schema lock_schema
+  local state_source_sha
   runs="$(active_runs_json)"
   active_count="$(migration_raw github-runs-filter 30 1 jq '
     [.workflow_runs[] | select(
@@ -198,7 +286,7 @@ inspect_active_runs() {
   ' <<<"$runs")"
   [[ "$active_count" =~ ^[0-9]+$ ]] ||
     migration_die "active migration run count is invalid"
-  [[ "$active_count" != "0" ]] || return 0
+  [[ "$active_count" != "0" ]] || return 20
 
   queued_count="$(migration_raw github-runs-filter 30 1 jq '
     [.workflow_runs[] | select(
@@ -239,6 +327,11 @@ inspect_active_runs() {
   [[ "$run_id" =~ ^[1-9][0-9]*$ && "$attempt" == "1" &&
     "$status" == "in_progress" ]] ||
     migration_die "active migration identity is invalid"
+  if [[ "$run_id" != "$EXPECTED_OWNER_RUN_ID" ||
+    "$attempt" != "$EXPECTED_OWNER_RUN_ATTEMPT" ]]; then
+    write_result false true different-active-migration
+    return 10
+  fi
   age="$(run_age_seconds "$created")"
   state_file="$(dirname "$RESULT_FILE")/azure-journal.json"
   lock_file="$(dirname "$RESULT_FILE")/azure-lock.json"
@@ -276,6 +369,8 @@ inspect_active_runs() {
     '.data["journal-id"]' "$lock_file")"
   owner_workflow="$(migration_raw recovery-state 30 1 jq -r \
     '.data["owner-workflow"]' "$state_file")"
+  state_source_sha="$(migration_raw recovery-state 30 1 jq -r \
+    '.data["original-source-sha"]' "$state_file")"
   phase="$(migration_raw recovery-state 30 1 jq -r '.data.phase' "$state_file")"
   sequence="$(migration_raw recovery-state 30 1 jq -r '.data.sequence' "$state_file")"
   boundary="$(migration_raw recovery-state 30 1 jq -r \
@@ -285,12 +380,15 @@ inspect_active_runs() {
   [[ "$state_owner" == "$run_id" && "$lock_owner" == "$run_id" &&
     "$state_attempt" == "$attempt" && "$lock_attempt" == "$attempt" &&
     "$state_migration" == "$lock_migration" &&
+    "$state_migration" == "$EXPECTED_MIGRATION_ID" &&
     "$state_fence" == "$lock_fence" &&
+    "$state_fence" == "$EXPECTED_FENCING_GENERATION" &&
     "$lock_state" == "active" &&
     "$state_fingerprint" == "$AZURE_CLUSTER_FINGERPRINT" &&
     "$state_schema" == "1" && "$lock_schema" == "1" &&
     "$journal_id" == "$lock_journal_id" &&
     "$owner_workflow" == ".github/workflows/oci-migrate.yml" &&
+    "$state_source_sha" == "$EXPECTED_SOURCE_SHA" &&
     -n "$phase" && "$sequence" =~ ^[0-9]+$ &&
     ("$boundary" == "true" || "$boundary" == "false") &&
     ("$recovery_required" == "true" || "$recovery_required" == "false") ]] || {
@@ -371,6 +469,60 @@ freeze_azure() {
     migration_die "recovery freeze did not preserve all eight Mongo StatefulSets"
 }
 
+drain_azure_queues() {
+  local pod attempt output rows count backlog bad_consumers
+  pod="$(
+    kube_capture rabbitmq-pod 30 2 \
+      get pods -n "$AZURE_NAMESPACE" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}'
+  )"
+  [[ -n "$pod" ]] ||
+    migration_die "Azure RabbitMQ pod is missing during recovery"
+  for attempt in $(seq 1 60); do
+    output="$(
+      kube_capture rabbitmq-queues 60 2 \
+        exec -n "$AZURE_NAMESPACE" "$pod" -- \
+        rabbitmqctl list_queues --quiet \
+          name messages_ready messages_unacknowledged consumers
+    )"
+    rows="$(
+      awk '
+        NF == 0 { next }
+        $1 == "name" && $2 == "messages_ready" &&
+          $3 == "messages_unacknowledged" && $4 == "consumers" &&
+          NF == 4 { next }
+        NF != 4 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ ||
+          $4 !~ /^[0-9]+$/ { exit 1 }
+        { print }
+      ' <<<"$output"
+    )" || migration_die "Azure RabbitMQ recovery queue output is malformed"
+    count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+    [[ "$count" == "17" ]] ||
+      migration_die "Azure RabbitMQ recovery queue count differs from 17"
+    backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+    bad_consumers="$(
+      awk '($2 != 0 || $3 != 0) && $4 < 1 {bad++} END {print bad+0}' \
+        <<<"$rows"
+    )"
+    [[ "$bad_consumers" == "0" ]] ||
+      migration_die "Azure recovery found queued work without a consumer"
+    [[ "$backlog" == "0" ]] && return 0
+    migration_sleep 5
+  done
+  migration_die "Azure RabbitMQ did not drain before recovery freeze"
+}
+
+freeze_azure_safely() {
+  kube_raw ingress-freeze "$COMMAND_TIMEOUT_SECONDS" 2 \
+    scale deployment ingress-nginx-controller -n ingress-nginx \
+    --replicas 0 >/dev/null
+  wait_deployment_zero ingress-nginx ingress-nginx-controller \
+    app.kubernetes.io/component=controller
+  drain_azure_queues
+  freeze_azure
+  drain_azure_queues
+}
+
 main() {
   validate_inputs
   validate_kubeconfig
@@ -383,10 +535,18 @@ main() {
     migration_log "azure_migration_recovery=DEFER"
     exit 0
   fi
+  if [[ "$inspection_status" == "20" ]]; then
+    validate_expected_completed_journal
+    inspection_status=0
+  fi
   [[ "$inspection_status" == "0" ]] ||
     migration_die "active migration inspection failed"
+  if [[ -n "$cancelled_run_id" &&
+    ! "$cancelled_run_id" =~ ^[1-9][0-9]*$ ]]; then
+    migration_die "cancelled migration run identity is invalid"
+  fi
   write_result true false recovery-conclusive "$cancelled_run_id"
-  freeze_azure
+  freeze_azure_safely
   write_result true false azure-frozen "$cancelled_run_id"
   migration_log \
     "azure_migration_recovery=PASS azure_apps=frozen azure_mongo_statefulsets=8"

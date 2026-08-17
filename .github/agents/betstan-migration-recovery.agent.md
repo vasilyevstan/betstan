@@ -38,6 +38,12 @@ read-only and prefer the checked-in recovery workflow and scripts.
 - After any target database drop or restore, keep OCI ingress and writers at
   zero. Clear every partial application database and retry the full export and
   restore from the preserved Azure source.
+- Keep Mongo writes and RabbitMQ publishes locked throughout public and
+  protected validation. Record `cutover-committed` only after final parity
+  under both locks, then unlock idempotently.
+- After `cutover-committed`, never retry from Azure. OCI may have accepted new
+  production writes; recover only forward through any remaining unlock and
+  completion steps.
 - Never expose mixed data or restart applications merely because cleanup ran.
 - Never delete Azure until exact database parity and `DEPLOYED_HEALTHY` pass.
 

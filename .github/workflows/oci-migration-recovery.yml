@@ -9,6 +9,32 @@ on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact migration journal SHA on master
+        required: true
+        type: string
+      migration_run_id:
+        description: Exact interrupted oci-migrate run ID
+        required: true
+        type: string
+      migration_run_attempt:
+        description: Exact interrupted oci-migrate run attempt
+        required: true
+        default: "1"
+        type: string
+      migration_id:
+        description: Exact migration journal ID
+        required: true
+        type: string
+      fencing_generation:
+        description: Exact migration journal fencing generation
+        required: true
+        type: string
+      confirmation:
+        description: Type STOP AZURE FOR EXACT MIGRATION
+        required: true
+        type: string
 
 permissions:
   actions: write
@@ -50,6 +76,11 @@ jobs:
       AZURE_EXPECTED_CLUSTER_SERVER_SHA256: ${{ vars.AZURE_MIGRATION_RECOVERY_CLUSTER_SERVER_SHA256 }}
       AZURE_NAMESPACE: default
       MIGRATION_STALE_HEARTBEAT_SECONDS: ${{ vars.OCI_MIGRATION_STALE_HEARTBEAT_SECONDS || '3600' }}
+      EXPECTED_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || vars.OCI_MIGRATION_RECOVERY_SOURCE_SHA }}
+      EXPECTED_OWNER_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.migration_run_id || vars.OCI_MIGRATION_RECOVERY_RUN_ID }}
+      EXPECTED_OWNER_RUN_ATTEMPT: ${{ github.event_name == 'workflow_dispatch' && inputs.migration_run_attempt || vars.OCI_MIGRATION_RECOVERY_RUN_ATTEMPT }}
+      EXPECTED_MIGRATION_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.migration_id || vars.OCI_MIGRATION_RECOVERY_MIGRATION_ID }}
+      EXPECTED_FENCING_GENERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.fencing_generation || vars.OCI_MIGRATION_RECOVERY_FENCING_GENERATION }}
 
     steps:
       - name: Initialize isolated recovery paths
@@ -67,10 +98,10 @@ jobs:
             "$RUNNER_TEMP/azure-recovery" \
             "$RUNNER_TEMP/azure-recovery/.azure"
 
-      - name: Checkout exact current master
+      - name: Checkout exact migration journal SHA
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: master
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -83,8 +114,16 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_OWNER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_OWNER_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_MIGRATION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          [[ "$EXPECTED_FENCING_GENERATION" =~ ^[1-9][0-9]*$ ]]
+          [ "$EXPECTED_MIGRATION_ID" = \
+            "${EXPECTED_OWNER_RUN_ID}-${EXPECTED_OWNER_RUN_ATTEMPT}" ]
           git fetch --quiet origin master:refs/remotes/origin/master
-          [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ]
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA" ]
+          git merge-base --is-ancestor "$EXPECTED_SOURCE_SHA" origin/master
           case "$GITHUB_EVENT_NAME" in
             schedule)
               [ "$RECOVERY_ENABLED" = "true" ]
@@ -95,6 +134,8 @@ jobs:
               ;;
             workflow_dispatch)
               [ "$GITHUB_REF_NAME" = "master" ]
+              [ "${{ inputs.confirmation }}" = \
+                "STOP AZURE FOR EXACT MIGRATION" ]
               ;;
             workflow_run)
               [[ "$UPSTREAM_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -105,21 +146,24 @@ jobs:
                   gh api "repos/$REPOSITORY/actions/workflows/oci-migrate.yml" \
                   --jq '.id'
               )"
-              read -r observed_workflow path event branch repository status conclusion attempt <<<"$(
+              read -r observed_workflow path event head_sha branch repository status conclusion attempt <<<"$(
                 ./infra/oci/scripts/bounded-command.py \
                   --timeout-seconds 45 --attempts 2 \
                   --classification github-run-read -- \
                   gh api "repos/$REPOSITORY/actions/runs/$UPSTREAM_RUN_ID/attempts/1" \
-                  --jq '[.workflow_id,.path,.event,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
               )"
               [ "$observed_workflow" = "$workflow_id" ]
               [ "$path" = ".github/workflows/oci-migrate.yml" ]
               [ "$event" = "workflow_dispatch" ]
+              [ "$head_sha" = "$EXPECTED_SOURCE_SHA" ]
               [ "$branch" = "master" ]
               [ "$repository" = "$REPOSITORY" ]
               [ "$status" = "completed" ]
               [ "$conclusion" != "success" ]
               [ "$attempt" = "1" ]
+              [ "$UPSTREAM_RUN_ID" = "$EXPECTED_OWNER_RUN_ID" ]
+              [ "$attempt" = "$EXPECTED_OWNER_RUN_ATTEMPT" ]
               ;;
             *)
               exit 1

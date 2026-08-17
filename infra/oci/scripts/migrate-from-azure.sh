@@ -73,6 +73,7 @@ oci_baseline=""
 target_mongo_pod=""
 target_mongo_image=""
 target_runtime_signature=""
+last_committed_phase=""
 
 state_boundary_text() {
   [[ "$state_boundary" == "1" ]] && printf true || printf false
@@ -143,7 +144,9 @@ simulate() {
       fi
     done
   done
-  for point in rabbitmq-recreate restart-auth restart-client protected-health public-health; do
+  for point in \
+    rabbitmq-recreate restart-auth restart-client mongo-write-lock \
+    rabbitmq-write-lock protected-health public-health; do
     if [[ "$fail_at" == "$point" ]]; then
       recovery=true
       printf '%s\n' \
@@ -157,6 +160,52 @@ simulate() {
       return 97
     fi
   done
+  case "$fail_at" in
+    cutover-committed)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-locked" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    mongo-write-unlocked)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-mongo-writable" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    rabbitmq-write-unlocked)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-writable" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    retry-after-cutover)
+      printf '%s\n' \
+        "result=forbidden" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=forward-only" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 98
+      ;;
+  esac
   printf '%s\n' \
     "result=success" \
     "partial_retry=$partial" \
@@ -259,6 +308,25 @@ state_compare_kind() {
     "$(state_file azure "$1")" "$(state_file oci "$1")"
 }
 
+state_reconcile_kind() {
+  local kind="$1"
+  if state_compare_kind "$kind" >/dev/null 2>&1; then
+    return 0
+  fi
+  migration_raw state-reconcile 30 1 \
+    python3 "$STATE_HELPER" reconcile \
+      --kind "$kind" \
+      "$(state_file azure "$kind")" \
+      "$(state_file oci "$kind")" |
+    kube_raw oci state-reconcile 30 1 replace -f - >/dev/null
+  local statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]] ||
+    migration_die "unsafe or failed $kind mirror reconciliation"
+  [[ "$(state_fetch_cm oci "$kind")" == "present" ]] ||
+    migration_die "reconciled OCI $kind disappeared"
+  state_compare_kind "$kind"
+}
+
 state_value() {
   migration_raw state-value 30 1 python3 "$STATE_HELPER" value \
     "$(state_file azure journal)" "$1"
@@ -267,6 +335,11 @@ state_value() {
 state_lock_value() {
   migration_raw state-value 30 1 python3 "$STATE_HELPER" value \
     "$(state_file azure lock)" "$1"
+}
+
+state_optional_value() {
+  migration_raw state-value 30 1 jq -r \
+    --arg key "$1" '.data[$key] // empty' "$(state_file azure journal)"
 }
 
 state_monotonic_epoch() {
@@ -373,6 +446,156 @@ state_validate_contract() {
     migration_die "journal and lock identity contract differs"
 }
 
+state_reconcile_existing() {
+  state_reconcile_kind journal
+  state_reconcile_kind lock
+  state_read_all >/dev/null
+
+  local journal_phase journal_fence journal_migration journal_owner journal_attempt
+  local lock_fence lock_migration lock_owner lock_attempt lock_state provider
+  journal_phase="$(state_value phase)"
+  journal_fence="$(state_value fencing-token)"
+  journal_migration="$(state_value migration-id)"
+  journal_owner="$(state_value owner-run-id)"
+  journal_attempt="$(state_value owner-run-attempt)"
+  lock_fence="$(state_lock_value fencing-token)"
+  lock_migration="$(state_lock_value migration-id)"
+  lock_owner="$(state_lock_value owner-run-id)"
+  lock_attempt="$(state_lock_value owner-run-attempt)"
+  lock_state="$(state_lock_value state)"
+
+  if [[ "$journal_phase" == "lock-taken-over" &&
+    "$journal_fence" =~ ^[1-9][0-9]*$ &&
+    "$lock_fence" =~ ^[1-9][0-9]*$ &&
+    "$journal_fence" -eq $((lock_fence + 1)) ]]; then
+    state_compare_kind lock
+    for provider in azure oci; do
+      state_replace_one "$provider" lock \
+        --expect "migration-id=$lock_migration" \
+        --expect "owner-run-id=$lock_owner" \
+        --expect "owner-run-attempt=$lock_attempt" \
+        --expect "fencing-token=$lock_fence" \
+        --expect "state=$lock_state" \
+        --set "migration-id=$journal_migration" \
+        --set "owner-run-id=$journal_owner" \
+        --set "owner-run-attempt=$journal_attempt" \
+        --set "fencing-token=$journal_fence" \
+        --set "state=active" >/dev/null ||
+        migration_die "interrupted takeover lock could not be completed"
+    done
+  fi
+
+  state_read_all >/dev/null
+  state_reconcile_kind lock
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_compare_kind lock
+  state_validate_contract
+}
+
+state_recover_partial_creation() {
+  local presence="$1"
+  local file kind provider first_file=""
+  local old_migration old_owner old_attempt old_fence old_journal expected_journal
+  local document_source document_azure document_oci document_sequence
+  local document_phase document_boundary document_recovery
+  for provider in azure oci; do
+    for kind in journal lock; do
+      file="$(state_file "$provider" "$kind")"
+      if [[ -f "$file" ]]; then
+        first_file="$file"
+        break 2
+      fi
+    done
+  done
+  [[ -n "$first_file" ]] ||
+    migration_die "partial migration state has no readable document"
+  old_migration="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" migration-id)"
+  old_owner="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" owner-run-id)"
+  old_attempt="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" owner-run-attempt)"
+  old_fence="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" fencing-token)"
+  old_journal="$(migration_raw state-value 30 1 \
+    python3 "$STATE_HELPER" value "$first_file" journal-id)"
+  migration_safe_id "$old_migration" &&
+    migration_is_positive_int "$old_owner" &&
+    migration_is_positive_int "$old_attempt" &&
+    [[ "$old_fence" == "1" ]] ||
+    migration_die "partial initial state identity is invalid"
+  expected_journal="$(
+    printf '%s|%s|%s|%s' \
+      "$SOURCE_SHA" "$AZURE_CLUSTER_FINGERPRINT" \
+      "$OCI_CLUSTER_FINGERPRINT" "$old_migration" |
+      migration_sha256
+  )"
+  [[ "$old_journal" == "$expected_journal" ]] ||
+    migration_die "partial initial journal ID differs"
+  [[ "$old_owner" != "$OWNER_RUN_ID" ]] ||
+    migration_die "current run cannot repair its own partial state"
+  owner_run_is_conclusively_inactive "$old_owner" "$old_attempt" ||
+    migration_die "partial initial state owner is not conclusively inactive"
+
+  for provider in azure oci; do
+    for kind in journal lock; do
+      file="$(state_file "$provider" "$kind")"
+      [[ -f "$file" ]] || continue
+      [[ "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" schema-version)" == "1" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" journal-id)" == "$old_journal" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" migration-id)" == "$old_migration" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" owner-run-id)" == "$old_owner" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" owner-run-attempt)" == "$old_attempt" &&
+        "$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" fencing-token)" == "1" ]] ||
+        migration_die "partial initial state documents disagree"
+      if [[ "$kind" == "journal" ]]; then
+        document_source="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" original-source-sha)"
+        document_azure="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" azure-cluster-fingerprint)"
+        document_oci="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" oci-cluster-fingerprint)"
+        document_sequence="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" sequence)"
+        document_phase="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" phase)"
+        document_boundary="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" destructive-boundary)"
+        document_recovery="$(migration_raw state-value 30 1 \
+          python3 "$STATE_HELPER" value "$file" recovery-required)"
+        [[ "$document_source" == "$SOURCE_SHA" &&
+          "$document_azure" == "$AZURE_CLUSTER_FINGERPRINT" &&
+          "$document_oci" == "$OCI_CLUSTER_FINGERPRINT" &&
+          "$document_sequence" == "0" &&
+          "$document_phase" == "initialized" &&
+          "$document_boundary" == "false" &&
+          "$document_recovery" == "false" ]] ||
+          migration_die "partial journal is beyond safe initial creation"
+      else
+        [[ "$(migration_raw state-value 30 1 \
+            python3 "$STATE_HELPER" value "$file" state)" == "active" ]] ||
+          migration_die "partial lock is not an initial active lock"
+      fi
+    done
+  done
+
+  for provider in azure oci; do
+    kube_raw "$provider" state-create-recovery 30 2 \
+      delete configmap "$STATE_CONFIGMAP" "$LOCK_CONFIGMAP" \
+      -n "$(provider_namespace "$provider")" --ignore-not-found >/dev/null
+  done
+  [[ "$(state_read_all)" == "missing|missing|missing|missing" ]] ||
+    migration_die "partial initial state cleanup did not converge"
+  migration_log "partial_initial_state_recovered=$presence"
+}
+
 owner_run_is_conclusively_inactive() {
   local run_id="$1"
   local attempt="$2"
@@ -441,6 +664,8 @@ state_new_documents() {
     "oci-baseline-sha256=$oci_hash"
     "signature-manifest-sha256="
     "transfer-manifest-sha256="
+    "mongo-write-lock=false"
+    "rabbitmq-write-lock=false"
   )
   local lock_values=(
     "schema-version=1"
@@ -579,6 +804,7 @@ state_takeover() {
 
 state_acquire() {
   local presence now journal_id lock_state existing_sha existing_azure existing_oci
+  local existing_phase
   presence="$(state_read_all)"
   now="$(migration_epoch)"
   case "$presence" in
@@ -593,9 +819,14 @@ state_acquire() {
       state_new_documents "$journal_id" "$fencing_token" "$now"
       ;;
     present\|present\|present\|present)
-      state_compare_kind journal
-      state_compare_kind lock
-      state_validate_contract
+      state_reconcile_existing
+      existing_phase="$(state_value phase)"
+      case "$existing_phase" in
+        cutover-committed | completed | cutover-forward-recovery)
+          migration_die \
+            "OCI cutover is committed; retrying from Azure is permanently forbidden"
+          ;;
+      esac
       existing_sha="$(state_value original-source-sha)"
       existing_azure="$(state_value azure-cluster-fingerprint)"
       existing_oci="$(state_value oci-cluster-fingerprint)"
@@ -628,7 +859,15 @@ state_acquire() {
       oci_baseline="$(state_value oci-baseline)"
       ;;
     *)
-      migration_die "migration lock/journal mirrors are incomplete; refusing unsafe repair"
+      state_recover_partial_creation "$presence"
+      journal_id="$(
+        printf '%s|%s|%s|%s' \
+          "$SOURCE_SHA" "$AZURE_CLUSTER_FINGERPRINT" \
+          "$OCI_CLUSTER_FINGERPRINT" "$MIGRATION_ID" |
+          migration_sha256
+      )"
+      fencing_token=1
+      state_new_documents "$journal_id" "$fencing_token" "$now"
       ;;
   esac
   state_initialized=1
@@ -638,6 +877,7 @@ state_acquire() {
   state_validate_contract
   state_boundary="$(state_value destructive-boundary)"
   state_recovery="$(state_value recovery-required)"
+  last_committed_phase="$(state_value phase)"
   [[ "$state_boundary" == "true" ]] && state_boundary=1 || state_boundary=0
   [[ "$state_recovery" == "true" ]] && state_recovery=1 || state_recovery=0
   printf 'timestamp\tsequence\tphase\tfencing_token\tdestructive_boundary\trecovery_required\n' \
@@ -662,6 +902,7 @@ state_load_owned() {
   state_initialized=1
   state_boundary="$(state_value destructive-boundary)"
   state_recovery="$(state_value recovery-required)"
+  last_committed_phase="$(state_value phase)"
   [[ "$state_boundary" == "true" ]] && state_boundary=1 || state_boundary=0
   [[ "$state_recovery" == "true" ]] && state_recovery=1 || state_recovery=0
   azure_baseline="$(state_value azure-baseline)"
@@ -792,6 +1033,7 @@ state_advance() {
       migration_die "phase mirror update failed and CAS rollback was incomplete"
     migration_die "phase mirror compare-and-swap failed: $phase"
   fi
+  last_committed_phase="$phase"
   state_boundary=0
   state_recovery=0
   [[ "$boundary" == "true" ]] && state_boundary=1
@@ -1063,6 +1305,98 @@ mongo_eval() {
   kube_capture "$provider" mongo-read "$COMMAND_TIMEOUT_SECONDS" 2 \
     exec -n "$(provider_namespace "$provider")" "$pod" -- \
     mongosh --quiet --eval "$script"
+}
+
+target_write_lock_status() {
+  mongo_eval oci "$target_mongo_pod" '
+    print(db.getSiblingDB("admin").currentOp().fsyncLock === true);
+  '
+}
+
+lock_target_writes() {
+  local result
+  [[ "$(target_write_lock_status)" == "false" ]] ||
+    migration_die "OCI Mongo write lock was already active unexpectedly"
+  result="$(mongo_eval oci "$target_mongo_pod" '
+    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsync:1,lock:true})));
+  ')"
+  migration_raw mongo-write-lock 30 1 jq -e \
+    '.ok == 1 and .lockCount >= 1' <<<"$result" >/dev/null ||
+    migration_die "OCI Mongo could not enter read-only cutover validation"
+  [[ "$(target_write_lock_status)" == "true" ]] ||
+    migration_die "OCI Mongo write lock is not active"
+  state_advance target-write-locked true true "mongo-write-lock=true"
+}
+
+unlock_target_writes() {
+  local result
+  if [[ "$(target_write_lock_status)" == "false" ]]; then
+    return 0
+  fi
+  result="$(mongo_eval oci "$target_mongo_pod" '
+    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsyncUnlock:1})));
+  ')"
+  migration_raw mongo-write-unlock 30 1 jq -e \
+    '.ok == 1 and .lockCount == 0' <<<"$result" >/dev/null ||
+    migration_die "OCI Mongo write lock could not be released"
+  [[ "$(target_write_lock_status)" == "false" ]] ||
+    migration_die "OCI Mongo remained write-locked after activation"
+}
+
+unlock_target_writes_for_retry() {
+  target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$target_mongo_pod" ]] ||
+    migration_die "OCI Mongo pod is unavailable for retry preparation"
+  if [[ "$(target_write_lock_status)" == "true" ]]; then
+    unlock_target_writes
+    state_advance retry-write-lock-released true true \
+      "mongo-write-lock=false"
+  fi
+}
+
+rabbitmq_write_permission() {
+  local pod output
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$pod" ]] ||
+    migration_die "OCI RabbitMQ pod is missing for permission validation"
+  output="$(kube_capture oci rabbitmq-permissions 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl list_user_permissions guest)"
+  awk '
+    $1 == "/" && NF == 4 { print $3; found++ }
+    END { if (found != 1) exit 1 }
+  ' <<<"$output" ||
+    migration_die "OCI RabbitMQ guest permissions are malformed"
+}
+
+lock_rabbitmq_writes() {
+  local pod
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  kube_run oci rabbitmq-write-lock 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl set_permissions -p / guest '.*' '^$' '.*' >/dev/null
+  [[ "$(rabbitmq_write_permission)" == "^$" ]] ||
+    migration_die "OCI RabbitMQ publish permission remained enabled"
+  state_advance messaging-write-locked true true \
+    "mongo-write-lock=true" "rabbitmq-write-lock=true"
+}
+
+unlock_rabbitmq_writes() {
+  local pod
+  pod="$(kube_capture oci rabbitmq-pod 30 2 \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  kube_run oci rabbitmq-write-unlock 60 2 \
+    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    rabbitmqctl set_permissions -p / guest '.*' '.*' '.*' >/dev/null
+  [[ "$(rabbitmq_write_permission)" == ".*" ]] ||
+    migration_die "OCI RabbitMQ publish permission was not restored"
 }
 
 mongo_runtime() {
@@ -1634,7 +1968,7 @@ recreate_rabbitmq_and_restart() {
   kube_run oci rabbitmq-rollout 600 1 \
     rollout status deployment/gaming-rabbitmq-depl \
     -n "$OCI_K8S_NAMESPACE" --timeout=9m
-  state_advance rabbitmq-recreated true true
+  state_advance rabbitmq-recreated true true "rabbitmq-write-lock=false"
   migration_failure_hook rabbitmq-recreate
 
   for service in "${BACKEND_SERVICES[@]}" client; do
@@ -1659,6 +1993,7 @@ recreate_rabbitmq_and_restart() {
   [[ "$count" == "17" && "$names" == "$expected" &&
     "$backlog" == "0" && "$bad" == "0" ]] ||
     migration_die "OCI RabbitMQ is not exact after sequential consumer restart"
+  lock_rabbitmq_writes
 
   ingress="$(baseline_value "$oci_baseline" ingress)"
   [[ "$ingress" =~ ^[1-9][0-9]*$ ]] ||
@@ -1728,6 +2063,7 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   local cleanup_failed=0
+  local current_phase=""
   if [[ -n "$disposable_container" ]]; then
     migration_raw disposable-delete 60 2 \
       docker rm -f "$disposable_container" >/dev/null 2>&1 ||
@@ -1739,10 +2075,23 @@ cleanup() {
       cleanup_failed=1
   fi
   if [[ "$operation_success" != "1" && "$state_initialized" == "1" ]]; then
+    current_phase="${last_committed_phase:-$(state_value phase 2>/dev/null || true)}"
     if [[ "$state_boundary" == "1" ]]; then
-      close_oci || cleanup_failed=1
-      ensure_azure_frozen || cleanup_failed=1
-      state_advance recovery-required true true || cleanup_failed=1
+      case "$current_phase" in
+        cutover-committed | cutover-forward-recovery)
+          ensure_azure_frozen || cleanup_failed=1
+          state_advance cutover-forward-recovery true false ||
+            cleanup_failed=1
+          ;;
+        completed)
+          ensure_azure_frozen || cleanup_failed=1
+          ;;
+        *)
+          close_oci || cleanup_failed=1
+          ensure_azure_frozen || cleanup_failed=1
+          state_advance recovery-required true true || cleanup_failed=1
+          ;;
+      esac
     else
       local baseline_restore_failed=0
       if [[ "$oci_frozen" == "1" ]]; then
@@ -1875,9 +2224,11 @@ main() {
       capture_transfers
       validate_transfers_disposable
       freeze_oci
+      unlock_target_writes_for_retry
       drop_target_databases
       restore_target_databases
       verify_target_exact
+      lock_target_writes
       recreate_rabbitmq_and_restart
       state_write_summary
       rm -rf "$WORK_DIR"
@@ -1888,11 +2239,53 @@ main() {
       ;;
     finalize-success)
       state_load_owned
-      [[ "$(state_value phase)" == "awaiting-protected-health" ]] ||
-        migration_die "migration is not awaiting exact health finalization"
       ensure_azure_frozen
-      verify_final_exact_state
-      state_advance completed true false
+      target_mongo_pod="$(kube_capture oci target-pod 30 2 \
+        get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+        -o jsonpath='{.items[0].metadata.name}')"
+      [[ -n "$target_mongo_pod" ]] ||
+        migration_die "OCI Mongo pod is missing for cutover finalization"
+      case "$(state_value phase)" in
+        awaiting-protected-health)
+          [[ "$(state_optional_value mongo-write-lock)" == "true" &&
+            "$(target_write_lock_status)" == "true" &&
+            "$(state_optional_value rabbitmq-write-lock)" == "true" &&
+            "$(rabbitmq_write_permission)" == "^$" ]] ||
+            migration_die "OCI data or messaging writes were enabled before parity certification"
+          verify_final_exact_state
+          state_advance cutover-committed true false \
+            "mongo-write-lock=true" "rabbitmq-write-lock=true"
+          ;;
+        cutover-committed | cutover-forward-recovery)
+          ;;
+        completed)
+          [[ "$(target_write_lock_status)" == "false" &&
+            "$(rabbitmq_write_permission)" == ".*" ]] ||
+            migration_die "completed cutover retained a write lock"
+          if [[ "$(state_lock_value state)" == "active" ]]; then
+            state_release
+          else
+            [[ "$(state_lock_value state)" == "released" ]] ||
+              migration_die "completed cutover lock state is invalid"
+          fi
+          state_write_summary
+          rm -rf "$WORK_DIR"
+          operation_success=1
+          trap - EXIT INT TERM
+          migration_log \
+            "oci_migration_finalize=PASS databases=8 recovery_required=false"
+          exit 0
+          ;;
+        *)
+          migration_die "migration is not in a forward finalization phase"
+          ;;
+      esac
+      unlock_target_writes
+      migration_failure_hook mongo-write-unlocked
+      unlock_rabbitmq_writes
+      migration_failure_hook rabbitmq-write-unlocked
+      state_advance completed true false \
+        "mongo-write-lock=false" "rabbitmq-write-lock=false"
       state_release
       state_write_summary
       rm -rf "$WORK_DIR"
@@ -1904,9 +2297,20 @@ main() {
     fail-closed)
       state_load_owned
       if [[ "$state_boundary" == "1" ]]; then
-        close_oci
-        ensure_azure_frozen
-        state_advance recovery-required true true
+        case "$(state_value phase)" in
+          cutover-committed | cutover-forward-recovery)
+            ensure_azure_frozen
+            state_advance cutover-forward-recovery true false
+            ;;
+          completed)
+            ensure_azure_frozen
+            ;;
+          *)
+            close_oci
+            ensure_azure_frozen
+            state_advance recovery-required true true
+            ;;
+        esac
       else
         restore_oci_baseline
         ensure_azure_frozen

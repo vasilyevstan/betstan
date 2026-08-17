@@ -564,6 +564,32 @@ jobs:
           )"
           [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
           [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
           printf '%s\n' \
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
@@ -698,6 +724,32 @@ jobs:
           )"
           [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
           [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
           printf '%s\n' \
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
@@ -999,7 +1051,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PUBLIC_VALIDATION_RESULT" = "success" ]; then
-            ./infra/oci/scripts/migrate-from-azure.sh finalize-success
+            for attempt in 1 2 3; do
+              if ./infra/oci/scripts/migrate-from-azure.sh finalize-success; then
+                exit 0
+              fi
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            exit 1
           else
             ./infra/oci/scripts/migrate-from-azure.sh fail-closed
           fi
@@ -1063,12 +1121,39 @@ jobs:
           )"
           [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
           [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
+          [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
+          mapfile -t vmss_names < <(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 2 \
+              --classification azure-vmss-list -- \
+              az vmss list \
+                --resource-group "$node_resource_group" \
+                --query '[].name' --output tsv
+          )
+          [ "${#vmss_names[@]}" = "1" ]
+          vmss_instances="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 60 --attempts 3 \
+              --classification azure-vmss-instance-read -- \
+              az vmss list-instances \
+                --resource-group "$node_resource_group" \
+                --name "${vmss_names[0]}" \
+                --expand instanceView \
+                --output json
+          )"
+          jq -e '
+            length >= 1 and
+            all(.[]; any(.instanceView.statuses[]?;
+              .code == "PowerState/deallocated"))
+          ' <<<"$vmss_instances" >/dev/null
           printf '%s\n' \
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
             "cluster_resource_id_sha256=$actual_hash" \
             "provisioning_state=Succeeded" \
-            "power_state=Stopped" \
+            "aks_power_state=Stopped" \
+            "vmss_instances_deallocated=true" \
             > artifacts/oci-migration-final/azure-stop.env
 
       - name: Upload sanitized final phase and Azure stop evidence
@@ -1300,9 +1385,13 @@ jobs:
           logical_parity="$(get_phase_field logical-parity)"
           source_signatures="$(get_phase_field signature-manifest-sha256)"
           target_signatures="$(get_phase_field target-signature-manifest-sha256)"
+          azure_cluster_fingerprint="$(get_phase_field azure-cluster-fingerprint)"
+          final_journal_sha256="$(sha256sum "$phase_file" | awk '{print $1}')"
 
           [[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [ "$migration_id" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]
+          [ "$source_sha" = "$SOURCE_SHA" ]
           [ "$run_id" = "$GITHUB_RUN_ID" ]
           [ "$run_attempt" = "$GITHUB_RUN_ATTEMPT" ]
           [[ "$journal_generation" =~ ^[1-9][0-9]*$ ]]
@@ -1315,8 +1404,15 @@ jobs:
           [ "$logical_parity" = "true" ]
           [[ "$source_signatures" =~ ^[0-9a-f]{64}$ ]]
           [ "$target_signatures" = "$source_signatures" ]
+          [[ "$azure_cluster_fingerprint" =~ ^[0-9a-f]{64}$ ]]
+          [ "$azure_cluster_fingerprint" = \
+            "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
+          [[ "$final_journal_sha256" =~ ^[0-9a-f]{64}$ ]]
           grep -Fxq "provisioning_state=Succeeded" "$stop_file"
-          grep -Fxq "power_state=Stopped" "$stop_file"
+          grep -Fxq "cluster_resource_id_sha256=$azure_cluster_fingerprint" \
+            "$stop_file"
+          grep -Fxq "aks_power_state=Stopped" "$stop_file"
+          grep -Fxq "vmss_instances_deallocated=true" "$stop_file"
 
           mkdir -p artifacts/oci-migration-success
           printf '%s\n' \
@@ -1331,6 +1427,7 @@ jobs:
             "fencing_generation=$journal_generation" \
             "journal_sequence=$journal_sequence" \
             "journal_heartbeat_epoch=$journal_heartbeat_epoch" \
+            "final_journal_sha256=$final_journal_sha256" \
             "artifact_run_binding=${run_id}-${run_attempt}" \
             "destructive_boundary_crossed=true" \
             "database_count=8" \
@@ -1339,6 +1436,9 @@ jobs:
             "target_signature_aggregate_sha256=$target_signatures" \
             "oci_reopened_healthy=true" \
             "azure_writers_frozen=true" \
+            "azure_cluster_resource_id_sha256=$azure_cluster_fingerprint" \
+            "aks_power_state=Stopped" \
+            "vmss_instances_deallocated=true" \
             "azure_cluster_stopped_deallocated=true" \
             > artifacts/oci-migration-success/migration-summary.env
 
