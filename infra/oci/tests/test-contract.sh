@@ -283,9 +283,12 @@ abort "canonical certificate SAN set differs" unless canonical_certificate.dig(
 redirect = by_kind.fetch("Ingress").find {
   |ingress| ingress.dig("metadata", "name") == "gaming-oci-www-redirect"
 }
-abort "www redirect target differs" unless redirect.dig(
-  "metadata", "annotations", "nginx.ingress.kubernetes.io/permanent-redirect"
-) == 'https://betstan.xyz$request_uri'
+abort "www ingress must leave HTTP for the canonical redirect" unless redirect.dig(
+  "metadata", "annotations", "nginx.ingress.kubernetes.io/ssl-redirect"
+) == "false"
+abort "www ingress contains an admission-rejected redirect variable" if redirect.dig(
+  "metadata", "annotations"
+).key?("nginx.ingress.kubernetes.io/permanent-redirect")
 puts "oci_rendered_topology=PASS"
 RUBY
 grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
@@ -371,6 +374,10 @@ for ingress_values in \
     fail "ingress-nginx digest differs from the reviewed multi-architecture image"
   ! grep -Eq "strict-validate-path-type:[[:space:]]*['\"]?false" "$ingress_values" ||
     fail "ingress-nginx strict path validation was disabled"
+  grep -Fq 'if ($host = "www.betstan.xyz") {' "$ingress_values" ||
+    fail "ingress-nginx lacks the exact www redirect host guard"
+  grep -Fq 'return 308 https://betstan.xyz$request_uri;' "$ingress_values" ||
+    fail "ingress-nginx does not preserve the www request URI in its HTTPS redirect"
 done
 grep -Fq '"gaming-auth-mongo": "sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1"' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
