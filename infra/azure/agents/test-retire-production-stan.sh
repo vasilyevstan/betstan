@@ -142,11 +142,13 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "aks show")
-    jq -n --arg id "$STUB_CLUSTER_ID" '{
+    jq -n \
+      --arg id "$STUB_CLUSTER_ID" \
+      --arg power "${STUB_AKS_POWER_STATE:-Stopped}" '{
       id:$id,
       etag:"fixture-etag",
       nodeResourceGroup:"MC_betstan-rg_betstan-aks_eastus",
-      powerState:{code:"Stopped"},
+      powerState:{code:$power},
       provisioningState:"Failed"
     }'
     ;;
@@ -274,7 +276,7 @@ target_signature_aggregate_sha256=${target_signature}
 oci_reopened_healthy=true
 azure_writers_frozen=true
 azure_cluster_resource_id_sha256=${STUB_CLUSTER_DIGEST}
-aks_power_state=Stopped
+aks_power_state=${STUB_AKS_POWER_STATE:-Stopped}
 vmss_instances_deallocated=true
 azure_cluster_stopped_deallocated=true
 final_journal_sha256=$(printf 'c%.0s' {1..64})
@@ -409,6 +411,7 @@ run_plan() {
     PATH="$BIN_DIR:$PATH" \
     STUB_AZ_LOG="$WORK_DIR/az.log" \
     STUB_CLUSTER_ID="$CLUSTER_ID" \
+    STUB_AKS_POWER_STATE=Stopped \
     STUB_PRIMARY_JSON="$WORK_DIR/primary.json" \
     STUB_MANAGED_JSON="$WORK_DIR/managed.json" \
     STUB_DELETE_PHASE_FILE="$WORK_DIR/delete-phase" \
@@ -431,6 +434,15 @@ run_plan "$WORK_DIR/good" |
   grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
 ! grep -Eq 'aks delete|group delete' "$WORK_DIR/az.log" ||
   { echo "plan mode issued a destructive Azure command" >&2; exit 1; }
+
+run_plan "$WORK_DIR/deallocated" STUB_AKS_POWER_STATE=Deallocated |
+  grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
+if run_plan "$WORK_DIR/running-control-plane" STUB_AKS_POWER_STATE=Running \
+    >"$WORK_DIR/running-control-plane.out" 2>&1; then
+  echo "retirement fixture accepted a running AKS control plane" >&2
+  exit 1
+fi
+grep -Fq 'NO_GO azure_retirement_reason=' "$WORK_DIR/running-control-plane.out"
 
 for failure_mode in \
   STUB_BAD_RUN STUB_BAD_PARITY STUB_UNKNOWN_RESOURCE STUB_RUNNING_VMSS \
@@ -499,4 +511,4 @@ for crash_point in aks managed primary; do
     grep -qx 'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'
 done
 
-printf 'azure_retirement_contract=PASS scenarios=12\n'
+printf 'azure_retirement_contract=PASS scenarios=14\n'

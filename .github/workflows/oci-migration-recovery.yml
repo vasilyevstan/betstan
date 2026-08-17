@@ -198,8 +198,18 @@ jobs:
           power="$(jq -r '.powerState.code // empty' <<<"$cluster_json")"
           actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
           [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
-          [ "$provisioning" = "Succeeded" ]
-          [ "$power" = "Running" ] || [ "$power" = "Stopped" ]
+          case "$power" in
+            Running)
+              [ "$provisioning" = "Succeeded" ]
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           {
             echo "power=$power"
             echo "resource_id_hash=$actual_hash"
@@ -230,7 +240,8 @@ jobs:
           AZURE_ACTUAL_CLUSTER_RESOURCE_ID_SHA256: ${{ steps.cluster.outputs.resource_id_hash }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.cluster.outputs.power }}" = "Stopped" ]; then
+          if [ "${{ steps.cluster.outputs.power }}" = "Stopped" ] ||
+             [ "${{ steps.cluster.outputs.power }}" = "Deallocated" ]; then
             printf '%s\n' \
               "safe_to_stop=true" \
               "defer=false" \
@@ -272,18 +283,24 @@ jobs:
           [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
           power="$(jq -r '.powerState.code // empty' <<<"$before")"
           provisioning="$(jq -r '.provisioningState // empty' <<<"$before")"
-          [ "$provisioning" = "Succeeded" ]
-          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
-            ./infra/oci/scripts/bounded-command.py \
-              --timeout-seconds 1200 --attempts 1 \
-              --classification azure-cluster-stop -- \
-              az aks stop \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_CLUSTER_NAME" \
-                --only-show-errors
-          else
-            [ "$power" = "Stopped" ]
-          fi
+          case "$power" in
+            Running|Starting)
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 1200 --attempts 1 \
+                --classification azure-cluster-stop -- \
+                az aks stop \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_CLUSTER_NAME" \
+                  --only-show-errors
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           after="$(
             ./infra/oci/scripts/bounded-command.py \
               --timeout-seconds 60 --attempts 3 \
@@ -293,14 +310,17 @@ jobs:
                 --name "$AZURE_CLUSTER_NAME" \
                 --output json
           )"
-          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
-          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          after_provisioning="$(jq -r '.provisioningState // empty' <<<"$after")"
+          after_power="$(jq -r '.powerState.code // empty' <<<"$after")"
+          [ "$after_provisioning" = "Succeeded" ] ||
+            [ "$after_provisioning" = "Failed" ]
+          [ "$after_power" = "Stopped" ] || [ "$after_power" = "Deallocated" ]
           printf '%s\n' \
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
             "cluster_resource_id_sha256=$actual_hash" \
-            "provisioning_state=Succeeded" \
-            "power_state=Stopped" \
+            "provisioning_state=$after_provisioning" \
+            "power_state=$after_power" \
             > artifacts/azure-migration-recovery/stop.env
 
       - name: Upload sanitized recovery evidence

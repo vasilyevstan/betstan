@@ -505,7 +505,10 @@ require_summary_value oci_reopened_healthy true
 require_summary_value azure_writers_frozen true
 require_summary_value azure_cluster_resource_id_sha256 \
   "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256"
-require_summary_value aks_power_state Stopped
+summary_power_state="$(env_value "$SUMMARY_FILE" aks_power_state)"
+[[ "$summary_power_state" == "Stopped" ||
+  "$summary_power_state" == "Deallocated" ]] ||
+  die "migration success summary does not prove a stopped AKS control plane"
 require_summary_value vmss_instances_deallocated true
 require_summary_value azure_cluster_stopped_deallocated true
 require_positive_integer journal_generation
@@ -563,7 +566,9 @@ else
     die "live AKS resource identity differs from the approved fingerprint"
   [[ "$(jq -r .nodeResourceGroup "$cluster_json")" == "$AZURE_EXPECTED_NODE_RESOURCE_GROUP" ]] ||
     die "live AKS managed resource group differs"
-  [[ "$(jq -r '.powerState.code' "$cluster_json")" == "Stopped" ]] ||
+  live_power_state="$(jq -r '.powerState.code // empty' "$cluster_json")"
+  [[ "$live_power_state" == "Stopped" ||
+    "$live_power_state" == "Deallocated" ]] ||
     die "AKS control plane is not stopped"
   CLUSTER_ETAG="$(jq -r '.etag // empty' "$cluster_json")"
   [[ -n "$CLUSTER_ETAG" ]] ||

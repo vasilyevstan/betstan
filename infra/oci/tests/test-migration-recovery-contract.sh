@@ -291,7 +291,7 @@ for literal in \
   'oci_reopened_healthy=true' \
   'azure_writers_frozen=true' \
   'azure_cluster_resource_id_sha256=' \
-  'aks_power_state=Stopped' \
+  '"aks_power_state=$aks_power_state"' \
   'vmss_instances_deallocated=true' \
   'azure_cluster_stopped_deallocated=true' \
   'for attempt in 1 2 3; do' \
@@ -305,6 +305,13 @@ for literal in \
 done
 [[ "$(grep -Fc 'az vmss list-instances' "$MIGRATION_WORKFLOW")" -ge 3 ]] ||
   fail "every Azure stop path does not independently verify VMSS deallocation"
+[[ "$(grep -Fc 'Stopped|Deallocated)' "$MIGRATION_WORKFLOW")" -ge 4 ]] ||
+  fail "migration does not accept both Azure stopped-state representations"
+grep -Fq '[ "$provisioning" = "Failed" ]' "$MIGRATION_WORKFLOW" ||
+  fail "migration cannot restart the exact failed/deallocated source"
+[[ "$(grep -Ec "steps\\.(final_)?oci_cli\\.outcome == 'success'" \
+  "$MIGRATION_WORKFLOW")" -eq 2 ]] ||
+  fail "migration can run Bastion cleanup before an OCI CLI is installed"
 ! grep -Eq 'az aks (create|update|delete)|az aks nodepool' "$MIGRATION_WORKFLOW" ||
   fail "migration workflow can create, resize, or delete Azure"
 
@@ -341,6 +348,10 @@ done
   fail "recovery workflow receives broader migration or OCI credentials"
 ! grep -Eq 'az aks (start|create|update|delete)|az aks nodepool' "$RECOVERY_WORKFLOW" ||
   fail "recovery workflow exceeds stop/read-only Azure permissions"
+[[ "$(grep -Fc 'Stopped|Deallocated)' "$RECOVERY_WORKFLOW")" -ge 2 ]] ||
+  fail "recovery does not accept both Azure stopped-state representations"
+grep -Fq '[ "$provisioning" = "Failed" ]' "$RECOVERY_WORKFLOW" ||
+  fail "recovery rejects a safely deallocated failed AKS control plane"
 ! grep -Eq 'scale deployment .*--replicas [1-9]' "$RECOVERY" ||
   fail "recovery script can reopen Azure applications"
 for literal in \
