@@ -189,6 +189,15 @@ for literal in \
   'OCI_DIAGNOSTIC_URL:' \
   '[ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]' \
   '[ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]' \
+  'name: oci-migration-success-provenance' \
+  'migration-summary.env' \
+  'schema=betstan.oci-migration-success.v1' \
+  'terminal_status=DEPLOYED_HEALTHY' \
+  'database_count=8' \
+  'logical_source_target_parity=true' \
+  'oci_reopened_healthy=true' \
+  'azure_writers_frozen=true' \
+  'azure_cluster_stopped_deallocated=true' \
   'az aks start' \
   'az aks stop' \
   'Always stop and deallocate exact Azure source with evidence' \
@@ -240,6 +249,8 @@ for literal in \
   'docker run -d --name "$disposable_container"' \
   'dropDatabase()' \
   'signature-$database' \
+  'target-signature-manifest-sha256' \
+  'logical-parity=true' \
   'rabbitmq-recreated' \
   'awaiting-protected-health'; do
   grep -Fq "$literal" "$MIGRATION" ||

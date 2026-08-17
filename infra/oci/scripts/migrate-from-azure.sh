@@ -1554,7 +1554,10 @@ restore_target_databases() {
 
 verify_target_exact() {
   local inventory mapping _service database _sts _pod _pvc expected actual
+  local signature_hash source_aggregate target_aggregate
   local signature_args=()
+  local target_manifest="$WORK_DIR/target-signature-manifest.tsv"
+  : >"$target_manifest"
   inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
   [[ "$inventory" == "$(expected_database_json)" ]] ||
     migration_die "OCI application database inventory is not the exact eight-name set"
@@ -1565,9 +1568,20 @@ verify_target_exact() {
     mongo_signature_kube oci "$target_mongo_pod" "$database" "$actual"
     cmp -s "$expected" "$actual" ||
       migration_die "OCI DB/collection/document/index/validator/options equality failed: $database"
-    signature_args+=("signature-$database=$(migration_sha256 <"$actual")")
+    signature_hash="$(migration_sha256 <"$actual")"
+    signature_args+=("signature-$database=$signature_hash")
+    printf '%s\t%s\n' "$database" "$signature_hash" >>"$target_manifest"
   done
-  state_advance target-exactly-validated true true "${signature_args[@]}"
+  source_aggregate="$(state_value signature-manifest-sha256)"
+  target_aggregate="$(migration_sha256 <"$target_manifest")"
+  [[ "$source_aggregate" =~ ^[0-9a-f]{64}$ &&
+    "$target_aggregate" == "$source_aggregate" ]] ||
+    migration_die "aggregate source/target signature parity failed"
+  state_advance target-exactly-validated true true \
+    "database-count=8" \
+    "logical-parity=true" \
+    "target-signature-manifest-sha256=$target_aggregate" \
+    "${signature_args[@]}"
 }
 
 restore_oci_baseline() {
@@ -1876,6 +1890,7 @@ main() {
       state_load_owned
       [[ "$(state_value phase)" == "awaiting-protected-health" ]] ||
         migration_die "migration is not awaiting exact health finalization"
+      ensure_azure_frozen
       verify_final_exact_state
       state_advance completed true false
       state_release

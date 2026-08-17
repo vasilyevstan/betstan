@@ -1241,6 +1241,7 @@ jobs:
               -n "$OCI_K8S_NAMESPACE" --replicas 0
 
       - name: Remove isolated finalization state
+        id: final_client_cleanup
         if: always()
         env:
           HOME: ${{ runner.temp }}/azure-finalize
@@ -1251,3 +1252,96 @@ jobs:
             "$RUNNER_TEMP/oci-finalize" \
             "$RUNNER_TEMP/oci-migration-finalize" \
             "$RUNNER_TEMP/betstan-k3s-finalize"
+
+      - name: Build sanitized successful migration summary
+        id: success_summary
+        if: >-
+          always() &&
+          env.PUBLIC_VALIDATION_RESULT == 'success' &&
+          steps.transition.outcome == 'success' &&
+          steps.azure_stop.outcome == 'success' &&
+          steps.final_artifact.outcome == 'success' &&
+          steps.revoke.outcome != 'failure' &&
+          steps.bastion_cleanup.outcome != 'failure' &&
+          steps.final_client_cleanup.outcome == 'success'
+        run: |
+          set -euo pipefail
+          phase_file=artifacts/oci-migration-final/phase.env
+          stop_file=artifacts/oci-migration-final/azure-stop.env
+          [ -f "$phase_file" ]
+          [ -f "$stop_file" ]
+
+          get_phase_field() {
+            local key="$1"
+            local value
+            value="$(awk -F= -v key="$key" '
+              $1 == key {
+                print substr($0, index($0, "=") + 1)
+                count++
+              }
+              END {
+                if (count != 1) exit 1
+              }
+            ' "$phase_file")"
+            printf '%s' "$value"
+          }
+
+          migration_id="$(get_phase_field migration-id)"
+          source_sha="$(get_phase_field original-source-sha)"
+          run_id="$(get_phase_field owner-run-id)"
+          run_attempt="$(get_phase_field owner-run-attempt)"
+          journal_generation="$(get_phase_field fencing-token)"
+          journal_sequence="$(get_phase_field sequence)"
+          journal_phase="$(get_phase_field phase)"
+          boundary="$(get_phase_field destructive-boundary)"
+          recovery_required="$(get_phase_field recovery-required)"
+          database_count="$(get_phase_field database-count)"
+          logical_parity="$(get_phase_field logical-parity)"
+          source_signatures="$(get_phase_field signature-manifest-sha256)"
+          target_signatures="$(get_phase_field target-signature-manifest-sha256)"
+
+          [[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [ "$run_id" = "$GITHUB_RUN_ID" ]
+          [ "$run_attempt" = "$GITHUB_RUN_ATTEMPT" ]
+          [[ "$journal_generation" =~ ^[1-9][0-9]*$ ]]
+          [[ "$journal_sequence" =~ ^[1-9][0-9]*$ ]]
+          [ "$journal_phase" = "completed" ]
+          [ "$boundary" = "true" ]
+          [ "$recovery_required" = "false" ]
+          [ "$database_count" = "8" ]
+          [ "$logical_parity" = "true" ]
+          [[ "$source_signatures" =~ ^[0-9a-f]{64}$ ]]
+          [ "$target_signatures" = "$source_signatures" ]
+          grep -Fxq "provisioning_state=Succeeded" "$stop_file"
+          grep -Fxq "power_state=Stopped" "$stop_file"
+
+          mkdir -p artifacts/oci-migration-success
+          printf '%s\n' \
+            "schema=betstan.oci-migration-success.v1" \
+            "migration_id=$migration_id" \
+            "source_sha=$source_sha" \
+            "github_run_id=$run_id" \
+            "github_run_attempt=$run_attempt" \
+            "terminal_phase=DEPLOYED_HEALTHY" \
+            "terminal_status=DEPLOYED_HEALTHY" \
+            "journal_generation=$journal_generation" \
+            "journal_sequence=$journal_sequence" \
+            "destructive_boundary_crossed=true" \
+            "database_count=8" \
+            "logical_source_target_parity=true" \
+            "source_signature_aggregate_sha256=$source_signatures" \
+            "target_signature_aggregate_sha256=$target_signatures" \
+            "oci_reopened_healthy=true" \
+            "azure_writers_frozen=true" \
+            "azure_cluster_stopped_deallocated=true" \
+            > artifacts/oci-migration-success/migration-summary.env
+
+      - name: Upload successful migration retirement provenance
+        if: steps.success_summary.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-migration-success-provenance
+          path: artifacts/oci-migration-success/migration-summary.env
+          if-no-files-found: error
+          retention-days: 90

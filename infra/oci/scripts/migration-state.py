@@ -126,7 +126,10 @@ def main() -> int:
         "oci-cluster-fingerprint",
         "azure-baseline-sha256",
         "oci-baseline-sha256",
+        "database-count",
+        "logical-parity",
         "signature-manifest-sha256",
+        "target-signature-manifest-sha256",
         "transfer-manifest-sha256",
     )
     for key in allowed:
