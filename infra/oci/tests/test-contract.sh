@@ -505,10 +505,17 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
       grep -c 'secrets\.' || true
   )"
+  public_cloud_credentials="$(
+    sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
+      grep -Ec \
+        'OCI_CLI_|OCI_CI_PRIVATE_KEY|AZURE_CONFIG|azure/login|aks-set-context|configure-kubectl-oke' ||
+      true
+  )"
   [[ -n "$public_job_line" && -n "$dependency_line" &&
       "$dependency_line" -gt "$public_job_line" &&
       "$dependency_line" -lt "$next_job_line" &&
-      "$public_secrets" == "0" ]] ||
+      "$public_secrets" == "0" &&
+      "$public_cloud_credentials" == "0" ]] ||
     fail "browser dependencies share a job with cloud credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
@@ -536,17 +543,28 @@ grep -Fq '[ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]' "$migrate_workflow"
 grep -Fq '[ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]' "$migrate_workflow"
 grep -Fq '[[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]' \
   "$migrate_workflow"
-grep -Fq 'name: oci-migration-success-provenance' "$migrate_workflow"
+grep -Fq 'name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}' \
+  "$migrate_workflow"
 grep -Fq 'path: artifacts/oci-migration-success/migration-summary.env' "$migrate_workflow"
 grep -Fq 'schema=betstan.oci-migration-success.v1' "$migrate_workflow"
 grep -Fq 'terminal_phase=DEPLOYED_HEALTHY' "$migrate_workflow"
 grep -Fq 'terminal_status=DEPLOYED_HEALTHY' "$migrate_workflow"
+grep -Fq 'journal_heartbeat_epoch=' "$migrate_workflow"
+grep -Fq 'fencing_generation=' "$migrate_workflow"
+grep -Fq 'artifact_run_binding=${run_id}-${run_attempt}' "$migrate_workflow"
 grep -Fq 'destructive_boundary_crossed=true' "$migrate_workflow"
 grep -Fq 'database_count=8' "$migrate_workflow"
 grep -Fq 'logical_source_target_parity=true' "$migrate_workflow"
 grep -Fq 'oci_reopened_healthy=true' "$migrate_workflow"
 grep -Fq 'azure_writers_frozen=true' "$migrate_workflow"
 grep -Fq 'azure_cluster_stopped_deallocated=true' "$migrate_workflow"
+public_job_line="$(grep -n -m1 '^  public-validate:' "$migrate_workflow" | cut -d: -f1)"
+terminal_summary_line="$(
+  grep -n -m1 'terminal_status=DEPLOYED_HEALTHY' "$migrate_workflow" |
+    cut -d: -f1
+)"
+[[ "$terminal_summary_line" -gt "$public_job_line" ]] ||
+  fail "terminal migration success provenance is emitted before public validation"
 grep -Fq 'OCI_MIGRATION_AZURE_CREDENTIALS' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AGE_IDENTITY' "$migrate_workflow"
 grep -Fq 'az aks start' "$migrate_workflow"

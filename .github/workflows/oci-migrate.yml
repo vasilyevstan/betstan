@@ -1292,6 +1292,7 @@ jobs:
           run_attempt="$(get_phase_field owner-run-attempt)"
           journal_generation="$(get_phase_field fencing-token)"
           journal_sequence="$(get_phase_field sequence)"
+          journal_heartbeat_epoch="$(get_phase_field heartbeat-epoch)"
           journal_phase="$(get_phase_field phase)"
           boundary="$(get_phase_field destructive-boundary)"
           recovery_required="$(get_phase_field recovery-required)"
@@ -1306,6 +1307,7 @@ jobs:
           [ "$run_attempt" = "$GITHUB_RUN_ATTEMPT" ]
           [[ "$journal_generation" =~ ^[1-9][0-9]*$ ]]
           [[ "$journal_sequence" =~ ^[1-9][0-9]*$ ]]
+          [[ "$journal_heartbeat_epoch" =~ ^[1-9][0-9]*$ ]]
           [ "$journal_phase" = "completed" ]
           [ "$boundary" = "true" ]
           [ "$recovery_required" = "false" ]
@@ -1326,7 +1328,10 @@ jobs:
             "terminal_phase=DEPLOYED_HEALTHY" \
             "terminal_status=DEPLOYED_HEALTHY" \
             "journal_generation=$journal_generation" \
+            "fencing_generation=$journal_generation" \
             "journal_sequence=$journal_sequence" \
+            "journal_heartbeat_epoch=$journal_heartbeat_epoch" \
+            "artifact_run_binding=${run_id}-${run_attempt}" \
             "destructive_boundary_crossed=true" \
             "database_count=8" \
             "logical_source_target_parity=true" \
@@ -1341,7 +1346,7 @@ jobs:
         if: steps.success_summary.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: oci-migration-success-provenance
+          name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-migration-success/migration-summary.env
           if-no-files-found: error
           retention-days: 90

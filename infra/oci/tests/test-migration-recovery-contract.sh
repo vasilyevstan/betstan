@@ -189,10 +189,13 @@ for literal in \
   'OCI_DIAGNOSTIC_URL:' \
   '[ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]' \
   '[ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]' \
-  'name: oci-migration-success-provenance' \
+  'name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}' \
   'migration-summary.env' \
   'schema=betstan.oci-migration-success.v1' \
   'terminal_status=DEPLOYED_HEALTHY' \
+  'journal_heartbeat_epoch=' \
+  'fencing_generation=' \
+  'artifact_run_binding=${run_id}-${run_attempt}' \
   'database_count=8' \
   'logical_source_target_parity=true' \
   'oci_reopened_healthy=true' \
