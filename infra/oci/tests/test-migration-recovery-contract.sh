@@ -183,6 +183,12 @@ for literal in \
   'replace_oci_data:' \
   'inputs.replace_oci_data == true' \
   'build_run_id:' \
+  'redirect_url: ${{ steps.provenance.outputs.redirect_url }}' \
+  'diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}' \
+  'OCI_REDIRECT_URL:' \
+  'OCI_DIAGNOSTIC_URL:' \
+  '[ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]' \
+  '[ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]' \
   'az aks start' \
   'az aks stop' \
   'Always stop and deallocate exact Azure source with evidence' \

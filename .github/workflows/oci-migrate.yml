@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 240
     outputs:
       public_url: ${{ steps.provenance.outputs.public_url }}
+      redirect_url: ${{ steps.provenance.outputs.redirect_url }}
+      diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}
     environment:
       name: oci-migration
     env:
@@ -227,6 +229,10 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$canonical_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [[ "$diagnostic_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
           grep -Fx "runtime_mode=$runtime_mode" artifacts/deploy/provenance.txt
           if [ "$runtime_mode" = "oke" ]; then
             runtime_ocid="$cluster_ocid"
@@ -243,6 +249,8 @@ jobs:
             printf 'runtime_ocid=%s\n' "$runtime_ocid"
             printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
             printf 'public_url=https://%s\n' "$public_host"
+            printf 'redirect_url=https://%s\n' "$redirect_host"
+            printf 'diagnostic_url=https://%s\n' "$diagnostic_host"
           } >> "$GITHUB_OUTPUT"
           printf '%s\n' \
             "source_sha=$SOURCE_SHA" \
@@ -253,6 +261,10 @@ jobs:
             "deploy_run_id=$DEPLOY_RUN_ID" \
             "deploy_run_attempt=1" \
             "runtime_fingerprint=$runtime_fingerprint" \
+            "public_host=$public_host" \
+            "canonical_host=$canonical_host" \
+            "redirect_host=$redirect_host" \
+            "diagnostic_host=$diagnostic_host" \
             "build_images_sha256=$(sha256sum artifacts/oci-migration/build-images.tsv | awk '{print $1}')" \
             "rabbitmq_baseline_sha256=$expected_queue_hash" \
             > artifacts/oci-migration/provenance.env
@@ -485,6 +497,8 @@ jobs:
           OCI_RABBITMQ_BASELINE_FILE: artifacts/deploy/rabbitmq-baseline.txt
           OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
           OCI_E2E_ALREADY_PASSED: "1"
           OUTPUT_DIR: ${{ runner.temp }}/oci-migration-health
@@ -723,12 +737,16 @@ jobs:
         env:
           SOURCE_SHA: ${{ inputs.approved_sha }}
           OCI_PUBLIC_URL: ${{ needs.migrate.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.migrate.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.migrate.outputs.diagnostic_url }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
-          [[ "$OCI_PUBLIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+          [ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]
+          [ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]
+          [[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
 
       - name: Install browser validation dependencies
         run: |
@@ -739,6 +757,8 @@ jobs:
       - name: Run full public OCI validation without cloud credentials
         env:
           OCI_PUBLIC_URL: ${{ needs.migrate.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.migrate.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.migrate.outputs.diagnostic_url }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           MAX_LOOPS: "3"
           SLEEP_SECONDS: "20"
@@ -844,6 +864,10 @@ jobs:
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$canonical_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [[ "$diagnostic_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
           if [ "$runtime_mode" = "oke" ]; then
             runtime_ocid="$cluster_ocid"
             runtime_fingerprint="$cluster_fingerprint"
