@@ -30,8 +30,12 @@ build_workflow=".github/workflows/production-build.yml"
 deploy_workflow=".github/workflows/production-deploy.yml"
 branch_workflow=".github/workflows/branch-policy.yml"
 policy_script=".github/scripts/publish-pr-policy.js"
+oci_migrate_workflow=".github/workflows/oci-migrate.yml"
+oci_recovery_workflow=".github/workflows/oci-migration-recovery.yml"
 
-for file in "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script"; do
+for file in \
+  "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
+  "$oci_migrate_workflow" "$oci_recovery_workflow"; do
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
 
@@ -115,11 +119,39 @@ require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion he
 require_literal "$policy_script" "assertExpectedPull(finalPull, pull)" "final stale-event check"
 require_literal "$policy_script" "relation.base?.sha === pull.baseSha" "exact base snapshot relation"
 
+require_literal "$oci_migrate_workflow" "build_run_id:" "exact OCI build provenance input"
+require_literal "$oci_migrate_workflow" "replace_oci_data:" "explicit destructive replacement input"
+require_literal "$oci_migrate_workflow" "inputs.replace_oci_data == true" "destructive replacement guard"
+require_literal "$oci_migrate_workflow" "REPLACE OCI DATA FROM AZURE" "destructive confirmation"
+require_literal "$oci_migrate_workflow" "group: oci-control-plane" "shared OCI control-plane concurrency"
+require_literal "$oci_migrate_workflow" "az aks start" "synchronous exact Azure start"
+require_literal "$oci_migrate_workflow" "az aks stop" "always-path Azure deallocation"
+reject_literal "$oci_migrate_workflow" "az aks create" "Azure cluster creation"
+reject_literal "$oci_migrate_workflow" "az aks nodepool" "Azure cluster resize"
+reject_literal "$oci_migrate_workflow" "Object Storage" "retained database artifact path"
+
+require_literal "$oci_recovery_workflow" "name: oci-migration-recovery" "migration recovery identity"
+require_literal "$oci_recovery_workflow" 'workflows: ["oci-migrate"]' "migration completion trigger"
+require_literal "$oci_recovery_workflow" 'cron: "*/15 * * * *"' "bounded recovery schedule"
+require_literal "$oci_recovery_workflow" "workflow_dispatch:" "manual recovery trigger"
+require_literal "$oci_recovery_workflow" "OCI_MIGRATION_RECOVERY_ENABLED" "false-by-default recovery guard"
+require_literal "$oci_recovery_workflow" "OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH" "bounded recovery arm deadline"
+require_literal "$oci_recovery_workflow" "86400" "one-day recovery arm bound"
+require_literal "$oci_recovery_workflow" "name: azure-migration-recovery" "stop-only protected environment"
+require_literal "$oci_recovery_workflow" "AZURE_MIGRATION_RECOVERY_CREDENTIALS" "dedicated stop-only credential"
+require_literal "$oci_recovery_workflow" "group: azure-migration-recovery" "collapsed recovery concurrency"
+require_literal "$oci_recovery_workflow" "cancel-in-progress: true" "duplicate recovery collapse"
+require_literal "$oci_recovery_workflow" "az aks stop" "exact Azure stop operation"
+reject_literal "$oci_recovery_workflow" "OCI_MIGRATION_AZURE_CREDENTIALS" "broader migration credential"
+reject_literal "$oci_recovery_workflow" "az aks start" "Azure start permission"
+reject_literal "$oci_recovery_workflow" "az aks create" "Azure create permission"
+reject_literal "$oci_recovery_workflow" "OCI_CI_PRIVATE_KEY_PEM" "OCI API credential"
+
 workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-production-build,oci-production-deploy,production-build,production-deploy"
+oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,production-build,production-deploy"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 

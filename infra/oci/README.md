@@ -6,6 +6,10 @@ and the load-balancer-derived `nip.io` host remains diagnostic. Azure
 deployment automation remains available for an explicitly approved future
 recreation, but no Azure workload may replace or alter OCI implicitly.
 
+This directory is the Oracle Cloud Infrastructure production path. Migration
+does not alter canonical DNS or reuse Azure credentials outside its protected
+source-only workflow. Azure remains the frozen recovery source until the OCI
+replacement passes; Azure deletion is a later operation outside this path.
 The preferred target is one directly launched `VM.Standard.A1.Flex` VM
 (2 OCPUs, 12 GiB) running pinned single-node k3s, one 50 GiB Mongo block
 volume, and one 10/10 Mbps flexible load balancer. The existing OKE Basic path
@@ -17,9 +21,9 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   `OCI_COMPARTMENT_OCID`; resources are never discovered by name alone.
 - Runtime selection is explicit. Scripts never fall from k3s to OKE or from
   OKE to k3s.
-- The tenancy home region, pinned runtime image, pinned Kubernetes
-  distribution, and migration watchdog image are required inputs. Scripts
-  stop rather than guessing region-specific or potentially billable values.
+- The tenancy home region, pinned runtime image, and pinned Kubernetes
+  distribution are required inputs. Scripts stop rather than guessing
+  region-specific or potentially billable values.
 - `OCI_A1_OCPUS=2`, `OCI_A1_MEMORY_GB=12`,
   `OCI_MONGO_VOLUME_GB=50`, `OCI_LB_MIN_MBPS=10`,
   `OCI_LB_MAX_MBPS=10`, and `OCI_EXPECTED_MONTHLY_COST=0` are immutable
@@ -91,8 +95,24 @@ Additional account-derived variables are intentionally required:
 - `OCI_CANONICAL_HOST=betstan.xyz`
 - `OCI_REDIRECT_HOST=www.betstan.xyz`
 - `AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256`,
-  `AZURE_EXPECTED_CLUSTER_SERVER_SHA256`, and
-  `AZURE_WATCHDOG_KUBECTL_IMAGE` for migration only
+  `AZURE_EXPECTED_CLUSTER_SERVER_SHA256` for migration only
+- `AZURE_MIGRATION_RECOVERY_RESOURCE_GROUP`,
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_NAME`,
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_RESOURCE_ID_SHA256`, and
+  `AZURE_MIGRATION_RECOVERY_CLUSTER_SERVER_SHA256` for stop-only recovery
+
+`azure-migration-recovery` uses only
+`AZURE_MIGRATION_RECOVERY_CREDENTIALS`. That identity may read the exact
+cluster and migration ConfigMaps, scale the known Azure ingress/application
+deployments to zero, stop `betstan-aks`, and cancel only a conclusively stale
+exact migration run. It cannot start, create, resize, delete, or access OCI.
+The schedule remains inert unless
+`OCI_MIGRATION_RECOVERY_ENABLED=true`; manual dispatch remains reviewer-gated.
+An armed schedule also requires
+`OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH` to be in the future and no more than
+24 hours away.
+`OCI_MIGRATION_STALE_HEARTBEAT_SECONDS` defaults to the bounded 3600-second
+window so protected and public validation are not mistaken for a hung run.
 
 The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
 and `VOLUME_DELETE` in the deployment compartment for boot-volume
@@ -146,12 +166,23 @@ fixtures.
 7. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
    `www` redirect, diagnostic TLS, API, browser, cluster, and zero-cost checks
    before the deployment is healthy.
-8. `scripts/migrate-from-azure.sh` is the only cross-cloud data path. The
-   approved operation is a no-backup exact logical replacement: it freezes
-   both clouds, validates encrypted ephemeral transfer archives, preserves
-   Azure as the sole source until OCI passes, and keeps OCI offline after any
-   destructive partial failure. `oci-migration-recovery` may only stop Azure
-   and preserve the phase journal; it never starts Azure or reopens OCI.
+8. Dispatch `oci-migrate` only with the exact current master SHA, successful
+   first-attempt build/infrastructure/deploy run IDs,
+   `replace_oci_data=true`, and the destructive confirmation. The workflow
+   synchronously starts only the existing `betstan-aks`, freezes Azure
+   ingress/applications while preserving all eight Mongo StatefulSets, and
+   mirrors a monotonic heartbeat/fencing journal to Azure and OCI.
+   `scripts/migrate-from-azure.sh` keeps all eight compressed, age-encrypted
+   transfer archives only on ephemeral runner storage, validates them in an
+   isolated disposable Mongo, then drops and exactly replaces the eight
+   allowlisted OCI databases. It verifies canonical data and metadata
+   signatures, recreates the 17-queue RabbitMQ topology, restarts consumers
+   sequentially, and requires protected plus public health before finalizing.
+   A pre-destructive failure restores OCI workload baselines. Any later
+   failure keeps OCI closed and marks `recovery-required`; a later full retry
+   clears partial application databases and starts again from frozen Azure.
+   No path reopens Azure writers, retains a data artifact, or rolls back to
+   the previous OCI data.
 9. Delete the exact Bastion session, restore the non-routable client CIDR,
    stop both exact tunnel PIDs, and remove ephemeral keys. Cleanup failure is
    a deployment failure.

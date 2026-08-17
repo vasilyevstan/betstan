@@ -414,12 +414,20 @@ grep -R -n -E '\baz\b|AKS|azure\.com|AZURE_' \
   --exclude='oci-live-smoke.spec.js' >/dev/null 2>&1 &&
   fail "OCI health agents contain an Azure dependency"
 for script in "$OCI_DIR/scripts"/*.sh; do
-  [[ "$(basename "$script")" == "migrate-from-azure.sh" ]] && continue
+  case "$(basename "$script")" in
+    migrate-from-azure.sh | recover-azure-migration.sh)
+      continue
+      ;;
+  esac
   grep -Eiq '\baz\b|AKS|AZURE_|azure\.com' "$script" &&
     fail "non-migration OCI script contains an Azure dependency: $script"
 done
 for workflow in "$ROOT_DIR/.github/workflows"/oci-*.yml; do
-  [[ "$(basename "$workflow")" == "oci-migrate.yml" ]] && continue
+  case "$(basename "$workflow")" in
+    oci-migrate.yml | oci-migration-recovery.yml)
+      continue
+      ;;
+  esac
   grep -Eq 'AZURE_|azure/login|azure/aks-set-context' "$workflow" &&
     fail "Azure credential/reference exists outside OCI migration: $workflow"
 done
@@ -429,6 +437,7 @@ capacity_workflow="$ROOT_DIR/.github/workflows/oci-capacity-acquire.yml"
 infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
+recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 
@@ -465,11 +474,17 @@ for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'workflow_dispatch:' "$workflow"
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
+done
+for workflow in "$infra_workflow" "$deploy_workflow"; do
   [[ "$(grep -Fc \
     'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
     "$workflow")" == "1" ]] ||
     fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
 done
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$migrate_workflow")" == "2" ]] ||
+  fail "migration SSH key must be scoped to migration and finalization access steps"
 ! grep -Fq 'OCI_K3S_SSH_PRIVATE_KEY' "$capacity_workflow" ||
   fail "capacity acquisition must receive only the target SSH public key"
 grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
@@ -480,13 +495,20 @@ grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
   fail "deployment or migration retains target SSH key material after API forwarding"
 for workflow in "$deploy_workflow" "$migrate_workflow"; do
   public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
+  next_job_line="$(awk -v start="$public_job_line" '
+    NR > start && /^  [A-Za-z0-9_-]+:/ {print NR; exit}
+  ' "$workflow")"
+  [[ -n "$next_job_line" ]] || next_job_line=$(( $(wc -l <"$workflow") + 1 ))
   dependency_line="$(grep -n -m1 'name: Install browser validation dependencies' \
     "$workflow" | cut -d: -f1)"
-  last_secret_line="$(grep -n 'secrets\.' "$workflow" | tail -1 | cut -d: -f1)"
+  public_secrets="$(
+    sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
+      grep -c 'secrets\.' || true
+  )"
   [[ -n "$public_job_line" && -n "$dependency_line" &&
-      -n "$last_secret_line" &&
       "$dependency_line" -gt "$public_job_line" &&
-      "$last_secret_line" -lt "$public_job_line" ]] ||
+      "$dependency_line" -lt "$next_job_line" &&
+      "$public_secrets" == "0" ]] ||
     fail "browser dependencies share a job with cloud credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
@@ -502,12 +524,40 @@ grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq 'name: oci-migration' "$migrate_workflow"
-grep -Fq 'MIGRATE AZURE DATA TO OCI' "$migrate_workflow"
+grep -Fq 'REPLACE OCI DATA FROM AZURE' "$migrate_workflow"
+grep -Fq 'replace_oci_data:' "$migrate_workflow"
+grep -Fq 'inputs.replace_oci_data == true' "$migrate_workflow"
+grep -Fq 'build_run_id:' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AZURE_CREDENTIALS' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AGE_IDENTITY' "$migrate_workflow"
+grep -Fq 'az aks start' "$migrate_workflow"
+grep -Fq 'az aks stop' "$migrate_workflow"
+! grep -Eq 'az aks (create|update|delete)|az aks nodepool' "$migrate_workflow" ||
+  fail "migration workflow can create, resize, or delete Azure compute"
 grep -Fq 'if: always()' "$infra_workflow"
 grep -Fq 'if: always()' "$deploy_workflow"
 grep -Fq 'if: always()' "$migrate_workflow"
+
+grep -Fq 'name: oci-migration-recovery' "$recovery_workflow"
+grep -Fq 'workflows: ["oci-migrate"]' "$recovery_workflow"
+grep -Fq 'cron: "*/15 * * * *"' "$recovery_workflow"
+grep -Fq 'workflow_dispatch:' "$recovery_workflow"
+grep -Fq "vars.OCI_MIGRATION_RECOVERY_ENABLED == 'true'" "$recovery_workflow"
+grep -Fq "vars.OCI_MIGRATION_RECOVERY_ENABLED || 'false'" "$recovery_workflow"
+grep -Fq 'OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH' "$recovery_workflow"
+grep -Fq '86400' "$recovery_workflow"
+grep -Fq 'name: azure-migration-recovery' "$recovery_workflow"
+grep -Fq 'AZURE_MIGRATION_RECOVERY_CREDENTIALS' "$recovery_workflow"
+grep -Fq 'group: azure-migration-recovery' "$recovery_workflow"
+grep -Fq 'cancel-in-progress: true' "$recovery_workflow"
+grep -Fq 'actions: write' "$recovery_workflow"
+grep -Fq 'az aks stop' "$recovery_workflow"
+! grep -Eq \
+  'OCI_MIGRATION_AZURE_CREDENTIALS|OCI_CI_PRIVATE_KEY_PEM|OCI_K3S_SSH_PRIVATE_KEY|OCI_MIGRATION_AGE_IDENTITY' \
+  "$recovery_workflow" ||
+  fail "stop-only recovery receives migration or OCI credentials"
+! grep -Eq 'az aks (start|create|update|delete)|az aks nodepool' "$recovery_workflow" ||
+  fail "stop-only recovery can start, create, resize, or delete Azure compute"
 
 grep -Fq 'pull_request:' "$validate_workflow"
 ! grep -Eq 'workflow_dispatch:|workflow_run:|^[[:space:]]+push:' "$validate_workflow" ||
@@ -588,6 +638,7 @@ fi
 "$OCI_DIR/tests/test-image-reuse-contract.sh"
 "$OCI_DIR/tests/test-capacity-contract.sh"
 "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
+"$OCI_DIR/tests/test-migration-recovery-contract.sh"
 
 git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
   fail "production-build.yml was modified"
