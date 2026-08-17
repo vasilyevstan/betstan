@@ -310,18 +310,27 @@ jobs:
             echo "resource_id_hash=$actual_hash"
             echo "touched=true"
           } >> "$GITHUB_OUTPUT"
-          [ "$(jq -r '.provisioningState // empty' <<<"$before")" = "Succeeded" ]
+          provisioning="$(jq -r '.provisioningState // empty' <<<"$before")"
           power="$(jq -r '.powerState.code // empty' <<<"$before")"
-          [ "$power" = "Running" ] || [ "$power" = "Stopped" ]
-          if [ "$power" = "Stopped" ]; then
-            ./infra/oci/scripts/bounded-command.py \
-              --timeout-seconds 1500 --attempts 1 \
-              --classification azure-cluster-start -- \
-              az aks start \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_CLUSTER_NAME" \
-                --only-show-errors
-          fi
+          case "$power" in
+            Running)
+              [ "$provisioning" = "Succeeded" ]
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 1500 --attempts 1 \
+                --classification azure-cluster-start -- \
+                az aks start \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_CLUSTER_NAME" \
+                  --only-show-errors
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           after="$(
             ./infra/oci/scripts/bounded-command.py \
               --timeout-seconds 60 --attempts 3 \
@@ -352,6 +361,7 @@ jobs:
           admin: false
 
       - name: Install pinned OCI CLI
+        id: oci_cli
         env:
           HOME: ${{ runner.temp }}/oci-home
         run: ./infra/oci/scripts/install-cli.sh
@@ -542,17 +552,25 @@ jobs:
           actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
           [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
           power="$(jq -r '.powerState.code' <<<"$before")"
-          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
-            ./infra/oci/scripts/bounded-command.py \
-              --timeout-seconds 1200 --attempts 1 \
-              --classification azure-cluster-stop -- \
-              az aks stop \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_CLUSTER_NAME" \
-                --only-show-errors
-          else
-            [ "$power" = "Stopped" ]
-          fi
+          provisioning="$(jq -r '.provisioningState // empty' <<<"$before")"
+          case "$power" in
+            Running|Starting)
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 1200 --attempts 1 \
+                --classification azure-cluster-stop -- \
+                az aks stop \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_CLUSTER_NAME" \
+                  --only-show-errors
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           after="$(
             ./infra/oci/scripts/bounded-command.py \
               --timeout-seconds 60 --attempts 3 \
@@ -562,8 +580,11 @@ jobs:
                 --name "$AZURE_CLUSTER_NAME" \
                 --output json
           )"
-          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
-          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          after_provisioning="$(jq -r '.provisioningState // empty' <<<"$after")"
+          after_power="$(jq -r '.powerState.code // empty' <<<"$after")"
+          [ "$after_provisioning" = "Succeeded" ] ||
+            [ "$after_provisioning" = "Failed" ]
+          [ "$after_power" = "Stopped" ] || [ "$after_power" = "Deallocated" ]
           node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
           [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
           mapfile -t vmss_names < <(
@@ -594,8 +615,8 @@ jobs:
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
             "cluster_resource_id_sha256=$actual_hash" \
-            "provisioning_state=Succeeded" \
-            "power_state=Stopped" \
+            "provisioning_state=$after_provisioning" \
+            "power_state=$after_power" \
             > artifacts/oci-migration/azure-stop.env
 
       - name: Upload sanitized migration phase and provenance
@@ -649,7 +670,10 @@ jobs:
           fi
 
       - name: Close ephemeral OCI Bastion access
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.oci_cli.outcome == 'success'
         env:
           HOME: ${{ runner.temp }}/oci-home
           KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
@@ -702,17 +726,25 @@ jobs:
           actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
           [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
           power="$(jq -r '.powerState.code' <<<"$cluster")"
-          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
-            ./infra/oci/scripts/bounded-command.py \
-              --timeout-seconds 1200 --attempts 1 \
-              --classification azure-cluster-stop -- \
-              az aks stop \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_CLUSTER_NAME" \
-                --only-show-errors
-          else
-            [ "$power" = "Stopped" ]
-          fi
+          provisioning="$(jq -r '.provisioningState // empty' <<<"$cluster")"
+          case "$power" in
+            Running|Starting)
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 1200 --attempts 1 \
+                --classification azure-cluster-stop -- \
+                az aks stop \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_CLUSTER_NAME" \
+                  --only-show-errors
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           after="$(
             ./infra/oci/scripts/bounded-command.py \
               --timeout-seconds 60 --attempts 3 \
@@ -722,8 +754,11 @@ jobs:
                 --name "$AZURE_CLUSTER_NAME" \
                 --output json
           )"
-          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
-          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          after_provisioning="$(jq -r '.provisioningState // empty' <<<"$after")"
+          after_power="$(jq -r '.powerState.code // empty' <<<"$after")"
+          [ "$after_provisioning" = "Succeeded" ] ||
+            [ "$after_provisioning" = "Failed" ]
+          [ "$after_power" = "Stopped" ] || [ "$after_power" = "Deallocated" ]
           node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
           [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
           mapfile -t vmss_names < <(
@@ -754,8 +789,8 @@ jobs:
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
             "cluster_resource_id_sha256=$actual_hash" \
-            "provisioning_state=Succeeded" \
-            "power_state=Stopped" \
+            "provisioning_state=$after_provisioning" \
+            "power_state=$after_power" \
             > artifacts/oci-migration/azure-stop.env
 
       - name: Remove isolated migration client state and transports
@@ -975,6 +1010,7 @@ jobs:
           admin: false
 
       - name: Install pinned finalization OCI CLI
+        id: final_oci_cli
         env:
           HOME: ${{ runner.temp }}/oci-finalize
         run: ./infra/oci/scripts/install-cli.sh
@@ -1097,19 +1133,26 @@ jobs:
           resource_id="$(jq -r '.id // empty' <<<"$before")"
           actual_hash="$(printf '%s' "$resource_id" | sha256sum | awk '{print $1}')"
           [ "$actual_hash" = "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
-          [ "$(jq -r '.provisioningState' <<<"$before")" = "Succeeded" ]
+          provisioning="$(jq -r '.provisioningState // empty' <<<"$before")"
           power="$(jq -r '.powerState.code' <<<"$before")"
-          if [ "$power" = "Running" ] || [ "$power" = "Starting" ]; then
-            ./infra/oci/scripts/bounded-command.py \
-              --timeout-seconds 1200 --attempts 1 \
-              --classification azure-cluster-stop -- \
-              az aks stop \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --name "$AZURE_CLUSTER_NAME" \
-                --only-show-errors
-          else
-            [ "$power" = "Stopped" ]
-          fi
+          case "$power" in
+            Running|Starting)
+              ./infra/oci/scripts/bounded-command.py \
+                --timeout-seconds 1200 --attempts 1 \
+                --classification azure-cluster-stop -- \
+                az aks stop \
+                  --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --name "$AZURE_CLUSTER_NAME" \
+                  --only-show-errors
+              ;;
+            Stopped|Deallocated)
+              [ "$provisioning" = "Succeeded" ] ||
+                [ "$provisioning" = "Failed" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           after="$(
             ./infra/oci/scripts/bounded-command.py \
               --timeout-seconds 60 --attempts 3 \
@@ -1119,8 +1162,11 @@ jobs:
                 --name "$AZURE_CLUSTER_NAME" \
                 --output json
           )"
-          [ "$(jq -r '.provisioningState' <<<"$after")" = "Succeeded" ]
-          [ "$(jq -r '.powerState.code' <<<"$after")" = "Stopped" ]
+          after_provisioning="$(jq -r '.provisioningState // empty' <<<"$after")"
+          after_power="$(jq -r '.powerState.code // empty' <<<"$after")"
+          [ "$after_provisioning" = "Succeeded" ] ||
+            [ "$after_provisioning" = "Failed" ]
+          [ "$after_power" = "Stopped" ] || [ "$after_power" = "Deallocated" ]
           node_resource_group="$(jq -r '.nodeResourceGroup // empty' <<<"$after")"
           [[ "$node_resource_group" =~ ^MC_[A-Za-z0-9._()/-]+$ ]]
           mapfile -t vmss_names < <(
@@ -1151,8 +1197,8 @@ jobs:
             "stop_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             "cluster_name=betstan-aks" \
             "cluster_resource_id_sha256=$actual_hash" \
-            "provisioning_state=Succeeded" \
-            "aks_power_state=Stopped" \
+            "provisioning_state=$after_provisioning" \
+            "aks_power_state=$after_power" \
             "vmss_instances_deallocated=true" \
             > artifacts/oci-migration-final/azure-stop.env
 
@@ -1279,7 +1325,10 @@ jobs:
 
       - name: Close finalization Bastion access
         id: bastion_cleanup
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.final_oci_cli.outcome == 'success'
         env:
           HOME: ${{ runner.temp }}/oci-finalize
           KUBECONFIG: ${{ env.OCI_KUBECONFIG }}
@@ -1371,6 +1420,22 @@ jobs:
             printf '%s' "$value"
           }
 
+          get_env_field() {
+            local file="$1"
+            local key="$2"
+            local value
+            value="$(awk -F= -v key="$key" '
+              $1 == key {
+                print substr($0, index($0, "=") + 1)
+                count++
+              }
+              END {
+                if (count != 1) exit 1
+              }
+            ' "$file")"
+            printf '%s' "$value"
+          }
+
           migration_id="$(get_phase_field migration-id)"
           source_sha="$(get_phase_field original-source-sha)"
           run_id="$(get_phase_field owner-run-id)"
@@ -1387,6 +1452,8 @@ jobs:
           target_signatures="$(get_phase_field target-signature-manifest-sha256)"
           azure_cluster_fingerprint="$(get_phase_field azure-cluster-fingerprint)"
           final_journal_sha256="$(sha256sum "$phase_file" | awk '{print $1}')"
+          stop_provisioning="$(get_env_field "$stop_file" provisioning_state)"
+          aks_power_state="$(get_env_field "$stop_file" aks_power_state)"
 
           [[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
@@ -1408,10 +1475,12 @@ jobs:
           [ "$azure_cluster_fingerprint" = \
             "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]
           [[ "$final_journal_sha256" =~ ^[0-9a-f]{64}$ ]]
-          grep -Fxq "provisioning_state=Succeeded" "$stop_file"
+          [ "$stop_provisioning" = "Succeeded" ] ||
+            [ "$stop_provisioning" = "Failed" ]
+          [ "$aks_power_state" = "Stopped" ] ||
+            [ "$aks_power_state" = "Deallocated" ]
           grep -Fxq "cluster_resource_id_sha256=$azure_cluster_fingerprint" \
             "$stop_file"
-          grep -Fxq "aks_power_state=Stopped" "$stop_file"
           grep -Fxq "vmss_instances_deallocated=true" "$stop_file"
 
           mkdir -p artifacts/oci-migration-success
@@ -1437,7 +1506,7 @@ jobs:
             "oci_reopened_healthy=true" \
             "azure_writers_frozen=true" \
             "azure_cluster_resource_id_sha256=$azure_cluster_fingerprint" \
-            "aks_power_state=Stopped" \
+            "aks_power_state=$aks_power_state" \
             "vmss_instances_deallocated=true" \
             "azure_cluster_stopped_deallocated=true" \
             > artifacts/oci-migration-success/migration-summary.env

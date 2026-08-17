@@ -601,6 +601,13 @@ grep -Fq 'OCI_MIGRATION_AZURE_CREDENTIALS' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AGE_IDENTITY' "$migrate_workflow"
 grep -Fq 'az aks start' "$migrate_workflow"
 grep -Fq 'az aks stop' "$migrate_workflow"
+[[ "$(grep -Fc 'Stopped|Deallocated)' "$migrate_workflow")" -ge 4 ]] ||
+  fail "migration does not accept both Azure stopped-state representations"
+grep -Fq '[ "$provisioning" = "Failed" ]' "$migrate_workflow" ||
+  fail "migration cannot restart the exact failed/deallocated source"
+[[ "$(grep -Ec "steps\\.(final_)?oci_cli\\.outcome == 'success'" \
+  "$migrate_workflow")" -eq 2 ]] ||
+  fail "migration can run Bastion cleanup before an OCI CLI is installed"
 ! grep -Eq 'az aks (create|update|delete)|az aks nodepool' "$migrate_workflow" ||
   fail "migration workflow can create, resize, or delete Azure compute"
 grep -Fq 'if: always()' "$infra_workflow"
@@ -621,6 +628,10 @@ grep -Fq 'group: azure-migration-recovery' "$recovery_workflow"
 grep -Fq 'cancel-in-progress: true' "$recovery_workflow"
 grep -Fq 'actions: write' "$recovery_workflow"
 grep -Fq 'az aks stop' "$recovery_workflow"
+[[ "$(grep -Fc 'Stopped|Deallocated)' "$recovery_workflow")" -ge 2 ]] ||
+  fail "recovery does not accept both Azure stopped-state representations"
+grep -Fq '[ "$provisioning" = "Failed" ]' "$recovery_workflow" ||
+  fail "recovery rejects a safely deallocated failed AKS control plane"
 ! grep -Eq \
   'OCI_MIGRATION_AZURE_CREDENTIALS|OCI_CI_PRIVATE_KEY_PEM|OCI_K3S_SSH_PRIVATE_KEY|OCI_MIGRATION_AGE_IDENTITY' \
   "$recovery_workflow" ||
