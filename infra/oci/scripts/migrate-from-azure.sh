@@ -322,7 +322,7 @@ kube_capture() {
   migration_raw "$classification" "$timeout_seconds" "$attempts" \
     kubectl --kubeconfig "$(provider_kubeconfig "$provider")" "$@"
   local status=$?
-  migration_maybe_heartbeat 1
+  migration_maybe_heartbeat
   return "$status"
 }
 
@@ -879,18 +879,15 @@ state_takeover() {
 
 validate_cross_release_takeover() {
   local existing_source="$1"
-  local service
+  local phase lock_status service stored_oci_baseline
   [[ "$existing_source" != "$SOURCE_SHA" ]] ||
     return 0
-  [[ "$(state_value phase)" == "failed-before-destructive-boundary" &&
-    "$(state_value destructive-boundary)" == "false" &&
-    "$(state_value recovery-required)" == "false" &&
-    "$(state_optional_value mongo-write-lock)" == "false" &&
-    "$(state_optional_value rabbitmq-write-lock)" == "false" &&
-    "$(state_optional_value http-write-fence)" == "false" ]] ||
-    migration_die "cross-release retry requires a fully unlocked pre-destructive failure"
-  [[ "$oci_baseline" == "$(state_value oci-baseline)" ]] ||
-    migration_die "cross-release retry OCI replica baseline differs from the journal"
+  [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] ||
+    migration_die "cross-release retry checkout differs from SOURCE_SHA"
+  git cat-file -e "${existing_source}^{commit}" 2>/dev/null ||
+    migration_die "prior active migration SHA is unavailable"
+  git merge-base --is-ancestor "$existing_source" "$SOURCE_SHA" ||
+    migration_die "cross-release retry is not a descendant of the active journal SHA"
   applications_are_zero azure ||
     migration_die "cross-release retry Azure applications are not frozen"
   wait_deployment_zero azure ingress-nginx ingress-nginx-controller \
@@ -900,17 +897,54 @@ validate_cross_release_takeover() {
       "app=gaming-${service}"
   done
   verify_frozen_source_queues
-  [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] ||
-    migration_die "cross-release retry checkout differs from SOURCE_SHA"
-  git cat-file -e "${existing_source}^{commit}" 2>/dev/null ||
-    migration_die "prior active migration SHA is unavailable"
-  git merge-base --is-ancestor "$existing_source" "$SOURCE_SHA" ||
-    migration_die "cross-release retry is not a descendant of the active journal SHA"
-  [[ "$(target_write_lock_status)" == "false" &&
-    "$(rabbitmq_write_permission)" == ".*" &&
-    "$(http_write_fence_config_status)" == "false" &&
-    "$(http_write_fence_runtime_status)" == "false" ]] ||
-    migration_die "cross-release retry found a live OCI write lock or HTTP fence"
+
+  phase="$(state_value phase)"
+  case "$phase" in
+    failed-before-destructive-boundary)
+      [[ "$(state_value destructive-boundary)" == "false" &&
+        "$(state_value recovery-required)" == "false" &&
+        "$(state_optional_value mongo-write-lock)" == "false" &&
+        "$(state_optional_value rabbitmq-write-lock)" == "false" &&
+        "$(state_optional_value http-write-fence)" == "false" ]] ||
+        migration_die "cross-release retry requires a fully unlocked pre-destructive failure"
+      [[ "$oci_baseline" == "$(state_value oci-baseline)" ]] ||
+        migration_die "cross-release retry OCI replica baseline differs from the journal"
+      [[ "$(target_write_lock_status)" == "false" &&
+        "$(rabbitmq_write_permission)" == ".*" &&
+        "$(http_write_fence_config_status)" == "false" &&
+        "$(http_write_fence_runtime_status)" == "false" ]] ||
+        migration_die "cross-release retry found a live OCI write lock or HTTP fence"
+      ;;
+    recovery-required)
+      [[ "$(state_value destructive-boundary)" == "true" &&
+        "$(state_value recovery-required)" == "true" &&
+        "$(state_lock_value state)" == "active" &&
+        "$(state_optional_value http-write-fence)" == "true" ]] ||
+        migration_die "cross-release recovery retry requires an active closed post-boundary journal"
+      applications_are_zero oci ||
+        migration_die "cross-release recovery retry OCI applications are not closed"
+      wait_deployment_zero oci ingress-nginx ingress-nginx-controller \
+        app.kubernetes.io/component=controller
+      wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
+        app=gaming-rabbitmq
+      [[ "$(http_write_fence_config_status)" == "true" ]] ||
+        migration_die "cross-release recovery retry lost the OCI HTTP write fence"
+      lock_status="$(target_write_lock_status)"
+      [[ "$lock_status" == "true" || "$lock_status" == "false" ]] ||
+        migration_die "cross-release recovery retry cannot determine the OCI Mongo lock"
+      stored_oci_baseline="$(state_value oci-baseline)"
+      [[ "$(baseline_value "$stored_oci_baseline" ingress)" =~ ^[1-9][0-9]*$ &&
+        "$(baseline_value "$stored_oci_baseline" rabbitmq)" == "1" ]] ||
+        migration_die "cross-release recovery retry has an inactive OCI baseline"
+      for service in "${APP_SERVICES[@]}"; do
+        [[ "$(baseline_value "$stored_oci_baseline" "$service")" =~ ^[1-9][0-9]*$ ]] ||
+          migration_die "cross-release recovery retry has an inactive $service baseline"
+      done
+      ;;
+    *)
+      migration_die "cross-release retry phase is not safely recoverable"
+      ;;
+  esac
 }
 
 state_acquire() {
@@ -1550,7 +1584,13 @@ mongo_eval() {
 
 target_write_lock_status() {
   mongo_eval oci "$target_mongo_pod" '
-    print(db.getSiblingDB("admin").currentOp().fsyncLock === true);
+    const result=db.getSiblingDB("admin").runCommand({currentOp:1,$all:true});
+    if (Number(result.ok) !== 1 ||
+        (result.fsyncLock !== undefined &&
+         typeof result.fsyncLock !== "boolean")) {
+      throw new Error("Mongo fsync lock status is unavailable");
+    }
+    print(result.fsyncLock === true);
   '
 }
 
@@ -1559,7 +1599,9 @@ lock_target_writes() {
   [[ "$(target_write_lock_status)" == "false" ]] ||
     migration_die "OCI Mongo write lock was already active unexpectedly"
   result="$(mongo_eval oci "$target_mongo_pod" '
-    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsync:1,lock:true})));
+    const result=db.getSiblingDB("admin").runCommand({fsync:1,lock:true});
+    const lockCount=Number(result.lockCount);
+    print(JSON.stringify({ok:Number(result.ok),lockCount}));
   ')"
   migration_raw mongo-write-lock 30 1 jq -e \
     '.ok == 1 and .lockCount >= 1' <<<"$result" >/dev/null ||
@@ -1575,7 +1617,9 @@ unlock_target_writes() {
     return 0
   fi
   result="$(mongo_eval oci "$target_mongo_pod" '
-    print(JSON.stringify(db.getSiblingDB("admin").runCommand({fsyncUnlock:1})));
+    const result=db.getSiblingDB("admin").runCommand({fsyncUnlock:1});
+    const lockCount=Number(result.lockCount);
+    print(JSON.stringify({ok:Number(result.ok),lockCount}));
   ')"
   migration_raw mongo-write-unlock 30 1 jq -e \
     '.ok == 1 and .lockCount == 0' <<<"$result" >/dev/null ||
@@ -2455,6 +2499,7 @@ recreate_rabbitmq_and_restart() {
   kube_run oci rabbitmq-rollout 600 1 \
     rollout status deployment/gaming-rabbitmq-depl \
     -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  unlock_rabbitmq_writes
   state_advance rabbitmq-recreated true true "rabbitmq-write-lock=false"
   migration_failure_hook rabbitmq-recreate
 
