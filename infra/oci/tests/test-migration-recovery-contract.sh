@@ -196,6 +196,7 @@ python3 "$STATE_HELPER" create \
   --set schema-version=1 \
   --set journal-id=fixture-journal \
   --set original-source-sha=1111111111111111111111111111111111111111 \
+  --set active-source-sha=1111111111111111111111111111111111111111 \
   --set migration-id=100-1 \
   --set owner-run-id=100 \
   --set owner-run-attempt=1 \
@@ -216,6 +217,49 @@ python3 "$STATE_HELPER" create \
 python3 "$STATE_HELPER" summary "$WORK_DIR/mirror-base.json" |
   grep -Fxq 'http-write-fence=true' ||
   fail "sanitized migration summary omitted the HTTP write fence"
+python3 "$STATE_HELPER" summary "$WORK_DIR/mirror-base.json" |
+  grep -Fxq \
+    'active-source-sha=1111111111111111111111111111111111111111' ||
+  fail "sanitized migration summary omitted the active source SHA"
+python3 "$STATE_HELPER" mutate "$WORK_DIR/mirror-base.json" \
+  --expect active-source-sha=1111111111111111111111111111111111111111 \
+  --expect migration-id=100-1 \
+  --expect fencing-token=1 \
+  --expect sequence=4 \
+  --set active-source-sha=2222222222222222222222222222222222222222 \
+  --set migration-id=101-1 \
+  --set owner-run-id=101 \
+  --set fencing-token=2 \
+  --set sequence=5 \
+  --set phase=lock-taken-over \
+  --set heartbeat-epoch=11 \
+  >"$WORK_DIR/cross-release-takeover.json"
+python3 "$STATE_HELPER" reconcile --kind journal \
+  "$WORK_DIR/cross-release-takeover.json" "$WORK_DIR/mirror-base.json" \
+  >"$WORK_DIR/cross-release-reconciled.json"
+python3 "$STATE_HELPER" compare \
+  "$WORK_DIR/cross-release-takeover.json" \
+  "$WORK_DIR/cross-release-reconciled.json" ||
+  fail "descendant release takeover could not be mirrored safely"
+grep -Fq \
+  '"original-source-sha": "1111111111111111111111111111111111111111"' \
+  "$WORK_DIR/cross-release-reconciled.json" ||
+  fail "descendant release takeover changed immutable journal lineage"
+grep -Fq \
+  '"active-source-sha": "2222222222222222222222222222222222222222"' \
+  "$WORK_DIR/cross-release-reconciled.json" ||
+  fail "descendant release takeover did not bind the active source SHA"
+python3 "$STATE_HELPER" mutate "$WORK_DIR/mirror-base.json" \
+  --set active-source-sha=2222222222222222222222222222222222222222 \
+  --set sequence=5 \
+  --set phase=source-captured \
+  --set heartbeat-epoch=11 \
+  >"$WORK_DIR/same-owner-lineage-drift.json"
+if python3 "$STATE_HELPER" reconcile --kind journal \
+    "$WORK_DIR/same-owner-lineage-drift.json" "$WORK_DIR/mirror-base.json" \
+    >/dev/null 2>&1; then
+  fail "same migration owner changed active source lineage"
+fi
 python3 "$STATE_HELPER" mutate "$WORK_DIR/mirror-base.json" \
   --expect sequence=4 \
   --set sequence=5 \
@@ -295,6 +339,7 @@ for literal in \
   'schema=betstan.oci-migration-success.v1' \
   'terminal_status=DEPLOYED_HEALTHY' \
   '[ "$migration_id" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]' \
+  'source_sha="$(get_phase_field active-source-sha)"' \
   '[ "$source_sha" = "$SOURCE_SHA" ]' \
   'journal_heartbeat_epoch=' \
   'fencing_generation=' \
@@ -401,12 +446,19 @@ for literal in \
   'EXPECTED_OWNER_RUN_ATTEMPT:' \
   'EXPECTED_MIGRATION_ID:' \
   'EXPECTED_FENCING_GENERATION:' \
-  '[ "$head_sha" = "$EXPECTED_SOURCE_SHA" ]' \
+  'owner_run_json="$(' \
+  '[ "$owner_head_sha" = "$EXPECTED_SOURCE_SHA" ]' \
+  'owner_conclusion="$(jq -r' \
+  '.conclusion // empty' \
+  '"repos/$REPOSITORY/actions/runs/$EXPECTED_OWNER_RUN_ID/attempts/1"' \
+  'mkdir -p artifacts/azure-migration-recovery' \
   'cancel-in-progress: true' \
   'az aks stop'; do
   grep -Fq "$literal" "$RECOVERY_WORKFLOW" ||
     fail "recovery workflow is missing: $literal"
 done
+! grep -Fq '@tsv' "$RECOVERY_WORKFLOW" ||
+  fail "recovery workflow can shift nullable owner-run fields"
 ! grep -Eq \
   'OCI_MIGRATION_AZURE_CREDENTIALS|OCI_CI_PRIVATE_KEY_PEM|OCI_K3S_SSH_PRIVATE_KEY|OCI_MIGRATION_AGE_IDENTITY' \
   "$RECOVERY_WORKFLOW" ||
@@ -424,6 +476,7 @@ for literal in \
   '"$state_migration" == "$EXPECTED_MIGRATION_ID"' \
   '"$state_fence" == "$EXPECTED_FENCING_GENERATION"' \
   '"$state_source_sha" == "$EXPECTED_SOURCE_SHA"' \
+  '.data["active-source-sha"] // .data["original-source-sha"]' \
   'different-active-migration'; do
   grep -Fq "$literal" "$RECOVERY" ||
     fail "recovery script is not bound to exact migration evidence: $literal"
@@ -450,6 +503,13 @@ for literal in \
   'state_reconcile_existing' \
   'state_recover_partial_creation' \
   'owner_run_is_conclusively_inactive' \
+  'active-source-sha=$SOURCE_SHA' \
+  'cross-release retry requires a fully unlocked pre-destructive failure' \
+  'cross-release retry OCI replica baseline differs from the journal' \
+  'cross-release retry Azure applications are not frozen' \
+  'verify_frozen_source_queues' \
+  'git merge-base --is-ancestor "$existing_source" "$SOURCE_SHA"' \
+  'cross-release retry found a live OCI write lock or HTTP fence' \
   'exactly eight Mongo PVCs' \
   'deployment_mongo_uri' \
   'MONGO_REVIEWED_INDEX_DIGEST=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3' \
@@ -562,5 +622,14 @@ if not fail_closed_case < fail_closed_committed < fail_closed_close:
 PY
 ! grep -Eiq 'watchdog|restore_azure|Object Storage|snapshot' "$MIGRATION" ||
   fail "migration can reopen Azure or retain a prohibited recovery copy"
+grep -Fq "journal's original source SHA immutable" \
+  "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+  fail "migration recovery agent omits immutable cross-release lineage"
+grep -Fq "descendant hotfix can replace only the active source SHA" \
+  "$OCI_DIR/LESSONS_LEARNED.md" ||
+  fail "OCI lessons omit the descendant hotfix takeover boundary"
+grep -Fq "Recreate sanitized recovery artifact directories after checkout" \
+  "$OCI_DIR/LESSONS_LEARNED.md" ||
+  fail "OCI lessons omit checkout-safe recovery evidence"
 
 echo "migration_recovery_contract=PASS"
