@@ -18,7 +18,7 @@ resources:
 images:
   - name: mongo
     newName: docker.io/library/mongo
-    digest: sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1
+    digest: sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3
   - name: rabbitmq
     newName: docker.io/library/rabbitmq
     digest: sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b

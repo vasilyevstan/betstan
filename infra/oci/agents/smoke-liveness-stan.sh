@@ -8,6 +8,7 @@ DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 EXPECTED_HOME_MARKER="${OCI_EXPECTED_HOME_MARKER:-BetStan.xyz demo app}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-25}"
 STABILITY_ATTEMPTS="${STABILITY_ATTEMPTS:-10}"
+EXPECT_HTTP_MUTATION_FENCE="${OCI_EXPECT_HTTP_MUTATION_FENCE:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/artifacts/oci-smoke}"
 WORK_DIR="$OUTPUT_DIR/.work"
 
@@ -25,6 +26,9 @@ fail() {
   fail "diagnostic URL must be an HTTPS IPv4-derived nip.io hostname"
 [[ "$STABILITY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
   fail "STABILITY_ATTEMPTS must be positive"
+[[ "$EXPECT_HTTP_MUTATION_FENCE" == "0" ||
+   "$EXPECT_HTTP_MUTATION_FENCE" == "1" ]] ||
+  fail "OCI_EXPECT_HTTP_MUTATION_FENCE must be 0 or 1"
 for command in curl dig jq openssl; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
@@ -94,6 +98,20 @@ require_served_certificate() {
   done
   openssl x509 -in "$certificate" -checkend 604800 -noout >/dev/null ||
     fail "$label certificate expires within seven days"
+}
+
+require_http_mutation_fence() {
+  local url="$1"
+  local label="$2"
+  local status
+  status="$(
+    curl --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+      --request POST --header 'Content-Type: application/json' \
+      --data '{}' --output "$WORK_DIR/${label}.body" \
+      --write-out '%{http_code}' "${url}/api/auth/signup"
+  )" || fail "$label mutation-fence request failed"
+  [[ "$status" == "503" ]] ||
+    fail "$label mutating request bypassed the HTTP maintenance fence"
 }
 
 require_exact_dns "$canonical_host" canonical
@@ -179,6 +197,11 @@ diagnostic_content_type="$(
 jq -e 'type == "object" and has("currentUser")' "$diagnostic_body" >/dev/null ||
   fail "diagnostic API JSON shape is invalid"
 
+if [[ "$EXPECT_HTTP_MUTATION_FENCE" == "1" ]]; then
+  require_http_mutation_fence "$PUBLIC_URL" canonical
+  require_http_mutation_fence "$DIAGNOSTIC_URL" diagnostic
+fi
+
 for _ in $(seq 1 "$STABILITY_ATTEMPTS"); do
   curl --fail --silent --show-error --max-time "$REQUEST_TIMEOUT" \
     --output /dev/null "${PUBLIC_URL}/" ||
@@ -188,4 +211,5 @@ for _ in $(seq 1 "$STABILITY_ATTEMPTS"); do
     fail "diagnostic stability probe failed"
 done
 
-printf 'oci_smoke_liveness=PASS canonical_https=1 www_redirect=1 diagnostic_https=1 dns_match=1 api_json=1\n'
+printf 'oci_smoke_liveness=PASS canonical_https=1 www_redirect=1 diagnostic_https=1 dns_match=1 api_json=1 http_mutation_fence=%s\n' \
+  "$EXPECT_HTTP_MUTATION_FENCE"

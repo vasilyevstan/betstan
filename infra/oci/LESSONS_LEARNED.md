@@ -47,9 +47,29 @@ conversation summaries are not authority.
 - The approved migration is an exact logical replacement with no retained
   backup. Once OCI target mutation begins, previous OCI data is unrecoverable.
 - No retained backup or old-OCI rollback exists.
+- The legacy Azure Mongo manifests use the mutable `mongo` image reference.
+  Read and record every live source image digest, server version, and FCV
+  before target mutation; repository history does not prove source runtime.
+  Bind the capture to each pod UID, container ID, restart count, digest,
+  version, and FCV. Persist that complete manifest in both journals and recheck
+  it around every dump so a restart cannot silently pull a different image.
+- Never skip Mongo's supported upgrade sequence to align the disposable OCI
+  target. Freeze ingress and writers, move 7.0 to the exact pinned 8.0 binary,
+  advance FCV to 8.0, then move to the exact pinned 8.2 binary and FCV 8.2.
+  A failed or interrupted deployment remains closed and resumes only from one
+  of those reviewed image/version/FCV states.
 - Keep Azure disks until OCI database signatures and full application health
   pass. After destructive failure, keep OCI closed and retry the complete
   replacement from Azure; never expose mixed data.
+- Mongo `fsyncLock` is process-local and disappears if the Mongo container
+  restarts. Before reopening ingress for pre-commit checks, add the reviewed
+  ingress-nginx ConfigMap fence that rejects mutating HTTP methods, verify it
+  in the running NGINX configuration, and mirror its state in both journals.
+  Keep it across every pre-commit failure and remove it only after
+  `cutover-committed` and both internal write locks are released.
+- Pre-commit public checks must be read-only and prove the HTTP mutation fence.
+  Run the mutating browser journey only after commit and fence removal; never
+  let a validation write invalidate the certified source/target signatures.
 - A stale heartbeat does not authorize blind lock deletion. Verify the owner
   run is conclusively inactive, both cluster locks and fingerprints agree, and
   the fencing generation is advanced atomically.

@@ -112,7 +112,7 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
   docker network create "$network" >/dev/null
   docker run -d --name "$mongo" --network "$network" \
     --network-alias mongo \
-    docker.io/library/mongo@sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1 >/dev/null
+    docker.io/library/mongo@sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3 >/dev/null
   docker run -d --name "$rabbit" --network "$network" \
     --network-alias rabbitmq \
     docker.io/library/rabbitmq@sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b >/dev/null
@@ -133,6 +133,14 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
     oci_die "Mongo verification dependency did not become ready"
   [[ "$rabbit_ready" == "1" ]] ||
     oci_die "RabbitMQ verification dependency did not become ready"
+  mongo_runtime="$(
+    docker exec "$mongo" mongosh --quiet --eval '
+      const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
+      print(db.version()+"|"+result.featureCompatibilityVersion.version);
+    '
+  )"
+  [[ "$mongo_runtime" == "8.2.12|8.2" ]] ||
+    oci_die "Mongo verification dependency differs from exact version 8.2.12 and FCV 8.2"
 
   while IFS=$'\t' read -r service _repository image_ref _digest _platform_digest; do
     container="betstan-oci-${service}-${work_id}"
