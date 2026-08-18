@@ -106,8 +106,8 @@ database_signature() {
   {
     printf 'const DB_NAME = "%s";\n' "$database"
     cat "$SIGNATURE_SCRIPT"
-  } | kubectl exec -i -n "$NAMESPACE" "$pod" -- mongosh --quiet |
-    tail -n 1
+  } | kubectl exec -i -n "$NAMESPACE" "$pod" -- \
+    mongosh --quiet --file /dev/stdin
 }
 
 database_exists() {
