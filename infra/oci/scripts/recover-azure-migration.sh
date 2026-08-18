@@ -194,7 +194,8 @@ validate_expected_completed_journal() {
   owner_workflow="$(migration_raw recovery-state 30 1 jq -r \
     '.data["owner-workflow"]' "$state_file")"
   source_sha="$(migration_raw recovery-state 30 1 jq -r \
-    '.data["original-source-sha"]' "$state_file")"
+    '.data["active-source-sha"] // .data["original-source-sha"]' \
+    "$state_file")"
   state_owner="$(migration_raw recovery-state 30 1 jq -r \
     '.data["owner-run-id"]' "$state_file")"
   state_attempt="$(migration_raw recovery-state 30 1 jq -r \
@@ -370,7 +371,8 @@ inspect_active_runs() {
   owner_workflow="$(migration_raw recovery-state 30 1 jq -r \
     '.data["owner-workflow"]' "$state_file")"
   state_source_sha="$(migration_raw recovery-state 30 1 jq -r \
-    '.data["original-source-sha"]' "$state_file")"
+    '.data["active-source-sha"] // .data["original-source-sha"]' \
+    "$state_file")"
   phase="$(migration_raw recovery-state 30 1 jq -r '.data.phase' "$state_file")"
   sequence="$(migration_raw recovery-state 30 1 jq -r '.data.sequence' "$state_file")"
   boundary="$(migration_raw recovery-state 30 1 jq -r \

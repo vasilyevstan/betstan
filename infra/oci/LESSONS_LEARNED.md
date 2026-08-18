@@ -73,6 +73,14 @@ conversation summaries are not authority.
 - A stale heartbeat does not authorize blind lock deletion. Verify the owner
   run is conclusively inactive, both cluster locks and fingerprints agree, and
   the fencing generation is advanced atomically.
+- Preserve the journal's original source SHA as immutable lineage. A
+  descendant hotfix can replace only the active source SHA, and only from the
+  exact unlocked `failed-before-destructive-boundary` phase with unchanged
+  OCI replicas, fully frozen Azure applications/ingress, no Azure queue
+  backlog, and no live Mongo, RabbitMQ, or HTTP write fence.
+- Checkout removes untracked directories created by earlier workflow steps.
+  Recreate sanitized recovery artifact directories after checkout before
+  writing evidence.
 - A recovery watchdog may freeze applications and stop/deallocate Azure. It
   must never start Azure, reopen OCI, delete data, or tear down resources.
 

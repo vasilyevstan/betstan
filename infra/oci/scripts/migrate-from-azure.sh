@@ -396,6 +396,17 @@ state_optional_value() {
     --arg key "$1" '.data[$key] // empty' "$(state_file azure journal)"
 }
 
+state_active_source_sha() {
+  local active_source
+  active_source="$(state_optional_value active-source-sha)"
+  if [[ -z "$active_source" ]]; then
+    active_source="$(state_value original-source-sha)"
+  fi
+  [[ "$active_source" =~ ^[0-9a-f]{40}$ ]] ||
+    migration_die "active migration source SHA is invalid"
+  printf '%s' "$active_source"
+}
+
 state_monotonic_epoch() {
   local previous="$1"
   local now
@@ -489,9 +500,12 @@ state_read_all() {
 }
 
 state_validate_contract() {
+  local active_source
+  active_source="$(state_active_source_sha)"
   [[ "$(state_value schema-version)" == "1" &&
     "$(state_lock_value schema-version)" == "1" &&
     "$(state_value owner-workflow)" == ".github/workflows/oci-migrate.yml" &&
+    "$active_source" =~ ^[0-9a-f]{40}$ &&
     "$(state_value journal-id)" == "$(state_lock_value journal-id)" &&
     "$(state_value migration-id)" == "$(state_lock_value migration-id)" &&
     "$(state_value owner-run-id)" == "$(state_lock_value owner-run-id)" &&
@@ -653,6 +667,7 @@ state_recover_partial_creation() {
 owner_run_is_conclusively_inactive() {
   local run_id="$1"
   local attempt="$2"
+  local expected_source_sha="${3:-}"
   local document status
   if [[ -n "${MIGRATION_OWNER_RUN_FIXTURE:-}" ]]; then
     document="$(cat "$MIGRATION_OWNER_RUN_FIXTURE")"
@@ -667,11 +682,13 @@ owner_run_is_conclusively_inactive() {
   migration_raw github-run-identity 30 1 jq -e \
     --argjson id "$run_id" \
     --argjson attempt "$attempt" \
+    --arg source_sha "$expected_source_sha" \
     --arg repository "$REPOSITORY" '
       .id == $id and
       .run_attempt == $attempt and
       .path == ".github/workflows/oci-migrate.yml" and
       .head_branch == "master" and
+      ($source_sha == "" or .head_sha == $source_sha) and
       (.head_repository.full_name == $repository or $repository == "")
     ' <<<"$document" >/dev/null ||
     migration_die "stale lock owner does not identify the exact migration workflow"
@@ -700,6 +717,7 @@ state_new_documents() {
     "schema-version=1"
     "journal-id=$journal_id"
     "original-source-sha=$SOURCE_SHA"
+    "active-source-sha=$SOURCE_SHA"
     "migration-id=$MIGRATION_ID"
     "owner-run-id=$OWNER_RUN_ID"
     "owner-run-attempt=$OWNER_RUN_ATTEMPT"
@@ -756,11 +774,13 @@ state_new_documents() {
 
 state_takeover() {
   local preserve_recovery="$1"
-  local old_migration old_run old_attempt old_fence old_sequence old_heartbeat
+  local old_migration old_run old_attempt old_source
+  local old_fence old_sequence old_heartbeat
   local journal_id now
   old_migration="$(state_value migration-id)"
   old_run="$(state_value owner-run-id)"
   old_attempt="$(state_value owner-run-attempt)"
+  old_source="$(state_active_source_sha)"
   old_fence="$(state_value fencing-token)"
   old_sequence="$(state_value sequence)"
   old_heartbeat="$(state_value heartbeat-epoch)"
@@ -771,13 +791,11 @@ state_takeover() {
   now="$(state_monotonic_epoch "$old_heartbeat")"
   fencing_token=$((old_fence + 1))
 
+  owner_run_is_conclusively_inactive \
+    "$old_run" "$old_attempt" "$old_source" ||
+    migration_die "migration lock owner is active; takeover is forbidden"
   case "$(state_lock_value state)" in
-    active)
-      if ! owner_run_is_conclusively_inactive "$old_run" "$old_attempt"; then
-        migration_die "migration lock owner is active; takeover is forbidden"
-      fi
-      ;;
-    released)
+    active | released)
       ;;
     *)
       migration_die "migration lock state is invalid"
@@ -798,6 +816,7 @@ state_takeover() {
       --expect "owner-run-attempt=$old_attempt" \
       --expect "fencing-token=$old_fence" \
       --expect "sequence=$old_sequence" \
+      --set "active-source-sha=$SOURCE_SHA" \
       --set "migration-id=$MIGRATION_ID" \
       --set "owner-run-id=$OWNER_RUN_ID" \
       --set "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
@@ -830,6 +849,7 @@ state_takeover() {
         "migration-id=$MIGRATION_ID" \
         "owner-run-id=$OWNER_RUN_ID" \
         "owner-run-attempt=$OWNER_RUN_ATTEMPT" \
+        "active-source-sha=$SOURCE_SHA" \
         "fencing-token=$fencing_token" \
         "sequence=$((old_sequence + 1))" \
         "phase=lock-taken-over" || rollback_failed=1
@@ -857,8 +877,45 @@ state_takeover() {
   fi
 }
 
+validate_cross_release_takeover() {
+  local existing_source="$1"
+  local service
+  [[ "$existing_source" != "$SOURCE_SHA" ]] ||
+    return 0
+  [[ "$(state_value phase)" == "failed-before-destructive-boundary" &&
+    "$(state_value destructive-boundary)" == "false" &&
+    "$(state_value recovery-required)" == "false" &&
+    "$(state_optional_value mongo-write-lock)" == "false" &&
+    "$(state_optional_value rabbitmq-write-lock)" == "false" &&
+    "$(state_optional_value http-write-fence)" == "false" ]] ||
+    migration_die "cross-release retry requires a fully unlocked pre-destructive failure"
+  [[ "$oci_baseline" == "$(state_value oci-baseline)" ]] ||
+    migration_die "cross-release retry OCI replica baseline differs from the journal"
+  applications_are_zero azure ||
+    migration_die "cross-release retry Azure applications are not frozen"
+  wait_deployment_zero azure ingress-nginx ingress-nginx-controller \
+    app.kubernetes.io/component=controller
+  for service in "${APP_SERVICES[@]}"; do
+    wait_deployment_zero azure "$AZURE_NAMESPACE" "gaming-${service}-depl" \
+      "app=gaming-${service}"
+  done
+  verify_frozen_source_queues
+  [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] ||
+    migration_die "cross-release retry checkout differs from SOURCE_SHA"
+  git cat-file -e "${existing_source}^{commit}" 2>/dev/null ||
+    migration_die "prior active migration SHA is unavailable"
+  git merge-base --is-ancestor "$existing_source" "$SOURCE_SHA" ||
+    migration_die "cross-release retry is not a descendant of the active journal SHA"
+  [[ "$(target_write_lock_status)" == "false" &&
+    "$(rabbitmq_write_permission)" == ".*" &&
+    "$(http_write_fence_config_status)" == "false" &&
+    "$(http_write_fence_runtime_status)" == "false" ]] ||
+    migration_die "cross-release retry found a live OCI write lock or HTTP fence"
+}
+
 state_acquire() {
-  local presence now journal_id lock_state existing_sha existing_azure existing_oci
+  local presence now journal_id lock_state existing_source
+  local existing_azure existing_oci
   local existing_phase
   presence="$(state_read_all)"
   now="$(migration_epoch)"
@@ -882,11 +939,9 @@ state_acquire() {
             "OCI cutover is committed; retrying from Azure is permanently forbidden"
           ;;
       esac
-      existing_sha="$(state_value original-source-sha)"
+      existing_source="$(state_active_source_sha)"
       existing_azure="$(state_value azure-cluster-fingerprint)"
       existing_oci="$(state_value oci-cluster-fingerprint)"
-      [[ "$existing_sha" == "$SOURCE_SHA" ]] ||
-        migration_die "existing journal original SHA differs from this exact retry"
       [[ "$existing_azure" == "$AZURE_CLUSTER_FINGERPRINT" &&
         "$existing_oci" == "$OCI_CLUSTER_FINGERPRINT" ]] ||
         migration_die "live cluster fingerprints differ from the mirrored journal"
@@ -901,6 +956,7 @@ state_acquire() {
         migration_die "Azure baseline hash differs from the mirrored journal"
       [[ "$(state_value oci-baseline-sha256)" == "$expected_oci_baseline_hash" ]] ||
         migration_die "OCI baseline hash differs from the mirrored journal"
+      validate_cross_release_takeover "$existing_source"
       lock_state="$(state_lock_value state)"
       if [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
             "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
@@ -930,6 +986,8 @@ state_acquire() {
   state_compare_kind journal
   state_compare_kind lock
   state_validate_contract
+  [[ "$(state_active_source_sha)" == "$SOURCE_SHA" ]] ||
+    migration_die "migration journal is not bound to this active source SHA"
   state_boundary="$(state_value destructive-boundary)"
   state_recovery="$(state_value recovery-required)"
   last_committed_phase="$(state_value phase)"
@@ -953,7 +1011,8 @@ state_load_owned() {
   state_validate_contract
   [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
     "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
-    "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" ]] ||
+    "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" &&
+    "$(state_active_source_sha)" == "$SOURCE_SHA" ]] ||
     migration_die "migration state is fenced by another run"
   fencing_token="$(state_value fencing-token)"
   [[ "$(state_lock_value fencing-token)" == "$fencing_token" ]] ||
@@ -978,6 +1037,7 @@ state_assert_fence() {
   [[ "$(state_value migration-id)" == "$MIGRATION_ID" &&
     "$(state_value owner-run-id)" == "$OWNER_RUN_ID" &&
     "$(state_value owner-run-attempt)" == "$OWNER_RUN_ATTEMPT" &&
+    "$(state_active_source_sha)" == "$SOURCE_SHA" &&
     "$(state_value fencing-token)" == "$fencing_token" &&
     "$(state_lock_value migration-id)" == "$MIGRATION_ID" &&
     "$(state_lock_value owner-run-id)" == "$OWNER_RUN_ID" &&
@@ -2624,7 +2684,7 @@ validate_inputs() {
     -x "$MIGRATION_BOUNDED_COMMAND" ]] ||
     migration_die "migration helpers are unavailable"
   local command_name
-  for command_name in kubectl jq python3 gh cmp awk sort; do
+  for command_name in kubectl jq python3 gh git cmp awk sort; do
     migration_require_command "$command_name"
   done
   if [[ "$MODE" == "replace" ]]; then
