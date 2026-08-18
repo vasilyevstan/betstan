@@ -33,6 +33,7 @@ run_failure() {
   local expected_boundary="$2"
   local expected_recovery="$3"
   local expected_oci_state="$4"
+  local expected_http_fence="$5"
   local output="$WORK_DIR/${point//\//-}.env"
   if OCI_RUNTIME_MODE=oke \
       MIGRATION_SIMULATION=1 \
@@ -49,6 +50,8 @@ run_failure() {
     fail "recovery state differs for $point"
   grep -Fxq "oci_state=$expected_oci_state" "$output" ||
     fail "OCI closure/baseline state differs for $point"
+  grep -Fxq "http_write_fence=$expected_http_fence" "$output" ||
+    fail "HTTP write-fence state differs for $point"
   grep -Fxq "azure_apps=frozen" "$output" ||
     fail "Azure writers were not kept frozen for $point"
   grep -Fxq "azure_stopped=true" "$output" ||
@@ -58,9 +61,10 @@ run_failure() {
 for point in \
   azure-start azure-provisioning azure-freeze source-queue-drain \
   runner-capacity archive-capture corrupt-archive disposable-validation \
-  cancellation hang target-queue-drain oci-freeze; do
-  run_failure "$point" false false baseline
+  cancellation hang target-queue-drain oci-freeze http-write-fence-install; do
+  run_failure "$point" false false baseline false
 done
+run_failure http-write-fence-installed-crash false false closed true
 
 databases=(
   gaming_auth gaming_bet gaming_backoffice gaming_event
@@ -70,21 +74,23 @@ for database in "${databases[@]}"; do
   for point in \
     "before-drop-$database" "after-drop-$database" \
     "before-restore-$database" "after-restore-$database"; do
-    run_failure "$point" true true closed
+    run_failure "$point" true true closed true
   done
 done
 
 for point in \
   rabbitmq-recreate restart-auth restart-client mongo-write-lock \
-  rabbitmq-write-lock protected-health public-health; do
-  run_failure "$point" true true closed
+  rabbitmq-write-lock http-write-fence-runtime \
+  mongo-restart-during-public-health protected-health public-health; do
+  run_failure "$point" true true closed true
 done
-run_failure post-boundary-cancellation true true closed
-run_failure post-boundary-hang true true closed
-run_failure cutover-committed true false committed-locked
-run_failure mongo-write-unlocked true false committed-mongo-writable
-run_failure rabbitmq-write-unlocked true false committed-writable
-run_failure retry-after-cutover true false forward-only
+run_failure post-boundary-cancellation true true closed true
+run_failure post-boundary-hang true true closed true
+run_failure cutover-committed true false committed-locked true
+run_failure mongo-write-unlocked true false committed-mongo-writable true
+run_failure rabbitmq-write-unlocked true false committed-writable true
+run_failure http-write-fence-removed true false committed-writable false
+run_failure retry-after-cutover true false forward-only true
 
 success_output="$WORK_DIR/success.env"
 OCI_RUNTIME_MODE=oke \
@@ -97,6 +103,8 @@ grep -Fxq 'exact_database_count=8' "$success_output" ||
   fail "successful replacement did not require eight exact databases"
 grep -Fxq 'oci_state=healthy' "$success_output" ||
   fail "successful replacement did not reach exact health"
+grep -Fxq 'http_write_fence=false' "$success_output" ||
+  fail "successful replacement retained the HTTP write fence"
 grep -Fxq 'azure_stopped=true' "$success_output" ||
   fail "successful replacement did not retain Azure stop evidence"
 
@@ -201,7 +209,11 @@ python3 "$STATE_HELPER" create \
   --set azure-baseline-sha256=azure-hash \
   --set oci-baseline=oci-baseline \
   --set oci-baseline-sha256=oci-hash \
+  --set http-write-fence=true \
   >"$WORK_DIR/mirror-base.json"
+python3 "$STATE_HELPER" summary "$WORK_DIR/mirror-base.json" |
+  grep -Fxq 'http-write-fence=true' ||
+  fail "sanitized migration summary omitted the HTTP write fence"
 python3 "$STATE_HELPER" mutate "$WORK_DIR/mirror-base.json" \
   --expect sequence=4 \
   --set sequence=5 \
@@ -299,7 +311,13 @@ for literal in \
   'az aks stop' \
   'Always stop and deallocate exact Azure source with evidence' \
   'OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"' \
-  'OCI_E2E_ALREADY_PASSED: "1"'; do
+  'OCI_E2E_ALREADY_PASSED: "1"' \
+  'Run read-only public OCI validation with mutation fence' \
+  'OCI_EXPECT_HTTP_MUTATION_FENCE: "1"' \
+  'post-commit-validate:' \
+  "needs.finalize.result == 'success'" \
+  'Validate public write path after committed fence removal' \
+  'http_mutation_fence_removed=true'; do
   grep -Fq "$literal" "$MIGRATION_WORKFLOW" ||
     fail "migration workflow is missing: $literal"
 done
@@ -323,6 +341,42 @@ grep -Fq '[ "$provisioning" = "Failed" ]' "$MIGRATION_WORKFLOW" ||
   fail "migration can run Bastion cleanup before an OCI CLI is installed"
 ! grep -Eq 'az aks (create|update|delete)|az aks nodepool' "$MIGRATION_WORKFLOW" ||
   fail "migration workflow can create, resize, or delete Azure"
+python3 - "$MIGRATION_WORKFLOW" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+public_job = text.index("  public-validate:")
+finalize_job = text.index("  finalize:", public_job)
+read_only = text.index(
+    "Run read-only public OCI validation with mutation fence", public_job)
+fence_expectation = text.index(
+    'OCI_EXPECT_HTTP_MUTATION_FENCE: "1"', read_only)
+browser_install = text.index(
+    "Install browser validation dependencies", finalize_job)
+transition = text.index(
+    "Finalize success or enforce post-boundary closure", finalize_job)
+azure_stop = text.index(
+    "Always stop and deallocate exact Azure source with evidence", transition)
+post_commit_job = text.index("  post-commit-validate:", azure_stop)
+post_commit = text.index(
+    "Validate public write path after committed fence removal", post_commit_job)
+if not (public_job < read_only < fence_expectation < finalize_job <
+        transition < azure_stop < post_commit_job < browser_install <
+        post_commit):
+    raise SystemExit("read-only/public-write validation ordering differs")
+if "playwright" in text[public_job:finalize_job].lower():
+    raise SystemExit("pre-commit public validation can execute mutating browser checks")
+if "playwright" in text[finalize_job:post_commit_job].lower():
+    raise SystemExit("credentialed finalization can execute package browser code")
+post_commit_block = text[post_commit:]
+for output in ("public_url", "redirect_url", "diagnostic_url"):
+    expected = f"${{{{ needs.migrate.outputs.{output} }}}}"
+    if expected not in post_commit_block:
+        raise SystemExit(f"post-commit validation lacks migrated {output}")
+if "steps.provenance.outputs." in post_commit_block:
+    raise SystemExit("post-commit validation uses job-local unset URL outputs")
+PY
 
 for literal in \
   'workflows: ["oci-migrate"]' \
@@ -396,6 +450,19 @@ for literal in \
   'owner_run_is_conclusively_inactive' \
   'exactly eight Mongo PVCs' \
   'deployment_mongo_uri' \
+  'MONGO_REVIEWED_INDEX_DIGEST=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3' \
+  'MONGO_REVIEWED_AMD64_MANIFEST=sha256:41afd6e1183f57e4e4d03ab733070671fca8553da2b36f15d6e3fc9760494d17' \
+  'MONGO_REVIEWED_ARM64_MANIFEST=sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7ceafc8fa489c0486525b4' \
+  'source-mongo-identities.json' \
+  'source-mongo-identities=' \
+  'target-mongo-container-id=' \
+  'target-mongo-restart-count=' \
+  'restore_source_mongo_manifest_from_state true' \
+  'verify_source_mongo_identity' \
+  'verify_target_mongo_identity' \
+  'verify_target_mongo_identity false' \
+  'freeze_azure_after_commit' \
+  'verify_cutover_write_locks' \
   'mongodump --quiet --archive --gzip' \
   'age --encrypt' \
   'docker run -d --name "$disposable_container"' \
@@ -405,6 +472,18 @@ for literal in \
   'logical-parity=true' \
   'lock_target_writes' \
   'lock_rabbitmq_writes' \
+  'INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"' \
+  'if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$)' \
+  'http-write-fence=false' \
+  'http_write_fence_config_status' \
+  'http_write_fence_runtime_status' \
+  "jq -r '.items[].metadata.name'" \
+  'ingress controller replicas disagree on the HTTP write fence' \
+  'install_http_write_fence' \
+  'wait_http_write_fence_runtime true' \
+  'state_optional_value http-write-fence' \
+  'remove_http_write_fence' \
+  'migration_failure_hook http-write-fence-removed' \
   'cutover-committed' \
   'cutover-committed | cutover-forward-recovery' \
   'last_committed_phase="$phase"' \
@@ -417,6 +496,12 @@ for literal in \
   grep -Fq "$literal" "$MIGRATION" ||
     fail "migration state machine is missing: $literal"
 done
+[[ "$(grep -Fc 'verify_source_mongo_identity "$pod"' "$MIGRATION")" -ge 3 ]] ||
+  fail "migration does not revalidate each source around capture"
+[[ "$(grep -Fc 'verify_target_mongo_identity' "$MIGRATION")" -ge 6 ]] ||
+  fail "migration does not revalidate the target around replacement"
+[[ "$(grep -Fc 'verify_cutover_write_locks' "$MIGRATION")" -ge 3 ]] ||
+  fail "migration does not revalidate both write locks immediately before commit"
 python3 - "$MIGRATION" <<'PY'
 from pathlib import Path
 import sys
@@ -425,9 +510,15 @@ text = Path(sys.argv[1]).read_text()
 replace = text.index("      verify_target_exact\n", text.index("case \"$MODE\" in"))
 mongo_lock = text.index("      lock_target_writes\n", replace)
 restart = text.index("      recreate_rabbitmq_and_restart\n", mongo_lock)
+main_freeze = text.rindex("      freeze_oci\n", 0, replace)
+fence_install = text.index("      install_http_write_fence\n", main_freeze)
+retry_unlock = text.index("      unlock_target_writes_for_retry\n", fence_install)
 finalize = text.index("    finalize-success)", restart)
+finalize_phase = text.index('finalize_phase="$(state_value phase)"', finalize)
 target_pod = text.index("target_mongo_pod=\"$(kube_capture", finalize)
-lock_check = text.index("$(target_write_lock_status)", target_pod)
+lock_check = text.index("          verify_cutover_write_locks\n", target_pod)
+final_exact = text.index("          verify_final_exact_state\n", lock_check)
+lock_recheck = text.index("          verify_cutover_write_locks\n", final_exact)
 commit = text.index("state_advance cutover-committed", finalize)
 mongo_unlock = text.index("      unlock_target_writes\n", commit)
 mongo_unlock_failure = text.index(
@@ -435,10 +526,20 @@ mongo_unlock_failure = text.index(
 rabbit_unlock = text.index("      unlock_rabbitmq_writes\n", mongo_unlock)
 rabbit_unlock_failure = text.index(
     "migration_failure_hook rabbitmq-write-unlocked", rabbit_unlock)
-completed = text.index("state_advance completed", rabbit_unlock)
-if not (replace < mongo_lock < restart < finalize < target_pod < lock_check <
-        commit < mongo_unlock < mongo_unlock_failure < rabbit_unlock <
-        rabbit_unlock_failure < completed):
+http_fence_remove = text.index("      remove_http_write_fence\n", rabbit_unlock)
+http_fence_failure = text.index(
+    "migration_failure_hook http-write-fence-removed", http_fence_remove)
+completed = text.index("state_advance completed", http_fence_failure)
+committed_case = text.index(
+    "        cutover-committed | cutover-forward-recovery)", lock_recheck)
+forward_identity = text.index(
+    "          verify_target_mongo_identity false", committed_case)
+if not (main_freeze < fence_install < retry_unlock < replace < mongo_lock <
+        restart < finalize < finalize_phase <
+        target_pod < lock_check < final_exact < lock_recheck < commit <
+        committed_case < forward_identity < mongo_unlock <
+        mongo_unlock_failure < rabbit_unlock < rabbit_unlock_failure <
+        http_fence_remove < http_fence_failure < completed):
     raise SystemExit("write-lock/cutover ordering differs")
 
 cleanup = text.index("cleanup() {")

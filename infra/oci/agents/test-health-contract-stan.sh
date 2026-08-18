@@ -48,6 +48,8 @@ run_failure platform-digest '.platform_workloads[0].image="mutable"' platform-di
 run_failure empty-endpoint '.services[0].ready_endpoints=false' empty-endpoint
 run_failure extra-mongo '.mongo.statefulset_count=2' extra-mongo
 run_failure unbound-pvc '.mongo.pvc_bound=false' mongo-pvc-unbound
+run_failure mongo-version '.mongo.version="7.0.21"|.mongo.major_minor="7.0"' mongo-version
+run_failure mongo-fcv '.mongo.fcv="8.0"' mongo-fcv
 run_failure digest-mismatch '.pods[0].digest_match=false' digest-mismatch
 run_failure restart-increase '.pods[0].restarts=1' restart-increase
 run_failure oom-kill '.pods[0].last_reason="OOMKilled"' pod-failure-reason
@@ -83,17 +85,24 @@ set -euo pipefail
 output=/dev/null
 headers=/dev/null
 url=""
+method=GET
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --dump-header) headers="$2"; shift 2 ;;
     --write-out) shift 2 ;;
     --max-time) shift 2 ;;
-    --silent|--show-error) shift ;;
+    --request) method="$2"; shift 2 ;;
+    --header|--data) shift 2 ;;
+    --silent|--show-error|--fail) shift ;;
     *) url="$1"; shift ;;
   esac
 done
-if [[ "$url" == http://betstan.xyz/* ]]; then
+if [[ "$method" == "POST" && "${STUB_MUTATION_FENCE:-0}" == "1" ]]; then
+  printf 'HTTP/2 503\r\ncontent-type: text/html\r\n\r\n' > "$headers"
+  printf 'maintenance' > "$output"
+  printf '503'
+elif [[ "$url" == http://betstan.xyz/* ]]; then
   location="https://betstan.xyz/${url#http://betstan.xyz/}"
   printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: %s\r\n\r\n' "$location" > "$headers"
   : > "$output"
@@ -205,6 +214,27 @@ PATH="$WORK_DIR/bin:$PATH" \
   OCI_REDIRECT_URL=https://www.betstan.xyz \
   OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
   OUTPUT_DIR="$WORK_DIR/smoke-good" "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null
+PATH="$WORK_DIR/bin:$PATH" \
+STUB_MUTATION_FENCE=1 \
+OCI_EXPECT_HTTP_MUTATION_FENCE=1 \
+OCI_PUBLIC_URL=https://betstan.xyz \
+OCI_REDIRECT_URL=https://www.betstan.xyz \
+OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+OUTPUT_DIR="$WORK_DIR/smoke-fenced" \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null
+if PATH="$WORK_DIR/bin:$PATH" \
+    OCI_EXPECT_HTTP_MUTATION_FENCE=1 \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OUTPUT_DIR="$WORK_DIR/smoke-unfenced" \
+    "$OCI_DIR/agents/smoke-liveness-stan.sh" \
+    >"$WORK_DIR/smoke-unfenced.out" 2>&1; then
+  echo "missing HTTP mutation fence unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq 'mutating request bypassed the HTTP maintenance fence' \
+  "$WORK_DIR/smoke-unfenced.out"
 if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_API=1 \
   OCI_PUBLIC_URL=https://betstan.xyz \
   OCI_REDIRECT_URL=https://www.betstan.xyz \
@@ -279,4 +309,4 @@ if OCI_PUBLIC_URL=https://betstan.xyz \
   exit 1
 fi
 
-echo "oci_health_fixture_contract=PASS scenarios=38"
+echo "oci_health_fixture_contract=PASS scenarios=40"

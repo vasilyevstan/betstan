@@ -39,8 +39,12 @@ read-only and prefer the checked-in recovery workflow and scripts.
   zero. Clear every partial application database and retry the full export and
   restore from the preserved Azure source.
 - Keep Mongo writes and RabbitMQ publishes locked throughout public and
-  protected validation. Record `cutover-committed` only after final parity
-  under both locks, then unlock idempotently.
+  protected validation. Because Mongo's `fsyncLock` is cleared by a container
+  restart, also require the mirrored, controller-level HTTP mutation fence
+  before ingress reopens and verify the directive in the running NGINX
+  configuration. Pre-commit public checks are read-only. Record
+  `cutover-committed` only after final parity under all three fences, then
+  unlock idempotently and remove the HTTP fence last.
 - After `cutover-committed`, never retry from Azure. OCI may have accepted new
   production writes; recover only forward through any remaining unlock and
   completion steps.

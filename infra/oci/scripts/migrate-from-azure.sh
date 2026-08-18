@@ -41,6 +41,21 @@ RUNNER_CAPACITY_MULTIPLIER="${RUNNER_CAPACITY_MULTIPLIER:-2}"
 RUNNER_CAPACITY_RESERVE_BYTES="${RUNNER_CAPACITY_RESERVE_BYTES:-2147483648}"
 SIGNATURE_SCRIPT="$SCRIPT_DIR/mongo-canonical-signature.js"
 STATE_HELPER="$SCRIPT_DIR/migration-state.py"
+MONGO_REVIEWED_VERSION=8.2.12
+MONGO_REVIEWED_FCV=8.2
+MONGO_REVIEWED_INDEX_DIGEST=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3
+MONGO_REVIEWED_AMD64_MANIFEST=sha256:41afd6e1183f57e4e4d03ab733070671fca8553da2b36f15d6e3fc9760494d17
+MONGO_REVIEWED_ARM64_MANIFEST=sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7ceafc8fa489c0486525b4
+MONGO_REVIEWED_TARGET_IMAGE="docker.io/library/mongo@$MONGO_REVIEWED_INDEX_DIGEST"
+INGRESS_CONTROLLER_NAMESPACE="ingress-nginx"
+INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"
+INGRESS_BASE_SERVER_SNIPPET="if (\$host = \"www.betstan.xyz\") {
+  return 308 https://betstan.xyz\$request_uri;
+}"
+INGRESS_HTTP_WRITE_FENCE_DIRECTIVE="if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$) {
+  return 503;
+}"
+INGRESS_FENCED_SERVER_SNIPPET="${INGRESS_BASE_SERVER_SNIPPET}"$'\n'"${INGRESS_HTTP_WRITE_FENCE_DIRECTIVE}"
 
 APP_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip client)
 BACKEND_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip)
@@ -72,7 +87,12 @@ azure_baseline=""
 oci_baseline=""
 target_mongo_pod=""
 target_mongo_image=""
+target_mongo_uid=""
+target_mongo_image_id=""
+target_mongo_container_id=""
+target_mongo_restart_count=""
 target_runtime_signature=""
+source_mongo_manifest=""
 last_committed_phase=""
 
 state_boundary_text() {
@@ -94,7 +114,7 @@ simulate() {
   local points=(
     azure-start azure-provisioning azure-freeze source-queue-drain runner-capacity
     archive-capture corrupt-archive disposable-validation cancellation hang
-    target-queue-drain oci-freeze
+    target-queue-drain oci-freeze http-write-fence-install
   )
   mkdir -p "$(dirname "$output")"
   for point in "${points[@]}"; do
@@ -105,11 +125,24 @@ simulate() {
         "destructive_boundary=$boundary" \
         "recovery_required=$recovery" \
         "oci_state=$oci_state" \
+        "http_write_fence=false" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
     fi
   done
+  if [[ "$fail_at" == "http-write-fence-installed-crash" ]]; then
+    printf '%s\n' \
+      "result=failed" \
+      "failure_point=$fail_at" \
+      "destructive_boundary=false" \
+      "recovery_required=false" \
+      "oci_state=closed" \
+      "http_write_fence=true" \
+      "azure_apps=frozen" \
+      "azure_stopped=true" >"$output"
+    return 97
+  fi
   boundary=true
   oci_state=closed
   for point in post-boundary-cancellation post-boundary-hang; do
@@ -121,6 +154,7 @@ simulate() {
         "destructive_boundary=$boundary" \
         "recovery_required=$recovery" \
         "oci_state=$oci_state" \
+        "http_write_fence=true" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
@@ -138,6 +172,7 @@ simulate() {
           "destructive_boundary=$boundary" \
           "recovery_required=$recovery" \
           "oci_state=$oci_state" \
+          "http_write_fence=true" \
           "azure_apps=frozen" \
           "azure_stopped=true" >"$output"
         return 97
@@ -146,7 +181,8 @@ simulate() {
   done
   for point in \
     rabbitmq-recreate restart-auth restart-client mongo-write-lock \
-    rabbitmq-write-lock protected-health public-health; do
+    rabbitmq-write-lock http-write-fence-runtime \
+    mongo-restart-during-public-health protected-health public-health; do
     if [[ "$fail_at" == "$point" ]]; then
       recovery=true
       printf '%s\n' \
@@ -155,6 +191,7 @@ simulate() {
         "destructive_boundary=$boundary" \
         "recovery_required=$recovery" \
         "oci_state=closed" \
+        "http_write_fence=true" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
@@ -168,6 +205,7 @@ simulate() {
         "destructive_boundary=true" \
         "recovery_required=false" \
         "oci_state=committed-locked" \
+        "http_write_fence=true" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
@@ -179,6 +217,7 @@ simulate() {
         "destructive_boundary=true" \
         "recovery_required=false" \
         "oci_state=committed-mongo-writable" \
+        "http_write_fence=true" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
@@ -190,6 +229,19 @@ simulate() {
         "destructive_boundary=true" \
         "recovery_required=false" \
         "oci_state=committed-writable" \
+        "http_write_fence=true" \
+        "azure_apps=frozen" \
+        "azure_stopped=true" >"$output"
+      return 97
+      ;;
+    http-write-fence-removed)
+      printf '%s\n' \
+        "result=failed" \
+        "failure_point=$fail_at" \
+        "destructive_boundary=true" \
+        "recovery_required=false" \
+        "oci_state=committed-writable" \
+        "http_write_fence=false" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 97
@@ -201,6 +253,7 @@ simulate() {
         "destructive_boundary=true" \
         "recovery_required=false" \
         "oci_state=forward-only" \
+        "http_write_fence=true" \
         "azure_apps=frozen" \
         "azure_stopped=true" >"$output"
       return 98
@@ -212,6 +265,7 @@ simulate() {
     "destructive_boundary=true" \
     "recovery_required=false" \
     "oci_state=healthy" \
+    "http_write_fence=false" \
     "exact_database_count=8" \
     "azure_apps=frozen" \
     "azure_stopped=true" >"$output"
@@ -666,6 +720,7 @@ state_new_documents() {
     "transfer-manifest-sha256="
     "mongo-write-lock=false"
     "rabbitmq-write-lock=false"
+    "http-write-fence=false"
   )
   local lock_values=(
     "schema-version=1"
@@ -880,6 +935,10 @@ state_acquire() {
   last_committed_phase="$(state_value phase)"
   [[ "$state_boundary" == "true" ]] && state_boundary=1 || state_boundary=0
   [[ "$state_recovery" == "true" ]] && state_recovery=1 || state_recovery=0
+  if [[ "$(state_optional_value http-write-fence)" == "true" ||
+        "$(http_write_fence_config_status)" == "true" ]]; then
+    oci_frozen=1
+  fi
   printf 'timestamp\tsequence\tphase\tfencing_token\tdestructive_boundary\trecovery_required\n' \
     >"$JOURNAL_FILE"
 }
@@ -1174,6 +1233,128 @@ baseline_value() {
   return 1
 }
 
+http_write_fence_config_status() {
+  local snippet
+  snippet="$(kube_capture oci ingress-config-read 30 2 \
+    get configmap "$INGRESS_CONTROLLER_CONFIGMAP" \
+    -n "$INGRESS_CONTROLLER_NAMESPACE" \
+    -o jsonpath='{.data.server-snippet}')"
+  case "$snippet" in
+    "$INGRESS_BASE_SERVER_SNIPPET")
+      printf false
+      ;;
+    "$INGRESS_FENCED_SERVER_SNIPPET")
+      printf true
+      ;;
+    *)
+      migration_die \
+        "ingress controller server-snippet differs from the reviewed baseline or mutation fence"
+      ;;
+  esac
+}
+
+set_http_write_fence_config() {
+  local expected="$1"
+  local current desired patch
+  [[ "$expected" == "true" || "$expected" == "false" ]] ||
+    migration_die "HTTP write fence state must be true or false"
+  current="$(http_write_fence_config_status)"
+  [[ "$current" == "$expected" ]] && return 0
+  if [[ "$expected" == "true" ]]; then
+    desired="$INGRESS_FENCED_SERVER_SNIPPET"
+  else
+    desired="$INGRESS_BASE_SERVER_SNIPPET"
+  fi
+  patch="$(migration_raw ingress-config-patch 30 1 \
+    jq -cn --arg snippet "$desired" \
+      '{data:{"server-snippet":$snippet}}')"
+  kube_run oci ingress-config-patch "$COMMAND_TIMEOUT_SECONDS" 2 \
+    patch configmap "$INGRESS_CONTROLLER_CONFIGMAP" \
+    -n "$INGRESS_CONTROLLER_NAMESPACE" \
+    --type merge --patch "$patch" >/dev/null
+  [[ "$(http_write_fence_config_status)" == "$expected" ]] ||
+    migration_die "ingress HTTP write fence ConfigMap did not reach the requested state"
+}
+
+http_write_fence_runtime_status() {
+  local deployment_state desired available pods_json pod_count pod_names
+  local pod rendered fence_line fenced_count=0
+  deployment_state="$(kube_capture oci ingress-workload-read 30 2 \
+    get deployment ingress-nginx-controller \
+    -n "$INGRESS_CONTROLLER_NAMESPACE" \
+    -o jsonpath='{.spec.replicas}|{.status.availableReplicas}')"
+  IFS='|' read -r desired available <<<"$deployment_state"
+  available="${available:-0}"
+  [[ "$desired" =~ ^[1-9][0-9]*$ && "$available" == "$desired" ]] ||
+    migration_die "ingress controller is not fully available for mutation-fence validation"
+  pods_json="$(kube_capture oci ingress-pod-read 30 2 \
+    get pods -n "$INGRESS_CONTROLLER_NAMESPACE" \
+    -l app.kubernetes.io/component=controller -o json)"
+  pod_count="$(migration_raw ingress-pod-count 30 1 \
+    jq '.items | length' <<<"$pods_json")"
+  [[ "$pod_count" == "$desired" ]] ||
+    migration_die "ingress controller pod count differs from its available replicas"
+  migration_raw ingress-pod-readiness 30 1 jq -e '
+    all(.items[];
+      .metadata.deletionTimestamp == null and
+      .status.phase == "Running" and
+      any(.status.conditions[]?;
+        .type == "Ready" and .status == "True"))
+  ' <<<"$pods_json" >/dev/null ||
+    migration_die "an ingress controller pod is not stably Ready"
+  pod_names="$(migration_raw ingress-pod-names 30 1 \
+    jq -r '.items[].metadata.name' <<<"$pods_json")"
+  [[ "$(awk 'NF {count++} END {print count+0}' <<<"$pod_names")" == "$pod_count" ]] ||
+    migration_die "ingress controller pod-name inventory is incomplete"
+  fence_line="${INGRESS_HTTP_WRITE_FENCE_DIRECTIVE%%$'\n'*}"
+  while IFS= read -r pod; do
+    [[ -n "$pod" ]] || continue
+    rendered="$(kube_capture oci ingress-runtime-read 60 2 \
+      exec -n "$INGRESS_CONTROLLER_NAMESPACE" "$pod" -- \
+      sh -c 'nginx -T 2>&1')"
+    grep -Fq 'return 308 https://betstan.xyz$request_uri;' <<<"$rendered" ||
+      migration_die "running ingress controller lost the reviewed www redirect"
+    if grep -Fq "$fence_line" <<<"$rendered"; then
+      fenced_count=$((fenced_count + 1))
+    fi
+  done <<<"$pod_names"
+  if [[ "$fenced_count" == "$pod_count" ]]; then
+    printf true
+  elif [[ "$fenced_count" == "0" ]]; then
+    printf false
+  else
+    migration_die "ingress controller replicas disagree on the HTTP write fence"
+  fi
+}
+
+wait_http_write_fence_runtime() {
+  local expected="$1"
+  local attempt actual=""
+  for attempt in $(seq 1 30); do
+    if actual="$(http_write_fence_runtime_status)" &&
+        [[ "$actual" == "$expected" ]]; then
+      return 0
+    fi
+    migration_sleep 2
+  done
+  migration_die \
+    "running ingress controller HTTP write fence did not reach state $expected"
+}
+
+install_http_write_fence() {
+  state_assert_fence
+  set_http_write_fence_config true
+  state_advance http-write-fence-installed \
+    "$(state_boundary_text)" "$(state_recovery_text)" \
+    "http-write-fence=true"
+  migration_failure_hook http-write-fence-install
+}
+
+remove_http_write_fence() {
+  set_http_write_fence_config false
+  wait_http_write_fence_runtime false
+}
+
 wait_deployment_zero() {
   local provider="$1"
   local namespace="$2"
@@ -1399,6 +1580,18 @@ unlock_rabbitmq_writes() {
     migration_die "OCI RabbitMQ publish permission was not restored"
 }
 
+verify_cutover_write_locks() {
+  [[ "$(state_optional_value mongo-write-lock)" == "true" &&
+    "$(target_write_lock_status)" == "true" &&
+    "$(state_optional_value rabbitmq-write-lock)" == "true" &&
+    "$(rabbitmq_write_permission)" == "^$" &&
+    "$(state_optional_value http-write-fence)" == "true" &&
+    "$(http_write_fence_config_status)" == "true" &&
+    "$(http_write_fence_runtime_status)" == "true" ]] ||
+    migration_die \
+      "OCI data, messaging, or external HTTP write fence changed before parity certification"
+}
+
 mongo_runtime() {
   mongo_eval "$1" "$2" '
     const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
@@ -1409,6 +1602,26 @@ mongo_runtime() {
       fcv:result.featureCompatibilityVersion.version
     }));
   '
+}
+
+mongo_runtime_is_reviewed() {
+  migration_raw mongo-runtime 30 1 jq -e \
+    --arg version "$MONGO_REVIEWED_VERSION" \
+    --arg fcv "$MONGO_REVIEWED_FCV" '
+      .version == $version and
+      .majorMinor == $fcv and
+      .fcv == $fcv
+    ' <<<"$1" >/dev/null
+}
+
+source_mongo_image_is_reviewed() {
+  [[ "$1" == *"@$MONGO_REVIEWED_INDEX_DIGEST" ||
+    "$1" == *"@$MONGO_REVIEWED_AMD64_MANIFEST" ]]
+}
+
+target_mongo_image_is_reviewed() {
+  [[ "$1" == *"@$MONGO_REVIEWED_INDEX_DIGEST" ||
+    "$1" == *"@$MONGO_REVIEWED_ARM64_MANIFEST" ]]
 }
 
 mongo_non_system_databases() {
@@ -1486,9 +1699,12 @@ mongo_signature_docker() {
 
 validate_source_topology() {
   local statefulsets expected_count=0 mapping service database sts pod pvc
-  local sts_json pod_json claim phase runtime digest non_system expected_json
+  local sts_json pod_json claim phase runtime digest uid container_id restart_count
+  local non_system expected_json
   local runtime_reference="" digest_reference="" source_pvcs target_statefulsets
-  local expected_uri actual_uri
+  local expected_uri actual_uri source_rows
+  source_rows="${source_mongo_manifest}.rows"
+  : >"$source_rows"
   statefulsets="$(kube_capture azure source-statefulsets 30 2 \
     get statefulsets -n "$AZURE_NAMESPACE" -o json)"
   expected_count="$(
@@ -1544,8 +1760,19 @@ validate_source_topology() {
       migration_die "Azure Mongo pod is not Ready: $pod"
     digest="$(migration_raw source-pod 30 1 jq -r \
       '.status.containerStatuses[0].imageID // empty' <<<"$pod_json")"
-    [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]] ||
-      migration_die "Azure Mongo image digest is not immutable: $pod"
+    source_mongo_image_is_reviewed "$digest" ||
+      migration_die "Azure Mongo image differs from the reviewed 8.2.12 release: $pod"
+    uid="$(migration_raw source-pod 30 1 jq -r '.metadata.uid // empty' <<<"$pod_json")"
+    [[ "$uid" =~ ^[a-z0-9-]+$ ]] ||
+      migration_die "Azure Mongo pod UID is unreadable: $pod"
+    container_id="$(migration_raw source-pod 30 1 jq -r \
+      '.status.containerStatuses[0].containerID // empty' <<<"$pod_json")"
+    [[ "$container_id" =~ ^[a-z0-9+.-]+://[a-zA-Z0-9._:-]+$ ]] ||
+      migration_die "Azure Mongo container ID is unreadable: $pod"
+    restart_count="$(migration_raw source-pod 30 1 jq -r \
+      '.status.containerStatuses[0].restartCount // empty' <<<"$pod_json")"
+    [[ "$restart_count" =~ ^[0-9]+$ ]] ||
+      migration_die "Azure Mongo restart count is unreadable: $pod"
     if [[ -z "$digest_reference" ]]; then
       digest_reference="$digest"
     else
@@ -1554,14 +1781,16 @@ validate_source_topology() {
     fi
     runtime="$(mongo_runtime azure "$pod")"
     migration_raw mongo-runtime 30 1 jq -e \
-      '.majorMinor != null and .fcv != null' <<<"$runtime" >/dev/null ||
+      '.version != null and .majorMinor != null and .fcv != null' <<<"$runtime" >/dev/null ||
       migration_die "Azure Mongo version/FCV is unreadable: $pod"
+    mongo_runtime_is_reviewed "$runtime" ||
+      migration_die "Azure Mongo runtime differs from exact version 8.2.12 and FCV 8.2: $pod"
     if [[ -z "$runtime_reference" ]]; then
       runtime_reference="$(migration_raw mongo-runtime 30 1 jq -c \
-        '{majorMinor,fcv}' <<<"$runtime")"
+        '{version,majorMinor,fcv}' <<<"$runtime")"
     else
       [[ "$(migration_raw mongo-runtime 30 1 jq -c \
-        '{majorMinor,fcv}' <<<"$runtime")" == "$runtime_reference" ]] ||
+        '{version,majorMinor,fcv}' <<<"$runtime")" == "$runtime_reference" ]] ||
         migration_die "Azure Mongo version/FCV differs across sources"
     fi
     non_system="$(mongo_non_system_databases azure "$pod")"
@@ -1569,7 +1798,31 @@ validate_source_topology() {
       '[$database]')"
     [[ "$non_system" == "$expected_json" ]] ||
       migration_die "Azure source inventory is not exact for $database"
+    migration_raw source-manifest 30 1 jq -cn \
+      --arg pod "$pod" \
+      --arg uid "$uid" \
+      --arg image_id "$digest" \
+      --arg container_id "$container_id" \
+      --arg restart_count "$restart_count" \
+      --argjson runtime "$runtime" \
+      '{
+        pod:$pod,
+        uid:$uid,
+        image_id:$image_id,
+        container_id:$container_id,
+        restart_count:$restart_count,
+        runtime:$runtime
+      }' >>"$source_rows"
   done
+  migration_raw source-manifest 30 1 jq -cs 'sort_by(.pod)' \
+    "$source_rows" >"$source_mongo_manifest"
+  rm -f "$source_rows"
+  [[ "$(migration_raw source-manifest 30 1 jq 'length' "$source_mongo_manifest")" == "8" ]] ||
+    migration_die "Azure Mongo identity manifest does not contain all eight sources"
+  migration_log "azure_mongo_runtime=$(
+    migration_raw mongo-runtime 30 1 jq -r \
+      '.version + "/fcv-" + .fcv' <<<"$runtime_reference"
+  )"
 
   target_statefulsets="$(kube_capture oci target-statefulsets 30 2 \
     get statefulsets -n "$OCI_K8S_NAMESPACE" -o json)"
@@ -1596,17 +1849,37 @@ validate_source_topology() {
   target_mongo_image="$(kube_capture oci target-image 30 2 \
     get statefulset gaming-auth-mongo-depl -n "$OCI_K8S_NAMESPACE" \
     -o jsonpath='{.spec.template.spec.containers[0].image}')"
-  [[ "$target_mongo_image" =~ @sha256:[0-9a-f]{64}$ ]] ||
-    migration_die "OCI Mongo image must be digest-pinned"
-  digest="$(kube_capture oci target-image 30 2 \
-    get pod "$target_mongo_pod" -n "$OCI_K8S_NAMESPACE" \
-    -o jsonpath='{.status.containerStatuses[0].imageID}')"
-  [[ "$digest" =~ @sha256:[0-9a-f]{64}$ ]] ||
-    migration_die "OCI running Mongo image digest is not immutable"
+  [[ "$target_mongo_image" == "$MONGO_REVIEWED_TARGET_IMAGE" ]] ||
+    migration_die "OCI Mongo does not request the reviewed 8.2.12 image"
+  pod_json="$(kube_capture oci target-image 30 2 \
+    get pod "$target_mongo_pod" -n "$OCI_K8S_NAMESPACE" -o json)"
+  target_mongo_uid="$(migration_raw target-image 30 1 jq -r \
+    '.metadata.uid // empty' <<<"$pod_json")"
+  [[ "$target_mongo_uid" =~ ^[a-z0-9-]+$ ]] ||
+    migration_die "OCI Mongo pod UID is unreadable"
+  target_mongo_image_id="$(migration_raw target-image 30 1 jq -r \
+    '.status.containerStatuses[0].imageID // empty' <<<"$pod_json")"
+  target_mongo_image_is_reviewed "$target_mongo_image_id" ||
+    migration_die "OCI running Mongo image differs from the reviewed ARM64 release"
+  target_mongo_container_id="$(migration_raw target-image 30 1 jq -r \
+    '.status.containerStatuses[0].containerID // empty' <<<"$pod_json")"
+  [[ "$target_mongo_container_id" =~ ^[a-z0-9+.-]+://[a-zA-Z0-9._:-]+$ ]] ||
+    migration_die "OCI Mongo container ID is unreadable"
+  target_mongo_restart_count="$(migration_raw target-image 30 1 jq -r \
+    '.status.containerStatuses[0].restartCount // empty' <<<"$pod_json")"
+  [[ "$target_mongo_restart_count" =~ ^[0-9]+$ ]] ||
+    migration_die "OCI Mongo restart count is unreadable"
   target_runtime_signature="$(mongo_runtime oci "$target_mongo_pod")"
+  mongo_runtime_is_reviewed "$target_runtime_signature" ||
+    migration_die "OCI Mongo runtime differs from exact version 8.2.12 and FCV 8.2"
+  migration_log "oci_mongo_runtime=$(
+    migration_raw mongo-runtime 30 1 jq -r \
+      '.version + "/fcv-" + .fcv' <<<"$target_runtime_signature"
+  )"
   [[ "$(migration_raw mongo-runtime 30 1 jq -c \
-    '{majorMinor,fcv}' <<<"$target_runtime_signature")" == "$runtime_reference" ]] ||
-    migration_die "Azure and OCI Mongo major version/FCV differ"
+    '{version,majorMinor,fcv}' <<<"$target_runtime_signature")" == "$runtime_reference" ]] ||
+    migration_die "Azure and OCI Mongo version/FCV differ"
+  verify_target_mongo_identity
   non_system="$(mongo_non_system_databases oci "$target_mongo_pod")"
   migration_raw target-inventory 30 1 jq -e \
     --argjson expected "$(expected_database_json)" '
@@ -1622,6 +1895,142 @@ validate_source_topology() {
   done
 }
 
+restore_source_mongo_manifest_from_state() {
+  local required="$1"
+  local content expected_hash actual_hash
+  content="$(state_optional_value source-mongo-identities)"
+  expected_hash="$(state_optional_value source-mongo-manifest-sha256)"
+  if [[ -z "$content" && -z "$expected_hash" && "$required" == "false" ]]; then
+    return
+  fi
+  [[ -n "$content" && "$expected_hash" =~ ^[0-9a-f]{64}$ ]] ||
+    migration_die "persisted Azure Mongo identity manifest is incomplete"
+  printf '%s\n' "$content" >"$source_mongo_manifest"
+  migration_raw source-manifest 30 1 jq -e \
+    --arg version "$MONGO_REVIEWED_VERSION" \
+    --arg fcv "$MONGO_REVIEWED_FCV" '
+      type == "array" and
+      length == 8 and
+      all(.[];
+        (.pod | type == "string") and
+        (.uid | test("^[a-z0-9-]+$")) and
+        (.image_id | type == "string") and
+        (.container_id | test("^[a-z0-9+.-]+://[a-zA-Z0-9._:-]+$")) and
+        (.restart_count | test("^[0-9]+$")) and
+        .runtime.version == $version and
+        .runtime.majorMinor == $fcv and
+        .runtime.fcv == $fcv
+      )
+    ' "$source_mongo_manifest" >/dev/null ||
+    migration_die "persisted Azure Mongo identity manifest is invalid"
+  actual_hash="$(migration_sha256 <"$source_mongo_manifest")"
+  [[ "$actual_hash" == "$expected_hash" ]] ||
+    migration_die "persisted Azure Mongo identity manifest hash differs"
+}
+
+verify_source_mongo_identity() {
+  local pod="$1"
+  local pod_json uid image_id container_id restart_count runtime expected
+  local expected_uid expected_image_id expected_container_id expected_restart_count
+  local expected_runtime actual_runtime
+  pod_json="$(kube_capture azure source-mongo-identity 30 2 \
+    get pod "$pod" -n "$AZURE_NAMESPACE" -o json)"
+  migration_raw source-mongo-identity 30 1 jq -e '
+    ([.status.conditions[] | select(
+      .type == "Ready" and .status == "True"
+    )] | length) == 1
+  ' <<<"$pod_json" >/dev/null ||
+    migration_die "Azure Mongo pod changed readiness during migration: $pod"
+  uid="$(migration_raw source-mongo-identity 30 1 jq -r \
+    '.metadata.uid // empty' <<<"$pod_json")"
+  image_id="$(migration_raw source-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].imageID // empty' <<<"$pod_json")"
+  container_id="$(migration_raw source-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].containerID // empty' <<<"$pod_json")"
+  restart_count="$(migration_raw source-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].restartCount // empty' <<<"$pod_json")"
+  source_mongo_image_is_reviewed "$image_id" ||
+    migration_die "Azure Mongo image drifted from the reviewed release: $pod"
+  runtime="$(mongo_runtime azure "$pod")"
+  mongo_runtime_is_reviewed "$runtime" ||
+    migration_die "Azure Mongo runtime drifted from version 8.2.12 and FCV 8.2: $pod"
+
+  if [[ -f "$source_mongo_manifest" ]]; then
+    expected="$(migration_raw source-manifest 30 1 jq -c \
+      --arg pod "$pod" '
+        [.[] | select(.pod == $pod)] |
+        if length == 1 then .[0] else empty end
+      ' "$source_mongo_manifest")"
+    [[ -n "$expected" ]] ||
+      migration_die "Azure Mongo pod is absent from the preflight identity manifest: $pod"
+    expected_uid="$(migration_raw source-manifest 30 1 jq -r \
+      '.uid' <<<"$expected")"
+    expected_image_id="$(migration_raw source-manifest 30 1 jq -r \
+      '.image_id' <<<"$expected")"
+    expected_container_id="$(migration_raw source-manifest 30 1 jq -r \
+      '.container_id' <<<"$expected")"
+    expected_restart_count="$(migration_raw source-manifest 30 1 jq -r \
+      '.restart_count' <<<"$expected")"
+    expected_runtime="$(migration_raw source-manifest 30 1 jq -c \
+      '.runtime | {version,majorMinor,fcv}' <<<"$expected")"
+    actual_runtime="$(migration_raw mongo-runtime 30 1 jq -c \
+      '{version,majorMinor,fcv}' <<<"$runtime")"
+    [[ "$uid" == "$expected_uid" &&
+      "$image_id" == "$expected_image_id" &&
+      "$container_id" == "$expected_container_id" &&
+      "$restart_count" == "$expected_restart_count" &&
+      "$actual_runtime" == "$expected_runtime" ]] ||
+      migration_die "Azure Mongo pod identity changed after preflight: $pod"
+  fi
+}
+
+verify_target_mongo_identity() {
+  local require_baseline="${1:-true}"
+  local desired_image pod_json uid image_id container_id restart_count runtime
+  local expected_runtime actual_runtime
+  [[ "$require_baseline" == "true" || "$require_baseline" == "false" ]] ||
+    migration_die "target Mongo identity validation mode is invalid"
+  desired_image="$(kube_capture oci target-mongo-identity 30 2 \
+    get statefulset gaming-auth-mongo-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  [[ "$desired_image" == "$MONGO_REVIEWED_TARGET_IMAGE" ]] ||
+    migration_die "OCI Mongo desired image drifted from the reviewed release"
+  pod_json="$(kube_capture oci target-mongo-identity 30 2 \
+    get pod "$target_mongo_pod" -n "$OCI_K8S_NAMESPACE" -o json)"
+  migration_raw target-mongo-identity 30 1 jq -e '
+    ([.status.conditions[] | select(
+      .type == "Ready" and .status == "True"
+    )] | length) == 1
+  ' <<<"$pod_json" >/dev/null ||
+    migration_die "OCI Mongo pod changed readiness during migration"
+  uid="$(migration_raw target-mongo-identity 30 1 jq -r \
+    '.metadata.uid // empty' <<<"$pod_json")"
+  image_id="$(migration_raw target-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].imageID // empty' <<<"$pod_json")"
+  container_id="$(migration_raw target-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].containerID // empty' <<<"$pod_json")"
+  restart_count="$(migration_raw target-mongo-identity 30 1 jq -r \
+    '.status.containerStatuses[0].restartCount // empty' <<<"$pod_json")"
+  target_mongo_image_is_reviewed "$image_id" ||
+    migration_die "OCI Mongo image drifted from the reviewed ARM64 release"
+  runtime="$(mongo_runtime oci "$target_mongo_pod")"
+  mongo_runtime_is_reviewed "$runtime" ||
+    migration_die "OCI Mongo runtime drifted from version 8.2.12 and FCV 8.2"
+  if [[ "$require_baseline" == "true" ]]; then
+    [[ "$uid" == "$target_mongo_uid" &&
+      "$image_id" == "$target_mongo_image_id" &&
+      "$container_id" == "$target_mongo_container_id" &&
+      "$restart_count" == "$target_mongo_restart_count" ]] ||
+      migration_die "OCI Mongo pod identity changed after preflight"
+    expected_runtime="$(migration_raw mongo-runtime 30 1 jq -c \
+      '{version,majorMinor,fcv}' <<<"$target_runtime_signature")"
+    actual_runtime="$(migration_raw mongo-runtime 30 1 jq -c \
+      '{version,majorMinor,fcv}' <<<"$runtime")"
+    [[ "$actual_runtime" == "$expected_runtime" ]] ||
+      migration_die "OCI Mongo runtime changed after preflight"
+  fi
+}
+
 verify_source_mongo_stays_ready() {
   local mapping _service _database sts _pod _pvc ready replicas
   for mapping in "${DATABASE_MAPPINGS[@]}"; do
@@ -1633,6 +2042,7 @@ verify_source_mongo_stays_ready() {
       -o jsonpath='{.status.readyReplicas}')"
     [[ "$replicas" == "1" && "$ready" == "1" ]] ||
       migration_die "Azure Mongo StatefulSet changed during freeze: $sts"
+    verify_source_mongo_identity "$_pod"
   done
 }
 
@@ -1697,7 +2107,9 @@ capture_transfers() {
     IFS='|' read -r _service database _sts pod _pvc <<<"$mapping"
     signature="$signature_dir/${database}.source.json"
     archive="$transport_dir/${database}.archive.gz.age"
+    verify_source_mongo_identity "$pod"
     mongo_signature_kube azure "$pod" "$database" "$signature"
+    verify_source_mongo_identity "$pod"
     migration_maybe_heartbeat 1
     kube_raw azure mongo-transport "$STREAM_TIMEOUT_SECONDS" 1 \
       exec -n "$AZURE_NAMESPACE" "$pod" -- \
@@ -1708,6 +2120,7 @@ capture_transfers() {
     local statuses=("${PIPESTATUS[@]}")
     [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" && -s "$archive" ]] ||
       migration_die "encrypted compressed transport capture failed for $database"
+    verify_source_mongo_identity "$pod"
     migration_maybe_heartbeat 1
     cipher_hash="$(migration_sha256 <"$archive")"
     signature_hash="$(migration_sha256 <"$signature")"
@@ -1755,12 +2168,13 @@ validate_transfers_disposable() {
     docker exec "$disposable_container" mongosh --quiet --eval '
       const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
       print(JSON.stringify({
+        version:db.version(),
         majorMinor:db.version().split(".").slice(0,2).join("."),
         fcv:result.featureCompatibilityVersion.version
       }));
     ' | migration_raw disposable-runtime-json 30 1 jq -c .)"
   expected_runtime="$(migration_raw mongo-runtime 30 1 jq -c \
-    '{majorMinor,fcv}' <<<"$target_runtime_signature")"
+    '{version,majorMinor,fcv}' <<<"$target_runtime_signature")"
   [[ "$disposable_runtime" == "$expected_runtime" ]] ||
     migration_die "disposable Mongo version/FCV differs from OCI target"
   for mapping in "${DATABASE_MAPPINGS[@]}"; do
@@ -1837,6 +2251,7 @@ freeze_oci() {
 
 drop_target_databases() {
   local inventory mapping _service database _sts _pod _pvc result
+  verify_target_mongo_identity
   inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
   migration_raw target-inventory 30 1 jq -e \
     --argjson expected "$(expected_database_json)" '
@@ -1849,6 +2264,7 @@ drop_target_databases() {
   for mapping in "${DATABASE_MAPPINGS[@]}"; do
     IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
     state_assert_fence
+    verify_target_mongo_identity
     migration_failure_hook "before-drop-$database"
     result="$(mongo_eval oci "$target_mongo_pod" \
       "print(JSON.stringify(db.getSiblingDB('${database}').dropDatabase()));")"
@@ -1859,6 +2275,7 @@ drop_target_databases() {
         .some(item=>item.name==='${database}'));
     ")" == "false" ]] ||
       migration_die "OCI database remains visible after drop: $database"
+    verify_target_mongo_identity
     state_advance "dropped-$database" true true
     migration_failure_hook "after-drop-$database"
   done
@@ -1870,6 +2287,7 @@ restore_target_databases() {
     IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
     archive="$transport_dir/${database}.archive.gz.age"
     state_assert_fence
+    verify_target_mongo_identity
     migration_failure_hook "before-restore-$database"
     migration_maybe_heartbeat 1
     migration_raw transport-decryption "$STREAM_TIMEOUT_SECONDS" 1 \
@@ -1881,6 +2299,7 @@ restore_target_databases() {
     local statuses=("${PIPESTATUS[@]}")
     [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]] ||
       migration_die "OCI restore failed for $database"
+    verify_target_mongo_identity
     state_advance "restored-$database" true true
     migration_failure_hook "after-restore-$database"
   done
@@ -1892,6 +2311,7 @@ verify_target_exact() {
   local signature_args=()
   local target_manifest="$WORK_DIR/target-signature-manifest.tsv"
   : >"$target_manifest"
+  verify_target_mongo_identity
   inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
   [[ "$inventory" == "$(expected_database_json)" ]] ||
     migration_die "OCI application database inventory is not the exact eight-name set"
@@ -1899,7 +2319,9 @@ verify_target_exact() {
     IFS='|' read -r _service database _sts _pod _pvc <<<"$mapping"
     expected="$signature_dir/${database}.source.json"
     actual="$signature_dir/${database}.target.json"
+    verify_target_mongo_identity
     mongo_signature_kube oci "$target_mongo_pod" "$database" "$actual"
+    verify_target_mongo_identity
     cmp -s "$expected" "$actual" ||
       migration_die "OCI DB/collection/document/index/validator/options equality failed: $database"
     signature_hash="$(migration_sha256 <"$actual")"
@@ -1911,6 +2333,7 @@ verify_target_exact() {
   [[ "$source_aggregate" =~ ^[0-9a-f]{64}$ &&
     "$target_aggregate" == "$source_aggregate" ]] ||
     migration_die "aggregate source/target signature parity failed"
+  verify_target_mongo_identity
   state_advance target-exactly-validated true true \
     "database-count=8" \
     "logical-parity=true" \
@@ -1936,6 +2359,7 @@ restore_oci_baseline() {
         -n "$OCI_K8S_NAMESPACE" --timeout=9m
     fi
   done
+  set_http_write_fence_config false
   ingress="$(baseline_value "$oci_baseline" ingress)"
   scale_deployment oci ingress-nginx ingress-nginx-controller "$ingress"
   if (( ingress > 0 )); then
@@ -1948,6 +2372,7 @@ restore_oci_baseline() {
 
 close_oci() {
   freeze_ingress oci
+  set_http_write_fence_config true
   freeze_applications oci
   scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
   wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
@@ -1958,6 +2383,7 @@ close_oci() {
 recreate_rabbitmq_and_restart() {
   local service replicas ingress rows count names expected backlog bad
   state_assert_fence
+  verify_target_mongo_identity
   scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
   wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
     app=gaming-rabbitmq
@@ -1973,6 +2399,7 @@ recreate_rabbitmq_and_restart() {
 
   for service in "${BACKEND_SERVICES[@]}" client; do
     state_assert_fence
+    verify_target_mongo_identity
     replicas="$(baseline_value "$oci_baseline" "$service")"
     [[ "$replicas" =~ ^[1-9][0-9]*$ ]] ||
       migration_die "OCI successful baseline requires active $service replicas"
@@ -1999,11 +2426,18 @@ recreate_rabbitmq_and_restart() {
   [[ "$ingress" =~ ^[1-9][0-9]*$ ]] ||
     migration_die "OCI ingress baseline must be active for validation"
   state_assert_fence
+  verify_target_mongo_identity
+  [[ "$(state_optional_value http-write-fence)" == "true" &&
+    "$(http_write_fence_config_status)" == "true" ]] ||
+    migration_die "HTTP mutation fence is absent before ingress activation"
   scale_deployment oci ingress-nginx ingress-nginx-controller "$ingress"
   kube_run oci ingress-rollout 600 1 \
     rollout status deployment/ingress-nginx-controller \
     -n ingress-nginx --timeout=9m
-  state_advance awaiting-protected-health true true
+  wait_http_write_fence_runtime true
+  migration_failure_hook http-write-fence-runtime
+  state_advance awaiting-protected-health true true \
+    "http-write-fence=true"
 }
 
 verify_final_exact_state() {
@@ -2013,6 +2447,7 @@ verify_final_exact_state() {
   target_mongo_pod="$(kube_capture oci target-pod 30 2 \
     get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
     -o jsonpath='{.items[0].metadata.name}')"
+  verify_target_mongo_identity
   inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
   [[ "$inventory" == "$(expected_database_json)" ]] ||
     migration_die "final OCI database inventory is not exact"
@@ -2048,12 +2483,18 @@ verify_final_exact_state() {
   [[ "$count" == "17" && "$names" == "$expected_names" &&
     "$backlog" == "0" && "$bad" == "0" ]] ||
     migration_die "final OCI RabbitMQ state differs"
+  verify_target_mongo_identity
 }
 
 ensure_azure_frozen() {
   freeze_ingress azure
   freeze_applications azure
   verify_source_mongo_stays_ready
+}
+
+freeze_azure_after_commit() {
+  freeze_ingress azure
+  freeze_applications azure
 }
 
 cleanup() {
@@ -2064,6 +2505,7 @@ cleanup() {
   set +e
   local cleanup_failed=0
   local current_phase=""
+  local live_http_fence=""
   if [[ -n "$disposable_container" ]]; then
     migration_raw disposable-delete 60 2 \
       docker rm -f "$disposable_container" >/dev/null 2>&1 ||
@@ -2079,17 +2521,22 @@ cleanup() {
     if [[ "$state_boundary" == "1" ]]; then
       case "$current_phase" in
         cutover-committed | cutover-forward-recovery)
-          ensure_azure_frozen || cleanup_failed=1
-          state_advance cutover-forward-recovery true false ||
+          freeze_azure_after_commit || cleanup_failed=1
+          if live_http_fence="$(http_write_fence_config_status)"; then
+            state_advance cutover-forward-recovery true false \
+              "http-write-fence=$live_http_fence" || cleanup_failed=1
+          else
             cleanup_failed=1
+          fi
           ;;
         completed)
-          ensure_azure_frozen || cleanup_failed=1
+          freeze_azure_after_commit || cleanup_failed=1
           ;;
         *)
           close_oci || cleanup_failed=1
           ensure_azure_frozen || cleanup_failed=1
-          state_advance recovery-required true true || cleanup_failed=1
+          state_advance recovery-required true true \
+            "http-write-fence=true" || cleanup_failed=1
           ;;
       esac
     else
@@ -2099,12 +2546,14 @@ cleanup() {
       fi
       ensure_azure_frozen || baseline_restore_failed=1
       if [[ "$baseline_restore_failed" == "0" ]]; then
-        state_advance failed-before-destructive-boundary false false ||
+        state_advance failed-before-destructive-boundary false false \
+          "http-write-fence=false" ||
           cleanup_failed=1
         state_release || cleanup_failed=1
       else
         close_oci || cleanup_failed=1
-        state_advance pre-destructive-recovery-required false true ||
+        state_advance pre-destructive-recovery-required false true \
+          "http-write-fence=true" ||
           cleanup_failed=1
         cleanup_failed=1
       fi
@@ -2189,6 +2638,7 @@ validate_inputs() {
   signature_dir="$WORK_DIR/signatures"
   state_dir="$WORK_DIR/state"
   identity_file="$WORK_DIR/age-identity.txt"
+  source_mongo_manifest="$state_dir/source-mongo-identities.json"
   mkdir -p "$transport_dir" "$signature_dir" "$state_dir" \
     "$(dirname "$JOURNAL_FILE")" "$(dirname "$SUMMARY_FILE")"
   chmod 700 "$WORK_DIR" "$transport_dir" "$signature_dir" "$state_dir"
@@ -2199,6 +2649,7 @@ validate_inputs() {
 }
 
 main() {
+  local finalize_phase=""
   validate_inputs
   trap 'cleanup $?' EXIT
   trap 'cleanup 130' INT
@@ -2216,7 +2667,15 @@ main() {
       oci_baseline="$(baseline_capture oci)"
       state_acquire
       state_advance azure-inspected \
-        "$(state_boundary_text)" "$(state_recovery_text)"
+        "$(state_boundary_text)" "$(state_recovery_text)" \
+        "target-mongo-pod-uid=$target_mongo_uid" \
+        "target-mongo-image-id=$target_mongo_image_id" \
+        "target-mongo-container-id=$target_mongo_container_id" \
+        "target-mongo-restart-count=$target_mongo_restart_count" \
+        "target-mongo-runtime=$target_runtime_signature" \
+        "source-mongo-manifest-sha256=$(migration_sha256 <"$source_mongo_manifest")" \
+        "source-mongo-identities=$(migration_raw source-manifest 30 1 \
+          jq -c . "$source_mongo_manifest")"
       freeze_azure
       state_advance azure-writers-frozen \
         "$(state_boundary_text)" "$(state_recovery_text)"
@@ -2224,10 +2683,13 @@ main() {
       capture_transfers
       validate_transfers_disposable
       freeze_oci
+      install_http_write_fence
       unlock_target_writes_for_retry
+      verify_source_mongo_stays_ready
       drop_target_databases
       restore_target_databases
       verify_target_exact
+      verify_target_mongo_identity
       lock_target_writes
       recreate_rabbitmq_and_restart
       state_write_summary
@@ -2239,28 +2701,51 @@ main() {
       ;;
     finalize-success)
       state_load_owned
-      ensure_azure_frozen
+      finalize_phase="$(state_value phase)"
       target_mongo_pod="$(kube_capture oci target-pod 30 2 \
         get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
         -o jsonpath='{.items[0].metadata.name}')"
       [[ -n "$target_mongo_pod" ]] ||
         migration_die "OCI Mongo pod is missing for cutover finalization"
-      case "$(state_value phase)" in
+      case "$finalize_phase" in
         awaiting-protected-health)
-          [[ "$(state_optional_value mongo-write-lock)" == "true" &&
-            "$(target_write_lock_status)" == "true" &&
-            "$(state_optional_value rabbitmq-write-lock)" == "true" &&
-            "$(rabbitmq_write_permission)" == "^$" ]] ||
-            migration_die "OCI data or messaging writes were enabled before parity certification"
+          restore_source_mongo_manifest_from_state true
+          ensure_azure_frozen
+          target_mongo_uid="$(state_value target-mongo-pod-uid)"
+          target_mongo_image_id="$(state_value target-mongo-image-id)"
+          target_mongo_container_id="$(state_value target-mongo-container-id)"
+          target_mongo_restart_count="$(state_value target-mongo-restart-count)"
+          target_runtime_signature="$(state_value target-mongo-runtime)"
+          [[ "$target_mongo_uid" =~ ^[a-z0-9-]+$ ]] ||
+            migration_die "persisted OCI Mongo pod UID is invalid"
+          target_mongo_image_is_reviewed "$target_mongo_image_id" ||
+            migration_die "persisted OCI Mongo image identity is invalid"
+          [[ "$target_mongo_container_id" =~ ^[a-z0-9+.-]+://[a-zA-Z0-9._:-]+$ &&
+            "$target_mongo_restart_count" =~ ^[0-9]+$ ]] ||
+            migration_die "persisted OCI Mongo container identity is invalid"
+          mongo_runtime_is_reviewed "$target_runtime_signature" ||
+            migration_die "persisted OCI Mongo runtime identity is invalid"
+          verify_target_mongo_identity true
+          verify_cutover_write_locks
           verify_final_exact_state
+          verify_target_mongo_identity true
+          verify_cutover_write_locks
           state_advance cutover-committed true false \
-            "mongo-write-lock=true" "rabbitmq-write-lock=true"
+            "mongo-write-lock=true" "rabbitmq-write-lock=true" \
+            "http-write-fence=true"
           ;;
         cutover-committed | cutover-forward-recovery)
+          freeze_azure_after_commit
+          verify_target_mongo_identity false
           ;;
         completed)
+          freeze_azure_after_commit
+          verify_target_mongo_identity false
           [[ "$(target_write_lock_status)" == "false" &&
-            "$(rabbitmq_write_permission)" == ".*" ]] ||
+            "$(rabbitmq_write_permission)" == ".*" &&
+            "$(state_optional_value http-write-fence)" == "false" &&
+            "$(http_write_fence_config_status)" == "false" &&
+            "$(http_write_fence_runtime_status)" == "false" ]] ||
             migration_die "completed cutover retained a write lock"
           if [[ "$(state_lock_value state)" == "active" ]]; then
             state_release
@@ -2284,8 +2769,11 @@ main() {
       migration_failure_hook mongo-write-unlocked
       unlock_rabbitmq_writes
       migration_failure_hook rabbitmq-write-unlocked
+      remove_http_write_fence
+      migration_failure_hook http-write-fence-removed
       state_advance completed true false \
-        "mongo-write-lock=false" "rabbitmq-write-lock=false"
+        "mongo-write-lock=false" "rabbitmq-write-lock=false" \
+        "http-write-fence=false"
       state_release
       state_write_summary
       rm -rf "$WORK_DIR"
@@ -2296,25 +2784,29 @@ main() {
       ;;
     fail-closed)
       state_load_owned
+      restore_source_mongo_manifest_from_state false
       if [[ "$state_boundary" == "1" ]]; then
         case "$(state_value phase)" in
           cutover-committed | cutover-forward-recovery)
-            ensure_azure_frozen
-            state_advance cutover-forward-recovery true false
+            freeze_azure_after_commit
+            state_advance cutover-forward-recovery true false \
+              "http-write-fence=$(http_write_fence_config_status)"
             ;;
           completed)
-            ensure_azure_frozen
+            freeze_azure_after_commit
             ;;
           *)
             close_oci
             ensure_azure_frozen
-            state_advance recovery-required true true
+            state_advance recovery-required true true \
+              "http-write-fence=true"
             ;;
         esac
       else
         restore_oci_baseline
         ensure_azure_frozen
-        state_advance failed-before-destructive-boundary false false
+        state_advance failed-before-destructive-boundary false false \
+          "http-write-fence=false"
         if [[ "$(state_lock_value state)" == "active" ]]; then
           state_release
         fi

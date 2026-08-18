@@ -284,15 +284,20 @@ import sys
 
 pods = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = {
-    "gaming-auth-mongo": "sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1",
-    "gaming-rabbitmq": "sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b",
+    "gaming-auth-mongo": {
+        "sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3",
+        "sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7ceafc8fa489c0486525b4",
+    },
+    "gaming-rabbitmq": {
+        "sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b",
+    },
 }
 with open(sys.argv[2], encoding="utf-8") as handle:
     for row in csv.reader(handle, delimiter="\t"):
         if not row:
             continue
         service, _, _, _, platform_digest = row
-        expected[f"gaming-{service}"] = platform_digest
+        expected[f"gaming-{service}"] = {platform_digest}
 
 result = []
 for pod in pods.get("items", []):
@@ -306,8 +311,11 @@ for pod in pods.get("items", []):
             reasons.append(waiting)
         if terminated:
             reasons.append(terminated)
-        digest = expected.get(status.get("name"))
-        if not digest or not status.get("imageID", "").endswith("@" + digest):
+        digests = expected.get(status.get("name"), set())
+        if not any(
+            status.get("imageID", "").endswith("@" + digest)
+            for digest in digests
+        ):
             digest_match = False
     if pod.get("status", {}).get("reason"):
         reasons.append(pod["status"]["reason"])
@@ -355,6 +363,22 @@ PY
 
 mongo_pod="$(kubectl get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo -o jsonpath='{.items[0].metadata.name}')"
 [[ -n "$mongo_pod" ]] || oci_die "Mongo pod is missing"
+mongo_runtime_json="$(
+  kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
+    mongosh --quiet --eval '
+      const result=db.adminCommand({getParameter:1,featureCompatibilityVersion:1});
+      if (result.ok !== 1) throw new Error("FCV read failed");
+      print(JSON.stringify({
+        version:db.version(),
+        majorMinor:db.version().split(".").slice(0,2).join("."),
+        fcv:result.featureCompatibilityVersion.version
+      }));
+    '
+)"
+jq -e '
+  .version == "8.2.12" and .majorMinor == "8.2" and .fcv == "8.2"
+' <<<"$mongo_runtime_json" >/dev/null ||
+  oci_die "Mongo runtime differs from exact version 8.2.12 and FCV 8.2"
 database_json="$(
   kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
     mongosh --quiet --eval \
@@ -486,6 +510,7 @@ jq -n \
   --argjson mongo_pvc_count "$mongo_pvc_count" \
   --argjson mongo_pvc_bound "$mongo_pvc_bound" \
   --argjson mongo_pvc_gib "$mongo_pvc_gib" \
+  --argjson mongo_runtime "$mongo_runtime_json" \
   --argjson databases "$database_json" \
   --argjson services "$service_health" \
   --argjson queue_count "$queue_count" \
@@ -534,6 +559,9 @@ jq -n \
       pvc_count: $mongo_pvc_count,
       pvc_bound: $mongo_pvc_bound,
       pvc_gib: $mongo_pvc_gib,
+      version: $mongo_runtime.version,
+      major_minor: $mongo_runtime.majorMinor,
+      fcv: $mongo_runtime.fcv,
       logical_databases: $databases
     },
     services: $services,
