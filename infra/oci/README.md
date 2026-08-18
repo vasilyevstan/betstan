@@ -120,7 +120,9 @@ An armed schedule also requires
 window so protected and public validation are not mistaken for a hung run.
 The expected SHA, run, attempt, migration ID, and fencing generation must be
 set immediately after dispatch and before approving `oci-migration`; recovery
-checks those values against both the workflow run and Azure journal.
+checks those values against both the workflow run and Azure journal. Set and
+clear these variables in the `azure-migration-recovery` environment; an
+environment value overrides a repository value with the same name.
 
 The capacity-acquirer identity needs only `VOLUME_INSPECT`, `VOLUME_UPDATE`,
 and `VOLUME_DELETE` in the deployment compartment for boot-volume
@@ -191,7 +193,11 @@ fixtures.
    A pre-destructive failure restores OCI workload baselines. Any later
    pre-commit failure keeps OCI closed and marks `recovery-required`; a later
    full retry clears partial application databases and starts again from
-   frozen Azure. A post-commit interruption is retried only forward through
+   frozen Azure. A descendant deployment-only hotfix may reuse the exact
+   image-equivalent deployed ancestor provenance only for that closed retry;
+   the journal must independently prove the old owner is inactive, Azure is
+   frozen, and OCI ingress, applications, and RabbitMQ remain at zero. A
+   post-commit interruption is retried only forward through
    idempotent write unlock and completion; retry from Azure is permanently
    forbidden because OCI may already have accepted writes. No path reopens
    Azure writers, retains a data artifact, or rolls back to the previous OCI

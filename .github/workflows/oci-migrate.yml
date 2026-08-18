@@ -25,8 +25,18 @@ on:
         required: true
         default: false
         type: boolean
+      recover_closed_oci:
+        description: Reuse an image-equivalent ancestor deployment while OCI is fail-closed
+        required: true
+        default: false
+        type: boolean
+      recovery_deploy_source_sha:
+        description: Exact deployed ancestor SHA for a fail-closed recovery retry
+        required: false
+        default: ""
+        type: string
       confirmation:
-        description: Type REPLACE OCI DATA FROM AZURE
+        description: Type REPLACE OCI DATA FROM AZURE or RECOVER CLOSED OCI DATA FROM AZURE
         required: true
         type: string
 
@@ -55,6 +65,9 @@ jobs:
       DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       REPLACE_OCI_DATA: ${{ inputs.replace_oci_data }}
+      RECOVER_CLOSED_OCI: ${{ inputs.recover_closed_oci }}
+      RECOVERY_DEPLOY_SOURCE_INPUT: ${{ inputs.recovery_deploy_source_sha }}
+      DEPLOY_SOURCE_SHA: ${{ inputs.recovery_deploy_source_sha || inputs.approved_sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -127,20 +140,39 @@ jobs:
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$REPLACE_OCI_DATA" = "true" ]
-          [ "$CONFIRMATION" = "REPLACE OCI DATA FROM AZURE" ]
           [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          case "$RECOVER_CLOSED_OCI" in
+            false)
+              [ "$CONFIRMATION" = "REPLACE OCI DATA FROM AZURE" ]
+              [ "$DEPLOY_SOURCE_SHA" = "$SOURCE_SHA" ]
+              [ -z "$RECOVERY_DEPLOY_SOURCE_INPUT" ]
+              ;;
+            true)
+              [ "$CONFIRMATION" = "RECOVER CLOSED OCI DATA FROM AZURE" ]
+              [ "$DEPLOY_SOURCE_SHA" != "$SOURCE_SHA" ]
+              git cat-file -e "${DEPLOY_SOURCE_SHA}^{commit}"
+              git merge-base --is-ancestor "$DEPLOY_SOURCE_SHA" "$SOURCE_SHA"
+              ./infra/oci/scripts/compare-image-inputs.sh \
+                "$DEPLOY_SOURCE_SHA" "$SOURCE_SHA"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
 
           validate_run() {
             local workflow_file="$1"
             local run_id="$2"
             local expected_event="$3"
+            local expected_sha="$4"
             local workflow_id
             workflow_id="$(
               ./infra/oci/scripts/bounded-command.py \
@@ -158,16 +190,19 @@ jobs:
             [ "$observed_workflow" = "$workflow_id" ]
             [ "$path" = ".github/workflows/$workflow_file" ]
             [ "$event" = "$expected_event" ]
-            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_sha" = "$expected_sha" ]
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ]
             [ "$conclusion" = "success" ]
             [ "$attempt" = "1" ]
           }
-          validate_run oci-production-build.yml "$BUILD_RUN_ID" workflow_run
-          validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch
-          validate_run oci-production-deploy.yml "$DEPLOY_RUN_ID" workflow_dispatch
+          validate_run \
+            oci-production-build.yml "$BUILD_RUN_ID" workflow_run "$SOURCE_SHA"
+          validate_run \
+            oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch "$SOURCE_SHA"
+          validate_run \
+            oci-production-deploy.yml "$DEPLOY_RUN_ID" workflow_dispatch "$DEPLOY_SOURCE_SHA"
 
       - name: Download exact build provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -211,7 +246,7 @@ jobs:
           VERIFY_REMOTE=0 BOOT_IMAGES=0 \
             ./infra/oci/scripts/verify-images.sh
 
-          grep -Fx "source_sha=$SOURCE_SHA" artifacts/deploy/provenance.txt
+          grep -Fx "source_sha=$DEPLOY_SOURCE_SHA" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_id=$DEPLOY_RUN_ID" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_attempt=1" artifacts/deploy/provenance.txt
           cmp -s artifacts/oci-migration/build-images.tsv artifacts/deploy/images.tsv
@@ -254,6 +289,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf '%s\n' \
             "source_sha=$SOURCE_SHA" \
+            "deploy_source_sha=$DEPLOY_SOURCE_SHA" \
+            "recover_closed_oci=$RECOVER_CLOSED_OCI" \
             "build_run_id=$BUILD_RUN_ID" \
             "build_run_attempt=1" \
             "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID" \
@@ -875,6 +912,9 @@ jobs:
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
       DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+      RECOVER_CLOSED_OCI: ${{ inputs.recover_closed_oci }}
+      RECOVERY_DEPLOY_SOURCE_INPUT: ${{ inputs.recovery_deploy_source_sha }}
+      DEPLOY_SOURCE_SHA: ${{ inputs.recovery_deploy_source_sha || inputs.approved_sha }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       REPLACE_OCI_DATA: ${{ inputs.replace_oci_data }}
       PUBLIC_VALIDATION_RESULT: ${{ needs.public-validate.result }}
@@ -925,9 +965,26 @@ jobs:
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$REPLACE_OCI_DATA" = "true" ]
           [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
+          [[ "$DEPLOY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          case "$RECOVER_CLOSED_OCI" in
+            false)
+              [ "$DEPLOY_SOURCE_SHA" = "$SOURCE_SHA" ]
+              [ -z "$RECOVERY_DEPLOY_SOURCE_INPUT" ]
+              ;;
+            true)
+              [ "$DEPLOY_SOURCE_SHA" != "$SOURCE_SHA" ]
+              git cat-file -e "${DEPLOY_SOURCE_SHA}^{commit}"
+              git merge-base --is-ancestor "$DEPLOY_SOURCE_SHA" "$SOURCE_SHA"
+              ./infra/oci/scripts/compare-image-inputs.sh \
+                "$DEPLOY_SOURCE_SHA" "$SOURCE_SHA"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
 
       - name: Download exact deployment provenance for finalization
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -951,7 +1008,7 @@ jobs:
         id: provenance
         run: |
           set -euo pipefail
-          grep -Fx "source_sha=$SOURCE_SHA" artifacts/deploy/provenance.txt
+          grep -Fx "source_sha=$DEPLOY_SOURCE_SHA" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_id=$DEPLOY_RUN_ID" artifacts/deploy/provenance.txt
           grep -Fx "deployment_run_attempt=1" artifacts/deploy/provenance.txt
           # shellcheck disable=SC1091
@@ -1426,6 +1483,8 @@ jobs:
       name: oci-migration
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
+      DEPLOY_SOURCE_SHA: ${{ inputs.recovery_deploy_source_sha || inputs.approved_sha }}
+      RECOVER_CLOSED_OCI: ${{ inputs.recover_closed_oci }}
       AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 }}
     steps:
       - name: Checkout exact committed migration without credentials
@@ -1540,6 +1599,9 @@ jobs:
 
           [[ "$migration_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RECOVER_CLOSED_OCI" == "true" ||
+            "$RECOVER_CLOSED_OCI" == "false" ]]
           [ "$migration_id" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]
           [ "$source_sha" = "$SOURCE_SHA" ]
           [ "$run_id" = "$GITHUB_RUN_ID" ]
@@ -1572,6 +1634,8 @@ jobs:
             "schema=betstan.oci-migration-success.v1" \
             "migration_id=$migration_id" \
             "source_sha=$source_sha" \
+            "runtime_deploy_source_sha=$DEPLOY_SOURCE_SHA" \
+            "closed_recovery_retry=$RECOVER_CLOSED_OCI" \
             "github_run_id=$run_id" \
             "github_run_attempt=$run_attempt" \
             "terminal_phase=DEPLOYED_HEALTHY" \

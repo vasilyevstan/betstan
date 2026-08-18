@@ -30,10 +30,12 @@ read-only and prefer the checked-in recovery workflow and scripts.
   fencing generation increments atomically.
 - Keep the journal's original source SHA immutable. A newer release may become
   the active source SHA only when it is a Git descendant of the prior active
-  SHA, the retained phase is exactly a fully unlocked pre-destructive failure,
-  the live OCI replica baseline still matches, Azure remains fully frozen with
-  no queue backlog, and Mongo, RabbitMQ, and the HTTP fence are all
-  writable/unfenced before the atomic takeover.
+  SHA. A fully unlocked pre-destructive failure additionally requires the live
+  OCI replica baseline to match and Mongo, RabbitMQ, and HTTP to be unfenced.
+  A destructive `recovery-required` retry instead requires the active old
+  lock, retained HTTP fence and active replica baseline, plus zero live OCI
+  ingress, application, and RabbitMQ replicas. Both paths require frozen Azure
+  with no queue backlog before the atomic owner and fencing takeover.
 - Never substitute current `master` for the journal SHA during recovery.
 
 ## No-backup replacement boundary
