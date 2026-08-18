@@ -192,6 +192,8 @@ case "${1:-} ${2:-}" in
   "vmss list-instances")
     if [[ "${STUB_RUNNING_VMSS:-0}" == "1" ]]; then
       printf '%s\n' '[{"instanceView":{"statuses":[{"code":"PowerState/running"}]}}]'
+    elif [[ "${STUB_EMPTY_VMSS:-0}" == "1" ]]; then
+      printf '%s\n' '[]'
     else
       printf '%s\n' '[{"instanceView":{"statuses":[{"code":"PowerState/deallocated"}]}}]'
     fi
@@ -437,6 +439,8 @@ run_plan "$WORK_DIR/good" |
 
 run_plan "$WORK_DIR/deallocated" STUB_AKS_POWER_STATE=Deallocated |
   grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
+run_plan "$WORK_DIR/empty-vmss" STUB_EMPTY_VMSS=1 |
+  grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
 if run_plan "$WORK_DIR/running-control-plane" STUB_AKS_POWER_STATE=Running \
     >"$WORK_DIR/running-control-plane.out" 2>&1; then
   echo "retirement fixture accepted a running AKS control plane" >&2
@@ -511,4 +515,4 @@ for crash_point in aks managed primary; do
     grep -qx 'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'
 done
 
-printf 'azure_retirement_contract=PASS scenarios=14\n'
+printf 'azure_retirement_contract=PASS scenarios=15\n'

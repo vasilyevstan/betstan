@@ -64,6 +64,12 @@ conversation summaries are not authority.
   of `Succeeded`/`Stopped`. Accept that combination only as the exact
   pre-start or already-deallocated state, then require `Succeeded`/`Running`
   after start and independently prove VMSS deallocation after stop.
+- `azure/aks-set-context` writes a runner-generated kubeconfig and exports
+  `KUBE_CONFIG_PATH`; it does not honor a preselected output path. Materialize
+  that file into each reviewed isolated path before dual-cluster operations.
+- A stopped AKS VMSS may retain deallocated instances or contain zero
+  instances. Both prove that no node compute is running when the exact VMSS
+  resource identity has already been verified.
 - A stopped AKS cluster still incurs disk, load-balancer, public-IP, snapshot,
   and monitoring charges.
 - Azure retirement is complete only after the AKS and managed resource groups,

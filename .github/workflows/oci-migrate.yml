@@ -360,6 +360,15 @@ jobs:
           cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
           admin: false
 
+      - name: Materialize isolated Azure kubeconfig
+        run: |
+          set -euo pipefail
+          [[ -n "${KUBE_CONFIG_PATH:-}" ]]
+          [[ "$KUBE_CONFIG_PATH" == "$RUNNER_TEMP/"* ]]
+          [[ "$AZURE_KUBECONFIG" == "$RUNNER_TEMP/"* ]]
+          [ -f "$KUBE_CONFIG_PATH" ] && [ ! -L "$KUBE_CONFIG_PATH" ]
+          install -m 600 -- "$KUBE_CONFIG_PATH" "$AZURE_KUBECONFIG"
+
       - name: Install pinned OCI CLI
         id: oci_cli
         env:
@@ -607,7 +616,7 @@ jobs:
                 --output json
           )"
           jq -e '
-            length >= 1 and
+            type == "array" and
             all(.[]; any(.instanceView.statuses[]?;
               .code == "PowerState/deallocated"))
           ' <<<"$vmss_instances" >/dev/null
@@ -781,7 +790,7 @@ jobs:
                 --output json
           )"
           jq -e '
-            length >= 1 and
+            type == "array" and
             all(.[]; any(.instanceView.statuses[]?;
               .code == "PowerState/deallocated"))
           ' <<<"$vmss_instances" >/dev/null
@@ -798,12 +807,19 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/azure-home
         run: |
+          cleanup_status=0
           az logout >/dev/null 2>&1 || true
+          case "${KUBE_CONFIG_PATH:-}" in
+            "$RUNNER_TEMP/"*) rm -f -- "$KUBE_CONFIG_PATH" || cleanup_status=1 ;;
+            "") ;;
+            *) cleanup_status=1 ;;
+          esac
           rm -rf \
             "$RUNNER_TEMP/azure-home" \
             "$RUNNER_TEMP/oci-home" \
             "$RUNNER_TEMP/oci-migration-transport" \
-            "$RUNNER_TEMP/oci-migration-health"
+            "$RUNNER_TEMP/oci-migration-health" || cleanup_status=1
+          exit "$cleanup_status"
 
   public-validate:
     needs: migrate
@@ -1009,6 +1025,15 @@ jobs:
           cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
           admin: false
 
+      - name: Materialize finalization Azure kubeconfig
+        run: |
+          set -euo pipefail
+          [[ -n "${KUBE_CONFIG_PATH:-}" ]]
+          [[ "$KUBE_CONFIG_PATH" == "$RUNNER_TEMP/"* ]]
+          [[ "$AZURE_KUBECONFIG" == "$RUNNER_TEMP/"* ]]
+          [ -f "$KUBE_CONFIG_PATH" ] && [ ! -L "$KUBE_CONFIG_PATH" ]
+          install -m 600 -- "$KUBE_CONFIG_PATH" "$AZURE_KUBECONFIG"
+
       - name: Install pinned finalization OCI CLI
         id: final_oci_cli
         env:
@@ -1189,7 +1214,7 @@ jobs:
                 --output json
           )"
           jq -e '
-            length >= 1 and
+            type == "array" and
             all(.[]; any(.instanceView.statuses[]?;
               .code == "PowerState/deallocated"))
           ' <<<"$vmss_instances" >/dev/null
@@ -1380,12 +1405,19 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/azure-finalize
         run: |
+          cleanup_status=0
           az logout >/dev/null 2>&1 || true
+          case "${KUBE_CONFIG_PATH:-}" in
+            "$RUNNER_TEMP/"*) rm -f -- "$KUBE_CONFIG_PATH" || cleanup_status=1 ;;
+            "") ;;
+            *) cleanup_status=1 ;;
+          esac
           rm -rf \
             "$RUNNER_TEMP/azure-finalize" \
             "$RUNNER_TEMP/oci-finalize" \
             "$RUNNER_TEMP/oci-migration-finalize" \
-            "$RUNNER_TEMP/betstan-k3s-finalize"
+            "$RUNNER_TEMP/betstan-k3s-finalize" || cleanup_status=1
+          exit "$cleanup_status"
 
       - name: Build sanitized successful migration summary
         id: success_summary
