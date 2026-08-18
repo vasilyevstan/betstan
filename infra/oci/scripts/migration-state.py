@@ -68,6 +68,11 @@ def reconcile(source: dict, target: dict, kind: str) -> dict:
                 "owner-run-attempt",
             )
         )
+        active_source_unchanged = source_data.get(
+            "active-source-sha", source_data.get("original-source-sha")
+        ) == target_data.get(
+            "active-source-sha", target_data.get("original-source-sha")
+        )
         heartbeat_only = (
             same_owner
             and source_fence == target_fence
@@ -89,6 +94,7 @@ def reconcile(source: dict, target: dict, kind: str) -> dict:
             and source_fence == target_fence
             and source_sequence == target_sequence + 1
             and source_heartbeat >= target_heartbeat
+            and active_source_unchanged
         )
         takeover = (
             not same_owner
@@ -229,6 +235,7 @@ def main() -> int:
         "schema-version",
         "journal-id",
         "original-source-sha",
+        "active-source-sha",
         "migration-id",
         "owner-run-id",
         "owner-run-attempt",

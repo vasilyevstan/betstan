@@ -124,6 +124,39 @@ jobs:
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA" ]
           git merge-base --is-ancestor "$EXPECTED_SOURCE_SHA" origin/master
+          workflow_id="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 45 --attempts 2 \
+              --classification github-workflow-read -- \
+              gh api "repos/$REPOSITORY/actions/workflows/oci-migrate.yml" \
+              --jq '.id'
+          )"
+          owner_run_json="$(
+            ./infra/oci/scripts/bounded-command.py \
+              --timeout-seconds 45 --attempts 2 \
+              --classification github-run-read -- \
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$EXPECTED_OWNER_RUN_ID/attempts/1"
+          )"
+          observed_workflow="$(jq -r '.workflow_id // empty' <<<"$owner_run_json")"
+          path="$(jq -r '.path // empty' <<<"$owner_run_json")"
+          owner_event="$(jq -r '.event // empty' <<<"$owner_run_json")"
+          owner_head_sha="$(jq -r '.head_sha // empty' <<<"$owner_run_json")"
+          owner_branch="$(jq -r '.head_branch // empty' <<<"$owner_run_json")"
+          owner_repository="$(
+            jq -r '.head_repository.full_name // empty' <<<"$owner_run_json"
+          )"
+          owner_status="$(jq -r '.status // empty' <<<"$owner_run_json")"
+          owner_conclusion="$(jq -r '.conclusion // empty' <<<"$owner_run_json")"
+          owner_attempt="$(jq -r '.run_attempt // empty' <<<"$owner_run_json")"
+          [ "$observed_workflow" = "$workflow_id" ]
+          [ "$path" = ".github/workflows/oci-migrate.yml" ]
+          [ "$owner_event" = "workflow_dispatch" ]
+          [ "$owner_head_sha" = "$EXPECTED_SOURCE_SHA" ]
+          [ "$owner_branch" = "master" ]
+          [ "$owner_repository" = "$REPOSITORY" ]
+          [ "$owner_attempt" = "1" ]
+          [ "$owner_attempt" = "$EXPECTED_OWNER_RUN_ATTEMPT" ]
           case "$GITHUB_EVENT_NAME" in
             schedule)
               [ "$RECOVERY_ENABLED" = "true" ]
@@ -139,31 +172,9 @@ jobs:
               ;;
             workflow_run)
               [[ "$UPSTREAM_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-              workflow_id="$(
-                ./infra/oci/scripts/bounded-command.py \
-                  --timeout-seconds 45 --attempts 2 \
-                  --classification github-workflow-read -- \
-                  gh api "repos/$REPOSITORY/actions/workflows/oci-migrate.yml" \
-                  --jq '.id'
-              )"
-              read -r observed_workflow path event head_sha branch repository status conclusion attempt <<<"$(
-                ./infra/oci/scripts/bounded-command.py \
-                  --timeout-seconds 45 --attempts 2 \
-                  --classification github-run-read -- \
-                  gh api "repos/$REPOSITORY/actions/runs/$UPSTREAM_RUN_ID/attempts/1" \
-                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
-              )"
-              [ "$observed_workflow" = "$workflow_id" ]
-              [ "$path" = ".github/workflows/oci-migrate.yml" ]
-              [ "$event" = "workflow_dispatch" ]
-              [ "$head_sha" = "$EXPECTED_SOURCE_SHA" ]
-              [ "$branch" = "master" ]
-              [ "$repository" = "$REPOSITORY" ]
-              [ "$status" = "completed" ]
-              [ "$conclusion" != "success" ]
-              [ "$attempt" = "1" ]
+              [ "$owner_status" = "completed" ]
+              [ "$owner_conclusion" != "success" ]
               [ "$UPSTREAM_RUN_ID" = "$EXPECTED_OWNER_RUN_ID" ]
-              [ "$attempt" = "$EXPECTED_OWNER_RUN_ATTEMPT" ]
               ;;
             *)
               exit 1
@@ -183,6 +194,7 @@ jobs:
           HOME: ${{ runner.temp }}/azure-recovery
         run: |
           set -euo pipefail
+          mkdir -p artifacts/azure-migration-recovery
           [ "$AZURE_CLUSTER_NAME" = "betstan-aks" ]
           cluster_json="$(
             ./infra/oci/scripts/bounded-command.py \

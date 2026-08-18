@@ -28,6 +28,12 @@ read-only and prefer the checked-in recovery workflow and scripts.
 - Take over a stale lock only when GitHub proves the owner run is inactive,
   both cluster journals agree, live fingerprints and phase match, and the
   fencing generation increments atomically.
+- Keep the journal's original source SHA immutable. A newer release may become
+  the active source SHA only when it is a Git descendant of the prior active
+  SHA, the retained phase is exactly a fully unlocked pre-destructive failure,
+  the live OCI replica baseline still matches, Azure remains fully frozen with
+  no queue backlog, and Mongo, RabbitMQ, and the HTTP fence are all
+  writable/unfenced before the atomic takeover.
 - Never substitute current `master` for the journal SHA during recovery.
 
 ## No-backup replacement boundary
