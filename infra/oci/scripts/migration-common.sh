@@ -78,7 +78,7 @@ migration_run() {
     "external_command=START classification=$classification timeout_seconds=$timeout_seconds attempts=$attempts"
   migration_raw "$classification" "$timeout_seconds" "$attempts" "$@"
   local status=$?
-  migration_maybe_heartbeat 1
+  migration_maybe_heartbeat
   if [[ "$status" -ne 0 ]]; then
     migration_log \
       "external_command=FAIL classification=$classification status=$status"

@@ -327,6 +327,16 @@ fi
 for literal in \
   'replace_oci_data:' \
   'inputs.replace_oci_data == true' \
+  'recover_closed_oci:' \
+  'recovery_deploy_source_sha:' \
+  'RECOVER CLOSED OCI DATA FROM AZURE' \
+  'DEPLOY_SOURCE_SHA:' \
+  'compare-image-inputs.sh' \
+  'validate_run \' \
+  'oci-production-deploy.yml "$DEPLOY_RUN_ID" workflow_dispatch "$DEPLOY_SOURCE_SHA"' \
+  'grep -Fx "source_sha=$DEPLOY_SOURCE_SHA" artifacts/deploy/provenance.txt' \
+  'runtime_deploy_source_sha=$DEPLOY_SOURCE_SHA' \
+  'closed_recovery_retry=$RECOVER_CLOSED_OCI' \
   'build_run_id:' \
   'redirect_url: ${{ steps.provenance.outputs.redirect_url }}' \
   'diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}' \
@@ -510,6 +520,10 @@ for literal in \
   'verify_frozen_source_queues' \
   'git merge-base --is-ancestor "$existing_source" "$SOURCE_SHA"' \
   'cross-release retry found a live OCI write lock or HTTP fence' \
+  'cross-release recovery retry requires an active closed post-boundary journal' \
+  'cross-release recovery retry OCI applications are not closed' \
+  'cross-release recovery retry lost the OCI HTTP write fence' \
+  'cross-release recovery retry has an inactive OCI baseline' \
   'exactly eight Mongo PVCs' \
   'deployment_mongo_uri' \
   'MONGO_REVIEWED_INDEX_DIGEST=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3' \
@@ -533,6 +547,10 @@ for literal in \
   'target-signature-manifest-sha256' \
   'logical-parity=true' \
   'lock_target_writes' \
+  'runCommand({currentOp:1,$all:true})' \
+  '(result.fsyncLock !== undefined &&' \
+  'print(result.fsyncLock === true)' \
+  'const lockCount=Number(result.lockCount)' \
   'lock_rabbitmq_writes' \
   'INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"' \
   'if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$)' \
@@ -558,6 +576,35 @@ for literal in \
   grep -Fq "$literal" "$MIGRATION" ||
     fail "migration state machine is missing: $literal"
 done
+! grep -Fq '.currentOp().fsyncLock' "$MIGRATION" ||
+  fail "migration uses mongosh currentOp(), which omits MongoDB 8.2 fsyncLock"
+python3 - "$MIGRATION" "$OCI_DIR/scripts/migration-common.sh" <<'PY'
+from pathlib import Path
+import sys
+
+migration = Path(sys.argv[1]).read_text()
+common = Path(sys.argv[2]).read_text()
+kube_capture = migration[
+    migration.index("kube_capture() {"):migration.index("\n}\n", migration.index("kube_capture() {")) + 3
+]
+migration_run = common[
+    common.index("migration_run() {"):common.index("\n}\n", common.index("migration_run() {")) + 3
+]
+if "migration_maybe_heartbeat 1" in kube_capture:
+    raise SystemExit("captured Kubernetes reads force redundant mirrored heartbeats")
+if "migration_maybe_heartbeat 1" in migration_run:
+    raise SystemExit("short external commands force redundant mirrored heartbeats")
+
+rabbit_restart = migration.index(
+    'scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 1'
+)
+rabbit_unlock = migration.index("  unlock_rabbitmq_writes\n", rabbit_restart)
+rabbit_state = migration.index(
+    "  state_advance rabbitmq-recreated true true", rabbit_unlock
+)
+if not rabbit_restart < rabbit_unlock < rabbit_state:
+    raise SystemExit("RabbitMQ recovery does not normalize publish permissions")
+PY
 [[ "$(grep -Fc 'verify_source_mongo_identity "$pod"' "$MIGRATION")" -ge 3 ]] ||
   fail "migration does not revalidate each source around capture"
 [[ "$(grep -Fc 'verify_target_mongo_identity' "$MIGRATION")" -ge 6 ]] ||

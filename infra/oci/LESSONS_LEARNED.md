@@ -67,6 +67,12 @@ conversation summaries are not authority.
   in the running NGINX configuration, and mirror its state in both journals.
   Keep it across every pre-commit failure and remove it only after
   `cutover-committed` and both internal write locks are released.
+- In MongoDB 8.2, mongosh `db.currentOp()` can omit the top-level `fsyncLock`
+  field even while the raw `currentOp` database command reports it as true.
+  The raw command omits the field while unlocked, so treat absence as false
+  but reject command errors or malformed present values. Normalize BSON `Long`
+  lock counts to JavaScript numbers before serializing them for shell
+  validation.
 - Pre-commit public checks must be read-only and prove the HTTP mutation fence.
   Run the mutating browser journey only after commit and fence removal; never
   let a validation write invalidate the certified source/target signatures.
@@ -74,10 +80,17 @@ conversation summaries are not authority.
   run is conclusively inactive, both cluster locks and fingerprints agree, and
   the fencing generation is advanced atomically.
 - Preserve the journal's original source SHA as immutable lineage. A
-  descendant hotfix can replace only the active source SHA, and only from the
-  exact unlocked `failed-before-destructive-boundary` phase with unchanged
-  OCI replicas, fully frozen Azure applications/ingress, no Azure queue
-  backlog, and no live Mongo, RabbitMQ, or HTTP write fence.
+  descendant hotfix can replace only the active source SHA. For an unlocked
+  `failed-before-destructive-boundary` phase, require unchanged OCI replicas,
+  fully frozen Azure applications/ingress, no Azure queue backlog, and no live
+  Mongo, RabbitMQ, or HTTP write fence. For `recovery-required`, require the
+  destructive and recovery flags, active journal lock, frozen Azure, closed
+  OCI ingress/applications/RabbitMQ, retained HTTP fence, and the original
+  active replica baseline before atomically advancing the owner and fencing
+  generation.
+- Recovery bindings belong to the `azure-migration-recovery` GitHub
+  environment. Repository variables with the same names do not override stale
+  environment values.
 - Checkout removes untracked directories created by earlier workflow steps.
   Recreate sanitized recovery artifact directories after checkout before
   writing evidence.
