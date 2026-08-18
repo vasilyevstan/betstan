@@ -601,6 +601,15 @@ grep -Fq 'OCI_MIGRATION_AZURE_CREDENTIALS' "$migrate_workflow"
 grep -Fq 'OCI_MIGRATION_AGE_IDENTITY' "$migrate_workflow"
 grep -Fq 'az aks start' "$migrate_workflow"
 grep -Fq 'az aks stop' "$migrate_workflow"
+[[ "$(grep -Fc 'type == "array" and' "$migrate_workflow")" -ge 3 ]] ||
+  fail "Azure stop paths do not safely accept an empty VMSS instance set"
+! grep -Fq 'length >= 1 and' "$migrate_workflow" ||
+  fail "Azure stop paths incorrectly require a retained VMSS instance"
+[[ "$(grep -Fc 'install -m 600 -- "$KUBE_CONFIG_PATH" "$AZURE_KUBECONFIG"' \
+  "$migrate_workflow")" -eq 2 ]] ||
+  fail "Azure action kubeconfigs are not materialized at both isolated paths"
+[[ "$(grep -Fc 'exit "$cleanup_status"' "$migrate_workflow")" -eq 2 ]] ||
+  fail "unexpected kubeconfig paths can bypass credential cleanup"
 [[ "$(grep -Fc 'Stopped|Deallocated)' "$migrate_workflow")" -ge 4 ]] ||
   fail "migration does not accept both Azure stopped-state representations"
 grep -Fq '[ "$provisioning" = "Failed" ]' "$migrate_workflow" ||
