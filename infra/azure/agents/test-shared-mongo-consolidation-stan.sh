@@ -7,7 +7,7 @@ LOCK_SCRIPT="$ROOT_DIR/infra/azure/agents/shared-mongo-operation-lock-stan.sh"
 ROLLBACK_READINESS="$ROOT_DIR/infra/azure/agents/rollback-readiness-stan.sh"
 SIGNATURE_SCRIPT="$ROOT_DIR/infra/azure/agents/mongo-database-signature-stan.js"
 MIGRATION_AGENT="$ROOT_DIR/.github/agents/betstan-mongo-migration.agent.md"
-MONGO_TEST_IMAGE="${MONGO_TEST_IMAGE:-mongo:7}"
+MONGO_TEST_IMAGE="${MONGO_TEST_IMAGE:-docker.io/library/mongo@sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 
 fail() {
@@ -197,10 +197,21 @@ wait_for_mongo() {
 container_signature() {
   local container="$1"
   local database="$2"
-  {
-    printf 'const DB_NAME = "%s";\n' "$database"
-    cat "$SIGNATURE_SCRIPT"
-  } | docker exec -i "$container" mongosh --quiet | tail -n 1
+  local signature
+  signature="$(
+    {
+      printf 'const DB_NAME = "%s";\n' "$database"
+      cat "$SIGNATURE_SCRIPT"
+    } | docker exec -i "$container" mongosh --quiet --file /dev/stdin
+  )"
+  jq -e --arg database "$database" '
+    .database == $database and
+    (.collections | type) == "array" and
+    (.dataHash | type) == "string" and
+    (.collectionHashes | type) == "object"
+  ' <<<"$signature" >/dev/null ||
+    fail "canonical signature is not valid JSON for $database"
+  printf '%s\n' "$signature"
 }
 
 wait_for_mongo "$source_container"

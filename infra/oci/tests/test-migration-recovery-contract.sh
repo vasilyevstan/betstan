@@ -27,6 +27,8 @@ done
 PYTHONPYCACHEPREFIX="$WORK_DIR/pycache" \
   python3 -m py_compile "$STATE_HELPER" "$BOUNDED"
 node --check "$OCI_DIR/scripts/mongo-canonical-signature.js"
+[[ "$(grep -Fc 'mongosh --quiet --file /dev/stdin' "$MIGRATION")" == "2" ]] ||
+  fail "canonical signatures are not executed in non-REPL mongosh file mode"
 
 run_failure() {
   local point="$1"
