@@ -1671,9 +1671,10 @@ mongo_signature_kube() {
     printf 'const DB_NAME = "%s";\n' "$database"
     cat "$SIGNATURE_SCRIPT"
   } >"$script_file"
+  # Mongosh 2.5 treats bare stdin as a REPL; file mode emits only the script result.
   kube_raw "$provider" mongo-signature "$MONGO_VALIDATION_TIMEOUT_SECONDS" 2 \
     exec -i -n "$(provider_namespace "$provider")" "$pod" -- \
-    mongosh --quiet <"$script_file" >"$output"
+    mongosh --quiet --file /dev/stdin <"$script_file" >"$output"
   [[ -s "$output" ]] || migration_die "empty canonical signature for $database"
   migration_raw signature-json 30 1 jq -e . "$output" >/dev/null ||
     migration_die "invalid canonical signature for $database"
@@ -1689,7 +1690,7 @@ mongo_signature_docker() {
     cat "$SIGNATURE_SCRIPT"
   } >"$script_file"
   migration_raw disposable-signature "$MONGO_VALIDATION_TIMEOUT_SECONDS" 2 \
-    docker exec -i "$disposable_container" mongosh --quiet \
+    docker exec -i "$disposable_container" mongosh --quiet --file /dev/stdin \
     <"$script_file" >"$output"
   [[ -s "$output" ]] || migration_die "empty disposable signature for $database"
   migration_raw signature-json 30 1 jq -e . "$output" >/dev/null ||
