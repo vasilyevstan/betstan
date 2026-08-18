@@ -41,6 +41,8 @@ for lesson in \
     "OCI deletion and registry layer reclamation are asynchronous" \
     "target-loopback tunnel" \
     "No retained backup or old-OCI rollback exists" \
+    "Mongo \`fsyncLock\` is process-local" \
+    "Pre-commit public checks must be read-only" \
     "Never return a blind \`NO_GO\`"; do
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
@@ -60,6 +62,9 @@ grep -Fq "A run waiting for environment approval is active, not hung" \
 grep -Fq "After \`cutover-committed\`, never retry from Azure" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can roll back a committed cutover"
+grep -Fq "controller-level HTTP mutation fence" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent does not preserve the restart-safe HTTP fence"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"
@@ -74,6 +79,7 @@ for retirement_contract in \
     'terminal_phase DEPLOYED_HEALTHY' \
     'destructive_boundary_crossed true' \
     'logical_source_target_parity true' \
+    'http_mutation_fence_removed true' \
     'azure_cluster_stopped_deallocated true' \
     'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
     'az aks delete' \
@@ -303,6 +309,9 @@ grep -Fq 'certificate was not issued by Let' \
 grep -Fq 'certificate expires within seven days' \
   "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
   fail "OCI public smoke does not verify served certificate expiry"
+grep -Fq 'mutating request bypassed the HTTP maintenance fence' \
+  "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
+  fail "OCI public smoke cannot prove the cutover HTTP mutation fence"
 
 OCI_RUNTIME_MODE=k3s \
 OCI_K3S_NODE_NAME=betstan-k3s \
@@ -379,10 +388,53 @@ for ingress_values in \
   grep -Fq 'return 308 https://betstan.xyz$request_uri;' "$ingress_values" ||
     fail "ingress-nginx does not preserve the www request URI in its HTTPS redirect"
 done
-grep -Fq '"gaming-auth-mongo": "sha256:3d715950d83061ff2fbc910d12d3703212538cacf6b3003e3736fa5c7f51a2e1"' \
+mongo_target_digest=sha256:e0ce8c35124d4a9f9785532d1f268f39e9728ffa1cb38f46fa482436424c4bd3
+for mongo_target_file in \
+  "$OCI_DIR/k8s/base/kustomization.yaml" \
+  "$OCI_DIR/scripts/verify-images.sh" \
+  "$OCI_DIR/agents/health-check-stan.sh"; do
+  grep -Fq "$mongo_target_digest" "$mongo_target_file" ||
+    fail "Mongo target identity differs from the requested immutable index: $mongo_target_file"
+done
+mongo_upgrade="$OCI_DIR/scripts/upgrade-mongo.sh"
+grep -Fq 'MONGO_TRANSITION_VERSION=8.0.29' "$mongo_upgrade" ||
+  fail "Mongo upgrade omits the reviewed 8.0 transition release"
+grep -Fq 'MONGO_TARGET_VERSION=8.2.12' "$mongo_upgrade" ||
+  fail "Mongo upgrade omits the exact Azure-compatible target release"
+grep -Fq 'MONGO_TARGET_ARM64_MANIFEST=sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7ceafc8fa489c0486525b4' \
+  "$mongo_upgrade" ||
+  fail "Mongo upgrade omits the exact ARM64 target manifest"
+grep -Fq 'sha256:21ca0269db1ebbd1c59f5cbc04928d7e3f6ab6186d7ceafc8fa489c0486525b4' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
-  fail "Mongo health identity differs from the requested immutable index"
-grep -Fq '"gaming-rabbitmq": "sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b"' \
+  fail "Mongo health omits the exact ARM64 target manifest"
+grep -Fq "setFeatureCompatibilityVersion:'\${requested}'" "$mongo_upgrade" ||
+  fail "Mongo upgrade does not advance FCV explicitly"
+grep -Fq '"$SCRIPT_DIR/upgrade-mongo.sh" prepare' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not prepare the staged Mongo upgrade"
+grep -Fq '"$SCRIPT_DIR/upgrade-mongo.sh" finalize' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not finalize the staged Mongo upgrade"
+grep -Fq '"$SCRIPT_DIR/upgrade-mongo.sh" resume' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not reopen ingress after staged Mongo maintenance"
+grep -Fq 'readOnly: true' "$mongo_upgrade" ||
+  fail "Mongo fresh-storage inspection is not read-only"
+grep -Fq "trap 'cleanup 143' TERM" "$mongo_upgrade" ||
+  fail "Mongo upgrade can report a terminated command as successful"
+grep -Fq 'exit 41' "$mongo_upgrade" ||
+  fail "Mongo fresh-storage inspection does not fail closed on enumeration errors"
+python3 - "$OCI_DIR/scripts/deploy.sh" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+prepare = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" prepare')
+apply_target = text.index("apply_documents 'StatefulSet:^gaming-auth-mongo-depl$'", prepare)
+finalize = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" finalize', apply_target)
+provenance = text.index('} > "$OUTPUT_DIR/provenance.txt"', finalize)
+resume = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" resume', provenance)
+completed = text.index('oci_log "oci_deploy=PASS', resume)
+if not prepare < apply_target < finalize < provenance < resume < completed:
+    raise SystemExit("Mongo maintenance/deploy ordering differs")
+PY
+grep -Fq 'sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
   fail "RabbitMQ health identity differs from the requested immutable index"
 grep -Fq 'shape-flex-min: "10"' "$OCI_DIR/helm/ingress-nginx-values.yaml"
@@ -529,10 +581,8 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
   next_job_line="$(awk -v start="$public_job_line" '
     NR > start && /^  [A-Za-z0-9_-]+:/ {print NR; exit}
-  ' "$workflow")"
+  ' "$workflow"  )"
   [[ -n "$next_job_line" ]] || next_job_line=$(( $(wc -l <"$workflow") + 1 ))
-  dependency_line="$(grep -n -m1 'name: Install browser validation dependencies' \
-    "$workflow" | cut -d: -f1)"
   public_secrets="$(
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
       grep -c 'secrets\.' || true
@@ -543,12 +593,9 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
         'OCI_CLI_|OCI_CI_PRIVATE_KEY|AZURE_CONFIG|azure/login|aks-set-context|configure-kubectl-oke' ||
       true
   )"
-  [[ -n "$public_job_line" && -n "$dependency_line" &&
-      "$dependency_line" -gt "$public_job_line" &&
-      "$dependency_line" -lt "$next_job_line" &&
-      "$public_secrets" == "0" &&
+  [[ -n "$public_job_line" && "$public_secrets" == "0" &&
       "$public_cloud_credentials" == "0" ]] ||
-    fail "browser dependencies share a job with cloud credentials: $(basename "$workflow")"
+    fail "public validation shares a job with cloud credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
   grep -Fq 'OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"' "$workflow" ||
@@ -558,6 +605,46 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'OCI_E2E_ALREADY_PASSED: "1"' "$workflow" ||
     fail "protected validation still executes browser code: $(basename "$workflow")"
 done
+deploy_public_job_line="$(
+  grep -n -m1 '^  public-validate:' "$deploy_workflow" | cut -d: -f1
+)"
+deploy_dependency_line="$(
+  grep -n -m1 'name: Install browser validation dependencies' \
+    "$deploy_workflow" | cut -d: -f1
+)"
+[[ "$deploy_dependency_line" -gt "$deploy_public_job_line" ]] ||
+  fail "deployment browser validation is not in its credential-free public job"
+migration_public_job_line="$(
+  grep -n -m1 '^  public-validate:' "$migrate_workflow" | cut -d: -f1
+)"
+migration_finalize_job_line="$(
+  grep -n -m1 '^  finalize:' "$migrate_workflow" | cut -d: -f1
+)"
+migration_post_job_line="$(
+  grep -n -m1 '^  post-commit-validate:' "$migrate_workflow" | cut -d: -f1
+)"
+migration_dependency_line="$(
+  grep -n -m1 'name: Install browser validation dependencies' \
+    "$migrate_workflow" | cut -d: -f1
+)"
+[[ -n "$migration_post_job_line" &&
+    "$migration_public_job_line" -lt "$migration_finalize_job_line" &&
+    "$migration_finalize_job_line" -lt "$migration_post_job_line" &&
+    "$migration_dependency_line" -gt "$migration_post_job_line" ]] ||
+  fail "migration browser validation is not isolated after finalization"
+migration_post_secrets="$(
+  sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
+    grep -c 'secrets\.' || true
+)"
+migration_post_cloud_credentials="$(
+  sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
+    grep -Ec \
+      'OCI_CLI_|OCI_CI_PRIVATE_KEY|AZURE_CONFIG|azure/login|aks-set-context|configure-kubectl-oke' ||
+    true
+)"
+[[ "$migration_post_secrets" == "0" &&
+    "$migration_post_cloud_credentials" == "0" ]] ||
+  fail "post-commit browser validation receives cloud credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
@@ -728,6 +815,7 @@ fi
 "$OCI_DIR/tests/test-capacity-contract.sh"
 "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
 "$OCI_DIR/tests/test-migration-recovery-contract.sh"
+"$OCI_DIR/tests/test-mongo-upgrade.sh"
 
 git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
   fail "production-build.yml was modified"

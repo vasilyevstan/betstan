@@ -249,6 +249,7 @@ def main() -> int:
         "transfer-manifest-sha256",
         "mongo-write-lock",
         "rabbitmq-write-lock",
+        "http-write-fence",
     )
     for key in allowed:
         if key in data:

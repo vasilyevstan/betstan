@@ -87,6 +87,9 @@
     "pvc_count": 1,
     "pvc_bound": true,
     "pvc_gib": 50,
+    "version": "8.2.12",
+    "major_minor": "8.2",
+    "fcv": "8.2",
     "logical_databases": [
       "gaming_auth",
       "gaming_bet",

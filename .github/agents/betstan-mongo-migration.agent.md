@@ -57,7 +57,9 @@ This agent owns only in-AKS legacy-to-shared Mongo consolidation. The
 cross-cloud Azure-to-OCI exact replacement is owned by
 `.github/agents/betstan-migration-recovery.agent.md` and
 `.github/workflows/oci-migrate.yml`. Do not apply this agent's retained-backup
-or reverse-copy model to that explicitly approved no-backup replacement.
+or reverse-copy model to that explicitly approved no-backup replacement. That
+replacement must pair its process-local Mongo lock with the journaled
+ingress-nginx HTTP mutation fence until the cutover is committed.
 
 Use:
 
@@ -100,7 +102,16 @@ the same journal identity and verified private artifacts.
 
 ### Preflight
 
-- Require exact server-version and FCV compatibility for all eight sources.
+- Read exact live image digests, server versions, and FCVs for all eight
+  sources; legacy mutable image references and repository history are not
+  runtime evidence.
+- Persist each source pod UID, container ID, restart count, digest, version,
+  and FCV in both journals. Recheck that identity before and after every
+  signature and dump, and abort on any pod or container recreation even if the
+  replacement appears Ready.
+- Require exact source/target server-version and FCV compatibility. If OCI
+  needs alignment, keep ingress and writers frozen and follow every supported,
+  digest-pinned intermediate binary and FCV transition during deployment.
 - Verify exact live legacy `MONGO_URI` values and the eight logical database
   names.
 - Verify target capacity, expandable StorageClass, retained auth PVC identity,

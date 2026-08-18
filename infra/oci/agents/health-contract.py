@@ -172,6 +172,12 @@ def validate(snapshot):
     require(mongo.get("pvc_bound") is True, "mongo-pvc-unbound", "Mongo PVC is not Bound")
     require(mongo.get("pvc_gib") == 50, "mongo-pvc-size", "Mongo PVC was not created at 50 GiB")
     require(
+        mongo.get("version") == "8.2.12" and mongo.get("major_minor") == "8.2",
+        "mongo-version",
+        "Mongo runtime is not the reviewed 8.2.12 release",
+    )
+    require(mongo.get("fcv") == "8.2", "mongo-fcv", "Mongo FCV is not 8.2")
+    require(
         set(mongo.get("logical_databases", [])) == EXPECTED_DATABASES,
         "mongo-databases",
         "Mongo does not contain exactly the eight logical database names",

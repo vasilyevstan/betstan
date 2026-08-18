@@ -471,6 +471,7 @@ fencing_generation
 final_journal_sha256
 github_run_attempt
 github_run_id
+http_mutation_fence_removed
 journal_generation
 journal_heartbeat_epoch
 journal_sequence
@@ -502,6 +503,7 @@ require_summary_value destructive_boundary_crossed true
 require_summary_value database_count 8
 require_summary_value logical_source_target_parity true
 require_summary_value oci_reopened_healthy true
+require_summary_value http_mutation_fence_removed true
 require_summary_value azure_writers_frozen true
 require_summary_value azure_cluster_resource_id_sha256 \
   "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256"

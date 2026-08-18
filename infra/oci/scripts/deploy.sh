@@ -138,6 +138,22 @@ apply_documents() {
   printf '%s' "$rendered" | kubectl apply -f -
 }
 
+mongo_target_image="$(
+  ruby -ryaml - "$RENDERED_FILE" <<'RUBY'
+documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+mongo = documents.find { |document|
+  document["kind"] == "StatefulSet" &&
+    document.dig("metadata", "name") == "gaming-auth-mongo-depl"
+}
+abort "rendered Mongo StatefulSet is missing" unless mongo
+containers = mongo.dig("spec", "template", "spec", "containers") || []
+container = containers.find { |item| item["name"] == "gaming-auth-mongo" }
+abort "rendered Mongo container is missing" unless container
+puts container.fetch("image")
+RUBY
+)"
+mongo_upgrade_state_file="$OUTPUT_DIR/mongo-upgrade.env"
+
 apply_documents "Namespace:^${OCI_K8S_NAMESPACE}$"
 
 printf '%s' "$OCI_JWT_KEY" |
@@ -169,13 +185,17 @@ kubectl patch serviceaccount default -n "$OCI_K8S_NAMESPACE" --type merge \
 
 apply_documents 'PersistentVolume:^gaming-auth-mongo-data$'
 apply_documents 'PersistentVolumeClaim:^gaming-auth-mongo-data$'
+kubectl wait pvc/gaming-auth-mongo-data -n "$OCI_K8S_NAMESPACE" \
+  --for=jsonpath='{.status.phase}'=Bound --timeout=10m
 apply_documents 'ClusterIssuer:^letsencrypt-prod$'
 apply_documents 'Service:^gaming-(auth-mongo|shared-mongo)-srv$'
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+MONGO_TARGET_IMAGE="$mongo_target_image" \
+MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
+  "$SCRIPT_DIR/upgrade-mongo.sh" prepare
 apply_documents 'StatefulSet:^gaming-auth-mongo-depl$'
 kubectl rollout status statefulset/gaming-auth-mongo-depl \
   -n "$OCI_K8S_NAMESPACE" --timeout=10m
-kubectl wait pvc/gaming-auth-mongo-data -n "$OCI_K8S_NAMESPACE" \
-  --for=jsonpath='{.status.phase}'=Bound --timeout=10m
 mongo_pod="$(
   kubectl get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
     -o jsonpath='{.items[0].metadata.name}'
@@ -192,6 +212,10 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 [[ "$mongo_ready" == "1" ]] || oci_die "Mongo did not become ready before deployment"
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+MONGO_TARGET_IMAGE="$mongo_target_image" \
+MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
+  "$SCRIPT_DIR/upgrade-mongo.sh" finalize
 for database in \
   gaming_auth gaming_bet gaming_backoffice gaming_event \
   gaming_gamemaster gaming_moderation gaming_resulting gaming_slip; do
@@ -325,5 +349,10 @@ public_data_services="$(
   printf 'deployment_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT:-1}"
 } > "$OUTPUT_DIR/provenance.txt"
 rm -f "$RENDERED_FILE"
+
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+MONGO_TARGET_IMAGE="$mongo_target_image" \
+MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
+  "$SCRIPT_DIR/upgrade-mongo.sh" resume
 
 oci_log "oci_deploy=PASS source_sha=$SOURCE_SHA workloads_sequential=1"

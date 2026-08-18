@@ -257,6 +257,8 @@ elif [[ "${1:-} ${2:-}" == "run download" ]]; then
   target_signature="$(printf 'a%.0s' {1..64})"
   [[ "${STUB_BAD_PARITY:-0}" != "1" ]] ||
     target_signature="$(printf 'b%.0s' {1..64})"
+  fence_removed=true
+  [[ "${STUB_FENCE_RETAINED:-0}" != "1" ]] || fence_removed=false
   cat > "$directory/migration-summary.env" <<ENV
 schema=betstan.oci-migration-success.v1
 migration_id=migration-fixture
@@ -276,6 +278,7 @@ logical_source_target_parity=true
 source_signature_aggregate_sha256=$(printf 'a%.0s' {1..64})
 target_signature_aggregate_sha256=${target_signature}
 oci_reopened_healthy=true
+http_mutation_fence_removed=${fence_removed}
 azure_writers_frozen=true
 azure_cluster_resource_id_sha256=${STUB_CLUSTER_DIGEST}
 aks_power_state=${STUB_AKS_POWER_STATE:-Stopped}
@@ -450,7 +453,7 @@ grep -Fq 'NO_GO azure_retirement_reason=' "$WORK_DIR/running-control-plane.out"
 
 for failure_mode in \
   STUB_BAD_RUN STUB_BAD_PARITY STUB_UNKNOWN_RESOURCE STUB_RUNNING_VMSS \
-  STUB_WRONG_SUBSCRIPTION STUB_GROUP_API_FAIL; do
+  STUB_WRONG_SUBSCRIPTION STUB_GROUP_API_FAIL STUB_FENCE_RETAINED; do
   if run_plan "$WORK_DIR/${failure_mode}" "$failure_mode=1" \
       >"$WORK_DIR/${failure_mode}.out" 2>&1; then
     echo "retirement fixture unexpectedly passed: $failure_mode" >&2
@@ -515,4 +518,4 @@ for crash_point in aks managed primary; do
     grep -qx 'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'
 done
 
-printf 'azure_retirement_contract=PASS scenarios=15\n'
+printf 'azure_retirement_contract=PASS scenarios=16\n'
