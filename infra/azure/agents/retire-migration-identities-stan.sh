@@ -144,34 +144,62 @@ write_state() {
   # Unpredictable same-directory temp file; reject pre-created symlinks
   local temporary="${STATE_FILE}.$$.$RANDOM"
   [[ ! -e "$temporary" && ! -L "$temporary" ]] || die "state_temp_file_exists:$temporary"
-  {
-    printf 'schema=betstan.identity-retirement.v1\n'
-    printf 'phase=%s\n' "$phase"
-    printf 'metadata_sha256=%s\n' "$(sha256_file "$METADATA_FILE")"
-    printf 'tenant_id=%s\n' "$TENANT_ID"
-    printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
-    printf 'repository=%s\n' "$GH_REPOSITORY"
-    # Terminal state: embed all exact IDs/bindings so the audit script can
-    # re-prove object absence after optional metadata cleanup, without broad
-    # name searches. This is the reviewed handoff contract for
-    # audit-oci-primary-retirement-stan.sh — it reads these fields directly.
-    if [[ "$phase" == "retired" ]]; then
-      printf 'migration_sp_object_id=%s\n' "$MIGRATION_SP_OBJECT_ID"
-      printf 'recovery_sp_object_id=%s\n' "$RECOVERY_SP_OBJECT_ID"
+
+  if [[ "$phase" == "retired" ]]; then
+    # -------------------------------------------------------------------
+    # Terminal state schema: betstan.identity-retirement-terminal.v1
+    # Exact unique-key-per-line format, 0600 permissions.
+    # This is the reviewed handoff contract for audit-oci-primary-retirement-stan.sh.
+    # The audit agent reads these fields directly to re-prove exact object absence
+    # after optional metadata cleanup, without broad name searches.
+    #
+    # Keys (23 total, each unique, one per line):
+    #   schema, phase, metadata_sha256,
+    #   tenant_id, subscription_id, repository,
+    #   migration_app_id, recovery_app_id,
+    #   migration_sp_object_id, recovery_sp_object_id,
+    #   role_assignment_id_1, role_assignment_id_2, role_assignment_id_3,
+    #   custom_role_id_1, custom_role_id_2,
+    #   retained_sp_object_id, retained_sp_display_name, retained_secret_name,
+    #   migration_environment, recovery_environment,
+    #   migration_secret_name, recovery_secret_name, workflow_name
+    # -------------------------------------------------------------------
+    {
+      printf 'schema=betstan.identity-retirement-terminal.v1\n'
+      printf 'phase=retired\n'
+      printf 'metadata_sha256=%s\n' "$(sha256_file "$METADATA_FILE")"
+      printf 'tenant_id=%s\n' "$TENANT_ID"
+      printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
+      printf 'repository=%s\n' "$GH_REPOSITORY"
       printf 'migration_app_id=%s\n' "$MIGRATION_APP_ID"
       printf 'recovery_app_id=%s\n' "$RECOVERY_APP_ID"
+      printf 'migration_sp_object_id=%s\n' "$MIGRATION_SP_OBJECT_ID"
+      printf 'recovery_sp_object_id=%s\n' "$RECOVERY_SP_OBJECT_ID"
       printf 'role_assignment_id_1=%s\n' "$ROLE_ASSIGNMENT_ID_1"
       printf 'role_assignment_id_2=%s\n' "$ROLE_ASSIGNMENT_ID_2"
       printf 'role_assignment_id_3=%s\n' "$ROLE_ASSIGNMENT_ID_3"
       printf 'custom_role_id_1=%s\n' "$CUSTOM_ROLE_ID_1"
       printf 'custom_role_id_2=%s\n' "$CUSTOM_ROLE_ID_2"
-      printf 'migration_environment=%s\n' "$MIGRATION_ENV"
-      printf 'recovery_environment=%s\n' "$RECOVERY_ENV"
       printf 'retained_sp_object_id=%s\n' "$RETAINED_SP_OBJECT_ID"
       printf 'retained_sp_display_name=%s\n' "$RETAINED_SP_DISPLAY_NAME"
       printf 'retained_secret_name=%s\n' "$RETAINED_SECRET_NAME"
-    fi
-  } > "$temporary"
+      printf 'migration_environment=%s\n' "$MIGRATION_ENV"
+      printf 'recovery_environment=%s\n' "$RECOVERY_ENV"
+      printf 'migration_secret_name=OCI_MIGRATION_AZURE_CREDENTIALS\n'
+      printf 'recovery_secret_name=AZURE_MIGRATION_RECOVERY_CREDENTIALS\n'
+      printf 'workflow_name=oci-migration-recovery.yml\n'
+    } > "$temporary"
+  else
+    # Intermediate state: minimal keys for identity/resume validation only
+    {
+      printf 'schema=betstan.identity-retirement.v1\n'
+      printf 'phase=%s\n' "$phase"
+      printf 'metadata_sha256=%s\n' "$(sha256_file "$METADATA_FILE")"
+      printf 'tenant_id=%s\n' "$TENANT_ID"
+      printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
+      printf 'repository=%s\n' "$GH_REPOSITORY"
+    } > "$temporary"
+  fi
   chmod 600 "$temporary"
   mv "$temporary" "$STATE_FILE"
 }
@@ -181,7 +209,9 @@ validate_state_identity() {
   local state_perms
   state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
   [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions:$state_perms"
-  [[ "$(env_value "$STATE_FILE" schema)" == "betstan.identity-retirement.v1" ]] ||
+  local state_schema
+  state_schema="$(env_value "$STATE_FILE" schema)"
+  [[ "$state_schema" == "betstan.identity-retirement.v1" || "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
     die "retirement_state_schema_differs"
   [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
     die "retirement_state_metadata_differs"

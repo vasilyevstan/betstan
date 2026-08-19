@@ -522,30 +522,59 @@ if [[ "$perms" == "600" ]]; then pass "state_file_0600"; else fail "state_file_0
 # State file must not be a symlink
 if [[ -f "$STATE_F" && ! -L "$STATE_F" ]]; then pass "state_not_symlink"; else fail "state_not_symlink"; fi
 
-# Terminal state must contain all exact IDs for audit re-proof
+# Terminal schema version
+if grep -q "^schema=betstan.identity-retirement-terminal.v1$" "$STATE_F"; then
+  pass "terminal_schema_version"
+else fail "terminal_schema_version"; fi
+
+# Terminal state must contain all 23 unique keys
 required_state_keys=(
-  migration_sp_object_id recovery_sp_object_id
+  schema phase metadata_sha256
+  tenant_id subscription_id repository
   migration_app_id recovery_app_id
+  migration_sp_object_id recovery_sp_object_id
   role_assignment_id_1 role_assignment_id_2 role_assignment_id_3
   custom_role_id_1 custom_role_id_2
-  migration_environment recovery_environment
   retained_sp_object_id retained_sp_display_name retained_secret_name
-  tenant_id subscription_id repository phase schema
+  migration_environment recovery_environment
+  migration_secret_name recovery_secret_name workflow_name
 )
 all_present=true
 for key in "${required_state_keys[@]}"; do
   if ! grep -q "^${key}=" "$STATE_F"; then all_present=false; break; fi
 done
-if [[ "$all_present" == "true" ]]; then pass "terminal_state_has_audit_ids"
-else fail "terminal_state_has_audit_ids (missing: $key)"; fi
+if [[ "$all_present" == "true" ]]; then pass "terminal_state_has_all_23_keys"
+else fail "terminal_state_has_all_23_keys (missing: $key)"; fi
 
-# Verify exact values match metadata
+# Exactly 23 lines (one key per line, no duplicates)
+line_count="$(wc -l < "$STATE_F" | tr -d ' ')"
+key_count="$(grep -c '=' "$STATE_F")"
+if [[ "$line_count" == "23" && "$key_count" == "23" ]]; then pass "terminal_state_exact_23_lines"
+else fail "terminal_state_exact_23_lines (lines=$line_count keys=$key_count)"; fi
+
+# No duplicate keys
+dup_count="$(sed 's/=.*//' "$STATE_F" | sort | uniq -d | wc -l | tr -d ' ')"
+if [[ "$dup_count" == "0" ]]; then pass "terminal_state_no_duplicate_keys"
+else fail "terminal_state_no_duplicate_keys"; fi
+
+# Verify exact ID values
 if [[ "$(grep '^migration_sp_object_id=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_MS" ]] &&
    [[ "$(grep '^role_assignment_id_1=' "$STATE_F" | sed 's/^[^=]*=//')" == "$RA_ID_1" ]] &&
    [[ "$(grep '^custom_role_id_1=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_CR1" ]] &&
    [[ "$(grep '^retained_sp_object_id=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_RET" ]]; then
-  pass "terminal_state_exact_values"
-else fail "terminal_state_exact_values"; fi
+  pass "terminal_state_exact_id_values"
+else fail "terminal_state_exact_id_values"; fi
+
+# Verify fixed binding constants
+if grep -q "^migration_secret_name=OCI_MIGRATION_AZURE_CREDENTIALS$" "$STATE_F" &&
+   grep -q "^recovery_secret_name=AZURE_MIGRATION_RECOVERY_CREDENTIALS$" "$STATE_F" &&
+   grep -q "^workflow_name=oci-migration-recovery.yml$" "$STATE_F" &&
+   grep -q "^migration_environment=oci-migration$" "$STATE_F" &&
+   grep -q "^recovery_environment=azure-migration-recovery$" "$STATE_F" &&
+   grep -q "^retained_sp_display_name=betstan-github-sp$" "$STATE_F" &&
+   grep -q "^retained_secret_name=AZURE_CREDENTIALS$" "$STATE_F"; then
+  pass "terminal_state_fixed_bindings"
+else fail "terminal_state_fixed_bindings"; fi
 
 # Intermediate (non-retired) state must NOT contain IDs (minimal surface)
 fixture_dir="$WORK_DIR/t-intermediate"
@@ -558,7 +587,8 @@ env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 STUB_SP_DELETE_FAIL=1 \
   "$OPERATOR" execute >/dev/null 2>&1 || true
 INT_STATE="$fixture_dir/identity-retirement-state.env"
-if [[ -f "$INT_STATE" ]] && ! grep -q "^migration_sp_object_id=" "$INT_STATE"; then
+if [[ -f "$INT_STATE" ]] && ! grep -q "^migration_sp_object_id=" "$INT_STATE" &&
+   grep -q "^schema=betstan.identity-retirement.v1$" "$INT_STATE"; then
   pass "intermediate_state_minimal"
 else fail "intermediate_state_minimal"; fi
 
@@ -581,11 +611,12 @@ env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=1 STUB_SP_ALREADY_ABSENT=1 \
   "$OPERATOR" verify >/dev/null 2>&1 || true
-# Metadata deleted, state remains with full IDs
+# Metadata deleted, state remains with full terminal schema
 if [[ ! -f "$fixture_dir/metadata.env" ]] &&
    [[ -f "$fixture_dir/identity-retirement-state.env" ]] &&
+   grep -q "^schema=betstan.identity-retirement-terminal.v1$" "$fixture_dir/identity-retirement-state.env" &&
    grep -q "^migration_sp_object_id=$G_MS" "$fixture_dir/identity-retirement-state.env" &&
-   grep -q "^role_assignment_id_3=" "$fixture_dir/identity-retirement-state.env" &&
+   grep -q "^workflow_name=oci-migration-recovery.yml$" "$fixture_dir/identity-retirement-state.env" &&
    grep -q "^retained_sp_object_id=$G_RET" "$fixture_dir/identity-retirement-state.env"; then
   pass "post_cleanup_state_self_sufficient"
 else fail "post_cleanup_state_self_sufficient"; fi
