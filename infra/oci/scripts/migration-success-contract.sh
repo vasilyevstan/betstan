@@ -366,9 +366,10 @@ _contract_validate_semantics() {
 
 # --- Emit mode ---------------------------------------------------------------
 # Writes an ordered envelope from key=value arguments, then validates it.
-# Atomic: runs in a subshell with EXIT trap on the temp file. The temp is
-# created via mktemp (mode 0600) in the destination directory. On any failure
-# the trap removes the temp; a pre-existing destination is never altered.
+# Atomic: everything (mktemp, chmod, write, validate, mv) runs inside a
+# subshell with a local EXIT trap. On any failure the trap removes the temp;
+# a pre-existing destination is never altered. Rejects directory or
+# non-regular-file destinations (absent is allowed).
 _contract_emit() {
   local output_file="$1"
   shift
@@ -378,17 +379,21 @@ _contract_emit() {
   [[ -d "$dest_dir" ]] ||
     _contract_die "destination_dir_missing" "emit"
 
-  # Create unpredictable temp in the same directory (same filesystem for atomic mv)
-  local tmp
-  tmp="$(mktemp "${dest_dir}/.contract-emit-XXXXXXXX")"
-  chmod 0600 "$tmp"
+  # Reject if destination exists but is not a regular file
+  if [[ -e "$output_file" && ! -f "$output_file" ]]; then
+    _contract_die "destination_not_regular_file" "emit"
+  fi
+  if [[ -L "$output_file" ]]; then
+    _contract_die "destination_is_symlink" "emit"
+  fi
 
-  # Subshell-local EXIT trap: removes temp unless cleared after successful mv
-  _contract_emit_inner() {
-    trap '[[ -z "${_emit_tmp:-}" ]] || rm -f "$_emit_tmp"' EXIT
-    local _emit_tmp="$1"
-    local _emit_output="$2"
-    shift 2
+  # Run entirely inside a subshell with EXIT trap on the temp
+  (
+    _emit_tmp=""
+    trap '[[ -z "$_emit_tmp" ]] || rm -f "$_emit_tmp"' EXIT
+
+    _emit_tmp="$(mktemp "${dest_dir}/.contract-emit-XXXXXXXX")"
+    chmod 0600 "$_emit_tmp"
 
     # Validate and collect args; reject malformed or duplicate keys
     local keys_seen="" arg key
@@ -442,13 +447,10 @@ _contract_emit() {
     _contract_validate_semantics "$_emit_tmp"
 
     # Atomic rename -- pre-existing destination untouched until this point
-    mv "$_emit_tmp" "$_emit_output"
-    # Clear trap variable: temp no longer exists, nothing to remove
+    mv "$_emit_tmp" "$output_file"
+    # Clear trap variable: temp no longer exists at old path
     _emit_tmp=""
-  }
-
-  # Run inner in subshell so EXIT trap is scoped and does not affect caller
-  ( _contract_emit_inner "$tmp" "$output_file" "$@" )
+  )
 }
 
 # --- Validate mode -----------------------------------------------------------
