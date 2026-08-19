@@ -6,3 +6,4 @@ updateCommonLib.sh
 artifacts/
 .test-workdirs/
 infra/oci/tests/.migration-recovery-work/
+infra/oci/tests/.test-workdirs/

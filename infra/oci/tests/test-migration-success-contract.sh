@@ -6,7 +6,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CONTRACT="$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh"
-WORK_DIR="$ROOT_DIR/infra/oci/tests/.migration-success-contract-work"
+WORK_BASE="$ROOT_DIR/infra/oci/tests/.test-workdirs"
+mkdir -p "$WORK_BASE"
+WORK_DIR="$WORK_BASE/migration-success-contract-$$"
+mkdir "$WORK_DIR"
 
 PASS=0
 FAIL=0
@@ -20,8 +23,6 @@ pass() {
   PASS=$((PASS + 1))
 }
 
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # Syntax check
