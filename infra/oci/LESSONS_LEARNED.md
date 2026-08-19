@@ -70,13 +70,24 @@ conversation summaries are not authority.
   ingress-nginx ConfigMap fence that rejects mutating HTTP methods, verify it
   in the running NGINX configuration, and mirror its state in both journals.
   Keep it across every pre-commit failure and remove it only after
-  `cutover-committed` and both internal write locks are released.
+  `cutover-committed` and both internal write locks are released. During a
+  full retry, a raw unlocked probe may safely reconcile a stale journal lock
+  field left behind by a Mongo process restart; never infer that state from
+  pod readiness alone.
 - In MongoDB 8.2, mongosh `db.currentOp()` can omit the top-level `fsyncLock`
   field even while the raw `currentOp` database command reports it as true.
   The raw command omits the field while unlocked, so treat absence as false
   but reject command errors or malformed present values. Normalize BSON `Long`
   lock counts to JavaScript numbers before serializing them for shell
   validation.
+- An application that awaits index reconciliation before opening its health
+  port cannot start under Mongo `fsyncLock`, even when the identical index
+  already exists. Keep ingress, RabbitMQ, and every other application at zero,
+  start only that exact application while Mongo is unlocked, immediately lock
+  Mongo after readiness, and recertify all canonical signatures under the lock
+  before starting the remaining workloads. Do not move the RabbitMQ publish
+  lock ahead of consumer topology initialization: queue binding requires write
+  permission even though external publishing is still blocked by zero ingress.
 - Pre-commit public checks must be read-only and prove the HTTP mutation fence.
   Run the mutating browser journey only after commit and fence removal; never
   let a validation write invalidate the certified source/target signatures.

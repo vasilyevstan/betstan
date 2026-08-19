@@ -188,9 +188,12 @@ fixtures.
    transfer archives only on ephemeral runner storage, validates them in an
    isolated disposable Mongo, then drops and exactly replaces the eight
    allowlisted OCI databases. It verifies canonical data and metadata
-   signatures, recreates the 17-queue RabbitMQ topology, restarts consumers
-   sequentially, then locks Mongo and RabbitMQ publishes while protected and
-   public health run. Finalization rechecks parity under both locks, records
+   signatures, starts only auth while ingress, RabbitMQ, and every other
+   application remain stopped so its required index initialization can finish,
+   then immediately locks Mongo and recertifies exact parity under that lock.
+   It recreates the 17-queue RabbitMQ topology, restarts consumers
+   sequentially, and locks RabbitMQ publishes before ingress opens under the
+   HTTP mutation fence. Finalization rechecks parity under all locks, records
    `cutover-committed`, and only then enables writes.
    A pre-destructive failure restores OCI workload baselines. Any later
    pre-commit failure keeps OCI closed and marks `recovery-required`; a later
