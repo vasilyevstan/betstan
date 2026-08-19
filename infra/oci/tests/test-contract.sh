@@ -42,6 +42,7 @@ for lesson in \
     "target-loopback tunnel" \
     "No retained backup or old-OCI rollback exists" \
     "Mongo \`fsyncLock\` is process-local" \
+    "application rollout does not prove that asynchronous RabbitMQ" \
     "Pre-commit public checks must be read-only" \
     "Never return a blind \`NO_GO\`"; do
     grep -Fq "$lesson" "$lessons" ||
@@ -65,6 +66,9 @@ grep -Fq "After \`cutover-committed\`, never retry from Azure" \
 grep -Fq "controller-level HTTP mutation fence" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent does not preserve the restart-safe HTTP fence"
+grep -Fq "bounded convergence loop for" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent does not require bounded RabbitMQ convergence"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"

@@ -37,6 +37,8 @@ STREAM_TIMEOUT_SECONDS="${MIGRATION_STREAM_TIMEOUT_SECONDS:-900}"
 MONGO_VALIDATION_TIMEOUT_SECONDS="${MIGRATION_MONGO_VALIDATION_TIMEOUT_SECONDS:-600}"
 QUEUE_DRAIN_ATTEMPTS="${QUEUE_DRAIN_ATTEMPTS:-30}"
 QUEUE_DRAIN_SLEEP_SECONDS="${QUEUE_DRAIN_SLEEP_SECONDS:-10}"
+QUEUE_CONVERGENCE_ATTEMPTS="${QUEUE_CONVERGENCE_ATTEMPTS:-30}"
+QUEUE_CONVERGENCE_SLEEP_SECONDS="${QUEUE_CONVERGENCE_SLEEP_SECONDS:-10}"
 RUNNER_CAPACITY_MULTIPLIER="${RUNNER_CAPACITY_MULTIPLIER:-2}"
 RUNNER_CAPACITY_RESERVE_BYTES="${RUNNER_CAPACITY_RESERVE_BYTES:-2147483648}"
 SIGNATURE_SCRIPT="$SCRIPT_DIR/mongo-canonical-signature.js"
@@ -182,6 +184,7 @@ simulate() {
   for point in \
     auth-startup-before-mongo-lock mongo-write-lock \
     rabbitmq-recreate restart-auth restart-client \
+    rabbitmq-consumer-convergence \
     rabbitmq-write-lock http-write-fence-runtime \
     mongo-restart-during-public-health protected-health public-health; do
     if [[ "$fail_at" == "$point" ]]; then
@@ -1544,6 +1547,49 @@ drain_queues() {
   migration_die "$provider RabbitMQ did not drain before the bounded deadline"
 }
 
+wait_rabbitmq_consumer_convergence() {
+  local provider="$1"
+  local attempt rows count names expected backlog bad
+  local missing extra zero_consumers
+  expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
+  for attempt in $(seq 1 "$QUEUE_CONVERGENCE_ATTEMPTS"); do
+    rows="$(rabbit_queue_rows "$provider")"
+    count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
+    names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
+    backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
+    bad="$(awk '$4 < 1 {bad++} END {print bad+0}' <<<"$rows")"
+    if [[ "$count" == "17" && "$names" == "$expected" &&
+      "$backlog" == "0" && "$bad" == "0" ]]; then
+      oci_log \
+        "rabbitmq_consumer_convergence=PASS provider=$provider attempt=$attempt"
+      return 0
+    fi
+    oci_log \
+      "rabbitmq_consumer_convergence=WAIT provider=$provider attempt=$attempt queue_count=$count backlog=$backlog zero_consumer_count=$bad"
+    if (( attempt < QUEUE_CONVERGENCE_ATTEMPTS )); then
+      migration_sleep "$QUEUE_CONVERGENCE_SLEEP_SECONDS"
+    fi
+  done
+
+  missing="$(
+    comm -23 \
+      <(printf '%s\n' "$expected") \
+      <(if [[ -n "$names" ]]; then printf '%s\n' "$names"; fi) |
+      paste -sd, -
+  )"
+  extra="$(
+    comm -13 \
+      <(printf '%s\n' "$expected") \
+      <(if [[ -n "$names" ]]; then printf '%s\n' "$names"; fi) |
+      paste -sd, -
+  )"
+  zero_consumers="$(
+    awk '$4 < 1 {printf "%s%s", separator, $1; separator=","}' <<<"$rows"
+  )"
+  migration_die \
+    "$provider RabbitMQ consumer topology did not converge: queue-count=$count backlog=$backlog missing=${missing:-none} extra=${extra:-none} zero-consumers=${zero_consumers:-none}"
+}
+
 applications_are_zero() {
   local provider="$1"
   local namespace service replicas
@@ -2553,7 +2599,7 @@ start_auth_before_mongo_lock() {
 }
 
 recreate_rabbitmq_and_restart() {
-  local service replicas ingress rows count names expected backlog bad
+  local service replicas ingress
   state_assert_fence
   verify_target_mongo_identity
   scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
@@ -2584,15 +2630,8 @@ recreate_rabbitmq_and_restart() {
     migration_failure_hook "restart-$service"
   done
 
-  rows="$(rabbit_queue_rows oci)"
-  count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
-  names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
-  expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
-  backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
-  bad="$(awk '$4 < 1 {bad++} END {print bad+0}' <<<"$rows")"
-  [[ "$count" == "17" && "$names" == "$expected" &&
-    "$backlog" == "0" && "$bad" == "0" ]] ||
-    migration_die "OCI RabbitMQ is not exact after sequential consumer restart"
+  wait_rabbitmq_consumer_convergence oci
+  migration_failure_hook rabbitmq-consumer-convergence
   lock_rabbitmq_writes
 
   ingress="$(baseline_value "$oci_baseline" ingress)"
@@ -2779,6 +2818,10 @@ validate_inputs() {
     migration_die "queue drain attempts must be positive"
   migration_is_positive_int "$QUEUE_DRAIN_SLEEP_SECONDS" ||
     migration_die "queue drain sleep must be positive"
+  migration_is_positive_int "$QUEUE_CONVERGENCE_ATTEMPTS" ||
+    migration_die "queue convergence attempts must be positive"
+  migration_is_positive_int "$QUEUE_CONVERGENCE_SLEEP_SECONDS" ||
+    migration_die "queue convergence sleep must be positive"
   migration_is_positive_int "$RUNNER_CAPACITY_MULTIPLIER" ||
     migration_die "runner capacity multiplier must be positive"
   migration_is_positive_int "$RUNNER_CAPACITY_RESERVE_BYTES" ||

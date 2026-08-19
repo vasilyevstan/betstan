@@ -88,6 +88,12 @@ conversation summaries are not authority.
   before starting the remaining workloads. Do not move the RabbitMQ publish
   lock ahead of consumer topology initialization: queue binding requires write
   permission even though external publishing is still blocked by zero ingress.
+- A successful application rollout does not prove that asynchronous RabbitMQ
+  queue declaration, binding, and consumer registration have converged. After
+  sequential startup, poll the exact 17 queue names, zero backlog, and nonzero
+  consumer count per queue within a bounded deadline. Keep ingress closed and
+  RabbitMQ writable during that wait, emit sanitized mismatch diagnostics on
+  exhaustion, and publish-lock RabbitMQ only after the exact topology passes.
 - Pre-commit public checks must be read-only and prove the HTTP mutation fence.
   Run the mutating browser journey only after commit and fence removal; never
   let a validation write invalidate the certified source/target signatures.

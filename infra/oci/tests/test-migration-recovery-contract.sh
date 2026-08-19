@@ -84,6 +84,7 @@ done
 for point in \
   auth-startup-before-mongo-lock mongo-write-lock \
   rabbitmq-recreate restart-auth restart-client \
+  rabbitmq-consumer-convergence \
   rabbitmq-write-lock http-write-fence-runtime \
   mongo-restart-during-public-health protected-health public-health; do
   run_failure "$point" true true closed true
@@ -560,6 +561,11 @@ for literal in \
   'const lockCount=Number(result.lockCount)' \
   'retry journal Mongo write-lock state is invalid' \
   'retry Mongo write-lock state did not reconcile' \
+  'wait_rabbitmq_consumer_convergence' \
+  'rabbitmq_consumer_convergence=WAIT' \
+  'rabbitmq_consumer_convergence=PASS' \
+  'RabbitMQ consumer topology did not converge' \
+  'rabbitmq-consumer-convergence' \
   'lock_rabbitmq_writes' \
   'INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"' \
   'if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$)' \
@@ -614,9 +620,40 @@ rabbit_state = migration.index(
 application_loop = migration.index(
     '  for service in "${BACKEND_SERVICES[@]}" client; do', rabbit_state
 )
-rabbit_lock = migration.index("  lock_rabbitmq_writes\n", application_loop)
-if not rabbit_restart < rabbit_unlock < rabbit_state < application_loop < rabbit_lock:
+rabbit_convergence = migration.index(
+    "  wait_rabbitmq_consumer_convergence oci\n", application_loop
+)
+rabbit_convergence_failure = migration.index(
+    "  migration_failure_hook rabbitmq-consumer-convergence\n",
+    rabbit_convergence,
+)
+rabbit_lock = migration.index(
+    "  lock_rabbitmq_writes\n", rabbit_convergence_failure
+)
+if not (
+    rabbit_restart < rabbit_unlock < rabbit_state < application_loop
+    < rabbit_convergence < rabbit_convergence_failure < rabbit_lock
+):
     raise SystemExit("RabbitMQ recovery does not normalize publish permissions")
+
+convergence_start = migration.index("wait_rabbitmq_consumer_convergence() {")
+convergence_end = migration.index("\n}\n", convergence_start)
+convergence = migration[convergence_start:convergence_end]
+for required in (
+    'seq 1 "$QUEUE_CONVERGENCE_ATTEMPTS"',
+    'migration_sleep "$QUEUE_CONVERGENCE_SLEEP_SECONDS"',
+    '"$count" == "17"',
+    '"$names" == "$expected"',
+    '"$backlog" == "0"',
+    '"$bad" == "0"',
+    "missing=",
+    "extra=",
+    "zero_consumers=",
+):
+    if required not in convergence:
+        raise SystemExit(
+            f"RabbitMQ convergence gate is missing: {required}"
+        )
 PY
 [[ "$(grep -Fc 'verify_source_mongo_identity "$pod"' "$MIGRATION")" -ge 3 ]] ||
   fail "migration does not revalidate each source around capture"
