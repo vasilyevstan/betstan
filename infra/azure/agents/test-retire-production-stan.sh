@@ -3,12 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OPERATOR="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
-WORK_DIR="$ROOT_DIR/infra/azure/agents/.retirement-fixture-work"
+_SAFE_PARENT="${BETSTAN_TEST_TMPDIR:-${ROOT_DIR}/.test-workdirs}"
+mkdir -p "$_SAFE_PARENT"
+WORK_DIR="$(mktemp -d "$_SAFE_PARENT/retirement-XXXXXX")"
 BIN_DIR="$WORK_DIR/bin"
 SOURCE_SHA="1111111111111111111111111111111111111111"
 CLUSTER_ID="/subscriptions/fixture/resourceGroups/betstan-rg/providers/Microsoft.ContainerService/managedClusters/betstan-aks"
 
-rm -rf "$WORK_DIR"
 mkdir -p "$BIN_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 

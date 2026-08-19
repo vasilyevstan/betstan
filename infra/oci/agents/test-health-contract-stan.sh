@@ -5,9 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OCI_DIR="$ROOT_DIR/infra/oci"
 HEALTH="$OCI_DIR/agents/health-check-stan.sh"
 HEALTHY="$OCI_DIR/tests/fixtures/health/healthy.json"
-WORK_DIR="$OCI_DIR/tests/.health-fixture-work"
+_SAFE_PARENT="${BETSTAN_TEST_TMPDIR:-${ROOT_DIR}/.test-workdirs}"
+mkdir -p "$_SAFE_PARENT"
+WORK_DIR="$(mktemp -d "$_SAFE_PARENT/health-contract-XXXXXX")"
 
-rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/bin"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
