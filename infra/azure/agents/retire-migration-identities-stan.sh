@@ -694,7 +694,7 @@ verify_azure_context() {
 
 probe_sp_presence() {
   local object_id="$1" output rc=0
-  output="$(az ad sp list --filter "id eq '$object_id'" --query 'length(@)' -o tsv 2>&1)" || rc=$?
+  output="$(az ad sp list --all --query "[?id=='$object_id'] | length(@)" -o tsv 2>&1)" || rc=$?
   [[ "$rc" -eq 0 ]] || die "probe_sp_api_error"
   case "$output" in
     0) printf 'absent' ;; 1) printf 'present' ;;
@@ -704,7 +704,7 @@ probe_sp_presence() {
 
 probe_sp_app_id() {
   local object_id="$1" output rc=0
-  output="$(az ad sp list --filter "id eq '$object_id'" --query '[0].appId' -o tsv 2>&1)" || rc=$?
+  output="$(az ad sp list --all --query "[?id=='$object_id'].[appId] | [0][0]" -o tsv 2>&1)" || rc=$?
   [[ "$rc" -eq 0 ]] || die "probe_sp_app_id_api_error"
   printf '%s' "$output"
 }
@@ -779,7 +779,7 @@ probe_repo_secret_presence() {
 
 verify_retained_identity() {
   local sp_output rc=0
-  sp_output="$(az ad sp list --filter "id eq '$RETAINED_SP_OBJECT_ID'" -o json 2>&1)" || rc=$?
+  sp_output="$(az ad sp list --all --query "[?id=='$RETAINED_SP_OBJECT_ID']" -o json 2>&1)" || rc=$?
   [[ "$rc" -eq 0 ]] || die "retained_sp_query_api_error"
   local sp_count
   sp_count="$(printf '%s' "$sp_output" | jq 'length')" || die "retained_sp_response_parse_error"

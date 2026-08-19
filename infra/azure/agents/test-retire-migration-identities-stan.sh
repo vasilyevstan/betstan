@@ -92,6 +92,11 @@ case "\${1:-} \${2:-}" in
   "ad sp")
     case "\${3:-}" in
       list)
+        # Reject server-side --filter (reproduces 404 on deleted objects)
+        if [[ "\$*" == *"--filter"* ]]; then
+          printf 'Resource does not exist or one of the queried reference-property objects are not present.\n' >&2
+          exit 1
+        fi
         if [[ "\$*" == *"\$STUB_RETAINED_SP_OID"* ]]; then
           if [[ "\${STUB_RETAINED_SP_MISSING:-0}" == "1" ]]; then
             if [[ "\$*" == *"length"* ]]; then printf '0\n'; else printf '[]\n'; fi
@@ -1348,6 +1353,34 @@ if [[ -n "$secret_del_last" && -n "$post_fence_run" ]]; then
 else
   fail "post_secrets_fence_runs_after_delete (no run list after secret delete)"
 fi
+
+# --- SP filter 404 regression: operator must use --all, never --filter ---
+printf '\n  --- SP probe uses --all not --filter ---\n'
+
+# The stub rejects --filter with a 404 (reproducing real CLI behavior on deleted SPs).
+# If any test above passed that exercises SP probes, --filter is not used.
+# Explicitly verify: a successful execute with absent SPs never hits --filter.
+fixture_dir="$WORK_DIR/t-no-filter"
+o="$(run_operator execute "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 2>&1)" || true
+if echo "$o" | grep -q "IDENTITY_RETIRED"; then
+  pass "sp_probe_succeeds_without_filter"
+else
+  fail "sp_probe_succeeds_without_filter (got: $(echo "$o"|head -1))"
+fi
+# Check az log: no --filter flag used for sp list
+if grep "ad sp list" "$WORK_DIR/az.log" | grep -q "\-\-filter"; then
+  fail "no_filter_in_sp_list (--filter found in az log)"
+else
+  pass "no_filter_in_sp_list"
+fi
+# Verify uses --all
+if grep "ad sp list" "$WORK_DIR/az.log" | grep -q "\-\-all"; then
+  pass "sp_list_uses_all_flag"
+else
+  fail "sp_list_uses_all_flag (--all not found)"
+fi
+# No IDs leaked
+assert_no_id_leakage "no_id_leak_sp_probe" "$o"
 
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
