@@ -294,10 +294,11 @@ github_run_id=123
 github_run_attempt=1
 terminal_phase=DEPLOYED_HEALTHY
 terminal_status=DEPLOYED_HEALTHY
-journal_heartbeat_epoch=1
 journal_generation=1
-journal_sequence=1
 fencing_generation=1
+journal_sequence=1
+journal_heartbeat_epoch=1
+final_journal_sha256=$(printf 'c%.0s' {1..64})
 artifact_run_binding=123-1
 destructive_boundary_crossed=true
 database_count=8
@@ -311,7 +312,6 @@ azure_cluster_resource_id_sha256=${STUB_CLUSTER_DIGEST}
 aks_power_state=${STUB_AKS_POWER_STATE:-Stopped}
 vmss_instances_deallocated=true
 azure_cluster_stopped_deallocated=true
-final_journal_sha256=$(printf 'c%.0s' {1..64})
 ENV
 else
   printf 'unexpected gh call: %s\n' "$*" >&2

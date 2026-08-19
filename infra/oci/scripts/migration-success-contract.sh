@@ -109,39 +109,80 @@ _contract_require_boolean() {
 # --- Field set validation (shared by emit and validate) ----------------------
 _contract_validate_field_set() {
   local file="$1"
-  local expected_sorted actual_sorted
 
   # Reject blank lines
   if grep -q '^[[:space:]]*$' "$file"; then
     _contract_die "blank_lines_present" "envelope"
   fi
 
-  # Build sorted expected
-  expected_sorted="$(printf '%s\n' "${CONTRACT_FIELDS[@]}" | sort)"
-
-  # Extract actual keys (everything before first =)
-  actual_sorted="$(sed 's/=.*//' "$file" | sort)"
-
-  # Check for unknown fields
-  local unknown
-  unknown="$(comm -23 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
-  if [[ -n "$unknown" ]]; then
-    _contract_die "unknown_field" "$unknown"
+  # Reject lines without key=value structure
+  if grep -qv '=' "$file"; then
+    _contract_die "malformed_line" "envelope"
   fi
 
-  # Check for missing fields
-  local missing
-  missing="$(comm -13 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
-  if [[ -n "$missing" ]]; then
-    _contract_die "missing_field" "$missing"
-  fi
+  # Extract actual keys in file order
+  local actual_keys
+  actual_keys="$(sed 's/=.*//' "$file")"
 
-  # Check for duplicates (actual line count != field count)
+  # Line count check (catches duplicates or extra lines early)
   local line_count field_count
-  line_count="$(wc -l < "$file" | tr -d ' ')"
+  line_count="$(printf '%s\n' "$actual_keys" | wc -l | tr -d ' ')"
   field_count="${#CONTRACT_FIELDS[@]}"
-  if [[ "$line_count" != "$field_count" ]]; then
+  if [[ "$line_count" -gt "$field_count" ]]; then
+    # Identify duplicate or unknown via sorted comparison
+    local actual_sorted expected_sorted
+    actual_sorted="$(printf '%s\n' "$actual_keys" | sort)"
+    expected_sorted="$(printf '%s\n' "${CONTRACT_FIELDS[@]}" | sort)"
+    local dup
+    dup="$(printf '%s\n' "$actual_keys" | sort | uniq -d | head -1)"
+    if [[ -n "$dup" ]]; then
+      _contract_die "duplicate_field" "$dup"
+    fi
+    local unknown
+    unknown="$(comm -23 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
+    if [[ -n "$unknown" ]]; then
+      _contract_die "unknown_field" "$unknown"
+    fi
     _contract_die "line_count_mismatch(expected=${field_count},actual=${line_count})" "envelope"
+  fi
+
+  if [[ "$line_count" -lt "$field_count" ]]; then
+    # Identify missing field
+    local actual_sorted expected_sorted
+    actual_sorted="$(printf '%s\n' "$actual_keys" | sort)"
+    expected_sorted="$(printf '%s\n' "${CONTRACT_FIELDS[@]}" | sort)"
+    local missing
+    missing="$(comm -13 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
+    if [[ -n "$missing" ]]; then
+      _contract_die "missing_field" "$missing"
+    fi
+    _contract_die "line_count_mismatch(expected=${field_count},actual=${line_count})" "envelope"
+  fi
+
+  # Exact count matches -- now enforce canonical order
+  local expected_keys
+  expected_keys="$(printf '%s\n' "${CONTRACT_FIELDS[@]}")"
+
+  if [[ "$actual_keys" != "$expected_keys" ]]; then
+    # Same count, figure out what's wrong: unknown, missing, or reordered
+    local actual_sorted expected_sorted
+    actual_sorted="$(printf '%s\n' "$actual_keys" | sort)"
+    expected_sorted="$(printf '%s\n' "${CONTRACT_FIELDS[@]}" | sort)"
+
+    local unknown
+    unknown="$(comm -23 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
+    if [[ -n "$unknown" ]]; then
+      _contract_die "unknown_field" "$unknown"
+    fi
+
+    local missing
+    missing="$(comm -13 <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)"
+    if [[ -n "$missing" ]]; then
+      _contract_die "missing_field" "$missing"
+    fi
+
+    # All fields present but wrong order
+    _contract_die "field_order_violated" "envelope"
   fi
 }
 

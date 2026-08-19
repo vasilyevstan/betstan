@@ -167,6 +167,17 @@ else
   pass
 fi
 
+# --- Test: reordered envelope rejected --------------------------------------
+echo "--- Test: reordered envelope rejected"
+{
+  make_valid_env false | sort
+} > "$WORK_DIR/reordered.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/reordered.env" 2>/dev/null; then
+  fail "reordered envelope should be rejected"
+else
+  pass
+fi
+
 # --- Test: invalid lineage relation (ordinary with different SHA) ----------
 echo "--- Test: invalid lineage - ordinary with ancestor SHA"
 {
