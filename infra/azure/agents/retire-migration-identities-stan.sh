@@ -179,6 +179,17 @@ validate_subscription_binding() {
   [[ "$embedded" == "$expected_sub" ]] || die "metadata_wrong_subscription_binding"
 }
 
+# Validate RA ID parent scope equals declared scope (case-insensitive).
+# Derives parent by stripping /providers/Microsoft.Authorization/roleAssignments/<GUID>.
+validate_ra_scope_binding() {
+  local label="$1" ra_id="$2" expected_scope="$3"
+  local derived lower_derived lower_expected
+  derived="$(printf '%s' "$ra_id" | sed 's|/providers/Microsoft\.Authorization/roleAssignments/[0-9a-f-]*$||')"
+  lower_derived="$(printf '%s' "$derived" | tr '[:upper:]' '[:lower:]')"
+  lower_expected="$(printf '%s' "$expected_scope" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower_derived" == "$lower_expected" ]] || die "metadata_ra_scope_mismatch"
+}
+
 # --- Metadata parsing ---
 
 env_value() {
@@ -576,6 +587,11 @@ load_metadata() {
   validate_subscription_binding "role_assignment_3_scope" "$RA3_SCOPE" "$SUBSCRIPTION_ID"
   validate_subscription_binding "custom_role_1_assignable_scope" "$CR1_SCOPE" "$SUBSCRIPTION_ID"
   validate_subscription_binding "custom_role_2_assignable_scope" "$CR2_SCOPE" "$SUBSCRIPTION_ID"
+
+  # RA ID parent scope must equal declared scope (case-insensitive)
+  validate_ra_scope_binding "role_assignment_id_1" "$ROLE_ASSIGNMENT_ID_1" "$RA1_SCOPE"
+  validate_ra_scope_binding "role_assignment_id_2" "$ROLE_ASSIGNMENT_ID_2" "$RA2_SCOPE"
+  validate_ra_scope_binding "role_assignment_id_3" "$ROLE_ASSIGNMENT_ID_3" "$RA3_SCOPE"
 
   # Safe names
   validate_safe_name_field "migration_environment" "$MIGRATION_ENV"

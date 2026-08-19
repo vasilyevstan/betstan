@@ -1037,6 +1037,71 @@ expect_fail_with "bad_nested_scope_rejected" "metadata_invalid_scope" \
     IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
     IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
 
+# --- RA scope binding ---
+printf '\n  --- ra scope binding ---\n'
+
+# (a) AKS-scoped assignment ID with RG-scoped metadata scope -> rejected
+fixture_dir="$WORK_DIR/t-ra-aks-with-rg-scope"
+mkdir -p "$fixture_dir"
+write_metadata "$fixture_dir"
+sed -i.bak "s|role_assignment_id_2=$RA_ID_2|role_assignment_id_2=$RA_ID_AKS|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_2_scope=$SCOPE|role_assignment_2_scope=$RG_SCOPE|" "$fixture_dir/metadata.env"
+rm -f "$fixture_dir/metadata.env.bak"
+expect_fail_with "aks_ra_with_rg_scope_rejected" "metadata_ra_scope_mismatch" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# (b) RG-scoped assignment ID with AKS scope -> rejected
+fixture_dir="$WORK_DIR/t-ra-rg-with-aks-scope"
+mkdir -p "$fixture_dir"
+write_metadata "$fixture_dir"
+sed -i.bak "s|role_assignment_id_3=$RA_ID_3|role_assignment_id_3=$RA_ID_RG|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_3_scope=$SCOPE|role_assignment_3_scope=$AKS_SCOPE|" "$fixture_dir/metadata.env"
+rm -f "$fixture_dir/metadata.env.bak"
+expect_fail_with "rg_ra_with_aks_scope_rejected" "metadata_ra_scope_mismatch" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# (c) Casing-only differences accepted (AKS scope with mixed case)
+fixture_dir="$WORK_DIR/t-ra-casing-match"
+mkdir -p "$fixture_dir"
+write_metadata "$fixture_dir"
+# Use AKS RA ID (lowercase resourcegroups) with uppercase ResourceGroups in scope
+AKS_SCOPE_UPPER="/subscriptions/$GS/ResourceGroups/betstan-rg/providers/Microsoft.ContainerService/managedClusters/betstan-aks"
+sed -i.bak "s|role_assignment_id_1=$RA_ID_1|role_assignment_id_1=$RA_ID_AKS|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_1_scope=$SCOPE|role_assignment_1_scope=$AKS_SCOPE_UPPER|" "$fixture_dir/metadata.env"
+rm -f "$fixture_dir/metadata.env.bak"
+expect_output "ra_casing_difference_accepted" "identity_retirement=READY" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# (d) Exact valid combinations: AKS RA+AKS scope, RG RA+RG scope
+fixture_dir="$WORK_DIR/t-ra-exact-valid"
+mkdir -p "$fixture_dir"
+write_metadata "$fixture_dir"
+sed -i.bak "s|role_assignment_id_2=$RA_ID_2|role_assignment_id_2=$RA_ID_AKS|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_2_scope=$SCOPE|role_assignment_2_scope=$AKS_SCOPE|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_id_3=$RA_ID_3|role_assignment_id_3=$RA_ID_RG|" "$fixture_dir/metadata.env"
+sed -i.bak "s|role_assignment_3_scope=$SCOPE|role_assignment_3_scope=$RG_SCOPE|" "$fixture_dir/metadata.env"
+rm -f "$fixture_dir/metadata.env.bak"
+expect_output "ra_exact_valid_combinations_accepted" "identity_retirement=READY" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
 # --- Fixed repository enforcement ---
 printf '\n  --- fixed repository ---\n'
 fixture_dir="$WORK_DIR/t-wrong-repo"
