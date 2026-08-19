@@ -78,6 +78,12 @@ grep -Fq "https://betstan.xyz" \
 grep -Fq "A successful delete command alone is not" \
     "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
     fail "Azure retirement agent trusts delete acceptance"
+grep -Fq 'runtime_deploy_source_sha' \
+    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
+    fail "Azure retirement agent omits recovery deployment lineage"
+grep -Fq 'never replace optimistic concurrency with a wildcard' \
+    "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
+    fail "Azure retirement agent permits an unfenced AKS delete"
 retirement_operator="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
 [[ -x "$retirement_operator" ]] ||
   fail "checked-in Azure retirement operator is missing or not executable"
@@ -89,12 +95,13 @@ for retirement_contract in \
     'http_mutation_fence_removed true' \
     'azure_cluster_stopped_deallocated true' \
     'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
-    'az aks delete' \
+    'az rest' \
+    '--headers "If-Match=${CLUSTER_ETAG}"' \
     'wait_for_cluster_absence' \
     'validate_inventory_subset "$CURRENT_INVENTORY_FILE"' \
     'verify_subscription_absence' \
     'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'; do
-    grep -Fq "$retirement_contract" "$retirement_operator" ||
+    grep -Fq -- "$retirement_contract" "$retirement_operator" ||
       fail "Azure retirement operator omits contract: $retirement_contract"
 done
 ! grep -Eq 'az (ad|role)|gh secret (delete|set)|oci |kubectl ' \

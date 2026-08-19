@@ -81,11 +81,12 @@ require_served_certificate() {
   shift 2
   local certificate="$WORK_DIR/${label}.certificate.pem"
   local issuer san_text
-  openssl s_client \
-    -connect "${host}:443" \
-    -servername "$host" \
-    -verify_return_error \
-    -showcerts </dev/null 2>"$WORK_DIR/${label}.openssl.log" |
+  printf 'Q\n' |
+    openssl s_client \
+      -connect "${host}:443" \
+      -servername "$host" \
+      -verify_return_error \
+      -showcerts 2>"$WORK_DIR/${label}.openssl.log" |
     openssl x509 -out "$certificate" ||
     fail "$label did not serve a trusted parseable certificate"
   issuer="$(openssl x509 -in "$certificate" -noout -issuer)"

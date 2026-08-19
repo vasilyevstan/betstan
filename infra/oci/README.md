@@ -254,4 +254,5 @@ inventory digest, then pass that digest and exact confirmation to `execute`.
 The operator deletes AKS first, resumes asynchronous deletion by fenced phase,
 removes only the two exact resource groups, and verifies subscription-wide
 absence twice. It reports resource retirement separately from delayed Cost
-Management completion.
+Management completion. AKS resource fingerprints and ETags are
+case-preserving; do not normalize or wildcard either value.
