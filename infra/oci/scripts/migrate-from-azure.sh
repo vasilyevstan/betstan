@@ -180,7 +180,8 @@ simulate() {
     done
   done
   for point in \
-    rabbitmq-recreate restart-auth restart-client mongo-write-lock \
+    auth-startup-before-mongo-lock mongo-write-lock \
+    rabbitmq-recreate restart-auth restart-client \
     rabbitmq-write-lock http-write-fence-runtime \
     mongo-restart-during-public-health protected-health public-health; do
     if [[ "$fail_at" == "$point" ]]; then
@@ -1629,16 +1630,29 @@ unlock_target_writes() {
 }
 
 unlock_target_writes_for_retry() {
+  local lock_status journal_lock
   target_mongo_pod="$(kube_capture oci target-pod 30 2 \
     get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
     -o jsonpath='{.items[0].metadata.name}')"
   [[ -n "$target_mongo_pod" ]] ||
     migration_die "OCI Mongo pod is unavailable for retry preparation"
-  if [[ "$(target_write_lock_status)" == "true" ]]; then
+  lock_status="$(target_write_lock_status)"
+  journal_lock="$(state_optional_value mongo-write-lock)"
+  [[ "$journal_lock" == "true" || "$journal_lock" == "false" ]] ||
+    migration_die "retry journal Mongo write-lock state is invalid"
+  if [[ "$lock_status" == "true" ]]; then
     unlock_target_writes
+  fi
+  if [[ "$lock_status" == "true" || "$journal_lock" == "true" ]]; then
     state_advance retry-write-lock-released true true \
       "mongo-write-lock=false"
   fi
+  state_read_all >/dev/null
+  state_compare_kind journal
+  state_validate_contract
+  [[ "$(target_write_lock_status)" == "false" &&
+    "$(state_optional_value mongo-write-lock)" == "false" ]] ||
+    migration_die "retry Mongo write-lock state did not reconcile"
 }
 
 rabbitmq_write_permission() {
@@ -2411,10 +2425,14 @@ restore_target_databases() {
 }
 
 verify_target_exact() {
+  local phase="${1:-target-exactly-validated}"
   local inventory mapping _service database _sts _pod _pvc expected actual
   local signature_hash source_aggregate target_aggregate
   local signature_args=()
   local target_manifest="$WORK_DIR/target-signature-manifest.tsv"
+  [[ "$phase" == "target-exactly-validated" ||
+    "$phase" == "target-exactly-validated-after-auth-startup" ]] ||
+    migration_die "target exact-validation phase is invalid"
   : >"$target_manifest"
   verify_target_mongo_identity
   inventory="$(mongo_non_system_databases oci "$target_mongo_pod")"
@@ -2439,7 +2457,7 @@ verify_target_exact() {
     "$target_aggregate" == "$source_aggregate" ]] ||
     migration_die "aggregate source/target signature parity failed"
   verify_target_mongo_identity
-  state_advance target-exactly-validated true true \
+  state_advance "$phase" true true \
     "database-count=8" \
     "logical-parity=true" \
     "target-signature-manifest-sha256=$target_aggregate" \
@@ -2483,6 +2501,55 @@ close_oci() {
   wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
     app=gaming-rabbitmq
   oci_frozen=1
+}
+
+start_auth_before_mongo_lock() {
+  local service replicas auth_state
+  state_assert_fence
+  verify_target_mongo_identity
+  [[ "$(state_optional_value mongo-write-lock)" == "false" &&
+    "$(target_write_lock_status)" == "false" ]] ||
+    migration_die "auth index initialization requires an unlocked OCI Mongo"
+  [[ "$(state_optional_value http-write-fence)" == "true" &&
+    "$(http_write_fence_config_status)" == "true" ]] ||
+    migration_die "auth index initialization requires the retained HTTP fence"
+  wait_deployment_zero oci ingress-nginx ingress-nginx-controller \
+    app.kubernetes.io/component=controller
+  wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
+    app=gaming-rabbitmq
+  for service in "${APP_SERVICES[@]}"; do
+    wait_deployment_zero oci "$OCI_K8S_NAMESPACE" \
+      "gaming-${service}-depl" "app=gaming-${service}"
+  done
+
+  replicas="$(baseline_value "$oci_baseline" auth)"
+  [[ "$replicas" == "1" ]] ||
+    migration_die "OCI auth baseline must be exactly one replica"
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-auth-depl "$replicas"
+  kube_run oci auth-pre-lock-rollout 600 1 \
+    rollout status deployment/gaming-auth-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  auth_state="$(kube_capture oci auth-pre-lock-read 30 2 \
+    get deployment gaming-auth-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.replicas}|{.status.availableReplicas}|{.status.readyReplicas}')"
+  [[ "$auth_state" == "1|1|1" &&
+    "$(target_write_lock_status)" == "false" &&
+    "$(http_write_fence_config_status)" == "true" ]] ||
+    migration_die "auth did not initialize safely before the Mongo write lock"
+  wait_deployment_zero oci ingress-nginx ingress-nginx-controller \
+    app.kubernetes.io/component=controller
+  wait_deployment_zero oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl \
+    app=gaming-rabbitmq
+  for service in "${APP_SERVICES[@]}"; do
+    [[ "$service" == "auth" ]] && continue
+    wait_deployment_zero oci "$OCI_K8S_NAMESPACE" \
+      "gaming-${service}-depl" "app=gaming-${service}"
+  done
+  state_assert_fence
+  verify_target_mongo_identity
+  state_advance auth-started-before-mongo-lock true true \
+    "mongo-write-lock=false" "http-write-fence=true"
+  migration_failure_hook auth-startup-before-mongo-lock
 }
 
 recreate_rabbitmq_and_restart() {
@@ -2796,7 +2863,9 @@ main() {
       restore_target_databases
       verify_target_exact
       verify_target_mongo_identity
+      start_auth_before_mongo_lock
       lock_target_writes
+      verify_target_exact target-exactly-validated-after-auth-startup
       recreate_rabbitmq_and_restart
       state_write_summary
       rm -rf "$WORK_DIR"

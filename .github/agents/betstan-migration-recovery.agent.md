@@ -50,7 +50,16 @@ read-only and prefer the checked-in recovery workflow and scripts.
   protected validation. Because Mongo's `fsyncLock` is cleared by a container
   restart, also require the mirrored, controller-level HTTP mutation fence
   before ingress reopens and verify the directive in the running NGINX
-  configuration. Pre-commit public checks are read-only. Record
+  configuration. If an application must reconcile an already-restored index
+  before it can become Ready, start only that exact application while Mongo is
+  unlocked and ingress, RabbitMQ, and every other application remain at zero;
+  lock Mongo immediately after readiness and recertify exact parity under the
+  lock. If a Mongo restart cleared a process-local lock while the journal still
+  says locked, reconcile the field only after the raw command proves the live
+  process is unlocked. RabbitMQ must remain writable only while consumers
+  declare and bind the empty topology, then be publish-locked before ingress
+  starts.
+  Pre-commit public checks are read-only. Record
   `cutover-committed` only after final parity under all three fences, then
   unlock idempotently and remove the HTTP fence last.
 - After `cutover-committed`, never retry from Azure. OCI may have accepted new
