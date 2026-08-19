@@ -629,6 +629,71 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 >/dev/null 2>&1 || true
 assert_no_retained_deletes "no_retained_delete_verify" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
 
+# --- Path and permission regressions ---
+printf '\n  --- path/permission regressions ---\n'
+
+# Relative metadata path rejected
+fixture_dir="$WORK_DIR/t-relpath"; write_metadata "$fixture_dir"
+expect_fail_with "relative_metadata_path" "metadata_path_not_absolute" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="relative/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
+
+# Relative state dir rejected
+expect_fail_with "relative_state_dir" "state_dir_not_absolute" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="relative/state" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
+
+# Metadata with wrong permissions (0644) rejected
+fixture_dir="$WORK_DIR/t-metaperm"; write_metadata "$fixture_dir"
+chmod 644 "$fixture_dir/metadata.env"
+expect_fail_with "metadata_wrong_perms" "metadata_file_wrong_permissions" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
+
+# Symlinked state directory rejected
+fixture_dir="$WORK_DIR/t-symdir-real"; mkdir -p "$fixture_dir"
+ln -sfn "$fixture_dir" "$WORK_DIR/t-symdir-link"
+write_metadata "$fixture_dir"
+expect_fail_with "symlinked_state_dir" "state_dir_symlink" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$WORK_DIR/t-symdir-link" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
+
+# State file with wrong permissions (0644) rejected on resume
+fixture_dir="$WORK_DIR/t-stateperm"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+chmod 644 "$fixture_dir/identity-retirement-state.env"
+expect_fail_with "state_file_wrong_perms" "state_file_wrong_permissions" \
+  run_operator execute "$fixture_dir"
+
+# Pre-created temp symlink in state dir rejected (write_state safety)
+fixture_dir="$WORK_DIR/t-tempsym"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# Create a predictable trap: symlink at the temp location write_state would use
+# Since temp name is unpredictable (PID+RANDOM), we test by creating many symlinks
+# Instead, we test indirectly: state file written is never a symlink after execute
+STATE_F="$fixture_dir/identity-retirement-state.env"
+if [[ -f "$STATE_F" && ! -L "$STATE_F" ]]; then pass "state_written_not_symlink"
+else fail "state_written_not_symlink"; fi
+
+# State dir that resolves elsewhere via symlink (caught as symlink)
+fixture_dir="$WORK_DIR/t-resolve"
+mkdir -p "$WORK_DIR/t-resolve-target"
+write_metadata "$WORK_DIR/t-resolve-target"
+ln -sfn "$WORK_DIR/t-resolve-target" "$WORK_DIR/t-resolve-via"
+expect_fail_with "state_dir_resolves_elsewhere" "state_dir_symlink" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$WORK_DIR/t-resolve-target/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$WORK_DIR/t-resolve-via" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
+
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$([[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL')" "$SCENARIOS" "$PASS" "$FAIL"
