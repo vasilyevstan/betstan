@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# Focused offline tests for the migration-success provenance contract helper.
+# Tests: ordinary, closed-recovery, unknown/missing/duplicate fields,
+#        invalid lineage relation, parity mismatch, wrong fingerprints.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+CONTRACT="$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh"
+WORK_DIR="$ROOT_DIR/infra/oci/tests/.migration-success-contract-work"
+
+PASS=0
+FAIL=0
+
+fail() {
+  echo "FAIL: $*" >&2
+  FAIL=$((FAIL + 1))
+}
+
+pass() {
+  PASS=$((PASS + 1))
+}
+
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# Syntax check
+bash -n "$CONTRACT" || { fail "bash -n failed"; exit 1; }
+
+# ─── Fixture values ────────────────────────────────────────────────────────
+SOURCE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ANCESTOR_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+SIG_SHA256="$(printf 'c%.0s' {1..64})"
+JOURNAL_SHA256="$(printf 'd%.0s' {1..64})"
+CLUSTER_FP="$(printf 'e%.0s' {1..64})"
+
+make_valid_env() {
+  local recovery="${1:-false}"
+  local deploy_sha="$SOURCE_SHA"
+  [[ "$recovery" == "false" ]] || deploy_sha="$ANCESTOR_SHA"
+  cat <<EOF
+schema=betstan.oci-migration-success.v1
+migration_id=42-1
+source_sha=${SOURCE_SHA}
+runtime_deploy_source_sha=${deploy_sha}
+closed_recovery_retry=${recovery}
+github_run_id=42
+github_run_attempt=1
+terminal_phase=DEPLOYED_HEALTHY
+terminal_status=DEPLOYED_HEALTHY
+journal_generation=5
+fencing_generation=5
+journal_sequence=12
+journal_heartbeat_epoch=1700000000
+final_journal_sha256=${JOURNAL_SHA256}
+artifact_run_binding=42-1
+destructive_boundary_crossed=true
+database_count=8
+logical_source_target_parity=true
+source_signature_aggregate_sha256=${SIG_SHA256}
+target_signature_aggregate_sha256=${SIG_SHA256}
+oci_reopened_healthy=true
+http_mutation_fence_removed=true
+azure_writers_frozen=true
+azure_cluster_resource_id_sha256=${CLUSTER_FP}
+aks_power_state=Stopped
+vmss_instances_deallocated=true
+azure_cluster_stopped_deallocated=true
+EOF
+}
+
+# ─── Test: ordinary migration validates ────────────────────────────────────
+echo "--- Test: ordinary migration validates"
+make_valid_env false > "$WORK_DIR/ordinary.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/ordinary.env" \
+    SOURCE_SHA="$SOURCE_SHA" \
+    MIGRATION_RUN_ID=42 \
+    MIGRATION_RUN_ATTEMPT=1 \
+    MIGRATION_ID=42-1 \
+    AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$CLUSTER_FP"; then
+  pass
+else
+  fail "ordinary migration should validate"
+fi
+
+# ─── Test: closed-recovery migration validates ─────────────────────────────
+echo "--- Test: closed-recovery migration validates"
+make_valid_env true > "$WORK_DIR/recovery.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/recovery.env" \
+    SOURCE_SHA="$SOURCE_SHA" \
+    MIGRATION_RUN_ID=42 \
+    MIGRATION_RUN_ATTEMPT=1 \
+    MIGRATION_ID=42-1 \
+    AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$CLUSTER_FP"; then
+  pass
+else
+  fail "closed-recovery migration should validate"
+fi
+
+# ─── Test: emit mode produces valid file ───────────────────────────────────
+echo "--- Test: emit mode produces valid file"
+if MODE=emit "$CONTRACT" "$WORK_DIR/emitted.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$SOURCE_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true"; then
+  # Re-validate independently
+  if MODE=validate "$CONTRACT" "$WORK_DIR/emitted.env"; then
+    pass
+  else
+    fail "emitted file should re-validate"
+  fi
+else
+  fail "emit mode should succeed with valid inputs"
+fi
+
+# ─── Test: unknown field rejected ──────────────────────────────────────────
+echo "--- Test: unknown field rejected"
+make_valid_env false > "$WORK_DIR/unknown.env"
+echo "bonus_field=surprise" >> "$WORK_DIR/unknown.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/unknown.env" 2>/dev/null; then
+  fail "unknown field should be rejected"
+else
+  pass
+fi
+
+# ─── Test: missing field rejected ──────────────────────────────────────────
+echo "--- Test: missing field rejected"
+make_valid_env false | grep -v "^oci_reopened_healthy=" > "$WORK_DIR/missing.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/missing.env" 2>/dev/null; then
+  fail "missing field should be rejected"
+else
+  pass
+fi
+
+# ─── Test: duplicate field rejected ────────────────────────────────────────
+echo "--- Test: duplicate field rejected"
+make_valid_env false > "$WORK_DIR/duplicate.env"
+echo "source_sha=$SOURCE_SHA" >> "$WORK_DIR/duplicate.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/duplicate.env" 2>/dev/null; then
+  fail "duplicate field should be rejected"
+else
+  pass
+fi
+
+# ─── Test: invalid lineage relation (ordinary with different SHA) ──────────
+echo "--- Test: invalid lineage - ordinary with ancestor SHA"
+{
+  make_valid_env false | sed "s/^runtime_deploy_source_sha=.*/runtime_deploy_source_sha=$ANCESTOR_SHA/"
+} > "$WORK_DIR/bad-lineage-ordinary.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/bad-lineage-ordinary.env" 2>/dev/null; then
+  fail "ordinary with ancestor SHA should fail lineage check"
+else
+  pass
+fi
+
+# ─── Test: invalid lineage relation (recovery with same SHA) ───────────────
+echo "--- Test: invalid lineage - recovery with same SHA"
+{
+  make_valid_env false | sed "s/^closed_recovery_retry=.*/closed_recovery_retry=true/"
+} > "$WORK_DIR/bad-lineage-recovery.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/bad-lineage-recovery.env" 2>/dev/null; then
+  fail "recovery with same SHA should fail lineage check"
+else
+  pass
+fi
+
+# ─── Test: parity mismatch (source != target signature) ────────────────────
+echo "--- Test: parity mismatch"
+BAD_SIG="$(printf 'f%.0s' {1..64})"
+{
+  make_valid_env false | sed "s/^target_signature_aggregate_sha256=.*/target_signature_aggregate_sha256=$BAD_SIG/"
+} > "$WORK_DIR/parity.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/parity.env" 2>/dev/null; then
+  fail "parity mismatch should be rejected"
+else
+  pass
+fi
+
+# ─── Test: wrong cluster fingerprint ──────────────────────────────────────
+echo "--- Test: wrong cluster fingerprint"
+WRONG_FP="$(printf '9%.0s' {1..64})"
+make_valid_env false > "$WORK_DIR/wrong-fp.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/wrong-fp.env" \
+    SOURCE_SHA="$SOURCE_SHA" \
+    AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$WRONG_FP" 2>/dev/null; then
+  fail "wrong fingerprint should be rejected"
+else
+  pass
+fi
+
+# ─── Test: invalid aks_power_state ─────────────────────────────────────────
+echo "--- Test: invalid aks_power_state"
+{
+  make_valid_env false | sed "s/^aks_power_state=.*/aks_power_state=Running/"
+} > "$WORK_DIR/bad-power.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/bad-power.env" 2>/dev/null; then
+  fail "invalid power state should be rejected"
+else
+  pass
+fi
+
+# ─── Test: Deallocated power state accepted ────────────────────────────────
+echo "--- Test: Deallocated power state (case-preserving)"
+{
+  make_valid_env false | sed "s/^aks_power_state=.*/aks_power_state=Deallocated/"
+} > "$WORK_DIR/dealloc-power.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/dealloc-power.env"; then
+  pass
+else
+  fail "Deallocated power state should be accepted"
+fi
+
+# ─── Test: invalid journal (zero) ─────────────────────────────────────────
+echo "--- Test: zero journal_generation rejected"
+{
+  make_valid_env false | sed "s/^journal_generation=.*/journal_generation=0/"
+} > "$WORK_DIR/zero-journal.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/zero-journal.env" 2>/dev/null; then
+  fail "zero journal_generation should be rejected"
+else
+  pass
+fi
+
+# ─── Test: run binding mismatch ────────────────────────────────────────────
+echo "--- Test: run binding mismatch"
+{
+  make_valid_env false | sed "s/^artifact_run_binding=.*/artifact_run_binding=99-2/"
+} > "$WORK_DIR/bad-binding.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/bad-binding.env" 2>/dev/null; then
+  fail "mismatched run binding should be rejected"
+else
+  pass
+fi
+
+# ─── Test: fields mode lists canonical fields ──────────────────────────────
+echo "--- Test: fields mode"
+field_count="$(MODE=fields "$CONTRACT" | wc -l | tr -d ' ')"
+if [[ "$field_count" == "27" ]]; then
+  pass
+else
+  fail "fields mode should list 27 fields, got $field_count"
+fi
+
+# ─── Test: sorted-fields matches retirement allowlist order ────────────────
+echo "--- Test: sorted-fields mode"
+sorted_output="$(MODE=sorted-fields "$CONTRACT")"
+expected_sorted="$(printf '%s\n' \
+  aks_power_state \
+  artifact_run_binding \
+  azure_cluster_resource_id_sha256 \
+  azure_cluster_stopped_deallocated \
+  azure_writers_frozen \
+  closed_recovery_retry \
+  database_count \
+  destructive_boundary_crossed \
+  fencing_generation \
+  final_journal_sha256 \
+  github_run_attempt \
+  github_run_id \
+  http_mutation_fence_removed \
+  journal_generation \
+  journal_heartbeat_epoch \
+  journal_sequence \
+  logical_source_target_parity \
+  migration_id \
+  oci_reopened_healthy \
+  runtime_deploy_source_sha \
+  schema \
+  source_sha \
+  source_signature_aggregate_sha256 \
+  target_signature_aggregate_sha256 \
+  terminal_phase \
+  terminal_status \
+  vmss_instances_deallocated
+)"
+if [[ "$sorted_output" == "$expected_sorted" ]]; then
+  pass
+else
+  fail "sorted-fields output doesn't match expected"
+fi
+
+# ─── Test: emit rejects duplicate key ─────────────────────────────────────
+echo "--- Test: emit rejects duplicate key"
+if MODE=emit "$CONTRACT" "$WORK_DIR/dup-emit.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" 2>/dev/null; then
+  fail "emit should reject duplicate keys"
+else
+  pass
+fi
+
+# ─── Test: emit rejects unknown key ───────────────────────────────────────
+echo "--- Test: emit rejects unknown key"
+if MODE=emit "$CONTRACT" "$WORK_DIR/unknown-emit.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$SOURCE_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true" \
+    "sneaky_extra=evil" 2>/dev/null; then
+  fail "emit should reject unknown keys"
+else
+  pass
+fi
+
+# ─── Summary ───────────────────────────────────────────────────────────────
+echo ""
+echo "migration-success-contract tests: $PASS passed, $FAIL failed"
+[[ "$FAIL" == "0" ]] || exit 1

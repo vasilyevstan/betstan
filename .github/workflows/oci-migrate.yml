@@ -1630,7 +1630,8 @@ jobs:
           grep -Fxq "vmss_instances_deallocated=true" "$stop_file"
 
           mkdir -p artifacts/oci-migration-success
-          printf '%s\n' \
+          MODE=emit ./infra/oci/scripts/migration-success-contract.sh \
+            artifacts/oci-migration-success/migration-summary.env \
             "schema=betstan.oci-migration-success.v1" \
             "migration_id=$migration_id" \
             "source_sha=$source_sha" \
@@ -1657,8 +1658,7 @@ jobs:
             "azure_cluster_resource_id_sha256=$azure_cluster_fingerprint" \
             "aks_power_state=$aks_power_state" \
             "vmss_instances_deallocated=true" \
-            "azure_cluster_stopped_deallocated=true" \
-            > artifacts/oci-migration-success/migration-summary.env
+            "azure_cluster_stopped_deallocated=true"
 
       - name: Upload successful migration retirement provenance
         if: steps.success_summary.outcome == 'success'
