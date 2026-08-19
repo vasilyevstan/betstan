@@ -37,8 +37,9 @@ STREAM_TIMEOUT_SECONDS="${MIGRATION_STREAM_TIMEOUT_SECONDS:-900}"
 MONGO_VALIDATION_TIMEOUT_SECONDS="${MIGRATION_MONGO_VALIDATION_TIMEOUT_SECONDS:-600}"
 QUEUE_DRAIN_ATTEMPTS="${QUEUE_DRAIN_ATTEMPTS:-30}"
 QUEUE_DRAIN_SLEEP_SECONDS="${QUEUE_DRAIN_SLEEP_SECONDS:-10}"
-QUEUE_CONVERGENCE_ATTEMPTS="${QUEUE_CONVERGENCE_ATTEMPTS:-30}"
-QUEUE_CONVERGENCE_SLEEP_SECONDS="${QUEUE_CONVERGENCE_SLEEP_SECONDS:-10}"
+QUEUE_CONVERGENCE_ATTEMPTS="${QUEUE_CONVERGENCE_ATTEMPTS:-8}"
+QUEUE_CONVERGENCE_SLEEP_SECONDS="${QUEUE_CONVERGENCE_SLEEP_SECONDS:-3}"
+QUEUE_CONVERGENCE_DEADLINE_SECONDS="${QUEUE_CONVERGENCE_DEADLINE_SECONDS:-45}"
 RUNNER_CAPACITY_MULTIPLIER="${RUNNER_CAPACITY_MULTIPLIER:-2}"
 RUNNER_CAPACITY_RESERVE_BYTES="${RUNNER_CAPACITY_RESERVE_BYTES:-2147483648}"
 SIGNATURE_SCRIPT="$SCRIPT_DIR/mongo-canonical-signature.js"
@@ -61,6 +62,27 @@ INGRESS_FENCED_SERVER_SNIPPET="${INGRESS_BASE_SERVER_SNIPPET}"$'\n'"${INGRESS_HT
 
 APP_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip client)
 BACKEND_SERVICES=(auth bet backoffice event gamemaster moderation resulting slip)
+RABBITMQ_PASSIVE_SERVICES=(bet backoffice event moderation resulting slip)
+RABBITMQ_CONSUMER_SERVICES=(bet backoffice event gamemaster moderation resulting slip)
+RABBITMQ_BINDING_MAPPINGS=(
+  "backoffice:event:result|backoffice_result_set"
+  "backoffice:event:result|event_result"
+  "backoffice:event:result|gamemaster_result_set"
+  "backoffice:event:result|moderation_event_result"
+  "backoffice:event:result|resulting_result"
+  "backoffice:event:visibility|event_event_visibility"
+  "event:new|backoffice_new_event"
+  "event:new|event_new_event"
+  "event:new|gamemaster_new_event"
+  "event:odds:selected|slip_odds_clicked"
+  "moderation:result|bet_moderation_result"
+  "moderation:result|resulting_moderation_result"
+  "resulting:slip:settle|bet_settle_slip"
+  "resulting:sliprow:settle|bet_settle_slip_row"
+  "slip:bet|bet_place_bet"
+  "slip:bet|moderation_place_bet"
+  "slip:bet|resulting_place_bet"
+)
 DATABASE_MAPPINGS=(
   "auth|gaming_auth|gaming-auth-mongo-depl|gaming-auth-mongo-depl-0|gaming-auth-mongo-data-gaming-auth-mongo-depl-0"
   "bet|gaming_bet|gaming-bet-mongo-depl|gaming-bet-mongo-depl-0|gaming-bet-mongo-data-gaming-bet-mongo-depl-0"
@@ -183,9 +205,9 @@ simulate() {
   done
   for point in \
     auth-startup-before-mongo-lock mongo-write-lock \
-    rabbitmq-recreate restart-auth restart-client \
+    rabbitmq-recreate restart-auth restart-gamemaster \
     rabbitmq-consumer-convergence \
-    rabbitmq-write-lock http-write-fence-runtime \
+    rabbitmq-write-lock restart-client http-write-fence-runtime \
     mongo-restart-during-public-health protected-health public-health; do
     if [[ "$fail_at" == "$point" ]]; then
       recovery=true
@@ -202,7 +224,7 @@ simulate() {
     fi
   done
   case "$fail_at" in
-    cutover-committed)
+    cutover-committed | gamemaster-quiesced-after-commit)
       printf '%s\n' \
         "result=failed" \
         "failure_point=$fail_at" \
@@ -328,6 +350,29 @@ kube_capture() {
   local status=$?
   migration_maybe_heartbeat
   return "$status"
+}
+
+autonomous_deadline_remaining() {
+  local autonomous_start_epoch="$1"
+  local elapsed remaining
+  migration_is_positive_int "$autonomous_start_epoch" ||
+    migration_die "RabbitMQ autonomous producer start epoch is invalid"
+  elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
+  remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"
+  (( remaining > 0 )) ||
+    migration_die "RabbitMQ autonomous producer deadline is exhausted"
+  printf '%s' "$remaining"
+}
+
+kube_before_autonomous_deadline() {
+  local provider="$1"
+  local classification="$2"
+  local autonomous_start_epoch="$3"
+  local remaining
+  shift 3
+  remaining="$(autonomous_deadline_remaining "$autonomous_start_epoch")"
+  migration_raw "$classification" "$remaining" 1 \
+    kubectl --kubeconfig "$(provider_kubeconfig "$provider")" "$@"
 }
 
 state_file() {
@@ -1511,16 +1556,32 @@ freeze_applications() {
 
 rabbit_queue_rows() {
   local provider="$1"
+  local autonomous_start_epoch="${2:-}"
   local namespace pod output
   namespace="$(provider_namespace "$provider")"
-  pod="$(kube_capture "$provider" rabbitmq-pod 30 2 \
-    get pods -n "$namespace" -l app=gaming-rabbitmq \
-    -o jsonpath='{.items[0].metadata.name}')"
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    pod="$(kube_before_autonomous_deadline \
+      "$provider" rabbitmq-pod "$autonomous_start_epoch" \
+      get pods -n "$namespace" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  else
+    pod="$(kube_capture "$provider" rabbitmq-pod 30 2 \
+      get pods -n "$namespace" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  fi
   [[ -n "$pod" ]] || migration_die "$provider RabbitMQ pod is missing"
-  output="$(kube_capture "$provider" rabbitmq-queues 60 2 \
-    exec -n "$namespace" "$pod" -- \
-    rabbitmqctl list_queues --quiet \
-      name messages_ready messages_unacknowledged consumers)"
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    output="$(kube_before_autonomous_deadline \
+      "$provider" rabbitmq-queues "$autonomous_start_epoch" \
+      exec -n "$namespace" "$pod" -- \
+      rabbitmqctl list_queues --quiet \
+        name messages_ready messages_unacknowledged consumers)"
+  else
+    output="$(kube_capture "$provider" rabbitmq-queues 60 2 \
+      exec -n "$namespace" "$pod" -- \
+      rabbitmqctl list_queues --quiet \
+        name messages_ready messages_unacknowledged consumers)"
+  fi
   oci_rabbitmq_queue_rows <<<"$output" ||
     migration_die "$provider RabbitMQ queue output is malformed"
 }
@@ -1549,25 +1610,34 @@ drain_queues() {
 
 wait_rabbitmq_consumer_convergence() {
   local provider="$1"
-  local attempt rows count names expected backlog bad
-  local missing extra zero_consumers
+  local autonomous_start_epoch="$2"
+  local attempt rows count names expected backlog bad elapsed remaining
+  local missing extra zero_consumers backlogged
+  migration_is_positive_int "$autonomous_start_epoch" ||
+    migration_die "RabbitMQ autonomous producer start epoch is invalid"
   expected="$(LC_ALL=C sort "$OCI_RABBITMQ_BASELINE_FILE")"
   for attempt in $(seq 1 "$QUEUE_CONVERGENCE_ATTEMPTS"); do
-    rows="$(rabbit_queue_rows "$provider")"
+    rows="$(rabbit_queue_rows "$provider" "$autonomous_start_epoch")"
     count="$(awk 'NF {count++} END {print count+0}' <<<"$rows")"
     names="$(awk '{print $1}' <<<"$rows" | LC_ALL=C sort)"
     backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$rows")"
     bad="$(awk '$4 < 1 {bad++} END {print bad+0}' <<<"$rows")"
+    elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
     if [[ "$count" == "17" && "$names" == "$expected" &&
-      "$backlog" == "0" && "$bad" == "0" ]]; then
+      "$backlog" == "0" && "$bad" == "0" ]] &&
+      (( elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS )); then
       oci_log \
-        "rabbitmq_consumer_convergence=PASS provider=$provider attempt=$attempt"
+        "rabbitmq_consumer_convergence=PASS provider=$provider attempt=$attempt elapsed_seconds=$elapsed"
       return 0
     fi
     oci_log \
-      "rabbitmq_consumer_convergence=WAIT provider=$provider attempt=$attempt queue_count=$count backlog=$backlog zero_consumer_count=$bad"
-    if (( attempt < QUEUE_CONVERGENCE_ATTEMPTS )); then
+      "rabbitmq_consumer_convergence=WAIT provider=$provider attempt=$attempt elapsed_seconds=$elapsed queue_count=$count backlog=$backlog zero_consumer_count=$bad"
+    remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"
+    if (( attempt < QUEUE_CONVERGENCE_ATTEMPTS &&
+      remaining > QUEUE_CONVERGENCE_SLEEP_SECONDS )); then
       migration_sleep "$QUEUE_CONVERGENCE_SLEEP_SECONDS"
+    else
+      break
     fi
   done
 
@@ -1586,8 +1656,16 @@ wait_rabbitmq_consumer_convergence() {
   zero_consumers="$(
     awk '$4 < 1 {printf "%s%s", separator, $1; separator=","}' <<<"$rows"
   )"
+  backlogged="$(
+    awk '
+      $2 + $3 > 0 {
+        printf "%s%s:%s+%s", separator, $1, $2, $3
+        separator=","
+      }
+    ' <<<"$rows"
+  )"
   migration_die \
-    "$provider RabbitMQ consumer topology did not converge: queue-count=$count backlog=$backlog missing=${missing:-none} extra=${extra:-none} zero-consumers=${zero_consumers:-none}"
+    "$provider RabbitMQ consumer topology did not converge before the autonomous producer deadline: elapsed=$elapsed queue-count=$count backlog=$backlog backlogged=${backlogged:-none} missing=${missing:-none} extra=${extra:-none} zero-consumers=${zero_consumers:-none}"
 }
 
 applications_are_zero() {
@@ -1702,15 +1780,30 @@ unlock_target_writes_for_retry() {
 }
 
 rabbitmq_write_permission() {
+  local autonomous_start_epoch="${1:-}"
   local pod output
-  pod="$(kube_capture oci rabbitmq-pod 30 2 \
-    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
-    -o jsonpath='{.items[0].metadata.name}')"
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    pod="$(kube_before_autonomous_deadline \
+      oci rabbitmq-pod "$autonomous_start_epoch" \
+      get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  else
+    pod="$(kube_capture oci rabbitmq-pod 30 2 \
+      get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  fi
   [[ -n "$pod" ]] ||
     migration_die "OCI RabbitMQ pod is missing for permission validation"
-  output="$(kube_capture oci rabbitmq-permissions 60 2 \
-    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
-    rabbitmqctl list_user_permissions guest)"
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    output="$(kube_before_autonomous_deadline \
+      oci rabbitmq-permissions "$autonomous_start_epoch" \
+      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      rabbitmqctl list_user_permissions guest)"
+  else
+    output="$(kube_capture oci rabbitmq-permissions 60 2 \
+      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      rabbitmqctl list_user_permissions guest)"
+  fi
   awk '
     $1 == "/" && NF == 4 { print $3; found++ }
     END { if (found != 1) exit 1 }
@@ -1718,37 +1811,226 @@ rabbitmq_write_permission() {
     migration_die "OCI RabbitMQ guest permissions are malformed"
 }
 
-lock_rabbitmq_writes() {
+rabbitmq_expected_binding_rows() {
+  printf '%s\n' "${RABBITMQ_BINDING_MAPPINGS[@]}" |
+    awk -F '|' 'NF == 2 {printf "%s\t%s\t~\n", $1, $2}' |
+    LC_ALL=C sort
+}
+
+rabbitmq_application_binding_rows() {
+  local autonomous_start_epoch="${1:-}"
+  local pod document
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    pod="$(kube_before_autonomous_deadline \
+      oci rabbitmq-pod "$autonomous_start_epoch" \
+      get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  else
+    pod="$(kube_capture oci rabbitmq-pod 30 2 \
+      get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+      -o jsonpath='{.items[0].metadata.name}')"
+  fi
+  [[ -n "$pod" ]] ||
+    migration_die "OCI RabbitMQ pod is missing for binding validation"
+  if [[ -n "$autonomous_start_epoch" ]]; then
+    document="$(kube_before_autonomous_deadline \
+      oci rabbitmq-bindings "$autonomous_start_epoch" \
+      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      rabbitmqadmin -q --format=raw_json list bindings \
+        source destination destination_type routing_key arguments properties_key)"
+  else
+    document="$(kube_capture oci rabbitmq-bindings 60 2 \
+      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      rabbitmqadmin -q --format=raw_json list bindings \
+        source destination destination_type routing_key arguments properties_key)"
+  fi
+  migration_raw rabbitmq-bindings 30 1 jq -r '
+    if type != "array" then
+      error("RabbitMQ bindings are not an array")
+    else
+      [
+        .[] |
+        select(.source != "") |
+        if (
+          .source | type == "string"
+        ) and (
+          .destination | type == "string"
+        ) and
+          .destination_type == "queue" and
+          .routing_key == "" and
+          .arguments == {} and
+          .properties_key == "~"
+        then
+          [.source, .destination, .properties_key] | @tsv
+        else
+          error("RabbitMQ application binding is malformed")
+        end
+      ] |
+      sort |
+      .[]
+    end
+  ' <<<"$document"
+}
+
+rabbitmq_routing_fence_status() {
+  local autonomous_start_epoch="${1:-}"
+  local actual expected
+  actual="$(rabbitmq_application_binding_rows "$autonomous_start_epoch")"
+  expected="$(rabbitmq_expected_binding_rows)"
+  if [[ "$actual" == "$expected" ]]; then
+    printf false
+  elif [[ -z "$actual" ]]; then
+    printf true
+  else
+    migration_die \
+      "OCI RabbitMQ application bindings are neither exact nor fully fenced"
+  fi
+}
+
+rabbitmq_binding_rows_are_reviewed_subset() {
+  local actual="$1"
+  local expected="$2"
+  local row
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+    grep -Fqx -- "$row" <<<"$expected" || return 1
+  done <<<"$actual"
+}
+
+normalize_rabbitmq_permissions() {
   local pod
   pod="$(kube_capture oci rabbitmq-pod 30 2 \
     get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
     -o jsonpath='{.items[0].metadata.name}')"
-  kube_run oci rabbitmq-write-lock 60 2 \
+  kube_run oci rabbitmq-write-normalize 60 2 \
     exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
-    rabbitmqctl set_permissions -p / guest '.*' '^$' '.*' >/dev/null
-  [[ "$(rabbitmq_write_permission)" == "^$" ]] ||
-    migration_die "OCI RabbitMQ publish permission remained enabled"
+    rabbitmqctl set_permissions -p / guest '.*' '.*' '.*' >/dev/null
+  [[ "$(rabbitmq_write_permission)" == ".*" ]] ||
+    migration_die "OCI RabbitMQ write permission was not normalized"
+}
+
+lock_rabbitmq_writes() {
+  local autonomous_start_epoch="$1"
+  local pod actual expected source destination properties_key elapsed remaining
+  migration_is_positive_int "$autonomous_start_epoch" ||
+    migration_die "RabbitMQ autonomous producer start epoch is invalid"
+  [[ "$(rabbitmq_write_permission "$autonomous_start_epoch")" == ".*" ]] ||
+    migration_die "OCI RabbitMQ must remain writable while topology is declared"
+  actual="$(rabbitmq_application_binding_rows "$autonomous_start_epoch")"
+  expected="$(rabbitmq_expected_binding_rows)"
+  [[ "$actual" == "$expected" ]] ||
+    migration_die "OCI RabbitMQ application binding baseline is not exact"
+  pod="$(kube_before_autonomous_deadline \
+    oci rabbitmq-pod "$autonomous_start_epoch" \
+    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$pod" ]] ||
+    migration_die "OCI RabbitMQ pod is missing for routing-fence installation"
+  elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
+  (( elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS )) ||
+    migration_die "RabbitMQ routing fence missed the autonomous producer deadline"
+  while IFS=$'\t' read -r source destination properties_key; do
+    [[ -n "$source" && -n "$destination" && -n "$properties_key" ]] ||
+      migration_die "OCI RabbitMQ application binding row is incomplete"
+    elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
+    remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"
+    (( remaining > 0 )) ||
+      migration_die "RabbitMQ routing fence exhausted the autonomous producer deadline"
+    migration_raw rabbitmq-binding-fence "$remaining" 1 \
+      kubectl --kubeconfig "$(provider_kubeconfig oci)" \
+      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+      rabbitmqadmin -q delete binding \
+        source="$source" \
+        destination_type=queue \
+        destination="$destination" \
+        properties_key="$properties_key"
+  done <<<"$actual"
+  elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
+  (( elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS )) ||
+    migration_die "RabbitMQ routing fence completed after the autonomous producer deadline"
+  [[ "$(rabbitmq_routing_fence_status "$autonomous_start_epoch")" == "true" &&
+    "$(rabbitmq_write_permission "$autonomous_start_epoch")" == ".*" ]] ||
+    migration_die "OCI RabbitMQ routing fence did not become exact"
+  oci_log "rabbitmq_routing_fence=PASS removed_bindings=17 elapsed_seconds=$elapsed"
   state_advance messaging-write-locked true true \
     "mongo-write-lock=true" "rabbitmq-write-lock=true"
 }
 
-unlock_rabbitmq_writes() {
-  local pod
-  pod="$(kube_capture oci rabbitmq-pod 30 2 \
-    get pods -n "$OCI_K8S_NAMESPACE" -l app=gaming-rabbitmq \
-    -o jsonpath='{.items[0].metadata.name}')"
-  kube_run oci rabbitmq-write-unlock 60 2 \
-    exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
-    rabbitmqctl set_permissions -p / guest '.*' '.*' '.*' >/dev/null
+ensure_forward_http_write_fence() {
+  state_assert_fence
+  set_http_write_fence_config true
+  wait_http_write_fence_runtime true
+  if [[ "$(state_optional_value http-write-fence)" != "true" ]]; then
+    state_advance cutover-forward-recovery true false \
+      "http-write-fence=true"
+  fi
+}
+
+quiesce_gamemaster_after_commit() {
+  local actual expected
+  state_assert_fence
   [[ "$(rabbitmq_write_permission)" == ".*" ]] ||
-    migration_die "OCI RabbitMQ publish permission was not restored"
+    migration_die "OCI RabbitMQ must remain writable during forward recovery"
+  actual="$(rabbitmq_application_binding_rows)"
+  expected="$(rabbitmq_expected_binding_rows)"
+  rabbitmq_binding_rows_are_reviewed_subset "$actual" "$expected" ||
+    migration_die "OCI RabbitMQ contains an unreviewed application binding"
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-gamemaster-depl 0
+  wait_deployment_zero oci "$OCI_K8S_NAMESPACE" \
+    gaming-gamemaster-depl app=gaming-gamemaster
+  oci_log "rabbitmq_autonomous_producer_quiesced=PASS"
+}
+
+unlock_rabbitmq_writes() {
+  local service replicas autonomous_start_epoch actual expected
+  [[ "$(rabbitmq_write_permission)" == ".*" ]] ||
+    migration_die "OCI RabbitMQ must remain writable during binding restoration"
+  actual="$(rabbitmq_application_binding_rows)"
+  expected="$(rabbitmq_expected_binding_rows)"
+  rabbitmq_binding_rows_are_reviewed_subset "$actual" "$expected" ||
+    migration_die "OCI RabbitMQ contains an unreviewed application binding"
+  for service in "${RABBITMQ_CONSUMER_SERVICES[@]}"; do
+    scale_deployment oci "$OCI_K8S_NAMESPACE" \
+      "gaming-${service}-depl" 0
+    wait_deployment_zero oci "$OCI_K8S_NAMESPACE" \
+      "gaming-${service}-depl" "app=gaming-${service}"
+  done
+  for service in "${RABBITMQ_PASSIVE_SERVICES[@]}"; do
+    replicas="$(baseline_value "$oci_baseline" "$service")"
+    [[ "$replicas" == "1" ]] ||
+      migration_die "OCI successful baseline requires one $service replica"
+    scale_deployment oci "$OCI_K8S_NAMESPACE" \
+      "gaming-${service}-depl" "$replicas"
+    kube_run oci workload-rollout 600 1 \
+      rollout status "deployment/gaming-${service}-depl" \
+      -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  done
+  migration_maybe_heartbeat 1
+  autonomous_start_epoch="$(migration_epoch)"
+  replicas="$(baseline_value "$oci_baseline" gamemaster)"
+  [[ "$replicas" == "1" ]] ||
+    migration_die "OCI successful baseline requires one gamemaster replica"
+  kube_before_autonomous_deadline \
+    oci workload-scale "$autonomous_start_epoch" \
+    scale deployment gaming-gamemaster-depl \
+    -n "$OCI_K8S_NAMESPACE" --replicas "$replicas" >/dev/null
+  kube_before_autonomous_deadline \
+    oci workload-rollout "$autonomous_start_epoch" \
+    rollout status deployment/gaming-gamemaster-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=45s
+  wait_rabbitmq_consumer_convergence oci "$autonomous_start_epoch"
+  [[ "$(rabbitmq_routing_fence_status)" == "false" &&
+    "$(rabbitmq_write_permission)" == ".*" ]] ||
+    migration_die "OCI RabbitMQ application bindings were not restored"
+  oci_log "rabbitmq_routing_fence_removed=PASS restored_bindings=17"
 }
 
 verify_cutover_write_locks() {
   [[ "$(state_optional_value mongo-write-lock)" == "true" &&
     "$(target_write_lock_status)" == "true" &&
     "$(state_optional_value rabbitmq-write-lock)" == "true" &&
-    "$(rabbitmq_write_permission)" == "^$" &&
+    "$(rabbitmq_routing_fence_status)" == "true" &&
+    "$(rabbitmq_write_permission)" == ".*" &&
     "$(state_optional_value http-write-fence)" == "true" &&
     "$(http_write_fence_config_status)" == "true" &&
     "$(http_write_fence_runtime_status)" == "true" ]] ||
@@ -2599,7 +2881,7 @@ start_auth_before_mongo_lock() {
 }
 
 recreate_rabbitmq_and_restart() {
-  local service replicas ingress
+  local service replicas ingress autonomous_start_epoch
   state_assert_fence
   verify_target_mongo_identity
   scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 0
@@ -2612,11 +2894,11 @@ recreate_rabbitmq_and_restart() {
   kube_run oci rabbitmq-rollout 600 1 \
     rollout status deployment/gaming-rabbitmq-depl \
     -n "$OCI_K8S_NAMESPACE" --timeout=9m
-  unlock_rabbitmq_writes
+  normalize_rabbitmq_permissions
   state_advance rabbitmq-recreated true true "rabbitmq-write-lock=false"
   migration_failure_hook rabbitmq-recreate
 
-  for service in "${BACKEND_SERVICES[@]}" client; do
+  for service in auth "${RABBITMQ_PASSIVE_SERVICES[@]}"; do
     state_assert_fence
     verify_target_mongo_identity
     replicas="$(baseline_value "$oci_baseline" "$service")"
@@ -2630,9 +2912,35 @@ recreate_rabbitmq_and_restart() {
     migration_failure_hook "restart-$service"
   done
 
-  wait_rabbitmq_consumer_convergence oci
+  migration_maybe_heartbeat 1
+  autonomous_start_epoch="$(migration_epoch)"
+  replicas="$(baseline_value "$oci_baseline" gamemaster)"
+  [[ "$replicas" == "1" ]] ||
+    migration_die "OCI successful baseline requires one gamemaster replica"
+  kube_before_autonomous_deadline \
+    oci workload-scale "$autonomous_start_epoch" \
+    scale deployment gaming-gamemaster-depl \
+    -n "$OCI_K8S_NAMESPACE" --replicas "$replicas" >/dev/null
+  kube_before_autonomous_deadline \
+    oci workload-rollout "$autonomous_start_epoch" \
+    rollout status deployment/gaming-gamemaster-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=45s
+  migration_failure_hook restart-gamemaster
+
+  wait_rabbitmq_consumer_convergence oci "$autonomous_start_epoch"
   migration_failure_hook rabbitmq-consumer-convergence
-  lock_rabbitmq_writes
+  lock_rabbitmq_writes "$autonomous_start_epoch"
+  migration_failure_hook rabbitmq-write-lock
+
+  replicas="$(baseline_value "$oci_baseline" client)"
+  [[ "$replicas" == "1" ]] ||
+    migration_die "OCI successful baseline requires one client replica"
+  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-client-depl "$replicas"
+  kube_run oci workload-rollout 600 1 \
+    rollout status deployment/gaming-client-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=9m
+  state_advance restarted-client true true
+  migration_failure_hook restart-client
 
   ingress="$(baseline_value "$oci_baseline" ingress)"
   [[ "$ingress" =~ ^[1-9][0-9]*$ ]] ||
@@ -2822,6 +3130,10 @@ validate_inputs() {
     migration_die "queue convergence attempts must be positive"
   migration_is_positive_int "$QUEUE_CONVERGENCE_SLEEP_SECONDS" ||
     migration_die "queue convergence sleep must be positive"
+  migration_is_positive_int "$QUEUE_CONVERGENCE_DEADLINE_SECONDS" ||
+    migration_die "queue convergence deadline must be positive"
+  (( QUEUE_CONVERGENCE_DEADLINE_SECONDS < 60 )) ||
+    migration_die "queue convergence deadline must precede the 60-second autonomous producer"
   migration_is_positive_int "$RUNNER_CAPACITY_MULTIPLIER" ||
     migration_die "runner capacity multiplier must be positive"
   migration_is_positive_int "$RUNNER_CAPACITY_RESERVE_BYTES" ||
@@ -2961,6 +3273,7 @@ main() {
           verify_target_mongo_identity false
           [[ "$(target_write_lock_status)" == "false" &&
             "$(rabbitmq_write_permission)" == ".*" &&
+            "$(rabbitmq_routing_fence_status)" == "false" &&
             "$(state_optional_value http-write-fence)" == "false" &&
             "$(http_write_fence_config_status)" == "false" &&
             "$(http_write_fence_runtime_status)" == "false" ]] ||
@@ -2983,6 +3296,9 @@ main() {
           migration_die "migration is not in a forward finalization phase"
           ;;
       esac
+      ensure_forward_http_write_fence
+      quiesce_gamemaster_after_commit
+      migration_failure_hook gamemaster-quiesced-after-commit
       unlock_target_writes
       migration_failure_hook mongo-write-unlocked
       unlock_rabbitmq_writes

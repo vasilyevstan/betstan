@@ -83,15 +83,16 @@ done
 
 for point in \
   auth-startup-before-mongo-lock mongo-write-lock \
-  rabbitmq-recreate restart-auth restart-client \
+  rabbitmq-recreate restart-auth restart-gamemaster \
   rabbitmq-consumer-convergence \
-  rabbitmq-write-lock http-write-fence-runtime \
+  rabbitmq-write-lock restart-client http-write-fence-runtime \
   mongo-restart-during-public-health protected-health public-health; do
   run_failure "$point" true true closed true
 done
 run_failure post-boundary-cancellation true true closed true
 run_failure post-boundary-hang true true closed true
 run_failure cutover-committed true false committed-locked true
+run_failure gamemaster-quiesced-after-commit true false committed-locked true
 run_failure mongo-write-unlocked true false committed-mongo-writable true
 run_failure rabbitmq-write-unlocked true false committed-writable true
 run_failure http-write-fence-removed true false committed-writable false
@@ -465,6 +466,10 @@ for literal in \
   '.conclusion // empty' \
   '"repos/$REPOSITORY/actions/runs/$EXPECTED_OWNER_RUN_ID/attempts/1"' \
   'mkdir -p artifacts/azure-migration-recovery' \
+  'Materialize isolated Azure recovery kubeconfig' \
+  'install -m 600 -- "$KUBE_CONFIG_PATH" "$AZURE_KUBECONFIG"' \
+  '[ ! -f "$RECOVERY_RESULT_FILE" ]' \
+  'exit "${recovery_status:-1}"' \
   'cancel-in-progress: true' \
   'az aks stop'; do
   grep -Fq "$literal" "$RECOVERY_WORKFLOW" ||
@@ -562,10 +567,26 @@ for literal in \
   'retry journal Mongo write-lock state is invalid' \
   'retry Mongo write-lock state did not reconcile' \
   'wait_rabbitmq_consumer_convergence' \
+  'QUEUE_CONVERGENCE_DEADLINE_SECONDS' \
+  'autonomous_deadline_remaining' \
+  'kube_before_autonomous_deadline' \
   'rabbitmq_consumer_convergence=WAIT' \
   'rabbitmq_consumer_convergence=PASS' \
   'RabbitMQ consumer topology did not converge' \
+  'backlogged=' \
   'rabbitmq-consumer-convergence' \
+  'rabbitmq_expected_binding_rows' \
+  'rabbitmq_application_binding_rows' \
+  'rabbitmq_binding_rows_are_reviewed_subset' \
+  'rabbitmq_routing_fence_status' \
+  '.properties_key == "~"' \
+  'rabbitmqadmin -q delete binding' \
+  'rabbitmq_routing_fence=PASS' \
+  'rabbitmq_routing_fence_removed=PASS' \
+  'migration_failure_hook rabbitmq-write-lock' \
+  'ensure_forward_http_write_fence' \
+  'quiesce_gamemaster_after_commit' \
+  'migration_failure_hook gamemaster-quiesced-after-commit' \
   'lock_rabbitmq_writes' \
   'INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"' \
   'if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$)' \
@@ -613,28 +634,48 @@ if "migration_maybe_heartbeat 1" in migration_run:
 rabbit_restart = migration.index(
     'scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-rabbitmq-depl 1'
 )
-rabbit_unlock = migration.index("  unlock_rabbitmq_writes\n", rabbit_restart)
-rabbit_state = migration.index(
-    "  state_advance rabbitmq-recreated true true", rabbit_unlock
+rabbit_normalize = migration.index(
+    "  normalize_rabbitmq_permissions\n", rabbit_restart
 )
-application_loop = migration.index(
-    '  for service in "${BACKEND_SERVICES[@]}" client; do', rabbit_state
+rabbit_state = migration.index(
+    "  state_advance rabbitmq-recreated true true", rabbit_normalize
+)
+passive_loop = migration.index(
+    '  for service in auth "${RABBITMQ_PASSIVE_SERVICES[@]}"; do',
+    rabbit_state,
+)
+gamemaster_start = migration.index(
+    '  autonomous_start_epoch="$(migration_epoch)"', passive_loop
 )
 rabbit_convergence = migration.index(
-    "  wait_rabbitmq_consumer_convergence oci\n", application_loop
+    '  wait_rabbitmq_consumer_convergence oci "$autonomous_start_epoch"\n',
+    gamemaster_start,
 )
 rabbit_convergence_failure = migration.index(
     "  migration_failure_hook rabbitmq-consumer-convergence\n",
     rabbit_convergence,
 )
 rabbit_lock = migration.index(
-    "  lock_rabbitmq_writes\n", rabbit_convergence_failure
+    '  lock_rabbitmq_writes "$autonomous_start_epoch"\n',
+    rabbit_convergence_failure,
+)
+rabbit_lock_failure = migration.index(
+    "  migration_failure_hook rabbitmq-write-lock\n",
+    rabbit_lock,
+)
+client_start = migration.index(
+    '  scale_deployment oci "$OCI_K8S_NAMESPACE" gaming-client-depl',
+    rabbit_lock_failure,
 )
 if not (
-    rabbit_restart < rabbit_unlock < rabbit_state < application_loop
-    < rabbit_convergence < rabbit_convergence_failure < rabbit_lock
+    rabbit_restart < rabbit_normalize < rabbit_state < passive_loop
+    < gamemaster_start < rabbit_convergence
+    < rabbit_convergence_failure < rabbit_lock < rabbit_lock_failure
+    < client_start
 ):
-    raise SystemExit("RabbitMQ recovery does not normalize publish permissions")
+    raise SystemExit(
+        "RabbitMQ recovery does not fence before autonomous publishing"
+    )
 
 convergence_start = migration.index("wait_rabbitmq_consumer_convergence() {")
 convergence_end = migration.index("\n}\n", convergence_start)
@@ -642,6 +683,9 @@ convergence = migration[convergence_start:convergence_end]
 for required in (
     'seq 1 "$QUEUE_CONVERGENCE_ATTEMPTS"',
     'migration_sleep "$QUEUE_CONVERGENCE_SLEEP_SECONDS"',
+    "QUEUE_CONVERGENCE_DEADLINE_SECONDS",
+    "autonomous_start_epoch",
+    'rabbit_queue_rows "$provider" "$autonomous_start_epoch"',
     '"$count" == "17"',
     '"$names" == "$expected"',
     '"$backlog" == "0"',
@@ -649,10 +693,84 @@ for required in (
     "missing=",
     "extra=",
     "zero_consumers=",
+    "backlogged=",
 ):
     if required not in convergence:
         raise SystemExit(
             f"RabbitMQ convergence gate is missing: {required}"
+        )
+
+bindings_start = migration.index("RABBITMQ_BINDING_MAPPINGS=(")
+bindings_end = migration.index("\n)", bindings_start)
+bindings = [
+    line.strip().strip('"')
+    for line in migration[bindings_start:bindings_end].splitlines()[1:]
+    if line.strip()
+]
+if len(bindings) != 17 or len(set(bindings)) != 17:
+    raise SystemExit("RabbitMQ binding baseline is not exactly 17 unique rows")
+
+lock_start = migration.index("lock_rabbitmq_writes() {")
+lock_end = migration.index("\n}\n", lock_start)
+lock = migration[lock_start:lock_end]
+for required in (
+    'rabbitmq_application_binding_rows "$autonomous_start_epoch"',
+    "rabbitmq_expected_binding_rows",
+    "rabbitmqadmin -q delete binding",
+    'rabbitmq_routing_fence_status "$autonomous_start_epoch"',
+    "elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS",
+    'remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"',
+    'migration_raw rabbitmq-binding-fence "$remaining" 1',
+):
+    if required not in lock:
+        raise SystemExit(f"RabbitMQ routing fence is missing: {required}")
+if "rabbitmqctl set_permissions -p / guest '.*' '^$' '.*'" in migration:
+    raise SystemExit("RabbitMQ ACL fence can crash autonomous publishers")
+
+deadline_start = migration.index("autonomous_deadline_remaining() {")
+deadline_end = migration.index("\n}\n", deadline_start)
+deadline = migration[deadline_start:deadline_end]
+deadline_kube_start = migration.index("kube_before_autonomous_deadline() {")
+deadline_kube_end = migration.index("\n}\n", deadline_kube_start)
+deadline_kube = migration[deadline_kube_start:deadline_kube_end]
+for required in (
+    "QUEUE_CONVERGENCE_DEADLINE_SECONDS",
+    '(( remaining > 0 ))',
+):
+    if required not in deadline:
+        raise SystemExit(
+            f"RabbitMQ absolute deadline helper is missing: {required}"
+        )
+for required in (
+    'remaining="$(autonomous_deadline_remaining',
+    'migration_raw "$classification" "$remaining" 1',
+):
+    if required not in deadline_kube:
+        raise SystemExit(
+            f"RabbitMQ bounded Kubernetes helper is missing: {required}"
+        )
+if migration.count(
+    'kube_before_autonomous_deadline \\\n'
+    '    oci workload-scale "$autonomous_start_epoch"'
+) != 2:
+    raise SystemExit("gamemaster starts are not bounded by the absolute deadline")
+if migration.count(
+    'kube_before_autonomous_deadline \\\n'
+    '    oci workload-rollout "$autonomous_start_epoch"'
+) != 2:
+    raise SystemExit("gamemaster rollouts are not bounded by the absolute deadline")
+
+unlock_start = migration.index("unlock_rabbitmq_writes() {")
+unlock_end = migration.index("\n}\n", unlock_start)
+unlock = migration[unlock_start:unlock_end]
+for required in (
+    "rabbitmq_binding_rows_are_reviewed_subset",
+    "rabbitmq_application_binding_rows",
+    "wait_rabbitmq_consumer_convergence",
+):
+    if required not in unlock:
+        raise SystemExit(
+            f"RabbitMQ binding restoration is not retry-safe: {required}"
         )
 PY
 [[ "$(grep -Fc 'verify_source_mongo_identity "$pod"' "$MIGRATION")" -ge 3 ]] ||
@@ -685,7 +803,15 @@ lock_check = text.index("          verify_cutover_write_locks\n", target_pod)
 final_exact = text.index("          verify_final_exact_state\n", lock_check)
 lock_recheck = text.index("          verify_cutover_write_locks\n", final_exact)
 commit = text.index("state_advance cutover-committed", finalize)
-mongo_unlock = text.index("      unlock_target_writes\n", commit)
+forward_http_fence = text.index(
+    "      ensure_forward_http_write_fence\n", commit)
+gamemaster_quiesce = text.index(
+    "      quiesce_gamemaster_after_commit\n", forward_http_fence)
+gamemaster_quiesce_failure = text.index(
+    "migration_failure_hook gamemaster-quiesced-after-commit",
+    gamemaster_quiesce)
+mongo_unlock = text.index(
+    "      unlock_target_writes\n", gamemaster_quiesce_failure)
 mongo_unlock_failure = text.index(
     "migration_failure_hook mongo-write-unlocked", mongo_unlock)
 rabbit_unlock = text.index("      unlock_rabbitmq_writes\n", mongo_unlock)
@@ -702,7 +828,8 @@ forward_identity = text.index(
 if not (main_freeze < fence_install < retry_unlock < replace < auth_start <
         mongo_lock < post_auth_exact < restart < finalize < finalize_phase <
         target_pod < lock_check < final_exact < lock_recheck < commit <
-        committed_case < forward_identity < mongo_unlock <
+        committed_case < forward_identity < forward_http_fence <
+        gamemaster_quiesce < gamemaster_quiesce_failure < mongo_unlock <
         mongo_unlock_failure < rabbit_unlock < rabbit_unlock_failure <
         http_fence_remove < http_fence_failure < completed):
     raise SystemExit("write-lock/cutover ordering differs")

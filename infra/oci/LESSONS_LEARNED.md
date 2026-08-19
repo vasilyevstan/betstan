@@ -85,15 +85,21 @@ conversation summaries are not authority.
   already exists. Keep ingress, RabbitMQ, and every other application at zero,
   start only that exact application while Mongo is unlocked, immediately lock
   Mongo after readiness, and recertify all canonical signatures under the lock
-  before starting the remaining workloads. Do not move the RabbitMQ publish
-  lock ahead of consumer topology initialization: queue binding requires write
+  before starting the remaining workloads. Do not move the RabbitMQ messaging
+  fence ahead of consumer topology initialization: queue binding requires write
   permission even though external publishing is still blocked by zero ingress.
 - A successful application rollout does not prove that asynchronous RabbitMQ
-  queue declaration, binding, and consumer registration have converged. After
-  sequential startup, poll the exact 17 queue names, zero backlog, and nonzero
-  consumer count per queue within a bounded deadline. Keep ingress closed and
-  RabbitMQ writable during that wait, emit sanitized mismatch diagnostics on
-  exhaustion, and publish-lock RabbitMQ only after the exact topology passes.
+  queue declaration, binding, and consumer registration have converged.
+  Gamemaster also publishes one result fanout every 60 seconds; under Mongo
+  `fsyncLock`, its three deliveries remain unacknowledged and can never satisfy
+  a zero-backlog gate. Start passive consumers first and gamemaster last, then
+  require exact convergence within 45 seconds. Do not deny RabbitMQ write
+  permission: the resulting channel error crashes gamemaster and removes
+  consumers. Instead remove the exact 17 non-default exchange-to-queue
+  bindings, verify queues and consumers stay stable with zero backlog, and
+  bound each deletion to the remaining pre-timer deadline. After commit,
+  quiesce gamemaster before unlocking Mongo, then restore bindings by restarting
+  passive consumers before gamemaster.
 - Pre-commit public checks must be read-only and prove the HTTP mutation fence.
   Run the mutating browser journey only after commit and fence removal; never
   let a validation write invalidate the certified source/target signatures.
@@ -128,7 +134,8 @@ conversation summaries are not authority.
   after start and independently prove VMSS deallocation after stop.
 - `azure/aks-set-context` writes a runner-generated kubeconfig and exports
   `KUBE_CONFIG_PATH`; it does not honor a preselected output path. Materialize
-  that file into each reviewed isolated path before dual-cluster operations.
+  that file into each reviewed isolated path before dual-cluster operations,
+  including the stop-only recovery workflow when Azure is already running.
 - A stopped AKS VMSS may retain deallocated instances or contain zero
   instances. Both prove that no node compute is running when the exact VMSS
   resource identity has already been verified.
