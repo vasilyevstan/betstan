@@ -195,13 +195,14 @@ fixtures.
    and the autonomous gamemaster last, then requires the exact empty topology
    to converge within 45 seconds. It fences messaging before gamemaster's first
    60-second polling tick by removing the exact 17 application exchange
-   bindings while retaining queues, consumers, and writable declaration
-   permissions. An ACL write denial is not used because it closes application
-   channels and destabilizes consumers. Application readiness alone does not
-   certify asynchronous broker registration. Finalization rechecks parity
-   under all fences, records `cutover-committed`, quiesces the autonomous
-   gamemaster, unlocks Mongo, restores the exact bindings by restarting passive
-   consumers before gamemaster, and only then enables external writes.
+   bindings in one bounded in-pod batch while retaining queues, consumers, and
+   writable declaration permissions. An ACL write denial is not used because
+   it closes application channels and destabilizes consumers. Application
+   readiness alone does not certify asynchronous broker registration.
+   Finalization rechecks parity under all fences, records `cutover-committed`,
+   quiesces the autonomous gamemaster, unlocks Mongo, restores the exact
+   bindings by restarting passive consumers before gamemaster, and only then
+   enables external writes.
    A pre-destructive failure restores OCI workload baselines. Any later
    pre-commit failure keeps OCI closed and marks `recovery-required`; a later
    full retry clears partial application databases and starts again from

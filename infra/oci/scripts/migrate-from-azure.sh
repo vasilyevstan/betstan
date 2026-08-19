@@ -1911,7 +1911,7 @@ normalize_rabbitmq_permissions() {
 
 lock_rabbitmq_writes() {
   local autonomous_start_epoch="$1"
-  local pod actual expected source destination properties_key elapsed remaining
+  local pod actual expected elapsed remaining
   migration_is_positive_int "$autonomous_start_epoch" ||
     migration_die "RabbitMQ autonomous producer start epoch is invalid"
   [[ "$(rabbitmq_write_permission "$autonomous_start_epoch")" == ".*" ]] ||
@@ -1929,22 +1929,26 @@ lock_rabbitmq_writes() {
   elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
   (( elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS )) ||
     migration_die "RabbitMQ routing fence missed the autonomous producer deadline"
-  while IFS=$'\t' read -r source destination properties_key; do
-    [[ -n "$source" && -n "$destination" && -n "$properties_key" ]] ||
-      migration_die "OCI RabbitMQ application binding row is incomplete"
-    elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
-    remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"
-    (( remaining > 0 )) ||
-      migration_die "RabbitMQ routing fence exhausted the autonomous producer deadline"
-    migration_raw rabbitmq-binding-fence "$remaining" 1 \
-      kubectl --kubeconfig "$(provider_kubeconfig oci)" \
-      exec -n "$OCI_K8S_NAMESPACE" "$pod" -- \
-      rabbitmqadmin -q delete binding \
-        source="$source" \
-        destination_type=queue \
-        destination="$destination" \
-        properties_key="$properties_key"
-  done <<<"$actual"
+  remaining="$(autonomous_deadline_remaining "$autonomous_start_epoch")"
+  migration_raw rabbitmq-binding-fence "$remaining" 1 \
+    kubectl --kubeconfig "$(provider_kubeconfig oci)" \
+    exec -i -n "$OCI_K8S_NAMESPACE" "$pod" -- \
+    sh -ceu '
+      tab="$(printf "\t")"
+      count=0
+      while IFS="$tab" read -r source destination properties_key; do
+        [ -n "$source" ] &&
+          [ -n "$destination" ] &&
+          [ "$properties_key" = "~" ]
+        rabbitmqadmin -q delete binding \
+          source="$source" \
+          destination_type=queue \
+          destination="$destination" \
+          properties_key="$properties_key"
+        count=$((count + 1))
+      done
+      [ "$count" -eq 17 ]
+    ' <<<"$actual"
   elapsed="$(( $(migration_epoch) - autonomous_start_epoch ))"
   (( elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS )) ||
     migration_die "RabbitMQ routing fence completed after the autonomous producer deadline"

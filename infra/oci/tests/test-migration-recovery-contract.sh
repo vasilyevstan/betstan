@@ -719,8 +719,10 @@ for required in (
     "rabbitmqadmin -q delete binding",
     'rabbitmq_routing_fence_status "$autonomous_start_epoch"',
     "elapsed < QUEUE_CONVERGENCE_DEADLINE_SECONDS",
-    'remaining="$(( QUEUE_CONVERGENCE_DEADLINE_SECONDS - elapsed ))"',
+    'remaining="$(autonomous_deadline_remaining',
     'migration_raw rabbitmq-binding-fence "$remaining" 1',
+    'exec -i -n "$OCI_K8S_NAMESPACE" "$pod"',
+    '[ "$count" -eq 17 ]',
 ):
     if required not in lock:
         raise SystemExit(f"RabbitMQ routing fence is missing: {required}")
