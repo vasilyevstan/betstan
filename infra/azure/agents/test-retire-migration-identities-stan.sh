@@ -485,6 +485,89 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 expect_fail_with "verify_sp_api_err" "probe_sp_api_error" \
   run_operator verify "$fixture_dir" STUB_PROBE_SP_FAIL=1
 
+# --- Terminal state handoff (re-auditability after metadata cleanup) ---
+printf '\n  --- terminal state handoff ---\n'
+
+# Execute to get terminal state, then verify+cleanup
+fixture_dir="$WORK_DIR/t-handoff"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+STATE_F="$fixture_dir/identity-retirement-state.env"
+
+# Permissions: state file must be 0600
+perms="$(stat -f '%Lp' "$STATE_F" 2>/dev/null || stat -c '%a' "$STATE_F" 2>/dev/null)"
+if [[ "$perms" == "600" ]]; then pass "state_file_0600"; else fail "state_file_0600 (got: $perms)"; fi
+
+# State file must not be a symlink
+if [[ -f "$STATE_F" && ! -L "$STATE_F" ]]; then pass "state_not_symlink"; else fail "state_not_symlink"; fi
+
+# Terminal state must contain all exact IDs for audit re-proof
+required_state_keys=(
+  migration_sp_object_id recovery_sp_object_id
+  migration_app_id recovery_app_id
+  role_assignment_id_1 role_assignment_id_2 role_assignment_id_3
+  custom_role_id_1 custom_role_id_2
+  migration_environment recovery_environment
+  retained_sp_object_id retained_sp_display_name retained_secret_name
+  tenant_id subscription_id repository phase schema
+)
+all_present=true
+for key in "${required_state_keys[@]}"; do
+  if ! grep -q "^${key}=" "$STATE_F"; then all_present=false; break; fi
+done
+if [[ "$all_present" == "true" ]]; then pass "terminal_state_has_audit_ids"
+else fail "terminal_state_has_audit_ids (missing: $key)"; fi
+
+# Verify exact values match metadata
+if [[ "$(grep '^migration_sp_object_id=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_MS" ]] &&
+   [[ "$(grep '^role_assignment_id_1=' "$STATE_F" | sed 's/^[^=]*=//')" == "$RA_ID_1" ]] &&
+   [[ "$(grep '^custom_role_id_1=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_CR1" ]] &&
+   [[ "$(grep '^retained_sp_object_id=' "$STATE_F" | sed 's/^[^=]*=//')" == "$G_RET" ]]; then
+  pass "terminal_state_exact_values"
+else fail "terminal_state_exact_values"; fi
+
+# Intermediate (non-retired) state must NOT contain IDs (minimal surface)
+fixture_dir="$WORK_DIR/t-intermediate"
+write_metadata "$fixture_dir"
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 STUB_SP_DELETE_FAIL=1 \
+  "$OPERATOR" execute >/dev/null 2>&1 || true
+INT_STATE="$fixture_dir/identity-retirement-state.env"
+if [[ -f "$INT_STATE" ]] && ! grep -q "^migration_sp_object_id=" "$INT_STATE"; then
+  pass "intermediate_state_minimal"
+else fail "intermediate_state_minimal"; fi
+
+# Operator must never print IDs to stdout/stderr
+fixture_dir="$WORK_DIR/t-noleak"
+out="$(run_operator execute "$fixture_dir" 2>&1)" || true
+leaked=false
+for guid in "$G_MS" "$G_RS" "$G_MA" "$G_RA" "$G_CR1" "$G_CR2" "$G_RA1" "$G_RA2" "$G_RA3"; do
+  if echo "$out" | grep -qF "$guid"; then leaked=true; break; fi
+done
+if [[ "$leaked" == "false" ]]; then pass "no_id_leak_stdout"; else fail "no_id_leak_stdout (leaked: $guid)"; fi
+
+# After cleanup, state alone is sufficient for audit
+fixture_dir="$WORK_DIR/t-audit-handoff"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 STUB_SP_ALREADY_ABSENT=1 \
+  "$OPERATOR" verify >/dev/null 2>&1 || true
+# Metadata deleted, state remains with full IDs
+if [[ ! -f "$fixture_dir/metadata.env" ]] &&
+   [[ -f "$fixture_dir/identity-retirement-state.env" ]] &&
+   grep -q "^migration_sp_object_id=$G_MS" "$fixture_dir/identity-retirement-state.env" &&
+   grep -q "^role_assignment_id_3=" "$fixture_dir/identity-retirement-state.env" &&
+   grep -q "^retained_sp_object_id=$G_RET" "$fixture_dir/identity-retirement-state.env"; then
+  pass "post_cleanup_state_self_sufficient"
+else fail "post_cleanup_state_self_sufficient"; fi
+
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$([[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL')" "$SCENARIOS" "$PASS" "$FAIL"
