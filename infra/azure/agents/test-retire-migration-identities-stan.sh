@@ -64,8 +64,8 @@ custom_role_id_1=$G_CR1
 custom_role_id_2=$G_CR2
 custom_role_1_assignable_scope=$SCOPE
 custom_role_2_assignable_scope=$SCOPE
-migration_environment=azure-migration
-recovery_environment=azure-recovery
+migration_environment=oci-migration
+recovery_environment=azure-migration-recovery
 retained_sp_display_name=betstan-github-sp
 retained_secret_name=AZURE_CREDENTIALS
 repository=vasilyevstan/betstan
@@ -243,11 +243,22 @@ case "${1:-}" in
   variable)
     case "${2:-}" in
       get)
-        if [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ENABLED" ]]; then
-          printf '%s\n' "${STUB_RECOVERY_ENABLED:-false}"
-        elif [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH" ]]; then
-          printf '%s\n' "${STUB_ARM_EPOCH:-0}"
-        else exit 1; fi ;;
+        # Discriminate repo-scoped vs env-scoped
+        if [[ "$*" == *"--env"* ]]; then
+          # Environment-scoped variable query
+          if [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ENABLED" ]]; then
+            printf '%s\n' "${STUB_RECOVERY_ENABLED_ENV:-${STUB_RECOVERY_ENABLED:-false}}"
+          elif [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH" ]]; then
+            printf '%s\n' "${STUB_ARM_EPOCH_ENV:-${STUB_ARM_EPOCH:-0}}"
+          else exit 1; fi
+        else
+          # Repository-scoped variable query
+          if [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ENABLED" ]]; then
+            printf '%s\n' "${STUB_RECOVERY_ENABLED_REPO:-${STUB_RECOVERY_ENABLED:-false}}"
+          elif [[ "${3:-}" == "OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH" ]]; then
+            printf '%s\n' "${STUB_ARM_EPOCH_REPO:-${STUB_ARM_EPOCH:-0}}"
+          else exit 1; fi
+        fi ;;
       set) ;;
     esac ;;
   workflow)
@@ -388,6 +399,17 @@ expect_fail_with "retained_secret_missing" "retained_secret_not_found" run_opera
 # --- Guards ---
 expect_fail_with "recovery_guard" "recovery_enabled_must_be_false" run_operator plan "$WORK_DIR/t-rec" STUB_RECOVERY_ENABLED=true
 expect_fail_with "arm_guard" "arm_epoch_must_be_zero" run_operator plan "$WORK_DIR/t-arm" STUB_ARM_EPOCH=999
+
+# Scope-specific: env-only override (repo false but env true)
+expect_fail_with "recovery_guard_env_only" "recovery_enabled_must_be_false:scope=env" \
+  run_operator plan "$WORK_DIR/t-rec-env" STUB_RECOVERY_ENABLED_REPO=false STUB_RECOVERY_ENABLED_ENV=true
+expect_fail_with "arm_guard_env_only" "arm_epoch_must_be_zero:scope=env" \
+  run_operator plan "$WORK_DIR/t-arm-env" STUB_ARM_EPOCH_REPO=0 STUB_ARM_EPOCH_ENV=42
+# Scope-specific: repo-only (repo true but env false)
+expect_fail_with "recovery_guard_repo_only" "recovery_enabled_must_be_false:scope=repo" \
+  run_operator plan "$WORK_DIR/t-rec-repo" STUB_RECOVERY_ENABLED_REPO=true STUB_RECOVERY_ENABLED_ENV=false
+expect_fail_with "arm_guard_repo_only" "arm_epoch_must_be_zero:scope=repo" \
+  run_operator plan "$WORK_DIR/t-arm-repo" STUB_ARM_EPOCH_REPO=7 STUB_ARM_EPOCH_ENV=0
 
 # --- Symlink ---
 fixture_dir="$WORK_DIR/t-sym"; mkdir -p "$fixture_dir"
