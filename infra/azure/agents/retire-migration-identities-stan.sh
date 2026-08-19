@@ -100,9 +100,18 @@ is_valid_guid() {
 }
 
 is_valid_role_assignment_id() {
-  # Accept subscription-scoped or resource-group-scoped role assignments
-  local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/resourceGroups/[a-zA-Z0-9._-]+)?/providers/Microsoft\.Authorization/roleAssignments/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-  [[ "$1" =~ $pattern ]]
+  # Accept exact reviewed scope forms before /providers/Microsoft.Authorization/roleAssignments/<GUID>:
+  # 1. Subscription root: /subscriptions/<GUID>/providers/...
+  # 2. Resource group: /subscriptions/<GUID>/resource[Gg]roups/<name>/providers/...
+  # 3. AKS managed cluster: /subscriptions/<GUID>/resource[Gg]roups/<name>/providers/Microsoft.ContainerService/managedClusters/<name>/providers/...
+  local guid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  local rg='[Rr]esource[Gg]roups/[a-zA-Z0-9._-]+'
+  local aks='providers/Microsoft\.ContainerService/managedClusters/[a-zA-Z0-9._-]+'
+  local tail="providers/Microsoft\.Authorization/roleAssignments/${guid}"
+  local p1="^/subscriptions/${guid}/${tail}$"
+  local p2="^/subscriptions/${guid}/${rg}/${tail}$"
+  local p3="^/subscriptions/${guid}/${rg}/${aks}/${tail}$"
+  [[ "$1" =~ $p1 ]] || [[ "$1" =~ $p2 ]] || [[ "$1" =~ $p3 ]]
 }
 
 is_valid_role_definition_id() {
@@ -111,8 +120,17 @@ is_valid_role_definition_id() {
 }
 
 is_valid_scope() {
-  local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/resourceGroups/[a-zA-Z0-9._-]+)?$'
-  [[ "$1" =~ $pattern ]]
+  # Accept exact reviewed scope forms:
+  # 1. Subscription root: /subscriptions/<GUID>
+  # 2. Resource group: /subscriptions/<GUID>/resource[Gg]roups/<name>
+  # 3. AKS managed cluster: /subscriptions/<GUID>/resource[Gg]roups/<name>/providers/Microsoft.ContainerService/managedClusters/<name>
+  local guid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  local rg='[Rr]esource[Gg]roups/[a-zA-Z0-9._-]+'
+  local aks='providers/Microsoft\.ContainerService/managedClusters/[a-zA-Z0-9._-]+'
+  local p1="^/subscriptions/${guid}$"
+  local p2="^/subscriptions/${guid}/${rg}$"
+  local p3="^/subscriptions/${guid}/${rg}/${aks}$"
+  [[ "$1" =~ $p1 ]] || [[ "$1" =~ $p2 ]] || [[ "$1" =~ $p3 ]]
 }
 
 has_control_chars() { [[ "$1" =~ [[:cntrl:]] ]]; }

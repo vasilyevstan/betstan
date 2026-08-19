@@ -34,6 +34,8 @@ RA_ID_1="/subscriptions/$GS/providers/Microsoft.Authorization/roleAssignments/dd
 RA_ID_2="/subscriptions/$GS/providers/Microsoft.Authorization/roleAssignments/eeee5555-ffff-1111-2222-333333333333"
 RA_ID_3="/subscriptions/$GS/providers/Microsoft.Authorization/roleAssignments/ffff6666-1111-2222-3333-444444444444"
 RA_ID_RG="/subscriptions/$GS/resourceGroups/betstan-rg/providers/Microsoft.Authorization/roleAssignments/dddd4444-eeee-ffff-1111-222222222222"
+AKS_SCOPE="/subscriptions/$GS/resourcegroups/betstan-rg/providers/Microsoft.ContainerService/managedClusters/betstan-aks"
+RA_ID_AKS="/subscriptions/$GS/resourcegroups/betstan-rg/providers/Microsoft.ContainerService/managedClusters/betstan-aks/providers/Microsoft.Authorization/roleAssignments/aaaa1111-2222-3333-4444-555555555555"
 
 write_metadata() {
   local dir="$1"; mkdir -p "$dir"
@@ -895,6 +897,134 @@ repository=vasilyevstan/betstan
 META
 chmod 600 "$fixture_dir/metadata.env"
 expect_output "rg_scoped_ra_accepted" "identity_retirement=READY" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# AKS-scoped role assignment IDs (actual migration identity uses this form)
+fixture_dir="$WORK_DIR/t-aks-ra"
+mkdir -p "$fixture_dir"
+cat > "$fixture_dir/metadata.env" <<META
+tenant_id=$GT
+subscription_id=$GS
+migration_app_id=$G_MA
+recovery_app_id=$G_RA
+migration_sp_object_id=$G_MS
+recovery_sp_object_id=$G_RS
+retained_sp_object_id=$G_RET
+role_assignment_id_1=$RA_ID_AKS
+role_assignment_id_2=$RA_ID_RG
+role_assignment_id_3=$RA_ID_3
+role_assignment_1_principal_id=$G_MS
+role_assignment_1_role_definition_id=$RD_1
+role_assignment_1_scope=$AKS_SCOPE
+role_assignment_2_principal_id=$G_RS
+role_assignment_2_role_definition_id=$RD_2
+role_assignment_2_scope=$RG_SCOPE
+role_assignment_3_principal_id=$G_MS
+role_assignment_3_role_definition_id=$RD_3
+role_assignment_3_scope=$SCOPE
+custom_role_id_1=$G_CR1
+custom_role_id_2=$G_CR2
+custom_role_1_assignable_scope=$SCOPE
+custom_role_2_assignable_scope=$SCOPE
+migration_environment=oci-migration
+recovery_environment=azure-migration-recovery
+retained_sp_display_name=betstan-github-sp
+retained_secret_name=AZURE_CREDENTIALS
+repository=vasilyevstan/betstan
+META
+chmod 600 "$fixture_dir/metadata.env"
+expect_output "aks_scoped_ra_accepted" "identity_retirement=READY" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# Malformed nested-provider RA ID (not the AKS pattern) must be rejected
+fixture_dir="$WORK_DIR/t-nested-ra"
+mkdir -p "$fixture_dir"
+NESTED_RA="/subscriptions/$GS/resourcegroups/betstan-rg/providers/Microsoft.Network/virtualNetworks/vnet1/providers/Microsoft.Authorization/roleAssignments/dddd4444-eeee-ffff-1111-222222222222"
+cat > "$fixture_dir/metadata.env" <<META
+tenant_id=$GT
+subscription_id=$GS
+migration_app_id=$G_MA
+recovery_app_id=$G_RA
+migration_sp_object_id=$G_MS
+recovery_sp_object_id=$G_RS
+retained_sp_object_id=$G_RET
+role_assignment_id_1=$NESTED_RA
+role_assignment_id_2=$RA_ID_2
+role_assignment_id_3=$RA_ID_3
+role_assignment_1_principal_id=$G_MS
+role_assignment_1_role_definition_id=$RD_1
+role_assignment_1_scope=$SCOPE
+role_assignment_2_principal_id=$G_RS
+role_assignment_2_role_definition_id=$RD_2
+role_assignment_2_scope=$SCOPE
+role_assignment_3_principal_id=$G_MS
+role_assignment_3_role_definition_id=$RD_3
+role_assignment_3_scope=$SCOPE
+custom_role_id_1=$G_CR1
+custom_role_id_2=$G_CR2
+custom_role_1_assignable_scope=$SCOPE
+custom_role_2_assignable_scope=$SCOPE
+migration_environment=oci-migration
+recovery_environment=azure-migration-recovery
+retained_sp_display_name=betstan-github-sp
+retained_secret_name=AZURE_CREDENTIALS
+repository=vasilyevstan/betstan
+META
+chmod 600 "$fixture_dir/metadata.env"
+expect_fail_with "nested_provider_ra_rejected" "metadata_invalid_role_assignment_id" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# Malformed AKS scope (wrong provider path) in metadata scope field
+fixture_dir="$WORK_DIR/t-bad-aks-scope"
+mkdir -p "$fixture_dir"
+BAD_AKS_SCOPE="/subscriptions/$GS/resourcegroups/betstan-rg/providers/Microsoft.Compute/virtualMachines/vm1"
+cat > "$fixture_dir/metadata.env" <<META
+tenant_id=$GT
+subscription_id=$GS
+migration_app_id=$G_MA
+recovery_app_id=$G_RA
+migration_sp_object_id=$G_MS
+recovery_sp_object_id=$G_RS
+retained_sp_object_id=$G_RET
+role_assignment_id_1=$RA_ID_1
+role_assignment_id_2=$RA_ID_2
+role_assignment_id_3=$RA_ID_3
+role_assignment_1_principal_id=$G_MS
+role_assignment_1_role_definition_id=$RD_1
+role_assignment_1_scope=$BAD_AKS_SCOPE
+role_assignment_2_principal_id=$G_RS
+role_assignment_2_role_definition_id=$RD_2
+role_assignment_2_scope=$SCOPE
+role_assignment_3_principal_id=$G_MS
+role_assignment_3_role_definition_id=$RD_3
+role_assignment_3_scope=$SCOPE
+custom_role_id_1=$G_CR1
+custom_role_id_2=$G_CR2
+custom_role_1_assignable_scope=$SCOPE
+custom_role_2_assignable_scope=$SCOPE
+migration_environment=oci-migration
+recovery_environment=azure-migration-recovery
+retained_sp_display_name=betstan-github-sp
+retained_secret_name=AZURE_CREDENTIALS
+repository=vasilyevstan/betstan
+META
+chmod 600 "$fixture_dir/metadata.env"
+expect_fail_with "bad_nested_scope_rejected" "metadata_invalid_scope" \
   env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
     STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
     STUB_ROLE_STILL_PRESENT=1 \
