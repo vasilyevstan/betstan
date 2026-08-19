@@ -240,7 +240,7 @@ cat > "$BIN_DIR/gh" <<'STUB'
 set -euo pipefail
 if [[ "${1:-}" == "api" ]]; then
   endpoint="${2:-}"
-  if [[ "$endpoint" == */actions/runs/123 ]]; then
+  if [[ "$endpoint" == */actions/runs/1234567 ]]; then
     conclusion=success
     [[ "${STUB_BAD_RUN:-0}" != "1" ]] || conclusion=failure
     jq -n --arg sha "$STUB_SOURCE_SHA" --arg conclusion "$conclusion" '{
@@ -254,9 +254,9 @@ if [[ "${1:-}" == "api" ]]; then
     }'
   elif [[ "$endpoint" == */git/ref/heads/master ]]; then
     printf '%s\n' "$STUB_SOURCE_SHA"
-  elif [[ "$endpoint" == */actions/runs/123/artifacts* ]]; then
+  elif [[ "$endpoint" == */actions/runs/1234567/artifacts* ]]; then
     printf '%s\n' '{"artifacts":[{
-      "name":"oci-migration-success-provenance-123-1",
+      "name":"oci-migration-success-provenance-1234567-1",
       "expired":false
     }]}'
   else
@@ -286,11 +286,11 @@ elif [[ "${1:-} ${2:-}" == "run download" ]]; then
     closed_recovery_retry=invalid
   cat > "$directory/migration-summary.env" <<ENV
 schema=betstan.oci-migration-success.v1
-migration_id=migration-fixture
+migration_id=1234567-1
 source_sha=${STUB_SOURCE_SHA}
 runtime_deploy_source_sha=${runtime_deploy_source_sha}
 closed_recovery_retry=${closed_recovery_retry}
-github_run_id=123
+github_run_id=1234567
 github_run_attempt=1
 terminal_phase=DEPLOYED_HEALTHY
 terminal_status=DEPLOYED_HEALTHY
@@ -299,7 +299,7 @@ fencing_generation=1
 journal_sequence=1
 journal_heartbeat_epoch=1
 final_journal_sha256=$(printf 'c%.0s' {1..64})
-artifact_run_binding=123-1
+artifact_run_binding=1234567-1
 destructive_boundary_crossed=true
 database_count=8
 logical_source_target_parity=true
@@ -450,9 +450,9 @@ run_plan() {
     STUB_DELETE_PHASE_FILE="$WORK_DIR/delete-phase" \
     STUB_SOURCE_SHA="$SOURCE_SHA" \
     STUB_CLUSTER_DIGEST="$cluster_digest" \
-    MIGRATION_RUN_ID=123 \
+    MIGRATION_RUN_ID=1234567 \
     MIGRATION_RUN_ATTEMPT=1 \
-    MIGRATION_ID=migration-fixture \
+    MIGRATION_ID=1234567-1 \
     SOURCE_SHA="$SOURCE_SHA" \
     AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$cluster_digest" \
     AZURE_EXPECTED_SUBSCRIPTION_ID_SHA256="$subscription_digest" \
@@ -510,7 +510,7 @@ inventory_sha256="$(
     <<<"$plan_output"
 )"
 [[ "$inventory_sha256" =~ ^[0-9a-f]{64}$ ]]
-confirmation="DELETE AZURE AFTER OCI migration-fixture ${SOURCE_SHA} ${inventory_sha256}"
+confirmation="DELETE AZURE AFTER OCI 1234567-1 ${SOURCE_SHA} ${inventory_sha256}"
 run_plan "$WORK_DIR/delete-execute" --execute \
   EXPECTED_INVENTORY_SHA256="$inventory_sha256" \
   RETIRE_AZURE_CONFIRMATION="$confirmation" \

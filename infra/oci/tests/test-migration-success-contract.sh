@@ -268,6 +268,17 @@ else
   pass
 fi
 
+# --- Test: migration_id != run_id-run_attempt rejected ---------------------
+echo "--- Test: migration_id intrinsic mismatch rejected"
+{
+  make_valid_env false | sed "s/^migration_id=.*/migration_id=99-9/"
+} > "$WORK_DIR/bad-migration-id.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/bad-migration-id.env" 2>/dev/null; then
+  fail "migration_id != run_id-attempt should be rejected"
+else
+  pass
+fi
+
 # --- Test: fields mode lists canonical fields ------------------------------
 echo "--- Test: fields mode"
 field_count="$(MODE=fields "$CONTRACT" | wc -l | tr -d ' ')"

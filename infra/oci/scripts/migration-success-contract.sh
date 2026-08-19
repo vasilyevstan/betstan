@@ -276,6 +276,8 @@ _contract_validate_semantics() {
   if [[ -n "$ctx_run_attempt" ]]; then
     _contract_require_exact "github_run_attempt" "$ctx_run_attempt" "$run_attempt"
   fi
+  # Intrinsic: migration_id must equal github_run_id-github_run_attempt
+  _contract_require_exact "migration_id" "${run_id}-${run_attempt}" "$migration_id"
 
   # Terminal state
   _contract_require_exact "terminal_phase" "DEPLOYED_HEALTHY" \
