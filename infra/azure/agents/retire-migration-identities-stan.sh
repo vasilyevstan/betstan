@@ -736,6 +736,24 @@ disable_workflow() {
   fi
 }
 
+# Verify no in-progress or queued runs of the workflow exist before crossing
+# the identity boundary. Fail closed on API errors; only accept proven-zero.
+verify_no_active_runs() {
+  local wf="$1" output rc=0 count
+  output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
+    --status in_progress --json databaseId --jq 'length' 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error:$wf rc=$rc"
+  count="$output"
+  [[ "$count" == "0" ]] || die "active_workflow_runs_exist:$wf in_progress=$count"
+
+  rc=0
+  output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
+    --status queued --json databaseId --jq 'length' 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error:$wf rc=$rc"
+  count="$output"
+  [[ "$count" == "0" ]] || die "queued_workflow_runs_exist:$wf queued=$count"
+}
+
 # --- Verification helpers with bounded propagation retries ---
 # Retries ONLY when probe returns "present" (Entra/GitHub propagation delay).
 # API errors are never retried — they die immediately (fail-closed).
@@ -864,7 +882,6 @@ case "$MODE" in
   execute)
     verify_azure_context
     query_all_guard_variables
-    set_all_guard_variables
 
     if [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
       validate_state_identity
@@ -881,6 +898,27 @@ case "$MODE" in
         initialized)
           verify_retained_identity
           verify_all_relationships
+          write_state guards-intent
+          local_phase=guards-intent
+          ;;
+        guards-intent)
+          set_all_guard_variables
+          write_state workflow-intent
+          local_phase=workflow-intent
+          ;;
+        workflow-intent)
+          disable_workflow "oci-migration-recovery.yml"
+          write_state runs-fence
+          local_phase=runs-fence
+          ;;
+        runs-fence)
+          verify_no_active_runs "oci-migration-recovery.yml"
+          write_state secrets-intent
+          local_phase=secrets-intent
+          ;;
+        secrets-intent)
+          delete_environment_secret "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
+          delete_environment_secret "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
           write_state role-assignments-intent
           local_phase=role-assignments-intent
           ;;
@@ -906,18 +944,6 @@ case "$MODE" in
         custom-roles-intent)
           delete_custom_role "$CUSTOM_ROLE_ID_1"
           delete_custom_role "$CUSTOM_ROLE_ID_2"
-          write_state secrets-intent
-          local_phase=secrets-intent
-          ;;
-        secrets-intent)
-          delete_environment_secret "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
-          delete_environment_secret "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
-          write_state workflow-intent
-          local_phase=workflow-intent
-          ;;
-        workflow-intent)
-          set_all_guard_variables
-          disable_workflow "oci-migration-recovery.yml"
           write_state retired
           local_phase=retired
           ;;

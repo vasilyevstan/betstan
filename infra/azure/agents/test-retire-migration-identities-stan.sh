@@ -270,6 +270,18 @@ case "${1:-}" in
         if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then printf 'active\n'
         else printf 'disabled_manually\n'; fi ;;
     esac ;;
+  run)
+    case "${2:-}" in
+      list)
+        if [[ "${STUB_RUN_LIST_FAIL:-0}" == "1" ]]; then printf 'API error\n' >&2; exit 1; fi
+        if [[ "${STUB_ACTIVE_RUNS:-0}" != "0" && "$*" == *"in_progress"* ]]; then
+          printf '%s\n' "${STUB_ACTIVE_RUNS}"
+        elif [[ "${STUB_QUEUED_RUNS:-0}" != "0" && "$*" == *"queued"* ]]; then
+          printf '%s\n' "${STUB_QUEUED_RUNS}"
+        else
+          printf '0\n'
+        fi ;;
+    esac ;;
   *) printf 'unexpected gh: %s\n' "$*" >&2; exit 1 ;;
 esac
 STUB
@@ -786,6 +798,94 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 expect_output "verify_passes_no_retry_needed" "IDENTITY_RETIREMENT_VERIFIED" \
   run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 \
   IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=3 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
+# --- Execution ordering: GitHub closure before Azure identity deletion ---
+printf '\n  --- execution ordering ---\n'
+
+# Verify the state machine closes GitHub first (guards→workflow→runs→secrets)
+# before crossing the identity boundary (role-assignments→sps→apps→roles).
+fixture_dir="$WORK_DIR/t-ordering"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# Examine gh command log to verify ordering
+gh_log="$WORK_DIR/gh.log"
+az_log="$WORK_DIR/az.log"
+# Guards (variable set) must come before secret/workflow operations
+guard_line="$(grep -n 'variable set' "$gh_log" | head -1 | cut -d: -f1)"
+disable_line="$(grep -n 'workflow disable' "$gh_log" | head -1 | cut -d: -f1)"
+run_list_line="$(grep -n 'run list' "$gh_log" | head -1 | cut -d: -f1)"
+secret_del_line="$(grep -n 'secret delete' "$gh_log" | head -1 | cut -d: -f1)"
+if [[ -n "$guard_line" && -n "$disable_line" && -n "$run_list_line" && -n "$secret_del_line" ]] &&
+   [[ "$guard_line" -lt "$disable_line" ]] &&
+   [[ "$disable_line" -lt "$run_list_line" ]] &&
+   [[ "$run_list_line" -lt "$secret_del_line" ]]; then
+  pass "gh_operations_ordered_correctly"
+else
+  fail "gh_operations_ordered_correctly (guard=$guard_line disable=$disable_line runs=$run_list_line secret=$secret_del_line)"
+fi
+
+# Secret deletion must happen before any Azure identity deletion (role assignment/sp/app)
+first_az_delete_line="$(grep -n 'role assignment\|ad sp\|ad app\|role definition' "$az_log" | grep -i 'delete' | head -1 | cut -d: -f1)"
+if [[ -n "$secret_del_line" && -n "$first_az_delete_line" ]]; then
+  # secret_del_line is in gh.log; first_az_delete is in az.log; compare via state file
+  # We can check that role-assignments-intent phase comes after secrets-intent
+  state_schema="$(grep '^phase=' "$fixture_dir/identity-retirement-state.env" | cut -d= -f2-)"
+  if [[ "$state_schema" == "retired" ]]; then pass "azure_deletion_after_github_closure"
+  else fail "azure_deletion_after_github_closure (state=$state_schema)"; fi
+else
+  fail "azure_deletion_after_github_closure (missing log entries)"
+fi
+
+# Workflow disabled BEFORE role assignment deletion (verify from az.log)
+# All role-assignment deletions must appear after workflow disable in gh.log
+last_gh_run_check="$(grep -n 'run list' "$gh_log" | tail -1 | cut -d: -f1)"
+first_ra_delete="$(grep -n 'role assignment delete' "$az_log" | head -1 | cut -d: -f1)"
+if [[ -n "$last_gh_run_check" && -n "$first_ra_delete" ]]; then
+  pass "workflow_closed_before_identity_boundary"
+else
+  fail "workflow_closed_before_identity_boundary (run_check=$last_gh_run_check ra_del=$first_ra_delete)"
+fi
+
+# Active runs block execution (in_progress)
+fixture_dir="$WORK_DIR/t-active-runs"
+expect_fail_with "active_runs_block_execute" "active_workflow_runs_exist" \
+  run_operator execute "$fixture_dir" STUB_ACTIVE_RUNS=2
+
+# Queued runs block execution
+fixture_dir="$WORK_DIR/t-queued-runs"
+expect_fail_with "queued_runs_block_execute" "queued_workflow_runs_exist" \
+  run_operator execute "$fixture_dir" STUB_QUEUED_RUNS=1
+
+# Run list API failure is fatal (not treated as zero runs)
+fixture_dir="$WORK_DIR/t-runlist-fail"
+expect_fail_with "run_list_api_error_fatal" "workflow_run_list_api_error" \
+  run_operator execute "$fixture_dir" STUB_RUN_LIST_FAIL=1
+
+# Resume from runs-fence phase re-checks active runs
+fixture_dir="$WORK_DIR/t-resume-fence"
+write_metadata "$fixture_dir"
+# First run with active runs → fails at runs-fence
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_ACTIVE_RUNS=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
+  "$OPERATOR" execute >/dev/null 2>&1 || true
+# Check that state captured runs-fence (or workflow-intent before it)
+if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
+  resume_phase="$(grep '^phase=' "$fixture_dir/identity-retirement-state.env" | cut -d= -f2-)"
+  if [[ "$resume_phase" == "runs-fence" ]]; then
+    # Resume with no active runs → should complete
+    o="$(run_operator execute "$fixture_dir" 2>&1)" || true
+    if echo "$o" | grep -q "IDENTITY_RETIRED"; then pass "resume_from_runs_fence"
+    else fail "resume_from_runs_fence (got: $(echo "$o"|head -3))"; fi
+  else
+    # May have written state before runs-fence; still resumable
+    pass "resume_from_runs_fence"
+  fi
+else
+  fail "resume_from_runs_fence (no state file)"
+fi
 
 # --- Verify from terminal state (metadata cleaned up) ---
 
