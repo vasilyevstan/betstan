@@ -10,27 +10,35 @@ TESTS_DIR="$ROOT_DIR/infra/oci/tests"
 # Deterministic suite order
 suites=(
   "$TESTS_DIR/test-contract.sh"
+  "$TESTS_DIR/test-migration-success-contract.sh"
   "$TESTS_DIR/test-capacity-contract.sh"
   "$TESTS_DIR/test-image-reuse-contract.sh"
   "$TESTS_DIR/test-k3s-runtime-contract.sh"
   "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
+  "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
 )
-
-# Also include the OCI health contract (lives under agents/)
-suites+=("$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh")
-
-# Reentrant retirement regression (Azure agents/)
-suites+=("$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh")
 
 passed=0
 failed=0
 failed_names=()
 
+run_suite() {
+  local suite="$1"
+  if [[ "$(basename "$suite")" == "test-contract.sh" ]]; then
+    BETSTAN_CONTRACT_ORCHESTRATED=1 "$suite"
+  else
+    "$suite"
+  fi
+}
+
 for suite in "${suites[@]}"; do
   name="$(basename "$suite")"
   printf '> %s\n' "$name"
-  if "$suite"; then
+  if run_suite "$suite"; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1))

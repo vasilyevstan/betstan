@@ -45,12 +45,11 @@ their relationship rather than ignoring new provenance. Hash Azure resource
 IDs exactly as emitted; the migration fingerprint is case-preserving.
 
 Read AKS `eTag` with its Azure casing and preserve its exact value through the
-delete intent. If an Azure CLI extension transforms the `If-Match` value, use
-the reviewed literal ARM delete request; never replace optimistic concurrency with a wildcard.
+delete intent. If an Azure CLI extension transforms the `If-Match` value, use the
+reviewed literal ARM delete request; never replace optimistic concurrency with a wildcard.
 Delete the AKS cluster, wait for its managed resource group, then remove the
 primary BetStan resource group contents, historical snapshots, load
-balancer/IPs, disks, alerts, action group, and temporary migration/recovery
-identities and secrets.
+balancer/IPs, disks, alerts, and action group.
 
 Keep resource deletion and identity deletion as separate state machines.
 After resource absence, use `retire-migration-identities-stan.sh` with the
@@ -79,6 +78,6 @@ approve, or mutate production solely to clear history.
 The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
 subscription-wide resource absence; delayed Cost Management verification
 remains pending. Return `AZURE_RETIRED` only after later ActualCost and
-AmortizedCost checks show no new BetStan usage. A successful delete command
-alone is not completion. Otherwise return `NO_GO` with bounded evidence and
-the exact safe next action.
+AmortizedCost checks show no new BetStan usage.
+A successful delete command alone is not completion. Otherwise return `NO_GO`
+with bounded evidence and the exact safe next action.

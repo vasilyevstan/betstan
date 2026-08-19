@@ -132,8 +132,7 @@ permissions; `boot-volumes` is not an individual IAM resource type.
 ## Offline validation
 
 ```bash
-./infra/oci/tests/test-contract.sh
-./infra/oci/agents/test-health-contract-stan.sh
+./infra/oci/tests/run-contracts.sh
 ```
 
 The tests parse every OCI YAML file, check every shell script with `bash -n`,
@@ -142,7 +141,9 @@ Mongo/PVC/load balancer, canonical/redirect/diagnostic ingress and certificate
 contracts, verify the k3s local-PV and Bastion cleanup
 contracts, reject mixed OKE/k3s inventory, mutable application images, and
 legacy Mongo, check credential separation, and exercise health failure
-fixtures.
+fixtures. The entrypoint also validates shared migration-success provenance,
+temporary Azure identity retirement, the read-only terminal audit, and
+concurrent retirement fixture isolation without masking failed suites.
 
 ## Operator sequence
 

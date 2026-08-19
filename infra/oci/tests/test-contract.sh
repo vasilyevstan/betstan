@@ -85,15 +85,17 @@ grep -Fq 'never replace optimistic concurrency with a wildcard' \
     "$ROOT_DIR/.github/agents/betstan-azure-retirement.agent.md" ||
     fail "Azure retirement agent permits an unfenced AKS delete"
 retirement_operator="$ROOT_DIR/infra/azure/agents/retire-production-stan.sh"
+migration_success_contract="$OCI_DIR/scripts/migration-success-contract.sh"
 [[ -x "$retirement_operator" ]] ||
   fail "checked-in Azure retirement operator is missing or not executable"
+[[ -x "$migration_success_contract" ]] ||
+  fail "shared migration-success contract is missing or not executable"
+grep -Fq \
+    'MODE=validate "$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh"' \
+    "$retirement_operator" ||
+  fail "Azure retirement does not consume the shared migration-success contract"
 for retirement_contract in \
     'oci-migration-success-provenance-${MIGRATION_RUN_ID}-${MIGRATION_RUN_ATTEMPT}' \
-    'terminal_phase DEPLOYED_HEALTHY' \
-    'destructive_boundary_crossed true' \
-    'logical_source_target_parity true' \
-    'http_mutation_fence_removed true' \
-    'azure_cluster_stopped_deallocated true' \
     'validate_initial_inventory "$INITIAL_INVENTORY_FILE"' \
     'az rest' \
     '--headers "If-Match=${CLUSTER_ETAG}"' \
@@ -107,7 +109,6 @@ done
 ! grep -Eq 'az (ad|role)|gh secret (delete|set)|oci |kubectl ' \
   "$retirement_operator" ||
   fail "Azure retirement operator crosses identity, OCI, or Kubernetes boundaries"
-"$ROOT_DIR/infra/azure/agents/test-retire-production-stan.sh"
 
 # shellcheck source=../scripts/lib.sh
 source "$OCI_DIR/scripts/lib.sh"
@@ -513,7 +514,7 @@ grep -R -n -E '\baz\b|AKS|azure\.com|AZURE_' \
   fail "OCI health agents contain an Azure dependency"
 for script in "$OCI_DIR/scripts"/*.sh; do
   case "$(basename "$script")" in
-    migrate-from-azure.sh | recover-azure-migration.sh)
+    migrate-from-azure.sh | migration-success-contract.sh | recover-azure-migration.sh)
       continue
       ;;
   esac
@@ -679,6 +680,9 @@ grep -Fq '[[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.n
 grep -Fq 'name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}' \
   "$migrate_workflow"
 grep -Fq 'path: artifacts/oci-migration-success/migration-summary.env' "$migrate_workflow"
+grep -Fq 'MODE=emit ./infra/oci/scripts/migration-success-contract.sh' \
+  "$migrate_workflow" ||
+  fail "OCI migration does not emit through the shared migration-success contract"
 grep -Fq 'schema=betstan.oci-migration-success.v1' "$migrate_workflow"
 grep -Fq 'terminal_phase=DEPLOYED_HEALTHY' "$migrate_workflow"
 grep -Fq 'terminal_status=DEPLOYED_HEALTHY' "$migrate_workflow"
@@ -824,12 +828,18 @@ if grep -R -n -E 'nat-gateway create|--type ENHANCED_CLUSTER|VM\.Standard\.(E|D|
   fail "OCI scripts contain a paid infrastructure fallback"
 fi
 
-"$OCI_DIR/agents/test-health-contract-stan.sh"
-"$OCI_DIR/tests/test-image-reuse-contract.sh"
-"$OCI_DIR/tests/test-capacity-contract.sh"
-"$OCI_DIR/tests/test-k3s-runtime-contract.sh"
-"$OCI_DIR/tests/test-migration-recovery-contract.sh"
-"$OCI_DIR/tests/test-mongo-upgrade.sh"
+if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
+  "$OCI_DIR/tests/test-migration-success-contract.sh"
+  "$OCI_DIR/tests/test-capacity-contract.sh"
+  "$OCI_DIR/tests/test-image-reuse-contract.sh"
+  "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
+  "$OCI_DIR/tests/test-migration-recovery-contract.sh"
+  "$OCI_DIR/tests/test-mongo-upgrade.sh"
+  "$OCI_DIR/agents/test-health-contract-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
+fi
 
 git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
   fail "production-build.yml was modified"
