@@ -798,7 +798,7 @@ disable_workflow() {
   local wf="$1"
   if ! gh workflow disable "$wf" --repo "$GH_REPOSITORY" 2>/dev/null; then
     local state rc=0
-    state="$(gh workflow view "$wf" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
+    state="$(gh api "repos/$GH_REPOSITORY/actions/workflows/$wf" --jq '.state' 2>&1)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "workflow_view_api_error"
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
       die "workflow_disable_failed"
@@ -888,7 +888,7 @@ verify_workflow_disabled() {
   local wf="$1" attempt=0 state rc
   while true; do
     rc=0
-    state="$(gh workflow view "$wf" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
+    state="$(gh api "repos/$GH_REPOSITORY/actions/workflows/$wf" --jq '.state' 2>&1)" || rc=$?
     [[ "$rc" -eq 0 ]] || die "workflow_view_api_error"
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] || {
       [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||

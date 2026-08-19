@@ -238,9 +238,8 @@ case "${1:-}" in
       disable)
         if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then exit 1; fi ;;
       view)
-        if [[ "${STUB_PROBE_WORKFLOW_FAIL:-0}" == "1" ]]; then printf 'Err\n' >&2; exit 1; fi
-        if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then printf 'active\n'
-        else printf 'disabled_manually\n'; fi ;;
+        # gh workflow view --json is NOT supported; operator must use gh api
+        printf 'unknown flag: --json\n' >&2; exit 1 ;;
     esac ;;
   run)
     case "${2:-}" in
@@ -260,6 +259,11 @@ case "${1:-}" in
           printf '0\n'
         fi ;;
     esac ;;
+  api)
+    # gh api repos/.../actions/workflows/<file> --jq .state
+    if [[ "${STUB_PROBE_WORKFLOW_FAIL:-0}" == "1" ]]; then printf 'API error\n' >&2; exit 1; fi
+    if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then printf 'active\n'
+    else printf 'disabled_manually\n'; fi ;;
   *) printf 'unexpected gh: %s\n' "$*" >&2; exit 1 ;;
 esac
 STUB
@@ -641,6 +645,25 @@ expect_fail_with "requested_runs_block" "nonterminal_workflow_runs_exist" \
 # Run list API error is fatal
 expect_fail_with "run_list_api_error_fatal" "workflow_run_list_api_error" \
   run_operator execute "$WORK_DIR/t-run-fail" STUB_RUN_LIST_FAIL=1
+
+# Regression: gh workflow view --json is NOT used (stub rejects it)
+# The operator uses gh api instead; a successful execute proves no --json flag
+fixture_dir="$WORK_DIR/t-no-wf-view-json"
+o="$(run_operator execute "$fixture_dir" 2>&1)" || true
+if echo "$o" | grep -q "IDENTITY_RETIRED"; then
+  # Verify gh log contains 'api' calls not 'workflow view'
+  if grep -q "workflow view" "$WORK_DIR/gh.log" 2>/dev/null; then
+    fail "no_workflow_view_json (workflow view found in log)"
+  else
+    pass "no_workflow_view_json"
+  fi
+else
+  fail "no_workflow_view_json (execute failed: $(echo "$o"|head -1))"
+fi
+
+# Workflow API error via gh api is fatal
+expect_fail_with "workflow_api_error_fatal" "workflow_view_api_error" \
+  run_operator execute "$WORK_DIR/t-wf-api-fail" STUB_PROBE_WORKFLOW_FAIL=1
 
 # --- Verify from terminal state (metadata cleaned up) ---
 printf '\n  --- verify from terminal state ---\n'
