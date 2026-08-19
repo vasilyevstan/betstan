@@ -72,23 +72,6 @@ env_value() {
   sed -n "s/^${key}=//p" "$file"
 }
 
-require_summary_value() {
-  local key="$1"
-  local expected="$2"
-  local actual
-  actual="$(env_value "$SUMMARY_FILE" "$key")"
-  [[ "$actual" == "$expected" ]] ||
-    die "migration success evidence differs for field: $key"
-}
-
-require_positive_integer() {
-  local key="$1"
-  local value
-  value="$(env_value "$SUMMARY_FILE" "$key")"
-  [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
-    die "migration success evidence is not positive for field: $key"
-}
-
 write_state() {
   local phase="$1"
   local temporary="${STATE_FILE}.tmp"
