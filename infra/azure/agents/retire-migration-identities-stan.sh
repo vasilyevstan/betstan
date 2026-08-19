@@ -19,6 +19,10 @@ GH_REPOSITORY="${GH_REPOSITORY:-vasilyevstan/betstan}"
 STATE_FILE=""
 RESUME_STARTED=0
 
+# Bounded propagation retry configuration (safe test defaults: no retries)
+VERIFY_MAX_RETRIES="${IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES:-0}"
+VERIFY_RETRY_SLEEP="${IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP:-0}"
+
 ALLOWED_KEYS=(
   tenant_id subscription_id
   migration_app_id recovery_app_id
@@ -40,6 +44,14 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required_command_unavailable:$1"
+}
+
+validate_retry_config() {
+  # Validate retry parameters are non-negative integers within safe bounds
+  [[ "$VERIFY_MAX_RETRIES" =~ ^[0-9]+$ ]] || die "verify_max_retries_not_integer:$VERIFY_MAX_RETRIES"
+  [[ "$VERIFY_RETRY_SLEEP" =~ ^[0-9]+$ ]] || die "verify_retry_sleep_not_integer:$VERIFY_RETRY_SLEEP"
+  [[ "$VERIFY_MAX_RETRIES" -le 30 ]] || die "verify_max_retries_exceeds_bound:$VERIFY_MAX_RETRIES>30"
+  [[ "$VERIFY_RETRY_SLEEP" -le 60 ]] || die "verify_retry_sleep_exceeds_bound:$VERIFY_RETRY_SLEEP>60"
 }
 
 sha256_file() {
@@ -655,19 +667,86 @@ disable_workflow() {
   fi
 }
 
-# --- Verification helpers ---
+# --- Verification helpers with bounded propagation retries ---
+# Retries ONLY when probe returns "present" (Entra/GitHub propagation delay).
+# API errors are never retried — they die immediately (fail-closed).
+# Retries are bounded by VERIFY_MAX_RETRIES/VERIFY_RETRY_SLEEP (validated integers).
 
-verify_sp_absent() { local s; s="$(probe_sp_presence "$1")"; [[ "$s" == "absent" ]] || die "sp_still_present:$1"; }
-verify_app_absent() { local s; s="$(probe_app_presence "$1")"; [[ "$s" == "absent" ]] || die "app_still_present:$1"; }
-verify_role_assignment_absent() { local s; s="$(probe_role_assignment_presence "$1")"; [[ "$s" == "absent" ]] || die "role_assignment_still_present:$1"; }
-verify_custom_role_absent() { local s; s="$(probe_custom_role_presence "$1")"; [[ "$s" == "absent" ]] || die "custom_role_still_present:$1"; }
-verify_secret_absent() { local s; s="$(probe_env_secret_presence "$1" "$2")"; [[ "$s" == "absent" ]] || die "secret_still_present:$1/$2"; }
+verify_sp_absent() {
+  local oid="$1" attempt=0 s
+  while true; do
+    s="$(probe_sp_presence "$oid")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "sp_still_present_after_retries:$oid attempts=$((attempt+1))"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
+
+verify_app_absent() {
+  local app_id="$1" attempt=0 s
+  while true; do
+    s="$(probe_app_presence "$app_id")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "app_still_present_after_retries:$app_id attempts=$((attempt+1))"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
+
+verify_role_assignment_absent() {
+  local id="$1" attempt=0 s
+  while true; do
+    s="$(probe_role_assignment_presence "$id")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "role_assignment_still_present_after_retries:$id attempts=$((attempt+1))"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
+
+verify_custom_role_absent() {
+  local role_id="$1" attempt=0 s
+  while true; do
+    s="$(probe_custom_role_presence "$role_id")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "custom_role_still_present_after_retries:$role_id attempts=$((attempt+1))"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
+
+verify_secret_absent() {
+  local env_name="$1" secret_name="$2" attempt=0 s
+  while true; do
+    s="$(probe_env_secret_presence "$env_name" "$secret_name")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "secret_still_present_after_retries:$env_name/$secret_name attempts=$((attempt+1))"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
 
 verify_workflow_disabled() {
-  local state rc=0
-  state="$(gh workflow view "$1" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "workflow_view_api_error:$1 rc=$rc"
-  [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] || die "workflow_still_enabled:$1"
+  local wf="$1" attempt=0 state rc
+  while true; do
+    rc=0
+    state="$(gh workflow view "$wf" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || die "workflow_view_api_error:$wf rc=$rc"
+    [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] || {
+      [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+        die "workflow_still_enabled_after_retries:$wf attempts=$((attempt+1))"
+      attempt=$((attempt+1))
+      sleep "$VERIFY_RETRY_SLEEP"
+      continue
+    }
+    break
+  done
 }
 
 # --- Main ---
@@ -675,6 +754,7 @@ verify_workflow_disabled() {
 require_command az
 require_command gh
 require_command jq
+validate_retry_config
 
 load_metadata
 verify_gh_repository

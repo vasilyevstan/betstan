@@ -716,6 +716,46 @@ expect_fail_with "state_dir_resolves_elsewhere" "state_dir_symlink" \
   IDENTITY_RETIREMENT_METADATA="$WORK_DIR/t-resolve-target/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$WORK_DIR/t-resolve-via" GH_REPOSITORY="vasilyevstan/betstan" "$OPERATOR" plan
 
+# --- Propagation retry regressions ---
+printf '\n  --- propagation retry regressions ---\n'
+
+# Retry config validation: non-integer rejected
+expect_fail_with "retry_max_not_integer" "verify_max_retries_not_integer" \
+  run_operator plan "$WORK_DIR/t-rni" IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=abc
+expect_fail_with "retry_sleep_not_integer" "verify_retry_sleep_not_integer" \
+  run_operator plan "$WORK_DIR/t-rsni" IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=xyz
+
+# Retry config validation: exceeds bounds
+expect_fail_with "retry_max_exceeds_bound" "verify_max_retries_exceeds_bound" \
+  run_operator plan "$WORK_DIR/t-rmeb" IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=31
+expect_fail_with "retry_sleep_exceeds_bound" "verify_retry_sleep_exceeds_bound" \
+  run_operator plan "$WORK_DIR/t-rseb" IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=61
+
+# Valid bounds accepted (max=30, sleep=60)
+expect_output "retry_max_at_bound" "identity_retirement=READY" \
+  run_operator plan "$WORK_DIR/t-rmab" IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=30 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=60 STUB_RA_STILL_PRESENT=1 STUB_ROLE_STILL_PRESENT=1
+
+# Retry exhaustion: SP still present after retries (retries=2, sleep=0)
+fixture_dir="$WORK_DIR/t-retry-exhaust"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_fail_with "sp_present_after_retries" "sp_still_present_after_retries.*attempts=3" \
+  run_operator verify "$fixture_dir" STUB_SP_STILL_PRESENT=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=2 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
+# Retry does NOT mask API errors (should die immediately, not retry)
+fixture_dir="$WORK_DIR/t-retry-apierr"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_fail_with "api_error_not_retried" "probe_sp_api_error" \
+  run_operator verify "$fixture_dir" STUB_PROBE_SP_FAIL=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=5 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
+# Verify succeeds on first try when absent (retries configured but unused)
+fixture_dir="$WORK_DIR/t-retry-pass"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_output "verify_passes_no_retry_needed" "IDENTITY_RETIREMENT_VERIFIED" \
+  run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=3 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$([[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL')" "$SCENARIOS" "$PASS" "$FAIL"
