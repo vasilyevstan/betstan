@@ -9,6 +9,7 @@ STATE_HELPER="$OCI_DIR/scripts/migration-state.py"
 BOUNDED="$OCI_DIR/scripts/bounded-command.py"
 MIGRATION_WORKFLOW="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 RECOVERY_WORKFLOW="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
+AUTH_ENTRYPOINT="$ROOT_DIR/auth/src/index.ts"
 WORK_DIR="$OCI_DIR/tests/.migration-recovery-work"
 
 fail() {
@@ -81,7 +82,8 @@ for database in "${databases[@]}"; do
 done
 
 for point in \
-  rabbitmq-recreate restart-auth restart-client mongo-write-lock \
+  auth-startup-before-mongo-lock mongo-write-lock \
+  rabbitmq-recreate restart-auth restart-client \
   rabbitmq-write-lock http-write-fence-runtime \
   mongo-restart-during-public-health protected-health public-health; do
   run_failure "$point" true true closed true
@@ -546,11 +548,18 @@ for literal in \
   'signature-$database' \
   'target-signature-manifest-sha256' \
   'logical-parity=true' \
+  'start_auth_before_mongo_lock' \
+  'auth-started-before-mongo-lock' \
+  'target-exactly-validated-after-auth-startup' \
+  'auth index initialization requires an unlocked OCI Mongo' \
+  'auth index initialization requires the retained HTTP fence' \
   'lock_target_writes' \
   'runCommand({currentOp:1,$all:true})' \
   '(result.fsyncLock !== undefined &&' \
   'print(result.fsyncLock === true)' \
   'const lockCount=Number(result.lockCount)' \
+  'retry journal Mongo write-lock state is invalid' \
+  'retry Mongo write-lock state did not reconcile' \
   'lock_rabbitmq_writes' \
   'INGRESS_CONTROLLER_CONFIGMAP="ingress-nginx-controller"' \
   'if (\$request_method !~ ^(GET|HEAD|OPTIONS)\$)' \
@@ -602,7 +611,11 @@ rabbit_unlock = migration.index("  unlock_rabbitmq_writes\n", rabbit_restart)
 rabbit_state = migration.index(
     "  state_advance rabbitmq-recreated true true", rabbit_unlock
 )
-if not rabbit_restart < rabbit_unlock < rabbit_state:
+application_loop = migration.index(
+    '  for service in "${BACKEND_SERVICES[@]}" client; do', rabbit_state
+)
+rabbit_lock = migration.index("  lock_rabbitmq_writes\n", application_loop)
+if not rabbit_restart < rabbit_unlock < rabbit_state < application_loop < rabbit_lock:
     raise SystemExit("RabbitMQ recovery does not normalize publish permissions")
 PY
 [[ "$(grep -Fc 'verify_source_mongo_identity "$pod"' "$MIGRATION")" -ge 3 ]] ||
@@ -611,14 +624,20 @@ PY
   fail "migration does not revalidate the target around replacement"
 [[ "$(grep -Fc 'verify_cutover_write_locks' "$MIGRATION")" -ge 3 ]] ||
   fail "migration does not revalidate both write locks immediately before commit"
-python3 - "$MIGRATION" <<'PY'
+python3 - "$MIGRATION" "$AUTH_ENTRYPOINT" <<'PY'
 from pathlib import Path
 import sys
 
 text = Path(sys.argv[1]).read_text()
+auth_entrypoint = Path(sys.argv[2]).read_text()
 replace = text.index("      verify_target_exact\n", text.index("case \"$MODE\" in"))
-mongo_lock = text.index("      lock_target_writes\n", replace)
-restart = text.index("      recreate_rabbitmq_and_restart\n", mongo_lock)
+auth_start = text.index("      start_auth_before_mongo_lock\n", replace)
+mongo_lock = text.index("      lock_target_writes\n", auth_start)
+post_auth_exact = text.index(
+    "      verify_target_exact target-exactly-validated-after-auth-startup\n",
+    mongo_lock,
+)
+restart = text.index("      recreate_rabbitmq_and_restart\n", post_auth_exact)
 main_freeze = text.rindex("      freeze_oci\n", 0, replace)
 fence_install = text.index("      install_http_write_fence\n", main_freeze)
 retry_unlock = text.index("      unlock_target_writes_for_retry\n", fence_install)
@@ -643,13 +662,68 @@ committed_case = text.index(
     "        cutover-committed | cutover-forward-recovery)", lock_recheck)
 forward_identity = text.index(
     "          verify_target_mongo_identity false", committed_case)
-if not (main_freeze < fence_install < retry_unlock < replace < mongo_lock <
-        restart < finalize < finalize_phase <
+if not (main_freeze < fence_install < retry_unlock < replace < auth_start <
+        mongo_lock < post_auth_exact < restart < finalize < finalize_phase <
         target_pod < lock_check < final_exact < lock_recheck < commit <
         committed_case < forward_identity < mongo_unlock <
         mongo_unlock_failure < rabbit_unlock < rabbit_unlock_failure <
         http_fence_remove < http_fence_failure < completed):
     raise SystemExit("write-lock/cutover ordering differs")
+
+auth_function_start = text.index("start_auth_before_mongo_lock() {")
+auth_function_end = text.index("\n}\n", auth_function_start)
+auth_function = text[auth_function_start:auth_function_end]
+for required in (
+    '$(target_write_lock_status)" == "false"',
+    '$(http_write_fence_config_status)" == "true"',
+    "wait_deployment_zero oci ingress-nginx",
+    "gaming-rabbitmq-depl",
+    '"gaming-${service}-depl"',
+    'baseline_value "$oci_baseline" auth',
+    "rollout status deployment/gaming-auth-depl",
+    '[[ "$service" == "auth" ]] && continue',
+    "migration_failure_hook auth-startup-before-mongo-lock",
+):
+    if required not in auth_function:
+        raise SystemExit(f"pre-lock auth startup is missing: {required}")
+if not (
+    auth_entrypoint.index("await User.init()")
+    < auth_entrypoint.index("app.listen(3000")
+):
+    raise SystemExit("auth no longer requires index initialization before readiness")
+
+retry_unlock_start = text.index("unlock_target_writes_for_retry() {")
+retry_unlock_end = text.index("\n}\n", retry_unlock_start)
+retry_unlock_function = text[retry_unlock_start:retry_unlock_end]
+runtime_read = retry_unlock_function.index(
+    'lock_status="$(target_write_lock_status)"'
+)
+journal_read = retry_unlock_function.index(
+    'journal_lock="$(state_optional_value mongo-write-lock)"'
+)
+runtime_unlock = retry_unlock_function.index(
+    'if [[ "$lock_status" == "true" ]]; then'
+)
+journal_reconcile = retry_unlock_function.index(
+    'if [[ "$lock_status" == "true" || "$journal_lock" == "true" ]]'
+)
+state_release = retry_unlock_function.index(
+    "state_advance retry-write-lock-released", journal_reconcile
+)
+state_refresh = retry_unlock_function.index(
+    "state_read_all >/dev/null", state_release
+)
+state_compare = retry_unlock_function.index(
+    "state_compare_kind journal", state_refresh
+)
+final_assertion = retry_unlock_function.index(
+    "retry Mongo write-lock state did not reconcile", state_compare
+)
+if not (
+    runtime_read < journal_read < runtime_unlock < journal_reconcile
+    < state_release < state_refresh < state_compare < final_assertion
+):
+    raise SystemExit("retry does not reconcile a process-cleared Mongo write lock")
 
 cleanup = text.index("cleanup() {")
 cleanup_case = text.index('case "$current_phase" in', cleanup)
