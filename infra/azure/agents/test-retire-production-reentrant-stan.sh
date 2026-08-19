@@ -8,7 +8,7 @@ TEST_SCRIPT="$ROOT_DIR/infra/azure/agents/test-retire-production-stan.sh"
 
 # Each instance gets its own mktemp directory via the shared safe parent.
 # Override BETSTAN_TEST_TMPDIR so both instances share the same parent but
-# allocate unique subdirs — proving no collision.
+# allocate unique subdirs -- proving no collision.
 _SAFE_PARENT="${BETSTAN_TEST_TMPDIR:-${ROOT_DIR}/.test-workdirs}"
 mkdir -p "$_SAFE_PARENT"
 export BETSTAN_TEST_TMPDIR="$_SAFE_PARENT"

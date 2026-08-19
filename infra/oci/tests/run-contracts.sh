@@ -20,20 +20,23 @@ suites=(
 # Also include the OCI health contract (lives under agents/)
 suites+=("$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh")
 
+# Reentrant retirement regression (Azure agents/)
+suites+=("$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh")
+
 passed=0
 failed=0
 failed_names=()
 
 for suite in "${suites[@]}"; do
   name="$(basename "$suite")"
-  printf '▶ %s\n' "$name"
+  printf '> %s\n' "$name"
   if "$suite"; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1))
     failed_names+=("$name")
     if [[ "${BETSTAN_RUN_ALL:-0}" != "1" ]]; then
-      printf 'FAIL %s — aborting (set BETSTAN_RUN_ALL=1 to continue)\n' "$name" >&2
+      printf 'FAIL %s -- aborting (set BETSTAN_RUN_ALL=1 to continue)\n' "$name" >&2
       exit 1
     fi
   fi
