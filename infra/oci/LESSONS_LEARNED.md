@@ -29,6 +29,10 @@ conversation summaries are not authority.
 - Direct Bastion forwarding to k3s port 6443 is blocked by the OCI Ubuntu host
   firewall. Use one Bastion session to target SSH and a target-loopback tunnel
   to `127.0.0.1:6443`.
+- An OCI Bastion session can report `ACTIVE` before its SSH endpoint accepts a
+  durable tunnel. Retry the tunnel against that same exact session with a
+  bounded backoff, clearing and persisting each failed PID; do not create
+  duplicate sessions or weaken cleanup.
 
 ## Canonical production routing
 

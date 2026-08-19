@@ -437,6 +437,24 @@ grep -Fq -- \
 grep -Fq 'kubectl --request-timeout=10s get --raw=/readyz' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s API readiness does not have a bounded request timeout"
+grep -Fq 'for tunnel_attempt in $(seq 1 6)' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not retry an ACTIVE session whose SSH endpoint is not ready"
+grep -Fq 'while (( target_ssh_attempt < 30 ))' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access shortened the bounded target SSH readiness window"
+grep -Fq 'tunnel_failed=1' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access cannot distinguish endpoint failure from target startup"
+grep -Fq 'bastion_ssh_tunnel_retry=$tunnel_attempt reason=endpoint-not-ready' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not classify Bastion endpoint propagation retries"
+grep -Fq 'stop_tunnel "$ssh_tunnel_pid"' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not stop a failed tunnel before retrying"
+grep -Fq 'ssh_tunnel_pid=""' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not clear a failed tunnel PID before persisting retry state"
 ! grep -Eq 'iptables|netfilter|ufw' "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access mutates the target host firewall"
 ! grep -Eq 'ControlMaster|ControlPersist' \
