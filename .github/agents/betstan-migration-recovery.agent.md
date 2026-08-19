@@ -56,11 +56,15 @@ read-only and prefer the checked-in recovery workflow and scripts.
   lock Mongo immediately after readiness and recertify exact parity under the
   lock. If a Mongo restart cleared a process-local lock while the journal still
   says locked, reconcile the field only after the raw command proves the live
-  process is unlocked. RabbitMQ must remain writable only while consumers
-  declare and bind the empty topology. Workload readiness does not prove
-  asynchronous broker registration: require a bounded convergence loop for
-  the exact 17 queues, zero backlog, and nonzero consumers on every queue,
-  then publish-lock RabbitMQ before ingress starts.
+  process is unlocked. Workload readiness does not prove asynchronous RabbitMQ
+  registration, and gamemaster begins autonomous fanout after 60 seconds.
+  Start passive consumers first and gamemaster last, require exact empty
+  topology within 45 seconds, then remove the exact 17 application bindings as
+  the routing fence. Never deny RabbitMQ write permission: declaration and
+  timer channel errors crash consumers. Bound every binding deletion to the
+  remaining pre-timer deadline. After commit, quiesce gamemaster, unlock Mongo,
+  restart passive consumers before gamemaster to restore exact bindings, verify
+  convergence, and only then remove the HTTP fence.
   Pre-commit public checks are read-only. Record
   `cutover-committed` only after final parity under all three fences, then
   unlock idempotently and remove the HTTP fence last.
