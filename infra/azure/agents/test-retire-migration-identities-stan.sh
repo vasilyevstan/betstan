@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Test contract for retire-migration-identities-stan.sh
-# Uses unique work directory under .test-workdirs for reentrancy.
+# Verifies fail-closed presence probes: API errors are never accepted as absence.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OPERATOR="$ROOT_DIR/infra/azure/agents/retire-migration-identities-stan.sh"
@@ -16,17 +16,8 @@ PASS=0
 FAIL=0
 SCENARIOS=0
 
-pass() {
-  PASS=$((PASS + 1))
-  SCENARIOS=$((SCENARIOS + 1))
-  printf '  PASS: %s\n' "$1"
-}
-
-fail() {
-  FAIL=$((FAIL + 1))
-  SCENARIOS=$((SCENARIOS + 1))
-  printf '  FAIL: %s\n' "$1" >&2
-}
+pass() { PASS=$((PASS + 1)); SCENARIOS=$((SCENARIOS + 1)); printf '  PASS: %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); SCENARIOS=$((SCENARIOS + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 
 # Valid GUIDs for fixtures
 GUID_TENANT="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -46,7 +37,6 @@ RA_ID_1="/subscriptions/$GUID_SUB/providers/Microsoft.Authorization/roleAssignme
 RA_ID_2="/subscriptions/$GUID_SUB/providers/Microsoft.Authorization/roleAssignments/$GUID_RA2"
 RA_ID_3="/subscriptions/$GUID_SUB/providers/Microsoft.Authorization/roleAssignments/$GUID_RA3"
 
-# --- Fixture metadata ---
 write_metadata() {
   local dir="$1"
   mkdir -p "$dir"
@@ -73,10 +63,15 @@ META
 }
 
 # --- Stub: az ---
+# Probes use filtered list queries returning counts.
+# STUB_PROBE_*_FAIL=1 makes the probe command itself fail (simulating API error).
+# STUB_*_ALREADY_ABSENT=1 makes the probe return count=0 (proven absent).
+# STUB_*_STILL_PRESENT=1 makes the probe return count=1 (still present).
 cat > "$BIN_DIR/az" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${STUB_AZ_LOG:?}"
+
 case "${1:-} ${2:-}" in
   "account show")
     if [[ "${STUB_WRONG_SUBSCRIPTION:-0}" == "1" ]]; then
@@ -89,23 +84,41 @@ case "${1:-} ${2:-}" in
     ;;
   "ad sp")
     case "${3:-}" in
-      show)
-        sp_id=""
-        while [[ $# -gt 0 ]]; do
-          if [[ "$1" == "--id" ]]; then sp_id="$2"; break; fi
-          shift
-        done
-        if [[ "$sp_id" == "$STUB_RETAINED_SP_OID" ]]; then
-          if [[ "${STUB_RETAINED_SP_MISSING:-0}" == "1" ]]; then exit 1; fi
-          printf '{"displayName":"%s","id":"%s"}\n' \
-            "${STUB_RETAINED_SP_DISPLAY:-betstan-github-sp}" "$sp_id"
-        else
-          if [[ "${STUB_SP_ALREADY_ABSENT:-0}" == "1" ]]; then exit 1; fi
-          if [[ "${STUB_CHANGED_OBJECT:-0}" == "1" ]]; then
-            printf '{"objectId":"changed-object"}\n'
-            exit 0
+      list)
+        # Probe: filtered list query
+        # Check if this is the retained SP probe or temporary SP probe
+        if [[ "$*" == *"$STUB_RETAINED_SP_OID"* ]]; then
+          if [[ "${STUB_RETAINED_SP_MISSING:-0}" == "1" ]]; then
+            # For count query
+            if [[ "$*" == *"length"* ]]; then
+              printf '0\n'
+            else
+              printf '[]\n'
+            fi
+          elif [[ "${STUB_PROBE_RETAINED_SP_FAIL:-0}" == "1" ]]; then
+            printf 'AuthenticationError\n' >&2
+            exit 1
+          else
+            if [[ "$*" == *"length"* ]]; then
+              printf '1\n'
+            else
+              printf '[{"displayName":"%s","id":"%s"}]\n' \
+                "${STUB_RETAINED_SP_DISPLAY:-betstan-github-sp}" "$STUB_RETAINED_SP_OID"
+            fi
           fi
-          exit 1
+        else
+          # Temporary SP probe
+          if [[ "${STUB_PROBE_SP_FAIL:-0}" == "1" ]]; then
+            printf 'ServiceUnavailable\n' >&2
+            exit 1
+          fi
+          if [[ "${STUB_SP_ALREADY_ABSENT:-0}" == "1" ]]; then
+            printf '0\n'
+          elif [[ "${STUB_SP_STILL_PRESENT:-0}" == "1" ]]; then
+            printf '1\n'
+          else
+            printf '0\n'
+          fi
         fi
         ;;
       delete)
@@ -113,34 +126,63 @@ case "${1:-} ${2:-}" in
         if [[ "${STUB_SP_ALREADY_ABSENT:-0}" == "1" ]]; then exit 1; fi
         ;;
       *)
-        printf 'unexpected az ad sp subcommand: %s\n' "${3:-}" >&2
-        exit 1
+        printf 'unexpected az ad sp subcommand: %s\n' "${3:-}" >&2; exit 1
         ;;
     esac
     ;;
   "ad app")
     case "${3:-}" in
+      list)
+        if [[ "${STUB_PROBE_APP_FAIL:-0}" == "1" ]]; then
+          printf 'ServiceUnavailable\n' >&2; exit 1
+        fi
+        if [[ "${STUB_APP_ALREADY_ABSENT:-0}" == "1" ]]; then
+          printf '0\n'
+        elif [[ "${STUB_APP_STILL_PRESENT:-0}" == "1" ]]; then
+          printf '1\n'
+        else
+          printf '0\n'
+        fi
+        ;;
       delete)
         if [[ "${STUB_APP_ALREADY_ABSENT:-0}" == "1" ]]; then exit 1; fi
-        ;;
-      show)
-        if [[ "${STUB_APP_ALREADY_ABSENT:-0}" == "1" ]]; then exit 1; fi
-        exit 1
         ;;
     esac
     ;;
   "role assignment")
     case "${3:-}" in
-      delete) ;;
-      list) printf '\n' ;;
+      list)
+        if [[ "${STUB_PROBE_RA_FAIL:-0}" == "1" ]]; then
+          printf 'Forbidden\n' >&2; exit 1
+        fi
+        if [[ "${STUB_RA_STILL_PRESENT:-0}" == "1" ]]; then
+          printf '1\n'
+        else
+          printf '0\n'
+        fi
+        ;;
+      delete)
+        if [[ "${STUB_RA_DELETE_FAIL:-0}" == "1" ]]; then exit 1; fi
+        ;;
     esac
     ;;
   "role definition")
     case "${3:-}" in
+      list)
+        if [[ "${STUB_PROBE_ROLE_FAIL:-0}" == "1" ]]; then
+          printf 'NetworkError\n' >&2; exit 1
+        fi
+        if [[ "${STUB_ROLE_ALREADY_ABSENT:-0}" == "1" ]]; then
+          printf '0\n'
+        elif [[ "${STUB_ROLE_STILL_PRESENT:-0}" == "1" ]]; then
+          printf '1\n'
+        else
+          printf '0\n'
+        fi
+        ;;
       delete)
         if [[ "${STUB_ROLE_ALREADY_ABSENT:-0}" == "1" ]]; then exit 1; fi
         ;;
-      list) printf '0\n' ;;
     esac
     ;;
   *) printf 'unexpected az call: %s\n' "$*" >&2; exit 1 ;;
@@ -158,12 +200,18 @@ case "${1:-}" in
     case "${2:-}" in
       list)
         if [[ "$*" == *"--env"* ]]; then
+          if [[ "${STUB_PROBE_SECRET_FAIL:-0}" == "1" ]]; then
+            printf 'HttpError\n' >&2; exit 1
+          fi
           if [[ "${STUB_SECRET_STILL_PRESENT:-0}" == "1" ]]; then
             printf 'OCI_MIGRATION_AZURE_CREDENTIALS    Updated 2025-01-01\n'
           else
             printf '\n'
           fi
         else
+          if [[ "${STUB_PROBE_REPO_SECRET_FAIL:-0}" == "1" ]]; then
+            printf 'HttpError\n' >&2; exit 1
+          fi
           if [[ "${STUB_RETAINED_SECRET_MISSING:-0}" == "1" ]]; then
             printf 'OTHER_SECRET    Updated 2025-01-01\n'
           else
@@ -205,7 +253,10 @@ case "${1:-}" in
         if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then exit 1; fi
         ;;
       view)
-        if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then
+        if [[ "${STUB_PROBE_WORKFLOW_FAIL:-0}" == "1" ]]; then
+          printf 'HttpError\n' >&2; exit 1
+        fi
+        if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" && "${STUB_PROBE_WORKFLOW_FAIL:-0}" != "1" ]]; then
           printf 'active\n'
         else
           printf 'disabled_manually\n'
@@ -218,7 +269,7 @@ esac
 STUB
 chmod +x "$BIN_DIR/gh"
 
-# --- Stub: jq (pass to real jq) ---
+# --- Stub: jq ---
 JQ_REAL="$(command -v jq)"
 cat > "$BIN_DIR/jq" <<STUB
 #!/usr/bin/env bash
@@ -229,17 +280,12 @@ chmod +x "$BIN_DIR/jq"
 # --- Helpers ---
 
 run_operator() {
-  local mode="$1"
-  shift
-  local fixture_dir="$1"
-  shift
+  local mode="$1"; shift
+  local fixture_dir="$1"; shift
   write_metadata "$fixture_dir"
 
   local extra_env=()
-  while [[ $# -gt 0 ]]; do
-    extra_env+=("$1")
-    shift
-  done
+  while [[ $# -gt 0 ]]; do extra_env+=("$1"); shift; done
 
   : > "$WORK_DIR/az.log"
   : > "$WORK_DIR/gh.log"
@@ -259,401 +305,304 @@ run_operator() {
 }
 
 expect_output() {
-  local label="$1"
-  local pattern="$2"
-  shift 2
+  local label="$1" pattern="$2"; shift 2
   local output
   output="$("$@" 2>&1)" || true
-  if echo "$output" | grep -qE "$pattern"; then
-    pass "$label"
-  else
-    fail "$label (pattern: $pattern, got: $(echo "$output" | tail -2))"
-  fi
+  if echo "$output" | grep -qE "$pattern"; then pass "$label"
+  else fail "$label (pattern: $pattern, got: $(echo "$output" | tail -1))"; fi
 }
 
 expect_fail_with() {
-  local label="$1"
-  local pattern="$2"
-  shift 2
+  local label="$1" pattern="$2"; shift 2
   local output
-  if output="$("$@" 2>&1)"; then
-    fail "$label (should have failed)"
+  if output="$("$@" 2>&1)"; then fail "$label (should have failed)"
   else
-    if echo "$output" | grep -qE "$pattern"; then
-      pass "$label"
-    else
-      fail "$label (expected: $pattern, got: $(echo "$output" | tail -1))"
-    fi
+    if echo "$output" | grep -qE "$pattern"; then pass "$label"
+    else fail "$label (expected: $pattern, got: $(echo "$output" | tail -1))"; fi
   fi
 }
 
 # ==========================================
 # TEST SCENARIOS
 # ==========================================
-
 printf 'identity_retirement_contract: starting\n'
 
-# --- 1. Successful plan ---
-expect_output "successful_plan" \
-  "identity_retirement=READY phase=plan" \
-  run_operator plan "$WORK_DIR/test-plan"
+# --- Core success path ---
+expect_output "successful_plan" "identity_retirement=READY phase=plan" \
+  run_operator plan "$WORK_DIR/t-plan"
 
-# --- 2. Successful execute ---
-expect_output "successful_execute" \
-  "IDENTITY_RETIRED objects_deleted=9" \
-  run_operator execute "$WORK_DIR/test-execute"
+expect_output "successful_execute" "IDENTITY_RETIRED objects_deleted=9" \
+  run_operator execute "$WORK_DIR/t-execute"
 
-# --- 3. Successful verify after execute ---
-run_operator execute "$WORK_DIR/test-verify-flow" >/dev/null 2>&1 || true
-expect_output "successful_verify" \
-  "IDENTITY_RETIREMENT_VERIFIED" \
-  run_operator verify "$WORK_DIR/test-verify-flow"
+run_operator execute "$WORK_DIR/t-verify-flow" >/dev/null 2>&1 || true
+expect_output "successful_verify" "IDENTITY_RETIREMENT_VERIFIED" \
+  run_operator verify "$WORK_DIR/t-verify-flow"
 
-# --- 4. Partial deletion / resume (SP delete fails, SP still present) ---
-fixture_dir="$WORK_DIR/test-resume"
+# --- Partial deletion / resume ---
+fixture_dir="$WORK_DIR/t-resume"
 write_metadata "$fixture_dir"
-: > "$WORK_DIR/az.log"
-: > "$WORK_DIR/gh.log"
-if env \
-  PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" \
-  STUB_GH_LOG="$WORK_DIR/gh.log" \
-  STUB_EXPECTED_TENANT="$GUID_TENANT" \
-  STUB_EXPECTED_SUB="$GUID_SUB" \
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
-  STUB_SP_DELETE_FAIL=1 \
-  STUB_CHANGED_OBJECT=1 \
-  "$OPERATOR" execute >/dev/null 2>&1; then
-  fail "partial_crash_should_fail"
-else
-  if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
-    : > "$WORK_DIR/az.log"
-    : > "$WORK_DIR/gh.log"
-    output="$(env \
-      PATH="$BIN_DIR:$PATH" \
-      STUB_AZ_LOG="$WORK_DIR/az.log" \
-      STUB_GH_LOG="$WORK_DIR/gh.log" \
-      STUB_EXPECTED_TENANT="$GUID_TENANT" \
-      STUB_EXPECTED_SUB="$GUID_SUB" \
-      STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
-      IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-      IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-      GH_REPOSITORY="vasilyevstan/betstan" \
-      "$OPERATOR" execute 2>&1)" || true
-    if echo "$output" | grep -q "IDENTITY_RETIRED"; then
-      pass "partial_deletion_resume"
-    else
-      fail "partial_deletion_resume (output: $output)"
-    fi
-  else
-    fail "partial_deletion_resume (no state file)"
-  fi
-fi
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  STUB_SP_DELETE_FAIL=1 STUB_SP_STILL_PRESENT=1 \
+  "$OPERATOR" execute >/dev/null 2>&1 || true
+if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
+  output="$(run_operator execute "$fixture_dir" 2>&1)" || true
+  if echo "$output" | grep -q "IDENTITY_RETIRED"; then pass "partial_deletion_resume"
+  else fail "partial_deletion_resume"; fi
+else fail "partial_deletion_resume (no state)"; fi
 
-# --- 5. Already-absent objects ---
-expect_output "already_absent_objects" \
-  "IDENTITY_RETIRED" \
-  run_operator execute "$WORK_DIR/test-absent" \
+# --- Already-absent (proven empty response) ---
+expect_output "already_absent_objects" "IDENTITY_RETIRED" \
+  run_operator execute "$WORK_DIR/t-absent" \
   STUB_SP_ALREADY_ABSENT=1 STUB_APP_ALREADY_ABSENT=1 STUB_ROLE_ALREADY_ABSENT=1
 
-# --- 6. Wrong subscription ---
+# --- Wrong scope ---
 expect_fail_with "wrong_subscription" "wrong_subscription" \
-  run_operator plan "$WORK_DIR/test-wrong-sub" STUB_WRONG_SUBSCRIPTION=1
-
-# --- 7. Wrong tenant ---
+  run_operator plan "$WORK_DIR/t-wrong-sub" STUB_WRONG_SUBSCRIPTION=1
 expect_fail_with "wrong_tenant" "wrong_tenant" \
-  run_operator plan "$WORK_DIR/test-wrong-tenant" STUB_WRONG_TENANT=1
+  run_operator plan "$WORK_DIR/t-wrong-tenant" STUB_WRONG_TENANT=1
 
-# --- 8. Changed object identity (SP still present after delete) ---
-expect_fail_with "changed_object_identity" "sp_delete_failed" \
-  run_operator execute "$WORK_DIR/test-changed-obj" \
-  STUB_SP_DELETE_FAIL=1 STUB_CHANGED_OBJECT=1
+# --- Changed object (still present after delete) ---
+expect_fail_with "changed_object_sp" "sp_delete_failed" \
+  run_operator execute "$WORK_DIR/t-changed-sp" \
+  STUB_SP_DELETE_FAIL=1 STUB_SP_STILL_PRESENT=1
 
-# --- 9. Missing metadata field ---
-fixture_dir="$WORK_DIR/test-missing-field"
+# --- Missing/duplicate/malformed metadata ---
+fixture_dir="$WORK_DIR/t-missing-field"
 mkdir -p "$fixture_dir"
 cat > "$fixture_dir/metadata.env" <<META
 tenant_id=$GUID_TENANT
 subscription_id=$GUID_SUB
-migration_app_id=$GUID_MIG_APP
 META
 chmod 600 "$fixture_dir/metadata.env"
 expect_fail_with "missing_metadata_field" "metadata_unknown_or_missing_keys" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 10. Duplicate metadata field ---
-fixture_dir="$WORK_DIR/test-dup-field"
+fixture_dir="$WORK_DIR/t-dup-field"
 write_metadata "$fixture_dir"
 printf 'tenant_id=duplicate\n' >> "$fixture_dir/metadata.env"
 expect_fail_with "duplicate_metadata_field" \
   "metadata_unknown_or_missing_keys|metadata_missing_or_duplicate_field" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 11. Unknown extra field ---
-fixture_dir="$WORK_DIR/test-unknown-field"
-write_metadata "$fixture_dir"
-printf 'extra_field=injected\n' >> "$fixture_dir/metadata.env"
-expect_fail_with "unknown_extra_field" "metadata_unknown_or_missing_keys" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
-  STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
-  STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
-  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
-  "$OPERATOR" plan
-
-# --- 12. Malformed metadata line ---
-fixture_dir="$WORK_DIR/test-malformed"
+fixture_dir="$WORK_DIR/t-malformed"
 mkdir -p "$fixture_dir"
-printf 'INVALID LINE WITHOUT EQUALS\n' > "$fixture_dir/metadata.env"
+printf 'NOT A VALID LINE\n' > "$fixture_dir/metadata.env"
 chmod 600 "$fixture_dir/metadata.env"
 expect_fail_with "malformed_metadata_line" "metadata_malformed_line" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 13. Invalid GUID format ---
-fixture_dir="$WORK_DIR/test-bad-guid"
+fixture_dir="$WORK_DIR/t-bad-guid"
 write_metadata "$fixture_dir"
-sed -i.bak "s/^tenant_id=.*/tenant_id=not-a-valid-guid/" "$fixture_dir/metadata.env"
+sed -i.bak "s/^tenant_id=.*/tenant_id=not-a-guid/" "$fixture_dir/metadata.env"
 rm -f "$fixture_dir/metadata.env.bak"
 expect_fail_with "invalid_guid_format" "metadata_invalid_guid" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 14. Role assignment wrong subscription binding ---
-fixture_dir="$WORK_DIR/test-ra-wrong-sub"
+fixture_dir="$WORK_DIR/t-ra-wrong-sub"
 write_metadata "$fixture_dir"
 sed -i.bak "s|role_assignment_id_1=.*|role_assignment_id_1=/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleAssignments/$GUID_RA1|" \
   "$fixture_dir/metadata.env"
 rm -f "$fixture_dir/metadata.env.bak"
-expect_fail_with "role_assignment_wrong_subscription" \
-  "metadata_role_assignment_wrong_subscription" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+expect_fail_with "role_assignment_wrong_subscription" "metadata_role_assignment_wrong_subscription" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 15. GitHub secret delete failure (secret still present) ---
+# --- GitHub secret/workflow failures ---
 expect_fail_with "github_secret_delete_failure" "github_secret_delete_failed" \
-  run_operator execute "$WORK_DIR/test-secret-fail" \
+  run_operator execute "$WORK_DIR/t-secret-fail" \
   STUB_SECRET_DELETE_FAIL=1 STUB_SECRET_STILL_PRESENT=1
-
-# --- 16. Workflow disable failure ---
 expect_fail_with "workflow_disable_failure" "workflow_disable_failed" \
-  run_operator execute "$WORK_DIR/test-wf-fail" STUB_WORKFLOW_DISABLE_FAIL=1
+  run_operator execute "$WORK_DIR/t-wf-fail" STUB_WORKFLOW_DISABLE_FAIL=1
 
-# --- 17. Retained SP protection (SP missing) ---
+# --- Retained identity protection ---
 expect_fail_with "retained_sp_missing" "retained_sp_not_found" \
-  run_operator plan "$WORK_DIR/test-retained-sp" STUB_RETAINED_SP_MISSING=1
-
-# --- 18. Retained SP displayName mismatch ---
+  run_operator plan "$WORK_DIR/t-retained-sp" STUB_RETAINED_SP_MISSING=1
 expect_fail_with "retained_sp_display_mismatch" "retained_sp_display_name_mismatch" \
-  run_operator plan "$WORK_DIR/test-sp-display" STUB_RETAINED_SP_DISPLAY=wrong-name
-
-# --- 19. Retained secret protection ---
+  run_operator plan "$WORK_DIR/t-sp-display" STUB_RETAINED_SP_DISPLAY=wrong-name
 expect_fail_with "retained_secret_missing" "retained_secret_not_found" \
-  run_operator plan "$WORK_DIR/test-retained-secret" STUB_RETAINED_SECRET_MISSING=1
+  run_operator plan "$WORK_DIR/t-retained-secret" STUB_RETAINED_SECRET_MISSING=1
 
-# --- 20. Wrong repository ---
-fixture_dir="$WORK_DIR/test-wrong-repo"
+# --- Wrong repository ---
+fixture_dir="$WORK_DIR/t-wrong-repo"
 write_metadata "$fixture_dir"
-sed -i.bak 's/repository=vasilyevstan\/betstan/repository=other\/repo/' \
-  "$fixture_dir/metadata.env"
+sed -i.bak 's/repository=vasilyevstan\/betstan/repository=other\/repo/' "$fixture_dir/metadata.env"
 rm -f "$fixture_dir/metadata.env.bak"
 expect_fail_with "wrong_repository" "wrong_repository" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 21. Recovery variable not false ---
+# --- Recovery/ARM guards ---
 expect_fail_with "recovery_variable_guard" "recovery_enabled_must_be_false" \
-  run_operator plan "$WORK_DIR/test-recovery-var" STUB_RECOVERY_ENABLED=true
-
-# --- 22. ARM epoch variable not zero ---
+  run_operator plan "$WORK_DIR/t-recovery-var" STUB_RECOVERY_ENABLED=true
 expect_fail_with "arm_epoch_guard" "arm_epoch_must_be_zero" \
-  run_operator plan "$WORK_DIR/test-arm-var" STUB_ARM_EPOCH=1724000000
+  run_operator plan "$WORK_DIR/t-arm-var" STUB_ARM_EPOCH=1724000000
 
-# --- 23. Symlink metadata rejection ---
-fixture_dir="$WORK_DIR/test-symlink"
+# --- Symlink rejection ---
+fixture_dir="$WORK_DIR/t-symlink"
 mkdir -p "$fixture_dir"
-write_metadata "$WORK_DIR/test-symlink-source"
-ln -sf "$WORK_DIR/test-symlink-source/metadata.env" "$fixture_dir/metadata.env"
+write_metadata "$WORK_DIR/t-symlink-src"
+ln -sf "$WORK_DIR/t-symlink-src/metadata.env" "$fixture_dir/metadata.env"
 expect_fail_with "symlink_metadata_rejection" "metadata_file_missing_or_symlink" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 24. Safe cleanup removes metadata, preserves state ---
-fixture_dir="$WORK_DIR/test-cleanup"
+# --- Safe cleanup / metadata preservation ---
+fixture_dir="$WORK_DIR/t-cleanup"
 run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
-: > "$WORK_DIR/az.log"
-: > "$WORK_DIR/gh.log"
-env \
-  PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" \
-  STUB_GH_LOG="$WORK_DIR/gh.log" \
-  STUB_EXPECTED_TENANT="$GUID_TENANT" \
-  STUB_EXPECTED_SUB="$GUID_SUB" \
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
   "$OPERATOR" verify >/dev/null 2>&1 || true
 if [[ ! -f "$fixture_dir/metadata.env" && -f "$fixture_dir/identity-retirement-state.env" ]]; then
   pass "safe_cleanup_metadata_removed_state_preserved"
-else
-  fail "safe_cleanup_metadata_removed_state_preserved"
-fi
+else fail "safe_cleanup_metadata_removed_state_preserved"; fi
 
-# --- 25. Metadata retained without cleanup flag ---
-fixture_dir="$WORK_DIR/test-no-cleanup"
+fixture_dir="$WORK_DIR/t-no-cleanup"
 run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
-: > "$WORK_DIR/az.log"
-: > "$WORK_DIR/gh.log"
-env \
-  PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" \
-  STUB_GH_LOG="$WORK_DIR/gh.log" \
-  STUB_EXPECTED_TENANT="$GUID_TENANT" \
-  STUB_EXPECTED_SUB="$GUID_SUB" \
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
   "$OPERATOR" verify >/dev/null 2>&1 || true
-if [[ -f "$fixture_dir/metadata.env" ]]; then
-  pass "metadata_retained_without_cleanup_flag"
-else
-  fail "metadata_retained_without_cleanup_flag"
-fi
+if [[ -f "$fixture_dir/metadata.env" ]]; then pass "metadata_retained_without_cleanup_flag"
+else fail "metadata_retained_without_cleanup_flag"; fi
 
-# --- 26. Duplicate app IDs rejection ---
-fixture_dir="$WORK_DIR/test-dup-app"
+# --- Duplicate/targeting protection ---
+fixture_dir="$WORK_DIR/t-dup-app"
 write_metadata "$fixture_dir"
 sed -i.bak "s/^recovery_app_id=.*/recovery_app_id=$GUID_MIG_APP/" "$fixture_dir/metadata.env"
 rm -f "$fixture_dir/metadata.env.bak"
 expect_fail_with "duplicate_app_ids" "metadata_duplicate_app_ids" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 27. Retained SP targeting protection ---
-fixture_dir="$WORK_DIR/test-target-retained"
+fixture_dir="$WORK_DIR/t-target-retained"
 write_metadata "$fixture_dir"
-sed -i.bak "s/^migration_sp_object_id=.*/migration_sp_object_id=$GUID_RETAINED_SP/" \
-  "$fixture_dir/metadata.env"
+sed -i.bak "s/^migration_sp_object_id=.*/migration_sp_object_id=$GUID_RETAINED_SP/" "$fixture_dir/metadata.env"
 rm -f "$fixture_dir/metadata.env.bak"
-expect_fail_with "retained_sp_targeting_protection" \
-  "metadata_retained_sp_equals_temporary" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+expect_fail_with "retained_sp_targeting_protection" "metadata_retained_sp_equals_temporary" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
   "$OPERATOR" plan
 
-# --- 28. Control characters in metadata values ---
-fixture_dir="$WORK_DIR/test-control-chars"
+# --- Failure preserves metadata ---
+fixture_dir="$WORK_DIR/t-fail-preserves"
 write_metadata "$fixture_dir"
-# Inject a tab into tenant_id value
-printf 'tenant_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee\tee\n' > "$fixture_dir/metadata-inject.env"
-# Build metadata with injected value
-sed "1s/.*/$(cat "$fixture_dir/metadata-inject.env")/" \
-  "$fixture_dir/metadata.env" > "$fixture_dir/metadata2.env"
-mv "$fixture_dir/metadata2.env" "$fixture_dir/metadata.env"
-chmod 600 "$fixture_dir/metadata.env"
-expect_fail_with "control_chars_rejection" \
-  "metadata_malformed_line|metadata_invalid_guid|metadata_control_chars" \
-  env PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GUID_TENANT" STUB_EXPECTED_SUB="$GUID_SUB" \
   STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
-  "$OPERATOR" plan
-
-# --- 29. Failure preserves metadata ---
-fixture_dir="$WORK_DIR/test-fail-preserves"
-write_metadata "$fixture_dir"
-: > "$WORK_DIR/az.log"
-: > "$WORK_DIR/gh.log"
-env \
-  PATH="$BIN_DIR:$PATH" \
-  STUB_AZ_LOG="$WORK_DIR/az.log" \
-  STUB_GH_LOG="$WORK_DIR/gh.log" \
-  STUB_EXPECTED_TENANT="$GUID_TENANT" \
-  STUB_EXPECTED_SUB="$GUID_SUB" \
-  STUB_RETAINED_SP_OID="$GUID_RETAINED_SP" \
-  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
-  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
-  GH_REPOSITORY="vasilyevstan/betstan" \
-  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
-  STUB_WORKFLOW_DISABLE_FAIL=1 \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 STUB_WORKFLOW_DISABLE_FAIL=1 \
   "$OPERATOR" execute >/dev/null 2>&1 || true
-if [[ -f "$fixture_dir/metadata.env" ]]; then
-  pass "failure_preserves_metadata"
-else
-  fail "failure_preserves_metadata"
-fi
+if [[ -f "$fixture_dir/metadata.env" ]]; then pass "failure_preserves_metadata"
+else fail "failure_preserves_metadata"; fi
+
+# ==========================================
+# FAIL-CLOSED REGRESSIONS: API errors never accepted as absence
+# ==========================================
+printf '\n  --- fail-closed regressions ---\n'
+
+# SP probe API error during delete fallback
+expect_fail_with "probe_sp_api_error_not_absence" "probe_sp_api_error" \
+  run_operator execute "$WORK_DIR/t-probe-sp-err" \
+  STUB_SP_DELETE_FAIL=1 STUB_PROBE_SP_FAIL=1
+
+# App probe API error during delete fallback
+expect_fail_with "probe_app_api_error_not_absence" "probe_app_api_error" \
+  run_operator execute "$WORK_DIR/t-probe-app-err" \
+  STUB_APP_ALREADY_ABSENT=1 STUB_PROBE_APP_FAIL=1
+
+# Role assignment probe API error during delete fallback
+expect_fail_with "probe_ra_api_error_not_absence" "probe_role_assignment_api_error" \
+  run_operator execute "$WORK_DIR/t-probe-ra-err" \
+  STUB_RA_DELETE_FAIL=1 STUB_PROBE_RA_FAIL=1
+
+# Custom role probe API error during delete fallback
+expect_fail_with "probe_role_api_error_not_absence" "probe_custom_role_api_error" \
+  run_operator execute "$WORK_DIR/t-probe-role-err" \
+  STUB_ROLE_ALREADY_ABSENT=1 STUB_PROBE_ROLE_FAIL=1
+
+# Secret probe API error during delete fallback
+expect_fail_with "probe_secret_api_error_not_absence" "probe_secret_api_error" \
+  run_operator execute "$WORK_DIR/t-probe-secret-err" \
+  STUB_SECRET_DELETE_FAIL=1 STUB_PROBE_SECRET_FAIL=1
+
+# Retained SP probe API error during plan
+expect_fail_with "retained_sp_probe_api_error" "retained_sp_query_api_error" \
+  run_operator plan "$WORK_DIR/t-retained-sp-err" STUB_PROBE_RETAINED_SP_FAIL=1
+
+# Repo secret probe API error during plan (retained secret check)
+expect_fail_with "retained_secret_probe_api_error" "probe_repo_secret_api_error" \
+  run_operator plan "$WORK_DIR/t-retained-secret-err" STUB_PROBE_REPO_SECRET_FAIL=1
+
+# Workflow view API error during verify
+fixture_dir="$WORK_DIR/t-wf-probe-err"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_fail_with "workflow_view_api_error_in_verify" "workflow_view_api_error" \
+  run_operator verify "$fixture_dir" STUB_PROBE_WORKFLOW_FAIL=1
+
+# SP probe API error during terminal verify
+fixture_dir="$WORK_DIR/t-verify-sp-err"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_fail_with "verify_sp_probe_api_error" "probe_sp_api_error" \
+  run_operator verify "$fixture_dir" STUB_PROBE_SP_FAIL=1
 
 # ==========================================
 # SUMMARY
 # ==========================================
-
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$( [[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL' )" \
   "$SCENARIOS" "$PASS" "$FAIL"

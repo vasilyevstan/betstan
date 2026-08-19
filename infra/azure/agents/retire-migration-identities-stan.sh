@@ -7,6 +7,9 @@ set -euo pipefail
 # oci-migration-recovery.yml workflow. Retains the general betstan-github-sp
 # and repository AZURE_CREDENTIALS. Requires evidence from GitHub repository
 # variables that recovery is disabled and ARM epoch is zero.
+#
+# All presence probes are fail-closed: API/auth/transport/parse errors are fatal.
+# Only a proven-empty successful response is treated as "absent".
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 export ROOT_DIR
@@ -55,18 +58,15 @@ is_valid_guid() {
 
 is_valid_role_assignment_id() {
   local id="$1"
-  # Must be: /subscriptions/<GUID>/providers/Microsoft.Authorization/roleAssignments/<GUID>
   local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/providers/Microsoft\.Authorization/roleAssignments/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   [[ "$id" =~ $pattern ]]
 }
 
 has_control_chars() {
-  # Reject any control characters (ASCII 0x00-0x1F, 0x7F) except none expected
   [[ "$1" =~ [[:cntrl:]] ]]
 }
 
 is_safe_name() {
-  # Alphanumeric, hyphens, underscores, dots, slashes (for repo names)
   [[ "$1" =~ ^[a-zA-Z0-9._/@-]+$ ]]
 }
 
@@ -168,7 +168,6 @@ load_metadata() {
   [[ -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]] ||
     die "metadata_file_missing_or_symlink"
 
-  # Reject malformed lines: every line must be key=value with safe key name
   local line_num=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_num=$((line_num + 1))
@@ -176,7 +175,6 @@ load_metadata() {
       die "metadata_malformed_line:$line_num"
   done < "$METADATA_FILE"
 
-  # Reject unknown keys: extract all keys and ensure exact match against allowed set
   local file_keys
   file_keys="$(sed 's/=.*//' "$METADATA_FILE" | sort)"
   local expected_keys
@@ -184,7 +182,6 @@ load_metadata() {
   [[ "$file_keys" == "$expected_keys" ]] ||
     die "metadata_unknown_or_missing_keys"
 
-  # Parse exact fields
   TENANT_ID="$(env_value "$METADATA_FILE" tenant_id)"
   SUBSCRIPTION_ID="$(env_value "$METADATA_FILE" subscription_id)"
   MIGRATION_APP_ID="$(env_value "$METADATA_FILE" migration_app_id)"
@@ -202,7 +199,6 @@ load_metadata() {
   RETAINED_SP_DISPLAY_NAME="$(env_value "$METADATA_FILE" retained_sp_display_name)"
   RETAINED_SECRET_NAME="$(env_value "$METADATA_FILE" retained_secret_name)"
 
-  # Validate non-empty
   local field
   for field in TENANT_ID SUBSCRIPTION_ID MIGRATION_APP_ID RECOVERY_APP_ID \
     MIGRATION_SP_OBJECT_ID RECOVERY_SP_OBJECT_ID RETAINED_SP_OBJECT_ID \
@@ -212,7 +208,6 @@ load_metadata() {
     [[ -n "${!field}" ]] || die "metadata_empty_field:$field"
   done
 
-  # Syntactic validation: GUIDs
   validate_guid_field "tenant_id" "$TENANT_ID"
   validate_guid_field "subscription_id" "$SUBSCRIPTION_ID"
   validate_guid_field "migration_app_id" "$MIGRATION_APP_ID"
@@ -223,12 +218,10 @@ load_metadata() {
   validate_guid_field "custom_role_id_1" "$CUSTOM_ROLE_ID_1"
   validate_guid_field "custom_role_id_2" "$CUSTOM_ROLE_ID_2"
 
-  # Syntactic validation: role assignment resource IDs
   validate_role_assignment_field "role_assignment_id_1" "$ROLE_ASSIGNMENT_ID_1"
   validate_role_assignment_field "role_assignment_id_2" "$ROLE_ASSIGNMENT_ID_2"
   validate_role_assignment_field "role_assignment_id_3" "$ROLE_ASSIGNMENT_ID_3"
 
-  # Semantic: role assignments must reference the correct subscription
   validate_role_assignment_subscription "role_assignment_id_1" \
     "$ROLE_ASSIGNMENT_ID_1" "$SUBSCRIPTION_ID"
   validate_role_assignment_subscription "role_assignment_id_2" \
@@ -236,20 +229,17 @@ load_metadata() {
   validate_role_assignment_subscription "role_assignment_id_3" \
     "$ROLE_ASSIGNMENT_ID_3" "$SUBSCRIPTION_ID"
 
-  # Syntactic validation: safe names (no injection)
   validate_safe_name_field "migration_environment" "$MIGRATION_ENV"
   validate_safe_name_field "recovery_environment" "$RECOVERY_ENV"
   validate_safe_name_field "retained_sp_display_name" "$RETAINED_SP_DISPLAY_NAME"
   validate_safe_name_field "retained_secret_name" "$RETAINED_SECRET_NAME"
   validate_safe_name_field "repository" "$(env_value "$METADATA_FILE" repository)"
 
-  # Exact expected fixed names
   [[ "$RETAINED_SP_DISPLAY_NAME" == "betstan-github-sp" ]] ||
     die "metadata_retained_sp_name_mismatch"
   [[ "$RETAINED_SECRET_NAME" == "AZURE_CREDENTIALS" ]] ||
     die "metadata_retained_secret_name_mismatch"
 
-  # Reject duplicates across identities
   [[ "$MIGRATION_APP_ID" != "$RECOVERY_APP_ID" ]] ||
     die "metadata_duplicate_app_ids"
   [[ "$MIGRATION_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] ||
@@ -263,14 +253,13 @@ load_metadata() {
   [[ "$ROLE_ASSIGNMENT_ID_2" != "$ROLE_ASSIGNMENT_ID_3" ]] ||
     die "metadata_duplicate_role_assignment_ids"
 
-  # Retained SP must not equal any temporary SP
   [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_SP_OBJECT_ID" ]] ||
     die "metadata_retained_sp_equals_temporary"
   [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] ||
     die "metadata_retained_sp_equals_temporary"
 }
 
-# --- GitHub repository variable queries (evidence, not caller assertions) ---
+# --- GitHub repository variable queries ---
 
 query_recovery_variable() {
   local value
@@ -316,22 +305,131 @@ verify_azure_context() {
     die "wrong_tenant:expected=$TENANT_ID,actual=$actual_tenant"
 }
 
+# --- Fail-closed presence probes ---
+# Each returns: "present", "absent", or dies on error.
+# API/auth/transport failures are fatal (fail-closed).
+
+probe_sp_presence() {
+  local object_id="$1"
+  local output rc=0
+  output="$(az ad sp list --filter "id eq '$object_id'" \
+    --query 'length(@)' -o tsv 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_sp_api_error:$object_id rc=$rc output=$output"
+  fi
+  case "$output" in
+    0) printf 'absent' ;;
+    1) printf 'present' ;;
+    *)
+      # Unexpected count or parse error
+      die "probe_sp_unexpected_response:$object_id count=$output"
+      ;;
+  esac
+}
+
+probe_app_presence() {
+  local app_id="$1"
+  local output rc=0
+  output="$(az ad app list --filter "appId eq '$app_id'" \
+    --query 'length(@)' -o tsv 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_app_api_error:$app_id rc=$rc output=$output"
+  fi
+  case "$output" in
+    0) printf 'absent' ;;
+    1) printf 'present' ;;
+    *)
+      die "probe_app_unexpected_response:$app_id count=$output"
+      ;;
+  esac
+}
+
+probe_role_assignment_presence() {
+  local assignment_id="$1"
+  local output rc=0
+  output="$(az role assignment list --all \
+    --query "[?id=='$assignment_id'] | length(@)" -o tsv 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_role_assignment_api_error:$assignment_id rc=$rc output=$output"
+  fi
+  case "$output" in
+    0) printf 'absent' ;;
+    1) printf 'present' ;;
+    *)
+      die "probe_role_assignment_unexpected_response:$assignment_id count=$output"
+      ;;
+  esac
+}
+
+probe_custom_role_presence() {
+  local role_id="$1"
+  local output rc=0
+  output="$(az role definition list --name "$role_id" \
+    --query 'length(@)' -o tsv 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_custom_role_api_error:$role_id rc=$rc output=$output"
+  fi
+  case "$output" in
+    0) printf 'absent' ;;
+    1) printf 'present' ;;
+    *)
+      die "probe_custom_role_unexpected_response:$role_id count=$output"
+      ;;
+  esac
+}
+
+probe_env_secret_presence() {
+  local env_name="$1"
+  local secret_name="$2"
+  local output rc=0
+  output="$(gh secret list --repo "$GH_REPOSITORY" --env "$env_name" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_secret_api_error:$env_name/$secret_name rc=$rc output=$output"
+  fi
+  if printf '%s\n' "$output" | awk '{print $1}' | grep -qxF "$secret_name"; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
+probe_repo_secret_presence() {
+  local secret_name="$1"
+  local output rc=0
+  output="$(gh secret list --repo "$GH_REPOSITORY" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "probe_repo_secret_api_error:$secret_name rc=$rc output=$output"
+  fi
+  if printf '%s\n' "$output" | awk '{print $1}' | grep -qxF "$secret_name"; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
+# --- Retained identity verification ---
+
 verify_retained_identity() {
-  # Prove retained SP exists by exact object ID and validate displayName
-  local sp_json
-  sp_json="$(az ad sp show --id "$RETAINED_SP_OBJECT_ID" -o json 2>/dev/null)" ||
+  # Prove retained SP exists by exact object ID via filtered list query
+  local sp_output rc=0
+  sp_output="$(az ad sp list --filter "id eq '$RETAINED_SP_OBJECT_ID'" -o json 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "retained_sp_query_api_error:rc=$rc output=$sp_output"
+  fi
+  local sp_count
+  sp_count="$(printf '%s' "$sp_output" | jq 'length')" ||
+    die "retained_sp_response_parse_error"
+  [[ "$sp_count" == "1" ]] ||
     die "retained_sp_not_found:$RETAINED_SP_OBJECT_ID"
   local actual_display
-  actual_display="$(printf '%s' "$sp_json" | jq -r '.displayName // empty')"
+  actual_display="$(printf '%s' "$sp_output" | jq -r '.[0].displayName // empty')"
   [[ "$actual_display" == "$RETAINED_SP_DISPLAY_NAME" ]] ||
     die "retained_sp_display_name_mismatch:expected=$RETAINED_SP_DISPLAY_NAME,actual=$actual_display"
 
-  # Prove repository AZURE_CREDENTIALS secret exists (exact first-column match)
-  local secret_names
-  secret_names="$(gh secret list --repo "$GH_REPOSITORY" 2>/dev/null |
-    awk '{print $1}')" ||
-    die "retained_secret_query_failed"
-  printf '%s\n' "$secret_names" | grep -qxF "$RETAINED_SECRET_NAME" ||
+  # Prove repository AZURE_CREDENTIALS secret exists via exact probe
+  local secret_status
+  secret_status="$(probe_repo_secret_presence "$RETAINED_SECRET_NAME")"
+  [[ "$secret_status" == "present" ]] ||
     die "retained_secret_not_found:$RETAINED_SECRET_NAME"
 }
 
@@ -342,17 +440,17 @@ verify_gh_repository() {
     die "wrong_repository:expected=$expected_repo,actual=$GH_REPOSITORY"
 }
 
-# --- Deletion helpers (tolerate already-absent) ---
+# --- Deletion helpers (tolerate only proven-absent, fail on API error) ---
 
 delete_role_assignment() {
   local assignment_id="$1"
   local rc=0
   az role assignment delete --ids "$assignment_id" 2>/dev/null || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    if az role assignment list --query "[?id=='$assignment_id']" -o tsv 2>/dev/null |
-      grep -q .; then
+    local status
+    status="$(probe_role_assignment_presence "$assignment_id")"
+    [[ "$status" == "absent" ]] ||
       die "role_assignment_delete_failed:$assignment_id"
-    fi
   fi
 }
 
@@ -361,9 +459,10 @@ delete_sp() {
   local rc=0
   az ad sp delete --id "$object_id" 2>/dev/null || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    if az ad sp show --id "$object_id" >/dev/null 2>&1; then
+    local status
+    status="$(probe_sp_presence "$object_id")"
+    [[ "$status" == "absent" ]] ||
       die "sp_delete_failed:$object_id"
-    fi
   fi
 }
 
@@ -372,9 +471,10 @@ delete_app_registration() {
   local rc=0
   az ad app delete --id "$app_id" 2>/dev/null || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    if az ad app show --id "$app_id" >/dev/null 2>&1; then
+    local status
+    status="$(probe_app_presence "$app_id")"
+    [[ "$status" == "absent" ]] ||
       die "app_registration_delete_failed:$app_id"
-    fi
   fi
 }
 
@@ -383,12 +483,10 @@ delete_custom_role() {
   local rc=0
   az role definition delete --name "$role_id" 2>/dev/null || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    local count
-    count="$(az role definition list --name "$role_id" \
-      --query 'length(@)' -o tsv 2>/dev/null || echo 0)"
-    if [[ "$count" != "0" ]]; then
+    local status
+    status="$(probe_custom_role_presence "$role_id")"
+    [[ "$status" == "absent" ]] ||
       die "custom_role_delete_failed:$role_id"
-    fi
   fi
 }
 
@@ -399,70 +497,73 @@ delete_environment_secret() {
   gh secret delete "$secret_name" --repo "$GH_REPOSITORY" \
     --env "$env_name" 2>/dev/null || rc=$?
   if [[ "$rc" -ne 0 ]]; then
-    if gh secret list --repo "$GH_REPOSITORY" --env "$env_name" 2>/dev/null |
-      awk '{print $1}' | grep -qxF "$secret_name"; then
+    local status
+    status="$(probe_env_secret_presence "$env_name" "$secret_name")"
+    [[ "$status" == "absent" ]] ||
       die "github_secret_delete_failed:$env_name/$secret_name"
-    fi
   fi
 }
 
 disable_workflow() {
   local workflow_file="$1"
   if ! gh workflow disable "$workflow_file" --repo "$GH_REPOSITORY" 2>/dev/null; then
-    local state
+    local state rc=0
     state="$(gh workflow view "$workflow_file" --repo "$GH_REPOSITORY" \
-      --json state --jq '.state' 2>/dev/null || true)"
+      --json state --jq '.state' 2>&1)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      die "workflow_view_api_error:$workflow_file rc=$rc output=$state"
+    fi
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
       die "workflow_disable_failed:$workflow_file"
   fi
 }
 
-# --- Verification helpers ---
+# --- Terminal verification helpers (fail-closed) ---
 
 verify_sp_absent() {
   local object_id="$1"
-  if az ad sp show --id "$object_id" >/dev/null 2>&1; then
-    die "sp_still_present:$object_id"
-  fi
+  local status
+  status="$(probe_sp_presence "$object_id")"
+  [[ "$status" == "absent" ]] || die "sp_still_present:$object_id"
 }
 
 verify_app_absent() {
   local app_id="$1"
-  if az ad app show --id "$app_id" >/dev/null 2>&1; then
-    die "app_still_present:$app_id"
-  fi
+  local status
+  status="$(probe_app_presence "$app_id")"
+  [[ "$status" == "absent" ]] || die "app_still_present:$app_id"
 }
 
 verify_role_assignment_absent() {
   local assignment_id="$1"
-  local result
-  result="$(az role assignment list --query "[?id=='$assignment_id']" \
-    -o tsv 2>/dev/null || true)"
-  [[ -z "$result" ]] || die "role_assignment_still_present:$assignment_id"
+  local status
+  status="$(probe_role_assignment_presence "$assignment_id")"
+  [[ "$status" == "absent" ]] || die "role_assignment_still_present:$assignment_id"
 }
 
 verify_custom_role_absent() {
   local role_id="$1"
-  local count
-  count="$(az role definition list --name "$role_id" \
-    --query 'length(@)' -o tsv 2>/dev/null || true)"
-  [[ "$count" == "0" || -z "$count" ]] || die "custom_role_still_present:$role_id"
+  local status
+  status="$(probe_custom_role_presence "$role_id")"
+  [[ "$status" == "absent" ]] || die "custom_role_still_present:$role_id"
 }
 
 verify_secret_absent() {
   local env_name="$1"
   local secret_name="$2"
-  if gh secret list --repo "$GH_REPOSITORY" --env "$env_name" 2>/dev/null |
-    awk '{print $1}' | grep -qxF "$secret_name"; then
-    die "secret_still_present:$env_name/$secret_name"
-  fi
+  local status
+  status="$(probe_env_secret_presence "$env_name" "$secret_name")"
+  [[ "$status" == "absent" ]] || die "secret_still_present:$env_name/$secret_name"
 }
 
 verify_workflow_disabled() {
   local workflow_file="$1"
-  local state
+  local state rc=0
   state="$(gh workflow view "$workflow_file" --repo "$GH_REPOSITORY" \
-    --json state --jq '.state' 2>/dev/null || true)"
+    --json state --jq '.state' 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    die "workflow_view_api_error:$workflow_file rc=$rc output=$state"
+  fi
   [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
     die "workflow_still_enabled:$workflow_file"
 }
@@ -498,7 +599,6 @@ case "$MODE" in
     query_recovery_variable
     query_arm_variable
 
-    # Explicitly enforce recovery=false and arm=0 before/during execution
     set_recovery_variable
     set_arm_variable
 
@@ -586,7 +686,6 @@ case "$MODE" in
       die "retirement_state_missing"
     fi
 
-    # Verify all temporary objects absent
     verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_1"
     verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_2"
     verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_3"
@@ -600,13 +699,12 @@ case "$MODE" in
     verify_secret_absent "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
     verify_workflow_disabled "oci-migration-recovery.yml"
 
-    # Prove retained identity still intact
     verify_retained_identity
 
     printf 'IDENTITY_RETIREMENT_VERIFIED all_temporary_objects_absent=true retained_identity_intact=true\n'
 
-    # Cleanup private metadata only after terminal verification;
-    # state file is preserved for auditability
+    # Cleanup private metadata only after terminal verification succeeds;
+    # state file always preserved for auditability
     if [[ "$SAFE_CLEANUP" == "1" ]]; then
       rm -f "$METADATA_FILE"
       printf 'metadata_cleaned=true\n'
