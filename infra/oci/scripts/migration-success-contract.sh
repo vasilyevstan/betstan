@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# migration-success-contract.sh — Single source of truth for the
+# migration-success-contract.sh -- Single source of truth for the
 # betstan.oci-migration-success.v1 provenance envelope.
 #
 # Usage:
@@ -14,7 +14,7 @@
 #   - Fail-closed on any violation
 set -euo pipefail
 
-# ─── Canonical ordered field set ────────────────────────────────────────────
+# --- Canonical ordered field set ---------------------------------------------
 # This is the ONLY place that defines the contract field list.
 CONTRACT_FIELDS=(
   schema
@@ -49,7 +49,16 @@ CONTRACT_FIELDS=(
 CONTRACT_SCHEMA="betstan.oci-migration-success.v1"
 CONTRACT_DATABASE_COUNT=8
 
-# ─── Internal helpers ───────────────────────────────────────────────────────
+# Allowed validation-context keys (MODE=validate extra args)
+_CONTRACT_CONTEXT_KEYS=(
+  SOURCE_SHA
+  MIGRATION_RUN_ID
+  MIGRATION_RUN_ATTEMPT
+  MIGRATION_ID
+  AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256
+)
+
+# --- Internal helpers --------------------------------------------------------
 _contract_die() {
   printf 'CONTRACT_VIOLATION field=%s reason=%s\n' "${2:-unknown}" "$1" >&2
   exit 1
@@ -97,7 +106,7 @@ _contract_require_boolean() {
     _contract_die "invalid_boolean" "$key"
 }
 
-# ─── Field set validation (shared by emit and validate) ─────────────────────
+# --- Field set validation (shared by emit and validate) ----------------------
 _contract_validate_field_set() {
   local file="$1"
   local expected_sorted actual_sorted
@@ -136,7 +145,7 @@ _contract_validate_field_set() {
   fi
 }
 
-# ─── Semantic validation ────────────────────────────────────────────────────
+# --- Semantic validation -----------------------------------------------------
 # Validates ALL semantic relationships. Parameters passed as env-style args:
 #   SOURCE_SHA, MIGRATION_RUN_ID, MIGRATION_RUN_ATTEMPT, MIGRATION_ID,
 #   AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256
@@ -144,17 +153,30 @@ _contract_validate_semantics() {
   local file="$1"
   shift
 
-  # Parse context parameters
+  # Parse and strict-check context parameters
   local ctx_source_sha="" ctx_run_id="" ctx_run_attempt=""
   local ctx_migration_id="" ctx_cluster_fingerprint=""
-  local arg
+  local arg ctx_key
   for arg in "$@"; do
-    case "$arg" in
-      SOURCE_SHA=*) ctx_source_sha="${arg#*=}" ;;
-      MIGRATION_RUN_ID=*) ctx_run_id="${arg#*=}" ;;
-      MIGRATION_RUN_ATTEMPT=*) ctx_run_attempt="${arg#*=}" ;;
-      MIGRATION_ID=*) ctx_migration_id="${arg#*=}" ;;
-      AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256=*) ctx_cluster_fingerprint="${arg#*=}" ;;
+    [[ "$arg" == *=* ]] ||
+      _contract_die "malformed_context_arg(${arg})" "context"
+    ctx_key="${arg%%=*}"
+    local ctx_known=0
+    local ck
+    for ck in "${_CONTRACT_CONTEXT_KEYS[@]}"; do
+      if [[ "$ctx_key" == "$ck" ]]; then
+        ctx_known=1
+        break
+      fi
+    done
+    [[ "$ctx_known" == "1" ]] ||
+      _contract_die "unknown_context_key(${ctx_key})" "context"
+    case "$ctx_key" in
+      SOURCE_SHA) ctx_source_sha="${arg#*=}" ;;
+      MIGRATION_RUN_ID) ctx_run_id="${arg#*=}" ;;
+      MIGRATION_RUN_ATTEMPT) ctx_run_attempt="${arg#*=}" ;;
+      MIGRATION_ID) ctx_migration_id="${arg#*=}" ;;
+      AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256) ctx_cluster_fingerprint="${arg#*=}" ;;
     esac
   done
 
@@ -220,11 +242,14 @@ _contract_validate_semantics() {
   _contract_require_exact "terminal_status" "DEPLOYED_HEALTHY" \
     "$(_contract_env_value "$file" terminal_status)"
 
-  # Journal and fencing (positive integers)
-  _contract_require_positive_int "journal_generation" \
-    "$(_contract_env_value "$file" journal_generation)"
-  _contract_require_positive_int "fencing_generation" \
-    "$(_contract_env_value "$file" fencing_generation)"
+  # Journal and fencing (positive integers, must be equal)
+  local jgen fgen
+  jgen="$(_contract_env_value "$file" journal_generation)"
+  fgen="$(_contract_env_value "$file" fencing_generation)"
+  _contract_require_positive_int "journal_generation" "$jgen"
+  _contract_require_positive_int "fencing_generation" "$fgen"
+  [[ "$jgen" == "$fgen" ]] ||
+    _contract_die "generation_mismatch(journal=${jgen},fencing=${fgen})" "fencing_generation"
   _contract_require_positive_int "journal_sequence" \
     "$(_contract_env_value "$file" journal_sequence)"
   _contract_require_positive_int "journal_heartbeat_epoch" \
@@ -291,25 +316,31 @@ _contract_validate_semantics() {
     "$(_contract_env_value "$file" azure_cluster_stopped_deallocated)"
 }
 
-# ─── Emit mode ──────────────────────────────────────────────────────────────
+# --- Emit mode ---------------------------------------------------------------
 # Writes an ordered envelope from key=value arguments, then validates it.
+# Atomic: validates the temp file before mv; cleans up on any failure.
 _contract_emit() {
   local output_file="$1"
   shift
 
-  # Store all args; check for duplicate keys
+  local tmp="${output_file}.tmp.$$"
+  # Ensure temp is removed on any failure path
+  trap 'rm -f "$tmp"' RETURN 2>/dev/null || true
+
+  # Validate and collect args; reject malformed or duplicate keys
   local keys_seen="" arg key
   for arg in "$@"; do
+    [[ "$arg" == *=* ]] ||
+      { rm -f "$tmp"; _contract_die "malformed_emit_arg(${arg})" "emit"; }
     key="${arg%%=*}"
     if printf '%s\n' "$keys_seen" | grep -Fxq "$key"; then
-      _contract_die "duplicate_emit_key" "$key"
+      rm -f "$tmp"; _contract_die "duplicate_emit_key" "$key"
     fi
     keys_seen="${keys_seen}${key}
 "
   done
 
   # Write in canonical order
-  local tmp="${output_file}.tmp.$$"
   : > "$tmp"
   local field found_value
   for field in "${CONTRACT_FIELDS[@]}"; do
@@ -324,13 +355,12 @@ _contract_emit() {
       fi
     done
     if [[ "$matched" == "0" ]]; then
-      rm -f "$tmp"
-      _contract_die "missing_emit_key" "$field"
+      rm -f "$tmp"; _contract_die "missing_emit_key" "$field"
     fi
     printf '%s=%s\n' "$field" "$found_value" >> "$tmp"
   done
 
-  # Check for unknown keys
+  # Reject unknown keys
   for arg in "$@"; do
     key="${arg%%=*}"
     local found=0
@@ -341,19 +371,21 @@ _contract_emit() {
       fi
     done
     if [[ "$found" == "0" ]]; then
-      rm -f "$tmp"
-      _contract_die "unknown_emit_key" "$key"
+      rm -f "$tmp"; _contract_die "unknown_emit_key" "$key"
     fi
   done
 
-  mv "$tmp" "$output_file"
+  # Validate temp BEFORE making it the output (atomic gate)
+  # Run in subshell so _contract_die does not skip cleanup
+  if ! ( _contract_validate_field_set "$tmp" && _contract_validate_semantics "$tmp" ) 2>&1; then
+    rm -f "$tmp"
+    exit 1
+  fi
 
-  # Self-validate: the emitted file must also pass semantic validation
-  _contract_validate_field_set "$output_file"
-  _contract_validate_semantics "$output_file"
+  mv "$tmp" "$output_file"
 }
 
-# ─── Validate mode ─────────────────────────────────────────────────────────
+# --- Validate mode -----------------------------------------------------------
 _contract_validate() {
   local input_file="$1"
   shift
@@ -367,7 +399,7 @@ _contract_validate() {
   _contract_validate_semantics "$input_file" "$@"
 }
 
-# ─── Public API (field list query) ─────────────────────────────────────────
+# --- Public API (field list query) -------------------------------------------
 contract_field_list() {
   printf '%s\n' "${CONTRACT_FIELDS[@]}"
 }
@@ -376,7 +408,7 @@ contract_sorted_field_list() {
   printf '%s\n' "${CONTRACT_FIELDS[@]}" | sort
 }
 
-# ─── Entry point (when run as a script) ────────────────────────────────────
+# --- Entry point (when run as a script) --------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   CONTRACT_MODE="${MODE:-validate}"
   case "$CONTRACT_MODE" in
