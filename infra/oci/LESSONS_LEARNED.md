@@ -97,9 +97,11 @@ conversation summaries are not authority.
   permission: the resulting channel error crashes gamemaster and removes
   consumers. Instead remove the exact 17 non-default exchange-to-queue
   bindings, verify queues and consumers stay stable with zero backlog, and
-  bound each deletion to the remaining pre-timer deadline. After commit,
-  quiesce gamemaster before unlocking Mongo, then restore bindings by restarting
-  passive consumers before gamemaster.
+  execute the exact deletions as one bounded in-pod batch. A separate
+  Bastion/kubectl round trip for each binding can exhaust the pre-timer deadline
+  even after fast topology convergence. After commit, quiesce gamemaster before
+  unlocking Mongo, then restore bindings by restarting passive consumers before
+  gamemaster.
 - Pre-commit public checks must be read-only and prove the HTTP mutation fence.
   Run the mutating browser journey only after commit and fence removal; never
   let a validation write invalidate the certified source/target signatures.

@@ -61,10 +61,12 @@ read-only and prefer the checked-in recovery workflow and scripts.
   Start passive consumers first and gamemaster last, require exact empty
   topology within 45 seconds, then remove the exact 17 application bindings as
   the routing fence. Never deny RabbitMQ write permission: declaration and
-  timer channel errors crash consumers. Bound every binding deletion to the
-  remaining pre-timer deadline. After commit, quiesce gamemaster, unlock Mongo,
-  restart passive consumers before gamemaster to restore exact bindings, verify
-  convergence, and only then remove the HTTP fence.
+  timer channel errors crash consumers. Remove the exact 17 application
+  bindings by sending their rows to one bounded in-pod deletion loop;
+  per-binding Bastion round trips can exhaust the pre-timer deadline. After
+  commit, quiesce gamemaster, unlock Mongo, restart passive consumers before
+  gamemaster to restore exact bindings, verify convergence, and only then
+  remove the HTTP fence.
   Pre-commit public checks are read-only. Record
   `cutover-committed` only after final parity under all three fences, then
   unlock idempotently and remove the HTTP fence last.
