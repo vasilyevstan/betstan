@@ -192,8 +192,11 @@ fixtures.
    application remain stopped so its required index initialization can finish,
    then immediately locks Mongo and recertifies exact parity under that lock.
    It recreates the 17-queue RabbitMQ topology, restarts consumers
-   sequentially, and locks RabbitMQ publishes before ingress opens under the
-   HTTP mutation fence. Finalization rechecks parity under all locks, records
+   sequentially, waits within a bounded loop for the exact queue names, zero
+   backlog, and at least one consumer per queue, and only then locks RabbitMQ
+   publishes before ingress opens under the HTTP mutation fence. Application
+   readiness alone does not certify that asynchronous broker registration has
+   converged. Finalization rechecks parity under all locks, records
    `cutover-committed`, and only then enables writes.
    A pre-destructive failure restores OCI workload baselines. Any later
    pre-commit failure keeps OCI closed and marks `recovery-required`; a later
