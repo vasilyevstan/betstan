@@ -167,13 +167,12 @@ env_value() {
 
 write_state() {
   local phase="$1"
-  # Use mktemp in same directory; cleanup on any failure
-  local temporary
+  local temporary=""
+  # Install cleanup trap BEFORE mktemp
+  _ws_cleanup() { [[ -n "$temporary" && -f "$temporary" ]] && rm -f "$temporary" 2>/dev/null; }
+  trap _ws_cleanup EXIT
   temporary="$(mktemp "${STATE_FILE}.XXXXXXXX")" || die "state_temp_create_failed"
   chmod 600 "$temporary"
-  # Cleanup trap for this subshell scope
-  _state_temp_cleanup() { rm -f "$temporary" 2>/dev/null; }
-  trap _state_temp_cleanup EXIT
 
   if [[ "$phase" == "retired" ]]; then
     {
@@ -201,6 +200,17 @@ write_state() {
       printf 'recovery_secret_name=AZURE_MIGRATION_RECOVERY_CREDENTIALS\n'
       printf 'workflow_name=oci-migration-recovery.yml\n'
     } > "$temporary"
+    # Validate temp: exact field set, schema, phase, permissions, fixed values
+    validate_exact_field_set "$temporary" "${TERMINAL_STATE_KEYS[@]}"
+    [[ "$(env_value "$temporary" schema)" == "betstan.identity-retirement-terminal.v1" ]] ||
+      die "state_temp_schema_invalid"
+    [[ "$(env_value "$temporary" phase)" == "retired" ]] ||
+      die "state_temp_phase_invalid"
+    [[ "$(env_value "$temporary" repository)" == "$GH_REPOSITORY" ]] ||
+      die "state_temp_repo_invalid"
+    local tp
+    tp="$(stat -f '%Lp' "$temporary" 2>/dev/null || stat -c '%a' "$temporary" 2>/dev/null)"
+    [[ "$tp" == "600" ]] || die "state_temp_perms_invalid"
   else
     {
       printf 'schema=betstan.identity-retirement.v1\n'
@@ -210,11 +220,18 @@ write_state() {
       printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
       printf 'repository=%s\n' "$GH_REPOSITORY"
     } > "$temporary"
+    # Validate temp: exact field set, schema, phase nonempty, permissions
+    validate_exact_field_set "$temporary" "${INTERMEDIATE_STATE_KEYS[@]}"
+    [[ "$(env_value "$temporary" schema)" == "betstan.identity-retirement.v1" ]] ||
+      die "state_temp_schema_invalid"
+    [[ -n "$(env_value "$temporary" phase)" ]] || die "state_temp_phase_invalid"
+    local tp
+    tp="$(stat -f '%Lp' "$temporary" 2>/dev/null || stat -c '%a' "$temporary" 2>/dev/null)"
+    [[ "$tp" == "600" ]] || die "state_temp_perms_invalid"
   fi
 
-  # Validate temp was written correctly
-  [[ -s "$temporary" ]] || die "state_temp_write_failed"
   mv "$temporary" "$STATE_FILE" || die "state_atomic_mv_failed"
+  temporary=""
   trap - EXIT
 }
 
@@ -252,6 +269,45 @@ validate_state_identity() {
       die "retirement_state_metadata_differs"
   elif [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]]; then
     validate_exact_field_set "$STATE_FILE" "${TERMINAL_STATE_KEYS[@]}"
+    # Compare digest
+    [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
+      die "retirement_state_metadata_differs"
+    # Compare every terminal ID and fixed binding to loaded metadata values
+    [[ "$(env_value "$STATE_FILE" migration_app_id)" == "$MIGRATION_APP_ID" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" recovery_app_id)" == "$RECOVERY_APP_ID" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" migration_sp_object_id)" == "$MIGRATION_SP_OBJECT_ID" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" recovery_sp_object_id)" == "$RECOVERY_SP_OBJECT_ID" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" retained_sp_object_id)" == "$RETAINED_SP_OBJECT_ID" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" role_assignment_id_1)" == "$ROLE_ASSIGNMENT_ID_1" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" role_assignment_id_2)" == "$ROLE_ASSIGNMENT_ID_2" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" role_assignment_id_3)" == "$ROLE_ASSIGNMENT_ID_3" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" custom_role_id_1)" == "$CUSTOM_ROLE_ID_1" ]] ||
+      die "terminal_state_id_mismatch"
+    [[ "$(env_value "$STATE_FILE" custom_role_id_2)" == "$CUSTOM_ROLE_ID_2" ]] ||
+      die "terminal_state_id_mismatch"
+    # Fixed bindings
+    [[ "$(env_value "$STATE_FILE" retained_sp_display_name)" == "$RETAINED_SP_DISPLAY_NAME" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" retained_secret_name)" == "$RETAINED_SECRET_NAME" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" migration_environment)" == "$MIGRATION_ENV" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" recovery_environment)" == "$RECOVERY_ENV" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" migration_secret_name)" == "OCI_MIGRATION_AZURE_CREDENTIALS" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" recovery_secret_name)" == "AZURE_MIGRATION_RECOVERY_CREDENTIALS" ]] ||
+      die "terminal_state_fixed_name_mismatch"
+    [[ "$(env_value "$STATE_FILE" workflow_name)" == "oci-migration-recovery.yml" ]] ||
+      die "terminal_state_fixed_name_mismatch"
   else
     die "retirement_state_schema_invalid"
   fi
@@ -308,6 +364,27 @@ load_from_terminal_state() {
   is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_1" || die "terminal_state_invalid_ra_id"
   is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_2" || die "terminal_state_invalid_ra_id"
   is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_3" || die "terminal_state_invalid_ra_id"
+
+  # Validate RA IDs bind to correct subscription
+  local ra_sub
+  for ra_id in "$ROLE_ASSIGNMENT_ID_1" "$ROLE_ASSIGNMENT_ID_2" "$ROLE_ASSIGNMENT_ID_3"; do
+    ra_sub="$(printf '%s' "$ra_id" | sed -n 's|^/subscriptions/\([^/]*\)/.*|\1|p')"
+    [[ "$ra_sub" == "$SUBSCRIPTION_ID" ]] || die "terminal_state_ra_subscription_mismatch"
+  done
+
+  # Validate uniqueness: no duplicate IDs among temporary objects
+  local all_temp_ids=("$MIGRATION_APP_ID" "$RECOVERY_APP_ID" "$MIGRATION_SP_OBJECT_ID"
+    "$RECOVERY_SP_OBJECT_ID" "$CUSTOM_ROLE_ID_1" "$CUSTOM_ROLE_ID_2"
+    "$ROLE_ASSIGNMENT_ID_1" "$ROLE_ASSIGNMENT_ID_2" "$ROLE_ASSIGNMENT_ID_3")
+  local seen_count
+  seen_count="$(printf '%s\n' "${all_temp_ids[@]}" | sort -u | wc -l | tr -d ' ')"
+  [[ "$seen_count" == "9" ]] || die "terminal_state_duplicate_ids"
+
+  # Retained SP must not match any temporary SP/app
+  [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_SP_OBJECT_ID" ]] || die "terminal_state_retained_collision"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] || die "terminal_state_retained_collision"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_APP_ID" ]] || die "terminal_state_retained_collision"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_APP_ID" ]] || die "terminal_state_retained_collision"
 
   # Validate fixed bindings
   [[ "$RETAINED_SP_DISPLAY_NAME" == "betstan-github-sp" ]] || die "terminal_state_fixed_name_mismatch"
@@ -805,6 +882,26 @@ disable_workflow() {
   fi
 }
 
+verify_workflow_disabled() {
+  local wf="$1" state rc=0
+  state="$(gh api "repos/$GH_REPOSITORY/actions/workflows/$wf" --jq '.state' 2>&1)" || rc=$?
+  [[ "$rc" -eq 0 ]] || die "workflow_verify_api_error"
+  [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
+    die "workflow_not_disabled_after_action"
+}
+
+verify_secret_absent() {
+  local env_name="$1" secret_name="$2" attempt=0 s
+  while true; do
+    s="$(probe_env_secret_presence "$env_name" "$secret_name")"
+    [[ "$s" == "present" ]] || break
+    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
+      die "secret_still_present_after_retries"
+    attempt=$((attempt+1))
+    sleep "$VERIFY_RETRY_SLEEP"
+  done
+}
+
 # Verify no nonterminal runs across all fenced workflows/statuses.
 # Fail closed on API errors; only accept proven-zero.
 verify_no_active_runs() {
@@ -992,11 +1089,15 @@ case "$MODE" in
           ;;
         guards-intent)
           set_all_guard_variables
+          # Verify variables were actually set
+          query_all_guard_variables
           write_state workflow-intent
           local_phase=workflow-intent
           ;;
         workflow-intent)
           disable_workflow "oci-migration-recovery.yml"
+          # Verify workflow is actually disabled
+          verify_workflow_disabled "oci-migration-recovery.yml"
           write_state runs-fence
           local_phase=runs-fence
           ;;
@@ -1008,6 +1109,15 @@ case "$MODE" in
         secrets-intent)
           delete_environment_secret "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
           delete_environment_secret "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
+          write_state post-secrets-fence
+          local_phase=post-secrets-fence
+          ;;
+        post-secrets-fence)
+          # Prove both secrets are absent before crossing identity boundary
+          verify_secret_absent "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
+          verify_secret_absent "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
+          # Rerun full workflow nonterminal fence to catch runs started between first fence and deletion
+          verify_no_active_runs
           write_state role-assignments-intent
           local_phase=role-assignments-intent
           ;;

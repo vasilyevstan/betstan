@@ -6,8 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPERATOR="$SCRIPT_DIR/retire-migration-identities-stan.sh"
-WORK_DIR="$SCRIPT_DIR/.test-workdirs/$$-$(date +%s)"
-mkdir -p "$WORK_DIR"
+mkdir -p "$SCRIPT_DIR/.test-workdirs"
+WORK_DIR="$(mktemp -d "$SCRIPT_DIR/.test-workdirs/XXXXXXXX")"
 BIN_DIR="$WORK_DIR/bin"; mkdir -p "$BIN_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -206,6 +206,15 @@ case "${1:-}" in
           if [[ "${STUB_SECRET_STILL_PRESENT:-0}" == "1" ]]; then
             printf 'OCI_MIGRATION_AZURE_CREDENTIALS    Updated 2025-01-01\n'
             printf 'AZURE_MIGRATION_RECOVERY_CREDENTIALS    Updated 2025-01-01\n'
+          elif [[ "${STUB_SECRET_REMAINS_AFTER_DELETE:-0}" == "1" ]]; then
+            # Secret still present (simulates delete success but propagation delay)
+            del_count_file="${STUB_GH_LOG}.secret_del_count"
+            dc=0
+            if [[ -f "$del_count_file" ]]; then dc="$(cat "$del_count_file")"; fi
+            if [[ "$dc" -gt 0 ]]; then
+              printf 'OCI_MIGRATION_AZURE_CREDENTIALS    Updated 2025-01-01\n'
+              printf 'AZURE_MIGRATION_RECOVERY_CREDENTIALS    Updated 2025-01-01\n'
+            else printf '\n'; fi
           else printf '\n'; fi
         else
           if [[ "${STUB_PROBE_REPO_SECRET_FAIL:-0}" == "1" ]]; then printf 'Err\n' >&2; exit 1; fi
@@ -213,7 +222,13 @@ case "${1:-}" in
           else printf 'AZURE_CREDENTIALS    Updated 2025-01-01\n'; fi
         fi ;;
       delete)
-        if [[ "${STUB_SECRET_DELETE_FAIL:-0}" == "1" ]]; then exit 1; fi ;;
+        if [[ "${STUB_SECRET_DELETE_FAIL:-0}" == "1" ]]; then exit 1; fi
+        if [[ "${STUB_SECRET_REMAINS_AFTER_DELETE:-0}" == "1" ]]; then
+          del_count_file="${STUB_GH_LOG}.secret_del_count"
+          dc=0
+          if [[ -f "$del_count_file" ]]; then dc="$(cat "$del_count_file")"; fi
+          dc=$((dc+1)); printf '%s' "$dc" > "$del_count_file"
+        fi ;;
     esac ;;
   variable)
     case "${2:-}" in
@@ -231,7 +246,8 @@ case "${1:-}" in
             printf '%s\n' "${STUB_ARM_EPOCH_REPO:-${STUB_ARM_EPOCH:-0}}"
           else exit 1; fi
         fi ;;
-      set) ;;
+      set)
+        if [[ "${STUB_VARIABLE_SET_FAIL:-0}" == "1" ]]; then exit 1; fi ;;
     esac ;;
   workflow)
     case "${2:-}" in
@@ -245,6 +261,18 @@ case "${1:-}" in
     case "${2:-}" in
       list)
         if [[ "${STUB_RUN_LIST_FAIL:-0}" == "1" ]]; then printf 'API error\n' >&2; exit 1; fi
+        if [[ "${STUB_POST_FENCE_ACTIVE_RUNS:-0}" != "0" ]]; then
+          # Simulate run appearing only on second fence (after secrets deleted)
+          call_count_file="${STUB_AZ_LOG}.run_fence_count"
+          cc=0
+          if [[ -f "$call_count_file" ]]; then cc="$(cat "$call_count_file")"; fi
+          cc=$((cc+1))
+          printf '%s' "$cc" > "$call_count_file"
+          # First 14 calls (2 workflows * 7 statuses) succeed; second batch has runs
+          if [[ "$cc" -gt 14 && "$*" == *"in_progress"* ]]; then
+            printf '%s\n' "${STUB_POST_FENCE_ACTIVE_RUNS}"; exit 0
+          fi
+        fi
         if [[ "${STUB_ACTIVE_RUNS:-0}" != "0" && "$*" == *"in_progress"* ]]; then
           printf '%s\n' "${STUB_ACTIVE_RUNS}"
         elif [[ "${STUB_QUEUED_RUNS:-0}" != "0" && "$*" == *"queued"* ]]; then
@@ -266,7 +294,8 @@ case "${1:-}" in
   api)
     # gh api repos/.../actions/workflows/<file> --jq .state
     if [[ "${STUB_PROBE_WORKFLOW_FAIL:-0}" == "1" ]]; then printf 'API error\n' >&2; exit 1; fi
-    if [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then printf 'active\n'
+    if [[ "${STUB_WORKFLOW_NOT_DISABLED:-0}" == "1" ]]; then printf 'active\n'
+    elif [[ "${STUB_WORKFLOW_DISABLE_FAIL:-0}" == "1" ]]; then printf 'active\n'
     else printf 'disabled_manually\n'; fi ;;
   *) printf 'unexpected gh: %s\n' "$*" >&2; exit 1 ;;
 esac
@@ -287,6 +316,7 @@ run_operator() {
   local extra_env=()
   while [[ $# -gt 0 ]]; do extra_env+=("$1"); shift; done
   : > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+  rm -f "$WORK_DIR/az.log.run_fence_count" "$WORK_DIR/gh.log.secret_del_count" 2>/dev/null
   env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
     STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
     IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
@@ -908,6 +938,116 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 o="$(run_operator verify "$fixture_dir" STUB_SP_STILL_PRESENT=1 \
   IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=1 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0 2>&1)" || true
 assert_no_id_leakage "no_id_leak_retry_failure" "$o"
+
+# --- New regression tests: post-secrets-fence, write_state, terminal mismatch ---
+printf '\n  --- post-secrets-fence and boundary regressions ---\n'
+
+# False-success variable set (set command fails -> error)
+expect_fail_with "variable_set_fail_blocks_execute" "variable_.*_set_failed" \
+  run_operator execute "$WORK_DIR/t-varfail" STUB_VARIABLE_SET_FAIL=1
+
+# Workflow not actually disabled after disable command (false success)
+expect_fail_with "workflow_not_disabled_false_success" "workflow_still_enabled_after_retries" \
+  run_operator execute "$WORK_DIR/t-wf-false" STUB_WORKFLOW_NOT_DISABLED=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=0 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
+# Secret delete succeeds but secret remains -> post-secrets-fence catches
+expect_fail_with "secret_remains_after_delete_blocks_boundary" "secret_still_present_after_retries" \
+  run_operator execute "$WORK_DIR/t-sec-remains" STUB_SECRET_REMAINS_AFTER_DELETE=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=1 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
+
+# Run appearing after first fence (post-secrets-fence catches it)
+expect_fail_with "run_after_first_fence_blocks_boundary" "nonterminal_workflow_runs_exist" \
+  run_operator execute "$WORK_DIR/t-post-run" STUB_POST_FENCE_ACTIVE_RUNS=1
+
+# Terminal state ID mismatch when metadata loaded
+fixture_dir="$WORK_DIR/t-ts-idmismatch"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+# Tamper: replace migration_app_id with a valid-shape but different GUID
+sed -i.bak "s/^migration_app_id=.*$/migration_app_id=99999999-0000-1111-2222-333333333333/" "$sf"
+rm -f "$sf.bak"
+expect_fail_with "terminal_state_id_mismatch_detected" "terminal_state_id_mismatch" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Terminal state digest mismatch (metadata modified after execute)
+fixture_dir="$WORK_DIR/t-ts-digest"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# Swap a GUID value for another valid one to change digest but keep valid field set
+sed -i.bak "s/^custom_role_id_2=$G_CR2$/custom_role_id_2=ffffffff-aaaa-bbbb-cccc-dddddddddddd/" "$fixture_dir/metadata.env"
+rm -f "$fixture_dir/metadata.env.bak"
+expect_fail_with "terminal_digest_mismatch_detected" "retirement_state_metadata_differs" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Terminal state uniqueness tampering (duplicate IDs)
+fixture_dir="$WORK_DIR/t-ts-uniq"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+rm -f "$fixture_dir/metadata.env"
+# Make recovery_app_id same as migration_app_id
+sed -i.bak "s/^recovery_app_id=.*$/recovery_app_id=$G_MA/" "$sf"; rm -f "$sf.bak"
+expect_fail_with "terminal_state_duplicate_id_detected" "terminal_state_duplicate_ids" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Terminal state subscription binding tampering in RA IDs
+fixture_dir="$WORK_DIR/t-ts-rasub"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+rm -f "$fixture_dir/metadata.env"
+# Replace subscription in RA ID with a different one
+sed -i.bak "s|/subscriptions/$GS/providers/Microsoft.Authorization/roleAssignments/dddd4444|/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleAssignments/dddd4444|" "$sf"
+rm -f "$sf.bak"
+expect_fail_with "terminal_ra_subscription_mismatch" "terminal_state_ra_subscription_mismatch" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Temp cleanup on write_state mv failure: metadata preserved
+fixture_dir="$WORK_DIR/t-mv-fail"
+write_metadata "$fixture_dir"; mkdir -p "$fixture_dir"; chmod 700 "$fixture_dir"
+# Make state dir read-only to force mv to fail
+chmod 500 "$fixture_dir"
+o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
+chmod 700 "$fixture_dir"
+# Temp files should be cleaned up
+temps="$(find "$fixture_dir" -name 'identity-retirement-state.env.*' 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$temps" == "0" ]]; then pass "temp_cleaned_on_mv_failure"
+else fail "temp_cleaned_on_mv_failure (found $temps temp files)"; fi
+
+# Post-secrets-fence ordering in gh log
+fixture_dir="$WORK_DIR/t-psf-order"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+gh_log="$WORK_DIR/gh.log"
+# After secret delete, there should be another run list check (post-secrets-fence)
+secret_del_last="$(grep -n 'secret delete' "$gh_log" | tail -1 | cut -d: -f1)"
+post_fence_run="$(awk "NR>$secret_del_last" "$gh_log" | grep -n 'run list' | head -1 | cut -d: -f1)"
+if [[ -n "$secret_del_last" && -n "$post_fence_run" ]]; then
+  pass "post_secrets_fence_runs_after_delete"
+else
+  fail "post_secrets_fence_runs_after_delete (no run list after secret delete)"
+fi
 
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
