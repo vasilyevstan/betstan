@@ -361,30 +361,39 @@ _contract_validate_semantics() {
 
 # --- Emit mode ---------------------------------------------------------------
 # Writes an ordered envelope from key=value arguments, then validates it.
-# Atomic: validates the temp file before mv; cleans up on any failure.
+# Atomic: uses mktemp in the destination directory, mode 0600, validates
+# completely before mv. Never removes or alters a pre-existing destination.
 _contract_emit() {
   local output_file="$1"
   shift
 
-  local tmp="${output_file}.tmp.$$"
-  # Ensure temp is removed on any failure path
-  trap 'rm -f "$tmp"' RETURN 2>/dev/null || true
+  local dest_dir
+  dest_dir="$(dirname "$output_file")"
+  [[ -d "$dest_dir" ]] ||
+    _contract_die "destination_dir_missing" "emit"
+
+  # Create unpredictable temp in the same directory (same filesystem for atomic mv)
+  local tmp
+  tmp="$(mktemp "${dest_dir}/.contract-emit-XXXXXXXX")"
+  chmod 0600 "$tmp"
+
+  # Cleanup helper: removes temp only (never the destination)
+  _emit_cleanup() { rm -f "$tmp"; }
 
   # Validate and collect args; reject malformed or duplicate keys
   local keys_seen="" arg key
   for arg in "$@"; do
     [[ "$arg" == *=* ]] ||
-      { rm -f "$tmp"; _contract_die "malformed_emit_arg(${arg})" "emit"; }
+      { _emit_cleanup; _contract_die "malformed_emit_arg(${arg})" "emit"; }
     key="${arg%%=*}"
     if printf '%s\n' "$keys_seen" | grep -Fxq "$key"; then
-      rm -f "$tmp"; _contract_die "duplicate_emit_key" "$key"
+      _emit_cleanup; _contract_die "duplicate_emit_key" "$key"
     fi
     keys_seen="${keys_seen}${key}
 "
   done
 
   # Write in canonical order
-  : > "$tmp"
   local field found_value
   for field in "${CONTRACT_FIELDS[@]}"; do
     found_value=""
@@ -398,7 +407,7 @@ _contract_emit() {
       fi
     done
     if [[ "$matched" == "0" ]]; then
-      rm -f "$tmp"; _contract_die "missing_emit_key" "$field"
+      _emit_cleanup; _contract_die "missing_emit_key" "$field"
     fi
     printf '%s=%s\n' "$field" "$found_value" >> "$tmp"
   done
@@ -414,18 +423,20 @@ _contract_emit() {
       fi
     done
     if [[ "$found" == "0" ]]; then
-      rm -f "$tmp"; _contract_die "unknown_emit_key" "$key"
+      _emit_cleanup; _contract_die "unknown_emit_key" "$key"
     fi
   done
 
-  # Validate temp BEFORE making it the output (atomic gate)
+  # Validate temp completely BEFORE making it the destination (atomic gate)
   # Run in subshell so _contract_die does not skip cleanup
   if ! ( _contract_validate_field_set "$tmp" && _contract_validate_semantics "$tmp" ) 2>&1; then
-    rm -f "$tmp"
+    _emit_cleanup
     exit 1
   fi
 
+  # Atomic rename -- destination is only written on full success
   mv "$tmp" "$output_file"
+  chmod 0600 "$output_file"
 }
 
 # --- Validate mode -----------------------------------------------------------

@@ -447,12 +447,91 @@ if MODE=emit "$CONTRACT" "$WORK_DIR/fail-atomic.env" \
     "azure_cluster_stopped_deallocated=true" 2>/dev/null; then
   fail "emit with bad lineage should fail"
 else
-  # Verify neither output nor temp exist
-  if compgen -G "$WORK_DIR/fail-atomic.env*" >/dev/null 2>&1; then
+  # Verify neither output nor temp exist in the work dir
+  if compgen -G "$WORK_DIR/fail-atomic.env" >/dev/null 2>&1 ||
+     compgen -G "$WORK_DIR/.contract-emit-*" >/dev/null 2>&1; then
     fail "emit left temp or output file on failure"
   else
     pass
   fi
+fi
+
+# --- Test: emit preserves pre-existing destination on failure ----------------
+echo "--- Test: emit preserves pre-existing destination on failure"
+echo "ORIGINAL_CONTENT" > "$WORK_DIR/preserve-target.env"
+if MODE=emit "$CONTRACT" "$WORK_DIR/preserve-target.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$ANCESTOR_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true" 2>/dev/null; then
+  fail "emit with bad lineage should fail"
+else
+  # Pre-existing file must be intact
+  if [[ "$(cat "$WORK_DIR/preserve-target.env")" == "ORIGINAL_CONTENT" ]]; then
+    pass
+  else
+    fail "emit altered pre-existing destination on failure"
+  fi
+fi
+
+# --- Test: successful emit produces 0600 permissions -------------------------
+echo "--- Test: emit output has mode 0600"
+MODE=emit "$CONTRACT" "$WORK_DIR/perms.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$SOURCE_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true"
+perms="$(stat -f '%Lp' "$WORK_DIR/perms.env" 2>/dev/null || stat -c '%a' "$WORK_DIR/perms.env" 2>/dev/null)"
+if [[ "$perms" == "600" ]]; then
+  pass
+else
+  fail "emit output should be mode 600, got $perms"
 fi
 
 # --- Summary -----------------------------------------------------------------
