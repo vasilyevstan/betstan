@@ -545,6 +545,82 @@ else
   fail "emit output should be mode 600, got $perms"
 fi
 
+# --- Test: trap cleans temp on mv failure (read-only dir) --------------------
+echo "--- Test: trap cleans temp on mv failure"
+mkdir -p "$WORK_DIR/readonly-dest"
+# First create a valid emit to confirm the dir works
+MODE=emit "$CONTRACT" "$WORK_DIR/readonly-dest/canary.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$SOURCE_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true"
+rm "$WORK_DIR/readonly-dest/canary.env"
+# Make dir read-only so mktemp inside fails (cannot create temp)
+chmod 0555 "$WORK_DIR/readonly-dest"
+if MODE=emit "$CONTRACT" "$WORK_DIR/readonly-dest/blocked.env" \
+    "schema=betstan.oci-migration-success.v1" \
+    "migration_id=42-1" \
+    "source_sha=$SOURCE_SHA" \
+    "runtime_deploy_source_sha=$SOURCE_SHA" \
+    "closed_recovery_retry=false" \
+    "github_run_id=42" \
+    "github_run_attempt=1" \
+    "terminal_phase=DEPLOYED_HEALTHY" \
+    "terminal_status=DEPLOYED_HEALTHY" \
+    "journal_generation=5" \
+    "fencing_generation=5" \
+    "journal_sequence=12" \
+    "journal_heartbeat_epoch=1700000000" \
+    "final_journal_sha256=$JOURNAL_SHA256" \
+    "artifact_run_binding=42-1" \
+    "destructive_boundary_crossed=true" \
+    "database_count=8" \
+    "logical_source_target_parity=true" \
+    "source_signature_aggregate_sha256=$SIG_SHA256" \
+    "target_signature_aggregate_sha256=$SIG_SHA256" \
+    "oci_reopened_healthy=true" \
+    "http_mutation_fence_removed=true" \
+    "azure_writers_frozen=true" \
+    "azure_cluster_resource_id_sha256=$CLUSTER_FP" \
+    "aks_power_state=Stopped" \
+    "vmss_instances_deallocated=true" \
+    "azure_cluster_stopped_deallocated=true" 2>/dev/null; then
+  chmod 0755 "$WORK_DIR/readonly-dest"
+  fail "emit into read-only dir should fail"
+else
+  chmod 0755 "$WORK_DIR/readonly-dest"
+  # No temp or output should remain
+  if compgen -G "$WORK_DIR/readonly-dest/.contract-emit-*" >/dev/null 2>&1 ||
+     [[ -f "$WORK_DIR/readonly-dest/blocked.env" ]]; then
+    fail "emit left temp in read-only dir scenario"
+  else
+    pass
+  fi
+fi
+
 # --- Summary -----------------------------------------------------------------
 echo ""
 echo "migration-success-contract tests: $PASS passed, $FAIL failed"

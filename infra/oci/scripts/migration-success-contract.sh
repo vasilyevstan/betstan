@@ -200,7 +200,7 @@ _contract_validate_semantics() {
   local ctx_seen="" arg ctx_key
   for arg in "$@"; do
     [[ "$arg" == *=* ]] ||
-      _contract_die "malformed_context_arg(${arg})" "context"
+      _contract_die "malformed_context_arg" "context"
     ctx_key="${arg%%=*}"
     local ctx_known=0
     local ck
@@ -366,8 +366,9 @@ _contract_validate_semantics() {
 
 # --- Emit mode ---------------------------------------------------------------
 # Writes an ordered envelope from key=value arguments, then validates it.
-# Atomic: uses mktemp in the destination directory, mode 0600, validates
-# completely before mv. Never removes or alters a pre-existing destination.
+# Atomic: runs in a subshell with EXIT trap on the temp file. The temp is
+# created via mktemp (mode 0600) in the destination directory. On any failure
+# the trap removes the temp; a pre-existing destination is never altered.
 _contract_emit() {
   local output_file="$1"
   shift
@@ -382,66 +383,72 @@ _contract_emit() {
   tmp="$(mktemp "${dest_dir}/.contract-emit-XXXXXXXX")"
   chmod 0600 "$tmp"
 
-  # Cleanup helper: removes temp only (never the destination)
-  _emit_cleanup() { rm -f "$tmp"; }
+  # Subshell-local EXIT trap: removes temp unless cleared after successful mv
+  _contract_emit_inner() {
+    trap '[[ -z "${_emit_tmp:-}" ]] || rm -f "$_emit_tmp"' EXIT
+    local _emit_tmp="$1"
+    local _emit_output="$2"
+    shift 2
 
-  # Validate and collect args; reject malformed or duplicate keys
-  local keys_seen="" arg key
-  for arg in "$@"; do
-    [[ "$arg" == *=* ]] ||
-      { _emit_cleanup; _contract_die "malformed_emit_arg(${arg})" "emit"; }
-    key="${arg%%=*}"
-    if printf '%s\n' "$keys_seen" | grep -Fxq "$key"; then
-      _emit_cleanup; _contract_die "duplicate_emit_key" "$key"
-    fi
-    keys_seen="${keys_seen}${key}
+    # Validate and collect args; reject malformed or duplicate keys
+    local keys_seen="" arg key
+    for arg in "$@"; do
+      [[ "$arg" == *=* ]] ||
+        _contract_die "malformed_emit_arg" "emit"
+      key="${arg%%=*}"
+      if printf '%s\n' "$keys_seen" | grep -Fxq "$key"; then
+        _contract_die "duplicate_emit_key" "$key"
+      fi
+      keys_seen="${keys_seen}${key}
 "
-  done
+    done
 
-  # Write in canonical order
-  local field found_value
-  for field in "${CONTRACT_FIELDS[@]}"; do
-    found_value=""
-    local matched=0
+    # Write in canonical order
+    local field found_value
+    for field in "${CONTRACT_FIELDS[@]}"; do
+      found_value=""
+      local matched=0
+      for arg in "$@"; do
+        key="${arg%%=*}"
+        if [[ "$key" == "$field" ]]; then
+          found_value="${arg#*=}"
+          matched=1
+          break
+        fi
+      done
+      if [[ "$matched" == "0" ]]; then
+        _contract_die "missing_emit_key" "$field"
+      fi
+      printf '%s=%s\n' "$field" "$found_value" >> "$_emit_tmp"
+    done
+
+    # Reject unknown keys
     for arg in "$@"; do
       key="${arg%%=*}"
-      if [[ "$key" == "$field" ]]; then
-        found_value="${arg#*=}"
-        matched=1
-        break
+      local found=0
+      for field in "${CONTRACT_FIELDS[@]}"; do
+        if [[ "$key" == "$field" ]]; then
+          found=1
+          break
+        fi
+      done
+      if [[ "$found" == "0" ]]; then
+        _contract_die "unknown_emit_key" "$key"
       fi
     done
-    if [[ "$matched" == "0" ]]; then
-      _emit_cleanup; _contract_die "missing_emit_key" "$field"
-    fi
-    printf '%s=%s\n' "$field" "$found_value" >> "$tmp"
-  done
 
-  # Reject unknown keys
-  for arg in "$@"; do
-    key="${arg%%=*}"
-    local found=0
-    for field in "${CONTRACT_FIELDS[@]}"; do
-      if [[ "$key" == "$field" ]]; then
-        found=1
-        break
-      fi
-    done
-    if [[ "$found" == "0" ]]; then
-      _emit_cleanup; _contract_die "unknown_emit_key" "$key"
-    fi
-  done
+    # Validate temp completely BEFORE making it the destination
+    _contract_validate_field_set "$_emit_tmp"
+    _contract_validate_semantics "$_emit_tmp"
 
-  # Validate temp completely BEFORE making it the destination (atomic gate)
-  # Run in subshell so _contract_die does not skip cleanup
-  if ! ( _contract_validate_field_set "$tmp" && _contract_validate_semantics "$tmp" ) 2>&1; then
-    _emit_cleanup
-    exit 1
-  fi
+    # Atomic rename -- pre-existing destination untouched until this point
+    mv "$_emit_tmp" "$_emit_output"
+    # Clear trap variable: temp no longer exists, nothing to remove
+    _emit_tmp=""
+  }
 
-  # Atomic rename -- destination is only written on full success
-  mv "$tmp" "$output_file"
-  chmod 0600 "$output_file"
+  # Run inner in subshell so EXIT trap is scoped and does not affect caller
+  ( _contract_emit_inner "$tmp" "$output_file" "$@" )
 }
 
 # --- Validate mode -----------------------------------------------------------
