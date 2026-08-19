@@ -57,8 +57,10 @@ read-only and prefer the checked-in recovery workflow and scripts.
   lock. If a Mongo restart cleared a process-local lock while the journal still
   says locked, reconcile the field only after the raw command proves the live
   process is unlocked. RabbitMQ must remain writable only while consumers
-  declare and bind the empty topology, then be publish-locked before ingress
-  starts.
+  declare and bind the empty topology. Workload readiness does not prove
+  asynchronous broker registration: require a bounded convergence loop for
+  the exact 17 queues, zero backlog, and nonzero consumers on every queue,
+  then publish-lock RabbitMQ before ingress starts.
   Pre-commit public checks are read-only. Record
   `cutover-committed` only after final parity under all three fences, then
   unlock idempotently and remove the HTTP fence last.
