@@ -787,6 +787,127 @@ expect_output "verify_passes_no_retry_needed" "IDENTITY_RETIREMENT_VERIFIED" \
   run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 \
   IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=3 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0
 
+# --- Verify from terminal state (metadata cleaned up) ---
+
+# Execute with safe cleanup → first verify succeeds and cleans metadata → second
+# verify (metadata absent) loads from terminal state and still passes.
+fixture_dir="$WORK_DIR/t-termstate-verify"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# First verify with safe cleanup: should pass and delete metadata
+o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_ALREADY_ABSENT=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
+  "$OPERATOR" verify 2>&1)" || true
+if echo "$o" | grep -q "IDENTITY_RETIREMENT_VERIFIED" && echo "$o" | grep -q "metadata_cleaned=true"; then
+  pass "verify_with_cleanup_succeeds"
+else
+  fail "verify_with_cleanup_succeeds (got: $(echo "$o"|head -3))"
+fi
+# Confirm metadata actually deleted
+if [[ ! -f "$fixture_dir/metadata.env" ]]; then
+  pass "metadata_deleted_after_cleanup"
+else
+  fail "metadata_deleted_after_cleanup (file still exists)"
+fi
+# Second verify: metadata absent, loads from terminal state
+o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_ALREADY_ABSENT=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
+  "$OPERATOR" verify 2>&1)" || true
+if echo "$o" | grep -q "IDENTITY_RETIREMENT_VERIFIED"; then
+  pass "verify_from_terminal_state_after_cleanup"
+else
+  fail "verify_from_terminal_state_after_cleanup (got: $(echo "$o"|head -3))"
+fi
+
+# Non-terminal state with metadata absent → must fail (cannot bypass metadata)
+fixture_dir="$WORK_DIR/t-nonterminal-nometa"
+write_metadata "$fixture_dir"
+# Run execute but force failure early to get non-terminal (intermediate) state
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_DELETE_FAIL=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
+  "$OPERATOR" execute >/dev/null 2>&1 || true
+# Confirm intermediate (non-terminal) state exists
+if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
+  state_schema="$(grep '^schema=' "$fixture_dir/identity-retirement-state.env" | cut -d= -f2-)"
+  if [[ "$state_schema" == "betstan.identity-retirement.v1" ]]; then
+    # Now delete metadata and attempt verify — must fail
+    rm -f "$fixture_dir/metadata.env"
+    expect_fail_with "nonterminal_state_cannot_bypass_metadata" \
+      "state_not_terminal_schema:cannot_verify_without_metadata" \
+      env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+        STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+        IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+        IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+        IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
+        "$OPERATOR" verify
+  else
+    fail "nonterminal_state_cannot_bypass_metadata (wrong schema: $state_schema)"
+  fi
+else
+  fail "nonterminal_state_cannot_bypass_metadata (no state file created)"
+fi
+
+# Execute with no cleanup → metadata present → verify still uses metadata normally
+fixture_dir="$WORK_DIR/t-verify-with-meta"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+expect_output "verify_with_metadata_present" "IDENTITY_RETIREMENT_VERIFIED" \
+  run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1
+
+# Verify from terminal state with empty METADATA_FILE (unset path)
+fixture_dir="$WORK_DIR/t-termstate-nometapath"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# First run with cleanup to create terminal state
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_ALREADY_ABSENT=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
+  "$OPERATOR" verify >/dev/null 2>&1 || true
+# Now verify with empty METADATA_FILE (simulating unset)
+o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_ALREADY_ABSENT=1 \
+  IDENTITY_RETIREMENT_METADATA="" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
+  "$OPERATOR" verify 2>&1)" || true
+if echo "$o" | grep -q "IDENTITY_RETIREMENT_VERIFIED"; then
+  pass "verify_from_terminal_state_no_metadata_path"
+else
+  fail "verify_from_terminal_state_no_metadata_path (got: $(echo "$o"|head -3))"
+fi
+
+# Failure leaves metadata intact (no cleanup on failure)
+fixture_dir="$WORK_DIR/t-fail-keeps-meta"
+write_metadata "$fixture_dir"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+# Attempt verify with safe_cleanup=1 but force failure (SP still present)
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_SP_STILL_PRESENT=1 \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
+  IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=0 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0 \
+  "$OPERATOR" verify >/dev/null 2>&1 || true
+if [[ -f "$fixture_dir/metadata.env" ]]; then
+  pass "failure_preserves_metadata"
+else
+  fail "failure_preserves_metadata (metadata was deleted despite failure)"
+fi
+
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$([[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL')" "$SCENARIOS" "$PASS" "$FAIL"

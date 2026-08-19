@@ -213,14 +213,53 @@ validate_state_identity() {
   state_schema="$(env_value "$STATE_FILE" schema)"
   [[ "$state_schema" == "betstan.identity-retirement.v1" || "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
     die "retirement_state_schema_differs"
-  [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
-    die "retirement_state_metadata_differs"
+  # Metadata digest binding: mandatory for intermediate state; skipped for terminal
+  # (metadata may have been cleaned up after terminal verify)
+  if [[ "$state_schema" == "betstan.identity-retirement.v1" ]]; then
+    [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
+      die "retirement_state_metadata_differs"
+  fi
   [[ "$(env_value "$STATE_FILE" tenant_id)" == "$TENANT_ID" ]] ||
     die "retirement_state_tenant_differs"
   [[ "$(env_value "$STATE_FILE" subscription_id)" == "$SUBSCRIPTION_ID" ]] ||
     die "retirement_state_subscription_differs"
   [[ "$(env_value "$STATE_FILE" repository)" == "$GH_REPOSITORY" ]] ||
     die "retirement_state_repository_differs"
+}
+
+# Load all bindings from terminal state file (post-cleanup verify path).
+# Only valid for terminal schema; non-terminal state NEVER bypasses metadata.
+load_from_terminal_state() {
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
+  local state_perms
+  state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
+  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions:$state_perms"
+  local state_schema
+  state_schema="$(env_value "$STATE_FILE" schema)"
+  [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
+    die "state_not_terminal_schema:cannot_verify_without_metadata"
+  [[ "$(env_value "$STATE_FILE" phase)" == "retired" ]] ||
+    die "state_not_retired:cannot_verify_without_metadata"
+
+  TENANT_ID="$(env_value "$STATE_FILE" tenant_id)"
+  SUBSCRIPTION_ID="$(env_value "$STATE_FILE" subscription_id)"
+  MIGRATION_APP_ID="$(env_value "$STATE_FILE" migration_app_id)"
+  RECOVERY_APP_ID="$(env_value "$STATE_FILE" recovery_app_id)"
+  MIGRATION_SP_OBJECT_ID="$(env_value "$STATE_FILE" migration_sp_object_id)"
+  RECOVERY_SP_OBJECT_ID="$(env_value "$STATE_FILE" recovery_sp_object_id)"
+  RETAINED_SP_OBJECT_ID="$(env_value "$STATE_FILE" retained_sp_object_id)"
+  ROLE_ASSIGNMENT_ID_1="$(env_value "$STATE_FILE" role_assignment_id_1)"
+  ROLE_ASSIGNMENT_ID_2="$(env_value "$STATE_FILE" role_assignment_id_2)"
+  ROLE_ASSIGNMENT_ID_3="$(env_value "$STATE_FILE" role_assignment_id_3)"
+  CUSTOM_ROLE_ID_1="$(env_value "$STATE_FILE" custom_role_id_1)"
+  CUSTOM_ROLE_ID_2="$(env_value "$STATE_FILE" custom_role_id_2)"
+  MIGRATION_ENV="$(env_value "$STATE_FILE" migration_environment)"
+  RECOVERY_ENV="$(env_value "$STATE_FILE" recovery_environment)"
+  RETAINED_SP_DISPLAY_NAME="$(env_value "$STATE_FILE" retained_sp_display_name)"
+  RETAINED_SECRET_NAME="$(env_value "$STATE_FILE" retained_secret_name)"
+
+  [[ "$(env_value "$STATE_FILE" repository)" == "$GH_REPOSITORY" ]] ||
+    die "terminal_state_repository_mismatch"
 }
 
 # --- Field declarations ---
@@ -786,9 +825,6 @@ require_command gh
 require_command jq
 validate_retry_config
 
-load_metadata
-verify_gh_repository
-
 [[ -n "$STATE_DIR" ]] || die "state_dir_not_specified"
 [[ "$STATE_DIR" == /* ]] || die "state_dir_not_absolute"
 mkdir -p "$STATE_DIR"
@@ -801,6 +837,17 @@ STATE_DIR_REAL="$(cd "$STATE_DIR" && pwd -P)"
 STATE_DIR_PERMS="$(stat -f '%Lp' "$STATE_DIR" 2>/dev/null || stat -c '%a' "$STATE_DIR" 2>/dev/null)"
 [[ "$STATE_DIR_PERMS" == "700" ]] || die "state_dir_wrong_permissions:$STATE_DIR_PERMS"
 STATE_FILE="$STATE_DIR/identity-retirement-state.env"
+
+# Metadata loading: required for plan/execute; for verify, load from terminal state
+# if metadata was cleaned up (only terminal schema can bypass metadata requirement).
+METADATA_LOADED_FROM_STATE=0
+if [[ "$MODE" == "verify" && ( -z "$METADATA_FILE" || ! -f "$METADATA_FILE" ) ]]; then
+  load_from_terminal_state
+  METADATA_LOADED_FROM_STATE=1
+else
+  load_metadata
+  verify_gh_repository
+fi
 
 case "$MODE" in
   plan)
@@ -889,7 +936,10 @@ case "$MODE" in
     verify_azure_context
     query_all_guard_variables
 
-    if [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
+    if [[ "$METADATA_LOADED_FROM_STATE" == "1" ]]; then
+      # Already validated in load_from_terminal_state; phase is retired
+      :
+    elif [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
       validate_state_identity
       [[ "$(env_value "$STATE_FILE" phase)" == "retired" ]] || die "verify_requires_retired_state"
     else
@@ -912,7 +962,7 @@ case "$MODE" in
 
     printf 'IDENTITY_RETIREMENT_VERIFIED all_temporary_objects_absent=true retained_identity_intact=true\n'
 
-    if [[ "$SAFE_CLEANUP" == "1" ]]; then
+    if [[ "$SAFE_CLEANUP" == "1" && -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
       rm -f "$METADATA_FILE"
       printf 'metadata_cleaned=true\n'
     fi
