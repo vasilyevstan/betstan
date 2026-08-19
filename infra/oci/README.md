@@ -166,7 +166,9 @@ fixtures.
    port-forwarding session to target SSH, then tunnels the k3s API through
    the target loopback interface. This avoids both Managed SSH, which OCI
    Bastion does not support for Ubuntu on Ampere A1, and the OCI Ubuntu host
-   firewall that rejects direct non-SSH input.
+   firewall that rejects direct non-SSH input. Because session `ACTIVE` can
+   precede endpoint readiness, the operator retries only the tunnel against
+   that same session with bounded backoff and exact PID cleanup.
    `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
    ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
    load balancer.
