@@ -308,6 +308,8 @@ load_metadata() {
   # Fixed names
   [[ "$RETAINED_SP_DISPLAY_NAME" == "betstan-github-sp" ]] || die "metadata_retained_sp_name_mismatch"
   [[ "$RETAINED_SECRET_NAME" == "AZURE_CREDENTIALS" ]] || die "metadata_retained_secret_name_mismatch"
+  [[ "$MIGRATION_ENV" == "oci-migration" ]] || die "metadata_migration_env_name_mismatch"
+  [[ "$RECOVERY_ENV" == "azure-migration-recovery" ]] || die "metadata_recovery_env_name_mismatch"
 
   # Uniqueness
   [[ "$MIGRATION_APP_ID" != "$RECOVERY_APP_ID" ]] || die "metadata_duplicate_app_ids"
@@ -327,30 +329,69 @@ load_metadata() {
   done
 }
 
-# --- GitHub repository variable queries ---
+# --- GitHub repository and environment variable queries ---
+# Environment values override repository values, so both scopes must be verified/set.
 
-query_recovery_variable() {
+query_recovery_variable_repo() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" 2>/dev/null)" ||
-    die "recovery_variable_query_failed"
-  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false:actual=$value"
+    die "recovery_variable_repo_query_failed"
+  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false:scope=repo,actual=$value"
 }
 
-query_arm_variable() {
+query_recovery_variable_env() {
+  local value
+  value="$(gh variable get OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" 2>/dev/null)" ||
+    die "recovery_variable_env_query_failed"
+  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false:scope=env,actual=$value"
+}
+
+query_arm_variable_repo() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" 2>/dev/null)" ||
-    die "arm_variable_query_failed"
-  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero:actual=$value"
+    die "arm_variable_repo_query_failed"
+  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero:scope=repo,actual=$value"
 }
 
-set_recovery_variable() {
+query_arm_variable_env() {
+  local value
+  value="$(gh variable get OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" 2>/dev/null)" ||
+    die "arm_variable_env_query_failed"
+  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero:scope=env,actual=$value"
+}
+
+query_all_guard_variables() {
+  query_recovery_variable_repo
+  query_recovery_variable_env
+  query_arm_variable_repo
+  query_arm_variable_env
+}
+
+set_recovery_variable_repo() {
   gh variable set OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" --body "false" 2>/dev/null ||
-    die "recovery_variable_set_failed"
+    die "recovery_variable_repo_set_failed"
 }
 
-set_arm_variable() {
+set_recovery_variable_env() {
+  gh variable set OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" --body "false" 2>/dev/null ||
+    die "recovery_variable_env_set_failed"
+}
+
+set_arm_variable_repo() {
   gh variable set OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" --body "0" 2>/dev/null ||
-    die "arm_variable_set_failed"
+    die "arm_variable_repo_set_failed"
+}
+
+set_arm_variable_env() {
+  gh variable set OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" --body "0" 2>/dev/null ||
+    die "arm_variable_env_set_failed"
+}
+
+set_all_guard_variables() {
+  set_recovery_variable_repo
+  set_recovery_variable_env
+  set_arm_variable_repo
+  set_arm_variable_env
 }
 
 verify_azure_context() {
@@ -654,8 +695,7 @@ STATE_FILE="$STATE_DIR/identity-retirement-state.env"
 case "$MODE" in
   plan)
     verify_azure_context
-    query_recovery_variable
-    query_arm_variable
+    query_all_guard_variables
     verify_retained_identity
     verify_all_relationships
 
@@ -666,10 +706,8 @@ case "$MODE" in
 
   execute)
     verify_azure_context
-    query_recovery_variable
-    query_arm_variable
-    set_recovery_variable
-    set_arm_variable
+    query_all_guard_variables
+    set_all_guard_variables
 
     if [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
       validate_state_identity
@@ -721,16 +759,14 @@ case "$MODE" in
           local_phase=workflow-intent
           ;;
         workflow-intent)
-          set_recovery_variable
-          set_arm_variable
+          set_all_guard_variables
           disable_workflow "oci-migration-recovery.yml"
           write_state retired
           local_phase=retired
           ;;
         retired)
           verify_retained_identity
-          query_recovery_variable
-          query_arm_variable
+          query_all_guard_variables
           printf 'IDENTITY_RETIRED objects_deleted=9 secrets_deleted=2 workflow_disabled=1\n'
           break
           ;;
@@ -741,8 +777,7 @@ case "$MODE" in
 
   verify)
     verify_azure_context
-    query_recovery_variable
-    query_arm_variable
+    query_all_guard_variables
 
     if [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
       validate_state_identity
