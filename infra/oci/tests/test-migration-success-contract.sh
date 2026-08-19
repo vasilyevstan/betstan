@@ -8,8 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CONTRACT="$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh"
 WORK_BASE="$ROOT_DIR/infra/oci/tests/.test-workdirs"
 mkdir -p "$WORK_BASE"
-WORK_DIR="$WORK_BASE/migration-success-contract-$$"
-mkdir "$WORK_DIR"
+WORK_DIR="$(mktemp -d "$WORK_BASE/migration-success-contract-XXXXXX")"
 
 PASS=0
 FAIL=0
@@ -411,6 +410,18 @@ make_valid_env false > "$WORK_DIR/ctx-malformed.env"
 if MODE=validate "$CONTRACT" "$WORK_DIR/ctx-malformed.env" \
     "not_a_key_value" 2>/dev/null; then
   fail "malformed context arg should be rejected"
+else
+  pass
+fi
+
+# --- Test: duplicate context key rejected (last-wins prevented) --------------
+echo "--- Test: duplicate context key rejected"
+WRONG_SHA="ffffffffffffffffffffffffffffffffffffffff"
+make_valid_env false > "$WORK_DIR/ctx-dup.env"
+if MODE=validate "$CONTRACT" "$WORK_DIR/ctx-dup.env" \
+    SOURCE_SHA="$WRONG_SHA" \
+    SOURCE_SHA="$SOURCE_SHA" 2>/dev/null; then
+  fail "duplicate context key should be rejected even if second is correct"
 else
   pass
 fi

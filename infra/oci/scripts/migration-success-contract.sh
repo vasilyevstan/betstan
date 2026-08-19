@@ -194,10 +194,10 @@ _contract_validate_semantics() {
   local file="$1"
   shift
 
-  # Parse and strict-check context parameters
+  # Parse and strict-check context parameters (reject duplicates)
   local ctx_source_sha="" ctx_run_id="" ctx_run_attempt=""
   local ctx_migration_id="" ctx_cluster_fingerprint=""
-  local arg ctx_key
+  local ctx_seen="" arg ctx_key
   for arg in "$@"; do
     [[ "$arg" == *=* ]] ||
       _contract_die "malformed_context_arg(${arg})" "context"
@@ -212,6 +212,11 @@ _contract_validate_semantics() {
     done
     [[ "$ctx_known" == "1" ]] ||
       _contract_die "unknown_context_key(${ctx_key})" "context"
+    if printf '%s\n' "$ctx_seen" | grep -Fxq "$ctx_key"; then
+      _contract_die "duplicate_context_key(${ctx_key})" "context"
+    fi
+    ctx_seen="${ctx_seen}${ctx_key}
+"
     case "$ctx_key" in
       SOURCE_SHA) ctx_source_sha="${arg#*=}" ;;
       MIGRATION_RUN_ID) ctx_run_id="${arg#*=}" ;;
