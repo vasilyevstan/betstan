@@ -146,6 +146,20 @@ conversation summaries are not authority.
 - Azure retirement is complete only after the AKS and managed resource groups,
   VMs/VMSS, disks, snapshots, load balancers, public IPs, alerts, and temporary
   identities are absent. CLI acceptance is not resource absence.
+- Keep retirement's strict migration-success field allowlist synchronized with
+  the producer. Recovery retries add runtime deployment lineage fields; accept
+  them only with their exact names and validate the retry flag against the
+  runtime and active source SHAs.
+- Azure resource-ID fingerprints are case-preserving. Do not lowercase the
+  live AKS ID before comparing it with migration and recovery evidence.
+- Current AKS output exposes `eTag`, not only `etag`. Some `aks-preview`
+  versions quote a supplied UUID before sending `If-Match`, although the AKS
+  delete endpoint requires the exact emitted value. Preserve the reviewed
+  ETag literally through an ARM delete request; never fall back to `*`.
+- macOS LibreSSL can finish a verified `s_client` handshake and then exit with
+  `poll error` when stdin is `/dev/null`. Send its graceful `Q` command so the
+  trust-verifying pipeline remains fail-closed without rejecting a valid
+  certificate.
 - Delayed historical charges are not current resources. Continue bounded
   Cost Management checks until no new BetStan usage appears.
 

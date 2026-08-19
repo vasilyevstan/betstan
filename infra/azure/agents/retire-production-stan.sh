@@ -7,6 +7,7 @@ GH_REPOSITORY="${GH_REPOSITORY:-vasilyevstan/betstan}"
 AZURE_RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-betstan-rg}"
 AZURE_CLUSTER_NAME="${AZURE_CLUSTER_NAME:-betstan-aks}"
 AZURE_EXPECTED_NODE_RESOURCE_GROUP="${AZURE_EXPECTED_NODE_RESOURCE_GROUP:-MC_betstan-rg_betstan-aks_eastus}"
+AZURE_AKS_API_VERSION=2025-10-01
 MIGRATION_RUN_ID="${MIGRATION_RUN_ID:-}"
 MIGRATION_RUN_ATTEMPT="${MIGRATION_RUN_ATTEMPT:-}"
 MIGRATION_ID="${MIGRATION_ID:-}"
@@ -465,6 +466,7 @@ artifact_run_binding
 azure_cluster_resource_id_sha256
 azure_cluster_stopped_deallocated
 azure_writers_frozen
+closed_recovery_retry
 database_count
 destructive_boundary_crossed
 fencing_generation
@@ -478,6 +480,7 @@ journal_sequence
 logical_source_target_parity
 migration_id
 oci_reopened_healthy
+runtime_deploy_source_sha
 schema
 source_sha
 source_signature_aggregate_sha256
@@ -493,6 +496,27 @@ actual_summary_keys="$(
 require_summary_value schema betstan.oci-migration-success.v1
 require_summary_value migration_id "$MIGRATION_ID"
 require_summary_value source_sha "$SOURCE_SHA"
+runtime_deploy_source_sha="$(
+  env_value "$SUMMARY_FILE" runtime_deploy_source_sha
+)"
+[[ "$runtime_deploy_source_sha" =~ ^[0-9a-f]{40}$ ]] ||
+  die "runtime deployment source SHA is invalid"
+closed_recovery_retry="$(
+  env_value "$SUMMARY_FILE" closed_recovery_retry
+)"
+case "$closed_recovery_retry" in
+  false)
+    [[ "$runtime_deploy_source_sha" == "$SOURCE_SHA" ]] ||
+      die "ordinary migration runtime deployment SHA differs"
+    ;;
+  true)
+    [[ "$runtime_deploy_source_sha" != "$SOURCE_SHA" ]] ||
+      die "closed-recovery runtime deployment SHA was not an ancestor"
+    ;;
+  *)
+    die "closed-recovery retry flag is invalid"
+    ;;
+esac
 require_summary_value github_run_id "$MIGRATION_RUN_ID"
 require_summary_value github_run_attempt "$MIGRATION_RUN_ATTEMPT"
 require_summary_value artifact_run_binding \
@@ -562,7 +586,7 @@ else
     --name "$AZURE_CLUSTER_NAME" -o json > "$cluster_json"
   cluster_id="$(jq -r .id "$cluster_json")"
   cluster_id_digest="$(
-    printf '%s' "$cluster_id" | tr '[:upper:]' '[:lower:]' | sha256_text
+    printf '%s' "$cluster_id" | sha256_text
   )"
   [[ "$cluster_id_digest" == "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]] ||
     die "live AKS resource identity differs from the approved fingerprint"
@@ -572,7 +596,7 @@ else
   [[ "$live_power_state" == "Stopped" ||
     "$live_power_state" == "Deallocated" ]] ||
     die "AKS control plane is not stopped"
-  CLUSTER_ETAG="$(jq -r '.etag // empty' "$cluster_json")"
+  CLUSTER_ETAG="$(jq -r '.eTag // .etag // empty' "$cluster_json")"
   [[ -n "$CLUSTER_ETAG" ]] ||
     die "live AKS ETag is missing"
 
@@ -648,23 +672,20 @@ while true; do
         --name "$AZURE_CLUSTER_NAME" -o json > "$cluster_json"
       live_cluster_id="$(jq -r '.id // empty' "$cluster_json")"
       live_cluster_digest="$(
-        printf '%s' "$live_cluster_id" |
-          tr '[:upper:]' '[:lower:]' |
-          sha256_text
+        printf '%s' "$live_cluster_id" | sha256_text
       )"
       [[ "$live_cluster_digest" == "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ]] ||
         die "AKS identity changed after delete intent"
       provisioning_state="$(jq -r '.provisioningState // empty' "$cluster_json")"
-      live_etag="$(jq -r '.etag // empty' "$cluster_json")"
+      live_etag="$(jq -r '.eTag // .etag // empty' "$cluster_json")"
       if [[ "$provisioning_state" != "Deleting" ]]; then
         [[ "$live_etag" == "$CLUSTER_ETAG" ]] ||
           die "AKS ETag changed after delete intent"
-        az aks delete \
-          --subscription "$AZURE_SUBSCRIPTION_ID" \
-          --resource-group "$AZURE_RESOURCE_GROUP" \
-          --name "$AZURE_CLUSTER_NAME" \
-          --if-match "$CLUSTER_ETAG" \
-          --yes --no-wait
+        az rest \
+          --method delete \
+          --url "${live_cluster_id}?api-version=${AZURE_AKS_API_VERSION}" \
+          --headers "If-Match=${CLUSTER_ETAG}" \
+          --output none
       fi
       write_state aks-delete-submitted
       ;;
