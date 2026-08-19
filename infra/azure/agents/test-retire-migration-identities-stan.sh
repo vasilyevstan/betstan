@@ -568,6 +568,67 @@ if [[ ! -f "$fixture_dir/metadata.env" ]] &&
   pass "post_cleanup_state_self_sufficient"
 else fail "post_cleanup_state_self_sufficient"; fi
 
+# --- Retained identity deletion protection ---
+# No delete command must ever target retained_sp_object_id, betstan-github-sp,
+# or repository-level AZURE_CREDENTIALS. Asserted via command log inspection.
+printf '\n  --- retained identity protection ---\n'
+
+# Helper: assert no retained-identity-targeting commands in logs
+assert_no_retained_deletes() {
+  local label="$1" az_log="$2" gh_log="$3"
+  local violations=0
+
+  # No az sp/app delete targeting retained SP OID
+  if grep -q "delete.*$G_RET" "$az_log" 2>/dev/null; then
+    violations=$((violations+1))
+    printf '    violation: az delete targets retained SP OID\n' >&2
+  fi
+
+  # No gh secret delete of AZURE_CREDENTIALS without --env (repo-level)
+  # Environment secret deletes include --env; repo-level ones do not
+  if grep "secret delete.*AZURE_CREDENTIALS" "$gh_log" 2>/dev/null | grep -qv -- "--env"; then
+    violations=$((violations+1))
+    printf '    violation: gh secret delete targets repo AZURE_CREDENTIALS\n' >&2
+  fi
+
+  if [[ "$violations" -eq 0 ]]; then pass "$label"; else fail "$label ($violations violations)"; fi
+}
+
+# Scenario: successful full execute
+fixture_dir="$WORK_DIR/t-prot-exec"
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+assert_no_retained_deletes "no_retained_delete_execute" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
+
+# Scenario: already-absent path
+fixture_dir="$WORK_DIR/t-prot-absent"
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+run_operator execute "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 STUB_APP_ALREADY_ABSENT=1 >/dev/null 2>&1 || true
+assert_no_retained_deletes "no_retained_delete_absent" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
+
+# Scenario: partial failure + resume
+fixture_dir="$WORK_DIR/t-prot-resume"
+write_metadata "$fixture_dir"
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" GH_REPOSITORY="vasilyevstan/betstan" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 STUB_SP_DELETE_FAIL=1 \
+  "$OPERATOR" execute >/dev/null 2>&1 || true
+assert_no_retained_deletes "no_retained_delete_partial" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
+# Resume after partial
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+assert_no_retained_deletes "no_retained_delete_resume" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
+
+# Scenario: verify mode (should only probe, never delete retained)
+fixture_dir="$WORK_DIR/t-prot-verify"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+: > "$WORK_DIR/az.log"; : > "$WORK_DIR/gh.log"
+run_operator verify "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 >/dev/null 2>&1 || true
+assert_no_retained_deletes "no_retained_delete_verify" "$WORK_DIR/az.log" "$WORK_DIR/gh.log"
+
 # ==========================================
 printf '\nidentity_retirement_contract=%s scenarios=%d pass=%d fail=%d\n' \
   "$([[ "$FAIL" -eq 0 ]] && printf 'PASS' || printf 'FAIL')" "$SCENARIOS" "$PASS" "$FAIL"
