@@ -69,6 +69,9 @@ grep -Fq "controller-level HTTP mutation fence" \
 grep -Fq "remove the exact 17 application bindings" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent does not require the RabbitMQ routing fence"
+grep -Fq "one bounded in-pod deletion loop" \
+    "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
+    fail "migration recovery agent permits per-binding Bastion round trips"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"
