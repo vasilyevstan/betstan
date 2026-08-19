@@ -146,7 +146,7 @@ case "${1:-} ${2:-}" in
       --arg id "$STUB_CLUSTER_ID" \
       --arg power "${STUB_AKS_POWER_STATE:-Stopped}" '{
       id:$id,
-      etag:"fixture-etag",
+      eTag:"fixture-etag",
       nodeResourceGroup:"MC_betstan-rg_betstan-aks_eastus",
       powerState:{code:$power},
       provisioningState:"Failed"
@@ -208,6 +208,24 @@ case "${1:-} ${2:-}" in
     printf '%s\n' aks-absent > "$STUB_DELETE_PHASE_FILE"
     [[ "${STUB_CRASH_POINT:-}" != "aks" ]] || exit 99
     ;;
+  "rest --method")
+    method=""
+    url=""
+    header=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --method) method="$2"; shift 2 ;;
+        --url) url="$2"; shift 2 ;;
+        --headers) header="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [[ "$method" == "delete" ]]
+    [[ "$url" == "${STUB_CLUSTER_ID}?api-version=2025-10-01" ]]
+    [[ "$header" == "If-Match=fixture-etag" ]]
+    printf '%s\n' aks-absent > "$STUB_DELETE_PHASE_FILE"
+    [[ "${STUB_CRASH_POINT:-}" != "aks" ]] || exit 99
+    ;;
   *)
     printf 'unexpected az call: %s\n' "$*" >&2
     exit 1
@@ -259,10 +277,18 @@ elif [[ "${1:-} ${2:-}" == "run download" ]]; then
     target_signature="$(printf 'b%.0s' {1..64})"
   fence_removed=true
   [[ "${STUB_FENCE_RETAINED:-0}" != "1" ]] || fence_removed=false
+  runtime_deploy_source_sha="${STUB_RUNTIME_DEPLOY_SOURCE_SHA:-${STUB_SOURCE_SHA}}"
+  [[ "${STUB_BAD_RUNTIME_SHA:-0}" != "1" ]] ||
+    runtime_deploy_source_sha=invalid
+  closed_recovery_retry="${STUB_CLOSED_RECOVERY_RETRY:-false}"
+  [[ "${STUB_BAD_CLOSED_RECOVERY:-0}" != "1" ]] ||
+    closed_recovery_retry=invalid
   cat > "$directory/migration-summary.env" <<ENV
 schema=betstan.oci-migration-success.v1
 migration_id=migration-fixture
 source_sha=${STUB_SOURCE_SHA}
+runtime_deploy_source_sha=${runtime_deploy_source_sha}
+closed_recovery_retry=${closed_recovery_retry}
 github_run_id=123
 github_run_attempt=1
 terminal_phase=DEPLOYED_HEALTHY
@@ -360,6 +386,8 @@ operation="${1:-}"
 shift || true
 case "$operation" in
   s_client)
+    IFS= read -r command
+    [[ "$command" == "Q" ]]
     printf '%s\n' fixture-certificate
     ;;
   x509)
@@ -391,7 +419,6 @@ chmod +x "$BIN_DIR/openssl"
 
 cluster_digest="$(
   printf '%s' "$CLUSTER_ID" |
-    tr '[:upper:]' '[:lower:]' |
     shasum -a 256 |
     awk '{print $1}'
 )"
@@ -437,12 +464,16 @@ run_plan() {
 : > "$WORK_DIR/az.log"
 run_plan "$WORK_DIR/good" |
   grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
-! grep -Eq 'aks delete|group delete' "$WORK_DIR/az.log" ||
+! grep -Eq 'aks delete|rest --method delete|group delete' "$WORK_DIR/az.log" ||
   { echo "plan mode issued a destructive Azure command" >&2; exit 1; }
 
 run_plan "$WORK_DIR/deallocated" STUB_AKS_POWER_STATE=Deallocated |
   grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
 run_plan "$WORK_DIR/empty-vmss" STUB_EMPTY_VMSS=1 |
+  grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
+run_plan "$WORK_DIR/closed-recovery" \
+    STUB_CLOSED_RECOVERY_RETRY=true \
+    STUB_RUNTIME_DEPLOY_SOURCE_SHA=2222222222222222222222222222222222222222 |
   grep -Eq '^azure_retirement=READY_TO_CONFIRM inventory_sha256=[0-9a-f]{64} resources=28$'
 if run_plan "$WORK_DIR/running-control-plane" STUB_AKS_POWER_STATE=Running \
     >"$WORK_DIR/running-control-plane.out" 2>&1; then
@@ -453,7 +484,8 @@ grep -Fq 'NO_GO azure_retirement_reason=' "$WORK_DIR/running-control-plane.out"
 
 for failure_mode in \
   STUB_BAD_RUN STUB_BAD_PARITY STUB_UNKNOWN_RESOURCE STUB_RUNNING_VMSS \
-  STUB_WRONG_SUBSCRIPTION STUB_GROUP_API_FAIL STUB_FENCE_RETAINED; do
+  STUB_WRONG_SUBSCRIPTION STUB_GROUP_API_FAIL STUB_FENCE_RETAINED \
+  STUB_BAD_RUNTIME_SHA STUB_BAD_CLOSED_RECOVERY; do
   if run_plan "$WORK_DIR/${failure_mode}" "$failure_mode=1" \
       >"$WORK_DIR/${failure_mode}.out" 2>&1; then
     echo "retirement fixture unexpectedly passed: $failure_mode" >&2
@@ -461,6 +493,14 @@ for failure_mode in \
   fi
   grep -Fq 'NO_GO azure_retirement_reason=' "$WORK_DIR/${failure_mode}.out"
 done
+if run_plan "$WORK_DIR/inconsistent-closed-recovery" \
+    STUB_CLOSED_RECOVERY_RETRY=true \
+    >"$WORK_DIR/inconsistent-closed-recovery.out" 2>&1; then
+  echo "retirement fixture accepted inconsistent closed-recovery provenance" >&2
+  exit 1
+fi
+grep -Fq 'NO_GO azure_retirement_reason=' \
+  "$WORK_DIR/inconsistent-closed-recovery.out"
 
 printf '%s\n' initial > "$WORK_DIR/delete-phase"
 plan_output="$(run_plan "$WORK_DIR/delete-plan")"
@@ -479,7 +519,7 @@ run_plan "$WORK_DIR/delete-execute" --execute \
   ABSENCE_VERIFY_LOOPS=2 \
   ABSENCE_VERIFY_SLEEP_SECONDS=0 |
   grep -qx 'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'
-grep -Fq 'aks delete' "$WORK_DIR/az.log"
+grep -Fq 'rest --method delete' "$WORK_DIR/az.log"
 grep -Eq 'group delete .*--name MC_betstan-rg_betstan-aks_eastus' "$WORK_DIR/az.log"
 grep -Eq 'group delete .*--name betstan-rg' "$WORK_DIR/az.log"
 grep -qx 'phase=retired' "$WORK_DIR/delete-execute/retirement-state.env"
@@ -518,4 +558,4 @@ for crash_point in aks managed primary; do
     grep -qx 'AZURE_RESOURCES_RETIRED cost_verification=pending_delayed_reporting'
 done
 
-printf 'azure_retirement_contract=PASS scenarios=16\n'
+printf 'azure_retirement_contract=PASS scenarios=20\n'

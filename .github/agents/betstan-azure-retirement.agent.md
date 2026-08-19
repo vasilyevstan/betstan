@@ -39,10 +39,18 @@ delete Azure while migration or OCI validation is incomplete.
 
 Use exact resource IDs and `retire-production-stan.sh`. Run `plan`, bind the
 destructive confirmation to its exact inventory digest, then run `execute`.
-Delete the AKS cluster,
-wait for its managed resource group, then remove the primary BetStan resource
-group contents, historical snapshots, load balancer/IPs, disks, alerts,
-action group, and temporary migration/recovery identities and secrets.
+The migration success field allowlist must exactly match the producer,
+including `runtime_deploy_source_sha` and `closed_recovery_retry`, and validate
+their relationship rather than ignoring new provenance. Hash Azure resource
+IDs exactly as emitted; the migration fingerprint is case-preserving.
+
+Read AKS `eTag` with its Azure casing and preserve its exact value through the
+delete intent. If an Azure CLI extension transforms the `If-Match` value, use
+the reviewed literal ARM delete request; never replace optimistic concurrency with a wildcard.
+Delete the AKS cluster, wait for its managed resource group, then remove the
+primary BetStan resource group contents, historical snapshots, load
+balancer/IPs, disks, alerts, action group, and temporary migration/recovery
+identities and secrets.
 
 If deletion is asynchronous, record the same resource identity and resume
 observation; never recreate or broaden deletion by a name pattern. Verify the
