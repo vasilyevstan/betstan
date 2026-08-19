@@ -129,7 +129,9 @@ env_value() {
 
 write_state() {
   local phase="$1"
-  local temporary="${STATE_FILE}.tmp"
+  # Unpredictable same-directory temp file; reject pre-created symlinks
+  local temporary="${STATE_FILE}.$$.$RANDOM"
+  [[ ! -e "$temporary" && ! -L "$temporary" ]] || die "state_temp_file_exists:$temporary"
   {
     printf 'schema=betstan.identity-retirement.v1\n'
     printf 'phase=%s\n' "$phase"
@@ -164,6 +166,9 @@ write_state() {
 
 validate_state_identity() {
   [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
+  local state_perms
+  state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
+  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions:$state_perms"
   [[ "$(env_value "$STATE_FILE" schema)" == "betstan.identity-retirement.v1" ]] ||
     die "retirement_state_schema_differs"
   [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
@@ -191,7 +196,13 @@ RETAINED_SP_DISPLAY_NAME="" ; RETAINED_SECRET_NAME=""
 
 load_metadata() {
   [[ -n "$METADATA_FILE" ]] || die "metadata_file_not_specified"
+  [[ "$METADATA_FILE" == /* ]] || die "metadata_path_not_absolute"
   [[ -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]] || die "metadata_file_missing_or_symlink"
+
+  # Require restrictive permissions
+  local meta_perms
+  meta_perms="$(stat -f '%Lp' "$METADATA_FILE" 2>/dev/null || stat -c '%a' "$METADATA_FILE" 2>/dev/null)"
+  [[ "$meta_perms" == "600" ]] || die "metadata_file_wrong_permissions:$meta_perms"
 
   local line_num=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -628,8 +639,16 @@ load_metadata
 verify_gh_repository
 
 [[ -n "$STATE_DIR" ]] || die "state_dir_not_specified"
+[[ "$STATE_DIR" == /* ]] || die "state_dir_not_absolute"
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
+# Reject symlinked state directory or any component that resolves elsewhere
+[[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || die "state_dir_symlink"
+STATE_DIR_REAL="$(cd "$STATE_DIR" && pwd -P)"
+[[ "$STATE_DIR_REAL" == "$STATE_DIR" ]] || die "state_dir_resolves_elsewhere:$STATE_DIR_REAL"
+# Verify directory permissions
+STATE_DIR_PERMS="$(stat -f '%Lp' "$STATE_DIR" 2>/dev/null || stat -c '%a' "$STATE_DIR" 2>/dev/null)"
+[[ "$STATE_DIR_PERMS" == "700" ]] || die "state_dir_wrong_permissions:$STATE_DIR_PERMS"
 STATE_FILE="$STATE_DIR/identity-retirement-state.env"
 
 case "$MODE" in
