@@ -5,4 +5,5 @@ updateCommonLib.sh
 # Runtime diagnostic artifacts
 artifacts/
 infra/azure/agents/.retirement-fixture-work/
+infra/azure/agents/.test-workdirs/
 infra/oci/tests/.migration-recovery-work/
