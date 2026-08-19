@@ -174,8 +174,8 @@ stop_tunnel() {
   [[ -n "$tunnel_pid" ]] || return 0
   if kill -0 "$tunnel_pid" 2>/dev/null; then
     kill "$tunnel_pid"
-    wait "$tunnel_pid" 2>/dev/null || true
   fi
+  wait "$tunnel_pid" 2>/dev/null || true
 }
 
 cleanup_access() {
@@ -417,22 +417,25 @@ ssh_session_id="$(
 bastion_endpoint="$(session_endpoint "$ssh_session_id" 22)"
 write_session_state
 
-ssh \
-  -i "$bastion_private_key" \
-  -N \
-  -L "127.0.0.1:${OCI_K3S_LOCAL_SSH_PORT}:${instance_private_ip}:22" \
-  -o BatchMode=yes \
-  -o ExitOnForwardFailure=yes \
-  -o IdentitiesOnly=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$bastion_known_hosts" \
-  -p 22 \
-  "${ssh_session_id}@${bastion_endpoint}" \
-  >"$WORK_DIR/bastion-ssh-tunnel.log" 2>&1 &
-ssh_tunnel_pid=$!
-write_session_state
+start_bastion_ssh_tunnel() {
+  : >"$WORK_DIR/bastion-ssh-tunnel.log"
+  ssh \
+    -i "$bastion_private_key" \
+    -N \
+    -L "127.0.0.1:${OCI_K3S_LOCAL_SSH_PORT}:${instance_private_ip}:22" \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o IdentitiesOnly=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$bastion_known_hosts" \
+    -p 22 \
+    "${ssh_session_id}@${bastion_endpoint}" \
+    >"$WORK_DIR/bastion-ssh-tunnel.log" 2>&1 &
+  ssh_tunnel_pid=$!
+  write_session_state
+}
 
 target_ssh_options=(
   -i "$target_private_key"
@@ -448,18 +451,37 @@ target_ssh_options=(
   -o UserKnownHostsFile="$target_known_hosts"
 )
 ssh_ready=0
-for _ in $(seq 1 30); do
-  kill -0 "$ssh_tunnel_pid" 2>/dev/null ||
-    oci_die "target SSH Bastion tunnel process exited"
-  if ssh \
-      "${target_ssh_options[@]}" \
-      "${OCI_K3S_OS_USER}@127.0.0.1" \
-      'sudo test -s /etc/rancher/k3s/k3s.yaml' \
-      >/dev/null 2>&1; then
-    ssh_ready=1
+target_ssh_attempt=0
+for tunnel_attempt in $(seq 1 6); do
+  tunnel_failed=0
+  start_bastion_ssh_tunnel
+  while (( target_ssh_attempt < 30 )); do
+    if ! kill -0 "$ssh_tunnel_pid" 2>/dev/null; then
+      tunnel_failed=1
+      break
+    fi
+    target_ssh_attempt=$((target_ssh_attempt + 1))
+    if ssh \
+        "${target_ssh_options[@]}" \
+        "${OCI_K3S_OS_USER}@127.0.0.1" \
+        'sudo test -s /etc/rancher/k3s/k3s.yaml' \
+        >/dev/null 2>&1; then
+      ssh_ready=1
+      break 2
+    fi
+    sleep 10
+  done
+  stop_tunnel "$ssh_tunnel_pid"
+  ssh_tunnel_pid=""
+  write_session_state
+  if [[ "$tunnel_failed" == "1" &&
+    "$tunnel_attempt" -lt 6 &&
+    "$target_ssh_attempt" -lt 30 ]]; then
+    oci_log "bastion_ssh_tunnel_retry=$tunnel_attempt reason=endpoint-not-ready"
+    sleep 15
+  else
     break
   fi
-  sleep 10
 done
 [[ "$ssh_ready" == "1" ]] ||
   oci_die "target SSH did not become usable through OCI Bastion"

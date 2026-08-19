@@ -72,6 +72,9 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
   SSH to `127.0.0.1:6443`. Direct Bastion-to-6443 and Managed SSH are not the
   supported A1 path. Always delete the session, restore the non-routable
   Bastion client CIDR, stop the exact tunnel PIDs, and remove temporary keys.
+  Treat session `ACTIVE` and SSH endpoint readiness as separate asynchronous
+  states; retry only the tunnel against the same session with bounded backoff
+  and persisted PID cleanup.
 - Never expose SSH, port 6443, kubelet, Mongo, RabbitMQ, or application
   NodePorts directly to the internet.
 - Deploy only exact digest provenance, sequentially: Mongo, RabbitMQ,
