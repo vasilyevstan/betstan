@@ -851,7 +851,7 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 sf="$fixture_dir/identity-retirement-state.env"
 rm -f "$fixture_dir/metadata.env"
 sed -i.bak "s/^migration_environment=.*$/migration_environment=fake-env/" "$sf"; rm -f "$sf.bak"
-expect_fail_with "terminal_state_fixed_name_substitution" "terminal_state_fixed_name_mismatch" \
+expect_fail_with "terminal_state_fixed_name_substitution" "state_fixed_name_mismatch|terminal_state_fixed_name_mismatch" \
   env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
     STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
     STUB_SP_ALREADY_ABSENT=1 \
@@ -996,7 +996,7 @@ sf="$fixture_dir/identity-retirement-state.env"
 rm -f "$fixture_dir/metadata.env"
 # Make recovery_app_id same as migration_app_id
 sed -i.bak "s/^recovery_app_id=.*$/recovery_app_id=$G_MA/" "$sf"; rm -f "$sf.bak"
-expect_fail_with "terminal_state_duplicate_id_detected" "terminal_state_duplicate_ids" \
+expect_fail_with "terminal_state_duplicate_id_detected" "terminal_state_duplicate_ids|state_duplicate_ids" \
   env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
     STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
     STUB_SP_ALREADY_ABSENT=1 \
@@ -1012,7 +1012,7 @@ rm -f "$fixture_dir/metadata.env"
 # Replace subscription in RA ID with a different one
 sed -i.bak "s|/subscriptions/$GS/providers/Microsoft.Authorization/roleAssignments/dddd4444|/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleAssignments/dddd4444|" "$sf"
 rm -f "$sf.bak"
-expect_fail_with "terminal_ra_subscription_mismatch" "terminal_state_ra_subscription_mismatch" \
+expect_fail_with "terminal_ra_subscription_mismatch" "terminal_state_ra_subscription_mismatch|state_ra_subscription_mismatch" \
   env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
     STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
     STUB_SP_ALREADY_ABSENT=1 \
@@ -1020,21 +1020,191 @@ expect_fail_with "terminal_ra_subscription_mismatch" "terminal_state_ra_subscrip
     IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
     IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
 
-# Temp cleanup on write_state mv failure: metadata preserved
-fixture_dir="$WORK_DIR/t-mv-fail"
+# --- write_state forced failure regressions (PATH stubs) ---
+printf '\n  --- write_state forced failure regressions ---\n'
+
+# (a) mv stub that fails for state temp files only
+fixture_dir="$WORK_DIR/t-mvfail"
 write_metadata "$fixture_dir"; mkdir -p "$fixture_dir"; chmod 700 "$fixture_dir"
-# Make state dir read-only to force mv to fail
-chmod 500 "$fixture_dir"
-o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+mv_stub_dir="$WORK_DIR/mvstub"; mkdir -p "$mv_stub_dir"
+cat > "$mv_stub_dir/mv" <<'MVSTUB'
+#!/usr/bin/env bash
+# Fail only for state temp files (identity-retirement-state.env.*)
+if printf '%s' "$1" | grep -q 'identity-retirement-state.env\.'; then
+  printf 'stubbed_mv_invoked\n' >> "${STUB_MV_LOG:-/dev/null}"
+  exit 1
+fi
+exec /bin/mv "$@"
+MVSTUB
+chmod +x "$mv_stub_dir/mv"
+: > "$WORK_DIR/mv.log"
+o="$(env PATH="$mv_stub_dir:$BIN_DIR:$PATH" \
+  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_MV_LOG="$WORK_DIR/mv.log" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
+if echo "$o" | grep -qE "state_atomic_mv_failed"; then
+  pass "mv_failure_detected"
+else fail "mv_failure_detected (got: $(echo "$o"|head -1))"; fi
+# Assert stubbed mv was actually invoked
+if grep -q "stubbed_mv_invoked" "$WORK_DIR/mv.log" 2>/dev/null; then
+  pass "mv_stub_was_invoked"
+else fail "mv_stub_was_invoked (stub not called)"; fi
+# Temp files should be cleaned up by EXIT trap
+temps="$(find "$fixture_dir" -name 'identity-retirement-state.env.*' 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$temps" == "0" ]]; then pass "temp_cleaned_on_mv_failure"
+else fail "temp_cleaned_on_mv_failure (found $temps)"; fi
+# Metadata must be preserved
+if [[ -f "$fixture_dir/metadata.env" ]]; then pass "metadata_preserved_on_mv_failure"
+else fail "metadata_preserved_on_mv_failure"; fi
+# No IDs in output
+assert_no_id_leakage "no_id_leak_mv_failure" "$o"
+
+# (b) chmod stub that fails after mktemp
+fixture_dir="$WORK_DIR/t-chmodfail"
+write_metadata "$fixture_dir"; mkdir -p "$fixture_dir"; chmod 700 "$fixture_dir"
+chmod_stub_dir="$WORK_DIR/chmodstub"; mkdir -p "$chmod_stub_dir"
+cat > "$chmod_stub_dir/chmod" <<'CHSTUB'
+#!/usr/bin/env bash
+# Fail only when targeting a state temp file (600 + identity-retirement-state)
+if [[ "${1:-}" == "600" ]] && printf '%s' "${2:-}" | grep -q 'identity-retirement-state.env\.'; then
+  printf 'stubbed_chmod_invoked\n' >> "${STUB_CHMOD_LOG:-/dev/null}"
+  exit 1
+fi
+exec /bin/chmod "$@"
+CHSTUB
+chmod +x "$chmod_stub_dir/chmod"
+: > "$WORK_DIR/chmod.log"
+o="$(env PATH="$chmod_stub_dir:$BIN_DIR:$PATH" \
+  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+  STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+  STUB_CHMOD_LOG="$WORK_DIR/chmod.log" \
+  IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+  IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+  IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
+if echo "$o" | grep -qE "state_temp_chmod_failed"; then
+  pass "chmod_failure_detected"
+else fail "chmod_failure_detected (got: $(echo "$o"|head -1))"; fi
+if grep -q "stubbed_chmod_invoked" "$WORK_DIR/chmod.log" 2>/dev/null; then
+  pass "chmod_stub_was_invoked"
+else fail "chmod_stub_was_invoked (stub not called)"; fi
+# Metadata preserved
+if [[ -f "$fixture_dir/metadata.env" ]]; then pass "metadata_preserved_on_chmod_failure"
+else fail "metadata_preserved_on_chmod_failure"; fi
+
+# (c) mktemp stub that fails
+fixture_dir="$WORK_DIR/t-mktempfail"
+write_metadata "$fixture_dir"; mkdir -p "$fixture_dir"; chmod 700 "$fixture_dir"
+mktemp_stub_dir="$WORK_DIR/mktempstub"; mkdir -p "$mktemp_stub_dir"
+cat > "$mktemp_stub_dir/mktemp" <<'MKSTUB'
+#!/usr/bin/env bash
+# Fail when called for state temp files
+if printf '%s' "$*" | grep -q 'identity-retirement-state.env'; then
+  exit 1
+fi
+exec /usr/bin/mktemp "$@"
+MKSTUB
+chmod +x "$mktemp_stub_dir/mktemp"
+o="$(env PATH="$mktemp_stub_dir:$BIN_DIR:$PATH" \
+  STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
   STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
-chmod 700 "$fixture_dir"
-# Temp files should be cleaned up
-temps="$(find "$fixture_dir" -name 'identity-retirement-state.env.*' 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "$temps" == "0" ]]; then pass "temp_cleaned_on_mv_failure"
-else fail "temp_cleaned_on_mv_failure (found $temps temp files)"; fi
+if echo "$o" | grep -qE "state_temp_create_failed"; then
+  pass "mktemp_failure_detected"
+else fail "mktemp_failure_detected (got: $(echo "$o"|head -1))"; fi
+
+# --- Terminal phase substitution regression ---
+printf '\n  --- terminal state phase/digest regressions ---\n'
+
+fixture_dir="$WORK_DIR/t-ts-phase-sub"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+rm -f "$fixture_dir/metadata.env"
+# Replace retired with a different phase
+sed -i.bak "s/^phase=retired$/phase=verification-intent/" "$sf"; rm -f "$sf.bak"
+expect_fail_with "terminal_phase_substitution_rejected" "state_phase_invalid" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Invalid terminal digest (metadata absent): non-hex value
+fixture_dir="$WORK_DIR/t-ts-bad-digest"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+rm -f "$fixture_dir/metadata.env"
+sed -i.bak "s/^metadata_sha256=.*$/metadata_sha256=ZZZZ0000111122223333444455556666777788889999aaaabbbbccccddddeee/" "$sf"; rm -f "$sf.bak"
+expect_fail_with "terminal_invalid_digest_rejected" "state_digest_syntax_invalid|state_empty_or_malformed_field" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_RET" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
+
+# Retained/custom-role collision in metadata
+printf '\n  --- retained separation regressions ---\n'
+fixture_dir="$WORK_DIR/t-ret-cr-col"
+mkdir -p "$fixture_dir"
+cat > "$fixture_dir/metadata.env" <<META
+tenant_id=$GT
+subscription_id=$GS
+migration_app_id=$G_MA
+recovery_app_id=$G_RA
+migration_sp_object_id=$G_MS
+recovery_sp_object_id=$G_RS
+retained_sp_object_id=$G_CR1
+role_assignment_id_1=$RA_ID_1
+role_assignment_id_2=$RA_ID_2
+role_assignment_id_3=$RA_ID_3
+role_assignment_1_principal_id=$G_MS
+role_assignment_1_role_definition_id=$RD_1
+role_assignment_1_scope=$SCOPE
+role_assignment_2_principal_id=$G_RS
+role_assignment_2_role_definition_id=$RD_2
+role_assignment_2_scope=$SCOPE
+role_assignment_3_principal_id=$G_MS
+role_assignment_3_role_definition_id=$RD_3
+role_assignment_3_scope=$SCOPE
+custom_role_id_1=$G_CR1
+custom_role_id_2=$G_CR2
+custom_role_1_assignable_scope=$SCOPE
+custom_role_2_assignable_scope=$SCOPE
+migration_environment=oci-migration
+recovery_environment=azure-migration-recovery
+retained_sp_display_name=betstan-github-sp
+retained_secret_name=AZURE_CREDENTIALS
+repository=vasilyevstan/betstan
+META
+chmod 600 "$fixture_dir/metadata.env"
+expect_fail_with "retained_custom_role_collision_rejected" "metadata_retained_sp_equals_temporary" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_CR1" \
+    STUB_ROLE_STILL_PRESENT=1 \
+    IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan
+
+# Terminal state retained/custom-role collision
+fixture_dir="$WORK_DIR/t-ts-ret-cr"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+sf="$fixture_dir/identity-retirement-state.env"
+rm -f "$fixture_dir/metadata.env"
+# Make retained_sp_object_id same as custom_role_id_1
+sed -i.bak "s/^retained_sp_object_id=.*$/retained_sp_object_id=$G_CR1/" "$sf"; rm -f "$sf.bak"
+expect_fail_with "terminal_retained_custom_role_collision" "state_retained_collision" \
+  env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/gh.log" \
+    STUB_EXPECTED_TENANT="$GT" STUB_EXPECTED_SUB="$GS" STUB_RETAINED_SP_OID="$G_CR1" \
+    STUB_SP_ALREADY_ABSENT=1 \
+    IDENTITY_RETIREMENT_METADATA="" \
+    IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
+    IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" verify
 
 # Post-secrets-fence ordering in gh log
 fixture_dir="$WORK_DIR/t-psf-order"

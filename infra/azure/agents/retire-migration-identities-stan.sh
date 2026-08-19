@@ -43,6 +43,13 @@ ALLOWED_KEYS=(
 # Exact intermediate state field set (6 keys)
 INTERMEDIATE_STATE_KEYS=(schema phase metadata_sha256 tenant_id subscription_id repository)
 
+# Valid intermediate state phases (explicit state-machine phases)
+VALID_INTERMEDIATE_PHASES=(
+  initialized guards-intent workflow-intent runs-fence secrets-intent
+  post-secrets-fence role-assignments-intent sps-intent apps-intent
+  custom-roles-intent verification-intent
+)
+
 # Exact terminal state field set (23 keys)
 TERMINAL_STATE_KEYS=(
   schema phase metadata_sha256
@@ -172,7 +179,7 @@ write_state() {
   _ws_cleanup() { [[ -n "$temporary" && -f "$temporary" ]] && rm -f "$temporary" 2>/dev/null; }
   trap _ws_cleanup EXIT
   temporary="$(mktemp "${STATE_FILE}.XXXXXXXX")" || die "state_temp_create_failed"
-  chmod 600 "$temporary"
+  chmod 600 "$temporary" || die "state_temp_chmod_failed"
 
   if [[ "$phase" == "retired" ]]; then
     {
@@ -199,18 +206,8 @@ write_state() {
       printf 'migration_secret_name=OCI_MIGRATION_AZURE_CREDENTIALS\n'
       printf 'recovery_secret_name=AZURE_MIGRATION_RECOVERY_CREDENTIALS\n'
       printf 'workflow_name=oci-migration-recovery.yml\n'
-    } > "$temporary"
-    # Validate temp: exact field set, schema, phase, permissions, fixed values
-    validate_exact_field_set "$temporary" "${TERMINAL_STATE_KEYS[@]}"
-    [[ "$(env_value "$temporary" schema)" == "betstan.identity-retirement-terminal.v1" ]] ||
-      die "state_temp_schema_invalid"
-    [[ "$(env_value "$temporary" phase)" == "retired" ]] ||
-      die "state_temp_phase_invalid"
-    [[ "$(env_value "$temporary" repository)" == "$GH_REPOSITORY" ]] ||
-      die "state_temp_repo_invalid"
-    local tp
-    tp="$(stat -f '%Lp' "$temporary" 2>/dev/null || stat -c '%a' "$temporary" 2>/dev/null)"
-    [[ "$tp" == "600" ]] || die "state_temp_perms_invalid"
+    } > "$temporary" || die "state_temp_write_failed"
+    validate_state_semantics "$temporary" "terminal"
   else
     {
       printf 'schema=betstan.identity-retirement.v1\n'
@@ -219,15 +216,8 @@ write_state() {
       printf 'tenant_id=%s\n' "$TENANT_ID"
       printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
       printf 'repository=%s\n' "$GH_REPOSITORY"
-    } > "$temporary"
-    # Validate temp: exact field set, schema, phase nonempty, permissions
-    validate_exact_field_set "$temporary" "${INTERMEDIATE_STATE_KEYS[@]}"
-    [[ "$(env_value "$temporary" schema)" == "betstan.identity-retirement.v1" ]] ||
-      die "state_temp_schema_invalid"
-    [[ -n "$(env_value "$temporary" phase)" ]] || die "state_temp_phase_invalid"
-    local tp
-    tp="$(stat -f '%Lp' "$temporary" 2>/dev/null || stat -c '%a' "$temporary" 2>/dev/null)"
-    [[ "$tp" == "600" ]] || die "state_temp_perms_invalid"
+    } > "$temporary" || die "state_temp_write_failed"
+    validate_state_semantics "$temporary" "intermediate"
   fi
 
   mv "$temporary" "$STATE_FILE" || die "state_atomic_mv_failed"
@@ -256,20 +246,133 @@ validate_exact_field_set() {
   done < "$file"
 }
 
+# Helper: check if value is in array
+is_valid_phase() {
+  local val="$1"; shift
+  local p
+  for p in "$@"; do [[ "$p" == "$val" ]] && return 0; done
+  return 1
+}
+
+is_valid_sha256() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]]
+}
+
+# Centralized strict semantic validation for state files.
+# Validates structure, schema, phase, digest, GUIDs, RA syntax + subscription
+# binding, fixed names, repository, uniqueness, retained separation, and perms.
+# file: path to validate; mode: "terminal" or "intermediate"
+validate_state_semantics() {
+  local file="$1" mode="$2"
+  local fp
+  fp="$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null)"
+  [[ "$fp" == "600" ]] || die "state_perms_invalid"
+
+  if [[ "$mode" == "terminal" ]]; then
+    validate_exact_field_set "$file" "${TERMINAL_STATE_KEYS[@]}"
+    [[ "$(env_value "$file" schema)" == "betstan.identity-retirement-terminal.v1" ]] ||
+      die "state_schema_invalid"
+    [[ "$(env_value "$file" phase)" == "retired" ]] ||
+      die "state_phase_invalid"
+  else
+    validate_exact_field_set "$file" "${INTERMEDIATE_STATE_KEYS[@]}"
+    [[ "$(env_value "$file" schema)" == "betstan.identity-retirement.v1" ]] ||
+      die "state_schema_invalid"
+    local ph
+    ph="$(env_value "$file" phase)"
+    is_valid_phase "$ph" "${VALID_INTERMEDIATE_PHASES[@]}" ||
+      die "state_phase_invalid"
+  fi
+
+  # metadata_sha256 must be valid hex
+  local digest
+  digest="$(env_value "$file" metadata_sha256)"
+  is_valid_sha256 "$digest" || die "state_digest_syntax_invalid"
+
+  # Tenant/subscription/repository
+  local st ss sr
+  st="$(env_value "$file" tenant_id)"
+  ss="$(env_value "$file" subscription_id)"
+  sr="$(env_value "$file" repository)"
+  is_valid_guid "$st" || die "state_tenant_invalid_guid"
+  is_valid_guid "$ss" || die "state_subscription_invalid_guid"
+  [[ "$sr" == "$GH_REPOSITORY" ]] || die "state_repository_mismatch"
+
+  if [[ "$mode" == "terminal" ]]; then
+    # All GUIDs
+    local sma sra sms srs sret scr1 scr2
+    sma="$(env_value "$file" migration_app_id)"
+    sra="$(env_value "$file" recovery_app_id)"
+    sms="$(env_value "$file" migration_sp_object_id)"
+    srs="$(env_value "$file" recovery_sp_object_id)"
+    sret="$(env_value "$file" retained_sp_object_id)"
+    scr1="$(env_value "$file" custom_role_id_1)"
+    scr2="$(env_value "$file" custom_role_id_2)"
+    is_valid_guid "$sma" || die "state_guid_invalid"
+    is_valid_guid "$sra" || die "state_guid_invalid"
+    is_valid_guid "$sms" || die "state_guid_invalid"
+    is_valid_guid "$srs" || die "state_guid_invalid"
+    is_valid_guid "$sret" || die "state_guid_invalid"
+    is_valid_guid "$scr1" || die "state_guid_invalid"
+    is_valid_guid "$scr2" || die "state_guid_invalid"
+
+    # RA IDs syntax + subscription binding
+    local sra1 sra2 sra3
+    sra1="$(env_value "$file" role_assignment_id_1)"
+    sra2="$(env_value "$file" role_assignment_id_2)"
+    sra3="$(env_value "$file" role_assignment_id_3)"
+    is_valid_role_assignment_id "$sra1" || die "state_invalid_ra_id"
+    is_valid_role_assignment_id "$sra2" || die "state_invalid_ra_id"
+    is_valid_role_assignment_id "$sra3" || die "state_invalid_ra_id"
+    local ra_sub
+    for ra_id in "$sra1" "$sra2" "$sra3"; do
+      ra_sub="$(printf '%s' "$ra_id" | sed -n 's|^/subscriptions/\([^/]*\)/.*|\1|p')"
+      [[ "$ra_sub" == "$ss" ]] || die "state_ra_subscription_mismatch"
+    done
+
+    # Uniqueness: no duplicate IDs among temporary objects
+    local all_temp_ids=("$sma" "$sra" "$sms" "$srs" "$scr1" "$scr2" "$sra1" "$sra2" "$sra3")
+    local seen_c
+    seen_c="$(printf '%s\n' "${all_temp_ids[@]}" | sort -u | wc -l | tr -d ' ')"
+    [[ "$seen_c" == "9" ]] || die "state_duplicate_ids"
+
+    # Retained SP must not match any temporary GUID-valued identity
+    [[ "$sret" != "$sma" ]] || die "state_retained_collision"
+    [[ "$sret" != "$sra" ]] || die "state_retained_collision"
+    [[ "$sret" != "$sms" ]] || die "state_retained_collision"
+    [[ "$sret" != "$srs" ]] || die "state_retained_collision"
+    [[ "$sret" != "$scr1" ]] || die "state_retained_collision"
+    [[ "$sret" != "$scr2" ]] || die "state_retained_collision"
+
+    # Fixed names
+    [[ "$(env_value "$file" retained_sp_display_name)" == "betstan-github-sp" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" retained_secret_name)" == "AZURE_CREDENTIALS" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" migration_environment)" == "oci-migration" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" recovery_environment)" == "azure-migration-recovery" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" migration_secret_name)" == "OCI_MIGRATION_AZURE_CREDENTIALS" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" recovery_secret_name)" == "AZURE_MIGRATION_RECOVERY_CREDENTIALS" ]] ||
+      die "state_fixed_name_mismatch"
+    [[ "$(env_value "$file" workflow_name)" == "oci-migration-recovery.yml" ]] ||
+      die "state_fixed_name_mismatch"
+  fi
+}
+
 validate_state_identity() {
   [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
-  local state_perms
-  state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
-  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions"
   local state_schema
   state_schema="$(env_value "$STATE_FILE" schema)"
   if [[ "$state_schema" == "betstan.identity-retirement.v1" ]]; then
-    validate_exact_field_set "$STATE_FILE" "${INTERMEDIATE_STATE_KEYS[@]}"
+    validate_state_semantics "$STATE_FILE" "intermediate"
     [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
       die "retirement_state_metadata_differs"
   elif [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]]; then
-    validate_exact_field_set "$STATE_FILE" "${TERMINAL_STATE_KEYS[@]}"
-    # Compare digest
+    validate_state_semantics "$STATE_FILE" "terminal"
+    # Digest must match metadata
     [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
       die "retirement_state_metadata_differs"
     # Compare every terminal ID and fixed binding to loaded metadata values
@@ -293,24 +396,10 @@ validate_state_identity() {
       die "terminal_state_id_mismatch"
     [[ "$(env_value "$STATE_FILE" custom_role_id_2)" == "$CUSTOM_ROLE_ID_2" ]] ||
       die "terminal_state_id_mismatch"
-    # Fixed bindings
-    [[ "$(env_value "$STATE_FILE" retained_sp_display_name)" == "$RETAINED_SP_DISPLAY_NAME" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" retained_secret_name)" == "$RETAINED_SECRET_NAME" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" migration_environment)" == "$MIGRATION_ENV" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" recovery_environment)" == "$RECOVERY_ENV" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" migration_secret_name)" == "OCI_MIGRATION_AZURE_CREDENTIALS" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" recovery_secret_name)" == "AZURE_MIGRATION_RECOVERY_CREDENTIALS" ]] ||
-      die "terminal_state_fixed_name_mismatch"
-    [[ "$(env_value "$STATE_FILE" workflow_name)" == "oci-migration-recovery.yml" ]] ||
-      die "terminal_state_fixed_name_mismatch"
   else
     die "retirement_state_schema_invalid"
   fi
+  # Context identity (from loaded metadata)
   [[ "$(env_value "$STATE_FILE" tenant_id)" == "$TENANT_ID" ]] ||
     die "retirement_state_tenant_differs"
   [[ "$(env_value "$STATE_FILE" subscription_id)" == "$SUBSCRIPTION_ID" ]] ||
@@ -323,16 +412,12 @@ validate_state_identity() {
 # Only valid for terminal schema; non-terminal state NEVER bypasses metadata.
 load_from_terminal_state() {
   [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
-  local state_perms
-  state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
-  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions"
   local state_schema
   state_schema="$(env_value "$STATE_FILE" schema)"
   [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
     die "state_not_terminal_schema:cannot_verify_without_metadata"
-  validate_exact_field_set "$STATE_FILE" "${TERMINAL_STATE_KEYS[@]}"
-  [[ "$(env_value "$STATE_FILE" phase)" == "retired" ]] ||
-    die "state_not_retired:cannot_verify_without_metadata"
+  # Full semantic validation via centralized validator
+  validate_state_semantics "$STATE_FILE" "terminal"
 
   TENANT_ID="$(env_value "$STATE_FILE" tenant_id)"
   SUBSCRIPTION_ID="$(env_value "$STATE_FILE" subscription_id)"
@@ -350,56 +435,6 @@ load_from_terminal_state() {
   RECOVERY_ENV="$(env_value "$STATE_FILE" recovery_environment)"
   RETAINED_SP_DISPLAY_NAME="$(env_value "$STATE_FILE" retained_sp_display_name)"
   RETAINED_SECRET_NAME="$(env_value "$STATE_FILE" retained_secret_name)"
-
-  # Validate every terminal value
-  validate_guid_field "tenant_id" "$TENANT_ID"
-  validate_guid_field "subscription_id" "$SUBSCRIPTION_ID"
-  validate_guid_field "migration_app_id" "$MIGRATION_APP_ID"
-  validate_guid_field "recovery_app_id" "$RECOVERY_APP_ID"
-  validate_guid_field "migration_sp_object_id" "$MIGRATION_SP_OBJECT_ID"
-  validate_guid_field "recovery_sp_object_id" "$RECOVERY_SP_OBJECT_ID"
-  validate_guid_field "retained_sp_object_id" "$RETAINED_SP_OBJECT_ID"
-  validate_guid_field "custom_role_id_1" "$CUSTOM_ROLE_ID_1"
-  validate_guid_field "custom_role_id_2" "$CUSTOM_ROLE_ID_2"
-  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_1" || die "terminal_state_invalid_ra_id"
-  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_2" || die "terminal_state_invalid_ra_id"
-  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_3" || die "terminal_state_invalid_ra_id"
-
-  # Validate RA IDs bind to correct subscription
-  local ra_sub
-  for ra_id in "$ROLE_ASSIGNMENT_ID_1" "$ROLE_ASSIGNMENT_ID_2" "$ROLE_ASSIGNMENT_ID_3"; do
-    ra_sub="$(printf '%s' "$ra_id" | sed -n 's|^/subscriptions/\([^/]*\)/.*|\1|p')"
-    [[ "$ra_sub" == "$SUBSCRIPTION_ID" ]] || die "terminal_state_ra_subscription_mismatch"
-  done
-
-  # Validate uniqueness: no duplicate IDs among temporary objects
-  local all_temp_ids=("$MIGRATION_APP_ID" "$RECOVERY_APP_ID" "$MIGRATION_SP_OBJECT_ID"
-    "$RECOVERY_SP_OBJECT_ID" "$CUSTOM_ROLE_ID_1" "$CUSTOM_ROLE_ID_2"
-    "$ROLE_ASSIGNMENT_ID_1" "$ROLE_ASSIGNMENT_ID_2" "$ROLE_ASSIGNMENT_ID_3")
-  local seen_count
-  seen_count="$(printf '%s\n' "${all_temp_ids[@]}" | sort -u | wc -l | tr -d ' ')"
-  [[ "$seen_count" == "9" ]] || die "terminal_state_duplicate_ids"
-
-  # Retained SP must not match any temporary SP/app
-  [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_SP_OBJECT_ID" ]] || die "terminal_state_retained_collision"
-  [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] || die "terminal_state_retained_collision"
-  [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_APP_ID" ]] || die "terminal_state_retained_collision"
-  [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_APP_ID" ]] || die "terminal_state_retained_collision"
-
-  # Validate fixed bindings
-  [[ "$RETAINED_SP_DISPLAY_NAME" == "betstan-github-sp" ]] || die "terminal_state_fixed_name_mismatch"
-  [[ "$RETAINED_SECRET_NAME" == "AZURE_CREDENTIALS" ]] || die "terminal_state_fixed_name_mismatch"
-  [[ "$MIGRATION_ENV" == "oci-migration" ]] || die "terminal_state_fixed_name_mismatch"
-  [[ "$RECOVERY_ENV" == "azure-migration-recovery" ]] || die "terminal_state_fixed_name_mismatch"
-  [[ "$(env_value "$STATE_FILE" migration_secret_name)" == "OCI_MIGRATION_AZURE_CREDENTIALS" ]] ||
-    die "terminal_state_fixed_name_mismatch"
-  [[ "$(env_value "$STATE_FILE" recovery_secret_name)" == "AZURE_MIGRATION_RECOVERY_CREDENTIALS" ]] ||
-    die "terminal_state_fixed_name_mismatch"
-  [[ "$(env_value "$STATE_FILE" workflow_name)" == "oci-migration-recovery.yml" ]] ||
-    die "terminal_state_fixed_name_mismatch"
-
-  [[ "$(env_value "$STATE_FILE" repository)" == "$GH_REPOSITORY" ]] ||
-    die "terminal_state_repository_mismatch"
 
   # Compare terminal fields to loaded metadata when metadata is present
   if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]]; then
@@ -551,6 +586,10 @@ load_metadata() {
   [[ "$ROLE_ASSIGNMENT_ID_2" != "$ROLE_ASSIGNMENT_ID_3" ]] || die "metadata_duplicate_role_assignment_ids"
   [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_SP_OBJECT_ID" ]] || die "metadata_retained_sp_equals_temporary"
   [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] || die "metadata_retained_sp_equals_temporary"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$MIGRATION_APP_ID" ]] || die "metadata_retained_sp_equals_temporary"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$RECOVERY_APP_ID" ]] || die "metadata_retained_sp_equals_temporary"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$CUSTOM_ROLE_ID_1" ]] || die "metadata_retained_sp_equals_temporary"
+  [[ "$RETAINED_SP_OBJECT_ID" != "$CUSTOM_ROLE_ID_2" ]] || die "metadata_retained_sp_equals_temporary"
 
   # Principal IDs must reference known temporary SPs
   for field in RA1_PRINCIPAL RA2_PRINCIPAL RA3_PRINCIPAL; do
@@ -880,26 +919,6 @@ disable_workflow() {
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
       die "workflow_disable_failed"
   fi
-}
-
-verify_workflow_disabled() {
-  local wf="$1" state rc=0
-  state="$(gh api "repos/$GH_REPOSITORY/actions/workflows/$wf" --jq '.state' 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "workflow_verify_api_error"
-  [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
-    die "workflow_not_disabled_after_action"
-}
-
-verify_secret_absent() {
-  local env_name="$1" secret_name="$2" attempt=0 s
-  while true; do
-    s="$(probe_env_secret_presence "$env_name" "$secret_name")"
-    [[ "$s" == "present" ]] || break
-    [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "secret_still_present_after_retries"
-    attempt=$((attempt+1))
-    sleep "$VERIFY_RETRY_SLEEP"
-  done
 }
 
 # Verify no nonterminal runs across all fenced workflows/statuses.
