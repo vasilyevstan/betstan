@@ -66,9 +66,9 @@ grep -Fq "After \`cutover-committed\`, never retry from Azure" \
 grep -Fq "controller-level HTTP mutation fence" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent does not preserve the restart-safe HTTP fence"
-grep -Fq "bounded convergence loop for" \
+grep -Fq "remove the exact 17 application bindings" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
-    fail "migration recovery agent does not require bounded RabbitMQ convergence"
+    fail "migration recovery agent does not require the RabbitMQ routing fence"
 grep -Fq "https://betstan.xyz" \
     "$ROOT_DIR/.github/agents/betstan-domain-ingress.agent.md" ||
     fail "domain ingress agent lacks the canonical host"

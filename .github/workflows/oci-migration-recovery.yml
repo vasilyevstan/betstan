@@ -245,6 +245,16 @@ jobs:
           cluster-name: ${{ env.AZURE_CLUSTER_NAME }}
           admin: false
 
+      - name: Materialize isolated Azure recovery kubeconfig
+        if: steps.cluster.outputs.power == 'Running'
+        run: |
+          set -euo pipefail
+          [[ -n "${KUBE_CONFIG_PATH:-}" ]]
+          [[ "$KUBE_CONFIG_PATH" == "$RUNNER_TEMP/"* ]]
+          [[ "$AZURE_KUBECONFIG" == "$RUNNER_TEMP/"* ]]
+          [ -f "$KUBE_CONFIG_PATH" ] && [ ! -L "$KUBE_CONFIG_PATH" ]
+          install -m 600 -- "$KUBE_CONFIG_PATH" "$AZURE_KUBECONFIG"
+
       - name: Inspect runs and freeze Azure when recovery is conclusive
         id: recovery
         env:
@@ -265,6 +275,11 @@ jobs:
             ./infra/oci/scripts/recover-azure-migration.sh
             recovery_status=$?
             set -e
+          fi
+          if [ ! -f "$RECOVERY_RESULT_FILE" ] ||
+             [ -L "$RECOVERY_RESULT_FILE" ]; then
+            echo "::error::Recovery helper produced no reviewed result file."
+            exit "${recovery_status:-1}"
           fi
           # shellcheck disable=SC1090
           source "$RECOVERY_RESULT_FILE"
