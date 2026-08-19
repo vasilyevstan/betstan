@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # Exact migration/recovery identity retirement operator.
-# Verifies exact object relationships (SP→app, role-assignment→principal/role/scope,
-# custom-role→assignable-scope) before writing deletion intent. All presence probes
-# are fail-closed: API errors are fatal, only proven-empty responses are "absent".
-# Already-absent objects are acceptable only on resume or terminal cleanup; initial
-# plan distinguishes planned-absent from query failure.
+# Verifies exact object relationships before writing deletion intent.
+# All presence probes are fail-closed: API errors are fatal.
+# Closes GitHub execution (guards, workflow, secrets) before crossing
+# the identity boundary (role-assignments, SPs, apps, custom-roles).
+# Terminal state is written only after full verification-intent proves
+# all temporary objects absent.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 export ROOT_DIR
@@ -14,7 +15,8 @@ MODE="${1:-plan}"
 METADATA_FILE="${IDENTITY_RETIREMENT_METADATA:-}"
 STATE_DIR="${IDENTITY_RETIREMENT_STATE_DIR:-}"
 SAFE_CLEANUP="${IDENTITY_RETIREMENT_SAFE_CLEANUP:-0}"
-GH_REPOSITORY="${GH_REPOSITORY:-vasilyevstan/betstan}"
+# Fixed repository - never accept arbitrary caller values
+GH_REPOSITORY="vasilyevstan/betstan"
 
 STATE_FILE=""
 RESUME_STARTED=0
@@ -23,6 +25,7 @@ RESUME_STARTED=0
 VERIFY_MAX_RETRIES="${IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES:-0}"
 VERIFY_RETRY_SLEEP="${IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP:-0}"
 
+# Exact metadata field set (28 keys)
 ALLOWED_KEYS=(
   tenant_id subscription_id
   migration_app_id recovery_app_id
@@ -37,21 +40,42 @@ ALLOWED_KEYS=(
   retained_sp_display_name retained_secret_name repository
 )
 
+# Exact intermediate state field set (6 keys)
+INTERMEDIATE_STATE_KEYS=(schema phase metadata_sha256 tenant_id subscription_id repository)
+
+# Exact terminal state field set (23 keys)
+TERMINAL_STATE_KEYS=(
+  schema phase metadata_sha256
+  tenant_id subscription_id repository
+  migration_app_id recovery_app_id
+  migration_sp_object_id recovery_sp_object_id
+  role_assignment_id_1 role_assignment_id_2 role_assignment_id_3
+  custom_role_id_1 custom_role_id_2
+  retained_sp_object_id retained_sp_display_name retained_secret_name
+  migration_environment recovery_environment
+  migration_secret_name recovery_secret_name workflow_name
+)
+
+# All nonterminal workflow run statuses to fence
+RUN_STATUSES=(queued in_progress waiting pending requested)
+
+# Both workflows to fence before identity boundary
+FENCED_WORKFLOWS=(oci-migrate.yml oci-migration-recovery.yml)
+
 die() {
   printf 'NO_GO identity_retirement_reason=%s\n' "$1" >&2
   exit 1
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || die "required_command_unavailable:$1"
+  command -v "$1" >/dev/null 2>&1 || die "required_command_unavailable"
 }
 
 validate_retry_config() {
-  # Validate retry parameters are non-negative integers within safe bounds
-  [[ "$VERIFY_MAX_RETRIES" =~ ^[0-9]+$ ]] || die "verify_max_retries_not_integer:$VERIFY_MAX_RETRIES"
-  [[ "$VERIFY_RETRY_SLEEP" =~ ^[0-9]+$ ]] || die "verify_retry_sleep_not_integer:$VERIFY_RETRY_SLEEP"
-  [[ "$VERIFY_MAX_RETRIES" -le 30 ]] || die "verify_max_retries_exceeds_bound:$VERIFY_MAX_RETRIES>30"
-  [[ "$VERIFY_RETRY_SLEEP" -le 60 ]] || die "verify_retry_sleep_exceeds_bound:$VERIFY_RETRY_SLEEP>60"
+  [[ "$VERIFY_MAX_RETRIES" =~ ^[0-9]+$ ]] || die "verify_max_retries_not_integer"
+  [[ "$VERIFY_RETRY_SLEEP" =~ ^[0-9]+$ ]] || die "verify_retry_sleep_not_integer"
+  [[ "$VERIFY_MAX_RETRIES" -le 30 ]] || die "verify_max_retries_exceeds_bound"
+  [[ "$VERIFY_RETRY_SLEEP" -le 60 ]] || die "verify_retry_sleep_exceeds_bound"
 }
 
 sha256_file() {
@@ -69,7 +93,8 @@ is_valid_guid() {
 }
 
 is_valid_role_assignment_id() {
-  local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/providers/Microsoft\.Authorization/roleAssignments/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  # Accept subscription-scoped or resource-group-scoped role assignments
+  local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/resourceGroups/[a-zA-Z0-9._-]+)?/providers/Microsoft\.Authorization/roleAssignments/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
   [[ "$1" =~ $pattern ]]
 }
 
@@ -79,7 +104,6 @@ is_valid_role_definition_id() {
 }
 
 is_valid_scope() {
-  # /subscriptions/<GUID> or /subscriptions/<GUID>/resourceGroups/<name>
   local pattern='^/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/resourceGroups/[a-zA-Z0-9._-]+)?$'
   [[ "$1" =~ $pattern ]]
 }
@@ -89,45 +113,45 @@ is_safe_name() { [[ "$1" =~ ^[a-zA-Z0-9._/@-]+$ ]]; }
 
 validate_no_control_chars() {
   local label="$1" value="$2"
-  has_control_chars "$value" && die "metadata_control_chars_in:$label"
+  has_control_chars "$value" && die "metadata_control_chars"
   return 0
 }
 
 validate_guid_field() {
   local label="$1" value="$2"
   validate_no_control_chars "$label" "$value"
-  is_valid_guid "$value" || die "metadata_invalid_guid:$label"
+  is_valid_guid "$value" || die "metadata_invalid_guid"
 }
 
 validate_role_assignment_id_field() {
   local label="$1" value="$2"
   validate_no_control_chars "$label" "$value"
-  is_valid_role_assignment_id "$value" || die "metadata_invalid_role_assignment_id:$label"
+  is_valid_role_assignment_id "$value" || die "metadata_invalid_role_assignment_id"
 }
 
 validate_role_definition_id_field() {
   local label="$1" value="$2"
   validate_no_control_chars "$label" "$value"
-  is_valid_role_definition_id "$value" || die "metadata_invalid_role_definition_id:$label"
+  is_valid_role_definition_id "$value" || die "metadata_invalid_role_definition_id"
 }
 
 validate_scope_field() {
   local label="$1" value="$2"
   validate_no_control_chars "$label" "$value"
-  is_valid_scope "$value" || die "metadata_invalid_scope:$label"
+  is_valid_scope "$value" || die "metadata_invalid_scope"
 }
 
 validate_safe_name_field() {
   local label="$1" value="$2"
   validate_no_control_chars "$label" "$value"
-  is_safe_name "$value" || die "metadata_invalid_name:$label"
+  is_safe_name "$value" || die "metadata_invalid_name"
 }
 
 validate_subscription_binding() {
   local label="$1" value="$2" expected_sub="$3"
   local embedded
   embedded="$(printf '%s' "$value" | sed -n 's|^/subscriptions/\([^/]*\).*$|\1|p')"
-  [[ "$embedded" == "$expected_sub" ]] || die "metadata_wrong_subscription_binding:$label"
+  [[ "$embedded" == "$expected_sub" ]] || die "metadata_wrong_subscription_binding"
 }
 
 # --- Metadata parsing ---
@@ -135,35 +159,23 @@ validate_subscription_binding() {
 env_value() {
   local file="$1" key="$2" count
   count="$(grep -c "^${key}=" "$file" || true)"
-  [[ "$count" == "1" ]] || die "metadata_missing_or_duplicate_field:$key"
+  [[ "$count" == "1" ]] || die "field_missing_or_duplicate"
   sed -n "s/^${key}=//p" "$file"
 }
 
+# --- State file management ---
+
 write_state() {
   local phase="$1"
-  # Unpredictable same-directory temp file; reject pre-created symlinks
-  local temporary="${STATE_FILE}.$$.$RANDOM"
-  [[ ! -e "$temporary" && ! -L "$temporary" ]] || die "state_temp_file_exists:$temporary"
+  # Use mktemp in same directory; cleanup on any failure
+  local temporary
+  temporary="$(mktemp "${STATE_FILE}.XXXXXXXX")" || die "state_temp_create_failed"
+  chmod 600 "$temporary"
+  # Cleanup trap for this subshell scope
+  _state_temp_cleanup() { rm -f "$temporary" 2>/dev/null; }
+  trap _state_temp_cleanup EXIT
 
   if [[ "$phase" == "retired" ]]; then
-    # -------------------------------------------------------------------
-    # Terminal state schema: betstan.identity-retirement-terminal.v1
-    # Exact unique-key-per-line format, 0600 permissions.
-    # This is the reviewed handoff contract for audit-oci-primary-retirement-stan.sh.
-    # The audit agent reads these fields directly to re-prove exact object absence
-    # after optional metadata cleanup, without broad name searches.
-    #
-    # Keys (23 total, each unique, one per line):
-    #   schema, phase, metadata_sha256,
-    #   tenant_id, subscription_id, repository,
-    #   migration_app_id, recovery_app_id,
-    #   migration_sp_object_id, recovery_sp_object_id,
-    #   role_assignment_id_1, role_assignment_id_2, role_assignment_id_3,
-    #   custom_role_id_1, custom_role_id_2,
-    #   retained_sp_object_id, retained_sp_display_name, retained_secret_name,
-    #   migration_environment, recovery_environment,
-    #   migration_secret_name, recovery_secret_name, workflow_name
-    # -------------------------------------------------------------------
     {
       printf 'schema=betstan.identity-retirement-terminal.v1\n'
       printf 'phase=retired\n'
@@ -190,7 +202,6 @@ write_state() {
       printf 'workflow_name=oci-migration-recovery.yml\n'
     } > "$temporary"
   else
-    # Intermediate state: minimal keys for identity/resume validation only
     {
       printf 'schema=betstan.identity-retirement.v1\n'
       printf 'phase=%s\n' "$phase"
@@ -200,24 +211,49 @@ write_state() {
       printf 'repository=%s\n' "$GH_REPOSITORY"
     } > "$temporary"
   fi
-  chmod 600 "$temporary"
-  mv "$temporary" "$STATE_FILE"
+
+  # Validate temp was written correctly
+  [[ -s "$temporary" ]] || die "state_temp_write_failed"
+  mv "$temporary" "$STATE_FILE" || die "state_atomic_mv_failed"
+  trap - EXIT
+}
+
+# --- State validation ---
+
+validate_exact_field_set() {
+  local file="$1"; shift
+  local -a expected_keys=("$@")
+  local file_keys expected_sorted
+  file_keys="$(sed 's/=.*//' "$file" | sort)"
+  expected_sorted="$(printf '%s\n' "${expected_keys[@]}" | sort)"
+  [[ "$file_keys" == "$expected_sorted" ]] || die "state_field_set_mismatch"
+  # Reject duplicates
+  local unique_count total_count
+  unique_count="$(sed 's/=.*//' "$file" | sort -u | wc -l | tr -d ' ')"
+  total_count="$(wc -l < "$file" | tr -d ' ')"
+  [[ "$unique_count" == "$total_count" ]] || die "state_duplicate_fields"
+  # Reject empty values
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[a-z_0-9]+=.+$ ]] || die "state_empty_or_malformed_field"
+  done < "$file"
 }
 
 validate_state_identity() {
   [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
   local state_perms
   state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
-  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions:$state_perms"
+  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions"
   local state_schema
   state_schema="$(env_value "$STATE_FILE" schema)"
-  [[ "$state_schema" == "betstan.identity-retirement.v1" || "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
-    die "retirement_state_schema_differs"
-  # Metadata digest binding: mandatory for intermediate state; skipped for terminal
-  # (metadata may have been cleaned up after terminal verify)
   if [[ "$state_schema" == "betstan.identity-retirement.v1" ]]; then
+    validate_exact_field_set "$STATE_FILE" "${INTERMEDIATE_STATE_KEYS[@]}"
     [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
       die "retirement_state_metadata_differs"
+  elif [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]]; then
+    validate_exact_field_set "$STATE_FILE" "${TERMINAL_STATE_KEYS[@]}"
+  else
+    die "retirement_state_schema_invalid"
   fi
   [[ "$(env_value "$STATE_FILE" tenant_id)" == "$TENANT_ID" ]] ||
     die "retirement_state_tenant_differs"
@@ -233,11 +269,12 @@ load_from_terminal_state() {
   [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die "retirement_state_missing"
   local state_perms
   state_perms="$(stat -f '%Lp' "$STATE_FILE" 2>/dev/null || stat -c '%a' "$STATE_FILE" 2>/dev/null)"
-  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions:$state_perms"
+  [[ "$state_perms" == "600" ]] || die "state_file_wrong_permissions"
   local state_schema
   state_schema="$(env_value "$STATE_FILE" schema)"
   [[ "$state_schema" == "betstan.identity-retirement-terminal.v1" ]] ||
     die "state_not_terminal_schema:cannot_verify_without_metadata"
+  validate_exact_field_set "$STATE_FILE" "${TERMINAL_STATE_KEYS[@]}"
   [[ "$(env_value "$STATE_FILE" phase)" == "retired" ]] ||
     die "state_not_retired:cannot_verify_without_metadata"
 
@@ -258,8 +295,40 @@ load_from_terminal_state() {
   RETAINED_SP_DISPLAY_NAME="$(env_value "$STATE_FILE" retained_sp_display_name)"
   RETAINED_SECRET_NAME="$(env_value "$STATE_FILE" retained_secret_name)"
 
+  # Validate every terminal value
+  validate_guid_field "tenant_id" "$TENANT_ID"
+  validate_guid_field "subscription_id" "$SUBSCRIPTION_ID"
+  validate_guid_field "migration_app_id" "$MIGRATION_APP_ID"
+  validate_guid_field "recovery_app_id" "$RECOVERY_APP_ID"
+  validate_guid_field "migration_sp_object_id" "$MIGRATION_SP_OBJECT_ID"
+  validate_guid_field "recovery_sp_object_id" "$RECOVERY_SP_OBJECT_ID"
+  validate_guid_field "retained_sp_object_id" "$RETAINED_SP_OBJECT_ID"
+  validate_guid_field "custom_role_id_1" "$CUSTOM_ROLE_ID_1"
+  validate_guid_field "custom_role_id_2" "$CUSTOM_ROLE_ID_2"
+  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_1" || die "terminal_state_invalid_ra_id"
+  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_2" || die "terminal_state_invalid_ra_id"
+  is_valid_role_assignment_id "$ROLE_ASSIGNMENT_ID_3" || die "terminal_state_invalid_ra_id"
+
+  # Validate fixed bindings
+  [[ "$RETAINED_SP_DISPLAY_NAME" == "betstan-github-sp" ]] || die "terminal_state_fixed_name_mismatch"
+  [[ "$RETAINED_SECRET_NAME" == "AZURE_CREDENTIALS" ]] || die "terminal_state_fixed_name_mismatch"
+  [[ "$MIGRATION_ENV" == "oci-migration" ]] || die "terminal_state_fixed_name_mismatch"
+  [[ "$RECOVERY_ENV" == "azure-migration-recovery" ]] || die "terminal_state_fixed_name_mismatch"
+  [[ "$(env_value "$STATE_FILE" migration_secret_name)" == "OCI_MIGRATION_AZURE_CREDENTIALS" ]] ||
+    die "terminal_state_fixed_name_mismatch"
+  [[ "$(env_value "$STATE_FILE" recovery_secret_name)" == "AZURE_MIGRATION_RECOVERY_CREDENTIALS" ]] ||
+    die "terminal_state_fixed_name_mismatch"
+  [[ "$(env_value "$STATE_FILE" workflow_name)" == "oci-migration-recovery.yml" ]] ||
+    die "terminal_state_fixed_name_mismatch"
+
   [[ "$(env_value "$STATE_FILE" repository)" == "$GH_REPOSITORY" ]] ||
     die "terminal_state_repository_mismatch"
+
+  # Compare terminal fields to loaded metadata when metadata is present
+  if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]]; then
+    [[ "$(env_value "$STATE_FILE" metadata_sha256)" == "$(sha256_file "$METADATA_FILE")" ]] ||
+      die "terminal_state_metadata_digest_mismatch"
+  fi
 }
 
 # --- Field declarations ---
@@ -280,15 +349,14 @@ load_metadata() {
   [[ "$METADATA_FILE" == /* ]] || die "metadata_path_not_absolute"
   [[ -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]] || die "metadata_file_missing_or_symlink"
 
-  # Require restrictive permissions
   local meta_perms
   meta_perms="$(stat -f '%Lp' "$METADATA_FILE" 2>/dev/null || stat -c '%a' "$METADATA_FILE" 2>/dev/null)"
-  [[ "$meta_perms" == "600" ]] || die "metadata_file_wrong_permissions:$meta_perms"
+  [[ "$meta_perms" == "600" ]] || die "metadata_file_wrong_permissions"
 
   local line_num=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_num=$((line_num + 1))
-    [[ "$line" =~ ^[a-z_0-9]+= ]] || die "metadata_malformed_line:$line_num"
+    [[ "$line" =~ ^[a-z_0-9]+= ]] || die "metadata_malformed_line"
   done < "$METADATA_FILE"
 
   local file_keys expected_keys
@@ -334,7 +402,7 @@ load_metadata() {
     RA3_PRINCIPAL RA3_ROLE_DEF RA3_SCOPE \
     CUSTOM_ROLE_ID_1 CUSTOM_ROLE_ID_2 CR1_SCOPE CR2_SCOPE \
     MIGRATION_ENV RECOVERY_ENV RETAINED_SP_DISPLAY_NAME RETAINED_SECRET_NAME; do
-    [[ -n "${!field}" ]] || die "metadata_empty_field:$field"
+    [[ -n "${!field}" ]] || die "metadata_empty_field"
   done
 
   # GUID validation
@@ -392,6 +460,11 @@ load_metadata() {
   [[ "$MIGRATION_ENV" == "oci-migration" ]] || die "metadata_migration_env_name_mismatch"
   [[ "$RECOVERY_ENV" == "azure-migration-recovery" ]] || die "metadata_recovery_env_name_mismatch"
 
+  # Repository must match fixed value
+  local meta_repo
+  meta_repo="$(env_value "$METADATA_FILE" repository)"
+  [[ "$meta_repo" == "$GH_REPOSITORY" ]] || die "metadata_repository_mismatch"
+
   # Uniqueness
   [[ "$MIGRATION_APP_ID" != "$RECOVERY_APP_ID" ]] || die "metadata_duplicate_app_ids"
   [[ "$MIGRATION_SP_OBJECT_ID" != "$RECOVERY_SP_OBJECT_ID" ]] || die "metadata_duplicate_sp_object_ids"
@@ -406,39 +479,38 @@ load_metadata() {
   for field in RA1_PRINCIPAL RA2_PRINCIPAL RA3_PRINCIPAL; do
     local val="${!field}"
     [[ "$val" == "$MIGRATION_SP_OBJECT_ID" || "$val" == "$RECOVERY_SP_OBJECT_ID" ]] ||
-      die "metadata_principal_not_temporary_sp:$field=$val"
+      die "metadata_principal_not_temporary_sp"
   done
 }
 
 # --- GitHub repository and environment variable queries ---
-# Environment values override repository values, so both scopes must be verified/set.
 
 query_recovery_variable_repo() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" 2>/dev/null)" ||
     die "recovery_variable_repo_query_failed"
-  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false:scope=repo,actual=$value"
+  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false_repo"
 }
 
 query_recovery_variable_env() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ENABLED --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" 2>/dev/null)" ||
     die "recovery_variable_env_query_failed"
-  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false:scope=env,actual=$value"
+  [[ "$value" == "false" ]] || die "recovery_enabled_must_be_false_env"
 }
 
 query_arm_variable_repo() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" 2>/dev/null)" ||
     die "arm_variable_repo_query_failed"
-  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero:scope=repo,actual=$value"
+  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero_repo"
 }
 
 query_arm_variable_env() {
   local value
   value="$(gh variable get OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH --repo "$GH_REPOSITORY" --env "$RECOVERY_ENV" 2>/dev/null)" ||
     die "arm_variable_env_query_failed"
-  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero:scope=env,actual=$value"
+  [[ "$value" == "0" ]] || die "arm_epoch_must_be_zero_env"
 }
 
 query_all_guard_variables() {
@@ -478,12 +550,10 @@ set_all_guard_variables() {
 verify_azure_context() {
   local actual_sub
   actual_sub="$(az account show --query 'id' -o tsv)" || die "azure_account_unavailable"
-  [[ "$actual_sub" == "$SUBSCRIPTION_ID" ]] ||
-    die "wrong_subscription:expected=$SUBSCRIPTION_ID,actual=$actual_sub"
+  [[ "$actual_sub" == "$SUBSCRIPTION_ID" ]] || die "wrong_subscription"
   local actual_tenant
   actual_tenant="$(az account show --query 'tenantId' -o tsv)" || die "azure_tenant_unavailable"
-  [[ "$actual_tenant" == "$TENANT_ID" ]] ||
-    die "wrong_tenant:expected=$TENANT_ID,actual=$actual_tenant"
+  [[ "$actual_tenant" == "$TENANT_ID" ]] || die "wrong_tenant"
 }
 
 # --- Fail-closed probes (present/absent/die-on-error) ---
@@ -491,68 +561,68 @@ verify_azure_context() {
 probe_sp_presence() {
   local object_id="$1" output rc=0
   output="$(az ad sp list --filter "id eq '$object_id'" --query 'length(@)' -o tsv 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_sp_api_error:$object_id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_sp_api_error"
   case "$output" in
     0) printf 'absent' ;; 1) printf 'present' ;;
-    *) die "probe_sp_unexpected_response:$object_id count=$output" ;;
+    *) die "probe_sp_unexpected_count" ;;
   esac
 }
 
 probe_sp_app_id() {
   local object_id="$1" output rc=0
   output="$(az ad sp list --filter "id eq '$object_id'" --query '[0].appId' -o tsv 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_sp_app_id_api_error:$object_id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_sp_app_id_api_error"
   printf '%s' "$output"
 }
 
 probe_app_presence() {
   local app_id="$1" output rc=0
   output="$(az ad app list --filter "appId eq '$app_id'" --query 'length(@)' -o tsv 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_app_api_error:$app_id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_app_api_error"
   case "$output" in
     0) printf 'absent' ;; 1) printf 'present' ;;
-    *) die "probe_app_unexpected_response:$app_id count=$output" ;;
+    *) die "probe_app_unexpected_count" ;;
   esac
 }
 
 probe_role_assignment_presence() {
   local id="$1" output rc=0
   output="$(az role assignment list --all --query "[?id=='$id'] | length(@)" -o tsv 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_role_assignment_api_error:$id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_role_assignment_api_error"
   case "$output" in
     0) printf 'absent' ;; 1) printf 'present' ;;
-    *) die "probe_role_assignment_unexpected_response:$id count=$output" ;;
+    *) die "probe_role_assignment_unexpected_count" ;;
   esac
 }
 
 probe_role_assignment_details() {
   local id="$1" output rc=0
   output="$(az role assignment list --all --query "[?id=='$id'] | [0]" -o json 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_role_assignment_details_api_error:$id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_role_assignment_details_api_error"
   printf '%s' "$output"
 }
 
 probe_custom_role_presence() {
   local role_id="$1" output rc=0
   output="$(az role definition list --name "$role_id" --query 'length(@)' -o tsv 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_custom_role_api_error:$role_id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_custom_role_api_error"
   case "$output" in
     0) printf 'absent' ;; 1) printf 'present' ;;
-    *) die "probe_custom_role_unexpected_response:$role_id count=$output" ;;
+    *) die "probe_custom_role_unexpected_count" ;;
   esac
 }
 
 probe_custom_role_details() {
   local role_id="$1" output rc=0
   output="$(az role definition list --name "$role_id" --query '[0]' -o json 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_custom_role_details_api_error:$role_id rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_custom_role_details_api_error"
   printf '%s' "$output"
 }
 
 probe_env_secret_presence() {
   local env_name="$1" secret_name="$2" output rc=0
   output="$(gh secret list --repo "$GH_REPOSITORY" --env "$env_name" 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_secret_api_error:$env_name/$secret_name rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_secret_api_error"
   if printf '%s\n' "$output" | awk '{print $1}' | grep -qxF "$secret_name"; then
     printf 'present'
   else
@@ -563,7 +633,7 @@ probe_env_secret_presence() {
 probe_repo_secret_presence() {
   local secret_name="$1" output rc=0
   output="$(gh secret list --repo "$GH_REPOSITORY" 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "probe_repo_secret_api_error:$secret_name rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "probe_repo_secret_api_error"
   if printf '%s\n' "$output" | awk '{print $1}' | grep -qxF "$secret_name"; then
     printf 'present'
   else
@@ -576,31 +646,27 @@ probe_repo_secret_presence() {
 verify_retained_identity() {
   local sp_output rc=0
   sp_output="$(az ad sp list --filter "id eq '$RETAINED_SP_OBJECT_ID'" -o json 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "retained_sp_query_api_error:rc=$rc"
+  [[ "$rc" -eq 0 ]] || die "retained_sp_query_api_error"
   local sp_count
   sp_count="$(printf '%s' "$sp_output" | jq 'length')" || die "retained_sp_response_parse_error"
-  [[ "$sp_count" == "1" ]] || die "retained_sp_not_found:$RETAINED_SP_OBJECT_ID"
+  [[ "$sp_count" == "1" ]] || die "retained_sp_not_found"
   local actual_display
   actual_display="$(printf '%s' "$sp_output" | jq -r '.[0].displayName // empty')"
   [[ "$actual_display" == "$RETAINED_SP_DISPLAY_NAME" ]] ||
-    die "retained_sp_display_name_mismatch:expected=$RETAINED_SP_DISPLAY_NAME,actual=$actual_display"
+    die "retained_sp_display_name_mismatch"
 
   local secret_status
   secret_status="$(probe_repo_secret_presence "$RETAINED_SECRET_NAME")"
-  [[ "$secret_status" == "present" ]] || die "retained_secret_not_found:$RETAINED_SECRET_NAME"
+  [[ "$secret_status" == "present" ]] || die "retained_secret_not_found"
 }
 
 verify_gh_repository() {
   local expected_repo
   expected_repo="$(env_value "$METADATA_FILE" repository)"
-  [[ "$expected_repo" == "$GH_REPOSITORY" ]] ||
-    die "wrong_repository:expected=$expected_repo,actual=$GH_REPOSITORY"
+  [[ "$expected_repo" == "$GH_REPOSITORY" ]] || die "wrong_repository"
 }
 
 # --- Relationship verification (plan phase) ---
-# Verifies exact SP→app, RA→principal/role/scope, CR→scope before deletion intent.
-# On initial plan: present objects must have correct relationships; proven-absent
-# is noted but accepted. On resume: all already-absent is expected.
 
 verify_sp_relationship() {
   local sp_oid="$1" expected_app_id="$2" label="$3"
@@ -610,9 +676,8 @@ verify_sp_relationship() {
     local actual_app_id
     actual_app_id="$(probe_sp_app_id "$sp_oid")"
     [[ "$actual_app_id" == "$expected_app_id" ]] ||
-      die "sp_app_id_mismatch:$label expected=$expected_app_id actual=$actual_app_id"
+      die "sp_app_id_mismatch"
   fi
-  # absent is acceptable on plan (object may have been previously deleted)
 }
 
 verify_role_assignment_relationship() {
@@ -627,17 +692,16 @@ verify_role_assignment_relationship() {
     actual_role_def="$(printf '%s' "$details" | jq -r '.roleDefinitionId // empty')"
     actual_scope="$(printf '%s' "$details" | jq -r '.scope // empty')"
     [[ "$actual_principal" == "$expected_principal" ]] ||
-      die "ra_principal_mismatch:$label expected=$expected_principal actual=$actual_principal"
-    # Case-insensitive comparison for Azure resource paths
+      die "ra_principal_mismatch"
     local lower_actual_role lower_expected_role lower_actual_scope lower_expected_scope
     lower_actual_role="$(printf '%s' "$actual_role_def" | tr '[:upper:]' '[:lower:]')"
     lower_expected_role="$(printf '%s' "$expected_role_def" | tr '[:upper:]' '[:lower:]')"
     lower_actual_scope="$(printf '%s' "$actual_scope" | tr '[:upper:]' '[:lower:]')"
     lower_expected_scope="$(printf '%s' "$expected_scope" | tr '[:upper:]' '[:lower:]')"
     [[ "$lower_actual_role" == "$lower_expected_role" ]] ||
-      die "ra_role_definition_mismatch:$label expected=$expected_role_def actual=$actual_role_def"
+      die "ra_role_definition_mismatch"
     [[ "$lower_actual_scope" == "$lower_expected_scope" ]] ||
-      die "ra_scope_mismatch:$label expected=$expected_scope actual=$actual_scope"
+      die "ra_scope_mismatch"
   fi
 }
 
@@ -648,13 +712,18 @@ verify_custom_role_relationship() {
   if [[ "$status" == "present" ]]; then
     local details
     details="$(probe_custom_role_details "$role_id")"
-    local actual_id actual_scopes
+    local actual_id
     actual_id="$(printf '%s' "$details" | jq -r '.name // empty')"
-    [[ "$actual_id" == "$role_id" ]] ||
-      die "custom_role_id_mismatch:$label expected=$role_id actual=$actual_id"
-    actual_scopes="$(printf '%s' "$details" | jq -r '.assignableScopes[]? // empty')"
-    printf '%s\n' "$actual_scopes" | grep -qxiF "$expected_scope" ||
-      die "custom_role_scope_mismatch:$label expected=$expected_scope"
+    [[ "$actual_id" == "$role_id" ]] || die "custom_role_id_mismatch"
+    # Require EXACT assignableScopes set (one scope only, no extras)
+    local scope_count actual_scope
+    scope_count="$(printf '%s' "$details" | jq '.assignableScopes | length')"
+    [[ "$scope_count" == "1" ]] || die "custom_role_extra_scopes"
+    actual_scope="$(printf '%s' "$details" | jq -r '.assignableScopes[0] // empty')"
+    local lower_actual lower_expected
+    lower_actual="$(printf '%s' "$actual_scope" | tr '[:upper:]' '[:lower:]')"
+    lower_expected="$(printf '%s' "$expected_scope" | tr '[:upper:]' '[:lower:]')"
+    [[ "$lower_actual" == "$lower_expected" ]] || die "custom_role_scope_mismatch"
   fi
 }
 
@@ -681,7 +750,7 @@ delete_role_assignment() {
   if [[ "$rc" -ne 0 ]]; then
     local status
     status="$(probe_role_assignment_presence "$id")"
-    [[ "$status" == "absent" ]] || die "role_assignment_delete_failed:$id"
+    [[ "$status" == "absent" ]] || die "role_assignment_delete_failed"
   fi
 }
 
@@ -691,7 +760,7 @@ delete_sp() {
   if [[ "$rc" -ne 0 ]]; then
     local status
     status="$(probe_sp_presence "$oid")"
-    [[ "$status" == "absent" ]] || die "sp_delete_failed:$oid"
+    [[ "$status" == "absent" ]] || die "sp_delete_failed"
   fi
 }
 
@@ -701,7 +770,7 @@ delete_app_registration() {
   if [[ "$rc" -ne 0 ]]; then
     local status
     status="$(probe_app_presence "$app_id")"
-    [[ "$status" == "absent" ]] || die "app_registration_delete_failed:$app_id"
+    [[ "$status" == "absent" ]] || die "app_registration_delete_failed"
   fi
 }
 
@@ -711,7 +780,7 @@ delete_custom_role() {
   if [[ "$rc" -ne 0 ]]; then
     local status
     status="$(probe_custom_role_presence "$role_id")"
-    [[ "$status" == "absent" ]] || die "custom_role_delete_failed:$role_id"
+    [[ "$status" == "absent" ]] || die "custom_role_delete_failed"
   fi
 }
 
@@ -721,7 +790,7 @@ delete_environment_secret() {
   if [[ "$rc" -ne 0 ]]; then
     local status
     status="$(probe_env_secret_presence "$env_name" "$secret_name")"
-    [[ "$status" == "absent" ]] || die "github_secret_delete_failed:$env_name/$secret_name"
+    [[ "$status" == "absent" ]] || die "github_secret_delete_failed"
   fi
 }
 
@@ -730,34 +799,30 @@ disable_workflow() {
   if ! gh workflow disable "$wf" --repo "$GH_REPOSITORY" 2>/dev/null; then
     local state rc=0
     state="$(gh workflow view "$wf" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
-    [[ "$rc" -eq 0 ]] || die "workflow_view_api_error:$wf rc=$rc"
+    [[ "$rc" -eq 0 ]] || die "workflow_view_api_error"
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] ||
-      die "workflow_disable_failed:$wf"
+      die "workflow_disable_failed"
   fi
 }
 
-# Verify no in-progress or queued runs of the workflow exist before crossing
-# the identity boundary. Fail closed on API errors; only accept proven-zero.
+# Verify no nonterminal runs across all fenced workflows/statuses.
+# Fail closed on API errors; only accept proven-zero.
 verify_no_active_runs() {
-  local wf="$1" output rc=0 count
-  output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
-    --status in_progress --json databaseId --jq 'length' 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error:$wf rc=$rc"
-  count="$output"
-  [[ "$count" == "0" ]] || die "active_workflow_runs_exist:$wf in_progress=$count"
-
-  rc=0
-  output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
-    --status queued --json databaseId --jq 'length' 2>&1)" || rc=$?
-  [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error:$wf rc=$rc"
-  count="$output"
-  [[ "$count" == "0" ]] || die "queued_workflow_runs_exist:$wf queued=$count"
+  local wf status output rc count
+  for wf in "${FENCED_WORKFLOWS[@]}"; do
+    for status in "${RUN_STATUSES[@]}"; do
+      rc=0
+      output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
+        --status "$status" --json databaseId --jq 'length' 2>&1)" || rc=$?
+      [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error"
+      count="$output"
+      [[ "$count" =~ ^[0-9]+$ ]] || die "workflow_run_list_parse_error"
+      [[ "$count" == "0" ]] || die "nonterminal_workflow_runs_exist"
+    done
+  done
 }
 
 # --- Verification helpers with bounded propagation retries ---
-# Retries ONLY when probe returns "present" (Entra/GitHub propagation delay).
-# API errors are never retried — they die immediately (fail-closed).
-# Retries are bounded by VERIFY_MAX_RETRIES/VERIFY_RETRY_SLEEP (validated integers).
 
 verify_sp_absent() {
   local oid="$1" attempt=0 s
@@ -765,7 +830,7 @@ verify_sp_absent() {
     s="$(probe_sp_presence "$oid")"
     [[ "$s" == "present" ]] || break
     [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "sp_still_present_after_retries:$oid attempts=$((attempt+1))"
+      die "sp_still_present_after_retries"
     attempt=$((attempt+1))
     sleep "$VERIFY_RETRY_SLEEP"
   done
@@ -777,7 +842,7 @@ verify_app_absent() {
     s="$(probe_app_presence "$app_id")"
     [[ "$s" == "present" ]] || break
     [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "app_still_present_after_retries:$app_id attempts=$((attempt+1))"
+      die "app_still_present_after_retries"
     attempt=$((attempt+1))
     sleep "$VERIFY_RETRY_SLEEP"
   done
@@ -789,7 +854,7 @@ verify_role_assignment_absent() {
     s="$(probe_role_assignment_presence "$id")"
     [[ "$s" == "present" ]] || break
     [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "role_assignment_still_present_after_retries:$id attempts=$((attempt+1))"
+      die "role_assignment_still_present_after_retries"
     attempt=$((attempt+1))
     sleep "$VERIFY_RETRY_SLEEP"
   done
@@ -801,7 +866,7 @@ verify_custom_role_absent() {
     s="$(probe_custom_role_presence "$role_id")"
     [[ "$s" == "present" ]] || break
     [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "custom_role_still_present_after_retries:$role_id attempts=$((attempt+1))"
+      die "custom_role_still_present_after_retries"
     attempt=$((attempt+1))
     sleep "$VERIFY_RETRY_SLEEP"
   done
@@ -813,7 +878,7 @@ verify_secret_absent() {
     s="$(probe_env_secret_presence "$env_name" "$secret_name")"
     [[ "$s" == "present" ]] || break
     [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-      die "secret_still_present_after_retries:$env_name/$secret_name attempts=$((attempt+1))"
+      die "secret_still_present_after_retries"
     attempt=$((attempt+1))
     sleep "$VERIFY_RETRY_SLEEP"
   done
@@ -824,16 +889,35 @@ verify_workflow_disabled() {
   while true; do
     rc=0
     state="$(gh workflow view "$wf" --repo "$GH_REPOSITORY" --json state --jq '.state' 2>&1)" || rc=$?
-    [[ "$rc" -eq 0 ]] || die "workflow_view_api_error:$wf rc=$rc"
+    [[ "$rc" -eq 0 ]] || die "workflow_view_api_error"
     [[ "$state" == "disabled_manually" || "$state" == "disabled" ]] || {
       [[ "$attempt" -lt "$VERIFY_MAX_RETRIES" ]] ||
-        die "workflow_still_enabled_after_retries:$wf attempts=$((attempt+1))"
+        die "workflow_still_enabled_after_retries"
       attempt=$((attempt+1))
       sleep "$VERIFY_RETRY_SLEEP"
       continue
     }
     break
   done
+}
+
+# Full absence verification for all temporary objects
+verify_all_absent() {
+  verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_1"
+  verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_2"
+  verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_3"
+  verify_sp_absent "$MIGRATION_SP_OBJECT_ID"
+  verify_sp_absent "$RECOVERY_SP_OBJECT_ID"
+  verify_app_absent "$MIGRATION_APP_ID"
+  verify_app_absent "$RECOVERY_APP_ID"
+  verify_custom_role_absent "$CUSTOM_ROLE_ID_1"
+  verify_custom_role_absent "$CUSTOM_ROLE_ID_2"
+  verify_secret_absent "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
+  verify_secret_absent "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
+  verify_workflow_disabled "oci-migration-recovery.yml"
+  query_all_guard_variables
+  verify_no_active_runs
+  verify_retained_identity
 }
 
 # --- Main ---
@@ -845,15 +929,21 @@ validate_retry_config
 
 [[ -n "$STATE_DIR" ]] || die "state_dir_not_specified"
 [[ "$STATE_DIR" == /* ]] || die "state_dir_not_absolute"
+# Reject existing symlink BEFORE any mkdir/chmod
+if [[ -e "$STATE_DIR" || -L "$STATE_DIR" ]]; then
+  [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || die "state_dir_symlink"
+fi
+# Validate resolved parent is sane (not /, not /tmp, not broad)
+STATE_DIR_PARENT="$(dirname "$STATE_DIR")"
+[[ -d "$STATE_DIR_PARENT" && ! -L "$STATE_DIR_PARENT" ]] || die "state_dir_parent_invalid"
+STATE_DIR_PARENT_REAL="$(cd "$STATE_DIR_PARENT" && pwd -P)"
+[[ "$STATE_DIR_PARENT_REAL" == "$STATE_DIR_PARENT" ]] || die "state_dir_parent_resolves_elsewhere"
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
-# Reject symlinked state directory or any component that resolves elsewhere
-[[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || die "state_dir_symlink"
 STATE_DIR_REAL="$(cd "$STATE_DIR" && pwd -P)"
-[[ "$STATE_DIR_REAL" == "$STATE_DIR" ]] || die "state_dir_resolves_elsewhere:$STATE_DIR_REAL"
-# Verify directory permissions
+[[ "$STATE_DIR_REAL" == "$STATE_DIR" ]] || die "state_dir_resolves_elsewhere"
 STATE_DIR_PERMS="$(stat -f '%Lp' "$STATE_DIR" 2>/dev/null || stat -c '%a' "$STATE_DIR" 2>/dev/null)"
-[[ "$STATE_DIR_PERMS" == "700" ]] || die "state_dir_wrong_permissions:$STATE_DIR_PERMS"
+[[ "$STATE_DIR_PERMS" == "700" ]] || die "state_dir_wrong_permissions"
 STATE_FILE="$STATE_DIR/identity-retirement-state.env"
 
 # Metadata loading: required for plan/execute; for verify, load from terminal state
@@ -873,8 +963,7 @@ case "$MODE" in
     query_all_guard_variables
     verify_retained_identity
     verify_all_relationships
-
-    printf 'identity_retirement=READY phase=plan '
+    printf 'identity_retirement=READY '
     printf 'role_assignments=3 sps=2 apps=2 custom_roles=2 '
     printf 'secrets=2 workflow=oci-migration-recovery.yml\n'
     ;;
@@ -912,7 +1001,7 @@ case "$MODE" in
           local_phase=runs-fence
           ;;
         runs-fence)
-          verify_no_active_runs "oci-migration-recovery.yml"
+          verify_no_active_runs
           write_state secrets-intent
           local_phase=secrets-intent
           ;;
@@ -944,16 +1033,20 @@ case "$MODE" in
         custom-roles-intent)
           delete_custom_role "$CUSTOM_ROLE_ID_1"
           delete_custom_role "$CUSTOM_ROLE_ID_2"
+          write_state verification-intent
+          local_phase=verification-intent
+          ;;
+        verification-intent)
+          verify_all_absent
           write_state retired
           local_phase=retired
           ;;
         retired)
-          verify_retained_identity
-          query_all_guard_variables
-          printf 'IDENTITY_RETIRED objects_deleted=9 secrets_deleted=2 workflow_disabled=1\n'
+          verify_all_absent
+          printf 'IDENTITY_RETIRED objects_absent=9 secrets_absent=2 workflow_disabled=1\n'
           break
           ;;
-        *) die "unknown_state_phase:$local_phase" ;;
+        *) die "unknown_state_phase" ;;
       esac
     done
     ;;
@@ -963,7 +1056,6 @@ case "$MODE" in
     query_all_guard_variables
 
     if [[ "$METADATA_LOADED_FROM_STATE" == "1" ]]; then
-      # Already validated in load_from_terminal_state; phase is retired
       :
     elif [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
       validate_state_identity
@@ -972,19 +1064,7 @@ case "$MODE" in
       die "retirement_state_missing"
     fi
 
-    verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_1"
-    verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_2"
-    verify_role_assignment_absent "$ROLE_ASSIGNMENT_ID_3"
-    verify_sp_absent "$MIGRATION_SP_OBJECT_ID"
-    verify_sp_absent "$RECOVERY_SP_OBJECT_ID"
-    verify_app_absent "$MIGRATION_APP_ID"
-    verify_app_absent "$RECOVERY_APP_ID"
-    verify_custom_role_absent "$CUSTOM_ROLE_ID_1"
-    verify_custom_role_absent "$CUSTOM_ROLE_ID_2"
-    verify_secret_absent "$MIGRATION_ENV" "OCI_MIGRATION_AZURE_CREDENTIALS"
-    verify_secret_absent "$RECOVERY_ENV" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"
-    verify_workflow_disabled "oci-migration-recovery.yml"
-    verify_retained_identity
+    verify_all_absent
 
     printf 'IDENTITY_RETIREMENT_VERIFIED all_temporary_objects_absent=true retained_identity_intact=true\n'
 
@@ -994,5 +1074,5 @@ case "$MODE" in
     fi
     ;;
 
-  *) die "unknown_mode:$MODE" ;;
+  *) die "unknown_mode" ;;
 esac
