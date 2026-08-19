@@ -57,7 +57,7 @@ TERMINAL_STATE_KEYS=(
 )
 
 # All nonterminal workflow run statuses to fence
-RUN_STATUSES=(queued in_progress waiting pending requested)
+RUN_STATUSES=(queued in_progress waiting pending requested action_required stale)
 
 # Both workflows to fence before identity boundary
 FENCED_WORKFLOWS=(oci-migrate.yml oci-migration-recovery.yml)
@@ -812,7 +812,7 @@ verify_no_active_runs() {
   for wf in "${FENCED_WORKFLOWS[@]}"; do
     for status in "${RUN_STATUSES[@]}"; do
       rc=0
-      output="$(gh run list --workflow "$wf" --repo "$GH_REPOSITORY" \
+      output="$(gh run list --all --workflow "$wf" --repo "$GH_REPOSITORY" \
         --status "$status" --json databaseId --jq 'length' 2>&1)" || rc=$?
       [[ "$rc" -eq 0 ]] || die "workflow_run_list_api_error"
       count="$output"

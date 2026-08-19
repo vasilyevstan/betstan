@@ -255,6 +255,10 @@ case "${1:-}" in
           printf '%s\n' "${STUB_PENDING_RUNS}"
         elif [[ "${STUB_REQUESTED_RUNS:-0}" != "0" && "$*" == *"requested"* ]]; then
           printf '%s\n' "${STUB_REQUESTED_RUNS}"
+        elif [[ "${STUB_ACTION_REQUIRED_RUNS:-0}" != "0" && "$*" == *"action_required"* ]]; then
+          printf '%s\n' "${STUB_ACTION_REQUIRED_RUNS}"
+        elif [[ "${STUB_STALE_RUNS:-0}" != "0" && "$*" == *"stale"* ]]; then
+          printf '%s\n' "${STUB_STALE_RUNS}"
         else
           printf '0\n'
         fi ;;
@@ -642,9 +646,24 @@ expect_fail_with "pending_runs_block" "nonterminal_workflow_runs_exist" \
 # Requested runs block
 expect_fail_with "requested_runs_block" "nonterminal_workflow_runs_exist" \
   run_operator execute "$WORK_DIR/t-run-r" STUB_REQUESTED_RUNS=1
+# action_required runs block
+expect_fail_with "action_required_runs_block" "nonterminal_workflow_runs_exist" \
+  run_operator execute "$WORK_DIR/t-run-ar" STUB_ACTION_REQUIRED_RUNS=1
+# stale runs block
+expect_fail_with "stale_runs_block" "nonterminal_workflow_runs_exist" \
+  run_operator execute "$WORK_DIR/t-run-st" STUB_STALE_RUNS=1
 # Run list API error is fatal
 expect_fail_with "run_list_api_error_fatal" "workflow_run_list_api_error" \
   run_operator execute "$WORK_DIR/t-run-fail" STUB_RUN_LIST_FAIL=1
+
+# Verify --all flag is used in run list (disabled workflows need it)
+fixture_dir="$WORK_DIR/t-run-all-flag"
+run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
+if grep "run list" "$WORK_DIR/gh.log" | grep -q "\-\-all"; then
+  pass "run_list_uses_all_flag"
+else
+  fail "run_list_uses_all_flag (--all not found in gh log)"
+fi
 
 # Regression: gh workflow view --json is NOT used (stub rejects it)
 # The operator uses gh api instead; a successful execute proves no --json flag
