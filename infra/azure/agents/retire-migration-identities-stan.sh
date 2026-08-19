@@ -137,6 +137,26 @@ write_state() {
     printf 'tenant_id=%s\n' "$TENANT_ID"
     printf 'subscription_id=%s\n' "$SUBSCRIPTION_ID"
     printf 'repository=%s\n' "$GH_REPOSITORY"
+    # Terminal state: embed all exact IDs/bindings so the audit script can
+    # re-prove object absence after optional metadata cleanup, without broad
+    # name searches. This is the reviewed handoff contract for
+    # audit-oci-primary-retirement-stan.sh — it reads these fields directly.
+    if [[ "$phase" == "retired" ]]; then
+      printf 'migration_sp_object_id=%s\n' "$MIGRATION_SP_OBJECT_ID"
+      printf 'recovery_sp_object_id=%s\n' "$RECOVERY_SP_OBJECT_ID"
+      printf 'migration_app_id=%s\n' "$MIGRATION_APP_ID"
+      printf 'recovery_app_id=%s\n' "$RECOVERY_APP_ID"
+      printf 'role_assignment_id_1=%s\n' "$ROLE_ASSIGNMENT_ID_1"
+      printf 'role_assignment_id_2=%s\n' "$ROLE_ASSIGNMENT_ID_2"
+      printf 'role_assignment_id_3=%s\n' "$ROLE_ASSIGNMENT_ID_3"
+      printf 'custom_role_id_1=%s\n' "$CUSTOM_ROLE_ID_1"
+      printf 'custom_role_id_2=%s\n' "$CUSTOM_ROLE_ID_2"
+      printf 'migration_environment=%s\n' "$MIGRATION_ENV"
+      printf 'recovery_environment=%s\n' "$RECOVERY_ENV"
+      printf 'retained_sp_object_id=%s\n' "$RETAINED_SP_OBJECT_ID"
+      printf 'retained_sp_display_name=%s\n' "$RETAINED_SP_DISPLAY_NAME"
+      printf 'retained_secret_name=%s\n' "$RETAINED_SECRET_NAME"
+    fi
   } > "$temporary"
   chmod 600 "$temporary"
   mv "$temporary" "$STATE_FILE"
