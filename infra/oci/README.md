@@ -256,3 +256,11 @@ removes only the two exact resource groups, and verifies subscription-wide
 absence twice. It reports resource retirement separately from delayed Cost
 Management completion. AKS resource fingerprints and ETags are
 case-preserving; do not normalize or wildcard either value.
+
+After resource absence, run the separate
+`infra/azure/agents/retire-migration-identities-stan.sh` state machine with the
+exact private migration identity metadata, then run
+`infra/azure/agents/audit-oci-primary-retirement-stan.sh`. The identity
+operator must retain general Azure recreation configuration. The terminal
+audit reports resource completion separately from delayed billing ingestion
+and never mutates GitHub merely to clear an inert historical run record.

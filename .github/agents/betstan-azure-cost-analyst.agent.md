@@ -126,6 +126,16 @@ OCI is primary. When Azure is used temporarily as a frozen migration source:
 - search for detached/orphaned disks, snapshots, IPs, and managed groups;
 - keep delayed historical charges distinct from new post-deletion usage and
   continue bounded Cost Management checks until no new BetStan usage appears.
+- distinguish temporary migration/recovery identities from intentionally
+  retained Azure recreation configuration. An Entra application, service
+  principal, or GitHub secret is not a billable resource; verify its exact
+  role assignments and checked-in purpose before calling it an orphan;
+- require the exact temporary identity metadata or the dedicated identity
+  retirement operator before claiming temporary access is absent. Never infer
+  secret deletion from resource-group deletion or an operator statement;
+- report immediate resource retirement separately from delayed billing
+  ingestion. Historical cost posted after the deletion timestamp is not
+  evidence that a deleted resource is still active.
 
 Never treat stopped AKS as zero spend. Never recommend recreating Azure
 automatically after retirement.

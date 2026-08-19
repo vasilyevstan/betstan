@@ -52,15 +52,33 @@ primary BetStan resource group contents, historical snapshots, load
 balancer/IPs, disks, alerts, action group, and temporary migration/recovery
 identities and secrets.
 
+Keep resource deletion and identity deletion as separate state machines.
+After resource absence, use `retire-migration-identities-stan.sh` with the
+exact private metadata file. It may remove only the recorded migration and
+recovery identities, custom roles, assignments, and two environment secrets.
+It must retain the general Azure recreation application, repository
+`AZURE_CREDENTIALS`, and checked-in revival automation.
+
 If deletion is asynchronous, record the same resource identity and resume
 observation; never recreate or broaden deletion by a name pattern. Verify the
 subscription contains no BetStan AKS, VM/VMSS, disks, snapshots, load
 balancers, IPs, gateways, registries, workspaces, vaults, alerts, action
 groups, or orphaned managed group.
 
+Run `audit-oci-primary-retirement-stan.sh` after resource and identity
+retirement. It must distinguish immediate resource absence, delayed Cost
+Management ingestion, retained zero-cost recreation configuration, genuine
+temporary-access residue, and active workflow work.
+
+A GitHub run reported as queued is not automatically active or safe to delete.
+Classify it as an inert provider record only when the workflow is disabled,
+the run has zero jobs and pending deployments, its timestamps are stale, and
+its SHA cannot satisfy current master provenance. Report it; never re-enable,
+approve, or mutate production solely to clear history.
+
 The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
 subscription-wide resource absence; delayed Cost Management verification
 remains pending. Return `AZURE_RETIRED` only after later ActualCost and
-AmortizedCost checks show no new BetStan usage. A successful delete command alone is not
-completion. Otherwise return `NO_GO` with bounded evidence and the exact safe
-next action.
+AmortizedCost checks show no new BetStan usage. A successful delete command
+alone is not completion. Otherwise return `NO_GO` with bounded evidence and
+the exact safe next action.

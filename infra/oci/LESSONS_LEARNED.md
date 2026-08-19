@@ -160,6 +160,18 @@ conversation summaries are not authority.
   `poll error` when stdin is `/dev/null`. Send its graceful `Q` command so the
   trust-verifying pipeline remains fail-closed without rejecting a valid
   certificate.
+- Keep resource and temporary-identity retirement separate. Resource-group
+  deletion can remove scoped assignments but not app registrations, service
+  principals, custom roles, or protected GitHub secrets. Delete those through
+  exact private metadata and explicitly retain the zero-cost Azure recreation
+  identity and repository credential.
+- A GitHub run can remain `queued` with zero jobs, zero pending deployments,
+  and unchanged timestamps even when its workflow is disabled. Treat that as
+  a reported provider artifact only after exact provenance checks; never
+  re-enable or approve production work just to clear the record.
+- Fixed repository fixture directories are not safe when contract suites run
+  concurrently. Use unique temporary directories and ensure output filtering
+  cannot mask a non-zero test exit.
 - Delayed historical charges are not current resources. Continue bounded
   Cost Management checks until no new BetStan usage appears.
 

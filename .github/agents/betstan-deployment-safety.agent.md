@@ -138,6 +138,14 @@ A Running broker with missing consumers is not healthy production.
 - Do not broaden or narrow CI scope merely to manufacture a green result.
 - Keep secrets scans and workflow/script syntax checks in scope for infrastructure changes.
 - Before declaring a file missing, inspect `master`, PR ancestry, and later merge commits.
+- For every long protected operation, report the exact run ID, current phase,
+  pending environment name, and whether the next action is approval-bound,
+  provider-bound, or executing. A protected environment wait is progress, not
+  a hang.
+- Do not use top-level run status alone to classify a stale GitHub record.
+  Inspect jobs, pending deployments, workflow enablement, timestamps, and head
+  provenance. Never re-enable or approve a production-capable workflow merely
+  to make an old queue record disappear.
 
 ## Rollback
 

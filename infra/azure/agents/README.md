@@ -32,6 +32,9 @@
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
 - `decommission-stage-rg-stan.sh` — deletes the entire stage resource group to remove stage costs.
 - `reconcile-nodepool-profile-stan.sh` — creates or validates the `Standard_B4as_v2` + Managed 64 GiB OS disk profile and reconciles autoscaler `1..3`; it refuses workload cutover and legacy pool deletion.
+- `retire-production-stan.sh` — exact-inventory, resumable deletion of the retired BetStan Azure resource groups after OCI cutover.
+- `retire-migration-identities-stan.sh` — separate exact-metadata retirement of temporary migration/recovery identities and environment secrets while retaining Azure recreation configuration.
+- `audit-oci-primary-retirement-stan.sh` — read-only terminal audit for OCI health/free-tier state, Azure and identity absence, workflows, journal fences, and delayed billing.
 
 Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
 
