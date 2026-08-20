@@ -38,6 +38,34 @@
 
 Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
 
+## Temporary migration identity retirement
+
+Keep the 28-field metadata file and state directory outside the repository with
+mode `0600` and `0700`, respectively. Review `plan` before the destructive
+mode, then retain the terminal state for independent verification:
+
+```bash
+export IDENTITY_RETIREMENT_METADATA=/absolute/private/identity-metadata.env
+export IDENTITY_RETIREMENT_STATE_DIR=/absolute/private/identity-state
+
+./infra/azure/agents/retire-migration-identities-stan.sh plan
+./infra/azure/agents/retire-migration-identities-stan.sh execute
+./infra/azure/agents/retire-migration-identities-stan.sh verify
+```
+
+After reviewed metadata cleanup, `verify` can load the exact 23-field
+`betstan.identity-retirement-terminal.v1` state without the metadata file.
+The operator disables only `oci-migration-recovery.yml`; `oci-migrate.yml`
+remains available for future reconfiguration but is fenced twice and loses
+its temporary Azure environment secret before any identity deletion. Both
+workflows must have no nonterminal runs at the post-secret fence.
+
+Role-assignment IDs may use only subscription, resource-group, or the exact
+AKS managed-cluster scope, and each ID parent must equal its declared metadata
+scope. Deleted service principals are probed with a successful `--all`
+listing and exact client-side object-ID count because Azure CLI's server-side
+ID filter exits nonzero for an absent object.
+
 ## Required validation sequence for production changes
 
 ```

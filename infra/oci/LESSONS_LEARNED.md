@@ -174,6 +174,28 @@ conversation summaries are not authority.
   cannot mask a non-zero test exit.
 - Delayed historical charges are not current resources. Continue bounded
   Cost Management checks until no new BetStan usage appears.
+- Treat Cost Management ingestion as mature only after a 96-hour grace from
+  the verified retirement cutoff. Require at least three individually hashed
+  clean observations, at least 24 hours between adjacent observations, at
+  least 96 hours from first to last, and a final observation no more than
+  48 hours old. Both ActualCost and AmortizedCost must be clean in every
+  window.
+- Cost rows on or before the UTC cutoff date are historical. A positive
+  BetStan row after that date is `NO_GO`; malformed data is
+  `AUDIT_INCOMPLETE`; missing or immature evidence remains
+  `BILLING_INGESTION_PENDING`. A negative post-cutoff adjustment is not proof
+  of running infrastructure, but it remains pending until classified.
+- Azure CLI can return an error for a deleted service principal queried with
+  a server-side object-ID filter. Prove absence through a successful
+  `az ad sp list --all` response and an exact client-side count; never parse
+  localized 404 text as absence.
+- Validate each role-assignment resource ID against its declared parent scope
+  before any provider call. Syntax and subscription binding alone do not
+  prevent a valid-shaped ID under a substituted resource group or AKS scope.
+- Historical cleanup evidence must use the same 23-field terminal identity
+  schema as the current operator. If exact state was reconstructed from
+  retained events, bind it to a strict private legacy attestation rather than
+  weakening live checks to broad display-name searches.
 
 ## Decision quality
 

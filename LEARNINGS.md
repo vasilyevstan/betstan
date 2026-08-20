@@ -114,3 +114,10 @@ cd resulting && npm ci && npm run test:ci
   phase, and pending environment instead of presenting a silent wait.
 - A jobless stale GitHub queue record can be an inert provider artifact, but it
   is never authority to recover data or mutate production.
+- Deleted Entra service principals require a successful list-all,
+  client-side exact-ID absence probe; a server-filter 404 is not usable
+  evidence. Role-assignment IDs must also bind to their declared parent scope.
+- Billing closure starts only after a 96-hour ingestion grace and requires
+  three clean ActualCost and AmortizedCost observations over at least
+  96 hours. Resource retirement remains complete while that separate evidence
+  phase is pending.

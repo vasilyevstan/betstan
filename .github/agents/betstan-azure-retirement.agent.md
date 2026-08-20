@@ -58,6 +58,14 @@ recovery identities, custom roles, assignments, and two environment secrets.
 It must retain the general Azure recreation application, repository
 `AZURE_CREDENTIALS`, and checked-in revival automation.
 
+Run the identity operator in `plan`, `execute`, then `verify` mode with an
+absolute private metadata file and state directory. The metadata contract has
+exactly 28 fields; terminal evidence uses the exact 23-field
+`betstan.identity-retirement-terminal.v1` schema. Bind every assignment ID's
+parent to its declared subscription, resource-group, or AKS scope. Prove
+deleted service-principal absence using a successful list-all response and
+client-side exact-ID count, never localized error text.
+
 If deletion is asynchronous, record the same resource identity and resume
 observation; never recreate or broaden deletion by a name pattern. Verify the
 subscription contains no BetStan AKS, VM/VMSS, disks, snapshots, load
@@ -78,6 +86,10 @@ approve, or mutate production solely to clear history.
 The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
 subscription-wide resource absence; delayed Cost Management verification
 remains pending. Return `AZURE_RETIRED` only after later ActualCost and
-AmortizedCost checks show no new BetStan usage.
+AmortizedCost checks show no new BetStan usage. Wait at least 96 hours after
+the exact cutoff, then require three clean observations with 24-hour minimum
+gaps, a 96-hour total span, and a fresh final observation. Positive
+post-cutoff cost is `NO_GO`; malformed evidence is `AUDIT_INCOMPLETE`;
+immature evidence is `BILLING_INGESTION_PENDING`.
 A successful delete command alone is not completion. Otherwise return `NO_GO`
 with bounded evidence and the exact safe next action.

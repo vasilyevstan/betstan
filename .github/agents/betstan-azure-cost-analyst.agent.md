@@ -135,7 +135,21 @@ OCI is primary. When Azure is used temporarily as a frozen migration source:
   secret deletion from resource-group deletion or an operator statement;
 - report immediate resource retirement separately from delayed billing
   ingestion. Historical cost posted after the deletion timestamp is not
-  evidence that a deleted resource is still active.
+  evidence that a deleted resource is still active;
+- use the exact verified retirement cutoff and wait at least 96 hours for
+  ingestion before counting a billing observation. Require at least three
+  distinct observations, adjacent gaps of at least 24 hours, a total span of
+  at least 96 hours, and a final observation no more than 48 hours old;
+- validate the complete Cost Management response before classifying it:
+  unique `Cost`, `UsageDate`, `ResourceGroup`, and `Currency` columns, numeric
+  costs, valid dates, one currency, complete pagination, and both ActualCost
+  and AmortizedCost. Rows on or before the cutoff date are historical;
+  positive post-cutoff BetStan cost is `NO_GO`, malformed evidence is
+  `AUDIT_INCOMPLETE`, and immature evidence is
+  `BILLING_INGESTION_PENDING`;
+- keep negative post-cutoff adjustments pending unless separately classified.
+  They are not active positive usage, but they are not sufficient evidence for
+  `AZURE_RETIRED`.
 
 Never treat stopped AKS as zero spend. Never recommend recreating Azure
 automatically after retirement.
