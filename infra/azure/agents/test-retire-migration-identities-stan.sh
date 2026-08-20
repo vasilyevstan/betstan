@@ -335,13 +335,13 @@ run_operator() {
 expect_output() {
   local l="$1" p="$2"; shift 2; local o
   o="$("$@" 2>&1)" || true
-  if echo "$o" | grep -qE "$p"; then pass "$l"; else fail "$l (got: $(echo "$o"|head -3|tail -1))"; fi
+  if grep -qE "$p" <<<"$o"; then pass "$l"; else fail "$l (got: $(sed -n '3p' <<<"$o"))"; fi
 }
 expect_fail_with() {
   local l="$1" p="$2"; shift 2; local o
   if o="$("$@" 2>&1)"; then fail "$l (should fail)"
-  elif echo "$o"|grep -qE "$p"; then pass "$l"
-  else fail "$l (got: $(echo "$o"|head -3|tail -1))"; fi
+  elif grep -qE "$p" <<<"$o"; then pass "$l"
+  else fail "$l (got: $(sed -n '3p' <<<"$o"))"; fi
 }
 
 # Scan combined stdout+stderr for leaked fixture IDs
@@ -350,7 +350,7 @@ assert_no_id_leakage() {
   local leaked=0
   for id in "$GT" "$GS" "$G_MA" "$G_RA" "$G_MS" "$G_RS" "$G_RET" "$G_CR1" "$G_CR2" \
     "OCI_MIGRATION_AZURE_CREDENTIALS" "AZURE_MIGRATION_RECOVERY_CREDENTIALS"; do
-    if echo "$output" | grep -qF "$id"; then leaked=1; break; fi
+    if grep -qF "$id" <<<"$output"; then leaked=1; break; fi
   done
   if [[ "$leaked" -eq 0 ]]; then pass "$label"; else fail "$label (ID leaked in output)"; fi
 }
@@ -359,10 +359,13 @@ assert_no_retained_deletes() {
   local label="$1" az_log="$2" gh_log="$3"
   local bad=0
   # Check az log for delete commands targeting retained SP OID
-  if grep -q "delete" "$az_log" 2>/dev/null && grep "delete" "$az_log" | grep -qF "$G_RET"; then bad=1; fi
+  if awk -v retained="$G_RET" \
+    '/delete/ && index($0, retained) { found=1 } END { exit !found }' \
+    "$az_log" 2>/dev/null; then bad=1; fi
   # Check gh log: only flag if "secret delete AZURE_CREDENTIALS" appears as exact
   # secret name (not as substring of OCI_MIGRATION_AZURE_CREDENTIALS)
-  if grep "secret delete" "$gh_log" 2>/dev/null | grep -qE "secret delete AZURE_CREDENTIALS( |$)"; then bad=1; fi
+  if awk '/secret delete AZURE_CREDENTIALS( |$)/ { found=1 } END { exit !found }' \
+    "$gh_log" 2>/dev/null; then bad=1; fi
   if [[ "$bad" -eq 0 ]]; then pass "$label"; else fail "$label (retained target in delete)"; fi
 }
 
@@ -394,7 +397,7 @@ env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/
   "$OPERATOR" execute >/dev/null 2>&1 || true
 if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
   o="$(run_operator execute "$fixture_dir" 2>&1)" || true
-  if echo "$o"|grep -q "IDENTITY_RETIRED"; then pass "partial_resume"; else fail "partial_resume (output: $o)"; fi
+  if grep -q "IDENTITY_RETIRED" <<<"$o"; then pass "partial_resume"; else fail "partial_resume (output: $o)"; fi
 else fail "partial_resume (no state)"; fi
 
 # --- Already-absent ---
@@ -500,7 +503,7 @@ o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK
   IDENTITY_RETIREMENT_METADATA="$WORK_DIR/t-sym-src/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" plan 2>&1)" || true
-if echo "$o" | grep -q "state_dir_symlink"; then
+if grep -q "state_dir_symlink" <<<"$o"; then
   # Verify target was NOT mutated (no new files created)
   if [[ "$(find "$WORK_DIR/t-sym-target" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" == "0" ]]; then
     pass "symlink_dir_no_pre_rejection_mutation"
@@ -641,10 +644,10 @@ run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 gh_log="$WORK_DIR/gh.log"
 az_log="$WORK_DIR/az.log"
 # Guards (variable set) before workflow disable
-guard_line="$(grep -n 'variable set' "$gh_log" | head -1 | cut -d: -f1)"
-disable_line="$(grep -n 'workflow disable' "$gh_log" | head -1 | cut -d: -f1)"
-run_list_line="$(grep -n 'run list' "$gh_log" | head -1 | cut -d: -f1)"
-secret_del_line="$(grep -n 'secret delete' "$gh_log" | head -1 | cut -d: -f1)"
+guard_line="$(awk '/variable set/ { print NR; exit }' "$gh_log")"
+disable_line="$(awk '/workflow disable/ { print NR; exit }' "$gh_log")"
+run_list_line="$(awk '/run list/ { print NR; exit }' "$gh_log")"
+secret_del_line="$(awk '/secret delete/ { print NR; exit }' "$gh_log")"
 if [[ -n "$guard_line" && -n "$disable_line" && -n "$run_list_line" && -n "$secret_del_line" ]] &&
    [[ "$guard_line" -lt "$disable_line" ]] &&
    [[ "$disable_line" -lt "$run_list_line" ]] &&
@@ -661,7 +664,7 @@ if [[ "$state_phase" == "retired" ]]; then pass "azure_deletion_after_github_clo
 else fail "azure_deletion_after_github_closure (state=$state_phase)"; fi
 
 # Role assignments come after secret deletes in az log
-first_ra_delete="$(grep -n 'role assignment delete' "$az_log" | head -1 | cut -d: -f1)"
+first_ra_delete="$(awk '/role assignment delete/ { print NR; exit }' "$az_log")"
 if [[ -n "$secret_del_line" && -n "$first_ra_delete" ]]; then
   pass "workflow_closed_before_identity_boundary"
 else
@@ -696,7 +699,7 @@ expect_fail_with "run_list_api_error_fatal" "workflow_run_list_api_error" \
 # Verify --all flag is used in run list (disabled workflows need it)
 fixture_dir="$WORK_DIR/t-run-all-flag"
 run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
-if grep "run list" "$WORK_DIR/gh.log" | grep -q "\-\-all"; then
+if awk '/run list/ && /--all/ { found=1 } END { exit !found }' "$WORK_DIR/gh.log"; then
   pass "run_list_uses_all_flag"
 else
   fail "run_list_uses_all_flag (--all not found in gh log)"
@@ -706,7 +709,7 @@ fi
 # The operator uses gh api instead; a successful execute proves no --json flag
 fixture_dir="$WORK_DIR/t-no-wf-view-json"
 o="$(run_operator execute "$fixture_dir" 2>&1)" || true
-if echo "$o" | grep -q "IDENTITY_RETIRED"; then
+if grep -q "IDENTITY_RETIRED" <<<"$o"; then
   # Verify gh log contains 'api' calls not 'workflow view'
   if grep -q "workflow view" "$WORK_DIR/gh.log" 2>/dev/null; then
     fail "no_workflow_view_json (workflow view found in log)"
@@ -714,7 +717,7 @@ if echo "$o" | grep -q "IDENTITY_RETIRED"; then
     pass "no_workflow_view_json"
   fi
 else
-  fail "no_workflow_view_json (execute failed: $(echo "$o"|head -1))"
+  fail "no_workflow_view_json (execute failed: $(sed -n '1p' <<<"$o"))"
 fi
 
 # Workflow API error via gh api is fatal
@@ -734,9 +737,10 @@ o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=1 \
   "$OPERATOR" verify 2>&1)" || true
-if echo "$o" | grep -q "IDENTITY_RETIREMENT_VERIFIED" && echo "$o" | grep -q "metadata_cleaned=true"; then
+if grep -q "IDENTITY_RETIREMENT_VERIFIED" <<<"$o" &&
+   grep -q "metadata_cleaned=true" <<<"$o"; then
   pass "verify_with_cleanup_succeeds"
-else fail "verify_with_cleanup_succeeds (got: $(echo "$o"|head -3))"; fi
+else fail "verify_with_cleanup_succeeds (got: $(sed -n '1,3p' <<<"$o"))"; fi
 if [[ ! -f "$fixture_dir/metadata.env" ]]; then
   pass "metadata_deleted_after_cleanup"
 else fail "metadata_deleted_after_cleanup (still exists)"; fi
@@ -748,9 +752,9 @@ o="$(env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 \
   "$OPERATOR" verify 2>&1)" || true
-if echo "$o" | grep -q "IDENTITY_RETIREMENT_VERIFIED"; then
+if grep -q "IDENTITY_RETIREMENT_VERIFIED" <<<"$o"; then
   pass "verify_from_terminal_state_after_cleanup"
-else fail "verify_from_terminal_state_after_cleanup (got: $(echo "$o"|head -3))"; fi
+else fail "verify_from_terminal_state_after_cleanup (got: $(sed -n '1,3p' <<<"$o"))"; fi
 
 # Non-terminal state + metadata absent -> must fail
 fixture_dir="$WORK_DIR/t-nonterminal-nometa"
@@ -800,16 +804,16 @@ run_operator execute "$fixture_dir" STUB_SP_STILL_PRESENT=1 >/dev/null 2>&1 || t
 # Should fail at verification-intent because SP is still present
 o="$(run_operator execute "$fixture_dir" STUB_SP_STILL_PRESENT=1 \
   IDENTITY_RETIREMENT_VERIFY_MAX_RETRIES=0 IDENTITY_RETIREMENT_VERIFY_RETRY_SLEEP=0 2>&1)" || true
-if echo "$o" | grep -q "sp_still_present_after_retries"; then
+if grep -q "sp_still_present_after_retries" <<<"$o"; then
   pass "delete_success_but_still_present_caught"
-else fail "delete_success_but_still_present_caught (got: $(echo "$o"|head -3))"; fi
+else fail "delete_success_but_still_present_caught (got: $(sed -n '1,3p' <<<"$o"))"; fi
 
 # Execute reports objects_absent not objects_deleted
 fixture_dir="$WORK_DIR/t-report-absent"
 o="$(run_operator execute "$fixture_dir" 2>&1)" || true
-if echo "$o" | grep -q "objects_absent=9"; then
+if grep -q "objects_absent=9" <<<"$o"; then
   pass "reports_objects_absent_not_deleted"
-else fail "reports_objects_absent_not_deleted (got: $(echo "$o"|head -3))"; fi
+else fail "reports_objects_absent_not_deleted (got: $(sed -n '1,3p' <<<"$o"))"; fi
 
 # --- Terminal state tampering/validation ---
 printf '\n  --- terminal state validation ---\n'
@@ -1230,7 +1234,7 @@ mv_stub_dir="$WORK_DIR/mvstub"; mkdir -p "$mv_stub_dir"
 cat > "$mv_stub_dir/mv" <<'MVSTUB'
 #!/usr/bin/env bash
 # Fail only for state temp files (identity-retirement-state.env.*)
-if printf '%s' "$1" | grep -q 'identity-retirement-state.env\.'; then
+if [[ "${1:-}" == *identity-retirement-state.env.* ]]; then
   printf 'stubbed_mv_invoked\n' >> "${STUB_MV_LOG:-/dev/null}"
   exit 1
 fi
@@ -1245,9 +1249,9 @@ o="$(env PATH="$mv_stub_dir:$BIN_DIR:$PATH" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
-if echo "$o" | grep -qE "state_atomic_mv_failed"; then
+if grep -qE "state_atomic_mv_failed" <<<"$o"; then
   pass "mv_failure_detected"
-else fail "mv_failure_detected (got: $(echo "$o"|head -1))"; fi
+else fail "mv_failure_detected (got: $(sed -n '1p' <<<"$o"))"; fi
 # Assert stubbed mv was actually invoked
 if grep -q "stubbed_mv_invoked" "$WORK_DIR/mv.log" 2>/dev/null; then
   pass "mv_stub_was_invoked"
@@ -1269,7 +1273,7 @@ chmod_stub_dir="$WORK_DIR/chmodstub"; mkdir -p "$chmod_stub_dir"
 cat > "$chmod_stub_dir/chmod" <<'CHSTUB'
 #!/usr/bin/env bash
 # Fail only when targeting a state temp file (600 + identity-retirement-state)
-if [[ "${1:-}" == "600" ]] && printf '%s' "${2:-}" | grep -q 'identity-retirement-state.env\.'; then
+if [[ "${1:-}" == "600" && "${2:-}" == *identity-retirement-state.env.* ]]; then
   printf 'stubbed_chmod_invoked\n' >> "${STUB_CHMOD_LOG:-/dev/null}"
   exit 1
 fi
@@ -1284,9 +1288,9 @@ o="$(env PATH="$chmod_stub_dir:$BIN_DIR:$PATH" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
-if echo "$o" | grep -qE "state_temp_chmod_failed"; then
+if grep -qE "state_temp_chmod_failed" <<<"$o"; then
   pass "chmod_failure_detected"
-else fail "chmod_failure_detected (got: $(echo "$o"|head -1))"; fi
+else fail "chmod_failure_detected (got: $(sed -n '1p' <<<"$o"))"; fi
 if grep -q "stubbed_chmod_invoked" "$WORK_DIR/chmod.log" 2>/dev/null; then
   pass "chmod_stub_was_invoked"
 else fail "chmod_stub_was_invoked (stub not called)"; fi
@@ -1301,7 +1305,7 @@ mktemp_stub_dir="$WORK_DIR/mktempstub"; mkdir -p "$mktemp_stub_dir"
 cat > "$mktemp_stub_dir/mktemp" <<'MKSTUB'
 #!/usr/bin/env bash
 # Fail when called for state temp files
-if printf '%s' "$*" | grep -q 'identity-retirement-state.env'; then
+if [[ "$*" == *identity-retirement-state.env* ]]; then
   exit 1
 fi
 exec /usr/bin/mktemp "$@"
@@ -1313,9 +1317,9 @@ o="$(env PATH="$mktemp_stub_dir:$BIN_DIR:$PATH" \
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute 2>&1)" || true
-if echo "$o" | grep -qE "state_temp_create_failed"; then
+if grep -qE "state_temp_create_failed" <<<"$o"; then
   pass "mktemp_failure_detected"
-else fail "mktemp_failure_detected (got: $(echo "$o"|head -1))"; fi
+else fail "mktemp_failure_detected (got: $(sed -n '1p' <<<"$o"))"; fi
 
 # --- Terminal phase substitution regression ---
 printf '\n  --- terminal state phase/digest regressions ---\n'
@@ -1411,8 +1415,14 @@ fixture_dir="$WORK_DIR/t-psf-order"
 run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 gh_log="$WORK_DIR/gh.log"
 # After secret delete, there should be another run list check (post-secrets-fence)
-secret_del_last="$(grep -n 'secret delete' "$gh_log" | tail -1 | cut -d: -f1)"
-post_fence_run="$(awk "NR>$secret_del_last" "$gh_log" | grep -n 'run list' | head -1 | cut -d: -f1)"
+secret_del_last="$(awk '/secret delete/ { line=NR } END { if (line) print line }' "$gh_log")"
+post_fence_run=""
+if [[ -n "$secret_del_last" ]]; then
+  post_fence_run="$(
+    awk -v start="$secret_del_last" \
+      'NR > start && /run list/ { print NR; exit }' "$gh_log"
+  )"
+fi
 if [[ -n "$secret_del_last" && -n "$post_fence_run" ]]; then
   pass "post_secrets_fence_runs_after_delete"
 else
@@ -1427,19 +1437,21 @@ printf '\n  --- SP probe uses --all not --filter ---\n'
 # Explicitly verify: a successful execute with absent SPs never hits --filter.
 fixture_dir="$WORK_DIR/t-no-filter"
 o="$(run_operator execute "$fixture_dir" STUB_SP_ALREADY_ABSENT=1 2>&1)" || true
-if echo "$o" | grep -q "IDENTITY_RETIRED"; then
+if grep -q "IDENTITY_RETIRED" <<<"$o"; then
   pass "sp_probe_succeeds_without_filter"
 else
-  fail "sp_probe_succeeds_without_filter (got: $(echo "$o"|head -1))"
+  fail "sp_probe_succeeds_without_filter (got: $(sed -n '1p' <<<"$o"))"
 fi
 # Check az log: no --filter flag used for sp list
-if grep "ad sp list" "$WORK_DIR/az.log" | grep -q "\-\-filter"; then
+if awk '/ad sp list/ && /--filter/ { found=1 } END { exit !found }' \
+  "$WORK_DIR/az.log"; then
   fail "no_filter_in_sp_list (--filter found in az log)"
 else
   pass "no_filter_in_sp_list"
 fi
 # Verify uses --all
-if grep "ad sp list" "$WORK_DIR/az.log" | grep -q "\-\-all"; then
+if awk '/ad sp list/ && /--all/ { found=1 } END { exit !found }' \
+  "$WORK_DIR/az.log"; then
   pass "sp_list_uses_all_flag"
 else
   fail "sp_list_uses_all_flag (--all not found)"
