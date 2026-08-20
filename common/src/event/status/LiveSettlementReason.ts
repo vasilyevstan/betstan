@@ -1,0 +1,6 @@
+export enum LiveSettlementReason {
+  INCIDENT = "INCIDENT",
+  HALF_TIME = "HALF_TIME",
+  FULL_TIME_NONE = "FULL_TIME_NONE",
+  MANUAL_VOID = "MANUAL_VOID",
+}

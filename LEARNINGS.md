@@ -2,7 +2,7 @@
 
 ## Repository overview
 
-`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities are published as the `@betstan/common` npm package. The orphaned `common` gitlink was removed; do not recreate it without a valid, intentional submodule configuration.
+`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities live in the normal tracked `common/` package and are published as `@betstan/common`; never recreate `common/` as a gitlink or submodule.
 
 ---
 
@@ -86,7 +86,7 @@ cd resulting && npm ci && npm run test:ci
 
 ## Resolved failures and durable rules
 
-- An orphaned `common` gitlink without `.gitmodules` broke checkout cleanup. It was removed because services consume `@betstan/common` from npm.
+- An orphaned `common` gitlink without `.gitmodules` previously broke checkout cleanup. `common/` is now maintained as a normal tracked package while services consume explicit published versions from npm.
 - Per-service workflows use `actions/checkout@v4`; do not reintroduce `checkout@v2`.
 - Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
