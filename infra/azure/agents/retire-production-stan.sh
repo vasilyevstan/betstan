@@ -72,23 +72,6 @@ env_value() {
   sed -n "s/^${key}=//p" "$file"
 }
 
-require_summary_value() {
-  local key="$1"
-  local expected="$2"
-  local actual
-  actual="$(env_value "$SUMMARY_FILE" "$key")"
-  [[ "$actual" == "$expected" ]] ||
-    die "migration success evidence differs for field: $key"
-}
-
-require_positive_integer() {
-  local key="$1"
-  local value
-  value="$(env_value "$SUMMARY_FILE" "$key")"
-  [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
-    die "migration success evidence is not positive for field: $key"
-}
-
 write_state() {
   local phase="$1"
   local temporary="${STATE_FILE}.tmp"
@@ -461,94 +444,18 @@ SUMMARY_FILE="$(find "$ARTIFACT_DIR" -type f -name migration-summary.env -print)
   die "migration success summary must not be a symlink"
 chmod 600 "$SUMMARY_FILE"
 
-allowed_summary_keys='aks_power_state
-artifact_run_binding
-azure_cluster_resource_id_sha256
-azure_cluster_stopped_deallocated
-azure_writers_frozen
-closed_recovery_retry
-database_count
-destructive_boundary_crossed
-fencing_generation
-final_journal_sha256
-github_run_attempt
-github_run_id
-http_mutation_fence_removed
-journal_generation
-journal_heartbeat_epoch
-journal_sequence
-logical_source_target_parity
-migration_id
-oci_reopened_healthy
-runtime_deploy_source_sha
-schema
-source_sha
-source_signature_aggregate_sha256
-target_signature_aggregate_sha256
-terminal_phase
-terminal_status
-vmss_instances_deallocated'
-actual_summary_keys="$(
-  sed '/^[[:space:]]*$/d; s/=.*//' "$SUMMARY_FILE" | sort
-)"
-[[ "$actual_summary_keys" == "$allowed_summary_keys" ]] ||
-  die "migration success summary field set differs from the retirement contract"
-require_summary_value schema betstan.oci-migration-success.v1
-require_summary_value migration_id "$MIGRATION_ID"
-require_summary_value source_sha "$SOURCE_SHA"
-runtime_deploy_source_sha="$(
-  env_value "$SUMMARY_FILE" runtime_deploy_source_sha
-)"
-[[ "$runtime_deploy_source_sha" =~ ^[0-9a-f]{40}$ ]] ||
-  die "runtime deployment source SHA is invalid"
-closed_recovery_retry="$(
-  env_value "$SUMMARY_FILE" closed_recovery_retry
-)"
-case "$closed_recovery_retry" in
-  false)
-    [[ "$runtime_deploy_source_sha" == "$SOURCE_SHA" ]] ||
-      die "ordinary migration runtime deployment SHA differs"
-    ;;
-  true)
-    [[ "$runtime_deploy_source_sha" != "$SOURCE_SHA" ]] ||
-      die "closed-recovery runtime deployment SHA was not an ancestor"
-    ;;
-  *)
-    die "closed-recovery retry flag is invalid"
-    ;;
-esac
-require_summary_value github_run_id "$MIGRATION_RUN_ID"
-require_summary_value github_run_attempt "$MIGRATION_RUN_ATTEMPT"
-require_summary_value artifact_run_binding \
-  "${MIGRATION_RUN_ID}-${MIGRATION_RUN_ATTEMPT}"
-require_summary_value terminal_phase DEPLOYED_HEALTHY
-require_summary_value terminal_status DEPLOYED_HEALTHY
-require_summary_value destructive_boundary_crossed true
-require_summary_value database_count 8
-require_summary_value logical_source_target_parity true
-require_summary_value oci_reopened_healthy true
-require_summary_value http_mutation_fence_removed true
-require_summary_value azure_writers_frozen true
-require_summary_value azure_cluster_resource_id_sha256 \
-  "$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256"
-summary_power_state="$(env_value "$SUMMARY_FILE" aks_power_state)"
-[[ "$summary_power_state" == "Stopped" ||
-  "$summary_power_state" == "Deallocated" ]] ||
-  die "migration success summary does not prove a stopped AKS control plane"
-require_summary_value vmss_instances_deallocated true
-require_summary_value azure_cluster_stopped_deallocated true
-require_positive_integer journal_generation
-require_positive_integer journal_sequence
-require_positive_integer journal_heartbeat_epoch
-require_positive_integer fencing_generation
+# Validate through the shared contract helper (single source of truth)
+MODE=validate "$ROOT_DIR/infra/oci/scripts/migration-success-contract.sh" \
+  "$SUMMARY_FILE" \
+  SOURCE_SHA="$SOURCE_SHA" \
+  MIGRATION_RUN_ID="$MIGRATION_RUN_ID" \
+  MIGRATION_RUN_ATTEMPT="$MIGRATION_RUN_ATTEMPT" \
+  MIGRATION_ID="$MIGRATION_ID" \
+  AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256" ||
+  die "migration success summary failed shared contract validation"
+
+# Extract fields needed by downstream retirement logic
 FINAL_JOURNAL_SHA256="$(env_value "$SUMMARY_FILE" final_journal_sha256)"
-[[ "$FINAL_JOURNAL_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
-  die "final migration journal digest is invalid"
-source_signature="$(env_value "$SUMMARY_FILE" source_signature_aggregate_sha256)"
-target_signature="$(env_value "$SUMMARY_FILE" target_signature_aggregate_sha256)"
-[[ "$source_signature" =~ ^[0-9a-f]{64}$ &&
-  "$source_signature" == "$target_signature" ]] ||
-  die "source and target aggregate signatures do not match"
 
 OCI_PUBLIC_URL=https://betstan.xyz \
 OCI_REDIRECT_URL=https://www.betstan.xyz \

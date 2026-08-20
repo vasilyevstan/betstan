@@ -126,6 +126,47 @@ OCI is primary. When Azure is used temporarily as a frozen migration source:
 - search for detached/orphaned disks, snapshots, IPs, and managed groups;
 - keep delayed historical charges distinct from new post-deletion usage and
   continue bounded Cost Management checks until no new BetStan usage appears.
+- distinguish temporary migration/recovery identities from intentionally
+  retained Azure recreation configuration. An Entra application, service
+  principal, or GitHub secret is not a billable resource; verify its exact
+  role assignments and checked-in purpose before calling it an orphan;
+- require the exact temporary identity metadata or the dedicated identity
+  retirement operator before claiming temporary access is absent. Never infer
+  secret deletion from resource-group deletion or an operator statement;
+- report immediate resource retirement separately from delayed billing
+  ingestion. Historical cost posted after the deletion timestamp is not
+  evidence that a deleted resource is still active;
+- retain the exact verified resource-retirement cutoff, but use the next UTC
+  midnight as the billing boundary because daily usage cannot attribute a
+  partial day. Wait at least 96 hours after that boundary before counting an
+  observation. Require at least three distinct observations, adjacent gaps of
+  at least 24 hours, a total span of at least 96 hours, and a final observation
+  no more than 48 hours old;
+- validate the complete Cost Management response before classifying it:
+  unique `Cost`, `UsageDate`, `ResourceGroup`, and `Currency` columns, numeric
+  costs, valid dates, one currency, complete pagination, and both ActualCost
+  and AmortizedCost. Validate item-level Usage Details too so daily aggregation
+  cannot net a charge against a refund. Rows before the full-day billing
+  boundary are historical; positive cost on or after the boundary is `NO_GO`,
+  malformed evidence is
+  `AUDIT_INCOMPLETE`, and immature evidence is
+  `BILLING_INGESTION_PENDING`;
+- keep negative post-cutoff adjustments pending unless separately classified.
+  They are not active positive usage, but they are not sufficient evidence for
+  `AZURE_RETIRED`;
+- normalize each page with its own reviewed column indexes before combining
+  rows. Scope the query to the two exact BetStan resource groups, use full UTC
+  date-time bounds, and repeat the original POST body for every continuation.
+  Reject malformed, cyclic, cross-subscription, off-endpoint, or over-bounded
+  `nextLink` values instead of treating them as end-of-data. Retry only
+  transport/provider failures with a small reviewed bound; never retry a
+  malformed successful response into a different classification;
+- derive each cost type's result, currency, and response digest from the same
+  query stream. Accept only locked atomic
+  `betstan.billing-observation.v4` appends whose exact prior prefix,
+  per-window digest pair, chronology, established non-empty currency, and
+  predecessor hash all validate. A known positive result remains `NO_GO` even
+  if the peer query is malformed.
 
 Never treat stopped AKS as zero spend. Never recommend recreating Azure
 automatically after retirement.

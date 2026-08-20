@@ -132,8 +132,7 @@ permissions; `boot-volumes` is not an individual IAM resource type.
 ## Offline validation
 
 ```bash
-./infra/oci/tests/test-contract.sh
-./infra/oci/agents/test-health-contract-stan.sh
+./infra/oci/tests/run-contracts.sh
 ```
 
 The tests parse every OCI YAML file, check every shell script with `bash -n`,
@@ -142,7 +141,9 @@ Mongo/PVC/load balancer, canonical/redirect/diagnostic ingress and certificate
 contracts, verify the k3s local-PV and Bastion cleanup
 contracts, reject mixed OKE/k3s inventory, mutable application images, and
 legacy Mongo, check credential separation, and exercise health failure
-fixtures.
+fixtures. The entrypoint also validates shared migration-success provenance,
+temporary Azure identity retirement, the read-only terminal audit, and
+concurrent retirement fixture isolation without masking failed suites.
 
 ## Operator sequence
 
@@ -256,3 +257,11 @@ removes only the two exact resource groups, and verifies subscription-wide
 absence twice. It reports resource retirement separately from delayed Cost
 Management completion. AKS resource fingerprints and ETags are
 case-preserving; do not normalize or wildcard either value.
+
+After resource absence, run the separate
+`infra/azure/agents/retire-migration-identities-stan.sh` state machine with the
+exact private migration identity metadata, then run
+`infra/azure/agents/audit-oci-primary-retirement-stan.sh`. The identity
+operator must retain general Azure recreation configuration. The terminal
+audit reports resource completion separately from delayed billing ingestion
+and never mutates GitHub merely to clear an inert historical run record.

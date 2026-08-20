@@ -31,4 +31,4 @@ jobs:
           "$RUNNER_TEMP/actionlint" -shellcheck= .github/workflows/oci-*.yml
 
       - name: Run OCI offline contract
-        run: ./infra/oci/tests/test-contract.sh
+        run: ./infra/oci/tests/run-contracts.sh

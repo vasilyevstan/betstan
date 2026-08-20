@@ -91,3 +91,42 @@ cd resulting && npm ci && npm run test:ci
 - Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
 - Coverage instrumentation can report `branches=0` with a non-zero branch total. Keep line coverage mandatory and apply the branch threshold only when a meaningful branch percentage exists.
+
+## OCI cutover and Azure retirement
+
+- Cross-cloud cutover safety comes from independent fences: close public
+  writes, freeze producers, preserve exact queue consumers, lock Mongo, bind
+  every phase to immutable run/SHA provenance, and recover stop-only.
+- A strict evidence consumer must share its schema with the producer. Adding
+  valid provenance fields only on one side can block the terminal operation.
+- Azure resource-ID fingerprints are case-preserving. AKS exposes `eTag`, and
+  provider/SDK transformations of `If-Match` must not replace the exact
+  optimistic-concurrency value or fall back to a wildcard.
+- Resource absence, identity hygiene, and delayed billing are separate
+  completion phases. Retain documented zero-cost Azure recreation
+  configuration while deleting exact temporary migration access.
+- Public TLS checks must account for platform behavior without weakening
+  trust. macOS LibreSSL needs a graceful `Q` input after `s_client` validation.
+- Contract fixtures must be reentrant. Fixed directories make parallel tests
+  erase each other's state, and output pipelines require `pipefail` so a
+  failing suite cannot appear green.
+- A protected environment wait is active progress. Report the exact run,
+  phase, and pending environment instead of presenting a silent wait.
+- A jobless stale GitHub queue record can be an inert provider artifact, but it
+  is never authority to recover data or mutate production.
+- Deleted Entra service principals require a successful list-all,
+  client-side exact-ID absence probe; a server-filter 404 is not usable
+  evidence. Role-assignment IDs must also bind to their declared parent scope.
+- Billing closure starts only after a 96-hour ingestion grace from the first
+  full UTC billing day after retirement and requires three clean ActualCost
+  and AmortizedCost observations over at least 96 hours. Resource retirement
+  remains complete while that separate evidence phase is pending.
+- Billing evidence must normalize each bounded page before aggregation and
+  append under a lock with exact response-digest pairs and a predecessor hash.
+  Continuations repeat the exact filtered POST on the bound subscription, and
+  only transient provider failures receive bounded retries. Signal handlers
+  terminate before lock cleanup, and verified dead owners are recoverable.
+  Item-level usage prevents a charge/refund cancellation from looking clean.
+  A second currency query, malformed `nextLink`, trailing `NO_ROWS` reset, or
+  rewritten prior prefix invalidates the evidence rather than defaulting to a
+  clean window.
