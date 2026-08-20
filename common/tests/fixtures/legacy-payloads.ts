@@ -15,6 +15,7 @@ import {
   LiveMarketStatus,
   LiveMarketType,
   LiveSettlementReason,
+  ModerationDeclineReason,
   TeamSide,
 } from "../../src";
 
@@ -54,6 +55,54 @@ const moderationResult: IModerationResultEvent = {
   data: {
     slipId: "slip-id",
     result: "APPROVED",
+  },
+};
+
+const liveModerationResult: IModerationResultEvent = {
+  data: {
+    slipId: "live-slip-id",
+    result: "DECLINED",
+    betKind: BetKind.LIVE,
+    declineReason: ModerationDeclineReason.STALE_QUOTE,
+    affectedRows: [
+      {
+        rowId: "row-one",
+        declineReason: ModerationDeclineReason.STALE_QUOTE,
+        marketId: "event-one:NEXT_CORNER",
+        marketVersion: 2,
+        quoteVersion: 4,
+        currentOdds: 2.1,
+        marketStatus: LiveMarketStatus.OPEN,
+        selectionId: "event-one:NEXT_CORNER:2:HOME",
+      },
+      {
+        rowId: "row-two",
+        declineReason: ModerationDeclineReason.MARKET_SUSPENDED,
+        marketId: "event-two:NEXT_RED_CARD",
+        marketVersion: 1,
+        quoteVersion: 3,
+        marketStatus: LiveMarketStatus.SUSPENDED,
+        selectionId: "event-two:NEXT_RED_CARD:1:AWAY",
+      },
+    ],
+  },
+};
+
+const ambiguousModerationVersion: IModerationResultEvent = {
+  data: {
+    slipId: "invalid-slip-id",
+    result: "DECLINED",
+    // @ts-expect-error Current versions must be scoped to an affected row.
+    currentMarketVersion: 2,
+  },
+};
+
+const ambiguousModerationRows: IModerationResultEvent = {
+  data: {
+    slipId: "invalid-slip-id",
+    result: "DECLINED",
+    // @ts-expect-error Affected row metadata must be carried by affectedRows.
+    affectedRowIds: ["row-one"],
   },
 };
 
@@ -155,6 +204,9 @@ void [
   eventResult,
   eventVisibility,
   moderationResult,
+  liveModerationResult,
+  ambiguousModerationVersion,
+  ambiguousModerationRows,
   newEvent,
   placeBet,
   settleSlip,

@@ -1,5 +1,6 @@
-import { Channel, ChannelModel, ConfirmChannel, Options } from "amqplib";
+import { Channel, ConfirmChannel, Options } from "amqplib";
 import { IEvent } from "../IEvent";
+import { IAmqpConnection } from "./IAmqpConnection";
 import { QueueNames } from "./QueueNames";
 
 export type PublishOptions = Options.Publish;
@@ -9,9 +10,9 @@ export abstract class APublisher<T extends IEvent> {
   abstract serviceName: string;
   private _channel?: Channel;
   private _confirmChannel?: ConfirmChannel;
-  connection: ChannelModel;
+  connection: IAmqpConnection;
 
-  constructor(connection: ChannelModel) {
+  constructor(connection: IAmqpConnection) {
     this.connection = connection;
   }
 

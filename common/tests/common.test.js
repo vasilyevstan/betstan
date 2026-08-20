@@ -68,7 +68,7 @@ class OverriddenListener extends DefaultListener {
   }
 
   get queueOptions() {
-    return { durable: false, exclusive: true };
+    return { durable: false, exclusive: true, autoDelete: true };
   }
 }
 
@@ -128,7 +128,11 @@ test("listener uses overridden queue name and queue options everywhere", async (
 
   assert.deepEqual(connection.channel.calls.slice(0, 3), [
     ["assertExchange", common.QueueNames.NEW_EVENT, "fanout"],
-    ["assertQueue", "live-listener", { durable: false, exclusive: true }],
+    [
+      "assertQueue",
+      "live-listener",
+      { durable: false, exclusive: true, autoDelete: true },
+    ],
     ["bindQueue", "live-listener", common.QueueNames.NEW_EVENT, ""],
   ]);
   assert.equal(connection.channel.calls[3][0], "consume");
@@ -188,5 +192,43 @@ test("confirm publishing is persistent and resolves or rejects on broker confirm
   await assert.rejects(
     rejectedPublisher.publishWithConfirm({ data: {} }),
     /nack/,
+  );
+});
+
+test("moderation decline keeps authoritative metadata scoped to each row", () => {
+  const event = {
+    data: {
+      slipId: "slip-id",
+      result: "DECLINED",
+      betKind: common.BetKind.LIVE,
+      declineReason: common.ModerationDeclineReason.STALE_QUOTE,
+      affectedRows: [
+        {
+          rowId: "row-one",
+          declineReason: common.ModerationDeclineReason.STALE_QUOTE,
+          marketId: "event-one:NEXT_CORNER",
+          marketVersion: 2,
+          quoteVersion: 4,
+          currentOdds: 2.1,
+          marketStatus: common.LiveMarketStatus.OPEN,
+          selectionId: "event-one:NEXT_CORNER:2:HOME",
+        },
+        {
+          rowId: "row-two",
+          declineReason: common.ModerationDeclineReason.MARKET_SUSPENDED,
+          marketId: "event-two:NEXT_RED_CARD",
+          marketVersion: 1,
+          quoteVersion: 3,
+          marketStatus: common.LiveMarketStatus.SUSPENDED,
+          selectionId: "event-two:NEXT_RED_CARD:1:AWAY",
+        },
+      ],
+    },
+  };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(event)), event);
+  assert.notEqual(
+    event.data.affectedRows[0].quoteVersion,
+    event.data.affectedRows[1].quoteVersion,
   );
 });

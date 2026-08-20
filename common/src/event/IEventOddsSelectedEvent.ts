@@ -21,8 +21,8 @@ export interface IEventOddsSelectedEvent extends IEvent {
     quoteVersion?: number;
     selectionId?: string;
     side?: TeamSide;
-    selectionSide?: TeamSide;
     selectedAt?: string;
+    /** When absent, the quote has no time-based expiry. */
     quoteValidUntil?: string;
   };
 }

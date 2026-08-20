@@ -1,5 +1,6 @@
-import { Channel, ChannelModel, ConsumeMessage, Options } from "amqplib";
+import { Channel, ConsumeMessage, Options } from "amqplib";
 import { IEvent } from "../IEvent";
+import { IAmqpConnection } from "./IAmqpConnection";
 import { QueueNames } from "./QueueNames";
 
 export type QueueOptions = Options.AssertQueue;
@@ -9,11 +10,11 @@ export abstract class AListener<T extends IEvent> {
   abstract queue: QueueNames;
   abstract serviceName: string;
   private _channel?: Channel;
-  connection: ChannelModel;
+  connection: IAmqpConnection;
 
   abstract onMessage(event: T, msg: ConsumeMessage): void;
 
-  constructor(connection: ChannelModel) {
+  constructor(connection: IAmqpConnection) {
     this.connection = connection;
   }
 

@@ -1,12 +1,13 @@
 import amqp from "amqplib";
+import { IAmqpConnection } from "./IAmqpConnection";
 
 const { execSync } = require("child_process");
 const CONNECT_RETRIES = 10;
 
 class MessengerWrapper {
-  private _connection?: amqp.ChannelModel;
+  private _connection?: IAmqpConnection;
 
-  get connection(): amqp.ChannelModel {
+  get connection(): IAmqpConnection {
     if (!this._connection) {
       throw new Error("Connection must be initialised before use");
     }

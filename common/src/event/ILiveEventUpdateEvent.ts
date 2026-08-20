@@ -7,25 +7,20 @@ import { LiveMarketType } from "./status/LiveMarketType";
 import { LiveSettlementReason } from "./status/LiveSettlementReason";
 import { TeamSide } from "./status/TeamSide";
 
-export interface ILiveScore {
-  home: number;
-  away: number;
-}
-
 export interface ILiveIncident {
+  id?: string;
+  relatedIncidentId?: string;
   type: LiveIncidentType;
   side?: TeamSide;
   occurredAt?: string;
   minute?: number;
   addedTime?: number;
-  teamLabel?: string;
 }
 
 export interface ILiveMarketSelection {
   selectionId: string;
   side: TeamSide;
   odds: number;
-  label?: string;
 }
 
 export interface ILiveMarketSnapshot {
@@ -33,6 +28,7 @@ export interface ILiveMarketSnapshot {
   marketType: LiveMarketType;
   marketVersion: number;
   quoteVersion: number;
+  /** When absent, the quote has no time-based expiry. */
   quoteValidUntil?: string;
   status: LiveMarketStatus;
   selections: ILiveMarketSelection[];
@@ -46,10 +42,6 @@ export interface ILiveMarketSettlement {
   winningSide: TeamSide;
   winningSelection?: string;
 }
-
-export type LiveMarket = ILiveMarketSnapshot;
-export type LiveMarketSelection = ILiveMarketSelection;
-export type LiveMarketSettlement = ILiveMarketSettlement;
 
 /**
  * Consumers replace event state only when this per-event sequence is strictly
@@ -67,7 +59,6 @@ export interface ILiveEventUpdateEvent extends IEvent {
     phase: EventPhase;
     homeScore: number;
     awayScore: number;
-    scores?: ILiveScore;
     bettingStatus: BettingStatus;
     incident?: ILiveIncident;
     markets: ILiveMarketSnapshot[];
@@ -75,7 +66,5 @@ export interface ILiveEventUpdateEvent extends IEvent {
     eventName?: string;
     home?: string;
     away?: string;
-    homeTeam?: string;
-    awayTeam?: string;
   };
 }

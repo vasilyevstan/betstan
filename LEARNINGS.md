@@ -11,6 +11,7 @@
 ### Messaging (AMQP / RabbitMQ)
 - Every service communicates through RabbitMQ exchanges.
 - Base classes live in `@betstan/common`: `AListener<T>` (consumers) and `APublisher<T>` (producers).
+- The public base classes accept the structural `IAmqpConnection`; do not expose version-specific `Connection`/`ChannelModel` types because services intentionally carry different compatible `@types/amqplib` versions.
 - `APublisher.publish()` stamps `data.timestamp` and `data.sender` onto every outgoing event before serialising it. This means the `timestamp` field on an `IEvent` is **set by the publisher at send time**, not by the originating request.
 - Because of the above, when creating events manually in tests (without going through a publisher), `event.timestamp` is `undefined`. Any code that reads `event.timestamp` to populate a required model field must provide a fallback (e.g. `event.timestamp ?? new Date().toISOString()`).
 

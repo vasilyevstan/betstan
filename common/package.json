@@ -10,7 +10,8 @@
   "scripts": {
     "clean": "del ./build/*",
     "build": "npm run clean && tsc -p tsconfig.json",
-    "test": "npm run build && tsc --noEmit -p tsconfig.test.json && node --test tests/*.test.js",
+    "test": "npm run build && tsc --noEmit -p tsconfig.test.json && npm run test:legacy-amqp && node --test tests/*.test.js",
+    "test:legacy-amqp": "tsc --noEmit -p tsconfig.legacy-amqp.json",
     "test:ci": "npm run test",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "del-cli": "^5.1.0",
+    "legacy-amqplib-types": "npm:@types/amqplib@0.10.4",
     "legacy-common": "npm:@betstan/common@1.0.54",
     "typescript": "^5.3.3"
   }
