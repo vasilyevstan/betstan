@@ -49,8 +49,8 @@ done
 observation_parent="$(dirname "$OBSERVATION_FILE")"
 [[ -d "$observation_parent" && ! -L "$observation_parent" ]] ||
   die "observation_parent_invalid"
-parent_mode="$(stat -f '%Lp' "$observation_parent" 2>/dev/null ||
-  stat -c '%a' "$observation_parent" 2>/dev/null)" ||
+parent_mode="$(stat -c '%a' "$observation_parent" 2>/dev/null ||
+  stat -f '%Lp' "$observation_parent" 2>/dev/null)" ||
   die "observation_parent_stat_error"
 [[ "$parent_mode" == "700" ]] || die "observation_parent_unsafe_mode"
 if [[ -e "$OBSERVATION_FILE" || -L "$OBSERVATION_FILE" ]]; then
@@ -78,8 +78,8 @@ temporary_file=""
 lock_acquired=false
 
 file_inode() {
-  stat -f '%d:%i' "$1" 2>/dev/null ||
-    stat -c '%d:%i' "$1" 2>/dev/null
+  stat -c '%d:%i' "$1" 2>/dev/null ||
+    stat -f '%d:%i' "$1" 2>/dev/null
 }
 
 cleanup() {
@@ -131,8 +131,8 @@ printf '%s\n' \
 if ! ln "$lock_candidate" "$lock_file" 2>/dev/null; then
   [[ -f "$lock_file" && ! -L "$lock_file" ]] ||
     die "lock_invalid"
-  lock_mode="$(stat -f '%Lp' "$lock_file" 2>/dev/null ||
-    stat -c '%a' "$lock_file" 2>/dev/null)" ||
+  lock_mode="$(stat -c '%a' "$lock_file" 2>/dev/null ||
+    stat -f '%Lp' "$lock_file" 2>/dev/null)" ||
     die "lock_stat_error"
   [[ "$lock_mode" == "600" ]] || die "lock_unsafe_mode"
   lock_fields="$(sed 's/=.*//' "$lock_file" | LC_ALL=C sort)"
@@ -224,8 +224,8 @@ previous_count=0
 if [[ -e "$OBSERVATION_FILE" || -L "$OBSERVATION_FILE" ]]; then
   [[ -f "$OBSERVATION_FILE" && ! -L "$OBSERVATION_FILE" ]] ||
     die "observation_not_regular"
-  observation_mode="$(stat -f '%Lp' "$OBSERVATION_FILE" 2>/dev/null ||
-    stat -c '%a' "$OBSERVATION_FILE" 2>/dev/null)" ||
+  observation_mode="$(stat -c '%a' "$OBSERVATION_FILE" 2>/dev/null ||
+    stat -f '%Lp' "$OBSERVATION_FILE" 2>/dev/null)" ||
     die "observation_stat_error"
   [[ "$observation_mode" == "600" ]] || die "observation_unsafe_mode"
   if ! betstan_billing_validate_observation_file \

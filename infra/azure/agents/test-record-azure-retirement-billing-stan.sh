@@ -466,8 +466,8 @@ else
 fi
 mode="missing"
 if [[ -f "$OBSERVATION" ]]; then
-  mode="$(stat -f '%Lp' "$OBSERVATION" 2>/dev/null ||
-    stat -c '%a' "$OBSERVATION")"
+  mode="$(stat -c '%a' "$OBSERVATION" 2>/dev/null ||
+    stat -f '%Lp' "$OBSERVATION")"
 fi
 assert_eq 600 "$mode" "evidence mode is private"
 if betstan_billing_validate_observation_file \

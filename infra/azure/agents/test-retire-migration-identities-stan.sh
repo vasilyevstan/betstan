@@ -515,7 +515,7 @@ fi
 fixture_dir="$WORK_DIR/t-sfperm"
 run_operator execute "$fixture_dir" >/dev/null 2>&1 || true
 if [[ -f "$fixture_dir/identity-retirement-state.env" ]]; then
-  sp="$(stat -f '%Lp' "$fixture_dir/identity-retirement-state.env" 2>/dev/null || stat -c '%a' "$fixture_dir/identity-retirement-state.env" 2>/dev/null)"
+  sp="$(stat -c '%a' "$fixture_dir/identity-retirement-state.env" 2>/dev/null || stat -f '%Lp' "$fixture_dir/identity-retirement-state.env" 2>/dev/null)"
   if [[ "$sp" == "600" ]]; then pass "state_written_600"; else fail "state_written_600 (got $sp)"; fi
 else fail "state_written_600 (no state)"; fi
 
@@ -527,7 +527,7 @@ env PATH="$BIN_DIR:$PATH" STUB_AZ_LOG="$WORK_DIR/az.log" STUB_GH_LOG="$WORK_DIR/
   IDENTITY_RETIREMENT_METADATA="$fixture_dir/metadata.env" \
   IDENTITY_RETIREMENT_STATE_DIR="$fixture_dir" \
   IDENTITY_RETIREMENT_SAFE_CLEANUP=0 "$OPERATOR" execute >/dev/null 2>&1 || true
-sdp="$(stat -f '%Lp' "$fixture_dir" 2>/dev/null || stat -c '%a' "$fixture_dir" 2>/dev/null)"
+sdp="$(stat -c '%a' "$fixture_dir" 2>/dev/null || stat -f '%Lp' "$fixture_dir" 2>/dev/null)"
 if [[ "$sdp" == "700" ]]; then pass "state_dir_enforced_700"; else fail "state_dir_enforced_700 (got $sdp)"; fi
 
 # --- Fail-closed regressions ---
@@ -571,7 +571,7 @@ if [[ -f "$sf" ]]; then
     pass "terminal_state_fixed_bindings"
   else fail "terminal_state_fixed_bindings"; fi
   # Permissions
-  sp="$(stat -f '%Lp' "$sf" 2>/dev/null || stat -c '%a' "$sf" 2>/dev/null)"
+  sp="$(stat -c '%a' "$sf" 2>/dev/null || stat -f '%Lp' "$sf" 2>/dev/null)"
   if [[ "$sp" == "600" ]]; then pass "terminal_state_permissions"; else fail "terminal_state_permissions (got $sp)"; fi
   # No IDs leaked to stdout during execute
   pass "terminal_state_no_stdout_ids"

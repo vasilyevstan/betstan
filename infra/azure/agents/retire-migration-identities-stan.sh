@@ -294,7 +294,7 @@ is_valid_sha256() {
 validate_state_semantics() {
   local file="$1" mode="$2"
   local fp
-  fp="$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null)"
+  fp="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null)"
   [[ "$fp" == "600" ]] || die "state_perms_invalid"
 
   if [[ "$mode" == "terminal" ]]; then
@@ -491,7 +491,7 @@ load_metadata() {
   [[ -f "$METADATA_FILE" && ! -L "$METADATA_FILE" ]] || die "metadata_file_missing_or_symlink"
 
   local meta_perms
-  meta_perms="$(stat -f '%Lp' "$METADATA_FILE" 2>/dev/null || stat -c '%a' "$METADATA_FILE" 2>/dev/null)"
+  meta_perms="$(stat -c '%a' "$METADATA_FILE" 2>/dev/null || stat -f '%Lp' "$METADATA_FILE" 2>/dev/null)"
   [[ "$meta_perms" == "600" ]] || die "metadata_file_wrong_permissions"
 
   local line_num=0
@@ -1092,7 +1092,7 @@ mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 STATE_DIR_REAL="$(cd "$STATE_DIR" && pwd -P)"
 [[ "$STATE_DIR_REAL" == "$STATE_DIR" ]] || die "state_dir_resolves_elsewhere"
-STATE_DIR_PERMS="$(stat -f '%Lp' "$STATE_DIR" 2>/dev/null || stat -c '%a' "$STATE_DIR" 2>/dev/null)"
+STATE_DIR_PERMS="$(stat -c '%a' "$STATE_DIR" 2>/dev/null || stat -f '%Lp' "$STATE_DIR" 2>/dev/null)"
 [[ "$STATE_DIR_PERMS" == "700" ]] || die "state_dir_wrong_permissions"
 STATE_FILE="$STATE_DIR/identity-retirement-state.env"
 

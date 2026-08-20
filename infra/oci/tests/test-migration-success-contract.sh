@@ -538,7 +538,7 @@ MODE=emit "$CONTRACT" "$WORK_DIR/perms.env" \
     "aks_power_state=Stopped" \
     "vmss_instances_deallocated=true" \
     "azure_cluster_stopped_deallocated=true"
-perms="$(stat -f '%Lp' "$WORK_DIR/perms.env" 2>/dev/null || stat -c '%a' "$WORK_DIR/perms.env" 2>/dev/null)"
+perms="$(stat -c '%a' "$WORK_DIR/perms.env" 2>/dev/null || stat -f '%Lp' "$WORK_DIR/perms.env" 2>/dev/null)"
 if [[ "$perms" == "600" ]]; then
   pass
 else

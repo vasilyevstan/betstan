@@ -152,7 +152,7 @@ validate_private_file() {
   [[ -f "$file" && ! -L "$file" ]] || {
     emit "${label}=not_regular_file"; unknowns=$((unknowns + 1)); return 1; }
   local mode
-  mode="$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null)" || {
+  mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null)" || {
     emit "${label}=stat_error"; unknowns=$((unknowns + 1)); return 1; }
   [[ "$mode" == "600" ]] || {
     emit "${label}=unsafe_mode"; unknowns=$((unknowns + 1)); return 1; }
@@ -364,7 +364,7 @@ ret_state_etag="$(state_field "$AZURE_RETIREMENT_STATE_FILE" cluster_etag)" ||
 if [[ -n "$AUDIT_WORK_PARENT" ]]; then
   [[ -d "$AUDIT_WORK_PARENT" && ! -L "$AUDIT_WORK_PARENT" ]] ||
     die_incomplete "audit_work_parent_invalid"
-  local_mode="$(stat -f '%Lp' "$AUDIT_WORK_PARENT" 2>/dev/null || stat -c '%a' "$AUDIT_WORK_PARENT" 2>/dev/null)" || die_incomplete "stat_work_parent_failed"
+  local_mode="$(stat -c '%a' "$AUDIT_WORK_PARENT" 2>/dev/null || stat -f '%Lp' "$AUDIT_WORK_PARENT" 2>/dev/null)" || die_incomplete "stat_work_parent_failed"
   [[ "$local_mode" == "700" ]] ||
     die_incomplete "audit_work_parent_unsafe_mode"
   AUDIT_WORK_DIR="$(mktemp -d "${AUDIT_WORK_PARENT}/audit.XXXXXX")"
