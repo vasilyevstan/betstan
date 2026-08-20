@@ -32,8 +32,116 @@
 - `resume-stage-stan.sh` — starts stage AKS and runs quick readiness checks.
 - `decommission-stage-rg-stan.sh` — deletes the entire stage resource group to remove stage costs.
 - `reconcile-nodepool-profile-stan.sh` — creates or validates the `Standard_B4as_v2` + Managed 64 GiB OS disk profile and reconciles autoscaler `1..3`; it refuses workload cutover and legacy pool deletion.
+- `retire-production-stan.sh` — exact-inventory, resumable deletion of the retired BetStan Azure resource groups after OCI cutover.
+- `retire-migration-identities-stan.sh` — separate exact-metadata retirement of temporary migration/recovery identities and environment secrets while retaining Azure recreation configuration.
+- `audit-oci-primary-retirement-stan.sh` — read-only terminal audit for OCI health/free-tier state, Azure and identity absence, workflows, journal fences, and delayed billing.
+- `record-azure-retirement-billing-stan.sh` — locked append-only recorder for mature clean ActualCost and AmortizedCost observations.
 
 Scripts assume the CLIs and authentication required by their operations are already available. The node-pool profile reconciler requires only `az` and does not change the user's Kubernetes context.
+
+## Temporary migration identity retirement
+
+Keep the 28-field metadata file and state directory outside the repository with
+mode `0600` and `0700`, respectively. Review `plan` before the destructive
+mode, then retain the terminal state for independent verification:
+
+```bash
+export IDENTITY_RETIREMENT_METADATA=/absolute/private/identity-metadata.env
+export IDENTITY_RETIREMENT_STATE_DIR=/absolute/private/identity-state
+
+./infra/azure/agents/retire-migration-identities-stan.sh plan
+./infra/azure/agents/retire-migration-identities-stan.sh execute
+./infra/azure/agents/retire-migration-identities-stan.sh verify
+```
+
+After reviewed metadata cleanup, `verify` can load the exact 23-field
+`betstan.identity-retirement-terminal.v1` state without the metadata file.
+The operator disables only `oci-migration-recovery.yml`; `oci-migrate.yml`
+remains available for future reconfiguration but is fenced twice and loses
+its temporary Azure environment secret before any identity deletion. Both
+workflows must have no nonterminal runs at the post-secret fence.
+
+Role-assignment IDs may use only subscription, resource-group, or the exact
+AKS managed-cluster scope, and each ID parent must equal its declared metadata
+scope. Deleted service principals are probed with a successful `--all`
+listing and exact client-side object-ID count because Azure CLI's server-side
+ID filter exits nonzero for an absent object.
+
+## Terminal retirement audit and billing evidence
+
+Keep all evidence paths private and absolute. The terminal audit is read-only
+and recomputes the live OCI inventory, resource bindings, Azure absence,
+temporary-identity state, workflow state, migration contract, and both cost
+types:
+
+```bash
+field() { sed -n "s/^$1=//p" "$2"; }
+
+export OCI_INFRASTRUCTURE_PROVENANCE_FILE=/absolute/private/provenance.env
+export AZURE_RETIREMENT_STATE_FILE=/absolute/private/retirement-state.env
+export IDENTITY_STATE_FILE=/absolute/private/identity-terminal.env
+export IDENTITY_ATTESTATION_FILE=/absolute/private/identity-attestation.env
+export OCI_DIAGNOSTIC_URL=https://92.5.96.113.nip.io
+export OCI_COMPARTMENT_OCID="$(field compartment_ocid "$OCI_INFRASTRUCTURE_PROVENANCE_FILE")"
+export EXPECTED_OCI_PROVENANCE_DIGEST=6aacf7029e8ea5a5b3e905a4c07e6318885f69786332b079d30f2b3790fed8b2
+export EXPECTED_OCI_INVENTORY_DIGEST=56c3fac911b71a31214129b5a027c669a362c62fb6b9b6e4559d439c834d8377
+export AZURE_SUBSCRIPTION_FINGERPRINT="$(field subscription_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
+export AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256="$(field cluster_resource_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
+export MIGRATION_RUN_ID="$(field github_run_id "$AZURE_RETIREMENT_STATE_FILE")"
+export MIGRATION_RUN_ATTEMPT="$(field github_run_attempt "$AZURE_RETIREMENT_STATE_FILE")"
+export MIGRATION_ID="$(field migration_id "$AZURE_RETIREMENT_STATE_FILE")"
+export MIGRATION_SHA="$(field source_sha "$AZURE_RETIREMENT_STATE_FILE")"
+
+./infra/azure/agents/audit-oci-primary-retirement-stan.sh
+```
+
+The expected pre-maturity result is
+`resource_phase=RESOURCE_RETIREMENT_COMPLETE` with
+`terminal_phase=BILLING_INGESTION_PENDING` and exit code `3`. Exit `0` is
+reserved for `AZURE_RETIRED`; `1` means `NO_GO`, and `2` means
+`AUDIT_INCOMPLETE`. Do not convert delayed billing ingestion into a
+resource-retirement failure. The audit checks a live JSON API route and all
+eight production-capable workflow records, not only the OCI deploy workflows.
+
+Azure's daily `UsageDate` cannot attribute the partial retirement day. The
+reviewed billing boundary is therefore `2026-08-20T00:00:00Z`, the first full
+UTC day after the exact resource cutoff. Resource absence covers the intervening
+hours. Only after that billing boundary plus 96 hours, record a window into a
+mode-0700 private directory.
+
+The recorder recomputes the case-preserving subscription fingerprint,
+validates the active Azure account, queries both cost types with the exact
+BetStan resource-group filter, repeats the original POST body for every
+subscription-bound continuation, and validates item-level usage details so a
+charge cannot net against a refund. It retries provider failures at most four
+times with bounded backoff. Its hard-link lock records exact ownership,
+recovers only a verified dead owner, and validates the complete prior chain
+before an atomic append. A terminating signal exits before releasing the lock:
+
+```bash
+export OBSERVATION_FILE=/absolute/private/billing-observations.env
+export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export AZURE_SUBSCRIPTION_FINGERPRINT="$(field subscription_id_sha256 "$AZURE_RETIREMENT_STATE_FILE")"
+
+./infra/azure/agents/record-azure-retirement-billing-stan.sh
+```
+
+Pass that file to later audits with
+`BILLING_OBSERVATION_FILE="$OBSERVATION_FILE"`. The
+`betstan.billing-observation.v4` contract binds both Cost Management Query and
+item-level Usage Details API versions, stores exact combined response-digest
+pairs, and chains every append. Positive cost on or after the full-day billing
+boundary is `NO_GO`;
+negative adjustments, an incomplete 96-hour grace, fewer than three windows,
+less than 24 hours between appends, or less than a 96-hour observation span
+remain pending. Provider/schema/pagination, currency, chain, or binding errors
+are `AUDIT_INCOMPLETE`. A known positive result remains `NO_GO` even if the
+peer cost type is malformed, and `NO_ROWS` never resets an established
+currency. The current subscription emits `legacy` Usage Details records;
+another record kind fails closed as incomplete rather than being generalized
+across billing-account types. Legacy records may reuse an ARM `id` for
+different charge lines; the audit validates and classifies every item instead
+of assuming that resource-shaped identifier is a unique charge key.
 
 ## Required validation sequence for production changes
 

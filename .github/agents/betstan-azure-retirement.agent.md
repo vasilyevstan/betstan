@@ -45,12 +45,26 @@ their relationship rather than ignoring new provenance. Hash Azure resource
 IDs exactly as emitted; the migration fingerprint is case-preserving.
 
 Read AKS `eTag` with its Azure casing and preserve its exact value through the
-delete intent. If an Azure CLI extension transforms the `If-Match` value, use
-the reviewed literal ARM delete request; never replace optimistic concurrency with a wildcard.
+delete intent. If an Azure CLI extension transforms the `If-Match` value, use the
+reviewed literal ARM delete request; never replace optimistic concurrency with a wildcard.
 Delete the AKS cluster, wait for its managed resource group, then remove the
 primary BetStan resource group contents, historical snapshots, load
-balancer/IPs, disks, alerts, action group, and temporary migration/recovery
-identities and secrets.
+balancer/IPs, disks, alerts, and action group.
+
+Keep resource deletion and identity deletion as separate state machines.
+After resource absence, use `retire-migration-identities-stan.sh` with the
+exact private metadata file. It may remove only the recorded migration and
+recovery identities, custom roles, assignments, and two environment secrets.
+It must retain the general Azure recreation application, repository
+`AZURE_CREDENTIALS`, and checked-in revival automation.
+
+Run the identity operator in `plan`, `execute`, then `verify` mode with an
+absolute private metadata file and state directory. The metadata contract has
+exactly 28 fields; terminal evidence uses the exact 23-field
+`betstan.identity-retirement-terminal.v1` schema. Bind every assignment ID's
+parent to its declared subscription, resource-group, or AKS scope. Prove
+deleted service-principal absence using a successful list-all response and
+client-side exact-ID count, never localized error text.
 
 If deletion is asynchronous, record the same resource identity and resume
 observation; never recreate or broaden deletion by a name pattern. Verify the
@@ -58,9 +72,32 @@ subscription contains no BetStan AKS, VM/VMSS, disks, snapshots, load
 balancers, IPs, gateways, registries, workspaces, vaults, alerts, action
 groups, or orphaned managed group.
 
-The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
-subscription-wide resource absence; delayed Cost Management verification
+Run `audit-oci-primary-retirement-stan.sh` after resource and identity
+retirement. It must distinguish immediate resource absence, delayed Cost
+Management ingestion, retained zero-cost recreation configuration, genuine
+temporary-access residue, and active workflow work across all eight
+production-capable workflows. A live homepage alone is insufficient; require
+the canonical and diagnostic JSON API probes as well.
+After the 96-hour grace, use
+`record-azure-retirement-billing-stan.sh` for each clean observation; never
+hand-edit or replace its locked append-only v4 evidence.
+
+A GitHub run reported as queued is not automatically active or safe to delete.
+Classify it as an inert provider record only when the workflow is disabled,
+the run has zero jobs and pending deployments, its timestamps are stale, and
+its SHA cannot satisfy current master provenance. Report it; never re-enable,
+approve, or mutate production solely to clear history.
+
+The operator returns `RESOURCE_RETIREMENT_COMPLETE` after repeated
+subscription-wide resource absence while delayed Cost Management verification
 remains pending. Return `AZURE_RETIRED` only after later ActualCost and
-AmortizedCost checks show no new BetStan usage. A successful delete command alone is not
-completion. Otherwise return `NO_GO` with bounded evidence and the exact safe
-next action.
+AmortizedCost checks show no new BetStan usage. Wait at least 96 hours after
+the first full UTC billing day after the exact resource cutoff, then require
+three clean chained observations with 24-hour minimum gaps, a 96-hour total
+span, and a fresh final observation. Positive cost on or after that boundary
+is `NO_GO`; malformed provider, pagination, binding, or chain evidence is
+`AUDIT_INCOMPLETE`; immature evidence is
+`BILLING_INGESTION_PENDING` with exit code `3`. Exit `0` is reserved for
+`AZURE_RETIRED`.
+A successful delete command alone is not completion. Otherwise return `NO_GO`
+with bounded evidence and the exact safe next action.
