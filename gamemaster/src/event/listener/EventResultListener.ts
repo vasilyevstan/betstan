@@ -30,24 +30,22 @@ class EventResultListener extends AListener<IEventResultEvent> {
       return;
     }
 
-    storedEvent.set({
-      homeResult: data.homeScore,
-      awayResult: data.awayScore,
-      status: EventStatus.RESULTED,
-    });
-
-    await storedEvent.save();
-
-    // archive the event
-    const eventsToArchive = await Event.find({
-      status: EventStatus.RESULTED,
-    }).lean();
-
-    for (const eventToArchive of eventsToArchive) {
-      const archivedEvent = new EventArchive(eventToArchive);
-      await archivedEvent.save();
-      await Event.deleteOne({ _id: eventToArchive._id });
-    }
+    await EventArchive.updateOne(
+      { eventId: storedEvent.eventId },
+      {
+        $setOnInsert: {
+          eventId: storedEvent.eventId,
+          time: storedEvent.time,
+          home: storedEvent.home,
+          away: storedEvent.away,
+          homeResult: data.homeScore,
+          awayResult: data.awayScore,
+          status: EventStatus.RESULTED,
+        },
+      },
+      { upsert: true }
+    );
+    await Event.deleteOne({ _id: storedEvent._id });
 
     this.ack(msg);
   }

@@ -30,6 +30,12 @@
   ```
 - Pattern for workers (`GamemasterWorker`): expose an `async init()` and wire it in `index.ts` before calling `worker.work()`.
 
+### Event scheduling ownership
+- The `event` service owns future-event generation; `GET /api/event` is read-only and Gamemaster never creates replacement events.
+- Scheduler events use deterministic epoch-aligned slots and a partial unique `slotKey` index so rolling event pods converge without leader election.
+- A short-lived per-event publish claim and pending marker provide at-least-once `NEW_EVENT` retry while duplicate-safe consumers preserve existing documents.
+- Backoffice and legacy events have no scheduler slot and are never counted, modified, deleted, or republished by the scheduler.
+
 ---
 
 ## Testing conventions

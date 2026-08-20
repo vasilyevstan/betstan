@@ -3,16 +3,12 @@ import { ConsumeMessage } from "amqplib";
 import { EventStatus } from "@betstan/common";
 
 import { Event } from "../../model/Event";
-import NewEventPublisher from "../../event/publisher/NewEventPublisher";
 import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
 import { EventArchive } from "../../model/EventArchive";
 import { GamemasterWorker } from "../GamemasterWorker";
 
-// Give each publisher its own init spy so they don't share the inherited
-// APublisher.prototype.init mock and toHaveBeenCalledTimes assertions work correctly.
 beforeAll(() => {
   jest.spyOn(ResultSetPublisher.prototype, "init").mockResolvedValue(undefined);
-  jest.spyOn(NewEventPublisher.prototype, "init").mockResolvedValue(undefined);
 });
 
 const futureDate = new Date(new Date().getTime() + 30000);
@@ -85,33 +81,27 @@ it("with three events in the database, start time in the future, none is resulte
 
   expect(storedEvents.length).toEqual(3);
   expect(storedArchievedEvents.length).toEqual(0);
-  expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
 });
 
-it.skip("with three events in the database, 2 start in the future, one is resulted", async () => {
+it("results and archives a past event without publishing a replacement", async () => {
   const { events, message } = await setup(
     [futureDate, pastDate, futureDate],
     3
   );
 
-  // const eventId = events[0].eventId;
-
   const gameMaster = new GamemasterWorker();
-  await gameMaster.checkEventsOnce().then(() => {
-    console.log("checking event finished");
-  });
+  await gameMaster.init();
+  await gameMaster.checkEventsOnce();
 
-  console.log("checking collections");
   const storedEvents = await Event.find({});
   const storedArchievedEvents = await EventArchive.find({});
 
-  console.log("events", storedEvents);
   expect(storedEvents.length).toEqual(2);
   expect(storedArchievedEvents.length).toEqual(1);
-  expect(NewEventPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(ResultSetPublisher.prototype.publish).toHaveBeenCalledTimes(1);
 });
 
-it("publishers are initialised once during worker.init(), not per event processed", async () => {
+it("initialises the result publisher once during worker.init()", async () => {
   jest.clearAllMocks();
   await setup([pastDate, pastDate, pastDate], 3);
 
@@ -121,16 +111,9 @@ it("publishers are initialised once during worker.init(), not per event processe
   const resultSetInitCallsAfterInit = (
     ResultSetPublisher.prototype.init as jest.Mock
   ).mock.calls.length;
-  const newEventInitCallsAfterInit = (NewEventPublisher.prototype.init as jest.Mock)
-    .mock.calls.length;
-
-  // Processing 3 events — no additional init calls should occur.
   await gameMaster.checkEventsOnce();
 
   expect((ResultSetPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
     resultSetInitCallsAfterInit
-  );
-  expect((NewEventPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
-    newEventInitCallsAfterInit
   );
 });

@@ -10,8 +10,6 @@ import {
 
 import { Event } from "../../../model/Event";
 import { EventArchive } from "../../../model/EventArchive";
-import NewEventListener from "../NewEventListener";
-import NewEventPublisher from "../../publisher/NewEventPublisher";
 
 const setup = async (numberOfEvents?: number) => {
   const listener = new EventResultListener(messengerWrapper.connection);
@@ -98,7 +96,7 @@ it("when event is resulted and moved to archive", async () => {
 
   await listener.onMessage(data, message);
 
-  const archievedEvent = await EventArchive.findById(events[0].id);
+  const archievedEvent = await EventArchive.findOne({ eventId });
 
   const storedEvents = await Event.find({});
   const storedArchievedEvents = await EventArchive.find({});
@@ -106,7 +104,6 @@ it("when event is resulted and moved to archive", async () => {
   expect(storedEvents.length).toEqual(2);
   expect(storedArchievedEvents.length).toEqual(1);
   expect(archievedEvent?.status).toEqual(EventStatus.RESULTED);
-  expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
 });
 
 it("acknowledges self-emitted result events without changing stored events", async () => {

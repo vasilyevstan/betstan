@@ -1,11 +1,9 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { ConsumeMessage } from "amqplib";
 import {
   AListener,
-  BetStatus,
   EventStatus,
   INewEventEvent,
   QueueNames,
-  SlipRowStatus,
 } from "@betstan/common";
 import { Event } from "../../model/Event";
 
@@ -22,16 +20,26 @@ class NewEventListener extends AListener<INewEventEvent> {
       return;
     }
 
-    const newEvent = new Event({
-      eventId: data.id,
-      name: data.name,
-      time: data.time,
-      home: data.home,
-      away: data.away,
-      status: EventStatus.NO_RESULT,
-    });
-
-    await newEvent.save();
+    try {
+      await Event.updateOne(
+        { eventId: data.id },
+        {
+          $setOnInsert: {
+            eventId: data.id,
+            name: data.name,
+            time: data.time,
+            home: data.home,
+            away: data.away,
+            status: EventStatus.NO_RESULT,
+          },
+        },
+        { upsert: true }
+      );
+    } catch (err: any) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
+    }
 
     this.channel.ack(msg);
   }

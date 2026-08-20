@@ -34,6 +34,8 @@ const eventSchema = new Schema({
   },
 });
 
+eventSchema.index({ eventId: 1 }, { unique: true });
+
 const Event = model("Event", eventSchema);
 
 export { Event };

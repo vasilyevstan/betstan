@@ -1,9 +1,7 @@
 import { EventStatus, messengerWrapper } from "@betstan/common";
 
 import { Event } from "../model/Event";
-import NewEventPublisher from "../event/publisher/NewEventPublisher";
 import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
-import { faker } from "@faker-js/faker";
 import { EventArchive } from "../model/EventArchive";
 
 const MAX_SCORE = 10;
@@ -16,16 +14,12 @@ const getRandomResult = () => {
 
 export class GamemasterWorker {
   private resultSetPublisher!: ResultSetPublisher;
-  private newEventPublisher!: NewEventPublisher;
 
   async init() {
     this.resultSetPublisher = new ResultSetPublisher(
       messengerWrapper.connection
     );
     await this.resultSetPublisher.init();
-
-    this.newEventPublisher = new NewEventPublisher(messengerWrapper.connection);
-    await this.newEventPublisher.init();
   }
 
   async checkEventsOnce() {
@@ -64,18 +58,6 @@ export class GamemasterWorker {
       await archivedEvent.save();
       await event.deleteOne();
 
-      const home = faker.location.city();
-      const away = faker.location.city();
-
-      this.newEventPublisher.publish({
-        data: {
-          id: faker.string.uuid(),
-          name: `${home} - ${away}`,
-          time: faker.date.soon().toISOString(),
-          home,
-          away,
-        },
-      });
     }
   }
 

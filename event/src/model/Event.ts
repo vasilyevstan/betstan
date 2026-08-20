@@ -6,6 +6,43 @@ const eventSchema = new Schema({
     type: String,
     required: true,
   },
+  home: {
+    type: String,
+    required: false,
+  },
+  away: {
+    type: String,
+    required: false,
+  },
+  source: {
+    type: String,
+    required: false,
+    enum: ["SCHEDULER", "EXTERNAL"],
+  },
+  slotKey: {
+    type: String,
+    required: false,
+  },
+  newEventPublishedAt: {
+    type: Date,
+    required: false,
+    default: null,
+  },
+  newEventPublishAttempts: {
+    type: Number,
+    required: false,
+    default: 0,
+  },
+  newEventPublishClaimedAt: {
+    type: Date,
+    required: false,
+    default: null,
+  },
+  newEventPublishClaimToken: {
+    type: String,
+    required: false,
+    default: null,
+  },
   name: {
     type: String,
     required: true,
@@ -59,6 +96,16 @@ const eventSchema = new Schema({
     }),
   ],
 });
+
+eventSchema.index({ eventId: 1 }, { unique: true });
+eventSchema.index(
+  { slotKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { slotKey: { $type: "string" } },
+    name: "event_slot_key_unique",
+  }
+);
 
 const Event = model("Event", eventSchema);
 

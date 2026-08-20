@@ -4,8 +4,10 @@ import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./messaging/listener/NewEventListener";
 import EventResultListener from "./messaging/listener/EventResultListener";
 import EventVisibilityListener from "./messaging/listener/EventVisibilityListener";
+import { EventScheduler } from "./scheduler/EventScheduler";
 
 const startUp = async () => {
+  let scheduler: EventScheduler | null = null;
   console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
@@ -36,6 +38,9 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+
+    scheduler = new EventScheduler();
+    await scheduler.start();
   } catch (err) {
     console.log(err);
   }
@@ -47,6 +52,7 @@ const startUp = async () => {
   process.on("uncaughtException", async function (err) {
     console.log("logging general error", err);
     try {
+      await scheduler?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       // await channel.close();
@@ -62,6 +68,7 @@ const startUp = async () => {
   process.on("SIGINT", async () => {
     console.log("Received sigint command");
     try {
+      await scheduler?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       server.close();
@@ -74,6 +81,7 @@ const startUp = async () => {
   process.on("SIGTERM", async () => {
     console.log("Received sigterm command");
     try {
+      await scheduler?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       server.close();
