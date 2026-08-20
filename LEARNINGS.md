@@ -36,6 +36,12 @@
 - A short-lived per-event publish claim and pending marker provide at-least-once `NEW_EVENT` retry while duplicate-safe consumers preserve existing documents.
 - Backoffice and legacy events have no scheduler slot and are never counted, modified, deleted, or republished by the scheduler.
 
+### Live simulation engine
+- `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
+- The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
+- Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
+- Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
+
 ---
 
 ## Testing conventions
