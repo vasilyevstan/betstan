@@ -117,7 +117,16 @@ cd resulting && npm ci && npm run test:ci
 - Deleted Entra service principals require a successful list-all,
   client-side exact-ID absence probe; a server-filter 404 is not usable
   evidence. Role-assignment IDs must also bind to their declared parent scope.
-- Billing closure starts only after a 96-hour ingestion grace and requires
-  three clean ActualCost and AmortizedCost observations over at least
-  96 hours. Resource retirement remains complete while that separate evidence
-  phase is pending.
+- Billing closure starts only after a 96-hour ingestion grace from the first
+  full UTC billing day after retirement and requires three clean ActualCost
+  and AmortizedCost observations over at least 96 hours. Resource retirement
+  remains complete while that separate evidence phase is pending.
+- Billing evidence must normalize each bounded page before aggregation and
+  append under a lock with exact response-digest pairs and a predecessor hash.
+  Continuations repeat the exact filtered POST on the bound subscription, and
+  only transient provider failures receive bounded retries. Signal handlers
+  terminate before lock cleanup, and verified dead owners are recoverable.
+  Item-level usage prevents a charge/refund cancellation from looking clean.
+  A second currency query, malformed `nextLink`, trailing `NO_ROWS` reset, or
+  rewritten prior prefix invalidates the evidence rather than defaulting to a
+  clean window.

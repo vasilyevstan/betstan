@@ -75,7 +75,12 @@ groups, or orphaned managed group.
 Run `audit-oci-primary-retirement-stan.sh` after resource and identity
 retirement. It must distinguish immediate resource absence, delayed Cost
 Management ingestion, retained zero-cost recreation configuration, genuine
-temporary-access residue, and active workflow work.
+temporary-access residue, and active workflow work across all eight
+production-capable workflows. A live homepage alone is insufficient; require
+the canonical and diagnostic JSON API probes as well.
+After the 96-hour grace, use
+`record-azure-retirement-billing-stan.sh` for each clean observation; never
+hand-edit or replace its locked append-only v4 evidence.
 
 A GitHub run reported as queued is not automatically active or safe to delete.
 Classify it as an inert provider record only when the workflow is disabled,
@@ -83,13 +88,16 @@ the run has zero jobs and pending deployments, its timestamps are stale, and
 its SHA cannot satisfy current master provenance. Report it; never re-enable,
 approve, or mutate production solely to clear history.
 
-The operator returns `AZURE_RESOURCES_RETIRED` only after repeated
-subscription-wide resource absence; delayed Cost Management verification
+The operator returns `RESOURCE_RETIREMENT_COMPLETE` after repeated
+subscription-wide resource absence while delayed Cost Management verification
 remains pending. Return `AZURE_RETIRED` only after later ActualCost and
 AmortizedCost checks show no new BetStan usage. Wait at least 96 hours after
-the exact cutoff, then require three clean observations with 24-hour minimum
-gaps, a 96-hour total span, and a fresh final observation. Positive
-post-cutoff cost is `NO_GO`; malformed evidence is `AUDIT_INCOMPLETE`;
-immature evidence is `BILLING_INGESTION_PENDING`.
+the first full UTC billing day after the exact resource cutoff, then require
+three clean chained observations with 24-hour minimum gaps, a 96-hour total
+span, and a fresh final observation. Positive cost on or after that boundary
+is `NO_GO`; malformed provider, pagination, binding, or chain evidence is
+`AUDIT_INCOMPLETE`; immature evidence is
+`BILLING_INGESTION_PENDING` with exit code `3`. Exit `0` is reserved for
+`AZURE_RETIRED`.
 A successful delete command alone is not completion. Otherwise return `NO_GO`
 with bounded evidence and the exact safe next action.

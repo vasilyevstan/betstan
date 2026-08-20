@@ -19,6 +19,7 @@ suites=(
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
+  "$ROOT_DIR/infra/azure/agents/test-record-azure-retirement-billing-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
 )
 

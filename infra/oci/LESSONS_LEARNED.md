@@ -152,6 +152,12 @@ conversation summaries are not authority.
   runtime and active source SHAs.
 - Azure resource-ID fingerprints are case-preserving. Do not lowercase the
   live AKS ID before comparing it with migration and recovery evidence.
+- Azure data APIs may return the same subscription GUID with different casing.
+  Compare that GUID case-insensitively while keeping the active-account
+  fingerprint case-preserving.
+- Legacy Usage Details may reuse one ARM `id` for distinct charge lines. Do not
+  treat it as a line-item key; validate every row and preserve the raw page
+  digest so repeated identifiers cannot hide a positive charge.
 - Current AKS output exposes `eTag`, not only `etag`. Some `aks-preview`
   versions quote a supplied UUID before sending `If-Match`, although the AKS
   delete endpoint requires the exact emitted value. Preserve the reviewed
@@ -174,14 +180,31 @@ conversation summaries are not authority.
   cannot mask a non-zero test exit.
 - Delayed historical charges are not current resources. Continue bounded
   Cost Management checks until no new BetStan usage appears.
-- Treat Cost Management ingestion as mature only after a 96-hour grace from
-  the verified retirement cutoff. Require at least three individually hashed
-  clean observations, at least 24 hours between adjacent observations, at
-  least 96 hours from first to last, and a final observation no more than
+- Daily usage cannot attribute the partial UTC retirement day. Keep the exact
+  resource cutoff, define the next UTC midnight as the billing boundary, and
+  start the 96-hour ingestion grace there. Require at least three individually
+  hashed clean observations, at least 24 hours between adjacent observations,
+  at least 96 hours from first to last, and a final observation no more than
   48 hours old. Both ActualCost and AmortizedCost must be clean in every
   window.
-- Cost rows on or before the UTC cutoff date are historical. A positive
-  BetStan row after that date is `NO_GO`; malformed data is
+- Normalize every Cost Management page into one canonical column order before
+  combining rows. Validate exact column names and types, bounded non-cyclic
+  `nextLink` values, dates, currencies, and row shapes on every page. Repeat
+  the original POST body for each exact-subscription continuation and scope
+  the provider query to the two reviewed BetStan resource groups. Bound
+  transient request retries, but never retry malformed successful data into a
+  different classification; a parse failure is never equivalent to the last
+  page.
+- Record each cost type from one response stream so its result, currency, and
+  digest cannot come from different queries. Bind item-level usage details
+  into the digest so a positive charge cannot net against a refund. Serialize
+  writers with an owner-verifiable atomic lock, recover only dead owners,
+  preserve the complete prior prefix, and chain each observation before an
+  atomic same-directory replacement. Signal handlers must terminate before
+  cleanup releases the lock, and trailing `NO_ROWS` windows must not reset an
+  established currency.
+- Cost rows before the full-day billing boundary are historical. A positive
+  BetStan row on or after that date is `NO_GO`; malformed data is
   `AUDIT_INCOMPLETE`; missing or immature evidence remains
   `BILLING_INGESTION_PENDING`. A negative post-cutoff adjustment is not proof
   of running infrastructure, but it remains pending until classified.
