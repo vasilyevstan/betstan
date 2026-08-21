@@ -15,9 +15,15 @@ import {
   MAX_RETRY_ERROR_STACK_FRAMES,
   MAX_RETRY_PAYLOAD_BYTES,
   buildRetryPayloadStorage,
+  buildRetryPayloadSummary,
+  sanitizeRetryStack,
+  sanitizeRetryText,
 } from "../retryRetention";
 import * as resultingService from "../resulting";
 import {
+  createLiveSettlement,
+  createLiveUpdateEvent,
+  createModerationEvent,
   createLiveRow,
   createPlaceBetEvent,
   createPreMatchRow,
@@ -214,6 +220,80 @@ it("produces deterministic payload hashes and summaries for equivalent payloads"
   expect(left.hash).toEqual(right.hash);
   expect(left.byteCount).toEqual(right.byteCount);
   expect(left.summary).toEqual(right.summary);
+});
+
+it("sanitizes complex structured values and empty stacks", () => {
+  const circular: Record<string, unknown> = {
+    array: [1, new Date("2026-08-21T10:00:00.000Z"), BigInt(2)],
+    bool: true,
+    token: "apiKey=secret-token",
+  };
+  circular.self = circular;
+  circular.fn = () => "ignored";
+  circular.symbol = Symbol("secret-symbol");
+
+  const singleLine = sanitizeRetryText(circular, {
+    maxBytes: 512,
+  });
+  const multiline = sanitizeRetryText(" first\r\nsecond\tline \n", {
+    maxBytes: 512,
+    preserveNewlines: true,
+  });
+
+  expect(singleLine).toContain("[Circular]");
+  expect(singleLine).toContain("[REDACTED]");
+  expect(singleLine).toContain("2026-08-21T10:00:00.000Z");
+  expect(singleLine).not.toContain("secret-token");
+  expect(singleLine).not.toContain("\r");
+  expect(multiline).toEqual("first\nsecond line");
+  expect(sanitizeRetryStack(" \n \n")).toEqual("");
+});
+
+it("builds bounded summaries for moderation and live payloads", () => {
+  const moderationSummary = buildRetryPayloadSummary({
+    kind: "MODERATION_RESULT",
+    payload: createModerationEvent("moderation-slip", undefined, {
+      betKind: "LIVE" as never,
+      affectedRows: [
+        { declineReason: "ODDS_CHANGED", rowId: "row-a" },
+        { declineReason: "ODDS_CHANGED", rowId: "row-b" },
+      ] as never,
+    }),
+  });
+  const liveUpdateEvent = createLiveUpdateEvent({
+    eventId: "live-event",
+    markets: [],
+    sequence: 77,
+    settlements: [
+      createLiveSettlement({
+        eventId: "live-event",
+        marketId: "market-a",
+      }),
+      createLiveSettlement({
+        eventId: "live-event",
+        marketId: "market-b",
+      }),
+    ],
+  });
+  const liveSummary = buildRetryPayloadStorage({
+    kind: "LIVE_EVENT_UPDATE",
+    payload: liveUpdateEvent,
+  }).summary;
+
+  expect(moderationSummary).toEqual({
+    affectedRowCount: 2,
+    betKind: "LIVE",
+    kind: "MODERATION_RESULT",
+    result: "APPROVED",
+    slipId: "moderation-slip",
+  });
+  expect(liveSummary).toEqual({
+    eventId: "live-event",
+    kind: "LIVE_EVENT_UPDATE",
+    marketCount: 0,
+    sequence: 77,
+    settlementCount: 2,
+  });
 });
 
 it("retains replay payload while retryable and clears it when the retry becomes a dead letter", async () => {

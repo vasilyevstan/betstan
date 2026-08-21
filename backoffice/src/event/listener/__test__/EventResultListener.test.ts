@@ -90,3 +90,25 @@ it("acks without update when event is not found", async () => {
   const events = await Event.find({});
   expect(events.length).toEqual(0);
 });
+
+it("ignores self-inflicted result events", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await createEvent(eventId);
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  await listener.onMessage(
+    {
+      sender: "backoffice_result_set",
+      timestamp: new Date().toISOString(),
+      data: { eventId, homeScore: 5, awayScore: 4, home: "A", away: "B" },
+    },
+    buildMessage()
+  );
+
+  const storedEvent = await Event.findOne({ eventId });
+  expect(storedEvent!.status).toEqual(EventStatus.NO_RESULT);
+  expect(storedEvent!.homeResult).toBeUndefined();
+  expect(storedEvent!.awayResult).toBeUndefined();
+});

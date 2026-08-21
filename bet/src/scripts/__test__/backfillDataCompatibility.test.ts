@@ -1,7 +1,12 @@
 import mongoose from "mongoose";
 import { BetKind, BetStatus, SlipRowStatus } from "@betstan/common";
 import { Bet } from "../../model/Bet";
-import { runDataCompatibilityBackfill } from "../backfillDataCompatibility";
+import {
+  backfillDataCompatibilityInternals,
+  parseBackfillArgs,
+  runBackfillCli,
+  runDataCompatibilityBackfill,
+} from "../backfillDataCompatibility";
 
 const buildRow = (id: string, overrides: Record<string, unknown> = {}) => ({
   id,
@@ -73,4 +78,130 @@ it("supports dry-run, batched apply, explicit LIVE preservation, and idempotence
 
   const idempotent = await runDataCompatibilityBackfill({ apply: true, batchSize: 1 });
   expect(idempotent.changed).toBe(0);
+});
+
+it("parses CLI arguments and rejects invalid values", () => {
+  expect(parseBackfillArgs([])).toEqual({ apply: false, batchSize: 100 });
+  expect(parseBackfillArgs(["--apply"])).toEqual({ apply: true, batchSize: 100 });
+  expect(parseBackfillArgs(["--batch-size", "25"])).toEqual({
+    apply: false,
+    batchSize: 25,
+  });
+  expect(parseBackfillArgs(["--batch-size=7", "--apply"])).toEqual({
+    apply: true,
+    batchSize: 7,
+  });
+
+  expect(() => parseBackfillArgs(["--batch-size"])).toThrow(
+    "Missing value for --batch-size"
+  );
+  expect(() => parseBackfillArgs(["--batch-size", "0"])).toThrow(
+    "Invalid --batch-size value: 0"
+  );
+  expect(() => parseBackfillArgs(["--batch-size=abc"])).toThrow(
+    "Invalid --batch-size value: abc"
+  );
+  expect(() => parseBackfillArgs(["--unexpected"])).toThrow(
+    "Unknown argument: --unexpected"
+  );
+});
+
+it("covers raw document normalization internals for legacy shapes", () => {
+  expect(backfillDataCompatibilityInternals.isMissing(undefined)).toBe(true);
+  expect(backfillDataCompatibilityInternals.isMissing(null)).toBe(true);
+  expect(backfillDataCompatibilityInternals.isMissing("value")).toBe(false);
+
+  expect(backfillDataCompatibilityInternals.asRecord({ key: "value" })).toEqual({
+    key: "value",
+  });
+  expect(backfillDataCompatibilityInternals.asRecord(42)).toBeNull();
+
+  expect(backfillDataCompatibilityInternals.explicitBetKind(BetKind.LIVE)).toBe(
+    BetKind.LIVE
+  );
+  expect(
+    backfillDataCompatibilityInternals.explicitBetKind(BetKind.PRE_MATCH)
+  ).toBe(BetKind.PRE_MATCH);
+  expect(backfillDataCompatibilityInternals.explicitBetKind("other")).toBeUndefined();
+
+  expect(
+    backfillDataCompatibilityInternals.inferBetKind({
+      betKind: BetKind.PRE_MATCH,
+      rows: [{ betKind: BetKind.LIVE }],
+    })
+  ).toBe(BetKind.PRE_MATCH);
+  expect(
+    backfillDataCompatibilityInternals.inferBetKind({
+      rows: [{ betKind: BetKind.LIVE }],
+    })
+  ).toBe(BetKind.LIVE);
+  expect(
+    backfillDataCompatibilityInternals.inferBetKind({
+      rows: ["not-an-object"],
+    })
+  ).toBe(BetKind.PRE_MATCH);
+
+  expect(
+    backfillDataCompatibilityInternals.buildUpdateSet({
+      betKind: BetKind.PRE_MATCH,
+      rows: [{}, { betKind: BetKind.LIVE }],
+    })
+  ).toEqual({
+    "rows.0.betKind": BetKind.PRE_MATCH,
+  });
+  expect(
+    backfillDataCompatibilityInternals.buildUpdateSet({
+      rows: [null, { betKind: BetKind.LIVE }],
+    })
+  ).toEqual({
+    betKind: BetKind.LIVE,
+  });
+  expect(
+    backfillDataCompatibilityInternals.buildUpdateSet({
+      rows: "not-an-array",
+    })
+  ).toEqual({
+    betKind: BetKind.PRE_MATCH,
+  });
+});
+
+it("handles CLI execution logging and missing MONGO_URI defensively", async () => {
+  const originalMongoUri = process.env.MONGO_URI;
+  delete process.env.MONGO_URI;
+
+  await expect(runBackfillCli([])).rejects.toThrow("Missing MONGO_URI variable");
+
+  const slipId = new mongoose.Types.ObjectId().toHexString();
+  await Bet.collection.insertOne({
+    userId: "cli-user",
+    userName: "cli-user",
+    slipId,
+    status: BetStatus.PENDING,
+    wager: 5,
+    timestamp: new Date("2025-01-01T12:00:00.000Z").toISOString(),
+    rows: [buildRow("cli-row")],
+  });
+
+  process.env.MONGO_URI = originalMongoUri ?? "mongodb://localhost/fake";
+  const logger = {
+    log: jest.fn(),
+    error: jest.fn(),
+  };
+  const connection = {
+    connect: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const report = await runBackfillCli(
+    ["--apply", "--batch-size=1"],
+    logger,
+    connection
+  );
+
+  expect(report.mode).toBe("apply");
+  expect(report.changed).toBe(1);
+  expect(connection.connect).toHaveBeenCalledWith(process.env.MONGO_URI);
+  expect(connection.disconnect).toHaveBeenCalled();
+  expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
+  process.env.MONGO_URI = originalMongoUri;
 });

@@ -10,7 +10,7 @@ import {
   LiveMarketType,
   TeamSide,
 } from "@betstan/common";
-import { LiveEventHub } from "../../live/LiveEventHub";
+import { liveEventHub, LiveEventHub } from "../../live/LiveEventHub";
 import { PublicEventSnapshot } from "../../live/LiveEventReadModel";
 import { openEventLiveStream } from "../EventLiveStream";
 
@@ -261,4 +261,93 @@ it("sets SSE headers, sanitizes snapshots, emits heartbeats, and cleans up disco
   const writesBefore = (res as unknown as MockResponse).writes.length;
   hub.broadcast(buildSnapshot(8));
   expect((res as unknown as MockResponse).writes).toHaveLength(writesBefore);
+});
+
+it("uses default options, skips non-live payloads, and tolerates repeated cleanup without flushHeaders", () => {
+  jest.useFakeTimers();
+
+  const req = new EventEmitter() as Request;
+  const res = new MockResponse();
+  delete (res as Partial<MockResponse>).flushHeaders;
+
+  openEventLiveStream(req, res as unknown as Response);
+
+  expect(liveEventHub.subscriberCount()).toEqual(1);
+
+  const writesBeforeLive = res.writes.length;
+  const subscribedCallbacks = new Set(res.writes);
+
+  liveEventHub.broadcast({
+    id: "event-id",
+    eventId: "event-id",
+    name: "No live snapshot",
+    time: "2030-01-01T12:00:00.000Z",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+  } as PublicEventSnapshot);
+
+  expect(res.writes).toHaveLength(writesBeforeLive);
+  expect(new Set(res.writes)).toEqual(subscribedCallbacks);
+
+  res.writableEnded = true;
+  liveEventHub.broadcast(buildSnapshot(9));
+  jest.advanceTimersByTime(15000);
+  expect(res.writes).toHaveLength(writesBeforeLive);
+
+  req.emit("close");
+  req.emit("close");
+  (res as unknown as EventEmitter).emit("close");
+  expect(liveEventHub.subscriberCount()).toEqual(0);
+});
+
+it("ignores subscribed snapshots that sanitize to non-live payloads", () => {
+  const req = new EventEmitter() as Request;
+  const res = new MockResponse() as unknown as Response;
+  let subscriber: ((snapshot: PublicEventSnapshot) => void) | undefined;
+  const fakeHub = {
+    subscribe(callback: (snapshot: PublicEventSnapshot) => void) {
+      subscriber = callback;
+      return jest.fn();
+    },
+  } as unknown as LiveEventHub;
+
+  openEventLiveStream(req, res, { hub: fakeHub, heartbeatMs: 1000 });
+
+  subscriber?.({
+    id: "event-id",
+    eventId: "event-id",
+    name: "Hidden live snapshot",
+    time: "2030-01-01T12:00:00.000Z",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 1,
+      minute: 5,
+      phase: EventPhase.FIRST_HALF,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  expect((res as unknown as MockResponse).writes.join("")).toContain("event: snapshot");
+
+  subscriber?.({
+    _id: "raw-id",
+    id: "event-id",
+    eventId: "event-id",
+    name: "Sanitized away",
+    time: "2030-01-01T12:00:00.000Z",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: undefined,
+  });
+
+  expect((res as unknown as MockResponse).writes.filter((chunk) => chunk.startsWith("data: "))).toHaveLength(1);
+  req.emit("close");
 });

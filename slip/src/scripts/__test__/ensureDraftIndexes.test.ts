@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { BetKind, SlipStatus } from "@betstan/common";
 import {
   Slip,
@@ -6,7 +7,12 @@ import {
   SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
 } from "../../model/Slip";
 import { runDataCompatibilityBackfill } from "../backfillDataCompatibility";
-import { ensureSlipDraftIndex } from "../ensureDraftIndexes";
+import {
+  ensureSlipDraftIndex,
+  parseEnsureArgs,
+  runEnsureDraftIndexCli,
+  scanDraftNormalization,
+} from "../ensureDraftIndexes";
 
 const buildLegacyDraft = (userId: string) => ({
   userId,
@@ -38,6 +44,12 @@ beforeEach(async () => {
       await Slip.collection.dropIndex(index.name);
     }
   }
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+  delete process.env.MONGO_URI;
+  process.exitCode = 0;
 });
 
 it("keeps the guarded unique index absent until the explicit phase and refuses duplicate draft groups", async () => {
@@ -139,4 +151,151 @@ it("fails closed when a conflicting guarded index shape already exists", async (
   expect(report.changed).toBe(0);
   expect(report.existingIndex).toBe("conflicting");
   expect(report.blocking.unnormalizedDraftCount).toBe(0);
+});
+
+it("counts invalid, mismatched, and duplicate draft blockers during readiness scanning", async () => {
+  await Slip.collection.insertMany([
+    buildLegacyDraft("duplicate-user"),
+    buildLegacyDraft("duplicate-user"),
+    {
+      userId: "invalid-user",
+      status: SlipStatus.DRAFT,
+      timestamp: new Date("2025-01-01T12:10:00.000Z").toISOString(),
+      betKind: "INVALID",
+      draftKey: "INVALID",
+      rows: [
+        {
+          ...buildLegacyDraft("invalid-user").rows[0],
+          betKind: "INVALID",
+        },
+      ],
+    },
+    {
+      userId: "mismatch-user",
+      status: SlipStatus.DRAFT,
+      timestamp: new Date("2025-01-01T12:20:00.000Z").toISOString(),
+      betKind: BetKind.PRE_MATCH,
+      draftKey: BetKind.LIVE,
+      rows: [
+        {
+          ...buildLegacyDraft("mismatch-user").rows[0],
+          betKind: BetKind.LIVE,
+        },
+        "ignored-row",
+      ],
+    },
+    {
+      userId: "missing-row-kind-user",
+      status: SlipStatus.DRAFT,
+      timestamp: new Date("2025-01-01T12:30:00.000Z").toISOString(),
+      betKind: BetKind.PRE_MATCH,
+      draftKey: BetKind.PRE_MATCH,
+      rows: [buildLegacyDraft("missing-row-kind-user").rows[0]],
+    },
+  ]);
+
+  const counts = await scanDraftNormalization();
+  expect(counts.draftCount).toBe(5);
+  expect(counts.duplicateGroupCount).toBe(1);
+  expect(counts.duplicateDraftCount).toBe(2);
+  expect(counts.missingBetKindCount).toBe(2);
+  expect(counts.invalidBetKindCount).toBe(1);
+  expect(counts.missingDraftKeyCount).toBe(2);
+  expect(counts.invalidDraftKeyCount).toBe(1);
+  expect(counts.mismatchedDraftKeyCount).toBe(1);
+  expect(counts.missingRowKindCount).toBe(3);
+  expect(counts.invalidRowKindCount).toBe(1);
+  expect(counts.mismatchedRowKindCount).toBe(1);
+  expect(counts.unnormalizedDraftCount).toBe(5);
+});
+
+it("treats malformed named indexes and same-shape unnamed indexes as conflicting", async () => {
+  const indexesSpy = jest.spyOn(Slip.collection, "indexes");
+
+  indexesSpy.mockResolvedValueOnce([
+    { name: SLIP_DRAFT_UNIQUE_INDEX_NAME, unique: false },
+  ] as any);
+  expect((await ensureSlipDraftIndex()).existingIndex).toBe("conflicting");
+
+  indexesSpy.mockResolvedValueOnce([
+    {
+      name: SLIP_DRAFT_UNIQUE_INDEX_NAME,
+      unique: true,
+      key: { status: 1, draftKey: 1 },
+      partialFilterExpression: SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+    },
+  ] as any);
+  expect((await ensureSlipDraftIndex()).existingIndex).toBe("conflicting");
+
+  indexesSpy.mockResolvedValueOnce([
+    {
+      name: SLIP_DRAFT_UNIQUE_INDEX_NAME,
+      unique: true,
+      key: {
+        userId: 1,
+        status: 1,
+        draftKey: 1,
+      },
+      partialFilterExpression: {
+        status: SlipStatus.COMPLETE,
+        draftKey: { $type: "string" },
+      },
+    },
+  ] as any);
+  expect((await ensureSlipDraftIndex()).existingIndex).toBe("conflicting");
+
+  indexesSpy.mockResolvedValueOnce([
+    {
+      name: SLIP_DRAFT_UNIQUE_INDEX_NAME,
+      unique: true,
+      key: SLIP_DRAFT_UNIQUE_INDEX_KEYS,
+      partialFilterExpression: {
+        status: SlipStatus.DRAFT,
+        draftKey: { $type: "number" },
+      },
+    },
+  ] as any);
+  expect((await ensureSlipDraftIndex()).existingIndex).toBe("conflicting");
+
+  indexesSpy.mockResolvedValueOnce([
+    {
+      name: "other_name",
+      unique: true,
+      key: SLIP_DRAFT_UNIQUE_INDEX_KEYS,
+    },
+  ] as any);
+  expect((await ensureSlipDraftIndex()).existingIndex).toBe("conflicting");
+});
+
+it("parses ensure args and runs the CLI with fail-closed reporting", async () => {
+  expect(parseEnsureArgs([])).toEqual({ apply: false });
+  expect(parseEnsureArgs(["--apply"])).toEqual({ apply: true });
+  expect(() => parseEnsureArgs(["--unknown"])).toThrow("Unknown argument");
+
+  await expect(runEnsureDraftIndexCli([], console)).rejects.toThrow(
+    "Missing MONGO_URI variable"
+  );
+
+  await Slip.collection.insertOne(buildLegacyDraft("cli-user"));
+
+  process.env.MONGO_URI = "mongodb://ignored-for-tests";
+  const connectSpy = jest
+    .spyOn(mongoose, "connect")
+    .mockResolvedValue(mongoose as any);
+  const disconnectSpy = jest
+    .spyOn(mongoose, "disconnect")
+    .mockResolvedValue(undefined as any);
+  const logger = {
+    log: jest.fn(),
+    error: jest.fn(),
+  };
+
+  const report = await runEnsureDraftIndexCli([], logger);
+  expect(report.ready).toBe(false);
+  expect(process.exitCode).toBe(1);
+  expect(connectSpy).toHaveBeenCalledWith(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
+  expect(disconnectSpy).toHaveBeenCalled();
+  expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
 });

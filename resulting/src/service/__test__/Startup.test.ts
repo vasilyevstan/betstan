@@ -4,6 +4,7 @@ import {
   ManagedBackgroundWorker,
   ResultingServiceConfig,
   ProcessLike,
+  resolveResultingConfig,
   runResultingService,
   startResultingService,
 } from "../startup";
@@ -53,6 +54,27 @@ const createWorker = (): ManagedBackgroundWorker => ({
   init: jest.fn().mockResolvedValue(undefined),
   start: jest.fn().mockResolvedValue(undefined),
   stop: jest.fn().mockResolvedValue(undefined),
+});
+
+it("resolves config and rejects missing required env variables", () => {
+  expect(
+    resolveResultingConfig({
+      MONGO_URI: config.mongoUri,
+      RABBITMQ_URI: config.rabbitmqUri,
+    } as NodeJS.ProcessEnv)
+  ).toEqual(config);
+
+  expect(() =>
+    resolveResultingConfig({
+      MONGO_URI: config.mongoUri,
+    } as NodeJS.ProcessEnv)
+  ).toThrow("Missing RABBITMQ_URI variable");
+
+  expect(() =>
+    resolveResultingConfig({
+      RABBITMQ_URI: config.rabbitmqUri,
+    } as NodeJS.ProcessEnv)
+  ).toThrow("Missing MONGO_URI variable");
 });
 
 it("registers shutdown hooks before connecting and starts recovery before listeners listen", async () => {
@@ -215,4 +237,128 @@ it("shuts down idempotently", async () => {
   expect(closeDb).toHaveBeenCalledTimes(1);
   expect(disconnectDb).toHaveBeenCalledTimes(1);
   expect(processLike.exit).toHaveBeenCalledTimes(1);
+});
+
+it("uses removeListener fallback and shuts down on signal handlers", async () => {
+  const connection = createConnection();
+  const { handlers, processLike } = createProcessLike();
+  delete (processLike as Partial<ProcessLike>).off;
+  const listener = createListener("listener-one");
+  const retryWorker = createWorker();
+  const moderationWorker = createWorker();
+
+  await startResultingService(config, {
+    closeBroker: jest.fn().mockResolvedValue(undefined),
+    closeDb: jest.fn().mockResolvedValue(undefined),
+    connectBroker: jest.fn().mockResolvedValue(undefined),
+    connectDb: jest.fn().mockResolvedValue(undefined),
+    createListeners: jest.fn().mockReturnValue([listener]),
+    createWorkers: jest.fn().mockReturnValue([retryWorker, moderationWorker]),
+    disconnectDb: jest.fn().mockResolvedValue(undefined),
+    getBrokerConnection: jest.fn().mockReturnValue(connection),
+    logger: {
+      error: jest.fn(),
+      log: jest.fn(),
+    },
+    processLike,
+  });
+
+  await handlers.get("SIGTERM")?.();
+
+  expect(processLike.removeListener).toHaveBeenCalledWith(
+    "uncaughtException",
+    expect.any(Function)
+  );
+  expect(processLike.removeListener).toHaveBeenCalledWith(
+    "SIGINT",
+    expect.any(Function)
+  );
+  expect(processLike.removeListener).toHaveBeenCalledWith(
+    "SIGTERM",
+    expect.any(Function)
+  );
+  expect(processLike.exit).toHaveBeenCalledWith(0);
+});
+
+it("shuts down with exit code 1 on uncaught exceptions", async () => {
+  const connection = createConnection();
+  const { handlers, processLike } = createProcessLike();
+  const listener = createListener("listener-one");
+  const retryWorker = createWorker();
+  const moderationWorker = createWorker();
+  const logger = {
+    error: jest.fn(),
+    log: jest.fn(),
+  };
+
+  await startResultingService(config, {
+    closeBroker: jest.fn().mockResolvedValue(undefined),
+    closeDb: jest.fn().mockResolvedValue(undefined),
+    connectBroker: jest.fn().mockResolvedValue(undefined),
+    connectDb: jest.fn().mockResolvedValue(undefined),
+    createListeners: jest.fn().mockReturnValue([listener]),
+    createWorkers: jest.fn().mockReturnValue([retryWorker, moderationWorker]),
+    disconnectDb: jest.fn().mockResolvedValue(undefined),
+    getBrokerConnection: jest.fn().mockReturnValue(connection),
+    logger,
+    processLike,
+  });
+
+  const error = new Error("boom");
+  await handlers.get("uncaughtException")?.(error);
+
+  expect(logger.log).toHaveBeenCalledWith("logging general error", error);
+  expect(processLike.exit).toHaveBeenCalledWith(1);
+});
+
+it("logs shutdown cleanup failures but still exits", async () => {
+  const connection = createConnection();
+  const { processLike } = createProcessLike();
+  const listener = createListener("listener-one");
+  const retryWorker = createWorker();
+  const moderationWorker = createWorker();
+  const logger = {
+    error: jest.fn(),
+    log: jest.fn(),
+  };
+
+  (retryWorker.stop as jest.Mock).mockRejectedValueOnce(new Error("retry stop failed"));
+  (moderationWorker.stop as jest.Mock).mockRejectedValueOnce(
+    new Error("pending stop failed")
+  );
+
+  const runtime = await startResultingService(config, {
+    closeBroker: jest.fn().mockRejectedValueOnce(new Error("broker close failed")),
+    closeDb: jest.fn().mockRejectedValueOnce(new Error("db close failed")),
+    connectBroker: jest.fn().mockResolvedValue(undefined),
+    connectDb: jest.fn().mockResolvedValue(undefined),
+    createListeners: jest.fn().mockReturnValue([listener]),
+    createWorkers: jest.fn().mockReturnValue([retryWorker, moderationWorker]),
+    disconnectDb: jest
+      .fn()
+      .mockRejectedValueOnce(new Error("db disconnect failed")),
+    getBrokerConnection: jest.fn().mockReturnValue(connection),
+    logger,
+    processLike,
+  });
+
+  await runtime.shutdown(0);
+
+  expect(logger.log).toHaveBeenCalledWith(
+    "error stopping background worker",
+    expect.any(Error)
+  );
+  expect(logger.log).toHaveBeenCalledWith(
+    "error closing broker connection",
+    expect.any(Error)
+  );
+  expect(logger.log).toHaveBeenCalledWith(
+    "error closing connections",
+    expect.any(Error)
+  );
+  expect(logger.log).toHaveBeenCalledWith(
+    "error disconnecting database",
+    expect.any(Error)
+  );
+  expect(processLike.exit).toHaveBeenCalledWith(0);
 });

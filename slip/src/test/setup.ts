@@ -31,6 +31,7 @@ beforeAll(async () => {
       bindQueue: jest.fn(),
       consume: jest.fn(),
       ack: jest.fn(),
+      nack: jest.fn(),
       publish: jest.fn(),
     }),
     createConfirmChannel: jest.fn().mockResolvedValue({

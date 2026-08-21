@@ -993,3 +993,33 @@ export const applyPendingBetUpdatesToBet = async (
     processedPendingUpdates,
   };
 };
+
+export const betHistoryInternals = {
+  applyModerationAffectedRow,
+  buildBetRecord,
+  buildBetRow,
+  buildPendingUpdateInsert,
+  canAdvanceBetStatus,
+  canAdvanceRowStatus,
+  comparePendingUpdates,
+  ensureBetDefaults,
+  inferBetKind,
+  isDuplicateKeyError,
+  mapBetResultToStatus,
+  mapRowResultToStatus,
+  mergeBetKind,
+  mergePlaceBet,
+  mergePlaceRow,
+  normalizeBetKind,
+  normalizeOptionalPlacementValue,
+  recordPlacementConflict,
+  resolveEventTimestamp,
+  resolvePendingSequence,
+  resolvePendingTimestamp,
+  resolvePlaceBetTimestamp,
+  resolvePlacementAttemptId,
+  setDefinedValue,
+  setMissingValue,
+  stableStringify,
+  updateBetKind,
+};

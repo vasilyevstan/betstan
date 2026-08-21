@@ -108,7 +108,94 @@ const createSubmittedSlip = async ({
 };
 
 afterEach(() => {
+  jest.restoreAllMocks();
   jest.useRealTimers();
+});
+
+it("returns missing for invalid ids and not-claimable for already published slips", async () => {
+  const worker = new SlipSubmissionWorker(messengerWrapper.connection, {
+    confirmTimeoutMs: 5,
+  });
+  await worker.init();
+
+  expect(await worker.publishSlipNow("invalid-id")).toEqual({
+    claimed: false,
+    outcome: "missing",
+  });
+
+  const publishedSlip = await createSubmittedSlip({
+    publication: {
+      state: SlipPublicationState.PUBLISHED,
+      attemptCount: 1,
+      publishedAt: new Date().toISOString(),
+    },
+  });
+
+  expect(await worker.publishSlipNow(publishedSlip.id)).toEqual({
+    claimed: false,
+    outcome: "not-claimable",
+  });
+
+  await worker.stop();
+});
+
+it("publishes claimable slips without prior publication state during replay", async () => {
+  const publishWithConfirmMock =
+    PlaceBetEventPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirmMock.mockResolvedValueOnce(undefined);
+
+  const slip = await createSubmittedSlip();
+  await Slip.updateOne({ _id: slip.id }, { $unset: { publication: 1 } });
+
+  const worker = new SlipSubmissionWorker(messengerWrapper.connection, {
+    confirmTimeoutMs: 5,
+    baseBackoffMs: 0,
+    maxBackoffMs: 0,
+  });
+  await worker.start();
+  await worker.stop();
+
+  const publishedSlip = await Slip.findById(slip.id);
+  expect(publishedSlip!.publication?.state).toEqual(SlipPublicationState.PUBLISHED);
+  expect(publishedSlip!.publication?.attemptCount).toEqual(1);
+  expect(publishWithConfirmMock).toHaveBeenCalledTimes(1);
+});
+
+it("exhausts submitted slips that are missing an immutable submitted event snapshot", async () => {
+  const slipId = new mongoose.Types.ObjectId().toHexString();
+  await Slip.create({
+    _id: slipId,
+    userId: "missing-event-user",
+    betKind: BetKind.PRE_MATCH,
+    draftKey: BetKind.PRE_MATCH,
+    status: SlipStatus.SUBMITTED,
+    timestamp: new Date().toISOString(),
+    submittedAt: new Date().toISOString(),
+    publication: {
+      state: SlipPublicationState.PENDING,
+      attemptCount: 0,
+      nextAttemptAt: new Date().toISOString(),
+    },
+    rows: [buildRow()],
+  });
+
+  const worker = new SlipSubmissionWorker(messengerWrapper.connection, {
+    confirmTimeoutMs: 5,
+  });
+  await worker.init();
+
+  expect(await worker.publishSlipNow(slipId)).toEqual({
+    claimed: true,
+    outcome: "exhausted",
+  });
+
+  const exhaustedSlip = await Slip.findById(slipId);
+  expect(exhaustedSlip!.publication?.state).toEqual(SlipPublicationState.EXHAUSTED);
+  expect(exhaustedSlip!.publication?.lastError).toEqual(
+    "Missing submitted event snapshot"
+  );
+
+  await worker.stop();
 });
 
 it("keeps the slip submitted, times out unknown delivery, and retries the same payload successfully", async () => {

@@ -320,3 +320,207 @@ it("treats duplicate decline delivery as idempotent for the restored draft", asy
   expect(drafts[0].id).toEqual(firstRestoredDraft!.id);
   expect(archivedDeclinedSlip!.replacementSlipId).toEqual(firstRestoredDraft!.id);
 });
+
+it("acks invalid ids, archived approvals, archived declines without replacement ids, and unknown results", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const channel = {
+    assertExchange: jest.fn().mockResolvedValue(undefined),
+    assertQueue: jest.fn().mockResolvedValue(undefined),
+    bindQueue: jest.fn(),
+    consume: jest.fn(),
+    ack: jest.fn(),
+    nack: jest.fn(),
+    publish: jest.fn(),
+  };
+  ((messengerWrapper as any).connection.createChannel as jest.Mock).mockResolvedValueOnce(
+    channel
+  );
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  Object.defineProperty(listener, "channel", {
+    configurable: true,
+    get: () => channel,
+  });
+  const ackSpy = jest.spyOn(listener, "ack");
+  const nackSpy = channel.nack;
+
+  const archivedApprovedId = new mongoose.Types.ObjectId().toHexString();
+  await SlipArchive.create({
+    _id: archivedApprovedId,
+    userId,
+    status: SlipStatus.COMPLETE,
+    betKind: BetKind.PRE_MATCH,
+    draftKey: BetKind.PRE_MATCH,
+    timestamp: new Date().toISOString(),
+    rows: [buildRow()],
+  });
+  const archivedDeclinedId = new mongoose.Types.ObjectId().toHexString();
+  await SlipArchive.create({
+    _id: archivedDeclinedId,
+    userId,
+    status: SlipStatus.SUBMITTED,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    rows: [buildRow(BetKind.LIVE)],
+  });
+
+  await listener.onMessage(
+    buildEvent({
+      slipId: "not-an-object-id",
+      result: ModerationStatus.APPROVED,
+    }),
+    buildMessage()
+  );
+  await listener.onMessage(
+    buildEvent({
+      slipId: archivedApprovedId,
+      result: ModerationStatus.APPROVED,
+    }),
+    buildMessage()
+  );
+  await listener.onMessage(
+    buildEvent({
+      slipId: archivedDeclinedId,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+    }),
+    buildMessage()
+  );
+  await listener.onMessage(
+    buildEvent({
+      slipId: archivedApprovedId,
+      result: "UNKNOWN" as ModerationStatus,
+    }),
+    buildMessage()
+  );
+
+  expect(ackSpy).toHaveBeenCalledTimes(4);
+  expect(nackSpy).not.toHaveBeenCalled();
+});
+
+it("nacks missing approvals and declines, and repairs archived replacement ids from restored drafts", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const channel = {
+    assertExchange: jest.fn().mockResolvedValue(undefined),
+    assertQueue: jest.fn().mockResolvedValue(undefined),
+    bindQueue: jest.fn(),
+    consume: jest.fn(),
+    ack: jest.fn(),
+    nack: jest.fn(),
+    publish: jest.fn(),
+  };
+  ((messengerWrapper as any).connection.createChannel as jest.Mock).mockResolvedValueOnce(
+    channel
+  );
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  Object.defineProperty(listener, "channel", {
+    configurable: true,
+    get: () => channel,
+  });
+  const ackSpy = jest.spyOn(listener, "ack");
+  const nackSpy = channel.nack;
+
+  const missingSlipId = new mongoose.Types.ObjectId().toHexString();
+  await listener.onMessage(
+    buildEvent({
+      slipId: missingSlipId,
+      result: ModerationStatus.APPROVED,
+    }),
+    buildMessage()
+  );
+  await listener.onMessage(
+    buildEvent({
+      slipId: new mongoose.Types.ObjectId().toHexString(),
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+    }),
+    buildMessage()
+  );
+
+  const archivedSlip = await SlipArchive.create({
+    userId,
+    status: SlipStatus.SUBMITTED,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    replacementSlipId: "old-replacement-id",
+    rows: [buildRow(BetKind.LIVE)],
+  });
+  const restoredDraft = await Slip.create({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    sourceSlipId: archivedSlip.id,
+    rows: [buildRow(BetKind.LIVE)],
+  });
+
+  await listener.onMessage(
+    buildEvent({
+      slipId: archivedSlip.id,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+    }),
+    buildMessage()
+  );
+
+  const repairedArchive = await SlipArchive.findById(archivedSlip.id);
+  expect(repairedArchive!.replacementSlipId).toEqual(restoredDraft.id);
+  expect(nackSpy).toHaveBeenCalledTimes(2);
+  expect(ackSpy).toHaveBeenCalledTimes(1);
+});
+
+it("recreates a restored draft from an archived declined attempt with a stored replacement id", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  const replacementSlipId = new mongoose.Types.ObjectId().toHexString();
+  const archivedSlip = await SlipArchive.create({
+    userId,
+    status: SlipStatus.SUBMITTED,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    declineReason: ModerationDeclineReason.STALE_QUOTE,
+    replacementSlipId,
+    submittedEvent: {
+      userId,
+      userName: `${userId}@example.com`,
+      slipId: new mongoose.Types.ObjectId().toHexString(),
+      wager: 10,
+      rows: [
+        {
+          ...buildRow(BetKind.LIVE),
+          id: new mongoose.Types.ObjectId().toHexString(),
+        },
+      ],
+      betKind: BetKind.LIVE,
+    },
+    publication: {
+      state: SlipPublicationState.PENDING,
+      attemptCount: 2,
+    },
+    rows: [buildRow(BetKind.LIVE)],
+  });
+
+  await listener.onMessage(
+    buildEvent({
+      slipId: archivedSlip.id,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+      declineReason: ModerationDeclineReason.STALE_QUOTE,
+    }),
+    buildMessage()
+  );
+
+  const restoredDraft = await Slip.findById(replacementSlipId);
+  expect(restoredDraft).not.toBeNull();
+  expect(restoredDraft!.status).toEqual(SlipStatus.DRAFT);
+  expect(restoredDraft!.sourceSlipId).toEqual(archivedSlip.id);
+  expect(restoredDraft!.submittedEvent).toBeUndefined();
+  expect(restoredDraft!.publication).toBeUndefined();
+});

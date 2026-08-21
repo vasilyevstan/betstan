@@ -122,3 +122,28 @@ it("acknowledges late NewEvent deliveries without resurrecting an archive", asyn
   expect(await Event.countDocuments({ eventId: data.data.id })).toBe(0);
   expect(listener.ack).toHaveBeenCalledWith(message);
 });
+
+it("swallows duplicate-key races when the insert already won elsewhere", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+  const updateSpy = jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce({ code: 11000 });
+
+  await listener.onMessage(data, message);
+
+  expect(listener.ack).toHaveBeenCalledWith(message);
+  updateSpy.mockRestore();
+});
+
+it("rethrows unexpected persistence errors so the delivery can be retried", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+  const error = Object.assign(new Error("write failed"), { code: 500 });
+  const updateSpy = jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce(error);
+
+  await expect(listener.onMessage(data, message)).rejects.toThrow("write failed");
+  updateSpy.mockRestore();
+});

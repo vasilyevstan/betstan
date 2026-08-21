@@ -11,9 +11,19 @@ import {
   TeamSide,
 } from "@betstan/common";
 import {
+  applyLiveEventUpdate,
   createPublicEventSnapshot,
   createPublicEventSnapshotFromLiveUpdate,
+  getStoredPublicEventSnapshot,
+  listPublicEvents,
+  sanitizePublicEventSnapshot,
 } from "../LiveEventReadModel";
+import { Event } from "../../model/Event";
+
+afterEach(() => {
+  jest.restoreAllMocks();
+  jest.useRealTimers();
+});
 
 const buildRawEventDocument = () => {
   const eventTime = new Date("2030-01-01T12:00:00.000Z");
@@ -325,4 +335,368 @@ it("builds higher-sequence live snapshots without mutating the seed snapshot or 
   expect(Object.isFrozen(nextSnapshot)).toEqual(true);
   expect(nextSnapshot.live).not.toHaveProperty("occurredAt");
   expect(nextSnapshot.live).not.toHaveProperty("kickoffAt");
+});
+
+it("sanitizes sparse legacy documents and keeps malformed fields within the public contract", () => {
+  const rawEventDocument = {
+    _id: new mongoose.Types.ObjectId(),
+    id: 42,
+    name: 99,
+    time: "not-a-date",
+    home: false,
+    away: { toString: () => "Away FC" },
+    products: [
+      {
+        id: 7,
+        type: true,
+        name: false,
+        odds: [{ id: 1, name: 2, value: "2.5" }],
+      },
+    ],
+    live: {
+      sequence: 1,
+      phase: EventPhase.PRE_MATCH,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [{ type: LiveIncidentType.CORNER }],
+      currentMarkets: [
+        {
+          marketId: "market-1",
+          marketType: LiveMarketType.NEXT_CORNER,
+          marketVersion: 1,
+          quoteVersion: 2,
+          quoteValidUntil: "not-a-date",
+          status: LiveMarketStatus.OPEN,
+          selections: [
+            { selectionId: "", side: TeamSide.AWAY, odds: 4.2 },
+            { selectionId: "home", side: TeamSide.HOME, odds: 1.2 },
+          ],
+        },
+      ],
+    },
+  };
+
+  expect(
+    sanitizePublicEventSnapshot(rawEventDocument as Record<string, unknown>)
+  ).toEqual({
+    _id: rawEventDocument._id.toHexString(),
+    id: "42",
+    eventId: "42",
+    name: "99",
+    time: "not-a-date",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    home: "false",
+    away: "Away FC",
+    products: [
+      {
+        id: "7",
+        type: "true",
+        name: "false",
+        odds: [
+          {
+            id: "1",
+            name: "2",
+            value: 2.5,
+          },
+        ],
+      },
+    ],
+    live: {
+      sequence: 1,
+      minute: 0,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [{ type: LiveIncidentType.CORNER }],
+      currentMarkets: [
+        {
+          marketId: "market-1",
+          marketType: LiveMarketType.NEXT_CORNER,
+          marketVersion: 1,
+          quoteVersion: 2,
+          quoteValidUntil: "not-a-date",
+          status: LiveMarketStatus.OPEN,
+          selections: [
+            {
+              selectionId: "home",
+              side: TeamSide.HOME,
+              odds: 1.2,
+            },
+          ],
+        },
+      ],
+    },
+  });
+});
+
+it("returns the seed snapshot unchanged for duplicate or stale live sequences", () => {
+  const seedSnapshot = createPublicEventSnapshot(
+    buildRawEventDocument() as Record<string, unknown>
+  );
+
+  expect(createPublicEventSnapshotFromLiveUpdate(buildLiveUpdate(7), seedSnapshot)).toBe(
+    seedSnapshot
+  );
+  expect(createPublicEventSnapshotFromLiveUpdate(buildLiveUpdate(6), seedSnapshot)).toBe(
+    seedSnapshot
+  );
+});
+
+it("builds sparse live updates with defaults, deduplicated incidents, and filtered markets", () => {
+  jest.useFakeTimers().setSystemTime(new Date("2030-02-01T00:00:00.000Z"));
+
+  const sparseSnapshot = createPublicEventSnapshotFromLiveUpdate(
+    {
+      data: {
+        eventId: "generated-event",
+        sequence: 1,
+        minute: 1,
+        phase: EventPhase.PRE_MATCH,
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidents: [
+          { type: LiveIncidentType.CORNER },
+          { type: LiveIncidentType.CORNER },
+          {
+            id: "incident-2",
+            type: LiveIncidentType.GOAL,
+            side: TeamSide.HOME,
+            occurredAt: "not-a-date",
+            minute: 2,
+            addedTime: 1,
+          },
+        ],
+        markets: [
+          {
+            marketId: "",
+            marketType: LiveMarketType.NEXT_CORNER,
+            marketVersion: 1,
+            quoteVersion: 1,
+            status: LiveMarketStatus.OPEN,
+            selections: [],
+          },
+          {
+            marketId: "market-1",
+            marketType: LiveMarketType.NEXT_CORNER,
+            marketVersion: 1,
+            quoteVersion: 1,
+            quoteValidUntil: "bad-date",
+            status: LiveMarketStatus.OPEN,
+            selections: [
+              { selectionId: "", side: TeamSide.AWAY, odds: 4.2 },
+              { selectionId: "home", side: TeamSide.HOME, odds: 1.2 },
+            ],
+          },
+        ],
+        settlements: [],
+        eventName: "   ",
+      },
+    } as any
+  );
+
+  expect(sparseSnapshot).toEqual({
+    id: "generated-event",
+    eventId: "generated-event",
+    name: "generated-event",
+    time: "2030-02-01T00:00:00.000Z",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 1,
+      minute: 1,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [
+        { type: LiveIncidentType.CORNER },
+        {
+          id: "incident-2",
+          type: LiveIncidentType.GOAL,
+          side: TeamSide.HOME,
+          occurredAt: "not-a-date",
+          minute: 2,
+          addedTime: 1,
+        },
+      ],
+      currentMarkets: [
+        {
+          marketId: "market-1",
+          marketType: LiveMarketType.NEXT_CORNER,
+          marketVersion: 1,
+          quoteVersion: 1,
+          quoteValidUntil: "bad-date",
+          status: LiveMarketStatus.OPEN,
+          selections: [
+            {
+              selectionId: "home",
+              side: TeamSide.HOME,
+              odds: 1.2,
+            },
+          ],
+        },
+      ],
+    },
+  });
+});
+
+it("reads stored snapshots, sorts ties by event id, and applies single-incident updates to live-null events", async () => {
+  const kickoffAt = "2030-01-01T12:00:00.000Z";
+  const event = await Event.create({
+    eventId: "legacy-live-null",
+    name: "Legacy live null",
+    home: "Team A",
+    away: "Team B",
+    time: new Date(kickoffAt),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: null,
+  });
+
+  const updatedSnapshot = await applyLiveEventUpdate({
+    data: {
+      eventId: event.eventId,
+      sequence: 1,
+      occurredAt: kickoffAt,
+      kickoffAt,
+      minute: 1,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incident: { type: LiveIncidentType.CORNER },
+      markets: [],
+      settlements: [],
+      home: "Team A",
+      away: "Team B",
+    },
+  } as any);
+
+  expect(updatedSnapshot?.live?.incidentHistory).toEqual([
+    { type: LiveIncidentType.CORNER },
+  ]);
+  expect(await getStoredPublicEventSnapshot(event.eventId)).toEqual(updatedSnapshot);
+  expect(await getStoredPublicEventSnapshot("missing-event")).toBeUndefined();
+
+  await Event.create({
+    eventId: "alpha",
+    name: "Alpha",
+    time: new Date("2030-01-01T13:00:00.000Z"),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+  });
+  await Event.create({
+    eventId: "beta",
+    name: "Beta",
+    time: new Date("2030-01-01T13:00:00.000Z"),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+  });
+
+  const listedEvents = await listPublicEvents(new Date("2030-01-01T12:30:00.000Z"));
+  expect(listedEvents.map((listedEvent) => listedEvent.eventId)).toEqual([
+    "legacy-live-null",
+    "alpha",
+    "beta",
+  ]);
+});
+
+it("retries duplicate key races and handles mismatch, missing document, and non-duplicate failures", async () => {
+  const liveUpdate = buildLiveUpdate(9);
+  const updateOneSpy = jest.spyOn(Event, "updateOne");
+  const findOneSpy = jest.spyOn(Event, "findOne");
+
+  updateOneSpy
+    .mockResolvedValueOnce({} as any)
+    .mockRejectedValueOnce({ code: 11000 } as any)
+    .mockResolvedValueOnce({} as any);
+  findOneSpy.mockReturnValueOnce({
+    lean: jest.fn().mockResolvedValue({
+      eventId: "event-id",
+      name: "Recovered",
+      time: "2030-01-01T12:00:00.000Z",
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+      live: {
+        sequence: 9,
+        minute: 34,
+        phase: EventPhase.FIRST_HALF_STOPPAGE,
+        homeScore: 2,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    }),
+  } as any);
+
+  expect(await applyLiveEventUpdate(liveUpdate)).toEqual({
+    id: "event-id",
+    eventId: "event-id",
+    name: "Recovered",
+    time: "2030-01-01T12:00:00.000Z",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 9,
+      minute: 34,
+      phase: EventPhase.FIRST_HALF_STOPPAGE,
+      homeScore: 2,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  updateOneSpy.mockReset();
+  findOneSpy.mockReset();
+
+  updateOneSpy.mockResolvedValueOnce({} as any).mockResolvedValueOnce({} as any);
+  findOneSpy.mockReturnValueOnce({
+    lean: jest.fn().mockResolvedValue({
+      eventId: "event-id",
+      name: "Mismatch",
+      time: "2030-01-01T12:00:00.000Z",
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+      live: {
+        sequence: 8,
+        minute: 34,
+        phase: EventPhase.FIRST_HALF_STOPPAGE,
+        homeScore: 2,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    }),
+  } as any);
+  await expect(applyLiveEventUpdate(liveUpdate)).resolves.toBeNull();
+
+  updateOneSpy.mockReset();
+  findOneSpy.mockReset();
+
+  updateOneSpy.mockResolvedValueOnce({} as any).mockResolvedValueOnce({} as any);
+  findOneSpy.mockReturnValueOnce({
+    lean: jest.fn().mockResolvedValue(null),
+  } as any);
+  await expect(applyLiveEventUpdate(liveUpdate)).resolves.toBeNull();
+
+  updateOneSpy.mockReset();
+  updateOneSpy
+    .mockResolvedValueOnce({} as any)
+    .mockRejectedValueOnce({ code: 500 } as any);
+  await expect(applyLiveEventUpdate(liveUpdate)).rejects.toMatchObject({
+    code: 500,
+  });
 });

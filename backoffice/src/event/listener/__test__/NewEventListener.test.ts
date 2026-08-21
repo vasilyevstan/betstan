@@ -117,3 +117,49 @@ it("keeps the original event when delivery is duplicated", async () => {
   expect(stored!.name).toEqual("Team A - Team B");
   expect(stored!.time).toEqual("2030-01-01T00:00:00.000Z");
 });
+
+it("acks duplicate key errors emitted by persistence", async () => {
+  const listener = new NewEventListener(messengerWrapper.connection);
+  await listener.init();
+
+  const updateOneSpy = jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce({ code: 11000 });
+
+  const event: INewEventEvent = {
+    sender: "other_service",
+    timestamp: new Date().toISOString(),
+    data: {
+      id: new mongoose.Types.ObjectId().toHexString(),
+      name: "Team A - Team B",
+      time: new Date().toISOString(),
+      home: "Team A",
+      away: "Team B",
+    },
+  };
+
+  await expect(listener.onMessage(event, buildMessage())).resolves.toBeUndefined();
+  expect(updateOneSpy).toHaveBeenCalledTimes(1);
+});
+
+it("rethrows unexpected persistence errors", async () => {
+  const listener = new NewEventListener(messengerWrapper.connection);
+  await listener.init();
+
+  const error = new Error("db unavailable");
+  jest.spyOn(Event, "updateOne").mockRejectedValueOnce(error);
+
+  const event: INewEventEvent = {
+    sender: "other_service",
+    timestamp: new Date().toISOString(),
+    data: {
+      id: new mongoose.Types.ObjectId().toHexString(),
+      name: "Team A - Team B",
+      time: new Date().toISOString(),
+      home: "Team A",
+      away: "Team B",
+    },
+  };
+
+  await expect(listener.onMessage(event, buildMessage())).rejects.toThrow(error);
+});

@@ -1,7 +1,12 @@
 import mongoose from "mongoose";
 import { BetKind, SlipStatus } from "@betstan/common";
 import { Slip, SlipArchive } from "../../model/Slip";
-import { runDataCompatibilityBackfill } from "../backfillDataCompatibility";
+import {
+  findDuplicateDrafts,
+  parseBackfillArgs,
+  runBackfillCli,
+  runDataCompatibilityBackfill,
+} from "../backfillDataCompatibility";
 
 const buildRow = (id: string, overrides: Record<string, unknown> = {}) => ({
   eventId: `${id}-event`,
@@ -13,6 +18,11 @@ const buildRow = (id: string, overrides: Record<string, unknown> = {}) => ({
   productId: `${id}-product`,
   timestamp: new Date("2025-01-01T12:00:00.000Z").toISOString(),
   ...overrides,
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+  delete process.env.MONGO_URI;
 });
 
 it("supports dry-run, batched apply, active/archive coverage, LIVE preservation, and idempotence", async () => {
@@ -84,4 +94,131 @@ it("supports dry-run, batched apply, active/archive coverage, LIVE preservation,
 
   const idempotent = await runDataCompatibilityBackfill({ apply: true, batchSize: 1 });
   expect(idempotent.changed).toBe(0);
+});
+
+it("parses backfill args, infers duplicate kinds, and leaves duplicate draft keys untouched", async () => {
+  expect(parseBackfillArgs([])).toEqual({ apply: false, batchSize: 100 });
+  expect(parseBackfillArgs(["--apply", "--batch-size", "10"])).toEqual({
+    apply: true,
+    batchSize: 10,
+  });
+  expect(parseBackfillArgs(["--batch-size=5"])).toEqual({
+    apply: false,
+    batchSize: 5,
+  });
+  expect(() => parseBackfillArgs(["--batch-size"])).toThrow(
+    "Missing value for --batch-size"
+  );
+  expect(() => parseBackfillArgs(["--batch-size=0"])).toThrow(
+    "Invalid --batch-size value: 0"
+  );
+  expect(() => parseBackfillArgs(["--unknown"])).toThrow("Unknown argument");
+
+  await Slip.collection.insertMany([
+    {
+      userId: "duplicate-live-user",
+      status: SlipStatus.DRAFT,
+      timestamp: new Date("2025-01-01T12:00:00.000Z").toISOString(),
+      rows: [buildRow("duplicate-live-a", { betKind: BetKind.LIVE })],
+    },
+    {
+      userId: "duplicate-live-user",
+      status: SlipStatus.DRAFT,
+      timestamp: new Date("2025-01-01T12:01:00.000Z").toISOString(),
+      rows: [buildRow("duplicate-live-b", { betKind: BetKind.LIVE })],
+    },
+    {
+      userId: "submitted-user",
+      status: SlipStatus.SUBMITTED,
+      timestamp: new Date("2025-01-01T12:10:00.000Z").toISOString(),
+      rows: [buildRow("submitted-row")],
+    },
+  ]);
+
+  const duplicateGroups = await findDuplicateDrafts();
+  expect(duplicateGroups).toEqual([
+    expect.objectContaining({
+      userId: "duplicate-live-user",
+      betKind: BetKind.LIVE,
+      count: 2,
+    }),
+  ]);
+
+  const report = await runDataCompatibilityBackfill({ apply: true, batchSize: 1 });
+  expect(report.duplicateDrafts).toHaveLength(1);
+
+  const duplicateDrafts = await Slip.find({
+    userId: "duplicate-live-user",
+    status: SlipStatus.DRAFT,
+  }).lean();
+  expect(duplicateDrafts.every((slip) => typeof slip.draftKey === "undefined")).toBe(
+    true
+  );
+
+  const submittedSlip = await Slip.findOne({
+    userId: "submitted-user",
+    status: SlipStatus.SUBMITTED,
+  }).lean();
+  expect(submittedSlip?.draftKey).toBe(BetKind.PRE_MATCH);
+});
+
+it("defensively maps aggregate duplicate results and runs the CLI when mongo is configured", async () => {
+  const aggregateSpy = jest.spyOn(Slip.collection, "aggregate").mockReturnValue({
+    toArray: async () => [
+      {
+        _id: {},
+        count: "2",
+        slipIds: null,
+      },
+      {
+        _id: {
+          userId: "explicit-user",
+          betKind: BetKind.LIVE,
+        },
+        count: 3,
+        slipIds: [new mongoose.Types.ObjectId()],
+      },
+    ],
+  } as any);
+
+  await expect(findDuplicateDrafts()).resolves.toEqual([
+    {
+      userId: "",
+      betKind: BetKind.PRE_MATCH,
+      count: 2,
+      slipIds: [],
+    },
+    {
+      userId: "explicit-user",
+      betKind: BetKind.LIVE,
+      count: 3,
+      slipIds: [expect.any(String)],
+    },
+  ]);
+  aggregateSpy.mockRestore();
+
+  await expect(runBackfillCli([], console)).rejects.toThrow(
+    "Missing MONGO_URI variable"
+  );
+
+  process.env.MONGO_URI = "mongodb://ignored-for-tests";
+  const connectSpy = jest
+    .spyOn(mongoose, "connect")
+    .mockResolvedValue(mongoose as any);
+  const disconnectSpy = jest
+    .spyOn(mongoose, "disconnect")
+    .mockResolvedValue(undefined as any);
+  const logger = {
+    log: jest.fn(),
+    error: jest.fn(),
+  };
+
+  const report = await runBackfillCli(["--apply", "--batch-size", "2"], logger);
+  expect(report.mode).toBe("apply");
+  expect(report.batchSize).toBe(2);
+  expect(connectSpy).toHaveBeenCalledWith(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
+  expect(disconnectSpy).toHaveBeenCalled();
+  expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
 });

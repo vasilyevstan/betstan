@@ -53,6 +53,14 @@ beforeEach(() => {
 
 const baseKickoff = new Date("2025-01-01T12:00:00.000Z");
 
+function createStaticClock(now: Date): WorkerClock {
+  return {
+    now: () => new Date(now.getTime()),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+  };
+}
+
 function buildMessage(): ConsumeMessage {
   return {
     content: Buffer.alloc(5),
@@ -1043,4 +1051,564 @@ it("archives without republishing a final result that was already confirmed", as
   const archived = await EventArchive.findOne({ eventId: event.eventId });
   expect(archived?.resultPublishedAt).toBeTruthy();
   expect(await Event.countDocuments({ eventId: event.eventId })).toBe(0);
+});
+
+it("covers helper fallbacks for getters, dates, incidents, and manual payloads", async () => {
+  const clock = createStaticClock(new Date(baseKickoff.getTime() + 5000));
+  const worker = new GamemasterWorker({ clock });
+  const simulation = buildSimulationResult("helper-event");
+
+  expect(() => (worker as any).resultPublisher).toThrow(
+    "Result publisher is not initialised"
+  );
+  expect(() => (worker as any).livePublisher).toThrow(
+    "Live update publisher is not initialised"
+  );
+  await expect((worker as any).refreshClaimedEvent("ignored", undefined)).resolves.toBeNull();
+
+  expect(
+    (worker as any)
+      .kickoffAt({ time: baseKickoff.toISOString() })
+      .toISOString()
+  ).toBe(baseKickoff.toISOString());
+  expect((worker as any).nextTransitionAt(baseKickoff, simulation.transitions, 99)).toBeNull();
+  expect((worker as any).lastTransitionOccurredAt({ liveTransitions: [] })).toBeNull();
+
+  const pushedIncident = {
+    id: "synthetic-incident",
+    type: LiveIncidentType.FULL_TIME,
+    occurredAt: baseKickoff.toISOString(),
+    minute: 90,
+  };
+  expect(
+    (worker as any).buildCumulativeIncidents(
+      { liveStartedAt: baseKickoff.toISOString(), liveTransitions: [] },
+      0,
+      pushedIncident
+    )
+  ).toEqual([pushedIncident]);
+  expect(
+    (worker as any).buildCumulativeIncidents(
+      {
+        liveStartedAt: baseKickoff.toISOString(),
+        liveTransitions: simulation.transitions,
+      },
+      1,
+      {
+        ...pushedIncident,
+        id: simulation.transitions[0].incident.id,
+      }
+    )
+  ).toHaveLength(1);
+
+  const payloadFromStoredTransitions = (worker as any).buildManualLiveUpdatePayload(
+    {
+      eventId: "helper-event",
+      time: baseKickoff,
+      pendingResult: {
+        homeScore: 2,
+        awayScore: 1,
+        requestedAt: baseKickoff.toISOString(),
+      },
+      liveTransitions: simulation.transitions,
+      liveConfirmedReplayCursor: 1,
+      liveSequence: 1,
+      home: "Home",
+      away: "Away",
+    }
+  );
+  expect(payloadFromStoredTransitions.data.markets).toHaveLength(4);
+  expect(payloadFromStoredTransitions.data.settlements).toHaveLength(4);
+  expect(payloadFromStoredTransitions.data.incidents).toHaveLength(2);
+
+  const payloadWithoutMarkets = (worker as any).buildManualLiveUpdatePayload({
+    eventId: "empty-event",
+    time: baseKickoff.valueOf(),
+    pendingResult: {
+      homeScore: 0,
+      awayScore: 0,
+    },
+    liveTransitions: [],
+    liveConfirmedReplayCursor: 0,
+    home: "Home",
+    away: "Away",
+  });
+  expect(payloadWithoutMarkets.data.markets).toEqual([]);
+  expect(payloadWithoutMarkets.data.settlements).toEqual([]);
+  expect(payloadWithoutMarkets.data.occurredAt).toBe(clock.now().toISOString());
+});
+
+it("avoids duplicate scheduling and logs scheduled tick failures", async () => {
+  const setTimeoutSpy = jest.fn().mockReturnValue(123);
+  const clearTimeoutSpy = jest.fn();
+  const clock: WorkerClock = {
+    now: () => new Date(baseKickoff.getTime()),
+    setTimeout: setTimeoutSpy,
+    clearTimeout: clearTimeoutSpy,
+  };
+  const worker = new GamemasterWorker({ clock });
+
+  (worker as any).scheduledTick = 77;
+  worker.work();
+  expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+  (worker as any).scheduledTick = undefined;
+  (worker as any).running = true;
+  (worker as any).stopped = false;
+  worker.work();
+  expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+  worker.stop();
+  expect(clearTimeoutSpy).not.toHaveBeenCalled();
+
+  const scheduleGuardWorker = new GamemasterWorker({ clock });
+  (scheduleGuardWorker as any).stopped = true;
+  (scheduleGuardWorker as any).scheduleNextTick(25);
+  expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+  const runningWorker = new GamemasterWorker({ clock });
+  const rescheduleSpy = jest
+    .spyOn(runningWorker as any, "scheduleNextTick")
+    .mockImplementation(() => undefined);
+  (runningWorker as any).running = true;
+  await (runningWorker as any).runScheduledTick();
+  expect(rescheduleSpy).toHaveBeenCalledWith((runningWorker as any).cadenceMs);
+  rescheduleSpy.mockRestore();
+
+  const failingWorker = new GamemasterWorker({ clock });
+  const failureScheduleSpy = jest
+    .spyOn(failingWorker as any, "scheduleNextTick")
+    .mockImplementation(() => undefined);
+  jest
+    .spyOn(failingWorker as any, "checkEventsOnce")
+    .mockRejectedValue(new Error("boom"));
+  const consoleSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+
+  await (failingWorker as any).runScheduledTick();
+
+  expect(consoleSpy).toHaveBeenCalledWith(
+    "Gamemaster tick failed",
+    expect.any(Error)
+  );
+  expect((failingWorker as any).running).toBe(false);
+  expect(failureScheduleSpy).toHaveBeenCalledWith(
+    (failingWorker as any).cadenceMs
+  );
+
+  consoleSpy.mockRestore();
+  failureScheduleSpy.mockRestore();
+});
+
+it("covers claim selection and persistence planning helper branches", async () => {
+  const baseClock = createStaticClock(baseKickoff);
+  const kickoffWorker = new GamemasterWorker({
+    clock: baseClock,
+    liveKickoffsEnabled: () => true,
+  });
+  const claimSpy = jest.spyOn(kickoffWorker as any, "claimEvent");
+
+  claimSpy.mockResolvedValueOnce({ source: "manual" });
+  await expect((kickoffWorker as any).claimNextEvent()).resolves.toEqual({
+    source: "manual",
+  });
+
+  claimSpy.mockReset();
+  claimSpy.mockResolvedValueOnce(null).mockResolvedValueOnce({ source: "replay" });
+  await expect((kickoffWorker as any).claimNextEvent()).resolves.toEqual({
+    source: "replay",
+  });
+
+  claimSpy.mockReset();
+  claimSpy
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce({ source: "kickoff" });
+  await expect((kickoffWorker as any).claimNextEvent()).resolves.toEqual({
+    source: "kickoff",
+  });
+  claimSpy.mockRestore();
+
+  const replayOnlyWorker = new GamemasterWorker({
+    clock: baseClock,
+    liveKickoffsEnabled: () => false,
+  });
+  const replayClaimSpy = jest
+    .spyOn(replayOnlyWorker as any, "claimEvent")
+    .mockResolvedValue(null);
+  await expect((replayOnlyWorker as any).claimNextEvent()).resolves.toBeNull();
+  expect(replayClaimSpy).toHaveBeenCalledTimes(2);
+  replayClaimSpy.mockRestore();
+
+  const defaultPlanWorker = new GamemasterWorker({ clock: baseClock });
+  const cutoverSimulation = buildCutoverWindowSimulation("cutover-window");
+  expect(
+    (defaultPlanWorker as any).initialSimulationPersistencePlan(
+      baseKickoff,
+      cutoverSimulation
+    )
+  ).toEqual({ confirmedSequence: 0 });
+
+  const noDueTransitionSimulation = buildDelayedSimulationResult("future-only");
+  noDueTransitionSimulation.transitions = noDueTransitionSimulation.transitions.slice(1);
+  const noDueWorker = new GamemasterWorker({
+    clock: createStaticClock(new Date(baseKickoff.getTime() + 1000)),
+  });
+  expect(
+    (noDueWorker as any).initialSimulationPersistencePlan(
+      baseKickoff,
+      noDueTransitionSimulation
+    )
+  ).toEqual({ confirmedSequence: 0 });
+
+  const moderateOverdueWorker = new GamemasterWorker({
+    clock: createStaticClock(new Date(baseKickoff.getTime() + 6 * 60 * 1000)),
+  });
+  expect(
+    (moderateOverdueWorker as any).initialSimulationPersistencePlan(
+      baseKickoff,
+      cutoverSimulation
+    )
+  ).toEqual({ confirmedSequence: 2 });
+
+  const cutoverWorker = new GamemasterWorker({
+    clock: createStaticClock(new Date(baseKickoff.getTime() + 12 * 60 * 1000)),
+  });
+  const cutoverPlan = (cutoverWorker as any).initialSimulationPersistencePlan(
+    baseKickoff,
+    cutoverSimulation
+  );
+  expect(cutoverPlan.confirmedSequence).toBe(5);
+  expect(cutoverPlan.liveEndedAt?.toISOString()).toBe(
+    new Date(baseKickoff.getTime() + 12 * 60 * 1000).toISOString()
+  );
+
+  const simulation = buildSimulationResult("persisted-helper");
+  const defaultPersistence = (defaultPlanWorker as any).simulationPersistenceUpdate(
+    baseKickoff,
+    {
+      ...simulation,
+      transitions: [],
+    }
+  );
+  expect(defaultPersistence.phase).toBe(EventPhase.PRE_MATCH);
+  expect(defaultPersistence.liveMarkets).toEqual([]);
+
+  const fullTimePersistence = (defaultPlanWorker as any).simulationPersistenceUpdate(
+    baseKickoff,
+    simulation,
+    5
+  );
+  expect(fullTimePersistence.liveEndedAt).toEqual(
+    new Date(baseKickoff.getTime() + 2000)
+  );
+
+  const simulateSpy = jest.fn(() => simulation);
+  const persistenceWorker = new GamemasterWorker({
+    clock: baseClock,
+    liveKickoffsEnabled: () => true,
+    simulate: simulateSpy,
+  });
+
+  const storedEvent = {
+    liveTransitions: [simulation.transitions[0]],
+    pendingResult: undefined,
+  };
+  await expect(
+    (persistenceWorker as any).ensureSimulationPersisted(storedEvent)
+  ).resolves.toBe(storedEvent);
+  expect(simulateSpy).not.toHaveBeenCalled();
+
+  const manualEvent = {
+    liveTransitions: [],
+    pendingResult: { source: LiveResultSource.MANUAL },
+  };
+  await expect(
+    (persistenceWorker as any).ensureSimulationPersisted(manualEvent)
+  ).resolves.toBe(manualEvent);
+
+  const futureEvent = {
+    eventId: "future-event",
+    time: new Date(baseKickoff.getTime() + 1000),
+    liveTransitions: [],
+  };
+  await expect(
+    (persistenceWorker as any).ensureSimulationPersisted(futureEvent)
+  ).resolves.toBe(futureEvent);
+
+  const featureDisabledWorker = new GamemasterWorker({
+    clock: baseClock,
+    liveKickoffsEnabled: () => false,
+    simulate: simulateSpy,
+  });
+  const dueEvent = {
+    eventId: "disabled-event",
+    time: baseKickoff,
+    liveTransitions: [],
+  };
+  await expect(
+    (featureDisabledWorker as any).ensureSimulationPersisted(dueEvent)
+  ).resolves.toBe(dueEvent);
+
+  const recoveringEvent = {
+    _id: new mongoose.Types.ObjectId(),
+    eventId: "recovering-event",
+    time: baseKickoff,
+    liveSeed: "stored-seed",
+    processingLease: { token: "lease-token" },
+    liveTransitions: [],
+  };
+  const findOneAndUpdateSpy = jest
+    .spyOn(Event, "findOneAndUpdate")
+    .mockResolvedValueOnce(null as any);
+  const refreshSpy = jest
+    .spyOn(persistenceWorker as any, "refreshClaimedEvent")
+    .mockResolvedValue({ recovered: true });
+
+  await expect(
+    (persistenceWorker as any).ensureSimulationPersisted(recoveringEvent)
+  ).resolves.toEqual({ recovered: true });
+  expect(simulateSpy).toHaveBeenCalledWith({
+    eventId: "recovering-event",
+    seed: "stored-seed",
+  });
+
+  findOneAndUpdateSpy.mockRestore();
+  refreshSpy.mockRestore();
+});
+
+it("covers due-transition, manual-result, and final-result fallback branches", async () => {
+  const clock = createStaticClock(new Date(baseKickoff.getTime() + 5000));
+  const worker = new GamemasterWorker({ clock });
+  const refreshSpy = jest.spyOn(worker as any, "refreshClaimedEvent");
+
+  refreshSpy.mockResolvedValueOnce(null);
+  await expect(
+    (worker as any).publishDueTransitions({
+      _id: new mongoose.Types.ObjectId(),
+      processingLease: { token: "lease" },
+    })
+  ).resolves.toBeNull();
+
+  refreshSpy.mockReset();
+  const manualPendingEvent = {
+    _id: new mongoose.Types.ObjectId(),
+    processingLease: { token: "lease" },
+    pendingResult: { source: LiveResultSource.MANUAL },
+  };
+  refreshSpy.mockResolvedValueOnce(manualPendingEvent);
+  await expect(
+    (worker as any).publishDueTransitions(manualPendingEvent)
+  ).resolves.toBe(manualPendingEvent);
+
+  refreshSpy.mockReset();
+  const exhaustedEvent = {
+    _id: new mongoose.Types.ObjectId(),
+    processingLease: { token: "lease" },
+    liveTransitions: [],
+    liveConfirmedReplayCursor: 0,
+  };
+  refreshSpy.mockResolvedValueOnce(exhaustedEvent);
+  await expect(
+    (worker as any).publishDueTransitions(exhaustedEvent)
+  ).resolves.toBe(exhaustedEvent);
+
+  refreshSpy.mockReset();
+  const futureTransition = buildTransition(
+    "future-transition",
+    1,
+    10000,
+    EventPhase.FIRST_HALF,
+    LiveIncidentType.KICK_OFF,
+    marketSet(
+      "future-transition",
+      LiveMarketStatus.OPEN,
+      LiveMarketStatus.OPEN
+    ),
+    { minute: 0 }
+  );
+  const futureReplayEvent = {
+    _id: new mongoose.Types.ObjectId(),
+    eventId: "future-transition",
+    time: baseKickoff,
+    liveStartedAt: baseKickoff,
+    processingLease: { token: "lease" },
+    liveTransitions: [futureTransition],
+    liveConfirmedReplayCursor: 0,
+  };
+  refreshSpy.mockResolvedValueOnce(futureReplayEvent);
+  await expect(
+    (worker as any).publishDueTransitions(futureReplayEvent)
+  ).resolves.toBe(futureReplayEvent);
+  refreshSpy.mockRestore();
+
+  const recoveryWorker = new GamemasterWorker({ clock });
+  jest.spyOn(recoveryWorker as any, "init").mockResolvedValue(undefined);
+  (recoveryWorker as any).liveEventUpdatePublisher = {
+    publishWithConfirm: jest.fn().mockResolvedValue(undefined),
+  };
+  const dueTransitionEvent = {
+    _id: new mongoose.Types.ObjectId(),
+    eventId: "due-transition",
+    time: baseKickoff,
+    liveStartedAt: baseKickoff,
+    processingLease: { token: "lease" },
+    liveTransitions: [
+      buildTransition(
+        "due-transition",
+        1,
+        0,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.KICK_OFF,
+        marketSet("due-transition", LiveMarketStatus.OPEN, LiveMarketStatus.OPEN),
+        { minute: 0 }
+      ),
+    ],
+    liveConfirmedReplayCursor: 0,
+    liveSequence: 0,
+    home: "Home",
+    away: "Away",
+  };
+  const publishRefreshSpy = jest
+    .spyOn(recoveryWorker as any, "refreshClaimedEvent")
+    .mockResolvedValueOnce(dueTransitionEvent);
+  const publishUpdateSpy = jest
+    .spyOn(Event, "findOneAndUpdate")
+    .mockResolvedValueOnce(null as any);
+  const findByIdSpy = jest.spyOn(Event, "findById").mockResolvedValueOnce(null as any);
+
+  await expect(
+    (recoveryWorker as any).publishDueTransitions(dueTransitionEvent)
+  ).resolves.toBeNull();
+  expect(
+    (recoveryWorker as any).liveEventUpdatePublisher.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+
+  publishRefreshSpy.mockRestore();
+  publishUpdateSpy.mockRestore();
+  findByIdSpy.mockRestore();
+
+  const publishedManualWorker = new GamemasterWorker({ clock });
+  const archiveSpy = jest
+    .spyOn(publishedManualWorker as any, "archiveAndDelete")
+    .mockResolvedValue(undefined);
+  await (publishedManualWorker as any).processManualResult({
+    eventId: "published-manual",
+    pendingResult: {
+      source: LiveResultSource.MANUAL,
+      publishedSequence: 2,
+      publishedAt: baseKickoff,
+    },
+    liveMarkets: [],
+  });
+  expect(archiveSpy).toHaveBeenCalled();
+  archiveSpy.mockRestore();
+
+  const unpublishedManualWorker = new GamemasterWorker({ clock });
+  jest.spyOn(unpublishedManualWorker as any, "init").mockResolvedValue(undefined);
+  (unpublishedManualWorker as any).liveEventUpdatePublisher = {
+    publishWithConfirm: jest.fn().mockResolvedValue(undefined),
+  };
+  const unpublishedArchiveSpy = jest
+    .spyOn(unpublishedManualWorker as any, "archiveAndDelete")
+    .mockResolvedValue(undefined);
+  const manualUpdateSpy = jest
+    .spyOn(Event, "findOneAndUpdate")
+    .mockResolvedValueOnce(null as any);
+
+  await (unpublishedManualWorker as any).processManualResult({
+    _id: new mongoose.Types.ObjectId(),
+    eventId: "unpublished-manual",
+    time: baseKickoff.valueOf(),
+    pendingResult: {
+      source: LiveResultSource.MANUAL,
+      homeScore: 4,
+      awayScore: 2,
+    },
+    home: "Home",
+    away: "Away",
+    processingLease: { token: "lease" },
+    liveTransitions: [],
+    liveConfirmedReplayCursor: 0,
+  });
+  expect(unpublishedArchiveSpy).not.toHaveBeenCalled();
+
+  manualUpdateSpy.mockRestore();
+  unpublishedArchiveSpy.mockRestore();
+
+  const finalWorker = new GamemasterWorker({ clock });
+  (finalWorker as any).resultSetPublisher = {
+    publishWithConfirm: jest.fn().mockResolvedValue(undefined),
+  };
+  await (finalWorker as any).publishFinalResultAndArchive({
+    pendingResult: { source: LiveResultSource.MANUAL },
+  });
+  expect(
+    (finalWorker as any).resultSetPublisher.publishWithConfirm
+  ).not.toHaveBeenCalled();
+
+  const fallbackFinalWorker = new GamemasterWorker({ clock });
+  jest.spyOn(fallbackFinalWorker as any, "init").mockResolvedValue(undefined);
+  (fallbackFinalWorker as any).resultSetPublisher = {
+    publishWithConfirm: jest.fn().mockResolvedValue(undefined),
+  };
+  const processManualSpy = jest
+    .spyOn(fallbackFinalWorker as any, "processManualResult")
+    .mockResolvedValue(undefined);
+  const finalUpdateSpy = jest
+    .spyOn(Event, "findOneAndUpdate")
+    .mockResolvedValueOnce(null as any);
+  const finalRefreshSpy = jest
+    .spyOn(fallbackFinalWorker as any, "refreshClaimedEvent")
+    .mockResolvedValue({
+      pendingResult: { source: LiveResultSource.MANUAL },
+    });
+
+  await (fallbackFinalWorker as any).publishFinalResultAndArchive({
+    _id: new mongoose.Types.ObjectId(),
+    eventId: "fallback-final",
+    time: baseKickoff,
+    home: "Home",
+    away: "Away",
+    processingLease: { token: "lease" },
+    liveTransitions: [],
+    liveHomeScore: 2,
+    liveAwayScore: 1,
+  });
+  expect(
+    (fallbackFinalWorker as any).resultSetPublisher.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+  expect(processManualSpy).toHaveBeenCalled();
+
+  finalUpdateSpy.mockRestore();
+  finalRefreshSpy.mockRestore();
+  processManualSpy.mockRestore();
+
+  const archivedFinalWorker = new GamemasterWorker({ clock });
+  const finalArchiveSpy = jest
+    .spyOn(archivedFinalWorker as any, "archiveAndDelete")
+    .mockResolvedValue(undefined);
+
+  await (archivedFinalWorker as any).publishFinalResultAndArchive({
+    eventId: "archived-final",
+    time: baseKickoff.toISOString(),
+    home: "Home",
+    away: "Away",
+    resultPublishedAt: baseKickoff.toISOString(),
+    liveHomeScore: 6,
+    liveAwayScore: 4,
+    liveTransitions: [],
+    liveConfirmedReplayCursor: 0,
+    liveSequence: 0,
+  });
+
+  expect(finalArchiveSpy).toHaveBeenCalledWith(
+    expect.objectContaining({ eventId: "archived-final" }),
+    expect.objectContaining({
+      liveEndedAt: null,
+      homeResult: 6,
+      awayResult: 4,
+    })
+  );
+
+  finalArchiveSpy.mockRestore();
 });

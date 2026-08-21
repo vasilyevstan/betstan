@@ -208,21 +208,30 @@ export const runDataCompatibilityBackfill = async (
 
 export const runBackfillCli = async (
   argv: string[] = process.argv.slice(2),
-  logger: Pick<Console, "log" | "error"> = console
+  logger: Pick<Console, "log" | "error"> = console,
+  connection: Pick<typeof mongoose, "connect" | "disconnect"> = mongoose
 ): Promise<BackfillReport> => {
   const parsed = parseBackfillArgs(argv);
   if (!process.env.MONGO_URI) {
     throw new Error("Missing MONGO_URI variable");
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await connection.connect(process.env.MONGO_URI);
   try {
     const report = await runDataCompatibilityBackfill(parsed);
     logger.log(JSON.stringify(report, null, 2));
     return report;
   } finally {
-    await mongoose.disconnect();
+    await connection.disconnect();
   }
+};
+
+export const backfillDataCompatibilityInternals = {
+  asRecord,
+  buildUpdateSet,
+  explicitBetKind,
+  inferBetKind,
+  isMissing,
 };
 
 if (require.main === module) {
