@@ -1,11 +1,11 @@
 import { ConsumeMessage } from "amqplib";
-import { AListener, IEventResultEvent, QueueNames } from "@betstan/common";
+import { AListener, ILiveEventUpdateEvent, QueueNames } from "@betstan/common";
 import BetModerationResultPublisher from "../publisher/BetModerationResultPublisher";
 import ModerationService from "../../service/ModerationService";
 
-class EventResultListener extends AListener<IEventResultEvent> {
-  serviceName: string = "moderation_event_result";
-  queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
+class LiveEventUpdateListener extends AListener<ILiveEventUpdateEvent> {
+  serviceName: string = "moderation_live_event_update";
+  queue: QueueNames.LIVE_EVENT_UPDATE = QueueNames.LIVE_EVENT_UPDATE;
 
   private publisher!: BetModerationResultPublisher;
   private moderationService!: ModerationService;
@@ -18,12 +18,12 @@ class EventResultListener extends AListener<IEventResultEvent> {
     this.moderationService = new ModerationService(this.publisher);
   }
 
-  async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
-    await this.moderationService.upsertResulted(
-      event.data.eventId,
-      event.timestamp ?? new Date().toISOString()
-    );
-    await this.moderationService.replayParkedForEvent(event.data.eventId);
+  async onMessage(event: ILiveEventUpdateEvent, msg: ConsumeMessage) {
+    const updated = await this.moderationService.upsertLiveEventMirror(event);
+
+    if (updated) {
+      await this.moderationService.replayParkedForEvent(event.data.eventId);
+    }
 
     this.ack(msg);
   }
@@ -43,4 +43,4 @@ class EventResultListener extends AListener<IEventResultEvent> {
   }
 }
 
-export default EventResultListener;
+export default LiveEventUpdateListener;

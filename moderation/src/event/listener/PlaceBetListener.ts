@@ -1,80 +1,40 @@
 import { ConsumeMessage } from "amqplib";
 import { AListener, IPlaceBetEvent, QueueNames } from "@betstan/common";
-import { Bet } from "../../model/Bet";
-import { ModerationStatus, messengerWrapper } from "@betstan/common";
 import BetModerationResultPublisher from "../publisher/BetModerationResultPublisher";
-import { Resulted } from "../../model/Resulted";
+import ModerationService from "../../service/ModerationService";
 
 class PlaceBetListener extends AListener<IPlaceBetEvent> {
   serviceName: string = "moderation_place_bet";
   queue: QueueNames.SLIP_BET = QueueNames.SLIP_BET;
 
   private publisher!: BetModerationResultPublisher;
+  private moderationService!: ModerationService;
 
   async init() {
     await super.init();
-    this.publisher = new BetModerationResultPublisher(
-      messengerWrapper.connection
-    );
+    this.publisher = new BetModerationResultPublisher(this.connection);
     await this.publisher.init();
+    await this.publisher.initConfirmChannel();
+    this.moderationService = new ModerationService(this.publisher);
   }
 
   async onMessage(event: IPlaceBetEvent, msg: ConsumeMessage) {
-    const { data } = event;
+    await this.moderationService.handlePlaceBet(event);
+    this.ack(msg);
+  }
 
-    const affectedEvents = new Set();
+  async close(): Promise<void> {
+    const channel = Reflect.get(this, "_channel") as
+      | { close?: () => Promise<void> }
+      | undefined;
 
-    const bet = new Bet({
-      status: ModerationStatus.RECEIVED,
-      userId: data.userId,
-      slipId: data.slipId,
-      wager: data.wager,
-      timestamp: event.timestamp ?? new Date().toISOString(),
-      moderationTimestamp: "",
-      rows: data.rows.map((row) => {
-        affectedEvents.add(row.eventId);
-
-        return {
-          eventId: row.eventId,
-          eventName: row.eventName,
-          oddsId: row.oddsId,
-          oddsValue: row.oddsValue,
-          oddsName: row.oddsName,
-          productName: row.productName,
-          productId: row.productId,
-          timestamp: row.timestamp,
-          id: row.id,
-        };
-      }),
-    });
-
-    await bet.save();
-
-    // here be some fancy logic to validate the bet
-    let moderationStatus: ModerationStatus;
-
-    const resulted = await Resulted.findOne({
-      eventId: [...affectedEvents],
-    });
-
-    if (!resulted) {
-      moderationStatus = ModerationStatus.APPROVED;
-    } else {
-      moderationStatus = ModerationStatus.DECLINED;
+    if (this.publisher) {
+      await this.publisher.close();
     }
 
-    bet.status = moderationStatus;
-    bet.moderationTimestamp = new Date().toISOString();
-    await bet.save();
-
-    this.publisher.publish({
-      data: {
-        slipId: data.slipId,
-        result: moderationStatus,
-      },
-    });
-
-    this.ack(msg);
+    if (channel?.close) {
+      await channel.close();
+    }
   }
 }
 

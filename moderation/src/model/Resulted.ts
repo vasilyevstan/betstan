@@ -1,10 +1,11 @@
 import { Schema, model } from "mongoose";
-import { ModerationStatus } from "@betstan/common";
 
 const resultedSchema = new Schema({
   eventId: {
     type: String,
     required: true,
+    unique: true,
+    index: true,
   },
   timestamp: {
     type: String,

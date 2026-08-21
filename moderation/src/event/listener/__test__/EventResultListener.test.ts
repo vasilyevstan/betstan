@@ -1,45 +1,23 @@
 import mongoose from "mongoose";
-import { ConsumeMessage } from "amqplib";
-import { IEventResultEvent, messengerWrapper } from "@betstan/common";
+import {
+  BetKind,
+  ModerationDeclineReason,
+  ModerationStatus,
+  messengerWrapper,
+} from "@betstan/common";
+import { Bet } from "../../../model/Bet";
+import { ParkedPlaceBet } from "../../../model/ParkedPlaceBet";
 import { Resulted } from "../../../model/Resulted";
 import EventResultListener from "../EventResultListener";
-
-const createMessage = (): ConsumeMessage => ({
-  content: Buffer.alloc(5),
-  fields: {
-    consumerTag: "",
-    deliveryTag: 0,
-    redelivered: false,
-    exchange: "",
-    routingKey: "",
-  },
-  properties: {
-    contentType: undefined,
-    contentEncoding: undefined,
-    headers: {},
-    deliveryMode: undefined,
-    priority: undefined,
-    correlationId: undefined,
-    replyTo: undefined,
-    expiration: undefined,
-    messageId: undefined,
-    timestamp: undefined,
-    type: undefined,
-    userId: undefined,
-    appId: undefined,
-    clusterId: undefined,
-  },
-});
-
-const createEventData = (eventId?: string): IEventResultEvent => ({
-  data: {
-    eventId: eventId ?? new mongoose.Types.ObjectId().toHexString(),
-    homeScore: 2,
-    awayScore: 1,
-    home: "Team A",
-    away: "Team B",
-  },
-});
+import PlaceBetListener from "../PlaceBetListener";
+import BetModerationResultPublisher from "../../publisher/BetModerationResultPublisher";
+import {
+  createEventResultEvent,
+  createLiveMarket,
+  createLivePlaceBetEvent,
+  createMessage,
+  createReplayWorker,
+} from "./helpers";
 
 const setup = async () => {
   const listener = new EventResultListener(messengerWrapper.connection);
@@ -50,7 +28,7 @@ const setup = async () => {
 it("event result is saved in the Resulted collection", async () => {
   const { listener } = await setup();
   const message = createMessage();
-  const data = createEventData();
+  const data = createEventResultEvent();
 
   await listener.onMessage(data, message);
 
@@ -64,21 +42,49 @@ it("multiple event results are each saved as separate Resulted entries", async (
   const { listener } = await setup();
   const message = createMessage();
 
-  await listener.onMessage(createEventData(), message);
-  await listener.onMessage(createEventData(), message);
+  await listener.onMessage(createEventResultEvent(), message);
+  await listener.onMessage(createEventResultEvent(), message);
 
   const results = await Resulted.find({});
   expect(results).toHaveLength(2);
 });
 
-it("resulted entry for a specific event prevents future bets on that event from being approved", async () => {
+it("parked live bets are replayed and declined when the result arrives first", async () => {
+  const placeBetListener = new PlaceBetListener(messengerWrapper.connection);
+  await placeBetListener.init();
   const { listener } = await setup();
-  const message = createMessage();
+  const replayWorker = await createReplayWorker();
   const eventId = new mongoose.Types.ObjectId().toHexString();
+  const market = createLiveMarket(eventId);
+  const placeBet = createLivePlaceBetEvent(market);
 
-  await listener.onMessage(createEventData(eventId), message);
+  await placeBetListener.onMessage(placeBet, createMessage());
+  expect(await ParkedPlaceBet.findOne({ slipId: placeBet.data.slipId })).not.toBeNull();
 
-  const resulted = await Resulted.findOne({ eventId });
-  expect(resulted).not.toBeNull();
-  expect(resulted!.eventId).toEqual(eventId);
+  await listener.onMessage(createEventResultEvent(eventId), createMessage());
+  await replayWorker.runOnce();
+
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+  const publishMock =
+    BetModerationResultPublisher.prototype.publishWithConfirm as jest.Mock;
+
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.betKind).toEqual(BetKind.LIVE);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
+  expect(await ParkedPlaceBet.findOne({ slipId: placeBet.data.slipId })).toBeNull();
+  expect(publishMock.mock.calls[0][0]).toEqual({
+    data: {
+      slipId: placeBet.data.slipId,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+      declineReason: ModerationDeclineReason.EVENT_RESULTED,
+      affectedRows: [
+        {
+          rowId: placeBet.data.rows[0].id,
+          declineReason: ModerationDeclineReason.EVENT_RESULTED,
+        },
+      ],
+    },
+  });
 });

@@ -7,7 +7,8 @@
     "start": "ts-node-dev src/index",
     "dev": "ts-node-dev src/index",
     "test": "jest --watchAll --no-cache",
-    "test:ci": "jest"
+    "test:ci": "jest",
+    "data:compat:backfill": "node -r ts-node/register/transpile-only src/scripts/backfillDataCompatibility.ts"
   },
   "jest": {
     "preset": "ts-jest",
