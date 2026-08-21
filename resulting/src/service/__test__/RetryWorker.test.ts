@@ -216,6 +216,9 @@ it("extends the lease during slow replay so a competing worker cannot reclaim mi
 });
 
 it("abandons completion after heartbeat storage failure and allows stale-lease recovery", async () => {
+  const consoleErrorSpy = jest
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
   let release!: () => void;
   let startedResolve!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -256,7 +259,12 @@ it("abandons completion after heartbeat storage failure and allows stale-lease r
 
   const firstRun = workerOne.runOnce();
   await started;
-  await waitForCondition(() => heartbeatFailed, "heartbeat failure");
+  await waitForCondition(
+    () => consoleErrorSpy.mock.calls.some(
+      ([message]) => message === "Retry record heartbeat failed:"
+    ),
+    "handled heartbeat failure"
+  );
   release();
   await firstRun;
 
