@@ -963,6 +963,7 @@ case "${1:-}" in
         *oci-capacity-acquire.yml*) state="disabled_manually" ;;
         *oci-infrastructure.yml*) state="active" ;;
         *oci-production-build.yml*) state="active" ;;
+        *oci-live-data-rollout.yml*) state="active" ;;
         *oci-production-deploy.yml*) state="active" ;;
         *production-build.yml*) state="active" ;;
         *production-deploy.yml*) state="${STUB_AZURE_DEPLOY_STATE:-active}" ;;
@@ -1295,6 +1296,8 @@ assert_contains "$RUN_OUTPUT" "workflow_production-deploy_state=correct" \
   "all production-capable workflows are governed"
 assert_contains "$RUN_OUTPUT" "workflow_oci-production-build_state=correct" \
   "OCI build workflow is governed"
+assert_contains "$RUN_OUTPUT" "workflow_oci-live-data-rollout_state=correct" \
+  "OCI data rollout workflow is governed"
 
 new_case mature
 mature_cutoff_date="$(epoch_date "$MATURE_CUTOFF_EPOCH")"

@@ -47,6 +47,7 @@ paths = {
     ".github/workflows/oci-production-rollback.yml",
     ".github/workflows/oci-infrastructure.yml",
     ".github/workflows/oci-capacity-acquire.yml",
+    ".github/workflows/oci-live-data-rollout.yml",
     ".github/workflows/oci-migrate.yml",
     ".github/workflows/oci-migration-recovery.yml",
 }

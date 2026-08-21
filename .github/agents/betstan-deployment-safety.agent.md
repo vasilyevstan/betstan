@@ -16,6 +16,8 @@ Before changing or assessing deployment behavior, read:
 - `.github/workflows/production-build.yml`
 - `.github/workflows/branch-policy.yml`
 - `.github/workflows/production-deploy.yml`
+- `.github/workflows/oci-live-data-rollout.yml`
+- `.github/workflows/oci-production-deploy.yml`
 - `infra/azure/LESSONS_LEARNED.md`
 - `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
@@ -51,7 +53,8 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
   OCI is the operational service primary and is active; that statement is not
   evidence that Azure data cutover or retirement is complete. The governed set includes `production-build`,
   `production-deploy`, `oci-production-build`, `oci-production-deploy`,
-  `oci-infrastructure`, `oci-capacity-acquire`, `oci-migrate`, and the
+  `oci-infrastructure`, `oci-capacity-acquire`, `oci-live-data-rollout`,
+  `oci-migrate`, and the
   stop-only `oci-migration-recovery`; use the checked-in inventory as
   authority when it changes.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
@@ -82,10 +85,18 @@ Before deployment:
   must not race migration, cleanup, or rollback;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
+- for a schema-dependent OCI release, require the exact successful three-phase
+  data chain, baseline digest, active transferred database lock, ingress write
+  fence, and six quiesced legacy writer Deployments before applying images;
+- treat a successful final data phase as an active maintenance handoff, not a
+  completed release, and proceed directly to its bound deployment.
 
 During deployment:
 
 - hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
+- keep the public write fence active while new exact-digest services start;
+- after protected validation, release the transferred database lock before
+  removing the public write fence;
 - treat lock acquisition or release failure as deployment failure;
 - apply shared infrastructure without causing intermediate untagged application rollouts;
 - apply SHA-pinned application Deployments sequentially;
@@ -105,6 +116,9 @@ After deployment:
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
 - upload diagnostics when validation fails;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
+- on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
+  all six data writers, and retain or reacquire the exact handoff lock before
+  permitting a retry.
 
 ## Ingress safety
 

@@ -173,13 +173,38 @@ concurrent retirement fixture isolation without masking failed suites.
    `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
    ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
    load balancer.
-6. `scripts/deploy.sh` creates secrets without logging values, renders exact
+6. Before a schema-dependent application deploy, dispatch
+   `oci-live-data-rollout` against the same exact current master SHA,
+   first-attempt OCI build, and finalized infrastructure run. Run the
+   reviewer-gated phases in order: `dry-run`, `apply-backfills`, then
+   `apply-slip-index`, passing each successful run ID to the next phase.
+   The workflow runs only compiled CLIs from the approved immutable image
+   digests, binds its pre-mutation rollback baseline by digest, holds the shared
+   Mongo operation lock, and uploads sanitized hash-bound evidence. Mutating
+   phases first install the ingress write fence and scale the event,
+   gamemaster, moderation, resulting, bet, and slip writers to zero, preventing
+   legacy documents from racing the backfill or index. The backfill-only phase
+   restores the captured replica counts before it completes.
+   The final phase reapplies all six idempotent backfills under that fence,
+   creates or verifies the exact Slip index, and deliberately hands the
+   quiesced runtime plus active database lock to deployment. Public writes and
+   the six writer services remain unavailable between that successful phase
+   and deployment; dispatch the bound deployment immediately.
+   `oci-production-deploy` rejects the release unless the final evidence proves
+   all six backfills complete, the exact Slip draft index ready, the baseline
+   digest unchanged, the expected database lock active, and all legacy writers
+   still quiesced. It starts the new exact-digest services under the write
+   fence, keeps the transferred lock through protected validation, then
+   releases the lock and fence in order. Any incomplete apply or validation
+   scales the writers back to zero, restores the fence, and retains or
+   reacquires the same lock for a bounded retry with the same data run.
+7. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.
-7. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
+8. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
    `www` redirect, diagnostic TLS, API, browser, cluster, and zero-cost checks
    before the deployment is healthy.
-8. Dispatch `oci-migrate` only with the exact current master SHA, successful
+9. Dispatch `oci-migrate` only with the exact current master SHA, successful
    first-attempt build/infrastructure/deploy run IDs,
    `replace_oci_data=true`, and the destructive confirmation. The workflow
    synchronously starts only the existing `betstan-aks`, freezes Azure

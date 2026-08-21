@@ -248,6 +248,7 @@ jobs:
           az aks stop --name betstan-aks
 YAML
 
+  cp "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
 }
 
@@ -656,7 +657,7 @@ PY
 }
 
 azure_set="production-build,production-deploy,production-rollback"
-full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+full_set="oci-capacity-acquire,oci-infrastructure,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 reset_fixtures
