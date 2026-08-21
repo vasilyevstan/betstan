@@ -150,6 +150,12 @@ async function main() {
   assert.equal(changedWorkflow.statuses[2].state, "failure");
   assert.equal(changedWorkflow.statuses[3].state, "failure");
 
+  const approvedWorkflow = await execute({
+    headBlob: "c300f1291fe98565b49a7944743f356981a9f664",
+  });
+  assert.equal(approvedWorkflow.statuses[2].state, "success");
+  assert.equal(approvedWorkflow.statuses[3].state, "success");
+
   const qualityCompletion = await execute({ eventName: "workflow_run" });
   assert.deepEqual(
     qualityCompletion.statuses.map(({ context, state, sha }) => ({
