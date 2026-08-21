@@ -24,8 +24,12 @@ gh() {
     if [[ "$STUB_MODE" == "recent-disabled" ]]; then
       updated_at=1970-01-01T00:33:20Z
     fi
+    local path=.github/workflows/production-build.yml
+    if [[ "$STUB_MODE" == "data-active" ]]; then
+      path=.github/workflows/oci-live-data-rollout.yml
+    fi
     printf '%s\n' \
-      "{\"total_count\":1,\"workflow_runs\":[{\"id\":$RUN_ID,\"workflow_id\":$WORKFLOW_ID,\"path\":\".github/workflows/production-build.yml\",\"head_branch\":\"$branch\",\"status\":\"in_progress\",\"updated_at\":\"$updated_at\"}]}"
+      "{\"total_count\":1,\"workflow_runs\":[{\"id\":$RUN_ID,\"workflow_id\":$WORKFLOW_ID,\"path\":\"$path\",\"head_branch\":\"$branch\",\"status\":\"in_progress\",\"updated_at\":\"$updated_at\"}]}"
   elif [[ "$1" == "api" && "$2" == *"/actions/workflows/$WORKFLOW_ID"* ]]; then
     local state=active
     if [[ "$STUB_MODE" == *disabled* ]]; then
@@ -60,7 +64,7 @@ REPO=example/repo NOW_EPOCH=2000 STUB_MODE=stale-disabled \
 REPO=example/repo NOW_EPOCH=2000 STUB_MODE=active EXCLUDE_RUN_ID=$RUN_ID \
   "$EXCLUSIVITY" >/dev/null
 
-for mode in active recent-disabled pending-disabled jobs-disabled overflow; do
+for mode in active data-active recent-disabled pending-disabled jobs-disabled overflow; do
   if REPO=example/repo NOW_EPOCH=2000 STUB_MODE="$mode" \
     "$EXCLUSIVITY" >/dev/null 2>&1; then
     echo "production exclusivity accepted unsafe mode=$mode" >&2

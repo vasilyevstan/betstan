@@ -175,6 +175,30 @@ run_live_betting_scenario azure-topology-lock "$SCRIPT" azure MODE=dark STUB_LOC
 assert_eq 1 "$RUN_RC" "dark mode should fail when topology lock is active"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'active lock should fail topology contract'
 
+run_live_betting_scenario azure-expected-topology-lock "$SCRIPT" azure \
+  MODE=dark \
+  STUB_LOCK_STATE=active \
+  STUB_LOCK_HOLDER=live-data-4003-1 \
+  STUB_LOCK_OPERATION_ID=live-data-apply-slip-index \
+  STUB_LOCK_SOURCE_SHA=1111111111111111111111111111111111111111 \
+  EXPECTED_OPERATION_LOCK_HOLDER=live-data-4003-1 \
+  EXPECTED_OPERATION_LOCK_ID=live-data-apply-slip-index \
+  EXPECTED_OPERATION_LOCK_SOURCE_SHA=1111111111111111111111111111111111111111
+assert_eq 0 "$RUN_RC" "dark validation should accept the exact active deploy handoff lock"
+assert_contains "$RUN_SUMMARY_FILE" 'lock_state=active' 'expected active lock should be recorded'
+
+run_live_betting_scenario azure-wrong-topology-lock-holder "$SCRIPT" azure \
+  MODE=dark \
+  STUB_LOCK_STATE=active \
+  STUB_LOCK_HOLDER=different-holder \
+  STUB_LOCK_OPERATION_ID=live-data-apply-slip-index \
+  STUB_LOCK_SOURCE_SHA=1111111111111111111111111111111111111111 \
+  EXPECTED_OPERATION_LOCK_HOLDER=live-data-4003-1 \
+  EXPECTED_OPERATION_LOCK_ID=live-data-apply-slip-index \
+  EXPECTED_OPERATION_LOCK_SOURCE_SHA=1111111111111111111111111111111111111111
+assert_eq 1 "$RUN_RC" "dark validation should reject a different active lock holder"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'wrong active lock should fail topology contract'
+
 run_live_betting_scenario azure-command-failure "$SCRIPT" azure MODE=dark STUB_COMMAND_FAILURE=workloads
 assert_eq 1 "$RUN_RC" "dark mode should fail when kubectl workloads command fails"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' 'command failure should fail workload inspection'

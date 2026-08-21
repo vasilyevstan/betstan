@@ -31,14 +31,15 @@ deploy_workflow=".github/workflows/production-deploy.yml"
 rollback_workflow=".github/workflows/production-rollback.yml"
 branch_workflow=".github/workflows/branch-policy.yml"
 policy_script=".github/scripts/publish-pr-policy.js"
+oci_data_workflow=".github/workflows/oci-live-data-rollout.yml"
 oci_migrate_workflow=".github/workflows/oci-migrate.yml"
 oci_recovery_workflow=".github/workflows/oci-migration-recovery.yml"
 oci_rollback_workflow=".github/workflows/oci-production-rollback.yml"
 
 for file in \
   "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
-  "$rollback_workflow" "$oci_migrate_workflow" "$oci_recovery_workflow" \
-  "$oci_rollback_workflow"; do
+  "$rollback_workflow" "$oci_data_workflow" "$oci_migrate_workflow" \
+  "$oci_recovery_workflow" "$oci_rollback_workflow"; do
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
 
@@ -188,6 +189,22 @@ require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion he
 require_literal "$policy_script" "assertExpectedPull(finalPull, pull)" "final stale-event check"
 require_literal "$policy_script" "relation.base?.sha === pull.baseSha" "exact base snapshot relation"
 
+require_literal "$oci_data_workflow" "name: oci-live-data-rollout" "OCI live data workflow identity"
+require_literal "$oci_data_workflow" "  workflow_dispatch:" "manual OCI live data trigger"
+reject_literal "$oci_data_workflow" "  workflow_run:" "automatic OCI live data trigger"
+reject_literal "$oci_data_workflow" "  push:" "push-triggered OCI live data mutation"
+reject_literal "$oci_data_workflow" "  schedule:" "scheduled OCI live data mutation"
+require_literal "$oci_data_workflow" "if: github.run_attempt == 1" "first-attempt-only OCI live data rollout"
+require_literal "$oci_data_workflow" "name: oci-migration" "protected OCI migration environment"
+require_literal "$oci_data_workflow" "group: oci-control-plane" "shared OCI control-plane concurrency"
+require_literal "$oci_data_workflow" "cancel-in-progress: false" "non-cancelling OCI live data concurrency"
+require_literal "$oci_data_workflow" "DRY RUN LIVE DATA EXACT SHA" "exact dry-run confirmation"
+require_literal "$oci_data_workflow" "APPLY LIVE BACKFILLS EXACT SHA" "exact backfill confirmation"
+require_literal "$oci_data_workflow" "APPLY LIVE SLIP INDEX EXACT SHA" "exact index confirmation"
+require_literal "$oci_data_workflow" "live-data-maintenance-stan.sh enter" "legacy writer quiescence"
+require_literal "$oci_data_workflow" "shared-mongo-operation-lock-stan.sh acquire" "database lock acquisition"
+require_literal "$oci_data_workflow" "verify-live-betting-data-evidence-stan.sh" "tamper-evident data evidence"
+
 require_literal "$oci_migrate_workflow" "build_run_id:" "exact OCI build provenance input"
 require_literal "$oci_migrate_workflow" "replace_oci_data:" "explicit destructive replacement input"
 require_literal "$oci_migrate_workflow" "inputs.replace_oci_data == true" "destructive replacement guard"
@@ -235,7 +252,7 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 

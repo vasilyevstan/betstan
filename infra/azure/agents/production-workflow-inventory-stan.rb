@@ -12,6 +12,7 @@ AZURE_WORKFLOWS = %w[
 OCI_WORKFLOWS = %w[
   oci-capacity-acquire
   oci-infrastructure
+  oci-live-data-rollout
   oci-migrate
   oci-migration-recovery
   oci-production-build
@@ -23,6 +24,7 @@ PROTECTED_ENVIRONMENTS = {
   "production-rollback" => "production-emergency",
   "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
+  "oci-live-data-rollout" => "oci-migration",
   "oci-migrate" => "oci-migration",
   "oci-migration-recovery" => "azure-migration-recovery",
   "oci-production-build" => "oci-build",
@@ -37,6 +39,12 @@ ROLLBACK_ACTION_PINS = {
     "azure/aks-set-context" => "c7eb093e5a5d47caa333f64974d5fd1cd4bf069d"
   },
   "oci-production-rollback" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
+  },
+  "oci-live-data-rollout" => {
     "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
     "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -661,6 +669,76 @@ def validate_scheduled_oci_workflow!(name, document, content)
   )
 end
 
+def validate_live_data_rollout_workflow!(file, document, content)
+  name = "oci-live-data-rollout"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      approved_sha
+      build_run_id
+      infrastructure_run_id
+      phase
+      prerequisite_run_id
+      confirmation
+    ]
+  )
+  validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
+  validate_expected_action_pins!(name, content)
+
+  phase = workflow_dispatch_inputs(document)["phase"]
+  unless phase.is_a?(Hash) &&
+         phase["type"] == "choice" &&
+         phase["options"] == %w[dry-run apply-backfills apply-slip-index]
+    fail_inventory("#{name} must expose only the three reviewed rollout phases")
+  end
+
+  {
+    "DRY RUN LIVE DATA EXACT SHA" => "read-only confirmation",
+    "APPLY LIVE BACKFILLS EXACT SHA" => "backfill confirmation",
+    "APPLY LIVE SLIP INDEX EXACT SHA" => "index confirmation",
+    "oci-production-build.yml" => "exact build provenance",
+    "oci-infrastructure.yml" => "exact infrastructure provenance",
+    "oci-live-data-rollout.yml" => "phase-chain provenance",
+    "production-run-exclusivity-stan.sh" => "production run exclusivity",
+    "baseline-capture-stan.sh" => "before and after rollback baselines",
+    "shared-mongo-operation-lock-stan.sh acquire" => "database operation lock acquisition",
+    "shared-mongo-operation-lock-stan.sh verify" => "database operation lock handoff",
+    "shared-mongo-operation-lock-stan.sh release" => "always-run database lock release",
+    "live-data-maintenance-stan.sh enter" => "legacy writer quiescence",
+    "live-data-maintenance-stan.sh verify-held" => "deploy maintenance handoff",
+    "live-betting-data-rollout-stan.sh" => "reviewed data operator",
+    "verify-live-betting-data-evidence-stan.sh" => "tamper-evident phase validation"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+
+  require_content(
+    content,
+    /group:\s*oci-control-plane/,
+    "#{name} must serialize with the OCI control plane"
+  )
+  require_content(
+    content,
+    /cancel-in-progress:\s*false/,
+    "#{name} must never cancel an in-flight data operation"
+  )
+  require_content(
+    content,
+    /expected_phase=apply-backfills/,
+    "#{name} must chain the Slip index phase to completed backfills"
+  )
+end
+
 def validate_oci_workflow!(name, file, document, content)
   expected_file = "#{name}.yml"
   unless File.basename(file) == expected_file
@@ -726,6 +804,8 @@ def validate_oci_workflow!(name, file, document, content)
     validate_scheduled_oci_workflow!(name, document, content)
   elsif name == "oci-migration-recovery"
     validate_migration_recovery_workflow!(name, document, content)
+  elsif name == "oci-live-data-rollout"
+    validate_live_data_rollout_workflow!(file, document, content)
   else
     validate_manual_oci_workflow!(name, document, content)
   end

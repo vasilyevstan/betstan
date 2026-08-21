@@ -1,0 +1,492 @@
+name: oci-live-data-rollout
+run-name: oci-live-data ${{ inputs.phase }} ${{ inputs.approved_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA approved for the live-betting data phase
+        required: true
+        type: string
+      build_run_id:
+        description: Successful first-attempt oci-production-build run ID
+        required: true
+        type: string
+      infrastructure_run_id:
+        description: Successful first-attempt finalized oci-infrastructure run ID
+        required: true
+        type: string
+      phase:
+        description: Read, backfill, or create and verify the Slip index
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - apply-backfills
+          - apply-slip-index
+      prerequisite_run_id:
+        description: Prior successful phase run ID, or 0 for dry-run
+        required: true
+        default: "0"
+        type: string
+      confirmation:
+        description: Type the exact confirmation phrase for the selected phase
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: oci-migration
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      PHASE: ${{ inputs.phase }}
+      PREREQUISITE_RUN_ID: ${{ inputs.prerequisite_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_AVAILABILITY_DOMAIN: ${{ vars.OCI_AVAILABILITY_DOMAIN }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_CPU_MAX_PERCENT: "90"
+      SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}
+      SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
+
+    steps:
+      - name: Initialize isolated OCI data paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-home/.kube" \
+            artifacts/build \
+            artifacts/infrastructure \
+            artifacts/prerequisite \
+            artifacts/oci-live-data-rollout \
+            artifacts/oci-data-baseline-before \
+            artifacts/oci-data-baseline-after
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout approved current master commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact SHA phase and trusted upstream runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          case "$PHASE" in
+            dry-run)
+              [ "$CONFIRMATION" = "DRY RUN LIVE DATA EXACT SHA" ]
+              [ "$PREREQUISITE_RUN_ID" = "0" ]
+              ;;
+            apply-backfills)
+              [ "$CONFIRMATION" = "APPLY LIVE BACKFILLS EXACT SHA" ]
+              [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              ;;
+            apply-slip-index)
+              [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
+              [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+
+          validate_run() {
+            local workflow_file="$1"
+            local run_id="$2"
+            local expected_event="$3"
+            local workflow_id
+            workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" --jq '.id'
+            )"
+            read -r observed_workflow path event head_sha head_branch repository status conclusion attempt <<<"$(
+              gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            )"
+            [ "$observed_workflow" = "$workflow_id" ]
+            [ "$path" = ".github/workflows/$workflow_file" ]
+            [ "$event" = "$expected_event" ]
+            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_branch" = "master" ]
+            [ "$repository" = "$REPOSITORY" ]
+            [ "$status" = "completed" ]
+            [ "$conclusion" = "success" ]
+            [ "$attempt" = "1" ]
+          }
+
+          validate_run oci-production-build.yml "$BUILD_RUN_ID" workflow_run
+          validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch
+          if [ "$PHASE" != "dry-run" ]; then
+            validate_run oci-live-data-rollout.yml "$PREREQUISITE_RUN_ID" workflow_dispatch
+            artifact_name="oci-live-data-rollout-${PREREQUISITE_RUN_ID}-1"
+            artifact_count="$(
+              gh api "repos/$REPOSITORY/actions/runs/$PREREQUISITE_RUN_ID/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+          fi
+
+      - name: Reject competing production activity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXCLUDE_RUN_ID: ${{ github.run_id }}
+        run: ./infra/azure/agents/production-run-exclusivity-stan.sh
+
+      - name: Download exact OCI image provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Download exact OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Download prerequisite data evidence
+        if: inputs.phase != 'dry-run'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-live-data-rollout-${{ inputs.prerequisite_run_id }}-1
+          path: artifacts/prerequisite
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.prerequisite_run_id }}
+
+      - name: Verify immutable release and phase provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          PROVENANCE_DIR=artifacts/build \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/oci-live-data-rollout/images.tsv \
+          VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+
+          # shellcheck disable=SC1091
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$infrastructure_finalized" = "true" ]
+          if [ "$runtime_mode" = "oke" ]; then
+            echo "::add-mask::$cluster_ocid"
+            echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          else
+            echo "::add-mask::$instance_ocid"
+            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+          fi
+          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
+          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
+          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+
+          if [ "$PHASE" != "dry-run" ]; then
+            expected_phase=dry-run
+            [ "$PHASE" != "apply-slip-index" ] || expected_phase=apply-backfills
+            EVIDENCE_DIR=artifacts/prerequisite \
+            EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+            EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+            EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+            EXPECTED_PHASE="$expected_phase" \
+            EXPECTED_RUN_ID="$PREREQUISITE_RUN_ID" \
+            EXPECTED_RUN_ATTEMPT=1 \
+              ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+          fi
+
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Verify OKE identity
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_CLUSTER_OCID: ${{ steps.provenance.outputs.cluster_ocid }}
+        run: |
+          oci ce cluster get \
+            --cluster-id "$OCI_CLUSTER_OCID" \
+            --query 'data.{type:type,state:"lifecycle-state"}' \
+            >/dev/null
+
+      - name: Verify k3s identity
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.provenance.outputs.instance_ocid }}
+        run: |
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' \
+            >/dev/null
+
+      - name: Reconcile expired and authorize current runner IPv4
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/oci-live-data-rollout/runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact cluster OCID
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/oci-live-data-rollout/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Acquire database operation lock
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
+
+      - name: Capture pre-mutation rollback baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/oci-data-baseline-before
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+        run: |
+          ./infra/oci/scripts/baseline-capture-stan.sh
+          printf 'BASELINE_SHA256=%s\n' \
+            "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
+            >> "$GITHUB_ENV"
+
+      - name: Fence writes and quiesce legacy data writers
+        id: maintenance_enter
+        if: inputs.phase != 'dry-run'
+        env:
+          STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
+        run: ./infra/oci/scripts/live-data-maintenance-stan.sh enter
+
+      - name: Execute exact-digest live data phase
+        id: data
+        env:
+          IMAGE_PROVENANCE_FILE: artifacts/oci-live-data-rollout/images.tsv
+          OUTPUT_DIR: artifacts/oci-live-data-rollout/evidence
+          JOB_TIMEOUT_SECONDS: "1800"
+          BATCH_SIZE: "100"
+          MAINTENANCE_FENCE_ENFORCED: ${{ inputs.phase != 'dry-run' }}
+          WRITERS_QUIESCED: ${{ inputs.phase != 'dry-run' }}
+          RUNTIME_HELD_FOR_DEPLOY: ${{ inputs.phase == 'apply-slip-index' }}
+          OPERATION_LOCK_ENFORCED: "true"
+          OPERATION_LOCK_HANDOFF: ${{ inputs.phase == 'apply-slip-index' }}
+        run: ./infra/oci/scripts/live-betting-data-rollout-stan.sh
+
+      - name: Restore runtime or verify final deploy handoff
+        id: maintenance
+        if: always() && steps.maintenance_enter.outcome == 'success'
+        env:
+          DATA_OUTCOME: ${{ steps.data.outcome }}
+          STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
+        run: |
+          set -euo pipefail
+          if [[ "$PHASE" == "apply-slip-index" && "$DATA_OUTCOME" == "success" ]]; then
+            if ! ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held; then
+              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              exit 1
+            fi
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+          else
+            ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+          fi
+
+      - name: Capture post-phase runtime baseline
+        if: >-
+          steps.data.outcome == 'success' &&
+          inputs.phase != 'apply-slip-index' &&
+          (inputs.phase == 'dry-run' || steps.maintenance.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/oci-data-baseline-after
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+        run: ./infra/oci/scripts/baseline-capture-stan.sh
+
+      - name: Upload exact sanitized data evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-data-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-live-data-rollout/evidence
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload protected rollout baselines
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-data-baselines-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/oci-data-baseline-before
+            artifacts/oci-data-baseline-after
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Restore runtime if final handoff packaging failed
+        id: abort_handoff
+        if: >-
+          always() &&
+          failure() &&
+          inputs.phase == 'apply-slip-index' &&
+          steps.data.outcome == 'success' &&
+          steps.maintenance.outcome == 'success'
+        env:
+          STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
+        run: ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+
+      - name: Release database operation lock unless handed to deploy
+        if: >-
+          always() &&
+          (!(inputs.phase == 'apply-slip-index' &&
+             steps.data.outcome == 'success' &&
+             steps.maintenance.outcome == 'success') ||
+           steps.abort_handoff.outcome == 'success')
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+
+      - name: Revoke exact runner rule
+        if: always() && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/oci-live-data-rollout/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/oci-live-data-rollout/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-home"

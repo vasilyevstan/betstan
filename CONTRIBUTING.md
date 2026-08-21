@@ -19,6 +19,8 @@ Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They ma
 
 Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to normal application build/deploy workflows; rollback, migration, and infrastructure workflows remain human-gated.
 
+Schema-dependent OCI releases use the reviewer-gated `oci-live-data-rollout` workflow before deployment. Its exact-SHA phases are chained `dry-run` → `apply-backfills` → `apply-slip-index`; `oci-production-deploy` requires the final hash-bound schema evidence and pre-mutation rollback baseline from the same build and infrastructure runs. Mutating phases fence public writes and quiesce legacy data writers. A successful final phase deliberately retains that maintenance state and the shared-Mongo operation lock until the exact deployment passes protected validation, so dispatch the bound deployment immediately; an incomplete deployment re-enters the same fail-closed state for a safe retry.
+
 ## Production safety
 
 Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.

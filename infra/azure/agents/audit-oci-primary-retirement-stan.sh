@@ -28,6 +28,7 @@ readonly WORKFLOW_RECOVERY="oci-migration-recovery.yml"
 readonly WORKFLOW_CAPACITY="oci-capacity-acquire.yml"
 readonly WORKFLOW_INFRASTRUCTURE="oci-infrastructure.yml"
 readonly WORKFLOW_OCI_BUILD="oci-production-build.yml"
+readonly WORKFLOW_DATA="oci-live-data-rollout.yml"
 readonly WORKFLOW_DEPLOY="oci-production-deploy.yml"
 readonly WORKFLOW_AZURE_BUILD="production-build.yml"
 readonly WORKFLOW_AZURE_DEPLOY="production-deploy.yml"
@@ -1556,6 +1557,7 @@ _expected_workflow_state() {
     "$WORKFLOW_CAPACITY") echo "disabled_manually" ;;
     "$WORKFLOW_INFRASTRUCTURE") echo "active" ;;
     "$WORKFLOW_OCI_BUILD") echo "active" ;;
+    "$WORKFLOW_DATA") echo "active" ;;
     "$WORKFLOW_DEPLOY") echo "active" ;;
     "$WORKFLOW_AZURE_BUILD") echo "active" ;;
     "$WORKFLOW_AZURE_DEPLOY") echo "active" ;;
@@ -1570,6 +1572,7 @@ check_workflows() {
     "$WORKFLOW_MIGRATE"
     "$WORKFLOW_RECOVERY"
     "$WORKFLOW_OCI_BUILD"
+    "$WORKFLOW_DATA"
     "$WORKFLOW_DEPLOY"
     "$WORKFLOW_AZURE_BUILD"
     "$WORKFLOW_AZURE_DEPLOY"
