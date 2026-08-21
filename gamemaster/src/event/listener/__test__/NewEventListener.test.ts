@@ -5,20 +5,26 @@ import { EventStatus, INewEventEvent, messengerWrapper } from "@betstan/common";
 import { Event } from "../../../model/Event";
 import { EventArchive } from "../../../model/EventArchive";
 import NewEventListener from "../NewEventListener";
-import NewEventPublisher from "../../publisher/NewEventPublisher";
 
-const setup = async (numberOfEvents?: number) => {
+const setup = async (numberOfEvents = 1) => {
   const listener = new NewEventListener(messengerWrapper.connection);
   await listener.init();
 
-  const events = Array();
+  const events = await Promise.all(
+    Array.from({ length: numberOfEvents }, async () => {
+      const event = new Event({
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        name: "Existing event",
+        time: new Date(),
+        home: "Team 1",
+        away: "Team 2",
+        status: EventStatus.NO_RESULT,
+      });
 
-  if (!numberOfEvents) numberOfEvents = 1;
-
-  for (let i = 0; i < numberOfEvents; i++) {
-    const event = await createEvent();
-    events.push(event);
-  }
+      await event.save();
+      return event;
+    })
+  );
 
   const message: ConsumeMessage = {
     content: Buffer.alloc(5),
@@ -48,46 +54,96 @@ const setup = async (numberOfEvents?: number) => {
   };
 
   return { listener, events, message };
-
-  async function createEvent() {
-    const event = new Event({
-      eventId: new mongoose.Types.ObjectId().toHexString(),
-      time: new Date(),
-      home: "Team 1",
-      away: "Team 2",
-      status: EventStatus.NO_RESULT,
-    });
-
-    await event.save();
-    return event;
-  }
 };
 
-const getData = (): INewEventEvent => {
-  return {
-    data: {
-      id: new mongoose.Types.ObjectId().toHexString(),
-      name: "New event",
-      time: new Date().toISOString(),
-      home: "Player 1",
-      away: "Player 2",
-    },
-  };
-};
+const getData = (): INewEventEvent => ({
+  data: {
+    id: new mongoose.Types.ObjectId().toHexString(),
+    name: "New event",
+    time: new Date().toISOString(),
+    home: "Player 1",
+    away: "Player 2",
+  },
+});
 
-it("when new event arrives it is added to a collection", async () => {
-  const { listener, events, message } = await setup(3);
-
-  const eventId = events[0].eventId;
-
+it("stores new events with their live pre-match defaults", async () => {
+  const { listener, message } = await setup(3);
   const data = getData();
 
   await listener.onMessage(data, message);
 
-  const storedEvents = await Event.find({});
-  const storedArchievedEvents = await EventArchive.find({});
+  const stored = await Event.findOne({ eventId: data.data.id });
+  expect(await Event.countDocuments()).toBe(4);
+  expect(await EventArchive.countDocuments()).toBe(0);
+  expect(stored?.name).toBe("New event");
+  expect(stored?.phase).toBe("PRE_MATCH");
+  expect(stored?.liveConfirmedReplayCursor).toBe(0);
+});
 
-  expect(storedEvents.length).toEqual(4);
-  expect(storedArchievedEvents.length).toEqual(0);
-  expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
+it("keeps the first insert when a NewEvent delivery is duplicated", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+
+  await listener.onMessage(data, message);
+  await listener.onMessage(
+    {
+      ...data,
+      data: {
+        ...data.data,
+        name: "Changed",
+        home: "Changed",
+        away: "Changed",
+      },
+    },
+    message
+  );
+
+  const stored = await Event.findOne({ eventId: data.data.id });
+  expect(await Event.countDocuments({ eventId: data.data.id })).toBe(1);
+  expect(stored?.name).toBe("New event");
+  expect(stored?.home).toBe("Player 1");
+  expect(stored?.away).toBe("Player 2");
+});
+
+it("acknowledges late NewEvent deliveries without resurrecting an archive", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+  await EventArchive.create({
+    eventId: data.data.id,
+    name: data.data.name,
+    time: data.data.time,
+    home: data.data.home,
+    away: data.data.away,
+    status: EventStatus.RESULTED,
+  });
+
+  await listener.onMessage(data, message);
+
+  expect(await Event.countDocuments({ eventId: data.data.id })).toBe(0);
+  expect(listener.ack).toHaveBeenCalledWith(message);
+});
+
+it("swallows duplicate-key races when the insert already won elsewhere", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+  const updateSpy = jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce({ code: 11000 });
+
+  await listener.onMessage(data, message);
+
+  expect(listener.ack).toHaveBeenCalledWith(message);
+  updateSpy.mockRestore();
+});
+
+it("rethrows unexpected persistence errors so the delivery can be retried", async () => {
+  const { listener, message } = await setup();
+  const data = getData();
+  const error = Object.assign(new Error("write failed"), { code: 500 });
+  const updateSpy = jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce(error);
+
+  await expect(listener.onMessage(data, message)).rejects.toThrow("write failed");
+  updateSpy.mockRestore();
 });

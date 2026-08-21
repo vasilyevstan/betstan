@@ -1,105 +1,129 @@
-import mongoose from "mongoose";
-import { ConsumeMessage } from "amqplib";
 import {
-  IModerationResultEvent,
+  BetKind,
+  LiveSettlementReason,
   ModerationStatus,
   ResultingStatus,
+  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
-import { Bet } from "../../../model/Bet";
+import EventResultListener from "../EventResultListener";
 import ModerationResultListener from "../ModerationResultListener";
+import { Bet, BetArchive } from "../../../model/Bet";
+import FinalScoreLedger from "../../../model/FinalScoreLedger";
+import LiveSettlementLedger from "../../../model/LiveSettlementLedger";
+import PendingModerationResult from "../../../model/PendingModerationResult";
+import SettleSlipPublisher from "../../publisher/SettleSlipPublisher";
+import SettleSlipRowPublisher from "../../publisher/SettleSlipRowPublisher";
+import {
+  createBet,
+  createFinalScoreEvent,
+  createLiveRow,
+  createMessage,
+  createModerationEvent,
+  createPreMatchRow,
+  setupPublisherSpies,
+} from "../../../test/resultingTestUtils";
 
-const createMessage = (): ConsumeMessage => ({
-  content: Buffer.alloc(5),
-  fields: {
-    consumerTag: "",
-    deliveryTag: 0,
-    redelivered: false,
-    exchange: "",
-    routingKey: "",
-  },
-  properties: {
-    contentType: undefined,
-    contentEncoding: undefined,
-    headers: {},
-    deliveryMode: undefined,
-    priority: undefined,
-    correlationId: undefined,
-    replyTo: undefined,
-    expiration: undefined,
-    messageId: undefined,
-    timestamp: undefined,
-    type: undefined,
-    userId: undefined,
-    appId: undefined,
-    clusterId: undefined,
-  },
-});
-
-const createBet = async () => {
-  const slipId = new mongoose.Types.ObjectId().toHexString();
-  const bet = new Bet({
-    status: ResultingStatus.BET_PENDING,
-    userId: new mongoose.Types.ObjectId().toHexString(),
-    slipId,
-    wager: 10,
-    timestamp: new Date().toISOString(),
-    moderationTimestamp: "",
-    resultingTimestamp: "",
-    rows: [
-      {
-        id: new mongoose.Types.ObjectId().toHexString(),
-        eventId: new mongoose.Types.ObjectId().toHexString(),
-        eventName: "Test Match",
-        oddsId: new mongoose.Types.ObjectId().toHexString(),
-        oddsValue: 1.5,
-        oddsName: "Home",
-        productName: "1X2",
-        productId: new mongoose.Types.ObjectId().toHexString(),
-        timestamp: new Date().toISOString(),
-        resultingTimestamp: "",
-        result: ResultingStatus.ROW_NO_RESULT,
-      },
-    ],
-  });
-  await bet.save();
-  return bet;
-};
+setupPublisherSpies();
 
 const setup = async () => {
   const listener = new ModerationResultListener(messengerWrapper.connection);
   await listener.init();
-  return { listener };
+  return listener;
 };
 
-const createEventData = (
-  slipId: string,
-  result: string
-): IModerationResultEvent => ({
-  data: { slipId, result },
-});
+const setupEventResultListener = async () => {
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  return listener;
+};
 
-it("approved moderation result updates bet status to BET_APPROVED", async () => {
-  const { listener } = await setup();
-  const bet = await createBet();
-  const message = createMessage();
-  const data = createEventData(bet.slipId, ModerationStatus.APPROVED);
+it("approves pending live bets and replays stored settlements", async () => {
+  const row = createLiveRow({ side: TeamSide.HOME });
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    status: ResultingStatus.BET_PENDING,
+    rows: [row],
+  });
+  await LiveSettlementLedger.create({
+    eventId: row.eventId,
+    occurredAt: "2026-08-20T17:00:00.000Z",
+    marketId: row.marketId,
+    marketType: row.marketType,
+    marketVersion: row.marketVersion,
+    settlementReason: LiveSettlementReason.INCIDENT,
+    settlementSequence: 9,
+    winningSide: TeamSide.HOME,
+    winningSelection: row.selectionId,
+  });
+  const listener = await setup();
 
-  await listener.onMessage(data, message);
+  await listener.onMessage(
+    createModerationEvent(bet.slipId, ModerationStatus.APPROVED, {
+      betKind: BetKind.LIVE,
+    }),
+    createMessage()
+  );
 
-  const updatedBet = await Bet.findOne({ slipId: bet.slipId });
-  expect(updatedBet).not.toBeNull();
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+
+  expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(archivedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
   expect(listener.ack).toHaveBeenCalled();
 });
 
-it("declined moderation result updates bet status to BET_DECLINED", async () => {
-  const { listener } = await setup();
-  const bet = await createBet();
-  const message = createMessage();
-  const data = createEventData(bet.slipId, ModerationStatus.DECLINED);
+it("replays final scores when approval arrives after EVENT_RESULT and a listener restart", async () => {
+  const row = createPreMatchRow({
+    eventId: "late-approval-event",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_PENDING,
+  });
+  const eventResultListener = await setupEventResultListener();
 
-  await listener.onMessage(data, message);
+  await eventResultListener.onMessage(
+    createFinalScoreEvent({
+      eventId: row.eventId,
+      homeScore: 2,
+      awayScore: 0,
+      home: "Home Team",
+      away: "Away Team",
+    }),
+    createMessage()
+  );
+
+  expect(await FinalScoreLedger.countDocuments({ eventId: row.eventId })).toEqual(1);
+  expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+
+  const moderationListener = await setup();
+  await moderationListener.onMessage(
+    createModerationEvent(bet.slipId, ModerationStatus.APPROVED),
+    createMessage()
+  );
+
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(archivedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+});
+
+it("declined moderation results update bets to BET_DECLINED", async () => {
+  const bet = await createBet({
+    status: ResultingStatus.BET_PENDING,
+    rows: [createPreMatchRow()],
+  });
+  const listener = await setup();
+
+  await listener.onMessage(
+    createModerationEvent(bet.slipId, ModerationStatus.DECLINED),
+    createMessage()
+  );
 
   const updatedBet = await Bet.findOne({ slipId: bet.slipId });
   expect(updatedBet).not.toBeNull();
@@ -107,19 +131,29 @@ it("declined moderation result updates bet status to BET_DECLINED", async () => 
   expect(listener.ack).toHaveBeenCalled();
 });
 
-it("nacks message when bet is not found for the given slipId", async () => {
-  const { listener } = await setup();
-  const mockChannel = { nack: jest.fn(), ack: jest.fn() };
-  Object.defineProperty(listener, "channel", {
-    get: jest.fn().mockReturnValue(mockChannel),
-    configurable: true,
-  });
-  const message = createMessage();
-  const unknownSlipId = new mongoose.Types.ObjectId().toHexString();
-  const data = createEventData(unknownSlipId, ModerationStatus.APPROVED);
+it("parks moderation results when the aggregate has not arrived yet", async () => {
+  const listener = await setup();
+  const slipId = "missing-slip";
 
-  await listener.onMessage(data, message);
+  await listener.onMessage(
+    createModerationEvent(slipId, ModerationStatus.APPROVED, {
+      betKind: BetKind.LIVE,
+    }),
+    createMessage()
+  );
 
-  expect(mockChannel.nack).toHaveBeenCalled();
-  expect(listener.ack).not.toHaveBeenCalled();
+  const pendingModeration = await PendingModerationResult.findOne({ slipId });
+
+  expect(await Bet.findOne({ slipId })).toBeNull();
+  expect(pendingModeration).not.toBeNull();
+  expect(pendingModeration!.result).toEqual(ModerationStatus.APPROVED);
+  expect(pendingModeration!.betKind).toEqual(BetKind.LIVE);
+  expect(pendingModeration!.status).toEqual("PENDING");
+  expect(pendingModeration!.attemptCount).toEqual(0);
+  expect(pendingModeration!.leaseOwner).toEqual("");
+  expect(pendingModeration!.nextAttemptAt).toBeInstanceOf(Date);
+  expect(pendingModeration!.lastError?.message).toEqual("");
+  expect(pendingModeration!.lastError?.name).toEqual("");
+  expect(pendingModeration!.exhaustedAt).toBeUndefined();
+  expect(listener.ack).toHaveBeenCalled();
 });

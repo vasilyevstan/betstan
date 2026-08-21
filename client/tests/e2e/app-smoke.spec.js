@@ -1,17 +1,19 @@
 const { test, expect } = require('@playwright/test');
 const authCopy = require('../../src/pages/auth/authCopy.json');
+const { installFakeEventSource } = require('./support/fakeEventSource');
+const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
 
-const rejectAuthRequest = async (page, path, message) => {
-  await page.route(`**${path}`, (route) => route.fulfill({
-    status: 400,
-    contentType: 'application/json',
-    body: JSON.stringify({ errors: [{ message }] }),
-  }));
+const prepareShell = async (page, overrides = {}) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState(overrides);
+  await installAppApiMocks(page, state);
+  return state;
 };
 
 test('home page responds and renders shell', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  await prepareShell(page);
 
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('body')).toContainText('Create account');
@@ -22,6 +24,7 @@ test('home page responds and renders shell', async ({ page }) => {
 test('variant query param keeps app functional', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  await prepareShell(page);
 
   await page.goto('/?ui=v3', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('body')).toContainText('Create account');
@@ -31,7 +34,7 @@ test('variant query param keeps app functional', async ({ page }) => {
 test('signup submit does not crash UI', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  await rejectAuthRequest(page, '/api/auth/new', 'Signup smoke request rejected');
+  await prepareShell(page, { signupError: 'Signup smoke request rejected' });
 
   await page.goto('/signup', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('heading', { name: authCopy.signup.title })).toBeVisible();
@@ -47,7 +50,7 @@ test('signup submit does not crash UI', async ({ page }) => {
 test('login submit does not crash UI', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  await rejectAuthRequest(page, '/api/auth/login', 'Login smoke request rejected');
+  await prepareShell(page, { loginError: 'Login smoke request rejected' });
 
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('heading', { name: authCopy.login.title })).toBeVisible();
@@ -61,6 +64,7 @@ test('login submit does not crash UI', async ({ page }) => {
 });
 
 test('auth pages fit a mobile viewport', async ({ page }) => {
+  await prepareShell(page);
   await page.setViewportSize({ width: 390, height: 844 });
 
   for (const { path, title } of [

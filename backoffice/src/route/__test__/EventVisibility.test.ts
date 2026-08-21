@@ -48,3 +48,17 @@ it("flips event visibility from OFFLINE to ONLINE", async () => {
   expect(response.body.visibility).toEqual(EventVisibilityStatus.ONLINE);
   expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledTimes(1);
 });
+
+it("defaults corrupted visibility to OFFLINE before publishing", async () => {
+  await createEvent("evt-3", undefined as unknown as EventVisibilityStatus);
+
+  const response = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({ eventId: "evt-3" })
+    .expect(200);
+
+  expect(response.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
+  expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledWith({
+    data: { eventId: "evt-3", visibility: EventVisibilityStatus.OFFLINE },
+  });
+});

@@ -277,6 +277,24 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Capture protected OCI rollback baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/oci-baseline
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+        run: ./infra/oci/scripts/baseline-capture-stan.sh
+
+      - name: Upload protected OCI rollback baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-baseline
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Deploy immutable images sequentially
         id: apply
         env:
@@ -310,8 +328,20 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
           OCI_E2E_ALREADY_PASSED: "1"
+          LIVE_BETTING_READINESS_MODE: dark
+          LIVE_READINESS_REQUEST_TIMEOUT: "15"
+          LIVE_READINESS_SSE_TIMEOUT: "20"
           OUTPUT_DIR: artifacts/oci-deploy-validation
         run: ./infra/oci/agents/deploy-validation-loop-stan.sh
+
+      - name: Upload sanitized live readiness evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-deploy-validation/live-readiness
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Capture sanitized deployment diagnostics
         if: always() && (steps.apply.outcome == 'failure' || steps.health.outcome == 'failure')

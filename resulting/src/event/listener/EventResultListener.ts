@@ -1,138 +1,32 @@
-import { ConsumeMessage } from "amqplib";
+import { IEventResultEvent, QueueNames } from "@betstan/common";
+import RetriableResultingListener from "./RetriableResultingListener";
+import { SettlementPublishers, processFinalScore } from "../../service/resulting";
 import {
-  AListener,
-  IEventResultEvent,
-  ISettleSlipRowEvent,
-  QueueNames,
-  ResultingStatus,
-  messengerWrapper,
-} from "@betstan/common";
-import { Bet, BetArchive } from "../../model/Bet";
-import SettleSlipRowPublisher from "../publisher/SettleSlipRowPublisher";
-import SettleSlipPublisher from "../publisher/SettleSlipPublisher";
+  RetryDescriptor,
+  retryIdentityForEventResult,
+} from "../../service/retry";
 
-class EventResultListener extends AListener<IEventResultEvent> {
+class EventResultListener extends RetriableResultingListener<IEventResultEvent> {
   serviceName: string = "resulting_result";
   queue: QueueNames.EVENT_RESULT = QueueNames.EVENT_RESULT;
+  protected readonly failureLogMessage = "Error processing final score result:";
 
-  private settleSlipRowPublisher!: SettleSlipRowPublisher;
-  private settleSlipPublisher!: SettleSlipPublisher;
-
-  async init() {
-    await super.init();
-    this.settleSlipRowPublisher = new SettleSlipRowPublisher(
-      messengerWrapper.connection
-    );
-    await this.settleSlipRowPublisher.init();
-    this.settleSlipPublisher = new SettleSlipPublisher(
-      messengerWrapper.connection
-    );
-    await this.settleSlipPublisher.init();
+  protected buildRetryDescriptor(
+    event: IEventResultEvent
+  ): RetryDescriptor<IEventResultEvent> {
+    return {
+      identity: retryIdentityForEventResult(event),
+      kind: "EVENT_RESULT",
+      listenerServiceName: this.serviceName,
+      payload: event,
+    };
   }
 
-  async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
-    const { data } = event;
-
-    const bets = await Bet.find({ status: ResultingStatus.BET_APPROVED });
-
-    const correctScoreResult = data.homeScore + " - " + data.awayScore;
-    const oneCrossTwoResult =
-      Number(data.homeScore) > Number(data.awayScore)
-        ? data.home
-        : Number(data.homeScore) < Number(data.awayScore)
-        ? data.away
-        : "draw";
-
-    for (const bet of bets) {
-      let betLost = false;
-      let settledRows = 0;
-
-      for (const row of bet.rows) {
-        try {
-          if (row.result !== ResultingStatus.ROW_NO_RESULT) {
-            settledRows++;
-            continue;
-          }
-
-          if (row.eventId !== data.eventId) {
-            continue;
-          }
-
-          switch (row.productName) {
-            case "1X2":
-              row.winningSelection = oneCrossTwoResult;
-              if (row.oddsName == oneCrossTwoResult) {
-                row.result = ResultingStatus.ROW_WIN;
-              } else {
-                row.result = ResultingStatus.ROW_LOSS;
-                betLost = true;
-              }
-              break;
-            case "Correct Score":
-              row.winningSelection = correctScoreResult;
-              if (row.oddsName === correctScoreResult) {
-                row.result = ResultingStatus.ROW_WIN;
-              } else {
-                row.result = ResultingStatus.ROW_LOSS;
-                betLost = true;
-              }
-              break;
-            default:
-              // ignore - the product does not exist
-              continue;
-          }
-
-          settledRows++;
-
-          const settleRowData: ISettleSlipRowEvent["data"] & {
-            winningSelection?: string;
-          } = {
-            slipId: bet.slipId,
-            slipRowId: row.id,
-            result: row.result,
-            winningSelection: row.winningSelection || "",
-          };
-
-          await this.settleSlipRowPublisher.publish({
-            data: settleRowData,
-          });
-        } catch (error) {
-          console.error("Error processing row:", error);
-        }
-      }
-
-      if (settledRows === bet.rows.length && !betLost) {
-        bet.status = ResultingStatus.BET_WIN;
-      } else if (betLost) {
-        bet.status = ResultingStatus.BET_LOSS;
-      }
-
-      try {
-        if (bet.isModified()) {
-          await bet.save();
-
-          if (bet.status !== ResultingStatus.BET_APPROVED) {
-            await this.settleSlipPublisher.publish({
-              data: {
-                slipId: bet.slipId,
-                result: bet.status,
-              },
-            });
-
-            const jsonBet: Partial<typeof Bet.prototype> = bet.toJSON();
-            delete jsonBet["_id"];
-            const archivedBet = new BetArchive(jsonBet);
-            await archivedBet.save();
-
-            await bet.deleteOne();
-          }
-        }
-      } catch (error) {
-        console.error("Error saving bet:", error);
-      }
-    }
-
-    this.ack(msg);
+  protected async handleEvent(
+    event: IEventResultEvent,
+    publishers: SettlementPublishers
+  ): Promise<void> {
+    await processFinalScore(event, publishers);
   }
 }
 

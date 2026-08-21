@@ -1,437 +1,367 @@
-import mongoose from "mongoose";
+import { BetKind, ResultingStatus, messengerWrapper } from "@betstan/common";
 import EventResultListener from "../EventResultListener";
-import { ConsumeMessage } from "amqplib";
-import {
-  IEventResultEvent,
-  ResultingStatus,
-  messengerWrapper,
-} from "@betstan/common";
 import { Bet, BetArchive } from "../../../model/Bet";
-import SettleSlipRowPublisher from "../../publisher/SettleSlipRowPublisher";
+import FinalScoreLedger from "../../../model/FinalScoreLedger";
+import RetryRecord from "../../../model/RetryRecord";
+import { RetryWorker, buildRetryKey } from "../../../service/retry";
 import SettleSlipPublisher from "../../publisher/SettleSlipPublisher";
+import SettleSlipRowPublisher from "../../publisher/SettleSlipRowPublisher";
+import {
+  createBet,
+  createFinalScoreEvent,
+  createMessage,
+  createLiveRow,
+  createPreMatchRow,
+  setupPublisherSpies,
+} from "../../../test/resultingTestUtils";
 
-// Give each publisher its own init spy so they don't share the inherited
-// APublisher.prototype.init mock and toHaveBeenCalledTimes assertions work correctly.
-beforeAll(() => {
-  jest
-    .spyOn(SettleSlipRowPublisher.prototype, "init")
-    .mockResolvedValue(undefined);
-  jest
-    .spyOn(SettleSlipPublisher.prototype, "init")
-    .mockResolvedValue(undefined);
-});
+setupPublisherSpies();
 
-const setup = async (
-  productName: string,
-  slipRowsAmount: number,
-  numberOfBets?: number
-) => {
+const setup = async () => {
   const listener = new EventResultListener(messengerWrapper.connection);
   await listener.init();
-
-  const bets = Array();
-
-  if (!numberOfBets) numberOfBets = 1;
-
-  for (let i = 0; i < numberOfBets; i++) {
-    const bet = await createBet();
-    bets.push(bet);
-  }
-
-  const message: ConsumeMessage = {
-    content: Buffer.alloc(5),
-    fields: {
-      consumerTag: "",
-      deliveryTag: 0,
-      redelivered: false,
-      exchange: "",
-      routingKey: "",
-    },
-    properties: {
-      contentType: undefined,
-      contentEncoding: undefined,
-      headers: {},
-      deliveryMode: undefined,
-      priority: undefined,
-      correlationId: undefined,
-      replyTo: undefined,
-      expiration: undefined,
-      messageId: undefined,
-      timestamp: undefined,
-      type: undefined,
-      userId: undefined,
-      appId: undefined,
-      clusterId: undefined,
-    },
-  };
-
-  return { listener, bets, message };
-
-  async function createBet() {
-    const betData = getBetData(productName, slipRowsAmount);
-
-    const bet = new Bet({
-      status: ResultingStatus.BET_APPROVED,
-      userId: betData.userId,
-      slipId: betData.slipId,
-      wager: betData.wager,
-      timestamp: new Date().toISOString(),
-      moderationTimestamp: "",
-      resultingTimestamp: "",
-      rows: betData.rows.map((row) => {
-        return {
-          eventId: row.eventId,
-          eventName: row.eventName,
-          oddsId: row.oddsId,
-          oddsValue: row.oddsValue,
-          oddsName: row.oddsName,
-          productName: row.productName,
-          productId: row.productId,
-          timestamp: row.timestamp,
-          id: row.id,
-          resultingTimestamp: "",
-          result: ResultingStatus.ROW_NO_RESULT,
-        };
-      }),
-    });
-
-    await bet.save();
-    return bet;
-  }
+  return listener;
 };
 
-const getBetData = (productName: string, slipRowsAmount: number) => {
-  return {
-    userId: new mongoose.Types.ObjectId().toHexString(),
-    userName: "testUser",
-    slipId: new mongoose.Types.ObjectId().toHexString(),
-    wager: 5,
-    rows: getSlipRows(slipRowsAmount, productName),
-  };
+const createWorker = async () => {
+  const worker = new RetryWorker(messengerWrapper.connection);
+  await worker.init();
+  return worker;
 };
 
-const getSlipRows = (amount: number, productName: string) => {
-  let rows = Array();
-  for (let i = 0; i < amount; i++) {
-    // const eventId = new mongoose.Types.ObjectId().toHexString();
-
-    rows.push({
-      eventId: new mongoose.Types.ObjectId().toHexString(),
-      eventName: "string",
-      oddsId: new mongoose.Types.ObjectId().toHexString(),
-      oddsValue: 1.5,
-      oddsName: "Team " + i,
-      productName: productName,
-      productId: new mongoose.Types.ObjectId().toHexString(),
-      timestamp: new Date().toISOString(),
-      id: new mongoose.Types.ObjectId().toHexString(),
-    });
-  }
-
-  return rows;
-};
-
-const getData = (
-  homeScore: number,
-  awayScore: number,
-  eventId: string,
-  home: string,
-  away: string
-): IEventResultEvent => {
-  return {
-    data: {
-      eventId: eventId,
-      homeScore: homeScore,
-      awayScore: awayScore,
-      home: home,
-      away: away,
-    },
-  };
-};
-
-it("checks that win result for the bet was set", async () => {
-  const { listener, bets, message } = await setup("1X2", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-
-  const data = getData(3, 0, eventId, bets[0].rows[0].oddsName, "Other team");
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await BetArchive.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-  expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("checks that loss result for the bet was set", async () => {
-  const { listener, bets, message } = await setup("1X2", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-
-  const data = getData(1, 3, eventId, bets[0].rows[0].oddsName, "Other team");
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await BetArchive.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_LOSS);
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_LOSS);
-  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-  expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("checks that bet is not resolved if the bet product does not exist", async () => {
-  const { listener, bets, message } = await setup("uga-uga", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-  const data = getData(1, 3, eventId, bets[0].rows[0].oddsName, "Other team");
-
-  // const originalBet = await Bet.findById(bet.id);
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await Bet.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].eventId).toEqual(data.data.eventId);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_NO_RESULT);
-  expect(SettleSlipRowPublisher.prototype.publish).not.toHaveBeenCalled();
-  expect(SettleSlipPublisher.prototype.publish).not.toHaveBeenCalled();
-});
-
-it("bet with multiple slip rows eventually won", async () => {
-  const numberOfSlipRows = 5;
-  const { listener, bets, message } = await setup("1X2", numberOfSlipRows);
-
-  for (let i = 0; i < numberOfSlipRows; i++) {
-    const eventId = bets[0].rows[i].eventId;
-    const data = getData(3, 1, eventId, bets[0].rows[i].oddsName, "Other team");
-    await listener.onMessage(data, message);
-    const updatedBet = await Bet.findOne();
-
-    if (i < bets[0].rows.length - 1) {
-      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-      expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-      expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
-    } else {
-      const updatedBet = await BetArchive.findOne();
-      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-      expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-      expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
+const makeRetryDue = async (key: string) => {
+  await RetryRecord.updateOne(
+    { key },
+    {
+      $set: {
+        nextAttemptAt: new Date(0),
+      },
     }
-    expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-    // expect(SettleSlipPublisher.prototype.publish).not.toHaveBeenCalled();
-
-    expect(listener.ack).toHaveBeenCalled();
-  }
-
-  expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("there are 20 bets in the system but only one is resolved", async () => {
-  const winningBetIndex = 9;
-  const numberOfSlipRows = 5;
-  const numberOfBetsInTheSystem = 20;
-  const { listener, bets, message } = await setup(
-    "1X2",
-    numberOfSlipRows,
-    numberOfBetsInTheSystem
   );
+};
 
-  for (let i = 0; i < numberOfSlipRows; i++) {
-    const eventId = bets[winningBetIndex].rows[i].eventId;
-    const data = getData(
-      3,
-      1,
-      eventId,
-      bets[winningBetIndex].rows[i].oddsName,
-      "Other team"
-    );
-    await listener.onMessage(data, message);
-    const updatedBet = await Bet.findById(bets[winningBetIndex].id);
-
-    if (i < bets[winningBetIndex].rows.length - 1) {
-      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-      expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
-      expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
-    } else {
-      const updatedBet = await BetArchive.findOne();
-      expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-      expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
-      expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
+it("settles legacy pre-match rows when kind metadata is missing", async () => {
+  const row = createPreMatchRow({
+    oddsName: "Home Team",
+    eventName: "Home Team vs Away Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  await Bet.updateOne(
+    { slipId: bet.slipId },
+    {
+      $unset: {
+        betKind: "",
+        "rows.0.betKind": "",
+      },
     }
-    expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-    // expect(SettleSlipPublisher.prototype.publish).not.toHaveBeenCalled();
-
-    expect(listener.ack).toHaveBeenCalled();
-  }
-
-  expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-// it("there are 10000 bets in the system, single event processing time", async () => {
-//   const winningBetIndex = 5000;
-//   const numberOfSlipRows = 10;
-//   const numberOfBetsInTheSystem = 10000;
-//   const { listener, bets, message } = await setup(
-//     "1X2",
-//     numberOfSlipRows,
-//     numberOfBetsInTheSystem
-//   );
-
-//   console.log("setup complate");
-
-//   const i = 5;
-//   const eventId = bets[winningBetIndex].rows[i].eventId;
-//   const data = getData(
-//     3,
-//     1,
-//     eventId,
-//     bets[winningBetIndex].rows[i].oddsName,
-//     "Other team"
-//   );
-//   await listener.onMessage(data, message);
-//   const updatedBet = await Bet.findById(bets[winningBetIndex].id);
-
-//   expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-//   expect(updatedBet!.rows[i].result).toEqual(ResultingStatus.ROW_WIN);
-//   if (i < bets[winningBetIndex].rows.length - 1) {
-//     expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
-//   } else {
-//     expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
-//   }
-//   expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-//   // expect(SettleSlipPublisher.prototype.publish).not.toHaveBeenCalled();
-
-//   expect(listener.ack).toHaveBeenCalled();
-
-//   expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-// }, 1000000);
-
-// it("there are 10000 of bets in the system but only one is resolved", async () => {
-//   const winningBetIndex = 5000;
-//   const numberOfSlipRows = 10;
-//   const numberOfBetsInTheSystem = 10000;
-//   const { listener, bets, message } = await setup(
-//     "1X2",
-//     numberOfSlipRows,
-//     numberOfBetsInTheSystem
-//   );
-
-//   for (let i = 0; i < numberOfSlipRows; i++) {
-//     const eventId = bets[winningBetIndex].rows[i].eventId;
-//     const data = getData(
-//       3,
-//       1,
-//       eventId,
-//       bets[winningBetIndex].rows[i].oddsName,
-//       "Other team"
-//     );
-//     await listener.onMessage(data, message);
-//     const updatedBet = await Bet.findById(bets[winningBetIndex].id);
-
-//     expect(updatedBet!.rows[i].eventId).toEqual(data.data.eventId);
-//     expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-//     if (i < bets[winningBetIndex].rows.length - 1) {
-//       expect(updatedBet!.status).toEqual(ResultingStatus.BET_APPROVED);
-//     } else {
-//       expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
-//     }
-//     expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-//     // expect(SettleSlipPublisher.prototype.publish).not.toHaveBeenCalled();
-
-//     expect(listener.ack).toHaveBeenCalled();
-//   }
-
-//   expect(SettleSlipPublisher.prototype.publish).toHaveBeenCalled();
-// }, 1000000);
-
-it("1X2 draw: bet wins when oddsName is 'draw' and scores are equal", async () => {
-  const { listener, bets, message } = await setup("1X2", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-  // Override oddsName to "draw" so the draw branch is taken and the row wins
-  bets[0].rows[0].oddsName = "draw";
-  await bets[0].save();
-
-  const data = getData(2, 2, eventId, "Home team", "Away team");
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await BetArchive.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
-  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("Correct Score: bet wins when oddsName matches the final score", async () => {
-  const { listener, bets, message } = await setup("Correct Score", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-  bets[0].rows[0].oddsName = "2 - 1";
-  await bets[0].save();
-
-  const data = getData(2, 1, eventId, "Home", "Away");
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await BetArchive.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_WIN);
-  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("Correct Score: bet loses when oddsName does not match the final score", async () => {
-  const { listener, bets, message } = await setup("Correct Score", 1);
-
-  const eventId = bets[0].rows[0].eventId;
-  bets[0].rows[0].oddsName = "0 - 0";
-  await bets[0].save();
-
-  const data = getData(3, 1, eventId, "Home", "Away");
-
-  await listener.onMessage(data, message);
-
-  const updatedBet = await BetArchive.findOne();
-
-  expect(listener.ack).toHaveBeenCalled();
-  expect(updatedBet!.rows[0].result).toEqual(ResultingStatus.ROW_LOSS);
-  expect(updatedBet!.status).toEqual(ResultingStatus.BET_LOSS);
-  expect(SettleSlipRowPublisher.prototype.publish).toHaveBeenCalled();
-});
-
-it("publishers are initialised once during listener.init(), not on every message", async () => {
-  jest.clearAllMocks();
-  const { listener, bets, message } = await setup("1X2", 1);
-
-  const settleSlipRowInitCallsAfterInit = (
-    SettleSlipRowPublisher.prototype.init as jest.Mock
-  ).mock.calls.length;
-  const settleSlipInitCallsAfterInit = (
-    SettleSlipPublisher.prototype.init as jest.Mock
-  ).mock.calls.length;
-
-  // Fire the same message twice — no additional init calls should occur.
-  const data = getData(3, 0, bets[0].rows[0].eventId, bets[0].rows[0].oddsName, "Other team");
-  await listener.onMessage(data, message);
-  await listener.onMessage(data, message);
-
-  expect((SettleSlipRowPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
-    settleSlipRowInitCallsAfterInit
   );
-  expect((SettleSlipPublisher.prototype.init as jest.Mock).mock.calls.length).toEqual(
-    settleSlipInitCallsAfterInit
+  const listener = await setup();
+
+  await listener.onMessage(
+    createFinalScoreEvent({
+      eventId: row.eventId,
+      homeScore: 2,
+      awayScore: 0,
+      home: "Home Team",
+      away: "Away Team",
+    }),
+    createMessage()
   );
+
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(archivedBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(listener.ack).toHaveBeenCalled();
+});
+
+it("ignores live rows even when their product name looks like a final-score market", async () => {
+  const row = createLiveRow({
+    productName: "1X2",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+
+  await listener.onMessage(
+    createFinalScoreEvent({
+      eventId: row.eventId,
+      homeScore: 1,
+      awayScore: 0,
+      home: "Home Team",
+      away: "Away Team",
+    }),
+    createMessage()
+  );
+
+  const activeBet = await Bet.findOne({ slipId: bet.slipId });
+
+  expect(activeBet).not.toBeNull();
+  expect(activeBet!.status).toEqual(ResultingStatus.BET_APPROVED);
+  expect(activeBet!.rows[0].result).toEqual(ResultingStatus.ROW_NO_RESULT);
+  expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
+it("first pre-match loss immediately finalises the accumulator and voids unsettled rows", async () => {
+  const losingRow = createPreMatchRow({
+    eventId: "event-loss",
+    oddsName: "Away Team",
+    eventName: "Home Team vs Away Team",
+  });
+  const pendingRow = createPreMatchRow({
+    eventId: "event-pending",
+    productName: "Correct Score",
+    oddsName: "2 - 1",
+  });
+  const bet = await createBet({
+    rows: [losingRow, pendingRow],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+
+  await listener.onMessage(
+    createFinalScoreEvent({
+      eventId: losingRow.eventId,
+      homeScore: 3,
+      awayScore: 1,
+      home: "Home Team",
+      away: "Away Team",
+    }),
+    createMessage()
+  );
+
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_LOSS);
+  expect(archivedBet!.rows[0].result).toEqual(ResultingStatus.ROW_LOSS);
+  expect(archivedBet!.rows[1].result).toEqual(ResultingStatus.ROW_VOID);
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(2);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
+it("settles winning 1X2 and Correct Score accumulators once all rows have landed", async () => {
+  const rowOne = createPreMatchRow({
+    eventId: "event-home-win",
+    oddsName: "Home Team",
+  });
+  const rowTwo = createPreMatchRow({
+    eventId: "event-correct-score",
+    productName: "Correct Score",
+    oddsName: "2 - 1",
+  });
+  const bet = await createBet({
+    rows: [rowOne, rowTwo],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+
+  await listener.onMessage(
+    createFinalScoreEvent({
+      eventId: rowOne.eventId,
+      homeScore: 1,
+      awayScore: 0,
+      home: "Home Team",
+      away: "Away Team",
+    }),
+    createMessage()
+  );
+
+  const activeBet = await Bet.findOne({ slipId: bet.slipId });
+  expect(activeBet).not.toBeNull();
+  expect(activeBet!.status).toEqual(ResultingStatus.BET_APPROVED);
+  expect(activeBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(activeBet!.rows[1].result).toEqual(ResultingStatus.ROW_NO_RESULT);
+
+  await listener.onMessage(
+    createFinalScoreEvent({
+      eventId: rowTwo.eventId,
+      homeScore: 2,
+      awayScore: 1,
+      home: "Second Home",
+      away: "Second Away",
+    }),
+    createMessage()
+  );
+
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(
+    archivedBet!.rows.every((row: any) => row.result === ResultingStatus.ROW_WIN)
+  ).toBe(true);
+});
+
+it("persists final-score facts idempotently across duplicate deliveries", async () => {
+  const row = createPreMatchRow({
+    eventId: "duplicate-event-result",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+  const event = createFinalScoreEvent({
+    eventId: row.eventId,
+    homeScore: 4,
+    awayScore: 0,
+    home: "Home Team",
+    away: "Away Team",
+  });
+
+  await listener.onMessage(event, createMessage());
+  await listener.onMessage(event, createMessage());
+
+  expect(await FinalScoreLedger.countDocuments({ eventId: row.eventId })).toEqual(1);
+  expect(await BetArchive.countDocuments({ slipId: bet.slipId })).toEqual(1);
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
+it("parks row publication confirm failures, acknowledges the message, and recovers via the retry worker", async () => {
+  const rowPublish = SettleSlipRowPublisher.prototype
+    .publishWithConfirm as jest.Mock;
+  rowPublish.mockRejectedValueOnce(new Error("row confirm failed"));
+
+  const row = createPreMatchRow({
+    eventId: "row-confirm-retry",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+  const event = createFinalScoreEvent({
+    eventId: row.eventId,
+    homeScore: 2,
+    awayScore: 0,
+    home: "Home Team",
+    away: "Away Team",
+  });
+
+  await listener.onMessage(event, createMessage());
+
+  let activeBet = await Bet.findOne({ slipId: bet.slipId });
+  const retryKey = buildRetryKey("EVENT_RESULT", row.eventId);
+  let retryRecord = await RetryRecord.findOne({ key: retryKey });
+
+  expect(listener.ack).toHaveBeenCalledTimes(1);
+  expect(activeBet).not.toBeNull();
+  expect(activeBet!.status).toEqual(ResultingStatus.BET_APPROVED);
+  expect(activeBet!.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
+  expect(activeBet!.rows[0].settlementPublicationState).toEqual("PENDING");
+  expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(retryRecord).not.toBeNull();
+  expect(retryRecord!.status).toEqual("PENDING");
+
+  await makeRetryDue(retryKey);
+  const worker = await createWorker();
+  await worker.runOnce();
+
+  activeBet = await Bet.findOne({ slipId: bet.slipId });
+  retryRecord = await RetryRecord.findOne({ key: retryKey });
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+
+  expect(activeBet).toBeNull();
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(retryRecord).not.toBeNull();
+  expect(retryRecord!.status).toEqual("COMPLETED");
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(2);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
+it("parks terminal publication confirm failures and resumes them after worker restart", async () => {
+  const slipPublish = SettleSlipPublisher.prototype
+    .publishWithConfirm as jest.Mock;
+  slipPublish.mockRejectedValueOnce(new Error("terminal confirm failed"));
+
+  const row = createPreMatchRow({
+    eventId: "terminal-confirm-retry",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+  const event = createFinalScoreEvent({
+    eventId: row.eventId,
+    homeScore: 3,
+    awayScore: 0,
+    home: "Home Team",
+    away: "Away Team",
+  });
+
+  await listener.onMessage(event, createMessage());
+
+  let activeBet = await Bet.findOne({ slipId: bet.slipId });
+  const retryKey = buildRetryKey("EVENT_RESULT", row.eventId);
+  let retryRecord = await RetryRecord.findOne({ key: retryKey });
+
+  expect(listener.ack).toHaveBeenCalledTimes(1);
+  expect(activeBet).not.toBeNull();
+  expect(activeBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(activeBet!.rows[0].settlementPublicationState).toEqual("PUBLISHED");
+  expect(activeBet!.terminalPublicationState).toEqual("PENDING");
+  expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(retryRecord).not.toBeNull();
+  expect(retryRecord!.status).toEqual("PENDING");
+
+  await makeRetryDue(retryKey);
+  const worker = await createWorker();
+  await worker.runOnce();
+
+  activeBet = await Bet.findOne({ slipId: bet.slipId });
+  retryRecord = await RetryRecord.findOne({ key: retryKey });
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+
+  expect(activeBet).toBeNull();
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+  expect(retryRecord).not.toBeNull();
+  expect(retryRecord!.status).toEqual("COMPLETED");
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(2);
+});
+
+it("deduplicates duplicate final-score deliveries under concurrency", async () => {
+  const row = createPreMatchRow({
+    eventId: "event-concurrent",
+    oddsName: "Home Team",
+  });
+  const bet = await createBet({
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await setup();
+  const event = createFinalScoreEvent({
+    eventId: row.eventId,
+    homeScore: 2,
+    awayScore: 0,
+    home: "Home Team",
+    away: "Away Team",
+  });
+
+  await Promise.all([
+    listener.onMessage(event, createMessage()),
+    listener.onMessage(event, createMessage()),
+  ]);
+
+  expect(await FinalScoreLedger.countDocuments({ eventId: row.eventId })).toEqual(1);
+  expect(await BetArchive.countDocuments({ slipId: bet.slipId })).toEqual(1);
+  expect(SettleSlipRowPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(SettleSlipPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(await RetryRecord.countDocuments({ key: buildRetryKey("EVENT_RESULT", row.eventId) })).toEqual(0);
 });

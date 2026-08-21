@@ -136,8 +136,9 @@ transition_output="$(
     MIGRATION_BACKUP_DIR="$tmp_dir/backups" \
     "$ROLLBACK_READINESS"
 )"
-grep -Fq 'rollback_readiness=GO mode=migration-transition phase=backing-up' \
-  <<<"$transition_output" ||
+grep -Fxq 'rollback_readiness=GO' <<<"$transition_output" &&
+  grep -Fxq 'mode=migration-transition' <<<"$transition_output" &&
+  grep -Fxq 'phase=backing-up' <<<"$transition_output" ||
   fail "migration-transition rollback readiness was not accepted"
 grep -Fq 'rollback_operator=infra/azure/agents/consolidate-production-mongo-stan.sh' \
   <<<"$transition_output" ||

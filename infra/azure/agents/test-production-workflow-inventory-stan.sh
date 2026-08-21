@@ -4,15 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 INVENTORY="$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.sh"
 tmp_dir="$(mktemp -d "$ROOT_DIR/.workflow-inventory-test.XXXXXX")"
+support_dir="$(mktemp -d "$ROOT_DIR/.workflow-inventory-support.XXXXXX")"
+local_extra_paths_file="$support_dir/local-extra-paths.bin"
 cleanup() {
   rm -rf -- "$tmp_dir"
+  rm -rf -- "$support_dir"
 }
 trap cleanup EXIT
 
 reset_fixtures() {
-  rm -f -- "$tmp_dir"/*.yml "$tmp_dir"/*.yaml
+  python3 - "$tmp_dir" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for child in root.iterdir():
+    if child.is_dir() and not child.is_symlink():
+        shutil.rmtree(child)
+    else:
+        child.unlink()
+PY
+  rm -f -- "$local_extra_paths_file"
   cp "$ROOT_DIR/.github/workflows/production-build.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/production-deploy.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/production-rollback.yml" "$tmp_dir/"
 
   cat > "$tmp_dir/oci-validate.yml" <<'YAML'
 name: oci-validate
@@ -231,13 +247,15 @@ jobs:
           az aks show --name betstan-aks
           az aks stop --name betstan-aks
 YAML
+
+  cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
 }
 
 assert_pass() {
   local expected="$1"
   local actual
   actual="$(
-    WORKFLOW_DIR="$tmp_dir" "$INVENTORY" |
+    run_local_inventory |
       sed -n 's/^production_workflows=//p'
   )"
   [[ "$actual" == "$expected" ]] || {
@@ -250,7 +268,7 @@ assert_fail() {
   local label="$1"
   local expected_message="$2"
   local output
-  if output="$(WORKFLOW_DIR="$tmp_dir" "$INVENTORY" 2>&1)"; then
+  if output="$(run_local_inventory 2>&1)"; then
     echo "$label unexpectedly passed: $output" >&2
     exit 1
   fi
@@ -260,8 +278,386 @@ assert_fail() {
   }
 }
 
-azure_set="production-build,production-deploy"
-full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,production-build,production-deploy"
+run_local_inventory() {
+  if [[ -f "$local_extra_paths_file" ]]; then
+    WORKFLOW_DIR="$tmp_dir" \
+      WORKFLOW_INVENTORY_EXTRA_LOCAL_PATHS_FILE="$local_extra_paths_file" \
+      "$INVENTORY"
+  else
+    WORKFLOW_DIR="$tmp_dir" "$INVENTORY"
+  fi
+}
+
+pr_repo="example/repo"
+pr_number="41"
+pr_head_sha="1111111111111111111111111111111111111111"
+pr_alt_head_sha="2222222222222222222222222222222222222222"
+pr_tree_sha="3333333333333333333333333333333333333333"
+pr_stub_dir="$support_dir/pr-bin"
+pr_remote_root="$support_dir/pr-remote"
+pr_state_dir="$support_dir/pr-state"
+pr_tree_payload_file="$support_dir/pr-tree-payload.json"
+pr_head_sha_after=""
+pr_commit_lookup_fail="0"
+pr_commit_tree_sha=""
+pr_tree_truncated="0"
+
+install_pr_gh_stub() {
+  mkdir -p "$pr_stub_dir"
+  cat >"$pr_stub_dir/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="${GH_STUB_REPO:?}"
+fixture_dir="${GH_STUB_FIXTURE_DIR:?}"
+state_dir="${GH_STUB_STATE_DIR:?}"
+head_sha="${GH_STUB_PR_HEAD_SHA:?}"
+tree_sha="${GH_STUB_TREE_SHA:?}"
+tree_payload_file="${GH_STUB_TREE_PAYLOAD_FILE:-}"
+mkdir -p "$state_dir"
+
+command_name="${1:-}"
+[[ -n "$command_name" ]] || {
+  echo "missing gh subcommand" >&2
+  exit 1
+}
+shift || true
+
+case "$command_name" in
+  pr)
+    [[ "${1:-}" == "view" ]] || {
+      echo "unsupported gh pr subcommand" >&2
+      exit 1
+    }
+    shift
+    pr_number="${1:-}"
+    shift || true
+    repo_arg=""
+    json_fields=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --repo)
+          repo_arg="$2"
+          shift 2
+          ;;
+        --json)
+          json_fields="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    [[ -n "$pr_number" ]] || {
+      echo "missing PR number" >&2
+      exit 1
+    }
+    [[ "$repo_arg" == "$repo" ]] || {
+      echo "unexpected repo=$repo_arg" >&2
+      exit 1
+    }
+    [[ "$json_fields" == "headRefOid" ]] || {
+      echo "unsupported gh pr view fields=$json_fields" >&2
+      exit 1
+    }
+    count_file="$state_dir/pr-view-count"
+    count=0
+    [[ -f "$count_file" ]] && count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s' "$count" >"$count_file"
+    response_head="$head_sha"
+    if [[ -n "${GH_STUB_PR_HEAD_SHA_AFTER:-}" && "$count" -ge 2 ]]; then
+      response_head="$GH_STUB_PR_HEAD_SHA_AFTER"
+    fi
+    printf '{"headRefOid":"%s"}\n' "$response_head"
+    ;;
+  api)
+    endpoint="${1:-}"
+    [[ -n "$endpoint" ]] || {
+      echo "missing gh api endpoint" >&2
+      exit 1
+    }
+    case "$endpoint" in
+      "repos/$repo/git/commits/"*)
+        commit_sha="${endpoint##*/}"
+        [[ "$commit_sha" == "$head_sha" ]] || {
+          echo "unexpected commit lookup=$endpoint" >&2
+          exit 1
+        }
+        if [[ "${GH_STUB_COMMIT_LOOKUP_FAIL:-0}" == "1" ]]; then
+          echo "simulated commit lookup failure" >&2
+          exit 1
+        fi
+        response_commit_sha="${GH_STUB_COMMIT_RESPONSE_SHA:-$head_sha}"
+        response_tree_sha="${GH_STUB_COMMIT_TREE_SHA:-$tree_sha}"
+        tree_url="https://api.github.com/repos/$repo/git/trees/$response_tree_sha"
+        python3 - "$response_commit_sha" "$response_tree_sha" "$tree_url" <<'PY'
+import json
+import sys
+
+print(
+    json.dumps(
+        {
+            "sha": sys.argv[1],
+            "tree": {"sha": sys.argv[2], "url": sys.argv[3]},
+        }
+    )
+)
+PY
+        ;;
+      "repos/$repo/git/trees/"*"?recursive=1")
+        requested_tree_sha="${endpoint#repos/$repo/git/trees/}"
+        requested_tree_sha="${requested_tree_sha%\?recursive=1}"
+        [[ "$requested_tree_sha" == "$tree_sha" ]] || {
+          echo "unexpected tree lookup=$endpoint" >&2
+          exit 1
+        }
+        python3 - "$fixture_dir" "$tree_sha" "${GH_STUB_TREE_TRUNCATED:-0}" "$tree_payload_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+fixture_dir = Path(sys.argv[1])
+tree_sha = sys.argv[2]
+truncated = sys.argv[3] == "1"
+payload_path = Path(sys.argv[4]) if sys.argv[4] else None
+if payload_path and payload_path.is_file():
+    entries = json.loads(payload_path.read_text(encoding="utf-8"))
+else:
+    workflows_dir = fixture_dir / ".github" / "workflows"
+    entries = []
+    for path in sorted(workflows_dir.iterdir()):
+        if path.is_file():
+            entries.append({"path": path.relative_to(fixture_dir).as_posix(), "type": "blob"})
+print(json.dumps({"sha": tree_sha, "truncated": truncated, "tree": entries}))
+PY
+        ;;
+      "repos/$repo/contents/"*"?ref="*)
+        fetch_count_file="$state_dir/content-fetch-count"
+        fetch_count=0
+        [[ -f "$fetch_count_file" ]] && fetch_count="$(<"$fetch_count_file")"
+        fetch_count=$((fetch_count + 1))
+        printf '%s' "$fetch_count" >"$fetch_count_file"
+        python3 - "$endpoint" "$repo" "$head_sha" "$fixture_dir" <<'PY'
+import base64
+import hashlib
+import json
+import sys
+import urllib.parse
+from pathlib import Path
+
+endpoint = sys.argv[1]
+repo = sys.argv[2]
+head_sha = sys.argv[3]
+fixture_dir = Path(sys.argv[4])
+prefix = f"repos/{repo}/contents/"
+
+if not endpoint.startswith(prefix) or "?ref=" not in endpoint:
+    raise SystemExit(f"unexpected contents lookup={endpoint}")
+
+path, ref = endpoint[len(prefix) :].split("?ref=", 1)
+if ref != head_sha:
+    raise SystemExit(f"unexpected contents ref={ref}")
+path = urllib.parse.unquote(path)
+
+workflow_path = fixture_dir / Path(path)
+content = workflow_path.read_bytes()
+print(
+    json.dumps(
+        {
+            "path": path,
+            "sha": hashlib.sha1(content).hexdigest(),
+            "type": "file",
+            "encoding": "base64",
+            "content": base64.b64encode(content).decode("ascii"),
+        }
+    )
+)
+PY
+        ;;
+      *)
+        echo "unexpected gh api endpoint=$endpoint" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "unsupported gh command=$command_name" >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$pr_stub_dir/gh"
+}
+
+reset_pr_stub_state() {
+  rm -rf -- "$pr_state_dir"
+  mkdir -p "$pr_state_dir"
+  rm -f -- "$pr_tree_payload_file"
+  pr_head_sha_after=""
+  pr_commit_lookup_fail="0"
+  pr_commit_tree_sha=""
+  pr_tree_truncated="0"
+}
+
+prepare_pr_remote() {
+  reset_pr_stub_state
+  rm -rf -- "$pr_remote_root"
+  mkdir -p "$pr_remote_root/.github/workflows"
+  reset_fixtures
+  write_complete_oci_set
+  while IFS= read -r -d '' file; do
+    cp "$file" "$pr_remote_root/.github/workflows/"
+  done < <(
+    find "$tmp_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0
+  )
+}
+
+run_inventory_pr() {
+  env \
+    PATH="$pr_stub_dir:$PATH" \
+    REPO="$pr_repo" \
+    PR="$pr_number" \
+    EXPECTED_HEAD_SHA="$pr_head_sha" \
+    GH_STUB_REPO="$pr_repo" \
+    GH_STUB_FIXTURE_DIR="$pr_remote_root" \
+    GH_STUB_STATE_DIR="$pr_state_dir" \
+    GH_STUB_PR_HEAD_SHA="$pr_head_sha" \
+    GH_STUB_PR_HEAD_SHA_AFTER="$pr_head_sha_after" \
+    GH_STUB_TREE_SHA="$pr_tree_sha" \
+    GH_STUB_TREE_PAYLOAD_FILE="$pr_tree_payload_file" \
+    GH_STUB_COMMIT_LOOKUP_FAIL="$pr_commit_lookup_fail" \
+    GH_STUB_COMMIT_TREE_SHA="$pr_commit_tree_sha" \
+    GH_STUB_TREE_TRUNCATED="$pr_tree_truncated" \
+    "$INVENTORY"
+}
+
+assert_pr_pass() {
+  local expected="$1"
+  local actual
+  actual="$(
+    run_inventory_pr |
+      sed -n 's/^production_workflows=//p'
+  )"
+  [[ "$actual" == "$expected" ]] || {
+    echo "expected=$expected actual=$actual" >&2
+    exit 1
+  }
+}
+
+assert_pr_fail() {
+  local label="$1"
+  local expected_message="$2"
+  local output
+  if output="$(run_inventory_pr 2>&1)"; then
+    echo "$label unexpectedly passed: $output" >&2
+    exit 1
+  fi
+  grep -Fq "$expected_message" <<<"$output" || {
+    echo "$label failed without expected message: $output" >&2
+    exit 1
+  }
+}
+
+pr_content_fetch_count() {
+  local count_file="$pr_state_dir/content-fetch-count"
+  if [[ -f "$count_file" ]]; then
+    cat "$count_file"
+  else
+    echo 0
+  fi
+}
+
+assert_pr_no_fetches() {
+  local label="$1"
+  local actual
+  actual="$(pr_content_fetch_count)"
+  [[ "$actual" == "0" ]] || {
+    echo "$label unexpectedly fetched workflow contents count=$actual" >&2
+    exit 1
+  }
+}
+
+assert_pr_fail_no_fetch() {
+  local label="$1"
+  local expected_message="$2"
+  assert_pr_fail "$label" "$expected_message"
+  assert_pr_no_fetches "$label"
+}
+
+write_pr_tree_payload() {
+  local extras_literal="$1"
+  python3 - "$pr_remote_root" "$pr_tree_payload_file" "$extras_literal" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+remote_root = Path(sys.argv[1])
+payload_path = Path(sys.argv[2])
+extras_literal = sys.argv[3]
+extras = json.loads(extras_literal)
+if isinstance(extras, dict):
+    extras = [extras]
+entries = []
+for path in sorted((remote_root / ".github" / "workflows").iterdir()):
+    if path.is_file():
+        entries.append({"path": path.relative_to(remote_root).as_posix(), "type": "blob"})
+entries.extend(extras)
+payload_path.write_text(json.dumps(entries), encoding="utf-8")
+PY
+}
+
+write_local_extra_paths() {
+  local extras_literal="$1"
+  python3 - "$local_extra_paths_file" "$extras_literal" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload_path = Path(sys.argv[1])
+extras = json.loads(sys.argv[2])
+if isinstance(extras, str):
+    extras = [extras]
+payload_path.write_bytes(b"".join(item.encode("utf-8") + b"\0" for item in extras))
+PY
+}
+
+copy_named_workflow_fixture() {
+  local destination_root="$1"
+  local source_path="$2"
+  local relative_path="$3"
+  python3 - "$destination_root" "$source_path" "$relative_path" <<'PY'
+import sys
+from pathlib import Path
+
+destination_root = Path(sys.argv[1])
+source_path = Path(sys.argv[2])
+target_path = destination_root / Path(sys.argv[3])
+target_path.parent.mkdir(parents=True, exist_ok=True)
+target_path.write_bytes(source_path.read_bytes())
+PY
+}
+
+rename_named_workflow_fixture() {
+  local destination_root="$1"
+  local current_name="$2"
+  local relative_path="$3"
+  python3 - "$destination_root" "$current_name" "$relative_path" <<'PY'
+import sys
+from pathlib import Path
+
+destination_root = Path(sys.argv[1])
+current_path = destination_root / sys.argv[2]
+target_path = destination_root / Path(sys.argv[3])
+target_path.parent.mkdir(parents=True, exist_ok=True)
+current_path.rename(target_path)
+PY
+}
+
+azure_set="production-build,production-deploy,production-rollback"
+full_set="oci-capacity-acquire,oci-infrastructure,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+install_pr_gh_stub
 
 reset_fixtures
 assert_fail "Azure-only set" "expected $full_set; found $azure_set"
@@ -269,6 +665,113 @@ assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+cat > "$tmp_dir/safe space.yml" <<'YAML'
+name: safe space
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-space
+YAML
+cat > "$tmp_dir/safe+plus.yml" <<'YAML'
+name: safe-plus
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-plus
+YAML
+cat > "$tmp_dir/safe,comma.yaml" <<'YAML'
+name: safe-comma
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-comma
+YAML
+assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" 'Twin.yml'
+write_local_extra_paths '[".github/workflows/twin.yml"]'
+assert_fail "local workflow case-only collision" "local workflow directory contained a normalization collision"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" <<'PY'
+from pathlib import Path
+import sys
+
+destination = Path(sys.argv[1]) / "caf\u00e9.yml"
+destination.write_bytes(Path(sys.argv[2]).read_bytes())
+PY
+write_local_extra_paths '[".github/workflows/cafe\u0301.yml"]'
+assert_fail "local workflow Unicode normalization collision" "local workflow directory contained a normalization collision"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\nworkflow.yml'
+assert_fail "local workflow newline injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\rworkflow.yml'
+assert_fail "local workflow carriage return injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\tworkflow.yml'
+assert_fail "local workflow tab injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\x7fworkflow.yml'
+assert_fail "local workflow DEL injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\u2028workflow.yml'
+assert_fail "local workflow Unicode line separator injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" $'rogue\u2029workflow.yml'
+assert_fail "local workflow Unicode paragraph separator injection" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" 'rogue\workflow.yml'
+assert_fail "local workflow backslash path" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" 'rogue%2Fworkflow.yml'
+assert_fail "local workflow percent-encoded separator" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" 'rogue%0Aworkflow.yml'
+assert_fail "local workflow percent-encoded control" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" '%70roduction-build.yml'
+assert_fail "local workflow percent-encoded colliding filename" "local workflow directory contained an unsafe path"
+
+reset_fixtures
+write_complete_oci_set
+copy_named_workflow_fixture "$tmp_dir" "$ROOT_DIR/.github/workflows/production-build.yml" 'nested/rogue.yml'
+assert_fail "local workflow nested path" "local workflow directory contained an unsafe path"
 
 reset_fixtures
 write_complete_oci_set
@@ -289,7 +792,7 @@ reset_fixtures
 write_complete_oci_set
 sed -i.bak 's/name: oci-infrastructure/name: oci-platform/' "$tmp_dir/oci-infrastructure.yml"
 rm "$tmp_dir/oci-infrastructure.yml.bak"
-assert_fail "renamed OCI identity" "found oci-capacity-acquire,oci-migrate,oci-migration-recovery,oci-platform"
+assert_fail "renamed OCI identity" "oci-platform"
 
 reset_fixtures
 cat > "$tmp_dir/rogue-production.yml" <<'YAML'
@@ -305,6 +808,87 @@ jobs:
       - run: echo unsafe
 YAML
 assert_fail "unexpected production workflow" "rogue-production"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/production-rollback.yml" <<'PY'
+from pathlib import Path
+path = Path(__import__("sys").argv[1])
+text = path.read_text()
+path.write_text(text.replace("on:\n  workflow_dispatch:", "on:\n  push:\n    branches: [master]\n  workflow_dispatch:", 1))
+PY
+assert_fail "automatic production rollback" "production-rollback must be workflow_dispatch-only"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/actions: read/actions: write/' "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "production rollback with write permissions" \
+  "production-rollback must set exact permissions actions=read,contents=read"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683#actions/checkout@v4#' \
+  "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "floating production rollback action ref" \
+  "must pin actions/checkout to a full 40-character lowercase hex commit SHA"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\[ "\$GITHUB_REF_NAME" = "master" \]/d' "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "production rollback without master guard" \
+  "production-rollback must reject non-master dispatches"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/BASELINE_ARTIFACT_NAME/d' "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "production rollback without artifact provenance binding" \
+  "production-rollback must bind rollback provenance to the exact baseline artifact"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-production-rollback.yml" <<'PY'
+from pathlib import Path
+path = Path(__import__("sys").argv[1])
+text = path.read_text()
+path.write_text(text.replace("on:\n  workflow_dispatch:", "on:\n  workflow_run:\n    workflows: [oci-production-build]\n    types: [completed]\n  workflow_dispatch:", 1))
+PY
+assert_fail "automatic OCI rollback" "oci-production-rollback must be workflow_dispatch-only"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093#actions/download-artifact@v4#' \
+  "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "floating OCI rollback action ref" \
+  "must pin actions/download-artifact to a full 40-character lowercase hex commit SHA"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/contents: read/contents: write/' "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback with write permissions" \
+  "oci-production-rollback must set exact permissions actions=read,contents=read"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\[ "\$GITHUB_REF_NAME" = "master" \]/d' "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback without master guard" \
+  "oci-production-rollback must reject non-master dispatches"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's#actions/runs/\$INFRASTRUCTURE_RUN_ID/attempts/1#actions/runs/\$INFRASTRUCTURE_RUN_ID#' \
+  "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback without immutable infrastructure provenance" \
+  "oci-production-rollback must inspect the immutable first-attempt infrastructure provenance"
 
 reset_fixtures
 write_complete_oci_set
@@ -494,6 +1078,181 @@ path.write_text(text.replace(
 ))
 PY
 assert_fail "reusable workflow from governed OCI job" "must not call a reusable workflow"
+
+prepare_pr_remote
+assert_pr_pass "$full_set"
+
+prepare_pr_remote
+cat > "$pr_remote_root/.github/workflows/safe space.yml" <<'YAML'
+name: safe space
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-space
+YAML
+cat > "$pr_remote_root/.github/workflows/safe+plus.yml" <<'YAML'
+name: safe-plus
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-plus
+YAML
+cat > "$pr_remote_root/.github/workflows/safe,comma.yaml" <<'YAML'
+name: safe-comma
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe-comma
+YAML
+assert_pr_pass "$full_set"
+
+prepare_pr_remote
+copy_named_workflow_fixture "$pr_remote_root/.github/workflows" \
+  "$ROOT_DIR/.github/workflows/production-build.yml" 'Twin.yml'
+write_pr_tree_payload '[{"path": ".github/workflows/twin.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow case-only collision" \
+  "PR workflow tree response contained a normalization collision"
+
+prepare_pr_remote
+python3 - "$pr_remote_root/.github/workflows" "$ROOT_DIR/.github/workflows/production-build.yml" <<'PY'
+from pathlib import Path
+import sys
+
+destination = Path(sys.argv[1]) / "caf\u00e9.yml"
+destination.write_bytes(Path(sys.argv[2]).read_bytes())
+PY
+write_pr_tree_payload '[{"path": ".github/workflows/cafe\u0301.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow Unicode normalization collision" \
+  "PR workflow tree response contained a normalization collision"
+
+prepare_pr_remote
+pr_head_sha_after="$pr_alt_head_sha"
+assert_pr_fail "PR head changed during inventory" "PR head changed during workflow inventory"
+
+prepare_pr_remote
+pr_commit_lookup_fail="1"
+assert_pr_fail "PR commit lookup failure" "unable to resolve PR head commit $pr_head_sha"
+
+prepare_pr_remote
+pr_commit_tree_sha="not-a-tree-sha"
+assert_pr_fail "PR malformed tree SHA" \
+  "PR head commit response did not include a complete lowercase tree SHA"
+
+prepare_pr_remote
+pr_tree_truncated="1"
+assert_pr_fail "PR truncated workflow tree" "PR workflow tree response was truncated"
+
+prepare_pr_remote
+cat > "$pr_remote_root/.github/workflows/rogue-production.yml" <<'YAML'
+name: rogue-production
+on:
+  push:
+    branches: [master]
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    environment: production-emergency
+    steps:
+      - run: echo unsafe
+YAML
+assert_pr_fail "PR unknown production workflow" "rogue-production"
+
+prepare_pr_remote
+python3 - "$pr_remote_root/.github/workflows/production-rollback.yml" <<'PY'
+from pathlib import Path
+path = Path(__import__("sys").argv[1])
+text = path.read_text()
+path.write_text(text.replace("on:\n  workflow_dispatch:", "on:\n  push:\n    branches: [master]\n  workflow_dispatch:", 1))
+PY
+assert_pr_fail "PR automatic production rollback" \
+  "production-rollback must be workflow_dispatch-only"
+
+prepare_pr_remote
+sed -i.bak \
+  's#actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093#actions/download-artifact@v4#' \
+  "$pr_remote_root/.github/workflows/oci-production-rollback.yml"
+rm "$pr_remote_root/.github/workflows/oci-production-rollback.yml.bak"
+assert_pr_fail "PR floating OCI rollback action ref" \
+  "must pin actions/download-artifact to a full 40-character lowercase hex commit SHA"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue.yml\\n.github/workflows/production-build.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow newline injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\\rproduction.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow carriage return injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\\tproduction.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow tab injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\u007fproduction.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow DEL injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\\u0000production.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow NUL injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\\u2028production.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow Unicode line separator injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue\\u2029production.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow Unicode paragraph separator injection" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github\\\\workflows\\\\rogue.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow backslash path" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/%2e%2e%2frogue.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow percent-encoded traversal" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github%2Fworkflows%2Frogue.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow percent-encoded separator" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/rogue%0Aworkflow.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow percent-encoded control" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/%70roduction-build.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow percent-encoded colliding filename" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github//workflows/rogue.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR workflow empty component path" \
+  "PR workflow tree response contained an unsafe path"
+
+prepare_pr_remote
+write_pr_tree_payload '[{"path": ".github/workflows/production-build.yml", "type": "blob"}]'
+assert_pr_fail_no_fetch "PR duplicate workflow path" \
+  "PR workflow tree response contained a duplicate path"
 
 "$ROOT_DIR/infra/azure/agents/test-shared-mongo-consolidation-stan.sh"
 

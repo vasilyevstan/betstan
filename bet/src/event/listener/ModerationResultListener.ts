@@ -1,12 +1,15 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { ConsumeMessage } from "amqplib";
 import {
   AListener,
-  BetStatus,
   IModerationResultEvent,
-  ModerationStatus,
   QueueNames,
 } from "@betstan/common";
 import { Bet } from "../../model/Bet";
+import { PendingBetUpdateKind } from "../../model/PendingBetUpdate";
+import {
+  applyModerationResult,
+  parkPendingBetUpdate,
+} from "../../service/betHistory";
 
 class PlaceBetListener extends AListener<IModerationResultEvent> {
   serviceName: string = "bet_moderation_result";
@@ -18,17 +21,14 @@ class PlaceBetListener extends AListener<IModerationResultEvent> {
     const bet = await Bet.findOne({ slipId: data.slipId });
 
     if (!bet) {
-      // do not ack, handle concurrency
-      this.channel.nack(msg, undefined, true);
+      await parkPendingBetUpdate(PendingBetUpdateKind.MODERATION_RESULT, event);
+      this.channel.ack(msg);
       return;
     }
 
-    if (data.result === ModerationStatus.APPROVED) {
-      bet.status = BetStatus.CONFIRMED;
-    } else {
-      bet.status = BetStatus.DECLINED;
+    if (applyModerationResult(bet, event)) {
+      await bet.save();
     }
-    await bet.save();
 
     this.channel.ack(msg);
   }

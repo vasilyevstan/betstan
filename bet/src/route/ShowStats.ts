@@ -1,12 +1,12 @@
 import express, { Request, Response } from "express";
-import { Bet } from "../model/Bet";
+import { getPublicBetStats } from "../service/publicBetStats";
 
 const router = express.Router();
 
 router.get("/api/bet/stats", async (req: Request, res: Response) => {
-  const bets = await Bet.find({});
+  const stats = await getPublicBetStats();
 
-  res.send(bets);
+  res.send(stats);
 });
 
 export { router as ShowStats };

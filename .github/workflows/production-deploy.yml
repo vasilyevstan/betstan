@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout approved master commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
@@ -119,22 +119,39 @@ jobs:
             > artifacts/deploy-provenance/provenance.txt
 
       - name: Upload deploy provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/deploy-provenance
           if-no-files-found: error
 
       - name: Azure Login
-        uses: azure/login@v1
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Set AKS context
-        uses: azure/aks-set-context@v3
+        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
         with:
           resource-group: ${{ env.RESOURCE_GROUP }}
           cluster-name: ${{ env.CLUSTER_NAME }}
+
+      - name: Capture protected rollback baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/production-baseline
+        run: |
+          HOSTS="${APP_DOMAIN},www.${APP_DOMAIN}" \
+            ./infra/azure/agents/baseline-capture-stan.sh
+
+      - name: Upload protected rollback baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/production-baseline
+          if-no-files-found: error
+          retention-days: 30
 
       - name: DB safety guardrails
         run: |
@@ -172,17 +189,23 @@ jobs:
             immutable_images["$service"]="$image_ref"
           done < artifacts/deploy-provenance/images.tsv
 
+          # Passive readers/consumers first, producer next, gamemaster last.
           rollouts=(
             'auth|auth-depl.yaml|gaming-auth-depl|gaming-auth'
             'bet|bet-depl.yaml|gaming-bet-depl|gaming-bet'
-            'backoffice|backoffice-depl.yaml|gaming-backoffice-depl|gaming-backoffice'
             'client|client-depl.yaml|gaming-client-depl|gaming-client'
             'event|event-depl.yaml|gaming-event-depl|gaming-event'
-            'gamemaster|gamemaster-depl.yaml|gaming-gamemaster-depl|gaming-gamemaster'
             'moderation|moderation-depl.yaml|gaming-moderation-depl|gaming-moderation'
             'resulting|resulting-depl.yaml|gaming-resulting-depl|gaming-resulting'
             'slip|slip-depl.yaml|gaming-slip-depl|gaming-slip'
+            'backoffice|backoffice-depl.yaml|gaming-backoffice-depl|gaming-backoffice'
+            'gamemaster|gamemaster-depl.yaml|gaming-gamemaster-depl|gaming-gamemaster'
           )
+          IFS='|' read -r last_service _ <<<"${rollouts[$(( ${#rollouts[@]} - 1 ))]}"
+          [ "$last_service" = "gamemaster" ] || {
+            echo "gamemaster must rollout last" >&2
+            exit 1
+          }
           for rollout in "${rollouts[@]}"; do
             IFS='|' read -r service manifest deployment container <<<"$rollout"
             image_ref="${immutable_images[$service]:-}"
@@ -271,15 +294,29 @@ jobs:
           DOMAIN: ${{ env.APP_DOMAIN }}
           CERT_NAME: ${{ env.APP_CERT_NAME }}
           E2E_BASE_URL: ${{ env.APP_E2E_BASE_URL }}
+          SECONDARY_PUBLIC_URL: ${{ format('https://www.{0}', env.APP_DOMAIN) }}
           MAX_ATTEMPTS: ${{ env.DEPLOY_VALIDATION_ATTEMPTS }}
           SLEEP_SECONDS: ${{ env.DEPLOY_VALIDATION_SLEEP_SECONDS }}
           VALIDATION_MAX_LOOPS: ${{ env.DEPLOY_VALIDATION_MAX_LOOPS }}
           VALIDATION_SLEEP_SECONDS: ${{ env.DEPLOY_VALIDATION_LOOP_SLEEP_SECONDS }}
+          IMAGE_PROVENANCE_FILE: artifacts/deploy-provenance/images.tsv
+          LIVE_BETTING_READINESS_MODE: dark
+          LIVE_READINESS_REQUEST_TIMEOUT: "15"
+          LIVE_READINESS_SSE_TIMEOUT: "20"
           OUTPUT_DIR: artifacts/deploy-validation
+
+      - name: Upload sanitized live readiness evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deploy-live-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/deploy-validation/live-readiness
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload deploy diagnostics
         if: always() && steps.post_deploy_validation.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deploy-validation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/deploy-validation

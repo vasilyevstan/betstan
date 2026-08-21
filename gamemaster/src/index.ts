@@ -17,6 +17,8 @@ const bootstrap = async () => {
   try {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);
     await messengerWrapper.connect(process.env.RABBITMQ_URI);
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("Connected to database");
 
     const newEventListener = new NewEventListener(messengerWrapper.connection);
     await newEventListener.init();
@@ -28,9 +30,6 @@ const bootstrap = async () => {
     await eventResultListener.init();
     eventResultListener.listen();
 
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log("Connected to database");
-
     const gameMaster = new GamemasterWorker();
     await gameMaster.init();
     gameMaster.work();
@@ -38,6 +37,7 @@ const bootstrap = async () => {
     process.on("uncaughtException", async function (err) {
       console.log("logging general error", err);
       try {
+        gameMaster.stop();
         await mongoose.connection.close();
         await mongoose.disconnect();
         process.exit(1);
@@ -49,6 +49,7 @@ const bootstrap = async () => {
     process.on("SIGINT", async () => {
       console.log("Received sigint command");
       try {
+        gameMaster.stop();
         await mongoose.connection.close();
         await mongoose.disconnect();
         process.exit(0);
@@ -60,6 +61,7 @@ const bootstrap = async () => {
     process.on("SIGTERM", async () => {
       console.log("Received sigterm command");
       try {
+        gameMaster.stop();
         await mongoose.connection.close();
         await mongoose.disconnect();
         process.exit(0);

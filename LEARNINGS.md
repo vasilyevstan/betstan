@@ -2,7 +2,7 @@
 
 ## Repository overview
 
-`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities are published as the `@betstan/common` npm package. The orphaned `common` gitlink was removed; do not recreate it without a valid, intentional submodule configuration.
+`betstan` is a microservices betting platform. Each service lives in its own top-level directory (`auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`, `resulting`, `slip`). Shared types, base classes, and utilities live in the normal tracked `common/` package and are published as `@betstan/common`; never recreate `common/` as a gitlink or submodule.
 
 ---
 
@@ -11,6 +11,7 @@
 ### Messaging (AMQP / RabbitMQ)
 - Every service communicates through RabbitMQ exchanges.
 - Base classes live in `@betstan/common`: `AListener<T>` (consumers) and `APublisher<T>` (producers).
+- The public base classes accept the structural `IAmqpConnection`; do not expose version-specific `Connection`/`ChannelModel` types because services intentionally carry different compatible `@types/amqplib` versions.
 - `APublisher.publish()` stamps `data.timestamp` and `data.sender` onto every outgoing event before serialising it. This means the `timestamp` field on an `IEvent` is **set by the publisher at send time**, not by the originating request.
 - Because of the above, when creating events manually in tests (without going through a publisher), `event.timestamp` is `undefined`. Any code that reads `event.timestamp` to populate a required model field must provide a fallback (e.g. `event.timestamp ?? new Date().toISOString()`).
 
@@ -29,6 +30,18 @@
   }
   ```
 - Pattern for workers (`GamemasterWorker`): expose an `async init()` and wire it in `index.ts` before calling `worker.work()`.
+
+### Event scheduling ownership
+- The `event` service owns future-event generation; `GET /api/event` is read-only and Gamemaster never creates replacement events.
+- Scheduler events use deterministic epoch-aligned slots and a partial unique `slotKey` index so rolling event pods converge without leader election.
+- A short-lived per-event publish claim and pending marker provide at-least-once `NEW_EVENT` retry while duplicate-safe consumers preserve existing documents.
+- Backoffice and legacy events have no scheduler slot and are never counted, modified, deleted, or republished by the scheduler.
+
+### Live simulation engine
+- `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
+- The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
+- Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
+- Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
 
 ---
 
@@ -86,7 +99,7 @@ cd resulting && npm ci && npm run test:ci
 
 ## Resolved failures and durable rules
 
-- An orphaned `common` gitlink without `.gitmodules` broke checkout cleanup. It was removed because services consume `@betstan/common` from npm.
+- An orphaned `common` gitlink without `.gitmodules` previously broke checkout cleanup. `common/` is now maintained as a normal tracked package while services consume explicit published versions from npm.
 - Per-service workflows use `actions/checkout@v4`; do not reintroduce `checkout@v2`.
 - Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
