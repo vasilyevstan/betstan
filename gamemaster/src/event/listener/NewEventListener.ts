@@ -1,6 +1,7 @@
 import { ConsumeMessage } from "amqplib";
 import {
   AListener,
+  EventPhase,
   EventStatus,
   INewEventEvent,
   QueueNames,
@@ -26,10 +27,12 @@ class NewEventListener extends AListener<INewEventEvent> {
         {
           $setOnInsert: {
             eventId: data.id,
+            name: data.name,
             time: new Date(data.time),
             home: data.home,
             away: data.away,
             status: EventStatus.NO_RESULT,
+            phase: EventPhase.PRE_MATCH,
           },
         },
         { upsert: true }

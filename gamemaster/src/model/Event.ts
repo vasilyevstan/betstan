@@ -1,10 +1,15 @@
-import { EventStatus, EventVisibility } from "@betstan/common";
+import { EventStatus } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import { liveStateFields } from "./liveStateFields";
 
 const eventSchema = new Schema({
   eventId: {
     type: String,
     required: true,
+  },
+  name: {
+    type: String,
+    required: false,
   },
   time: {
     type: Date,
@@ -32,6 +37,7 @@ const eventSchema = new Schema({
     enum: Object.values(EventStatus),
     default: EventStatus.NO_RESULT,
   },
+  ...liveStateFields,
 });
 
 eventSchema.index({ eventId: 1 }, { unique: true });

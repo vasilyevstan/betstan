@@ -1,28 +1,35 @@
 import mongoose from "mongoose";
-import EventResultListener from "../EventResultListener";
 import { ConsumeMessage } from "amqplib";
 import {
   EventStatus,
   IEventResultEvent,
-  ResultingStatus,
   messengerWrapper,
 } from "@betstan/common";
 
 import { Event } from "../../../model/Event";
 import { EventArchive } from "../../../model/EventArchive";
+import { LiveResultSource } from "../../../model/liveStateFields";
+import EventResultListener from "../EventResultListener";
 
-const setup = async (numberOfEvents?: number) => {
+const setup = async (numberOfEvents = 1) => {
   const listener = new EventResultListener(messengerWrapper.connection);
   await listener.init();
 
-  const events = Array();
+  const events = await Promise.all(
+    Array.from({ length: numberOfEvents }, async () => {
+      const event = new Event({
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        name: "Team 1 - Team 2",
+        time: new Date(),
+        home: "Team 1",
+        away: "Team 2",
+        status: EventStatus.NO_RESULT,
+      });
 
-  if (!numberOfEvents) numberOfEvents = 1;
-
-  for (let i = 0; i < numberOfEvents; i++) {
-    const event = await createEvent();
-    events.push(event);
-  }
+      await event.save();
+      return event;
+    })
+  );
 
   const message: ConsumeMessage = {
     content: Buffer.alloc(5),
@@ -52,87 +59,78 @@ const setup = async (numberOfEvents?: number) => {
   };
 
   return { listener, events, message };
-
-  async function createEvent() {
-    // const betData = getBetData();
-
-    const event = new Event({
-      eventId: new mongoose.Types.ObjectId().toHexString(),
-      time: new Date(),
-      home: "Team 1",
-      away: "Team 2",
-      status: EventStatus.NO_RESULT,
-    });
-
-    await event.save();
-    return event;
-  }
 };
 
 const getData = (
-  homeScore: number,
-  awayScore: number,
   eventId: string,
-  home: string,
-  away: string
-): IEventResultEvent => {
-  return {
-    data: {
-      eventId: eventId,
-      homeScore: homeScore,
-      awayScore: awayScore,
-      home,
-      away,
-    },
-  };
-};
+  homeScore: number,
+  awayScore: number
+): IEventResultEvent => ({
+  sender: "backoffice_result_set",
+  timestamp: new Date("2025-01-01T12:00:01.000Z").toISOString(),
+  data: {
+    eventId,
+    homeScore,
+    awayScore,
+    home: "Team 1",
+    away: "Team 2",
+  },
+});
 
-it("when event is resulted and moved to archive", async () => {
+it("stores a pending manual result without archiving the live match immediately", async () => {
   const { listener, events, message } = await setup(3);
-
-  const eventId = events[0].eventId;
-
-  const data = getData(3, 0, eventId, "Team 1", "Team 2");
+  const data = getData(events[0].eventId, 3, 0);
 
   await listener.onMessage(data, message);
 
-  const archievedEvent = await EventArchive.findOne({ eventId });
-
-  const storedEvents = await Event.find({});
-  const storedArchievedEvents = await EventArchive.find({});
-
-  expect(storedEvents.length).toEqual(2);
-  expect(storedArchievedEvents.length).toEqual(1);
-  expect(archievedEvent?.status).toEqual(EventStatus.RESULTED);
+  const storedEvent = await Event.findOne({ eventId: events[0].eventId });
+  expect(await Event.countDocuments()).toBe(3);
+  expect(await EventArchive.countDocuments()).toBe(0);
+  expect(storedEvent?.pendingResult?.source).toBe(LiveResultSource.MANUAL);
+  expect(storedEvent?.homeResult).toBe(3);
+  expect(storedEvent?.awayResult).toBe(0);
+  expect(storedEvent?.resultPublishedAt).toBeTruthy();
 });
 
-it("acknowledges self-emitted result events without changing stored events", async () => {
+it("keeps the first manual result when a duplicate delivery is received", async () => {
+  const { listener, events, message } = await setup();
+  const first = getData(events[0].eventId, 3, 0);
+  const second = getData(events[0].eventId, 0, 3);
+
+  await listener.onMessage(first, message);
+  await listener.onMessage(second, message);
+
+  const storedEvent = await Event.findOne({ eventId: events[0].eventId });
+  expect(storedEvent?.pendingResult?.source).toBe(LiveResultSource.MANUAL);
+  expect(storedEvent?.homeResult).toBe(3);
+  expect(storedEvent?.awayResult).toBe(0);
+});
+
+it("acknowledges self-emitted final results without changing stored events", async () => {
   const { listener, events, message } = await setup();
   const data = {
-    ...getData(3, 0, events[0].eventId, "Team 1", "Team 2"),
+    ...getData(events[0].eventId, 3, 0),
     sender: listener.serviceName,
   };
 
   await listener.onMessage(data, message);
 
-  expect(await Event.countDocuments()).toEqual(1);
-  expect(await EventArchive.countDocuments()).toEqual(0);
+  expect(await Event.countDocuments()).toBe(1);
+  expect(await EventArchive.countDocuments()).toBe(0);
   expect(listener.ack).toHaveBeenCalledWith(message);
 });
 
 it("acknowledges result events when the stored event is missing", async () => {
   const { listener, message } = await setup();
   const data = getData(
-    3,
-    0,
     new mongoose.Types.ObjectId().toHexString(),
-    "Missing",
-    "Event"
+    3,
+    0
   );
 
   await listener.onMessage(data, message);
 
-  expect(await Event.countDocuments()).toEqual(1);
-  expect(await EventArchive.countDocuments()).toEqual(0);
+  expect(await Event.countDocuments()).toBe(1);
+  expect(await EventArchive.countDocuments()).toBe(0);
   expect(listener.ack).toHaveBeenCalledWith(message);
 });

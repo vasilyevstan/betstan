@@ -1,10 +1,15 @@
 import { EventStatus } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import { liveStateFields } from "./liveStateFields";
 
 const eventArchiveSchema = new Schema({
   eventId: {
     type: String,
     required: true,
+  },
+  name: {
+    type: String,
+    required: false,
   },
   time: {
     type: String,
@@ -32,6 +37,7 @@ const eventArchiveSchema = new Schema({
     enum: Object.values(EventStatus),
     default: EventStatus.NO_RESULT,
   },
+  ...liveStateFields,
 });
 
 const EventArchive = model("EventArchive", eventArchiveSchema);
