@@ -1,11 +1,47 @@
 import { ConsumeMessage } from "amqplib";
 import {
   AListener,
+  BetKind,
   IEventOddsSelectedEvent,
   QueueNames,
-  SlipStatus,
 } from "@betstan/common";
-import { Slip } from "../../model/Slip";
+import { Types } from "mongoose";
+import {
+  findSubmittedSlipForUser,
+  PlainSlipRow,
+  upsertDraftSlipRow,
+  normalizeBetKind,
+} from "../../model/slipSupport";
+
+const buildSlipRow = (
+  event: IEventOddsSelectedEvent,
+  betKind: BetKind
+): PlainSlipRow => {
+  const rowTimestamp =
+    event.data.eventTime || event.timestamp || new Date().toISOString();
+
+  return {
+    _id: new Types.ObjectId(),
+    eventId: event.data.eventId,
+    eventName: event.data.eventName,
+    oddsId: event.data.oddsId,
+    oddsValue: event.data.oddsValue,
+    oddsName: event.data.oddsName,
+    productName: event.data.productName,
+    productId: event.data.productId,
+    timestamp: rowTimestamp,
+    eventTime: event.data.eventTime,
+    betKind,
+    marketId: event.data.marketId,
+    marketType: event.data.marketType,
+    marketVersion: event.data.marketVersion,
+    quoteVersion: event.data.quoteVersion,
+    selectionId: event.data.selectionId,
+    side: event.data.side,
+    selectedAt: event.data.selectedAt ?? event.timestamp ?? new Date().toISOString(),
+    quoteValidUntil: event.data.quoteValidUntil,
+  };
+};
 
 class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
   serviceName: string = "slip_odds_clicked";
@@ -13,50 +49,21 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
 
   async onMessage(event: IEventOddsSelectedEvent, msg: ConsumeMessage) {
     const userId = event.data.userId;
-    const dataWithEventTime = event.data as IEventOddsSelectedEvent["data"] & {
-      eventTime?: string;
-    };
-    const rowTimestamp = dataWithEventTime.eventTime || event.timestamp;
+    const betKind = normalizeBetKind(event.data.betKind);
 
     if (!userId) {
       this.ack(msg);
       return;
     }
 
-    let slip = await Slip.findOne({
-      userId: userId,
-      status: SlipStatus.DRAFT,
-    });
+    const submittedSlip = await findSubmittedSlipForUser(userId, betKind);
 
-    if (!slip) {
-      slip = new Slip({
-        userId,
-        status: SlipStatus.DRAFT,
-        timestamp: new Date().toISOString(),
-        rows: [
-          {
-            timestamp: rowTimestamp,
-            ...event.data,
-          },
-        ],
-      });
-    } else {
-      const newRow = { timestamp: rowTimestamp, ...event.data };
-
-      // check if that odds already in the list
-      let hasDuplicate = false;
-      slip.rows.map((row) => {
-        if (row.oddsId === event.data.oddsId) {
-          hasDuplicate = true;
-        }
-      });
-
-      if (!hasDuplicate) {
-        slip.rows.push(newRow);
-      }
+    if (submittedSlip) {
+      this.ack(msg);
+      return;
     }
 
-    await slip.save();
+    await upsertDraftSlipRow(userId, betKind, buildSlipRow(event, betKind));
     this.ack(msg);
   }
 }

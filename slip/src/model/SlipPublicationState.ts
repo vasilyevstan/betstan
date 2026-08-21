@@ -1,0 +1,6 @@
+export enum SlipPublicationState {
+  PENDING = "PENDING",
+  PROCESSING = "PROCESSING",
+  PUBLISHED = "PUBLISHED",
+  EXHAUSTED = "EXHAUSTED",
+}

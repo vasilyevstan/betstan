@@ -1,12 +1,18 @@
 import mongoose from "mongoose";
 import { ConsumeMessage } from "amqplib";
 import {
+  BetKind,
   IEventOddsSelectedEvent,
   SlipStatus,
   messengerWrapper,
 } from "@betstan/common";
 import OddsClickedListener from "../OddsClickedListener";
-import { Slip } from "../../../model/Slip";
+import {
+  Slip,
+  SLIP_DRAFT_UNIQUE_INDEX_KEYS,
+  SLIP_DRAFT_UNIQUE_INDEX_NAME,
+  SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+} from "../../../model/Slip";
 
 const buildMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -35,7 +41,10 @@ const buildMessage = (): ConsumeMessage => ({
   },
 });
 
-const buildEvent = (userId: string): IEventOddsSelectedEvent => ({
+const buildEvent = (
+  userId: string,
+  overrides: Partial<IEventOddsSelectedEvent["data"]> = {}
+): IEventOddsSelectedEvent => ({
   timestamp: new Date().toISOString(),
   data: {
     userId,
@@ -46,10 +55,52 @@ const buildEvent = (userId: string): IEventOddsSelectedEvent => ({
     oddsName: "Team A",
     productName: "1X2",
     productId: new mongoose.Types.ObjectId().toHexString(),
+    ...overrides,
   },
 });
 
-it("creates a new draft slip when user has no existing slip", async () => {
+const createSubmittedSlip = async (userId: string, betKind: BetKind) => {
+  const slip = new Slip({
+    userId,
+    betKind,
+    status: SlipStatus.SUBMITTED,
+    timestamp: new Date().toISOString(),
+    submittedAt: new Date().toISOString(),
+    rows: [
+      {
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        eventName: "Team A - Team B",
+        oddsId: new mongoose.Types.ObjectId().toHexString(),
+        oddsValue: 1.5,
+        oddsName: "Team A",
+        productName: "1X2",
+        productId: new mongoose.Types.ObjectId().toHexString(),
+        timestamp: new Date().toISOString(),
+        betKind,
+        ...(betKind === BetKind.LIVE
+          ? {
+              marketId: "event-one:NEXT_CORNER",
+              marketVersion: 1,
+              quoteVersion: 1,
+              selectionId: "event-one:NEXT_CORNER:1:HOME",
+            }
+          : {}),
+      },
+    ],
+  });
+
+  await slip.save();
+  return slip;
+};
+
+const createGuardedDraftIndex = () =>
+  Slip.collection.createIndex(SLIP_DRAFT_UNIQUE_INDEX_KEYS, {
+    name: SLIP_DRAFT_UNIQUE_INDEX_NAME,
+    unique: true,
+    partialFilterExpression: SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+  });
+
+it("creates a new PRE_MATCH draft slip when betKind is missing", async () => {
   const userId = new mongoose.Types.ObjectId().toHexString();
   const listener = new OddsClickedListener(messengerWrapper.connection);
   await listener.init();
@@ -58,25 +109,73 @@ it("creates a new draft slip when user has no existing slip", async () => {
 
   const slip = await Slip.findOne({ userId, status: SlipStatus.DRAFT });
   expect(slip).not.toBeNull();
+  expect(slip!.betKind).toEqual(BetKind.PRE_MATCH);
   expect(slip!.rows.length).toEqual(1);
+  expect(slip!.rows[0].betKind).toEqual(BetKind.PRE_MATCH);
 });
 
-it("appends a row to existing draft slip", async () => {
+it("keeps PRE_MATCH and LIVE boards separate for the same user", async () => {
   const userId = new mongoose.Types.ObjectId().toHexString();
   const listener = new OddsClickedListener(messengerWrapper.connection);
   await listener.init();
 
-  const event1 = buildEvent(userId);
-  const event2 = buildEvent(userId);
+  await listener.onMessage(buildEvent(userId), buildMessage());
+  await listener.onMessage(
+    buildEvent(userId, {
+      betKind: BetKind.LIVE,
+      marketId: "event-one:NEXT_CORNER",
+      marketVersion: 1,
+      quoteVersion: 1,
+      selectionId: "event-one:NEXT_CORNER:1:HOME",
+    }),
+    buildMessage()
+  );
 
-  await listener.onMessage(event1, buildMessage());
-  await listener.onMessage(event2, buildMessage());
+  const slips = await Slip.find({ userId, status: SlipStatus.DRAFT });
+  expect(slips).toHaveLength(2);
+  expect(slips.map((slip) => slip.betKind).sort()).toEqual([
+    BetKind.LIVE,
+    BetKind.PRE_MATCH,
+  ]);
+});
 
-  const slip = await Slip.findOne({ userId, status: SlipStatus.DRAFT });
+it("coalesces simultaneous PRE_MATCH clicks into one shared draft", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+  await createGuardedDraftIndex();
+
+  await Promise.all([
+    listener.onMessage(buildEvent(userId), buildMessage()),
+    listener.onMessage(buildEvent(userId), buildMessage()),
+  ]);
+
+  const slips = await Slip.find({
+    userId,
+    status: SlipStatus.DRAFT,
+  });
+  expect(slips).toHaveLength(1);
+  expect(slips[0].betKind).toEqual(BetKind.PRE_MATCH);
+  expect(slips[0].rows).toHaveLength(2);
+});
+
+it("appends a row to an existing draft board of the same kind", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  await listener.onMessage(buildEvent(userId), buildMessage());
+  await listener.onMessage(buildEvent(userId), buildMessage());
+
+  const slip = await Slip.findOne({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.PRE_MATCH,
+  });
   expect(slip!.rows.length).toEqual(2);
 });
 
-it("does not add duplicate odds to the slip", async () => {
+it("does not add duplicate odds to the same board", async () => {
   const userId = new mongoose.Types.ObjectId().toHexString();
   const listener = new OddsClickedListener(messengerWrapper.connection);
   await listener.init();
@@ -89,6 +188,159 @@ it("does not add duplicate odds to the slip", async () => {
   expect(slip!.rows.length).toEqual(1);
 });
 
+it("updates the legacy PRE_MATCH draft instead of creating a parallel normalized board", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const legacySlipId = new mongoose.Types.ObjectId();
+  const legacyOddsId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  await Slip.collection.insertOne({
+    _id: legacySlipId,
+    userId,
+    status: SlipStatus.DRAFT,
+    timestamp: new Date().toISOString(),
+    rows: [
+      {
+        _id: new mongoose.Types.ObjectId(),
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        eventName: "Team A - Team B",
+        oddsId: legacyOddsId,
+        oddsValue: 1.5,
+        oddsName: "Team A",
+        productName: "1X2",
+        productId: new mongoose.Types.ObjectId().toHexString(),
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+
+  await listener.onMessage(buildEvent(userId), buildMessage());
+
+  const slips = await Slip.find({
+    userId,
+    status: SlipStatus.DRAFT,
+  });
+  expect(slips).toHaveLength(1);
+  expect(slips[0].id).toEqual(legacySlipId.toHexString());
+  expect(slips[0].betKind).toEqual(BetKind.PRE_MATCH);
+  expect(slips[0].rows).toHaveLength(2);
+  expect(slips[0].rows[0].betKind).toEqual(BetKind.PRE_MATCH);
+});
+
+it("replaces a LIVE row by market identity even when the replacement quote is stale", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  const initialEvent = buildEvent(userId, {
+    betKind: BetKind.LIVE,
+    marketId: "event-one:NEXT_CORNER",
+    marketVersion: 2,
+    quoteVersion: 5,
+    selectionId: "event-one:NEXT_CORNER:2:HOME",
+    oddsId: "odds-home",
+    oddsValue: 1.5,
+    oddsName: "Home",
+  });
+  const replacementEvent = buildEvent(userId, {
+    betKind: BetKind.LIVE,
+    marketId: "event-one:NEXT_CORNER",
+    marketVersion: 2,
+    quoteVersion: 4,
+    selectionId: "event-one:NEXT_CORNER:2:AWAY",
+    oddsId: "odds-away",
+    oddsValue: 2.4,
+    oddsName: "Away",
+  });
+
+  await listener.onMessage(initialEvent, buildMessage());
+  await listener.onMessage(replacementEvent, buildMessage());
+
+  const slip = await Slip.findOne({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+  });
+
+  expect(slip!.rows).toHaveLength(1);
+  expect(slip!.rows[0].oddsId).toEqual("odds-away");
+  expect(slip!.rows[0].quoteVersion).toEqual(4);
+  expect(slip!.rows[0].oddsValue).toEqual(2.4);
+});
+
+it("replaces a LIVE row when the same market rolls to a new version", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  await listener.onMessage(
+    buildEvent(userId, {
+      betKind: BetKind.LIVE,
+      marketId: "event-one:NEXT_CORNER",
+      marketVersion: 1,
+      quoteVersion: 3,
+      selectionId: "event-one:NEXT_CORNER:1:HOME",
+      oddsId: "version-one-odds",
+    }),
+    buildMessage()
+  );
+  await listener.onMessage(
+    buildEvent(userId, {
+      betKind: BetKind.LIVE,
+      marketId: "event-one:NEXT_CORNER",
+      marketVersion: 2,
+      quoteVersion: 1,
+      selectionId: "event-one:NEXT_CORNER:2:AWAY",
+      oddsId: "version-two-odds",
+      oddsValue: 2.2,
+      oddsName: "Away",
+    }),
+    buildMessage()
+  );
+
+  const slip = await Slip.findOne({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+  });
+  expect(slip!.rows).toHaveLength(1);
+  expect(slip!.rows[0].marketId).toEqual("event-one:NEXT_CORNER");
+  expect(slip!.rows[0].marketVersion).toEqual(2);
+  expect(slip!.rows[0].quoteVersion).toEqual(1);
+  expect(slip!.rows[0].selectionId).toEqual("event-one:NEXT_CORNER:2:AWAY");
+  expect(slip!.rows[0].oddsId).toEqual("version-two-odds");
+});
+
+it("ignores same-kind selections while that board is submitted", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  const submittedSlip = await createSubmittedSlip(userId, BetKind.LIVE);
+
+  await listener.onMessage(
+    buildEvent(userId, {
+      betKind: BetKind.LIVE,
+      marketId: "event-one:NEXT_CORNER",
+      marketVersion: 2,
+      quoteVersion: 1,
+      selectionId: "event-one:NEXT_CORNER:2:HOME",
+    }),
+    buildMessage()
+  );
+
+  expect(await Slip.countDocuments({ userId, betKind: BetKind.LIVE })).toEqual(1);
+  expect(
+    await Slip.findOne({
+      userId,
+      betKind: BetKind.LIVE,
+      status: SlipStatus.DRAFT,
+    })
+  ).toBeNull();
+  expect(await Slip.findById(submittedSlip.id)).not.toBeNull();
+});
+
 it("acks message without creating slip when userId is missing", async () => {
   const listener = new OddsClickedListener(messengerWrapper.connection);
   await listener.init();
@@ -96,6 +348,5 @@ it("acks message without creating slip when userId is missing", async () => {
   const event = buildEvent("");
   await listener.onMessage(event, buildMessage());
 
-  const slips = await Slip.find({});
-  expect(slips.length).toEqual(0);
+  expect(await Slip.find({})).toHaveLength(0);
 });

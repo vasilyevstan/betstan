@@ -33,12 +33,20 @@ beforeAll(async () => {
       ack: jest.fn(),
       publish: jest.fn(),
     }),
+    createConfirmChannel: jest.fn().mockResolvedValue({
+      assertExchange: jest.fn().mockResolvedValue(undefined),
+      publish: jest.fn((_exchange, _routingKey, _content, _options, callback) =>
+        callback(undefined)
+      ),
+    }),
   };
 
   mongo = await MongoMemoryServer.create();
   const mongoUri = mongo.getUri();
 
-  await mongoose.connect(mongoUri, {});
+  await mongoose.connect(mongoUri, {
+    autoIndex: false,
+  });
 
   mongoose.connection.on("error", (e) => {
     console.log(e);
