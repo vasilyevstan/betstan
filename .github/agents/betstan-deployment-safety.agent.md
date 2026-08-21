@@ -34,7 +34,9 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
 - Commits and pushes to non-`master` branches do not deploy production.
 - Never commit or push directly to `master`, even with generic user approval.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
-- Never merge a `dev`-to-`master` promotion, manually dispatch or rerun any production-capable workflow, initiate or directly apply any production deployment, rerun a production deployment, or initiate rollback without explicit user approval for the exact target SHA and the complete set of production-capable workflows that action will trigger.
+- For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
+- Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
+- Use `copilot-cli-run-approval-stan.sh` for protected build/deploy environments in automatic mode. Never auto-approve rollback, migration, infrastructure, stale-master, rerun, unlabelled, or competing workflow activity.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
@@ -132,7 +134,7 @@ A Running broker with missing consumers is not healthy production.
 
 - Use `branch-policy-guard-stan.sh` to reject unsupported base/head pairs.
 - Use `pr-validation-stan.sh` to verify the exact current head, base, unique merge snapshot, and trusted workflow identities.
-- Use `pr-merge-safety-stan.sh` for a conservative recommendation.
+- Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode for every other PR.
 - Treat skipped, stale, pending, neutral, or branch-name-only runs as non-success.
 - Separate infrastructure failures from unrelated application-test failures; never hide either.
 - Do not broaden or narrow CI scope merely to manufacture a green result.
