@@ -828,6 +828,394 @@ if grep -R -n -E 'nat-gateway create|--type ENHANCED_CLUSTER|VM\.Standard\.(E|D|
   fail "OCI scripts contain a paid infrastructure fallback"
 fi
 
+validate_production_build_deployment_safety_contract() {
+  local workflow_file="$1"
+  ruby - "$workflow_file" <<'RUBY'
+require "yaml"
+
+workflow_file = ARGV.fetch(0)
+workflow_text = File.read(workflow_file)
+expected_checkout = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+approved_action_refs = {
+  "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+  "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
+  "actions/cache" => "0400d5f644dc74513175e3cd8d07132dd4860809",
+  "docker/setup-buildx-action" => "e468171a9de216ec08956ac3ada2f0791b6bd435",
+  "docker/login-action" => "184bdaa0721073962dff0199f1fb9940f07167d1",
+  "docker/build-push-action" => "ca052bb54ab0790a636c9b5f226502c73d547a25",
+  "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+}.freeze
+expected_syntax_targets = [
+  "infra/azure/agents/deploy-validation-loop-stan.sh",
+  "infra/azure/agents/live-betting-readiness-lib.sh",
+  "infra/azure/agents/live-betting-readiness-stan.sh",
+  "infra/azure/agents/live-betting-readiness-test-lib.sh",
+  "infra/azure/agents/pre-commit-infra-check-stan.sh",
+  "infra/azure/agents/test-deploy-validation-loop-stan.sh",
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh",
+  "infra/azure/agents/test-live-betting-readiness-stan.sh",
+  "infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
+  "infra/azure/agents/test-production-rollback-stan.sh",
+  "infra/oci/agents/deploy-validation-loop-stan.sh",
+  "infra/oci/agents/live-betting-readiness-stan.sh",
+  "infra/oci/scripts/deploy.sh",
+  "infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "infra/oci/tests/test-live-betting-readiness-stan.sh",
+  "infra/oci/tests/rollback-live-readiness-contract.sh",
+  "infra/oci/tests/rollback-contract.sh",
+]
+expected_exec_targets = [
+  "./infra/azure/agents/pre-commit-infra-check-stan.sh",
+  "./infra/azure/agents/test-deployment-safety-ci-stan.sh",
+  "./infra/azure/agents/test-deploy-validation-loop-stan.sh",
+  "./infra/azure/agents/test-live-betting-readiness-stan.sh",
+  "./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
+  "./infra/azure/agents/test-production-rollback-stan.sh",
+  "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "./infra/oci/tests/test-live-betting-readiness-stan.sh",
+  "./infra/oci/tests/rollback-live-readiness-contract.sh",
+  "./infra/oci/tests/rollback-contract.sh",
+]
+expected_yaml_targets = [
+  ".github/workflows/production-build.yml",
+  ".github/workflows/production-deploy.yml",
+  ".github/workflows/oci-production-deploy.yml",
+]
+
+def flatten_strings(value, output = [])
+  case value
+  when String
+    output << value
+  when Array
+    value.each { |item| flatten_strings(item, output) }
+  when Hash
+    value.each do |key, item|
+      flatten_strings(key, output)
+      flatten_strings(item, output)
+    end
+  end
+  output
+end
+
+def writable_permissions?(value)
+  case value
+  when String
+    value.include?("write")
+  when Hash
+    value.any? { |_key, item| writable_permissions?(item) }
+  else
+    false
+  end
+end
+
+def deep_stringify_workflow_keys(value)
+  case value
+  when Hash
+    value.each_with_object({}) do |(key, item), output|
+      normalized_key = key == true ? "on" : key.to_s
+      output[normalized_key] = deep_stringify_workflow_keys(item)
+    end
+  when Array
+    value.map { |item| deep_stringify_workflow_keys(item) }
+  else
+    value
+  end
+end
+
+def load_workflow_document(text)
+  deep_stringify_workflow_keys(YAML.load_stream(text).first)
+end
+
+def parse_action_uses(workflow_text)
+  entries = []
+  workflow_text.each_line.with_index(1) do |line, line_number|
+    next unless line =~ /^\s*uses:\s*([^\s#]+)/
+
+    entries << {
+      "line" => line_number,
+      "use" => Regexp.last_match(1),
+    }
+  end
+  entries
+end
+
+def validate_action_pins(workflow_text, approved_action_refs)
+  errors = []
+  seen_repositories = []
+
+  parse_action_uses(workflow_text).each do |entry|
+    line_number = entry.fetch("line")
+    use = entry.fetch("use")
+    match = use.match(/\A(?<repository>[^@\s]+)@(?<ref>[^\s]+)\z/)
+
+    unless match
+      errors << "production-build uses entry at line #{line_number} does not pin an action ref: #{use}"
+      next
+    end
+
+    repository = match[:repository]
+    ref = match[:ref]
+    seen_repositories << repository
+
+    expected_ref = approved_action_refs[repository]
+    unless expected_ref
+      errors << "production-build uses entry at line #{line_number} references an unreviewed third-party action: #{repository}"
+      next
+    end
+
+    unless ref.match?(/\A[0-9a-f]{40}\z/)
+      errors << "production-build uses entry at line #{line_number} is not pinned to a full 40-character lowercase hex commit SHA: #{use}"
+      next
+    end
+
+    next if ref == expected_ref
+
+    errors << "production-build uses entry at line #{line_number} is pinned to #{repository}@#{ref}, expected #{repository}@#{expected_ref}"
+  end
+
+  missing_repositories = approved_action_refs.keys - seen_repositories.uniq
+  unexpected_repositories = seen_repositories.uniq - approved_action_refs.keys
+  if missing_repositories.any? || unexpected_repositories.any?
+    fragments = []
+    fragments << "missing reviewed actions: #{missing_repositories.join(', ')}" if missing_repositories.any?
+    fragments << "unexpected actions: #{unexpected_repositories.sort.join(', ')}" if unexpected_repositories.any?
+    errors << "production-build action inventory changed (#{fragments.join('; ')})"
+  end
+
+  errors
+end
+
+def normalize_run(run)
+  ruby_block = run.match(/ruby -ryaml -e '\n(?<body>.*?)\n\s*'/m)
+  normalized_run = if ruby_block
+    run.sub(ruby_block[0], "RUBY_PRODUCTION_WORKFLOW_PARSE\n")
+  else
+    run
+  end
+  tokens = normalized_run.lines.map { |line| line.strip }.reject(&:empty?)
+  [tokens, ruby_block&.named_captures&.fetch("body", nil)]
+end
+
+def validate_workflow(
+  workflow_text,
+  expected_checkout:,
+  approved_action_refs:,
+  expected_syntax_targets:,
+  expected_exec_targets:,
+  expected_yaml_targets:
+)
+  errors = []
+  document = load_workflow_document(workflow_text)
+  jobs = document["jobs"] || {}
+
+  permissions = document["permissions"]
+  errors << "production-build permissions must stay read-only" unless permissions == { "contents" => "read" }
+  errors << "production-build must not request writable permissions" if writable_permissions?(permissions)
+  errors.concat(validate_action_pins(workflow_text, approved_action_refs))
+
+  safety_job = jobs["deployment-safety-contracts"]
+  unless safety_job.is_a?(Hash)
+    errors << "deployment-safety-contracts job is missing"
+    return errors
+  end
+  errors << "deployment-safety-contracts must stay on ubuntu-latest" unless safety_job["runs-on"] == "ubuntu-latest"
+  errors << "deployment-safety-contracts must not declare job env" if safety_job.key?("env")
+  errors << "deployment-safety-contracts must not declare job permissions" if safety_job.key?("permissions")
+
+  safety_job_strings = flatten_strings(safety_job)
+  if safety_job_strings.any? { |value| value.include?("secrets.") || value.include?("${{ secrets.") }
+    errors << "deployment-safety-contracts must not receive production credentials"
+  end
+  if safety_job_strings.any? { |value| value.match?(/\b(OCI_CLI_|OCI_CI_|AZURE_|KUBECONFIG|GITHUB_TOKEN|DOCKERHUB_)\b/) }
+    errors << "deployment-safety-contracts references production-capable credentials"
+  end
+  if safety_job_strings.any? { |value| value.include?("${{ vars.") }
+    errors << "deployment-safety-contracts must not rely on mutable workflow vars"
+  end
+
+  steps = safety_job["steps"]
+  unless steps.is_a?(Array) && steps.length == 2
+    errors << "deployment-safety-contracts must keep exactly two steps"
+    return errors
+  end
+
+  checkout_step = steps[0] || {}
+  validate_step = steps[1] || {}
+  errors << "deployment-safety-contracts checkout action is no longer pinned" unless checkout_step["uses"] == expected_checkout
+  errors << "deployment-safety-contracts checkout step changed shape" unless checkout_step.keys.sort == %w[name uses]
+  errors << "deployment-safety-contracts validation step changed shape" unless validate_step.keys.sort == %w[name run]
+
+  tokens, yaml_block = normalize_run(validate_step["run"].to_s)
+  syntax_targets = []
+  exec_targets = []
+  unexpected_tokens = []
+
+  tokens.each do |token|
+    case token
+    when "RUBY_PRODUCTION_WORKFLOW_PARSE"
+      next
+    when /\Abash -n (.+)\z/
+      syntax_targets << Regexp.last_match(1)
+    when /\A\.\//
+      exec_targets << token
+    else
+      unexpected_tokens << token
+    end
+  end
+
+  errors << "deployment-safety-contracts contains unexpected commands: #{unexpected_tokens.join(', ')}" unless unexpected_tokens.empty?
+  errors << "deployment-safety-contracts syntax checks changed" unless syntax_targets == expected_syntax_targets
+  errors << "deployment-safety-contracts fixture executions changed" unless exec_targets == expected_exec_targets
+
+  run_text = validate_step["run"].to_s
+  if (forbidden_command = run_text.each_line.map(&:strip).reject(&:empty?).find { |line| line.match?(/\b(kubectl|gh|curl)\b/) })
+    errors << "deployment-safety-contracts contains a production-capable command: #{forbidden_command}"
+  end
+  if (dangerous_local = exec_targets.find { |target| target.match?(%r{\A\./infra/(?:azure|oci)/(?:agents|scripts)/(?!(?:pre-commit-infra-check|test-).+\.sh\z).+}) })
+    errors << "deployment-safety-contracts invokes a non-fixture local command: #{dangerous_local}"
+  end
+
+  unless yaml_block &&
+         yaml_block.include?("YAML.load_stream(File.read(file))") &&
+         expected_yaml_targets.all? { |target| yaml_block.include?(target) }
+    errors << "deployment-safety-contracts workflow YAML parse block changed"
+  end
+
+  pr_job = jobs["pr-quality-gates"] || {}
+  errors << "pr-quality-gates must depend on deployment-safety-contracts" unless Array(pr_job["needs"]).include?("deployment-safety-contracts")
+  pr_gate_step = Array(pr_job["steps"]).find { |step| step["name"] == "Require every validation gate" } || {}
+  pr_gate_env = pr_gate_step["env"] || {}
+  unless pr_gate_env["DEPLOYMENT_SAFETY_RESULT"] == "${{ needs.deployment-safety-contracts.result }}"
+    errors << "pr-quality-gates lost deployment-safety result wiring"
+  end
+  unless pr_gate_step["run"].to_s.include?('$DEPLOYMENT_SAFETY_RESULT')
+    errors << "pr-quality-gates no longer checks deployment-safety result"
+  end
+
+  build_job = jobs["build"] || {}
+  errors << "build must depend on deployment-safety-contracts" unless Array(build_job["needs"]).include?("deployment-safety-contracts")
+  unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
+    errors << "build no longer blocks on deployment-safety failure"
+  end
+
+  errors
+end
+
+def mutate_once(text, needle, replacement)
+  mutated = text.sub(needle, replacement)
+  raise "fixture mutation failed for #{needle.inspect}" if mutated == text
+  mutated
+end
+
+errors = validate_workflow(
+  workflow_text,
+  expected_checkout: expected_checkout,
+  approved_action_refs: approved_action_refs,
+  expected_syntax_targets: expected_syntax_targets,
+  expected_exec_targets: expected_exec_targets,
+  expected_yaml_targets: expected_yaml_targets,
+)
+abort(errors.join("\n")) unless errors.empty?
+
+negative_cases = {
+  "missing-fixture-test" => [
+    mutate_once(
+      workflow_text,
+      "          ./infra/oci/tests/rollback-contract.sh\n",
+      ""
+    ),
+    "deployment-safety-contracts fixture executions changed",
+  ],
+  "production-capable-command" => [
+    mutate_once(
+      workflow_text,
+      "          ./infra/azure/agents/pre-commit-infra-check-stan.sh\n",
+      "          kubectl get deployments -n default\n          ./infra/azure/agents/pre-commit-infra-check-stan.sh\n"
+    ),
+    "deployment-safety-contracts contains a production-capable command",
+  ],
+  "writable-permissions" => [
+    mutate_once(
+      workflow_text,
+      "permissions:\n  contents: read",
+      "permissions:\n  contents: write"
+    ),
+    "production-build permissions must stay read-only",
+  ],
+  "floating-major-tag" => [
+    mutate_once(
+      workflow_text,
+      "actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809",
+      "actions/cache@v4"
+    ),
+    "is not pinned to a full 40-character lowercase hex commit SHA",
+  ],
+  "short-sha" => [
+    mutate_once(
+      workflow_text,
+      "docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1",
+      "docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d"
+    ),
+    "is not pinned to a full 40-character lowercase hex commit SHA",
+  ],
+  "uppercase-nonhex" => [
+    mutate_once(
+      workflow_text,
+      "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "actions/setup-node@49933EA5288CAECA8642D1E84AFBD3F7D6820020"
+    ),
+    "is not pinned to a full 40-character lowercase hex commit SHA",
+  ],
+  "wrong-full-sha" => [
+    mutate_once(
+      workflow_text,
+      "docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25",
+      "docker/build-push-action@0000000000000000000000000000000000000000"
+    ),
+    "expected docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25",
+  ],
+  "unknown-action" => [
+    mutate_once(
+      workflow_text,
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "acme/unknown-action@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    ),
+    "references an unreviewed third-party action",
+  ],
+  "ungated-build" => [
+    mutate_once(
+      workflow_text,
+      "      needs.deployment-safety-contracts.result == 'success' &&\n",
+      ""
+    ),
+    "build no longer blocks on deployment-safety failure",
+  ],
+}
+
+negative_cases.each do |name, (candidate, expected_error)|
+  candidate_errors = validate_workflow(
+    candidate,
+    expected_checkout: expected_checkout,
+    approved_action_refs: approved_action_refs,
+    expected_syntax_targets: expected_syntax_targets,
+    expected_exec_targets: expected_exec_targets,
+    expected_yaml_targets: expected_yaml_targets,
+  )
+  if candidate_errors.empty?
+    abort("#{name} fixture unexpectedly passed")
+  end
+  next if candidate_errors.any? { |error| error.include?(expected_error) }
+
+  abort("#{name} fixture failed for the wrong reason: #{candidate_errors.join(' | ')}")
+end
+
+puts "production_build_deployment_safety_contract=PASS cases=#{negative_cases.length + 1}"
+RUBY
+}
+
+validate_production_build_deployment_safety_contract \
+  "$ROOT_DIR/.github/workflows/production-build.yml"
+
 if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
   "$OCI_DIR/tests/test-migration-success-contract.sh"
   "$OCI_DIR/tests/test-capacity-contract.sh"
@@ -840,8 +1228,5 @@ if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
   "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-audit-oci-primary-retirement-stan.sh"
 fi
-
-git -C "$ROOT_DIR" diff --exit-code -- .github/workflows/production-build.yml >/dev/null ||
-  fail "production-build.yml was modified"
 
 echo "oci_offline_contract=PASS"

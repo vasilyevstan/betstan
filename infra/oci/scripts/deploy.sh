@@ -237,7 +237,10 @@ apply_documents 'Deployment:^gaming-rabbitmq-depl$'
 kubectl rollout status deployment/gaming-rabbitmq-depl \
   -n "$OCI_K8S_NAMESPACE" --timeout=10m
 
-services=(auth bet backoffice event gamemaster moderation resulting slip client)
+# Passive readers/consumers first, producer next, gamemaster last.
+services=(auth bet client event moderation resulting slip backoffice gamemaster)
+[[ "${services[$(( ${#services[@]} - 1 ))]}" == "gamemaster" ]] ||
+  oci_die "gamemaster must rollout last"
 for service in "${services[@]}"; do
   apply_documents "Service:^gaming-${service}-srv$"
   apply_documents "Deployment:^gaming-${service}-depl$"
