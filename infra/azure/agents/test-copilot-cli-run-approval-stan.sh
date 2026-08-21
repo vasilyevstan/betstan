@@ -5,11 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APPROVER="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
 SHA="1111111111111111111111111111111111111111"
 RUN_ID=123
-approval_log="$(mktemp)"
+tmp_dir="$(mktemp -d)"
+approval_log="$tmp_dir/approval.log"
 cleanup() {
-  rm -f "$approval_log"
+  rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+
+cat >"$tmp_dir/production-exclusivity" <<'SH'
+#!/usr/bin/env bash
+[[ "${STUB_ACTIVE:-false}" != "true" ]]
+SH
+chmod +x "$tmp_dir/production-exclusivity"
 
 gh() {
   if [[ "$*" == *"--method POST"* ]]; then
@@ -33,16 +40,6 @@ gh() {
     fi
     printf '%s\n' \
       "[{\"number\":225,\"merged_at\":\"2026-08-21T00:00:00Z\",\"merge_commit_sha\":\"$SHA\",\"base\":{\"ref\":\"master\"},\"head\":{\"ref\":\"dev\"},\"labels\":$labels}]"
-  elif [[ "$1" == "api" && "$2" == *"/actions/runs?status="* ]]; then
-    if [[ "${STUB_ACTIVE:-false}" == "true" && "$2" == *"status=in_progress"* ]]; then
-      printf '%s\n' \
-        '{"total_count":1,"workflow_runs":[{"id":999,"path":".github/workflows/production-deploy.yml","head_branch":"master","status":"in_progress"}]}'
-    elif [[ "${STUB_PR_VALIDATION_ACTIVE:-false}" == "true" && "$2" == *"status=in_progress"* ]]; then
-      printf '%s\n' \
-        '{"total_count":1,"workflow_runs":[{"id":998,"path":".github/workflows/production-build.yml","event":"pull_request","head_branch":"dev","status":"in_progress"}]}'
-    else
-      printf '%s\n' "{\"total_count\":1,\"workflow_runs\":[{\"id\":$RUN_ID,\"path\":\".github/workflows/production-build.yml\",\"head_branch\":\"master\",\"status\":\"waiting\"}]}"
-    fi
   else
     echo "unexpected gh invocation: $*" >&2
     return 1
@@ -56,12 +53,10 @@ common_env=(
   "EXPECTED_SHA=$SHA"
   "EXPECTED_WORKFLOW=production-build.yml"
   "EXPECTED_ENVIRONMENT=production-emergency"
+  "PRODUCTION_RUN_EXCLUSIVITY=$tmp_dir/production-exclusivity"
 )
 
 env "${common_env[@]}" "$APPROVER" "$RUN_ID" >/dev/null
-
-env "${common_env[@]}" STUB_PR_VALIDATION_ACTIVE=true \
-  "$APPROVER" "$RUN_ID" >/dev/null
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$APPROVER" "$RUN_ID" --approve >/dev/null

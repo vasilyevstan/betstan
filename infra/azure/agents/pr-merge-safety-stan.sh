@@ -15,6 +15,7 @@ CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 BRANCH_POLICY_GUARD="${BRANCH_POLICY_GUARD:-./infra/azure/agents/branch-policy-guard-stan.sh}"
 PR_VALIDATOR="${PR_VALIDATOR:-./infra/azure/agents/pr-validation-stan.sh}"
 WORKFLOW_INVENTORY="${WORKFLOW_INVENTORY:-./infra/azure/agents/production-workflow-inventory-stan.sh}"
+PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
   exit 1
@@ -173,45 +174,8 @@ if [[ "$base_ref" == "master" ]]; then
   [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ]] ||
     fail "current master tip is not an ancestor of the promotion head status=$compare_status"
 
-  active_runs="$(
-    for status in queued in_progress waiting requested pending; do
-      gh api "repos/$REPO/actions/runs?status=$status&per_page=100"
-    done
-  )"
-  python3 - "$active_runs" <<'PY' || fail "another production-capable workflow is active"
-import json
-import sys
-
-paths = {
-    ".github/workflows/production-build.yml",
-    ".github/workflows/production-deploy.yml",
-    ".github/workflows/production-rollback.yml",
-    ".github/workflows/oci-production-build.yml",
-    ".github/workflows/oci-production-deploy.yml",
-    ".github/workflows/oci-production-rollback.yml",
-    ".github/workflows/oci-infrastructure.yml",
-    ".github/workflows/oci-capacity-acquire.yml",
-    ".github/workflows/oci-migrate.yml",
-    ".github/workflows/oci-migration-recovery.yml",
-}
-decoder = json.JSONDecoder()
-payload = sys.argv[1]
-index = 0
-while index < len(payload):
-    while index < len(payload) and payload[index].isspace():
-        index += 1
-    if index >= len(payload):
-        break
-    response, index = decoder.raw_decode(payload, index)
-    if response.get("total_count", 0) > 100:
-        raise SystemExit("more than 100 active runs requires manual review")
-    for run in response.get("workflow_runs", []):
-        if run.get("path") in paths and run.get("head_branch") == "master":
-            raise SystemExit(
-                f"active production run {run.get('id')} path={run.get('path')} "
-                f"status={run.get('status')}"
-            )
-PY
+  REPO="$REPO" "$PRODUCTION_RUN_EXCLUSIVITY" ||
+    fail "another actionable production-capable workflow is active"
 
   expected_workflows="$(
     REPO="$REPO" PR="$PR_NUMBER" EXPECTED_HEAD_SHA="$head_sha" \

@@ -18,6 +18,7 @@ EXPECTED_WORKFLOW="${EXPECTED_WORKFLOW:-}"
 EXPECTED_ENVIRONMENT="${EXPECTED_ENVIRONMENT:-}"
 CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
+PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
 
 fail() {
   echo "safe_to_approve=no"
@@ -137,51 +138,8 @@ then
   fail "current master is not bound to one merged CLI-managed dev promotion"
 fi
 
-active_runs="$(
-  for status in queued in_progress waiting requested pending; do
-    gh api "repos/$REPO/actions/runs?status=$status&per_page=100"
-  done
-)"
-if ! python3 - "$active_runs" "$RUN_ID" <<'PY'
-import json
-import sys
-
-current_run = sys.argv[2]
-paths = {
-    ".github/workflows/production-build.yml",
-    ".github/workflows/production-deploy.yml",
-    ".github/workflows/production-rollback.yml",
-    ".github/workflows/oci-production-build.yml",
-    ".github/workflows/oci-production-deploy.yml",
-    ".github/workflows/oci-production-rollback.yml",
-    ".github/workflows/oci-infrastructure.yml",
-    ".github/workflows/oci-capacity-acquire.yml",
-    ".github/workflows/oci-migrate.yml",
-    ".github/workflows/oci-migration-recovery.yml",
-}
-decoder = json.JSONDecoder()
-payload = sys.argv[1]
-index = 0
-while index < len(payload):
-    while index < len(payload) and payload[index].isspace():
-        index += 1
-    if index >= len(payload):
-        break
-    response, index = decoder.raw_decode(payload, index)
-    if response.get("total_count", 0) > 100:
-        raise SystemExit("more than 100 active runs requires manual review")
-    for run in response.get("workflow_runs", []):
-        if str(run.get("id", "")) == current_run:
-            continue
-        if run.get("path") in paths and run.get("head_branch") == "master":
-            raise SystemExit(
-                f"active production run {run.get('id')} path={run.get('path')} "
-                f"status={run.get('status')}"
-            )
-PY
-then
-  fail "another production-capable workflow is active"
-fi
+REPO="$REPO" EXCLUDE_RUN_ID="$RUN_ID" "$PRODUCTION_RUN_EXCLUSIVITY" ||
+  fail "another actionable production-capable workflow is active"
 
 pending_json="$(read_pending)"
 environment_id="$(
