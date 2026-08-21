@@ -1,74 +1,81 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import axios from 'axios';
 
-import React,  { useState, useEffect }  from "react";
-import axios from "axios";
+const EMAIL_LIKE_PATTERN = /@/;
+const FALLBACK_DISPLAY_NAME = 'Anonymous player';
 
-const HandleUserStatistics = ({ uiVariant }) => {
+const normalizeStatEntry = (entry, index) => {
+  const displayName = typeof entry?.displayName === 'string' ? entry.displayName.trim() : '';
+  const safeDisplayName = !displayName || EMAIL_LIKE_PATTERN.test(displayName)
+    ? FALLBACK_DISPLAY_NAME
+    : displayName;
 
-    const [betsForStats, setBetsForStats] = useState({});
+  return {
+    userKey: typeof entry?.userKey === 'string' && entry.userKey.trim() ? entry.userKey : `row-${index}`,
+    displayName: safeDisplayName,
+    betCount: Number.isFinite(entry?.betCount) ? entry.betCount : 0,
+    wagerTotal: Number.isFinite(entry?.wagerTotal) ? entry.wagerTotal : 0,
+  };
+};
 
-    const fetchBets = async () => {
+const HandleUserStatistics = ({ refreshToken, uiVariant }) => {
+  const [stats, setStats] = useState([]);
+  const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchStats = async () => {
       try {
-        const res = await axios.get('/api/bet/stats');
-        const data = res.data;
-        setBetsForStats(data && typeof data === 'object' ? data : {});
+        const response = await axios.get('/api/bet/stats');
+        if (!isMounted) {
+          return;
+        }
+
+        const nextStats = Array.isArray(response.data)
+          ? response.data.map(normalizeStatEntry)
+          : [];
+        setStats(nextStats);
+        setHasError(false);
       } catch (error) {
-        // ignore
+        if (!isMounted) {
+          return;
+        }
+
+        setStats([]);
+        setHasError(true);
       }
-    }
-
-    useEffect(() => {
-        fetchBets();
-    }, []);
-    
-    const stats = [];
-
-    const statsSource = Object.values(betsForStats ?? {});
-
-    statsSource.map(bet => {
-      
-      let userStat = stats.find(stat => stat.user === bet.userName);
-
-      if (!userStat) {
-        userStat = {user: bet.userName, userId: bet.userId, betamount: 0, wageramount: 0}
-        stats.push(userStat)
-      }
-
-      userStat.betamount = userStat.betamount + 1;
-      userStat.wageramount = userStat.wageramount + bet.wager;
-
-      return userStat;
-    });
-
-    stats.sort((a, b) => b.betamount - a.betamount);
-
-    const displayName = (email) => {
-      if (!email) return '—';
-      const local = email.split('@')[0];
-      return local.length > 16 ? local.slice(0, 16) + '…' : local;
     };
 
-    const renderedStats = stats.map((stat, idx) => {
-      return <div className="stat-row" key={stat.userId}>
-        <div className="stat-row__rank text-secondary">{idx + 1}</div>
-        <div className="stat-row__user" title={stat.user}>{displayName(stat.user)}</div>
-        <div className="stat-row__count">{stat.betamount}</div>
-        <div className="stat-row__wager fw-semibold">{stat.wageramount}</div>
-      </div>
-    });
+    fetchStats();
 
-    return (
-      <div className={`flex-wrap scoreboard scoreboard--${uiVariant}`}>
-        <div className="card scoreboard__table">
-          <div className="stat-row stat-row--header text-secondary">
-            <div className="stat-row__rank"></div>
-            <div className="stat-row__user">User</div>
-            <div className="stat-row__count">Bets</div>
-            <div className="stat-row__wager">Wager</div>
-          </div>
-          {renderedStats}
-        </div>
+    return () => {
+      isMounted = false;
+    };
+  }, [refreshToken]);
+
+  const renderedStats = useMemo(() => stats.map((stat, index) => <div className="stat-row" key={stat.userKey}>
+    <div className="stat-row__rank text-secondary">{index + 1}</div>
+    <div className="stat-row__user" title={stat.displayName}>{stat.displayName}</div>
+    <div className="stat-row__count">{stat.betCount}</div>
+    <div className="stat-row__wager fw-semibold">{stat.wagerTotal}</div>
+  </div>), [stats]);
+
+  return <div className={`flex-wrap scoreboard scoreboard--${uiVariant}`}>
+    <div className="card scoreboard__table">
+      <div className="stat-row stat-row--header text-secondary">
+        <div className="stat-row__rank"></div>
+        <div className="stat-row__user">User</div>
+        <div className="stat-row__count">Bets</div>
+        <div className="stat-row__wager">Wager</div>
       </div>
-    );
+      {hasError ? (
+        <div className="card-body empty-state-card" role="alert">Leaderboard unavailable.</div>
+      ) : renderedStats.length === 0 ? (
+        <div className="card-body empty-state-card">No public betting activity yet.</div>
+      ) : renderedStats}
+    </div>
+  </div>;
 };
 
 export default HandleUserStatistics;
