@@ -26,6 +26,12 @@ echo "production_workflows=oci-production-build,production-build"
 SH
 chmod +x "$tmp_dir/workflow-inventory"
 
+cat >"$tmp_dir/production-exclusivity" <<'SH'
+#!/usr/bin/env bash
+[[ "${STUB_ACTIVE:-false}" != "true" ]]
+SH
+chmod +x "$tmp_dir/production-exclusivity"
+
 gh() {
   if [[ "$1 $2" == "pr view" ]]; then
     if [[ "$*" == *"--json headRefOid,baseRefOid"* ]]; then
@@ -49,16 +55,6 @@ gh() {
       "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":$nodes}}}}}"
   elif [[ "$1" == "api" && "$2" == *"/compare/"* ]]; then
     echo "ahead"
-  elif [[ "$1" == "api" && "$2" == *"/actions/runs?status="* ]]; then
-    if [[ "${STUB_ACTIVE:-false}" == "true" && "$2" == *"status=in_progress"* ]]; then
-      printf '%s\n' \
-        '{"total_count":1,"workflow_runs":[{"id":999,"path":".github/workflows/production-deploy.yml","head_branch":"master","status":"in_progress"}]}'
-    elif [[ "${STUB_PR_VALIDATION_ACTIVE:-false}" == "true" && "$2" == *"status=in_progress"* ]]; then
-      printf '%s\n' \
-        '{"total_count":1,"workflow_runs":[{"id":998,"path":".github/workflows/production-build.yml","event":"pull_request","head_branch":"dev","status":"in_progress"}]}'
-    else
-      printf '%s\n' '{"total_count":0,"workflow_runs":[]}'
-    fi
   else
     echo "unexpected gh invocation: $*" >&2
     return 1
@@ -72,13 +68,11 @@ common_env=(
   "BRANCH_POLICY_GUARD=$tmp_dir/branch-policy"
   "PR_VALIDATOR=$tmp_dir/pr-validator"
   "WORKFLOW_INVENTORY=$tmp_dir/workflow-inventory"
+  "PRODUCTION_RUN_EXCLUSIVITY=$tmp_dir/production-exclusivity"
 )
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$MERGE_SAFETY" 224 >/dev/null
-
-env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
-  STUB_PR_VALIDATION_ACTIVE=true "$MERGE_SAFETY" 224 >/dev/null
 
 if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true STUB_LABEL=missing \
   "$MERGE_SAFETY" 224 >/dev/null 2>&1; then

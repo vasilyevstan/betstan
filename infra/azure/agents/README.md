@@ -16,6 +16,7 @@
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
 - `copilot-cli-run-approval-stan.sh` — fail-closed protected-environment approval for normal CLI-managed build/deploy runs.
+- `production-run-exclusivity-stan.sh` — blocks actionable concurrent production runs while identifying inert disabled queue records.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
 - `rollback-readiness-stan.sh` — emits explicit rollback go/no-go based on current health, queue pressure, and rollout history.
 - `node-logs-stan.sh` — node-level health/events + pod error-log extraction.
@@ -268,7 +269,7 @@ EXPECTED_ENVIRONMENT=production-emergency \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
-The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments, and competing production activity. It does not support automatic rollback, migration, or infrastructure approval.
+The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic rollback, migration, and infrastructure approval is unsupported.
 
 ## Post-merge production verification
 

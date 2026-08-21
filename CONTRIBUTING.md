@@ -15,7 +15,7 @@ Use this flow:
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
-Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They may use `COPILOT_CLI_AUTO_APPROVE=true` only after the merge-safety script verifies the label, exact refs, trusted required checks, resolved review threads, production workflow inventory, and absence of competing production activity. Unlabelled pull requests and work created outside Copilot CLI require explicit human approval. Automatic mode never skips required checks or immutable-SHA gates.
+Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They may use `COPILOT_CLI_AUTO_APPROVE=true` only after the merge-safety script verifies the label, exact refs, trusted required checks, resolved review threads, production workflow inventory, and absence of actionable competing production activity. Unlabelled pull requests and work created outside Copilot CLI require explicit human approval. Automatic mode never skips required checks or immutable-SHA gates.
 
 Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to normal application build/deploy workflows; rollback, migration, and infrastructure workflows remain human-gated.
 
