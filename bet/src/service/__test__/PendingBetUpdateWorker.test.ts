@@ -734,6 +734,7 @@ it("waits for in-flight work to finish before stopping and cleans heartbeat time
   await stopPromise;
   await startPromise;
 
+  await waitForCondition(async () => clock.pendingTimerCount() === 0);
   expect(clock.pendingTimerCount()).toEqual(0);
   expect((await Bet.findOne({ slipId }))!.status).toEqual(BetStatus.CONFIRMED);
 

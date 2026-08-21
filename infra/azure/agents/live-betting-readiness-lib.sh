@@ -1147,27 +1147,45 @@ live_betting_check_topology() {
   local lock_file="$2"
   local result_stdout="$LIVE_BETTING_WORK_DIR/topology.result"
   local result_stderr="$LIVE_BETTING_WORK_DIR/topology.result.stderr"
-  if ! python3 - "$topology_file" "$lock_file" >"$result_stdout" 2>"$result_stderr" <<'PY'
+  if ! python3 - \
+    "$topology_file" \
+    "$lock_file" \
+    "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER" \
+    "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID" \
+    "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" \
+    >"$result_stdout" 2>"$result_stderr" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-topology_path, lock_path = sys.argv[1:]
+topology_path, lock_path, expected_holder, expected_operation, expected_sha = sys.argv[1:]
 topology = json.loads(Path(topology_path).read_text(encoding="utf-8"))
 topology_data = topology.get("data") or {}
 mode = str(topology_data.get("mode", "legacy") or "legacy")
 validated = str(topology_data.get("validated", "false") or "false").lower()
+expect_active_lock = bool(expected_holder or expected_operation or expected_sha)
 if mode == "shared":
     if validated != "true":
         raise SystemExit("shared Mongo topology must be validated")
     lock_state = "missing"
     if Path(lock_path).exists():
         lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
-        lock_state = str((lock.get("data") or {}).get("state", "missing"))
-        if lock_state not in {"released", "missing", ""}:
+        lock_data = lock.get("data") or {}
+        lock_state = str(lock_data.get("state", "missing"))
+        if expect_active_lock:
+            if (
+                lock_state != "active"
+                or str(lock_data.get("holder", "")) != expected_holder
+                or str(lock_data.get("operation-id", "")) != expected_operation
+                or str(lock_data.get("source-sha", "")) != expected_sha
+            ):
+                raise SystemExit("shared Mongo operation lock differs from the expected active handoff")
+        elif lock_state not in {"released", "missing", ""}:
             raise SystemExit("shared Mongo operation lock must be released")
         if lock_state == "":
             lock_state = "missing"
+    elif expect_active_lock:
+        raise SystemExit("expected shared Mongo operation lock is missing")
     print("topology_validated=true")
     print(f"lock_state={lock_state}")
 elif mode == "legacy":
@@ -1860,6 +1878,9 @@ live_betting_readiness_main() {
   LIVE_BETTING_EXACT_MASTER_PROVENANCE_FILE="${EXACT_MASTER_PROVENANCE_FILE:-}"
   LIVE_BETTING_SCHEMA_EVIDENCE_FILE="${LIVE_SCHEMA_EVIDENCE_FILE:-}"
   LIVE_BETTING_ROLLBACK_BASELINE_FILE="${ROLLBACK_BASELINE_FILE:-}"
+  LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER="${EXPECTED_OPERATION_LOCK_HOLDER:-}"
+  LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID="${EXPECTED_OPERATION_LOCK_ID:-}"
+  LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA="${EXPECTED_OPERATION_LOCK_SOURCE_SHA:-}"
   LIVE_BETTING_PUBLIC_HOSTS_REQUIRED="${PUBLIC_HOSTS_REQUIRED:-0}"
   LIVE_BETTING_DIAGNOSTIC_URL_REQUIRED="${DIAGNOSTIC_URL_REQUIRED:-0}"
   LIVE_BETTING_REQUIRE_HTTPS_PRIMARY="${REQUIRE_HTTPS_PRIMARY:-0}"
@@ -1942,6 +1963,16 @@ live_betting_readiness_main() {
     live_betting_record_failure preflight "IMAGE_PROVENANCE_FILE is required"
   [[ "$(live_betting_normalize_bool "$LIVE_BETTING_EXPECTED_FLAG")" != invalid ]] ||
     live_betting_record_failure preflight "EXPECTED_LIVE_KICKOFFS_ENABLED must be explicit true or false"
+  if [[ -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER" ||
+        -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID" ||
+        -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" ]]; then
+    [[ "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+      live_betting_record_failure preflight "EXPECTED_OPERATION_LOCK_HOLDER is invalid"
+    [[ "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+      live_betting_record_failure preflight "EXPECTED_OPERATION_LOCK_ID is invalid"
+    [[ "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+      live_betting_record_failure preflight "EXPECTED_OPERATION_LOCK_SOURCE_SHA is invalid"
+  fi
   live_betting_require_uint REQUEST_TIMEOUT "$LIVE_BETTING_REQUEST_TIMEOUT"
   live_betting_require_uint SSE_TIMEOUT "$LIVE_BETTING_SSE_TIMEOUT"
   live_betting_require_uint MAX_ACTIVE_MATCHES "$LIVE_BETTING_MAX_ACTIVE_MATCHES"

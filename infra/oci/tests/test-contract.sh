@@ -534,6 +534,7 @@ done
 build_workflow="$ROOT_DIR/.github/workflows/oci-production-build.yml"
 capacity_workflow="$ROOT_DIR/.github/workflows/oci-capacity-acquire.yml"
 infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
+data_workflow="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
@@ -569,12 +570,12 @@ grep -Fq 'OCI_CAPACITY_PRIVATE_KEY_PEM' "$capacity_workflow"
   "$capacity_workflow" ||
   fail "capacity workflow receives credentials outside its dedicated identity"
 
-for workflow in "$infra_workflow" "$deploy_workflow" "$migrate_workflow"; do
+for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow" "$migrate_workflow"; do
   grep -Fq 'workflow_dispatch:' "$workflow"
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
 done
-for workflow in "$infra_workflow" "$deploy_workflow"; do
+for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow"; do
   [[ "$(grep -Fc \
     'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
     "$workflow")" == "1" ]] ||
@@ -590,7 +591,7 @@ grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH: "true"' "$infra_workflow" ||
   fail "infrastructure finalization does not retain target SSH within its access step"
 grep -Fq 'unset OCI_K3S_SSH_PRIVATE_KEY' "$infra_workflow" ||
   fail "infrastructure finalization does not clear the target SSH secret before use"
-! grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH' "$deploy_workflow" "$migrate_workflow" ||
+! grep -Fq 'OCI_K3S_RETAIN_TARGET_SSH' "$data_workflow" "$deploy_workflow" "$migrate_workflow" ||
   fail "deployment or migration retains target SSH key material after API forwarding"
 for workflow in "$deploy_workflow" "$migrate_workflow"; do
   public_job_line="$(grep -n -m1 '^  public-validate:' "$workflow" | cut -d: -f1)"
@@ -662,8 +663,17 @@ migration_post_cloud_credentials="$(
   fail "post-commit browser validation receives cloud credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
+grep -Fq 'name: oci-migration' "$data_workflow"
+grep -Fq 'DRY RUN LIVE DATA EXACT SHA' "$data_workflow"
+grep -Fq 'APPLY LIVE BACKFILLS EXACT SHA' "$data_workflow"
+grep -Fq 'APPLY LIVE SLIP INDEX EXACT SHA' "$data_workflow"
+grep -Fq 'shared-mongo-operation-lock-stan.sh acquire' "$data_workflow"
+grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
+grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
+grep -Fq 'data_run_id:' "$deploy_workflow"
+grep -Fq 'EXPECTED_PHASE=apply-slip-index' "$deploy_workflow"
 grep -Fq 'name: oci-migration' "$migrate_workflow"
 grep -Fq 'REPLACE OCI DATA FROM AZURE' "$migrate_workflow"
 grep -Fq 'replace_oci_data:' "$migrate_workflow"
@@ -859,7 +869,13 @@ expected_syntax_targets = [
   "infra/oci/agents/deploy-validation-loop-stan.sh",
   "infra/oci/agents/live-betting-readiness-stan.sh",
   "infra/oci/scripts/deploy.sh",
+  "infra/oci/scripts/live-data-maintenance-stan.sh",
+  "infra/oci/scripts/live-betting-data-rollout-stan.sh",
+  "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
+  "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
   "infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "infra/oci/tests/test-live-data-maintenance-stan.sh",
+  "infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "infra/oci/tests/test-live-betting-readiness-stan.sh",
   "infra/oci/tests/rollback-live-readiness-contract.sh",
   "infra/oci/tests/rollback-contract.sh",
@@ -872,6 +888,8 @@ expected_exec_targets = [
   "./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
   "./infra/azure/agents/test-production-rollback-stan.sh",
   "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "./infra/oci/tests/test-live-data-maintenance-stan.sh",
+  "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "./infra/oci/tests/test-live-betting-readiness-stan.sh",
   "./infra/oci/tests/rollback-live-readiness-contract.sh",
   "./infra/oci/tests/rollback-contract.sh",
@@ -879,6 +897,7 @@ expected_exec_targets = [
 expected_yaml_targets = [
   ".github/workflows/production-build.yml",
   ".github/workflows/production-deploy.yml",
+  ".github/workflows/oci-live-data-rollout.yml",
   ".github/workflows/oci-production-deploy.yml",
 ]
 

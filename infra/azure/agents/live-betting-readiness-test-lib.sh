@@ -269,7 +269,18 @@ if [[ "$args" == *"get configmap gaming-mongo-migration-lock"* ]]; then
     echo 'Error from server (NotFound): configmaps "gaming-mongo-migration-lock" not found' >&2
     exit 1
   fi
-  printf '{"data":{"state":"%s"}}\n' "${STUB_LOCK_STATE:-released}"
+  jq -cn \
+    --arg state "${STUB_LOCK_STATE:-released}" \
+    --arg holder "${STUB_LOCK_HOLDER:-}" \
+    --arg operation "${STUB_LOCK_OPERATION_ID:-}" \
+    --arg source_sha "${STUB_LOCK_SOURCE_SHA:-}" '{
+      data:{
+        state:$state,
+        holder:$holder,
+        "operation-id":$operation,
+        "source-sha":$source_sha
+      }
+    }'
   exit 0
 fi
 if [[ "$args" == *"rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers"* ]]; then
@@ -551,7 +562,13 @@ run_live_betting_scenario() {
     export STUB_TOPOLOGY_VALIDATED=true
     export STUB_TOPOLOGY_MISSING=0
     export STUB_LOCK_STATE=released
+    export STUB_LOCK_HOLDER=
+    export STUB_LOCK_OPERATION_ID=
+    export STUB_LOCK_SOURCE_SHA=
     export STUB_LOCK_MISSING=0
+    export EXPECTED_OPERATION_LOCK_HOLDER=
+    export EXPECTED_OPERATION_LOCK_ID=
+    export EXPECTED_OPERATION_LOCK_SOURCE_SHA=
     export STUB_QUEUE_READY=0
     export STUB_QUEUE_UNACK=0
     export STUB_DURABLE_CONSUMERS=1

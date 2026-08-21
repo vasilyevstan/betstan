@@ -72,6 +72,34 @@ case "$ACTION" in
       fail "another database operation holds $LOCK_CONFIGMAP"
     echo "shared_mongo_lock=acquire status=PASS"
     ;;
+  verify)
+    validate_identity
+    lock_state="$(
+      kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" \
+        -o jsonpath='{.data.state}|{.data.holder}|{.data.operation-id}|{.data.source-sha}'
+    )" || fail "unable to read database operation lock"
+    IFS='|' read -r state holder operation_id source_sha <<<"$lock_state"
+    [[ "$state" == "active" &&
+      "$holder" == "$LOCK_TOKEN" &&
+      "$operation_id" == "$OPERATION_ID" &&
+      "$source_sha" == "$SOURCE_SHA" ]] ||
+      fail "active database operation lock does not match the expected handoff"
+    echo "shared_mongo_lock=verify status=PASS"
+    ;;
+  verify-released)
+    validate_identity
+    lock_state="$(
+      kubectl get configmap "$LOCK_CONFIGMAP" -n "$NAMESPACE" \
+        -o jsonpath='{.data.state}|{.data.holder}|{.data.operation-id}|{.data.source-sha}'
+    )" || fail "unable to read database operation lock"
+    IFS='|' read -r state holder operation_id source_sha <<<"$lock_state"
+    [[ "$state" == "released" &&
+      -z "$holder" &&
+      "$operation_id" == "$OPERATION_ID" &&
+      "$source_sha" == "$SOURCE_SHA" ]] ||
+      fail "released database operation lock does not match the expected handoff"
+    echo "shared_mongo_lock=verify-released status=PASS"
+    ;;
   release)
     validate_identity
     error_file="$(mktemp)"
@@ -118,7 +146,7 @@ case "$ACTION" in
     echo "shared_mongo_lock=force-release status=PASS"
     ;;
   *)
-    echo "usage: $0 {acquire|release|force-release}" >&2
+    echo "usage: $0 {acquire|verify|verify-released|release|force-release}" >&2
     exit 2
     ;;
 esac

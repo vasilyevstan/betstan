@@ -10,6 +10,7 @@ PRE_COMMIT_CHECK="$ROOT_DIR/infra/azure/agents/pre-commit-infra-check-stan.sh"
 PR_MERGE_SAFETY_TEST="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
 RUN_APPROVAL_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-run-approval-stan.sh"
 RUN_EXCLUSIVITY_TEST="$ROOT_DIR/infra/azure/agents/test-production-run-exclusivity-stan.sh"
+LIVE_DATA_ROLLOUT_TEST="$ROOT_DIR/infra/oci/tests/test-live-betting-data-rollout-stan.sh"
 
 test_output="$(mktemp)"
 trap 'rm -f "$test_output"' EXIT
@@ -29,6 +30,7 @@ fi
 "$PR_MERGE_SAFETY_TEST"
 "$RUN_APPROVAL_TEST"
 "$RUN_EXCLUSIVITY_TEST"
+"$LIVE_DATA_ROLLOUT_TEST"
 
 python3 - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import pathlib
