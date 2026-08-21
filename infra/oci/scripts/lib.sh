@@ -88,6 +88,48 @@ oci_prepare_private_dir() {
   chmod 700 "$directory"
 }
 
+oci_prepare_safe_private_dir() {
+  local directory="$1"
+  local resolved
+  command -v python3 >/dev/null 2>&1 || oci_die "python3 is required to prepare private directories"
+  if ! resolved="$(python3 - "$OCI_ROOT_DIR" "$directory" <<'PY'
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+raw_path = sys.argv[2]
+if not raw_path:
+    raise SystemExit("private directory path must not be empty")
+if raw_path in {".", "/"}:
+    raise SystemExit(f"refusing unsafe private directory: {raw_path}")
+input_path = Path(raw_path)
+if any(part == ".." for part in input_path.parts):
+    raise SystemExit("private directory parent traversal is not allowed")
+candidate = input_path if input_path.is_absolute() else repo_root / input_path
+resolved = candidate.resolve(strict=False)
+allowed_roots = [
+    (repo_root / "artifacts").resolve(strict=False),
+    (repo_root / ".test-workdirs").resolve(strict=False),
+    (repo_root / "infra/oci/tests/.rollback-contract-workdirs").resolve(strict=False),
+]
+for root in allowed_roots:
+    if resolved == root:
+        raise SystemExit(f"private directory must be nested under {root}")
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        continue
+    print(resolved)
+    raise SystemExit(0)
+raise SystemExit("private directory must stay within reviewed artifact roots")
+PY
+ 2>&1)"; then
+    oci_die "$resolved"
+  fi
+  rm -rf -- "$resolved"
+  oci_prepare_private_dir "$resolved"
+}
+
 oci_redact() {
   python3 -c '
 import re

@@ -1,12 +1,15 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { ConsumeMessage } from "amqplib";
 import {
   AListener,
   ISettleSlipRowEvent,
   QueueNames,
-  ResultingStatus,
-  SlipRowStatus,
 } from "@betstan/common";
 import { Bet } from "../../model/Bet";
+import { PendingBetUpdateKind } from "../../model/PendingBetUpdate";
+import {
+  applySettleSlipRow,
+  parkPendingBetUpdate,
+} from "../../service/betHistory";
 
 class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
   serviceName: string = "bet_settle_slip_row";
@@ -14,33 +17,18 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
 
   async onMessage(event: ISettleSlipRowEvent, msg: ConsumeMessage) {
     const { data } = event;
-    const dataWithWinningSelection = data as ISettleSlipRowEvent["data"] & {
-      winningSelection?: string;
-    };
 
     const bet = await Bet.findOne({ slipId: data.slipId });
 
     if (!bet) {
-      // do not ack, handle concurrency
-      this.channel.nack(msg, undefined, true);
-      return;
-    }
-
-    const row = bet.rows.find((row) => row.id === data.slipRowId);
-
-    if (!row) {
+      await parkPendingBetUpdate(PendingBetUpdateKind.SETTLE_SLIP_ROW, event);
       this.channel.ack(msg);
       return;
     }
 
-    if (data.result == ResultingStatus.ROW_WIN) {
-      row.status = SlipRowStatus.WIN;
-    } else {
-      row.status = SlipRowStatus.LOSS;
+    if (applySettleSlipRow(bet, event)) {
+      await bet.save();
     }
-    row.winningSelection = dataWithWinningSelection.winningSelection || "";
-
-    await bet.save();
 
     this.channel.ack(msg);
   }

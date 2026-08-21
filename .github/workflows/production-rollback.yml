@@ -1,0 +1,124 @@
+name: production-rollback
+run-name: rollback ${{ inputs.target_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact historical master commit SHA to restore
+        required: true
+        type: string
+      baseline_source_run_id:
+        description: Production deploy run ID that uploaded the protected baseline artifact
+        required: true
+        type: string
+      baseline_source_run_attempt:
+        description: Protected baseline source run attempt (must be 1)
+        required: true
+        type: string
+      baseline_artifact_name:
+        description: Exact baseline artifact name production-baseline-<run-id>-1
+        required: true
+        type: string
+      confirmation:
+        description: Type ROLLBACK PRODUCTION EXACT DIGEST
+        required: true
+        type: string
+
+env:
+  TARGET_SHA: ${{ inputs.target_sha }}
+  BASELINE_SOURCE_RUN_ID: ${{ inputs.baseline_source_run_id }}
+  BASELINE_SOURCE_RUN_ATTEMPT: ${{ inputs.baseline_source_run_attempt }}
+  BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
+  RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  APP_DOMAIN: ${{ vars.APP_DOMAIN || 'betstan.xyz' }}
+  SHARED_MONGO_LOCK_TOKEN: production-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+  SHARED_MONGO_LOCK_OPERATION: production-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  rollback:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: production-emergency
+    concurrency:
+      group: deploy-master
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout current master commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate rollback request and immutable target
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "${{ inputs.confirmation }}" = "ROLLBACK PRODUCTION EXACT DIGEST" ]
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BASELINE_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ "$BASELINE_SOURCE_RUN_ATTEMPT" = "1" ]
+          [ "$BASELINE_ARTIFACT_NAME" = "production-baseline-${BASELINE_SOURCE_RUN_ID}-${BASELINE_SOURCE_RUN_ATTEMPT}" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          current_master="$(git rev-parse origin/master)"
+          [ "$(git rev-parse HEAD)" = "$current_master" ]
+          [ "$TARGET_SHA" != "$current_master" ]
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          [ "$(git rev-parse "${TARGET_SHA}^{commit}")" = "$TARGET_SHA" ]
+          git merge-base --is-ancestor "$TARGET_SHA" "$current_master"
+
+      - name: Azure Login
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.CLUSTER_NAME }}
+
+      - name: Acquire rollback operation lock
+        run: |
+          NAMESPACE=default \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$TARGET_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
+
+      - name: Roll back exact immutable production images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTPUT_DIR: artifacts/production-rollback
+        run: |
+          HOSTS="${APP_DOMAIN},www.${APP_DOMAIN}" \
+            ./infra/azure/agents/rollback-application-stan.sh
+
+      - name: Upload rollback provenance and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/production-rollback
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Release rollback operation lock
+        if: always()
+        run: |
+          if [[ -x ./infra/azure/agents/shared-mongo-operation-lock-stan.sh ]]; then
+            NAMESPACE=default \
+            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+            SOURCE_SHA="$TARGET_SHA" \
+              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh release
+          fi

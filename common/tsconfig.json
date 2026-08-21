@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "commonjs",
+    "outDir": "./build",
+    "rootDir": "./src",
+    "skipLibCheck": true,
+    "target": "ES2015"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

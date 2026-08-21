@@ -5,14 +5,14 @@ const router = express.Router();
 
 router.get("/api/bet", async (req: Request, res: Response) => {
   if (!req.currentUser) {
-    res.send({});
-  } else {
-    const bets = await Bet.find({
-      userId: req.currentUser.id,
-    }).sort({ timestamp: -1 });
-
-    res.send(bets);
+    return res.send({});
   }
+
+  const bets = await Bet.find({
+    userId: req.currentUser.id,
+  }).sort({ timestamp: -1 });
+
+  return res.send(bets.map((bet) => bet.toJSON()));
 });
 
 export { router as ShowBets };

@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "rootDir": ".",
+    "skipLibCheck": false,
+    "paths": {
+      "amqplib": [
+        "node_modules/legacy-amqplib-types"
+      ]
+    }
+  },
+  "include": [
+    "build/**/*.d.ts",
+    "tests/fixtures/legacy-amqp-consumer.ts"
+  ]
+}

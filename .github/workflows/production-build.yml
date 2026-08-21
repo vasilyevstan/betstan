@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate Kubernetes manifest YAML syntax
         run: |
@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate prod ingress host/path safety
         run: |
@@ -65,7 +65,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate deploy/runtime shell scripts syntax
         run: |
@@ -101,10 +101,54 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate trusted production workflow chain
         run: ./infra/azure/agents/workflow-trigger-guard-stan.sh
+
+  deployment-safety-contracts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate deployment safety contracts
+        run: |
+          bash -n infra/azure/agents/deploy-validation-loop-stan.sh
+          bash -n infra/azure/agents/live-betting-readiness-lib.sh
+          bash -n infra/azure/agents/live-betting-readiness-stan.sh
+          bash -n infra/azure/agents/live-betting-readiness-test-lib.sh
+          bash -n infra/azure/agents/pre-commit-infra-check-stan.sh
+          bash -n infra/azure/agents/test-deploy-validation-loop-stan.sh
+          bash -n infra/azure/agents/test-deployment-safety-ci-stan.sh
+          bash -n infra/azure/agents/test-live-betting-readiness-stan.sh
+          bash -n infra/azure/agents/test-live-betting-rollback-readiness-stan.sh
+          bash -n infra/azure/agents/test-production-rollback-stan.sh
+          bash -n infra/oci/agents/deploy-validation-loop-stan.sh
+          bash -n infra/oci/agents/live-betting-readiness-stan.sh
+          bash -n infra/oci/scripts/deploy.sh
+          bash -n infra/oci/tests/test-deploy-validation-loop-stan.sh
+          bash -n infra/oci/tests/test-live-betting-readiness-stan.sh
+          bash -n infra/oci/tests/rollback-live-readiness-contract.sh
+          bash -n infra/oci/tests/rollback-contract.sh
+          ruby -ryaml -e '
+            %w[
+              .github/workflows/production-build.yml
+              .github/workflows/production-deploy.yml
+              .github/workflows/oci-production-deploy.yml
+            ].each { |file| YAML.load_stream(File.read(file)) }
+          '
+          ./infra/azure/agents/pre-commit-infra-check-stan.sh
+          ./infra/azure/agents/test-deployment-safety-ci-stan.sh
+          ./infra/azure/agents/test-deploy-validation-loop-stan.sh
+          ./infra/azure/agents/test-live-betting-readiness-stan.sh
+          ./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh
+          ./infra/azure/agents/test-production-rollback-stan.sh
+          ./infra/oci/tests/test-deploy-validation-loop-stan.sh
+          ./infra/oci/tests/test-live-betting-readiness-stan.sh
+          ./infra/oci/tests/rollback-live-readiness-contract.sh
+          ./infra/oci/tests/rollback-contract.sh
 
   auth-container-smoke:
     runs-on: ubuntu-latest
@@ -122,7 +166,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Build deterministic auth image
         run: docker build --tag "betstan-auth-smoke:${GITHUB_SHA}" auth
@@ -187,17 +231,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
       - name: Cache mongodb-memory-server binaries
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ~/.cache/mongodb-binaries
           key: mongodb-binaries-${{ runner.os }}
@@ -244,7 +288,7 @@ jobs:
   pr-quality-gates:
     name: pr-quality-gates
     if: always() && github.event_name == 'pull_request'
-    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, auth-container-smoke, coverage-gate]
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Require every validation gate
@@ -253,10 +297,11 @@ jobs:
           INGRESS_RESULT: ${{ needs.ingress-routing-guard.result }}
           SCRIPT_RESULT: ${{ needs.deploy-runtime-script-validate.result }}
           WORKFLOW_RESULT: ${{ needs.workflow-trigger-guard.result }}
+          DEPLOYMENT_SAFETY_RESULT: ${{ needs.deployment-safety-contracts.result }}
           AUTH_CONTAINER_RESULT: ${{ needs.auth-container-smoke.result }}
           COVERAGE_RESULT: ${{ needs.coverage-gate.result }}
         run: |
-          for result in "$MANIFEST_RESULT" "$INGRESS_RESULT" "$SCRIPT_RESULT" "$WORKFLOW_RESULT" "$AUTH_CONTAINER_RESULT" "$COVERAGE_RESULT"; do
+          for result in "$MANIFEST_RESULT" "$INGRESS_RESULT" "$SCRIPT_RESULT" "$WORKFLOW_RESULT" "$DEPLOYMENT_SAFETY_RESULT" "$AUTH_CONTAINER_RESULT" "$COVERAGE_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "required validation result=$result" >&2
               exit 1
@@ -264,7 +309,7 @@ jobs:
           done
 
   build:
-    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, auth-container-smoke, coverage-gate]
+    needs: [manifest-static-validate, ingress-routing-guard, deploy-runtime-script-validate, workflow-trigger-guard, deployment-safety-contracts, auth-container-smoke, coverage-gate]
     if: >
       always() &&
       github.event_name == 'push' &&
@@ -273,6 +318,7 @@ jobs:
       needs.ingress-routing-guard.result == 'success' &&
       needs.deploy-runtime-script-validate.result == 'success' &&
       needs.workflow-trigger-guard.result == 'success' &&
+      needs.deployment-safety-contracts.result == 'success' &&
       needs.auth-container-smoke.result == 'success' &&
       needs.coverage-gate.result == 'success'
     runs-on: ubuntu-latest
@@ -303,7 +349,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ env.IMAGE_TAG }}
 
@@ -317,17 +363,17 @@ jobs:
           }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
 
       - name: Build and push ${{ matrix.service }}
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ./${{ matrix.service }}
           file: ./${{ matrix.service }}/Dockerfile
@@ -358,7 +404,7 @@ jobs:
             > "artifacts/image-provenance/${SERVICE}.env"
 
       - name: Upload immutable image provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: image-provenance-${{ matrix.service }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/image-provenance/${{ matrix.service }}.env

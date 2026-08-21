@@ -1,47 +1,29 @@
-import { ConsumeMessage } from "amqplib";
-import {
-  AListener,
-  IPlaceBetEvent,
-  QueueNames,
-  ResultingStatus,
-} from "@betstan/common";
-import { Bet } from "../../model/Bet";
+import { IPlaceBetEvent, QueueNames } from "@betstan/common";
+import RetriableResultingListener from "./RetriableResultingListener";
+import { SettlementPublishers, upsertPlaceBet } from "../../service/resulting";
+import { RetryDescriptor, retryIdentityForPlaceBet } from "../../service/retry";
 
-class PlaceBetListener extends AListener<IPlaceBetEvent> {
+class PlaceBetListener extends RetriableResultingListener<IPlaceBetEvent> {
   serviceName: string = "resulting_place_bet";
   queue: QueueNames.SLIP_BET = QueueNames.SLIP_BET;
+  protected readonly failureLogMessage = "Error upserting place bet:";
 
-  async onMessage(event: IPlaceBetEvent, msg: ConsumeMessage) {
-    const { data } = event;
+  protected buildRetryDescriptor(
+    event: IPlaceBetEvent
+  ): RetryDescriptor<IPlaceBetEvent> {
+    return {
+      identity: retryIdentityForPlaceBet(event),
+      kind: "PLACE_BET",
+      listenerServiceName: this.serviceName,
+      payload: event,
+    };
+  }
 
-    const bet = new Bet({
-      status: ResultingStatus.BET_PENDING,
-      userId: data.userId,
-      slipId: data.slipId,
-      wager: data.wager,
-      timestamp: event.timestamp ?? new Date().toISOString(),
-      moderationTimestamp: "",
-      resultingTimestamp: "",
-      rows: data.rows.map((row) => {
-        return {
-          eventId: row.eventId,
-          eventName: row.eventName,
-          oddsId: row.oddsId,
-          oddsValue: row.oddsValue,
-          oddsName: row.oddsName,
-          productName: row.productName,
-          productId: row.productId,
-          timestamp: row.timestamp,
-          id: row.id,
-          resultingTimestamp: "",
-          result: ResultingStatus.ROW_NO_RESULT,
-        };
-      }),
-    });
-
-    await bet.save();
-
-    this.ack(msg);
+  protected async handleEvent(
+    event: IPlaceBetEvent,
+    publishers: SettlementPublishers
+  ): Promise<void> {
+    await upsertPlaceBet(event, publishers);
   }
 }
 

@@ -1,4 +1,4 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { ConsumeMessage } from "amqplib";
 import { AListener, INewEventEvent, QueueNames } from "@betstan/common";
 import EventTemplate from "../../data/EventTemplate";
 import { Event } from "../../model/Event";
@@ -23,10 +23,27 @@ class NewEventListener extends AListener<INewEventEvent> {
       data.away,
       data.time
     );
-    const persistedEvent = await Event.create(newEvent);
-    await persistedEvent.save();
-
-    //await newEvent.save();
+    try {
+      await Event.updateOne(
+        { eventId: data.id },
+        {
+          $setOnInsert: {
+            eventId: newEvent.eventId,
+            name: newEvent.name,
+            time: newEvent.time,
+            home: newEvent.home,
+            away: newEvent.away,
+            products: newEvent.products,
+            source: "EXTERNAL",
+          },
+        },
+        { upsert: true }
+      );
+    } catch (err: any) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
+    }
 
     this.channel.ack(msg);
   }

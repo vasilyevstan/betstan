@@ -2,6 +2,7 @@ import express from "express";
 import { json } from "body-parser";
 import { ListllEvents } from "./route/ListAllEvents";
 import { EventOddsClicked } from "./route/EventOddsClicked";
+import { EventLiveStream } from "./route/EventLiveStream";
 import { BadRequestError, currentUser, errorHandler } from "@betstan/common";
 import cookieSession from "cookie-session";
 
@@ -20,6 +21,7 @@ app.use(
 app.use(currentUser);
 
 app.use(ListllEvents);
+app.use(EventLiveStream);
 app.use(EventOddsClicked);
 
 app.all("*", async (req, res, next) => {

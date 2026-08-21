@@ -1,13 +1,13 @@
 import { ConsumeMessage } from "amqplib";
 import {
   AListener,
-  EventStatus,
   IEventResultEvent,
   QueueNames,
 } from "@betstan/common";
 
 import { Event } from "../../model/Event";
 import { EventArchive } from "../../model/EventArchive";
+import { LiveResultSource } from "../../model/liveStateFields";
 
 class EventResultListener extends AListener<IEventResultEvent> {
   serviceName: string = "gamemaster_result_set";
@@ -22,31 +22,40 @@ class EventResultListener extends AListener<IEventResultEvent> {
       return;
     }
 
-    const storedEvent = await Event.findOne({ eventId: data.eventId });
+    const requestedAt = new Date(event.timestamp ?? new Date().toISOString());
+    const updatedEvent = await Event.findOneAndUpdate(
+      {
+        eventId: data.eventId,
+        resultPublishedAt: null,
+        "pendingResult.source": { $ne: LiveResultSource.MANUAL },
+      },
+      {
+        $set: {
+          homeResult: data.homeScore,
+          awayResult: data.awayScore,
+          resultPublishedAt: requestedAt,
+          pendingResult: {
+            source: LiveResultSource.MANUAL,
+            homeScore: data.homeScore,
+            awayScore: data.awayScore,
+            requestedAt,
+            sender: event.sender ?? null,
+          },
+        },
+      },
+      { new: true }
+    );
 
-    if (!storedEvent) {
-      console.log("event not found", event);
+    if (!updatedEvent) {
+      const [eventExists, archivedExists] = await Promise.all([
+        Event.exists({ eventId: data.eventId }),
+        EventArchive.exists({ eventId: data.eventId }),
+      ]);
+      if (!eventExists && !archivedExists) {
+        console.log("event not found", event);
+      }
       this.ack(msg);
       return;
-    }
-
-    storedEvent.set({
-      homeResult: data.homeScore,
-      awayResult: data.awayScore,
-      status: EventStatus.RESULTED,
-    });
-
-    await storedEvent.save();
-
-    // archive the event
-    const eventsToArchive = await Event.find({
-      status: EventStatus.RESULTED,
-    }).lean();
-
-    for (const eventToArchive of eventsToArchive) {
-      const archivedEvent = new EventArchive(eventToArchive);
-      await archivedEvent.save();
-      await Event.deleteOne({ _id: eventToArchive._id });
     }
 
     this.ack(msg);

@@ -4,7 +4,11 @@ require "yaml"
 
 directory = ARGV.fetch(0)
 
-AZURE_WORKFLOWS = %w[production-build production-deploy].freeze
+AZURE_WORKFLOWS = %w[
+  production-build
+  production-deploy
+  production-rollback
+].freeze
 OCI_WORKFLOWS = %w[
   oci-capacity-acquire
   oci-infrastructure
@@ -12,16 +16,34 @@ OCI_WORKFLOWS = %w[
   oci-migration-recovery
   oci-production-build
   oci-production-deploy
+  oci-production-rollback
 ].freeze
 REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
+  "production-rollback" => "production-emergency",
   "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
   "oci-migrate" => "oci-migration",
   "oci-migration-recovery" => "azure-migration-recovery",
   "oci-production-build" => "oci-build",
-  "oci-production-deploy" => "oci-production"
+  "oci-production-deploy" => "oci-production",
+  "oci-production-rollback" => "oci-production"
 }.freeze
+ROLLBACK_ACTION_PINS = {
+  "production-rollback" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "azure/login" => "a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
+    "azure/aks-set-context" => "c7eb093e5a5d47caa333f64974d5fd1cd4bf069d"
+  },
+  "oci-production-rollback" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
+  }
+}.freeze
+FULL_SHA = /\A[0-9a-f]{40}\z/
 AZURE_SECRET_NAME = /\A(?:AZURE[A-Z0-9_]*|ARM[A-Z0-9_]*|ACR[A-Z0-9_]*|
   RESOURCE_GROUP|CLUSTER_NAME)\z/ix
 AZURE_DOT_SECRET_REFERENCE = %r{
@@ -39,12 +61,96 @@ def workflow_triggers(document)
   triggers.is_a?(Hash) ? triggers : {}
 end
 
+def workflow_dispatch_inputs(document)
+  dispatch = workflow_triggers(document)["workflow_dispatch"]
+  inputs = dispatch.is_a?(Hash) ? dispatch["inputs"] : nil
+  inputs.is_a?(Hash) ? inputs : {}
+end
+
 def require_content(content, pattern, message)
   fail_inventory(message) unless content.match?(pattern)
 end
 
 def reject_content(content, pattern, message)
   fail_inventory(message) if content.match?(pattern)
+end
+
+def validate_dispatch_only_workflow!(name, document)
+  triggers = workflow_triggers(document)
+  fail_inventory("#{name} must be workflow_dispatch-only") unless triggers.keys == ["workflow_dispatch"]
+end
+
+def validate_required_workflow_dispatch_inputs!(name, document, expected_inputs)
+  inputs = workflow_dispatch_inputs(document)
+  unless inputs.keys.sort == expected_inputs.sort
+    fail_inventory(
+      "#{name} must expose exactly these workflow_dispatch inputs: #{expected_inputs.join(",")}"
+    )
+  end
+
+  expected_inputs.each do |input_name|
+    config = inputs[input_name]
+    unless config.is_a?(Hash) && config["required"] == true
+      fail_inventory("#{name} must require the #{input_name} dispatch input")
+    end
+  end
+end
+
+def validate_exact_permissions!(name, document, expected_permissions)
+  permissions = document["permissions"]
+  unless permissions.is_a?(Hash) && permissions == expected_permissions
+    fail_inventory(
+      "#{name} must set exact permissions " \
+      "#{expected_permissions.map { |key, value| "#{key}=#{value}" }.join(",")}"
+    )
+  end
+end
+
+def uses_entries(content)
+  entries = []
+  content.each_line.with_index(1) do |line, line_number|
+    match = line.match(/^\s*uses:\s*([^\s#]+)/)
+    next unless match
+
+    entries << [line_number, match[1]]
+  end
+  entries
+end
+
+def validate_expected_action_pins!(name, content)
+  expected = ROLLBACK_ACTION_PINS.fetch(name)
+  seen = {}
+
+  uses_entries(content).each do |line_number, use|
+    match = /\A(?<repository>[^@\s]+)@(?<ref>[^\s]+)\z/.match(use)
+    unless match
+      fail_inventory("#{name} line #{line_number} must pin actions to a reviewed full SHA")
+    end
+
+    repository = match[:repository]
+    ref = match[:ref]
+    expected_ref = expected[repository]
+    unless expected_ref
+      fail_inventory("#{name} line #{line_number} references an unexpected action #{repository}")
+    end
+    unless FULL_SHA.match?(ref)
+      fail_inventory(
+        "#{name} line #{line_number} must pin #{repository} to a full 40-character lowercase hex commit SHA"
+      )
+    end
+    unless ref == expected_ref
+      fail_inventory(
+        "#{name} line #{line_number} must pin #{repository} to #{expected_ref}"
+      )
+    end
+
+    seen[repository] = true
+  end
+
+  missing = expected.keys.reject { |repository| seen[repository] }
+  return if missing.empty?
+
+  fail_inventory("#{name} is missing reviewed pinned actions: #{missing.join(",")}")
 end
 
 def validate_environment!(name, document)
@@ -86,6 +192,245 @@ def validate_non_migration_secrets!(name, content)
       fail_inventory("#{name} must not receive Azure credentials")
     end
   end
+end
+
+def validate_azure_rollback_workflow!(file, document, content)
+  name = "production-rollback"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      target_sha
+      baseline_source_run_id
+      baseline_source_run_attempt
+      baseline_artifact_name
+      confirmation
+    ]
+  )
+  validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
+  validate_environment!(name, document)
+  validate_expected_action_pins!(name, content)
+
+  require_content(
+    content,
+    %r{run-name:\s*rollback\s+\$\{\{\s*inputs\.target_sha\s*\}\}},
+    "#{name} run name must identify the rollback target SHA"
+  )
+  require_content(
+    content,
+    /github\.run_attempt\s*==\s*1/,
+    "#{name} must reject rerun attempts"
+  )
+  require_content(
+    content,
+    /\[\s*"\$GITHUB_REF_NAME"\s*=\s*"master"\s*\]/,
+    "#{name} must reject non-master dispatches"
+  )
+  require_content(
+    content,
+    /\[\s*"\$\{\{\s*inputs\.confirmation\s*\}\}"\s*=\s*"ROLLBACK PRODUCTION EXACT DIGEST"\s*\]/,
+    "#{name} must require the exact production rollback confirmation phrase"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$TARGET_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/,
+    "#{name} must validate a complete lowercase target SHA"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$BASELINE_SOURCE_RUN_ID"\s*=~\s*\^\[1-9\]\[0-9\]\*\$\s*\]\]/,
+    "#{name} must validate a numeric baseline source run ID"
+  )
+  require_content(
+    content,
+    /\[\s*"\$BASELINE_SOURCE_RUN_ATTEMPT"\s*=\s*"1"\s*\]/,
+    "#{name} must bind rollback provenance to the first deploy attempt"
+  )
+  require_content(
+    content,
+    /\[\s*"\$BASELINE_ARTIFACT_NAME"\s*=\s*"production-baseline-\$\{BASELINE_SOURCE_RUN_ID\}-\$\{BASELINE_SOURCE_RUN_ATTEMPT\}"\s*\]/,
+    "#{name} must bind rollback provenance to the exact baseline artifact"
+  )
+  require_content(
+    content,
+    /\[\s*"\$GITHUB_RUN_ATTEMPT"\s*=\s*"1"\s*\]/,
+    "#{name} must reject rerun attempts inside the validation step"
+  )
+  require_content(
+    content,
+    %r{git fetch --quiet origin master:refs/remotes/origin/master},
+    "#{name} must resolve current master before rollback"
+  )
+  require_content(
+    content,
+    /\[\s*"\$TARGET_SHA"\s*!=\s*"\$current_master"\s*\]/,
+    "#{name} must reject rollbacks to the current master commit"
+  )
+  require_content(
+    content,
+    /git merge-base --is-ancestor "\$TARGET_SHA" "\$current_master"/,
+    "#{name} must require the rollback target to remain on master history"
+  )
+  require_content(
+    content,
+    /shared-mongo-operation-lock-stan\.sh acquire/,
+    "#{name} must acquire the reviewed rollback operation lock"
+  )
+  require_content(
+    content,
+    /shared-mongo-operation-lock-stan\.sh release/,
+    "#{name} must always release the reviewed rollback operation lock"
+  )
+  require_content(
+    content,
+    /rollback-application-stan\.sh/,
+    "#{name} must call the reviewed rollback executor"
+  )
+  require_content(
+    content,
+    /production-rollback-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
+    "#{name} must upload attempt-bound rollback diagnostics"
+  )
+end
+
+def validate_oci_rollback_workflow!(file, document, content)
+  name = "oci-production-rollback"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      target_sha
+      baseline_source_run_id
+      baseline_source_run_attempt
+      baseline_artifact_name
+      infrastructure_run_id
+      confirmation
+    ]
+  )
+  validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
+  validate_environment!(name, document)
+  validate_expected_action_pins!(name, content)
+
+  require_content(
+    content,
+    %r{run-name:\s*oci-rollback\s+\$\{\{\s*inputs\.target_sha\s*\}\}},
+    "#{name} run name must identify the rollback target SHA"
+  )
+  require_content(
+    content,
+    /group:\s*oci-control-plane/,
+    "#{name} must use the shared reviewed OCI control-plane concurrency group"
+  )
+  require_content(
+    content,
+    /cancel-in-progress:\s*false/,
+    "#{name} must keep reviewed rollback concurrency non-cancelling"
+  )
+  require_content(
+    content,
+    /github\.run_attempt\s*==\s*1/,
+    "#{name} must reject rerun attempts"
+  )
+  require_content(
+    content,
+    /\[\s*"\$GITHUB_REF_NAME"\s*=\s*"master"\s*\]/,
+    "#{name} must reject non-master dispatches"
+  )
+  require_content(
+    content,
+    /\[\s*"\$CONFIRMATION"\s*=\s*"ROLLBACK OCI EXACT DIGEST"\s*\]/,
+    "#{name} must require the exact OCI rollback confirmation phrase"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$TARGET_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/,
+    "#{name} must validate a complete lowercase target SHA"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$BASELINE_SOURCE_RUN_ID"\s*=~\s*\^\[1-9\]\[0-9\]\*\$\s*\]\]/,
+    "#{name} must validate a numeric baseline source run ID"
+  )
+  require_content(
+    content,
+    /\[\s*"\$BASELINE_SOURCE_RUN_ATTEMPT"\s*=\s*"1"\s*\]/,
+    "#{name} must bind rollback provenance to the first deploy attempt"
+  )
+  require_content(
+    content,
+    /\[\s*"\$BASELINE_ARTIFACT_NAME"\s*=\s*"oci-production-baseline-\$\{BASELINE_SOURCE_RUN_ID\}-\$\{BASELINE_SOURCE_RUN_ATTEMPT\}"\s*\]/,
+    "#{name} must bind rollback provenance to the exact baseline artifact"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$INFRASTRUCTURE_RUN_ID"\s*=~\s*\^\[1-9\]\[0-9\]\*\$\s*\]\]/,
+    "#{name} must validate a numeric infrastructure run ID"
+  )
+  require_content(
+    content,
+    %r{git fetch --quiet origin master:refs/remotes/origin/master},
+    "#{name} must resolve current master before rollback"
+  )
+  require_content(
+    content,
+    /gh api "repos\/\$REPOSITORY\/actions\/workflows\/oci-infrastructure\.yml"/,
+    "#{name} must resolve the reviewed OCI infrastructure workflow identity"
+  )
+  require_content(
+    content,
+    %r{actions/runs/\$INFRASTRUCTURE_RUN_ID/attempts/1},
+    "#{name} must inspect the immutable first-attempt infrastructure provenance"
+  )
+  require_content(
+    content,
+    /\[\s*"\$workflow_path"\s*=\s*"\.github\/workflows\/oci-infrastructure\.yml"\s*\]/,
+    "#{name} must bind rollback provenance to the reviewed infrastructure workflow path"
+  )
+  require_content(
+    content,
+    /\[\s*"\$event"\s*=\s*"workflow_dispatch"\s*\]/,
+    "#{name} must trust only manually approved infrastructure runs"
+  )
+  require_content(
+    content,
+    /\[\s*"\$head_branch"\s*=\s*"master"\s*\]/,
+    "#{name} must reject infrastructure provenance from non-master branches"
+  )
+  require_content(
+    content,
+    /\[\s*"\$repository"\s*=\s*"\$REPOSITORY"\s*\]/,
+    "#{name} must reject infrastructure provenance from another repository"
+  )
+  require_content(
+    content,
+    /\[\s*"\$status"\s*=\s*"completed"\s*\]\s*&&\s*\[\s*"\$conclusion"\s*=\s*"success"\s*\]\s*&&\s*\[\s*"\$attempt"\s*=\s*"1"\s*\]/,
+    "#{name} must require successful first-attempt infrastructure provenance"
+  )
+  require_content(
+    content,
+    /oci-infrastructure-provenance-\$\{\{\s*inputs\.infrastructure_run_id\s*\}\}-1/,
+    "#{name} must download the exact reviewed infrastructure provenance artifact"
+  )
+  require_content(
+    content,
+    /run-id:\s*\$\{\{\s*inputs\.infrastructure_run_id\s*\}\}/,
+    "#{name} must bind the infrastructure provenance artifact to the reviewed run ID"
+  )
+  require_content(
+    content,
+    /oci-production-rollback-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
+    "#{name} must upload attempt-bound rollback diagnostics"
+  )
 end
 
 def validate_manual_oci_workflow!(name, document, content)
@@ -375,6 +720,8 @@ def validate_oci_workflow!(name, file, document, content)
       /github\.run_attempt\s*==\s*1/,
       "#{name} must reject downstream rerun attempts"
     )
+  elsif name == "oci-production-rollback"
+    validate_oci_rollback_workflow!(file, document, content)
   elsif name == "oci-capacity-acquire"
     validate_scheduled_oci_workflow!(name, document, content)
   elsif name == "oci-migration-recovery"
@@ -397,7 +744,14 @@ def validate_oci_workflow!(name, file, document, content)
 end
 
 documents = {}
-names = Dir.glob(File.join(directory, "*.{yml,yaml}")).each_with_object([]) do |file, result|
+workflow_files = Dir.children(directory).sort.each_with_object([]) do |entry, files|
+  next unless entry.end_with?(".yml", ".yaml")
+
+  file = File.join(directory, entry)
+  files << file if File.file?(file)
+end
+
+names = workflow_files.each_with_object([]) do |file, result|
   content = File.read(file)
   document = YAML.safe_load(content, aliases: true) || {}
   next unless document.is_a?(Hash)
@@ -461,6 +815,9 @@ unless names == REQUIRED_SET
     "expected #{REQUIRED_SET.join(",")}; found #{names.join(",")}"
   )
 end
+
+file, document, content = documents.fetch("production-rollback")
+validate_azure_rollback_workflow!(file, document, content)
 
 OCI_WORKFLOWS.each do |name|
   file, document, content = documents.fetch(name)

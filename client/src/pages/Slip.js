@@ -1,117 +1,257 @@
-import React,  { useState, useEffect }  from "react";
-import axios from "axios";
+import React, { useEffect } from 'react';
+import { format } from 'date-fns';
+import useSlipBoards from '../hook/useSlipBoards';
+import {
+  BET_KIND,
+  formatDeclineReason,
+  formatMarketStatus,
+  getBetKindLabel,
+} from '../liveBettingUtils';
+import { BOARD_KINDS, getBoardId, getRowId } from '../hook/useSlipBoards';
 
-const HandleSlip = ({ sliprefresh, statsrefresh, currentUser, uiVariant }) => {
+const formatTimestamp = (value, fallback = '—') => {
+  const parsed = new Date(value ?? '');
+  return Number.isNaN(parsed.getTime()) ? fallback : format(parsed, 'MMM d, HH:mm');
+};
 
-    const [slip, setSlip] = useState({});
-    const [wager, setWager] = useState('');
+const getBoardTitle = (betKind) => (
+  betKind === BET_KIND.LIVE ? 'LIVE SLIP' : 'PRE-MATCH SLIP'
+);
 
-    const fetchSlip = async () => {
-        try {
-            const res = await axios.get('/api/slip');
-            const data = res.data;
-            setSlip(data && typeof data === 'object' && !Array.isArray(data) ? data : {});
-        } catch (error) {
-            // ignore
-          }
-    }
+const getBoardPrompt = (betKind, currentUser) => {
+  if (!currentUser) {
+    return {
+      title: 'Login and bet!',
+      body: betKind === BET_KIND.LIVE
+        ? 'Sign in to track live selections and place in-play bets.'
+        : 'Sign in to track pre-match selections and place slips.',
+    };
+  }
 
-    useEffect(() => {
-        fetchSlip();
-    }, []);
+  return {
+    title: betKind === BET_KIND.LIVE ? 'Build your live board' : 'Build your pre-match board',
+    body: betKind === BET_KIND.LIVE
+      ? 'Choose an in-play market to keep live bets separate from pre-match picks.'
+      : 'Pick pre-match odds from the events page to compose your slip.',
+  };
+};
 
-    const slipRows = Array.isArray(slip?.rows) ? slip.rows : [];
+const getBoardStatusMessage = (betKind, boardState) => {
+  if (!boardState?.isAwaitingDecision) {
+    return null;
+  }
 
-    if (slipRows.length === 0) {
-        return currentUser ? <div className={`card card-body empty-state-card slip-board slip-board--${uiVariant}`}>
-            <div className="slip-board__title">BET SLIP</div>
-            <small className="text-secondary">Pick odds from events to compose your slip.</small>
-        </div> :
-        <div className={`card card-body empty-state-card slip-board slip-board--${uiVariant}`}>
-            <div className="slip-board__title">BET SLIP</div>
-            <div className="slip-board__empty-main">Login and bet!</div>
-            <small className="text-secondary">Sign in to track selections and place slips.</small>
-        </div>;
-    }
+  if (boardState.targetedStatus === 'DECLINED') {
+    return betKind === BET_KIND.LIVE
+      ? 'Review declined. Syncing the latest live quote…'
+      : 'Review declined. Restoring the latest board…';
+  }
 
-    const deleteSlipRow = async (event) => {
-        event.preventDefault();
-        const slipId = event.currentTarget.getAttribute("slipid");
-        const slipRowId = event.currentTarget.getAttribute("sliprowid");
-        
-        try {
-            await axios.post('/api/slip/row', { slipId, slipRowId });
+  return betKind === BET_KIND.LIVE
+    ? 'Awaiting live moderation and approval…'
+    : 'Awaiting pre-match approval…';
+};
 
-            sliprefresh();
-        } catch (error) {
-            // ignore
-        }
-    }
+const BoardModeration = ({ row }) => {
+  if (!row?.moderation) {
+    return null;
+  }
 
-    const cleanSlip = async (event) => {
+  const moderation = row.moderation;
 
-        event.preventDefault();
-        const slipId = event.currentTarget.getAttribute("slipid");
+  return <div className="slip-row-card__moderation" role="note">
+    <div className="fw-semibold text-danger">Declined: {formatDeclineReason(moderation.declineReason)}</div>
+    <div className="slip-row-card__moderation-meta">
+      {typeof moderation.currentOdds === 'number' ? <span>Current quote {moderation.currentOdds}</span> : null}
+      {typeof moderation.quoteVersion === 'number' ? <span>Quote v{moderation.quoteVersion}</span> : null}
+      {moderation.marketStatus ? <span>{formatMarketStatus(moderation.marketStatus)}</span> : null}
+    </div>
+  </div>;
+};
 
-        try {
-            await axios.post('/api/slip/row/clean', { slipId });
+const SlipBoardPanel = ({
+  betKind,
+  board,
+  boardState,
+  currentUser,
+  error,
+  onDeleteRow,
+  onCleanBoard,
+  onSubmitBoard,
+  onWagerChange,
+  uiVariant,
+  wager,
+}) => {
+  const rows = Array.isArray(board?.rows) ? board.rows : [];
+  const boardId = getBoardId(board);
+  const isBusy = boardState?.isSubmitting || boardState?.isAwaitingDecision;
+  const statusMessage = getBoardStatusMessage(betKind, boardState);
+  const moderationCount = rows.filter((row) => row?.moderation).length;
+  const totalOdds = rows.reduce((accumulator, row) => (
+    accumulator * (Number(row?.oddsValue) || 1)
+  ), 1);
 
-            sliprefresh();
-        } catch (error) {
-            // ignore
-        }
-    }
+  const possibleWin = Number(wager);
+  const possibleWinValue = Number.isFinite(possibleWin)
+    ? (possibleWin * totalOdds).toFixed(2)
+    : null;
 
-    const placeBet = async (event) => {
+  if (rows.length === 0) {
+    const prompt = getBoardPrompt(betKind, currentUser);
 
-        event.preventDefault();
-        const slipId = event.currentTarget.getAttribute("slipid");
-        const wager = event.currentTarget.getAttribute("wager");
+    return <section
+      className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
+      aria-labelledby={`slip-board-title-${betKind}`}
+    >
+      <div className="slip-board__heading">
+        <div id={`slip-board-title-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
+        <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{getBetKindLabel(betKind)}</span>
+      </div>
+      <div className="card card-body empty-state-card slip-board__empty-state">
+        <div className="slip-board__empty-main">{prompt.title}</div>
+        <small className="text-secondary">{prompt.body}</small>
+      </div>
+      {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
+    </section>;
+  }
 
-        if (wager > 0) {
-
-            try {
-                await axios.post('/api/slip/bet', { slipId, wager });
-
-                sliprefresh();
-                statsrefresh();
-            } catch (error) {
-                // ignore
-            }
-        }
-    }
-
-    let totalOdds = 1;
-    const renderedSlip = slipRows.map(slipRow => {
-        totalOdds = totalOdds * slipRow.oddsValue;
-        return <div className="card slip-row-card" key={slipRow._id}>
-               {/* {(e) => deleteSlipRow(e.currentTarget.getAttribute('value'))} */}
-                <small className="card-subtitle text-muted d-flex justify-content-between align-items-center px-2 pt-2"><div>{slipRow.eventName}</div><button sliprowid={slipRow._id} slipid={slip._id} type="button" onClick={(e) => deleteSlipRow(e)} className="btn-close slip-row-close" aria-label="Remove from slip"></button></small>
-                <div className="card-text d-flex justify-content-between align-items-center px-2 pb-2"><div>{slipRow.productName} - ({slipRow.oddsName})</div><div className="slip-row-card__odds">{slipRow.oddsValue}</div></div>
-
+  return <section
+    className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
+    aria-labelledby={`slip-board-title-${betKind}`}
+  >
+    <div className="slip-board__heading">
+      <div>
+        <div id={`slip-board-title-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
+        <div className="slip-board__meta">
+          <span className={`bet-kind-badge bet-kind-badge--${betKind.toLowerCase()}`}>{getBetKindLabel(betKind)}</span>
+          {moderationCount > 0 ? <span className="text-danger">{moderationCount} quote issue{moderationCount > 1 ? 's' : ''}</span> : null}
         </div>
-    });
-
-
-    const oddAndPossibleWin = <div className="d-flex justify-content-between mt-2 px-1 slip-board__summary">
-        <small>Odds: {Number((totalOdds).toFixed(2))}</small>
-        <small>{isNaN(Number(wager)) ? ' ' : 'Win'} {isNaN(Number(wager)) ? ' ' : Number((Number(wager) * totalOdds).toFixed(2))}</small>
+      </div>
+      {board?.declineReason ? <span className="slip-board__status text-danger">{formatDeclineReason(board.declineReason)}</span> : null}
     </div>
 
-    const wagerAndBet = <div key={slip._id ?? 'empty-slip'} className="card p-2 mt-2 slip-board__actions">
-        <div className="form-group mb-2">
-            <input value={wager} type="number" className="form-control" placeholder="Wager" onChange={(e) => setWager(e.target.value)} />
+    {statusMessage ? <div className="slip-board__pending" aria-live="polite">{statusMessage}</div> : null}
+    {error ? <div className="alert alert-danger slip-board__error" role="alert">{error}</div> : null}
+
+    {rows.map((row) => {
+      const rowId = getRowId(row);
+      return <div className="card slip-row-card" key={rowId ?? `${row.eventId}-${row.oddsId}`}>
+        <div className="card-body">
+          <div className="card-subtitle text-muted d-flex justify-content-between align-items-start gap-2 mb-2">
+            <div>
+              <div>{row.eventName}</div>
+              <div className="slip-row-card__meta">Kickoff {formatTimestamp(row.eventTime ?? row.timestamp)}</div>
+            </div>
+            <button
+              aria-label={`Remove ${row.oddsName} from ${getBetKindLabel(betKind)} slip`}
+              className="btn-close slip-row-close"
+              disabled={isBusy}
+              type="button"
+              onClick={() => onDeleteRow(betKind, boardId, rowId)}
+            ></button>
+          </div>
+          <div className="card-text d-flex justify-content-between align-items-start gap-2">
+            <div>
+              <div>{row.productName}</div>
+              <div className="slip-row-card__selection">{row.oddsName}</div>
+            </div>
+            <div className="slip-row-card__odds">{row.oddsValue}</div>
+          </div>
+          <BoardModeration row={row} />
         </div>
-        <button slipid={slip._id} wager={wager} type="button" className={`btn w-100 mb-2 slip-action-primary slip-action-primary--${uiVariant}`} onClick={(e) => placeBet(e)}>BET!</button>
-        <button slipid={slip._id} type="button" className={`btn w-100 slip-action-secondary slip-action-secondary--${uiVariant}`} onClick={(e) => cleanSlip(e)}>CLEAN</button>
+      </div>;
+    })}
+
+    <div className="d-flex justify-content-between mt-2 px-1 slip-board__summary">
+      <small>Odds: {totalOdds.toFixed(2)}</small>
+      <small>{possibleWinValue ? `Win ${possibleWinValue}` : 'Enter a wager to calculate a win'}</small>
     </div>
 
-    return <div className={`slip-board slip-board--${uiVariant}`}>
-        <div className="slip-board__title">BET SLIP</div>
-        {renderedSlip}
-        {oddAndPossibleWin}
-        {wagerAndBet}
+    <div className="card p-2 mt-2 slip-board__actions">
+      <div className="form-group mb-2">
+        <label className="form-label visually-hidden" htmlFor={`wager-${betKind}`}>Wager for {getBoardTitle(betKind)}</label>
+        <input
+          id={`wager-${betKind}`}
+          value={wager}
+          type="number"
+          className="form-control"
+          disabled={isBusy}
+          placeholder="Wager"
+          onChange={(event) => onWagerChange(betKind, event.target.value)}
+        />
+      </div>
+      <button
+        type="button"
+        className={`btn w-100 mb-2 slip-action-primary slip-action-primary--${uiVariant}`}
+        disabled={isBusy}
+        onClick={() => onSubmitBoard(betKind)}
+      >
+        {boardState?.isSubmitting ? 'Submitting…' : boardState?.isAwaitingDecision ? 'Awaiting review…' : 'BET!'}
+      </button>
+      <button
+        type="button"
+        className={`btn w-100 slip-action-secondary slip-action-secondary--${uiVariant}`}
+        disabled={isBusy}
+        onClick={() => onCleanBoard(betKind, boardId)}
+      >
+        CLEAN
+      </button>
+    </div>
+  </section>;
+};
+
+const HandleSlip = ({ currentUser, onBoardSubmitted, onSelectionKeysChange, refreshSignal, uiVariant }) => {
+  const {
+    boardStateByKind,
+    boards,
+    cleanBoard,
+    deleteRow,
+    errors,
+    isLoading,
+    selectedSelectionKeys,
+    submitBoard,
+    updateWager,
+    wagers,
+  } = useSlipBoards({ currentUser, refreshSignal, onBoardSubmitted });
+
+  useEffect(() => {
+    onSelectionKeysChange?.(selectedSelectionKeys);
+  }, [onSelectionKeysChange, selectedSelectionKeys]);
+
+  if (isLoading) {
+    return <div className={`slip-boards slip-boards--${uiVariant}`}>
+      {BOARD_KINDS.map((betKind) => (
+        <section
+          key={betKind}
+          className={`slip-board slip-board--${uiVariant} slip-board--kind-${betKind.toLowerCase()}`}
+          aria-busy="true"
+          aria-labelledby={`loading-slip-board-${betKind}`}
+        >
+          <div id={`loading-slip-board-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
+          <div className="card card-body empty-state-card">Loading {getBetKindLabel(betKind).toLowerCase()} board…</div>
+        </section>
+      ))}
     </div>;
-}
+  }
+
+  return <div className={`slip-boards slip-boards--${uiVariant}`}>
+    {BOARD_KINDS.map((betKind) => (
+      <SlipBoardPanel
+        key={betKind}
+        betKind={betKind}
+        board={boards[betKind]}
+        boardState={boardStateByKind[betKind]}
+        currentUser={currentUser}
+        error={errors[betKind]}
+        onCleanBoard={cleanBoard}
+        onDeleteRow={deleteRow}
+        onSubmitBoard={submitBoard}
+        onWagerChange={updateWager}
+        uiVariant={uiVariant}
+        wager={wagers[betKind]}
+      />
+    ))}
+  </div>;
+};
 
 export default HandleSlip;

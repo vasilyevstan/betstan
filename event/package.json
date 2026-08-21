@@ -7,7 +7,8 @@
     "start": "ts-node-dev src/index",
     "dev": "ts-node-dev src/index",
     "test": "jest --watchAll --no-cache",
-    "test:ci": "jest"
+    "test:ci": "jest",
+    "data:compat:backfill": "node -r ts-node/register/transpile-only src/scripts/backfillDataCompatibility.ts"
   },
   "jest": {
     "preset": "ts-jest",
@@ -20,7 +21,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@betstan/common": "1.0.54",
+    "@betstan/common": "1.1.0-rc.1",
     "@faker-js/faker": "^8.2.0",
     "@types/amqplib": "^0.10.4",
     "@types/cookie-session": "^2.0.48",

@@ -1,14 +1,15 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { ConsumeMessage } from "amqplib";
 import {
   AListener,
-  BetStatus,
   ISettleSlipEvent,
-  ISettleSlipRowEvent,
   QueueNames,
-  ResultingStatus,
-  SlipRowStatus,
 } from "@betstan/common";
 import { Bet } from "../../model/Bet";
+import { PendingBetUpdateKind } from "../../model/PendingBetUpdate";
+import {
+  applySettleSlip,
+  parkPendingBetUpdate,
+} from "../../service/betHistory";
 
 class SettleSlipListener extends AListener<ISettleSlipEvent> {
   serviceName: string = "bet_settle_slip";
@@ -20,18 +21,14 @@ class SettleSlipListener extends AListener<ISettleSlipEvent> {
     const bet = await Bet.findOne({ slipId: data.slipId });
 
     if (!bet) {
-      // do not ack, handle concurrency
-      this.channel.nack(msg, undefined, true);
+      await parkPendingBetUpdate(PendingBetUpdateKind.SETTLE_SLIP, event);
+      this.channel.ack(msg);
       return;
     }
 
-    if (data.result == ResultingStatus.BET_WIN) {
-      bet.status = BetStatus.WIN;
-    } else {
-      bet.status = BetStatus.LOSS;
+    if (applySettleSlip(bet, event)) {
+      await bet.save();
     }
-
-    await bet.save();
 
     this.channel.ack(msg);
   }
