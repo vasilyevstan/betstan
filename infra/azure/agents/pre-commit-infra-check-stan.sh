@@ -24,7 +24,7 @@ fail() {
 }
 
 current_branch="${BRANCH_NAME:-$(git branch --show-current 2>/dev/null || true)}"
-if [[ "$current_branch" == "master" ]]; then
+if [[ "$current_branch" == "master" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
   echo "ERROR: direct work on master is forbidden; switch to dev or a branch based on dev" >&2
   echo "RESULT=BLOCKED"
   exit 1

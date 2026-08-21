@@ -6,6 +6,27 @@ AZURE_WORKFLOW="$ROOT_DIR/.github/workflows/production-deploy.yml"
 OCI_WORKFLOW="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 BUILD_WORKFLOW="$ROOT_DIR/.github/workflows/production-build.yml"
 OCI_DEPLOY_SCRIPT="$ROOT_DIR/infra/oci/scripts/deploy.sh"
+PRE_COMMIT_CHECK="$ROOT_DIR/infra/azure/agents/pre-commit-infra-check-stan.sh"
+PR_MERGE_SAFETY_TEST="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
+RUN_APPROVAL_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-run-approval-stan.sh"
+
+test_output="$(mktemp)"
+trap 'rm -f "$test_output"' EXIT
+
+if BRANCH_NAME=master GITHUB_ACTIONS=false "$PRE_COMMIT_CHECK" >"$test_output" 2>&1; then
+  echo "ERROR: local master pre-commit check unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "direct work on master is forbidden" "$test_output"
+
+BRANCH_NAME=master GITHUB_ACTIONS=true "$PRE_COMMIT_CHECK" >"$test_output" 2>&1
+if grep -qF "direct work on master is forbidden" "$test_output"; then
+  echo "ERROR: GitHub Actions master validation was blocked" >&2
+  exit 1
+fi
+
+"$PR_MERGE_SAFETY_TEST"
+"$RUN_APPROVAL_TEST"
 
 python3 - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import pathlib

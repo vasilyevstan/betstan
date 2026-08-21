@@ -15,6 +15,7 @@
 - `production-workflow-inventory-stan.sh` — derives and validates the exact governed Azure-plus-OCI production workflow set matched by a promotion diff.
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
+- `copilot-cli-run-approval-stan.sh` — fail-closed protected-environment approval for normal CLI-managed build/deploy runs.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
 - `rollback-readiness-stan.sh` — emits explicit rollback go/no-go based on current health, queue pressure, and rollout history.
 - `node-logs-stan.sh` — node-level health/events + pod error-log extraction.
@@ -237,6 +238,7 @@ Use the merge-safety agent when you want a conservative yes/no recommendation:
 
 ```bash
 ./infra/azure/agents/pr-merge-safety-stan.sh 41
+COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh 41
 ```
 
 The validation agent:
@@ -248,7 +250,25 @@ The merge-safety agent:
 - rejects unsupported branch pairs;
 - requires matching trusted runs on the current head and merge snapshots;
 - recommends a `dev` merge only when validation is green;
-- requires `APPROVED_SHA` and `APPROVED_WORKFLOWS` before recommending a production promotion.
+- requires `APPROVED_SHA` and `APPROVED_WORKFLOWS` before recommending a human-managed production promotion;
+- allows automatic mode only for a `copilot-cli-managed` PR with resolved reviews and no competing production run.
+
+For a normal CLI-managed build/deploy environment gate, validate first and mutate only after the dry-run succeeds:
+
+```bash
+EXPECTED_SHA=<current-master-sha> \
+EXPECTED_WORKFLOW=production-build.yml \
+EXPECTED_ENVIRONMENT=production-emergency \
+./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
+
+COPILOT_CLI_AUTO_APPROVE=true \
+EXPECTED_SHA=<current-master-sha> \
+EXPECTED_WORKFLOW=production-build.yml \
+EXPECTED_ENVIRONMENT=production-emergency \
+./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
+```
+
+The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments, and competing production activity. It does not support automatic rollback, migration, or infrastructure approval.
 
 ## Post-merge production verification
 
