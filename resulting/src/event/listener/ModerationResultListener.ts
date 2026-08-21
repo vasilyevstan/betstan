@@ -1,37 +1,36 @@
-import { ConsumeMessage, Connection } from "amqplib";
+import { IModerationResultEvent, QueueNames } from "@betstan/common";
+import RetriableResultingListener from "./RetriableResultingListener";
 import {
-  AListener,
-  IModerationResultEvent,
-  ModerationStatus,
-  QueueNames,
-  ResultingStatus,
-} from "@betstan/common";
-import { Bet } from "../../model/Bet";
+  SettlementPublishers,
+  applyModerationResult,
+} from "../../service/resulting";
+import {
+  RetryDescriptor,
+  retryIdentityForModerationResult,
+} from "../../service/retry";
 
-class PlaceBetListener extends AListener<IModerationResultEvent> {
+class ModerationResultListener extends RetriableResultingListener<IModerationResultEvent> {
   serviceName: string = "resulting_moderation_result";
   queue: QueueNames.MODERATION_RESULT = QueueNames.MODERATION_RESULT;
+  protected readonly failureLogMessage = "Error applying moderation result:";
 
-  async onMessage(event: IModerationResultEvent, msg: ConsumeMessage) {
-    const { data } = event;
+  protected buildRetryDescriptor(
+    event: IModerationResultEvent
+  ): RetryDescriptor<IModerationResultEvent> {
+    return {
+      identity: retryIdentityForModerationResult(event),
+      kind: "MODERATION_RESULT",
+      listenerServiceName: this.serviceName,
+      payload: event,
+    };
+  }
 
-    const bet = await Bet.findOne({ slipId: data.slipId });
-
-    if (!bet) {
-      this.channel.nack(msg, undefined, true);
-      return;
-      // throw new Error("No bet exists");
-    }
-
-    if (data.result === ModerationStatus.APPROVED) {
-      bet.status = ResultingStatus.BET_APPROVED;
-    } else {
-      bet.status = ResultingStatus.BET_DECLINED;
-    }
-    await bet.save();
-
-    this.ack(msg);
+  protected async handleEvent(
+    event: IModerationResultEvent,
+    publishers: SettlementPublishers
+  ): Promise<void> {
+    await applyModerationResult(event, publishers);
   }
 }
 
-export default PlaceBetListener;
+export default ModerationResultListener;
