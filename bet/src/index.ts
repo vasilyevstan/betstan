@@ -1,3 +1,4 @@
+import { Server } from "http";
 import mongoose from "mongoose";
 import { app } from "./app";
 import { messengerWrapper } from "@betstan/common";
@@ -6,8 +7,26 @@ import ModerationResultListener from "./event/listener/ModerationResultListener"
 import PlaceBetListener from "./event/listener/PlaceBetListener";
 import SettleSlipRowListener from "./event/listener/SettleSlipRowListener";
 import SettleSlipListener from "./event/listener/SettleSlipListener";
+import { PendingBetUpdateWorker } from "./service/PendingBetUpdateWorker";
 
-const startUp = async () => {
+const closeServer = (server: Server) =>
+  new Promise<void>((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+
+export const startUp = async () => {
   console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
     throw new Error("Missing RABBITMQ_URI variable");
@@ -16,52 +35,58 @@ const startUp = async () => {
     throw new Error("Missing MONGO_URI variable");
   }
 
-  try {
-    console.log("Connecting to: ", process.env.RABBITMQ_URI);
-    await messengerWrapper.connect(process.env.RABBITMQ_URI);
+  await mongoose.connect(process.env.MONGO_URI);
+  console.log("Connected to database");
 
-    const placeBetListener = new PlaceBetListener(messengerWrapper.connection);
-    await placeBetListener.init();
-    placeBetListener.listen();
+  console.log("Connecting to: ", process.env.RABBITMQ_URI);
+  await messengerWrapper.connect(process.env.RABBITMQ_URI);
 
-    const moderationResultListener = new ModerationResultListener(
-      messengerWrapper.connection
-    );
-    await moderationResultListener.init();
-    moderationResultListener.listen();
+  const pendingBetUpdateWorker = new PendingBetUpdateWorker();
+  await pendingBetUpdateWorker.start();
 
-    const settleSlipRowListener = new SettleSlipRowListener(
-      messengerWrapper.connection
-    );
-    await settleSlipRowListener.init();
-    settleSlipRowListener.listen();
+  const listeners = [
+    new PlaceBetListener(messengerWrapper.connection),
+    new ModerationResultListener(messengerWrapper.connection),
+    new SettleSlipRowListener(messengerWrapper.connection),
+    new SettleSlipListener(messengerWrapper.connection),
+  ];
 
-    const settleSlipListener = new SettleSlipListener(
-      messengerWrapper.connection
-    );
-    await settleSlipListener.init();
-    settleSlipListener.listen();
-
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log("Connected to database");
-  } catch (err) {
-    console.log(err);
+  for (const listener of listeners) {
+    await listener.init();
+    listener.listen();
   }
 
   const server = app.listen(3000, () => {
     console.log("listening on port 3000");
   });
 
+  let shuttingDownPromise: Promise<void> | null = null;
+  const shutDown = async (exitCode?: number) => {
+    if (shuttingDownPromise) {
+      await shuttingDownPromise;
+      return;
+    }
+
+    shuttingDownPromise = (async () => {
+      await pendingBetUpdateWorker.stop();
+      await closeServer(server);
+      await mongoose.connection.close();
+      await mongoose.disconnect();
+    })();
+
+    try {
+      await shuttingDownPromise;
+    } finally {
+      if (typeof exitCode === "number") {
+        process.exit(exitCode);
+      }
+    }
+  };
+
   process.on("uncaughtException", async function (err) {
     console.log("logging general error", err);
     try {
-      await mongoose.connection.close();
-      await mongoose.disconnect();
-      // await channel.close();
-
-      server.close();
-
-      process.exit(1);
+      await shutDown(1);
     } catch (err) {
       console.log("error inside error", err);
     }
@@ -70,10 +95,7 @@ const startUp = async () => {
   process.on("SIGINT", async () => {
     console.log("Received sigint command");
     try {
-      await mongoose.connection.close();
-      await mongoose.disconnect();
-      server.close();
-      process.exit(0);
+      await shutDown(0);
     } catch (err) {
       console.log("error closing connections", err);
     }
@@ -82,14 +104,18 @@ const startUp = async () => {
   process.on("SIGTERM", async () => {
     console.log("Received sigterm command");
     try {
-      await mongoose.connection.close();
-      await mongoose.disconnect();
-      server.close();
-      process.exit(0);
+      await shutDown(0);
     } catch (err) {
       console.log("Error closing conection", err);
     }
   });
+
+  return { pendingBetUpdateWorker, server, shutDown };
 };
 
-startUp();
+if (process.env.NODE_ENV !== "test") {
+  void startUp().catch((error) => {
+    console.log(error);
+    process.exit(1);
+  });
+}
