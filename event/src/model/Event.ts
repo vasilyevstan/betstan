@@ -1,5 +1,160 @@
-import { EventStatus, EventVisibility } from "@betstan/common";
+import {
+  BettingStatus,
+  EventPhase,
+  EventStatus,
+  EventVisibility,
+  LiveIncidentType,
+  LiveMarketStatus,
+  LiveMarketType,
+  TeamSide,
+} from "@betstan/common";
 import { Schema, model } from "mongoose";
+
+const liveIncidentSchema = new Schema(
+  {
+    id: {
+      type: String,
+      required: false,
+    },
+    relatedIncidentId: {
+      type: String,
+      required: false,
+    },
+    type: {
+      type: String,
+      required: true,
+      enum: Object.values(LiveIncidentType),
+    },
+    side: {
+      type: String,
+      required: false,
+      enum: Object.values(TeamSide),
+    },
+    occurredAt: {
+      type: String,
+      required: false,
+    },
+    minute: {
+      type: Number,
+      required: false,
+    },
+    addedTime: {
+      type: Number,
+      required: false,
+    },
+  },
+  { _id: false }
+);
+
+const liveMarketSelectionSchema = new Schema(
+  {
+    selectionId: {
+      type: String,
+      required: true,
+    },
+    side: {
+      type: String,
+      required: true,
+      enum: Object.values(TeamSide),
+    },
+    odds: {
+      type: Number,
+      required: true,
+    },
+  },
+  { _id: false }
+);
+
+const liveMarketSchema = new Schema(
+  {
+    marketId: {
+      type: String,
+      required: true,
+    },
+    marketType: {
+      type: String,
+      required: true,
+      enum: Object.values(LiveMarketType),
+    },
+    marketVersion: {
+      type: Number,
+      required: true,
+    },
+    quoteVersion: {
+      type: Number,
+      required: true,
+    },
+    quoteValidUntil: {
+      type: String,
+      required: false,
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: Object.values(LiveMarketStatus),
+    },
+    selections: {
+      type: [liveMarketSelectionSchema],
+      required: true,
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+const liveStateSchema = new Schema(
+  {
+    sequence: {
+      type: Number,
+      required: true,
+    },
+    occurredAt: {
+      type: String,
+      required: true,
+    },
+    kickoffAt: {
+      type: String,
+      required: true,
+    },
+    minute: {
+      type: Number,
+      required: true,
+    },
+    addedTime: {
+      type: Number,
+      required: false,
+    },
+    phase: {
+      type: String,
+      required: true,
+      enum: Object.values(EventPhase),
+    },
+    homeScore: {
+      type: Number,
+      required: true,
+    },
+    awayScore: {
+      type: Number,
+      required: true,
+    },
+    bettingStatus: {
+      type: String,
+      required: true,
+      enum: Object.values(BettingStatus),
+    },
+    incidentHistory: {
+      type: [liveIncidentSchema],
+      required: true,
+      default: [],
+    },
+    currentMarkets: {
+      type: [liveMarketSchema],
+      required: true,
+      default: [],
+    },
+  },
+  { _id: false }
+);
 
 const eventSchema = new Schema({
   eventId: {
@@ -95,6 +250,11 @@ const eventSchema = new Schema({
       ],
     }),
   ],
+  live: {
+    type: liveStateSchema,
+    required: false,
+    default: null,
+  },
 });
 
 eventSchema.index({ eventId: 1 }, { unique: true });

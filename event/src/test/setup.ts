@@ -1,5 +1,6 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
+import { liveEventHub } from "../live/LiveEventHub";
 
 jest.mock("@betstan/common", () => {
   const actual = jest.requireActual("@betstan/common");
@@ -17,7 +18,20 @@ jest.mock("@betstan/common", () => {
     public ack = ack;
     public channel = channel;
     constructor(public connection: unknown) {}
-    async init() {}
+
+    get queueName() {
+      return (this as any).serviceName;
+    }
+
+    get queueOptions() {
+      return {};
+    }
+
+    async init() {
+      await channel.assertExchange((this as any).queue, "fanout");
+      await channel.assertQueue(this.queueName, this.queueOptions);
+      channel.bindQueue(this.queueName, (this as any).queue, "");
+    }
   }
 
   class APublisher<T> {
@@ -55,6 +69,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  liveEventHub.reset();
   const collections = await mongoose.connection.db.collections();
 
   for (let collection of collections) {
