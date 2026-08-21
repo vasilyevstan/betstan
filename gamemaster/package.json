@@ -21,7 +21,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@betstan/common": "1.0.54",
+    "@betstan/common": "1.1.0-rc.1",
     "@faker-js/faker": "^8.4.1",
     "mongoose": "^8.0.4",
     "ts-node-dev": "^2.0.0",

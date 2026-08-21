@@ -20,7 +20,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@betstan/common": "1.0.54",
+    "@betstan/common": "1.1.0-rc.1",
     "@types/cookie-session": "^2.0.48",
     "@types/jsonwebtoken": "^9.0.5",
     "cookie-session": "^2.0.0",
