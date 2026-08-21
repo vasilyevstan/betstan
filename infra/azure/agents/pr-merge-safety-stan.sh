@@ -6,13 +6,28 @@ set -euo pipefail
 #   ./infra/azure/agents/pr-merge-safety-stan.sh 41
 #   APPROVED_SHA=<sha> APPROVED_WORKFLOWS=production-build,production-deploy \
 #     ./infra/azure/agents/pr-merge-safety-stan.sh 41
+#   COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh 41
 
 REPO="${REPO:-vasilyevstan/betstan}"
 PR_NUMBER="${1:-${PR:-}}"
+AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
+CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
+BRANCH_POLICY_GUARD="${BRANCH_POLICY_GUARD:-./infra/azure/agents/branch-policy-guard-stan.sh}"
+PR_VALIDATOR="${PR_VALIDATOR:-./infra/azure/agents/pr-validation-stan.sh}"
+WORKFLOW_INVENTORY="${WORKFLOW_INVENTORY:-./infra/azure/agents/production-workflow-inventory-stan.sh}"
+PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
   exit 1
 fi
+[[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+  echo "pull request number must be a positive integer" >&2
+  exit 1
+}
+[[ "$AUTO_APPROVE" == "true" || "$AUTO_APPROVE" == "false" ]] || {
+  echo "COPILOT_CLI_AUTO_APPROVE must be true or false" >&2
+  exit 1
+}
 
 section() {
   printf '\n=== %s ===\n' "$1"
@@ -27,7 +42,7 @@ fail() {
 
 meta_json="$(
   gh pr view "$PR_NUMBER" --repo "$REPO" \
-    --json number,title,state,mergeable,mergeStateStatus,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,url
+    --json number,title,state,mergeable,mergeStateStatus,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,labels,url
 )"
 mergeable="$(python3 - <<'PY' "$meta_json"
 import json,sys
@@ -75,6 +90,12 @@ repo=json.loads(sys.argv[1]).get("headRepository") or {}
 print(repo.get("nameWithOwner",""))
 PY
 )"
+cli_managed="$(python3 - <<'PY' "$meta_json" "$CLI_MANAGED_LABEL"
+import json,sys
+labels = json.loads(sys.argv[1]).get("labels") or []
+print("yes" if any(label.get("name") == sys.argv[2] for label in labels) else "no")
+PY
+)"
 
 section "pr"
 echo "title=$title"
@@ -86,16 +107,60 @@ echo "head_sha=$head_sha"
 echo "head_repository=$head_repository"
 echo "base_ref=$base_ref"
 echo "base_sha=$base_sha"
+echo "cli_managed=$cli_managed"
 
 [[ "$state" == "OPEN" ]] || fail "pull request is not open"
 [[ "$mergeable" == "MERGEABLE" ]] || fail "pull request is not currently mergeable"
+if [[ "$AUTO_APPROVE" == "true" ]]; then
+  [[ "$cli_managed" == "yes" ]] ||
+    fail "automatic approval requires the $CLI_MANAGED_LABEL label"
+  [[ "$head_repository" == "$REPO" ]] ||
+    fail "automatic approval requires a branch in $REPO"
+fi
+
+owner="${REPO%%/*}"
+repository="${REPO#*/}"
+review_threads="$(
+  gh api graphql \
+    -f query='
+      query($owner: String!, $repository: String!, $number: Int!) {
+        repository(owner: $owner, name: $repository) {
+          pullRequest(number: $number) {
+            reviewThreads(first: 100) {
+              pageInfo { hasNextPage }
+              nodes { isResolved }
+            }
+          }
+        }
+      }
+    ' \
+    -f owner="$owner" \
+    -f repository="$repository" \
+    -F number="$PR_NUMBER"
+)"
+python3 - "$review_threads" <<'PY' || fail "pull request has unresolved or unbounded review threads"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+threads = (
+    payload.get("data", {})
+    .get("repository", {})
+    .get("pullRequest", {})
+    .get("reviewThreads", {})
+)
+if threads.get("pageInfo", {}).get("hasNextPage"):
+    raise SystemExit("more than 100 review threads requires manual review")
+if any(not thread.get("isResolved", False) for thread in threads.get("nodes", [])):
+    raise SystemExit("unresolved review thread")
+PY
 
 BASE_REF="$base_ref" HEAD_REF="$head_ref" REPOSITORY="$REPO" \
   HEAD_REPOSITORY="$head_repository" \
-  ./infra/azure/agents/branch-policy-guard-stan.sh || fail "branch policy rejected the pull request"
+  "$BRANCH_POLICY_GUARD" || fail "branch policy rejected the pull request"
 
 REPO="$REPO" EXPECTED_HEAD_SHA="$head_sha" EXPECTED_BASE_SHA="$base_sha" \
-  ./infra/azure/agents/pr-validation-stan.sh "$PR_NUMBER" ||
+  "$PR_VALIDATOR" "$PR_NUMBER" ||
   fail "exact-head-SHA validation still has failed or incomplete jobs"
 
 if [[ "$base_ref" == "master" ]]; then
@@ -108,19 +173,29 @@ if [[ "$base_ref" == "master" ]]; then
   )"
   [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ]] ||
     fail "current master tip is not an ancestor of the promotion head status=$compare_status"
-  [[ "${APPROVED_SHA:-}" == "$head_sha" ]] ||
-    fail "production promotion requires APPROVED_SHA=$head_sha"
+
+  REPO="$REPO" "$PRODUCTION_RUN_EXCLUSIVITY" ||
+    fail "another actionable production-capable workflow is active"
+
   expected_workflows="$(
     REPO="$REPO" PR="$PR_NUMBER" EXPECTED_HEAD_SHA="$head_sha" \
-      ./infra/azure/agents/production-workflow-inventory-stan.sh |
+      "$WORKFLOW_INVENTORY" |
       sed -n 's/^production_workflows=//p'
   )"
-  approved_workflows="$(
-    tr ',' '\n' <<<"${APPROVED_WORKFLOWS:-}" |
-      sed '/^$/d' |
-      LC_ALL=C sort -u |
-      paste -sd, -
-  )"
+  if [[ "$AUTO_APPROVE" == "true" ]]; then
+    approved_sha="$head_sha"
+    approved_workflows="$expected_workflows"
+  else
+    approved_sha="${APPROVED_SHA:-}"
+    approved_workflows="$(
+      tr ',' '\n' <<<"${APPROVED_WORKFLOWS:-}" |
+        sed '/^$/d' |
+        LC_ALL=C sort -u |
+        paste -sd, -
+    )"
+  fi
+  [[ "$approved_sha" == "$head_sha" ]] ||
+    fail "production promotion requires APPROVED_SHA=$head_sha"
   [[ "$approved_workflows" == "$expected_workflows" ]] ||
     fail "production workflow approval mismatch expected=$expected_workflows approved=${approved_workflows:-none}"
 fi
@@ -143,4 +218,5 @@ PY
 
 section "recommendation"
 echo "safe_to_merge=yes"
+echo "approval_mode=$([[ "$AUTO_APPROVE" == "true" ]] && echo copilot-cli || echo human)"
 echo "reason=branch policy, mergeability, exact-SHA validation, and required approval gates passed"
