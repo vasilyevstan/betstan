@@ -232,3 +232,54 @@ test("moderation decline keeps authoritative metadata scoped to each row", () =>
     event.data.affectedRows[1].quoteVersion,
   );
 });
+
+test("live update payload keeps legacy incident and additive incidents history", () => {
+  const event = {
+    data: {
+      eventId: "event-id",
+      sequence: 3,
+      occurredAt: "2026-08-20T17:03:00.000Z",
+      kickoffAt: "2026-08-20T16:00:00.000Z",
+      minute: 63,
+      phase: common.EventPhase.SECOND_HALF,
+      homeScore: 2,
+      awayScore: 1,
+      bettingStatus: common.BettingStatus.OPEN,
+      incident: {
+        id: "incident-3",
+        type: common.LiveIncidentType.GOAL,
+        side: common.TeamSide.HOME,
+        occurredAt: "2026-08-20T17:03:00.000Z",
+        minute: 63,
+      },
+      incidents: [
+        {
+          id: "incident-1",
+          type: common.LiveIncidentType.KICK_OFF,
+          occurredAt: "2026-08-20T16:00:00.000Z",
+          minute: 0,
+        },
+        {
+          id: "incident-2",
+          type: common.LiveIncidentType.YELLOW_CARD,
+          side: common.TeamSide.AWAY,
+          occurredAt: "2026-08-20T17:02:00.000Z",
+          minute: 62,
+        },
+        {
+          id: "incident-3",
+          type: common.LiveIncidentType.GOAL,
+          side: common.TeamSide.HOME,
+          occurredAt: "2026-08-20T17:03:00.000Z",
+          minute: 63,
+        },
+      ],
+      markets: [],
+      settlements: [],
+    },
+  };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(event)), event);
+  assert.equal(event.data.incident.id, "incident-3");
+  assert.equal(event.data.incidents.length, 3);
+});

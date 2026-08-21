@@ -7,6 +7,7 @@ import {
   IEventResultEvent,
   IEventVibibilityEvent,
   ILiveEventUpdateEvent,
+  LiveIncidentType,
   IModerationResultEvent,
   INewEventEvent,
   IPlaceBetEvent,
@@ -164,6 +165,13 @@ const liveUpdate: ILiveEventUpdateEvent = {
     homeScore: 1,
     awayScore: 0,
     bettingStatus: BettingStatus.OPEN,
+    incident: {
+      id: "incident-id",
+      type: LiveIncidentType.GOAL,
+      side: TeamSide.HOME,
+      occurredAt: "2026-08-20T17:00:00.000Z",
+      minute: 60,
+    },
     markets: [
       {
         marketId: "market-id",
@@ -193,6 +201,31 @@ const liveUpdate: ILiveEventUpdateEvent = {
   },
 };
 
+const cumulativeLiveUpdate: ILiveEventUpdateEvent = {
+  data: {
+    ...liveUpdate.data,
+    sequence: 2,
+    occurredAt: "2026-08-20T17:01:00.000Z",
+    minute: 61,
+    incidents: [
+      {
+        id: "incident-id",
+        type: LiveIncidentType.GOAL,
+        side: TeamSide.HOME,
+        occurredAt: "2026-08-20T17:00:00.000Z",
+        minute: 60,
+      },
+      {
+        id: "incident-id-2",
+        type: LiveIncidentType.YELLOW_CARD,
+        side: TeamSide.AWAY,
+        occurredAt: "2026-08-20T17:01:00.000Z",
+        minute: 61,
+      },
+    ],
+  },
+};
+
 oddsSelected.data.betKind = BetKind.LIVE;
 oddsSelected.data.side = TeamSide.HOME;
 placeBet.data.rows[0].betKind = BetKind.LIVE;
@@ -212,4 +245,5 @@ void [
   settleSlip,
   settleSlipRow,
   liveUpdate,
+  cumulativeLiveUpdate,
 ];

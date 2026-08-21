@@ -60,7 +60,14 @@ export interface ILiveEventUpdateEvent extends IEvent {
     homeScore: number;
     awayScore: number;
     bettingStatus: BettingStatus;
+    /**
+     * Legacy single-incident field kept for existing consumers. New publishers
+     * should also provide `incidents` with the complete history through this
+     * sequence so snapshot consumers can rebuild state without replay bursts.
+     */
     incident?: ILiveIncident;
+    /** Complete incident history through `sequence`, ordered oldest -> newest. */
+    incidents?: ILiveIncident[];
     markets: ILiveMarketSnapshot[];
     settlements: ILiveMarketSettlement[];
     eventName?: string;
