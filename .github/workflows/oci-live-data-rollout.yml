@@ -347,6 +347,7 @@ jobs:
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          SSE_REQUIREMENT: deployed-source
         run: |
           ./infra/oci/scripts/baseline-capture-stan.sh
           printf 'BASELINE_SHA256=%s\n' \
@@ -408,6 +409,7 @@ jobs:
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          SSE_REQUIREMENT: deployed-source
         run: ./infra/oci/scripts/baseline-capture-stan.sh
 
       - name: Upload exact sanitized data evidence
