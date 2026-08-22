@@ -1043,7 +1043,7 @@ elif [[ "$url" == *'/api/event' ]]; then
 elif [[ "$url" == *'/api/slip' ]]; then
   body='{}'
 elif [[ "$url" == *'/api/bet/stats' ]]; then
-  body='{}'
+  body='[]'
 elif [[ "$url" == *'/api/bet' ]]; then
   body='{}'
 elif [[ "$url" == *'/api/backoffice' ]]; then
