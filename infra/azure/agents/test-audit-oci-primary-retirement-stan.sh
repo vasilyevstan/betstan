@@ -558,6 +558,32 @@ case "$key" in
       printf '{"data":{"items":[{"display-name":"betstan_images","image-count":9,"layer-count":49,"layers-size-in-bytes":171413487,"is-public":false,"is-immutable":null}]}}\n'
     fi
     ;;
+  artifacts/container/image/list)
+    jq -cn '
+      def services: [
+        "auth", "bet", "backoffice", "client", "event", "gamemaster",
+        "moderation", "resulting", "slip"
+      ];
+      def pad($value; $width):
+        ($value | tostring) as $text
+        | ("0" * ($width - ($text | length))) + $text;
+      {
+        data: {
+          items: [
+            range(0; 9) as $service_index
+            | {
+                "repository-name": "betstan_images",
+                version: (
+                  "oci-\(services[$service_index])-" + pad(1; 40)
+                ),
+                digest: ("sha256:" + pad($service_index + 1; 64)),
+                "lifecycle-state": "AVAILABLE"
+              }
+          ]
+        }
+      }
+    '
+    ;;
   network/internet-gateway/list)
     printf '{"data":[{"lifecycle-state":"AVAILABLE"}]}\n'
     ;;
