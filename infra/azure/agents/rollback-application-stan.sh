@@ -31,7 +31,7 @@ API_CONTRACTS=(
   "/api/event|prematch"
   "/api/slip|object"
   "/api/bet|object"
-  "/api/bet/stats|object"
+  "/api/bet/stats|array"
   "/api/backoffice|array"
 )
 

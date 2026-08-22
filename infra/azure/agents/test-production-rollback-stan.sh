@@ -1073,7 +1073,7 @@ case "$url" in
     ;;
   */api/bet/stats)
     content_type='application/json'
-    body='{}'
+    body='[]'
     ;;
   */api/backoffice)
     content_type='application/json'
