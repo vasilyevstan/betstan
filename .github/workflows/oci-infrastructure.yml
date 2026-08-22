@@ -86,8 +86,6 @@ jobs:
       OCI_REGION: ${{ vars.OCI_REGION }}
       OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
       OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
-      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
-      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
       OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
       PROVENANCE_DIR: artifacts/oci-registry-prune
@@ -102,11 +100,20 @@ jobs:
           echo "$RUNNER_TEMP/oci-registry-prune-home/.local/bin" >> "$GITHUB_PATH"
           mkdir -p \
             "$RUNNER_TEMP/oci-registry-prune-home" \
-            "$RUNNER_TEMP/oci-registry-prune-work" \
-            "$PROVENANCE_DIR"
+            "$RUNNER_TEMP/oci-registry-prune-work"
           chmod 700 \
             "$RUNNER_TEMP/oci-registry-prune-home" \
             "$RUNNER_TEMP/oci-registry-prune-work"
+
+      - name: Checkout exact current master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Initialize registry prune evidence
+        run: |
+          mkdir -p "$PROVENANCE_DIR"
           printf '%s\n' \
             "source_sha=$SOURCE_SHA" \
             "candidate_build_run_id=$CANDIDATE_BUILD_RUN_ID" \
@@ -119,12 +126,6 @@ jobs:
             "workflow_run_id=$GITHUB_RUN_ID" \
             "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
             > "$PROVENANCE_DIR/dispatch.env"
-
-      - name: Checkout exact current master
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ inputs.approved_sha }}
-          fetch-depth: 0
 
       - name: Validate exact registry prune request
         run: |

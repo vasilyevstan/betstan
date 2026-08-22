@@ -20,8 +20,7 @@ EXPECTED_IMAGES_BEFORE=36
 oci_require_cli_version
 oci_require_command jq
 oci_require_vars \
-  OCI_COMPARTMENT_OCID OCI_IMAGE_PREFIX OCI_REGISTRY_HOST \
-  OCI_REGISTRY_NAMESPACE OCI_REGISTRY_MAX_BYTES
+  OCI_COMPARTMENT_OCID OCI_IMAGE_PREFIX OCI_REGISTRY_MAX_BYTES
 oci_require_ocid OCI_COMPARTMENT_OCID
 
 [[ "$TARGET_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
@@ -49,7 +48,38 @@ cleanup() {
 trap cleanup EXIT
 
 repository="${OCI_IMAGE_PREFIX}_images"
-provenance_repository="$OCI_REGISTRY_HOST/$OCI_REGISTRY_NAMESPACE/$repository"
+
+read_provenance_repository() {
+  local source_file="$1"
+
+  awk -F '\t' -v repository="$repository" '
+    function valid_repository(value, suffix) {
+      suffix = "/" repository
+      return value !~ /[[:space:]]/ && length(value) > length(suffix) &&
+        substr(value, length(value) - length(suffix) + 1) == suffix
+    }
+    NF != 5 || !valid_repository($2) {
+      exit 1
+    }
+    {
+      repositories[$2] = 1
+    }
+    END {
+      for (value in repositories) {
+        count++
+        selected = value
+      }
+      if (count != 1) {
+        exit 1
+      }
+      print selected
+    }
+  ' "$source_file"
+}
+
+provenance_repository="$(
+  read_provenance_repository "$TARGET_IMAGES_FILE"
+)" || oci_die "target provenance does not identify one exact registry repository"
 
 normalize_provenance() {
   local source_file="$1"
