@@ -9,17 +9,53 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type PROVISION OCI ZERO COST
+        description: Type the exact confirmation required by the selected phase
         required: true
         type: string
       phase:
-        description: Prepare free networking or finalize an acquired k3s instance
+        description: Prepare/finalize zero-cost infrastructure or prune one obsolete image generation
         required: true
         default: prepare
         type: choice
         options:
           - prepare
           - finalize
+          - prune-registry
+      candidate_build_run_id:
+        description: Current-master OCI build run protected during registry pruning
+        required: false
+        default: ""
+        type: string
+      obsolete_sha:
+        description: Obsolete source SHA whose complete image generation may be pruned
+        required: false
+        default: ""
+        type: string
+      obsolete_build_run_id:
+        description: First-attempt OCI build provenance for the obsolete generation
+        required: false
+        default: ""
+        type: string
+      deployed_sha:
+        description: Currently deployed source SHA protected during registry pruning
+        required: false
+        default: ""
+        type: string
+      deployed_run_id:
+        description: Successful OCI deployment provenance for the deployed SHA
+        required: false
+        default: ""
+        type: string
+      fallback_sha:
+        description: Compatible fallback source SHA protected during registry pruning
+        required: false
+        default: ""
+        type: string
+      fallback_build_run_id:
+        description: First-attempt OCI build provenance for the fallback SHA
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -30,8 +66,285 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prune-registry:
+    if: github.run_attempt == 1 && inputs.phase == 'prune-registry'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-infrastructure
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      CANDIDATE_BUILD_RUN_ID: ${{ inputs.candidate_build_run_id }}
+      OBSOLETE_SHA: ${{ inputs.obsolete_sha }}
+      OBSOLETE_BUILD_RUN_ID: ${{ inputs.obsolete_build_run_id }}
+      DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+      DEPLOYED_RUN_ID: ${{ inputs.deployed_run_id }}
+      FALLBACK_SHA: ${{ inputs.fallback_sha }}
+      FALLBACK_BUILD_RUN_ID: ${{ inputs.fallback_build_run_id }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
+      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
+      PROVENANCE_DIR: artifacts/oci-registry-prune
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-registry-prune-home"
+            echo "WORK_DIR=$RUNNER_TEMP/oci-registry-prune-work"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-registry-prune-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-registry-prune-home" \
+            "$RUNNER_TEMP/oci-registry-prune-work" \
+            "$PROVENANCE_DIR"
+          chmod 700 \
+            "$RUNNER_TEMP/oci-registry-prune-home" \
+            "$RUNNER_TEMP/oci-registry-prune-work"
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "candidate_build_run_id=$CANDIDATE_BUILD_RUN_ID" \
+            "obsolete_sha=$OBSOLETE_SHA" \
+            "obsolete_build_run_id=$OBSOLETE_BUILD_RUN_ID" \
+            "deployed_sha=$DEPLOYED_SHA" \
+            "deployed_run_id=$DEPLOYED_RUN_ID" \
+            "fallback_sha=$FALLBACK_SHA" \
+            "fallback_build_run_id=$FALLBACK_BUILD_RUN_ID" \
+            "workflow_run_id=$GITHUB_RUN_ID" \
+            "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            > "$PROVENANCE_DIR/dispatch.env"
+
+      - name: Checkout exact current master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate exact registry prune request
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$CONFIRMATION" = "PRUNE OBSOLETE OCI IMAGE GENERATION" ]
+          for sha in \
+            "$SOURCE_SHA" "$OBSOLETE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            git cat-file -e "${sha}^{commit}"
+          done
+          for run_id in \
+            "$CANDIDATE_BUILD_RUN_ID" "$OBSOLETE_BUILD_RUN_ID" \
+            "$DEPLOYED_RUN_ID" "$FALLBACK_BUILD_RUN_ID"; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          done
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$OBSOLETE_SHA" != "$SOURCE_SHA" ]
+          [ "$OBSOLETE_SHA" != "$DEPLOYED_SHA" ]
+          [ "$OBSOLETE_SHA" != "$FALLBACK_SHA" ]
+          [ "$DEPLOYED_SHA" != "$FALLBACK_SHA" ]
+          for ancestor in "$OBSOLETE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
+            git merge-base --is-ancestor "$ancestor" "$SOURCE_SHA"
+          done
+
+      - name: Download and validate protected image provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          validate_run() {
+            local workflow_file="$1"
+            local run_id="$2"
+            local event="$3"
+            local expected_sha="$4"
+            local workflow_id
+            local run_json
+            workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" \
+                --jq '.id'
+            )"
+            run_json="$(
+              gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1"
+            )"
+            jq -e \
+              --argjson workflow_id "$workflow_id" \
+              --arg workflow_path ".github/workflows/$workflow_file" \
+              --arg event "$event" \
+              --arg sha "$expected_sha" \
+              --arg repository "$REPOSITORY" '
+                .workflow_id == $workflow_id and
+                .path == $workflow_path and
+                .event == $event and
+                .head_sha == $sha and
+                .head_branch == "master" and
+                .head_repository.full_name == $repository and
+                .status == "completed" and
+                .conclusion == "success" and
+                .run_attempt == 1
+              ' <<<"$run_json" >/dev/null
+          }
+          download_artifact() {
+            local run_id="$1"
+            local artifact_name="$2"
+            local destination="$3"
+            local artifact_count
+            artifact_count="$(
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+            mkdir -p "$destination"
+            gh run download "$run_id" \
+              --name "$artifact_name" \
+              --dir "$destination"
+          }
+
+          validate_run \
+            oci-production-build.yml \
+            "$CANDIDATE_BUILD_RUN_ID" workflow_run "$SOURCE_SHA"
+          validate_run \
+            oci-production-build.yml \
+            "$OBSOLETE_BUILD_RUN_ID" workflow_run "$OBSOLETE_SHA"
+          validate_run \
+            oci-production-deploy.yml \
+            "$DEPLOYED_RUN_ID" workflow_dispatch "$DEPLOYED_SHA"
+          validate_run \
+            oci-production-build.yml \
+            "$FALLBACK_BUILD_RUN_ID" workflow_run "$FALLBACK_SHA"
+
+          download_artifact \
+            "$CANDIDATE_BUILD_RUN_ID" \
+            "oci-image-provenance-${SOURCE_SHA}-${CANDIDATE_BUILD_RUN_ID}-1" \
+            "$WORK_DIR/candidate"
+          download_artifact \
+            "$OBSOLETE_BUILD_RUN_ID" \
+            "oci-image-provenance-${OBSOLETE_SHA}-${OBSOLETE_BUILD_RUN_ID}-1" \
+            "$WORK_DIR/obsolete"
+          download_artifact \
+            "$DEPLOYED_RUN_ID" \
+            "oci-deploy-provenance-${DEPLOYED_RUN_ID}-1" \
+            "$WORK_DIR/deployed"
+          download_artifact \
+            "$FALLBACK_BUILD_RUN_ID" \
+            "oci-image-provenance-${FALLBACK_SHA}-${FALLBACK_BUILD_RUN_ID}-1" \
+            "$WORK_DIR/fallback"
+
+          for pair in \
+            "candidate:$SOURCE_SHA:$CANDIDATE_BUILD_RUN_ID" \
+            "obsolete:$OBSOLETE_SHA:$OBSOLETE_BUILD_RUN_ID" \
+            "fallback:$FALLBACK_SHA:$FALLBACK_BUILD_RUN_ID"; do
+            IFS=: read -r directory expected_sha expected_run_id <<<"$pair"
+            grep -Fxq "source_sha=$expected_sha" \
+              "$WORK_DIR/$directory/build-chain.txt"
+            grep -Fxq "build_run_id=$expected_run_id" \
+              "$WORK_DIR/$directory/build-chain.txt"
+            grep -Fxq "build_run_attempt=1" \
+              "$WORK_DIR/$directory/build-chain.txt"
+            test -s "$WORK_DIR/$directory/images.tsv"
+          done
+          for pair in "deployed:$DEPLOYED_SHA:$DEPLOYED_RUN_ID"; do
+            IFS=: read -r directory expected_sha expected_run_id <<<"$pair"
+            grep -Fxq "source_sha=$expected_sha" \
+              "$WORK_DIR/$directory/provenance.txt"
+            grep -Fxq "deployment_run_id=$expected_run_id" \
+              "$WORK_DIR/$directory/provenance.txt"
+            grep -Fxq "deployment_run_attempt=1" \
+              "$WORK_DIR/$directory/provenance.txt"
+            test -s "$WORK_DIR/$directory/images.tsv"
+          done
+
+          cp "$WORK_DIR/obsolete/images.tsv" "$PROVENANCE_DIR/obsolete.tsv"
+          cat \
+            "$WORK_DIR/candidate/images.tsv" \
+            "$WORK_DIR/deployed/images.tsv" \
+            "$WORK_DIR/fallback/images.tsv" \
+            > "$PROVENANCE_DIR/protected.tsv"
+
+      - name: Install pinned OCI CLI and verify identity
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/install-cli.sh
+          home_region="$(
+            oci iam region-subscription list \
+              --tenancy-id "$OCI_CLI_TENANCY" \
+              --query "$OCI_HOME_REGION_QUERY" \
+              --raw-output
+          )"
+          [ "$home_region" = "$OCI_CLI_REGION" ]
+
+      - name: Prune only the obsolete complete generation
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          TARGET_IMAGES_FILE: artifacts/oci-registry-prune/obsolete.tsv
+          PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/protected.tsv
+          TARGET_SOURCE_SHA: ${{ inputs.obsolete_sha }}
+          CURRENT_SOURCE_SHA: ${{ inputs.approved_sha }}
+          OUTPUT_DIR: artifacts/oci-registry-prune
+        run: ./infra/oci/scripts/prune-registry-generation.sh
+
+      - name: Record registry prune provenance
+        run: |
+          set -euo pipefail
+          test -s "$PROVENANCE_DIR/after-summary.json"
+          jq -e \
+            --arg obsolete_sha "$OBSOLETE_SHA" \
+            --arg source_sha "$SOURCE_SHA" '
+              .target_source_sha == $obsolete_sha and
+              .current_source_sha == $source_sha and
+              .terminal_status == "PRUNED" and
+              .unique_images == 27
+            ' "$PROVENANCE_DIR/after-summary.json" >/dev/null
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "candidate_build_run_id=$CANDIDATE_BUILD_RUN_ID" \
+            "obsolete_sha=$OBSOLETE_SHA" \
+            "obsolete_build_run_id=$OBSOLETE_BUILD_RUN_ID" \
+            "deployed_sha=$DEPLOYED_SHA" \
+            "deployed_run_id=$DEPLOYED_RUN_ID" \
+            "fallback_sha=$FALLBACK_SHA" \
+            "fallback_build_run_id=$FALLBACK_BUILD_RUN_ID" \
+            "workflow_run_id=$GITHUB_RUN_ID" \
+            "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "terminal_status=PRUNED" \
+            > "$PROVENANCE_DIR/provenance.env"
+
+      - name: Upload registry prune evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-registry-prune-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-registry-prune
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$HOME" "$WORK_DIR"
+
   provision:
-    if: github.run_attempt == 1
+    if: github.run_attempt == 1 && inputs.phase != 'prune-registry'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     environment:

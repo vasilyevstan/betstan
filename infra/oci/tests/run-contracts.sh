@@ -14,6 +14,7 @@ suites=(
   "$TESTS_DIR/test-capacity-contract.sh"
   "$TESTS_DIR/test-image-reuse-contract.sh"
   "$TESTS_DIR/test-k3s-runtime-contract.sh"
+  "$TESTS_DIR/test-registry-prune-contract.sh"
   "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"

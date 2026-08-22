@@ -510,6 +510,7 @@ grep -Fq 'oci_(die|log|require_command|require_vars|prepare_private_dir)' \
 grep -Fq 'untracked helper dependency' "$compare_image_inputs" ||
   fail "OCI image input comparison does not enforce a closed helper dependency set"
 inventory="$OCI_DIR/scripts/inventory.sh"
+registry_pruner="$OCI_DIR/scripts/prune-registry-generation.sh"
 grep -Fq '[$prefix + "_images"]' "$inventory" ||
   fail "OCI inventory must allow only the shared image repository"
 grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=9' "$inventory" ||
@@ -526,6 +527,20 @@ grep -Fq 'incomplete_tag_generation_count' "$inventory" ||
   fail "OCI inventory must reject incomplete service tag generations"
 grep -Fq 'digest_service_conflict_count' "$inventory" ||
   fail "OCI inventory must reject cross-service digest identities"
+grep -Fq 'EXPECTED_IMAGES_BEFORE=36' "$registry_pruner" ||
+  fail "registry pruning must require exactly four complete generations"
+grep -Fq 'EXPECTED_PROTECTED_IMAGES=27' "$registry_pruner" ||
+  fail "registry pruning must retain exactly three complete generations"
+grep -Fq 'obsolete generation overlaps a protected generation' "$registry_pruner" ||
+  fail "registry pruning does not reject protected digest overlap"
+grep -Fq 'registry contains an unknown, missing, or unexpected image generation' \
+  "$registry_pruner" ||
+  fail "registry pruning does not fail closed on unknown images"
+grep -Fq 'OCI registry pruning did not reach the exact protected digest set' \
+  "$registry_pruner" ||
+  fail "registry pruning does not wait for asynchronous deletion"
+grep -Fq '.layers_size_bytes <= $max_bytes' "$registry_pruner" ||
+  fail "registry pruning does not wait for bounded registry accounting"
 grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_images" ||
   fail "OCI application boot verification must run the ARM64 images"
 if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then
@@ -693,6 +708,14 @@ migration_post_cloud_credentials="$(
   fail "post-commit browser validation receives cloud credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
+grep -Fq -- '- prune-registry' "$infra_workflow"
+grep -Fq 'PRUNE OBSOLETE OCI IMAGE GENERATION' "$infra_workflow"
+grep -Fq 'prune-registry-generation.sh' "$infra_workflow"
+grep -Fq 'oci-image-provenance-${OBSOLETE_SHA}-${OBSOLETE_BUILD_RUN_ID}-1' \
+  "$infra_workflow"
+grep -Fq 'oci-image-provenance-${FALLBACK_SHA}-${FALLBACK_BUILD_RUN_ID}-1' \
+  "$infra_workflow"
+grep -Fq 'oci-deploy-provenance-${DEPLOYED_RUN_ID}-1' "$infra_workflow"
 grep -Fq 'name: oci-migration' "$data_workflow"
 grep -Fq 'DRY RUN LIVE DATA EXACT SHA' "$data_workflow"
 grep -Fq 'APPLY LIVE BACKFILLS EXACT SHA' "$data_workflow"
@@ -907,6 +930,7 @@ expected_syntax_targets = [
   "infra/oci/tests/test-live-data-maintenance-stan.sh",
   "infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "infra/oci/tests/test-live-betting-readiness-stan.sh",
+  "infra/oci/tests/test-registry-prune-contract.sh",
   "infra/oci/tests/rollback-live-readiness-contract.sh",
   "infra/oci/tests/rollback-contract.sh",
 ]
@@ -921,12 +945,14 @@ expected_exec_targets = [
   "./infra/oci/tests/test-live-data-maintenance-stan.sh",
   "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "./infra/oci/tests/test-live-betting-readiness-stan.sh",
+  "./infra/oci/tests/test-registry-prune-contract.sh",
   "./infra/oci/tests/rollback-live-readiness-contract.sh",
   "./infra/oci/tests/rollback-contract.sh",
 ]
 expected_yaml_targets = [
   ".github/workflows/production-build.yml",
   ".github/workflows/production-deploy.yml",
+  ".github/workflows/oci-infrastructure.yml",
   ".github/workflows/oci-live-data-rollout.yml",
   ".github/workflows/oci-production-deploy.yml",
 ]
@@ -1270,6 +1296,7 @@ if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
   "$OCI_DIR/tests/test-capacity-contract.sh"
   "$OCI_DIR/tests/test-image-reuse-contract.sh"
   "$OCI_DIR/tests/test-k3s-runtime-contract.sh"
+  "$OCI_DIR/tests/test-registry-prune-contract.sh"
   "$OCI_DIR/tests/test-migration-recovery-contract.sh"
   "$OCI_DIR/tests/test-mongo-upgrade.sh"
   "$OCI_DIR/agents/test-health-contract-stan.sh"
