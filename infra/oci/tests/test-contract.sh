@@ -536,6 +536,8 @@ grep -Fq 'obsolete generation overlaps a protected generation' "$registry_pruner
 grep -Fq 'registry contains an unknown, missing, or unexpected image generation' \
   "$registry_pruner" ||
   fail "registry pruning does not fail closed on unknown images"
+grep -Fq 'read_provenance_repository "$TARGET_IMAGES_FILE"' "$registry_pruner" ||
+  fail "registry pruning does not derive one exact provenance repository"
 grep -Fq 'OCI registry pruning did not reach the exact protected digest set' \
   "$registry_pruner" ||
   fail "registry pruning does not wait for asynchronous deletion"
@@ -716,6 +718,15 @@ grep -Fq 'oci-image-provenance-${OBSOLETE_SHA}-${OBSOLETE_BUILD_RUN_ID}-1' \
 grep -Fq 'oci-image-provenance-${FALLBACK_SHA}-${FALLBACK_BUILD_RUN_ID}-1' \
   "$infra_workflow"
 grep -Fq 'oci-deploy-provenance-${DEPLOYED_RUN_ID}-1' "$infra_workflow"
+registry_checkout_line="$(
+  grep -n -m1 'Checkout exact current master' "$infra_workflow" | cut -d: -f1
+)"
+registry_evidence_line="$(
+  grep -n -m1 'Initialize registry prune evidence' "$infra_workflow" | cut -d: -f1
+)"
+[[ -n "$registry_checkout_line" && -n "$registry_evidence_line" &&
+    "$registry_checkout_line" -lt "$registry_evidence_line" ]] ||
+  fail "registry prune evidence is initialized before checkout cleanup"
 grep -Fq 'name: oci-migration' "$data_workflow"
 grep -Fq 'DRY RUN LIVE DATA EXACT SHA' "$data_workflow"
 grep -Fq 'APPLY LIVE BACKFILLS EXACT SHA' "$data_workflow"
