@@ -145,6 +145,15 @@ for queue_probe in \
     "$queue_probe" ||
     fail "RabbitMQ queue probe does not suppress non-tabular CLI output: $queue_probe"
 done
+for api_contract_probe in \
+  "$OCI_DIR/scripts/baseline-capture-stan.sh" \
+  "$OCI_DIR/scripts/rollback-readiness-stan.sh" \
+  "$OCI_DIR/scripts/rollback-application-stan.sh" \
+  "$ROOT_DIR/infra/azure/agents/baseline-capture-stan.sh" \
+  "$ROOT_DIR/infra/azure/agents/rollback-application-stan.sh"; do
+  grep -Fq '"/api/bet/stats|array"' "$api_contract_probe" ||
+    fail "bet stats rollback contract is not array-shaped: $api_contract_probe"
+done
 redacted="$(
   printf '%s\n' \
     'Authorization: Bearer header-secret' \
