@@ -15,6 +15,8 @@ OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-https://www.betstan.xyz}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-20}"
 SSE_TIMEOUT="${SSE_TIMEOUT:-5}"
+SSE_REQUIREMENT="${SSE_REQUIREMENT:-required}"
+SSE_REQUIRED=true
 BASELINE_RETENTION_DAYS="${BASELINE_RETENTION_DAYS:-30}"
 RABBIT_SELECTOR="${RABBIT_SELECTOR:-app=gaming-rabbitmq}"
 MIGRATION_STATE_CONFIGMAP="${MIGRATION_STATE_CONFIGMAP:-betstan-oci-migration-journal}"
@@ -184,16 +186,21 @@ capture_sse() {
     "$status" \
     "$duration_seconds" \
     "$SSE_TIMEOUT"
-  content_type="$(
-    live_betting_validate_sse_connectivity \
-      "$headers_file" \
-      "$body_file" \
-      "$curl_status" \
-      "$status" \
-      "$duration_seconds" \
-      "$SSE_TIMEOUT" \
-      "${base_url}${SSE_PATH}"
-  )" || oci_die "SSE connectivity contract failed for ${base_url}${SSE_PATH}"
+  if [[ "$SSE_REQUIRED" == "false" && "$curl_status" == "0" &&
+      ( "$status" == "404" || "$status" == "502" ) ]]; then
+    content_type="legacy-absent"
+  else
+    content_type="$(
+      live_betting_validate_sse_connectivity \
+        "$headers_file" \
+        "$body_file" \
+        "$curl_status" \
+        "$status" \
+        "$duration_seconds" \
+        "$SSE_TIMEOUT" \
+        "${base_url}${SSE_PATH}"
+    )" || oci_die "SSE connectivity contract failed for ${base_url}${SSE_PATH}"
+  fi
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$label" "$status" "$effective_url" "$content_type" "$(sha256_file "$body_file")" \
     >>"$OUTPUT_DIR/sse.tsv"
@@ -329,6 +336,8 @@ validate_positive_int "$RUN_LOOKBACK" || oci_die "RUN_LOOKBACK must be positive"
 [[ "$OCI_PUBLIC_URL" == https://* ]] || oci_die "OCI_PUBLIC_URL must be https://"
 [[ "$OCI_REDIRECT_URL" == https://* ]] || oci_die "OCI_REDIRECT_URL must be https://"
 [[ "$OCI_DIAGNOSTIC_URL" == https://* ]] || oci_die "OCI_DIAGNOSTIC_URL must be https://"
+[[ "$SSE_REQUIREMENT" == "required" || "$SSE_REQUIREMENT" == "deployed-source" ]] ||
+  oci_die "SSE_REQUIREMENT must be required or deployed-source"
 
 : >"$OUTPUT_DIR/live-images.tsv"
 : >"$OUTPUT_DIR/deployments.tsv"
@@ -461,6 +470,17 @@ done <"$WORK_DIR/build-candidates.txt"
 
 [[ -n "$matched_build_run_id" ]] || oci_die "unable to find trusted OCI build provenance for ${matched_source_sha}"
 
+if [[ "$SSE_REQUIREMENT" == "deployed-source" ]]; then
+  git cat-file -e "${matched_source_sha}^{commit}" ||
+    oci_die "trusted deployed source commit is unavailable"
+  if git cat-file -e \
+      "${matched_source_sha}:event/src/route/EventLiveStream.ts"; then
+    SSE_REQUIRED=true
+  else
+    SSE_REQUIRED=false
+  fi
+fi
+
 : >"$OUTPUT_DIR/pod-images.tsv"
 while IFS=$'\t' read -r service _repository _image_ref _digest platform_digest; do
   pods_json="$WORK_DIR/${service}-pods.json"
@@ -536,6 +556,8 @@ public_url=$OCI_PUBLIC_URL
 redirect_url=$OCI_REDIRECT_URL
 diagnostic_url=$OCI_DIAGNOSTIC_URL
 sse_path=$SSE_PATH
+sse_requirement=$SSE_REQUIREMENT
+sse_required=$SSE_REQUIRED
 database_restore=disabled
 EOF2
 
