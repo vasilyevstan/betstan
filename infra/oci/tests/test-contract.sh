@@ -494,8 +494,18 @@ grep -Fq 'untracked helper dependency' "$compare_image_inputs" ||
 inventory="$OCI_DIR/scripts/inventory.sh"
 grep -Fq '[$prefix + "_images"]' "$inventory" ||
   fail "OCI inventory must allow only the shared image repository"
-grep -Fq 'select(.image_count != 9)' "$inventory" ||
-  fail "OCI inventory must require all nine exact application images"
+grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=9' "$inventory" ||
+  fail "OCI inventory must require complete nine-image generations"
+grep -Fq 'REGISTRY_MAX_GENERATIONS=3' "$inventory" ||
+  fail "OCI inventory must retain at most two rollback generations"
+grep -Fq '(.image_count % $registry_images_per_generation) != 0' "$inventory" ||
+  fail "OCI inventory must reject partial image generations"
+grep -Fq 'oci artifacts container image list' "$inventory" ||
+  fail "OCI inventory must inspect exact image tags and digests"
+grep -Fq 'incomplete_tag_generation_count' "$inventory" ||
+  fail "OCI inventory must reject incomplete service tag generations"
+grep -Fq 'digest_service_conflict_count' "$inventory" ||
+  fail "OCI inventory must reject cross-service digest identities"
 grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_images" ||
   fail "OCI application boot verification must run the ARM64 images"
 if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then

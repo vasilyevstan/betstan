@@ -8,6 +8,12 @@ source "$SCRIPT_DIR/lib.sh"
 INVENTORY_MODE="${INVENTORY_MODE:-${1:-preflight}}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
 OCI_RUNTIME_MODE="$(oci_runtime_mode)"
+REGISTRY_IMAGES_PER_GENERATION=9
+REGISTRY_MAX_GENERATIONS=3
+REGISTRY_SERVICES_JSON='[
+  "auth", "bet", "backoffice", "client", "event", "gamemaster",
+  "moderation", "resulting", "slip"
+]'
 [[ "$INVENTORY_MODE" == "preflight" || "$INVENTORY_MODE" == "complete" ]] ||
   oci_die "INVENTORY_MODE must be preflight or complete"
 oci_require_cli_version
@@ -39,6 +45,12 @@ public_ips="$(
 )"
 bastions="$(oci bastion bastion list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 repositories="$(oci artifacts container repository list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
+images="$(
+  oci artifacts container image list \
+    --compartment-id "$OCI_COMPARTMENT_OCID" \
+    --repository-name "${OCI_IMAGE_PREFIX}_images" \
+    --all
+)"
 buckets="$(oci os bucket list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 clusters="$(oci_normalize_list_json "$clusters")"
 node_pools="$(oci_normalize_list_json "$node_pools")"
@@ -53,6 +65,7 @@ service_gateways="$(oci_normalize_list_json "$service_gateways")"
 public_ips="$(oci_normalize_list_json "$public_ips")"
 bastions="$(oci_normalize_list_json "$bastions")"
 repositories="$(oci_normalize_list_json "$repositories" items)"
+images="$(oci_normalize_list_json "$images" items)"
 buckets="$(oci_normalize_list_json "$buckets")"
 expected_repositories="$(
   jq -cn --arg prefix "$OCI_IMAGE_PREFIX" '[$prefix + "_images"]'
@@ -73,8 +86,13 @@ inventory="$(
     --argjson public_ips "$public_ips" \
     --argjson bastions "$bastions" \
     --argjson repositories "$repositories" \
+    --argjson images "$images" \
     --argjson buckets "$buckets" \
     --argjson expected_repositories "$expected_repositories" \
+    --argjson registry_images_per_generation "$REGISTRY_IMAGES_PER_GENERATION" \
+    --argjson registry_max_generations "$REGISTRY_MAX_GENERATIONS" \
+    --argjson registry_services "$REGISTRY_SERVICES_JSON" \
+    --arg expected_repository "${OCI_IMAGE_PREFIX}_images" \
     --arg mode "$INVENTORY_MODE" \
     --arg runtime_mode "$OCI_RUNTIME_MODE" \
     --argjson expected_cost "$OCI_EXPECTED_MONTHLY_COST" '
@@ -219,6 +237,72 @@ inventory="$(
           [$repositories.data.items[]? | (."layers-size-in-bytes" | type)] |
           all(. == "number")
         ),
+        registry_image_analysis: (
+          [
+            $images.data.items[]?
+            | . as $image
+            | (
+                (
+                  (.version // "")
+                  | try capture(
+                      "^oci-(?<service>auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-(?<source_sha>[0-9a-f]{40})$"
+                    ) catch null
+                ) // null
+              ) as $tag
+            | {
+                valid: (
+                  $tag != null and
+                  ($image.digest // "" | test("^sha256:[0-9a-f]{64}$")) and
+                  $image."repository-name" == $expected_repository and
+                  $image."lifecycle-state" == "AVAILABLE"
+                ),
+                service: ($tag.service // ""),
+                source_sha: ($tag.source_sha // ""),
+                digest: ($image.digest // "")
+              }
+          ] as $rows
+          | ($rows | map(select(.valid))) as $valid_rows
+          | ($valid_rows | group_by(.source_sha)) as $tag_generations
+          | ($valid_rows | unique_by(.digest)) as $unique_images
+          | {
+              listed_tag_count: ($rows | length),
+              valid_tag_count: ($valid_rows | length),
+              tag_generation_count: ($tag_generations | length),
+              incomplete_tag_generation_count: ([
+                $tag_generations[]
+                | select(
+                    length != $registry_images_per_generation or
+                    ([.[].service] | unique | sort) !=
+                      ($registry_services | sort) or
+                    ([.[].digest] | unique | length) !=
+                      $registry_images_per_generation
+                  )
+              ] | length),
+              unique_image_count: ($unique_images | length),
+              unique_generation_count: ([
+                $tag_generations[]
+                | sort_by(.service)
+                | map(.service + "=" + .digest)
+                | join("|")
+              ] | unique | length),
+              digest_service_conflict_count: ([
+                ($valid_rows | group_by(.digest))[]
+                | select(([.[].service] | unique | length) != 1)
+              ] | length),
+              unique_service_distribution_valid: (
+                ($unique_images | length) > 0 and
+                ([$unique_images[].service] | unique | sort) ==
+                  ($registry_services | sort) and
+                ([
+                  ($unique_images | group_by(.service))[] | length
+                ] | unique) == [
+                  (($unique_images | length) / $registry_images_per_generation)
+                ]
+              )
+            }
+        ),
+        registry_images_per_generation: $registry_images_per_generation,
+        registry_max_generations: $registry_max_generations,
         expected_registry_repositories: $expected_repositories,
         object_storage_buckets: [
           $buckets.data[]? | {name, storage_tier: ."storage-tier"}
@@ -230,7 +314,9 @@ inventory="$(
 jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
   --argjson lb_min "$OCI_LB_MIN_MBPS" --argjson lb_max "$OCI_LB_MAX_MBPS" \
   --argjson boot_vpus "$OCI_BOOT_VOLUME_VPUS_PER_GB" \
-  --argjson registry_max "$OCI_REGISTRY_MAX_BYTES" '
+  --argjson registry_max "$OCI_REGISTRY_MAX_BYTES" \
+  --argjson registry_images_per_generation "$REGISTRY_IMAGES_PER_GENERATION" \
+  --argjson registry_max_generations "$REGISTRY_MAX_GENERATIONS" '
     .expected_monthly_cost == 0 and
     .nat_gateway_count == 0 and
     .service_gateway_count == 0 and
@@ -266,7 +352,21 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
     .registry_layers_size_bytes <= $registry_max and
     ([.registry_repositories[].name] | sort) ==
       (.expected_registry_repositories | sort) and
-    ([.registry_repositories[] | select(.image_count != 9)] | length) == 0 and
+    ([.registry_repositories[] | select(
+      .image_count < $registry_images_per_generation or
+      .image_count > ($registry_images_per_generation * $registry_max_generations) or
+      (.image_count % $registry_images_per_generation) != 0
+    )] | length) == 0 and
+    .registry_image_analysis.listed_tag_count ==
+      .registry_image_analysis.valid_tag_count and
+    .registry_image_analysis.incomplete_tag_generation_count == 0 and
+    .registry_image_analysis.digest_service_conflict_count == 0 and
+    .registry_image_analysis.unique_service_distribution_valid == true and
+    .registry_image_analysis.unique_image_count ==
+      ([.registry_repositories[].image_count] | add // 0) and
+    .registry_image_analysis.unique_generation_count ==
+      (.registry_image_analysis.unique_image_count /
+       $registry_images_per_generation) and
     ([.registry_repositories[] | select(
       .public != false or (.immutable != true and .immutable != null)
     )] | length) == 0 and

@@ -29,7 +29,10 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   `OCI_LB_MAX_MBPS=10`, and `OCI_EXPECTED_MONTHLY_COST=0` are immutable
   Free Tier gates.
 - OCIR repository layer storage must remain at or below
-  `OCI_REGISTRY_MAX_BYTES=500000000`.
+  `OCI_REGISTRY_MAX_BYTES=500000000`. The inventory accepts only one to three
+  complete nine-image generations: the exact candidate and up to two retained
+  rollback generations. It verifies complete service tag sets and unique
+  service/digest mappings; partial or fourth generations fail closed.
 - Frankfurt OCIR does not currently support repository-level immutability.
   One private `${OCI_IMAGE_PREFIX}_images` repository is precreated so the
   eight backend images share their identical Node layers instead of charging
