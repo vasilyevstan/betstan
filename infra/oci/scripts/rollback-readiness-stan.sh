@@ -300,7 +300,7 @@ if [[ -z "$rabbit_pod" ]]; then
 else
   queue_raw="$WORK_DIR/queues.raw"
   kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
-    rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers >"$queue_raw" ||
+    rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers >"$queue_raw" ||
     failures_file_append 'rabbitmq: unable to read queue state'
   if [[ -s "$queue_raw" ]]; then
     if oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queue-state.tsv"; then
