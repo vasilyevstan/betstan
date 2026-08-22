@@ -14,6 +14,8 @@ OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-https://betstan.xyz}"
 OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-https://www.betstan.xyz}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-20}"
+HTTP_ATTEMPTS="${HTTP_ATTEMPTS:-4}"
+HTTP_RETRY_SECONDS="${HTTP_RETRY_SECONDS:-5}"
 SSE_TIMEOUT="${SSE_TIMEOUT:-5}"
 SSE_REQUIREMENT="${SSE_REQUIREMENT:-required}"
 SSE_REQUIRED=true
@@ -71,16 +73,36 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local meta status effective_url content_type shape
+  local attempt curl_status meta status effective_url content_type shape
 
-  meta="$({
-    curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
-      --output "$body_file" --dump-header "$headers_file" \
-      --write-out '%{http_code}\t%{url_effective}\t%{content_type}' \
-      "${base_url}${path}"
-  })" || oci_die "HTTP probe failed for ${base_url}${path}"
-  IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-  [[ "$status" == "200" ]] || oci_die "expected HTTP 200 for ${base_url}${path}, got ${status}"
+  status=""
+  for ((attempt = 1; attempt <= HTTP_ATTEMPTS; attempt++)); do
+    if meta="$(
+      curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+        --output "$body_file" --dump-header "$headers_file" \
+        --write-out '%{http_code}\t%{url_effective}\t%{content_type}' \
+        "${base_url}${path}"
+    )"; then
+      curl_status=0
+      IFS=$'\t' read -r status effective_url content_type <<<"$meta"
+      [[ "$status" == "200" ]] && break
+    else
+      curl_status=$?
+      status=""
+    fi
+
+    if ((attempt == HTTP_ATTEMPTS)); then
+      if [[ "$curl_status" != "0" ]]; then
+        oci_die "HTTP probe failed for ${base_url}${path} after ${HTTP_ATTEMPTS} attempts"
+      fi
+      oci_die "expected HTTP 200 for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
+    fi
+    if [[ "$curl_status" == "0" &&
+        ! "$status" =~ ^(429|500|502|503|504)$ ]]; then
+      oci_die "expected HTTP 200 for ${base_url}${path}, got ${status}"
+    fi
+    sleep "$HTTP_RETRY_SECONDS"
+  done
   case "$expected_kind" in
     html)
       [[ "$content_type" == text/html* ]] || oci_die "expected HTML for ${base_url}${path}"
@@ -333,6 +355,9 @@ oci_require_command python3
 oci_require_command jq
 validate_positive_int "$BASELINE_RETENTION_DAYS" || oci_die "BASELINE_RETENTION_DAYS must be positive"
 validate_positive_int "$RUN_LOOKBACK" || oci_die "RUN_LOOKBACK must be positive"
+validate_positive_int "$HTTP_ATTEMPTS" || oci_die "HTTP_ATTEMPTS must be positive"
+[[ "$HTTP_RETRY_SECONDS" =~ ^[0-9]+$ ]] ||
+  oci_die "HTTP_RETRY_SECONDS must be a nonnegative integer"
 [[ "$OCI_PUBLIC_URL" == https://* ]] || oci_die "OCI_PUBLIC_URL must be https://"
 [[ "$OCI_REDIRECT_URL" == https://* ]] || oci_die "OCI_REDIRECT_URL must be https://"
 [[ "$OCI_DIAGNOSTIC_URL" == https://* ]] || oci_die "OCI_DIAGNOSTIC_URL must be https://"
@@ -555,6 +580,8 @@ namespace=$OCI_K8S_NAMESPACE
 public_url=$OCI_PUBLIC_URL
 redirect_url=$OCI_REDIRECT_URL
 diagnostic_url=$OCI_DIAGNOSTIC_URL
+http_attempts=$HTTP_ATTEMPTS
+http_retry_seconds=$HTTP_RETRY_SECONDS
 sse_path=$SSE_PATH
 sse_requirement=$SSE_REQUIREMENT
 sse_required=$SSE_REQUIRED
