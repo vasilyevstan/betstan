@@ -91,6 +91,7 @@ case "$*" in
   "network public-ip list "*) response=public-ips.json ;;
   "bastion bastion list "*) response=bastions.json ;;
   "artifacts container repository list "*) response=repositories.json ;;
+  "artifacts container image list "*) response=images.json ;;
   "os bucket list "*) response=buckets.json ;;
   "bastion session delete "*)
     if [[ -n "${MOCK_OCI_FAIL_SESSION_ID:-}" &&
@@ -195,16 +196,58 @@ cat > "$WORK_DIR/responses/bastions.json" <<'JSON'
   }
 }]}
 JSON
-cat > "$WORK_DIR/responses/repositories.json" <<'JSON'
-{"data":{"items":[{
-  "display-name":"betstan_images",
-  "image-count":9,
-  "layer-count":18,
-  "layers-size-in-bytes":171415038,
-  "is-public":false,
-  "is-immutable":true
-}]}}
-JSON
+set_registry_fixture() {
+  local unique_generations="$1"
+  local tag_generations="${2:-$1}"
+  jq -n \
+    --argjson unique_generations "$unique_generations" \
+    --argjson tag_generations "$tag_generations" '
+      def services: [
+        "auth", "bet", "backoffice", "client", "event", "gamemaster",
+        "moderation", "resulting", "slip"
+      ];
+      def pad($value; $width):
+        ($value | tostring) as $text
+        | ("0" * ($width - ($text | length))) + $text;
+      {
+        data: {
+          items: [
+            range(0; $tag_generations) as $tag_generation
+            | range(0; 9) as $service_index
+            | ($tag_generation % $unique_generations) as $image_generation
+            | {
+                "repository-name": "betstan_images",
+                version: (
+                  "oci-\(services[$service_index])-" +
+                  pad($tag_generation + 1; 40)
+                ),
+                digest: (
+                  "sha256:" +
+                  pad(($image_generation * 9) + $service_index + 1; 64)
+                ),
+                "lifecycle-state": "AVAILABLE"
+              }
+          ]
+        }
+      }
+    ' > "$WORK_DIR/responses/images.json"
+  jq -n --argjson image_count "$((unique_generations * 9))" '
+    {
+      data: {
+        items: [{
+          "display-name": "betstan_images",
+          "image-count": $image_count,
+          "layer-count": ($image_count * 4),
+          "layers-size-in-bytes": (100000000 + ($image_count * 9000000)),
+          "is-public": false,
+          "is-immutable": true
+        }]
+      }
+    }
+  ' > "$WORK_DIR/responses/repositories.json"
+}
+set_registry_fixture 1
+
 cat > "$WORK_DIR/responses/buckets.json" <<'JSON'
 {"data":[]}
 JSON
@@ -239,6 +282,91 @@ jq -e '
   .expected_monthly_cost == 0
 ' "$WORK_DIR/k3s-inventory.json" >/dev/null ||
   fail "valid direct-k3s inventory was rejected"
+
+set_registry_fixture 2 4
+env "${inventory_env[@]}" \
+  INVENTORY_MODE=complete \
+  OUTPUT_FILE="$WORK_DIR/two-generation-inventory.json" \
+  "$OCI_DIR/scripts/inventory.sh"
+jq -e '
+  .registry_images_per_generation == 9 and
+  .registry_max_generations == 3 and
+  .registry_repositories[0].image_count == 18 and
+  .registry_image_analysis.tag_generation_count == 4 and
+  .registry_image_analysis.unique_generation_count == 2
+' "$WORK_DIR/two-generation-inventory.json" >/dev/null ||
+  fail "complete candidate and rollback image generations were rejected"
+
+set_registry_fixture 3 6
+env "${inventory_env[@]}" \
+  INVENTORY_MODE=complete \
+  OUTPUT_FILE="$WORK_DIR/three-generation-inventory.json" \
+  "$OCI_DIR/scripts/inventory.sh"
+jq -e '
+  .registry_repositories[0].image_count == 27 and
+  .registry_image_analysis.tag_generation_count == 6 and
+  .registry_image_analysis.unique_generation_count == 3 and
+  .registry_image_analysis.incomplete_tag_generation_count == 0
+' "$WORK_DIR/three-generation-inventory.json" >/dev/null ||
+  fail "three bounded complete registry generations were rejected"
+
+jq '.data.items[0].version = "invalid-tag"' \
+  "$WORK_DIR/responses/images.json" \
+  > "$WORK_DIR/responses/images.json.tmp"
+mv "$WORK_DIR/responses/images.json.tmp" "$WORK_DIR/responses/images.json"
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/malformed-tag-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "malformed registry image tag was accepted"
+fi
+
+set_registry_fixture 3 6
+jq '
+  .data.items[8].version = .data.items[0].version
+' "$WORK_DIR/responses/images.json" \
+  > "$WORK_DIR/responses/images.json.tmp"
+mv "$WORK_DIR/responses/images.json.tmp" "$WORK_DIR/responses/images.json"
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/mixed-generation-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "incomplete registry service generation was accepted"
+fi
+
+set_registry_fixture 3 6
+jq '.data.items[1].digest = .data.items[0].digest' \
+  "$WORK_DIR/responses/images.json" \
+  > "$WORK_DIR/responses/images.json.tmp"
+mv "$WORK_DIR/responses/images.json.tmp" "$WORK_DIR/responses/images.json"
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/cross-service-digest-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "registry digest shared across service identities was accepted"
+fi
+
+set_registry_fixture 1
+jq '.data.items[0]["image-count"] = 10' \
+  "$WORK_DIR/responses/repositories.json" \
+  > "$WORK_DIR/responses/repositories.json.tmp"
+mv "$WORK_DIR/responses/repositories.json.tmp" \
+  "$WORK_DIR/responses/repositories.json"
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/partial-generation-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "partial registry image generation was accepted"
+fi
+
+set_registry_fixture 4 8
+if env "${inventory_env[@]}" \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/fourth-generation-inventory.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "fourth registry image generation was accepted"
+fi
+set_registry_fixture 3 6
 
 cat > "$WORK_DIR/responses/public-ips.json" <<'JSON'
 {"data":[{
