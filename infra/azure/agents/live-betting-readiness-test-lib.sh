@@ -283,7 +283,7 @@ if [[ "$args" == *"get configmap gaming-mongo-migration-lock"* ]]; then
     }'
   exit 0
 fi
-if [[ "$args" == *"rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers"* ]]; then
+if [[ "$args" == *"rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers"* ]]; then
   [[ "$fail_command" != "rabbit" ]] || exit 1
   ready="${STUB_QUEUE_READY:-0}"
   unack="${STUB_QUEUE_UNACK:-0}"

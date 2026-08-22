@@ -533,7 +533,7 @@ verify_queue_state() {
     return 1
   }
   kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
-    rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers >"$WORK_DIR/current-queues.raw"
+    rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers >"$WORK_DIR/current-queues.raw"
   oci_rabbitmq_queue_rows <"$WORK_DIR/current-queues.raw" >"$current_queue_file" || {
     printf 'ERROR: unable to normalize RabbitMQ queue state\n' >&2
     return 1
