@@ -152,8 +152,6 @@ run_prune() {
     MOCK_OCI_STATE="$WORK_DIR/state" \
     OCI_CLI_VERSION=3.90.0 \
     OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..fixture \
-    OCI_REGISTRY_HOST=fra.ocir.io \
-    OCI_REGISTRY_NAMESPACE=example \
     OCI_IMAGE_PREFIX=betstan \
     OCI_REGISTRY_MAX_BYTES=500000000 \
     TARGET_IMAGES_FILE="$WORK_DIR/target.tsv" \
@@ -206,8 +204,6 @@ if env \
   MOCK_OCI_STATE="$WORK_DIR/state" \
   OCI_CLI_VERSION=3.90.0 \
   OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..fixture \
-  OCI_REGISTRY_HOST=fra.ocir.io \
-  OCI_REGISTRY_NAMESPACE=example \
   OCI_IMAGE_PREFIX=betstan \
   OCI_REGISTRY_MAX_BYTES=500000000 \
   TARGET_IMAGES_FILE="$WORK_DIR/target.tsv" \
