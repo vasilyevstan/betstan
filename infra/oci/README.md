@@ -155,6 +155,15 @@ concurrent retirement fixture isolation without masking failed suites.
 2. `scripts/build-images.sh` builds ARM64 OCI-only images; the production
    workflow records and verifies immutable digests with
    `scripts/verify-images.sh`.
+   If a fresh build creates a fourth complete generation, dispatch
+   `oci-infrastructure` with phase `prune-registry` before infrastructure
+   finalization. Bind the request to the exact current candidate build, the
+   currently deployed release, one compatible fallback build, and one
+   obsolete build. The protected job deletes only when those four
+   nine-service generations are pairwise disjoint and exhaust the registry;
+   it waits until the obsolete digests are absent, all 27 protected digests
+   remain, provider image accounting reaches 27, and retained layers are
+   within the configured Free Tier ceiling.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.
