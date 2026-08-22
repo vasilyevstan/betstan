@@ -101,7 +101,7 @@ const waitForCondition = async (
       return;
     }
 
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
   throw new Error("Condition was not met");
@@ -268,12 +268,14 @@ it("extends the lease during slow replay so a second worker cannot steal it", as
     leaseMs: 1_000,
   });
   const saveDeferred = createDeferred();
+  const saveStarted = createDeferred();
   const originalSave = Bet.prototype.save;
   const saveSpy = jest.spyOn(Bet.prototype, "save").mockImplementation(function (
     this: typeof Bet.prototype,
     ...args: unknown[]
   ) {
     if ((this as unknown as { slipId?: string }).slipId === slipId) {
+      saveStarted.resolve();
       return saveDeferred.promise.then(() =>
         (originalSave as (...innerArgs: unknown[]) => Promise<unknown>).apply(
           this,
@@ -299,15 +301,14 @@ it("extends the lease during slow replay so a second worker cannot steal it", as
   );
 
   const workerOneRun = workerOne.runNow();
-  await waitForCondition(async () =>
-    Boolean(
-      await PendingBetUpdate.findOne({
-        leaseOwner: workerOne.getLeaseOwner(),
-        slipId,
-        status: PendingBetUpdateStatus.PROCESSING,
-      })
-    )
-  );
+  await saveStarted.promise;
+  expect(
+    await PendingBetUpdate.findOne({
+      leaseOwner: workerOne.getLeaseOwner(),
+      slipId,
+      status: PendingBetUpdateStatus.PROCESSING,
+    })
+  ).not.toBeNull();
 
   clock.advanceBy(1_500);
   const workerTwoRun = workerTwo.runNow();
@@ -674,12 +675,14 @@ it("waits for in-flight work to finish before stopping and cleans heartbeat time
     leaseMs: 1_000,
   });
   const saveDeferred = createDeferred();
+  const saveStarted = createDeferred();
   const originalSave = Bet.prototype.save;
   const saveSpy = jest.spyOn(Bet.prototype, "save").mockImplementation(function (
     this: typeof Bet.prototype,
     ...args: unknown[]
   ) {
     if ((this as unknown as { slipId?: string }).slipId === slipId) {
+      saveStarted.resolve();
       return saveDeferred.promise.then(() =>
         (originalSave as (...innerArgs: unknown[]) => Promise<unknown>).apply(
           this,
@@ -705,15 +708,14 @@ it("waits for in-flight work to finish before stopping and cleans heartbeat time
   );
 
   const startPromise = worker.start();
-  await waitForCondition(async () =>
-    Boolean(
-      await PendingBetUpdate.findOne({
-        leaseOwner: worker.getLeaseOwner(),
-        slipId,
-        status: PendingBetUpdateStatus.PROCESSING,
-      })
-    )
-  );
+  await saveStarted.promise;
+  expect(
+    await PendingBetUpdate.findOne({
+      leaseOwner: worker.getLeaseOwner(),
+      slipId,
+      status: PendingBetUpdateStatus.PROCESSING,
+    })
+  ).not.toBeNull();
 
   const stopPromise = worker.stop();
   let stopped = false;
