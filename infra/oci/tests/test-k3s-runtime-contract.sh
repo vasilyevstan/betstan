@@ -225,7 +225,10 @@ set_registry_fixture() {
                   "sha256:" +
                   pad(($image_generation * 9) + $service_index + 1; 64)
                 ),
-                "lifecycle-state": "AVAILABLE"
+                "lifecycle-state": "AVAILABLE",
+                "defined-tags": {
+                  padding: ("x" * 60000)
+                }
               }
           ]
         }
@@ -284,6 +287,8 @@ jq -e '
   fail "valid direct-k3s inventory was rejected"
 
 set_registry_fixture 2 4
+[[ "$(wc -c < "$WORK_DIR/responses/images.json" | tr -d ' ')" -gt 2000000 ]] ||
+  fail "registry fixture does not exceed the runner argument limit"
 env "${inventory_env[@]}" \
   INVENTORY_MODE=complete \
   OUTPUT_FILE="$WORK_DIR/two-generation-inventory.json" \

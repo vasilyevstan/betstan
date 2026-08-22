@@ -502,6 +502,8 @@ grep -Fq '(.image_count % $registry_images_per_generation) != 0' "$inventory" ||
   fail "OCI inventory must reject partial image generations"
 grep -Fq 'oci artifacts container image list' "$inventory" ||
   fail "OCI inventory must inspect exact image tags and digests"
+grep -Fq '"repository-name": ."repository-name"' "$inventory" ||
+  fail "OCI inventory must bound registry metadata before jq argument use"
 grep -Fq 'incomplete_tag_generation_count' "$inventory" ||
   fail "OCI inventory must reject incomplete service tag generations"
 grep -Fq 'digest_service_conflict_count' "$inventory" ||
