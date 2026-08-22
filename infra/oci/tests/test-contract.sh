@@ -930,7 +930,6 @@ expected_syntax_targets = [
   "infra/oci/tests/test-live-data-maintenance-stan.sh",
   "infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "infra/oci/tests/test-live-betting-readiness-stan.sh",
-  "infra/oci/tests/test-registry-prune-contract.sh",
   "infra/oci/tests/rollback-live-readiness-contract.sh",
   "infra/oci/tests/rollback-contract.sh",
 ]
@@ -945,14 +944,12 @@ expected_exec_targets = [
   "./infra/oci/tests/test-live-data-maintenance-stan.sh",
   "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "./infra/oci/tests/test-live-betting-readiness-stan.sh",
-  "./infra/oci/tests/test-registry-prune-contract.sh",
   "./infra/oci/tests/rollback-live-readiness-contract.sh",
   "./infra/oci/tests/rollback-contract.sh",
 ]
 expected_yaml_targets = [
   ".github/workflows/production-build.yml",
   ".github/workflows/production-deploy.yml",
-  ".github/workflows/oci-infrastructure.yml",
   ".github/workflows/oci-live-data-rollout.yml",
   ".github/workflows/oci-production-deploy.yml",
 ]
