@@ -66,6 +66,21 @@ public_ips="$(oci_normalize_list_json "$public_ips")"
 bastions="$(oci_normalize_list_json "$bastions")"
 repositories="$(oci_normalize_list_json "$repositories" items)"
 images="$(oci_normalize_list_json "$images" items)"
+images="$(
+  jq -c '{
+    data: {
+      items: [
+        .data.items[]?
+        | {
+            "repository-name": ."repository-name",
+            version,
+            digest,
+            "lifecycle-state": ."lifecycle-state"
+          }
+      ]
+    }
+  }' <<<"$images"
+)"
 buckets="$(oci_normalize_list_json "$buckets")"
 expected_repositories="$(
   jq -cn --arg prefix "$OCI_IMAGE_PREFIX" '[$prefix + "_images"]'
