@@ -58,7 +58,11 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     job)
-      printf '{"status":{"succeeded":1}}\n'
+      if [[ "$scenario" == "image-pull" ]]; then
+        printf '{"status":{}}\n'
+      else
+        printf '{"status":{"succeeded":1}}\n'
+      fi
       exit 0
       ;;
     deployment)
@@ -66,7 +70,10 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     pods)
-      if [[ "$*" == *"app=gaming-auth-mongo"* ]]; then
+      if [[ "$scenario" == "image-pull" && "$*" == *"job-name="* ]]; then
+        printf '%s\n' \
+          '{"items":[{"status":{"phase":"Pending","containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff","message":"secret registry detail"}}}]}}]}'
+      elif [[ "$*" == *"app=gaming-auth-mongo"* ]]; then
         printf 'mongo-0'
       elif [[ "$*" == *"app=gaming-rabbitmq"* ]]; then
         printf 'rabbitmq-0'
@@ -318,6 +325,19 @@ for manifest in "$stub_state"/jobs/*.yaml; do
     fail "job invoked TypeScript source instead of the compiled CLI"
   fi
 done
+
+image_pull_output="$work_dir/image-pull.out"
+if run_phase dry-run image-pull 4005 "$work_dir/image-pull" \
+    >"$image_pull_output" 2>&1; then
+  fail "image pull failure was accepted"
+fi
+grep -Fq \
+  'pod_count=1 pod_phase=Pending container_state=waiting reason=ImagePullBackOff' \
+  "$image_pull_output" ||
+  fail "image pull failure did not report sanitized pod state"
+if grep -Fq 'secret registry detail' "$image_pull_output"; then
+  fail "image pull diagnostics leaked the provider message"
+fi
 
 for literal in \
   'name: oci-migration' \

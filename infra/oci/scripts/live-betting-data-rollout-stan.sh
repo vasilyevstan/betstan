@@ -227,7 +227,7 @@ wait_for_job_report() {
   local job_name="$1"
   local raw_file="$2"
   local deadline=$(( $(date +%s) + JOB_TIMEOUT_SECONDS ))
-  local job_json
+  local job_json pod_state pod_count pod_phase container_state container_reason
 
   while (( $(date +%s) < deadline )); do
     job_json="$(kubectl get job "$job_name" -n "$OCI_K8S_NAMESPACE" -o json)"
@@ -238,16 +238,109 @@ wait_for_job_report() {
         fail "unable to collect completed job report"
       return 0
     fi
+
+    pod_state="$(
+      kubectl get pods \
+        -n "$OCI_K8S_NAMESPACE" \
+        -l "job-name=$job_name" \
+        -o json |
+        jq -er '
+          def safe:
+            if type == "string" and
+               test("^[A-Za-z0-9_.:-]+$")
+            then .
+            else "Unknown"
+            end;
+
+          (.items // []) as $items |
+          if ($items | length) == 0 then
+            ["0", "Missing", "unknown", "PodNotCreated"]
+          elif ($items | length) > 1 then
+            [($items | length | tostring), "Ambiguous", "unknown", "MultiplePods"]
+          else
+            $items[0] as $pod |
+            ($pod.status.containerStatuses // []) as $statuses |
+            if ($statuses | length) == 0 then
+              (([
+                $pod.status.conditions[]? |
+                select(.type == "PodScheduled" and .status == "False")
+              ] | first) // {}) as $condition |
+              [
+                "1",
+                (($pod.status.phase // "Unknown") | safe),
+                "waiting",
+                (($condition.reason // "ContainerNotStarted") | safe)
+              ]
+            elif ($statuses | length) > 1 then
+              [
+                "1",
+                (($pod.status.phase // "Unknown") | safe),
+                "unknown",
+                "MultipleContainers"
+              ]
+            else
+              $statuses[0].state as $state |
+              if $state.waiting then
+                [
+                  "1",
+                  (($pod.status.phase // "Unknown") | safe),
+                  "waiting",
+                  (($state.waiting.reason // "Unknown") | safe)
+                ]
+              elif $state.running then
+                [
+                  "1",
+                  (($pod.status.phase // "Unknown") | safe),
+                  "running",
+                  "Running"
+                ]
+              elif $state.terminated then
+                [
+                  "1",
+                  (($pod.status.phase // "Unknown") | safe),
+                  "terminated",
+                  (($state.terminated.reason // "Unknown") | safe)
+                ]
+              else
+                [
+                  "1",
+                  (($pod.status.phase // "Unknown") | safe),
+                  "unknown",
+                  "StateMissing"
+                ]
+              end
+            end
+          end |
+          @tsv
+        '
+    )" || fail "unable to inspect sanitized pod state for $job_name"
+    IFS=$'\t' read -r \
+      pod_count pod_phase container_state container_reason <<<"$pod_state"
+
     if jq -e '(.status.failed // 0) > 0' <<<"$job_json" >/dev/null; then
       kubectl logs "job/$job_name" \
         -n "$OCI_K8S_NAMESPACE" \
         --container data-rollout >"$raw_file" 2>/dev/null || true
-      fail "data job failed for $job_name; raw logs were withheld"
+      fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+    fi
+    case "$container_reason" in
+      ErrImagePull|ImagePullBackOff|InvalidImageName|CreateContainerConfigError|\
+      CreateContainerError|RunContainerError|CrashLoopBackOff|\
+      PreCreateHookError|PostStartHookError|Unschedulable)
+        fail "data job startup failed for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+        ;;
+    esac
+    if [[ "$container_state" == "terminated" &&
+      "$container_reason" != "Completed" ]]; then
+      kubectl logs "job/$job_name" \
+        -n "$OCI_K8S_NAMESPACE" \
+        --container data-rollout >"$raw_file" 2>/dev/null || true
+      fail "data job terminated for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
     fi
     sleep 5
   done
 
-  fail "data job timed out for $job_name"
+  fail "data job timed out for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
 }
 
 run_job() {
