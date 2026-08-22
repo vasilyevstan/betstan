@@ -495,7 +495,7 @@ rabbit_pod="$(kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$RABBIT_SELECTOR" -o j
 [[ -n "$rabbit_pod" ]] || oci_die "RabbitMQ pod not found for selector ${RABBIT_SELECTOR}"
 queue_raw="$WORK_DIR/queues.raw"
 kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
-  rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers >"$queue_raw"
+  rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers >"$queue_raw"
 oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queues.tsv" ||
   oci_die "unable to normalize RabbitMQ queue state"
 [[ -s "$OUTPUT_DIR/queues.tsv" ]] || oci_die "queue snapshot is empty"

@@ -759,7 +759,7 @@ case "${1:-}" in
     ;;
   exec)
     shift
-    if [[ "$*" == *"rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers"* ]]; then
+    if [[ "$*" == *"rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers"* ]]; then
       live_ready="${STUB_LIVE_QUEUE_READY:-0}"
       live_unack="${STUB_LIVE_QUEUE_UNACK:-0}"
       baseline_ready="${STUB_BASELINE_QUEUE_READY:-0}"

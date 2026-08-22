@@ -2058,7 +2058,7 @@ PY
 
   if [[ -n "$rabbit_pod" ]]; then
     rabbit_stderr="$LIVE_BETTING_WORK_DIR/rabbitmq.stderr"
-    if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" exec -n "$LIVE_BETTING_NAMESPACE" "$rabbit_pod" -- rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers >"$LIVE_BETTING_WORK_DIR/rabbitmq.queues" 2>"$rabbit_stderr"; then
+    if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" exec -n "$LIVE_BETTING_NAMESPACE" "$rabbit_pod" -- rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers >"$LIVE_BETTING_WORK_DIR/rabbitmq.queues" 2>"$rabbit_stderr"; then
       live_betting_write_sanitized_file "$rabbit_stderr" "$LIVE_BETTING_OUTPUT_DIR/rabbitmq.stderr"
       live_betting_write_sanitized_file "$LIVE_BETTING_WORK_DIR/rabbitmq.queues" "$LIVE_BETTING_OUTPUT_DIR/rabbitmq.queues"
       live_betting_check_rabbitmq "$LIVE_BETTING_WORK_DIR/rabbitmq.queues" || true

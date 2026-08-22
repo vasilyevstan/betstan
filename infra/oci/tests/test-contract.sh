@@ -136,6 +136,15 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
+for queue_probe in \
+  "$OCI_DIR/scripts/baseline-capture-stan.sh" \
+  "$OCI_DIR/scripts/rollback-readiness-stan.sh" \
+  "$OCI_DIR/scripts/rollback-application-stan.sh" \
+  "$ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh"; do
+  grep -Fq 'rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers' \
+    "$queue_probe" ||
+    fail "RabbitMQ queue probe does not suppress non-tabular CLI output: $queue_probe"
+done
 redacted="$(
   printf '%s\n' \
     'Authorization: Bearer header-secret' \
