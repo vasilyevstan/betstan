@@ -251,6 +251,9 @@ case "$*" in
   "cat-file -e ${STUB_TARGET_SHA}^{commit}")
     exit 0
     ;;
+  "cat-file -e ${STUB_TARGET_SHA}:event/src/route/EventLiveStream.ts")
+    [[ "${STUB_DEPLOYED_SOURCE_HAS_SSE:-1}" == "1" ]]
+    ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
     ;;
@@ -997,6 +1000,13 @@ elif [[ "$url" == *'/api/event/stream' ]]; then
       header_block=$'HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Accel-Buffering: no\r\n\r\n'
       time_total='0.01'
       ;;
+    legacy-absent)
+      status='502'
+      content_type='text/html'
+      body='<html>legacy route unavailable</html>'
+      header_block=$'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\n\r\n'
+      time_total='0.01'
+      ;;
     connect-timeout)
       status='000'
       content_type=''
@@ -1191,6 +1201,28 @@ if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK
   cat "$WORK_DIR/capture-repeat-safe-1.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on first run'
 fi
+
+legacy_capture_dir="$WORK_DIR/capture-legacy-sse-absence"
+if ! run_capture "$legacy_capture_dir" \
+    SSE_REQUIREMENT=deployed-source \
+    STUB_DEPLOYED_SOURCE_HAS_SSE=0 \
+    STUB_SHORT_SSE_MODE=legacy-absent >"$WORK_DIR/capture-legacy-sse-absence.out" 2>&1; then
+  cat "$WORK_DIR/capture-legacy-sse-absence.out" >&2
+  fail "trusted pre-SSE deployed source baseline was rejected"
+fi
+assert_contains "$legacy_capture_dir/baseline-provenance.env" 'sse_requirement=deployed-source'
+assert_contains "$legacy_capture_dir/baseline-provenance.env" 'sse_required=false'
+[[ "$(awk -F '\t' '$4 == "legacy-absent" { count++ } END { print count + 0 }' "$legacy_capture_dir/sse.tsv")" == "3" ]] ||
+  fail "legacy SSE absence was not recorded for all public endpoints"
+
+run_capture_expect_failure capture-declared-sse-absence \
+  SSE_REQUIREMENT=deployed-source \
+  STUB_DEPLOYED_SOURCE_HAS_SSE=1 \
+  STUB_SHORT_SSE_MODE=legacy-absent
+run_capture_expect_failure capture-legacy-sse-unexpected-status \
+  SSE_REQUIREMENT=deployed-source \
+  STUB_DEPLOYED_SOURCE_HAS_SSE=0 \
+  STUB_SHORT_SSE_MODE=bad-status
 if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-repeat-safe-2.out" 2>&1; then
   cat "$WORK_DIR/capture-repeat-safe-2.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on second run'
@@ -1299,6 +1331,7 @@ fi
 [[ "$(sha256_file "$oci_cleanup_sentinel")" == "$oci_cleanup_before" ]] ||
   fail 'OCI cleanup symlink guard modified the sentinel'
 assert_contains "$WORK_DIR/capture-cleanup-symlink.out" 'private directory'
+unlink "$WORK_PARENT/oci-cleanup-link"
 rm -f "$oci_cleanup_sentinel"
 
 run_expect_failure provenance-rejection \

@@ -331,10 +331,13 @@ for literal in \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
   'baseline-capture-stan.sh' \
+  'SSE_REQUIREMENT: deployed-source' \
   'verify-live-betting-data-evidence-stan.sh'; do
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "data workflow is missing safety contract: $literal"
 done
+[[ "$(grep -Fc 'SSE_REQUIREMENT: deployed-source' "$WORKFLOW")" == "2" ]] ||
+  fail "data workflow does not source-gate both baseline SSE checks"
 for literal in \
   'data_run_id:' \
   'oci-live-data-rollout.yml' \
