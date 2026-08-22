@@ -1050,6 +1050,21 @@ elif [[ "$url" == *'/api/event' ]]; then
       body='[]'
       ;;
   esac
+  if [[ -n "${STUB_HTTP_PERSISTENT_FAILURE_MATCH:-}" &&
+      "$url" == *"$STUB_HTTP_PERSISTENT_FAILURE_MATCH"* ]]; then
+    status='503'
+    content_type='text/html'
+    body='<html>temporarily unavailable</html>'
+    header_block=$'HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html\r\n\r\n'
+  elif [[ -n "${STUB_HTTP_TRANSIENT_FAILURE_MATCH:-}" &&
+      "$url" == *"$STUB_HTTP_TRANSIENT_FAILURE_MATCH"* &&
+      ! -f "$STUB_STATE_DIR/http-transient-seen" ]]; then
+    touch "$STUB_STATE_DIR/http-transient-seen"
+    status='503'
+    content_type='text/html'
+    body='<html>temporarily unavailable</html>'
+    header_block=$'HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html\r\n\r\n'
+  fi
 elif [[ "$url" == *'/api/slip' ]]; then
   body='{}'
 elif [[ "$url" == *'/api/bet/stats' ]]; then
@@ -1223,6 +1238,24 @@ run_capture_expect_failure capture-legacy-sse-unexpected-status \
   SSE_REQUIREMENT=deployed-source \
   STUB_DEPLOYED_SOURCE_HAS_SSE=0 \
   STUB_SHORT_SSE_MODE=bad-status
+
+http_retry_capture_dir="$WORK_DIR/capture-http-transient-retry"
+if ! run_capture "$http_retry_capture_dir" \
+    HTTP_ATTEMPTS=2 \
+    HTTP_RETRY_SECONDS=0 \
+    STUB_HTTP_TRANSIENT_FAILURE_MATCH=www.betstan.xyz/api/event \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-http-transient-retry.out" 2>&1; then
+  cat "$WORK_DIR/capture-http-transient-retry.out" >&2
+  fail "bounded HTTP retry did not recover a transient 503"
+fi
+assert_contains "$http_retry_capture_dir/baseline-provenance.env" 'http_attempts=2'
+assert_contains "$http_retry_capture_dir/baseline-provenance.env" 'http_retry_seconds=0'
+
+run_capture_expect_failure capture-http-persistent-failure \
+  HTTP_ATTEMPTS=2 \
+  HTTP_RETRY_SECONDS=0 \
+  STUB_HTTP_PERSISTENT_FAILURE_MATCH=www.betstan.xyz/api/event \
+  STUB_SHORT_SSE_MODE=quiet-timeout
 if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-repeat-safe-2.out" 2>&1; then
   cat "$WORK_DIR/capture-repeat-safe-2.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on second run'
