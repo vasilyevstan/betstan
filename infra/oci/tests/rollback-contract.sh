@@ -1221,14 +1221,21 @@ legacy_capture_dir="$WORK_DIR/capture-legacy-sse-absence"
 if ! run_capture "$legacy_capture_dir" \
     SSE_REQUIREMENT=deployed-source \
     STUB_DEPLOYED_SOURCE_HAS_SSE=0 \
+    STUB_HTTP_PERSISTENT_FAILURE_MATCH=www.betstan.xyz/api/event \
     STUB_SHORT_SSE_MODE=legacy-absent >"$WORK_DIR/capture-legacy-sse-absence.out" 2>&1; then
   cat "$WORK_DIR/capture-legacy-sse-absence.out" >&2
   fail "trusted pre-SSE deployed source baseline was rejected"
 fi
 assert_contains "$legacy_capture_dir/baseline-provenance.env" 'sse_requirement=deployed-source'
 assert_contains "$legacy_capture_dir/baseline-provenance.env" 'sse_required=false'
-[[ "$(awk -F '\t' '$4 == "legacy-absent" { count++ } END { print count + 0 }' "$legacy_capture_dir/sse.tsv")" == "3" ]] ||
-  fail "legacy SSE absence was not recorded for all public endpoints"
+assert_contains "$legacy_capture_dir/baseline-provenance.env" 'alias_probe_mode=legacy-safe'
+[[ "$(awk -F '\t' '$4 == "legacy-absent" { count++ } END { print count + 0 }' "$legacy_capture_dir/sse.tsv")" == "1" ]] ||
+  fail "legacy SSE absence was not recorded for the canonical endpoint"
+[[ "$(awk -F '\t' '$1 != "canonical" && $2 == "/api/event" { count++ } END { print count + 0 }' "$legacy_capture_dir/public-http.tsv")" == "0" ]] ||
+  fail "legacy baseline repeated the side-effectful event API through an alias"
+grep -Fq $'redirect\t/api/auth/currentuser?live-betting-redirect=1\t308\t' \
+  "$legacy_capture_dir/public-http.tsv" ||
+  fail "legacy baseline did not prove the exact redirect"
 
 run_capture_expect_failure capture-declared-sse-absence \
   SSE_REQUIREMENT=deployed-source \

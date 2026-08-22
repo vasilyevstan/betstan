@@ -19,6 +19,7 @@ HTTP_RETRY_SECONDS="${HTTP_RETRY_SECONDS:-5}"
 SSE_TIMEOUT="${SSE_TIMEOUT:-5}"
 SSE_REQUIREMENT="${SSE_REQUIREMENT:-required}"
 SSE_REQUIRED=true
+ALIAS_PROBE_MODE=exhaustive
 BASELINE_RETENTION_DAYS="${BASELINE_RETENTION_DAYS:-30}"
 RABBIT_SELECTOR="${RABBIT_SELECTOR:-app=gaming-rabbitmq}"
 MIGRATION_STATE_CONFIGMAP="${MIGRATION_STATE_CONFIGMAP:-betstan-oci-migration-journal}"
@@ -36,6 +37,7 @@ API_CONTRACTS=(
   "/api/backoffice|array"
 )
 SSE_PATH="${SSE_PATH:-/api/event/stream}"
+REDIRECT_PATH="${REDIRECT_PATH:-/api/auth/currentuser?live-betting-redirect=1}"
 
 prepare_private_dir() {
   local directory="$1"
@@ -73,19 +75,26 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local attempt curl_status meta status effective_url content_type shape
+  local attempt curl_status expected_status location meta status effective_url content_type shape
+  local -a curl_options=(--silent --show-error --max-time "$REQUEST_TIMEOUT")
 
+  expected_status=200
+  if [[ "$expected_kind" == "redirect" ]]; then
+    expected_status=308
+  else
+    curl_options+=(--location)
+  fi
   status=""
   for ((attempt = 1; attempt <= HTTP_ATTEMPTS; attempt++)); do
     if meta="$(
-      curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+      curl "${curl_options[@]}" \
         --output "$body_file" --dump-header "$headers_file" \
         --write-out '%{http_code}\t%{url_effective}\t%{content_type}' \
         "${base_url}${path}"
     )"; then
       curl_status=0
       IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-      [[ "$status" == "200" ]] && break
+      [[ "$status" == "$expected_status" ]] && break
     else
       curl_status=$?
       status=""
@@ -95,11 +104,11 @@ capture_http() {
       if [[ "$curl_status" != "0" ]]; then
         oci_die "HTTP probe failed for ${base_url}${path} after ${HTTP_ATTEMPTS} attempts"
       fi
-      oci_die "expected HTTP 200 for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
+      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
     fi
     if [[ "$curl_status" == "0" &&
         ! "$status" =~ ^(429|500|502|503|504)$ ]]; then
-      oci_die "expected HTTP 200 for ${base_url}${path}, got ${status}"
+      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status}"
     fi
     sleep "$HTTP_RETRY_SECONDS"
   done
@@ -162,6 +171,18 @@ if not isinstance(payload, dict):
 print('object')
 PY
 )" || oci_die "invalid object JSON for ${base_url}${path}"
+      ;;
+    redirect)
+      [[ "$content_type" == text/html* || "$content_type" == text/plain* ]] ||
+        oci_die "expected redirect response for ${base_url}${path}"
+      location="$(
+        tr -d '\r' <"$headers_file" |
+          sed -n 's/^[Ll]ocation:[[:space:]]*//p' |
+          tail -1
+      )"
+      [[ "$location" == "${OCI_PUBLIC_URL}${path}" ]] ||
+        oci_die "unexpected redirect target for ${base_url}${path}"
+      shape="redirect:${location}"
       ;;
     *)
       oci_die "unsupported HTTP expectation: $expected_kind"
@@ -547,14 +568,23 @@ oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queues.tsv" ||
 
 : >"$OUTPUT_DIR/public-http.tsv"
 : >"$OUTPUT_DIR/sse.tsv"
-for entry in \
-  "canonical|$OCI_PUBLIC_URL" \
-  "redirect|$OCI_REDIRECT_URL" \
-  "diagnostic|$OCI_DIAGNOSTIC_URL"; do
-  IFS='|' read -r label base_url <<<"$entry"
-  capture_api_contracts "$base_url" "$label"
-  capture_sse "$base_url" "$label"
-done
+if [[ "$SSE_REQUIREMENT" == "deployed-source" && "$SSE_REQUIRED" == "false" ]]; then
+  ALIAS_PROBE_MODE=legacy-safe
+  capture_api_contracts "$OCI_PUBLIC_URL" canonical
+  capture_sse "$OCI_PUBLIC_URL" canonical
+  capture_http "$OCI_REDIRECT_URL" "$REDIRECT_PATH" redirect redirect
+  capture_http "$OCI_DIAGNOSTIC_URL" / html diagnostic
+  capture_http "$OCI_DIAGNOSTIC_URL" /api/auth/currentuser auth diagnostic
+else
+  for entry in \
+    "canonical|$OCI_PUBLIC_URL" \
+    "redirect|$OCI_REDIRECT_URL" \
+    "diagnostic|$OCI_DIAGNOSTIC_URL"; do
+    IFS='|' read -r label base_url <<<"$entry"
+    capture_api_contracts "$base_url" "$label"
+    capture_sse "$base_url" "$label"
+  done
+fi
 [[ -s "$OUTPUT_DIR/public-http.tsv" ]] || oci_die "public HTTP evidence was not captured"
 [[ -s "$OUTPUT_DIR/sse.tsv" ]] || oci_die "SSE evidence was not captured"
 
@@ -582,6 +612,7 @@ redirect_url=$OCI_REDIRECT_URL
 diagnostic_url=$OCI_DIAGNOSTIC_URL
 http_attempts=$HTTP_ATTEMPTS
 http_retry_seconds=$HTTP_RETRY_SECONDS
+alias_probe_mode=$ALIAS_PROBE_MODE
 sse_path=$SSE_PATH
 sse_requirement=$SSE_REQUIREMENT
 sse_required=$SSE_REQUIRED
