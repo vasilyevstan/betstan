@@ -80,7 +80,7 @@ env \
   STUB_ENVIRONMENT=oci-production \
     "$APPROVER" "$RUN_ID" >/dev/null
 
-for phase in validate-registry prune-registry; do
+for phase in validate-registry prune-registry finalize; do
   env \
     REPO=example/repo \
     EXPECTED_SHA="$SHA" \
@@ -92,6 +92,34 @@ for phase in validate-registry prune-registry; do
     STUB_EVENT=workflow_dispatch \
     STUB_ENVIRONMENT=oci-infrastructure \
     STUB_DISPLAY_TITLE="oci-infrastructure $phase $SHA" \
+      "$APPROVER" "$RUN_ID" >/dev/null
+done
+
+env \
+  REPO=example/repo \
+  EXPECTED_SHA="$SHA" \
+  EXPECTED_WORKFLOW=oci-capacity-acquire.yml \
+  EXPECTED_ENVIRONMENT=oci-capacity-acquire \
+  EXPECTED_DISPLAY_TITLE="oci-capacity-acquire $SHA" \
+  PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+  STUB_WORKFLOW=oci-capacity-acquire.yml \
+  STUB_EVENT=workflow_dispatch \
+  STUB_ENVIRONMENT=oci-capacity-acquire \
+  STUB_DISPLAY_TITLE="oci-capacity-acquire $SHA" \
+    "$APPROVER" "$RUN_ID" >/dev/null
+
+for phase in dry-run apply-backfills apply-slip-index; do
+  env \
+    REPO=example/repo \
+    EXPECTED_SHA="$SHA" \
+    EXPECTED_WORKFLOW=oci-live-data-rollout.yml \
+    EXPECTED_ENVIRONMENT=oci-migration \
+    EXPECTED_DISPLAY_TITLE="oci-live-data $phase $SHA" \
+    PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+    STUB_WORKFLOW=oci-live-data-rollout.yml \
+    STUB_EVENT=workflow_dispatch \
+    STUB_ENVIRONMENT=oci-migration \
+    STUB_DISPLAY_TITLE="oci-live-data $phase $SHA" \
       "$APPROVER" "$RUN_ID" >/dev/null
 done
 
@@ -108,6 +136,38 @@ if env \
   STUB_DISPLAY_TITLE="oci-infrastructure prune-registry $SHA" \
     "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
   echo "run approver accepted a different infrastructure phase" >&2
+  exit 1
+fi
+
+if env \
+  REPO=example/repo \
+  EXPECTED_SHA="$SHA" \
+  EXPECTED_WORKFLOW=oci-live-data-rollout.yml \
+  EXPECTED_ENVIRONMENT=oci-migration \
+  EXPECTED_DISPLAY_TITLE="oci-live-data dry-run $SHA" \
+  PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+  STUB_WORKFLOW=oci-live-data-rollout.yml \
+  STUB_EVENT=workflow_dispatch \
+  STUB_ENVIRONMENT=oci-migration \
+  STUB_DISPLAY_TITLE="oci-live-data apply-backfills $SHA" \
+    "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
+  echo "run approver accepted a different live-data phase" >&2
+  exit 1
+fi
+
+if env \
+  REPO=example/repo \
+  EXPECTED_SHA="$SHA" \
+  EXPECTED_WORKFLOW=oci-migrate.yml \
+  EXPECTED_ENVIRONMENT=oci-migration \
+  EXPECTED_DISPLAY_TITLE="oci-migrate $SHA" \
+  PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+  STUB_WORKFLOW=oci-migrate.yml \
+  STUB_EVENT=workflow_dispatch \
+  STUB_ENVIRONMENT=oci-migration \
+  STUB_DISPLAY_TITLE="oci-migrate $SHA" \
+    "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
+  echo "run approver accepted the broad OCI migration workflow" >&2
   exit 1
 fi
 

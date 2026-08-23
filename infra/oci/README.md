@@ -188,6 +188,15 @@ concurrent retirement fixture isolation without masking failed suites.
    unique manifest set, and retained layers are within the configured Free
    Tier ceiling. Read-only validation records an over-ceiling layer total
    because reducing that total is the purpose of the subsequent prune.
+   OCIR has no supported user-triggered garbage-collection command, and Oracle
+   documents that repository deletion and storage release can take up to 48
+   hours. If the exact protected manifest inventory is already converged,
+   continue read-only validation while provider accounting catches up; never
+   delete candidate, deployed, or fallback images merely to pass the storage
+   gate. Escalate to Oracle Support if accounting remains stale beyond the
+   documented window. Moving application images to GHCR while retaining
+   exact-digest rollback is tracked in
+   [issue #284](https://github.com/vasilyevstan/betstan/issues/284).
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.
