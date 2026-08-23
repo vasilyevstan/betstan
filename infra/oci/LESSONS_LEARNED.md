@@ -54,6 +54,13 @@ conversation summaries are not authority.
 - OCI deletion and registry layer reclamation are asynchronous. Wait for
   terminal provider state and accounting instead of assuming a successful
   delete response completed the operation.
+- Manifest convergence and billable-layer convergence are independent.
+  A registry can contain only the exact candidate, deployed rollback, and
+  fallback manifests while `layers-size-in-bytes` still includes deleted,
+  unreferenced layers. Never delete a protected rollback generation or bypass
+  the 500 MB gate to make accounting appear green; retain the proven lineage
+  and wait for provider garbage collection or reduce image weight in a
+  separately reviewed build.
 - A build that fails after publishing can leave a complete source-tagged image
   generation without a provenance artifact. Before pruning accumulated
   generations, protect the exact candidate, deployed, and fallback digest

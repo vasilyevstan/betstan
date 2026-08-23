@@ -112,6 +112,11 @@ inactive. Fail closed when either query is incomplete or fails.
   fresh validation. Bind the artifact to the exact candidate, deployed,
   fallback, and every obsolete SHA/run pair; matching SHAs with different run
   IDs are not interchangeable.
+- Treat exact manifest lineage and provider layer accounting as separate
+  gates. OCIR may retain deleted, unreferenced layers after all target OCIDs
+  are absent. Never prune a protected rollback generation or waive the storage
+  ceiling to compensate; return `NO_GO` until provider accounting converges or
+  a separately reviewed image-size change satisfies the limit.
 
 ## Deployment gates
 
