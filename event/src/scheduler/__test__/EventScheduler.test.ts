@@ -33,16 +33,6 @@ const deferred = <T = void>() => {
   return { promise, resolve, reject };
 };
 
-const waitFor = async (predicate: () => boolean) => {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error("condition was not satisfied in time");
-};
-
 it("uses scheduler defaults and validates environment overrides", () => {
   expect(getEventSchedulerConfig({})).toEqual({
     enabled: true,
@@ -186,7 +176,11 @@ it("marks a scheduled slot published only after broker confirmation", async () =
   const now = new Date("2030-01-01T00:00:00.000Z");
   const sent = publisher();
   const confirmation = deferred<void>();
-  sent.publishWithConfirm.mockReturnValueOnce(confirmation.promise);
+  const publishStarted = deferred<void>();
+  sent.publishWithConfirm.mockImplementationOnce(() => {
+    publishStarted.resolve();
+    return confirmation.promise;
+  });
   const scheduler = new EventScheduler({
     config: config({ poolSize: 1, horizonMinutes: 1, maxInsertsPerTick: 1 }),
     now: () => now,
@@ -195,7 +189,7 @@ it("marks a scheduled slot published only after broker confirmation", async () =
   await scheduler.ensureSlotKeyIndex();
 
   const run = scheduler.runOnce();
-  await waitFor(() => sent.publishWithConfirm.mock.calls.length === 1);
+  await publishStarted.promise;
 
   const pending = await Event.findOne({ source: "SCHEDULER" });
   expect(pending!.newEventPublishedAt).toBeNull();
