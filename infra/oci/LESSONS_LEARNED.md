@@ -63,8 +63,11 @@ conversation summaries are not authority.
   can safely converge.
 - OCIR lists one row per tag, not necessarily one row per stored image.
   `imagetools create` reuse adds exact-SHA aliases that share an image OCID and
-  digest. Destructive checks must validate every alias while counting and
-  deleting unique image IDs: require one service and digest per ID, one
+  digest. Repository `image-count` also counts those tag rows rather than
+  unique OCIDs, so reconcile it with the validated alias inventory while
+  retaining separate unique-identity checks. Destructive checks must validate
+  every alias while counting and deleting unique image IDs: require one
+  service and digest per ID, one
   service and ID per digest, complete trusted alias generations, canonical
   protected tags, and equality of the exact protected OCID set before and
   after deletion rather than relying on counts alone. Candidate, deployed,

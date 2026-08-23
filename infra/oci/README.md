@@ -184,8 +184,10 @@ concurrent retirement fixture isolation without masking failed suites.
    snapshot immediately before deletion, deletes each target image ID once,
    records the complete before/after alias inventory, and waits until all
    target digests are absent, the exact pre-delete protected set of 9, 18, or
-   27 image OCIDs/digests remains, provider image accounting matches that set,
-   and retained layers are within the configured Free Tier ceiling.
+   27 image OCIDs/digests remains, provider image accounting matches the
+   validated retained tag-row count, and retained layers are within the
+   configured Free Tier ceiling. OCIR repository `image-count` counts tag rows,
+   not unique image OCIDs.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.
