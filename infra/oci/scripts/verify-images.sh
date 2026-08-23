@@ -152,6 +152,7 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
         -e JWT_KEY=offline-verification-only \
         -e "MONGO_URI=mongodb://mongo:27017/gaming_${service}" \
         -e RABBITMQ_URI=amqp://rabbitmq \
+        -e AUTH_SERVICE_URL=http://auth:3000 \
         -e "CLIENT_ID=oci-verification-${service}" \
         "$image_ref" >/dev/null
     fi
