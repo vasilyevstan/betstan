@@ -31,6 +31,7 @@ concurrency:
 
 jobs:
   disable-and-drain:
+    if: github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment:
