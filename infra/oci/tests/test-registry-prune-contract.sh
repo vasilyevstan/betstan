@@ -222,18 +222,19 @@ case "$*" in
     fi
     repository_list_count="$((repository_list_count + 1))"
     printf '%s\n' "$repository_list_count" > "$repository_list_count_file"
-    layers_size_bytes=300000000
-    if [[ -n "${MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL:-}" &&
-          "$repository_list_count" == "$MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL" ]]; then
-      layers_size_bytes=300000001
-    fi
     image_count="$(
-      jq '[
-        .data.items[]
-        | select((."lifecycle-state" // "" | ascii_upcase) != "DELETED")
-      ] | length' \
+      jq '[.data.items[].digest] | unique | length' \
         "${MOCK_OCI_STATE:?}/images.json"
     )"
+    if ((image_count > 27)); then
+      layers_size_bytes=600000000
+    else
+      layers_size_bytes=300000000
+    fi
+    if [[ -n "${MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL:-}" &&
+          "$repository_list_count" == "$MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL" ]]; then
+      layers_size_bytes="$((layers_size_bytes + 1))"
+    fi
     jq -n \
       --argjson image_count "$image_count" \
       --argjson layers_size_bytes "$layers_size_bytes" '{
@@ -330,8 +331,8 @@ jq -e '
   .tag_rows == 360 and
   .alias_rows == 306 and
   .tag_generations == 40 and
-  .registry_image_count == 360 and
-  .registry_layers_size_bytes == 300000000
+  .registry_image_count == 54 and
+  .registry_layers_size_bytes == 600000000
 ' "$WORK_DIR/validation-evidence/validation-summary.json" >/dev/null ||
   fail "read-only validation did not capture the production-shaped inventory"
 run_prune
@@ -345,8 +346,8 @@ jq -e '
   .tag_rows == 360 and
   .alias_rows == 306 and
   .tag_generations == 40 and
-  .registry_image_count == 360 and
-  .registry_layers_size_bytes == 300000000
+  .registry_image_count == 54 and
+  .registry_layers_size_bytes == 600000000
 ' "$WORK_DIR/evidence/before-summary.json" >/dev/null ||
   fail "batch prune did not model tag aliases separately from image IDs"
 jq -e \
@@ -363,7 +364,7 @@ jq -e \
     .tag_rows == 189 and
     .alias_rows == 162 and
     .tag_generations == 21 and
-    .registry_image_count == 189 and
+    .registry_image_count == 27 and
     .registry_layers_size_bytes == 300000000
   ' "$WORK_DIR/evidence/after-summary.json" >/dev/null ||
   fail "batch prune did not emit terminal evidence"
@@ -571,7 +572,7 @@ jq -e '
   .tag_rows == 135 and
   .alias_rows == 117 and
   .tag_generations == 15 and
-  .registry_image_count == 135
+  .registry_image_count == 18
 ' "$WORK_DIR/evidence/after-summary.json" >/dev/null ||
   fail "reused protected generations did not retain exact alias accounting"
 jq -r '.data.items[].id' "$WORK_DIR/state/images.json" |
