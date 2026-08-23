@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       phase:
-        description: Prepare/finalize zero-cost infrastructure or prune one obsolete image generation
+        description: Prepare/finalize zero-cost infrastructure or prune obsolete image generations
         required: true
         default: prepare
         type: choice
@@ -27,12 +27,17 @@ on:
         default: ""
         type: string
       obsolete_sha:
-        description: Obsolete source SHA whose complete image generation may be pruned
+        description: Legacy single obsolete source SHA
         required: false
         default: ""
         type: string
       obsolete_build_run_id:
-        description: First-attempt OCI build provenance for the obsolete generation
+        description: Legacy single-generation first-attempt OCI build run
+        required: false
+        default: ""
+        type: string
+      obsolete_generations:
+        description: JSON array of obsolete first-attempt build SHA/run pairs
         required: false
         default: ""
         type: string
@@ -78,6 +83,7 @@ jobs:
       CANDIDATE_BUILD_RUN_ID: ${{ inputs.candidate_build_run_id }}
       OBSOLETE_SHA: ${{ inputs.obsolete_sha }}
       OBSOLETE_BUILD_RUN_ID: ${{ inputs.obsolete_build_run_id }}
+      OBSOLETE_GENERATIONS: ${{ inputs.obsolete_generations }}
       DEPLOYED_SHA: ${{ inputs.deployed_sha }}
       DEPLOYED_RUN_ID: ${{ inputs.deployed_run_id }}
       FALLBACK_SHA: ${{ inputs.fallback_sha }}
@@ -132,14 +138,13 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [ "$CONFIRMATION" = "PRUNE OBSOLETE OCI IMAGE GENERATION" ]
-          for sha in \
-            "$SOURCE_SHA" "$OBSOLETE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
+          for sha in "$SOURCE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
             git cat-file -e "${sha}^{commit}"
           done
           for run_id in \
-            "$CANDIDATE_BUILD_RUN_ID" "$OBSOLETE_BUILD_RUN_ID" \
-            "$DEPLOYED_RUN_ID" "$FALLBACK_BUILD_RUN_ID"; do
+            "$CANDIDATE_BUILD_RUN_ID" "$DEPLOYED_RUN_ID" \
+            "$FALLBACK_BUILD_RUN_ID"; do
             [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
           done
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
@@ -147,13 +152,56 @@ jobs:
           [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
-          [ "$OBSOLETE_SHA" != "$SOURCE_SHA" ]
-          [ "$OBSOLETE_SHA" != "$DEPLOYED_SHA" ]
-          [ "$OBSOLETE_SHA" != "$FALLBACK_SHA" ]
+          [ "$SOURCE_SHA" != "$DEPLOYED_SHA" ]
+          [ "$SOURCE_SHA" != "$FALLBACK_SHA" ]
           [ "$DEPLOYED_SHA" != "$FALLBACK_SHA" ]
-          for ancestor in "$OBSOLETE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
+          for ancestor in "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
             git merge-base --is-ancestor "$ancestor" "$SOURCE_SHA"
           done
+
+          if [ -n "$OBSOLETE_GENERATIONS" ]; then
+            [ -z "$OBSOLETE_SHA" ]
+            [ -z "$OBSOLETE_BUILD_RUN_ID" ]
+            jq -ceS '
+              . as $rows
+              | select(
+                  type == "array"
+                  and length >= 1
+                  and length <= 10
+                  and all(
+                    .[];
+                    type == "object"
+                    and (keys | sort) == ["build_run_id", "sha"]
+                    and (.sha | type) == "string"
+                    and (.sha | test("^[0-9a-f]{40}$"))
+                    and (.build_run_id | type) == "string"
+                    and (.build_run_id | test("^[1-9][0-9]*$"))
+                  )
+                  and ([$rows[].sha] | unique | length) == ($rows | length)
+                  and ([$rows[].build_run_id] | unique | length) == ($rows | length)
+                )
+            ' <<<"$OBSOLETE_GENERATIONS" \
+              > "$WORK_DIR/obsolete-generations.json"
+          else
+            [[ "$OBSOLETE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$OBSOLETE_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            jq -cn \
+              --arg sha "$OBSOLETE_SHA" \
+              --arg build_run_id "$OBSOLETE_BUILD_RUN_ID" \
+              '[{sha: $sha, build_run_id: $build_run_id}]' \
+              > "$WORK_DIR/obsolete-generations.json"
+          fi
+
+          jq -r '.[] | [.sha, .build_run_id] | @tsv' \
+            "$WORK_DIR/obsolete-generations.json" |
+            while IFS=$'\t' read -r obsolete_sha obsolete_run_id; do
+              [[ "$obsolete_run_id" =~ ^[1-9][0-9]*$ ]]
+              git cat-file -e "${obsolete_sha}^{commit}"
+              git merge-base --is-ancestor "$obsolete_sha" "$SOURCE_SHA"
+              [ "$obsolete_sha" != "$SOURCE_SHA" ]
+              [ "$obsolete_sha" != "$DEPLOYED_SHA" ]
+              [ "$obsolete_sha" != "$FALLBACK_SHA" ]
+            done
 
       - name: Download and validate protected image provenance
         env:
@@ -166,6 +214,7 @@ jobs:
             local run_id="$2"
             local event="$3"
             local expected_sha="$4"
+            local conclusion_mode="$5"
             local workflow_id
             local run_json
             workflow_id="$(
@@ -180,7 +229,8 @@ jobs:
               --arg workflow_path ".github/workflows/$workflow_file" \
               --arg event "$event" \
               --arg sha "$expected_sha" \
-              --arg repository "$REPOSITORY" '
+              --arg repository "$REPOSITORY" \
+              --arg conclusion_mode "$conclusion_mode" '
                 .workflow_id == $workflow_id and
                 .path == $workflow_path and
                 .event == $event and
@@ -188,7 +238,13 @@ jobs:
                 .head_branch == "master" and
                 .head_repository.full_name == $repository and
                 .status == "completed" and
-                .conclusion == "success" and
+                (
+                  if $conclusion_mode == "success" then
+                    .conclusion == "success"
+                  else
+                    (.conclusion == "success" or .conclusion == "failure")
+                  end
+                ) and
                 .run_attempt == 1
               ' <<<"$run_json" >/dev/null
           }
@@ -213,25 +269,18 @@ jobs:
 
           validate_run \
             oci-production-build.yml \
-            "$CANDIDATE_BUILD_RUN_ID" workflow_run "$SOURCE_SHA"
-          validate_run \
-            oci-production-build.yml \
-            "$OBSOLETE_BUILD_RUN_ID" workflow_run "$OBSOLETE_SHA"
+            "$CANDIDATE_BUILD_RUN_ID" workflow_run "$SOURCE_SHA" success
           validate_run \
             oci-production-deploy.yml \
-            "$DEPLOYED_RUN_ID" workflow_dispatch "$DEPLOYED_SHA"
+            "$DEPLOYED_RUN_ID" workflow_dispatch "$DEPLOYED_SHA" success
           validate_run \
             oci-production-build.yml \
-            "$FALLBACK_BUILD_RUN_ID" workflow_run "$FALLBACK_SHA"
+            "$FALLBACK_BUILD_RUN_ID" workflow_run "$FALLBACK_SHA" success
 
           download_artifact \
             "$CANDIDATE_BUILD_RUN_ID" \
             "oci-image-provenance-${SOURCE_SHA}-${CANDIDATE_BUILD_RUN_ID}-1" \
             "$WORK_DIR/candidate"
-          download_artifact \
-            "$OBSOLETE_BUILD_RUN_ID" \
-            "oci-image-provenance-${OBSOLETE_SHA}-${OBSOLETE_BUILD_RUN_ID}-1" \
-            "$WORK_DIR/obsolete"
           download_artifact \
             "$DEPLOYED_RUN_ID" \
             "oci-deploy-provenance-${DEPLOYED_RUN_ID}-1" \
@@ -243,7 +292,6 @@ jobs:
 
           for pair in \
             "candidate:$SOURCE_SHA:$CANDIDATE_BUILD_RUN_ID" \
-            "obsolete:$OBSOLETE_SHA:$OBSOLETE_BUILD_RUN_ID" \
             "fallback:$FALLBACK_SHA:$FALLBACK_BUILD_RUN_ID"; do
             IFS=: read -r directory expected_sha expected_run_id <<<"$pair"
             grep -Fxq "source_sha=$expected_sha" \
@@ -254,18 +302,72 @@ jobs:
               "$WORK_DIR/$directory/build-chain.txt"
             test -s "$WORK_DIR/$directory/images.tsv"
           done
-          for pair in "deployed:$DEPLOYED_SHA:$DEPLOYED_RUN_ID"; do
-            IFS=: read -r directory expected_sha expected_run_id <<<"$pair"
-            grep -Fxq "source_sha=$expected_sha" \
-              "$WORK_DIR/$directory/provenance.txt"
-            grep -Fxq "deployment_run_id=$expected_run_id" \
-              "$WORK_DIR/$directory/provenance.txt"
-            grep -Fxq "deployment_run_attempt=1" \
-              "$WORK_DIR/$directory/provenance.txt"
-            test -s "$WORK_DIR/$directory/images.tsv"
-          done
+          grep -Fxq "source_sha=$DEPLOYED_SHA" \
+            "$WORK_DIR/deployed/provenance.txt"
+          grep -Fxq "deployment_run_id=$DEPLOYED_RUN_ID" \
+            "$WORK_DIR/deployed/provenance.txt"
+          grep -Fxq "deployment_run_attempt=1" \
+            "$WORK_DIR/deployed/provenance.txt"
+          test -s "$WORK_DIR/deployed/images.tsv"
 
-          cp "$WORK_DIR/obsolete/images.tsv" "$PROVENANCE_DIR/obsolete.tsv"
+          : > "$PROVENANCE_DIR/target-source-shas.txt"
+          : > "$PROVENANCE_DIR/trusted-target-images.tsv"
+          : > "$PROVENANCE_DIR/obsolete-runs.tsv"
+          while IFS=$'\t' read -r obsolete_sha obsolete_run_id; do
+            validate_run \
+              oci-production-build.yml \
+              "$obsolete_run_id" workflow_run "$obsolete_sha" terminal
+            obsolete_conclusion="$(
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$obsolete_run_id/attempts/1" \
+                --jq '.conclusion'
+            )"
+            artifact_name="oci-image-provenance-${obsolete_sha}-${obsolete_run_id}-1"
+            artifact_count="$(
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$obsolete_run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            if [ "$obsolete_conclusion" = "success" ]; then
+              [ "$artifact_count" = "1" ]
+            else
+              [ "$obsolete_conclusion" = "failure" ]
+              [ "$artifact_count" = "0" ] || [ "$artifact_count" = "1" ]
+            fi
+
+            artifact_status=absent
+            if [ "$artifact_count" = "1" ]; then
+              destination="$WORK_DIR/obsolete-$obsolete_sha"
+              download_artifact \
+                "$obsolete_run_id" "$artifact_name" "$destination"
+              grep -Fxq "source_sha=$obsolete_sha" \
+                "$destination/build-chain.txt"
+              grep -Fxq "build_run_id=$obsolete_run_id" \
+                "$destination/build-chain.txt"
+              grep -Fxq "build_run_attempt=1" \
+                "$destination/build-chain.txt"
+              test -s "$destination/images.tsv"
+              awk -F '\t' -v sha="$obsolete_sha" '
+                BEGIN { OFS = "\t" }
+                NF != 5 { exit 1 }
+                { print sha, $0 }
+              ' "$destination/images.tsv" \
+                >> "$PROVENANCE_DIR/trusted-target-images.tsv"
+              artifact_status=verified
+            fi
+            printf '%s\t%s\t%s\t%s\n' \
+              "$obsolete_sha" "$obsolete_run_id" \
+              "$obsolete_conclusion" "$artifact_status" \
+              >> "$PROVENANCE_DIR/obsolete-runs.tsv"
+            printf '%s\n' "$obsolete_sha" \
+              >> "$PROVENANCE_DIR/target-source-shas.txt"
+          done < <(
+            jq -r '.[] | [.sha, .build_run_id] | @tsv' \
+              "$WORK_DIR/obsolete-generations.json"
+          )
+
           cat \
             "$WORK_DIR/candidate/images.tsv" \
             "$WORK_DIR/deployed/images.tsv" \
@@ -298,9 +400,9 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          TARGET_IMAGES_FILE: artifacts/oci-registry-prune/obsolete.tsv
+          TARGET_SOURCE_SHAS_FILE: artifacts/oci-registry-prune/target-source-shas.txt
+          TRUSTED_TARGET_IMAGES_FILE: artifacts/oci-registry-prune/trusted-target-images.tsv
           PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/protected.tsv
-          TARGET_SOURCE_SHA: ${{ inputs.obsolete_sha }}
           CURRENT_SOURCE_SHA: ${{ inputs.approved_sha }}
           OUTPUT_DIR: artifacts/oci-registry-prune
         run: ./infra/oci/scripts/prune-registry-generation.sh
@@ -309,10 +411,14 @@ jobs:
         run: |
           set -euo pipefail
           test -s "$PROVENANCE_DIR/after-summary.json"
+          expected_targets="$(
+            jq -c '[.[].sha] | sort' \
+              "$WORK_DIR/obsolete-generations.json"
+          )"
           jq -e \
-            --arg obsolete_sha "$OBSOLETE_SHA" \
+            --argjson expected_targets "$expected_targets" \
             --arg source_sha "$SOURCE_SHA" '
-              .target_source_sha == $obsolete_sha and
+              .target_source_shas == $expected_targets and
               .current_source_sha == $source_sha and
               .terminal_status == "PRUNED" and
               .unique_images == 27
@@ -322,6 +428,8 @@ jobs:
             "candidate_build_run_id=$CANDIDATE_BUILD_RUN_ID" \
             "obsolete_sha=$OBSOLETE_SHA" \
             "obsolete_build_run_id=$OBSOLETE_BUILD_RUN_ID" \
+            "obsolete_generation_count=$(jq 'length' "$WORK_DIR/obsolete-generations.json")" \
+            "obsolete_generations_sha256=$(sha256sum "$WORK_DIR/obsolete-generations.json" | awk '{print $1}')" \
             "deployed_sha=$DEPLOYED_SHA" \
             "deployed_run_id=$DEPLOYED_RUN_ID" \
             "fallback_sha=$FALLBACK_SHA" \

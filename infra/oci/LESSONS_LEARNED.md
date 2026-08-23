@@ -54,6 +54,13 @@ conversation summaries are not authority.
 - OCI deletion and registry layer reclamation are asynchronous. Wait for
   terminal provider state and accounting instead of assuming a successful
   delete response completed the operation.
+- A build that fails after publishing can leave a complete source-tagged image
+  generation without a provenance artifact. Before pruning accumulated
+  generations, protect the exact candidate, deployed, and fallback digest
+  sets; bind every target to a terminal first-attempt build; and prove that
+  protected plus target rows exhaust the registry before deleting the whole
+  explicit batch. Permit partial target subsets only so an interrupted prune
+  can safely converge.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.
