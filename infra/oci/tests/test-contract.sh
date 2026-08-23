@@ -547,8 +547,11 @@ grep -Fq 'digest_service_conflict_count' "$inventory" ||
   fail "OCI inventory must reject cross-service digest identities"
 grep -Fq 'MAX_TARGET_GENERATIONS=10' "$registry_pruner" ||
   fail "registry pruning must bound the explicit obsolete generation set"
-grep -Fq 'EXPECTED_PROTECTED_IMAGES=27' "$registry_pruner" ||
-  fail "registry pruning must retain exactly three complete generations"
+grep -Fq 'EXPECTED_PROTECTED_PROVENANCE_ROWS=27' "$registry_pruner" ||
+  fail "registry pruning must bind three canonical protected source generations"
+grep -Fq 'protected_image_count % IMAGES_PER_GENERATION == 0' \
+  "$registry_pruner" ||
+  fail "registry pruning must retain only complete unique protected generations"
 grep -Fq 'obsolete generations overlap a protected generation' "$registry_pruner" ||
   fail "registry pruning does not reject protected digest overlap"
 grep -Fq 'registry contains an unknown, missing, or unexpected image generation' \
@@ -558,8 +561,22 @@ grep -Fq 'read_provenance_repository "$PROTECTED_IMAGES_FILE"' "$registry_pruner
   fail "registry pruning does not derive one exact protected repository"
 grep -Fq 'TRUSTED_TARGET_IMAGES_FILE' "$registry_pruner" ||
   fail "registry pruning does not cross-check successful obsolete builds"
-grep -Fq 'registry contains duplicate or aliased image rows' "$registry_pruner" ||
-  fail "registry pruning does not reject unaccounted image aliases"
+grep -Fq 'TRUSTED_PROTECTED_IMAGES_FILE' "$registry_pruner" ||
+  fail "registry pruning does not cross-check canonical protected source tags"
+grep -Fq 'validate_alias_generations' "$registry_pruner" ||
+  fail "registry pruning does not validate complete image alias generations"
+grep -Fq 'registry_image_id_set' "$registry_pruner" ||
+  fail "registry pruning does not separate unique image IDs from tag aliases"
+grep -Fq 'before-aliases.tsv' "$registry_pruner" ||
+  fail "registry pruning does not retain pre-delete alias evidence"
+grep -Fq 'registry aliases changed after validation and before deletion' \
+  "$registry_pruner" ||
+  fail "registry pruning does not revalidate its alias snapshot before deletion"
+grep -Fq 'the exact protected image OCID set changed during pruning' \
+  "$registry_pruner" ||
+  fail "registry pruning does not preserve the exact protected image OCID set"
+grep -Fq 'protected_image_ids_sha256' "$registry_pruner" ||
+  fail "registry pruning does not bind protected image OCIDs into evidence"
 grep -Fq 'OCI registry pruning did not reach the exact protected digest set' \
   "$registry_pruner" ||
   fail "registry pruning does not wait for asynchronous deletion"
@@ -762,6 +779,9 @@ grep -Fq 'oci-image-provenance-${obsolete_sha}-${obsolete_run_id}-1' \
   "$infra_workflow"
 grep -Fq 'target-source-shas.txt' "$infra_workflow"
 grep -Fq 'trusted-target-images.tsv' "$infra_workflow"
+grep -Fq 'trusted-protected-images.tsv' "$infra_workflow"
+grep -Fq '.unique_image_ids == .unique_images' "$infra_workflow"
+grep -Fq '.protected_image_ids_sha256 ==' "$infra_workflow"
 grep -Fq 'oci-image-provenance-${FALLBACK_SHA}-${FALLBACK_BUILD_RUN_ID}-1' \
   "$infra_workflow"
 grep -Fq 'oci-deploy-provenance-${DEPLOYED_RUN_ID}-1' "$infra_workflow"

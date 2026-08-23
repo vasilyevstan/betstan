@@ -32,7 +32,10 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   `OCI_REGISTRY_MAX_BYTES=500000000`. The inventory accepts only one to three
   complete nine-image generations: the exact candidate and up to two retained
   rollback generations. It verifies complete service tag sets and unique
-  service/digest mappings; partial or fourth generations fail closed.
+  service/digest mappings; partial or fourth unique generations fail closed.
+  Exact-SHA tags created by image reuse are aliases and do not increase the
+  provider's unique image count, but every alias must resolve to one complete
+  trusted generation.
 - Frankfurt OCIR does not currently support repository-level immutability.
   One private `${OCI_IMAGE_PREFIX}_images` repository is precreated so the
   eight backend images share their identical Node layers instead of charging
@@ -165,10 +168,17 @@ concurrent retirement fixture isolation without masking failed suites.
    are cross-checked against their immutable artifacts; failed first-attempt
    builds are eligible only for their source-tagged service rows. The
    protected job also accepts an explicit target subset left by an interrupted
-   prior deletion, but deletes nothing
-   unless the protected and target sets are pairwise disjoint and exhaust
-   every registry row. It waits until all target digests are absent, all 27
-   protected digests remain, provider image accounting reaches 27, and
+   prior deletion, but deletes nothing unless the protected and target sets
+   are pairwise disjoint and exhaust every unique image ID/digest. All tag
+   aliases must map consistently to one trusted protected or target
+   generation, and each canonical candidate, deployed, and fallback tag must
+   remain present. Complete protected source generations may alias the same
+   nine immutable images after reuse; partial protected overlap is rejected.
+   The workflow rechecks an unchanged alias snapshot immediately before
+   deletion, deletes each target image ID once, records the complete
+   before/after alias inventory, and waits until all target digests are
+   absent, the exact pre-delete protected set of 9, 18, or 27 image
+   OCIDs/digests remains, provider image accounting matches that set, and
    retained layers are within the configured Free Tier ceiling.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet

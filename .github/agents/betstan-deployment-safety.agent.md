@@ -89,6 +89,16 @@ inactive. Fail closed when either query is incomplete or fails.
   failed targets, and exhaustive preservation of the candidate, deployed, and
   fallback digest sets. Accept a partial target subset only as bounded
   convergence after an interrupted prune.
+- Treat OCIR list rows as tag aliases, not unique images. Before any delete,
+  group by image OCID and digest, prove their one-to-one service mapping,
+  require every alias source set to match one trusted protected or target
+  generation, and require the canonical candidate, deployed, and fallback
+  tags. Approve deletion only for the exact unique target OCIDs and require
+  before/after alias evidence, equality of the exact protected OCID set, and
+  terminal unique-image accounting; matching counts alone are insufficient.
+  Allow canonical protected source generations to share a complete
+  nine-image OCID/digest set after reuse, but reject partial protected
+  overlap.
 
 ## Deployment gates
 

@@ -8,13 +8,18 @@ source "$SCRIPT_DIR/lib.sh"
 TARGET_SOURCE_SHAS_FILE="${TARGET_SOURCE_SHAS_FILE:-}"
 TRUSTED_TARGET_IMAGES_FILE="${TRUSTED_TARGET_IMAGES_FILE:-}"
 PROTECTED_IMAGES_FILE="${PROTECTED_IMAGES_FILE:-}"
+TRUSTED_PROTECTED_IMAGES_FILE="${TRUSTED_PROTECTED_IMAGES_FILE:-}"
 CURRENT_SOURCE_SHA="${CURRENT_SOURCE_SHA:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/oci-registry-prune}"
 PRUNE_POLL_ATTEMPTS="${PRUNE_POLL_ATTEMPTS:-60}"
 PRUNE_POLL_SECONDS="${PRUNE_POLL_SECONDS:-10}"
 EXPECTED_SERVICES='auth backoffice bet client event gamemaster moderation resulting slip'
-EXPECTED_PROTECTED_IMAGES=27
+IMAGES_PER_GENERATION=9
+EXPECTED_PROTECTED_PROVENANCE_ROWS=27
+MAX_PROTECTED_IMAGES=27
 MAX_TARGET_GENERATIONS=10
+MAX_REGISTRY_TAG_ROWS=900
+MAX_REGISTRY_TAG_GENERATIONS=100
 
 oci_require_cli_version
 oci_require_command jq
@@ -36,6 +41,8 @@ oci_require_ocid OCI_COMPARTMENT_OCID
   oci_die "TRUSTED_TARGET_IMAGES_FILE does not exist"
 [[ -f "$PROTECTED_IMAGES_FILE" ]] ||
   oci_die "PROTECTED_IMAGES_FILE does not exist"
+[[ -f "$TRUSTED_PROTECTED_IMAGES_FILE" ]] ||
+  oci_die "TRUSTED_PROTECTED_IMAGES_FILE does not exist"
 
 mkdir -p "$OUTPUT_DIR"
 work_dir="$(mktemp -d)"
@@ -104,8 +111,11 @@ provenance_repository="$(
 normalize_protected_provenance() {
   awk -F '\t' \
     -v repository="$provenance_repository" \
+    -v expected_rows="$EXPECTED_PROTECTED_PROVENANCE_ROWS" \
+    -v images_per_generation="$IMAGES_PER_GENERATION" \
     -v expected_services="$EXPECTED_SERVICES" '
       BEGIN {
+        expected_service_count = expected_rows / images_per_generation
         split(expected_services, services, " ")
         for (service_index in services) {
           allowed[services[service_index]] = 1
@@ -117,32 +127,28 @@ normalize_protected_provenance() {
           substr(value, 8) ~ /^[0-9a-f]+$/
       }
       NF != 5 || !($1 in allowed) || $2 != repository ||
-        $3 != $2 "@" $4 || $4 != $5 || !valid_digest($4) {
+        $3 != $2 "@" $4 || $4 != $5 || !valid_digest($4) ||
+        ($4 in digest_service && digest_service[$4] != $1) {
         exit 1
       }
       {
         rows++
         service_count[$1]++
-        digest_count[$4]++
+        digest_service[$4] = $1
         print $1 "\t" $4
       }
       END {
-        if (rows != 27) {
+        if (rows != expected_rows) {
           exit 1
         }
         for (service in allowed) {
-          if (service_count[service] != 3) {
-            exit 1
-          }
-        }
-        for (digest in digest_count) {
-          if (digest_count[digest] != 1) {
+          if (service_count[service] != expected_service_count) {
             exit 1
           }
         }
       }
     ' "$PROTECTED_IMAGES_FILE" |
-    LC_ALL=C sort -t $'\t' -k1,1 -k2,2 \
+    LC_ALL=C sort -u -t $'\t' -k1,1 -k2,2 \
       > "$work_dir/protected.tsv" ||
     oci_die "protected image provenance validation failed"
 }
@@ -194,14 +200,112 @@ normalize_trusted_target_provenance() {
     oci_die "trusted target image provenance validation failed"
 }
 
+normalize_trusted_protected_provenance() {
+  awk -F '\t' \
+    -v repository="$provenance_repository" \
+    -v current_sha="$CURRENT_SOURCE_SHA" \
+    -v expected_rows="$EXPECTED_PROTECTED_PROVENANCE_ROWS" \
+    -v images_per_generation="$IMAGES_PER_GENERATION" \
+    -v expected_services="$EXPECTED_SERVICES" '
+      BEGIN {
+        split(expected_services, services, " ")
+        for (service_index in services) {
+          allowed[services[service_index]] = 1
+        }
+      }
+      function valid_sha(value) {
+        return length(value) == 40 && value ~ /^[0-9a-f]+$/
+      }
+      function valid_digest(value) {
+        return length(value) == 71 &&
+          substr(value, 1, 7) == "sha256:" &&
+          substr(value, 8) ~ /^[0-9a-f]+$/
+      }
+      NF != 6 || !valid_sha($1) || !($2 in allowed) ||
+        $3 != repository || $4 != $3 "@" $5 || $5 != $6 ||
+        !valid_digest($5) || seen[$1 SUBSEP $2]++ ||
+        ($5 in digest_service && digest_service[$5] != $2) {
+        exit 1
+      }
+      {
+        rows++
+        source_count[$1]++
+        source_digest[$1 SUBSEP $2] = $5
+        digest_service[$5] = $2
+        print $1 "\t" $2 "\t" $5
+      }
+      END {
+        if (rows != expected_rows) {
+          exit 1
+        }
+        for (source in source_count) {
+          sources++
+          if (source_count[source] != images_per_generation) {
+            exit 1
+          }
+          for (service in allowed) {
+            if (!seen[source SUBSEP service]) {
+              exit 1
+            }
+          }
+        }
+        if (sources != expected_rows / images_per_generation) {
+          exit 1
+        }
+        if (source_count[current_sha] != images_per_generation) {
+          exit 1
+        }
+        for (left in source_count) {
+          for (right in source_count) {
+            if (left == right) {
+              continue
+            }
+            shared = 0
+            equal = 1
+            for (service in allowed) {
+              left_digest = source_digest[left SUBSEP service]
+              right_digest = source_digest[right SUBSEP service]
+              if (left_digest == right_digest) {
+                shared++
+              } else {
+                equal = 0
+              }
+            }
+            if (shared > 0 && !equal) {
+              exit 1
+            }
+          }
+        }
+      }
+    ' "$TRUSTED_PROTECTED_IMAGES_FILE" |
+    LC_ALL=C sort -t $'\t' -k1,1 -k2,2 \
+      > "$work_dir/trusted-protected.tsv" ||
+    oci_die "trusted protected image provenance validation failed"
+}
+
 normalize_protected_provenance
 normalize_trusted_target_provenance
+normalize_trusted_protected_provenance
 
 cut -f2 "$work_dir/protected.tsv" |
   LC_ALL=C sort -u > "$work_dir/protected-digests.txt"
-[[ "$(wc -l < "$work_dir/protected-digests.txt" | tr -d ' ')" == \
-  "$EXPECTED_PROTECTED_IMAGES" ]] ||
-  oci_die "protected image provenance is not digest-unique"
+protected_image_count="$(
+  wc -l < "$work_dir/protected-digests.txt" | tr -d ' '
+)"
+((protected_image_count >= IMAGES_PER_GENERATION &&
+  protected_image_count <= MAX_PROTECTED_IMAGES &&
+  protected_image_count % IMAGES_PER_GENERATION == 0)) ||
+  oci_die "protected provenance is not one to three complete unique image generations"
+protected_unique_generation_count="$(
+  printf '%s\n' "$((protected_image_count / IMAGES_PER_GENERATION))"
+)"
+cut -f2,3 "$work_dir/trusted-protected.tsv" |
+  LC_ALL=C sort -u -t $'\t' -k1,1 -k2,2 \
+    > "$work_dir/trusted-protected-service-digests.tsv"
+cmp -s \
+  "$work_dir/protected.tsv" \
+  "$work_dir/trusted-protected-service-digests.tsv" ||
+  oci_die "trusted protected source tags do not match protected digest provenance"
 
 list_images() {
   local destination="$1"
@@ -257,11 +361,25 @@ validate_registry_rows() {
         )
       )
       and ([
+        ($rows | group_by(.version))[]
+        | select(length != 1)
+      ] | length) == 0
+      and ([
         ($rows | group_by(.digest))[]
-        | select(([.[].parsed_tag.service] | unique | length) != 1)
+        | select(
+            ([.[].parsed_tag.service] | unique | length) != 1 or
+            ([.[].id] | unique | length) != 1
+          )
+      ] | length) == 0
+      and ([
+        ($rows | group_by(.id))[]
+        | select(
+            ([.[].parsed_tag.service] | unique | length) != 1 or
+            ([.[].digest] | unique | length) != 1
+          )
       ] | length) == 0
     ' "$inventory_file" >/dev/null ||
-    oci_die "OCI registry rows violate the exact tag, digest, or lifecycle contract"
+    oci_die "OCI registry aliases violate the exact tag, identity, digest, or lifecycle contract"
 }
 
 registry_digest_set() {
@@ -272,6 +390,17 @@ registry_digest_set() {
     .data.items[]?
     | select((."lifecycle-state" // "" | ascii_upcase) != "DELETED")
     | .digest
+  ' "$inventory_file" | LC_ALL=C sort -u > "$destination"
+}
+
+registry_image_id_set() {
+  local inventory_file="$1"
+  local destination="$2"
+
+  jq -r '
+    .data.items[]?
+    | select((."lifecycle-state" // "" | ascii_upcase) != "DELETED")
+    | .id
   ' "$inventory_file" | LC_ALL=C sort -u > "$destination"
 }
 
@@ -293,11 +422,85 @@ registry_service_digest_set() {
   ' "$inventory_file" | LC_ALL=C sort -u > "$destination"
 }
 
+registry_alias_inventory() {
+  local inventory_file="$1"
+  local destination="$2"
+
+  jq -r '
+    def parsed_tag:
+      (.version // "")
+      | capture(
+          "^oci-(?<service>auth|backoffice|bet|client|event|gamemaster|moderation|resulting|slip)-(?<source_sha>[0-9a-f]{40})$"
+        );
+    .data.items[]?
+    | select((."lifecycle-state" // "" | ascii_upcase) != "DELETED")
+    | parsed_tag as $tag
+    | [$tag.source_sha, $tag.service, .digest, .id, .version]
+    | @tsv
+  ' "$inventory_file" |
+    LC_ALL=C sort -t $'\t' -k1,1 -k2,2 > "$destination"
+}
+
 active_registry_row_count() {
   jq -r '[
     .data.items[]?
     | select((."lifecycle-state" // "" | ascii_upcase) != "DELETED")
   ] | length' "$1"
+}
+
+validate_alias_generations() {
+  local membership_file="$1"
+  local alias_file="$2"
+
+  awk -F '\t' -v expected_services="$EXPECTED_SERVICES" '
+    FNR == NR {
+      kind[$2] = $1
+      canonical[$2 SUBSEP $3] = $4
+      canonical_count[$2]++
+      canonical_sources[$2] = 1
+      next
+    }
+    NF != 5 || alias_seen[$1 SUBSEP $2]++ {
+      failed = 1
+      exit
+    }
+    {
+      alias[$1 SUBSEP $2] = $3
+      alias_count[$1]++
+      alias_sources[$1] = 1
+    }
+    END {
+      split(expected_services, services, " ")
+      for (source in alias_sources) {
+        matched = 0
+        for (candidate in canonical_sources) {
+          if (alias_count[source] > canonical_count[candidate]) {
+            continue
+          }
+          compatible = 1
+          for (service_index in services) {
+            service = services[service_index]
+            alias_key = source SUBSEP service
+            canonical_key = candidate SUBSEP service
+            if ((alias_key in alias) &&
+              alias[alias_key] != canonical[canonical_key]) {
+              compatible = 0
+            }
+          }
+          if (compatible) {
+            if (alias_count[source] == canonical_count[candidate] ||
+              kind[candidate] == "target") {
+              matched = 1
+            }
+          }
+        }
+        if (!matched) {
+          failed = 1
+        }
+      }
+      exit failed
+    }
+  ' "$membership_file" "$alias_file"
 }
 
 registry_accounting() {
@@ -341,6 +544,16 @@ registry_accounting() {
 
 list_images "$work_dir/before.json"
 validate_registry_rows "$work_dir/before.json" AVAILABLE
+registry_alias_inventory "$work_dir/before.json" "$work_dir/before-aliases.tsv"
+before_row_count="$(active_registry_row_count "$work_dir/before.json")"
+before_tag_generation_count="$(
+  cut -f1 "$work_dir/before-aliases.tsv" | LC_ALL=C sort -u | wc -l |
+    tr -d ' '
+)"
+((before_row_count <= MAX_REGISTRY_TAG_ROWS)) ||
+  oci_die "registry tag row count exceeds the bounded alias contract"
+((before_tag_generation_count <= MAX_REGISTRY_TAG_GENERATIONS)) ||
+  oci_die "registry tag generation count exceeds the bounded alias contract"
 
 jq -r \
   --rawfile target_sources "$work_dir/target-source-shas.txt" '
@@ -423,7 +636,7 @@ expected_images_before="$(
   wc -l < "$work_dir/expected-before-digests.txt" | tr -d ' '
 )"
 [[ "$expected_images_before" == \
-  "$((EXPECTED_PROTECTED_IMAGES + present_target_image_count))" ]] ||
+  "$((protected_image_count + present_target_image_count))" ]] ||
   oci_die "expected registry generations are not pairwise disjoint"
 
 {
@@ -431,12 +644,57 @@ expected_images_before="$(
   cat "$work_dir/protected.tsv"
 } | LC_ALL=C sort -u > "$work_dir/expected-service-digests.tsv"
 
+{
+  awk -F '\t' '{ print "protected\t" $1 "\t" $2 "\t" $3 }' \
+    "$work_dir/trusted-protected.tsv"
+  awk -F '\t' '{ print "target\t" $1 "\t" $2 "\t" $3 }' \
+    "$work_dir/target-registry.tsv"
+} > "$work_dir/known-generation-memberships.tsv"
+validate_alias_generations \
+  "$work_dir/known-generation-memberships.tsv" \
+  "$work_dir/before-aliases.tsv" ||
+  oci_die "registry alias generations do not match a complete protected or remaining target generation"
+
+cut -f1,2,3 "$work_dir/before-aliases.tsv" |
+  LC_ALL=C sort -u > "$work_dir/before-source-service-digests.tsv"
+if comm -23 \
+    "$work_dir/trusted-protected.tsv" \
+    "$work_dir/before-source-service-digests.tsv" |
+    grep -q .; then
+  oci_die "a canonical protected source tag is missing or has an unexpected digest"
+fi
+
 registry_digest_set "$work_dir/before.json" "$work_dir/before-digests.txt"
+registry_image_id_set "$work_dir/before.json" "$work_dir/before-image-ids.txt"
 registry_service_digest_set \
   "$work_dir/before.json" "$work_dir/before-service-digests.tsv"
-[[ "$(active_registry_row_count "$work_dir/before.json")" == \
-  "$expected_images_before" ]] ||
-  oci_die "registry contains duplicate or aliased image rows"
+before_image_id_count="$(
+  wc -l < "$work_dir/before-image-ids.txt" | tr -d ' '
+)"
+[[ "$before_image_id_count" == "$expected_images_before" ]] ||
+  oci_die "registry image IDs are not one-to-one with the expected unique digests"
+awk -F '\t' '
+  FNR == NR {
+    protected[$1] = 1
+    next
+  }
+  $3 in protected {
+    print $4
+  }
+' \
+  "$work_dir/protected-digests.txt" \
+  "$work_dir/before-aliases.tsv" |
+  LC_ALL=C sort -u > "$work_dir/protected-image-ids.txt"
+[[ "$(wc -l < "$work_dir/protected-image-ids.txt" | tr -d ' ')" == \
+  "$protected_image_count" ]] ||
+  oci_die "protected digests do not map one-to-one to immutable image OCIDs"
+cut -f4 "$work_dir/target-registry.tsv" |
+  LC_ALL=C sort -u > "$work_dir/target-image-ids.txt"
+if comm -12 \
+    "$work_dir/protected-image-ids.txt" "$work_dir/target-image-ids.txt" |
+    grep -q .; then
+  oci_die "obsolete generations overlap a protected image OCID"
+fi
 cmp -s \
   "$work_dir/expected-before-digests.txt" "$work_dir/before-digests.txt" ||
   oci_die "registry contains an unknown, missing, or unexpected image generation"
@@ -468,37 +726,69 @@ target_sources_json="$(
 target_sources_sha256="$(oci_sha256 < "$work_dir/target-source-shas.txt")"
 target_images_sha256="$(oci_sha256 < "$work_dir/target-registry.tsv")"
 protected_sha256="$(oci_sha256 < "$work_dir/protected.tsv")"
+protected_sources_sha256="$(
+  oci_sha256 < "$work_dir/trusted-protected.tsv"
+)"
+protected_image_ids_sha256="$(
+  oci_sha256 < "$work_dir/protected-image-ids.txt"
+)"
+before_alias_count="$((before_row_count - expected_images_before))"
 jq -n \
   --argjson target_source_shas "$target_sources_json" \
   --arg current_source_sha "$CURRENT_SOURCE_SHA" \
   --arg target_sources_sha256 "$target_sources_sha256" \
   --arg target_images_sha256 "$target_images_sha256" \
   --arg protected_sha256 "$protected_sha256" \
+  --arg protected_sources_sha256 "$protected_sources_sha256" \
+  --arg protected_image_ids_sha256 "$protected_image_ids_sha256" \
   --arg deletion_required "$deletion_required" \
   --argjson requested_target_generations "$target_generation_count" \
   --argjson present_target_generations "$present_target_generation_count" \
   --argjson present_target_images "$present_target_image_count" \
+  --argjson protected_unique_generations "$protected_unique_generation_count" \
   --argjson unique_images "$expected_images_before" \
+  --argjson unique_image_ids "$before_image_id_count" \
+  --argjson tag_rows "$before_row_count" \
+  --argjson alias_rows "$before_alias_count" \
+  --argjson tag_generations "$before_tag_generation_count" \
   '{
     target_source_shas: $target_source_shas,
     current_source_sha: $current_source_sha,
     target_sources_sha256: $target_sources_sha256,
     target_images_sha256: $target_images_sha256,
     protected_generations_sha256: $protected_sha256,
+    protected_source_tags_sha256: $protected_sources_sha256,
+    protected_image_ids_sha256: $protected_image_ids_sha256,
     requested_target_generations: $requested_target_generations,
     present_target_generations: $present_target_generations,
     present_target_images: $present_target_images,
+    protected_unique_generations: $protected_unique_generations,
     unique_images: $unique_images,
+    unique_image_ids: $unique_image_ids,
+    tag_rows: $tag_rows,
+    alias_rows: $alias_rows,
+    tag_generations: $tag_generations,
     deletion_required: ($deletion_required == "true")
   }' > "$OUTPUT_DIR/before-summary.json"
 
 if [[ "$deletion_required" == "true" ]]; then
+  list_images "$work_dir/pre-delete.json"
+  validate_registry_rows "$work_dir/pre-delete.json" AVAILABLE
+  registry_alias_inventory \
+    "$work_dir/pre-delete.json" "$work_dir/pre-delete-aliases.tsv"
+  cmp -s \
+    "$work_dir/before-aliases.tsv" "$work_dir/pre-delete-aliases.tsv" ||
+    oci_die "registry aliases changed after validation and before deletion"
+
   while IFS=$'\t' read -r _source _service _digest image_id; do
     oci artifacts container image delete \
       --image-id "$image_id" \
       --force >/dev/null
   done < "$OUTPUT_DIR/deletion-plan.tsv"
 fi
+
+grep '^protected' "$work_dir/known-generation-memberships.tsv" \
+  > "$work_dir/protected-generation-memberships.tsv"
 
 pruned=false
 for ((attempt = 1; attempt <= PRUNE_POLL_ATTEMPTS; attempt++)); do
@@ -510,9 +800,39 @@ for ((attempt = 1; attempt <= PRUNE_POLL_ATTEMPTS; attempt++)); do
       grep -q .; then
     if cmp -s \
       "$work_dir/protected-digests.txt" "$work_dir/after-digests.txt"; then
+      validate_registry_rows "$work_dir/after.json" AVAILABLE
+      registry_image_id_set \
+        "$work_dir/after.json" "$work_dir/after-image-ids.txt"
+      [[ "$(wc -l < "$work_dir/after-image-ids.txt" | tr -d ' ')" == \
+        "$protected_image_count" ]] ||
+        oci_die "protected digests no longer have one-to-one image IDs"
+      cmp -s \
+        "$work_dir/protected-image-ids.txt" \
+        "$work_dir/after-image-ids.txt" ||
+        oci_die "the exact protected image OCID set changed during pruning"
+      registry_service_digest_set \
+        "$work_dir/after.json" "$work_dir/after-service-digests.tsv"
+      cmp -s \
+        "$work_dir/protected.tsv" \
+        "$work_dir/after-service-digests.tsv" ||
+        oci_die "OCI registry retained an unexpected service or digest mapping"
+      registry_alias_inventory \
+        "$work_dir/after.json" "$work_dir/after-aliases.tsv"
+      validate_alias_generations \
+        "$work_dir/protected-generation-memberships.tsv" \
+        "$work_dir/after-aliases.tsv" ||
+        oci_die "OCI registry retained an incomplete or unknown protected alias generation"
+      cut -f1,2,3 "$work_dir/after-aliases.tsv" |
+        LC_ALL=C sort -u > "$work_dir/after-source-service-digests.tsv"
+      if comm -23 \
+        "$work_dir/trusted-protected.tsv" \
+        "$work_dir/after-source-service-digests.tsv" |
+        grep -q .; then
+        oci_die "a canonical protected source tag disappeared during pruning"
+      fi
       registry_accounting "$work_dir/accounting.json"
       if jq -e \
-        --argjson expected_images "$EXPECTED_PROTECTED_IMAGES" \
+        --argjson expected_images "$protected_image_count" \
         --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
           .image_count == $expected_images and
           .layers_size_bytes <= $max_bytes
@@ -532,35 +852,50 @@ done
 [[ "$pruned" == "true" ]] ||
   oci_die "OCI registry pruning did not reach the exact protected digest set"
 
-validate_registry_rows "$work_dir/after.json" AVAILABLE
-[[ "$(active_registry_row_count "$work_dir/after.json")" == \
-  "$EXPECTED_PROTECTED_IMAGES" ]] ||
-  oci_die "OCI registry retained duplicate or aliased image rows"
-registry_service_digest_set \
-  "$work_dir/after.json" "$work_dir/after-service-digests.tsv"
-cmp -s "$work_dir/protected.tsv" "$work_dir/after-service-digests.tsv" ||
-  oci_die "OCI registry retained an unexpected service or digest mapping"
 if comm -12 "$work_dir/target-digests.txt" "$work_dir/after-digests.txt" |
     grep -q .; then
   oci_die "obsolete registry digests remain after pruning"
 fi
 
 cp "$work_dir/target-registry.tsv" "$OUTPUT_DIR/deleted-images.tsv"
+cp "$work_dir/protected-image-ids.txt" "$OUTPUT_DIR/protected-image-ids.txt"
+cp "$work_dir/before-aliases.tsv" "$OUTPUT_DIR/before-aliases.tsv"
+cp "$work_dir/after-aliases.tsv" "$OUTPUT_DIR/after-aliases.tsv"
 jq -e . "$work_dir/accounting.json" > "$OUTPUT_DIR/registry-accounting.json"
+after_row_count="$(active_registry_row_count "$work_dir/after.json")"
+after_alias_count="$((after_row_count - protected_image_count))"
+after_tag_generation_count="$(
+  cut -f1 "$work_dir/after-aliases.tsv" | LC_ALL=C sort -u | wc -l |
+    tr -d ' '
+)"
 jq -n \
   --argjson target_source_shas "$target_sources_json" \
   --arg current_source_sha "$CURRENT_SOURCE_SHA" \
   --arg protected_sha256 "$protected_sha256" \
+  --arg protected_sources_sha256 "$protected_sources_sha256" \
+  --arg protected_image_ids_sha256 "$protected_image_ids_sha256" \
   --argjson requested_target_generations "$target_generation_count" \
   --argjson pruned_target_generations "$present_target_generation_count" \
-  --argjson unique_images "$EXPECTED_PROTECTED_IMAGES" \
+  --argjson protected_unique_generations "$protected_unique_generation_count" \
+  --argjson unique_images "$protected_image_count" \
+  --argjson unique_image_ids "$protected_image_count" \
+  --argjson tag_rows "$after_row_count" \
+  --argjson alias_rows "$after_alias_count" \
+  --argjson tag_generations "$after_tag_generation_count" \
   '{
     target_source_shas: $target_source_shas,
     current_source_sha: $current_source_sha,
     protected_generations_sha256: $protected_sha256,
+    protected_source_tags_sha256: $protected_sources_sha256,
+    protected_image_ids_sha256: $protected_image_ids_sha256,
     requested_target_generations: $requested_target_generations,
     pruned_target_generations: $pruned_target_generations,
+    protected_unique_generations: $protected_unique_generations,
     unique_images: $unique_images,
+    unique_image_ids: $unique_image_ids,
+    tag_rows: $tag_rows,
+    alias_rows: $alias_rows,
+    tag_generations: $tag_generations,
     terminal_status: "PRUNED"
   }' > "$OUTPUT_DIR/after-summary.json"
 
