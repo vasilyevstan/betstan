@@ -55,13 +55,20 @@ it("stores only the newest live snapshot when duplicates arrive", async () => {
   expect(await LiveEventMirror.countDocuments({ eventId })).toEqual(1);
 });
 
-it("replays parked live bets when the mirror arrives later", async () => {
+it("replays a pre-cutoff live bet when its mirror arrives after expiry", async () => {
   const { placeBetListener, liveEventListener, replayWorker } = await setup();
   const eventId = new mongoose.Types.ObjectId().toHexString();
+  const quoteValidUntil = new Date(Date.now() - 1_000);
   const market = createLiveMarket(eventId, {
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: quoteValidUntil.toISOString(),
   });
-  const placeBet = createLivePlaceBetEvent(market);
+  const placeBet = createLivePlaceBetEvent(market, {
+    data: {
+      submittedAt: new Date(
+        quoteValidUntil.getTime() - 1_000
+      ).toISOString(),
+    },
+  });
 
   await placeBetListener.onMessage(placeBet, createMessage());
 

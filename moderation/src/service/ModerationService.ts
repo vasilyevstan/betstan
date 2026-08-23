@@ -23,8 +23,12 @@ interface NormalizedSlipRow extends SlipRow {
   betKind: BetKind;
 }
 
+type SubmittedPlaceBetData = IPlaceBetEvent["data"] & {
+  submittedAt?: string;
+};
+
 type NormalizedPlaceBetEvent = Omit<IPlaceBetEvent, "data"> & {
-  data: Omit<IPlaceBetEvent["data"], "rows" | "betKind"> & {
+  data: Omit<SubmittedPlaceBetData, "rows" | "betKind"> & {
     rows: NormalizedSlipRow[];
     betKind?: BetKind;
   };
@@ -36,6 +40,7 @@ interface StoredBetRecord {
   status: ModerationStatus;
   wager: number;
   timestamp: string;
+  submittedAt?: string;
   moderationTimestamp: string;
   publishedAt?: string;
   publishToken?: string;
@@ -530,23 +535,34 @@ class ModerationService {
       }
 
       const mirror = mirrorByEventId.get(row.eventId);
-
-      if (!mirror) {
-        if (this.hasExpired(row.quoteValidUntil, evaluatedAt)) {
-          affectedRows.push(
-            this.buildAffectedRow(row, ModerationDeclineReason.STALE_QUOTE)
-          );
-          continue;
-        }
-
-        pendingEventIds.add(row.eventId);
-        continue;
-      }
-
-      const currentMarket = this.findCurrentMarket(mirror, row);
+      const currentMarket = mirror
+        ? this.findCurrentMarket(mirror, row)
+        : undefined;
       const currentSelection = currentMarket
         ? this.findCurrentSelection(currentMarket, row)
         : undefined;
+
+      if (
+        !this.isLiveSubmissionBeforeExpiry(
+          row.quoteValidUntil,
+          event.data.submittedAt
+        )
+      ) {
+        affectedRows.push(
+          this.buildAffectedRow(
+            row,
+            ModerationDeclineReason.STALE_QUOTE,
+            currentMarket,
+            currentSelection
+          )
+        );
+        continue;
+      }
+
+      if (!mirror) {
+        pendingEventIds.add(row.eventId);
+        continue;
+      }
 
       if (!this.isLiveOpen(mirror)) {
         affectedRows.push(
@@ -643,8 +659,11 @@ class ModerationService {
       }
 
       if (
-        this.hasExpired(row.quoteValidUntil, evaluatedAt)
-        || this.hasExpired(exactMarket.quoteValidUntil, evaluatedAt)
+        !this.isValidLiveQuoteAtSubmission(
+          row.quoteValidUntil,
+          exactMarket.quoteValidUntil,
+          event.data.submittedAt
+        )
       ) {
         affectedRows.push(
           this.buildAffectedRow(
@@ -783,6 +802,9 @@ class ModerationService {
     if (event.data.betKind) {
       update.$set.betKind = event.data.betKind;
     }
+    if (event.data.submittedAt) {
+      update.$set.submittedAt = event.data.submittedAt;
+    }
 
     try {
       await Bet.findOneAndUpdate({ slipId: event.data.slipId }, update, {
@@ -830,6 +852,9 @@ class ModerationService {
         ...(update.$unset ?? {}),
         betKind: 1,
       };
+    }
+    if (event.data.submittedAt) {
+      update.$set.submittedAt = event.data.submittedAt;
     }
 
     if (decision.declineReason) {
@@ -1194,14 +1219,44 @@ class ModerationService {
     return parsedKickoff ? now.getTime() >= parsedKickoff.getTime() : false;
   }
 
-  private hasExpired(validUntil: string | undefined, now: Date): boolean {
-    if (!validUntil) {
+  private isValidLiveQuoteAtSubmission(
+    rowValidUntil: string | undefined,
+    marketValidUntil: string | undefined,
+    submittedAt: string | undefined
+  ): boolean {
+    if (
+      !marketValidUntil
+      || !this.isLiveSubmissionBeforeExpiry(rowValidUntil, submittedAt)
+    ) {
       return false;
     }
 
-    const parsedValidUntil = this.parseDate(validUntil);
+    const rowExpiryMs = Date.parse(rowValidUntil);
+    const marketExpiryMs = Date.parse(marketValidUntil);
 
-    return parsedValidUntil ? now.getTime() >= parsedValidUntil.getTime() : true;
+    return (
+      Number.isFinite(rowExpiryMs)
+      && Number.isFinite(marketExpiryMs)
+      && rowExpiryMs === marketExpiryMs
+    );
+  }
+
+  private isLiveSubmissionBeforeExpiry(
+    rowValidUntil: string | undefined,
+    submittedAt: string | undefined
+  ): rowValidUntil is string {
+    if (!rowValidUntil || !submittedAt) {
+      return false;
+    }
+
+    const rowExpiryMs = Date.parse(rowValidUntil);
+    const submittedAtMs = Date.parse(submittedAt);
+
+    return (
+      Number.isFinite(rowExpiryMs)
+      && Number.isFinite(submittedAtMs)
+      && submittedAtMs < rowExpiryMs
+    );
   }
 
   private parseDate(value: string): Date | null {

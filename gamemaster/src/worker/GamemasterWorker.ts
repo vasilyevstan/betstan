@@ -669,6 +669,11 @@ export class GamemasterWorker {
   ): ILiveEventUpdateEvent {
     const occurredAtIso = occurredAt.toISOString();
     const incident = buildPublishedIncident(transition, occurredAtIso);
+    const quoteValidUntil = this.nextTransitionAt(
+      this.kickoffAt(event),
+      storedTransitions(event),
+      transition.sequence
+    )?.toISOString();
     const data: LiveUpdateData = {
       eventId: event.eventId,
       sequence: transition.sequence,
@@ -687,6 +692,10 @@ export class GamemasterWorker {
         marketType: market.marketType as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["marketType"],
         marketVersion: market.marketVersion,
         quoteVersion: market.quoteVersion,
+        quoteValidUntil:
+          market.status === LiveMarketStatus.OPEN
+            ? quoteValidUntil
+            : undefined,
         status: market.status as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["status"],
         selections: market.selections.map((selection) => ({
           selectionId: selection.selectionId,

@@ -20,6 +20,11 @@ import ParkedPlaceBetReplayWorker, {
 
 type LiveMarket = ILiveEventUpdateEvent["data"]["markets"][number];
 type SlipRow = IPlaceBetEvent["data"]["rows"][number];
+type PlaceBetDataOverrides = Partial<
+  Omit<IPlaceBetEvent["data"], "rows">
+> & {
+  submittedAt?: string;
+};
 
 const objectId = () => new mongoose.Types.ObjectId().toHexString();
 
@@ -92,7 +97,7 @@ export const createMessage = (): ConsumeMessage => ({
 
 export const createPlaceBetEvent = (
   options: {
-    data?: Partial<Omit<IPlaceBetEvent["data"], "rows">>;
+    data?: PlaceBetDataOverrides;
     row?: Partial<SlipRow>;
     rows?: SlipRow[];
   } = {}
@@ -155,7 +160,9 @@ export const createLiveMarket = (
     marketType,
     marketVersion,
     quoteVersion: overrides.quoteVersion ?? 4,
-    quoteValidUntil: overrides.quoteValidUntil,
+    quoteValidUntil:
+      overrides.quoteValidUntil
+      ?? new Date(Date.now() + 60_000).toISOString(),
     status: overrides.status ?? LiveMarketStatus.OPEN,
     selections,
   };
@@ -191,7 +198,7 @@ export const createLiveUpdateEvent = (
 export const createLivePlaceBetEvent = (
   market: LiveMarket,
   options: {
-    data?: Partial<Omit<IPlaceBetEvent["data"], "rows">>;
+    data?: PlaceBetDataOverrides;
     row?: Partial<SlipRow>;
   } = {}
 ): IPlaceBetEvent => {
@@ -202,6 +209,7 @@ export const createLivePlaceBetEvent = (
 
   return createPlaceBetEvent({
     data: {
+      submittedAt: options.data?.submittedAt ?? new Date().toISOString(),
       ...options.data,
       betKind: options.data?.betKind ?? BetKind.LIVE,
     },

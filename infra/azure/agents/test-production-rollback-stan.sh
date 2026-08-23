@@ -1291,6 +1291,14 @@ end
 puts 'azure_rollback_yaml=PASS'
 RUBY
 
+assert_contains "$WORKFLOW_FILE" 'CONFIRMATION: ${{ inputs.confirmation }}'
+assert_contains \
+  "$WORKFLOW_FILE" \
+  '[ "$CONFIRMATION" = "ROLLBACK PRODUCTION EXACT DIGEST" ]'
+if grep -Fq '[ "${{ inputs.confirmation }}"' "$WORKFLOW_FILE"; then
+  fail "rollback workflow interpolates the confirmation directly in shell"
+fi
+
 bash -n "$CAPTURE_SCRIPT" "$SCRIPT"
 
 action_lines=(

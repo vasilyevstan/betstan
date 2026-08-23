@@ -258,8 +258,18 @@ def validate_azure_rollback_workflow!(file, document, content)
   )
   require_content(
     content,
-    /\[\s*"\$\{\{\s*inputs\.confirmation\s*\}\}"\s*=\s*"ROLLBACK PRODUCTION EXACT DIGEST"\s*\]/,
+    /CONFIRMATION:\s*\$\{\{\s*inputs\.confirmation\s*\}\}/,
+    "#{name} must bind the production rollback confirmation through the environment"
+  )
+  require_content(
+    content,
+    /\[\s*"\$CONFIRMATION"\s*=\s*"ROLLBACK PRODUCTION EXACT DIGEST"\s*\]/,
     "#{name} must require the exact production rollback confirmation phrase"
+  )
+  reject_content(
+    content,
+    /\[\s*"\$\{\{\s*inputs\.confirmation\s*\}\}"/,
+    "#{name} must not interpolate the rollback confirmation in shell code"
   )
   require_content(
     content,

@@ -701,6 +701,18 @@ it("persists a simulation before kickoff publication and replays it after restar
     kickoffPayload.data.incidents.map((incident: { id: string }) => incident.id)
   ).toEqual([simulation.transitions[0].incident.id]);
   expect(kickoffPayload.data.incident.id).toBe(simulation.transitions[0].incident.id);
+  const kickoffOpenMarkets = kickoffPayload.data.markets.filter(
+    (market: { status: LiveMarketStatus }) =>
+      market.status === LiveMarketStatus.OPEN
+  );
+  expect(kickoffOpenMarkets.length).toBeGreaterThan(0);
+  expect(
+    kickoffOpenMarkets.every(
+      (market: { quoteValidUntil?: string }) =>
+        market.quoteValidUntil
+        === new Date(baseKickoff.getTime() + 500).toISOString()
+    )
+  ).toBe(true);
 
   const restartClock: WorkerClock = {
     now: () => new Date(baseKickoff.getTime() + 5000),
@@ -721,6 +733,13 @@ it("persists a simulation before kickoff publication and replays it after restar
     LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
   ).mock.calls[4][0];
   expect(finalSnapshot.data.sequence).toBe(5);
+  expect(finalSnapshot.data.markets.length).toBeGreaterThan(0);
+  expect(
+    finalSnapshot.data.markets.every(
+      (market: { quoteValidUntil?: string }) =>
+        market.quoteValidUntil === undefined
+    )
+  ).toBe(true);
   expect(
     finalSnapshot.data.incidents.map((incident: { id: string }) => incident.id)
   ).toEqual(simulation.transitions.map((transition) => transition.incident.id));

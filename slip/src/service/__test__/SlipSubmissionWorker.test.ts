@@ -89,6 +89,7 @@ const createSubmittedSlip = async ({
       userId,
       userName: `${userId}@example.com`,
       slipId,
+      submittedAt,
       placementAttemptId:
         placementAttemptId ?? buildPlacementAttemptId(slipId),
       wager: 5,
@@ -232,6 +233,7 @@ it("keeps the slip submitted, times out unknown delivery, and retries the same p
   expect(pendingSlip!.submittedEvent?.placementAttemptId).toEqual(
     placementAttemptId
   );
+  expect(pendingSlip!.submittedEvent?.submittedAt).toEqual(slip.submittedAt);
 
   publishWithConfirmMock.mockResolvedValueOnce(undefined);
   await worker.replayDueSubmissions();
@@ -245,6 +247,7 @@ it("keeps the slip submitted, times out unknown delivery, and retries the same p
       data: expect.objectContaining({
         slipId: slip.id,
         placementAttemptId,
+        submittedAt: slip.submittedAt,
         wager: 5,
       }),
     })
@@ -292,6 +295,7 @@ it("reclaims a stale processing lease on replay and publishes the submitted atte
       data: expect.objectContaining({
         slipId: slip.id,
         placementAttemptId,
+        submittedAt: staleSubmittedAt,
       }),
     })
   );

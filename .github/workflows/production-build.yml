@@ -104,7 +104,13 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate trusted production workflow chain
-        run: ./infra/azure/agents/workflow-trigger-guard-stan.sh
+        run: |
+          python3 -m py_compile \
+            infra/azure/agents/workflow-shell-input-guard-stan.py
+          bash -n \
+            infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+          ./infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+          ./infra/azure/agents/workflow-trigger-guard-stan.sh
 
   deployment-safety-contracts:
     runs-on: ubuntu-latest

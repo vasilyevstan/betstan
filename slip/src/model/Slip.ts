@@ -216,6 +216,9 @@ const submittedEventSchema = new Schema(
       type: String,
       required: true,
     },
+    submittedAt: {
+      type: String,
+    },
     placementAttemptId: {
       type: String,
     },

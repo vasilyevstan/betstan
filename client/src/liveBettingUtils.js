@@ -332,12 +332,12 @@ export const formatMarketStatus = (status) => (
 export const isMarketStale = (market, now = Date.now()) => {
   const expiresAt = normalizeText(market?.quoteValidUntil);
   if (!expiresAt) {
-    return false;
+    return true;
   }
 
   const expirationTime = Date.parse(expiresAt);
   if (Number.isNaN(expirationTime)) {
-    return false;
+    return true;
   }
 
   return expirationTime <= now;

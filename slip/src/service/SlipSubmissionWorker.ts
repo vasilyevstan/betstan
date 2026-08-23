@@ -198,6 +198,7 @@ export const submitDraftSlipAtomically = async (
           userId: args.userId,
           userName: args.userName,
           slipId: args.slipId,
+          submittedAt,
           placementAttemptId: args.placementAttemptId,
           wager: args.wager,
           rows: buildSubmittedEventRowsExpression(args.betKind),
