@@ -3,6 +3,9 @@ import { app } from "../../app";
 import { Event } from "../../model/Event";
 import { EventStatus } from "@betstan/common";
 import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
+import { buildSessionCookie } from "../../test/session";
+
+const adminCookie = () => buildSessionCookie("ADMIN");
 
 const createEvent = async (eventId: string, status = EventStatus.NO_RESULT) => {
   return Event.create({
@@ -18,6 +21,7 @@ const createEvent = async (eventId: string, status = EventStatus.NO_RESULT) => {
 it("returns 400 when event not found", async () => {
   const response = await request(app)
     .post("/api/backoffice/result")
+    .set("Cookie", adminCookie())
     .send({ eventId: "nonexistent", homeResult: 2, awayResult: 1 })
     .expect(400);
 
@@ -29,6 +33,7 @@ it("sets result and publishes event", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/result")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-1", homeResult: 3, awayResult: 1 })
     .expect(200);
 
@@ -44,6 +49,7 @@ it("returns event without change if already resulted", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/result")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-2", homeResult: 1, awayResult: 0 })
     .expect(200);
 
@@ -56,6 +62,7 @@ it("defaults invalid scores to 0", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/result")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-3" })
     .expect(200);
 

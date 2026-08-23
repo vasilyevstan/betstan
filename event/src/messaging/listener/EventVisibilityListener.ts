@@ -1,6 +1,7 @@
 import { ConsumeMessage } from "amqplib";
 import {
   AListener,
+  EventStatus,
   EventVisibility,
   IEventVibibilityEvent,
   QueueNames,
@@ -14,21 +15,75 @@ class EventVisibilityListener extends AListener<IEventVibibilityEvent> {
   async onMessage(event: IEventVibibilityEvent, msg: ConsumeMessage) {
     const { data } = event;
 
-    const storedEvent = await Event.findOne({ eventId: data.eventId });
+    try {
+      await Event.updateOne(
+        { eventId: data.eventId },
+        {
+          $set: { pendingVisibility: data.visibility },
+          $setOnInsert: {
+            eventId: data.eventId,
+            name: data.eventId,
+            time: new Date(),
+            status: EventStatus.NO_RESULT,
+            visibility: EventVisibility.OFFLINE,
+            visibilityInitialized: false,
+            eventMetadataInitialized: false,
+            products: [],
+            source: "EXTERNAL",
+          },
+        },
+        { upsert: true }
+      );
+    } catch (err: any) {
+      if (err?.code !== 11000) {
+        throw err;
+      }
 
-    if (!storedEvent) {
-      console.log("event not found", event);
-      this.channel.ack(msg);
-      return;
+      await Event.updateOne(
+        { eventId: data.eventId },
+        { $set: { pendingVisibility: data.visibility } }
+      );
     }
 
-    if (data.visibility === EventVisibility.ONLINE) {
-      storedEvent.visibility = EventVisibility.ONLINE;
-    } else {
-      storedEvent.visibility = EventVisibility.OFFLINE;
-    }
+    await Event.updateOne(
+      {
+        eventId: data.eventId,
+        $or: [
+          { eventMetadataInitialized: false },
+          {
+            eventMetadataInitialized: { $exists: false },
+            source: "EXTERNAL",
+            "live.sequence": { $exists: true },
+            "products.0": { $exists: false },
+          },
+        ],
+      },
+      {
+        $set: {
+          visibility: EventVisibility.OFFLINE,
+          eventMetadataInitialized: false,
+        },
+      }
+    );
 
-    await storedEvent.save();
+    await Event.updateOne(
+      {
+        eventId: data.eventId,
+        pendingVisibility: data.visibility,
+        $or: [
+          { eventMetadataInitialized: true },
+          { "products.0": { $exists: true } },
+        ],
+      },
+      {
+        $set: {
+          visibility: data.visibility,
+          visibilityInitialized: true,
+          eventMetadataInitialized: true,
+        },
+        $unset: { pendingVisibility: 1 },
+      }
+    );
 
     this.channel.ack(msg);
   }

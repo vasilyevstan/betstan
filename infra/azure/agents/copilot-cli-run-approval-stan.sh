@@ -50,6 +50,12 @@ case "$EXPECTED_WORKFLOW:$EXPECTED_ENVIRONMENT" in
   oci-production-deploy.yml:oci-production)
     expected_event="workflow_dispatch"
     ;;
+  oci-live-betting-activate.yml:oci-production)
+    expected_event="workflow_dispatch"
+    ;;
+  oci-live-betting-disable.yml:oci-production)
+    expected_event="workflow_dispatch"
+    ;;
   *)
     fail "workflow/environment pair is not eligible for automatic approval"
     ;;

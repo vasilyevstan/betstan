@@ -32,6 +32,11 @@ Read:
 5. Classify assertion failures separately from missing binaries, browser
    downloads, network dependencies, or privileged-install requirements.
 
+For privileged live acceptance, include negative ordinary-user REST/SSE
+coverage, stale/demoted administrator checks, auth-unavailable failure, private
+seed invariants, activation lease expiry, same-run/SHA commit ownership,
+ambiguous writes, and automatic flag-plus-lease disable.
+
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.
 

@@ -63,11 +63,15 @@ const buildLiveEvent = (sequence) => ({
   },
 });
 
-const Harness = () => {
-  const { events, feedState, isLoading } = useLiveEvents();
+const Harness = ({ visibleOfflineEventIds, onScopedAccessFailure }) => {
+  const { events, feedState, isLoading } = useLiveEvents(
+    visibleOfflineEventIds,
+    onScopedAccessFailure,
+  );
 
   return <div>
     <div data-testid="sequence">{events[0]?.live?.sequence ?? 'none'}</div>
+    <div data-testid="event-count">{events.length}</div>
     <div data-testid="feed-state">{feedState}</div>
     <div data-testid="loading-state">{String(isLoading)}</div>
   </div>;
@@ -79,6 +83,7 @@ describe('useLiveEvents', () => {
     createdSources.length = 0;
     axios.get.mockReset();
     global.EventSource = jest.fn((url) => new MockEventSource(url));
+    window.history.replaceState({}, '', '/');
   });
 
   afterEach(() => {
@@ -90,6 +95,7 @@ describe('useLiveEvents', () => {
       .mockResolvedValueOnce({ data: [buildLiveEvent(1)] })
       .mockResolvedValueOnce({ data: [buildLiveEvent(4)] })
       .mockResolvedValueOnce({ data: [buildLiveEvent(4)] })
+      .mockResolvedValueOnce({ data: [buildLiveEvent(5)] })
       .mockResolvedValueOnce({ data: [buildLiveEvent(5)] });
 
     const { unmount } = render(<Harness />);
@@ -132,11 +138,12 @@ describe('useLiveEvents', () => {
 
     expect(firstSource.close).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('feed-state')).toHaveTextContent('polling');
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(3));
 
     await act(async () => {
       jest.advanceTimersByTime(POLL_FALLBACK_MS);
     });
-    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(4));
 
     await act(async () => {
       jest.advanceTimersByTime(1000);
@@ -152,7 +159,7 @@ describe('useLiveEvents', () => {
     await act(async () => {
       jest.advanceTimersByTime(RECONCILE_DEBOUNCE_MS);
     });
-    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(5));
 
     unmount();
 
@@ -162,6 +169,90 @@ describe('useLiveEvents', () => {
       jest.advanceTimersByTime(POLL_FALLBACK_MS + 1000 + RECONCILE_DEBOUNCE_MS);
     });
 
-    expect(axios.get).toHaveBeenCalledTimes(4);
+    expect(axios.get).toHaveBeenCalledTimes(5);
+  });
+
+  it('scopes both REST and SSE requests to authorized acceptance event IDs', async () => {
+    const eventIds = `${'a'.repeat(24)},${'b'.repeat(24)}`;
+    axios.get.mockResolvedValue({ data: [] });
+
+    const { unmount } = render(
+      <Harness visibleOfflineEventIds={new Set(eventIds.split(','))} />,
+    );
+    const encodedScope = encodeURIComponent(eventIds);
+
+    await waitFor(() => {
+      expect(axios.get).toHaveBeenCalledWith(
+        `/api/event?acceptanceEventIds=${encodedScope}`,
+      );
+    });
+    expect(createdSources[0].url).toBe(
+      `/api/event/stream?acceptanceEventIds=${encodedScope}`,
+    );
+
+    unmount();
+  });
+
+  it('authoritatively removes events hidden while SSE remains healthy', async () => {
+    axios.get
+      .mockResolvedValueOnce({ data: [buildLiveEvent(1)] })
+      .mockResolvedValueOnce({ data: [] });
+
+    const { unmount } = render(<Harness />);
+    await waitFor(() => expect(screen.getByTestId('event-count')).toHaveTextContent('1'));
+
+    act(() => {
+      createdSources[0].emitOpen();
+    });
+    expect(screen.getByTestId('feed-state')).toHaveTextContent('open');
+
+    await act(async () => {
+      jest.advanceTimersByTime(POLL_FALLBACK_MS);
+    });
+
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('event-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('feed-state')).toHaveTextContent('open');
+
+    unmount();
+  });
+
+  it('immediately removes scoped offline events when stream authorization is lost', async () => {
+    const eventId = 'a'.repeat(24);
+    const offlineEvent = {
+      ...buildLiveEvent(1),
+      eventId,
+      visibility: 'OFFLINE',
+    };
+    const onScopedAccessFailure = jest.fn();
+    axios.get
+      .mockResolvedValueOnce({ data: [offlineEvent] })
+      .mockRejectedValueOnce({ response: { status: 403 } });
+
+    const { unmount } = render(
+      <Harness
+        visibleOfflineEventIds={new Set([eventId])}
+        onScopedAccessFailure={onScopedAccessFailure}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('sequence')).toHaveTextContent('1'));
+
+    act(() => {
+      createdSources[0].emitError();
+    });
+
+    expect(screen.getByTestId('sequence')).toHaveTextContent('none');
+    expect(onScopedAccessFailure).toHaveBeenCalled();
+    act(() => {
+      createdSources[0].emitSnapshot({ ...offlineEvent, live: {
+        ...offlineEvent.live,
+        sequence: 2,
+      } });
+    });
+    expect(screen.getByTestId('sequence')).toHaveTextContent('none');
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
+
+    unmount();
   });
 });

@@ -32,6 +32,17 @@ const App = () => {
   const [slipRefreshSignal, setSlipRefreshSignal] = useState(0);
   const [statsRefreshToken, setStatsRefreshToken] = useState(0);
   const [backofficeRefreshToken, setBackofficeRefreshToken] = useState(0);
+  const visibleOfflineEventIds = useMemo(() => {
+    if (currentUser?.role !== 'ADMIN') {
+      return new Set();
+    }
+
+    const rawIds = new URLSearchParams(location.search)
+      .get('acceptanceEventIds')
+      ?.split(',')
+      .slice(0, 10) ?? [];
+    return new Set(rawIds.filter((eventId) => /^[a-f0-9]{24}$/.test(eventId)));
+  }, [currentUser, location.search]);
 
   const fetchData = useCallback(async () => {
     try {
@@ -86,12 +97,25 @@ const App = () => {
                   onSelectionPlaced={requestSlipRefresh}
                   selectedSelectionKeys={selectedSelectionKeys}
                   uiVariant={uiVariant}
+                  visibleOfflineEventIds={visibleOfflineEventIds}
+                  onScopedAccessFailure={fetchData}
                 />}
               />
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
               <Route path="/logout" element={<LogOut callback={handleAuthChange} />} />
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />
-              <Route path="/backoffice" element={<Backoffice onChanged={refreshBackoffice} refreshToken={backofficeRefreshToken} />} />
+              <Route
+                path="/backoffice"
+                element={currentUser?.role === 'ADMIN'
+                  ? <Backoffice onChanged={refreshBackoffice} refreshToken={backofficeRefreshToken} />
+                  : <EventList
+                      onSelectionPlaced={requestSlipRefresh}
+                      selectedSelectionKeys={selectedSelectionKeys}
+                      uiVariant={uiVariant}
+                      visibleOfflineEventIds={visibleOfflineEventIds}
+                      onScopedAccessFailure={fetchData}
+                    />}
+              />
               <Route path="/bets" element={<MyBets />} />
               <Route
                 path="*"
@@ -99,6 +123,8 @@ const App = () => {
                   onSelectionPlaced={requestSlipRefresh}
                   selectedSelectionKeys={selectedSelectionKeys}
                   uiVariant={uiVariant}
+                  visibleOfflineEventIds={visibleOfflineEventIds}
+                  onScopedAccessFailure={fetchData}
                 />}
               />
             </Routes>

@@ -59,9 +59,12 @@ class LiveEventUpdateListener extends AListener<ILiveEventUpdateEvent> {
   }
 
   async onMessage(event: ILiveEventUpdateEvent, msg: ConsumeMessage) {
+    const localSnapshot = this.hub.getSnapshot(event.data.eventId);
+    const storedSnapshot = await getStoredPublicEventSnapshot(event.data.eventId);
     const seedSnapshot =
-      this.hub.getSnapshot(event.data.eventId) ??
-      (await getStoredPublicEventSnapshot(event.data.eventId));
+      localSnapshot && storedSnapshot
+        ? { ...localSnapshot, visibility: storedSnapshot.visibility }
+        : localSnapshot ?? storedSnapshot;
     const snapshot = createPublicEventSnapshotFromLiveUpdate(
       event,
       seedSnapshot

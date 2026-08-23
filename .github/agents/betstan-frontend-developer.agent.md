@@ -47,6 +47,10 @@ instead of crossing the boundary.
 - Keep server state, local input state, and asynchronous status state separate;
   never use remount keys as a refresh mechanism.
 - Apply realtime and REST state through one monotonic reducer invariant.
+- Treat privileged-stream failure as revocation: remove cached scoped records
+  immediately, reconcile without waiting for polling, and refresh auth state.
+- Keep a bounded authoritative reconcile active even while SSE is healthy when
+  the stream protocol cannot represent pre-match removals or visibility changes.
 - Surface actionable errors; do not add empty catches or success-shaped
   fallbacks.
 - Preserve independent form/wager state across sibling component updates.

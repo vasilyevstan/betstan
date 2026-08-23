@@ -1,5 +1,10 @@
 import { ConsumeMessage } from "amqplib";
-import { AListener, INewEventEvent, QueueNames } from "@betstan/common";
+import {
+  AListener,
+  EventVisibility,
+  INewEventEvent,
+  QueueNames,
+} from "@betstan/common";
 import EventTemplate from "../../data/EventTemplate";
 import { Event } from "../../model/Event";
 
@@ -9,6 +14,13 @@ class NewEventListener extends AListener<INewEventEvent> {
 
   async onMessage(event: INewEventEvent, msg: ConsumeMessage) {
     const { data } = event;
+    const requestedVisibility = (
+      data as typeof data & { visibility?: EventVisibility }
+    ).visibility;
+    const visibility =
+      requestedVisibility === EventVisibility.OFFLINE
+        ? EventVisibility.OFFLINE
+        : EventVisibility.ONLINE;
 
     if (event.sender === this.serviceName) {
       // ignoring selfinflicted message
@@ -23,18 +35,25 @@ class NewEventListener extends AListener<INewEventEvent> {
       data.away,
       data.time
     );
+    const eventMetadata = {
+      name: newEvent.name,
+      time: newEvent.time,
+      home: newEvent.home,
+      away: newEvent.away,
+      products: newEvent.products,
+    };
+
     try {
       await Event.updateOne(
         { eventId: data.id },
         {
           $setOnInsert: {
             eventId: newEvent.eventId,
-            name: newEvent.name,
-            time: newEvent.time,
-            home: newEvent.home,
-            away: newEvent.away,
-            products: newEvent.products,
             source: "EXTERNAL",
+            ...eventMetadata,
+            visibility,
+            visibilityInitialized: true,
+            eventMetadataInitialized: true,
           },
         },
         { upsert: true }
@@ -44,6 +63,76 @@ class NewEventListener extends AListener<INewEventEvent> {
         throw err;
       }
     }
+
+    await Event.updateOne(
+      {
+        eventId: data.id,
+        $or: [
+          { eventMetadataInitialized: false },
+          { visibilityInitialized: false },
+          {
+            eventMetadataInitialized: { $exists: false },
+            source: "EXTERNAL",
+            "live.sequence": { $exists: true },
+            "products.0": { $exists: false },
+          },
+        ],
+      },
+      {
+        $set: {
+          ...eventMetadata,
+          eventMetadataInitialized: true,
+        },
+      }
+    );
+
+    for (const pendingVisibility of [
+      EventVisibility.OFFLINE,
+      EventVisibility.ONLINE,
+    ]) {
+      await Event.updateOne(
+        {
+          eventId: data.id,
+          eventMetadataInitialized: true,
+          pendingVisibility,
+        },
+        {
+          $set: {
+            visibility: pendingVisibility,
+            visibilityInitialized: true,
+          },
+          $unset: { pendingVisibility: 1 },
+        }
+      );
+    }
+
+    await Event.updateOne(
+      {
+        eventId: data.id,
+        eventMetadataInitialized: true,
+        visibilityInitialized: { $exists: false },
+        pendingVisibility: { $exists: false },
+        visibility: EventVisibility.OFFLINE,
+      },
+      {
+        $set: { visibilityInitialized: true },
+      }
+    );
+
+    await Event.updateOne(
+      {
+        eventId: data.id,
+        eventMetadataInitialized: true,
+        visibilityInitialized: { $ne: true },
+        pendingVisibility: { $exists: false },
+      },
+      {
+        $set: {
+          visibility,
+          visibilityInitialized: true,
+        },
+      }
+    );
 
     this.channel.ack(msg);
   }

@@ -5,12 +5,14 @@ import {
   BetKind,
   BettingStatus,
   EventPhase,
+  EventVisibility,
   LiveMarketStatus,
   LiveMarketType,
   TeamSide,
   messengerWrapper,
 } from "@betstan/common";
 import EventOddsSelectedPublisher from "../messaging/publisher/EventOddsSelectedPublisher";
+import { verifyAdminRequest } from "../service/VerifyAdminSession";
 
 const router = express.Router();
 
@@ -120,6 +122,27 @@ router.post(
 
     if (!event) {
       return next(new BadRequestError("Event not found"));
+    }
+
+    if (event.visibility === EventVisibility.OFFLINE) {
+      try {
+        const adminStatus = await verifyAdminRequest(req);
+        if (adminStatus !== 204) {
+          return res.status(adminStatus).send({
+            errors: [{
+              message:
+                adminStatus === 401
+                  ? "Authentication required"
+                  : "Administrator role required",
+            }],
+          });
+        }
+      } catch (_error) {
+        console.error("Offline event authorization failed");
+        return res.status(503).send({
+          errors: [{ message: "Authorization service unavailable" }],
+        });
+      }
     }
 
     if (isLiveSelectionRequest(body)) {

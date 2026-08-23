@@ -15,8 +15,7 @@ test('OCI signup, logout, login, and navigation journey', async ({ page }) => {
 
   await page.getByTitle('My bets').click();
   await expect(page).toHaveURL(/\/bets/);
-  await page.getByTitle('Backoffice').click();
-  await expect(page).toHaveURL(/\/backoffice/);
+  await expect(page.getByTitle('Backoffice')).toHaveCount(0);
 
   await page.getByTitle('Log out').click();
   await expect(page.getByTitle('Log in')).toBeVisible();

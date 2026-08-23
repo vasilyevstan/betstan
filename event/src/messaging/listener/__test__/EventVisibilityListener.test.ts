@@ -43,6 +43,8 @@ const createEvent = async (eventId: string, visibility = EventVisibility.ONLINE)
     time: new Date(),
     status: EventStatus.NO_RESULT,
     visibility,
+    visibilityInitialized: true,
+    eventMetadataInitialized: true,
     products: [],
   });
 };
@@ -63,6 +65,7 @@ it("marks event as offline when visibility OFFLINE arrives", async () => {
 
   const updated = await Event.findOne({ eventId });
   expect(updated!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(updated!.get("visibilityInitialized")).toBe(true);
 });
 
 it("marks event as online when visibility ONLINE arrives", async () => {
@@ -81,16 +84,18 @@ it("marks event as online when visibility ONLINE arrives", async () => {
 
   const updated = await Event.findOne({ eventId });
   expect(updated!.visibility).toEqual(EventVisibility.ONLINE);
+  expect(updated!.get("visibilityInitialized")).toBe(true);
 });
 
-it("acks without error when event is not found", async () => {
+it("stores a fail-dark pending visibility when event metadata has not arrived", async () => {
   const listener = new EventVisibilityListener(messengerWrapper.connection);
   await listener.init();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
 
   const event: IEventVibibilityEvent = {
     timestamp: new Date().toISOString(),
     data: {
-      eventId: new mongoose.Types.ObjectId().toHexString(),
+      eventId,
       visibility: EventVisibility.ONLINE,
     },
   };
@@ -98,5 +103,33 @@ it("acks without error when event is not found", async () => {
   await listener.onMessage(event, buildMessage());
 
   const events = await Event.find({});
-  expect(events.length).toEqual(0);
+  expect(events.length).toEqual(1);
+  expect(events[0].eventId).toEqual(eventId);
+  expect(events[0].visibility).toEqual(EventVisibility.OFFLINE);
+  expect(events[0].get("pendingVisibility")).toEqual(EventVisibility.ONLINE);
+  expect(events[0].get("visibilityInitialized")).toBe(false);
+  expect(events[0].get("eventMetadataInitialized")).toBe(false);
+});
+
+it("retries the pending decision after a duplicate-key upsert race", async () => {
+  const listener = new EventVisibilityListener(messengerWrapper.connection);
+  await listener.init();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await createEvent(eventId, EventVisibility.ONLINE);
+  jest
+    .spyOn(Event, "updateOne")
+    .mockRejectedValueOnce({ code: 11000 } as any);
+
+  await listener.onMessage(
+    {
+      timestamp: new Date().toISOString(),
+      data: { eventId, visibility: EventVisibility.OFFLINE },
+    },
+    buildMessage()
+  );
+
+  const storedEvent = await Event.findOne({ eventId });
+  expect(storedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent!.get("pendingVisibility")).toBeUndefined();
+  expect((listener as any).channel.ack).toHaveBeenCalledTimes(1);
 });

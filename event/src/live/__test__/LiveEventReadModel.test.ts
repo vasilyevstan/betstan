@@ -502,7 +502,7 @@ it("builds sparse live updates with defaults, deduplicated incidents, and filter
     name: "generated-event",
     time: "2030-02-01T00:00:00.000Z",
     status: EventStatus.NO_RESULT,
-    visibility: EventVisibility.ONLINE,
+    visibility: EventVisibility.OFFLINE,
     products: [],
     live: {
       sequence: 1,

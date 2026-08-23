@@ -161,6 +161,9 @@ it("keeps legacy single-incident payloads valid for older publishers", async () 
 
   const updatedEvent = await Event.findOne({ eventId: "live-event" }).lean();
   const live = updatedEvent?.live as any;
+  expect(updatedEvent?.visibility).toBe(EventVisibility.OFFLINE);
+  expect((updatedEvent as any)?.visibilityInitialized).toBe(false);
+  expect((updatedEvent as any)?.eventMetadataInitialized).toBe(false);
   expect(live.sequence).toBe(1);
   expect(
     live.incidentHistory.map((incident: { id: string }) => incident.id)

@@ -13,6 +13,8 @@ import {
   TeamSide,
 } from "@betstan/common";
 import NewEventPublisher from "../../messaging/publisher/NewEventPublisher";
+import jwt from "jsonwebtoken";
+import { setAdminSessionVerifierForTests } from "../../service/VerifyAdminSession";
 
 const createPreMatchEvent = async (
   eventId: string,
@@ -33,6 +35,20 @@ const createPreMatchEvent = async (
       },
     ],
   });
+};
+
+const adminCookie = () => {
+  const token = jwt.sign(
+    {
+      id: new mongoose.Types.ObjectId().toHexString(),
+      email: "acceptance-admin",
+      role: "ADMIN",
+      timestamp: new Date(),
+    },
+    process.env.JWT_KEY!
+  );
+  const session = Buffer.from(JSON.stringify({ jwt: token })).toString("base64");
+  return [`session=${session}`];
 };
 
 it("returns a bounded event list with live events sorted before pre-match events", async () => {
@@ -95,6 +111,68 @@ it("returns an empty array without creating events when DB is empty", async () =
   expect(res.body).toEqual([]);
   expect(await Event.countDocuments()).toEqual(0);
   expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
+});
+
+it("hides offline events unless an administrator requests their exact IDs", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await createPreMatchEvent(eventId, new Date(Date.now() + 10 * 60 * 1000));
+  await Event.updateOne(
+    { eventId },
+    { $set: { visibility: EventVisibility.OFFLINE } }
+  );
+
+  expect((await request(app).get("/api/event").expect(200)).body).toEqual([]);
+  await request(app)
+    .get(`/api/event?acceptanceEventIds=${eventId}`)
+    .expect(401);
+
+  const response = await request(app)
+    .get(`/api/event?acceptanceEventIds=${eventId}`)
+    .set("Cookie", adminCookie())
+    .expect(200);
+  expect(response.body.map((event: { eventId: string }) => event.eventId)).toEqual(
+    [eventId]
+  );
+});
+
+it("rejects stale administrators and fails closed when auth verification is unavailable", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await createPreMatchEvent(eventId, new Date(Date.now() + 10 * 60 * 1000));
+  await Event.updateOne(
+    { eventId },
+    { $set: { visibility: EventVisibility.OFFLINE } }
+  );
+
+  setAdminSessionVerifierForTests(async () => 403);
+  await request(app)
+    .get(`/api/event?acceptanceEventIds=${eventId}`)
+    .set("Cookie", adminCookie())
+    .expect(403);
+
+  setAdminSessionVerifierForTests(async () => {
+    throw new Error("auth unavailable");
+  });
+  await request(app)
+    .get(`/api/event?acceptanceEventIds=${eventId}`)
+    .set("Cookie", adminCookie())
+    .expect(503);
+});
+
+it("rejects malformed or oversized acceptance event scopes", async () => {
+  const cookie = adminCookie();
+  await request(app)
+    .get("/api/event?acceptanceEventIds=ABCDEFABCDEFABCDEFABCDEF")
+    .set("Cookie", cookie)
+    .expect(400);
+
+  const tooManyIds = Array.from(
+    { length: 11 },
+    () => new mongoose.Types.ObjectId().toHexString()
+  ).join(",");
+  await request(app)
+    .get(`/api/event?acceptanceEventIds=${tooManyIds}`)
+    .set("Cookie", cookie)
+    .expect(400);
 });
 
 it("keeps legacy event documents readable without requiring live fields", async () => {

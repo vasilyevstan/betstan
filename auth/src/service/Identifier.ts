@@ -1,6 +1,7 @@
 type PublicUserSource = {
   _id: unknown;
   email: string;
+  role?: string;
 };
 
 export const usernamePattern = /^[A-Za-z0-9][A-Za-z0-9._%+@-]*$/;
@@ -11,6 +12,7 @@ export const normalizeIdentifier = (identifier: string) =>
 export const toPublicUser = (user: PublicUserSource) => ({
   id: String(user._id),
   email: user.email,
+  role: user.role ?? "USER",
 });
 
 export const isDuplicateKeyError = (error: unknown) =>

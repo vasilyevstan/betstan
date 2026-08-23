@@ -151,4 +151,31 @@ describe('EventList', () => {
     }));
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
   });
+
+  it('shows an explicitly scoped offline event only to the acceptance view', () => {
+    useLiveEvents.mockReturnValue({
+      events: [{ ...preMatchEvent, visibility: 'OFFLINE' }],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    const { rerender } = render(
+      <EventList
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+    expect(screen.queryByRole('article', { name: preMatchEvent.name })).toBeNull();
+
+    rerender(
+      <EventList
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+        visibleOfflineEventIds={new Set([preMatchEvent.eventId])}
+      />,
+    );
+    expect(
+      screen.getByRole('article', { name: preMatchEvent.name }),
+    ).toBeInTheDocument();
+  });
 });
