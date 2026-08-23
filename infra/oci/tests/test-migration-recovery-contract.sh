@@ -449,6 +449,8 @@ for literal in \
   'migration_id:' \
   'fencing_generation:' \
   'STOP AZURE FOR EXACT MIGRATION' \
+  'CONFIRMATION: ${{ inputs.confirmation }}' \
+  '[ "$CONFIRMATION" = "STOP AZURE FOR EXACT MIGRATION" ]' \
   "vars.OCI_MIGRATION_RECOVERY_ENABLED == 'true'" \
   "vars.OCI_MIGRATION_RECOVERY_ENABLED || 'false'" \
   'OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH' \
@@ -475,6 +477,8 @@ for literal in \
   grep -Fq "$literal" "$RECOVERY_WORKFLOW" ||
     fail "recovery workflow is missing: $literal"
 done
+! grep -Fq '[ "${{ inputs.confirmation }}"' "$RECOVERY_WORKFLOW" ||
+  fail "recovery workflow interpolates the confirmation directly in shell"
 ! grep -Fq '@tsv' "$RECOVERY_WORKFLOW" ||
   fail "recovery workflow can shift nullable owner-run fields"
 ! grep -Eq \

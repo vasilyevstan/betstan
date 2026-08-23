@@ -82,6 +82,7 @@ const createLiveEvent = async (
           marketType: LiveMarketType.NEXT_CORNER,
           marketVersion: 2,
           quoteVersion: 4,
+          quoteValidUntil: new Date(now + 60 * 1000).toISOString(),
           status: LiveMarketStatus.OPEN,
           selections: [
             { selectionId: "home", side: TeamSide.HOME, odds: 1.8 },
@@ -433,7 +434,42 @@ it("rejects live selections when the server-side selection does not exist", asyn
     .expect(400);
 });
 
+it.each([
+  ["missing", undefined],
+  ["invalid", "not-a-date"],
+  ["expired", new Date(Date.now() - 1_000).toISOString()],
+])("rejects live selections with %s quote expiry", async (_label, quoteValidUntil) => {
+  await createLiveEvent();
+
+  if (quoteValidUntil === undefined) {
+    await Event.updateOne(
+      { eventId: "test-event-id" },
+      { $unset: { "live.currentMarkets.0.quoteValidUntil": 1 } }
+    );
+  } else {
+    await Event.updateOne(
+      { eventId: "test-event-id" },
+      { $set: { "live.currentMarkets.0.quoteValidUntil": quoteValidUntil } }
+    );
+  }
+
+  const response = await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      marketId: "market-1",
+      marketVersion: 2,
+      quoteVersion: 4,
+      selectionId: "home",
+    })
+    .expect(400);
+
+  expect(response.body.errors[0].msg).toEqual("Live quote is stale");
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
+});
+
 it("accepts string live versions, away selections, and string event times", async () => {
+  const quoteValidUntil = new Date(Date.now() + 60_000).toISOString();
   await Event.collection.insertOne({
     eventId: "string-live-event",
     name: "Team A - Team B",
@@ -459,6 +495,7 @@ it("accepts string live versions, away selections, and string event times", asyn
           marketType: LiveMarketType.NEXT_CORNER,
           marketVersion: 2,
           quoteVersion: 4,
+          quoteValidUntil,
           status: LiveMarketStatus.OPEN,
           selections: [
             { selectionId: "away", side: TeamSide.AWAY, odds: 2.1 },
@@ -486,6 +523,7 @@ it("accepts string live versions, away selections, and string event times", asyn
       eventTime: "2030-01-01T12:00:00.000Z",
       marketVersion: 2,
       quoteVersion: 4,
+      quoteValidUntil,
     }),
   });
 });
@@ -532,6 +570,7 @@ it("falls back to stored kickoff time for pre-match eventTime when no event time
 });
 
 it("uses public fallback labels for live selections when team names or mappings are missing", async () => {
+  const quoteValidUntil = new Date(Date.now() + 60_000).toISOString();
   await Event.collection.insertOne({
     eventId: "label-fallback-event",
     name: "Fallback",
@@ -554,6 +593,7 @@ it("uses public fallback labels for live selections when team names or mappings 
           marketType: LiveMarketType.NEXT_PENALTY,
           marketVersion: 1,
           quoteVersion: 1,
+          quoteValidUntil,
           status: LiveMarketStatus.OPEN,
           selections: [
             { selectionId: "home", side: TeamSide.HOME, odds: 1.1 },
@@ -564,6 +604,7 @@ it("uses public fallback labels for live selections when team names or mappings 
           marketType: "CUSTOM_MARKET",
           marketVersion: 2,
           quoteVersion: 2,
+          quoteValidUntil,
           status: LiveMarketStatus.OPEN,
           selections: [
             { selectionId: "draw", side: TeamSide.DRAW, odds: 3.3 },
@@ -612,7 +653,7 @@ it("uses public fallback labels for live selections when team names or mappings 
         eventId: "label-fallback-event",
         oddsName: "Draw",
         productName: "CUSTOM_MARKET",
-        quoteValidUntil: undefined,
+        quoteValidUntil,
       }),
     }
   );

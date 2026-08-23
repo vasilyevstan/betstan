@@ -704,6 +704,9 @@ it("keeps the board submitted and pending when publish confirm fails", async () 
   expect(failedResponse.body.submittedEvent.placementAttemptId).toEqual(
     placementAttemptId
   );
+  expect(failedResponse.body.submittedEvent.submittedAt).toEqual(
+    failedResponse.body.submittedAt
+  );
 
   const pendingSlip = await Slip.findById(slip.id);
   expect(pendingSlip!.status).toEqual(SlipStatus.SUBMITTED);
@@ -712,12 +715,16 @@ it("keeps the board submitted and pending when publish confirm fails", async () 
   expect(pendingSlip!.submittedEvent?.placementAttemptId).toEqual(
     placementAttemptId
   );
+  expect(pendingSlip!.submittedEvent?.submittedAt).toEqual(
+    pendingSlip!.submittedAt
+  );
   expect(publishWithConfirmMock).toHaveBeenCalledTimes(1);
   expect(publishWithConfirmMock).toHaveBeenCalledWith(
     expect.objectContaining({
       data: expect.objectContaining({
         slipId: slip.id,
         placementAttemptId,
+        submittedAt: pendingSlip!.submittedAt,
       }),
     })
   );

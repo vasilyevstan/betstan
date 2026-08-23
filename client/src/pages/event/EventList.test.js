@@ -21,7 +21,7 @@ const buildLiveMarket = ({
   marketVersion,
   quoteVersion,
   status = 'OPEN',
-  quoteValidUntil,
+  quoteValidUntil = new Date(Date.now() + 60_000).toISOString(),
   odds = 1.8,
 }) => ({
   marketId,
@@ -65,7 +65,7 @@ const liveEvent = {
       buildLiveMarket({ marketId: 'market-1', marketType: 'NEXT_CORNER', marketVersion: 1, quoteVersion: 1, odds: 1.8 }),
       buildLiveMarket({ marketId: 'market-2', marketType: 'NEXT_RED_CARD', marketVersion: 1, quoteVersion: 2, status: 'SUSPENDED', odds: 3.2 }),
       buildLiveMarket({ marketId: 'market-3', marketType: 'NEXT_YELLOW_CARD', marketVersion: 1, quoteVersion: 3, quoteValidUntil: '2000-01-01T00:00:00.000Z', odds: 2.4 }),
-      buildLiveMarket({ marketId: 'market-4', marketType: 'NEXT_PENALTY', marketVersion: 1, quoteVersion: 4, odds: 5.1 }),
+      buildLiveMarket({ marketId: 'market-4', marketType: 'NEXT_PENALTY', marketVersion: 1, quoteVersion: 4, quoteValidUntil: null, odds: 5.1 }),
       buildLiveMarket({ marketId: 'market-5', marketType: 'HALF_TIME_RESULT', marketVersion: 1, quoteVersion: 5, odds: 1.4 }),
       buildLiveMarket({ marketId: 'market-6', marketType: 'NEXT_CORNER', marketVersion: 2, quoteVersion: 6, odds: 2.1 }),
     ],
@@ -132,11 +132,13 @@ describe('EventList', () => {
     const preMatchSelection = screen.getByRole('button', { name: 'Select 1X2 Team A at 1.5' });
     const suspendedSelection = screen.getByRole('button', { name: 'Select Next Red Card: Team A at 3.2' });
     const staleSelection = screen.getByRole('button', { name: 'Select Next Yellow Card: Team A at 2.4' });
+    const missingExpirySelection = screen.getByRole('button', { name: 'Select Next Penalty: Team A at 5.1' });
 
     expect(liveSelection).toHaveClass('product-button--selected');
     expect(preMatchSelection).toHaveClass('product-button--selected');
     expect(suspendedSelection).toBeDisabled();
     expect(staleSelection).toBeDisabled();
+    expect(missingExpirySelection).toBeDisabled();
     expect(screen.getByText('Quote v5')).toBeInTheDocument();
     expect(screen.queryByText('Quote v6')).toBeNull();
 

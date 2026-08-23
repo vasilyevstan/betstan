@@ -351,6 +351,82 @@ it("expired live quotes are declined", async () => {
   });
 });
 
+it.each([
+  ["missing quote expiry", "missing-expiry"],
+  ["missing submission time", "missing-submission"],
+  ["invalid submission time", "invalid-submission"],
+])("fails closed for live bets with %s", async (_label, scenario) => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const market = createLiveMarket(eventId);
+
+  if (scenario === "missing-expiry") {
+    market.quoteValidUntil = undefined;
+  }
+
+  await saveMirror(eventId, market);
+  const data = createLivePlaceBetEvent(market, {
+    data: {
+      submittedAt:
+        scenario === "missing-submission"
+          ? undefined
+          : scenario === "invalid-submission"
+            ? "not-a-date"
+            : new Date().toISOString(),
+    },
+  });
+
+  await listener.onMessage(data, createMessage());
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
+});
+
+it("approves delayed moderation when the server accepted the bet before cutoff", async () => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const quoteValidUntil = new Date(Date.now() - 1_000);
+  const submittedAt = new Date(quoteValidUntil.getTime() - 1_000).toISOString();
+  const market = await saveMirror(
+    eventId,
+    createLiveMarket(eventId, {
+      quoteValidUntil: quoteValidUntil.toISOString(),
+    })
+  );
+  const data = createLivePlaceBetEvent(market, {
+    data: { submittedAt },
+  });
+
+  await listener.onMessage(data, createMessage());
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+  expect(savedBet!.submittedAt).toEqual(submittedAt);
+});
+
+it("declines a bet accepted at the cutoff even while the mirror is stale and open", async () => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const quoteValidUntil = new Date(Date.now() - 1_000).toISOString();
+  const market = await saveMirror(
+    eventId,
+    createLiveMarket(eventId, { quoteValidUntil })
+  );
+  const data = createLivePlaceBetEvent(market, {
+    data: { submittedAt: quoteValidUntil },
+  });
+
+  await listener.onMessage(data, createMessage());
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
+});
+
 it("valid live bets are approved against the mirrored market", async () => {
   const { listener } = await setup();
   const eventId = new mongoose.Types.ObjectId().toHexString();

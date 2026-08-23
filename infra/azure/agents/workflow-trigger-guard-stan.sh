@@ -46,6 +46,18 @@ for file in \
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
 
+python3 -m py_compile \
+  infra/azure/agents/workflow-shell-input-guard-stan.py
+bash -n \
+  infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+./infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+
+if ! python3 \
+  infra/azure/agents/workflow-shell-input-guard-stan.py \
+  .github/workflows; then
+  fail "workflow shell steps interpolate untrusted inputs directly"
+fi
+
 retired=(
   .github/workflows/build-push.yml
   .github/workflows/deploy-manifests.yml
@@ -129,8 +141,10 @@ require_literal "$rollback_workflow" "baseline_source_run_id:" "baseline source 
 require_literal "$rollback_workflow" "baseline_source_run_attempt:" "baseline source run attempt input"
 require_literal "$rollback_workflow" "baseline_artifact_name:" "baseline artifact input"
 require_literal "$rollback_workflow" "confirmation:" "manual rollback confirmation input"
+require_literal "$rollback_workflow" 'CONFIRMATION: ${{ inputs.confirmation }}' "environment-bound rollback confirmation"
 require_literal "$rollback_workflow" '[ "$GITHUB_REF_NAME" = "master" ]' "master rollback branch guard"
-require_literal "$rollback_workflow" '[ "${{ inputs.confirmation }}" = "ROLLBACK PRODUCTION EXACT DIGEST" ]' "exact rollback confirmation"
+require_literal "$rollback_workflow" '[ "$CONFIRMATION" = "ROLLBACK PRODUCTION EXACT DIGEST" ]' "exact rollback confirmation"
+reject_literal "$rollback_workflow" '[ "${{ inputs.confirmation }}"' "direct rollback input interpolation"
 require_literal "$rollback_workflow" '[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]' "exact rollback target SHA validation"
 require_literal "$rollback_workflow" '[[ "$BASELINE_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]' "numeric rollback provenance run ID validation"
 require_literal "$rollback_workflow" '[ "$BASELINE_SOURCE_RUN_ATTEMPT" = "1" ]' "first-attempt rollback provenance guard"
@@ -255,6 +269,9 @@ require_literal "$oci_recovery_workflow" "workflow_dispatch:" "manual recovery t
 require_literal "$oci_recovery_workflow" "OCI_MIGRATION_RECOVERY_ENABLED" "false-by-default recovery guard"
 require_literal "$oci_recovery_workflow" "OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH" "bounded recovery arm deadline"
 require_literal "$oci_recovery_workflow" "86400" "one-day recovery arm bound"
+require_literal "$oci_recovery_workflow" 'CONFIRMATION: ${{ inputs.confirmation }}' "environment-bound recovery confirmation"
+require_literal "$oci_recovery_workflow" '[ "$CONFIRMATION" = "STOP AZURE FOR EXACT MIGRATION" ]' "exact recovery confirmation"
+reject_literal "$oci_recovery_workflow" '[ "${{ inputs.confirmation }}"' "direct recovery input interpolation"
 require_literal "$oci_recovery_workflow" "name: azure-migration-recovery" "stop-only protected environment"
 require_literal "$oci_recovery_workflow" "AZURE_MIGRATION_RECOVERY_CREDENTIALS" "dedicated stop-only credential"
 require_literal "$oci_recovery_workflow" "group: azure-migration-recovery" "collapsed recovery concurrency"
