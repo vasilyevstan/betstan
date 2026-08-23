@@ -719,12 +719,15 @@ cmp -s \
   oci_die "registry service and digest mappings differ from trusted provenance"
 registry_accounting "$work_dir/before-accounting.json"
 jq -e \
-  --argjson expected_images "$expected_images_before" \
+  --argjson expected_tag_rows "$before_row_count" \
   --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
-    .image_count == $expected_images and
+    .image_count == $expected_tag_rows and
     .layers_size_bytes <= $max_bytes
   ' "$work_dir/before-accounting.json" >/dev/null ||
-  oci_die "registry accounting does not match validated unique identities"
+  oci_die "registry accounting does not match validated tag rows"
+before_registry_image_count="$(
+  jq -r '.image_count' "$work_dir/before-accounting.json"
+)"
 before_layers_size_bytes="$(
   jq -r '.layers_size_bytes' "$work_dir/before-accounting.json"
 )"
@@ -786,6 +789,7 @@ jq -n \
   --argjson tag_rows "$before_row_count" \
   --argjson alias_rows "$before_alias_count" \
   --argjson tag_generations "$before_tag_generation_count" \
+  --argjson registry_image_count "$before_registry_image_count" \
   --argjson registry_layers_size_bytes "$before_layers_size_bytes" \
   '{
     target_source_shas: $target_source_shas,
@@ -806,6 +810,7 @@ jq -n \
     tag_rows: $tag_rows,
     alias_rows: $alias_rows,
     tag_generations: $tag_generations,
+    registry_image_count: $registry_image_count,
     registry_layers_size_bytes: $registry_layers_size_bytes,
     deletion_required: ($deletion_required == "true")
   }' > "$OUTPUT_DIR/before-summary.json"
@@ -897,11 +902,12 @@ for ((attempt = 1; attempt <= PRUNE_POLL_ATTEMPTS; attempt++)); do
         grep -q .; then
         oci_die "a canonical protected source tag disappeared during pruning"
       fi
+      after_row_count="$(active_registry_row_count "$work_dir/after.json")"
       registry_accounting "$work_dir/accounting.json"
       if jq -e \
-        --argjson expected_images "$protected_image_count" \
+        --argjson expected_tag_rows "$after_row_count" \
         --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
-          .image_count == $expected_images and
+          .image_count == $expected_tag_rows and
           .layers_size_bytes <= $max_bytes
         ' "$work_dir/accounting.json" >/dev/null; then
         pruned=true
@@ -931,6 +937,12 @@ cp "$work_dir/after-aliases.tsv" "$OUTPUT_DIR/after-aliases.tsv"
 jq -e . "$work_dir/accounting.json" > "$OUTPUT_DIR/registry-accounting.json"
 after_row_count="$(active_registry_row_count "$work_dir/after.json")"
 after_alias_count="$((after_row_count - protected_image_count))"
+after_registry_image_count="$(
+  jq -r '.image_count' "$work_dir/accounting.json"
+)"
+after_layers_size_bytes="$(
+  jq -r '.layers_size_bytes' "$work_dir/accounting.json"
+)"
 after_tag_generation_count="$(
   cut -f1 "$work_dir/after-aliases.tsv" | LC_ALL=C sort -u | wc -l |
     tr -d ' '
@@ -953,6 +965,8 @@ jq -n \
   --argjson tag_rows "$after_row_count" \
   --argjson alias_rows "$after_alias_count" \
   --argjson tag_generations "$after_tag_generation_count" \
+  --argjson registry_image_count "$after_registry_image_count" \
+  --argjson registry_layers_size_bytes "$after_layers_size_bytes" \
   '{
     target_source_shas: $target_source_shas,
     current_source_sha: $current_source_sha,
@@ -970,6 +984,8 @@ jq -n \
     tag_rows: $tag_rows,
     alias_rows: $alias_rows,
     tag_generations: $tag_generations,
+    registry_image_count: $registry_image_count,
+    registry_layers_size_bytes: $registry_layers_size_bytes,
     terminal_status: "PRUNED"
   }' > "$OUTPUT_DIR/after-summary.json"
 
