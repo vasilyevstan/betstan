@@ -48,6 +48,9 @@ run_failure missing-workload 'del(.workloads[0])' workload-set
 run_failure platform-digest '.platform_workloads[0].image="mutable"' platform-digest
 run_failure empty-endpoint '.services[0].ready_endpoints=false' empty-endpoint
 run_failure extra-mongo '.mongo.statefulset_count=2' extra-mongo
+run_failure wrong-pvc-identity '.mongo.pvc_inventory[0].name="gaming-bet-mongo-data"' mongo-pvc-topology
+run_failure extra-legacy-pvc '.mongo.pvc_inventory += [{"name":"gaming-bet-mongo-data-gaming-bet-mongo-depl-0","phase":"Bound"}]' mongo-pvc-topology
+run_failure inventory-unbound-pvc '.mongo.pvc_inventory[0].phase="Pending"' mongo-pvc-topology
 run_failure unbound-pvc '.mongo.pvc_bound=false' mongo-pvc-unbound
 run_failure mongo-version '.mongo.version="7.0.21"|.mongo.major_minor="7.0"' mongo-version
 run_failure mongo-fcv '.mongo.fcv="8.0"' mongo-fcv

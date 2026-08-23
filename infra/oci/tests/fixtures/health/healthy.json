@@ -85,6 +85,12 @@
   "mongo": {
     "statefulset_count": 1,
     "pvc_count": 1,
+    "pvc_inventory": [
+      {
+        "name": "gaming-auth-mongo-data",
+        "phase": "Bound"
+      }
+    ],
     "pvc_bound": true,
     "pvc_gib": 50,
     "version": "8.2.12",

@@ -8,6 +8,13 @@ conversation summaries are not authority.
 
 - Bind every mutation to one full current source SHA and one internally
   consistent build, capacity, infrastructure, deploy, or migration chain.
+- Resolve the remote default branch SHA through GitHub or `git ls-remote`,
+  fetch and verify that immutable commit, and read workflow, agent, manifest,
+  and test evidence from that same tree. Revalidate the remote SHA immediately
+  before mutation; local and remote-tracking refs are not authority.
+- Absence from the current tree does not retire historical workflow runs.
+  Require authoritative workflow-state and complete nonterminal-run queries,
+  and fail closed when either query fails or cannot be fully paginated.
 - A protected-environment approval wait is an active workflow state, not a
   hang. Never rerun or cancel it to bypass review.
 - Recovery uses the interrupted migration journal SHA and fencing generation.

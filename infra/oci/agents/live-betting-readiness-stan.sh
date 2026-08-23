@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LIVE_BETTING_STACK="oci"
+export REQUIRED_MONGO_TOPOLOGY_MODE=shared
+export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data
 BASE_URL="${BASE_URL:-${OCI_PUBLIC_URL:-}}"
 SECONDARY_PUBLIC_URL="${SECONDARY_PUBLIC_URL:-${OCI_REDIRECT_URL:-}}"
 DIAGNOSTIC_URL="${DIAGNOSTIC_URL:-${OCI_DIAGNOSTIC_URL:-}}"

@@ -139,9 +139,10 @@ permissions; `boot-volumes` is not an individual IAM resource type.
 ```
 
 The tests parse every OCI YAML file, check every shell script with `bash -n`,
-render the explicit overlay with sanitized fixture provenance, verify one
-Mongo/PVC/load balancer, canonical/redirect/diagnostic ingress and certificate
-contracts, verify the k3s local-PV and Bastion cleanup
+render the explicit overlay with sanitized fixture provenance, verify the exact
+`Bound` `gaming-auth-mongo-data` shared claim with no additional Mongo PVC,
+verify the single Mongo/load balancer and canonical/redirect/diagnostic ingress
+and certificate contracts, verify the k3s local-PV and Bastion cleanup
 contracts, reject mixed OKE/k3s inventory, mutable application images, and
 legacy Mongo, check credential separation, and exercise health failure
 fixtures. The entrypoint also validates shared migration-success provenance,
@@ -214,8 +215,9 @@ concurrent retirement fixture isolation without masking failed suites.
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.
 8. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
-   `www` redirect, diagnostic TLS, API, browser, cluster, and zero-cost checks
-   before the deployment is healthy.
+   `www` redirect, diagnostic TLS, API, browser, cluster, zero-cost, validated
+   shared-Mongo marker/lock, and exact `Bound` shared-PVC checks before the
+   deployment is healthy.
 9. Dispatch `oci-migrate` only with the exact current master SHA, successful
    first-attempt build/infrastructure/deploy run IDs,
    `replace_oci_data=true`, and the destructive confirmation. The workflow

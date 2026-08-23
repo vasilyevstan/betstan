@@ -605,6 +605,21 @@ migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
+deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"
+azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
+oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
+
+grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
+grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
+grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
+  "$azure_deploy_workflow"
+grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"
+grep -Fq 'export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data' \
+  "$oci_live_readiness"
+if grep -Eiq 'at least (eight|8) Mongo PVC' \
+  "$deployment_safety_agent" "$azure_deploy_workflow" "$deploy_workflow"; then
+  fail "current production safety sources retain the retired eight-PVC gate"
+fi
 
 grep -Fq 'workflow_run:' "$build_workflow"
 grep -Fq 'workflows: ["production-build"]' "$build_workflow"
@@ -628,6 +643,8 @@ grep -Fq 'cron: "*/5 * * * *"' "$capacity_workflow"
 grep -Fq 'workflow_dispatch:' "$capacity_workflow"
 grep -Fq 'github.run_attempt == 1' "$capacity_workflow"
 grep -Fq "vars.OCI_CAPACITY_CATCHER_ENABLED == 'true'" "$capacity_workflow"
+grep -Fq "github.event_name == 'workflow_dispatch'" "$capacity_workflow"
+grep -Fq "inputs.approved_sha != ''" "$capacity_workflow"
 grep -Fq 'group: oci-control-plane' "$capacity_workflow"
 grep -Fq 'name: oci-capacity-acquire' "$capacity_workflow"
 grep -Fq 'OCI_CAPACITY_PRIVATE_KEY_PEM' "$capacity_workflow"
