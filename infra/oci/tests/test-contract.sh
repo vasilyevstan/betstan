@@ -374,6 +374,9 @@ grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
 grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not apply canonical/diagnostic and www redirect ingresses"
+grep -Fq 'services=(auth bet event moderation resulting slip backoffice client gamemaster)' \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment must roll out API dependencies before Client and Gamemaster"
 grep -Fq 'certificate was not issued by Let' \
   "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
   fail "OCI public smoke does not verify the served certificate issuer"
