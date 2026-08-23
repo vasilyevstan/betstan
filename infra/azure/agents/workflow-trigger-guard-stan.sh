@@ -46,6 +46,12 @@ for file in \
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
 
+python3 -m py_compile \
+  infra/azure/agents/workflow-shell-input-guard-stan.py
+bash -n \
+  infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+./infra/azure/agents/test-workflow-shell-input-guard-stan.sh
+
 if ! python3 \
   infra/azure/agents/workflow-shell-input-guard-stan.py \
   .github/workflows; then
