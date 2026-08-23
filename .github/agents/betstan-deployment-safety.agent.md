@@ -51,7 +51,11 @@ inactive. Fail closed when either query is incomplete or fails.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
-- Use `copilot-cli-run-approval-stan.sh` for protected build/deploy environments in automatic mode. Never auto-approve rollback, migration, infrastructure, stale-master, rerun, unlabelled, or competing workflow activity.
+- Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
+  environments in automatic mode. The only infrastructure exceptions are an
+  exact-title `validate-registry` or `prune-registry` run on current
+  CLI-managed `master`; never auto-approve other infrastructure, rollback,
+  migration, stale-master, rerun, unlabelled, or competing workflow activity.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
@@ -99,6 +103,13 @@ inactive. Fail closed when either query is incomplete or fails.
   Allow canonical protected source generations to share a complete
   nine-image OCID/digest set after reuse, but reject partial protected
   overlap.
+- Require a successful exact-master `validate-registry` artifact before
+  approving `prune-registry`. The apply run must receive that validation run
+  ID and prove its complete live before-summary is byte-identical before any
+  delete; a new alias, OCID, digest, lineage, or accounting value requires a
+  fresh validation. Bind the artifact to the exact candidate, deployed,
+  fallback, and every obsolete SHA/run pair; matching SHAs with different run
+  IDs are not interchangeable.
 
 ## Deployment gates
 

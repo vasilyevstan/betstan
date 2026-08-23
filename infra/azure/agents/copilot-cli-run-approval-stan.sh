@@ -9,6 +9,10 @@ set -euo pipefail
 #     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
 #   COPILOT_CLI_AUTO_APPROVE=true ... \
 #     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
+#   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=oci-infrastructure.yml \
+#     EXPECTED_ENVIRONMENT=oci-infrastructure \
+#     EXPECTED_DISPLAY_TITLE="oci-infrastructure validate-registry <sha>" \
+#     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
 
 REPO="${REPO:-vasilyevstan/betstan}"
 RUN_ID="${1:-${RUN_ID:-}}"
@@ -16,6 +20,7 @@ ACTION="${2:-}"
 EXPECTED_SHA="${EXPECTED_SHA:-}"
 EXPECTED_WORKFLOW="${EXPECTED_WORKFLOW:-}"
 EXPECTED_ENVIRONMENT="${EXPECTED_ENVIRONMENT:-}"
+EXPECTED_DISPLAY_TITLE="${EXPECTED_DISPLAY_TITLE:-}"
 CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
 PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
@@ -56,6 +61,17 @@ case "$EXPECTED_WORKFLOW:$EXPECTED_ENVIRONMENT" in
   oci-live-betting-disable.yml:oci-production)
     expected_event="workflow_dispatch"
     ;;
+  oci-infrastructure.yml:oci-infrastructure)
+    expected_event="workflow_dispatch"
+    case "$EXPECTED_DISPLAY_TITLE" in
+      "oci-infrastructure validate-registry $EXPECTED_SHA" | \
+        "oci-infrastructure prune-registry $EXPECTED_SHA")
+        ;;
+      *)
+        fail "OCI infrastructure approval requires an exact validation or prune run title"
+        ;;
+    esac
+    ;;
   *)
     fail "workflow/environment pair is not eligible for automatic approval"
     ;;
@@ -82,12 +98,12 @@ read_pending() {
 
 validate_run() {
   python3 - "$1" "$RUN_ID" "$REPO" "$EXPECTED_SHA" \
-    "$EXPECTED_WORKFLOW" "$expected_event" <<'PY'
+    "$EXPECTED_WORKFLOW" "$expected_event" "$EXPECTED_DISPLAY_TITLE" <<'PY'
 import json
 import sys
 
 payload = json.loads(sys.argv[1])
-run_id, repository, sha, workflow, event = sys.argv[2:]
+run_id, repository, sha, workflow, event, display_title = sys.argv[2:]
 failures = []
 if str(payload.get("id", "")) != run_id:
     failures.append("run ID changed")
@@ -95,6 +111,8 @@ if payload.get("path") != f".github/workflows/{workflow}":
     failures.append("workflow path mismatch")
 if payload.get("event") != event:
     failures.append("workflow event mismatch")
+if display_title and payload.get("display_title") != display_title:
+    failures.append("workflow display title mismatch")
 if payload.get("head_sha") != sha:
     failures.append("run SHA mismatch")
 if payload.get("head_branch") != "master":

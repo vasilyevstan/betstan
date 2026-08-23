@@ -78,6 +78,31 @@ printf '%s\n' \
     'BEGIN { OFS = "\t" } { print sha, $0 }' \
     "$WORK_DIR/target-two.tsv"
 } > "$WORK_DIR/trusted-target-images.tsv"
+jq -cnS \
+  --arg source_sha "$CURRENT_SHA" \
+  --arg deployed_sha "$DEPLOYED_SHA" \
+  --arg rollback_sha "$ROLLBACK_SHA" \
+  --arg target_one_sha "$TARGET_ONE_SHA" \
+  --arg target_two_sha "$TARGET_TWO_SHA" \
+  --arg failed_target_sha "$FAILED_TARGET_SHA" '
+    {
+      schema: "betstan.oci-registry-prune-request.v1",
+      source_sha: $source_sha,
+      candidate_build_run_id: "1001",
+      deployed_sha: $deployed_sha,
+      deployed_run_id: "1002",
+      fallback_sha: $rollback_sha,
+      fallback_build_run_id: "1003",
+      obsolete_generations: [
+        {sha: $target_one_sha, build_run_id: "2001"},
+        {sha: $target_two_sha, build_run_id: "2002"},
+        {sha: $failed_target_sha, build_run_id: "2003"}
+      ]
+    }
+  ' > "$WORK_DIR/request-provenance.json"
+cp \
+  "$WORK_DIR/request-provenance.json" \
+  "$WORK_DIR/request-provenance-original.json"
 
 jq -n \
   --arg target_one_sha "$TARGET_ONE_SHA" \
@@ -190,16 +215,30 @@ case "$*" in
     cat "${MOCK_OCI_STATE:?}/images.json"
     ;;
   "artifacts container repository list "*)
+    repository_list_count_file="${MOCK_OCI_STATE:?}/repository-list-count"
+    repository_list_count=0
+    if [[ -f "$repository_list_count_file" ]]; then
+      repository_list_count="$(cat "$repository_list_count_file")"
+    fi
+    repository_list_count="$((repository_list_count + 1))"
+    printf '%s\n' "$repository_list_count" > "$repository_list_count_file"
+    layers_size_bytes=300000000
+    if [[ -n "${MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL:-}" &&
+          "$repository_list_count" == "$MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL" ]]; then
+      layers_size_bytes=300000001
+    fi
     image_count="$(
       jq '[.data.items[].digest] | unique | length' \
         "${MOCK_OCI_STATE:?}/images.json"
     )"
-    jq -n --argjson image_count "$image_count" '{
+    jq -n \
+      --argjson image_count "$image_count" \
+      --argjson layers_size_bytes "$layers_size_bytes" '{
       data: {
         items: [{
           "display-name": "betstan_images",
           "image-count": $image_count,
-          "layers-size-in-bytes": 300000000
+          "layers-size-in-bytes": $layers_size_bytes
         }]
       }
     }'
@@ -238,6 +277,7 @@ run_prune() {
     MOCK_OCI_STATE="$WORK_DIR/state" \
     MOCK_OCI_MUTATE_ON_LIST_CALL="${MOCK_OCI_MUTATE_ON_LIST_CALL:-}" \
     MOCK_OCI_REKEY_ON_LIST_CALL="${MOCK_OCI_REKEY_ON_LIST_CALL:-}" \
+    MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL="${MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL:-}" \
     OCI_CLI_VERSION=3.90.0 \
     OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..fixture \
     OCI_IMAGE_PREFIX=betstan \
@@ -246,15 +286,49 @@ run_prune() {
     TRUSTED_TARGET_IMAGES_FILE="$trusted_target_file" \
     PROTECTED_IMAGES_FILE="$protected_file" \
     TRUSTED_PROTECTED_IMAGES_FILE="$trusted_protected_file" \
+    REQUEST_PROVENANCE_FILE="$WORK_DIR/request-provenance.json" \
+    VALIDATED_BEFORE_SUMMARY_FILE="$WORK_DIR/validated-before-summary.json" \
     CURRENT_SOURCE_SHA="$CURRENT_SHA" \
     OUTPUT_DIR="$WORK_DIR/evidence" \
+    PRUNE_MODE="${TEST_PRUNE_MODE:-apply}" \
     PRUNE_POLL_ATTEMPTS=1 \
     PRUNE_POLL_SECONDS=0 \
     "$OCI_DIR/scripts/prune-registry-generation.sh"
 }
 
-: > "$WORK_DIR/oci.log"
-rm -f "$WORK_DIR/state/list-count"
+prepare_validation() {
+  rm -rf "$WORK_DIR/evidence" "$WORK_DIR/validation-evidence"
+  : > "$WORK_DIR/oci.log"
+  rm -f \
+    "$WORK_DIR/state/list-count" \
+    "$WORK_DIR/state/repository-list-count"
+  TEST_PRUNE_MODE=validate run_prune
+  [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+    fail "read-only registry validation attempted deletion"
+  jq -e '.terminal_status == "VALIDATED"' \
+    "$WORK_DIR/evidence/validation-summary.json" >/dev/null ||
+    fail "registry validation did not emit terminal evidence"
+  cp \
+    "$WORK_DIR/evidence/before-summary.json" \
+    "$WORK_DIR/validated-before-summary.json"
+  mv "$WORK_DIR/evidence" "$WORK_DIR/validation-evidence"
+  : > "$WORK_DIR/oci.log"
+  rm -f \
+    "$WORK_DIR/state/list-count" \
+    "$WORK_DIR/state/repository-list-count"
+}
+
+prepare_validation
+jq -e '
+  .terminal_status == "VALIDATED" and
+  .present_target_images == 27 and
+  .unique_images == 54 and
+  .unique_image_ids == 54 and
+  .tag_rows == 360 and
+  .alias_rows == 306 and
+  .tag_generations == 40
+' "$WORK_DIR/validation-evidence/validation-summary.json" >/dev/null ||
+  fail "read-only validation did not capture the production-shaped inventory"
 run_prune
 [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log")" == "27" ]] ||
   fail "batch prune did not delete exactly three complete generations"
@@ -284,6 +358,13 @@ jq -e \
     .tag_generations == 21
   ' "$WORK_DIR/evidence/after-summary.json" >/dev/null ||
   fail "batch prune did not emit terminal evidence"
+validated_before_summary_sha256="$(
+  shasum -a 256 "$WORK_DIR/evidence/validated-before-summary.json" |
+    awk '{ print $1 }'
+)"
+[[ "$(jq -r '.validated_before_summary_sha256' "$WORK_DIR/evidence/after-summary.json")" == \
+    "$validated_before_summary_sha256" ]] ||
+  fail "batch prune did not bind the exact read-only validation snapshot"
 [[ "$(wc -l < "$WORK_DIR/evidence/deleted-images.tsv" | tr -d ' ')" == "27" ]] ||
   fail "batch prune evidence does not contain 27 deleted service images"
 protected_image_ids_sha256="$(
@@ -309,9 +390,7 @@ protected_image_ids_sha256="$(
 )" == "[189,27,27]" ]] ||
   fail "batch prune did not retain exactly three protected alias generations"
 
-rm -rf "$WORK_DIR/evidence"
-: > "$WORK_DIR/oci.log"
-rm -f "$WORK_DIR/state/list-count"
+prepare_validation
 run_prune
 [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
   fail "an already-pruned target generation was deleted again"
@@ -327,9 +406,55 @@ jq -e '
   fail "an already-pruned batch was not resumed idempotently"
 
 cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
-rm -rf "$WORK_DIR/evidence"
-: > "$WORK_DIR/oci.log"
-rm -f "$WORK_DIR/state/list-count"
+cp \
+  "$WORK_DIR/request-provenance-original.json" \
+  "$WORK_DIR/request-provenance.json"
+prepare_validation
+jq -cS '.candidate_build_run_id = "9999"' \
+  "$WORK_DIR/request-provenance.json" \
+  > "$WORK_DIR/request-provenance.tmp"
+mv "$WORK_DIR/request-provenance.tmp" "$WORK_DIR/request-provenance.json"
+if run_prune >/dev/null 2>&1; then
+  fail "same-SHA validation replay with a different run ID was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "request provenance replay was rejected after a delete"
+cp \
+  "$WORK_DIR/request-provenance-original.json" \
+  "$WORK_DIR/request-provenance.json"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+prepare_validation
+jq --arg current_sha "$CURRENT_SHA" '
+  def services: [
+    "auth", "backoffice", "bet", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip"
+  ];
+  .data.items as $rows
+  | .data.items += [
+      range(0; 9) as $service_index
+      | ($rows[]
+        | select(
+            .version ==
+            ("oci-" + services[$service_index] + "-" + $current_sha)
+          ))
+      | . + {
+          version: (
+            "oci-" + services[$service_index] + "-" +
+            "6666666666666666666666666666666666666666"
+          )
+        }
+    ]
+' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "registry changes after read-only validation were accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "stale validation was rejected after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+prepare_validation
 if MOCK_OCI_MUTATE_ON_LIST_CALL=2 run_prune >/dev/null 2>&1; then
   fail "registry alias drift immediately before deletion was accepted"
 fi
@@ -337,9 +462,16 @@ fi
   fail "pre-delete alias drift was rejected after a delete"
 
 cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
-rm -rf "$WORK_DIR/evidence"
-: > "$WORK_DIR/oci.log"
-rm -f "$WORK_DIR/state/list-count"
+prepare_validation
+if MOCK_OCI_ACCOUNTING_DRIFT_ON_LIST_CALL=2 \
+  run_prune >/dev/null 2>&1; then
+  fail "registry accounting drift immediately before deletion was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "pre-delete accounting drift was rejected after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+prepare_validation
 if MOCK_OCI_REKEY_ON_LIST_CALL=3 run_prune >/dev/null 2>&1; then
   fail "post-delete protected image OCID substitution was accepted"
 fi
@@ -414,6 +546,9 @@ jq \
       )
   ' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
 mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+TEST_PROTECTED_IMAGES_FILE="$WORK_DIR/protected-reused.tsv" \
+  TEST_TRUSTED_PROTECTED_IMAGES_FILE="$WORK_DIR/trusted-protected-reused.tsv" \
+  prepare_validation
 TEST_PROTECTED_IMAGES_FILE="$WORK_DIR/protected-reused.tsv" \
   TEST_TRUSTED_PROTECTED_IMAGES_FILE="$WORK_DIR/trusted-protected-reused.tsv" \
   run_prune
@@ -515,6 +650,7 @@ jq \
     ))
 ' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
 mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+prepare_validation
 run_prune
 [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log")" == "25" ]] ||
   fail "partial batch recovery did not delete every remaining target image"

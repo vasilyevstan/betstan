@@ -9,8 +9,11 @@ TARGET_SOURCE_SHAS_FILE="${TARGET_SOURCE_SHAS_FILE:-}"
 TRUSTED_TARGET_IMAGES_FILE="${TRUSTED_TARGET_IMAGES_FILE:-}"
 PROTECTED_IMAGES_FILE="${PROTECTED_IMAGES_FILE:-}"
 TRUSTED_PROTECTED_IMAGES_FILE="${TRUSTED_PROTECTED_IMAGES_FILE:-}"
+VALIDATED_BEFORE_SUMMARY_FILE="${VALIDATED_BEFORE_SUMMARY_FILE:-}"
+REQUEST_PROVENANCE_FILE="${REQUEST_PROVENANCE_FILE:-}"
 CURRENT_SOURCE_SHA="${CURRENT_SOURCE_SHA:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/oci-registry-prune}"
+PRUNE_MODE="${PRUNE_MODE:-apply}"
 PRUNE_POLL_ATTEMPTS="${PRUNE_POLL_ATTEMPTS:-60}"
 PRUNE_POLL_SECONDS="${PRUNE_POLL_SECONDS:-10}"
 EXPECTED_SERVICES='auth backoffice bet client event gamemaster moderation resulting slip'
@@ -35,6 +38,8 @@ oci_require_ocid OCI_COMPARTMENT_OCID
   oci_die "PRUNE_POLL_SECONDS must be a nonnegative integer"
 [[ "$OCI_REGISTRY_MAX_BYTES" =~ ^[1-9][0-9]*$ ]] ||
   oci_die "OCI_REGISTRY_MAX_BYTES must be a positive integer"
+[[ "$PRUNE_MODE" == "validate" || "$PRUNE_MODE" == "apply" ]] ||
+  oci_die "PRUNE_MODE must be validate or apply"
 [[ -f "$TARGET_SOURCE_SHAS_FILE" ]] ||
   oci_die "TARGET_SOURCE_SHAS_FILE does not exist"
 [[ -f "$TRUSTED_TARGET_IMAGES_FILE" ]] ||
@@ -43,6 +48,17 @@ oci_require_ocid OCI_COMPARTMENT_OCID
   oci_die "PROTECTED_IMAGES_FILE does not exist"
 [[ -f "$TRUSTED_PROTECTED_IMAGES_FILE" ]] ||
   oci_die "TRUSTED_PROTECTED_IMAGES_FILE does not exist"
+[[ -f "$REQUEST_PROVENANCE_FILE" && ! -L "$REQUEST_PROVENANCE_FILE" ]] ||
+  oci_die "REQUEST_PROVENANCE_FILE must be a regular file"
+jq -e 'type == "object"' "$REQUEST_PROVENANCE_FILE" >/dev/null ||
+  oci_die "request provenance is not valid JSON"
+if [[ "$PRUNE_MODE" == "apply" ]]; then
+  [[ -f "$VALIDATED_BEFORE_SUMMARY_FILE" &&
+    ! -L "$VALIDATED_BEFORE_SUMMARY_FILE" ]] ||
+    oci_die "apply mode requires a regular validated before-summary file"
+  jq -e 'type == "object"' "$VALIDATED_BEFORE_SUMMARY_FILE" >/dev/null ||
+    oci_die "validated before-summary is not valid JSON"
+fi
 
 mkdir -p "$OUTPUT_DIR"
 work_dir="$(mktemp -d)"
@@ -701,6 +717,17 @@ cmp -s \
 cmp -s \
   "$work_dir/expected-service-digests.tsv" "$work_dir/before-service-digests.tsv" ||
   oci_die "registry service and digest mappings differ from trusted provenance"
+registry_accounting "$work_dir/before-accounting.json"
+jq -e \
+  --argjson expected_images "$expected_images_before" \
+  --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
+    .image_count == $expected_images and
+    .layers_size_bytes <= $max_bytes
+  ' "$work_dir/before-accounting.json" >/dev/null ||
+  oci_die "registry accounting does not match validated unique identities"
+before_layers_size_bytes="$(
+  jq -r '.layers_size_bytes' "$work_dir/before-accounting.json"
+)"
 
 deletion_required=true
 if [[ "$present_target_generation_count" == "0" ]]; then
@@ -732,6 +759,12 @@ protected_sources_sha256="$(
 protected_image_ids_sha256="$(
   oci_sha256 < "$work_dir/protected-image-ids.txt"
 )"
+registry_aliases_sha256="$(
+  oci_sha256 < "$work_dir/before-aliases.tsv"
+)"
+request_provenance_sha256="$(
+  oci_sha256 < "$REQUEST_PROVENANCE_FILE"
+)"
 before_alias_count="$((before_row_count - expected_images_before))"
 jq -n \
   --argjson target_source_shas "$target_sources_json" \
@@ -741,6 +774,8 @@ jq -n \
   --arg protected_sha256 "$protected_sha256" \
   --arg protected_sources_sha256 "$protected_sources_sha256" \
   --arg protected_image_ids_sha256 "$protected_image_ids_sha256" \
+  --arg registry_aliases_sha256 "$registry_aliases_sha256" \
+  --arg request_provenance_sha256 "$request_provenance_sha256" \
   --arg deletion_required "$deletion_required" \
   --argjson requested_target_generations "$target_generation_count" \
   --argjson present_target_generations "$present_target_generation_count" \
@@ -751,6 +786,7 @@ jq -n \
   --argjson tag_rows "$before_row_count" \
   --argjson alias_rows "$before_alias_count" \
   --argjson tag_generations "$before_tag_generation_count" \
+  --argjson registry_layers_size_bytes "$before_layers_size_bytes" \
   '{
     target_source_shas: $target_source_shas,
     current_source_sha: $current_source_sha,
@@ -759,6 +795,8 @@ jq -n \
     protected_generations_sha256: $protected_sha256,
     protected_source_tags_sha256: $protected_sources_sha256,
     protected_image_ids_sha256: $protected_image_ids_sha256,
+    registry_aliases_sha256: $registry_aliases_sha256,
+    request_provenance_sha256: $request_provenance_sha256,
     requested_target_generations: $requested_target_generations,
     present_target_generations: $present_target_generations,
     present_target_images: $present_target_images,
@@ -768,8 +806,32 @@ jq -n \
     tag_rows: $tag_rows,
     alias_rows: $alias_rows,
     tag_generations: $tag_generations,
+    registry_layers_size_bytes: $registry_layers_size_bytes,
     deletion_required: ($deletion_required == "true")
   }' > "$OUTPUT_DIR/before-summary.json"
+
+if [[ "$PRUNE_MODE" == "validate" ]]; then
+  cp "$work_dir/target-registry.tsv" "$OUTPUT_DIR/planned-images.tsv"
+  cp "$work_dir/protected-image-ids.txt" \
+    "$OUTPUT_DIR/protected-image-ids.txt"
+  cp "$work_dir/before-aliases.tsv" "$OUTPUT_DIR/before-aliases.tsv"
+  jq -e . "$work_dir/before-accounting.json" \
+    > "$OUTPUT_DIR/registry-accounting.json"
+  jq '. + {terminal_status: "VALIDATED"}' \
+    "$OUTPUT_DIR/before-summary.json" \
+    > "$OUTPUT_DIR/validation-summary.json"
+  echo "registry_generations_validated=$(paste -sd, "$work_dir/target-source-shas.txt")"
+  exit 0
+fi
+
+cmp -s \
+  "$VALIDATED_BEFORE_SUMMARY_FILE" "$OUTPUT_DIR/before-summary.json" ||
+  oci_die "live registry or trusted provenance changed since validation"
+cp "$VALIDATED_BEFORE_SUMMARY_FILE" \
+  "$OUTPUT_DIR/validated-before-summary.json"
+validated_before_summary_sha256="$(
+  oci_sha256 < "$VALIDATED_BEFORE_SUMMARY_FILE"
+)"
 
 if [[ "$deletion_required" == "true" ]]; then
   list_images "$work_dir/pre-delete.json"
@@ -779,6 +841,11 @@ if [[ "$deletion_required" == "true" ]]; then
   cmp -s \
     "$work_dir/before-aliases.tsv" "$work_dir/pre-delete-aliases.tsv" ||
     oci_die "registry aliases changed after validation and before deletion"
+  registry_accounting "$work_dir/pre-delete-accounting.json"
+  cmp -s \
+    "$work_dir/before-accounting.json" \
+    "$work_dir/pre-delete-accounting.json" ||
+    oci_die "registry accounting changed after validation and before deletion"
 
   while IFS=$'\t' read -r _source _service _digest image_id; do
     oci artifacts container image delete \
@@ -874,6 +941,10 @@ jq -n \
   --arg protected_sha256 "$protected_sha256" \
   --arg protected_sources_sha256 "$protected_sources_sha256" \
   --arg protected_image_ids_sha256 "$protected_image_ids_sha256" \
+  --arg registry_aliases_sha256 "$registry_aliases_sha256" \
+  --arg request_provenance_sha256 "$request_provenance_sha256" \
+  --arg validated_before_summary_sha256 \
+    "$validated_before_summary_sha256" \
   --argjson requested_target_generations "$target_generation_count" \
   --argjson pruned_target_generations "$present_target_generation_count" \
   --argjson protected_unique_generations "$protected_unique_generation_count" \
@@ -888,6 +959,9 @@ jq -n \
     protected_generations_sha256: $protected_sha256,
     protected_source_tags_sha256: $protected_sources_sha256,
     protected_image_ids_sha256: $protected_image_ids_sha256,
+    registry_aliases_sha256: $registry_aliases_sha256,
+    request_provenance_sha256: $request_provenance_sha256,
+    validated_before_summary_sha256: $validated_before_summary_sha256,
     requested_target_generations: $requested_target_generations,
     pruned_target_generations: $pruned_target_generations,
     protected_unique_generations: $protected_unique_generations,
