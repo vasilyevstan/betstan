@@ -63,11 +63,10 @@ conversation summaries are not authority.
   can safely converge.
 - OCIR lists one row per tag, not necessarily one row per stored image.
   `imagetools create` reuse adds exact-SHA aliases that share an image OCID and
-  digest. Repository `image-count` also counts those tag rows rather than
-  unique OCIDs, so reconcile it with the validated alias inventory while
-  retaining separate unique-identity checks. Destructive checks must validate
-  every alias while counting and deleting unique image IDs: require one
-  service and digest per ID, one
+  digest. Repository `image-count` counts unique manifests, so reconcile it
+  with unique digests/OCIDs while separately validating the complete alias
+  inventory. Destructive checks must validate every alias while counting and
+  deleting unique image IDs: require one service and digest per ID, one
   service and ID per digest, complete trusted alias generations, canonical
   protected tags, and equality of the exact protected OCID set before and
   after deletion rather than relying on counts alone. Candidate, deployed,
@@ -78,7 +77,9 @@ conversation summaries are not authority.
   evidence. Capture a read-only registry validation artifact first, then make
   apply require byte-for-byte equality of the live before-summary (all aliases,
   OCIDs, digests, lineage, and accounting) with that artifact before issuing
-  any delete.
+  any delete. The read-only phase may attest storage above the configured
+  ceiling; enforce that ceiling after the approved obsolete identities have
+  been deleted and provider accounting converges.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.
