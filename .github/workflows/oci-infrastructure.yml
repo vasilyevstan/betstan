@@ -13,13 +13,14 @@ on:
         required: true
         type: string
       phase:
-        description: Prepare/finalize zero-cost infrastructure or prune obsolete image generations
+        description: Prepare/finalize infrastructure or validate/prune image generations
         required: true
         default: prepare
         type: choice
         options:
           - prepare
           - finalize
+          - validate-registry
           - prune-registry
       candidate_build_run_id:
         description: Current-master OCI build run protected during registry pruning
@@ -61,6 +62,11 @@ on:
         required: false
         default: ""
         type: string
+      validation_run_id:
+        description: Successful exact-state registry validation required before pruning
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -72,7 +78,9 @@ concurrency:
 
 jobs:
   prune-registry:
-    if: github.run_attempt == 1 && inputs.phase == 'prune-registry'
+    if: >-
+      github.run_attempt == 1 &&
+      (inputs.phase == 'validate-registry' || inputs.phase == 'prune-registry')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -88,6 +96,8 @@ jobs:
       DEPLOYED_RUN_ID: ${{ inputs.deployed_run_id }}
       FALLBACK_SHA: ${{ inputs.fallback_sha }}
       FALLBACK_BUILD_RUN_ID: ${{ inputs.fallback_build_run_id }}
+      PHASE: ${{ inputs.phase }}
+      VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
       OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
@@ -129,6 +139,8 @@ jobs:
             "deployed_run_id=$DEPLOYED_RUN_ID" \
             "fallback_sha=$FALLBACK_SHA" \
             "fallback_build_run_id=$FALLBACK_BUILD_RUN_ID" \
+            "phase=$PHASE" \
+            "validation_run_id=$VALIDATION_RUN_ID" \
             "workflow_run_id=$GITHUB_RUN_ID" \
             "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
             > "$PROVENANCE_DIR/dispatch.env"
@@ -137,7 +149,20 @@ jobs:
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
-          [ "$CONFIRMATION" = "PRUNE OBSOLETE OCI IMAGE GENERATION" ]
+          case "$PHASE" in
+            validate-registry)
+              [ "$CONFIRMATION" = "VALIDATE OCI IMAGE GENERATIONS" ]
+              [ -z "$VALIDATION_RUN_ID" ]
+              ;;
+            prune-registry)
+              [ "$CONFIRMATION" = "PRUNE OBSOLETE OCI IMAGE GENERATION" ]
+              [[ "$VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [ "$VALIDATION_RUN_ID" != "$GITHUB_RUN_ID" ]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
           for sha in "$SOURCE_SHA" "$DEPLOYED_SHA" "$FALLBACK_SHA"; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
             git cat-file -e "${sha}^{commit}"
@@ -384,6 +409,56 @@ jobs:
             ' "$WORK_DIR/$directory/images.tsv" \
               >> "$PROVENANCE_DIR/trusted-protected-images.tsv"
           done
+          jq -cnS \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg candidate_build_run_id "$CANDIDATE_BUILD_RUN_ID" \
+            --arg deployed_sha "$DEPLOYED_SHA" \
+            --arg deployed_run_id "$DEPLOYED_RUN_ID" \
+            --arg fallback_sha "$FALLBACK_SHA" \
+            --arg fallback_build_run_id "$FALLBACK_BUILD_RUN_ID" \
+            --slurpfile obsolete "$WORK_DIR/obsolete-generations.json" '
+              {
+                schema: "betstan.oci-registry-prune-request.v1",
+                source_sha: $source_sha,
+                candidate_build_run_id: $candidate_build_run_id,
+                deployed_sha: $deployed_sha,
+                deployed_run_id: $deployed_run_id,
+                fallback_sha: $fallback_sha,
+                fallback_build_run_id: $fallback_build_run_id,
+                obsolete_generations: (
+                  $obsolete[0] |
+                  sort_by(.sha + ":" + .build_run_id)
+                )
+              }
+            ' > "$PROVENANCE_DIR/request-provenance.json"
+
+          if [ "$PHASE" = "prune-registry" ]; then
+            validate_run \
+              oci-infrastructure.yml \
+              "$VALIDATION_RUN_ID" workflow_dispatch "$SOURCE_SHA" success
+            download_artifact \
+              "$VALIDATION_RUN_ID" \
+              "oci-registry-prune-${VALIDATION_RUN_ID}-1" \
+              "$WORK_DIR/validated-registry"
+            test -s "$WORK_DIR/validated-registry/before-summary.json"
+            test -s "$WORK_DIR/validated-registry/validation-summary.json"
+            test -s "$WORK_DIR/validated-registry/request-provenance.json"
+            cmp -s \
+              "$PROVENANCE_DIR/request-provenance.json" \
+              "$WORK_DIR/validated-registry/request-provenance.json"
+            expected_targets="$(
+              jq -c '[.[].sha] | sort' \
+                "$WORK_DIR/obsolete-generations.json"
+            )"
+            jq -e \
+              --arg source_sha "$SOURCE_SHA" \
+              --argjson expected_targets "$expected_targets" '
+                .current_source_sha == $source_sha and
+                .target_source_shas == $expected_targets and
+                .terminal_status == "VALIDATED"
+              ' "$WORK_DIR/validated-registry/validation-summary.json" \
+              >/dev/null
+          fi
 
       - name: Install pinned OCI CLI and verify identity
         env:
@@ -404,7 +479,7 @@ jobs:
           )"
           [ "$home_region" = "$OCI_CLI_REGION" ]
 
-      - name: Prune only obsolete unique image IDs
+      - name: Validate or prune unique image IDs
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -415,11 +490,74 @@ jobs:
           TRUSTED_TARGET_IMAGES_FILE: artifacts/oci-registry-prune/trusted-target-images.tsv
           PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/protected.tsv
           TRUSTED_PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/trusted-protected-images.tsv
+          REQUEST_PROVENANCE_FILE: artifacts/oci-registry-prune/request-provenance.json
           CURRENT_SOURCE_SHA: ${{ inputs.approved_sha }}
           OUTPUT_DIR: artifacts/oci-registry-prune
-        run: ./infra/oci/scripts/prune-registry-generation.sh
+          PRUNE_MODE: ${{ inputs.phase == 'prune-registry' && 'apply' || 'validate' }}
+        run: |
+          set -euo pipefail
+          if [ "$PRUNE_MODE" = "apply" ]; then
+            export VALIDATED_BEFORE_SUMMARY_FILE="$WORK_DIR/validated-registry/before-summary.json"
+          fi
+          ./infra/oci/scripts/prune-registry-generation.sh
+
+      - name: Record registry validation provenance
+        if: inputs.phase == 'validate-registry'
+        run: |
+          set -euo pipefail
+          for evidence in \
+            before-summary.json validation-summary.json before-aliases.tsv \
+            protected-image-ids.txt registry-accounting.json \
+            request-provenance.json; do
+            test -s "$PROVENANCE_DIR/$evidence"
+          done
+          test -f "$PROVENANCE_DIR/planned-images.tsv"
+          expected_targets="$(
+            jq -c '[.[].sha] | sort' \
+              "$WORK_DIR/obsolete-generations.json"
+          )"
+          registry_aliases_sha256="$(
+            sha256sum "$PROVENANCE_DIR/before-aliases.tsv" |
+              awk '{ print $1 }'
+          )"
+          protected_image_ids_sha256="$(
+            sha256sum "$PROVENANCE_DIR/protected-image-ids.txt" |
+              awk '{ print $1 }'
+          )"
+          request_provenance_sha256="$(
+            sha256sum "$PROVENANCE_DIR/request-provenance.json" |
+              awk '{ print $1 }'
+          )"
+          jq -e \
+            --arg source_sha "$SOURCE_SHA" \
+            --argjson expected_targets "$expected_targets" \
+            --arg registry_aliases_sha256 "$registry_aliases_sha256" \
+            --arg protected_image_ids_sha256 \
+              "$protected_image_ids_sha256" \
+            --arg request_provenance_sha256 \
+              "$request_provenance_sha256" '
+              .current_source_sha == $source_sha and
+              .target_source_shas == $expected_targets and
+              .terminal_status == "VALIDATED" and
+              .registry_aliases_sha256 == $registry_aliases_sha256 and
+              .protected_image_ids_sha256 ==
+                $protected_image_ids_sha256 and
+              .request_provenance_sha256 ==
+                $request_provenance_sha256 and
+              .unique_images == .unique_image_ids and
+              .tag_rows >= .unique_images and
+              .alias_rows == (.tag_rows - .unique_images)
+            ' "$PROVENANCE_DIR/validation-summary.json" >/dev/null
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "candidate_build_run_id=$CANDIDATE_BUILD_RUN_ID" \
+            "validation_run_id=$GITHUB_RUN_ID" \
+            "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "terminal_status=VALIDATED" \
+            > "$PROVENANCE_DIR/provenance.env"
 
       - name: Record registry prune provenance
+        if: inputs.phase == 'prune-registry'
         run: |
           set -euo pipefail
           test -s "$PROVENANCE_DIR/before-summary.json"
@@ -427,6 +565,12 @@ jobs:
           test -s "$PROVENANCE_DIR/before-aliases.tsv"
           test -s "$PROVENANCE_DIR/after-aliases.tsv"
           test -s "$PROVENANCE_DIR/protected-image-ids.txt"
+          test -s "$PROVENANCE_DIR/validated-before-summary.json"
+          test -s "$PROVENANCE_DIR/request-provenance.json"
+          validated_before_summary_sha256="$(
+            sha256sum "$PROVENANCE_DIR/validated-before-summary.json" |
+              awk '{ print $1 }'
+          )"
           protected_image_ids_sha256="$(
             jq -er '.protected_image_ids_sha256' \
               "$PROVENANCE_DIR/before-summary.json"
@@ -443,6 +587,10 @@ jobs:
             sha256sum "$PROVENANCE_DIR/protected-image-ids.txt" |
               awk '{ print $1 }'
           )" ]
+          request_provenance_sha256="$(
+            sha256sum "$PROVENANCE_DIR/request-provenance.json" |
+              awk '{ print $1 }'
+          )"
           expected_targets="$(
             jq -c '[.[].sha] | sort' \
               "$WORK_DIR/obsolete-generations.json"
@@ -452,12 +600,20 @@ jobs:
             --arg source_sha "$SOURCE_SHA" \
             --arg protected_image_ids_sha256 \
               "$protected_image_ids_sha256" \
+            --arg validated_before_summary_sha256 \
+              "$validated_before_summary_sha256" \
+            --arg request_provenance_sha256 \
+              "$request_provenance_sha256" \
             --argjson protected_image_id_count \
               "$protected_image_id_count" '
               .target_source_shas == $expected_targets and
               .current_source_sha == $source_sha and
               .protected_image_ids_sha256 ==
                 $protected_image_ids_sha256 and
+              .validated_before_summary_sha256 ==
+                $validated_before_summary_sha256 and
+              .request_provenance_sha256 ==
+                $request_provenance_sha256 and
               .terminal_status == "PRUNED" and
               .protected_unique_generations >= 1 and
               .protected_unique_generations <= 3 and
@@ -480,6 +636,7 @@ jobs:
             "deployed_run_id=$DEPLOYED_RUN_ID" \
             "fallback_sha=$FALLBACK_SHA" \
             "fallback_build_run_id=$FALLBACK_BUILD_RUN_ID" \
+            "validation_run_id=$VALIDATION_RUN_ID" \
             "workflow_run_id=$GITHUB_RUN_ID" \
             "workflow_run_attempt=$GITHUB_RUN_ATTEMPT" \
             "terminal_status=PRUNED" \
@@ -499,7 +656,9 @@ jobs:
         run: rm -rf "$HOME" "$WORK_DIR"
 
   provision:
-    if: github.run_attempt == 1 && inputs.phase != 'prune-registry'
+    if: >-
+      github.run_attempt == 1 &&
+      (inputs.phase == 'prepare' || inputs.phase == 'finalize')
     runs-on: ubuntu-latest
     timeout-minutes: 150
     environment:

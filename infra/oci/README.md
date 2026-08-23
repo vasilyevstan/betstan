@@ -160,26 +160,32 @@ concurrent retirement fixture isolation without masking failed suites.
    workflow records and verifies immutable digests with
    `scripts/verify-images.sh`.
    If fresh or failed builds leave more than three complete generations,
-   dispatch
-   `oci-infrastructure` with phase `prune-registry` before infrastructure
-   finalization. Bind the request to the exact current candidate build, the
-   currently deployed release, one compatible fallback build, and a bounded
-   JSON list of explicit obsolete SHA/run pairs. Successful obsolete builds
-   are cross-checked against their immutable artifacts; failed first-attempt
-   builds are eligible only for their source-tagged service rows. The
-   protected job also accepts an explicit target subset left by an interrupted
-   prior deletion, but deletes nothing unless the protected and target sets
-   are pairwise disjoint and exhaust every unique image ID/digest. All tag
-   aliases must map consistently to one trusted protected or target
-   generation, and each canonical candidate, deployed, and fallback tag must
-   remain present. Complete protected source generations may alias the same
-   nine immutable images after reuse; partial protected overlap is rejected.
-   The workflow rechecks an unchanged alias snapshot immediately before
-   deletion, deletes each target image ID once, records the complete
-   before/after alias inventory, and waits until all target digests are
-   absent, the exact pre-delete protected set of 9, 18, or 27 image
-   OCIDs/digests remains, provider image accounting matches that set, and
-   retained layers are within the configured Free Tier ceiling.
+   first dispatch `oci-infrastructure` with phase `validate-registry` and the
+   exact confirmation `VALIDATE OCI IMAGE GENERATIONS`. Bind the request to
+   the exact current candidate build, the currently deployed release, one
+   compatible fallback build, and a bounded JSON list of explicit obsolete
+   SHA/run pairs. The successful validation artifact contains the complete
+   live alias inventory, exact protected OCIDs, target deletion plan, digest
+   lineage, and provider accounting without issuing a delete. Dispatch phase
+   `prune-registry` only with that validation run ID and identical inputs; the
+   apply run requires its freshly observed before-summary to match the
+   validated summary byte for byte.
+
+   Successful obsolete builds are cross-checked against their immutable
+   artifacts; failed first-attempt builds are eligible only for their
+   source-tagged service rows. The protected job also accepts an explicit
+   target subset left by an interrupted prior deletion, but deletes nothing
+   unless the protected and target sets are pairwise disjoint and exhaust
+   every unique image ID/digest. All tag aliases must map consistently to one
+   trusted protected or target generation, and each canonical candidate,
+   deployed, and fallback tag must remain present. Complete protected source
+   generations may alias the same nine immutable images after reuse; partial
+   protected overlap is rejected. The apply run rechecks an unchanged alias
+   snapshot immediately before deletion, deletes each target image ID once,
+   records the complete before/after alias inventory, and waits until all
+   target digests are absent, the exact pre-delete protected set of 9, 18, or
+   27 image OCIDs/digests remains, provider image accounting matches that set,
+   and retained layers are within the configured Free Tier ceiling.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.

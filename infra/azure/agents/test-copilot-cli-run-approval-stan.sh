@@ -32,7 +32,7 @@ gh() {
       "[{\"environment\":{\"id\":456,\"name\":\"${STUB_ENVIRONMENT:-production-emergency}\"},\"current_user_can_approve\":true}]"
   elif [[ "$1" == "api" && "$2" == *"/actions/runs/$RUN_ID" ]]; then
     printf '%s\n' \
-      "{\"id\":$RUN_ID,\"path\":\".github/workflows/${STUB_WORKFLOW:-production-build.yml}\",\"event\":\"${STUB_EVENT:-push}\",\"head_sha\":\"$SHA\",\"head_branch\":\"master\",\"head_repository\":{\"full_name\":\"example/repo\"},\"run_attempt\":${STUB_ATTEMPT:-1},\"status\":\"waiting\"}"
+      "{\"id\":$RUN_ID,\"path\":\".github/workflows/${STUB_WORKFLOW:-production-build.yml}\",\"display_title\":\"${STUB_DISPLAY_TITLE:-production-build}\",\"event\":\"${STUB_EVENT:-push}\",\"head_sha\":\"$SHA\",\"head_branch\":\"master\",\"head_repository\":{\"full_name\":\"example/repo\"},\"run_attempt\":${STUB_ATTEMPT:-1},\"status\":\"waiting\"}"
   elif [[ "$1" == "api" && "$2" == *"/commits/$SHA/pulls"* ]]; then
     local labels='[{"name":"copilot-cli-managed"}]'
     if [[ "${STUB_LABEL:-present}" == "missing" ]]; then
@@ -79,6 +79,37 @@ env \
   STUB_EVENT=workflow_dispatch \
   STUB_ENVIRONMENT=oci-production \
     "$APPROVER" "$RUN_ID" >/dev/null
+
+for phase in validate-registry prune-registry; do
+  env \
+    REPO=example/repo \
+    EXPECTED_SHA="$SHA" \
+    EXPECTED_WORKFLOW=oci-infrastructure.yml \
+    EXPECTED_ENVIRONMENT=oci-infrastructure \
+    EXPECTED_DISPLAY_TITLE="oci-infrastructure $phase $SHA" \
+    PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+    STUB_WORKFLOW=oci-infrastructure.yml \
+    STUB_EVENT=workflow_dispatch \
+    STUB_ENVIRONMENT=oci-infrastructure \
+    STUB_DISPLAY_TITLE="oci-infrastructure $phase $SHA" \
+      "$APPROVER" "$RUN_ID" >/dev/null
+done
+
+if env \
+  REPO=example/repo \
+  EXPECTED_SHA="$SHA" \
+  EXPECTED_WORKFLOW=oci-infrastructure.yml \
+  EXPECTED_ENVIRONMENT=oci-infrastructure \
+  EXPECTED_DISPLAY_TITLE="oci-infrastructure validate-registry $SHA" \
+  PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+  STUB_WORKFLOW=oci-infrastructure.yml \
+  STUB_EVENT=workflow_dispatch \
+  STUB_ENVIRONMENT=oci-infrastructure \
+  STUB_DISPLAY_TITLE="oci-infrastructure prune-registry $SHA" \
+    "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
+  echo "run approver accepted a different infrastructure phase" >&2
+  exit 1
+fi
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$APPROVER" "$RUN_ID" --approve >/dev/null
