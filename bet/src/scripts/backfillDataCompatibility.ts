@@ -216,7 +216,9 @@ export const runBackfillCli = async (
     throw new Error("Missing MONGO_URI variable");
   }
 
-  await connection.connect(process.env.MONGO_URI);
+  await connection.connect(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
   try {
     const report = await runDataCompatibilityBackfill(parsed);
     logger.log(JSON.stringify(report, null, 2));

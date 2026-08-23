@@ -219,7 +219,9 @@ export const runBackfillCli = async (
     throw new Error("Missing MONGO_URI variable");
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
   try {
     const report = await runDataCompatibilityBackfill(parsed);
     logger.log(JSON.stringify(report, null, 2));

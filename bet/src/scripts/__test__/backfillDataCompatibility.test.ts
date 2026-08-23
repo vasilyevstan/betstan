@@ -200,7 +200,9 @@ it("handles CLI execution logging and missing MONGO_URI defensively", async () =
 
   expect(report.mode).toBe("apply");
   expect(report.changed).toBe(1);
-  expect(connection.connect).toHaveBeenCalledWith(process.env.MONGO_URI);
+  expect(connection.connect).toHaveBeenCalledWith(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
   expect(connection.disconnect).toHaveBeenCalled();
   expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
   process.env.MONGO_URI = originalMongoUri;
