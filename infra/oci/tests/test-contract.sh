@@ -563,6 +563,8 @@ grep -Fq '.layers_size_bytes <= $max_bytes' "$registry_pruner" ||
   fail "registry pruning does not wait for bounded registry accounting"
 grep -Fq 'docker run -d --platform linux/arm64 --name "$container"' "$verify_images" ||
   fail "OCI application boot verification must run the ARM64 images"
+grep -Fq -- '-e AUTH_SERVICE_URL=http://auth:3000' "$verify_images" ||
+  fail "OCI application boot verification omits the required internal auth endpoint"
 if grep -Eq -- '--platform linux/arm64 --name "\$(mongo|rabbit)"' "$verify_images"; then
   fail "OCI build verification dependencies must use the runner native platform"
 fi
