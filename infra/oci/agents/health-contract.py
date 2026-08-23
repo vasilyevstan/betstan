@@ -39,6 +39,12 @@ EXPECTED_DATABASES = {
     "gaming_resulting",
     "gaming_slip",
 }
+EXPECTED_MONGO_PVC_INVENTORY = [
+    {
+        "name": "gaming-auth-mongo-data",
+        "phase": "Bound",
+    }
+]
 EXPECTED_PLATFORM_DIGESTS = {
     "ingress-nginx/ingress-nginx-controller": "sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1",
     "cert-manager/cert-manager": "sha256:416a2d76870d996460e62bd7f521bf14fa017be9e3e904aab92163a331fcb61a",
@@ -168,6 +174,11 @@ def validate(snapshot):
 
     mongo = snapshot.get("mongo", {})
     require(mongo.get("statefulset_count") == 1, "extra-mongo", "expected exactly one Mongo StatefulSet")
+    require(
+        mongo.get("pvc_inventory") == EXPECTED_MONGO_PVC_INVENTORY,
+        "mongo-pvc-topology",
+        "Mongo PVC inventory differs from the exact Bound shared claim",
+    )
     require(mongo.get("pvc_count") == 1, "mongo-pvc-count", "expected exactly one Mongo PVC")
     require(mongo.get("pvc_bound") is True, "mongo-pvc-unbound", "Mongo PVC is not Bound")
     require(mongo.get("pvc_gib") == 50, "mongo-pvc-size", "Mongo PVC was not created at 50 GiB")

@@ -739,6 +739,24 @@ case "${1:-}" in
           exit 1
         fi
         ;;
+      persistentvolumeclaims)
+        python3 - \
+          "${STUB_MONGO_PVC_NAME:-gaming-auth-mongo-data}" \
+          "${STUB_MONGO_PVC_PHASE:-Bound}" \
+          "${STUB_EXTRA_MONGO_PVC:-}" <<'PY'
+import json
+import sys
+
+name, phase, extra_name = sys.argv[1:]
+items = [{"metadata": {"name": name}, "status": {"phase": phase}}]
+if extra_name:
+    items.append({
+        "metadata": {"name": extra_name},
+        "status": {"phase": "Bound"},
+    })
+print(json.dumps({"items": items}))
+PY
+        ;;
       configmap)
         name="$2"
         case "$name" in
