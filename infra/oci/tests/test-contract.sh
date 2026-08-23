@@ -545,17 +545,21 @@ grep -Fq 'incomplete_tag_generation_count' "$inventory" ||
   fail "OCI inventory must reject incomplete service tag generations"
 grep -Fq 'digest_service_conflict_count' "$inventory" ||
   fail "OCI inventory must reject cross-service digest identities"
-grep -Fq 'EXPECTED_IMAGES_BEFORE=36' "$registry_pruner" ||
-  fail "registry pruning must require exactly four complete generations"
+grep -Fq 'MAX_TARGET_GENERATIONS=10' "$registry_pruner" ||
+  fail "registry pruning must bound the explicit obsolete generation set"
 grep -Fq 'EXPECTED_PROTECTED_IMAGES=27' "$registry_pruner" ||
   fail "registry pruning must retain exactly three complete generations"
-grep -Fq 'obsolete generation overlaps a protected generation' "$registry_pruner" ||
+grep -Fq 'obsolete generations overlap a protected generation' "$registry_pruner" ||
   fail "registry pruning does not reject protected digest overlap"
 grep -Fq 'registry contains an unknown, missing, or unexpected image generation' \
   "$registry_pruner" ||
   fail "registry pruning does not fail closed on unknown images"
-grep -Fq 'read_provenance_repository "$TARGET_IMAGES_FILE"' "$registry_pruner" ||
-  fail "registry pruning does not derive one exact provenance repository"
+grep -Fq 'read_provenance_repository "$PROTECTED_IMAGES_FILE"' "$registry_pruner" ||
+  fail "registry pruning does not derive one exact protected repository"
+grep -Fq 'TRUSTED_TARGET_IMAGES_FILE' "$registry_pruner" ||
+  fail "registry pruning does not cross-check successful obsolete builds"
+grep -Fq 'registry contains duplicate or aliased image rows' "$registry_pruner" ||
+  fail "registry pruning does not reject unaccounted image aliases"
 grep -Fq 'OCI registry pruning did not reach the exact protected digest set' \
   "$registry_pruner" ||
   fail "registry pruning does not wait for asynchronous deletion"
@@ -750,8 +754,14 @@ grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 grep -Fq -- '- prune-registry' "$infra_workflow"
 grep -Fq 'PRUNE OBSOLETE OCI IMAGE GENERATION' "$infra_workflow"
 grep -Fq 'prune-registry-generation.sh' "$infra_workflow"
-grep -Fq 'oci-image-provenance-${OBSOLETE_SHA}-${OBSOLETE_BUILD_RUN_ID}-1' \
+grep -Fq 'obsolete_generations:' "$infra_workflow"
+grep -Fq 'length <= 10' "$infra_workflow"
+grep -Fq '(.conclusion == "success" or .conclusion == "failure")' \
   "$infra_workflow"
+grep -Fq 'oci-image-provenance-${obsolete_sha}-${obsolete_run_id}-1' \
+  "$infra_workflow"
+grep -Fq 'target-source-shas.txt' "$infra_workflow"
+grep -Fq 'trusted-target-images.tsv' "$infra_workflow"
 grep -Fq 'oci-image-provenance-${FALLBACK_SHA}-${FALLBACK_BUILD_RUN_ID}-1' \
   "$infra_workflow"
 grep -Fq 'oci-deploy-provenance-${DEPLOYED_RUN_ID}-1' "$infra_workflow"

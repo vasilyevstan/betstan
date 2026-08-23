@@ -82,6 +82,13 @@ inactive. Fail closed when either query is incomplete or fails.
 - Do not deploy `latest` as the source of truth.
 - Verify every application Deployment uses the intended SHA after rollout.
 - If several commits were built, state whether an older SHA was skipped or superseded.
+- Treat a failed OCI build that published before verification as registry
+  state, not reusable release provenance. Before approving a batch prune,
+  require terminal first-attempt run bindings for every explicit target,
+  immutable artifacts for successful targets, source-tagged service rows for
+  failed targets, and exhaustive preservation of the candidate, deployed, and
+  fallback digest sets. Accept a partial target subset only as bounded
+  convergence after an interrupted prune.
 
 ## Deployment gates
 
