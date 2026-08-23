@@ -71,6 +71,11 @@ conversation summaries are not authority.
   and fallback source tags may legitimately share one complete nine-image set
   after reuse; permit exact whole-generation aliases but reject partial
   protected overlap.
+- A destructive run should not be the first consumer of live provider
+  evidence. Capture a read-only registry validation artifact first, then make
+  apply require byte-for-byte equality of the live before-summary (all aliases,
+  OCIDs, digests, lineage, and accounting) with that artifact before issuing
+  any delete.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.

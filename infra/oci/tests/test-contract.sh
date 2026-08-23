@@ -572,11 +572,23 @@ grep -Fq 'before-aliases.tsv' "$registry_pruner" ||
 grep -Fq 'registry aliases changed after validation and before deletion' \
   "$registry_pruner" ||
   fail "registry pruning does not revalidate its alias snapshot before deletion"
+grep -Fq 'registry accounting changed after validation and before deletion' \
+  "$registry_pruner" ||
+  fail "registry pruning does not revalidate accounting before deletion"
 grep -Fq 'the exact protected image OCID set changed during pruning' \
   "$registry_pruner" ||
   fail "registry pruning does not preserve the exact protected image OCID set"
 grep -Fq 'protected_image_ids_sha256' "$registry_pruner" ||
   fail "registry pruning does not bind protected image OCIDs into evidence"
+grep -Fq 'PRUNE_MODE must be validate or apply' "$registry_pruner" ||
+  fail "registry pruning does not separate read-only validation from apply"
+grep -Fq 'live registry or trusted provenance changed since validation' \
+  "$registry_pruner" ||
+  fail "registry pruning does not require the exact validated live snapshot"
+grep -Fq 'registry_aliases_sha256' "$registry_pruner" ||
+  fail "registry pruning does not bind the complete alias inventory"
+grep -Fq 'request_provenance_sha256' "$registry_pruner" ||
+  fail "registry pruning does not bind exact build and deployment run IDs"
 grep -Fq 'OCI registry pruning did not reach the exact protected digest set' \
   "$registry_pruner" ||
   fail "registry pruning does not wait for asynchronous deletion"
@@ -770,6 +782,15 @@ grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 grep -Fq -- '- prune-registry' "$infra_workflow"
 grep -Fq 'PRUNE OBSOLETE OCI IMAGE GENERATION' "$infra_workflow"
+grep -Fq -- '- validate-registry' "$infra_workflow"
+grep -Fq 'VALIDATE OCI IMAGE GENERATIONS' "$infra_workflow"
+grep -Fq 'validation_run_id:' "$infra_workflow"
+grep -Fq 'validated-registry/before-summary.json' "$infra_workflow"
+grep -Fq 'betstan.oci-registry-prune-request.v1' "$infra_workflow"
+grep -Fq 'validated-registry/request-provenance.json' "$infra_workflow"
+grep -Fq "(inputs.phase == 'prepare' || inputs.phase == 'finalize')" \
+  "$infra_workflow" ||
+  fail "read-only registry validation can enter the provisioning job"
 grep -Fq 'prune-registry-generation.sh' "$infra_workflow"
 grep -Fq 'obsolete_generations:' "$infra_workflow"
 grep -Fq 'length <= 10' "$infra_workflow"
