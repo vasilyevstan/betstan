@@ -51,6 +51,10 @@ instead of crossing the boundary.
 - Preserve old payloads and historical Mongo documents when compatibility is
   required.
 - Make message handlers idempotent and explicit about cross-queue ordering.
+- Treat publisher-stamped envelope timestamps as mutable transport metadata.
+  Use an immutable domain timestamp from event data for persisted ordering and
+  duplicate fingerprints, with an explicit legacy fallback when old payloads
+  lack that field.
 - Use database-enforced invariants for concurrency-sensitive uniqueness.
 - Treat JWT roles as non-authoritative for privileged operations. Revalidate
   current persisted roles through the owning auth service and fail closed.

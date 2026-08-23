@@ -13,6 +13,7 @@
 - Base classes live in `@betstan/common`: `AListener<T>` (consumers) and `APublisher<T>` (producers).
 - The public base classes accept the structural `IAmqpConnection`; do not expose version-specific `Connection`/`ChannelModel` types because services intentionally carry different compatible `@types/amqplib` versions.
 - `APublisher.publish()` stamps `data.timestamp` and `data.sender` onto every outgoing event before serialising it. This means the `timestamp` field on an `IEvent` is **set by the publisher at send time**, not by the originating request.
+- A publisher retry stamps a different envelope timestamp. Persisted domain time, ordering, and idempotency fingerprints must prefer an immutable timestamp captured in the event data, such as placement `submittedAt`; use the envelope or row timestamp only for backward-compatible messages that lack it.
 - Because of the above, when creating events manually in tests (without going through a publisher), `event.timestamp` is `undefined`. Any code that reads `event.timestamp` to populate a required model field must provide a fallback (e.g. `event.timestamp ?? new Date().toISOString()`).
 
 ### Singleton publishers — channel-leak fix (PR #29)
@@ -90,10 +91,15 @@ beforeAll(() => {
 `jest.spyOn` sets an own property on the prototype, decoupling it from the inherited mock. `jest.clearAllMocks()` in `beforeEach` resets call counts without removing the spy, so it works correctly across all tests in the file.
 
 ### Timestamp in PlaceBetListener tests
-Tests construct `IPlaceBetEvent` objects directly (without publishing them), so `event.timestamp` is `undefined`. The `Bet` Mongoose model has `timestamp: { required: true }`. Using `event.timestamp` directly as the bet timestamp causes a `ValidationError`. Always fall back to the current time:
+Tests construct `IPlaceBetEvent` objects directly (without publishing them), so `event.timestamp` can be `undefined`. The `Bet` Mongoose model has `timestamp: { required: true }`. New placement events use immutable `data.submittedAt`; legacy fixtures and payloads fall back to the envelope timestamp, then a row timestamp, then the current time:
 ```typescript
-timestamp: event.timestamp ?? new Date().toISOString(),
+timestamp:
+  event.data.submittedAt
+  ?? event.timestamp
+  ?? event.data.rows.find((row) => row.timestamp)?.timestamp
+  ?? new Date().toISOString(),
 ```
+Retry tests must keep `submittedAt` fixed while changing `event.timestamp` and prove the second delivery is an exact duplicate with no placement-conflict record.
 
 ---
 

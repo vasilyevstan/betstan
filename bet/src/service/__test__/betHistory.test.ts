@@ -36,9 +36,13 @@ import {
   upsertPlaceBet,
 } from "../betHistory";
 
+type PlaceBetEventData = IPlaceBetEvent["data"] & {
+  submittedAt?: string;
+};
+
 const buildPlaceEvent = (
   overrides: Partial<Omit<IPlaceBetEvent, "data">> & {
-    data?: Partial<Omit<IPlaceBetEvent["data"], "rows">> & {
+    data?: Partial<Omit<PlaceBetEventData, "rows">> & {
       rows?: Array<Partial<IPlaceBetEvent["data"]["rows"][number]>>;
     };
   } = {}
@@ -55,21 +59,24 @@ const buildPlaceEvent = (
     id: new mongoose.Types.ObjectId().toHexString(),
   };
 
+  const data: PlaceBetEventData = {
+    userId:
+      overrides.data?.userId ?? new mongoose.Types.ObjectId().toHexString(),
+    userName: overrides.data?.userName ?? "test-user",
+    slipId:
+      overrides.data?.slipId ?? new mongoose.Types.ObjectId().toHexString(),
+    wager: overrides.data?.wager ?? 25,
+    betKind: overrides.data?.betKind,
+    submittedAt: overrides.data?.submittedAt,
+    rows: (overrides.data?.rows?.map((row) => ({
+        ...defaultRow,
+        ...row,
+      })) ?? [defaultRow]) as IPlaceBetEvent["data"]["rows"],
+  };
+
   return {
     timestamp: overrides.timestamp ?? new Date("2025-01-01T12:01:00.000Z").toISOString(),
-    data: {
-      userId:
-        overrides.data?.userId ?? new mongoose.Types.ObjectId().toHexString(),
-      userName: overrides.data?.userName ?? "test-user",
-      slipId:
-        overrides.data?.slipId ?? new mongoose.Types.ObjectId().toHexString(),
-      wager: overrides.data?.wager ?? 25,
-      betKind: overrides.data?.betKind,
-      rows: (overrides.data?.rows?.map((row) => ({
-          ...defaultRow,
-          ...row,
-        })) ?? [defaultRow]) as IPlaceBetEvent["data"]["rows"],
-    },
+    data,
   };
 };
 
@@ -194,6 +201,36 @@ it("resolves placement timestamps, attempt ids, and optional values", () => {
   expect(
     betHistoryInternals.normalizeOptionalPlacementValue("2025-01-01T12:02:00.000Z")
   ).toBe("2025-01-01T12:02:00.000Z");
+});
+
+it("uses immutable submission time for retried placement identity", async () => {
+  const submittedAt = "2025-01-01T12:00:30.000Z";
+  const firstEvent = buildPlaceEvent({
+    timestamp: "2025-01-01T12:01:00.000Z",
+    data: {
+      betKind: BetKind.LIVE,
+      submittedAt,
+    },
+  });
+  const retryEvent = {
+    ...firstEvent,
+    timestamp: "2025-01-01T12:02:00.000Z",
+  };
+
+  await expect(upsertPlaceBet(firstEvent)).resolves.toMatchObject({
+    outcome: "inserted",
+  });
+  await expect(upsertPlaceBet(retryEvent)).resolves.toMatchObject({
+    outcome: "exact_duplicate",
+  });
+
+  const persistedBet = await Bet.findOne({ slipId: firstEvent.data.slipId });
+  expect(persistedBet!.timestamp).toBe(submittedAt);
+  expect(
+    await BetPlacementConflict.countDocuments({
+      slipId: firstEvent.data.slipId,
+    })
+  ).toBe(0);
 });
 
 it("infers and merges bet kinds across legacy and live payloads", () => {

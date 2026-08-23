@@ -27,6 +27,9 @@ Read:
 - Incorrect behavior and unmet acceptance criteria.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
+- Domain ordering or idempotency that accidentally depends on mutable
+  publisher-stamped envelope metadata; require retries with identical domain
+  data and changed transport timestamps.
 - Authorization, ownership, input trust, and silent-failure behavior.
 - Long-lived stream and synthetic-fixture isolation after stale-role,
   demotion, unavailable-auth, malformed-scope, and ordinary-public requests.

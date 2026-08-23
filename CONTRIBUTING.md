@@ -29,10 +29,9 @@ Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, stag
 
 ## Trusted-check bootstrap
 
-Do not change the protected quality workflow before its exact Git blob is authorized by the trusted publisher on the default branch. Roll out quality-workflow changes in two phases:
+The trusted publisher currently requires the protected quality workflow to be byte-identical to the default-branch copy. Prefer extending an existing checked-in guard or test entrypoint that `production-build.yml` already invokes; this preserves the trusted workflow identity while still exercising the new validation.
 
-1. Add only the intended workflow blob SHA to `APPROVED_QUALITY_WORKFLOW_BLOBS`, merge that policy change through `dev`, and promote it to protected `master`.
-2. Merge the exact workflow update through `dev`, remove the one-use authorization before promotion, and verify fresh statuses come from the expected workflow IDs.
+If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 

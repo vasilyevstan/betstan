@@ -30,6 +30,7 @@ type PlaceBetRow = IPlaceBetEvent["data"]["rows"][number];
 type PlaceBetEventData = IPlaceBetEvent["data"] & {
   attemptId?: string;
   placementAttemptId?: string;
+  submittedAt?: string;
 };
 type PendingUpdateInsert = Pick<
   PendingBetUpdateRecord,
@@ -133,7 +134,8 @@ const resolveEventTimestamp = (timestamp?: string) =>
   timestamp ?? new Date().toISOString();
 
 const resolvePlaceBetTimestamp = (event: IPlaceBetEvent) =>
-  event.timestamp
+  (event.data as PlaceBetEventData).submittedAt
+  ?? event.timestamp
   ?? event.data.rows.find((row) => typeof row.timestamp === "string")?.timestamp
   ?? resolveEventTimestamp(undefined);
 

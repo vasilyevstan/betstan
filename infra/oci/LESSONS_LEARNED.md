@@ -61,6 +61,12 @@ conversation summaries are not authority.
   the 500 MB gate to make accounting appear green; retain the proven lineage
   and wait for provider garbage collection or reduce image weight in a
   separately reviewed build.
+- OCIR exposes image/repository deletion and retention controls, but no
+  user-triggered garbage-collection operation. Oracle documents that
+  repository deletion and storage release can take up to 48 hours. Re-run the
+  read-only registry validation while waiting; if accounting remains stale
+  beyond that window, contact Oracle Support rather than deleting a protected
+  generation or weakening the storage gate.
 - A build that fails after publishing can leave a complete source-tagged image
   generation without a provenance artifact. Before pruning accumulated
   generations, protect the exact candidate, deployed, and fallback digest
