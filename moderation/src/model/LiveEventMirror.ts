@@ -64,6 +64,67 @@ const marketSchema = new Schema(
   { _id: false }
 );
 
+/**
+ * Bounded, persisted record of every distinct marketId+marketVersion+quoteVersion
+ * quote ever observed for an event, so a live snapshot replacing the current
+ * mirror can never erase evidence of a quote that was authoritative when a bet
+ * was submitted. `sequence` is the event sequence the quote was first observed
+ * at and is used only for recency ordering/pruning, never for quote identity.
+ * `phase`/`bettingStatus` capture the event's overall live state at that same
+ * sequence, so a later suspension/full-time snapshot can never retroactively
+ * hide that the event was genuinely live when this specific quote was issued.
+ */
+const marketHistorySchema = new Schema(
+  {
+    marketId: {
+      type: String,
+      required: true,
+    },
+    marketType: {
+      type: String,
+      required: true,
+      enum: Object.values(LiveMarketType),
+    },
+    marketVersion: {
+      type: Number,
+      required: true,
+    },
+    quoteVersion: {
+      type: Number,
+      required: true,
+    },
+    quoteValidUntil: {
+      type: String,
+      required: false,
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: Object.values(LiveMarketStatus),
+    },
+    selections: {
+      type: [selectionSchema],
+      required: true,
+      default: [],
+    },
+    sequence: {
+      type: Number,
+      required: true,
+    },
+    phase: {
+      type: String,
+      required: true,
+      enum: Object.values(EventPhase),
+    },
+    bettingStatus: {
+      type: String,
+      required: true,
+      enum: Object.values(BettingStatus),
+    },
+  },
+  { _id: false }
+);
+
 const settlementSchema = new Schema(
   {
     marketId: {
@@ -145,6 +206,16 @@ const liveEventMirrorSchema = new Schema({
     type: [marketSchema],
     required: true,
     default: [],
+  },
+  marketHistory: {
+    type: [marketHistorySchema],
+    required: true,
+    default: [],
+  },
+  historyRevision: {
+    type: Number,
+    required: true,
+    default: 0,
   },
   settlements: {
     type: [settlementSchema],

@@ -74,6 +74,21 @@ interface MirrorMarket {
   selections: MirrorSelection[];
 }
 
+/**
+ * A market quote as it existed at a specific event sequence. `sequence` is
+ * carried purely for recency ordering/pruning; identity for lookups is the
+ * (marketId, marketVersion, quoteVersion) triple, never `sequence`. `phase`
+ * and `bettingStatus` are the event's overall live state at that same
+ * sequence, captured so a later suspension/full-time snapshot can never
+ * retroactively hide that the event was genuinely live when this quote was
+ * issued.
+ */
+interface MirrorMarketHistoryEntry extends MirrorMarket {
+  sequence: number;
+  phase: EventPhase;
+  bettingStatus: BettingStatus;
+}
+
 interface LiveEventMirrorRecord {
   eventId: string;
   sequence: number;
@@ -84,6 +99,22 @@ interface LiveEventMirrorRecord {
   phase: EventPhase;
   homeScore: number;
   awayScore: number;
+  bettingStatus: BettingStatus;
+  markets: MirrorMarket[];
+  marketHistory?: MirrorMarketHistoryEntry[];
+  historyRevision?: number;
+}
+
+/**
+ * The minimal shape `recordMarketHistory` needs to fold a batch of markets
+ * into persisted history: either a freshly-arrived live update payload, or
+ * the mirror's own pre-update "current" snapshot being archived before it is
+ * replaced (see `upsertLiveEventMirror`).
+ */
+interface MarketHistorySnapshot {
+  eventId: string;
+  sequence: number;
+  phase: EventPhase;
   bettingStatus: BettingStatus;
   markets: MirrorMarket[];
 }
@@ -147,6 +178,37 @@ interface PublicationLeaseHeartbeat {
 
 const DEFAULT_PUBLICATION_LEASE_DURATION_MS = 30_000;
 const DEFAULT_PUBLICATION_LEASE_HEARTBEAT_MS = 10_000;
+/**
+ * Bounds the persisted market quote history so a single event can never grow
+ * without limit: only the most recent N distinct (marketVersion, quoteVersion)
+ * entries are retained per marketId, regardless of how many live snapshots
+ * have been observed. This must be large enough that a genuinely valid early
+ * quote can never be pruned while it could still be authoritative for a
+ * pending moderation decision.
+ *
+ * The bound below is an exact (not merely heuristic) worst case, derived from
+ * the live match simulator (see gamemaster/src/simulation/config.ts HARD_CAPS
+ * and gamemaster/src/simulation/markets.ts). Every "material" incident in a
+ * match can advance at most one (marketVersion, quoteVersion) entry for any
+ * single marketId: either it is that market's own trigger incident (bumping
+ * its marketVersion, or closing it once its own cap is reached), or it is a
+ * *different* market's incident that reprices every other still-open market
+ * by at most one quoteVersion step (`repriceOpenMarkets` skips the market it
+ * just triggered). HARD_CAPS bounds the total number of such incidents for an
+ * entire match regardless of configured duration (caps do not scale with
+ * `durationMs`):
+ *   own-type trigger incidents: goals(12) + yellows(14) + reds(4)
+ *     + corners(30) + penaltyAwards(6) + freeKicks(24)              =  90
+ *   + one PENALTY_SCORED/PENALTY_MISSED outcome per penaltyAwards   =  96
+ *   + ADDED_TIME_ANNOUNCED (fixed: exactly once per half)           =  98
+ *   + SECOND_HALF_KICK_OFF (fixed: exactly once)                   =  99
+ *   + the market's own initial KICK_OFF creation                   = 100
+ * If the simulator's HARD_CAPS or fixed-incident schedule ever changes, this
+ * bound must be re-derived alongside it.
+ */
+export const MAX_MARKET_HISTORY_VERSIONS_PER_MARKET = 100;
+/** Bounded optimistic-concurrency retries when two updates race to append history. */
+export const MAX_MARKET_HISTORY_WRITE_ATTEMPTS = 5;
 const LIVE_PHASES = new Set<EventPhase>([
   EventPhase.FIRST_HALF,
   EventPhase.FIRST_HALF_STOPPAGE,
@@ -201,6 +263,46 @@ class ModerationService {
 
   async upsertLiveEventMirror(event: ILiveEventUpdateEvent): Promise<boolean> {
     const { data } = event;
+    let currentChanged: boolean;
+
+    // Read the mirror's pre-update "current" snapshot before it is
+    // overwritten below. A rolling deployment (new history-aware code
+    // replacing a mirror written by the previous version, or a genuinely
+    // legacy pre-deploy document) may have current markets that were never
+    // independently folded into history; overwriting `markets` first would
+    // permanently erase the only persisted evidence that those quotes were
+    // ever authoritative. Archiving them first -- before they are replaced --
+    // closes that gap. This is a plain read (no lock): under concurrent
+    // writers the read can race with another pod's update, but that only
+    // ever results in redundant, harmless archival (recordMarketHistory's own
+    // dedupe/upgrade merge makes re-archiving the same or an inferior
+    // observation a no-op), never data loss or corruption.
+    const before = (await LiveEventMirror.findOne(
+      { eventId: data.eventId },
+      { sequence: 1, phase: 1, bettingStatus: 1, markets: 1 }
+    ).lean()) as {
+      sequence?: number;
+      phase?: EventPhase;
+      bettingStatus?: BettingStatus;
+      markets?: MirrorMarket[];
+    } | null;
+
+    let historyChanged = false;
+
+    if (
+      before?.markets
+      && before.markets.length > 0
+      && before.sequence !== undefined
+      && data.sequence > before.sequence
+    ) {
+      historyChanged = await this.recordMarketHistory({
+        eventId: data.eventId,
+        sequence: before.sequence,
+        phase: before.phase ?? data.phase,
+        bettingStatus: before.bettingStatus ?? data.bettingStatus,
+        markets: before.markets,
+      });
+    }
 
     try {
       const result = await LiveEventMirror.updateOne(
@@ -232,14 +334,200 @@ class ModerationService {
         { upsert: true }
       );
 
-      return result.modifiedCount > 0 || result.upsertedCount > 0;
+      currentChanged = result.modifiedCount > 0 || result.upsertedCount > 0;
     } catch (error) {
-      if (this.isDuplicateKeyError(error)) {
-        return false;
+      if (!this.isDuplicateKeyError(error)) {
+        throw error;
       }
 
-      throw error;
+      currentChanged = false;
     }
+
+    // Every snapshot's markets are folded into the bounded, persisted history
+    // regardless of whether this snapshot won the race to become "current".
+    // Otherwise a newer snapshot (or an out-of-order/duplicate delivery) could
+    // permanently erase evidence of a quote that was authoritative when a bet
+    // referencing it was submitted. This is intentionally left unguarded: if
+    // it throws (CAS exhaustion / missing document), the error must propagate
+    // to the caller so the message is not acked and gets redelivered instead
+    // of silently losing this snapshot's history.
+    const incomingHistoryChanged = await this.recordMarketHistory(data);
+
+    // Report "changed" when either the current mirror or the persisted
+    // history changed. An out-of-order/duplicate delivery can supply new
+    // history-only evidence (e.g. a delayed OPEN observation upgrading a
+    // previously-recorded CLOSED/SETTLED placeholder for the same identity)
+    // without ever becoming "current" -- callers rely on this to know when
+    // it is worth replaying parked bets for this event.
+    return currentChanged || historyChanged || incomingHistoryChanged;
+  }
+
+  /**
+   * Bounded merge of every distinct marketId+marketVersion+quoteVersion quote
+   * observed in this snapshot into the event's persisted market history.
+   * Uses optimistic concurrency (historyRevision) with bounded retries. If
+   * every attempt loses the race (or the mirror document cannot be found
+   * immediately after upsert), this throws rather than silently dropping the
+   * snapshot: swallowing the failure here could permanently erase the only
+   * persisted evidence that an authoritative old quote existed, which is
+   * exactly the loss this history exists to prevent. Callers must let this
+   * propagate out of `upsertLiveEventMirror` uncaught -- the listener then
+   * never acks the message, so it is redelivered. Redelivered processing is
+   * safe: recording is idempotent and merges deterministically (see below),
+   * so a retry can only add missing history or upgrade an existing entry,
+   * never duplicate or corrupt it.
+   *
+   * Merging is identity-keyed (marketId+marketVersion+quoteVersion), but not
+   * strictly first-write-wins: out-of-order or concurrent delivery can
+   * persist a CLOSED/SETTLED observation of a triple before its own earlier
+   * OPEN observation arrives (or vice versa). An authoritative live+OPEN
+   * observation always wins for a given identity -- it is adopted in place
+   * of an existing non-open/non-live placeholder for the same triple, but is
+   * itself never downgraded once frozen, and two non-open/non-live
+   * observations of the same triple are left as whichever was recorded
+   * first (their relative ordering carries no evidentiary weight).
+   *
+   * Returns whether anything in history actually changed, so callers (e.g.
+   * `upsertLiveEventMirror`) can tell a history-only change (no "current"
+   * mirror update) apart from a genuine no-op.
+   */
+  private async recordMarketHistory(
+    data: MarketHistorySnapshot,
+    attempt = 0
+  ): Promise<boolean> {
+    if (data.markets.length === 0) {
+      return false;
+    }
+
+    if (attempt >= MAX_MARKET_HISTORY_WRITE_ATTEMPTS) {
+      throw new Error(
+        `Failed to persist market history for event ${data.eventId} after `
+          + `${MAX_MARKET_HISTORY_WRITE_ATTEMPTS} concurrent-write attempts; `
+          + "refusing to silently drop this snapshot's quote history."
+      );
+    }
+
+    const current = (await LiveEventMirror.findOne(
+      { eventId: data.eventId },
+      { marketHistory: 1, historyRevision: 1 }
+    ).lean()) as {
+      marketHistory?: MirrorMarketHistoryEntry[];
+      historyRevision?: number;
+    } | null;
+
+    if (!current) {
+      throw new Error(
+        `Failed to persist market history for event ${data.eventId}: `
+          + "no live event mirror document was found immediately after upsert."
+      );
+    }
+
+    const existing = current.marketHistory ?? [];
+    const existingByKey = new Map<string, MirrorMarketHistoryEntry>(
+      existing.map((entry) => [this.marketHistoryKey(entry), entry] as const)
+    );
+    let changed = false;
+
+    for (const market of data.markets) {
+      const key = this.marketHistoryKey(market);
+      const candidate: MirrorMarketHistoryEntry = {
+        marketId: market.marketId,
+        marketType: market.marketType,
+        marketVersion: market.marketVersion,
+        quoteVersion: market.quoteVersion,
+        quoteValidUntil: market.quoteValidUntil,
+        status: market.status,
+        selections: market.selections,
+        sequence: data.sequence,
+        phase: data.phase,
+        bettingStatus: data.bettingStatus,
+      };
+      const priorEntry = existingByKey.get(key);
+
+      if (!priorEntry) {
+        existingByKey.set(key, candidate);
+        changed = true;
+        continue;
+      }
+
+      if (
+        !this.wasHistoricallyOpenAndLive(priorEntry)
+        && this.wasHistoricallyOpenAndLive(candidate)
+      ) {
+        existingByKey.set(key, candidate);
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      return false;
+    }
+
+    const revision = current.historyRevision ?? 0;
+    const merged = this.pruneMarketHistory([...existingByKey.values()]);
+    // A document written before this history feature existed (or before
+    // `historyRevision` was ever set) has no `historyRevision` field at all,
+    // not an explicit 0 -- `{ historyRevision: 0 }` does not match a missing
+    // field in MongoDB, so a plain equality CAS would exhaust every retry
+    // and this snapshot's history would never persist (the listener would
+    // redeliver forever). When the inferred revision is 0 because the field
+    // is genuinely absent, match either the missing field or an explicit 0;
+    // only one concurrent writer's update can actually apply (the other's
+    // filter stops matching the instant either succeeds), so this remains a
+    // safe compare-and-swap.
+    const revisionFilter =
+      current.historyRevision === undefined
+        ? { $or: [{ historyRevision: { $exists: false } }, { historyRevision: 0 }] }
+        : { historyRevision: revision };
+
+    const result = await LiveEventMirror.updateOne(
+      { eventId: data.eventId, ...revisionFilter },
+      {
+        $set: {
+          marketHistory: merged,
+          historyRevision: revision + 1,
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return this.recordMarketHistory(data, attempt + 1);
+    }
+
+    return true;
+  }
+
+  private marketHistoryKey(market: {
+    marketId: string;
+    marketVersion: number;
+    quoteVersion: number;
+  }): string {
+    return `${market.marketId}\u0000${market.marketVersion}\u0000${market.quoteVersion}`;
+  }
+
+  private pruneMarketHistory(
+    entries: MirrorMarketHistoryEntry[]
+  ): MirrorMarketHistoryEntry[] {
+    const byMarket = new Map<string, MirrorMarketHistoryEntry[]>();
+
+    for (const entry of entries) {
+      const bucket = byMarket.get(entry.marketId) ?? [];
+      bucket.push(entry);
+      byMarket.set(entry.marketId, bucket);
+    }
+
+    const pruned: MirrorMarketHistoryEntry[] = [];
+
+    for (const bucket of byMarket.values()) {
+      bucket.sort(
+        (left, right) =>
+          right.sequence - left.sequence
+          || right.quoteVersion - left.quoteVersion
+      );
+      pruned.push(...bucket.slice(0, MAX_MARKET_HISTORY_VERSIONS_PER_MARKET));
+    }
+
+    return pruned;
   }
 
   async upsertResulted(eventId: string, timestamp: string): Promise<void> {
@@ -564,33 +852,41 @@ class ModerationService {
         continue;
       }
 
-      if (!this.isLiveOpen(mirror)) {
+      const resolvedMarket = this.resolveExactMarket(mirror, row);
+
+      if (!resolvedMarket) {
+        // Nothing (current or history) matches this exact marketId+
+        // marketVersion+quoteVersion triple. Preserve the event-not-live
+        // gate for this case: an event that is not currently live, and for
+        // which no historical evidence of this specific quote exists, still
+        // declines as not live rather than as a generic missing-market reason.
+        affectedRows.push(
+          this.buildAffectedRow(
+            row,
+            this.isLiveOpen(mirror)
+              ? this.reasonForMissingExactMarket(currentMarket)
+              : ModerationDeclineReason.EVENT_NOT_LIVE,
+            currentMarket,
+            currentSelection
+          )
+        );
+        continue;
+      }
+
+      const { market: exactMarket, live: wasLiveWhenQuoted } = resolvedMarket;
+      const exactSelection = this.findExactSelection(exactMarket, row);
+
+      if (!wasLiveWhenQuoted) {
         affectedRows.push(
           this.buildAffectedRow(
             row,
             ModerationDeclineReason.EVENT_NOT_LIVE,
-            currentMarket,
-            currentSelection
+            exactMarket,
+            exactSelection ?? currentSelection
           )
         );
         continue;
       }
-
-      const exactMarket = this.findExactMarket(mirror, row);
-
-      if (!exactMarket) {
-        affectedRows.push(
-          this.buildAffectedRow(
-            row,
-            this.reasonForMissingExactMarket(currentMarket),
-            currentMarket,
-            currentSelection
-          )
-        );
-        continue;
-      }
-
-      const exactSelection = this.findExactSelection(exactMarket, row);
 
       if (exactMarket.status === LiveMarketStatus.SUSPENDED) {
         affectedRows.push(
@@ -1269,14 +1565,71 @@ class ModerationService {
     return LIVE_PHASES.has(mirror.phase) && mirror.bettingStatus === BettingStatus.OPEN;
   }
 
-  private findExactMarket(
+  /**
+   * Resolves the exact marketId+marketVersion+quoteVersion quote a row
+   * references, along with whether the event was genuinely live *at the
+   * moment that quote was authoritative*.
+   *
+   * Gamemaster does not bump marketVersion/quoteVersion when a market is
+   * later suspended/settled/closed *in place* (e.g. at half-time or
+   * full-time) -- the exact same triple is simply re-broadcast with a
+   * different `status` and, once no longer OPEN, no `quoteValidUntil`.
+   * `recordMarketHistory` dedupes purely on the (marketId, marketVersion,
+   * quoteVersion) key, so whenever a triple was ever genuinely open+live its
+   * one persisted historical entry is frozen at that original observation
+   * and is never overwritten by a later in-place status mutation of the
+   * *same* triple. That frozen, point-in-time observation -- not whatever
+   * the mirror's *current* snapshot now shows for the very same triple -- is
+   * what must govern a bet that was submitted while it was still
+   * authoritative, so it is preferred over the current mirror whenever it
+   * shows the quote was open and live. A current live+open entry is still
+   * honoured whenever history has nothing better to offer (no entry, or an
+   * entry that was never itself open+live, e.g. a version created already
+   * CLOSED because its own incident cap was already exhausted).
+   */
+  private resolveExactMarket(
     mirror: LiveEventMirrorRecord,
     row: NormalizedSlipRow
-  ): MirrorMarket | undefined {
-    return mirror.markets.find(
+  ): { market: MirrorMarket; live: boolean } | undefined {
+    const historical = this.findHistoricalMarket(mirror, row);
+
+    if (historical && this.wasHistoricallyOpenAndLive(historical)) {
+      return { market: historical, live: true };
+    }
+
+    const inCurrentMirror = mirror.markets.find(
       (market) =>
         this.matchesMarketIdentity(market, row)
         && market.marketVersion === row.marketVersion
+        && market.quoteVersion === row.quoteVersion
+    );
+
+    if (inCurrentMirror) {
+      return { market: inCurrentMirror, live: this.isLiveOpen(mirror) };
+    }
+
+    return historical
+      ? { market: historical, live: this.wasHistoricallyLive(historical) }
+      : undefined;
+  }
+
+  private wasHistoricallyLive(entry: MirrorMarketHistoryEntry): boolean {
+    return LIVE_PHASES.has(entry.phase) && entry.bettingStatus === BettingStatus.OPEN;
+  }
+
+  private wasHistoricallyOpenAndLive(entry: MirrorMarketHistoryEntry): boolean {
+    return entry.status === LiveMarketStatus.OPEN && this.wasHistoricallyLive(entry);
+  }
+
+  private findHistoricalMarket(
+    mirror: LiveEventMirrorRecord,
+    row: NormalizedSlipRow
+  ): MirrorMarketHistoryEntry | undefined {
+    return (mirror.marketHistory ?? []).find(
+      (entry) =>
+        this.matchesMarketIdentity(entry, row)
+        && entry.marketVersion === row.marketVersion
+        && entry.quoteVersion === row.quoteVersion
     );
   }
 
