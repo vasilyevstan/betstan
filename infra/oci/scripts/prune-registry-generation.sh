@@ -719,12 +719,10 @@ cmp -s \
   oci_die "registry service and digest mappings differ from trusted provenance"
 registry_accounting "$work_dir/before-accounting.json"
 jq -e \
-  --argjson expected_tag_rows "$before_row_count" \
-  --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
-    .image_count == $expected_tag_rows and
-    .layers_size_bytes <= $max_bytes
+  --argjson expected_images "$expected_images_before" '
+    .image_count == $expected_images
   ' "$work_dir/before-accounting.json" >/dev/null ||
-  oci_die "registry accounting does not match validated tag rows"
+  oci_die "registry accounting does not match validated unique identities"
 before_registry_image_count="$(
   jq -r '.image_count' "$work_dir/before-accounting.json"
 )"
@@ -905,9 +903,9 @@ for ((attempt = 1; attempt <= PRUNE_POLL_ATTEMPTS; attempt++)); do
       after_row_count="$(active_registry_row_count "$work_dir/after.json")"
       registry_accounting "$work_dir/accounting.json"
       if jq -e \
-        --argjson expected_tag_rows "$after_row_count" \
+        --argjson expected_images "$protected_image_count" \
         --argjson max_bytes "$OCI_REGISTRY_MAX_BYTES" '
-          .image_count == $expected_tag_rows and
+          .image_count == $expected_images and
           .layers_size_bytes <= $max_bytes
         ' "$work_dir/accounting.json" >/dev/null; then
         pruned=true

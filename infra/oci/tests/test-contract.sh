@@ -575,9 +575,9 @@ grep -Fq 'registry aliases changed after validation and before deletion' \
 grep -Fq 'registry accounting changed after validation and before deletion' \
   "$registry_pruner" ||
   fail "registry pruning does not revalidate accounting before deletion"
-grep -Fq -- '--argjson expected_tag_rows "$before_row_count"' \
+grep -Fq -- '--argjson expected_images "$expected_images_before"' \
   "$registry_pruner" ||
-  fail "registry pruning does not reconcile provider image accounting with tag rows"
+  fail "registry pruning does not reconcile provider accounting with unique images"
 grep -Fq 'the exact protected image OCID set changed during pruning' \
   "$registry_pruner" ||
   fail "registry pruning does not preserve the exact protected image OCID set"
