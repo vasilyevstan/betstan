@@ -34,6 +34,15 @@ Before changing or assessing deployment behavior, read:
 - `.github/agents/betstan-azure-retirement.agent.md`
 
 Inspect the current git graph and remote default branch. Do not infer that a merged PR is missing merely because its old head differs from a newer `master`; use `git merge-base --is-ancestor` and inspect the current tree.
+Resolve the remote default branch's full SHA through the GitHub API or
+`git ls-remote`, fetch and verify that immutable commit, and read every cited path from that same tree.
+Never treat a local branch or remote-tracking ref as authority. Immediately
+before mutation, resolve the remote SHA again and require it to be unchanged.
+
+A workflow absent from the authoritative tree is not necessarily retired.
+Require authoritative Actions workflow-state and paginated nonterminal-run
+checks, including historical runs for removed paths, before treating it as
+inactive. Fail closed when either query is incomplete or fails.
 
 ## Production trigger rules
 
@@ -85,6 +94,9 @@ Before deployment:
 - validate manifest YAML offline;
 - run `ingress-routing-guard-stan.sh`;
 - require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
+- require the target-specific retained Mongo PVC identity to be `Bound` and
+  reject every additional Mongo PVC; never infer topology safety from a count
+  threshold;
 - return `NO_GO` when the topology journal is in `transition`; normal deployment
   must not race migration, cleanup, or rollback;
 - check production health and rollback readiness;

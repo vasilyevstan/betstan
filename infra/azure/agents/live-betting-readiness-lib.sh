@@ -909,6 +909,8 @@ live_betting_apply_metric() {
     topology_mode) LIVE_BETTING_TOPOLOGY_MODE="$value" ;;
     topology_validated) LIVE_BETTING_TOPOLOGY_VALIDATED="$value" ;;
     lock_state) LIVE_BETTING_LOCK_STATE="$value" ;;
+    mongo_pvc_name) LIVE_BETTING_MONGO_PVC_NAME="$value" ;;
+    mongo_pvc_phase) LIVE_BETTING_MONGO_PVC_PHASE="$value" ;;
     public_event_status) LIVE_BETTING_PUBLIC_EVENT_STATUS="$value" ;;
     public_event_items) LIVE_BETTING_PUBLIC_EVENT_ITEMS="$value" ;;
     legacy_prematch_events) LIVE_BETTING_LEGACY_PREMATCH_EVENTS="$value" ;;
@@ -1145,11 +1147,15 @@ PY
 live_betting_check_topology() {
   local topology_file="$1"
   local lock_file="$2"
+  local pvc_file="$3"
   local result_stdout="$LIVE_BETTING_WORK_DIR/topology.result"
   local result_stderr="$LIVE_BETTING_WORK_DIR/topology.result.stderr"
   if ! python3 - \
     "$topology_file" \
     "$lock_file" \
+    "$pvc_file" \
+    "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" \
+    "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" \
     "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER" \
     "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID" \
     "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" \
@@ -1158,15 +1164,50 @@ import json
 import sys
 from pathlib import Path
 
-topology_path, lock_path, expected_holder, expected_operation, expected_sha = sys.argv[1:]
+(
+    topology_path,
+    lock_path,
+    pvc_path,
+    required_mode,
+    expected_shared_pvc,
+    expected_holder,
+    expected_operation,
+    expected_sha,
+) = sys.argv[1:]
 topology = json.loads(Path(topology_path).read_text(encoding="utf-8"))
 topology_data = topology.get("data") or {}
 mode = str(topology_data.get("mode", "legacy") or "legacy")
 validated = str(topology_data.get("validated", "false") or "false").lower()
+if required_mode and mode != required_mode:
+    raise SystemExit(f"Mongo topology mode must be {required_mode}")
 expect_active_lock = bool(expected_holder or expected_operation or expected_sha)
 if mode == "shared":
     if validated != "true":
         raise SystemExit("shared Mongo topology must be validated")
+    if expected_shared_pvc:
+        if not pvc_path or not Path(pvc_path).is_file():
+            raise SystemExit("shared Mongo PVC inventory is missing")
+        pvc_payload = json.loads(Path(pvc_path).read_text(encoding="utf-8"))
+        pvc_items = pvc_payload.get("items")
+        if not isinstance(pvc_items, list):
+            raise SystemExit("shared Mongo PVC inventory is invalid")
+        mongo_pvcs = []
+        for item in pvc_items:
+            if not isinstance(item, dict):
+                raise SystemExit("shared Mongo PVC inventory contains an invalid item")
+            metadata = item.get("metadata") or {}
+            status = item.get("status") or {}
+            name = metadata.get("name")
+            if isinstance(name, str) and "mongo" in name.lower():
+                mongo_pvcs.append((name, str(status.get("phase", ""))))
+        mongo_pvcs.sort()
+        if [name for name, _phase in mongo_pvcs] != [expected_shared_pvc]:
+            raise SystemExit("shared Mongo PVC inventory differs from the exact retained claim")
+        pvc_phase = mongo_pvcs[0][1]
+        if pvc_phase != "Bound":
+            raise SystemExit("retained shared Mongo PVC is not Bound")
+        print(f"mongo_pvc_name={expected_shared_pvc}")
+        print(f"mongo_pvc_phase={pvc_phase}")
     lock_state = "missing"
     if Path(lock_path).exists():
         lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
@@ -1828,6 +1869,8 @@ aux_workloads_ready=$LIVE_BETTING_AUX_WORKLOADS_READY
 topology_mode=$LIVE_BETTING_TOPOLOGY_MODE
 topology_validated=$LIVE_BETTING_TOPOLOGY_VALIDATED
 lock_state=$LIVE_BETTING_LOCK_STATE
+mongo_pvc_name=$LIVE_BETTING_MONGO_PVC_NAME
+mongo_pvc_phase=$LIVE_BETTING_MONGO_PVC_PHASE
 rabbit_live_ready_messages=$LIVE_BETTING_RABBIT_READY
 rabbit_live_unacked_messages=$LIVE_BETTING_RABBIT_UNACK
 rabbit_live_consumers=$LIVE_BETTING_RABBIT_CONSUMERS
@@ -1881,6 +1924,8 @@ live_betting_readiness_main() {
   LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER="${EXPECTED_OPERATION_LOCK_HOLDER:-}"
   LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID="${EXPECTED_OPERATION_LOCK_ID:-}"
   LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA="${EXPECTED_OPERATION_LOCK_SOURCE_SHA:-}"
+  LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE="${REQUIRED_MONGO_TOPOLOGY_MODE:-}"
+  LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC="${EXPECTED_SHARED_MONGO_PVC:-}"
   LIVE_BETTING_PUBLIC_HOSTS_REQUIRED="${PUBLIC_HOSTS_REQUIRED:-0}"
   LIVE_BETTING_DIAGNOSTIC_URL_REQUIRED="${DIAGNOSTIC_URL_REQUIRED:-0}"
   LIVE_BETTING_REQUIRE_HTTPS_PRIMARY="${REQUIRE_HTTPS_PRIMARY:-0}"
@@ -1926,6 +1971,8 @@ live_betting_readiness_main() {
   LIVE_BETTING_TOPOLOGY_MODE="unknown"
   LIVE_BETTING_TOPOLOGY_VALIDATED="unknown"
   LIVE_BETTING_LOCK_STATE="unknown"
+  LIVE_BETTING_MONGO_PVC_NAME="unknown"
+  LIVE_BETTING_MONGO_PVC_PHASE="unknown"
   LIVE_BETTING_PUBLIC_EVENT_STATUS="unknown"
   LIVE_BETTING_PUBLIC_EVENT_ITEMS="unknown"
   LIVE_BETTING_LEGACY_PREMATCH_EVENTS="unknown"
@@ -1973,6 +2020,18 @@ live_betting_readiness_main() {
     [[ "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
       live_betting_record_failure preflight "EXPECTED_OPERATION_LOCK_SOURCE_SHA is invalid"
   fi
+  case "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" in
+    ""|legacy|shared) ;;
+    *) live_betting_record_failure preflight "REQUIRED_MONGO_TOPOLOGY_MODE must be legacy or shared" ;;
+  esac
+  if [[ -n "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" ]]; then
+    [[ "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+      live_betting_record_failure preflight "EXPECTED_SHARED_MONGO_PVC is invalid"
+  fi
+  if [[ "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" == "shared" &&
+        -z "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" ]]; then
+    live_betting_record_failure preflight "EXPECTED_SHARED_MONGO_PVC is required for shared topology"
+  fi
   live_betting_require_uint REQUEST_TIMEOUT "$LIVE_BETTING_REQUEST_TIMEOUT"
   live_betting_require_uint SSE_TIMEOUT "$LIVE_BETTING_SSE_TIMEOUT"
   live_betting_require_uint MAX_ACTIVE_MATCHES "$LIVE_BETTING_MAX_ACTIVE_MATCHES"
@@ -2005,7 +2064,7 @@ live_betting_readiness_main() {
   live_betting_check_schema_evidence || true
   live_betting_check_rollback_baseline || true
 
-  local workloads_json pods_json topology_stderr lock_stderr rabbit_stderr
+  local workloads_json pods_json pvcs_json topology_stderr lock_stderr rabbit_stderr
   if workloads_json="$(live_betting_capture_command workloads kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get deploy,sts -n "$LIVE_BETTING_NAMESPACE" -o json)"; then
     printf '%s\n' "$workloads_json" >"$LIVE_BETTING_WORK_DIR/workloads.json"
   else
@@ -2019,11 +2078,19 @@ live_betting_readiness_main() {
   if [[ -f "$LIVE_BETTING_WORK_DIR/workloads.json" && -f "$LIVE_BETTING_PODS_JSON_FILE" && -f "$LIVE_BETTING_IMAGE_PROVENANCE_FILE" ]]; then
     live_betting_check_workloads "$LIVE_BETTING_WORK_DIR/workloads.json" "$LIVE_BETTING_PODS_JSON_FILE" || true
   fi
+  if [[ -n "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" ]]; then
+    if pvcs_json="$(live_betting_capture_command pvcs kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get persistentvolumeclaims -n "$LIVE_BETTING_NAMESPACE" -o json)"; then
+      printf '%s\n' "$pvcs_json" >"$LIVE_BETTING_WORK_DIR/pvcs.json"
+    else
+      live_betting_record_failure topology_lock "unable to inspect Mongo PVC inventory"
+    fi
+  fi
 
   topology_stderr="$LIVE_BETTING_WORK_DIR/topology.stderr"
   if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get configmap gaming-mongo-topology -n "$LIVE_BETTING_NAMESPACE" -o json >"$LIVE_BETTING_WORK_DIR/topology.json" 2>"$topology_stderr"; then
     live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
-  elif grep -Eqi 'not[ -]?found' "$topology_stderr"; then
+  elif grep -Eqi 'not[ -]?found' "$topology_stderr" &&
+      [[ "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" != "shared" ]]; then
     live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
     printf '{"data":{"mode":"legacy","validated":"true"}}\n' >"$LIVE_BETTING_WORK_DIR/topology.json"
   else
@@ -2041,7 +2108,10 @@ live_betting_readiness_main() {
     live_betting_record_failure topology_lock "unable to inspect Mongo operation lock"
   fi
   if [[ -f "$LIVE_BETTING_WORK_DIR/topology.json" ]]; then
-    live_betting_check_topology "$LIVE_BETTING_WORK_DIR/topology.json" "$LIVE_BETTING_WORK_DIR/lock.json" || true
+    live_betting_check_topology \
+      "$LIVE_BETTING_WORK_DIR/topology.json" \
+      "$LIVE_BETTING_WORK_DIR/lock.json" \
+      "$LIVE_BETTING_WORK_DIR/pvcs.json" || true
   fi
 
   local rabbit_pod

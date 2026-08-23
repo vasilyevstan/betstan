@@ -216,6 +216,26 @@ print(json.dumps({'items': items}))
 PY
   exit 0
 fi
+if [[ "$args" == *"get persistentvolumeclaims"* ]]; then
+  [[ "$fail_command" != "pvcs" ]] || exit 1
+  python3 - \
+    "${STUB_MONGO_PVC_NAME:-gaming-auth-mongo-data}" \
+    "${STUB_MONGO_PVC_PHASE:-Bound}" \
+    "${STUB_EXTRA_MONGO_PVC:-}" \
+    "${STUB_MONGO_PVC_MISSING:-0}" <<'PY'
+import json
+import sys
+
+name, phase, extra_name, missing = sys.argv[1:]
+items = []
+if missing != "1":
+    items.append({"metadata": {"name": name}, "status": {"phase": phase}})
+if extra_name:
+    items.append({"metadata": {"name": extra_name}, "status": {"phase": "Bound"}})
+print(json.dumps({"items": items}))
+PY
+  exit 0
+fi
 if [[ "$args" == *"get pods"* ]]; then
   [[ "$fail_command" != "pods" ]] || exit 1
   python3 - "$IMAGE_PROVENANCE_FILE" "${STUB_TOPOLOGY_MODE:-shared}" <<'PY'
@@ -561,6 +581,9 @@ run_live_betting_scenario() {
     export STUB_TOPOLOGY_MODE=shared
     export STUB_TOPOLOGY_VALIDATED=true
     export STUB_TOPOLOGY_MISSING=0
+    export STUB_MONGO_PVC_PHASE=Bound
+    export STUB_EXTRA_MONGO_PVC=
+    export STUB_MONGO_PVC_MISSING=0
     export STUB_LOCK_STATE=released
     export STUB_LOCK_HOLDER=
     export STUB_LOCK_OPERATION_ID=
@@ -616,10 +639,12 @@ run_live_betting_scenario() {
     export STUB_COMMAND_FAILURE=
     export MODE=dark
     if [[ "$stack" == "azure" ]]; then
+      export STUB_MONGO_PVC_NAME="gaming-auth-mongo-data-gaming-auth-mongo-depl-0"
       export BASE_URL="https://public.example.invalid"
       export SECONDARY_PUBLIC_URL=""
       export DIAGNOSTIC_URL=""
     else
+      export STUB_MONGO_PVC_NAME="gaming-auth-mongo-data"
       unset BASE_URL SECONDARY_PUBLIC_URL DIAGNOSTIC_URL
       export OCI_PUBLIC_URL="https://betstan.xyz"
       export OCI_REDIRECT_URL="https://www.betstan.xyz"

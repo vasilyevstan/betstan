@@ -388,6 +388,16 @@ jq -e 'type == "array"' <<<"$database_json" >/dev/null || oci_die "Mongo databas
 
 mongo_sts_count="$(jq '[.items[]? | select(.metadata.name | test("mongo"))] | length' "$statefulsets_json")"
 mongo_pvc_count="$(jq '[.items[]? | select(.metadata.name | test("mongo"))] | length' "$pvcs_json")"
+mongo_pvc_inventory="$(
+  jq -c '[
+    .items[]?
+    | select(.metadata.name | test("mongo"))
+    | {
+        name: .metadata.name,
+        phase: (.status.phase // "")
+      }
+  ] | sort_by(.name)' "$pvcs_json"
+)"
 mongo_pvc_bound="$(jq -r '[.items[]? | select(.metadata.name == "gaming-auth-mongo-data")][0].status.phase == "Bound"' "$pvcs_json")"
 mongo_pvc_size="$(jq -r '[.items[]? | select(.metadata.name == "gaming-auth-mongo-data")][0].spec.resources.requests.storage // ""' "$pvcs_json")"
 mongo_pvc_gib=0
@@ -508,6 +518,7 @@ jq -n \
   --argjson pods "$pods" \
   --argjson mongo_sts_count "$mongo_sts_count" \
   --argjson mongo_pvc_count "$mongo_pvc_count" \
+  --argjson mongo_pvc_inventory "$mongo_pvc_inventory" \
   --argjson mongo_pvc_bound "$mongo_pvc_bound" \
   --argjson mongo_pvc_gib "$mongo_pvc_gib" \
   --argjson mongo_runtime "$mongo_runtime_json" \
@@ -557,6 +568,7 @@ jq -n \
     mongo: {
       statefulset_count: $mongo_sts_count,
       pvc_count: $mongo_pvc_count,
+      pvc_inventory: $mongo_pvc_inventory,
       pvc_bound: $mongo_pvc_bound,
       pvc_gib: $mongo_pvc_gib,
       version: $mongo_runtime.version,

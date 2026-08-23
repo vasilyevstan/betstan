@@ -32,6 +32,9 @@ assert_contains "$RUN_SUMMARY_FILE" 'mode=monitor' 'OCI monitor summary should p
 assert_contains "$RUN_SUMMARY_FILE" 'secondary_redirect_status=308' 'OCI monitor should validate redirect host'
 assert_contains "$RUN_SUMMARY_FILE" 'diagnostic_event_status=200' 'OCI monitor should validate diagnostic event API'
 assert_contains "$RUN_SUMMARY_FILE" 'sse_diagnostic_status=200' 'OCI monitor should validate diagnostic SSE'
+assert_contains "$RUN_SUMMARY_FILE" 'topology_mode=shared' 'OCI monitor should require shared Mongo topology'
+assert_contains "$RUN_SUMMARY_FILE" 'mongo_pvc_name=gaming-auth-mongo-data' 'OCI monitor should record the exact shared Mongo PVC'
+assert_contains "$RUN_SUMMARY_FILE" 'mongo_pvc_phase=Bound' 'OCI monitor should require the shared Mongo PVC to be Bound'
 assert_contains "$RUN_SUMMARY_FILE" 'bet_pending_bet_update_processing_count=1' 'OCI monitor should surface bet processing backlog'
 assert_contains "$RUN_SUMMARY_FILE" 'moderation_parked_place_bet_processing_count=1' 'OCI monitor should surface moderation processing backlog'
 assert_contains "$RUN_SUMMARY_FILE" 'resulting_pending_moderation_result_processing_count=1' 'OCI monitor should surface resulting processing backlog'
@@ -48,20 +51,40 @@ assert_contains "$RUN_SUMMARY_FILE" 'rollback_baseline_verified=true' 'OCI activ
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=none' 'OCI activate should report no failed checks'
 assert_contains "$RUN_SUMMARY_FILE" 'legacy_prematch_events=1' 'OCI activate should persist prematch evidence'
 
-run_live_betting_scenario oci-legacy-monitor "$SCRIPT" oci \
+run_live_betting_scenario oci-legacy-topology "$SCRIPT" oci \
   MODE=monitor \
   STUB_TOPOLOGY_MODE=legacy \
+  STUB_FLAG_VALUE=true
+assert_eq 1 "$RUN_RC" "OCI monitor should reject legacy Mongo topology"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'legacy OCI topology should fail the topology contract'
+
+run_live_betting_scenario oci-wrong-shared-pvc "$SCRIPT" oci \
+  MODE=monitor \
   STUB_FLAG_VALUE=true \
-  STUB_BET_LEGACY_PENDING_COUNT=1 \
-  STUB_BET_LEGACY_PENDING_AGE_SECONDS=120 \
-  STUB_RESULTING_RETRY_LEGACY_PENDING_COUNT=1 \
-  STUB_RESULTING_RETRY_LEGACY_PENDING_AGE_SECONDS=180
-assert_eq 0 "$RUN_RC" "OCI monitor should support legacy topology parking diagnostics"
-assert_contains "$RUN_SUMMARY_FILE" 'topology_mode=legacy' 'OCI legacy monitor should persist topology mode'
-assert_contains "$RUN_SUMMARY_FILE" 'bet_pending_bet_update_pending_count=1' 'OCI legacy monitor should classify missing-status bet docs as pending'
-assert_contains "$RUN_SUMMARY_FILE" 'resulting_retry_record_pending_count=1' 'OCI legacy monitor should classify missing-status retry docs as pending'
-assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-bet-pending-bet-update.js" 'includeLegacyMissingStatus: true' 'OCI bet query should include legacy missing-status docs'
-assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'includeLegacyMissingStatus: true' 'OCI retry query should include legacy missing-status docs'
+  STUB_MONGO_PVC_NAME=gaming-bet-mongo-data
+assert_eq 1 "$RUN_RC" "OCI monitor should reject a different single Mongo PVC"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'wrong shared PVC identity should fail the topology contract'
+
+run_live_betting_scenario oci-unbound-shared-pvc "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_MONGO_PVC_PHASE=Pending
+assert_eq 1 "$RUN_RC" "OCI monitor should reject an unbound shared Mongo PVC"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'unbound shared PVC should fail the topology contract'
+
+run_live_betting_scenario oci-extra-legacy-pvc "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_EXTRA_MONGO_PVC=gaming-bet-mongo-data-gaming-bet-mongo-depl-0
+assert_eq 1 "$RUN_RC" "OCI monitor should reject an additional legacy Mongo PVC"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'additional legacy PVC should fail the topology contract'
+
+run_live_betting_scenario oci-missing-topology-marker "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_TOPOLOGY_MISSING=1
+assert_eq 1 "$RUN_RC" "OCI monitor should fail closed when the shared topology marker is missing"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'missing shared topology marker should fail the topology contract'
 
 run_live_betting_scenario oci-sse-heartbeat "$SCRIPT" oci MODE=monitor STUB_FLAG_VALUE=true STUB_SSE_MODE=bad-heartbeat
 assert_eq 1 "$RUN_RC" "OCI monitor should fail without SSE heartbeat"
@@ -87,4 +110,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=7'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=11'
