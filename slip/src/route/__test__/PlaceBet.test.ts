@@ -156,6 +156,27 @@ const declineSubmittedSlip = async (slipId: string, betKind: BetKind) => {
 
 const insertLegacyDraftSlip = async () => {
   const slipId = new mongoose.Types.ObjectId();
+  const boardFingerprint = new mongoose.Types.ObjectId().toHexString();
+
+  await Slip.collection.insertOne({
+    _id: slipId,
+    userId,
+    status: SlipStatus.DRAFT,
+    boardRevision: 1,
+    boardFingerprint,
+    timestamp: new Date().toISOString(),
+    rows: [buildRow({ includeBetKind: false })],
+  });
+
+  return {
+    slipId: slipId.toHexString(),
+    expectedBoardRevision: 1,
+    expectedBoardFingerprint: boardFingerprint,
+  };
+};
+
+const insertUnversionedLegacyDraftSlip = async () => {
+  const slipId = new mongoose.Types.ObjectId();
 
   await Slip.collection.insertOne({
     _id: slipId,
@@ -171,6 +192,14 @@ const insertLegacyDraftSlip = async () => {
 const buildPlacementAttemptId = (label: string) =>
   `placement-attempt-${label}`;
 
+const getBoardConfirmation = (slip?: {
+  boardRevision?: number | null;
+  boardFingerprint?: string | null;
+} | null) => ({
+  expectedBoardRevision: slip?.boardRevision,
+  expectedBoardFingerprint: slip?.boardFingerprint,
+});
+
 const placeBet = ({
   currentUser = currentUserHeader,
   slipId,
@@ -178,6 +207,8 @@ const placeBet = ({
   betKind,
   placementAttemptId,
   useHeaderAttemptId = false,
+  expectedBoardRevision,
+  expectedBoardFingerprint,
 }: {
   currentUser?: string;
   slipId: string;
@@ -185,6 +216,8 @@ const placeBet = ({
   betKind?: BetKind;
   placementAttemptId?: string;
   useHeaderAttemptId?: boolean;
+  expectedBoardRevision?: number | null;
+  expectedBoardFingerprint?: string | null;
 }) => {
   let requestBuilder = request(app).post("/api/slip/bet");
 
@@ -203,6 +236,14 @@ const placeBet = ({
     slipId,
     wager,
     ...(betKind ? { betKind } : {}),
+    ...(
+      expectedBoardRevision && expectedBoardFingerprint
+        ? {
+            expectedBoardRevision,
+            expectedBoardFingerprint,
+          }
+        : {}
+    ),
     ...(!useHeaderAttemptId && placementAttemptId
       ? { placementAttemptId }
       : {}),
@@ -213,7 +254,11 @@ it("returns 400 when user is not authenticated", async () => {
   const slip = await createSlip();
   const response = await request(app)
     .post("/api/slip/bet")
-    .send({ slipId: slip.id, wager: 5 })
+    .send({
+      slipId: slip.id,
+      wager: 5,
+      ...getBoardConfirmation(slip),
+    })
     .expect(400);
 
   expect(response.body.message).toEqual("must login first");
@@ -240,9 +285,10 @@ it("returns 400 when wager is invalid", async () => {
 });
 
 it("submits legacy PRE_MATCH slips without archiving them immediately", async () => {
-  const slipId = await insertLegacyDraftSlip();
+  const legacyDraftSlip = await insertLegacyDraftSlip();
 
-  const response = await placeBet({ slipId, wager: 5 }).expect(200);
+  const response = await placeBet({ ...legacyDraftSlip, wager: 5 }).expect(200);
+  const { slipId } = legacyDraftSlip;
 
   expect(response.body._id).toEqual(slipId);
   expect(response.body.status).toEqual(SlipStatus.SUBMITTED);
@@ -284,6 +330,84 @@ it("submits legacy PRE_MATCH slips without archiving them immediately", async ()
   );
 });
 
+it("lets a loaded legacy PRE_MATCH client submit only the board it fetched", async () => {
+  const slipId = await insertUnversionedLegacyDraftSlip();
+
+  const boardResponse = await request(app)
+    .get("/api/slip")
+    .set("currentUser", currentUserHeader)
+    .expect(200);
+
+  expect(boardResponse.body._id).toEqual(slipId);
+  expect(boardResponse.body.boardRevision).toEqual(1);
+  expect(boardResponse.body.boardFingerprint).toEqual(expect.any(String));
+
+  const preparedSlip = await Slip.findById(slipId).lean();
+  expect(preparedSlip!.boardRevision).toEqual(
+    boardResponse.body.boardRevision
+  );
+  expect(preparedSlip!.boardFingerprint).toEqual(
+    boardResponse.body.boardFingerprint
+  );
+  expect(preparedSlip!.legacyBoardRevision).toEqual(
+    boardResponse.body.boardRevision
+  );
+  expect(preparedSlip!.legacyBoardFingerprint).toEqual(
+    boardResponse.body.boardFingerprint
+  );
+
+  const placementResponse = await request(app)
+    .post("/api/slip/bet")
+    .set("currentUser", currentUserHeader)
+    .send({ slipId, wager: 5 })
+    .expect(200);
+
+  expect(placementResponse.body.status).toEqual(SlipStatus.SUBMITTED);
+  expect(placementResponse.body.placement).toEqual(
+    expect.objectContaining({
+      outcome: "accepted",
+      isLegacyRequest: true,
+    })
+  );
+});
+
+it("rejects a legacy PRE_MATCH placement when its fetched board changed", async () => {
+  const slip = await createSlip();
+
+  const boardResponse = await request(app)
+    .get("/api/slip")
+    .set("currentUser", currentUserHeader)
+    .expect(200);
+  const nextFingerprint = new mongoose.Types.ObjectId().toHexString();
+
+  await Slip.updateOne(
+    { _id: slip.id },
+    {
+      $set: {
+        rows: [...slip.rows.map((row) => row.toObject()), buildRow()],
+        boardRevision: boardResponse.body.boardRevision + 1,
+        boardFingerprint: nextFingerprint,
+      },
+    }
+  );
+
+  const response = await request(app)
+    .post("/api/slip/bet")
+    .set("currentUser", currentUserHeader)
+    .send({ slipId: slip.id, wager: 5 })
+    .expect(409);
+
+  expect(response.body.reload).toEqual({
+    required: true,
+    reason: "board-mismatch",
+  });
+  expect(response.body.slip.boardFingerprint).toEqual(nextFingerprint);
+  expect((await Slip.findById(slip.id))!.status).toEqual(SlipStatus.DRAFT);
+  expect(
+    PlaceBetEventPublisher.prototype.publishWithConfirm
+  ).not.toHaveBeenCalled();
+});
+
 it("submitting the same attempt twice with the same payload is idempotent", async () => {
   const slip = await createSlip({ betKind: BetKind.LIVE });
   const placementAttemptId = buildPlacementAttemptId("same-attempt");
@@ -293,6 +417,7 @@ it("submitting the same attempt twice with the same payload is idempotent", asyn
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   const duplicateResponse = await placeBet({
@@ -300,6 +425,7 @@ it("submitting the same attempt twice with the same payload is idempotent", asyn
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   expect(duplicateResponse.body._id).toEqual(slip.id);
@@ -332,6 +458,7 @@ it("rejects a conflicting payload for the same placement attempt", async () => {
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   const response = await placeBet({
@@ -339,6 +466,7 @@ it("rejects a conflicting payload for the same placement attempt", async () => {
     wager: 10,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(409);
 
   expect(response.body.message).toEqual(
@@ -367,6 +495,7 @@ it("rejects a different placement attempt even when the wager matches", async ()
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId: winningAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   const response = await placeBet({
@@ -374,6 +503,7 @@ it("rejects a different placement attempt even when the wager matches", async ()
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId: buildPlacementAttemptId("loser"),
+    ...getBoardConfirmation(slip),
   }).expect(409);
 
   expect(response.body.message).toEqual(
@@ -400,12 +530,14 @@ it("treats retries without an explicit legacy placement attempt id as conflicts 
     slipId: slip.id,
     wager: 5,
     betKind: BetKind.LIVE,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   const response = await placeBet({
     slipId: slip.id,
     wager: 5,
     betKind: BetKind.LIVE,
+    ...getBoardConfirmation(slip),
   }).expect(409);
 
   expect(response.body.message).toEqual(
@@ -433,12 +565,14 @@ it("allows only one concurrent identical attempt to publish", async () => {
       wager: 5,
       betKind: BetKind.LIVE,
       placementAttemptId,
+      ...getBoardConfirmation(slip),
     }),
     placeBet({
       slipId: slip.id,
       wager: 5,
       betKind: BetKind.LIVE,
       placementAttemptId,
+      ...getBoardConfirmation(slip),
     }),
   ]);
 
@@ -484,6 +618,7 @@ it("maps simultaneous conflicting attempts to the persisted winning attempt acro
           wager,
           betKind: BetKind.LIVE,
           placementAttemptId,
+          ...getBoardConfirmation(slip),
         })
       )
     );
@@ -539,6 +674,45 @@ it("maps simultaneous conflicting attempts to the persisted winning attempt acro
   expect(publishWithConfirmMock).toHaveBeenCalledTimes(12);
 });
 
+it("returns a reload conflict when the confirmed board revision is stale", async () => {
+  const slip = await createSlip({ betKind: BetKind.LIVE });
+  const staleBoardConfirmation = getBoardConfirmation(slip);
+  const nextBoardFingerprint = new mongoose.Types.ObjectId().toHexString();
+
+  await Slip.updateOne(
+    { _id: slip.id },
+    {
+      $set: {
+        rows: [buildRow({ betKind: BetKind.LIVE }), buildRow({ betKind: BetKind.LIVE, marketId: 'event-two:NEXT_CORNER', selectionId: 'event-two:NEXT_CORNER:1:HOME' })],
+        boardRevision: (slip.boardRevision ?? 1) + 1,
+        boardFingerprint: nextBoardFingerprint,
+      },
+    }
+  );
+
+  const response = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    ...staleBoardConfirmation,
+  }).expect(409);
+
+  expect(response.body.message).toEqual(
+    'This board changed before placement. Review the latest selections and try again.'
+  );
+  expect(response.body.reload).toEqual({
+    required: true,
+    reason: 'board-mismatch',
+  });
+  expect(response.body.slip._id).toEqual(slip.id);
+  expect(response.body.slip.status).toEqual(SlipStatus.DRAFT);
+  expect(response.body.slip.boardRevision).toEqual((slip.boardRevision ?? 1) + 1);
+  expect(response.body.slip.boardFingerprint).toEqual(nextBoardFingerprint);
+  expect(response.body.slip.rows).toHaveLength(2);
+  expect((await Slip.findById(slip.id))!.status).toEqual(SlipStatus.DRAFT);
+  expect(PlaceBetEventPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
 it("rejects slips that contain mixed bet kinds", async () => {
   const slip = await createSlip({
     betKind: BetKind.PRE_MATCH,
@@ -548,7 +722,11 @@ it("rejects slips that contain mixed bet kinds", async () => {
   const response = await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
-    .send({ slipId: slip.id, wager: 5 })
+    .send({
+      slipId: slip.id,
+      wager: 5,
+      ...getBoardConfirmation(slip),
+    })
     .expect(400);
 
   expect(response.body.message).toEqual("slip contains mixed bet kinds");
@@ -583,7 +761,11 @@ it("does not sweep unrelated COMPLETE slips into the archive", async () => {
   await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
-    .send({ slipId: slip.id, wager: 5 })
+    .send({
+      slipId: slip.id,
+      wager: 5,
+      ...getBoardConfirmation(slip),
+    })
     .expect(200);
 
   expect(await Slip.findById(completeSlip.id)).not.toBeNull();
@@ -596,7 +778,12 @@ it("restores a declined board under a new id and resubmits only the new attempt"
   await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
-    .send({ slipId: originalSlip.id, wager: 5, betKind: BetKind.LIVE })
+    .send({
+      slipId: originalSlip.id,
+      wager: 5,
+      betKind: BetKind.LIVE,
+      ...getBoardConfirmation(originalSlip),
+    })
     .expect(200);
 
   await declineSubmittedSlip(originalSlip.id, BetKind.LIVE);
@@ -617,7 +804,12 @@ it("restores a declined board under a new id and resubmits only the new attempt"
   await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
-    .send({ slipId: restoredDraft!.id, wager: 10, betKind: BetKind.LIVE })
+    .send({
+      slipId: restoredDraft!.id,
+      wager: 10,
+      betKind: BetKind.LIVE,
+      ...getBoardConfirmation(restoredDraft),
+    })
     .expect(200);
 
   const resubmittedSlip = await Slip.findById(restoredDraft!.id);
@@ -654,7 +846,12 @@ it("publishes the latest LIVE market version in the immutable submitted payload"
   await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
-    .send({ slipId: slip.id, wager: 5, betKind: BetKind.LIVE })
+    .send({
+      slipId: slip.id,
+      wager: 5,
+      betKind: BetKind.LIVE,
+      ...getBoardConfirmation(slip),
+    })
     .expect(200);
 
   expect(PlaceBetEventPublisher.prototype.publishWithConfirm).toHaveBeenCalledWith(
@@ -694,6 +891,7 @@ it("keeps the board submitted and pending when publish confirm fails", async () 
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   expect(failedResponse.body._id).toEqual(slip.id);
@@ -734,6 +932,7 @@ it("keeps the board submitted and pending when publish confirm fails", async () 
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId,
+    ...getBoardConfirmation(slip),
   }).expect(200);
 
   expect(duplicateResponse.body.placement).toEqual({
@@ -752,7 +951,11 @@ it("does not submit another user's board or mutate the caller's sibling board", 
   await request(app)
     .post("/api/slip/bet")
     .set("currentUser", otherUserHeader)
-    .send({ slipId: foreignSlip.id, wager: 5 })
+    .send({
+      slipId: foreignSlip.id,
+      wager: 5,
+      ...getBoardConfirmation(foreignSlip),
+    })
     .expect(200);
 
   const unauthorizedResponse = await placeBet({

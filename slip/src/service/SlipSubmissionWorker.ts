@@ -38,6 +38,8 @@ export interface SubmitDraftSlipArgs {
   placementAttemptId: string;
   wager: number;
   betKind: BetKind;
+  expectedBoardRevision: number;
+  expectedBoardFingerprint: string;
 }
 
 export interface PublishSlipResult {
@@ -181,6 +183,8 @@ export const submitDraftSlipAtomically = async (
     userId: args.userId,
     status: SlipStatus.DRAFT,
     ...buildBetKindScope(args.betKind),
+    boardRevision: args.expectedBoardRevision,
+    boardFingerprint: args.expectedBoardFingerprint,
     "rows.0": {
       $exists: true,
     },
@@ -193,6 +197,8 @@ export const submitDraftSlipAtomically = async (
         submittedAt,
         betKind: args.betKind,
         draftKey: args.betKind,
+        boardRevision: args.expectedBoardRevision,
+        boardFingerprint: args.expectedBoardFingerprint,
         rows: buildNormalizedRowsExpression(args.betKind),
         submittedEvent: {
           userId: args.userId,

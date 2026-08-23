@@ -265,10 +265,92 @@ it("declines only the targeted LIVE board, preserves the attempt, and restores a
       marketStatus: LiveMarketStatus.OPEN,
     })
   );
-  expect(restoredLiveSlip!.rows[1].moderation).toBeUndefined();
+  expect(restoredLiveSlip!.rows[1].moderation ?? undefined).toBeUndefined();
 
   const unchangedPreMatchSlip = await Slip.findById(siblingPreMatchSlip.id);
   expect(unchangedPreMatchSlip!.status).toEqual(SlipStatus.SUBMITTED);
+});
+
+it("merges a declined LIVE attempt into an existing draft of the same kind", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  const submittedRows = [
+    {
+      ...buildRow(BetKind.LIVE),
+      oddsId: 'submitted-home',
+      selectionId: 'event-one:NEXT_CORNER:1:HOME',
+    },
+    {
+      ...buildRow(BetKind.LIVE),
+      marketId: 'event-three:NEXT_CORNER',
+      oddsId: 'submitted-extra',
+      selectionId: 'event-three:NEXT_CORNER:1:AWAY',
+    },
+  ];
+  const submittedSlip = await createSubmittedSlip(userId, BetKind.LIVE, submittedRows);
+  const existingDraft = await Slip.create({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    rows: [
+      {
+        ...buildRow(BetKind.LIVE),
+        oddsId: 'existing-home',
+        oddsName: 'Away',
+        oddsValue: 2.4,
+        quoteVersion: 3,
+        selectionId: 'event-one:NEXT_CORNER:1:AWAY',
+      },
+      {
+        ...buildRow(BetKind.LIVE),
+        marketId: 'event-two:NEXT_CORNER',
+        oddsId: 'draft-extra',
+        selectionId: 'event-two:NEXT_CORNER:1:HOME',
+      },
+    ],
+  });
+  const affectedRow = submittedSlip.rows[0];
+
+  await listener.onMessage(
+    buildEvent({
+      slipId: submittedSlip.id,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+      declineReason: ModerationDeclineReason.STALE_QUOTE,
+      affectedRows: [
+        {
+          rowId: affectedRow.id,
+          declineReason: ModerationDeclineReason.STALE_QUOTE,
+          marketId: affectedRow.marketId ?? undefined,
+          marketVersion: affectedRow.marketVersion ?? undefined,
+          quoteVersion: (affectedRow.quoteVersion ?? 1) + 1,
+          currentOdds: 2.1,
+          marketStatus: LiveMarketStatus.OPEN,
+          selectionId: affectedRow.selectionId ?? undefined,
+        },
+      ],
+    }),
+    buildMessage()
+  );
+
+  const mergedDraft = await Slip.findById(existingDraft.id);
+  const archivedDeclinedSlip = await SlipArchive.findById(submittedSlip.id);
+
+  expect(mergedDraft).not.toBeNull();
+  expect(mergedDraft!.sourceSlipId).toEqual(submittedSlip.id);
+  expect(mergedDraft!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
+  expect(mergedDraft!.rows.map((row) => row.oddsId).sort()).toEqual([
+    'draft-extra',
+    'existing-home',
+    'submitted-extra',
+  ]);
+  expect(mergedDraft!.rows.every((row) => row.betKind === BetKind.LIVE)).toBe(true);
+  expect(archivedDeclinedSlip!.replacementSlipId).toEqual(existingDraft.id);
+  expect(await Slip.findById(submittedSlip.id)).toBeNull();
 });
 
 it("treats duplicate decline delivery as idempotent for the restored draft", async () => {

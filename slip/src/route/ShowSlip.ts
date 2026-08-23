@@ -5,9 +5,22 @@ import {
   findDraftSlipForUser,
   normalizeSlip,
   parseRequestedBetKind,
+  persistSlipBoardIdentityIfNeeded,
 } from "../model/slipSupport";
 
 const router = express.Router();
+
+const prepareSlipForResponse = async (
+  slip: Parameters<typeof normalizeSlip>[0],
+  betKind: Parameters<typeof normalizeSlip>[1],
+  recordLegacyConfirmation = false
+) => {
+  const authoritativeSlip = await persistSlipBoardIdentityIfNeeded(slip, {
+    recordLegacyConfirmation,
+  });
+  normalizeSlip(authoritativeSlip, betKind);
+  return authoritativeSlip;
+};
 
 router.get("/api/slip/boards", async (req: Request, res: Response) => {
   if (!req.currentUser) {
@@ -17,9 +30,18 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
     });
   }
 
-  const [preMatchSlip, liveSlip] = await Promise.all([
+  const [foundPreMatchSlip, foundLiveSlip] = await Promise.all([
     findActiveSlipForUser(req.currentUser.id, BetKind.PRE_MATCH),
     findActiveSlipForUser(req.currentUser.id, BetKind.LIVE),
+  ]);
+
+  const [preMatchSlip, liveSlip] = await Promise.all([
+    foundPreMatchSlip
+      ? prepareSlipForResponse(foundPreMatchSlip, BetKind.PRE_MATCH)
+      : Promise.resolve(null),
+    foundLiveSlip
+      ? prepareSlipForResponse(foundLiveSlip, BetKind.LIVE)
+      : Promise.resolve(null),
   ]);
 
   return res.send({
@@ -39,11 +61,14 @@ router.get("/api/slip", async (req: Request, res: Response) => {
     return res.status(400).send({ message: "Invalid bet kind" });
   }
 
-  const slip = await findDraftSlipForUser(req.currentUser.id, betKind);
-
-  if (slip) {
-    normalizeSlip(slip, betKind);
-  }
+  const foundSlip = await findDraftSlipForUser(req.currentUser.id, betKind);
+  const slip = foundSlip
+    ? await prepareSlipForResponse(
+        foundSlip,
+        betKind,
+        betKind === BetKind.PRE_MATCH
+      )
+    : null;
 
   return res.send(slip ?? null);
 });

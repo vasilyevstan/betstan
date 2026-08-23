@@ -341,6 +341,63 @@ it("ignores same-kind selections while that board is submitted", async () => {
   expect(await Slip.findById(submittedSlip.id)).not.toBeNull();
 });
 
+it("updates an existing replacement draft while the submitted board still exists", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  await listener.init();
+
+  const submittedSlip = await createSubmittedSlip(userId, BetKind.LIVE);
+  const draftEvent = buildEvent(userId, {
+    betKind: BetKind.LIVE,
+    marketId: "event-one:NEXT_CORNER",
+    marketVersion: 1,
+    quoteVersion: 1,
+    selectionId: "event-one:NEXT_CORNER:1:HOME",
+    oddsId: "draft-odds",
+  });
+  const nextEvent = buildEvent(userId, {
+    betKind: BetKind.LIVE,
+    marketId: "event-two:NEXT_CORNER",
+    marketVersion: 1,
+    quoteVersion: 1,
+    selectionId: "event-two:NEXT_CORNER:1:AWAY",
+    oddsId: "next-odds",
+    oddsName: "Away",
+    oddsValue: 2.1,
+  });
+  const { userId: _ignoredUserId, ...draftRow } = draftEvent.data;
+
+  const replacementDraft = await Slip.create({
+    userId,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    status: SlipStatus.DRAFT,
+    sourceSlipId: submittedSlip.id,
+    timestamp: new Date().toISOString(),
+    rows: [{
+      timestamp: draftEvent.timestamp,
+      ...draftRow,
+    }],
+  });
+
+  await listener.onMessage(nextEvent, buildMessage());
+
+  const refreshedDraft = await Slip.findById(replacementDraft.id);
+  expect(refreshedDraft!.rows).toHaveLength(2);
+  expect(refreshedDraft!.rows.map((row) => row.oddsId).sort()).toEqual([
+    'draft-odds',
+    'next-odds',
+  ]);
+  expect((await Slip.findById(submittedSlip.id))!.rows).toHaveLength(1);
+  expect(
+    await Slip.countDocuments({
+      userId,
+      betKind: BetKind.LIVE,
+      status: SlipStatus.DRAFT,
+    })
+  ).toEqual(1);
+});
+
 it("acks message without creating slip when userId is missing", async () => {
   const listener = new OddsClickedListener(messengerWrapper.connection);
   await listener.init();

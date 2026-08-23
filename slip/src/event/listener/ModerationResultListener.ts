@@ -6,12 +6,11 @@ import {
   QueueNames,
   SlipStatus,
 } from "@betstan/common";
-import { Slip, SlipArchive } from "../../model/Slip";
+import { SlipArchive } from "../../model/Slip";
 import {
   applyAffectedRows,
   clearSubmittedAttemptState,
   createSlipId,
-  findAnyArchivedOrActiveSlipById,
   findArchivedSlipById,
   findDraftSlipBySourceSlipId,
   findSubmittedSlipById,
@@ -21,6 +20,7 @@ import {
   normalizeSlip,
   PlainSlip,
   toPlainSlip,
+  upsertRestoredDraft,
 } from "../../model/slipSupport";
 
 const buildApprovedArchivePayload = (slip: Parameters<typeof toPlainSlip>[0]) => {
@@ -32,12 +32,12 @@ const buildApprovedArchivePayload = (slip: Parameters<typeof toPlainSlip>[0]) =>
 
 const buildDeclinedArchivePayload = (
   slip: Parameters<typeof toPlainSlip>[0],
-  replacementSlipId: string,
+  replacementSlipId: string | null,
   eventData: IModerationResultEvent["data"]
 ) => {
   const archivedSlip = toPlainSlip(slip);
 
-  archivedSlip.replacementSlipId = replacementSlipId;
+  archivedSlip.replacementSlipId = replacementSlipId ?? undefined;
   archivedSlip.declineReason = eventData.declineReason;
   applyAffectedRows(archivedSlip, eventData.affectedRows ?? []);
 
@@ -71,29 +71,6 @@ const upsertArchivedSlip = async (payload: PlainSlip) => {
   await SlipArchive.updateOne(
     { _id: payload._id },
     { $set: payload },
-    { upsert: true }
-  );
-};
-
-const upsertRestoredDraftIfAbsent = async (payload: PlainSlip) => {
-  const replacementSlipId =
-    typeof payload._id === "string" ? payload._id : payload._id?.toString();
-
-  if (!replacementSlipId) {
-    throw new Error("Replacement slip id is missing");
-  }
-
-  const existingReplacementSlip = await findAnyArchivedOrActiveSlipById(
-    replacementSlipId
-  );
-
-  if (existingReplacementSlip) {
-    return;
-  }
-
-  await Slip.updateOne(
-    { _id: replacementSlipId },
-    { $setOnInsert: payload },
     { upsert: true }
   );
 };
@@ -136,26 +113,34 @@ class ModerationResultListener extends AListener<IModerationResultEvent> {
     }
 
     if (data.result === ModerationStatus.DECLINED) {
-      const replacementSlipId =
+      const provisionalReplacementSlipId =
         archivedSlip?.replacementSlipId ?? restoredDraft?.id ?? createSlipId();
 
       if (submittedSlip) {
         normalizeSlip(submittedSlip, betKind);
 
-        const declinedArchivePayload = buildDeclinedArchivePayload(
-          submittedSlip,
-          replacementSlipId,
+        const restoredDraftPayload = buildRestoredDraftPayload(
+          buildDeclinedArchivePayload(
+            submittedSlip,
+            provisionalReplacementSlipId,
+            data
+          ),
+          data.slipId,
+          provisionalReplacementSlipId,
           data
         );
-        const restoredDraftPayload = buildRestoredDraftPayload(
-          declinedArchivePayload,
-          data.slipId,
-          replacementSlipId,
+        const mergedDraft = await upsertRestoredDraft(restoredDraftPayload);
+        const mergedDraftId =
+          typeof mergedDraft._id === "string"
+            ? mergedDraft._id
+            : mergedDraft._id?.toString() ?? null;
+        const declinedArchivePayload = buildDeclinedArchivePayload(
+          submittedSlip,
+          mergedDraftId,
           data
         );
 
         await upsertArchivedSlip(declinedArchivePayload);
-        await upsertRestoredDraftIfAbsent(restoredDraftPayload);
         await submittedSlip.deleteOne();
         this.ack(msg);
         return;
@@ -189,8 +174,19 @@ class ModerationResultListener extends AListener<IModerationResultEvent> {
         archivedSlip.replacementSlipId,
         data
       );
+      const mergedDraft = await upsertRestoredDraft(restoredDraftPayload);
+      const mergedDraftId =
+        typeof mergedDraft._id === "string"
+          ? mergedDraft._id
+          : mergedDraft._id?.toString() ?? null;
 
-      await upsertRestoredDraftIfAbsent(restoredDraftPayload);
+      if (mergedDraftId && mergedDraftId !== archivedSlip.replacementSlipId) {
+        await SlipArchive.updateOne(
+          { _id: archivedSlip.id },
+          { $set: { replacementSlipId: mergedDraftId } }
+        );
+      }
+
       this.ack(msg);
       return;
     }

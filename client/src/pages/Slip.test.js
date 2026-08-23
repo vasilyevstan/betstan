@@ -60,14 +60,22 @@ const buildRow = ({
   moderation,
 });
 
-const buildBoard = (betKind, overrides = {}) => ({
-  _id: `${betKind}-slip-1`,
-  betKind,
-  status: SLIP_STATUS.DRAFT,
-  timestamp: '2030-01-01T12:00:00.000Z',
-  rows: [buildRow({ betKind })],
-  ...overrides,
-});
+const buildBoard = (betKind, overrides = {}) => {
+  const boardId = overrides._id ?? `${betKind}-slip-1`;
+  const boardRevision = overrides.boardRevision ?? 1;
+  const boardFingerprint = overrides.boardFingerprint ?? `${boardId}-fingerprint-${boardRevision}`;
+
+  return {
+    _id: boardId,
+    betKind,
+    status: SLIP_STATUS.DRAFT,
+    timestamp: '2030-01-01T12:00:00.000Z',
+    boardRevision,
+    boardFingerprint,
+    rows: [buildRow({ betKind })],
+    ...overrides,
+  };
+};
 
 const getBoardsPayload = (overrides = {}) => ({
   [BET_KIND.PRE_MATCH]: buildBoard(BET_KIND.PRE_MATCH),
@@ -81,6 +89,34 @@ const getSubmittedBoard = (betKind, overrides = {}) => buildBoard(betKind, {
   _id: `${betKind.toLowerCase()}-submitted-1`,
   status: SLIP_STATUS.SUBMITTED,
   ...overrides,
+});
+
+const buildBoardConfirmation = ({
+  slipId,
+  boardRevision = 1,
+  boardFingerprint = `${slipId}-fingerprint-${boardRevision}`,
+}) => ({
+  expectedBoardRevision: boardRevision,
+  expectedBoardFingerprint: boardFingerprint,
+});
+
+const buildPlacementRequest = ({
+  betKind,
+  slipId,
+  wager,
+  placementAttemptId,
+  boardRevision = 1,
+  boardFingerprint = `${slipId}-fingerprint-${boardRevision}`,
+}) => ({
+  betKind,
+  slipId,
+  wager,
+  placementAttemptId,
+  ...buildBoardConfirmation({
+    slipId,
+    boardRevision,
+    boardFingerprint,
+  }),
 });
 
 const getRequestCount = (url) => axios.get.mock.calls.filter(([requestUrl]) => requestUrl === url).length;
@@ -336,12 +372,12 @@ describe('Slip', () => {
       fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: 'live-draft-2',
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
+    })));
   });
 
   it('reuses the in-flight placement attempt id for rapid double-clicks and allocates a new one for a later action', async () => {
@@ -380,12 +416,12 @@ describe('Slip', () => {
 
     expect(liveSubmitCount).toBe(1);
     expect(randomUUIDMock).toHaveBeenCalledTimes(1);
-    expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', {
+    expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    });
+    }));
 
     await act(async () => {
       firstLiveSubmit.resolve({ data: {} });
@@ -400,12 +436,12 @@ describe('Slip', () => {
       fireEvent.click(within(preMatchSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.PRE_MATCH,
       slipId: `${BET_KIND.PRE_MATCH}-slip-1`,
       wager: 11,
       placementAttemptId: 'placement-attempt-2',
-    }));
+    })));
     expect(randomUUIDMock).toHaveBeenCalledTimes(2);
   });
 
@@ -446,18 +482,18 @@ describe('Slip', () => {
       fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    })));
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
+    })));
     await waitFor(() => expect(within(liveSection()).getByRole('button', { name: 'Awaiting review…' })).toBeDisabled());
     expect(screen.getByLabelText('Wager for LIVE SLIP')).toHaveValue(22);
     expect(screen.queryByText('Placement status is still reconciling. Retry with the same wager and selections.')).not.toBeInTheDocument();
@@ -500,18 +536,18 @@ describe('Slip', () => {
       fireEvent.click(within(preMatchSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.PRE_MATCH,
       slipId: `${BET_KIND.PRE_MATCH}-slip-1`,
       wager: 11,
       placementAttemptId: 'placement-attempt-1',
-    }));
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    })));
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.PRE_MATCH,
       slipId: `${BET_KIND.PRE_MATCH}-slip-1`,
       wager: 11,
       placementAttemptId: 'placement-attempt-1',
-    }));
+    })));
     await waitFor(() => expect(within(preMatchSection()).getByRole('button', { name: 'Awaiting review…' })).toBeDisabled());
     expect(randomUUIDMock).toHaveBeenCalledTimes(1);
   });
@@ -560,6 +596,135 @@ describe('Slip', () => {
     expect(randomUUIDMock).toHaveBeenCalledTimes(1);
   });
 
+  it('reloads a stale board conflict without disturbing the sibling board', async () => {
+    const updatedLiveBoard = buildBoard(BET_KIND.LIVE, {
+      boardRevision: 2,
+      rows: [buildRow({ betKind: BET_KIND.LIVE, oddsName: 'Away', oddsValue: 2.4, selectionId: 'away', quoteVersion: 2 })],
+    });
+
+    axios.post.mockImplementationOnce(() => {
+      boardsResponse = getBoardsPayload({
+        [BET_KIND.LIVE]: updatedLiveBoard,
+      });
+
+      return Promise.reject(buildAxiosError({
+        status: 409,
+        data: {
+          message: 'This board changed before placement. Review the latest selections and try again.',
+          slip: updatedLiveBoard,
+          placement: {
+            requestedPlacementAttemptId: 'placement-attempt-1',
+            authoritativePlacementAttemptId: null,
+            outcome: 'conflict',
+          },
+          reload: {
+            required: true,
+            reason: 'board-mismatch',
+          },
+        },
+      }));
+    });
+
+    await renderSlip();
+
+    const liveSection = () => screen.getByText('LIVE SLIP').closest('section');
+    const preMatchSection = () => screen.getByText('PRE-MATCH SLIP').closest('section');
+
+    fireEvent.change(screen.getByLabelText('Wager for PRE-MATCH SLIP'), { target: { value: '11' } });
+    fireEvent.change(screen.getByLabelText('Wager for LIVE SLIP'), { target: { value: '22' } });
+
+    await act(async () => {
+      fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
+    });
+
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/slip/bet', buildPlacementRequest({
+      betKind: BET_KIND.LIVE,
+      slipId: `${BET_KIND.LIVE}-slip-1`,
+      wager: 22,
+      placementAttemptId: 'placement-attempt-1',
+    })));
+    await waitFor(() => expect(within(liveSection()).getByText('Away')).toBeInTheDocument());
+    expect(within(liveSection()).getByText('This board changed before placement. Review the latest selections and try again.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Wager for LIVE SLIP')).toHaveValue(22);
+    expect(within(liveSection()).getByRole('button', { name: 'BET!' })).toBeEnabled();
+    expect(screen.getByLabelText('Wager for PRE-MATCH SLIP')).toHaveValue(11);
+    expect(within(preMatchSection()).getByRole('button', { name: 'BET!' })).toBeEnabled();
+  });
+
+  it('ignores late placement continuations after logout and a new same-user generation', async () => {
+    const lateSubmit = createDeferred();
+    const onBoardSubmitted = jest.fn();
+    const onSelectionKeysChange = jest.fn();
+    const submittedLiveBoard = createSubmittedBoard(BET_KIND.LIVE, {
+      _id: `${BET_KIND.LIVE}-slip-1`,
+      submittedEvent: {
+        wager: 22,
+      },
+    });
+
+    axios.post.mockImplementationOnce((url, payload) => {
+      if (url === '/api/slip/bet') {
+        boardsResponse = getBoardsPayload({
+          [BET_KIND.LIVE]: submittedLiveBoard,
+        });
+        betsResponse = [{ slipId: payload.slipId, status: BET_STATUS.PENDING }];
+        return lateSubmit.promise;
+      }
+
+      return Promise.resolve({ data: {} });
+    });
+
+    const { rerender } = await renderSlip({ onBoardSubmitted, onSelectionKeysChange });
+    const liveSection = () => screen.getByText('LIVE SLIP').closest('section');
+
+    fireEvent.change(screen.getByLabelText('Wager for LIVE SLIP'), { target: { value: '22' } });
+    await act(async () => {
+      fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
+      await Promise.resolve();
+    });
+
+    expect(within(liveSection()).getByRole('button', { name: 'Submitting…' })).toBeDisabled();
+
+    rerender(
+      <Slip
+        currentUser={null}
+        onBoardSubmitted={onBoardSubmitted}
+        onSelectionKeysChange={onSelectionKeysChange}
+        refreshSignal={1}
+        uiVariant="v2"
+      />,
+    );
+
+    await waitFor(() => expect(screen.getAllByText('Login and bet!').length).toBeGreaterThan(0));
+
+    boardsResponse = getBoardsPayload({
+      [BET_KIND.LIVE]: null,
+    });
+
+    rerender(
+      <Slip
+        currentUser={{ id: 'user-1' }}
+        onBoardSubmitted={onBoardSubmitted}
+        onSelectionKeysChange={onSelectionKeysChange}
+        refreshSignal={2}
+        uiVariant="v2"
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText('Build your live board')).toBeInTheDocument());
+
+    await act(async () => {
+      lateSubmit.resolve({ data: submittedLiveBoard });
+      await Promise.resolve();
+    });
+    await flushAsync();
+
+    expect(screen.getByText('Build your live board')).toBeInTheDocument();
+    expect(screen.queryByText('Awaiting live moderation and approval…')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Wager for LIVE SLIP')).not.toBeInTheDocument();
+    expect(onBoardSubmitted).not.toHaveBeenCalled();
+  });
+
   it('blocks changed wagers from reusing an unresolved placement attempt and allows retry after reverting the payload', async () => {
     const authoritativeLiveBoard = createSubmittedBoard(BET_KIND.LIVE, {
       _id: `${BET_KIND.LIVE}-slip-1`,
@@ -606,12 +771,12 @@ describe('Slip', () => {
       fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
+    })));
     await waitFor(() => expect(within(liveSection()).getByRole('button', { name: 'Awaiting review…' })).toBeDisabled());
     expect(randomUUIDMock).toHaveBeenCalledTimes(1);
   });
@@ -657,18 +822,18 @@ describe('Slip', () => {
       fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    })));
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-2',
-    }));
+    })));
     await waitFor(() => expect(within(liveSection()).getByRole('button', { name: 'Awaiting review…' })).toBeDisabled());
     expect(randomUUIDMock).toHaveBeenCalledTimes(2);
   });
@@ -714,18 +879,18 @@ describe('Slip', () => {
       fireEvent.click(within(preMatchSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(1, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: 'placement-attempt-1',
-    }));
-    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', {
+    })));
+    await waitFor(() => expect(axios.post).toHaveBeenNthCalledWith(2, '/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.PRE_MATCH,
       slipId: `${BET_KIND.PRE_MATCH}-slip-1`,
       wager: 11,
       placementAttemptId: 'placement-attempt-2',
-    }));
+    })));
     await waitFor(() => expect(within(preMatchSection()).getByRole('button', { name: 'Awaiting review…' })).toBeDisabled());
     expect(within(liveSection()).getByRole('button', { name: 'BET!' })).toBeEnabled();
     expect(randomUUIDMock).toHaveBeenCalledTimes(2);
@@ -761,12 +926,12 @@ describe('Slip', () => {
       fireEvent.click(within(liveSection()).getByRole('button', { name: 'BET!' }));
     });
 
-    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/slip/bet', {
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/slip/bet', buildPlacementRequest({
       betKind: BET_KIND.LIVE,
       slipId: `${BET_KIND.LIVE}-slip-1`,
       wager: 22,
       placementAttemptId: '00010203-0405-4607-8809-0a0b0c0d0e0f',
-    }));
+    })));
     expect(fallbackCrypto.getRandomValues).toHaveBeenCalledTimes(1);
     expect(randomUUIDMock).not.toHaveBeenCalled();
   });
