@@ -7,7 +7,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
     const isV2 = uiVariant === 'v2';
 
     const links = [
-       currentUser && { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg' },
+       currentUser?.role === 'ADMIN' && { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg' },
        !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
        !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg', kind: 'login' },
        currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },

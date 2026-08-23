@@ -2,6 +2,7 @@ import { ConsumeMessage } from "amqplib";
 import {
   BettingStatus,
   EventPhase,
+  EventVisibility,
   ILiveEventUpdateEvent,
   LiveIncidentType,
   LiveMarketStatus,
@@ -254,6 +255,44 @@ it("delivers snapshots to both pod-local fanout listeners", async () => {
   expect(secondSubscriber).toHaveBeenCalledTimes(1);
   expect(firstSubscriber.mock.calls[0][0].live.sequence).toEqual(2);
   expect(secondSubscriber.mock.calls[0][0].live.sequence).toEqual(2);
+});
+
+it("refreshes authoritative visibility after a fail-dark local snapshot", async () => {
+  const projectionListener = new LiveEventProjectionListener(
+    messengerWrapper.connection
+  );
+  await projectionListener.init();
+  await projectionListener.onMessage(buildLiveUpdate(1), buildMessage());
+
+  const hub = new LiveEventHub();
+  const localListener = new LiveEventUpdateListener(messengerWrapper.connection, {
+    hub,
+    podId: "pod-visibility",
+  });
+  await localListener.init();
+
+  const subscriber = jest.fn();
+  hub.subscribe(subscriber);
+  await localListener.onMessage(buildLiveUpdate(1), buildMessage());
+  expect(subscriber.mock.calls[0][0].visibility).toEqual(
+    EventVisibility.OFFLINE
+  );
+
+  await Event.updateOne(
+    { eventId: "live-event" },
+    {
+      $set: {
+        visibility: EventVisibility.ONLINE,
+        visibilityInitialized: true,
+      },
+    }
+  );
+  await localListener.onMessage(buildLiveUpdate(2), buildMessage());
+
+  expect(subscriber).toHaveBeenCalledTimes(2);
+  expect(subscriber.mock.calls[1][0].visibility).toEqual(
+    EventVisibility.ONLINE
+  );
 });
 
 it("does not duplicate local SSE emission for durable, duplicate, or out-of-order deliveries", async () => {

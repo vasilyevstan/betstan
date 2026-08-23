@@ -1,5 +1,6 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
+import { setAdminSessionVerifierForTests } from "../middleware/RequireAdmin";
 
 jest.mock("@betstan/common", () => {
   const actual = jest.requireActual("@betstan/common");
@@ -55,6 +56,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   jest.clearAllMocks();
+  setAdminSessionVerifierForTests(async () => 204);
   const collections = await mongoose.connection.db.collections();
 
   for (let collection of collections) {

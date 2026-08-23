@@ -68,6 +68,9 @@ const startUp = async () => {
   if (!process.env.MONGO_URI) {
     throw new Error("Missing MONGO_URI variable");
   }
+  if (!process.env.AUTH_SERVICE_URL) {
+    throw new Error("Missing AUTH_SERVICE_URL variable");
+  }
 
   try {
     console.log("Connecting to: ", process.env.RABBITMQ_URI);

@@ -1,6 +1,6 @@
 import express, { Request, Response } from "express";
 import { body, oneOf } from "express-validator";
-import { User } from "../model/User";
+import { User, UserRole } from "../model/User";
 import jwt from "jsonwebtoken";
 import { validateRequest, BadRequestError } from "@betstan/common";
 import {
@@ -62,6 +62,7 @@ router.post(
         email: identifier,
         identifierNormalized,
         password,
+        role: UserRole.USER,
         timestamp: new Date().toISOString(),
         lastLogin: new Date().toISOString(),
       });
@@ -70,9 +71,11 @@ router.post(
         {
           id: user.id,
           email: user.email,
+          role: user.role,
           timestamp: new Date(),
         },
-        process.env.JWT_KEY!
+        process.env.JWT_KEY!,
+        { expiresIn: "12h" }
       );
 
       req.session = {

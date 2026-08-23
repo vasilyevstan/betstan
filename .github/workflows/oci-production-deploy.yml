@@ -403,6 +403,12 @@ jobs:
             printf 'data_run_id=%s\n' "$DATA_RUN_ID"
             printf 'data_run_attempt=1\n'
             printf 'data_evidence_sha256=%s\n' "$(sha256sum artifacts/data/SHA256SUMS | awk '{print $1}')"
+            printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
+            printf 'infrastructure_run_attempt=1\n'
+            printf 'infrastructure_provenance_sha256=%s\n' "$(
+              sha256sum artifacts/infrastructure/provenance.env |
+                awk '{print $1}'
+            )"
           } >> artifacts/oci-deploy/provenance.txt
           cp artifacts/data/schema.env artifacts/oci-deploy/live-schema.env
 

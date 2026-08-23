@@ -34,6 +34,7 @@ const formatQuoteValidity = (value) => {
 };
 
 const buildCardClass = (uiVariant) => (uiVariant === 'v3' ? 'col-12' : 'col-12 col-md-6 col-xl-4');
+const EMPTY_EVENT_IDS = new Set();
 
 const FeedStatus = ({ feedState }) => {
   if (feedState === 'open') {
@@ -216,12 +217,24 @@ const EventSection = ({ children, title, uiVariant }) => <section className={`ev
   <div className="row g-3 justify-content-center">{children}</div>
 </section>;
 
-const HandleEventList = ({ onSelectionPlaced, selectedSelectionKeys, uiVariant }) => {
-  const { events, feedState, isLoading } = useLiveEvents();
+const HandleEventList = ({
+  onSelectionPlaced,
+  selectedSelectionKeys,
+  uiVariant,
+  visibleOfflineEventIds = EMPTY_EVENT_IDS,
+  onScopedAccessFailure,
+}) => {
+  const { events, feedState, isLoading } = useLiveEvents(
+    visibleOfflineEventIds,
+    onScopedAccessFailure,
+  );
 
   const eventItems = useMemo(() => sortEvents(
-    (events ?? []).filter((event) => event.visibility !== 'OFFLINE'),
-  ), [events]);
+    (events ?? []).filter((event) => (
+      event.visibility !== 'OFFLINE'
+      || visibleOfflineEventIds.has(event.eventId)
+    )),
+  ), [events, visibleOfflineEventIds]);
 
   const liveEvents = eventItems.filter(isLiveEvent);
   const preMatchEvents = eventItems.filter((event) => !isLiveEvent(event));

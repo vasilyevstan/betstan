@@ -25,7 +25,17 @@ const clearScheduledInterval = (taskRef) => {
 
 const normalizeEventList = (payload) => (Array.isArray(payload) ? payload : []);
 
-const useLiveEvents = () => {
+const buildAcceptanceQuery = (visibleOfflineEventIds) => {
+  const eventIds = [...(visibleOfflineEventIds ?? [])]
+    .filter((eventId) => /^[a-f0-9]{24}$/.test(eventId))
+    .slice(0, 10)
+    .sort();
+  return eventIds.length > 0
+    ? `?acceptanceEventIds=${encodeURIComponent(eventIds.join(','))}`
+    : '';
+};
+
+const useLiveEvents = (visibleOfflineEventIds, onScopedAccessFailure) => {
   const [events, setEvents] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [feedState, setFeedState] = useState('connecting');
@@ -39,6 +49,21 @@ const useLiveEvents = () => {
   const hasConnectedRef = useRef(false);
   const restRequestIdRef = useRef(0);
   const lastAppliedRestRequestIdRef = useRef(0);
+  const scopedAccessGenerationRef = useRef(0);
+  const acceptanceQuery = buildAcceptanceQuery(visibleOfflineEventIds);
+  const eventApiUrl = `/api/event${acceptanceQuery}`;
+  const eventStreamUrl = `/api/event/stream${acceptanceQuery}`;
+  const revokeScopedEvents = useCallback(() => {
+    if (!acceptanceQuery) {
+      return;
+    }
+
+    scopedAccessGenerationRef.current += 1;
+    setEvents((currentEvents) => currentEvents.filter(
+      (event) => event.visibility !== 'OFFLINE',
+    ));
+    onScopedAccessFailure?.();
+  }, [acceptanceQuery, onScopedAccessFailure]);
 
   const closeSource = useCallback(() => {
     if (eventSourceRef.current) {
@@ -49,12 +74,17 @@ const useLiveEvents = () => {
 
   const fetchAuthoritativeEvents = useCallback(async () => {
     const requestId = restRequestIdRef.current + 1;
+    const scopedAccessGeneration = scopedAccessGenerationRef.current;
     restRequestIdRef.current = requestId;
 
     try {
-      const response = await axios.get('/api/event');
+      const response = await axios.get(eventApiUrl);
 
-      if (!mountedRef.current || requestId < lastAppliedRestRequestIdRef.current) {
+      if (
+        !mountedRef.current
+        || requestId < lastAppliedRestRequestIdRef.current
+        || scopedAccessGeneration !== scopedAccessGenerationRef.current
+      ) {
         return;
       }
 
@@ -66,21 +96,22 @@ const useLiveEvents = () => {
       setIsLoading(false);
     } catch (error) {
       if (mountedRef.current) {
+        revokeScopedEvents();
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [eventApiUrl, revokeScopedEvents]);
 
   const stopPollingFallback = useCallback(() => {
     clearScheduledInterval(pollTimerRef);
   }, []);
 
   const startPollingFallback = useCallback(() => {
+    setFeedState('polling');
     if (pollTimerRef.current) {
       return;
     }
 
-    setFeedState('polling');
     pollTimerRef.current = setInterval(() => {
       fetchAuthoritativeEvents();
     }, POLL_FALLBACK_MS);
@@ -111,10 +142,14 @@ const useLiveEvents = () => {
 
     setFeedState(isReconnect ? 'reconnecting' : 'connecting');
 
-    const source = new EventSource('/api/event/stream');
+    const source = new EventSource(eventStreamUrl);
     eventSourceRef.current = source;
 
     source.addEventListener('snapshot', (message) => {
+      if (eventSourceRef.current !== source || !mountedRef.current) {
+        return;
+      }
+
       try {
         const snapshot = JSON.parse(message.data);
         setEvents((currentEvents) => {
@@ -136,7 +171,6 @@ const useLiveEvents = () => {
 
       reconnectAttemptsRef.current = 0;
       clearScheduledTask(reconnectTimerRef);
-      stopPollingFallback();
       setFeedState('open');
       setIsLoading(false);
 
@@ -152,7 +186,9 @@ const useLiveEvents = () => {
         return;
       }
 
+      revokeScopedEvents();
       closeSource();
+      fetchAuthoritativeEvents();
       startPollingFallback();
 
       if (reconnectTimerRef.current) {
@@ -171,11 +207,23 @@ const useLiveEvents = () => {
         connect(true);
       }, reconnectDelay);
     };
-  }, [closeSource, scheduleReconcile, startPollingFallback, stopPollingFallback]);
+  }, [
+    closeSource,
+    eventStreamUrl,
+    fetchAuthoritativeEvents,
+    revokeScopedEvents,
+    scheduleReconcile,
+    startPollingFallback,
+  ]);
 
   useEffect(() => {
     mountedRef.current = true;
     fetchAuthoritativeEvents();
+    if (!pollTimerRef.current) {
+      pollTimerRef.current = setInterval(() => {
+        fetchAuthoritativeEvents();
+      }, POLL_FALLBACK_MS);
+    }
     connect(false);
 
     return () => {
@@ -199,4 +247,5 @@ export {
   MAX_RECONNECT_DELAY_MS,
   POLL_FALLBACK_MS,
   RECONCILE_DEBOUNCE_MS,
+  buildAcceptanceQuery,
 };

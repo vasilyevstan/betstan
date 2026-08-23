@@ -218,6 +218,19 @@ const eventSchema = new Schema({
     enum: Object.values(EventVisibility),
     default: EventVisibility.ONLINE,
   },
+  visibilityInitialized: {
+    type: Boolean,
+    required: false,
+  },
+  eventMetadataInitialized: {
+    type: Boolean,
+    required: false,
+  },
+  pendingVisibility: {
+    type: String,
+    required: false,
+    enum: Object.values(EventVisibility),
+  },
   products: [
     new Schema({
       id: {

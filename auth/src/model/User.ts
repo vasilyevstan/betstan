@@ -1,6 +1,11 @@
 import { Schema, model } from "mongoose";
 import { Password } from "../service/Password";
 
+enum UserRole {
+  USER = "USER",
+  ADMIN = "ADMIN",
+}
+
 const userSchema = new Schema({
   email: {
     type: String,
@@ -13,6 +18,12 @@ const userSchema = new Schema({
   password: {
     type: String,
     required: true,
+  },
+  role: {
+    type: String,
+    enum: Object.values(UserRole),
+    required: true,
+    default: UserRole.USER,
   },
   timestamp: {
     type: String,
@@ -39,6 +50,7 @@ userSchema.set("toJSON", {
     return {
       _id: returnedObject._id,
       email: returnedObject.email,
+      role: returnedObject.role,
       timestamp: returnedObject.timestamp,
       lastLogin: returnedObject.lastLogin,
     };
@@ -57,4 +69,4 @@ userSchema.pre("save", async function (done) {
 
 const User = model("User", userSchema);
 
-export { User };
+export { User, UserRole };

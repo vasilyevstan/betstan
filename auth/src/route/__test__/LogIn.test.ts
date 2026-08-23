@@ -1,12 +1,25 @@
 import request from "supertest";
+import jwt from "jsonwebtoken";
 import { app } from "../../app";
-import { User } from "../../model/User";
+import { User, UserRole } from "../../model/User";
 
 const createUser = async (identifier = "test@test.com") => {
   await request(app)
     .post("/api/auth/new")
     .send({ email: identifier, password: "password" })
     .expect(201);
+};
+
+const sessionPayload = (setCookie: string[]) => {
+  const encodedSession = /^session=([^;]+)/.exec(setCookie[0])?.[1];
+  if (!encodedSession) {
+    throw new Error("Session cookie was not set");
+  }
+
+  const session = JSON.parse(
+    Buffer.from(decodeURIComponent(encodedSession), "base64").toString("utf8")
+  );
+  return jwt.verify(session.jwt, process.env.JWT_KEY!) as jwt.JwtPayload;
 };
 
 it("logs in with a non-email username regardless of case", async () => {
@@ -20,10 +33,31 @@ it("logs in with a non-email username regardless of case", async () => {
   expect(response.body).toEqual({
     id: expect.any(String),
     email: "Stan_1",
+    role: "USER",
   });
   expect(response.body.password).toBeUndefined();
   expect(response.body.identifierNormalized).toBeUndefined();
   expect(response.get("Set-Cookie")).toBeDefined();
+  const payload = sessionPayload(response.get("Set-Cookie")!);
+  expect(payload.role).toEqual("USER");
+  expect(Number(payload.exp) - Number(payload.iat)).toEqual(12 * 60 * 60);
+});
+
+it("signs the persisted administrator role after login", async () => {
+  const user = await User.create({
+    email: "admin-user",
+    identifierNormalized: "admin-user",
+    password: "password",
+    role: UserRole.ADMIN,
+  });
+
+  const response = await request(app)
+    .post("/api/auth/login")
+    .send({ email: user.email, password: "password" })
+    .expect(200);
+
+  expect(response.body.role).toEqual("ADMIN");
+  expect(sessionPayload(response.get("Set-Cookie")!).role).toEqual("ADMIN");
 });
 
 it("continues to log in a legacy email record", async () => {
@@ -38,6 +72,28 @@ it("continues to log in a legacy email record", async () => {
     .post("/api/auth/login")
     .send({ email: "Legacy@Test.com", password: "password" })
     .expect(200);
+});
+
+it("normalizes a legacy user without a role to USER", async () => {
+  const user = await User.create({
+    email: "legacy-role-user",
+    identifierNormalized: "legacy-role-user",
+    password: "password",
+  });
+  await User.collection.updateOne(
+    { _id: user._id },
+    { $unset: { role: "" } }
+  );
+
+  const response = await request(app)
+    .post("/api/auth/login")
+    .send({ email: "legacy-role-user", password: "password" })
+    .expect(200);
+
+  expect(response.body.role).toEqual("USER");
+  expect((await User.collection.findOne({ _id: user._id }))?.role).toEqual(
+    "USER"
+  );
 });
 
 it.each(["Pelé@example.com", '"quoted local"@example.com'])(

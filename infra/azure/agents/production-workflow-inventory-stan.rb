@@ -12,6 +12,8 @@ AZURE_WORKFLOWS = %w[
 OCI_WORKFLOWS = %w[
   oci-capacity-acquire
   oci-infrastructure
+  oci-live-betting-activate
+  oci-live-betting-disable
   oci-live-data-rollout
   oci-migrate
   oci-migration-recovery
@@ -24,6 +26,8 @@ PROTECTED_ENVIRONMENTS = {
   "production-rollback" => "production-emergency",
   "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
+  "oci-live-betting-activate" => "oci-production",
+  "oci-live-betting-disable" => "oci-production",
   "oci-live-data-rollout" => "oci-migration",
   "oci-migrate" => "oci-migration",
   "oci-migration-recovery" => "azure-migration-recovery",
@@ -45,6 +49,19 @@ ROLLBACK_ACTION_PINS = {
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
   },
   "oci-live-data-rollout" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
+  },
+  "oci-live-betting-activate" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
+  },
+  "oci-live-betting-disable" => {
     "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
     "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -739,6 +756,158 @@ def validate_live_data_rollout_workflow!(file, document, content)
   )
 end
 
+def validate_live_betting_activation_workflow!(file, document, content)
+  name = "oci-live-betting-activate"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      approved_sha
+      build_run_id
+      infrastructure_run_id
+      deployment_run_id
+      confirmation
+    ]
+  )
+  validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
+  validate_expected_action_pins!(name, content)
+
+  {
+    "ACTIVATE OCI LIVE BETTING" => "exact activation confirmation",
+    "oci-production-build.yml" => "exact build provenance",
+    "oci-infrastructure.yml" => "exact infrastructure provenance",
+    "oci-production-deploy.yml" => "exact dark deployment provenance",
+    "oci-live-readiness-" => "dark readiness evidence",
+    "live-betting-control-stan.sh" => "reviewed flag operator",
+    "ACTION: activate" => "explicit activation action",
+    "LIVE_ACTIVATION_LEASE_SECONDS" => "bounded activation lease",
+    "activation_state=leased" => "leased pre-commit provenance",
+    "COMMIT OCI LIVE BETTING" => "exact permanent activation confirmation",
+    "ACTION: commit" => "post-acceptance activation commit",
+    "ACTION: disable" => "automatic failure disable action",
+    "steps.accepted.outcome != 'success'" => "failure-triggered disable gate",
+    "steps.evidence_upload.outcome != 'success'" => "evidence-failure disable gate",
+    "steps.commit_preflight.outcome != 'success'" => "commit preflight failure gate",
+    "steps.commit.outcome != 'success'" => "commit failure disable gate",
+    "runtime_fingerprint" => "deployment-to-infrastructure runtime binding",
+    "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
+    "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
+    "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
+    "role:set" => "protected disposable administrator operator",
+    "playwright-live-acceptance.config.js" => "production browser acceptance",
+    "service-ops-stan.sh" => "sanitized runtime log inspection"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+
+  require_content(
+    content,
+    /group:\s*oci-control-plane/,
+    "#{name} must serialize with the OCI control plane"
+  )
+  require_content(
+    content,
+    /cancel-in-progress:\s*false/,
+    "#{name} must never cancel an in-flight activation"
+  )
+  if content.scan("revalidate-live-activation-stan.sh").length < 3
+    fail_inventory(
+      "#{name} must revalidate before mutation, acceptance, and permanent activation"
+    )
+  end
+
+  evidence_position = content.index("- name: Upload protected activation evidence")
+  commit_revalidation_position =
+    content.index("- name: Revalidate release head before permanent activation")
+  commit_position = content.index("- name: Commit accepted live activation")
+  unless evidence_position &&
+      commit_revalidation_position &&
+      commit_position &&
+      evidence_position < commit_revalidation_position &&
+      commit_revalidation_position < commit_position
+    fail_inventory(
+      "#{name} must upload evidence and revalidate before permanent activation"
+    )
+  end
+end
+
+def validate_live_betting_disable_workflow!(file, document, content)
+  name = "oci-live-betting-disable"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[approved_sha deployment_run_id infrastructure_run_id confirmation]
+  )
+  validate_exact_permissions!(name, document, { "actions" => "read", "contents" => "read" })
+  validate_expected_action_pins!(name, content)
+
+  {
+    "DISABLE OCI LIVE BETTING" => "exact disable confirmation",
+    "oci-production-deploy.yml" => "exact deployment provenance",
+    "oci-infrastructure.yml" => "exact infrastructure provenance",
+    "authorize-github-runner.sh authorize" => "exact runner authorization",
+    "revoke-github-runner.sh" => "always-run runner revocation",
+    "configure-k3s-access.sh open" => "k3s runner authorization",
+    "configure-k3s-access.sh cleanup" => "always-run k3s access cleanup",
+    "runtime_fingerprint" => "deployment-to-infrastructure runtime binding",
+    "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
+    "merge-base --is-ancestor" => "deployed-master ancestry validation",
+    "live-betting-control-stan.sh" => "reviewed flag operator",
+    "ACTION: disable" => "explicit disable action",
+    "MODE=rollback-drain" => "live-aware drain gate",
+    "live betting did not drain within 20 minutes" => "bounded drain timeout",
+    "steps.disable.outcome != 'success'" => "workflow-level dark reassertion",
+    "service-ops-stan.sh" => "sanitized runtime diagnostics",
+    "oci-live-betting-disable-" => "attempt-bound disable evidence"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+
+  require_content(
+    content,
+    /group:\s*oci-control-plane/,
+    "#{name} must serialize with the OCI control plane"
+  )
+  require_content(
+    content,
+    /cancel-in-progress:\s*false/,
+    "#{name} must never cancel an in-flight disable or drain"
+  )
+end
+
+def validate_oci_production_deploy_binding!(name, document, content)
+  validate_manual_oci_workflow!(name, document, content)
+  {
+    "infrastructure_run_id=%s" => "infrastructure run binding",
+    "infrastructure_run_attempt=1" => "first-attempt infrastructure binding",
+    "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+end
+
 def validate_oci_workflow!(name, file, document, content)
   expected_file = "#{name}.yml"
   unless File.basename(file) == expected_file
@@ -806,6 +975,12 @@ def validate_oci_workflow!(name, file, document, content)
     validate_migration_recovery_workflow!(name, document, content)
   elsif name == "oci-live-data-rollout"
     validate_live_data_rollout_workflow!(file, document, content)
+  elsif name == "oci-live-betting-activate"
+    validate_live_betting_activation_workflow!(file, document, content)
+  elsif name == "oci-live-betting-disable"
+    validate_live_betting_disable_workflow!(file, document, content)
+  elsif name == "oci-production-deploy"
+    validate_oci_production_deploy_binding!(name, document, content)
   else
     validate_manual_oci_workflow!(name, document, content)
   end

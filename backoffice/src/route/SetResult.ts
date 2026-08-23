@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { EventStatus, messengerWrapper } from "@betstan/common";
+import { requireAdmin } from "../middleware/RequireAdmin";
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ const getPublisher = async (): Promise<ResultSetPublisher> => {
   return _publisher;
 };
 
-router.post("/api/backoffice/result", async (req: Request, res: Response) => {
+router.post("/api/backoffice/result", requireAdmin, async (req: Request, res: Response) => {
   let { eventId, homeResult, awayResult } = req.body;
 
   const event = await Event.findOne({ eventId: eventId });

@@ -34,6 +34,19 @@ Read:
   deployment specialists were invoked when their triggers apply.
 - Verify historical-data, mixed-version, feature-flag, rollout, rollback, and
   exact-SHA evidence is complete.
+- Verify production acceptance fixtures are offline and excluded server-side
+  from ordinary REST/SSE, with persisted-administrator checks on scoped reads
+  and offline selections.
+- Verify anonymous privileged catalog reads disclose no fixture metadata,
+  live-update-first ordering fails dark without coupling metadata to visibility,
+  and clients evict hidden records after authorization loss or visibility
+  changes.
+- Verify visibility-before-row ordering persists a pending decision on an
+  offline placeholder and applies it only after event metadata is initialized.
+- Verify temporary activation has an unexpired worker-enforced lease and that
+  permanent commit occurs only after acceptance evidence upload plus final
+  current-master/provenance revalidation. Require disable/failure paths to
+  clear both flag and lease.
 - Run only existing read-only/local validation needed to confirm the evidence.
 - Treat stale, skipped, neutral, unrelated, or branch-name-only CI as missing.
 

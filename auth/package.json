@@ -6,6 +6,7 @@
   "scripts": {
     "start": "ts-node-dev src/index",
     "dev": "ts-node-dev src/index",
+    "role:set": "ts-node src/scripts/SetUserRole.ts",
     "test": "jest --watchAll --no-cache",
     "test:ci": "jest"
   },

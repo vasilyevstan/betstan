@@ -104,6 +104,12 @@ Required invariants:
 - Every prior blocking finding is resolved with evidence before approval.
 - `from_agent` never appears in `approvals`.
 - Feature flags remain dark until the approved activation gate.
+- Privileged access is revalidated against persisted auth state; JWT role
+  claims and client-side filtering are not authorization boundaries.
+- Synthetic acceptance data is offline and server-scoped to exact IDs.
+- A production activation remains leased until acceptance evidence and final
+  provenance revalidation succeed; failure and disable clear both flag and
+  lease.
 
 ## Status vocabulary
 

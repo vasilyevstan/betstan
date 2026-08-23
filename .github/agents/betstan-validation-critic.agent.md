@@ -28,6 +28,11 @@ Read:
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
 - Authorization, ownership, input trust, and silent-failure behavior.
+- Long-lived stream and synthetic-fixture isolation after stale-role,
+  demotion, unavailable-auth, malformed-scope, and ordinary-public requests.
+- Fail-dark control behavior under cancellation, hard process termination,
+  expired leases, ambiguous writes, stale master, and mismatched run/SHA
+  ownership.
 - Missing negative, boundary, integration, and regression tests.
 - Unrelated scope or path-ownership violations.
 

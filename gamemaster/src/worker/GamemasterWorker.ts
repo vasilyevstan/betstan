@@ -22,6 +22,7 @@ import {
   SimulationTransition,
   simulateMatch,
 } from "../simulation";
+import { createLiveSeed, isPrivateLiveSeed } from "../simulation/liveSeed";
 
 const DEFAULT_WORK_CADENCE_MS = 1000;
 const DEFAULT_LEASE_DURATION_MS = 30000;
@@ -44,8 +45,9 @@ interface GamemasterWorkerOptions {
   clock?: WorkerClock;
   cadenceMs?: number;
   leaseDurationMs?: number;
-  liveKickoffsEnabled?: () => boolean;
+  liveKickoffsEnabled?: (now: Date) => boolean;
   simulate?: typeof simulateMatch;
+  createLiveSeed?: () => string;
 }
 
 const systemClock: WorkerClock = {
@@ -54,17 +56,30 @@ const systemClock: WorkerClock = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
-  if (value === undefined) {
-    return defaultValue;
+export function liveKickoffsAllowedAt(
+  now: Date,
+  enabledValue = process.env.LIVE_KICKOFFS_ENABLED,
+  leaseUntilEpochValue = process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH
+): boolean {
+  if (enabledValue?.trim().toLowerCase() !== "true") {
+    return false;
   }
 
-  const normalised = value.trim().toLowerCase();
-  if (!normalised) {
-    return defaultValue;
+  if (leaseUntilEpochValue === undefined) {
+    return true;
   }
 
-  return !["0", "false", "no", "off"].includes(normalised);
+  const normalisedLease = leaseUntilEpochValue.trim();
+  if (!/^[1-9][0-9]*$/.test(normalisedLease)) {
+    return false;
+  }
+
+  const leaseUntilEpoch = Number(normalisedLease);
+  if (!Number.isSafeInteger(leaseUntilEpoch)) {
+    return false;
+  }
+
+  return now.getTime() < leaseUntilEpoch * 1000;
 }
 
 function asDate(value: Date | string | null | undefined): Date {
@@ -180,8 +195,9 @@ export class GamemasterWorker {
   private readonly clock: WorkerClock;
   private readonly cadenceMs: number;
   private readonly leaseDurationMs: number;
-  private readonly liveKickoffsEnabled: () => boolean;
+  private readonly liveKickoffsEnabled: (now: Date) => boolean;
   private readonly simulate: typeof simulateMatch;
+  private readonly createLiveSeed: () => string;
   private initPromise?: Promise<void>;
   private scheduledTick?: TimerHandle;
   private running = false;
@@ -193,8 +209,9 @@ export class GamemasterWorker {
     this.leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     this.liveKickoffsEnabled =
       options.liveKickoffsEnabled
-      ?? (() => parseBoolean(process.env.LIVE_KICKOFFS_ENABLED, false));
+      ?? ((now: Date) => liveKickoffsAllowedAt(now));
     this.simulate = options.simulate ?? simulateMatch;
+    this.createLiveSeed = options.createLiveSeed ?? createLiveSeed;
   }
 
   async init() {
@@ -335,7 +352,7 @@ export class GamemasterWorker {
         { liveNextTransitionAt: 1, time: 1 },
         now
       )
-      ?? (this.liveKickoffsEnabled()
+      ?? (this.liveKickoffsEnabled(now)
         ? await this.claimEvent(
           {
             status: EventStatus.NO_RESULT,
@@ -452,15 +469,18 @@ export class GamemasterWorker {
     }
 
     const kickoffAt = asDate(event.time);
-    if (kickoffAt.getTime() > this.clock.now().getTime()) {
+    const now = this.clock.now();
+    if (kickoffAt.getTime() > now.getTime()) {
       return event;
     }
 
-    if (!this.liveKickoffsEnabled()) {
+    if (!this.liveKickoffsEnabled(now)) {
       return event;
     }
 
-    const seed = String(event.liveSeed ?? event.eventId);
+    const seed = isPrivateLiveSeed(event.liveSeed)
+      ? event.liveSeed
+      : this.createLiveSeed();
     const simulation = this.simulate({
       eventId: event.eventId,
       seed,
@@ -484,7 +504,8 @@ export class GamemasterWorker {
             kickoffAt,
             simulation,
             persistencePlan.confirmedSequence,
-            persistencePlan.liveEndedAt
+            persistencePlan.liveEndedAt,
+            seed
           ),
         },
         { new: true }
@@ -531,7 +552,8 @@ export class GamemasterWorker {
     kickoffAt: Date,
     simulation: SimulationResult,
     confirmedSequence = 0,
-    liveEndedAtOverride?: Date
+    liveEndedAtOverride?: Date,
+    privateSeed = String(simulation.timeline.seed)
   ): Record<string, unknown> {
     const confirmedTransition =
       confirmedSequence > 0
@@ -540,7 +562,7 @@ export class GamemasterWorker {
 
     return {
       phase: confirmedTransition?.phase ?? EventPhase.PRE_MATCH,
-      liveSeed: String(simulation.timeline.seed),
+      liveSeed: privateSeed,
       liveEngineVersion: simulation.engineVersion,
       liveStartedAt: kickoffAt,
       liveEndedAt:
