@@ -544,7 +544,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
-      - name: Write activation provenance
+      - name: Write accepted activation lease evidence
         id: accepted
         run: |
           set -euo pipefail
@@ -575,10 +575,30 @@ jobs:
             "live_kickoffs_enabled=true" \
             "activation_state=leased" \
             "activation_lease_until_epoch=$activation_lease_until_epoch" \
-            > artifacts/live-control/provenance.env
+            > artifacts/live-control/accepted.env
+
+      - name: Upload protected accepted activation evidence
+        id: accepted_evidence_upload
+        if: >-
+          always() &&
+          !cancelled() &&
+          steps.accepted.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-activation-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/live-control/acceptance
+            artifacts/live-control/activate
+            artifacts/live-control/accepted.env
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Disable new kickoffs after any failed activation gate
-        if: always() && steps.accepted.outcome != 'success'
+        id: failure_disable
+        if: >-
+          always() &&
+          (steps.accepted.outcome != 'success' ||
+            steps.accepted_evidence_upload.outcome != 'success')
         env:
           ACTION: disable
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
@@ -589,7 +609,7 @@ jobs:
         run: ./infra/oci/scripts/live-betting-control-stan.sh
 
       - name: Capture sanitized failure diagnostics
-        if: failure()
+        if: failure() || cancelled()
         env:
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           SINCE: 20m
@@ -599,22 +619,13 @@ jobs:
           ./infra/oci/agents/node-logs-stan.sh \
             > artifacts/live-control/failure-node-logs.txt 2>&1 || true
 
-      - name: Upload protected activation evidence
-        id: evidence_upload
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: oci-live-activation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/live-control
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Revalidate release head before permanent activation
         id: commit_preflight
         if: >-
           always() &&
+          !cancelled() &&
           steps.accepted.outcome == 'success' &&
-          steps.evidence_upload.outcome == 'success'
+          steps.accepted_evidence_upload.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -624,6 +635,7 @@ jobs:
         id: commit
         if: >-
           always() &&
+          !cancelled() &&
           steps.commit_preflight.outcome == 'success'
         env:
           ACTION: commit
@@ -633,12 +645,12 @@ jobs:
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/commit
         run: ./infra/oci/scripts/live-betting-control-stan.sh
-
       - name: Enforce dark mode unless activation committed
+        id: final_disable
         if: >-
           always() &&
           (steps.accepted.outcome != 'success' ||
-            steps.evidence_upload.outcome != 'success' ||
+            steps.accepted_evidence_upload.outcome != 'success' ||
             steps.commit_preflight.outcome != 'success' ||
             steps.commit.outcome != 'success')
         env:
@@ -651,6 +663,7 @@ jobs:
         run: ./infra/oci/scripts/live-betting-control-stan.sh
 
       - name: Revoke exact OKE runner rule
+        id: revoke_runner
         if: always() && env.OCI_RUNTIME_MODE == 'oke'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -665,6 +678,7 @@ jobs:
           fi
 
       - name: Close ephemeral OCI Bastion access
+        id: close_bastion
         if: always() && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -675,6 +689,177 @@ jobs:
           SESSION_STATE_FILE: ${{ runner.temp }}/live-control-k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-live-control
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Write final activation provenance
+        if: always()
+        env:
+          WORKFLOW_FAILED: ${{ failure() }}
+          WORKFLOW_CANCELLED: ${{ cancelled() }}
+          ACCEPTED_OUTCOME: ${{ steps.accepted.outcome }}
+          ACCEPTED_EVIDENCE_UPLOAD_OUTCOME: ${{ steps.accepted_evidence_upload.outcome }}
+          COMMIT_PREFLIGHT_OUTCOME: ${{ steps.commit_preflight.outcome }}
+          COMMIT_OUTCOME: ${{ steps.commit.outcome }}
+          FAILURE_DISABLE_OUTCOME: ${{ steps.failure_disable.outcome }}
+          FINAL_DISABLE_OUTCOME: ${{ steps.final_disable.outcome }}
+          REVOKE_RUNNER_OUTCOME: ${{ steps.revoke_runner.outcome }}
+          CLOSE_BASTION_OUTCOME: ${{ steps.close_bastion.outcome }}
+        run: |
+          set -euo pipefail
+
+          sha256_or_none() {
+            local file="$1"
+            if [ -f "$file" ]; then
+              sha256sum "$file" | awk '{print $1}'
+            else
+              printf 'none\n'
+            fi
+          }
+
+          env_value() {
+            local key="$1"
+            local file="$2"
+            awk -F= -v key="$key" '$1 == key {print $2}' "$file"
+          }
+
+          workflow_result=success
+          if [ "$WORKFLOW_CANCELLED" = "true" ]; then
+            workflow_result=cancelled
+          elif [ "$WORKFLOW_FAILED" = "true" ]; then
+            workflow_result=failure
+          fi
+
+          acceptance_sha256="$(
+            sha256_or_none artifacts/live-control/acceptance/evidence.json
+          )"
+          activate_control_sha256="$(
+            sha256_or_none artifacts/live-control/activate/control.env
+          )"
+          accepted_sha256="$(
+            sha256_or_none artifacts/live-control/accepted.env
+          )"
+          commit_control_sha256="$(
+            sha256_or_none artifacts/live-control/commit/control.env
+          )"
+          failure_disable_sha256="$(
+            sha256_or_none artifacts/live-control/failure-disable/control.env
+          )"
+          final_disable_sha256="$(
+            sha256_or_none artifacts/live-control/final-failure-disable/control.env
+          )"
+
+          activation_state=unknown
+          workflow_phase=activation-incomplete
+          post_commit_status=not-applicable
+          live_kickoffs_enabled=unknown
+          activation_lease_until_epoch=unknown
+          final_control_file=none
+          final_control_sha256=none
+
+          if [ "$COMMIT_OUTCOME" = "success" ]; then
+            final_control_file=artifacts/live-control/commit/control.env
+            [ -f "$final_control_file" ]
+            final_control_sha256="$commit_control_sha256"
+            activation_state=committed
+            workflow_phase=post-commit
+            live_kickoffs_enabled="$(
+              env_value after_flag "$final_control_file"
+            )"
+            activation_lease_until_epoch="$(
+              env_value after_lease_until_epoch "$final_control_file"
+            )"
+            if [ "$WORKFLOW_CANCELLED" = "true" ]; then
+              post_commit_status=cancelled
+            elif [ "$WORKFLOW_FAILED" = "true" ]; then
+              post_commit_status=failure
+            else
+              post_commit_status=success
+            fi
+          elif [ -f artifacts/live-control/final-failure-disable/control.env ]; then
+            final_control_file=artifacts/live-control/final-failure-disable/control.env
+            final_control_sha256="$final_disable_sha256"
+            activation_state=dark
+            workflow_phase=pre-commit-fallback
+            live_kickoffs_enabled="$(
+              env_value after_flag "$final_control_file"
+            )"
+            activation_lease_until_epoch="$(
+              env_value after_lease_until_epoch "$final_control_file"
+            )"
+          elif [ -f artifacts/live-control/failure-disable/control.env ]; then
+            final_control_file=artifacts/live-control/failure-disable/control.env
+            final_control_sha256="$failure_disable_sha256"
+            activation_state=dark
+            workflow_phase=acceptance-fallback
+            live_kickoffs_enabled="$(
+              env_value after_flag "$final_control_file"
+            )"
+            activation_lease_until_epoch="$(
+              env_value after_lease_until_epoch "$final_control_file"
+            )"
+          elif [ -f artifacts/live-control/accepted.env ]; then
+            final_control_file=artifacts/live-control/accepted.env
+            final_control_sha256="$accepted_sha256"
+            activation_state=leased
+            workflow_phase=accepted-not-committed
+            live_kickoffs_enabled="$(
+              env_value live_kickoffs_enabled "$final_control_file"
+            )"
+            activation_lease_until_epoch="$(
+              env_value activation_lease_until_epoch "$final_control_file"
+            )"
+          elif [ -f artifacts/live-control/activate/control.env ]; then
+            final_control_file=artifacts/live-control/activate/control.env
+            final_control_sha256="$activate_control_sha256"
+            activation_state=activation-control-only
+            workflow_phase=pre-acceptance
+            live_kickoffs_enabled="$(
+              env_value after_flag "$final_control_file"
+            )"
+            activation_lease_until_epoch="$(
+              env_value after_lease_until_epoch "$final_control_file"
+            )"
+          fi
+
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "build_run_id=$BUILD_RUN_ID" \
+            "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID" \
+            "deployment_run_id=$DEPLOYMENT_RUN_ID" \
+            "activation_run_id=$GITHUB_RUN_ID" \
+            "activation_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "activate_control_sha256=$activate_control_sha256" \
+            "acceptance_sha256=$acceptance_sha256" \
+            "accepted_sha256=$accepted_sha256" \
+            "commit_control_sha256=$commit_control_sha256" \
+            "failure_disable_sha256=$failure_disable_sha256" \
+            "final_disable_sha256=$final_disable_sha256" \
+            "final_control_file=$final_control_file" \
+            "final_control_sha256=$final_control_sha256" \
+            "live_kickoffs_enabled=$live_kickoffs_enabled" \
+            "activation_state=$activation_state" \
+            "activation_lease_until_epoch=$activation_lease_until_epoch" \
+            "workflow_result=$workflow_result" \
+            "workflow_phase=$workflow_phase" \
+            "accepted_outcome=$ACCEPTED_OUTCOME" \
+            "accepted_evidence_upload_outcome=$ACCEPTED_EVIDENCE_UPLOAD_OUTCOME" \
+            "commit_preflight_outcome=$COMMIT_PREFLIGHT_OUTCOME" \
+            "commit_outcome=$COMMIT_OUTCOME" \
+            "failure_disable_outcome=$FAILURE_DISABLE_OUTCOME" \
+            "final_disable_outcome=$FINAL_DISABLE_OUTCOME" \
+            "post_commit_status=$post_commit_status" \
+            "revoke_runner_outcome=$REVOKE_RUNNER_OUTCOME" \
+            "close_bastion_outcome=$CLOSE_BASTION_OUTCOME" \
+            > artifacts/live-control/provenance.env
+
+      - name: Upload protected activation evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-activation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/live-control
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Remove isolated client state
         if: always()

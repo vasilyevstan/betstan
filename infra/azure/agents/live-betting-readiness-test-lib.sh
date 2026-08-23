@@ -355,9 +355,10 @@ if [[ "$args" == *"mongosh --quiet --norc --eval"* ]]; then
       ;;
     mongo-submitted-slips)
       if [[ "$malformed_target" == "$target" ]]; then
-        printf '{"mongoOk":true,"submittedLiveSlips":"oops"}\n'
+        printf '{"mongoOk":true,"submittedLiveSlips":"oops","draftLiveSlips":0}\n'
       else
-        printf '{"mongoOk":true,"submittedLiveSlips":%s}\n' "${STUB_SUBMITTED_LIVE_SLIPS:-0}"
+        printf '{"mongoOk":true,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
+          "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
       fi
       ;;
     mongo-bet-pending-bet-update)
@@ -603,6 +604,7 @@ run_live_betting_scenario() {
     export STUB_DROP_DURABLE_QUEUE=
     export STUB_ACTIVE_MATCHES=0
     export STUB_SUBMITTED_LIVE_SLIPS=0
+    export STUB_DRAFT_LIVE_SLIPS=0
     export STUB_BET_PENDING_COUNT=0
     export STUB_BET_PENDING_AGE_SECONDS=0
     export STUB_BET_LEGACY_PENDING_COUNT=0

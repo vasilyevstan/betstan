@@ -349,6 +349,8 @@ def validate_oci_rollback_workflow!(file, document, content)
       baseline_source_run_attempt
       baseline_artifact_name
       infrastructure_run_id
+      allow_legacy_admin_auth
+      legacy_admin_auth_reason
       confirmation
     ]
   )
@@ -465,6 +467,21 @@ def validate_oci_rollback_workflow!(file, document, content)
     content,
     /oci-production-rollback-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
     "#{name} must upload attempt-bound rollback diagnostics"
+  )
+  require_content(
+    content,
+    /capability=legacy-admin-auth-accepted/,
+    "#{name} must record an explicit legacy admin-auth rollback capability"
+  )
+  require_content(
+    content,
+    /ADMIN_AUTH_CAPABILITY_FILE:\s*artifacts\/oci-rollback\/admin-auth-capability\.env/,
+    "#{name} must bind any legacy admin-auth override to the rollback operator"
+  )
+  require_content(
+    content,
+    /if:\s*inputs\.allow_legacy_admin_auth/,
+    "#{name} must keep the legacy admin-auth override explicitly opt-in"
   )
 end
 
@@ -735,6 +752,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "production-run-exclusivity-stan.sh" => "production run exclusivity",
     "baseline-capture-stan.sh" => "before and after rollback baselines",
     "shared-mongo-operation-lock-stan.sh acquire" => "database operation lock acquisition",
+    "shared-mongo-operation-lock-stan.sh renew" => "bounded database operation lock renewal",
     "shared-mongo-operation-lock-stan.sh verify" => "database operation lock handoff",
     "shared-mongo-operation-lock-stan.sh release" => "always-run database lock release",
     "live-data-maintenance-stan.sh enter" => "legacy writer quiescence",
@@ -797,13 +815,18 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "ACTION: activate" => "explicit activation action",
     "LIVE_ACTIVATION_LEASE_SECONDS" => "bounded activation lease",
     "activation_state=leased" => "leased pre-commit provenance",
+    "accepted.env" => "leased pre-commit evidence file",
     "COMMIT OCI LIVE BETTING" => "exact permanent activation confirmation",
     "ACTION: commit" => "post-acceptance activation commit",
     "ACTION: disable" => "automatic failure disable action",
     "steps.accepted.outcome != 'success'" => "failure-triggered disable gate",
-    "steps.evidence_upload.outcome != 'success'" => "evidence-failure disable gate",
+    "steps.accepted_evidence_upload.outcome != 'success'" => "accepted-evidence failure disable gate",
     "steps.commit_preflight.outcome != 'success'" => "commit preflight failure gate",
     "steps.commit.outcome != 'success'" => "commit failure disable gate",
+    "oci-live-activation-accepted-" => "protected pre-commit activation evidence",
+    "activation_state=committed" => "final committed provenance",
+    "post_commit_status=" => "explicit post-commit handling",
+    "workflow_result=" => "final workflow outcome provenance",
     "runtime_fingerprint" => "deployment-to-infrastructure runtime binding",
     "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
     "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
@@ -835,17 +858,32 @@ def validate_live_betting_activation_workflow!(file, document, content)
     )
   end
 
-  evidence_position = content.index("- name: Upload protected activation evidence")
+  accepted_evidence_position = content.index("- name: Write accepted activation lease evidence")
+  accepted_upload_position =
+    content.index("- name: Upload protected accepted activation evidence")
   commit_revalidation_position =
     content.index("- name: Revalidate release head before permanent activation")
   commit_position = content.index("- name: Commit accepted live activation")
-  unless evidence_position &&
+  final_provenance_position = content.index("- name: Write final activation provenance")
+  evidence_position = content.index("- name: Upload protected activation evidence")
+  unless accepted_evidence_position &&
+      accepted_upload_position &&
       commit_revalidation_position &&
       commit_position &&
-      evidence_position < commit_revalidation_position &&
-      commit_revalidation_position < commit_position
+      final_provenance_position &&
+      evidence_position &&
+      accepted_evidence_position < accepted_upload_position &&
+      accepted_upload_position < commit_revalidation_position &&
+      commit_revalidation_position < commit_position &&
+      commit_position < final_provenance_position &&
+      final_provenance_position < evidence_position
     fail_inventory(
-      "#{name} must upload evidence and revalidate before permanent activation"
+      "#{name} must lease before revalidation and upload final evidence after the permanent activation state is written"
+    )
+  end
+  if content.scan("!cancelled()").length < 3
+    fail_inventory(
+      "#{name} must block accepted-evidence upload, permanent preflight, and commit after cancellation"
     )
   end
 end
@@ -908,7 +946,11 @@ def validate_oci_production_deploy_binding!(name, document, content)
   {
     "infrastructure_run_id=%s" => "infrastructure run binding",
     "infrastructure_run_attempt=1" => "first-attempt infrastructure binding",
-    "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding"
+    "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding",
+    "SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" => "bounded deploy lock lease",
+    "shared-mongo-operation-lock-stan.sh renew" => "deploy lock lease renewal",
+    "steps.handoff.outcome != 'skipped'" => "failed handoff recovery",
+    "steps.release_runtime.outcome != 'success'" => "incomplete deploy maintenance recovery"
   }.each do |literal, label|
     require_content(
       content,

@@ -40,6 +40,9 @@ CURRENT_MASTER_SHA=2222222222222222222222222222222222222222
 SOURCE_RUN_ID=1701
 DEPLOY_RUN_ID=1601
 BUILD_RUN_ID=1501
+INFRASTRUCTURE_RUN_ID=1801
+INFRASTRUCTURE_PROVENANCE_SHA256="ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34"
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
 
@@ -126,6 +129,8 @@ current_image_ref() {
 create_baseline_fixture() {
   local directory="$1"
   local mode="${2:-good}"
+  local fixture_sse_required=true
+  [[ "$mode" != "legacy-sse" ]] || fixture_sse_required=false
   rm -rf "$directory"
   mkdir -p "$directory"
   : >"$directory/images.tsv"
@@ -171,6 +176,11 @@ REFS
 source_sha=$TARGET_SHA
 deployment_run_id=$DEPLOY_RUN_ID
 deployment_run_attempt=1
+runtime_mode=k3s
+runtime_fingerprint=$RUNTIME_FINGERPRINT
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+infrastructure_run_attempt=1
+infrastructure_provenance_sha256=$INFRASTRUCTURE_PROVENANCE_SHA256
 EOF2
   cat >"$directory/baseline-provenance.env" <<EOF2
 baseline_source_sha=$TARGET_SHA
@@ -187,6 +197,7 @@ public_url=https://betstan.xyz
 redirect_url=https://www.betstan.xyz
 diagnostic_url=https://203.0.113.10.nip.io
 sse_path=/api/event/stream
+sse_required=$fixture_sse_required
 database_restore=disabled
 EOF2
   : >"$directory/SHA256SUMS"
@@ -231,6 +242,7 @@ EOF2
 
 create_baseline_fixture "$FIXTURE_DIR/baseline-good"
 create_baseline_fixture "$FIXTURE_DIR/baseline-mutable" mutable
+create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-sse" legacy-sse
 
 cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
@@ -256,6 +268,12 @@ case "$*" in
     ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/RequireAdmin.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/service/VerifyAdminSession.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
     ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
@@ -810,8 +828,9 @@ EOF_QUEUES
         printf '%s 0 0 %s\n' "$dynamic_queue_name" "$dynamic_consumers"
       fi
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
-      printf '{"mongoOk":true,"activeMatches":%s,"submittedLiveSlips":%s}\n' \
-        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_SUBMITTED_LIVE_SLIPS:-0}"
+      printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
+        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
+        "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/"* ]]; then
       [[ "${STUB_AUTH_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' "${STUB_NORMALIZED_IDENTIFIER_COUNT:-0}"
@@ -1147,6 +1166,9 @@ common_env=(
   "STUB_DEPLOY_RUN_ID=$DEPLOY_RUN_ID"
   "STUB_BUILD_RUN_ID=$BUILD_RUN_ID"
   "STUB_ARTIFACT_NAME=$ARTIFACT_NAME"
+  "INFRASTRUCTURE_RUN_ID=$INFRASTRUCTURE_RUN_ID"
+  "OCI_INFRASTRUCTURE_PROVENANCE_SHA256=$INFRASTRUCTURE_PROVENANCE_SHA256"
+  "OCI_RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
 )
@@ -1433,6 +1455,114 @@ if ! run_script "$WORK_DIR/oci-auth-compatible" \
 fi
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_normalized_identifiers=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+run_expect_failure infra-run-id-mismatch \
+  ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
+assert_contains "$WORK_DIR/infra-run-id-mismatch.out" \
+  'selected infrastructure run does not match the trusted baseline infrastructure run'
+
+MISMATCHED_HEX_DIGEST="$(printf 'ef56%.0s' {1..16})"
+run_expect_failure infra-provenance-hash-mismatch \
+  ROLLBACK_MODE=dry-run OCI_INFRASTRUCTURE_PROVENANCE_SHA256="$MISMATCHED_HEX_DIGEST"
+assert_contains "$WORK_DIR/infra-provenance-hash-mismatch.out" \
+  'selected infrastructure provenance hash does not match the trusted baseline'
+
+run_expect_failure infra-runtime-fingerprint-mismatch \
+  ROLLBACK_MODE=dry-run OCI_RUNTIME_FINGERPRINT="$MISMATCHED_HEX_DIGEST"
+assert_contains "$WORK_DIR/infra-runtime-fingerprint-mismatch.out" \
+  'selected runtime fingerprint does not match the trusted baseline'
+
+run_expect_failure infra-runtime-mode-mismatch \
+  ROLLBACK_MODE=dry-run OCI_RUNTIME_MODE=aks
+assert_contains "$WORK_DIR/infra-runtime-mode-mismatch.out" \
+  'selected runtime mode does not match the trusted baseline'
+
+run_expect_failure oci-public-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_PUBLIC_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-public-url-mismatch.out" \
+  'OCI_PUBLIC_URL does not match the trusted baseline public URL'
+
+run_expect_failure oci-redirect-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_REDIRECT_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-redirect-url-mismatch.out" \
+  'OCI_REDIRECT_URL does not match the trusted baseline redirect URL'
+
+run_expect_failure oci-diagnostic-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_DIAGNOSTIC_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-diagnostic-url-mismatch.out" \
+  'OCI_DIAGNOSTIC_URL does not match the trusted baseline diagnostic URL'
+
+run_expect_failure admin-auth-missing-no-capability \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/admin-auth-missing-no-capability.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
+
+admin_auth_capability_valid="$WORK_DIR/admin-auth-capability-valid.env"
+cat >"$admin_auth_capability_valid" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$TARGET_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_wrong_sha="$WORK_DIR/admin-auth-capability-wrong-sha.env"
+cat >"$admin_auth_capability_wrong_sha" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$CURRENT_MASTER_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_wrong_value="$WORK_DIR/admin-auth-capability-wrong-value.env"
+cat >"$admin_auth_capability_wrong_value" <<EOF
+capability=some-other-capability
+source_sha=$TARGET_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_missing_reason="$WORK_DIR/admin-auth-capability-missing-reason.env"
+cat >"$admin_auth_capability_missing_reason" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$TARGET_SHA
+approved_by=release-captain
+EOF
+
+run_expect_failure admin-auth-capability-missing-file \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$WORK_DIR/does-not-exist.env"
+assert_contains "$WORK_DIR/admin-auth-capability-missing-file.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE does not exist'
+
+run_expect_failure admin-auth-capability-wrong-sha \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_wrong_sha"
+assert_contains "$WORK_DIR/admin-auth-capability-wrong-sha.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE source_sha does not match TARGET_SHA'
+
+run_expect_failure admin-auth-capability-wrong-value \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_wrong_value"
+assert_contains "$WORK_DIR/admin-auth-capability-wrong-value.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE capability must be legacy-admin-auth-accepted'
+
+run_expect_failure admin-auth-capability-missing-reason \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_missing_reason"
+assert_contains "$WORK_DIR/admin-auth-capability-missing-reason.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE reason must be non-empty'
+
+if ! run_script "$WORK_DIR/admin-auth-capability-accepted" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+    ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_valid" \
+    >"$WORK_DIR/admin-auth-capability-accepted.out" 2>&1; then
+  cat "$WORK_DIR/admin-auth-capability-accepted.out" >&2
+  fail 'OCI admin-auth explicit-capability dry-run unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/admin-auth-capability-accepted/rollback-summary.env" \
+  'admin_auth_rollback_check=explicit-capability-override'
 
 run_expect_failure oci-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run
@@ -1449,6 +1579,10 @@ assert_contains "$WORK_DIR/migration-transition-block/rollback-readiness/summary
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/active-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
+
+run_expect_failure draft-live-refusal \
+  STUB_DRAFT_LIVE_SLIPS=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/draft-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
 
 run_expect_failure queue-growth-refusal \
   STUB_BASELINE_QUEUE_READY_AFTER_ROLLBACK=1 ROLLBACK_MODE=execute
@@ -1516,6 +1650,29 @@ assert_contains "$WORK_DIR/sse-content-type-refusal.out" 'SSE verification faile
 run_expect_failure sse-malformed-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=malformed ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-malformed-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
+
+run_expect_failure sse-legacy-absent-required-refusal \
+  STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=legacy-absent ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/sse-legacy-absent-required-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
+
+if ! run_script "$WORK_DIR/legacy-sse-rollback-success" \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-sse" \
+    STUB_SSE_MODE=legacy-absent \
+    STUB_SHORT_SSE_MODE=legacy-absent \
+    ROLLBACK_MODE=execute >"$WORK_DIR/legacy-sse-rollback-success.out" 2>&1; then
+  cat "$WORK_DIR/legacy-sse-rollback-success.out" >&2
+  fail 'OCI rollback to a pre-SSE baseline unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/legacy-sse-rollback-success.out" 'oci_rollback_status=PASS'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_required=false'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_required=false'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\t502\t'
+[[ "$(wc -l <"$WORK_DIR/legacy-sse-rollback-success/rollout-order.tsv" | tr -d ' ')" == '9' ]] ||
+  fail 'OCI legacy pre-SSE rollback aborted mid-rollout instead of processing every service'
 
 run_expect_failure exact-digest-verification \
   STUB_BAD_DIGEST_SERVICE=event ROLLBACK_MODE=execute

@@ -24,6 +24,16 @@ on:
         description: Successful first-attempt oci-infrastructure run ID for the active runtime
         required: true
         type: string
+      allow_legacy_admin_auth:
+        description: Explicitly allow rollback to a release without persisted Backoffice admin authorization
+        required: true
+        type: boolean
+        default: false
+      legacy_admin_auth_reason:
+        description: Audited reason for the legacy admin-auth override, or not-requested
+        required: true
+        type: string
+        default: not-requested
       confirmation:
         description: Type ROLLBACK OCI EXACT DIGEST
         required: true
@@ -50,6 +60,8 @@ jobs:
       BASELINE_SOURCE_RUN_ATTEMPT: ${{ inputs.baseline_source_run_attempt }}
       BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      ALLOW_LEGACY_ADMIN_AUTH: ${{ inputs.allow_legacy_admin_auth }}
+      LEGACY_ADMIN_AUTH_REASON: ${{ inputs.legacy_admin_auth_reason }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -112,6 +124,7 @@ jobs:
           [ "$BASELINE_SOURCE_RUN_ATTEMPT" = "1" ]
           [ "$BASELINE_ARTIFACT_NAME" = "oci-production-baseline-${BASELINE_SOURCE_RUN_ID}-${BASELINE_SOURCE_RUN_ATTEMPT}" ]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ALLOW_LEGACY_ADMIN_AUTH" == "true" || "$ALLOW_LEGACY_ADMIN_AUTH" == "false" ]]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           git fetch --quiet origin master:refs/remotes/origin/master
           current_master="$(git rev-parse origin/master)"
@@ -134,6 +147,28 @@ jobs:
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
           mkdir -p "$HOME/.kube" artifacts/infrastructure artifacts/oci-rollback
           chmod 700 "$HOME" "$HOME/.kube"
+
+      - name: Record explicit legacy admin-auth rollback capability
+        if: inputs.allow_legacy_admin_auth
+        run: |
+          set -euo pipefail
+          [ "$LEGACY_ADMIN_AUTH_REASON" != "not-requested" ]
+          [ -n "$LEGACY_ADMIN_AUTH_REASON" ]
+          [ "${#LEGACY_ADMIN_AUTH_REASON}" -le 240 ]
+          case "$LEGACY_ADMIN_AUTH_REASON" in
+            *$'\n'*|*$'\r'*)
+              echo "legacy admin-auth reason must be one line" >&2
+              exit 1
+              ;;
+          esac
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          printf '%s\n' \
+            "capability=legacy-admin-auth-accepted" \
+            "source_sha=$TARGET_SHA" \
+            "reason=$LEGACY_ADMIN_AUTH_REASON" \
+            "approved_by=$GITHUB_ACTOR" \
+            > artifacts/oci-rollback/admin-auth-capability.env
+          chmod 600 artifacts/oci-rollback/admin-auth-capability.env
 
       - name: Download exact OCI infrastructure provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -164,13 +199,20 @@ jobs:
             echo "::add-mask::$endpoint_nsg_ocid"
             printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
             printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$cluster_fingerprint"
           else
             echo "::add-mask::$instance_ocid"
             printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$instance_fingerprint"
           fi
           printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
           printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
           printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+          printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint" >> "$GITHUB_OUTPUT"
+          printf 'infrastructure_provenance_sha256=%s\n' "$(
+            sha256sum artifacts/infrastructure/provenance.env |
+              awk '{print $1}'
+          )" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         run: ./infra/oci/scripts/install-cli.sh
@@ -264,6 +306,9 @@ jobs:
           OCI_PUBLIC_URL: ${{ steps.infra.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.infra.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.infra.outputs.diagnostic_url }}
+          OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
+          OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
+          ADMIN_AUTH_CAPABILITY_FILE: artifacts/oci-rollback/admin-auth-capability.env
         run: ./infra/oci/scripts/rollback-application-stan.sh
 
       - name: Upload rollback diagnostics and provenance

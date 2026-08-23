@@ -75,6 +75,8 @@ jobs:
       OCI_CPU_MAX_PERCENT: "90"
       SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}
       SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
+      SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"
+      SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"
 
     steps:
       - name: Initialize isolated OCI data paths
@@ -336,6 +338,7 @@ jobs:
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
           OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
@@ -388,11 +391,23 @@ jobs:
               ./infra/oci/scripts/live-data-maintenance-stan.sh restore
               exit 1
             fi
-            NAMESPACE="$OCI_K8S_NAMESPACE" \
-            LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
-            OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
-            SOURCE_SHA="$SOURCE_SHA" \
-              ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+            if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              SOURCE_SHA="$SOURCE_SHA" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify; then
+              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              exit 1
+            fi
+            if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              LOCK_LEASE_SECONDS="$SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS" \
+              SOURCE_SHA="$SOURCE_SHA" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew; then
+              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              exit 1
+            fi
           else
             ./infra/oci/scripts/live-data-maintenance-stan.sh restore
           fi
@@ -436,10 +451,9 @@ jobs:
         id: abort_handoff
         if: >-
           always() &&
-          failure() &&
+          (failure() || cancelled()) &&
           inputs.phase == 'apply-slip-index' &&
-          steps.data.outcome == 'success' &&
-          steps.maintenance.outcome == 'success'
+          steps.maintenance_enter.outcome == 'success'
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: ./infra/oci/scripts/live-data-maintenance-stan.sh restore

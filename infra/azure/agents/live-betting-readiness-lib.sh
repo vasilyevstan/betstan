@@ -29,6 +29,15 @@ live_betting_default_max_submitted_slips() {
   esac
 }
 
+live_betting_default_max_draft_live_slips() {
+  case "$1" in
+    dark|rollback-drain) printf '0' ;;
+    activate) printf '24' ;;
+    monitor) printf '200' ;;
+    *) printf '0' ;;
+  esac
+}
+
 live_betting_default_max_queue_ready() {
   case "$1" in
     dark|rollback-drain) printf '0' ;;
@@ -907,6 +916,7 @@ live_betting_apply_metric() {
     overdue_unstarted_events) LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS="$value" ;;
     simulation_quarantines) LIVE_BETTING_SIMULATION_QUARANTINES="$value" ;;
     submitted_live_slips) LIVE_BETTING_SUBMITTED_LIVE_SLIPS="$value" ;;
+    draft_live_slips) LIVE_BETTING_DRAFT_LIVE_SLIPS="$value" ;;
     mongo_ping_ok) LIVE_BETTING_MONGO_PING_OK="$value" ;;
     topology_mode) LIVE_BETTING_TOPOLOGY_MODE="$value" ;;
     topology_validated) LIVE_BETTING_TOPOLOGY_VALIDATED="$value" ;;
@@ -1334,6 +1344,7 @@ live_betting_check_mongo_observability() {
       "$LIVE_BETTING_MAX_OVERDUE_UNSTARTED_EVENTS" \
       "$LIVE_BETTING_MAX_SIMULATION_QUARANTINES" \
       "$LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS" \
+      "$LIVE_BETTING_MAX_DRAFT_LIVE_SLIPS" \
       "$LIVE_BETTING_MAX_WORKFLOW_PENDING_COUNT" \
       "$LIVE_BETTING_MAX_WORKFLOW_PENDING_AGE_SECONDS" \
       "$LIVE_BETTING_MAX_WORKFLOW_PROCESSING_COUNT" \
@@ -1355,6 +1366,7 @@ from pathlib import Path
     max_overdue_unstarted,
     max_simulation_quarantines,
     max_slips,
+    max_draft_slips,
     pending_limit,
     pending_age_limit,
     processing_limit,
@@ -1373,7 +1385,14 @@ def normalize_collection_payload(payload: dict, include_dead_letter: bool = Fals
     if not isinstance(payload, dict):
         return payload
     payload_keys = set(payload.keys())
-    if payload_keys <= {"mongoOk", "activeMatches", "submittedLiveSlips"} and "mongoOk" in payload:
+    if payload_keys <= {
+        "mongoOk",
+        "activeMatches",
+        "overdueUnstartedEvents",
+        "simulationQuarantines",
+        "submittedLiveSlips",
+        "draftLiveSlips",
+    } and "mongoOk" in payload:
         normalized = {
             "mongoOk": payload.get("mongoOk"),
             "pending": {"count": 0, "oldestAgeSeconds": 0},
@@ -1441,6 +1460,10 @@ submitted_live_slips = require_non_negative_int(
     slips_payload.get("submittedLiveSlips"),
     "submittedLiveSlips",
 )
+draft_live_slips = require_non_negative_int(
+    slips_payload.get("draftLiveSlips"),
+    "draftLiveSlips",
+)
 if active_matches > int(max_matches):
     raise SystemExit("active live match count exceeds bound")
 if overdue_unstarted_events > int(max_overdue_unstarted):
@@ -1449,6 +1472,8 @@ if simulation_quarantines > int(max_simulation_quarantines):
     raise SystemExit("simulation quarantine count exceeds bound")
 if submitted_live_slips > int(max_slips):
     raise SystemExit("submitted live slip count exceeds bound")
+if draft_live_slips > int(max_draft_slips):
+    raise SystemExit("draft live slip count exceeds bound")
 
 parking_metrics = {
     "bet_pending_bet_update": {
@@ -1509,6 +1534,7 @@ report = {
     "overdue_unstarted_events": overdue_unstarted_events,
     "simulation_quarantines": simulation_quarantines,
     "submitted_live_slips": submitted_live_slips,
+    "draft_live_slips": draft_live_slips,
     "limits": {
         "workflow_pending_count_limit": int(pending_limit),
         "workflow_pending_age_limit_seconds": int(pending_age_limit),
@@ -1537,6 +1563,7 @@ print(f"active_matches={active_matches}")
 print(f"overdue_unstarted_events={overdue_unstarted_events}")
 print(f"simulation_quarantines={simulation_quarantines}")
 print(f"submitted_live_slips={submitted_live_slips}")
+print(f"draft_live_slips={draft_live_slips}")
 print(f"workflow_pending_count_limit={int(pending_limit)}")
 print(f"workflow_pending_age_limit_seconds={int(pending_age_limit)}")
 print(f"workflow_processing_count_limit={int(processing_limit)}")
@@ -1552,7 +1579,7 @@ PY
   then
     live_betting_write_sanitized_file "$result_stderr" "$LIVE_BETTING_OUTPUT_DIR/mongo-check.stderr"
     case "$(cat "$result_stderr")" in
-      active\ live\ match\ count*|overdue\ unstarted\ event\ count*|simulation\ quarantine\ count*|submitted\ live\ slip\ count*|activeMatches*|overdueUnstartedEvents*|simulationQuarantines*|submittedLiveSlips*|active-match\ query*|submitted-slip\ query*)
+      active\ live\ match\ count*|overdue\ unstarted\ event\ count*|simulation\ quarantine\ count*|submitted\ live\ slip\ count*|draft\ live\ slip\ count*|activeMatches*|overdueUnstartedEvents*|simulationQuarantines*|submittedLiveSlips*|draftLiveSlips*|active-match\ query*|submitted-slip\ query*)
         live_betting_record_failure mongo_counts "$(cat "$result_stderr")"
         ;;
       *)
@@ -1829,6 +1856,17 @@ live_betting_check_sse_endpoint() {
   status="${result#*$'\t'}"
   body="$LIVE_BETTING_WORK_DIR/${label}.body"
   headers="$LIVE_BETTING_WORK_DIR/${label}.headers"
+  if [[ "$LIVE_BETTING_MODE" == "rollback-drain" && "$LIVE_BETTING_SSE_REQUIRED" == "false" &&
+      "$rc" == "0" && ( "$status" == "404" || "$status" == "502" ) ]]; then
+    if [[ "$prefix" == public ]]; then
+      LIVE_BETTING_SSE_PRIMARY_STATUS="legacy-absent:$status"
+      LIVE_BETTING_SSE_PRIMARY_HEARTBEAT="not_required"
+    else
+      LIVE_BETTING_SSE_DIAGNOSTIC_STATUS="legacy-absent:$status"
+      LIVE_BETTING_SSE_DIAGNOSTIC_HEARTBEAT="not_required"
+    fi
+    return 0
+  fi
   content_type="$(live_betting_header_value "$headers" Content-Type)"
   cache_control="$(live_betting_header_value "$headers" Cache-Control)"
   no_buffer="$(live_betting_header_value "$headers" X-Accel-Buffering)"
@@ -1903,6 +1941,7 @@ overdue_unstarted_events=$LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS
 simulation_quarantines=$LIVE_BETTING_SIMULATION_QUARANTINES
 unstarted_event_grace_seconds=$LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS
 submitted_live_slips=$LIVE_BETTING_SUBMITTED_LIVE_SLIPS
+draft_live_slips=$LIVE_BETTING_DRAFT_LIVE_SLIPS
 public_event_status=$LIVE_BETTING_PUBLIC_EVENT_STATUS
 public_event_items=$LIVE_BETTING_PUBLIC_EVENT_ITEMS
 event_rest_json_status=$LIVE_BETTING_PUBLIC_EVENT_STATUS
@@ -1920,6 +1959,7 @@ sse_primary_status=$LIVE_BETTING_SSE_PRIMARY_STATUS
 sse_primary_heartbeat=$LIVE_BETTING_SSE_PRIMARY_HEARTBEAT
 sse_diagnostic_status=$LIVE_BETTING_SSE_DIAGNOSTIC_STATUS
 sse_diagnostic_heartbeat=$LIVE_BETTING_SSE_DIAGNOSTIC_HEARTBEAT
+sse_required=$LIVE_BETTING_SSE_REQUIRED
 provenance_source_sha=$LIVE_BETTING_PROVENANCE_SOURCE_SHA
 schema_evidence_verified=$LIVE_BETTING_SCHEMA_EVIDENCE_VERIFIED
 rollback_baseline_verified=$LIVE_BETTING_ROLLBACK_BASELINE_VERIFIED
@@ -1962,6 +2002,7 @@ live_betting_readiness_main() {
   LIVE_BETTING_MAX_SIMULATION_QUARANTINES="${MAX_SIMULATION_QUARANTINES:-0}"
   LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS="${UNSTARTED_EVENT_GRACE_SECONDS:-120}"
   LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS="${MAX_SUBMITTED_LIVE_SLIPS:-$(live_betting_default_max_submitted_slips "$LIVE_BETTING_MODE")}"
+  LIVE_BETTING_MAX_DRAFT_LIVE_SLIPS="${MAX_DRAFT_LIVE_SLIPS:-$(live_betting_default_max_draft_live_slips "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_LIVE_QUEUE_READY="${MAX_LIVE_QUEUE_READY:-$(live_betting_default_max_queue_ready "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_LIVE_QUEUE_UNACK="${MAX_LIVE_QUEUE_UNACK:-$(live_betting_default_max_queue_unack "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_WORKFLOW_PENDING_COUNT="${MAX_WORKFLOW_PENDING_COUNT:-$(live_betting_default_max_workflow_pending_count "$LIVE_BETTING_MODE")}"
@@ -1977,6 +2018,7 @@ live_betting_readiness_main() {
   LIVE_BETTING_EVENT_API_PATH="${EVENT_API_PATH:-/api/event}"
   LIVE_BETTING_CURRENT_USER_PATH="${CURRENT_USER_PATH:-/api/auth/currentuser}"
   LIVE_BETTING_SSE_PATH="${SSE_PATH:-/api/event/stream}"
+  LIVE_BETTING_SSE_REQUIRED="$(live_betting_normalize_bool "${SSE_REQUIRED:-true}")"
   LIVE_BETTING_OUTPUT_DIR="${OUTPUT_DIR:-$LIVE_BETTING_ROOT_DIR/artifacts/${LIVE_BETTING_STACK}-live-betting-readiness/${LIVE_BETTING_MODE}}"
   LIVE_BETTING_WORK_DIR="$LIVE_BETTING_OUTPUT_DIR/.work-$$"
   LIVE_BETTING_SUMMARY_FILE="$LIVE_BETTING_OUTPUT_DIR/summary.env"
@@ -1997,6 +2039,7 @@ live_betting_readiness_main() {
   LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS="unknown"
   LIVE_BETTING_SIMULATION_QUARANTINES="unknown"
   LIVE_BETTING_SUBMITTED_LIVE_SLIPS="unknown"
+  LIVE_BETTING_DRAFT_LIVE_SLIPS="unknown"
   LIVE_BETTING_MONGO_PING_OK="unknown"
   LIVE_BETTING_TOPOLOGY_MODE="unknown"
   LIVE_BETTING_TOPOLOGY_VALIDATED="unknown"
@@ -2040,6 +2083,8 @@ live_betting_readiness_main() {
     live_betting_record_failure preflight "IMAGE_PROVENANCE_FILE is required"
   [[ "$(live_betting_normalize_bool "$LIVE_BETTING_EXPECTED_FLAG")" != invalid ]] ||
     live_betting_record_failure preflight "EXPECTED_LIVE_KICKOFFS_ENABLED must be explicit true or false"
+  [[ "$LIVE_BETTING_SSE_REQUIRED" != invalid ]] ||
+    live_betting_record_failure preflight "SSE_REQUIRED must be explicit true or false"
   if [[ -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_HOLDER" ||
         -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_ID" ||
         -n "$LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA" ]]; then
@@ -2069,6 +2114,7 @@ live_betting_readiness_main() {
   live_betting_require_uint MAX_SIMULATION_QUARANTINES "$LIVE_BETTING_MAX_SIMULATION_QUARANTINES"
   live_betting_require_uint UNSTARTED_EVENT_GRACE_SECONDS "$LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS"
   live_betting_require_uint MAX_SUBMITTED_LIVE_SLIPS "$LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS"
+  live_betting_require_uint MAX_DRAFT_LIVE_SLIPS "$LIVE_BETTING_MAX_DRAFT_LIVE_SLIPS"
   live_betting_require_uint MAX_LIVE_QUEUE_READY "$LIVE_BETTING_MAX_LIVE_QUEUE_READY"
   live_betting_require_uint MAX_LIVE_QUEUE_UNACK "$LIVE_BETTING_MAX_LIVE_QUEUE_UNACK"
   live_betting_require_uint MAX_WORKFLOW_PENDING_COUNT "$LIVE_BETTING_MAX_WORKFLOW_PENDING_COUNT"
@@ -2201,7 +2247,8 @@ EOF_QUERY
 const slips = db.getSiblingDB("gaming_slip");
 print(JSON.stringify({
   mongoOk: db.adminCommand({ping: 1}).ok === 1,
-  submittedLiveSlips: slips.slips.countDocuments({betKind: "LIVE", status: "SUBMITTED"})
+  submittedLiveSlips: slips.slips.countDocuments({betKind: "LIVE", status: "SUBMITTED"}),
+  draftLiveSlips: slips.slips.countDocuments({betKind: "LIVE", status: "DRAFT"})
 }));
 EOF_QUERY
 )"

@@ -5,7 +5,21 @@ import sys
 
 
 INPUT_EXPRESSION = re.compile(
-    r"\$\{\{\s*(?:github\.event\.)?inputs\."
+    r"""
+    \$\{\{\s*
+    (?:github\.event\.)?
+    inputs
+    (?:
+        \s*\.[A-Za-z_][A-Za-z0-9_-]*
+      |
+        \s*\[
+          \s*(['"])
+          [^'"]+
+          \1
+        \s*\]
+    )
+    """,
+    re.VERBOSE,
 )
 
 

@@ -347,11 +347,16 @@ for literal in \
   'production-run-exclusivity-stan.sh' \
   'shared-mongo-operation-lock-stan.sh acquire' \
   'shared-mongo-operation-lock-stan.sh release' \
+  'shared-mongo-operation-lock-stan.sh renew' \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
   'baseline-capture-stan.sh' \
   'SSE_REQUIREMENT: deployed-source' \
+  'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' \
+  'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
+  '(failure() || cancelled())' \
+  "steps.maintenance_enter.outcome == 'success'" \
   'verify-live-betting-data-evidence-stan.sh'; do
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "data workflow is missing safety contract: $literal"
@@ -400,6 +405,7 @@ require_order(
         "Fence writes and quiesce legacy data writers",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
+        "shared-mongo-operation-lock-stan.sh renew",
         "Upload exact sanitized data evidence",
         "Restore runtime if final handoff packaging failed",
         "Release database operation lock unless handed to deploy",

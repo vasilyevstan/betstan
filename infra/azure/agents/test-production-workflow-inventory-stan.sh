@@ -151,6 +151,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: oci-production
+    env:
+      SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: "10800"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -164,6 +166,9 @@ jobs:
           printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
           printf 'infrastructure_run_attempt=1\n'
           printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
+          ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          echo "steps.handoff.outcome != 'skipped'"
+          echo "steps.release_runtime.outcome != 'success'"
 YAML
 
   cat > "$tmp_dir/oci-migrate.yml" <<'YAML'

@@ -505,19 +505,24 @@ capture_sse() {
     "$status" \
     "$duration_seconds" \
     "$SSE_TIMEOUT"
-  content_type="$(
-    live_betting_validate_sse_connectivity \
-      "$headers_file" \
-      "$body_file" \
-      "$curl_status" \
-      "$status" \
-      "$duration_seconds" \
-      "$SSE_TIMEOUT" \
-      "${base_url}${SSE_PATH}"
-  )" || {
-    printf 'ERROR: SSE connectivity contract failed for %s%s\n' "$label" "$SSE_PATH" >&2
-    return 1
-  }
+  if [[ "$SSE_REQUIRED" == "false" && "$curl_status" == "0" &&
+      ( "$status" == "404" || "$status" == "502" ) ]]; then
+    content_type="legacy-absent"
+  else
+    content_type="$(
+      live_betting_validate_sse_connectivity \
+        "$headers_file" \
+        "$body_file" \
+        "$curl_status" \
+        "$status" \
+        "$duration_seconds" \
+        "$SSE_TIMEOUT" \
+        "${base_url}${SSE_PATH}"
+    )" || {
+      printf 'ERROR: SSE connectivity contract failed for %s%s\n' "$label" "$SSE_PATH" >&2
+      return 1
+    }
+  fi
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$CURRENT_STEP_LABEL" "$label" "$status" "$effective_url" "$(sha256_file "$body_file")" \
     >>"$OUTPUT_DIR/sse-verification.tsv"
@@ -567,6 +572,7 @@ run_live_betting_readiness() {
     OUTPUT_DIR="$readiness_output_dir" \
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     NAMESPACE="$OCI_K8S_NAMESPACE" \
+    SSE_REQUIRED="$SSE_REQUIRED" \
     "$LIVE_BETTING_READINESS_SCRIPT" >"$OUTPUT_DIR/${label}.txt" 2>&1
 }
 
@@ -670,6 +676,38 @@ resolved_target_sha="$(git rev-parse "${TARGET_SHA}^{commit}")"
 git merge-base --is-ancestor "$TARGET_SHA" "$current_master_sha" ||
   oci_die "TARGET_SHA must be an ancestor of current master"
 
+ADMIN_AUTH_EVIDENCE_PATHS=(
+  "backoffice/src/middleware/RequireAdmin.ts"
+  "backoffice/src/service/VerifyAdminSession.ts"
+)
+admin_auth_evidence_present=true
+for admin_auth_evidence_path in "${ADMIN_AUTH_EVIDENCE_PATHS[@]}"; do
+  git cat-file -e "${TARGET_SHA}:${admin_auth_evidence_path}" 2>/dev/null ||
+    admin_auth_evidence_present=false
+done
+if [[ "$admin_auth_evidence_present" == "true" ]]; then
+  ADMIN_AUTH_ROLLBACK_CHECK=persisted-admin-evidence
+else
+  ADMIN_AUTH_CAPABILITY_FILE="${ADMIN_AUTH_CAPABILITY_FILE:-}"
+  [[ -n "$ADMIN_AUTH_CAPABILITY_FILE" ]] ||
+    oci_die "TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied"
+  [[ -f "$ADMIN_AUTH_CAPABILITY_FILE" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE does not exist"
+  admin_auth_capability="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" capability)"
+  admin_auth_source_sha="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" source_sha)"
+  admin_auth_reason="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" reason)"
+  admin_auth_approved_by="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" approved_by)"
+  [[ "$admin_auth_capability" == "legacy-admin-auth-accepted" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE capability must be legacy-admin-auth-accepted"
+  [[ "$admin_auth_source_sha" == "$TARGET_SHA" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE source_sha does not match TARGET_SHA"
+  [[ -n "$admin_auth_reason" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE reason must be non-empty"
+  [[ -n "$admin_auth_approved_by" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE approved_by must be non-empty"
+  ADMIN_AUTH_ROLLBACK_CHECK=explicit-capability-override
+fi
+
 source_run_json="$WORK_DIR/source-run.json"
 trusted_source_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
 gh api "repos/$REPO/actions/runs/$BASELINE_SOURCE_RUN_ID/attempts/$BASELINE_SOURCE_RUN_ATTEMPT" >"$source_run_json"
@@ -687,6 +725,7 @@ verify_checksums "$BASELINE_DIR"
 [[ -f "$BASELINE_DIR/baseline-provenance.env" ]] || oci_die "baseline artifact is missing baseline-provenance.env"
 [[ -f "$BASELINE_DIR/images.tsv" ]] || oci_die "baseline artifact is missing images.tsv"
 [[ -f "$BASELINE_DIR/queues.tsv" ]] || oci_die "baseline artifact is missing queues.tsv"
+[[ -f "$BASELINE_DIR/trusted-deploy-provenance.txt" ]] || oci_die "baseline artifact is missing trusted-deploy-provenance.txt"
 # shellcheck disable=SC1090
 source "$BASELINE_DIR/baseline-provenance.env"
 [[ "${baseline_source_sha:-}" == "$TARGET_SHA" ]] || oci_die "baseline source SHA does not match TARGET_SHA"
@@ -698,15 +737,52 @@ validate_positive_int "${baseline_build_run_id:-0}" || oci_die "baseline build p
 [[ -n "${public_url:-}" && -n "${redirect_url:-}" ]] || oci_die "baseline artifact is missing public URLs"
 if [[ -z "$OCI_PUBLIC_URL" ]]; then
   OCI_PUBLIC_URL="$public_url"
+else
+  [[ "$OCI_PUBLIC_URL" == "$public_url" ]] || oci_die "OCI_PUBLIC_URL does not match the trusted baseline public URL"
 fi
 if [[ -z "$OCI_REDIRECT_URL" ]]; then
   OCI_REDIRECT_URL="$redirect_url"
+else
+  [[ "$OCI_REDIRECT_URL" == "$redirect_url" ]] || oci_die "OCI_REDIRECT_URL does not match the trusted baseline redirect URL"
 fi
 if [[ -z "$OCI_DIAGNOSTIC_URL" ]]; then
   OCI_DIAGNOSTIC_URL="${diagnostic_url:-}"
+elif [[ -n "${diagnostic_url:-}" ]]; then
+  [[ "$OCI_DIAGNOSTIC_URL" == "$diagnostic_url" ]] || oci_die "OCI_DIAGNOSTIC_URL does not match the trusted baseline diagnostic URL"
 fi
 if [[ -n "${sse_path:-}" ]]; then
   SSE_PATH="$sse_path"
+fi
+SSE_REQUIRED="${sse_required:-true}"
+[[ "$SSE_REQUIRED" == "true" || "$SSE_REQUIRED" == "false" ]] ||
+  oci_die "baseline sse_required must be true or false"
+
+# shellcheck disable=SC1090
+source "$BASELINE_DIR/trusted-deploy-provenance.txt"
+validate_positive_int "${infrastructure_run_id:-0}" || oci_die "trusted deploy provenance is missing an infrastructure run ID"
+[[ "${infrastructure_run_attempt:-}" == "1" ]] || oci_die "trusted deploy provenance infrastructure run is not first-attempt"
+[[ "${infrastructure_provenance_sha256:-}" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing an infrastructure provenance hash"
+[[ -n "${runtime_mode:-}" ]] || oci_die "trusted deploy provenance is missing runtime_mode"
+[[ "${runtime_fingerprint:-}" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing a runtime fingerprint"
+INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
+OCI_INFRASTRUCTURE_PROVENANCE_SHA256="${OCI_INFRASTRUCTURE_PROVENANCE_SHA256:-}"
+OCI_RUNTIME_FINGERPRINT="${OCI_RUNTIME_FINGERPRINT:-}"
+validate_positive_int "$INFRASTRUCTURE_RUN_ID" || oci_die "INFRASTRUCTURE_RUN_ID must be positive"
+[[ "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_INFRASTRUCTURE_PROVENANCE_SHA256 must be a sha256 hex digest"
+[[ "$OCI_RUNTIME_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_RUNTIME_FINGERPRINT must be a sha256 hex digest"
+[[ "$INFRASTRUCTURE_RUN_ID" == "$infrastructure_run_id" ]] ||
+  oci_die "selected infrastructure run does not match the trusted baseline infrastructure run"
+[[ "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" == "$infrastructure_provenance_sha256" ]] ||
+  oci_die "selected infrastructure provenance hash does not match the trusted baseline"
+[[ "$OCI_RUNTIME_FINGERPRINT" == "$runtime_fingerprint" ]] ||
+  oci_die "selected runtime fingerprint does not match the trusted baseline"
+if [[ -n "${OCI_RUNTIME_MODE:-}" ]]; then
+  [[ "$OCI_RUNTIME_MODE" == "$runtime_mode" ]] ||
+    oci_die "selected runtime mode does not match the trusted baseline"
 fi
 
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
@@ -762,6 +838,8 @@ mode=dry-run
 target_sha=$TARGET_SHA
 baseline_source_run_id=$BASELINE_SOURCE_RUN_ID
 baseline_artifact_name=$BASELINE_ARTIFACT_NAME
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 database_restore=disabled
 EOF2
   oci_log "oci_rollback_validation=PASS mode=dry-run target_sha=$TARGET_SHA"
@@ -834,6 +912,8 @@ mode=execute
 target_sha=$TARGET_SHA
 baseline_source_run_id=$BASELINE_SOURCE_RUN_ID
 baseline_artifact_name=$BASELINE_ARTIFACT_NAME
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 completed_services=${completed_services[*]}
 database_restore=disabled
 EOF2
