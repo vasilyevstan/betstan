@@ -58,9 +58,19 @@ conversation summaries are not authority.
   generation without a provenance artifact. Before pruning accumulated
   generations, protect the exact candidate, deployed, and fallback digest
   sets; bind every target to a terminal first-attempt build; and prove that
-  protected plus target rows exhaust the registry before deleting the whole
+  protected plus target identities exhaust the registry before deleting the
   explicit batch. Permit partial target subsets only so an interrupted prune
   can safely converge.
+- OCIR lists one row per tag, not necessarily one row per stored image.
+  `imagetools create` reuse adds exact-SHA aliases that share an image OCID and
+  digest. Destructive checks must validate every alias while counting and
+  deleting unique image IDs: require one service and digest per ID, one
+  service and ID per digest, complete trusted alias generations, canonical
+  protected tags, and equality of the exact protected OCID set before and
+  after deletion rather than relying on counts alone. Candidate, deployed,
+  and fallback source tags may legitimately share one complete nine-image set
+  after reuse; permit exact whole-generation aliases but reject partial
+  protected overlap.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.

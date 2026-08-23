@@ -368,11 +368,22 @@ jobs:
               "$WORK_DIR/obsolete-generations.json"
           )
 
-          cat \
-            "$WORK_DIR/candidate/images.tsv" \
-            "$WORK_DIR/deployed/images.tsv" \
-            "$WORK_DIR/fallback/images.tsv" \
-            > "$PROVENANCE_DIR/protected.tsv"
+          : > "$PROVENANCE_DIR/protected.tsv"
+          : > "$PROVENANCE_DIR/trusted-protected-images.tsv"
+          for protected in \
+            "candidate:$SOURCE_SHA" \
+            "deployed:$DEPLOYED_SHA" \
+            "fallback:$FALLBACK_SHA"; do
+            IFS=: read -r directory expected_sha <<<"$protected"
+            cat "$WORK_DIR/$directory/images.tsv" \
+              >> "$PROVENANCE_DIR/protected.tsv"
+            awk -F '\t' -v sha="$expected_sha" '
+              BEGIN { OFS = "\t" }
+              NF != 5 { exit 1 }
+              { print sha, $0 }
+            ' "$WORK_DIR/$directory/images.tsv" \
+              >> "$PROVENANCE_DIR/trusted-protected-images.tsv"
+          done
 
       - name: Install pinned OCI CLI and verify identity
         env:
@@ -393,7 +404,7 @@ jobs:
           )"
           [ "$home_region" = "$OCI_CLI_REGION" ]
 
-      - name: Prune only the obsolete complete generation
+      - name: Prune only obsolete unique image IDs
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -403,6 +414,7 @@ jobs:
           TARGET_SOURCE_SHAS_FILE: artifacts/oci-registry-prune/target-source-shas.txt
           TRUSTED_TARGET_IMAGES_FILE: artifacts/oci-registry-prune/trusted-target-images.tsv
           PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/protected.tsv
+          TRUSTED_PROTECTED_IMAGES_FILE: artifacts/oci-registry-prune/trusted-protected-images.tsv
           CURRENT_SOURCE_SHA: ${{ inputs.approved_sha }}
           OUTPUT_DIR: artifacts/oci-registry-prune
         run: ./infra/oci/scripts/prune-registry-generation.sh
@@ -410,18 +422,52 @@ jobs:
       - name: Record registry prune provenance
         run: |
           set -euo pipefail
+          test -s "$PROVENANCE_DIR/before-summary.json"
           test -s "$PROVENANCE_DIR/after-summary.json"
+          test -s "$PROVENANCE_DIR/before-aliases.tsv"
+          test -s "$PROVENANCE_DIR/after-aliases.tsv"
+          test -s "$PROVENANCE_DIR/protected-image-ids.txt"
+          protected_image_ids_sha256="$(
+            jq -er '.protected_image_ids_sha256' \
+              "$PROVENANCE_DIR/before-summary.json"
+          )"
+          [[ "$protected_image_ids_sha256" =~ ^[0-9a-f]{64}$ ]]
+          protected_image_id_count="$(
+            wc -l < "$PROVENANCE_DIR/protected-image-ids.txt" |
+              tr -d ' '
+          )"
+          [ "$protected_image_id_count" = "9" ] ||
+            [ "$protected_image_id_count" = "18" ] ||
+            [ "$protected_image_id_count" = "27" ]
+          [ "$protected_image_ids_sha256" = "$(
+            sha256sum "$PROVENANCE_DIR/protected-image-ids.txt" |
+              awk '{ print $1 }'
+          )" ]
           expected_targets="$(
             jq -c '[.[].sha] | sort' \
               "$WORK_DIR/obsolete-generations.json"
           )"
           jq -e \
             --argjson expected_targets "$expected_targets" \
-            --arg source_sha "$SOURCE_SHA" '
+            --arg source_sha "$SOURCE_SHA" \
+            --arg protected_image_ids_sha256 \
+              "$protected_image_ids_sha256" \
+            --argjson protected_image_id_count \
+              "$protected_image_id_count" '
               .target_source_shas == $expected_targets and
               .current_source_sha == $source_sha and
+              .protected_image_ids_sha256 ==
+                $protected_image_ids_sha256 and
               .terminal_status == "PRUNED" and
-              .unique_images == 27
+              .protected_unique_generations >= 1 and
+              .protected_unique_generations <= 3 and
+              .unique_images ==
+                (.protected_unique_generations * 9) and
+              .unique_images == $protected_image_id_count and
+              .unique_image_ids == .unique_images and
+              .tag_rows >= .unique_images and
+              .alias_rows == (.tag_rows - .unique_images) and
+              .tag_generations >= 3
             ' "$PROVENANCE_DIR/after-summary.json" >/dev/null
           printf '%s\n' \
             "source_sha=$SOURCE_SHA" \
