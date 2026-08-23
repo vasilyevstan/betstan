@@ -52,10 +52,12 @@ inactive. Fail closed when either query is incomplete or fails.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
-  environments in automatic mode. The only infrastructure exceptions are an
-  exact-title `validate-registry` or `prune-registry` run on current
-  CLI-managed `master`; never auto-approve other infrastructure, rollback,
-  migration, stale-master, rerun, unlabelled, or competing workflow activity.
+  environments in automatic mode. Exact-title capacity acquisition,
+  `validate-registry`, `prune-registry`, infrastructure `finalize`, and the
+  bounded live-data phases may also run automatically on current CLI-managed
+  `master`. Never auto-approve infrastructure `prepare`, broad migration,
+  recovery, rollback, stale-master, rerun, unlabelled, or competing workflow
+  activity.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.

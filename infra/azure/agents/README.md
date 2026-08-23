@@ -269,7 +269,7 @@ EXPECTED_ENVIRONMENT=production-emergency \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
-The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic rollback, migration, and infrastructure approval is unsupported.
+The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments or phase titles, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic mode supports the normal application build/deploy/activation path, exact-title OCI capacity and registry/finalize runs, and the bounded `dry-run` → `apply-backfills` → `apply-slip-index` workflow. Broad migration, recovery, and rollback remain human-gated.
 
 ## Post-merge production verification
 
