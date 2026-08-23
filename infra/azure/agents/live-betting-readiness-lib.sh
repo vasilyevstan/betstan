@@ -904,6 +904,8 @@ live_betting_apply_metric() {
     rabbit_live_consumers) LIVE_BETTING_RABBIT_CONSUMERS="$value" ;;
     rabbit_dynamic_queues) LIVE_BETTING_RABBIT_DYNAMIC_QUEUES="$value" ;;
     active_matches) LIVE_BETTING_ACTIVE_MATCHES="$value" ;;
+    overdue_unstarted_events) LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS="$value" ;;
+    simulation_quarantines) LIVE_BETTING_SIMULATION_QUARANTINES="$value" ;;
     submitted_live_slips) LIVE_BETTING_SUBMITTED_LIVE_SLIPS="$value" ;;
     mongo_ping_ok) LIVE_BETTING_MONGO_PING_OK="$value" ;;
     topology_mode) LIVE_BETTING_TOPOLOGY_MODE="$value" ;;
@@ -1329,6 +1331,8 @@ live_betting_check_mongo_observability() {
       "$retry_file" \
       "$report_file" \
       "$LIVE_BETTING_MAX_ACTIVE_MATCHES" \
+      "$LIVE_BETTING_MAX_OVERDUE_UNSTARTED_EVENTS" \
+      "$LIVE_BETTING_MAX_SIMULATION_QUARANTINES" \
       "$LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS" \
       "$LIVE_BETTING_MAX_WORKFLOW_PENDING_COUNT" \
       "$LIVE_BETTING_MAX_WORKFLOW_PENDING_AGE_SECONDS" \
@@ -1348,6 +1352,8 @@ from pathlib import Path
     retry_path,
     report_path,
     max_matches,
+    max_overdue_unstarted,
+    max_simulation_quarantines,
     max_slips,
     pending_limit,
     pending_age_limit,
@@ -1423,12 +1429,24 @@ for label, payload in (
         raise SystemExit(f"{label} ping check failed")
 
 active_matches = require_non_negative_int(active_payload.get("activeMatches"), "activeMatches")
+overdue_unstarted_events = require_non_negative_int(
+    active_payload.get("overdueUnstartedEvents"),
+    "overdueUnstartedEvents",
+)
+simulation_quarantines = require_non_negative_int(
+    active_payload.get("simulationQuarantines"),
+    "simulationQuarantines",
+)
 submitted_live_slips = require_non_negative_int(
     slips_payload.get("submittedLiveSlips"),
     "submittedLiveSlips",
 )
 if active_matches > int(max_matches):
     raise SystemExit("active live match count exceeds bound")
+if overdue_unstarted_events > int(max_overdue_unstarted):
+    raise SystemExit("overdue unstarted event count exceeds bound")
+if simulation_quarantines > int(max_simulation_quarantines):
+    raise SystemExit("simulation quarantine count exceeds bound")
 if submitted_live_slips > int(max_slips):
     raise SystemExit("submitted live slip count exceeds bound")
 
@@ -1488,6 +1506,8 @@ for collection_label, status_blocks in parking_metrics.items():
 
 report = {
     "active_matches": active_matches,
+    "overdue_unstarted_events": overdue_unstarted_events,
+    "simulation_quarantines": simulation_quarantines,
     "submitted_live_slips": submitted_live_slips,
     "limits": {
         "workflow_pending_count_limit": int(pending_limit),
@@ -1514,6 +1534,8 @@ Path(report_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n"
 
 print("mongo_ping_ok=true")
 print(f"active_matches={active_matches}")
+print(f"overdue_unstarted_events={overdue_unstarted_events}")
+print(f"simulation_quarantines={simulation_quarantines}")
 print(f"submitted_live_slips={submitted_live_slips}")
 print(f"workflow_pending_count_limit={int(pending_limit)}")
 print(f"workflow_pending_age_limit_seconds={int(pending_age_limit)}")
@@ -1530,7 +1552,7 @@ PY
   then
     live_betting_write_sanitized_file "$result_stderr" "$LIVE_BETTING_OUTPUT_DIR/mongo-check.stderr"
     case "$(cat "$result_stderr")" in
-      active\ live\ match\ count*|submitted\ live\ slip\ count*|activeMatches*|submittedLiveSlips*|active-match\ query*|submitted-slip\ query*)
+      active\ live\ match\ count*|overdue\ unstarted\ event\ count*|simulation\ quarantine\ count*|submitted\ live\ slip\ count*|activeMatches*|overdueUnstartedEvents*|simulationQuarantines*|submittedLiveSlips*|active-match\ query*|submitted-slip\ query*)
         live_betting_record_failure mongo_counts "$(cat "$result_stderr")"
         ;;
       *)
@@ -1877,6 +1899,9 @@ rabbit_live_consumers=$LIVE_BETTING_RABBIT_CONSUMERS
 rabbit_dynamic_queues=$LIVE_BETTING_RABBIT_DYNAMIC_QUEUES
 mongo_ping_ok=$LIVE_BETTING_MONGO_PING_OK
 active_matches=$LIVE_BETTING_ACTIVE_MATCHES
+overdue_unstarted_events=$LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS
+simulation_quarantines=$LIVE_BETTING_SIMULATION_QUARANTINES
+unstarted_event_grace_seconds=$LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS
 submitted_live_slips=$LIVE_BETTING_SUBMITTED_LIVE_SLIPS
 public_event_status=$LIVE_BETTING_PUBLIC_EVENT_STATUS
 public_event_items=$LIVE_BETTING_PUBLIC_EVENT_ITEMS
@@ -1933,6 +1958,9 @@ live_betting_readiness_main() {
   LIVE_BETTING_REQUIRE_HTTPS_DIAGNOSTIC="${REQUIRE_HTTPS_DIAGNOSTIC:-0}"
   LIVE_BETTING_EXPECTED_FLAG="${EXPECTED_LIVE_KICKOFFS_ENABLED:-$(live_betting_default_expected_flag "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_ACTIVE_MATCHES="${MAX_ACTIVE_MATCHES:-$(live_betting_default_max_active_matches "$LIVE_BETTING_MODE")}"
+  LIVE_BETTING_MAX_OVERDUE_UNSTARTED_EVENTS="${MAX_OVERDUE_UNSTARTED_EVENTS:-0}"
+  LIVE_BETTING_MAX_SIMULATION_QUARANTINES="${MAX_SIMULATION_QUARANTINES:-0}"
+  LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS="${UNSTARTED_EVENT_GRACE_SECONDS:-120}"
   LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS="${MAX_SUBMITTED_LIVE_SLIPS:-$(live_betting_default_max_submitted_slips "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_LIVE_QUEUE_READY="${MAX_LIVE_QUEUE_READY:-$(live_betting_default_max_queue_ready "$LIVE_BETTING_MODE")}"
   LIVE_BETTING_MAX_LIVE_QUEUE_UNACK="${MAX_LIVE_QUEUE_UNACK:-$(live_betting_default_max_queue_unack "$LIVE_BETTING_MODE")}"
@@ -1966,6 +1994,8 @@ live_betting_readiness_main() {
   LIVE_BETTING_RABBIT_CONSUMERS="unknown"
   LIVE_BETTING_RABBIT_DYNAMIC_QUEUES="unknown"
   LIVE_BETTING_ACTIVE_MATCHES="unknown"
+  LIVE_BETTING_OVERDUE_UNSTARTED_EVENTS="unknown"
+  LIVE_BETTING_SIMULATION_QUARANTINES="unknown"
   LIVE_BETTING_SUBMITTED_LIVE_SLIPS="unknown"
   LIVE_BETTING_MONGO_PING_OK="unknown"
   LIVE_BETTING_TOPOLOGY_MODE="unknown"
@@ -2035,6 +2065,9 @@ live_betting_readiness_main() {
   live_betting_require_uint REQUEST_TIMEOUT "$LIVE_BETTING_REQUEST_TIMEOUT"
   live_betting_require_uint SSE_TIMEOUT "$LIVE_BETTING_SSE_TIMEOUT"
   live_betting_require_uint MAX_ACTIVE_MATCHES "$LIVE_BETTING_MAX_ACTIVE_MATCHES"
+  live_betting_require_uint MAX_OVERDUE_UNSTARTED_EVENTS "$LIVE_BETTING_MAX_OVERDUE_UNSTARTED_EVENTS"
+  live_betting_require_uint MAX_SIMULATION_QUARANTINES "$LIVE_BETTING_MAX_SIMULATION_QUARANTINES"
+  live_betting_require_uint UNSTARTED_EVENT_GRACE_SECONDS "$LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS"
   live_betting_require_uint MAX_SUBMITTED_LIVE_SLIPS "$LIVE_BETTING_MAX_SUBMITTED_LIVE_SLIPS"
   live_betting_require_uint MAX_LIVE_QUEUE_READY "$LIVE_BETTING_MAX_LIVE_QUEUE_READY"
   live_betting_require_uint MAX_LIVE_QUEUE_UNACK "$LIVE_BETTING_MAX_LIVE_QUEUE_UNACK"
@@ -2143,12 +2176,27 @@ PY
   local active_query slips_query bet_query moderation_query pending_result_query retry_query
   active_query="$(cat <<'EOF_QUERY'
 const gm = db.getSiblingDB("gaming_gamemaster");
+const overdueBefore = new Date(Date.now() - (__UNSTARTED_EVENT_GRACE_SECONDS__ * 1000));
 print(JSON.stringify({
   mongoOk: db.adminCommand({ping: 1}).ok === 1,
-  activeMatches: gm.events.countDocuments({phase: {$nin: ["PRE_MATCH", "FULL_TIME"]}})
+  activeMatches: gm.events.countDocuments({phase: {$nin: ["PRE_MATCH", "FULL_TIME"]}}),
+  overdueUnstartedEvents: gm.events.countDocuments({
+    status: "NO_RESULT",
+    time: {$lt: overdueBefore},
+    "liveTransitions.0": {$exists: false},
+    $or: [
+      {phase: "PRE_MATCH"},
+      {phase: null},
+      {phase: {$exists: false}}
+    ]
+  }),
+  simulationQuarantines: gm.events.countDocuments({
+    "simulationFailure.quarantinedAt": {$ne: null}
+  })
 }));
 EOF_QUERY
 )"
+  active_query="${active_query//__UNSTARTED_EVENT_GRACE_SECONDS__/$LIVE_BETTING_UNSTARTED_EVENT_GRACE_SECONDS}"
   slips_query="$(cat <<'EOF_QUERY'
 const slips = db.getSiblingDB("gaming_slip");
 print(JSON.stringify({

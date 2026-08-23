@@ -15,24 +15,28 @@ const router = express.Router();
 export interface EventLiveStreamOptions {
   hub?: LiveEventHub;
   heartbeatMs?: number;
+  maxConnections?: number;
   verifyScopedAccess?: (req: Request) => Promise<boolean>;
 }
 
-const writeSnapshot = (res: Response, snapshot: PublicEventSnapshot): void => {
+const writeSnapshot = (
+  res: Response,
+  snapshot: PublicEventSnapshot
+): boolean => {
   const sanitizedSnapshot = sanitizePublicEventSnapshot(snapshot);
 
   if (!sanitizedSnapshot.live) {
-    return;
+    return true;
   }
 
-  res.write(
+  return res.write(
     `id: ${buildLiveEventId(
       sanitizedSnapshot.eventId,
       sanitizedSnapshot.live.sequence
     )}\n`
+    + "event: snapshot\n"
+    + `data: ${JSON.stringify(sanitizedSnapshot)}\n\n`
   );
-  res.write("event: snapshot\n");
-  res.write(`data: ${JSON.stringify(sanitizedSnapshot)}\n\n`);
 };
 
 export const openEventLiveStream = (
@@ -43,6 +47,8 @@ export const openEventLiveStream = (
   const heartbeatMs =
     options.heartbeatMs ?? getPublicEventConfig().sseHeartbeatMs;
   const hub = options.hub ?? liveEventHub;
+  const maxConnections =
+    options.maxConnections ?? getPublicEventConfig().sseMaxConnections;
   const visibleOfflineEventIds = new Set(req.visibleOfflineEventIds ?? []);
   const hasOfflineScope = visibleOfflineEventIds.size > 0;
   const verifyScopedAccess =
@@ -50,6 +56,13 @@ export const openEventLiveStream = (
     ?? (async (request: Request) => (
       await verifyAdminRequest(request)
     ) === 204);
+
+  if (hub.subscriberCount() >= maxConnections) {
+    res.status(503);
+    res.setHeader("Retry-After", "5");
+    res.end();
+    return;
+  }
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream");
@@ -107,7 +120,9 @@ export const openEventLiveStream = (
     }
 
     if (snapshot.visibility !== EventVisibility.OFFLINE) {
-      writeSnapshot(res, snapshot);
+      if (!writeSnapshot(res, snapshot)) {
+        closeScopedStream();
+      }
       return;
     }
 
@@ -122,7 +137,9 @@ export const openEventLiveStream = (
       }
 
       if (!res.writableEnded && !cleanedUp) {
-        writeSnapshot(res, snapshot);
+        if (!writeSnapshot(res, snapshot)) {
+          closeScopedStream();
+        }
       }
     });
   });
@@ -133,7 +150,9 @@ export const openEventLiveStream = (
     }
 
     if (!hasOfflineScope) {
-      res.write(": heartbeat\n\n");
+      if (!res.write(": heartbeat\n\n")) {
+        closeScopedStream();
+      }
       return;
     }
 
@@ -144,7 +163,9 @@ export const openEventLiveStream = (
       }
 
       if (!res.writableEnded && !cleanedUp) {
-        res.write(": heartbeat\n\n");
+        if (!res.write(": heartbeat\n\n")) {
+          closeScopedStream();
+        }
       }
     });
   }, heartbeatMs);

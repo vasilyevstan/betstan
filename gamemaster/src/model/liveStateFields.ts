@@ -65,6 +65,26 @@ const pendingResultSchema = new Schema(
   { _id: false }
 );
 
+const simulationFailureSchema = new Schema(
+  {
+    attemptCount: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    lastFailedAt: {
+      type: Date,
+      required: true,
+    },
+    quarantinedAt: {
+      type: Date,
+      required: false,
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
 export const liveStateFields = {
   phase: {
     type: String,
@@ -139,6 +159,11 @@ export const liveStateFields = {
   },
   pendingResult: {
     type: pendingResultSchema,
+    required: false,
+    default: undefined,
+  },
+  simulationFailure: {
+    type: simulationFailureSchema,
     required: false,
     default: undefined,
   },

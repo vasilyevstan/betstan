@@ -4,6 +4,7 @@ export interface PublicEventConfig {
   maxIncidents: number;
   maxMarkets: number;
   sseHeartbeatMs: number;
+  sseMaxConnections: number;
 }
 
 const DEFAULT_PUBLIC_EVENT_CONFIG: PublicEventConfig = {
@@ -12,6 +13,7 @@ const DEFAULT_PUBLIC_EVENT_CONFIG: PublicEventConfig = {
   maxIncidents: 25,
   maxMarkets: 20,
   sseHeartbeatMs: 15000,
+  sseMaxConnections: 500,
 };
 
 const readPositiveInteger = (
@@ -54,5 +56,10 @@ export const getPublicEventConfig = (
     env.EVENT_PUBLIC_SSE_HEARTBEAT_MS,
     DEFAULT_PUBLIC_EVENT_CONFIG.sseHeartbeatMs,
     1000
+  ),
+  sseMaxConnections: readPositiveInteger(
+    env.EVENT_PUBLIC_SSE_MAX_CONNECTIONS,
+    DEFAULT_PUBLIC_EVENT_CONFIG.sseMaxConnections,
+    1
   ),
 });

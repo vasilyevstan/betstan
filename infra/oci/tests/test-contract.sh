@@ -326,6 +326,13 @@ abort "Mongo does not use the explicit 50Gi claim" unless mongo.dig(
 abort "legacy Mongo rendered" if File.read(ARGV.fetch(0)).include?("legacy-mongo")
 abort "expected canonical and redirect OCI ingresses" unless by_kind.fetch("Ingress").length == 2
 abort "expected canonical and diagnostic certificates" unless by_kind.fetch("Certificate").length == 2
+event = by_kind.fetch("Deployment").find {
+  |deployment| deployment.dig("metadata", "name") == "gaming-event-depl"
+}
+event_env = event.dig("spec", "template", "spec", "containers", 0, "env").to_h {
+  |entry| [entry.fetch("name"), entry["value"]]
+}
+abort "event SSE connection cap differs" unless event_env["EVENT_PUBLIC_SSE_MAX_CONNECTIONS"] == "250"
 ingress_hosts = by_kind.fetch("Ingress").flat_map {
   |ingress| ingress.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
 }.sort
@@ -340,6 +347,19 @@ abort "canonical certificate SAN set differs" unless canonical_certificate.dig(
 redirect = by_kind.fetch("Ingress").find {
   |ingress| ingress.dig("metadata", "name") == "gaming-oci-www-redirect"
 }
+canonical_ingress = by_kind.fetch("Ingress").find {
+  |ingress| ingress.dig("metadata", "name") == "gaming-oci-ingress"
+}
+canonical_annotations = canonical_ingress.dig("metadata", "annotations")
+abort "OCI ingress must disable SSE proxy buffering" unless canonical_annotations[
+  "nginx.ingress.kubernetes.io/proxy-buffering"
+] == "off"
+abort "OCI ingress SSE read timeout differs" unless canonical_annotations[
+  "nginx.ingress.kubernetes.io/proxy-read-timeout"
+] == "75"
+abort "OCI ingress SSE send timeout differs" unless canonical_annotations[
+  "nginx.ingress.kubernetes.io/proxy-send-timeout"
+] == "75"
 abort "www ingress must leave HTTP for the canonical redirect" unless redirect.dig(
   "metadata", "annotations", "nginx.ingress.kubernetes.io/ssl-redirect"
 ) == "false"

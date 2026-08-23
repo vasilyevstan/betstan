@@ -345,9 +345,12 @@ if [[ "$args" == *"mongosh --quiet --norc --eval"* ]]; then
   case "$target" in
     mongo-active)
       if [[ "$malformed_target" == "$target" ]]; then
-        printf '{"mongoOk":true,"activeMatches":"oops"}\n'
+        printf '{"mongoOk":true,"activeMatches":"oops","overdueUnstartedEvents":0,"simulationQuarantines":0}\n'
       else
-        printf '{"mongoOk":true,"activeMatches":%s}\n' "${STUB_ACTIVE_MATCHES:-0}"
+        printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s}\n' \
+          "${STUB_ACTIVE_MATCHES:-0}" \
+          "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" \
+          "${STUB_SIMULATION_QUARANTINES:-0}"
       fi
       ;;
     mongo-submitted-slips)

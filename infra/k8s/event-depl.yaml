@@ -38,6 +38,8 @@ spec:
               value: "http://gaming-auth-srv:3000"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
+            - name: EVENT_PUBLIC_SSE_MAX_CONNECTIONS
+              value: "250"
             - name: CLIENT_ID
               valueFrom:
                 fieldRef:

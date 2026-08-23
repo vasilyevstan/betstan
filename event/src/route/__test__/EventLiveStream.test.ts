@@ -19,6 +19,7 @@ class MockResponse extends EventEmitter {
   writes: string[] = [];
   statusCode = 200;
   writableEnded = false;
+  writeResult = true;
   flushHeaders = jest.fn();
 
   status(code: number) {
@@ -32,7 +33,7 @@ class MockResponse extends EventEmitter {
 
   write(chunk: string) {
     this.writes.push(chunk);
-    return true;
+    return this.writeResult;
   }
 
   end() {
@@ -160,7 +161,10 @@ const buildDirtySnapshot = (): PublicEventSnapshot =>
   } as unknown as PublicEventSnapshot);
 
 const getDataPayload = (writes: string[]) => {
-  const dataChunk = writes.find((chunk) => chunk.startsWith("data: "));
+  const dataChunk = writes
+    .join("")
+    .split("\n")
+    .find((chunk) => chunk.startsWith("data: "));
   if (!dataChunk) {
     throw new Error("Missing SSE data chunk");
   }
@@ -377,11 +381,46 @@ it("uses default options, skips non-live payloads, and tolerates repeated cleanu
   expect(liveEventHub.subscriberCount()).toEqual(0);
 });
 
+it("rejects streams above the per-pod connection cap", () => {
+  const hub = new LiveEventHub();
+  const existingUnsubscribe = hub.subscribe(() => undefined);
+  const req = new EventEmitter() as Request;
+  const res = new MockResponse();
+
+  openEventLiveStream(req, res as unknown as Response, {
+    hub,
+    maxConnections: 1,
+  });
+
+  expect(res.statusCode).toBe(503);
+  expect(res.headers["Retry-After"]).toBe("5");
+  expect(res.writableEnded).toBe(true);
+  expect(hub.subscriberCount()).toBe(1);
+
+  existingUnsubscribe();
+});
+
+it("closes a slow stream when the response applies backpressure", () => {
+  const hub = new LiveEventHub();
+  const req = new EventEmitter() as Request;
+  const res = new MockResponse();
+  res.writeResult = false;
+
+  openEventLiveStream(req, res as unknown as Response, { hub });
+  hub.broadcast(buildSnapshot(1));
+
+  expect(res.writableEnded).toBe(true);
+  expect(hub.subscriberCount()).toBe(0);
+});
+
 it("ignores subscribed snapshots that sanitize to non-live payloads", () => {
   const req = new EventEmitter() as Request;
   const res = new MockResponse() as unknown as Response;
   let subscriber: ((snapshot: PublicEventSnapshot) => void) | undefined;
   const fakeHub = {
+    subscriberCount() {
+      return 0;
+    },
     subscribe(callback: (snapshot: PublicEventSnapshot) => void) {
       subscriber = callback;
       return jest.fn();
@@ -424,6 +463,11 @@ it("ignores subscribed snapshots that sanitize to non-live payloads", () => {
     live: undefined,
   });
 
-  expect((res as unknown as MockResponse).writes.filter((chunk) => chunk.startsWith("data: "))).toHaveLength(1);
+  expect(
+    (res as unknown as MockResponse).writes
+      .join("")
+      .split("\n")
+      .filter((chunk) => chunk.startsWith("data: "))
+  ).toHaveLength(1);
   req.emit("close");
 });
