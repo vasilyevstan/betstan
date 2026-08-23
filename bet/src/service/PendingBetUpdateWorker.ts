@@ -375,7 +375,12 @@ export class PendingBetUpdateWorker {
       this.requestedSlipIds.add(slipId);
       await this.runNow();
 
-      if (!(await this.hasClaimablePendingUpdatesForSlip(slipId, true))) {
+      // Only keep draining immediately while work is actually due now. A
+      // pending update that just got rescheduled with a backoff delay must
+      // not be reclaimed again here - the scheduled poll loop honors
+      // nextAttemptAt, whereas this replay loop otherwise ignores it and
+      // would burn through every retry attempt instantly.
+      if (!(await this.hasClaimablePendingUpdatesForSlip(slipId, false))) {
         return;
       }
     }
