@@ -19,8 +19,29 @@ const config = (overrides: Partial<EventSchedulerConfig> = {}) => ({
 
 const publisher = (): jest.Mocked<SchedulerPublisher> => ({
   init: jest.fn().mockResolvedValue(undefined),
-  publish: jest.fn(),
+  initConfirmChannel: jest.fn().mockResolvedValue(undefined),
+  publishWithConfirm: jest.fn().mockResolvedValue(undefined),
 });
+
+const deferred = <T = void>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+const waitFor = async (predicate: () => boolean) => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("condition was not satisfied in time");
+};
 
 it("uses scheduler defaults and validates environment overrides", () => {
   expect(getEventSchedulerConfig({})).toEqual({
@@ -117,7 +138,8 @@ it("creates the exact epoch-aligned slots at the configured spacing", async () =
       .digest("hex")
       .slice(0, 24)
   );
-  expect(sent.publish).toHaveBeenCalledTimes(3);
+  expect(sent.initConfirmChannel).toHaveBeenCalledTimes(1);
+  expect(sent.publishWithConfirm).toHaveBeenCalledTimes(3);
 });
 
 it("does not insert slots twice at the same clock value", async () => {
@@ -155,17 +177,44 @@ it("deduplicates two concurrent scheduler instances with the slotKey index", asy
 
   expect(await Event.countDocuments({ source: "SCHEDULER" })).toEqual(3);
   expect(
-    firstPublisher.publish.mock.calls.length +
-      secondPublisher.publish.mock.calls.length
+    firstPublisher.publishWithConfirm.mock.calls.length +
+      secondPublisher.publishWithConfirm.mock.calls.length
   ).toEqual(3);
 });
 
-it("keeps a failed publish pending and retries it with a new publisher", async () => {
+it("marks a scheduled slot published only after broker confirmation", async () => {
+  const now = new Date("2030-01-01T00:00:00.000Z");
+  const sent = publisher();
+  const confirmation = deferred<void>();
+  sent.publishWithConfirm.mockReturnValueOnce(confirmation.promise);
+  const scheduler = new EventScheduler({
+    config: config({ poolSize: 1, horizonMinutes: 1, maxInsertsPerTick: 1 }),
+    now: () => now,
+    publisherFactory: () => sent,
+  });
+  await scheduler.ensureSlotKeyIndex();
+
+  const run = scheduler.runOnce();
+  await waitFor(() => sent.publishWithConfirm.mock.calls.length === 1);
+
+  const pending = await Event.findOne({ source: "SCHEDULER" });
+  expect(pending!.newEventPublishedAt).toBeNull();
+  expect(pending!.newEventPublishClaimToken).toEqual(expect.any(String));
+
+  confirmation.resolve();
+  await run;
+
+  const stored = await Event.findOne({ source: "SCHEDULER" });
+  expect(stored!.newEventPublishedAt).not.toBeNull();
+  expect(stored!.newEventPublishClaimToken).toBeNull();
+});
+
+it("keeps a broker confirm failure pending and retries it with a new publisher", async () => {
   const now = new Date("2030-01-01T00:00:00.000Z");
   const failed = publisher();
-  failed.publish.mockImplementation(() => {
-    throw new Error("broker unavailable");
-  });
+  failed.publishWithConfirm.mockRejectedValueOnce(
+    new Error("broker unavailable")
+  );
   const recovered = publisher();
   const factories = [failed, recovered];
   const scheduler = new EventScheduler({
@@ -179,11 +228,13 @@ it("keeps a failed publish pending and retries it with a new publisher", async (
   let stored = await Event.findOne({ source: "SCHEDULER" });
   expect(stored!.newEventPublishedAt).toBeNull();
   expect(stored!.newEventPublishAttempts).toEqual(1);
+  expect(stored!.newEventPublishClaimToken).toBeNull();
 
   await scheduler.runOnce();
   stored = await Event.findOne({ source: "SCHEDULER" });
   expect(recovered.init).toHaveBeenCalledTimes(1);
-  expect(recovered.publish).toHaveBeenCalledTimes(1);
+  expect(recovered.initConfirmChannel).toHaveBeenCalledTimes(1);
+  expect(recovered.publishWithConfirm).toHaveBeenCalledTimes(1);
   expect(stored!.newEventPublishedAt).not.toBeNull();
   expect(stored!.newEventPublishAttempts).toEqual(2);
 });
@@ -223,7 +274,7 @@ it("reclaims a stale publish claim after the bounded claim timeout", async () =>
   await scheduler.runOnce();
 
   const stored = await Event.findOne({ eventId: "stale-publish-claim" });
-  expect(sent.publish).toHaveBeenCalledTimes(1);
+  expect(sent.publishWithConfirm).toHaveBeenCalledTimes(1);
   expect(stored!.newEventPublishedAt).not.toBeNull();
   expect(stored!.newEventPublishAttempts).toEqual(2);
   expect(stored!.newEventPublishClaimToken).toBeNull();
@@ -269,7 +320,7 @@ it("never modifies external events and marks past scheduler events without publi
   expect(external!.newEventPublishedAt).toBeNull();
   expect(external!.newEventPublishAttempts).toEqual(7);
   expect(past!.newEventPublishedAt).not.toBeNull();
-  expect(sent.publish).toHaveBeenCalledTimes(1);
+  expect(sent.publishWithConfirm).toHaveBeenCalledTimes(1);
 });
 
 it("stops an unstarted timeout without running it", async () => {
@@ -343,7 +394,7 @@ it("schedules the next run only after the current run completes", async () => {
   await scheduler.stop();
 
   expect(await Event.countDocuments({ source: "SCHEDULER" })).toEqual(1);
-  expect(sent.publish).toHaveBeenCalledTimes(1);
+  expect(sent.publishWithConfirm).toHaveBeenCalledTimes(1);
 });
 
 it("logs a failed scheduled run and retries on the next tick", async () => {
