@@ -14,6 +14,34 @@ conversation summaries are not authority.
   Do not replace it with a newer `master` SHA.
 - Only one mutation-producing release or migration workflow may run at once.
 
+## Live feature activation
+
+- A successful dark deployment is not permission to enable new live kickoffs.
+  Bind activation to the exact first-attempt build, infrastructure, and deploy
+  runs, the infrastructure artifact digest, and the selected runtime
+  fingerprint; revalidate current `master` immediately before each mutation.
+- Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
+  unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
+  malformed or expired and continue persisted active simulations.
+- Remove the lease only through a same-run, same-SHA commit after the complete
+  browser journey, queue/log/restart checks, protected evidence upload, and a
+  final provenance revalidation. A hard-killed runner before commit therefore
+  expires independently.
+- Disable and ambiguous-write recovery set `LIVE_KICKOFFS_ENABLED=false` and
+  remove the lease in one deployment update. Normal signal traps are useful,
+  but they are not a substitute for an expiry mechanism that survives
+  `SIGKILL`.
+- Production acceptance fixtures must start `OFFLINE`. Ordinary REST and SSE
+  remain server-filtered, while exact fixture IDs require current persisted
+  administrator verification; the odds path repeats that verification before
+  allowing a synthetic selection.
+- Acceptance must also prove that an anonymous backoffice catalog read returns
+  `401` without fixture names. Live-update-first projections stay `OFFLINE`
+  until event metadata establishes visibility; metadata repair must not undo a
+  newer visibility message. Revoked scoped clients purge cached fixtures
+  immediately, while healthy SSE clients still reconcile REST periodically so
+  newly hidden events disappear.
+
 ## OCI provider behavior
 
 - OCI deletion and registry layer reclamation are asynchronous. Wait for

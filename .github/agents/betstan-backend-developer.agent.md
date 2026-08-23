@@ -52,6 +52,13 @@ instead of crossing the boundary.
   required.
 - Make message handlers idempotent and explicit about cross-queue ordering.
 - Use database-enforced invariants for concurrency-sensitive uniqueness.
+- Treat JWT roles as non-authoritative for privileged operations. Revalidate
+  current persisted roles through the owning auth service and fail closed.
+- Keep synthetic acceptance records excluded by default in every public read
+  path, including long-lived streams, and authorize exact scoped IDs
+  server-side.
+- Generate private simulation randomness independently of public identifiers,
+  persist it before publication, and never include it in public DTOs.
 - Reuse existing helpers and patterns; avoid broad catches and silent failures.
 - Keep publisher instances singleton-scoped as documented in `LEARNINGS.md`.
 - Run the smallest existing tests that prove the slice.

@@ -161,6 +161,9 @@ jobs:
           git fetch origin master:refs/remotes/origin/master
           [ "${{ inputs.approved_sha }}" = "$(git rev-parse origin/master)" ]
           kubectl set image deployment/client client=iad.ocir.io/example/client:${{ inputs.approved_sha }}
+          printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
+          printf 'infrastructure_run_attempt=1\n'
+          printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
 YAML
 
   cat > "$tmp_dir/oci-migrate.yml" <<'YAML'
@@ -249,6 +252,8 @@ jobs:
 YAML
 
   cp "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
 }
 
@@ -657,7 +662,7 @@ PY
 }
 
 azure_set="production-build,production-deploy,production-rollback"
-full_set="oci-capacity-acquire,oci-infrastructure,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+full_set="oci-capacity-acquire,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 reset_fixtures
@@ -1055,6 +1060,76 @@ sed -i.bak '/terraform apply/i\
           echo "${{ secrets[\"OCI_CLI_USER\"] }}"' "$tmp_dir/oci-infrastructure.yml"
 rm "$tmp_dir/oci-infrastructure.yml.bak"
 assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak "/steps.accepted.outcome != 'success'/d" \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation without automatic disable" \
+  "is missing failure-triggered disable gate"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-activate.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+needle = "run: ./infra/oci/scripts/revalidate-live-activation-stan.sh"
+path.write_text(text.replace(needle, "run: echo skipped-revalidation", 1))
+PY
+assert_fail \
+  "activation with only two release revalidations" \
+  "must revalidate before mutation, acceptance, and permanent activation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/MODE=rollback-drain/d' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable without drain gate" \
+  "is missing live-aware drain gate"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak "/steps.disable.outcome != 'success'/d" \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable without final dark reassertion" \
+  "is missing workflow-level dark reassertion"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020#actions/setup-node@v4#' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation with mutable action" \
+  "must pin actions/setup-node to a full 40-character lowercase hex commit SHA"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/infrastructure_provenance_sha256=%s/d' \
+  "$tmp_dir/oci-production-deploy.yml"
+rm "$tmp_dir/oci-production-deploy.yml.bak"
+assert_fail \
+  "deployment without infrastructure artifact binding" \
+  "is missing infrastructure artifact digest binding"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/runtime_fingerprint/d' \
+  "$tmp_dir/oci-live-betting-disable.yml"
+rm "$tmp_dir/oci-live-betting-disable.yml.bak"
+assert_fail \
+  "disable without runtime identity binding" \
+  "is missing deployment-to-infrastructure runtime binding"
 
 reset_fixtures
 write_complete_oci_set

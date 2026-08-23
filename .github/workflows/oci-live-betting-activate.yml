@@ -1,0 +1,688 @@
+name: oci-live-betting-activate
+run-name: oci-live-activate ${{ inputs.approved_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact currently deployed master SHA to activate
+        required: true
+        type: string
+      build_run_id:
+        description: Successful first-attempt OCI build run ID
+        required: true
+        type: string
+      infrastructure_run_id:
+        description: Successful first-attempt OCI infrastructure run ID
+        required: true
+        type: string
+      deployment_run_id:
+        description: Successful first-attempt dark OCI deployment run ID
+        required: true
+        type: string
+      confirmation:
+        description: Type ACTIVATE OCI LIVE BETTING
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  activate-and-validate:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      LIVE_ACTIVATION_LEASE_SECONDS: "1800"
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-live-control-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-live-control-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-live-control-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-live-control-home/.kube" \
+            artifacts/build \
+            artifacts/infrastructure \
+            artifacts/deploy \
+            artifacts/dark-readiness \
+            artifacts/live-control
+          chmod 700 \
+            "$RUNNER_TEMP/oci-live-control-home" \
+            "$RUNNER_TEMP/oci-live-control-home/.kube"
+
+      - name: Checkout exact current master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact SHA and release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$CONFIRMATION" = "ACTIVATE OCI LIVE BETTING" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for run_id in \
+            "$BUILD_RUN_ID" "$INFRASTRUCTURE_RUN_ID" "$DEPLOYMENT_RUN_ID"; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+          done
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+
+          verify_run() {
+            local run_id="$1"
+            local workflow_file="$2"
+            local expected_event="$3"
+            local workflow_id actual_id path event head_sha head_branch repository
+            local status conclusion attempt
+            workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" --jq '.id'
+            )"
+            read -r actual_id path event head_sha head_branch repository \
+              status conclusion attempt <<<"$(
+              gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            )"
+            [ "$actual_id" = "$workflow_id" ]
+            [ "$path" = ".github/workflows/$workflow_file" ]
+            [ "$event" = "$expected_event" ]
+            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_branch" = "master" ]
+            [ "$repository" = "$REPOSITORY" ]
+            [ "$status" = "completed" ]
+            [ "$conclusion" = "success" ]
+            [ "$attempt" = "1" ]
+          }
+
+          verify_run "$BUILD_RUN_ID" oci-production-build.yml workflow_run
+          verify_run "$INFRASTRUCTURE_RUN_ID" oci-infrastructure.yml workflow_dispatch
+          verify_run "$DEPLOYMENT_RUN_ID" oci-production-deploy.yml workflow_dispatch
+
+      - name: Download exact OCI image provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Download exact OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Download exact dark deployment provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-deploy-provenance-${{ inputs.deployment_run_id }}-1
+          path: artifacts/deploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.deployment_run_id }}
+
+      - name: Download exact dark readiness evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-live-readiness-${{ inputs.deployment_run_id }}-1
+          path: artifacts/dark-readiness
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.deployment_run_id }}
+
+      - name: Verify downloaded provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          PROVENANCE_DIR=artifacts/build \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/live-control/images.tsv \
+          VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$infrastructure_finalized" = "true" ]
+          [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          selected_runtime_mode="$runtime_mode"
+          selected_infrastructure_sha256="$(
+            sha256sum artifacts/infrastructure/provenance.env |
+              awk '{print $1}'
+          )"
+          if [ "$selected_runtime_mode" = "oke" ]; then
+            selected_runtime_fingerprint="$cluster_fingerprint"
+          else
+            [ "$selected_runtime_mode" = "k3s" ]
+            selected_runtime_fingerprint="$instance_fingerprint"
+          fi
+
+          source artifacts/deploy/provenance.txt
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$deployment_run_id" = "$DEPLOYMENT_RUN_ID" ]
+          [ "$deployment_run_attempt" = "1" ]
+          [ "$runtime_mode" = "$selected_runtime_mode" ]
+          [ "$runtime_fingerprint" = "$selected_runtime_fingerprint" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$infrastructure_provenance_sha256" = "$selected_infrastructure_sha256" ]
+          [ "$public_host" = "$canonical_host" ]
+
+          mapfile -t dark_summaries < <(
+            find artifacts/dark-readiness -type f -name summary.env
+          )
+          [ "${#dark_summaries[@]}" = "1" ]
+          dark_summary="${dark_summaries[0]}"
+          [ "$(awk -F= '$1 == "mode" {print $2}' "$dark_summary")" = "dark" ]
+          [ "$(awk -F= '$1 == "live_betting_readiness" {print $2}' "$dark_summary")" = "GO" ]
+          [ "$(awk -F= '$1 == "actual_live_kickoffs_enabled" {print $2}' "$dark_summary")" = "false" ]
+          [ "$(awk -F= '$1 == "active_matches" {print $2}' "$dark_summary")" = "0" ]
+          [ "$(awk -F= '$1 == "submitted_live_slips" {print $2}' "$dark_summary")" = "0" ]
+          printf 'DARK_READINESS_FILE=%s\n' "$dark_summary" >> "$GITHUB_ENV"
+
+          printf 'public_url=https://%s\n' "$canonical_host" >> "$GITHUB_OUTPUT"
+          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
+          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+          if [ "$runtime_mode" = "oke" ]; then
+            echo "::add-mask::$cluster_ocid"
+            echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+          else
+            echo "::add-mask::$instance_ocid"
+            echo "::add-mask::$bastion_ocid"
+            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Verify OKE identity
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_CLUSTER_OCID: ${{ steps.provenance.outputs.cluster_ocid }}
+        run: |
+          oci ce cluster get \
+            --cluster-id "$OCI_CLUSTER_OCID" \
+            --query 'data.{type:type,state:"lifecycle-state"}' >/dev/null
+
+      - name: Verify k3s identity
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.provenance.outputs.instance_ocid }}
+        run: |
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' >/dev/null
+
+      - name: Authorize current OKE runner
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: ${{ runner.temp }}/live-control-runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact OKE cluster
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/live-control-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-live-control
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Install browser acceptance dependencies
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install locked client and Chromium
+        run: |
+          npm ci --prefix client --no-audit --no-fund
+          ./client/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Capture pre-activation pod restart baseline
+        run: |
+          kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json |
+            jq '[
+              .items[] as $pod |
+              $pod.status.containerStatuses[]? |
+              {
+                pod: $pod.metadata.name,
+                name: .name,
+                restarts: .restartCount
+              }
+            ]' > artifacts/live-control/restarts-before.json
+
+      - name: Verify dark activation preconditions
+        env:
+          MODE: dark
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          SECONDARY_PUBLIC_URL: ${{ steps.provenance.outputs.redirect_url }}
+          DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          IMAGE_PROVENANCE_FILE: artifacts/live-control/images.tsv
+          EXACT_MASTER_PROVENANCE_FILE: artifacts/deploy/provenance.txt
+          LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
+          OUTPUT_DIR: artifacts/live-control/readiness-before
+        run: ./infra/oci/agents/live-betting-readiness-stan.sh
+
+      - name: Revalidate current master before live mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
+
+      - name: Activate new live kickoffs
+        id: activate
+        env:
+          ACTION: activate
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          CONTROL_RUN_ID: ${{ github.run_id }}
+          CONFIRMATION: ACTIVATE OCI LIVE BETTING
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          LEASE_DURATION_SECONDS: ${{ env.LIVE_ACTIVATION_LEASE_SECONDS }}
+          OUTPUT_DIR: artifacts/live-control/activate
+        run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Verify activated runtime
+        env:
+          MODE: activate
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          SECONDARY_PUBLIC_URL: ${{ steps.provenance.outputs.redirect_url }}
+          DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          IMAGE_PROVENANCE_FILE: artifacts/live-control/images.tsv
+          EXACT_MASTER_PROVENANCE_FILE: artifacts/deploy/provenance.txt
+          LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
+          ROLLBACK_BASELINE_FILE: ${{ env.DARK_READINESS_FILE }}
+          OUTPUT_DIR: artifacts/live-control/readiness-activated
+        run: ./infra/oci/agents/live-betting-readiness-stan.sh
+
+      - name: Create disposable validation account
+        id: account
+        env:
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+        run: |
+          set -euo pipefail
+          umask 077
+          username="live-e2e-${GITHUB_RUN_ID}"
+          password="Lv1-$(openssl rand -hex 7)"
+          echo "::add-mask::$password"
+          response_file="$RUNNER_TEMP/live-acceptance-signup.json"
+          status="$(
+            jq -n --arg email "$username" --arg password "$password" \
+              '{email:$email,password:$password}' |
+              curl --fail-with-body --silent --show-error \
+                --output "$response_file" \
+                --write-out '%{http_code}' \
+                --header 'Content-Type: application/json' \
+                --data-binary @- \
+                "$BASE_URL/api/auth/new"
+          )"
+          [ "$status" = "201" ]
+          user_id="$(jq -er '.id | select(test("^[0-9a-f]{24}$"))' "$response_file")"
+          cookie_jar="$RUNNER_TEMP/live-acceptance.cookies"
+          {
+            echo "LIVE_ACCEPTANCE_USERNAME=$username"
+            echo "LIVE_ACCEPTANCE_PASSWORD=$password"
+            echo "LIVE_ACCEPTANCE_USER_ID=$user_id"
+            echo "LIVE_ACCEPTANCE_COOKIE_JAR=$cookie_jar"
+          } >> "$GITHUB_ENV"
+          printf 'user_id=%s\n' "$user_id" >> "$GITHUB_OUTPUT"
+          rm -f "$response_file"
+
+      - name: Grant and verify disposable administrator role
+        env:
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+        run: |
+          set -euo pipefail
+          kubectl exec -n "$OCI_K8S_NAMESPACE" \
+            deployment/gaming-auth-depl \
+            -c gaming-auth -- \
+            env \
+              "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
+              USER_ROLE=ADMIN \
+              "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$LIVE_ACCEPTANCE_USER_ID:ADMIN" \
+              npm run role:set
+          status="$(
+            jq -n \
+              --arg email "$LIVE_ACCEPTANCE_USERNAME" \
+              --arg password "$LIVE_ACCEPTANCE_PASSWORD" \
+              '{email:$email,password:$password}' |
+              curl --fail-with-body --silent --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --cookie-jar "$LIVE_ACCEPTANCE_COOKIE_JAR" \
+                --header 'Content-Type: application/json' \
+                --data-binary @- \
+                "$BASE_URL/api/auth/login"
+          )"
+          [ "$status" = "200" ]
+
+      - name: Exercise complete production live journey
+        env:
+          E2E_BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          LIVE_ACCEPTANCE_RUN_ID: ${{ github.run_id }}
+          LIVE_ACCEPTANCE_EVIDENCE_FILE: ${{ github.workspace }}/artifacts/live-control/acceptance/evidence.json
+          OCI_E2E_OUTPUT_DIR: ${{ github.workspace }}/artifacts/live-control/playwright
+        run: |
+          NODE_PATH="$GITHUB_WORKSPACE/client/node_modules" \
+            ./client/node_modules/.bin/playwright test \
+              --config infra/oci/agents/playwright-live-acceptance.config.js
+
+      - name: Revoke disposable administrator role
+        if: always() && steps.account.outcome == 'success'
+        env:
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+        run: |
+          set -euo pipefail
+          kubectl exec -n "$OCI_K8S_NAMESPACE" \
+            deployment/gaming-auth-depl \
+            -c gaming-auth -- \
+            env \
+              "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
+              USER_ROLE=USER \
+              "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$LIVE_ACCEPTANCE_USER_ID:USER" \
+              npm run role:set
+          if [ -s "$LIVE_ACCEPTANCE_COOKIE_JAR" ]; then
+            status="$(
+              curl --silent --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --cookie "$LIVE_ACCEPTANCE_COOKIE_JAR" \
+                --header 'Content-Type: application/json' \
+                --data '{"eventId":"revoked-admin-check","homeResult":1,"awayResult":0}' \
+                "$BASE_URL/api/backoffice/result"
+            )"
+            [ "$status" = "403" ]
+          fi
+          rm -f "$LIVE_ACCEPTANCE_COOKIE_JAR"
+
+      - name: Verify settled queues and runtime
+        env:
+          MODE: monitor
+          BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          SECONDARY_PUBLIC_URL: ${{ steps.provenance.outputs.redirect_url }}
+          DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          IMAGE_PROVENANCE_FILE: artifacts/live-control/images.tsv
+          EXACT_MASTER_PROVENANCE_FILE: artifacts/deploy/provenance.txt
+          LIVE_SCHEMA_EVIDENCE_FILE: artifacts/deploy/live-schema.env
+          OUTPUT_DIR: artifacts/live-control/readiness-final
+        run: ./infra/oci/agents/live-betting-readiness-stan.sh
+
+      - name: Verify no runtime errors or pod restarts
+        env:
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SINCE: 20m
+        run: |
+          set -euo pipefail
+          kubectl get pods -n "$OCI_K8S_NAMESPACE" -o json |
+            jq '[
+              .items[] as $pod |
+              $pod.status.containerStatuses[]? |
+              {
+                pod: $pod.metadata.name,
+                name: .name,
+                restarts: .restartCount
+              }
+            ]' > artifacts/live-control/restarts-after.json
+          jq -e \
+            --slurpfile before artifacts/live-control/restarts-before.json '
+              all(.[];
+                . as $after |
+                (
+                  $before[0]
+                  | map(select(
+                      .pod == $after.pod
+                      and .name == $after.name
+                    ))
+                  | if length == 0
+                    then $after.restarts == 0
+                    else $after.restarts <= .[0].restarts
+                    end
+                )
+              )
+            ' artifacts/live-control/restarts-after.json >/dev/null
+          ./infra/oci/agents/service-ops-stan.sh \
+            > artifacts/live-control/service-ops.txt
+          if grep -Eq '^pod=' artifacts/live-control/service-ops.txt; then
+            echo "redacted runtime error logs were detected" >&2
+            exit 1
+          fi
+
+      - name: Revalidate release head before acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
+
+      - name: Write activation provenance
+        id: accepted
+        run: |
+          set -euo pipefail
+          acceptance_sha256="$(
+            sha256sum artifacts/live-control/acceptance/evidence.json |
+              awk '{print $1}'
+          )"
+          control_sha256="$(
+            sha256sum artifacts/live-control/activate/control.env |
+              awk '{print $1}'
+          )"
+          activation_lease_until_epoch="$(
+            awk -F= \
+              '$1 == "after_lease_until_epoch" {print $2}' \
+              artifacts/live-control/activate/control.env
+          )"
+          [[ "$activation_lease_until_epoch" =~ ^[1-9][0-9]*$ ]]
+          [ "$activation_lease_until_epoch" -gt "$(date +%s)" ]
+          printf '%s\n' \
+            "source_sha=$SOURCE_SHA" \
+            "build_run_id=$BUILD_RUN_ID" \
+            "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID" \
+            "deployment_run_id=$DEPLOYMENT_RUN_ID" \
+            "activation_run_id=$GITHUB_RUN_ID" \
+            "activation_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "control_sha256=$control_sha256" \
+            "acceptance_sha256=$acceptance_sha256" \
+            "live_kickoffs_enabled=true" \
+            "activation_state=leased" \
+            "activation_lease_until_epoch=$activation_lease_until_epoch" \
+            > artifacts/live-control/provenance.env
+
+      - name: Disable new kickoffs after any failed activation gate
+        if: always() && steps.accepted.outcome != 'success'
+        env:
+          ACTION: disable
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          CONTROL_RUN_ID: ${{ github.run_id }}
+          CONFIRMATION: DISABLE OCI LIVE BETTING
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          OUTPUT_DIR: artifacts/live-control/failure-disable
+        run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Capture sanitized failure diagnostics
+        if: failure()
+        env:
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SINCE: 20m
+        run: |
+          ./infra/oci/agents/service-ops-stan.sh \
+            > artifacts/live-control/failure-service-ops.txt 2>&1 || true
+          ./infra/oci/agents/node-logs-stan.sh \
+            > artifacts/live-control/failure-node-logs.txt 2>&1 || true
+
+      - name: Upload protected activation evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-activation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/live-control
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Revalidate release head before permanent activation
+        id: commit_preflight
+        if: >-
+          always() &&
+          steps.accepted.outcome == 'success' &&
+          steps.evidence_upload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
+
+      - name: Commit accepted live activation
+        id: commit
+        if: >-
+          always() &&
+          steps.commit_preflight.outcome == 'success'
+        env:
+          ACTION: commit
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          CONTROL_RUN_ID: ${{ github.run_id }}
+          CONFIRMATION: COMMIT OCI LIVE BETTING
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          OUTPUT_DIR: artifacts/live-control/commit
+        run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Enforce dark mode unless activation committed
+        if: >-
+          always() &&
+          (steps.accepted.outcome != 'success' ||
+            steps.evidence_upload.outcome != 'success' ||
+            steps.commit_preflight.outcome != 'success' ||
+            steps.commit.outcome != 'success')
+        env:
+          ACTION: disable
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          CONTROL_RUN_ID: ${{ github.run_id }}
+          CONFIRMATION: DISABLE OCI LIVE BETTING
+          NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
+          OUTPUT_DIR: artifacts/live-control/final-failure-disable
+        run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Revoke exact OKE runner rule
+        if: always() && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: ${{ runner.temp }}/live-control-runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: ${{ runner.temp }}/live-control-k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-live-control
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated client state
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/oci-live-control-home"
+          rm -rf "$RUNNER_TEMP/betstan-k3s-live-control"
+          rm -f \
+            "$RUNNER_TEMP/live-acceptance.cookies" \
+            "$RUNNER_TEMP/live-acceptance-signup.json" \
+            "$RUNNER_TEMP/live-control-runner-rule.env" \
+            "$RUNNER_TEMP/live-control-k3s-access.env"

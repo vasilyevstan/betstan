@@ -32,6 +32,8 @@ rollback_workflow=".github/workflows/production-rollback.yml"
 branch_workflow=".github/workflows/branch-policy.yml"
 policy_script=".github/scripts/publish-pr-policy.js"
 oci_data_workflow=".github/workflows/oci-live-data-rollout.yml"
+oci_live_activate_workflow=".github/workflows/oci-live-betting-activate.yml"
+oci_live_disable_workflow=".github/workflows/oci-live-betting-disable.yml"
 oci_migrate_workflow=".github/workflows/oci-migrate.yml"
 oci_recovery_workflow=".github/workflows/oci-migration-recovery.yml"
 oci_rollback_workflow=".github/workflows/oci-production-rollback.yml"
@@ -39,7 +41,8 @@ oci_rollback_workflow=".github/workflows/oci-production-rollback.yml"
 for file in \
   "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
   "$rollback_workflow" "$oci_data_workflow" "$oci_migrate_workflow" \
-  "$oci_recovery_workflow" "$oci_rollback_workflow"; do
+  "$oci_recovery_workflow" "$oci_rollback_workflow" \
+  "$oci_live_activate_workflow" "$oci_live_disable_workflow"; do
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
 
@@ -189,6 +192,20 @@ require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion he
 require_literal "$policy_script" "assertExpectedPull(finalPull, pull)" "final stale-event check"
 require_literal "$policy_script" "relation.base?.sha === pull.baseSha" "exact base snapshot relation"
 
+for live_workflow in "$oci_live_activate_workflow" "$oci_live_disable_workflow"; do
+  require_literal "$live_workflow" "  workflow_dispatch:" "manual live control trigger"
+  reject_literal "$live_workflow" "  workflow_run:" "automatic live control trigger"
+  reject_literal "$live_workflow" "  push:" "push-triggered live control mutation"
+  reject_literal "$live_workflow" "  schedule:" "scheduled live control mutation"
+  require_literal "$live_workflow" "if: github.run_attempt == 1" "first-attempt-only live control"
+  require_literal "$live_workflow" "name: oci-production" "protected OCI production environment"
+  require_literal "$live_workflow" "group: oci-control-plane" "shared OCI control-plane concurrency"
+  require_literal "$live_workflow" "cancel-in-progress: false" "non-cancelling live control"
+done
+require_literal "$oci_live_activate_workflow" "ACTIVATE OCI LIVE BETTING" "exact activation confirmation"
+require_literal "$oci_live_activate_workflow" "COMMIT OCI LIVE BETTING" "exact activation commit"
+require_literal "$oci_live_disable_workflow" "DISABLE OCI LIVE BETTING" "exact disable confirmation"
+
 require_literal "$oci_data_workflow" "name: oci-live-data-rollout" "OCI live data workflow identity"
 require_literal "$oci_data_workflow" "  workflow_dispatch:" "manual OCI live data trigger"
 reject_literal "$oci_data_workflow" "  workflow_run:" "automatic OCI live data trigger"
@@ -252,7 +269,7 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 

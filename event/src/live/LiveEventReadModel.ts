@@ -498,7 +498,9 @@ const buildLiveUpdateOperations = (
   const setOnInsertOperations: UnknownRecord = {
     eventId: data.eventId,
     status: EventStatus.NO_RESULT,
-    visibility: EventVisibility.ONLINE,
+    visibility: EventVisibility.OFFLINE,
+    visibilityInitialized: false,
+    eventMetadataInitialized: false,
     products: [],
     source: "EXTERNAL",
     newEventPublishedAt: null,
@@ -649,7 +651,7 @@ export const createPublicEventSnapshotFromLiveUpdate = (
     name: eventName,
     time: kickoffAt,
     status: seedSnapshot?.status ?? EventStatus.NO_RESULT,
-    visibility: seedSnapshot?.visibility ?? EventVisibility.ONLINE,
+    visibility: seedSnapshot?.visibility ?? EventVisibility.OFFLINE,
     products: cloneProducts(seedSnapshot?.products ?? []),
     live: liveSnapshot,
   };
@@ -679,14 +681,25 @@ const compareEventTimes = (left: PublicEventSnapshot, right: PublicEventSnapshot
   Date.parse(left.time) - Date.parse(right.time);
 
 export const listPublicEvents = async (
-  now: Date = new Date()
+  now: Date = new Date(),
+  visibleOfflineEventIds: string[] = []
 ): Promise<PublicEventSnapshot[]> => {
   const { historyMinutes, horizonMinutes } = getPublicEventConfig();
   const lowerBound = new Date(now.getTime() - historyMinutes * 60 * 1000);
   const upperBound = new Date(now.getTime() + horizonMinutes * 60 * 1000);
 
+  const visibilityFilter =
+    visibleOfflineEventIds.length > 0
+      ? {
+          $or: [
+            { visibility: { $ne: EventVisibility.OFFLINE } },
+            { eventId: { $in: visibleOfflineEventIds } },
+          ],
+        }
+      : { visibility: { $ne: EventVisibility.OFFLINE } };
   const events = await Event.find({
     time: { $gte: lowerBound, $lte: upperBound },
+    ...visibilityFilter,
   }).lean();
 
   return events

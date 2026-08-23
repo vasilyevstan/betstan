@@ -1,4 +1,5 @@
 import request from "supertest";
+import jwt from "jsonwebtoken";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
 import {
@@ -12,6 +13,21 @@ import {
   TeamSide,
 } from "@betstan/common";
 import EventOddsSelectedPublisher from "../../messaging/publisher/EventOddsSelectedPublisher";
+import { setAdminSessionVerifierForTests } from "../../service/VerifyAdminSession";
+
+const buildSessionCookie = (role: "USER" | "ADMIN") => {
+  const token = jwt.sign(
+    {
+      id: "user-id",
+      email: "acceptance-admin",
+      role,
+      timestamp: new Date(),
+    },
+    process.env.JWT_KEY!
+  );
+  const session = Buffer.from(JSON.stringify({ jwt: token })).toString("base64");
+  return [`session=${session}`];
+};
 
 const createPreMatchEvent = async (time = new Date(Date.now() + 60 * 60 * 1000)) => {
   return Event.create({
@@ -118,6 +134,51 @@ it("publishes server-authoritative pre-match selections and ignores client kind/
       eventTime: event.time.toISOString(),
     }),
   });
+});
+
+it("keeps offline acceptance events unavailable to non-admin users", async () => {
+  const event = await createPreMatchEvent();
+  event.visibility = EventVisibility.OFFLINE;
+  await event.save();
+  const selection = {
+    eventId: "test-event-id",
+    productId: "product-1",
+    oddsId: "odds-1",
+  };
+
+  await request(app).post("/api/event/odds").send(selection).expect(401);
+  await request(app)
+    .post("/api/event/odds")
+    .set("Cookie", buildSessionCookie("USER"))
+    .send(selection)
+    .expect(403);
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
+
+  await request(app)
+    .post("/api/event/odds")
+    .set("Cookie", buildSessionCookie("ADMIN"))
+    .send(selection)
+    .expect(200);
+  expect(EventOddsSelectedPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+});
+
+it("rejects a demoted administrator for an offline acceptance event", async () => {
+  const event = await createPreMatchEvent();
+  event.visibility = EventVisibility.OFFLINE;
+  await event.save();
+  setAdminSessionVerifierForTests(async () => 403);
+
+  await request(app)
+    .post("/api/event/odds")
+    .set("Cookie", buildSessionCookie("ADMIN"))
+    .send({
+      eventId: "test-event-id",
+      productId: "product-1",
+      oddsId: "odds-1",
+    })
+    .expect(403);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
 });
 
 it("returns 400 when event not found", async () => {

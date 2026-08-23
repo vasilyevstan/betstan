@@ -8,6 +8,7 @@ import {
 } from "@betstan/common";
 import { Event } from "../../model/Event";
 import { EventArchive } from "../../model/EventArchive";
+import { createLiveSeed } from "../../simulation/liveSeed";
 
 class NewEventListener extends AListener<INewEventEvent> {
   serviceName: string = "gamemaster_new_event";
@@ -33,6 +34,7 @@ class NewEventListener extends AListener<INewEventEvent> {
             away: data.away,
             status: EventStatus.NO_RESULT,
             phase: EventPhase.PRE_MATCH,
+            liveSeed: createLiveSeed(),
           },
         },
         { upsert: true }

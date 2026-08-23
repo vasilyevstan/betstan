@@ -34,6 +34,12 @@ class MockResponse extends EventEmitter {
     this.writes.push(chunk);
     return true;
   }
+
+  end() {
+    this.writableEnded = true;
+    this.emit("finish");
+    return this;
+  }
 }
 
 const buildSnapshot = (sequence: number): PublicEventSnapshot => ({
@@ -162,6 +168,10 @@ const getDataPayload = (writes: string[]) => {
   return JSON.parse(dataChunk.slice(6));
 };
 
+const flushPromises = () => new Promise<void>((resolve) => {
+  setImmediate(resolve);
+});
+
 afterEach(() => {
   jest.useRealTimers();
 });
@@ -261,6 +271,72 @@ it("sets SSE headers, sanitizes snapshots, emits heartbeats, and cleans up disco
   const writesBefore = (res as unknown as MockResponse).writes.length;
   hub.broadcast(buildSnapshot(8));
   expect((res as unknown as MockResponse).writes).toHaveLength(writesBefore);
+});
+
+it("streams offline snapshots only to an authorized scoped connection", async () => {
+  const offlineSnapshot = {
+    ...buildDirtySnapshot(),
+    visibility: EventVisibility.OFFLINE,
+  };
+  const publicHub = new LiveEventHub();
+  const publicRequest = new EventEmitter() as Request;
+  const publicResponse = new MockResponse() as unknown as Response;
+  openEventLiveStream(publicRequest, publicResponse, { hub: publicHub });
+  publicHub.broadcast(offlineSnapshot);
+  expect((publicResponse as unknown as MockResponse).writes).toEqual([]);
+
+  const adminHub = new LiveEventHub();
+  const adminRequest = new EventEmitter() as Request;
+  adminRequest.visibleOfflineEventIds = ["event-id"];
+  const adminResponse = new MockResponse() as unknown as Response;
+  const verifyScopedAccess = jest.fn(async () => true);
+  openEventLiveStream(adminRequest, adminResponse, {
+    hub: adminHub,
+    verifyScopedAccess,
+  });
+  adminHub.broadcast(offlineSnapshot);
+  await flushPromises();
+  expect((adminResponse as unknown as MockResponse).writes.join("")).toContain(
+    "id: event-id:7"
+  );
+  expect(verifyScopedAccess).toHaveBeenCalledTimes(1);
+
+  publicRequest.emit("close");
+  adminRequest.emit("close");
+});
+
+it("closes a scoped stream before sending another offline snapshot after demotion", async () => {
+  let authorized = true;
+  const hub = new LiveEventHub();
+  const req = new EventEmitter() as Request;
+  req.visibleOfflineEventIds = ["event-id"];
+  const response = new MockResponse();
+  openEventLiveStream(req, response as unknown as Response, {
+    hub,
+    verifyScopedAccess: async () => authorized,
+  });
+
+  const firstSnapshot = {
+    ...buildDirtySnapshot(),
+    visibility: EventVisibility.OFFLINE,
+  };
+  hub.broadcast(firstSnapshot);
+  await flushPromises();
+  expect(response.writes.join("")).toContain("id: event-id:7");
+
+  authorized = false;
+  hub.broadcast({
+    ...firstSnapshot,
+    live: {
+      ...firstSnapshot.live!,
+      sequence: 8,
+    },
+  });
+  await flushPromises();
+
+  expect(response.writes.join("")).not.toContain("id: event-id:8");
+  expect(response.writableEnded).toBe(true);
+  expect(hub.subscriberCount()).toBe(0);
 });
 
 it("uses default options, skips non-live payloads, and tolerates repeated cleanup without flushHeaders", () => {

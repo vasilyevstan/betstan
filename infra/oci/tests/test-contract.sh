@@ -26,12 +26,30 @@ PYTHONPYCACHEPREFIX="$WORK_DIR/pycache" \
   python3 -m py_compile "$OCI_DIR/agents/health-contract.py"
 node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
+node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
+node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
 grep -Fq "getByRole('link', { name: 'BetStan', exact: true })" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not use the accessible BetStan brand"
 if grep -Fq "locator('body')).toContainText('BetStan')" \
     "$OCI_DIR/agents/oci-live-smoke.spec.js"; then
   fail "OCI browser check still relies on image alt text appearing in body text"
+fi
+acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
+grep -Fq 'const publicContext = await browser.newContext({' "$acceptance_spec" &&
+  grep -Fq 'baseURL: process.env.E2E_BASE_URL' "$acceptance_spec" ||
+  fail "OCI live acceptance public context is not bound to the configured base URL"
+grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
+  fail "OCI live acceptance does not pass scoped event IDs into the browser context"
+grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
+  grep -Fq 'expect(publicBackoffice.status()).toBe(401)' "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove anonymous backoffice reads fail closed"
+for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
+  grep -Fq "'$phase'" "$acceptance_spec" ||
+    fail "OCI live acceptance omits runtime phase $phase"
+done
+if grep -Fq "'STOPPAGE_TIME'" "$acceptance_spec"; then
+  fail "OCI live acceptance asserts a phase that the runtime never emits"
 fi
 
 lessons="$OCI_DIR/LESSONS_LEARNED.md"
@@ -934,11 +952,15 @@ expected_syntax_targets = [
   "infra/oci/agents/live-betting-readiness-stan.sh",
   "infra/oci/scripts/deploy.sh",
   "infra/oci/scripts/live-data-maintenance-stan.sh",
+  "infra/oci/scripts/live-betting-control-stan.sh",
+  "infra/oci/scripts/revalidate-live-activation-stan.sh",
   "infra/oci/scripts/live-betting-data-rollout-stan.sh",
   "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
   "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
   "infra/oci/tests/test-deploy-validation-loop-stan.sh",
   "infra/oci/tests/test-live-data-maintenance-stan.sh",
+  "infra/oci/tests/test-live-betting-control-stan.sh",
+  "infra/oci/tests/test-revalidate-live-activation-stan.sh",
   "infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "infra/oci/tests/test-live-betting-readiness-stan.sh",
   "infra/oci/tests/rollback-live-readiness-contract.sh",
@@ -953,6 +975,8 @@ expected_exec_targets = [
   "./infra/azure/agents/test-production-rollback-stan.sh",
   "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
   "./infra/oci/tests/test-live-data-maintenance-stan.sh",
+  "./infra/oci/tests/test-live-betting-control-stan.sh",
+  "./infra/oci/tests/test-revalidate-live-activation-stan.sh",
   "./infra/oci/tests/test-live-betting-data-rollout-stan.sh",
   "./infra/oci/tests/test-live-betting-readiness-stan.sh",
   "./infra/oci/tests/rollback-live-readiness-contract.sh",
@@ -961,6 +985,8 @@ expected_exec_targets = [
 expected_yaml_targets = [
   ".github/workflows/production-build.yml",
   ".github/workflows/production-deploy.yml",
+  ".github/workflows/oci-live-betting-activate.yml",
+  ".github/workflows/oci-live-betting-disable.yml",
   ".github/workflows/oci-live-data-rollout.yml",
   ".github/workflows/oci-production-deploy.yml",
 ]

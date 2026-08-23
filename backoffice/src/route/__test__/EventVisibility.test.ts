@@ -3,6 +3,9 @@ import { app } from "../../app";
 import { Event } from "../../model/Event";
 import { EventStatus, EventVisibility as EventVisibilityStatus } from "@betstan/common";
 import EventVisibilityPublisher from "../../event/publisher/EventVisibilityPublisher";
+import { buildSessionCookie } from "../../test/session";
+
+const adminCookie = () => buildSessionCookie("ADMIN");
 
 const createEvent = async (eventId: string, visibility = EventVisibilityStatus.ONLINE) => {
   return Event.create({
@@ -19,6 +22,7 @@ const createEvent = async (eventId: string, visibility = EventVisibilityStatus.O
 it("returns message when event not found", async () => {
   const response = await request(app)
     .post("/api/backoffice/event_visibility")
+    .set("Cookie", adminCookie())
     .send({ eventId: "nonexistent" })
     .expect(200);
 
@@ -30,6 +34,7 @@ it("flips event visibility from ONLINE to OFFLINE", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/event_visibility")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-1" })
     .expect(200);
 
@@ -42,6 +47,7 @@ it("flips event visibility from OFFLINE to ONLINE", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/event_visibility")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-2" })
     .expect(200);
 
@@ -54,6 +60,7 @@ it("defaults corrupted visibility to OFFLINE before publishing", async () => {
 
   const response = await request(app)
     .post("/api/backoffice/event_visibility")
+    .set("Cookie", adminCookie())
     .send({ eventId: "evt-3" })
     .expect(200);
 

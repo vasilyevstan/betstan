@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
 import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublisher";
+import { requireAdmin } from "../middleware/RequireAdmin";
 
 const router = express.Router();
 
@@ -16,6 +17,7 @@ const getPublisher = async (): Promise<EventVisibilityPublisher> => {
 
 router.post(
   "/api/backoffice/event_visibility",
+  requireAdmin,
   async (req: Request, res: Response) => {
     const { eventId } = req.body;
     const event = await Event.findOne({ eventId: eventId });

@@ -78,6 +78,8 @@ it("stores new events with their live pre-match defaults", async () => {
   expect(stored?.name).toBe("New event");
   expect(stored?.phase).toBe("PRE_MATCH");
   expect(stored?.liveConfirmedReplayCursor).toBe(0);
+  expect(stored?.liveSeed).toMatch(/^[a-f0-9]{64}$/);
+  expect(stored?.liveSeed).not.toBe(data.data.id);
 });
 
 it("keeps the first insert when a NewEvent delivery is duplicated", async () => {
@@ -85,6 +87,7 @@ it("keeps the first insert when a NewEvent delivery is duplicated", async () => 
   const data = getData();
 
   await listener.onMessage(data, message);
+  const firstSeed = (await Event.findOne({ eventId: data.data.id }))?.liveSeed;
   await listener.onMessage(
     {
       ...data,
@@ -103,6 +106,7 @@ it("keeps the first insert when a NewEvent delivery is duplicated", async () => 
   expect(stored?.name).toBe("New event");
   expect(stored?.home).toBe("Player 1");
   expect(stored?.away).toBe("Player 2");
+  expect(stored?.liveSeed).toBe(firstSeed);
 });
 
 it("acknowledges late NewEvent deliveries without resurrecting an archive", async () => {

@@ -2,10 +2,12 @@ import request from "supertest";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
 import { EventStatus } from "@betstan/common";
+import { buildSessionCookie } from "../../test/session";
 
 it("returns empty array when no events exist", async () => {
   const response = await request(app)
     .get("/api/backoffice")
+    .set("Cookie", buildSessionCookie("ADMIN"))
     .send()
     .expect(200);
 
@@ -34,6 +36,7 @@ it("returns all events sorted by status and time", async () => {
 
   const response = await request(app)
     .get("/api/backoffice")
+    .set("Cookie", buildSessionCookie("ADMIN"))
     .send()
     .expect(200);
 

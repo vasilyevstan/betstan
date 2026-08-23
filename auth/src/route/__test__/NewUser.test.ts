@@ -1,6 +1,19 @@
 import request from "supertest";
+import jwt from "jsonwebtoken";
 import { app } from "../../app";
 import { User } from "../../model/User";
+
+const sessionPayload = (setCookie: string[]) => {
+  const encodedSession = /^session=([^;]+)/.exec(setCookie[0])?.[1];
+  if (!encodedSession) {
+    throw new Error("Session cookie was not set");
+  }
+
+  const session = JSON.parse(
+    Buffer.from(decodeURIComponent(encodedSession), "base64").toString("utf8")
+  );
+  return jwt.verify(session.jwt, process.env.JWT_KEY!) as jwt.JwtPayload;
+};
 
 it("creates an account with a non-email username", async () => {
   const response = await request(app)
@@ -11,12 +24,24 @@ it("creates an account with a non-email username", async () => {
   expect(response.body).toEqual({
     id: expect.any(String),
     email: "stan_1",
+    role: "USER",
   });
   expect(response.body.password).toBeUndefined();
   expect(response.body.identifierNormalized).toBeUndefined();
 
   const user = await User.findOne({ email: "stan_1" });
   expect(user?.identifierNormalized).toEqual("stan_1");
+  expect(user?.role).toEqual("USER");
+});
+
+it("ignores attempts to self-register as an administrator", async () => {
+  const response = await request(app)
+    .post("/api/auth/new")
+    .send({ email: "not-an-admin", password: "password", role: "ADMIN" })
+    .expect(201);
+
+  expect(response.body.role).toEqual("USER");
+  expect((await User.findById(response.body.id))?.role).toEqual("USER");
 });
 
 it.each([
@@ -114,4 +139,7 @@ it("sets a cookie after successful signup", async () => {
     .expect(201);
 
   expect(response.get("Set-Cookie")).toBeDefined();
+  const payload = sessionPayload(response.get("Set-Cookie")!);
+  expect(payload.role).toEqual("USER");
+  expect(Number(payload.exp) - Number(payload.iat)).toEqual(12 * 60 * 60);
 });

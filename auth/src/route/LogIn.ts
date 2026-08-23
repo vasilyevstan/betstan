@@ -1,6 +1,6 @@
 import express, { Request, Response } from "express";
 import { body, oneOf } from "express-validator";
-import { User } from "../model/User";
+import { User, UserRole } from "../model/User";
 import { Password } from "../service/Password";
 import jwt from "jsonwebtoken";
 import { BadRequestError, validateRequest } from "@betstan/common";
@@ -76,16 +76,21 @@ router.post(
       {
         id: existingUser.id,
         email: existingUser.email,
+        role: existingUser.role ?? UserRole.USER,
         timestamp: new Date(),
       },
-      process.env.JWT_KEY!
+      process.env.JWT_KEY!,
+      { expiresIn: "12h" }
     );
 
     req.session = {
       jwt: userJwt,
     };
 
-    existingUser.set({ lastLogin: new Date().toISOString() });
+    existingUser.set({
+      lastLogin: new Date().toISOString(),
+      role: existingUser.role ?? UserRole.USER,
+    });
     await existingUser.save();
 
     res.status(200).send(toPublicUser(existingUser));

@@ -27,6 +27,10 @@ gh() {
     local path=.github/workflows/production-build.yml
     if [[ "$STUB_MODE" == "data-active" ]]; then
       path=.github/workflows/oci-live-data-rollout.yml
+    elif [[ "$STUB_MODE" == "activation-active" ]]; then
+      path=.github/workflows/oci-live-betting-activate.yml
+    elif [[ "$STUB_MODE" == "disable-active" ]]; then
+      path=.github/workflows/oci-live-betting-disable.yml
     fi
     printf '%s\n' \
       "{\"total_count\":1,\"workflow_runs\":[{\"id\":$RUN_ID,\"workflow_id\":$WORKFLOW_ID,\"path\":\"$path\",\"head_branch\":\"$branch\",\"status\":\"in_progress\",\"updated_at\":\"$updated_at\"}]}"
@@ -64,7 +68,7 @@ REPO=example/repo NOW_EPOCH=2000 STUB_MODE=stale-disabled \
 REPO=example/repo NOW_EPOCH=2000 STUB_MODE=active EXCLUDE_RUN_ID=$RUN_ID \
   "$EXCLUSIVITY" >/dev/null
 
-for mode in active data-active recent-disabled pending-disabled jobs-disabled overflow; do
+for mode in active data-active activation-active disable-active recent-disabled pending-disabled jobs-disabled overflow; do
   if REPO=example/repo NOW_EPOCH=2000 STUB_MODE="$mode" \
     "$EXCLUSIVITY" >/dev/null 2>&1; then
     echo "production exclusivity accepted unsafe mode=$mode" >&2

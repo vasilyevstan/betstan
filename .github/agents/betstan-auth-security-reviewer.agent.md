@@ -48,6 +48,22 @@ Inspect the exact diff, target branch, and currently deployed contract assumptio
   retention/origin trust.
 - Cookie `Secure`, `HttpOnly`, `SameSite`, TLS, CSRF, JWT expiry, revocation, logout,
   and mixed-version token compatibility.
+- Persisted-role revalidation for every administrative mutation and
+  administrator-scoped read; test stale claims, demotion, deletion, legacy
+  no-`exp` tokens, and auth-service failure.
+- Server-side exclusion of offline/synthetic records from ordinary REST and
+  long-lived streams. Client filtering and possession of an event ID are not
+  authorization.
+- Privileged read routes as well as mutations, message-reordering defaults that
+  fail dark before metadata arrives, independent metadata/visibility ordering,
+  and client cache eviction after authorization revocation or visibility
+  removal.
+- Missing-row visibility messages must create only a fail-dark pending
+  placeholder; they must not be acknowledged and discarded or published before
+  metadata arrives.
+- Review duplicate-key convergence for every competing placeholder upsert; a
+  losing consumer must retry its pending decision rather than crash or ACK it
+  away.
 - Public response DTOs, logs, DOM attributes, screenshots, and CI artifact leakage.
 - Authorization enforcement on authenticated and administrative routes.
 

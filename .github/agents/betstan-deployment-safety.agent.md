@@ -17,7 +17,11 @@ Before changing or assessing deployment behavior, read:
 - `.github/workflows/branch-policy.yml`
 - `.github/workflows/production-deploy.yml`
 - `.github/workflows/oci-live-data-rollout.yml`
+- `.github/workflows/oci-live-betting-activate.yml`
+- `.github/workflows/oci-live-betting-disable.yml`
 - `.github/workflows/oci-production-deploy.yml`
+- `infra/oci/scripts/live-betting-control-stan.sh`
+- `infra/oci/scripts/revalidate-live-activation-stan.sh`
 - `infra/azure/LESSONS_LEARNED.md`
 - `infra/oci/LESSONS_LEARNED.md`
 - `infra/azure/agents/README.md`
@@ -54,7 +58,7 @@ Inspect the current git graph and remote default branch. Do not infer that a mer
   evidence that Azure data cutover or retirement is complete. The governed set includes `production-build`,
   `production-deploy`, `oci-production-build`, `oci-production-deploy`,
   `oci-infrastructure`, `oci-capacity-acquire`, `oci-live-data-rollout`,
-  `oci-migrate`, and the
+  `oci-live-betting-activate`, `oci-live-betting-disable`, `oci-migrate`, and the
   stop-only `oci-migration-recovery`; use the checked-in inventory as
   authority when it changes.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
@@ -119,6 +123,12 @@ After deployment:
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
   permitting a retry.
+- enable live kickoffs only through a bounded worker-enforced activation lease;
+  permit the same run/SHA to remove that lease only after complete acceptance,
+  protected evidence upload, and final current-master/provenance revalidation;
+- on disable or any ambiguous activation/commit write, set the kickoff flag
+  false and remove the lease together. Never treat signal cleanup alone as
+  protection from hard runner termination.
 
 ## Ingress safety
 

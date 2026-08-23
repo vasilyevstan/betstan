@@ -20,7 +20,11 @@ import {
   SimulationTransition,
   TeamSide,
 } from "../../simulation";
-import { GamemasterWorker, WorkerClock } from "../GamemasterWorker";
+import {
+  GamemasterWorker,
+  WorkerClock,
+  liveKickoffsAllowedAt,
+} from "../GamemasterWorker";
 
 beforeAll(() => {
   jest.spyOn(ResultSetPublisher.prototype, "init").mockResolvedValue(undefined);
@@ -43,6 +47,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   process.env.LIVE_KICKOFFS_ENABLED = "true";
+  delete process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH;
   (
     ResultSetPublisher.prototype.publishWithConfirm as unknown as jest.Mock
   ).mockResolvedValue(undefined);
@@ -654,6 +659,7 @@ it("persists a simulation before kickoff publication and replays it after restar
   const event = await createEvent(baseKickoff);
   const simulation = buildSimulationResult(event.eventId);
   const simulate = jest.fn(() => simulation);
+  const privateSeed = "a".repeat(64);
   const firstClock: WorkerClock = {
     now: () => new Date(baseKickoff.getTime()),
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -668,11 +674,21 @@ it("persists a simulation before kickoff publication and replays it after restar
     expect(stored?.liveConfirmedReplayCursor).toBe(0);
   });
 
-  const firstWorker = new GamemasterWorker({ clock: firstClock, simulate });
+  const firstWorker = new GamemasterWorker({
+    clock: firstClock,
+    simulate,
+    createLiveSeed: () => privateSeed,
+  });
   await firstWorker.checkEventsOnce();
 
   const afterKickoff = await Event.findOne({ eventId: event.eventId });
   expect(simulate).toHaveBeenCalledTimes(1);
+  expect(simulate).toHaveBeenCalledWith({
+    eventId: event.eventId,
+    seed: privateSeed,
+  });
+  expect(afterKickoff?.liveSeed).toBe(privateSeed);
+  expect(afterKickoff?.liveSeed).not.toBe(event.eventId);
   expect(afterKickoff?.liveConfirmedReplayCursor).toBe(1);
   expect(afterKickoff?.phase).toBe(EventPhase.FIRST_HALF);
   expect(
@@ -816,6 +832,56 @@ it("keeps new kickoffs dark by default when the env flag is missing", async () =
   expect(
     ResultSetPublisher.prototype.publishWithConfirm
   ).not.toHaveBeenCalled();
+});
+
+it("fails dark when an activation lease is malformed or expired", () => {
+  const now = new Date("2025-01-01T12:00:00.500Z");
+  const nowEpoch = Math.floor(now.getTime() / 1000);
+
+  expect(liveKickoffsAllowedAt(now, "true", undefined)).toBe(true);
+  expect(
+    liveKickoffsAllowedAt(now, "true", String(nowEpoch + 60))
+  ).toBe(true);
+  expect(liveKickoffsAllowedAt(now, "true", String(nowEpoch))).toBe(false);
+  expect(
+    liveKickoffsAllowedAt(now, "true", String(nowEpoch - 1))
+  ).toBe(false);
+  expect(liveKickoffsAllowedAt(now, "true", "not-an-epoch")).toBe(false);
+  expect(liveKickoffsAllowedAt(now, "true", "0")).toBe(false);
+  expect(
+    liveKickoffsAllowedAt(now, "false", String(nowEpoch + 60))
+  ).toBe(false);
+});
+
+it("lets active matches finish but blocks new kickoffs after the lease expires", async () => {
+  const newEvent = await createEvent(baseKickoff);
+  const activeEvent = await createEvent(baseKickoff);
+  const activeSimulation = buildSimulationResult(activeEvent.eventId);
+  await storeSimulation(activeEvent, activeSimulation, 4);
+
+  const now = new Date(baseKickoff.getTime() + 5000);
+  process.env.LIVE_KICKOFFS_LEASE_UNTIL_EPOCH = String(
+    Math.floor(now.getTime() / 1000) - 1
+  );
+  const worker = new GamemasterWorker({
+    clock: createStaticClock(now),
+    simulate: jest.fn(() => buildSimulationResult(newEvent.eventId)),
+  });
+
+  await worker.checkEventsOnce();
+
+  const untouchedNewEvent = await Event.findOne({ eventId: newEvent.eventId });
+  const completedActiveArchive = await EventArchive.findOne({
+    eventId: activeEvent.eventId,
+  });
+  expect(untouchedNewEvent?.liveTransitions).toEqual([]);
+  expect(completedActiveArchive?.homeResult).toBe(1);
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+  expect(
+    ResultSetPublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
 });
 
 it("uses a lease so concurrent workers do not process the same match twice", async () => {
@@ -1307,6 +1373,7 @@ it("covers claim selection and persistence planning helper branches", async () =
     clock: baseClock,
     liveKickoffsEnabled: () => true,
     simulate: simulateSpy,
+    createLiveSeed: () => "b".repeat(64),
   });
 
   const storedEvent = {
@@ -1353,7 +1420,7 @@ it("covers claim selection and persistence planning helper branches", async () =
     _id: new mongoose.Types.ObjectId(),
     eventId: "recovering-event",
     time: baseKickoff,
-    liveSeed: "stored-seed",
+    liveSeed: "a".repeat(64),
     processingLease: { token: "lease-token" },
     liveTransitions: [],
   };
@@ -1369,7 +1436,7 @@ it("covers claim selection and persistence planning helper branches", async () =
   ).resolves.toEqual({ recovered: true });
   expect(simulateSpy).toHaveBeenCalledWith({
     eventId: "recovering-event",
-    seed: "stored-seed",
+    seed: "a".repeat(64),
   });
 
   findOneAndUpdateSpy.mockRestore();

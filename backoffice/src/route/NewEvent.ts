@@ -1,8 +1,13 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import NewEventPublisher from "../event/publisher/NewEventPublisher";
-import { EventStatus, messengerWrapper } from "@betstan/common";
+import {
+  EventStatus,
+  EventVisibility,
+  messengerWrapper,
+} from "@betstan/common";
 import mongoose from "mongoose";
+import { requireAdmin } from "../middleware/RequireAdmin";
 
 const router = express.Router();
 
@@ -17,16 +22,33 @@ const getPublisher = async (): Promise<NewEventPublisher> => {
 
 router.post(
   "/api/backoffice/new_event",
+  requireAdmin,
   async (req: Request, res: Response) => {
-    const { home, away } = req.body;
+    const { home, away, kickoffDelaySeconds } = req.body;
+    const visibility = req.body.visibility ?? EventVisibility.ONLINE;
 
     if (!home || !away) {
       res.send({});
       return;
     }
 
-    // all custom events will "run" in 30 minutes
-    const eventTime = new Date(new Date().getTime() + 30 * 60 * 1000);
+    const delaySeconds = kickoffDelaySeconds ?? 30 * 60;
+    if (
+      !Number.isInteger(delaySeconds)
+      || delaySeconds < 15
+      || delaySeconds > 24 * 60 * 60
+    ) {
+      res.status(400).send({
+        message: "Kickoff delay must be between 15 seconds and 24 hours",
+      });
+      return;
+    }
+    if (!Object.values(EventVisibility).includes(visibility)) {
+      res.status(400).send({ message: "Event visibility is invalid" });
+      return;
+    }
+
+    const eventTime = new Date(Date.now() + delaySeconds * 1000);
 
     const event = new Event({
       eventId: new mongoose.Types.ObjectId().toHexString(),
@@ -35,21 +57,24 @@ router.post(
       home: home,
       away: away,
       status: EventStatus.NO_RESULT,
+      visibility,
     });
 
     await event.save();
 
     const publisher = await getPublisher();
 
-    publisher.publish({
+    const newEventMessage = {
       data: {
         id: event.eventId,
         name: event.name,
         time: event.time,
         home: event.home,
         away: event.away,
+        visibility,
       },
-    });
+    };
+    publisher.publish(newEventMessage);
 
     res.send({ event });
   }

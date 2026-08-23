@@ -129,11 +129,15 @@ jobs:
           bash -n infra/oci/agents/live-betting-readiness-stan.sh
           bash -n infra/oci/scripts/deploy.sh
           bash -n infra/oci/scripts/live-data-maintenance-stan.sh
+          bash -n infra/oci/scripts/live-betting-control-stan.sh
+          bash -n infra/oci/scripts/revalidate-live-activation-stan.sh
           bash -n infra/oci/scripts/live-betting-data-rollout-stan.sh
           bash -n infra/oci/scripts/shared-mongo-operation-lock-stan.sh
           bash -n infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
           bash -n infra/oci/tests/test-deploy-validation-loop-stan.sh
           bash -n infra/oci/tests/test-live-data-maintenance-stan.sh
+          bash -n infra/oci/tests/test-live-betting-control-stan.sh
+          bash -n infra/oci/tests/test-revalidate-live-activation-stan.sh
           bash -n infra/oci/tests/test-live-betting-data-rollout-stan.sh
           bash -n infra/oci/tests/test-live-betting-readiness-stan.sh
           bash -n infra/oci/tests/rollback-live-readiness-contract.sh
@@ -143,6 +147,8 @@ jobs:
               .github/workflows/production-build.yml
               .github/workflows/production-deploy.yml
               .github/workflows/oci-live-data-rollout.yml
+              .github/workflows/oci-live-betting-activate.yml
+              .github/workflows/oci-live-betting-disable.yml
               .github/workflows/oci-production-deploy.yml
             ].each { |file| YAML.load_stream(File.read(file)) }
           '
@@ -154,6 +160,8 @@ jobs:
           ./infra/azure/agents/test-production-rollback-stan.sh
           ./infra/oci/tests/test-deploy-validation-loop-stan.sh
           ./infra/oci/tests/test-live-data-maintenance-stan.sh
+          ./infra/oci/tests/test-live-betting-control-stan.sh
+          ./infra/oci/tests/test-revalidate-live-activation-stan.sh
           ./infra/oci/tests/test-live-betting-data-rollout-stan.sh
           ./infra/oci/tests/test-live-betting-readiness-stan.sh
           ./infra/oci/tests/rollback-live-readiness-contract.sh

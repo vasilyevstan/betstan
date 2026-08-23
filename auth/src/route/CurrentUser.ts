@@ -1,6 +1,10 @@
 import express from "express";
-import { currentUser } from "../middleware/CurrentUser";
+import { currentUser, UserPayload } from "../middleware/CurrentUser";
 import { User } from "../model/User";
+import {
+  isSessionTimestampFresh,
+  normalizeUserRole,
+} from "../service/Session";
 
 const router = express.Router();
 
@@ -9,19 +13,23 @@ router.get("/api/auth/currentuser", currentUser, async (req, res) => {
 
   if (currentUser) {
     const user = await User.findById(currentUser.id);
+    const signedRole = normalizeUserRole(currentUser.role);
+    const persistedRole = normalizeUserRole(user?.role);
 
-    // session token expires evert 12 hours
-    const dateToExpire = currentUser.timestamp
-      ? new Date(
-          new Date(currentUser.timestamp).getTime() + 12 * 60 * 60 * 1000
-        )
-      : new Date().getTime() - 1 * 60 * 60 * 1000;
-
-    if (!user || new Date() > dateToExpire) {
-      console.log("user not found or expired", user, currentUser.email);
-
+    if (
+      !user
+      || !isSessionTimestampFresh(currentUser.timestamp)
+      || signedRole !== persistedRole
+    ) {
       req.session = null;
       currentUser = undefined;
+    } else {
+      currentUser = {
+        id: currentUser.id,
+        email: currentUser.email,
+        role: signedRole,
+        timestamp: currentUser.timestamp,
+      } satisfies UserPayload;
     }
   }
 

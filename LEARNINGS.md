@@ -40,8 +40,26 @@
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
 - The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
+- New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
 - Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
+
+### Privileged authorization and synthetic fixtures
+- A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
+- Signup never accepts an administrator role. Persisted demotion or deletion revokes privileged mutations immediately, and `/currentuser` invalidates expired, deleted, or role-mismatched sessions, including bounded legacy tokens without `exp`.
+- Synthetic production-acceptance events remain `OFFLINE`. Ordinary REST and SSE queries exclude them server-side; an acceptance view may request at most ten exact lowercase ObjectIDs and only a currently persisted administrator may receive them.
+- Offline-event odds requests repeat authoritative administrator verification. Client filtering and a stale JWT claim are never security boundaries.
+- Administrative catalog reads are privileged too: `/api/backoffice` revalidates the persisted role and must not return fixture metadata in an unauthorized error.
+- A live update received before `NEW_EVENT` creates an `OFFLINE` projection. Metadata and visibility initialize independently so `NEW_EVENT` can repair legacy/event-visibility-first placeholders without undoing a newer visibility change.
+- A visibility message may arrive before any event row. Persist it as pending on an `OFFLINE` placeholder, then apply it only after authoritative metadata arrives; ambiguous legacy hidden placeholders stay hidden.
+- Competing `NEW_EVENT` and visibility placeholder upserts can race on the unique event ID. Both paths must treat duplicate-key as convergence and retry the pending decision against the winning row before acknowledging.
+- Scoped clients immediately purge cached offline events and refresh authentication when REST or SSE access fails. A bounded authoritative REST reconcile continues while SSE is healthy because visibility removals and pre-match changes may not produce live snapshots.
+
+### Fail-dark live activation
+- `LIVE_KICKOFFS_ENABLED=true` is permanent only when no activation lease is present. A temporary activation also carries `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`; malformed or expired leases fail dark inside Gamemaster while already-started matches continue.
+- The protected activation workflow first uses a bounded lease. Only the same run and source SHA may remove it, and only after production acceptance, protected evidence upload, and a final current-master/provenance revalidation.
+- Disable and every ambiguous control failure set the flag false and remove the lease together. The lease remains the independent safety boundary if the workflow runner is hard-killed before its cleanup trap can execute.
+- Deployment provenance must bind source SHA, build/deploy attempts, infrastructure artifact digest, runtime mode, and runtime fingerprint. Rechecking current `master` immediately before mutation and commit closes the preflight-to-mutation race.
 
 ---
 
@@ -96,6 +114,7 @@ cd resulting && npm ci && npm run test:ci
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
+- Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 
 ## Resolved failures and durable rules
 
