@@ -39,6 +39,7 @@ describe('Statistics', () => {
 
     await renderStatistics();
 
+    expect(axios.get).toHaveBeenCalledWith('/api/bet/stats/v2');
     const safeRow = (await screen.findByTitle('Top Player')).closest('.stat-row');
     expect(within(safeRow).getByText('4')).toBeInTheDocument();
     expect(within(safeRow).getByText('120')).toBeInTheDocument();

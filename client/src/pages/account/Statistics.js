@@ -27,7 +27,7 @@ const HandleUserStatistics = ({ refreshToken, uiVariant }) => {
 
     const fetchStats = async () => {
       try {
-        const response = await axios.get('/api/bet/stats');
+        const response = await axios.get('/api/bet/stats/v2');
         if (!isMounted) {
           return;
         }
