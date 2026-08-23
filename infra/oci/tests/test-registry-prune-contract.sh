@@ -54,6 +54,17 @@ cat \
   "$WORK_DIR/deployed.tsv" \
   "$WORK_DIR/rollback.tsv" \
   > "$WORK_DIR/protected.tsv"
+{
+  awk -F '\t' -v sha="$CURRENT_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/current.tsv"
+  awk -F '\t' -v sha="$DEPLOYED_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/deployed.tsv"
+  awk -F '\t' -v sha="$ROLLBACK_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/rollback.tsv"
+} > "$WORK_DIR/trusted-protected-images.tsv"
 printf '%s\n' \
   "$TARGET_ONE_SHA" \
   "$TARGET_TWO_SHA" \
@@ -95,6 +106,22 @@ jq -n \
           items: [
             $generations[] as $generation
             | range(0; 9) as $service_index
+            | (
+                if $generation[1] < 4
+                then 7
+                else 6
+                end
+              ) as $tag_count
+            | range(0; $tag_count) as $tag_index
+            | (
+                if $tag_index == 0
+                then $generation[0]
+                else pad(
+                  100 + ($generation[1] * 10) + $tag_index;
+                  40
+                )
+                end
+              ) as $tag_source_sha
             | {
                 id: (
                   "ocid1.containerimage.oc1..fixture" +
@@ -102,7 +129,7 @@ jq -n \
                 ),
                 "repository-name": "betstan_images",
                 version: (
-                  "oci-\(services[$service_index])-\($generation[0])"
+                  "oci-\(services[$service_index])-\($tag_source_sha)"
                 ),
                 digest: (
                   "sha256:" +
@@ -126,6 +153,40 @@ fi
 printf '%s\n' "$*" >> "${MOCK_OCI_LOG:?}"
 case "$*" in
   "artifacts container image list "*)
+    list_count_file="${MOCK_OCI_STATE:?}/list-count"
+    list_count=0
+    if [[ -f "$list_count_file" ]]; then
+      list_count="$(cat "$list_count_file")"
+    fi
+    list_count="$((list_count + 1))"
+    printf '%s\n' "$list_count" > "$list_count_file"
+    if [[ -n "${MOCK_OCI_MUTATE_ON_LIST_CALL:-}" &&
+          "$list_count" == "$MOCK_OCI_MUTATE_ON_LIST_CALL" ]]; then
+      jq '
+        .data.items[0] as $source
+        | .data.items += [
+            $source + {
+              version: "oci-auth-7777777777777777777777777777777777777777"
+            }
+          ]
+      ' "${MOCK_OCI_STATE:?}/images.json" \
+        > "${MOCK_OCI_STATE:?}/images.json.tmp"
+      mv \
+        "${MOCK_OCI_STATE:?}/images.json.tmp" \
+        "${MOCK_OCI_STATE:?}/images.json"
+    fi
+    if [[ -n "${MOCK_OCI_REKEY_ON_LIST_CALL:-}" &&
+          "$list_count" == "$MOCK_OCI_REKEY_ON_LIST_CALL" ]]; then
+      jq '
+        .data.items |= map(
+          .id |= sub("fixture"; "rekey")
+        )
+      ' "${MOCK_OCI_STATE:?}/images.json" \
+        > "${MOCK_OCI_STATE:?}/images.json.tmp"
+      mv \
+        "${MOCK_OCI_STATE:?}/images.json.tmp" \
+        "${MOCK_OCI_STATE:?}/images.json"
+    fi
     cat "${MOCK_OCI_STATE:?}/images.json"
     ;;
   "artifacts container repository list "*)
@@ -169,11 +230,14 @@ chmod +x "$WORK_DIR/bin/oci"
 run_prune() {
   local protected_file="${TEST_PROTECTED_IMAGES_FILE:-$WORK_DIR/protected.tsv}"
   local trusted_target_file="${TEST_TRUSTED_TARGET_IMAGES_FILE:-$WORK_DIR/trusted-target-images.tsv}"
+  local trusted_protected_file="${TEST_TRUSTED_PROTECTED_IMAGES_FILE:-$WORK_DIR/trusted-protected-images.tsv}"
 
   env \
     PATH="$WORK_DIR/bin:$PATH" \
     MOCK_OCI_LOG="$WORK_DIR/oci.log" \
     MOCK_OCI_STATE="$WORK_DIR/state" \
+    MOCK_OCI_MUTATE_ON_LIST_CALL="${MOCK_OCI_MUTATE_ON_LIST_CALL:-}" \
+    MOCK_OCI_REKEY_ON_LIST_CALL="${MOCK_OCI_REKEY_ON_LIST_CALL:-}" \
     OCI_CLI_VERSION=3.90.0 \
     OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..fixture \
     OCI_IMAGE_PREFIX=betstan \
@@ -181,6 +245,7 @@ run_prune() {
     TARGET_SOURCE_SHAS_FILE="$WORK_DIR/target-source-shas.txt" \
     TRUSTED_TARGET_IMAGES_FILE="$trusted_target_file" \
     PROTECTED_IMAGES_FILE="$protected_file" \
+    TRUSTED_PROTECTED_IMAGES_FILE="$trusted_protected_file" \
     CURRENT_SOURCE_SHA="$CURRENT_SHA" \
     OUTPUT_DIR="$WORK_DIR/evidence" \
     PRUNE_POLL_ATTEMPTS=1 \
@@ -189,9 +254,20 @@ run_prune() {
 }
 
 : > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
 run_prune
 [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log")" == "27" ]] ||
   fail "batch prune did not delete exactly three complete generations"
+jq -e '
+  .present_target_images == 27 and
+  .protected_unique_generations == 3 and
+  .unique_images == 54 and
+  .unique_image_ids == 54 and
+  .tag_rows == 360 and
+  .alias_rows == 306 and
+  .tag_generations == 40
+' "$WORK_DIR/evidence/before-summary.json" >/dev/null ||
+  fail "batch prune did not model tag aliases separately from image IDs"
 jq -e \
   --arg one "$TARGET_ONE_SHA" \
   --arg two "$TARGET_TWO_SHA" \
@@ -200,32 +276,199 @@ jq -e \
     .target_source_shas == [$one, $two, $failed] and
     .requested_target_generations == 3 and
     .pruned_target_generations == 3 and
-    .unique_images == 27
+    .protected_unique_generations == 3 and
+    .unique_images == 27 and
+    .unique_image_ids == 27 and
+    .tag_rows == 189 and
+    .alias_rows == 162 and
+    .tag_generations == 21
   ' "$WORK_DIR/evidence/after-summary.json" >/dev/null ||
   fail "batch prune did not emit terminal evidence"
 [[ "$(wc -l < "$WORK_DIR/evidence/deleted-images.tsv" | tr -d ' ')" == "27" ]] ||
   fail "batch prune evidence does not contain 27 deleted service images"
+protected_image_ids_sha256="$(
+  shasum -a 256 "$WORK_DIR/evidence/protected-image-ids.txt" |
+    awk '{ print $1 }'
+)"
+[[ "$(wc -l < "$WORK_DIR/evidence/protected-image-ids.txt" | tr -d ' ')" == "27" &&
+    "$(jq -r '.protected_image_ids_sha256' "$WORK_DIR/evidence/before-summary.json")" == \
+      "$protected_image_ids_sha256" &&
+    "$(jq -r '.protected_image_ids_sha256' "$WORK_DIR/evidence/after-summary.json")" == \
+      "$protected_image_ids_sha256" ]] ||
+  fail "batch prune did not bind exact protected image OCID evidence"
+[[ "$(wc -l < "$WORK_DIR/evidence/before-aliases.tsv" | tr -d ' ')" == "360" &&
+    "$(wc -l < "$WORK_DIR/evidence/after-aliases.tsv" | tr -d ' ')" == "189" ]] ||
+  fail "batch prune did not retain complete before/after alias evidence"
 [[ "$(
-  jq -c '[.data.items | length, ([.[] | .digest] | unique | length)]' \
+  jq -c '[
+    .data.items | length,
+    ([.[] | .id] | unique | length),
+    ([.[] | .digest] | unique | length)
+  ]' \
     "$WORK_DIR/state/images.json"
-)" == "[27,27]" ]] ||
-  fail "batch prune did not retain exactly three complete generations"
+)" == "[189,27,27]" ]] ||
+  fail "batch prune did not retain exactly three protected alias generations"
 
 rm -rf "$WORK_DIR/evidence"
 : > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
 run_prune
 [[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
   fail "an already-pruned target generation was deleted again"
 jq -e '
   .deletion_required == false and
   .present_target_generations == 0 and
-  .unique_images == 27
+  .protected_unique_generations == 3 and
+  .unique_images == 27 and
+  .unique_image_ids == 27 and
+  .tag_rows == 189 and
+  .alias_rows == 162
 ' "$WORK_DIR/evidence/before-summary.json" >/dev/null ||
   fail "an already-pruned batch was not resumed idempotently"
 
 cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
 rm -rf "$WORK_DIR/evidence"
 : > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
+if MOCK_OCI_MUTATE_ON_LIST_CALL=2 run_prune >/dev/null 2>&1; then
+  fail "registry alias drift immediately before deletion was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "pre-delete alias drift was rejected after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
+if MOCK_OCI_REKEY_ON_LIST_CALL=3 run_prune >/dev/null 2>&1; then
+  fail "post-delete protected image OCID substitution was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log")" == "27" ]] ||
+  fail "protected OCID substitution fixture did not reach post-delete validation"
+[[ ! -e "$WORK_DIR/evidence/after-summary.json" ]] ||
+  fail "protected OCID substitution emitted terminal success evidence"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
+cat \
+  "$WORK_DIR/deployed.tsv" \
+  "$WORK_DIR/deployed.tsv" \
+  "$WORK_DIR/rollback.tsv" \
+  > "$WORK_DIR/protected-reused.tsv"
+{
+  awk -F '\t' -v sha="$CURRENT_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/deployed.tsv"
+  awk -F '\t' -v sha="$DEPLOYED_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/deployed.tsv"
+  awk -F '\t' -v sha="$ROLLBACK_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/rollback.tsv"
+} > "$WORK_DIR/trusted-protected-reused.tsv"
+jq -r \
+  --arg deployed_sha "$DEPLOYED_SHA" \
+  --arg rollback_sha "$ROLLBACK_SHA" '
+    .data.items[]
+    | select(
+        (.version | endswith("-" + $deployed_sha)) or
+        (.version | endswith("-" + $rollback_sha))
+      )
+    | .id
+  ' "$WORK_DIR/state/images.json" |
+  LC_ALL=C sort -u > "$WORK_DIR/expected-reused-protected-ids.txt"
+jq \
+  --arg current_sha "$CURRENT_SHA" \
+  --arg deployed_sha "$DEPLOYED_SHA" '
+    def services: [
+      "auth", "backoffice", "bet", "client", "event", "gamemaster",
+      "moderation", "resulting", "slip"
+    ];
+    .data.items as $rows
+    | ([
+        $rows[]
+        | select(.version | endswith("-" + $current_sha))
+        | .id
+      ] | unique) as $old_current_ids
+    | ([
+        range(0; 9) as $service_index
+        | ($rows[]
+          | select(
+              .version ==
+              ("oci-" + services[$service_index] + "-" + $deployed_sha)
+            ))
+        | . + {
+            version: (
+              "oci-" + services[$service_index] + "-" + $current_sha
+            )
+          }
+      ]) as $reused_current_tags
+    | .data.items = (
+        [
+          $rows[]
+          | .id as $id
+          | select(($old_current_ids | index($id)) == null)
+        ] + $reused_current_tags
+      )
+  ' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+TEST_PROTECTED_IMAGES_FILE="$WORK_DIR/protected-reused.tsv" \
+  TEST_TRUSTED_PROTECTED_IMAGES_FILE="$WORK_DIR/trusted-protected-reused.tsv" \
+  run_prune
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log")" == "27" ]] ||
+  fail "reused protected generations changed the exact target delete count"
+jq -e '
+  .terminal_status == "PRUNED" and
+  .protected_unique_generations == 2 and
+  .unique_images == 18 and
+  .unique_image_ids == 18 and
+  .tag_rows == 135 and
+  .alias_rows == 117 and
+  .tag_generations == 15
+' "$WORK_DIR/evidence/after-summary.json" >/dev/null ||
+  fail "reused protected generations did not retain exact alias accounting"
+jq -r '.data.items[].id' "$WORK_DIR/state/images.json" |
+  LC_ALL=C sort -u > "$WORK_DIR/actual-reused-protected-ids.txt"
+cmp -s \
+  "$WORK_DIR/expected-reused-protected-ids.txt" \
+  "$WORK_DIR/actual-reused-protected-ids.txt" ||
+  fail "reused protected generations did not preserve exact protected OCIDs"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+{
+  head -n 1 "$WORK_DIR/deployed.tsv"
+  tail -n +2 "$WORK_DIR/current.tsv"
+  cat "$WORK_DIR/deployed.tsv" "$WORK_DIR/rollback.tsv"
+} > "$WORK_DIR/protected-partial-reuse.tsv"
+{
+  {
+    head -n 1 "$WORK_DIR/deployed.tsv"
+    tail -n +2 "$WORK_DIR/current.tsv"
+  } | awk -F '\t' -v sha="$CURRENT_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }'
+  awk -F '\t' -v sha="$DEPLOYED_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/deployed.tsv"
+  awk -F '\t' -v sha="$ROLLBACK_SHA" \
+    'BEGIN { OFS = "\t" } { print sha, $0 }' \
+    "$WORK_DIR/rollback.tsv"
+} > "$WORK_DIR/trusted-protected-partial-reuse.tsv"
+if TEST_PROTECTED_IMAGES_FILE="$WORK_DIR/protected-partial-reuse.tsv" \
+  TEST_TRUSTED_PROTECTED_IMAGES_FILE="$WORK_DIR/trusted-protected-partial-reuse.tsv" \
+  run_prune >/dev/null 2>&1; then
+  fail "a partially overlapping protected generation was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "partial protected overlap rejection happened after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+rm -f "$WORK_DIR/state/list-count"
 cat \
   "$WORK_DIR/current.tsv" \
   "$WORK_DIR/deployed.tsv" \
@@ -261,12 +504,15 @@ rm -rf "$WORK_DIR/evidence"
 jq \
   --arg trusted_sha "$TARGET_ONE_SHA" \
   --arg failed_sha "$FAILED_TARGET_SHA" '
-  .data.items |= (
-    map(select(
-      .version != ("oci-auth-" + $trusted_sha) and
-      .version != ("oci-auth-" + $failed_sha)
+  ([.data.items[]
+    | select(.version == ("oci-auth-" + $trusted_sha))
+    | .id][0]) as $trusted_id
+  | ([.data.items[]
+    | select(.version == ("oci-auth-" + $failed_sha))
+    | .id][0]) as $failed_id
+  | .data.items |= map(select(
+      .id != $trusted_id and .id != $failed_id
     ))
-  )
 ' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
 mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
 run_prune
@@ -276,11 +522,131 @@ jq -e '
   .deletion_required == true and
   .present_target_generations == 3 and
   .present_target_images == 25 and
-  .unique_images == 52
+  .unique_images == 52 and
+  .unique_image_ids == 52 and
+  .tag_rows == 347 and
+  .alias_rows == 295
 ' "$WORK_DIR/evidence/before-summary.json" >/dev/null ||
   fail "partial batch recovery did not record its exact starting state"
-[[ "$(jq '[.data.items[]] | length' "$WORK_DIR/state/images.json")" == "27" ]] ||
-  fail "partial batch recovery did not retain exactly the protected images"
+[[ "$(
+  jq -c '[
+    .data.items | length,
+    ([.[] | .id] | unique | length),
+    ([.[] | .digest] | unique | length)
+  ]' "$WORK_DIR/state/images.json"
+)" == "[189,27,27]" ]] ||
+  fail "partial batch recovery did not retain protected aliases exactly"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+jq --arg current_sha "$CURRENT_SHA" '
+  .data.items |= map(select(.version != ("oci-auth-" + $current_sha)))
+' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "a missing canonical protected source tag was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "missing protected tag rejection happened after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+jq --arg target_sha "$TARGET_ONE_SHA" '
+  (.data.items[]
+    | select(.version == ("oci-auth-" + $target_sha))) as $source
+  | .data.items += [
+      $source + {
+        version: "oci-bet-1111111111111111111111111111111111111111"
+      }
+    ]
+' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "a cross-service alias was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "cross-service alias rejection happened after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+jq --arg target_sha "$TARGET_ONE_SHA" '
+  (.data.items[]
+    | select(.version == ("oci-auth-" + $target_sha))) as $source
+  | .data.items += [
+      $source + {
+        id: "ocid1.containerimage.oc1..fixture-conflict",
+        version: "oci-auth-2222222222222222222222222222222222222222"
+      }
+    ]
+' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "one digest mapped to multiple image IDs"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "image ID conflict rejection happened after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+jq --arg target_sha "$TARGET_ONE_SHA" '
+  (.data.items[]
+    | select(.version == ("oci-auth-" + $target_sha))) as $source
+  | .data.items += [
+      $source + {
+        version: "oci-auth-4444444444444444444444444444444444444444",
+        digest: ("sha256:" + ("8" * 64))
+      }
+    ]
+' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "one image ID mapped to multiple digests"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "digest conflict rejection happened after a delete"
+
+cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
+rm -rf "$WORK_DIR/evidence"
+: > "$WORK_DIR/oci.log"
+jq \
+  --arg target_one_sha "$TARGET_ONE_SHA" \
+  --arg target_two_sha "$TARGET_TWO_SHA" '
+    def services: [
+      "auth", "backoffice", "bet", "client", "event", "gamemaster",
+      "moderation", "resulting", "slip"
+    ];
+    .data.items as $rows
+    | .data.items += [
+        range(0; 9) as $service_index
+        | (
+            if $service_index == 0
+            then $target_one_sha
+            else $target_two_sha
+            end
+          ) as $source_sha
+        | ($rows[]
+          | select(
+              .version ==
+              ("oci-" + services[$service_index] + "-" + $source_sha)
+            )) as $source
+        | $source + {
+            version: (
+              "oci-" + services[$service_index] + "-" +
+              "3333333333333333333333333333333333333333"
+            )
+          }
+      ]
+  ' "$WORK_DIR/state/images.json" > "$WORK_DIR/state/images.json.tmp"
+mv "$WORK_DIR/state/images.json.tmp" "$WORK_DIR/state/images.json"
+if run_prune >/dev/null 2>&1; then
+  fail "a mixed-generation alias set was accepted"
+fi
+[[ "$(grep -c '^artifacts container image delete ' "$WORK_DIR/oci.log" || true)" == "0" ]] ||
+  fail "mixed alias rejection happened after a delete"
 
 cp "$WORK_DIR/state/images-original.json" "$WORK_DIR/state/images.json"
 rm -rf "$WORK_DIR/evidence"
