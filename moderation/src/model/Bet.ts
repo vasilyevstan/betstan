@@ -158,6 +158,10 @@ const betSchema = new Schema({
     type: String,
     required: true,
   },
+  submittedAt: {
+    type: String,
+    required: false,
+  },
   moderationTimestamp: {
     type: String,
     required: false,

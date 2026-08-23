@@ -81,6 +81,7 @@ jobs:
       EXPECTED_OWNER_RUN_ATTEMPT: ${{ github.event_name == 'workflow_dispatch' && inputs.migration_run_attempt || vars.OCI_MIGRATION_RECOVERY_RUN_ATTEMPT }}
       EXPECTED_MIGRATION_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.migration_id || vars.OCI_MIGRATION_RECOVERY_MIGRATION_ID }}
       EXPECTED_FENCING_GENERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.fencing_generation || vars.OCI_MIGRATION_RECOVERY_FENCING_GENERATION }}
+      CONFIRMATION: ${{ inputs.confirmation }}
 
     steps:
       - name: Initialize isolated recovery paths
@@ -167,8 +168,7 @@ jobs:
               ;;
             workflow_dispatch)
               [ "$GITHUB_REF_NAME" = "master" ]
-              [ "${{ inputs.confirmation }}" = \
-                "STOP AZURE FOR EXACT MIGRATION" ]
+              [ "$CONFIRMATION" = "STOP AZURE FOR EXACT MIGRATION" ]
               ;;
             workflow_run)
               [[ "$UPSTREAM_RUN_ID" =~ ^[1-9][0-9]*$ ]]

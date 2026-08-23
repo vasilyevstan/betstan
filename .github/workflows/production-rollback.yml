@@ -30,6 +30,7 @@ env:
   BASELINE_SOURCE_RUN_ID: ${{ inputs.baseline_source_run_id }}
   BASELINE_SOURCE_RUN_ATTEMPT: ${{ inputs.baseline_source_run_attempt }}
   BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
+  CONFIRMATION: ${{ inputs.confirmation }}
   RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
   CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
   APP_DOMAIN: ${{ vars.APP_DOMAIN || 'betstan.xyz' }}
@@ -61,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
-          [ "${{ inputs.confirmation }}" = "ROLLBACK PRODUCTION EXACT DIGEST" ]
+          [ "$CONFIRMATION" = "ROLLBACK PRODUCTION EXACT DIGEST" ]
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BASELINE_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [ "$BASELINE_SOURCE_RUN_ATTEMPT" = "1" ]

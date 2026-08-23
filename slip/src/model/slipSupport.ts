@@ -109,6 +109,7 @@ export interface SubmittedEventData {
   userId: string;
   userName: string;
   slipId: string;
+  submittedAt?: string | null;
   placementAttemptId?: string | null;
   wager: number;
   rows: ArrayLike<MutableSubmittedEventRow> & Iterable<MutableSubmittedEventRow>;
@@ -156,6 +157,7 @@ export interface PlainSlip {
 
 export type PublishedSubmittedEventData = IPlaceBetEvent["data"] & {
   placementAttemptId?: string;
+  submittedAt?: string;
 };
 
 const MAX_PLACEMENT_ATTEMPT_ID_LENGTH = 200;
@@ -681,6 +683,7 @@ export const toPublishedSubmittedEventData = (
   userId: submittedEvent.userId,
   userName: submittedEvent.userName,
   slipId: submittedEvent.slipId,
+  submittedAt: submittedEvent.submittedAt ?? undefined,
   placementAttemptId: canonicalPlacementAttemptId(submittedEvent),
   wager: submittedEvent.wager,
   betKind: submittedEvent.betKind ?? undefined,

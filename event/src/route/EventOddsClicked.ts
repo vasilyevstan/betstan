@@ -106,6 +106,18 @@ const isLiveSelectionRequest = (body: Record<string, unknown>): boolean =>
     body.selectionId,
   ].some((value) => value !== undefined);
 
+const isQuoteValidAt = (
+  validUntil: unknown,
+  selectedAt: Date
+): validUntil is string => {
+  if (!isNonEmptyString(validUntil)) {
+    return false;
+  }
+
+  const validUntilMs = Date.parse(validUntil);
+  return Number.isFinite(validUntilMs) && selectedAt.getTime() < validUntilMs;
+};
+
 router.post(
   "/api/event/odds",
   async (req: Request, res: Response, next: NextFunction) => {
@@ -187,6 +199,12 @@ router.post(
         return next(new BadRequestError("Market version mismatch"));
       }
 
+      const selectedAt = new Date();
+      const quoteValidUntil = selectedMarket.quoteValidUntil;
+      if (!isQuoteValidAt(quoteValidUntil, selectedAt)) {
+        return next(new BadRequestError("Live quote is stale"));
+      }
+
       const selectedSelection = selectedMarket.selections.find(
         (marketSelection) => marketSelection.selectionId === selectionId
       );
@@ -217,8 +235,8 @@ router.post(
           quoteVersion: selectedMarket.quoteVersion,
           selectionId: selectedSelection.selectionId,
           side: selectedSelection.side,
-          selectedAt: new Date().toISOString(),
-          quoteValidUntil: selectedMarket.quoteValidUntil || undefined,
+          selectedAt: selectedAt.toISOString(),
+          quoteValidUntil,
         },
       });
 
