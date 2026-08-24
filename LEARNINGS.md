@@ -82,6 +82,11 @@
 - Decline restoration may merge only into a board that is still `DRAFT`.
   Duplicate delivery treats a replacement that progressed to `SUBMITTED` or
   archive as completed and must never reset or resurrect it.
+- Compose reusable Mongo predicates without duplicate logical keys. Spreading
+  one filter containing `$or` beside another top-level `$or` silently drops a
+  safety condition in JavaScript; combine them under `$and`. Publication
+  claims must atomically require both an unpublished decision and a claimable
+  lease.
 - During a rolling Client/API upgrade, the boards read endpoint records a
   bounded confirmation scoped to a hash of the authenticated session plus the
   user, kind, slip, revision, and fingerprint. Never overwrite one
@@ -109,6 +114,11 @@
 
 ### Setup file (`src/test/setup.ts`)
 Backend services generally use an in-memory MongoDB instance, clear mocks and collections between tests, and stop Mongo in `afterAll`. Read each service's setup instead of assuming they are identical. Listener tests that need `AListener.channel` must use a concrete factory mock; a bare `jest.mock("@betstan/common")` can leave listener state undefined.
+
+Browser API fixtures must preserve concurrency contracts, not only response
+shapes. Mock Slip boards carry and rotate revision/fingerprint evidence, and
+placement mocks reject mismatched confirmations so Playwright exercises the
+same stale-board boundary as the real API.
 
 ### Shared mock prototype trap
 Because `@betstan/common` is auto-mocked, `APublisher.prototype.init` becomes a single `jest.fn()`. **All publisher classes that extend `APublisher` without defining their own `init` inherit the same mock function.** This means:

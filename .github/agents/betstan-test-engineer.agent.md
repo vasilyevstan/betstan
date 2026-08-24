@@ -45,6 +45,10 @@ authority-ending `occurredAt`, plus legacy history without the additive end
 field. For SSE, verify intentional backpressure disconnect and monotonic
 REST/reconnect recovery together.
 
+Keep browser API fixtures faithful to concurrency contracts: include and
+rotate board revisions/fingerprints, reject mismatched placement
+confirmations, and require stale-quote reselection before resubmission.
+
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.
 

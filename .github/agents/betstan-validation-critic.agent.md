@@ -38,6 +38,9 @@ Read:
 - Duplicate decline delivery after a replacement becomes submitted or
   archived. Restoration must not reset, overwrite, or resurrect that
   replacement.
+- Mongo filters assembled from reusable objects with repeated `$or` or other
+  logical keys. Require explicit `$and` composition so an unpublished,
+  ownership, or lease predicate cannot be overwritten before an atomic claim.
 - Historical quote decisions made after suspension, full-time, replacement,
   or other authority-ending transitions. Require immutable `submittedAt` to
   precede both expiry and the earliest authoritative `occurredAt`, including

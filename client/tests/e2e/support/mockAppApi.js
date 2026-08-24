@@ -148,14 +148,31 @@ const buildPreMatchEvent = () => ({
   ],
 });
 
-const buildBoard = (slipId, betKind, rows, overrides = {}) => ({
-  _id: slipId,
-  betKind,
-  status: 'DRAFT',
-  timestamp: '2030-01-01T12:05:00.000Z',
-  rows,
-  ...overrides,
-});
+const buildBoard = (slipId, betKind, rows, overrides = {}) => {
+  const boardRevision = overrides.boardRevision ?? 1;
+  const boardFingerprint = overrides.boardFingerprint
+    ?? `${slipId}-fingerprint-${boardRevision}`;
+
+  return {
+    _id: slipId,
+    betKind,
+    status: 'DRAFT',
+    timestamp: '2030-01-01T12:05:00.000Z',
+    boardRevision,
+    boardFingerprint,
+    rows,
+    ...overrides,
+  };
+};
+
+const nextBoardIdentity = (board, slipId) => {
+  const boardRevision = (board?.boardRevision ?? 0) + 1;
+
+  return {
+    boardRevision,
+    boardFingerprint: `${slipId}-fingerprint-${boardRevision}`,
+  };
+};
 
 const buildLiveBet = ({ slipId, status, timestamp, wager, rows, declineReason }) => ({
   _id: `bet-${slipId}`,
@@ -416,15 +433,19 @@ const createLiveBettingMockState = () => {
         : hasDuplicateOdds
           ? currentRows
           : [...currentRows, nextRow];
+      const slipId = existingBoard?._id || 'live-draft-1';
 
       state.boards[BET_KIND.LIVE] = buildBoard(
-        existingBoard?._id || 'live-draft-1',
+        slipId,
         BET_KIND.LIVE,
         rows,
-        existingBoard?.sourceSlipId ? {
-          sourceSlipId: existingBoard.sourceSlipId,
-          declineReason: existingBoard.declineReason,
-        } : {},
+        {
+          ...nextBoardIdentity(existingBoard, slipId),
+          ...(existingBoard?.sourceSlipId ? {
+            sourceSlipId: existingBoard.sourceSlipId,
+            declineReason: existingBoard.declineReason,
+          } : {}),
+        },
       );
       return;
     }
@@ -443,17 +464,33 @@ const createLiveBettingMockState = () => {
       return;
     }
 
+    const slipId = existingBoard?._id || 'prematch-draft-1';
     state.boards[BET_KIND.PRE_MATCH] = buildBoard(
-      existingBoard?._id || 'prematch-draft-1',
+      slipId,
       BET_KIND.PRE_MATCH,
       [...currentRows, buildPreMatchRow(event, product, odds)],
+      nextBoardIdentity(existingBoard, slipId),
     );
   };
 
-  state.submitBoard = ({ betKind, slipId, wager }) => {
+  state.submitBoard = ({
+    betKind,
+    slipId,
+    wager,
+    placementAttemptId,
+    expectedBoardRevision,
+    expectedBoardFingerprint,
+  }) => {
     const board = state.boards[betKind];
     if (!board || board._id !== slipId) {
       return { status: 400, body: { message: 'slip does not exist' } };
+    }
+    if (
+      !placementAttemptId
+      || expectedBoardRevision !== board.boardRevision
+      || expectedBoardFingerprint !== board.boardFingerprint
+    ) {
+      return { status: 409, body: { message: 'board confirmation mismatch' } };
     }
 
     const cleanedBoard = buildBoard(
@@ -468,6 +505,8 @@ const createLiveBettingMockState = () => {
         status: 'SUBMITTED',
         submittedAt: '2030-01-01T12:30:00.000Z',
         sourceSlipId: board.sourceSlipId,
+        boardRevision: board.boardRevision,
+        boardFingerprint: board.boardFingerprint,
       },
     );
     delete cleanedBoard.declineReason;
@@ -477,6 +516,9 @@ const createLiveBettingMockState = () => {
       betKind,
       slipId,
       wager: Number(wager),
+      placementAttemptId,
+      expectedBoardRevision,
+      expectedBoardFingerprint,
       rows: deepClone(cleanedBoard.rows),
     });
 
@@ -496,7 +538,7 @@ const createLiveBettingMockState = () => {
       resubmittedLiveTimestamp = '2030-01-01T12:42:00.000Z';
     }
 
-    return { status: 200, body: {} };
+    return { status: 200, body: deepClone(cleanedBoard) };
   };
 
   state.deleteRow = ({ betKind, slipRowId }) => {
@@ -512,6 +554,7 @@ const createLiveBettingMockState = () => {
         status: board.status,
         sourceSlipId: board.sourceSlipId,
         declineReason: board.declineReason,
+        ...nextBoardIdentity(board, board._id),
       });
   };
 
@@ -616,7 +659,7 @@ const installAppApiMocks = async (page, state) => {
       return;
     }
 
-    if (key === 'GET /api/bet/stats') {
+    if (key === 'GET /api/bet/stats' || key === 'GET /api/bet/stats/v2') {
       await fulfillJson(route, deepClone(state.stats));
       return;
     }

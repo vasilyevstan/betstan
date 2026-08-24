@@ -56,6 +56,10 @@ instead of crossing the boundary.
   duplicate fingerprints, with an explicit legacy fallback when old payloads
   lack that field.
 - Use database-enforced invariants for concurrency-sensitive uniqueness.
+- When composing Mongo filters, never let object spread overwrite repeated
+  logical keys such as `$or`. Put independent reusable clauses under `$and`
+  and test that every claim predicate remains enforced after a competing
+  operation completes.
 - Initialize Mongoose version keys on raw inserts/upserts when later writes use
   optimistic concurrency. Atomically initialize and reload historical
   versionless documents before mutation, and cover that path in compatibility

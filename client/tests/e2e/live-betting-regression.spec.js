@@ -97,6 +97,9 @@ test('live betting main page flow is deterministic without a backend', async ({ 
     betKind: BET_KIND.LIVE,
     slipId: 'live-draft-1',
     wager: 9,
+    placementAttemptId: expect.any(String),
+    expectedBoardRevision: 2,
+    expectedBoardFingerprint: 'live-draft-1-fingerprint-2',
   });
   expect(state.getLastSubmission().rows.map((row) => row.betKind)).toEqual([BET_KIND.LIVE]);
   await expect(liveBoard.getByRole('button', { name: 'Awaiting review…' })).toBeDisabled();
@@ -127,12 +130,18 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
 
   await page.getByLabel('Wager for LIVE SLIP').fill('13');
+  await page.getByRole('button', { name: state.fixtures.liveReplacementSelectionLabel }).click();
+  await expect.poll(() => state.boards[BET_KIND.LIVE]?.rows?.[0]?.quoteVersion).toBe(3);
+  await expect(page.getByLabel('Wager for LIVE SLIP')).toHaveValue('13');
   await liveBoard.getByRole('button', { name: 'BET!' }).click();
   await expect.poll(() => state.submissions.length).toBe(2);
   expect(state.getLastSubmission()).toMatchObject({
     betKind: BET_KIND.LIVE,
     slipId: 'live-draft-2',
     wager: 13,
+    placementAttemptId: expect.any(String),
+    expectedBoardRevision: 2,
+    expectedBoardFingerprint: 'live-draft-2-fingerprint-2',
   });
   await expect(liveBoard.getByRole('button', { name: 'Awaiting review…' })).toBeDisabled();
 

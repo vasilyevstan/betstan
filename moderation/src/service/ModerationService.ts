@@ -1489,8 +1489,12 @@ class ModerationService {
         status: {
           $ne: ModerationStatus.RECEIVED,
         },
-        ...this.unpublishedDecisionFilter(),
-        $or: this.claimablePublicationLeaseFilters(now.toISOString()),
+        $and: [
+          this.unpublishedDecisionFilter(),
+          {
+            $or: this.claimablePublicationLeaseFilters(now.toISOString()),
+          },
+        ],
       },
       {
         $set: {
