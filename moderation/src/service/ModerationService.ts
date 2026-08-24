@@ -85,6 +85,9 @@ interface MirrorMarket {
  */
 interface MirrorMarketHistoryEntry extends MirrorMarket {
   sequence: number;
+  occurredAt?: string;
+  authorityEndedAt?: string;
+  authorityEndSequence?: number;
   phase: EventPhase;
   bettingStatus: BettingStatus;
 }
@@ -114,6 +117,9 @@ interface LiveEventMirrorRecord {
 interface MarketHistorySnapshot {
   eventId: string;
   sequence: number;
+  occurredAt?: string;
+  authorityEndedAt?: string;
+  authorityEndSequence?: number;
   phase: EventPhase;
   bettingStatus: BettingStatus;
   markets: MirrorMarket[];
@@ -279,9 +285,10 @@ class ModerationService {
     // observation a no-op), never data loss or corruption.
     const before = (await LiveEventMirror.findOne(
       { eventId: data.eventId },
-      { sequence: 1, phase: 1, bettingStatus: 1, markets: 1 }
+      { sequence: 1, occurredAt: 1, phase: 1, bettingStatus: 1, markets: 1 }
     ).lean()) as {
       sequence?: number;
+      occurredAt?: string;
       phase?: EventPhase;
       bettingStatus?: BettingStatus;
       markets?: MirrorMarket[];
@@ -298,6 +305,13 @@ class ModerationService {
       historyChanged = await this.recordMarketHistory({
         eventId: data.eventId,
         sequence: before.sequence,
+        occurredAt: before.occurredAt,
+        authorityEndedAt: this.isLiveSnapshotOpen(data)
+          ? undefined
+          : data.occurredAt,
+        authorityEndSequence: this.isLiveSnapshotOpen(data)
+          ? undefined
+          : data.sequence,
         phase: before.phase ?? data.phase,
         bettingStatus: before.bettingStatus ?? data.bettingStatus,
         markets: before.markets,
@@ -395,7 +409,7 @@ class ModerationService {
     data: MarketHistorySnapshot,
     attempt = 0
   ): Promise<boolean> {
-    if (data.markets.length === 0) {
+    if (data.markets.length === 0 && this.isLiveSnapshotOpen(data)) {
       return false;
     }
 
@@ -439,6 +453,9 @@ class ModerationService {
         status: market.status,
         selections: market.selections,
         sequence: data.sequence,
+        occurredAt: data.occurredAt,
+        authorityEndedAt: data.authorityEndedAt,
+        authorityEndSequence: data.authorityEndSequence,
         phase: data.phase,
         bettingStatus: data.bettingStatus,
       };
@@ -450,11 +467,102 @@ class ModerationService {
         continue;
       }
 
-      if (
-        !this.wasHistoricallyOpenAndLive(priorEntry)
-        && this.wasHistoricallyOpenAndLive(candidate)
-      ) {
-        existingByKey.set(key, candidate);
+      const priorWasOpen = this.wasHistoricallyOpenAndLive(priorEntry);
+      const candidateWasOpen = this.wasHistoricallyOpenAndLive(candidate);
+
+      if (!priorWasOpen && candidateWasOpen) {
+        const upgradedCandidate =
+          priorEntry.sequence > candidate.sequence
+            ? this.withEarlierAuthorityEnd(
+                candidate,
+                priorEntry.sequence,
+                priorEntry.occurredAt
+              )
+            : candidate;
+        existingByKey.set(key, upgradedCandidate);
+        changed = true;
+        continue;
+      }
+
+      if (priorWasOpen) {
+        let authoritativeEntry = priorEntry;
+
+        if (candidate.authorityEndSequence && candidate.authorityEndedAt) {
+          authoritativeEntry = this.withEarlierAuthorityEnd(
+            authoritativeEntry,
+            candidate.authorityEndSequence,
+            candidate.authorityEndedAt
+          );
+        }
+
+        if (!candidateWasOpen && candidate.sequence > priorEntry.sequence) {
+          authoritativeEntry = this.withEarlierAuthorityEnd(
+            authoritativeEntry,
+            candidate.sequence,
+            candidate.occurredAt
+          );
+        }
+
+        if (authoritativeEntry !== priorEntry) {
+          existingByKey.set(key, authoritativeEntry);
+          changed = true;
+        }
+      }
+    }
+
+    if (!this.isLiveSnapshotOpen(data)) {
+      for (const [key, entry] of existingByKey) {
+        if (
+          !this.wasHistoricallyOpenAndLive(entry)
+          || data.sequence <= entry.sequence
+        ) {
+          continue;
+        }
+
+        const endedEntry = this.withEarlierAuthorityEnd(
+          entry,
+          data.sequence,
+          data.occurredAt
+        );
+
+        if (endedEntry !== entry) {
+          existingByKey.set(key, endedEntry);
+          changed = true;
+        }
+      }
+    }
+
+    const historyEntries = [...existingByKey.entries()];
+    for (const [key, entry] of historyEntries) {
+      if (!this.wasHistoricallyOpenAndLive(entry)) {
+        continue;
+      }
+
+      const nextAuthorityChange = historyEntries
+        .filter(
+          ([candidateKey, candidate]) =>
+            candidate.marketId === entry.marketId
+            && candidate.sequence > entry.sequence
+            && (
+              candidateKey !== key
+              || !this.wasHistoricallyOpenAndLive(candidate)
+            )
+            && Boolean(candidate.occurredAt)
+        )
+        .sort((left, right) => left[1].sequence - right[1].sequence)[0]?.[1];
+
+      if (!nextAuthorityChange) {
+        continue;
+      }
+
+      const endedEntry = this.withEarlierAuthorityEnd(
+        entry,
+        nextAuthorityChange.sequence,
+        nextAuthorityChange.occurredAt
+      );
+
+      if (endedEntry !== entry) {
+        existingByKey.set(key, endedEntry);
         changed = true;
       }
     }
@@ -503,6 +611,30 @@ class ModerationService {
     quoteVersion: number;
   }): string {
     return `${market.marketId}\u0000${market.marketVersion}\u0000${market.quoteVersion}`;
+  }
+
+  private withEarlierAuthorityEnd(
+    entry: MirrorMarketHistoryEntry,
+    authorityEndSequence: number | undefined,
+    authorityEndedAt: string | undefined
+  ): MirrorMarketHistoryEntry {
+    if (
+      !authorityEndedAt
+      || authorityEndSequence === undefined
+      || authorityEndSequence <= entry.sequence
+      || (
+        entry.authorityEndSequence !== undefined
+        && entry.authorityEndSequence <= authorityEndSequence
+      )
+    ) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      authorityEndedAt,
+      authorityEndSequence,
+    };
   }
 
   private pruneMarketHistory(
@@ -873,7 +1005,11 @@ class ModerationService {
         continue;
       }
 
-      const { market: exactMarket, live: wasLiveWhenQuoted } = resolvedMarket;
+      const {
+        market: exactMarket,
+        live: wasLiveWhenQuoted,
+        authorityEndedAt,
+      } = resolvedMarket;
       const exactSelection = this.findExactSelection(exactMarket, row);
 
       if (!wasLiveWhenQuoted) {
@@ -958,7 +1094,8 @@ class ModerationService {
         !this.isValidLiveQuoteAtSubmission(
           row.quoteValidUntil,
           exactMarket.quoteValidUntil,
-          event.data.submittedAt
+          event.data.submittedAt,
+          authorityEndedAt
         )
       ) {
         affectedRows.push(
@@ -1518,11 +1655,16 @@ class ModerationService {
   private isValidLiveQuoteAtSubmission(
     rowValidUntil: string | undefined,
     marketValidUntil: string | undefined,
-    submittedAt: string | undefined
+    submittedAt: string | undefined,
+    authorityEndedAt?: string
   ): boolean {
     if (
       !marketValidUntil
       || !this.isLiveSubmissionBeforeExpiry(rowValidUntil, submittedAt)
+      || !this.isLiveSubmissionBeforeAuthorityEnd(
+        submittedAt,
+        authorityEndedAt
+      )
     ) {
       return false;
     }
@@ -1534,6 +1676,28 @@ class ModerationService {
       Number.isFinite(rowExpiryMs)
       && Number.isFinite(marketExpiryMs)
       && rowExpiryMs === marketExpiryMs
+    );
+  }
+
+  private isLiveSubmissionBeforeAuthorityEnd(
+    submittedAt: string | undefined,
+    authorityEndedAt: string | undefined
+  ): boolean {
+    if (authorityEndedAt === undefined) {
+      return true;
+    }
+
+    if (!submittedAt) {
+      return false;
+    }
+
+    const submittedAtMs = Date.parse(submittedAt);
+    const authorityEndedAtMs = Date.parse(authorityEndedAt);
+
+    return (
+      Number.isFinite(submittedAtMs)
+      && Number.isFinite(authorityEndedAtMs)
+      && submittedAtMs < authorityEndedAtMs
     );
   }
 
@@ -1562,7 +1726,17 @@ class ModerationService {
   }
 
   private isLiveOpen(mirror: LiveEventMirrorRecord): boolean {
-    return LIVE_PHASES.has(mirror.phase) && mirror.bettingStatus === BettingStatus.OPEN;
+    return this.isLiveSnapshotOpen(mirror);
+  }
+
+  private isLiveSnapshotOpen(snapshot: {
+    phase: EventPhase;
+    bettingStatus: BettingStatus;
+  }): boolean {
+    return (
+      LIVE_PHASES.has(snapshot.phase)
+      && snapshot.bettingStatus === BettingStatus.OPEN
+    );
   }
 
   /**
@@ -1590,11 +1764,19 @@ class ModerationService {
   private resolveExactMarket(
     mirror: LiveEventMirrorRecord,
     row: NormalizedSlipRow
-  ): { market: MirrorMarket; live: boolean } | undefined {
+  ): {
+    market: MirrorMarket;
+    live: boolean;
+    authorityEndedAt?: string;
+  } | undefined {
     const historical = this.findHistoricalMarket(mirror, row);
 
     if (historical && this.wasHistoricallyOpenAndLive(historical)) {
-      return { market: historical, live: true };
+      return {
+        market: historical,
+        live: true,
+        authorityEndedAt: this.authorityEndedAtForHistory(mirror, historical),
+      };
     }
 
     const inCurrentMirror = mirror.markets.find(
@@ -1609,8 +1791,33 @@ class ModerationService {
     }
 
     return historical
-      ? { market: historical, live: this.wasHistoricallyLive(historical) }
+      ? {
+          market: historical,
+          live: this.wasHistoricallyLive(historical),
+          authorityEndedAt: this.authorityEndedAtForHistory(
+            mirror,
+            historical
+          ),
+        }
       : undefined;
+  }
+
+  private authorityEndedAtForHistory(
+    mirror: LiveEventMirrorRecord,
+    historical: MirrorMarketHistoryEntry
+  ): string | undefined {
+    if (historical.authorityEndedAt !== undefined) {
+      return historical.authorityEndedAt;
+    }
+
+    if (
+      mirror.sequence > historical.sequence
+      && !this.isLiveOpen(mirror)
+    ) {
+      return mirror.occurredAt;
+    }
+
+    return undefined;
   }
 
   private wasHistoricallyLive(entry: MirrorMarketHistoryEntry): boolean {

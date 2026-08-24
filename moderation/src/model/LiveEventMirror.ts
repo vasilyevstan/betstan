@@ -73,6 +73,8 @@ const marketSchema = new Schema(
  * `phase`/`bettingStatus` capture the event's overall live state at that same
  * sequence, so a later suspension/full-time snapshot can never retroactively
  * hide that the event was genuinely live when this specific quote was issued.
+ * `authorityEndedAt` is additive so older mirrors remain readable, and binds
+ * delayed moderation to the first later transition that stopped accepting it.
  */
 const marketHistorySchema = new Schema(
   {
@@ -110,6 +112,18 @@ const marketHistorySchema = new Schema(
     sequence: {
       type: Number,
       required: true,
+    },
+    occurredAt: {
+      type: String,
+      required: false,
+    },
+    authorityEndedAt: {
+      type: String,
+      required: false,
+    },
+    authorityEndSequence: {
+      type: Number,
+      required: false,
     },
     phase: {
       type: String,

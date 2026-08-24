@@ -1,14 +1,25 @@
 import express, { Request, Response } from "express";
+import { SlipStatus } from "@betstan/common";
+import { Slip } from "../model/Slip";
 import {
-  advanceSlipBoardIdentity,
-  clearSlipDeclineReason,
+  boardFingerprintOf,
+  boardRevisionOf,
+  buildSlipScope,
+  createBoardFingerprint,
   findDraftSlipByIdForUser,
   isValidSlipId,
+  normalizeSlip,
   parseRequestedBetKind,
+  persistSlipBoardIdentityIfNeeded,
   rowIdOf,
 } from "../model/slipSupport";
 
 const router = express.Router();
+const BOARD_CHANGED_MESSAGE =
+  "This board changed before the row was removed. Reload and try again.";
+
+const sendBoardConflict = (res: Response) =>
+  res.status(409).send({ message: BOARD_CHANGED_MESSAGE });
 
 router.post("/api/slip/row", async (req: Request, res: Response) => {
   const { slipId, slipRowId, betKind: requestedBetKind } = req.body;
@@ -37,20 +48,66 @@ router.post("/api/slip/row", async (req: Request, res: Response) => {
     return res.status(400).send({ message: "slip does not exist" });
   }
 
-  const targetRowId = typeof slipRowId === "string" ? slipRowId : "";
-  const updatedSlipRows = slip.rows.filter((row) => rowIdOf(row) !== targetRowId);
+  const authoritativeSlip = await persistSlipBoardIdentityIfNeeded(slip);
+  normalizeSlip(authoritativeSlip, betKind);
 
-  if (updatedSlipRows.length === slip.rows.length) {
+  if (authoritativeSlip.status !== SlipStatus.DRAFT) {
+    return sendBoardConflict(res);
+  }
+
+  const rows = Array.from(authoritativeSlip.rows);
+  const targetRowId = typeof slipRowId === "string" ? slipRowId : "";
+  const updatedSlipRows = rows.filter((row) => rowIdOf(row) !== targetRowId);
+
+  if (updatedSlipRows.length === rows.length) {
     return res.sendStatus(200);
   }
 
+  const expectedBoardRevision = boardRevisionOf(authoritativeSlip);
+  const expectedBoardFingerprint = boardFingerprintOf(authoritativeSlip);
+
+  if (!expectedBoardFingerprint) {
+    return sendBoardConflict(res);
+  }
+
+  const mutationScope = {
+    ...buildSlipScope(
+      SlipStatus.DRAFT,
+      betKind,
+      req.currentUser.id,
+      slipId
+    ),
+    boardRevision: expectedBoardRevision,
+    boardFingerprint: expectedBoardFingerprint,
+  };
+
   if (updatedSlipRows.length === 0) {
-    await slip.deleteOne();
+    const deleted = await Slip.deleteOne(mutationScope);
+
+    if (deleted.deletedCount !== 1) {
+      return sendBoardConflict(res);
+    }
   } else {
-    slip.set({ rows: updatedSlipRows });
-    advanceSlipBoardIdentity(slip);
-    clearSlipDeclineReason(slip);
-    await slip.save();
+    const updatedSlip = await Slip.findOneAndUpdate(
+      mutationScope,
+      {
+        $set: {
+          betKind,
+          draftKey: betKind,
+          rows: updatedSlipRows,
+          boardRevision: expectedBoardRevision + 1,
+          boardFingerprint: createBoardFingerprint(),
+        },
+        $unset: {
+          declineReason: 1,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedSlip) {
+      return sendBoardConflict(res);
+    }
   }
 
   return res.sendStatus(200);

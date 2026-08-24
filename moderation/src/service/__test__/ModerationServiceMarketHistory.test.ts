@@ -20,6 +20,9 @@ import {
   createLiveUpdateEvent,
 } from "../../event/listener/__test__/helpers";
 
+const timelineAt = (offsetMs: number) =>
+  new Date(Date.parse("2030-01-01T00:00:00.000Z") + offsetMs).toISOString();
+
 const createPublisher = () => ({
   publishWithConfirm: jest.fn(async () => undefined),
 }) as unknown as ModerationPublisher & {
@@ -30,25 +33,35 @@ it("approves a live bet whose valid quote predates a newer snapshot that already
   const publisher = createPublisher();
   const service = new ModerationService(publisher);
   const eventId = new mongoose.Types.ObjectId().toHexString();
-  const submittedAt = new Date().toISOString();
+  const submittedAt = timelineAt(5_000);
   const oldMarket = createLiveMarket(eventId, {
     marketVersion: 10,
     quoteVersion: 5,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
   const newMarket = createLiveMarket(eventId, {
     marketVersion: 11,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 1, markets: [oldMarket] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      markets: [oldMarket],
+    })
   );
   // A newer snapshot arrives and replaces the mirror's current market entry
   // *before* moderation ever evaluates the bet that referenced the old quote.
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 2, markets: [newMarket] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      markets: [newMarket],
+    })
   );
 
   const placeBet = createLivePlaceBetEvent(oldMarket, {
@@ -161,34 +174,54 @@ it("keeps market history idempotent across duplicates and preserves late out-of-
   const marketA = createLiveMarket(eventId, {
     marketVersion: 40,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
   const marketB = createLiveMarket(eventId, {
     marketVersion: 41,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
   // Represents a snapshot whose own sequence is lower than the mirror's
   // current sequence by the time it is delivered/replayed (out of order).
   const lateMarket = createLiveMarket(eventId, {
     marketVersion: 39,
     quoteVersion: 7,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 5, markets: [marketA] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 5,
+      occurredAt: timelineAt(10_000),
+      markets: [marketA],
+    })
   );
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 10, markets: [marketB] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 10,
+      occurredAt: timelineAt(20_000),
+      markets: [marketB],
+    })
   );
 
   // Duplicate redelivery of already-applied snapshots must not grow history.
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 10, markets: [marketB] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 10,
+      occurredAt: timelineAt(20_000),
+      markets: [marketB],
+    })
   );
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 5, markets: [marketA] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 5,
+      occurredAt: timelineAt(10_000),
+      markets: [marketA],
+    })
   );
 
   let mirror = await LiveEventMirror.findOne({ eventId });
@@ -196,7 +229,12 @@ it("keeps market history idempotent across duplicates and preserves late out-of-
   expect(mirror!.marketHistory).toHaveLength(2);
 
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 3, markets: [lateMarket] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 3,
+      occurredAt: timelineAt(0),
+      markets: [lateMarket],
+    })
   );
 
   mirror = await LiveEventMirror.findOne({ eventId });
@@ -209,7 +247,7 @@ it("keeps market history idempotent across duplicates and preserves late out-of-
   ).toBe(true);
 
   const placeBet = createLivePlaceBetEvent(lateMarket, {
-    data: { submittedAt: new Date().toISOString() },
+    data: { submittedAt: timelineAt(5_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -223,23 +261,33 @@ it("persists market history across a fresh ModerationService instance (simulated
   const oldMarket = createLiveMarket(eventId, {
     marketVersion: 50,
     quoteVersion: 4,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
   const newMarket = createLiveMarket(eventId, {
     marketVersion: 51,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   const firstProcessService = new ModerationService(createPublisher());
   await firstProcessService.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 1, markets: [oldMarket] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      markets: [oldMarket],
+    })
   );
   await firstProcessService.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 2, markets: [newMarket] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      markets: [newMarket],
+    })
   );
 
-  const submittedAt = new Date().toISOString();
+  const submittedAt = timelineAt(5_000);
   const placeBet = createLivePlaceBetEvent(oldMarket, { data: { submittedAt } });
 
   // No JS state is shared beyond this point: a brand-new service instance
@@ -367,22 +415,32 @@ it("approves a valid pre-expiry quote even when a newer quoteVersion for the sam
     marketId,
     marketVersion: 5,
     quoteVersion: 5,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
   const newQuote = createLiveMarket(eventId, {
     marketId,
     marketVersion: 5,
     quoteVersion: 6,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 1, markets: [oldQuote] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      markets: [oldQuote],
+    })
   );
   // Same marketVersion, only quoteVersion advances: the current mirror entry
   // now matches the row's marketVersion but not its quoteVersion.
   await service.upsertLiveEventMirror(
-    createLiveUpdateEvent({ eventId, sequence: 2, markets: [newQuote] })
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      markets: [newQuote],
+    })
   );
 
   const mirrorBeforeBet = await LiveEventMirror.findOne({ eventId });
@@ -391,7 +449,7 @@ it("approves a valid pre-expiry quote even when a newer quoteVersion for the sam
   expect(mirrorBeforeBet!.markets[0].quoteVersion).toEqual(6);
 
   const placeBet = createLivePlaceBetEvent(oldQuote, {
-    data: { submittedAt: new Date().toISOString() },
+    data: { submittedAt: timelineAt(5_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -403,29 +461,26 @@ it("approves a valid pre-expiry quote even when a newer quoteVersion for the sam
   expect(savedBet!.betKind).toEqual(BetKind.LIVE);
 });
 
-it("approves a live quote submitted before its expiry even though the market was later suspended", async () => {
-  // Gap 2 regression: the quote was genuinely live and unexpired when
-  // submitted. A later snapshot suspending the event must not retroactively
-  // decline it as EVENT_NOT_LIVE, since the immutable submittedAt plus the
-  // persisted historical (live) state should govern -- Resulted is the only
-  // thing that can override this.
+it("approves a live quote submitted before the later suspension ended its authority", async () => {
   const service = new ModerationService(createPublisher());
   const eventId = new mongoose.Types.ObjectId().toHexString();
+  const suspendedAt = timelineAt(10_000);
   const liveQuote = createLiveMarket(eventId, {
     marketVersion: 60,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
   const suspendedMarket = createLiveMarket(eventId, {
     marketVersion: 61,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   await service.upsertLiveEventMirror(
     createLiveUpdateEvent({
       eventId,
       sequence: 1,
+      occurredAt: timelineAt(0),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [liveQuote],
@@ -437,6 +492,7 @@ it("approves a live quote submitted before its expiry even though the market was
     createLiveUpdateEvent({
       eventId,
       sequence: 2,
+      occurredAt: suspendedAt,
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.SUSPENDED,
       markets: [suspendedMarket],
@@ -444,7 +500,7 @@ it("approves a live quote submitted before its expiry even though the market was
   );
 
   const placeBet = createLivePlaceBetEvent(liveQuote, {
-    data: { submittedAt: new Date().toISOString() },
+    data: { submittedAt: timelineAt(5_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -453,30 +509,36 @@ it("approves a live quote submitted before its expiry even though the market was
 
   expect(savedBet).not.toBeNull();
   expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+
+  const mirror = await LiveEventMirror.findOne({ eventId });
+  const historicalQuote = mirror!.marketHistory!.find(
+    (entry) =>
+      entry.marketVersion === liveQuote.marketVersion
+      && entry.quoteVersion === liveQuote.quoteVersion
+  );
+  expect(historicalQuote!.authorityEndedAt).toEqual(suspendedAt);
+  expect(historicalQuote!.authorityEndSequence).toEqual(2);
 });
 
-it("approves a live quote submitted before its expiry even though the event later reached full time", async () => {
-  // Same principle as the suspension case above, but for a later snapshot
-  // that has moved to FULL_TIME (with betting closed) -- as long as Resulted
-  // has not been recorded, the historically-live, unexpired quote must still
-  // be honoured.
+it("declines a live quote submitted after suspension even when its original expiry is later", async () => {
   const service = new ModerationService(createPublisher());
   const eventId = new mongoose.Types.ObjectId().toHexString();
   const liveQuote = createLiveMarket(eventId, {
-    marketVersion: 70,
+    marketVersion: 65,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
-  const fullTimeMarket = createLiveMarket(eventId, {
-    marketVersion: 71,
+  const suspendedMarket = createLiveMarket(eventId, {
+    marketVersion: 66,
     quoteVersion: 1,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   await service.upsertLiveEventMirror(
     createLiveUpdateEvent({
       eventId,
       sequence: 1,
+      occurredAt: timelineAt(0),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [liveQuote],
@@ -486,6 +548,54 @@ it("approves a live quote submitted before its expiry even though the event late
     createLiveUpdateEvent({
       eventId,
       sequence: 2,
+      occurredAt: timelineAt(10_000),
+      phase: EventPhase.FIRST_HALF,
+      bettingStatus: BettingStatus.SUSPENDED,
+      markets: [suspendedMarket],
+    })
+  );
+
+  const placeBet = createLivePlaceBetEvent(liveQuote, {
+    data: { submittedAt: timelineAt(15_000) },
+  });
+
+  await service.handlePlaceBet(placeBet);
+
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
+});
+
+it("approves a live quote submitted before full time ended its authority", async () => {
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const fullTimeAt = timelineAt(10_000);
+  const liveQuote = createLiveMarket(eventId, {
+    marketVersion: 70,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(30_000),
+  });
+  const fullTimeMarket = createLiveMarket(eventId, {
+    marketVersion: 71,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(60_000),
+  });
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      phase: EventPhase.FIRST_HALF,
+      bettingStatus: BettingStatus.OPEN,
+      markets: [liveQuote],
+    })
+  );
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: fullTimeAt,
       phase: EventPhase.FULL_TIME,
       bettingStatus: BettingStatus.CLOSED,
       markets: [fullTimeMarket],
@@ -493,7 +603,7 @@ it("approves a live quote submitted before its expiry even though the event late
   );
 
   const placeBet = createLivePlaceBetEvent(liveQuote, {
-    data: { submittedAt: new Date().toISOString() },
+    data: { submittedAt: timelineAt(5_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -502,6 +612,60 @@ it("approves a live quote submitted before its expiry even though the event late
 
   expect(savedBet).not.toBeNull();
   expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+
+  const mirror = await LiveEventMirror.findOne({ eventId });
+  const historicalQuote = mirror!.marketHistory!.find(
+    (entry) =>
+      entry.marketVersion === liveQuote.marketVersion
+      && entry.quoteVersion === liveQuote.quoteVersion
+  );
+  expect(historicalQuote!.authorityEndedAt).toEqual(fullTimeAt);
+});
+
+it("declines a live quote submitted after full time even when its original expiry is later", async () => {
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const liveQuote = createLiveMarket(eventId, {
+    marketVersion: 75,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(30_000),
+  });
+  const fullTimeMarket = createLiveMarket(eventId, {
+    marketVersion: 76,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(60_000),
+  });
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      phase: EventPhase.FIRST_HALF,
+      bettingStatus: BettingStatus.OPEN,
+      markets: [liveQuote],
+    })
+  );
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [fullTimeMarket],
+    })
+  );
+
+  const placeBet = createLivePlaceBetEvent(liveQuote, {
+    data: { submittedAt: timelineAt(15_000) },
+  });
+
+  await service.handlePlaceBet(placeBet);
+
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
 });
 
 it("still declines EVENT_RESULTED even when a perfectly valid historical quote exists", async () => {
@@ -680,7 +844,7 @@ it("approves a bet against the persisted OPEN historical entry when a later snap
   const eventId = new mongoose.Types.ObjectId().toHexString();
   const marketVersion = 200;
   const quoteVersion = 1;
-  const openQuoteValidUntil = new Date(Date.now() + 30_000).toISOString();
+  const openQuoteValidUntil = timelineAt(30_000);
   const openQuote = createLiveMarket(eventId, {
     marketVersion,
     quoteVersion,
@@ -705,6 +869,7 @@ it("approves a bet against the persisted OPEN historical entry when a later snap
     createLiveUpdateEvent({
       eventId,
       sequence: 1,
+      occurredAt: timelineAt(0),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [openQuote],
@@ -714,6 +879,7 @@ it("approves a bet against the persisted OPEN historical entry when a later snap
     createLiveUpdateEvent({
       eventId,
       sequence: 2,
+      occurredAt: timelineAt(20_000),
       phase: EventPhase.FULL_TIME,
       bettingStatus: BettingStatus.CLOSED,
       markets: [settledSameTriple],
@@ -735,7 +901,7 @@ it("approves a bet against the persisted OPEN historical entry when a later snap
   expect(historyEntry?.quoteValidUntil).toEqual(openQuoteValidUntil);
 
   const placeBet = createLivePlaceBetEvent(openQuote, {
-    data: { submittedAt: new Date(Date.now() + 10_000).toISOString() },
+    data: { submittedAt: timelineAt(10_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -761,7 +927,7 @@ it("declines a bet as STALE_QUOTE when submitted after the original expiry, even
   const eventId = new mongoose.Types.ObjectId().toHexString();
   const marketVersion = 210;
   const quoteVersion = 1;
-  const openQuoteValidUntil = new Date(Date.now() + 5_000).toISOString();
+  const openQuoteValidUntil = timelineAt(5_000);
   const openQuote = createLiveMarket(eventId, {
     marketVersion,
     quoteVersion,
@@ -784,6 +950,7 @@ it("declines a bet as STALE_QUOTE when submitted after the original expiry, even
     createLiveUpdateEvent({
       eventId,
       sequence: 1,
+      occurredAt: timelineAt(0),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [openQuote],
@@ -793,6 +960,7 @@ it("declines a bet as STALE_QUOTE when submitted after the original expiry, even
     createLiveUpdateEvent({
       eventId,
       sequence: 2,
+      occurredAt: timelineAt(10_000),
       phase: EventPhase.FULL_TIME,
       bettingStatus: BettingStatus.CLOSED,
       markets: [settledSameTriple],
@@ -800,7 +968,7 @@ it("declines a bet as STALE_QUOTE when submitted after the original expiry, even
   );
 
   const placeBet = createLivePlaceBetEvent(openQuote, {
-    data: { submittedAt: new Date(Date.now() + 20_000).toISOString() },
+    data: { submittedAt: timelineAt(20_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -828,11 +996,12 @@ it("archives a legacy mirror's pre-update current quote into history before a ro
     marketVersion: 300,
     quoteVersion: 1,
     status: LiveMarketStatus.OPEN,
-    quoteValidUntil: new Date(Date.now() + 30_000).toISOString(),
+    quoteValidUntil: timelineAt(30_000),
   });
   const legacyMirror = createLiveUpdateEvent({
     eventId,
     sequence: 1,
+    occurredAt: timelineAt(0),
     phase: EventPhase.FIRST_HALF,
     bettingStatus: BettingStatus.OPEN,
     markets: [oldMarket],
@@ -853,13 +1022,14 @@ it("archives a legacy mirror's pre-update current quote into history before a ro
     marketVersion: 301,
     quoteVersion: 1,
     status: LiveMarketStatus.OPEN,
-    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+    quoteValidUntil: timelineAt(60_000),
   });
 
   const changed = await service.upsertLiveEventMirror(
     createLiveUpdateEvent({
       eventId,
       sequence: 2,
+      occurredAt: timelineAt(20_000),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [newMarket],
@@ -884,7 +1054,7 @@ it("archives a legacy mirror's pre-update current quote into history before a ro
   ).toBe(true);
 
   const placeBet = createLivePlaceBetEvent(oldMarket, {
-    data: { submittedAt: new Date(Date.now() + 10_000).toISOString() },
+    data: { submittedAt: timelineAt(10_000) },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -913,14 +1083,15 @@ it("upgrades a persisted CLOSED history entry to OPEN when the genuinely earlier
     status: LiveMarketStatus.CLOSED,
   });
   delete (closedMarket as { quoteValidUntil?: string }).quoteValidUntil;
-  const openQuoteValidUntil = new Date(Date.now() + 30_000).toISOString();
+  const terminalAt = timelineAt(20_000);
+  const submittedAt = timelineAt(10_000);
   const openMarket = createLiveMarket(eventId, {
     marketId: closedMarket.marketId,
     marketType: closedMarket.marketType,
     marketVersion,
     quoteVersion,
     status: LiveMarketStatus.OPEN,
-    quoteValidUntil: openQuoteValidUntil,
+    quoteValidUntil: timelineAt(30_000),
   });
 
   // The CLOSED snapshot (a later point in the match) is delivered -- and
@@ -930,6 +1101,7 @@ it("upgrades a persisted CLOSED history entry to OPEN when the genuinely earlier
     createLiveUpdateEvent({
       eventId,
       sequence: 5,
+      occurredAt: terminalAt,
       phase: EventPhase.FULL_TIME,
       bettingStatus: BettingStatus.CLOSED,
       markets: [closedMarket],
@@ -951,6 +1123,7 @@ it("upgrades a persisted CLOSED history entry to OPEN when the genuinely earlier
     createLiveUpdateEvent({
       eventId,
       sequence: 3,
+      occurredAt: timelineAt(0),
       phase: EventPhase.FIRST_HALF,
       bettingStatus: BettingStatus.OPEN,
       markets: [openMarket],
@@ -967,10 +1140,12 @@ it("upgrades a persisted CLOSED history entry to OPEN when the genuinely earlier
     (entry) => entry.marketVersion === marketVersion && entry.quoteVersion === quoteVersion
   );
   expect(historyEntry?.status).toEqual(LiveMarketStatus.OPEN);
-  expect(historyEntry?.quoteValidUntil).toEqual(openQuoteValidUntil);
+  expect(historyEntry?.quoteValidUntil).toEqual(timelineAt(30_000));
+  expect(historyEntry?.authorityEndedAt).toEqual(terminalAt);
+  expect(historyEntry?.authorityEndSequence).toEqual(5);
 
   const placeBet = createLivePlaceBetEvent(openMarket, {
-    data: { submittedAt: new Date(Date.now() + 10_000).toISOString() },
+    data: { submittedAt },
   });
 
   await service.handlePlaceBet(placeBet);
@@ -979,6 +1154,79 @@ it("upgrades a persisted CLOSED history entry to OPEN when the genuinely earlier
 
   expect(savedBet).not.toBeNull();
   expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+
+  const latePlaceBet = createLivePlaceBetEvent(openMarket, {
+    data: { submittedAt: timelineAt(25_000) },
+  });
+
+  await service.handlePlaceBet(latePlaceBet);
+
+  const lateSavedBet = await Bet.findOne({
+    slipId: latePlaceBet.data.slipId,
+  });
+  expect(lateSavedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(lateSavedBet!.declineReason).toEqual(
+    ModerationDeclineReason.STALE_QUOTE
+  );
+});
+
+it("uses a terminal mirror timestamp when legacy history has no authority-ended fields", async () => {
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const openMarket = createLiveMarket(eventId, {
+    marketVersion: 405,
+    quoteVersion: 1,
+    status: LiveMarketStatus.OPEN,
+    quoteValidUntil: timelineAt(30_000),
+  });
+  const terminalMarket = createLiveMarket(eventId, {
+    marketVersion: 406,
+    quoteVersion: 1,
+    status: LiveMarketStatus.SETTLED,
+  });
+  delete (terminalMarket as { quoteValidUntil?: string }).quoteValidUntil;
+  const terminalMirror = createLiveUpdateEvent({
+    eventId,
+    sequence: 2,
+    occurredAt: timelineAt(10_000),
+    phase: EventPhase.FULL_TIME,
+    bettingStatus: BettingStatus.CLOSED,
+    markets: [terminalMarket],
+  }).data;
+
+  await LiveEventMirror.collection.insertOne({
+    ...terminalMirror,
+    marketHistory: [
+      {
+        ...openMarket,
+        sequence: 1,
+        phase: EventPhase.FIRST_HALF,
+        bettingStatus: BettingStatus.OPEN,
+      },
+    ],
+    historyRevision: 1,
+  } as never);
+
+  const beforeTerminal = createLivePlaceBetEvent(openMarket, {
+    data: { submittedAt: timelineAt(5_000) },
+  });
+  const afterTerminal = createLivePlaceBetEvent(openMarket, {
+    data: { submittedAt: timelineAt(15_000) },
+  });
+
+  await service.handlePlaceBet(beforeTerminal);
+  await service.handlePlaceBet(afterTerminal);
+
+  expect(
+    (await Bet.findOne({ slipId: beforeTerminal.data.slipId }))!.status
+  ).toEqual(ModerationStatus.APPROVED);
+  const declinedBet = await Bet.findOne({
+    slipId: afterTerminal.data.slipId,
+  });
+  expect(declinedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(declinedBet!.declineReason).toEqual(
+    ModerationDeclineReason.STALE_QUOTE
+  );
 });
 
 it("never downgrades an already-persisted OPEN history entry when a later in-place status mutation of the same triple is folded in", async () => {

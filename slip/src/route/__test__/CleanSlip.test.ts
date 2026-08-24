@@ -106,3 +106,35 @@ it("deletes the targeted LIVE board on clean", async () => {
 
   expect(await Slip.findById(liveSlip.id)).toBeNull();
 });
+
+it("returns 409 without cleaning when placement wins the delete race", async () => {
+  const liveSlip = await createSlip(BetKind.LIVE);
+  const originalDeleteOne = Slip.deleteOne.bind(Slip);
+  const deleteSpy = jest.spyOn(Slip, "deleteOne") as jest.SpyInstance;
+
+  deleteSpy.mockImplementationOnce(async (filter: unknown) => {
+    await Slip.collection.updateOne(
+      { _id: liveSlip._id },
+      { $set: { status: SlipStatus.SUBMITTED } }
+    );
+    return originalDeleteOne(filter as never);
+  });
+
+  try {
+    const response = await request(app)
+      .post("/api/slip/row/clean")
+      .set("currentUser", currentUserHeader)
+      .send({ slipId: liveSlip.id, betKind: BetKind.LIVE })
+      .expect(409);
+
+    expect(response.body.message).toEqual(
+      "This board changed before it was cleaned. Reload and try again."
+    );
+    const submittedSlip = await Slip.findById(liveSlip.id);
+    expect(submittedSlip).not.toBeNull();
+    expect(submittedSlip!.status).toEqual(SlipStatus.SUBMITTED);
+    expect(submittedSlip!.rows).toHaveLength(1);
+  } finally {
+    deleteSpy.mockRestore();
+  }
+});

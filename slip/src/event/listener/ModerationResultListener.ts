@@ -129,14 +129,10 @@ class ModerationResultListener extends AListener<IModerationResultEvent> {
           provisionalReplacementSlipId,
           data
         );
-        const mergedDraft = await upsertRestoredDraft(restoredDraftPayload);
-        const mergedDraftId =
-          typeof mergedDraft._id === "string"
-            ? mergedDraft._id
-            : mergedDraft._id?.toString() ?? null;
+        const restoration = await upsertRestoredDraft(restoredDraftPayload);
         const declinedArchivePayload = buildDeclinedArchivePayload(
           submittedSlip,
-          mergedDraftId,
+          restoration.replacementSlipId,
           data
         );
 
@@ -174,16 +170,15 @@ class ModerationResultListener extends AListener<IModerationResultEvent> {
         archivedSlip.replacementSlipId,
         data
       );
-      const mergedDraft = await upsertRestoredDraft(restoredDraftPayload);
-      const mergedDraftId =
-        typeof mergedDraft._id === "string"
-          ? mergedDraft._id
-          : mergedDraft._id?.toString() ?? null;
+      const restoration = await upsertRestoredDraft(restoredDraftPayload);
 
-      if (mergedDraftId && mergedDraftId !== archivedSlip.replacementSlipId) {
+      if (
+        restoration.replacementSlipId
+        !== archivedSlip.replacementSlipId
+      ) {
         await SlipArchive.updateOne(
           { _id: archivedSlip.id },
-          { $set: { replacementSlipId: mergedDraftId } }
+          { $set: { replacementSlipId: restoration.replacementSlipId } }
         );
       }
 

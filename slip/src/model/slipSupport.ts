@@ -1288,14 +1288,19 @@ export const clearSubmittedAttemptState = (slip: PlainSlip) => {
   slip.publication = undefined;
 };
 
+export interface RestoredDraftOutcome {
+  draft: PlainSlip | null;
+  replacementSlipId: string;
+}
+
 export const upsertRestoredDraft = async (
   payload: PlainSlip
-): Promise<PlainSlip> => {
+): Promise<RestoredDraftOutcome> => {
   const betKind = normalizeBetKind(payload.betKind);
   const replacementSlipId =
     typeof payload._id === "string" ? payload._id : payload._id?.toString();
 
-  if (!replacementSlipId) {
+  if (!replacementSlipId || !Types.ObjectId.isValid(replacementSlipId)) {
     throw new Error("Replacement slip id is missing");
   }
 
@@ -1352,7 +1357,12 @@ export const upsertRestoredDraft = async (
 
   const runUpsert = async (targetSlipId: string, upsert: boolean) => {
     const updated = await Slip.collection.findOneAndUpdate(
-      { _id: new Types.ObjectId(targetSlipId) },
+      {
+        _id: new Types.ObjectId(targetSlipId),
+        userId: payload.userId,
+        status: SlipStatus.DRAFT,
+        ...buildBetKindScope(betKind),
+      },
       buildUpdatePipeline(),
       {
         upsert,
@@ -1363,10 +1373,77 @@ export const upsertRestoredDraft = async (
     return asPlainSlip((updated as { value?: unknown })?.value ?? updated);
   };
 
-  let plainSlip: PlainSlip | null = null;
+  const completedReplacement = async (
+    targetSlipId: string
+  ): Promise<RestoredDraftOutcome | null> => {
+    const scope = {
+      _id: targetSlipId,
+      userId: payload.userId,
+      ...buildBetKindScope(betKind),
+    };
+    const [activeReplacement, archivedReplacement] = await Promise.all([
+      Slip.findOne(scope).lean(),
+      SlipArchive.findOne(scope).lean(),
+    ]);
+
+    if (
+      archivedReplacement
+      || (
+        activeReplacement
+        && activeReplacement.status !== SlipStatus.DRAFT
+      )
+    ) {
+      return {
+        draft: null,
+        replacementSlipId: targetSlipId,
+      };
+    }
+
+    return null;
+  };
+
+  const restoreExistingDraft = async (
+    targetSlipId: string
+  ): Promise<RestoredDraftOutcome> => {
+    const plainSlip = await runUpsert(targetSlipId, false);
+
+    if (plainSlip) {
+      return {
+        draft: normalizePlainSlip(plainSlip, betKind),
+        replacementSlipId: targetSlipId,
+      };
+    }
+
+    const completed = await completedReplacement(targetSlipId);
+    if (completed) {
+      return completed;
+    }
+
+    throw new Error(
+      `Draft ${targetSlipId} disappeared while restoring declined slip`
+    );
+  };
+
+  if (existingDraft) {
+    return restoreExistingDraft(initialTargetSlipId);
+  }
+
+  const existingReplacement = await completedReplacement(replacementSlipId);
+  if (existingReplacement) {
+    return existingReplacement;
+  }
 
   try {
-    plainSlip = await runUpsert(initialTargetSlipId, true);
+    const plainSlip = await runUpsert(replacementSlipId, true);
+
+    if (!plainSlip) {
+      throw new Error("Failed to restore declined draft slip");
+    }
+
+    return {
+      draft: normalizePlainSlip(plainSlip, betKind),
+      replacementSlipId,
+    };
   } catch (error) {
     if (!isDuplicateKeyError(error)) {
       throw error;
@@ -1375,18 +1452,17 @@ export const upsertRestoredDraft = async (
     const concurrentDraft = await findDraftSlipForUser(payload.userId, betKind);
     const concurrentDraftId = slipIdOf(concurrentDraft);
 
-    if (!concurrentDraftId) {
-      throw error;
+    if (concurrentDraftId) {
+      return restoreExistingDraft(concurrentDraftId);
     }
 
-    plainSlip = await runUpsert(concurrentDraftId, false);
-  }
+    const completed = await completedReplacement(replacementSlipId);
+    if (completed) {
+      return completed;
+    }
 
-  if (!plainSlip) {
-    throw new Error("Failed to restore declined draft slip");
+    throw error;
   }
-
-  return normalizePlainSlip(plainSlip, betKind);
 };
 
 export const toPublishedSubmittedEventData = (
