@@ -201,6 +201,9 @@ cd resulting && npm ci && npm run test:ci
   every phase to immutable run/SHA provenance, and recover stop-only.
 - A strict evidence consumer must share its schema with the producer. Adding
   valid provenance fields only on one side can block the terminal operation.
+- Integration stubs must preserve that command-boundary schema too. A lock
+  fixture must return the real ConfigMap JSON, including lease and fencing
+  fields, rather than an older pipe summary that production no longer reads.
 - A failed deployment may re-enter maintenance only after it successfully
   validated and accepted the exact data handoff. An invalid, stale, or
   unauthorized deployment request must not independently quiesce writers,

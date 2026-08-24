@@ -92,6 +92,9 @@ inactive. Fail closed when either query is incomplete or fails.
   readiness safety counter. Missing fixture evidence must remain `unknown`
   and block rollback before any image mutation. Optional nested safety markers
   must be queried with explicit existence and non-null predicates.
+- Make integration stubs emit the production command-boundary schema. Shared
+  Mongo lock fixtures return ConfigMap JSON with lease and fencing metadata,
+  never a reduced legacy summary.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.
