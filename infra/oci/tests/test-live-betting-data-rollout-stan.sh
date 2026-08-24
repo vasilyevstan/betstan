@@ -371,7 +371,8 @@ for literal in \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh verify-held' \
   'live-data-maintenance-stan.sh release' \
-  'live-data-maintenance-stan.sh hold'; do
+  'live-data-maintenance-stan.sh hold' \
+  "steps.handoff.outcome == 'success'"; do
   grep -Fq "$literal" "$DEPLOY_WORKFLOW" ||
     fail "deploy workflow is missing data prerequisite: $literal"
 done

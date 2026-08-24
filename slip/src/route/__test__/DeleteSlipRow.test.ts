@@ -117,6 +117,8 @@ it("deletes the slip when only one row remains", async () => {
 it("removes only the specified row from a LIVE board when multiple rows exist", async () => {
   const liveSlip = await createSlipWithRows(3, BetKind.LIVE);
   const rowToRemove = liveSlip.rows[0].id;
+  const previousBoardRevision = liveSlip.boardRevision;
+  const previousBoardFingerprint = liveSlip.boardFingerprint;
 
   await request(app)
     .post("/api/slip/row")
@@ -131,4 +133,6 @@ it("removes only the specified row from a LIVE board when multiple rows exist", 
   const updatedSlip = await Slip.findById(liveSlip.id);
   expect(updatedSlip!.rows.length).toEqual(2);
   expect(updatedSlip!.rows.find((row) => row.id === rowToRemove)).toBeUndefined();
+  expect(updatedSlip!.boardRevision).toEqual(previousBoardRevision + 1);
+  expect(updatedSlip!.boardFingerprint).not.toEqual(previousBoardFingerprint);
 });

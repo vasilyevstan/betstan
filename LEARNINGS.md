@@ -64,6 +64,25 @@
 - Disable and every ambiguous control failure set the flag false and remove the lease together. The lease remains the independent safety boundary if the workflow runner is hard-killed before its cleanup trap can execute.
 - Deployment provenance must bind source SHA, build/deploy attempts, infrastructure artifact digest, runtime mode, and runtime fingerprint. Rechecking current `master` immediately before mutation and commit closes the preflight-to-mutation race.
 
+### Mongo aggregate concurrency and rolling compatibility
+- Raw Mongo inserts and upserts that bypass Mongoose `save()` must initialize
+  `__v: 0` when later mutations rely on optimistic concurrency. Before
+  mutating a historical versionless document, atomically initialize the
+  missing version key and reload the document; compatibility backfills must
+  also repair missing version keys.
+- A Slip board revision and fingerprint are authorization evidence, not merely
+  display metadata. Every row mutation, including deletion, rotates both
+  values so a stale tab cannot place a materially changed draft.
+- During a rolling Client/API upgrade, the boards read endpoint records a
+  user-, kind-, slip-, revision-, and fingerprint-scoped legacy confirmation.
+  The quiesced compatibility backfill seeds the same confirmation for active
+  drafts so tabs opened before the API rollout remain placeable. Explicit
+  confirmation fields from a new Client remain authoritative.
+- A zero-row approved aggregate is a valid recoverable state after all
+  manual-void rows were published and removed before a crash. Terminal sweeps
+  must discover it and finalize the parent as void instead of filtering it out
+  as having no unsettled rows.
+
 ---
 
 ## Testing conventions
@@ -141,6 +160,10 @@ cd resulting && npm ci && npm run test:ci
   every phase to immutable run/SHA provenance, and recover stop-only.
 - A strict evidence consumer must share its schema with the producer. Adding
   valid provenance fields only on one side can block the terminal operation.
+- A failed deployment may re-enter maintenance only after it successfully
+  validated and accepted the exact data handoff. An invalid, stale, or
+  unauthorized deployment request must not independently quiesce writers,
+  acquire the database lock, or extend an outage.
 - Azure resource-ID fingerprints are case-preserving. AKS exposes `eTag`, and
   provider/SDK transformations of `If-Match` must not replace the exact
   optimistic-concurrency value or fall back to a wildcard.

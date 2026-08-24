@@ -167,7 +167,7 @@ jobs:
           printf 'infrastructure_run_attempt=1\n'
           printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
           ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
-          echo "steps.handoff.outcome != 'skipped'"
+          echo "steps.handoff.outcome == 'success'"
           echo "steps.release_runtime.outcome != 'success'"
 YAML
 

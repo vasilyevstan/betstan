@@ -371,6 +371,93 @@ it("lets a loaded legacy PRE_MATCH client submit only the board it fetched", asy
   );
 });
 
+it.each([BetKind.PRE_MATCH, BetKind.LIVE])(
+  "keeps the previously deployed boards client compatible for %s",
+  async (betKind) => {
+    const slip = await createSlip({ betKind });
+    const boardResponse = await request(app)
+      .get("/api/slip/boards")
+      .set("currentUser", currentUserHeader)
+      .expect(200);
+
+    expect(boardResponse.body[betKind]._id).toEqual(slip.id);
+
+    const placementResponse = await placeBet({
+      slipId: slip.id,
+      wager: 5,
+      betKind,
+      placementAttemptId: buildPlacementAttemptId(`rolling-${betKind}`),
+    }).expect(200);
+
+    expect(placementResponse.body.status).toEqual(SlipStatus.SUBMITTED);
+    expect(placementResponse.body.placement).toEqual(
+      expect.objectContaining({
+        outcome: "accepted",
+        isLegacyRequest: false,
+      })
+    );
+  }
+);
+
+it("keeps a board loaded before the API rollout placeable after backfill", async () => {
+  const slip = await createSlip({ betKind: BetKind.LIVE });
+  await Slip.updateOne(
+    { _id: slip.id },
+    {
+      $set: {
+        legacyBoardRevision: slip.boardRevision,
+        legacyBoardFingerprint: slip.boardFingerprint,
+        legacyBoardConfirmedAt: new Date().toISOString(),
+      },
+    }
+  );
+
+  const placementResponse = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    placementAttemptId: buildPlacementAttemptId("pre-rollout-live"),
+  }).expect(200);
+
+  expect(placementResponse.body.status).toEqual(SlipStatus.SUBMITTED);
+  expect(placementResponse.body.placement.outcome).toEqual("accepted");
+});
+
+it("rejects a previously deployed boards client after its fetched board changes", async () => {
+  const slip = await createSlip({ betKind: BetKind.LIVE });
+  await request(app)
+    .get("/api/slip/boards")
+    .set("currentUser", currentUserHeader)
+    .expect(200);
+
+  await Slip.updateOne(
+    { _id: slip.id },
+    {
+      $set: {
+        rows: [
+          ...slip.rows.map((row) => row.toObject()),
+          buildRow({ betKind: BetKind.LIVE }),
+        ],
+        boardRevision: (slip.boardRevision ?? 1) + 1,
+        boardFingerprint: new mongoose.Types.ObjectId().toHexString(),
+      },
+    }
+  );
+
+  const response = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    placementAttemptId: buildPlacementAttemptId("rolling-stale-live"),
+  }).expect(409);
+
+  expect(response.body.reload).toEqual({
+    required: true,
+    reason: "board-mismatch",
+  });
+  expect((await Slip.findById(slip.id))!.status).toEqual(SlipStatus.DRAFT);
+});
+
 it("rejects a legacy PRE_MATCH placement when its fetched board changed", async () => {
   const slip = await createSlip();
 

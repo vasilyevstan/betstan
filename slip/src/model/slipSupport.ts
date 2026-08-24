@@ -276,6 +276,11 @@ export const boardFingerprintOf = (slip?: {
   boardFingerprint?: unknown;
 } | null) => normalizeBoardFingerprintValue(slip?.boardFingerprint);
 
+export const advanceSlipBoardIdentity = (slip: MutableSlip) => {
+  setField(slip, "boardRevision", boardRevisionOf(slip) + 1);
+  setField(slip, "boardFingerprint", createBoardFingerprint());
+};
+
 export const isDuplicateKeyError = (error: unknown): error is { code: number } =>
   typeof error === "object"
   && error !== null

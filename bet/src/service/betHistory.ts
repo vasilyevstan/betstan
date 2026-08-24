@@ -740,7 +740,10 @@ export const upsertPlaceBet = async (
         slipId: event.data.slipId,
       },
       {
-        $setOnInsert: insertRecord,
+        $setOnInsert: {
+          ...insertRecord,
+          __v: 0,
+        },
       },
       {
         upsert: true,
@@ -789,6 +792,34 @@ export const parkPendingBetUpdate = async (
 const isBetVersionConflict = (error: unknown): boolean =>
   error instanceof mongoose.Error.VersionError;
 
+const ensureBetVersionKey = async (
+  bet: BetDocument
+): Promise<BetDocument | null> => {
+  const version = bet.get("__v");
+  if (Number.isInteger(version) && version >= 0) {
+    return bet;
+  }
+
+  if (version !== undefined && version !== null) {
+    throw new Error(`Bet ${bet.slipId} has an invalid version key`);
+  }
+
+  await Bet.collection.updateOne(
+    {
+      _id: bet._id,
+      $or: [
+        { __v: { $exists: false } },
+        { __v: null },
+      ],
+    },
+    {
+      $set: { __v: 0 },
+    }
+  );
+
+  return Bet.findById(bet._id);
+};
+
 /**
  * Applies `applyChanges` to `initialBet` and saves it, retrying against a
  * freshly reloaded document if another consumer concurrently saved the same
@@ -814,6 +845,12 @@ export const saveBetWithOptimisticRetry = async (
   let bet = initialBet;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const versionedBet = await ensureBetVersionKey(bet);
+    if (!versionedBet) {
+      return { bet, saved: false };
+    }
+    bet = versionedBet;
+
     const shouldSave = await applyChanges(bet);
 
     if (!shouldSave) {

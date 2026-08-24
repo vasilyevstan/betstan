@@ -479,7 +479,7 @@ jobs:
         id: rehold
         if: >-
           always() &&
-          steps.handoff.outcome != 'skipped' &&
+          steps.handoff.outcome == 'success' &&
           steps.release_runtime.outcome != 'success'
         env:
           STATE_FILE: artifacts/oci-deploy/unused-maintenance-state.tsv

@@ -20,6 +20,10 @@ conversation summaries are not authority.
 - Recovery uses the interrupted migration journal SHA and fencing generation.
   Do not replace it with a newer `master` SHA.
 - Only one mutation-producing release or migration workflow may run at once.
+- Deployment cleanup may re-enter maintenance only if that run first
+  validated and accepted the exact data handoff. A stale, unauthorized, or
+  otherwise invalid request must not independently quiesce writers, acquire
+  the shared database lock, or fence production.
 
 ## Live feature activation
 

@@ -93,6 +93,66 @@ const createConfirmedBet = async (
 };
 
 describe("optimistic concurrency guards for bet moderation/settlement consumers", () => {
+  it("initializes and protects legacy versionless bets before applying updates", async () => {
+    const slipId = new mongoose.Types.ObjectId().toHexString();
+    const rowId = new mongoose.Types.ObjectId().toHexString();
+    await Bet.collection.insertOne({
+      status: BetStatus.CONFIRMED,
+      userId: new mongoose.Types.ObjectId().toHexString(),
+      userName: "legacy-user",
+      slipId,
+      wager: 10,
+      timestamp: new Date().toISOString(),
+      betKind: BetKind.LIVE,
+      rows: [
+        {
+          eventId: new mongoose.Types.ObjectId().toHexString(),
+          eventName: "Team A - Team B",
+          oddsId: new mongoose.Types.ObjectId().toHexString(),
+          oddsValue: 1.5,
+          oddsName: "Team A",
+          productName: "1X2",
+          productId: new mongoose.Types.ObjectId().toHexString(),
+          timestamp: new Date().toISOString(),
+          status: SlipRowStatus.NOT_SETTLED,
+          id: rowId,
+          betKind: BetKind.LIVE,
+        },
+      ],
+    });
+
+    const staleView = (await Bet.findOne({ slipId })) as BetDocument;
+    const firstView = (await Bet.findOne({ slipId })) as BetDocument;
+    const winEvent: ISettleSlipEvent = {
+      timestamp: new Date().toISOString(),
+      data: { slipId, result: ResultingStatus.BET_WIN, betKind: BetKind.LIVE },
+    };
+    const voidEvent: ISettleSlipEvent = {
+      timestamp: new Date().toISOString(),
+      data: { slipId, result: ResultingStatus.BET_VOID, betKind: BetKind.LIVE },
+    };
+
+    expect(
+      (await Bet.collection.findOne({ slipId }, { projection: { __v: 1 } }))
+        ?.__v
+    ).toBeUndefined();
+
+    const { saved: firstSaved } = await saveBetWithOptimisticRetry(
+      firstView,
+      (bet) => applySettleSlip(bet, winEvent)
+    );
+    const { saved: staleSaved } = await saveBetWithOptimisticRetry(
+      staleView,
+      (bet) => applySettleSlip(bet, voidEvent)
+    );
+
+    expect(firstSaved).toBe(true);
+    expect(staleSaved).toBe(false);
+    const persistedBet = await Bet.findOne({ slipId });
+    expect(persistedBet!.status).toBe(BetStatus.WIN);
+    expect(persistedBet!.__v).toBe(1);
+  });
+
   it("does not let a stale moderation decline overwrite a concurrently settled WIN", async () => {
     const slipId = new mongoose.Types.ObjectId().toHexString();
     await createConfirmedBet(slipId);

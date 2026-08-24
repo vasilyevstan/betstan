@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import {
+  advanceSlipBoardIdentity,
   clearSlipDeclineReason,
   findDraftSlipByIdForUser,
   isValidSlipId,
@@ -47,6 +48,7 @@ router.post("/api/slip/row", async (req: Request, res: Response) => {
     await slip.deleteOne();
   } else {
     slip.set({ rows: updatedSlipRows });
+    advanceSlipBoardIdentity(slip);
     clearSlipDeclineReason(slip);
     await slip.save();
   }

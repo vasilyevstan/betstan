@@ -60,6 +60,10 @@ const buildUpdateSet = (document: RawDocument): Record<string, unknown> => {
     updateSet.betKind = normalizedKind;
   }
 
+  if (isMissing(document.__v)) {
+    updateSet.__v = 0;
+  }
+
   const rows = Array.isArray(document.rows) ? document.rows : [];
   rows.forEach((row, index) => {
     const rowRecord = asRecord(row);
@@ -92,6 +96,7 @@ async function processCollection(
       .find(filter, {
         projection: {
           _id: 1,
+          __v: 1,
           betKind: 1,
           rows: 1,
         },

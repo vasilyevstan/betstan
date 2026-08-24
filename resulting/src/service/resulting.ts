@@ -892,9 +892,6 @@ export async function findTerminalPendingSlipIds(
       },
       {
         status: ResultingStatus.BET_APPROVED,
-        "rows.0": {
-          $exists: true,
-        },
         rows: {
           $not: {
             $elemMatch: {

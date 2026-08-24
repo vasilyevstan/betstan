@@ -169,7 +169,9 @@ After deployment:
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
-  permitting a retry.
+  permitting a retry, but only if that same run first validated and accepted
+  the exact data handoff. If handoff validation did not succeed, failure
+  cleanup must not mutate replicas, fences, or database locks.
 - enable live kickoffs only through a bounded worker-enforced activation lease;
   permit the same run/SHA to remove that lease only after complete acceptance,
   protected evidence upload, and final current-master/provenance revalidation;

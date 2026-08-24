@@ -75,6 +75,13 @@ it("supports dry-run, batched apply, active/archive coverage, LIVE preservation,
   const legacySlip = await Slip.findById(legacySlipId).lean();
   expect(legacySlip?.betKind).toBe(BetKind.PRE_MATCH);
   expect(legacySlip?.draftKey).toBe(BetKind.PRE_MATCH);
+  expect(legacySlip?.boardRevision).toBe(1);
+  expect(legacySlip?.boardFingerprint).toEqual(expect.any(String));
+  expect(legacySlip?.legacyBoardRevision).toBe(legacySlip?.boardRevision);
+  expect(legacySlip?.legacyBoardFingerprint).toBe(
+    legacySlip?.boardFingerprint
+  );
+  expect(legacySlip?.legacyBoardConfirmedAt).toEqual(expect.any(String));
   expect((legacySlip?.rows as Array<{ betKind?: BetKind }>)[0].betKind).toBe(
     BetKind.PRE_MATCH
   );
@@ -154,6 +161,13 @@ it("parses backfill args, infers duplicate kinds, and leaves duplicate draft key
   expect(duplicateDrafts.every((slip) => typeof slip.draftKey === "undefined")).toBe(
     true
   );
+  expect(
+    duplicateDrafts.every(
+      (slip) =>
+        slip.legacyBoardRevision === slip.boardRevision
+        && slip.legacyBoardFingerprint === slip.boardFingerprint
+    )
+  ).toBe(true);
 
   const submittedSlip = await Slip.findOne({
     userId: "submitted-user",

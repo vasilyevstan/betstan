@@ -174,6 +174,28 @@ it(
   }
 );
 
+it("recovers an approved all-void slip after its last row was removed", async () => {
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const publishWithConfirm =
+    SettleSlipPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockResolvedValue(undefined);
+
+  const sweepWorker = await createSweepWorker();
+  const processed = await sweepWorker.runOnce();
+
+  expect(processed).toEqual(1);
+  expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_VOID);
+  expect(archivedBet!.rows).toHaveLength(0);
+  expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
+});
+
 it(
   "does not reclaim an active (non-stale) terminal-publish claim",
   async () => {

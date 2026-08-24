@@ -27,6 +27,12 @@ Read:
 - Incorrect behavior and unmet acceptance criteria.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
+- Raw-write/Mongoose-version interactions, including historical documents
+  without `__v`, stale aggregate revision/fingerprint reuse after every
+  mutation, and terminal recovery after all child rows are removed.
+- Old-client/new-API and new-client/old-API rolling combinations. Legacy
+  compatibility evidence must be scoped to the exact user and aggregate, and
+  must not override an explicit mismatched new-client confirmation.
 - Domain ordering or idempotency that accidentally depends on mutable
   publisher-stamped envelope metadata; require retries with identical domain
   data and changed transport timestamps.
@@ -36,6 +42,8 @@ Read:
 - Fail-dark control behavior under cancellation, hard process termination,
   expired leases, ambiguous writes, stale master, and mismatched run/SHA
   ownership.
+- Deployment failure cleanup that can acquire a lock, fence writes, or
+  quiesce workloads before the same run has validated the exact handoff.
 - Missing negative, boundary, integration, and regression tests.
 - Unrelated scope or path-ownership violations.
 

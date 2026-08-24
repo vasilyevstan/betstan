@@ -56,6 +56,18 @@ instead of crossing the boundary.
   duplicate fingerprints, with an explicit legacy fallback when old payloads
   lack that field.
 - Use database-enforced invariants for concurrency-sensitive uniqueness.
+- Initialize Mongoose version keys on raw inserts/upserts when later writes use
+  optimistic concurrency. Atomically initialize and reload historical
+  versionless documents before mutation, and cover that path in compatibility
+  backfills.
+- Treat revision/fingerprint pairs as stale-write authorization. Rotate both
+  on every aggregate mutation, including row deletion, and test an old
+  confirmation against the changed aggregate.
+- For rolling clients, prove both old and new request shapes. Scope any legacy
+  confirmation to the exact user, aggregate, kind, revision, and fingerprint;
+  never let an explicit new-client confirmation fall back after mismatch.
+- Include empty-but-terminal aggregates in recovery sweeps when rows can be
+  removed before parent finalization.
 - Treat JWT roles as non-authoritative for privileged operations. Revalidate
   current persisted roles through the owning auth service and fail closed.
 - Keep synthetic acceptance records excluded by default in every public read

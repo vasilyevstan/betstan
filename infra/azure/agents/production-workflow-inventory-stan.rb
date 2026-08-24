@@ -949,7 +949,7 @@ def validate_oci_production_deploy_binding!(name, document, content)
     "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding",
     "SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" => "bounded deploy lock lease",
     "shared-mongo-operation-lock-stan.sh renew" => "deploy lock lease renewal",
-    "steps.handoff.outcome != 'skipped'" => "failed handoff recovery",
+    "steps.handoff.outcome == 'success'" => "verified handoff recovery",
     "steps.release_runtime.outcome != 'success'" => "incomplete deploy maintenance recovery"
   }.each do |literal, label|
     require_content(

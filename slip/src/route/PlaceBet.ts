@@ -329,12 +329,7 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
     authoritativeDraft = preparedDraft;
     boardConfirmation =
       boardConfirmation
-      ?? (
-        betKind === BetKind.PRE_MATCH
-        && !hasExplicitPlacementAttemptId
-          ? legacyBoardConfirmationOf(preparedDraft)
-          : null
-      );
+      ?? legacyBoardConfirmationOf(preparedDraft);
 
     if (!boardConfirmation) {
       return res.status(400).send({ message: "Missing board confirmation" });

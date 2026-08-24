@@ -37,10 +37,10 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
 
   const [preMatchSlip, liveSlip] = await Promise.all([
     foundPreMatchSlip
-      ? prepareSlipForResponse(foundPreMatchSlip, BetKind.PRE_MATCH)
+      ? prepareSlipForResponse(foundPreMatchSlip, BetKind.PRE_MATCH, true)
       : Promise.resolve(null),
     foundLiveSlip
-      ? prepareSlipForResponse(foundLiveSlip, BetKind.LIVE)
+      ? prepareSlipForResponse(foundLiveSlip, BetKind.LIVE, true)
       : Promise.resolve(null),
   ]);
 
