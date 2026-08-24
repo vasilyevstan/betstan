@@ -183,6 +183,8 @@ cd resulting && npm ci && npm run test:ci
 - Readiness evidence is fail-closed. When its required Mongo safety counters
   expand, update every Azure and OCI rollback fixture in the same change;
   omitted counters are `unknown`, not zero, and must prevent image mutation.
+  Queries for optional nested safety markers require explicit field existence
+  and a non-null value so the production predicate is reviewable in fixtures.
 
 ## Resolved failures and durable rules
 

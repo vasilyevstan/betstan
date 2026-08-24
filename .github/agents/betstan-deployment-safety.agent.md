@@ -90,7 +90,8 @@ inactive. Fail closed when either query is incomplete or fails.
   Gamemaster last.
 - Keep Azure and OCI rollback fixtures synchronized with every required
   readiness safety counter. Missing fixture evidence must remain `unknown`
-  and block rollback before any image mutation.
+  and block rollback before any image mutation. Optional nested safety markers
+  must be queried with explicit existence and non-null predicates.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.

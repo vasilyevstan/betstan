@@ -2237,7 +2237,7 @@ print(JSON.stringify({
     ]
   }),
   simulationQuarantines: gm.events.countDocuments({
-    "simulationFailure.quarantinedAt": {$ne: null}
+    "simulationFailure.quarantinedAt": {$exists: true, $ne: null}
   })
 }));
 EOF_QUERY

@@ -64,7 +64,7 @@ assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'proces
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'deadLetter: { statuses: ["DEAD_LETTER"], includeLegacyMissingStatus: false, primaryField: "deadLetteredAt", fallbackField: "" }' 'retry query should use DEAD_LETTER and deadLetteredAt for terminal age'
 assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'statuses: ["EXHAUSTED"]' 'retry query should not invent an EXHAUSTED status bucket'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" 'time: {$lt: overdueBefore}' 'Gamemaster query should bound overdue unstarted events by time'
-assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '"simulationFailure.quarantinedAt": {$ne: null}' 'Gamemaster query should surface simulation quarantines'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '"simulationFailure.quarantinedAt": {$exists: true, $ne: null}' 'Gamemaster query should count only persisted simulation quarantines'
 assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '__UNSTARTED_EVENT_GRACE_SECONDS__' 'Gamemaster query should resolve the configured grace period'
 
 run_live_betting_scenario azure-activate "$SCRIPT" azure MODE=activate STUB_FLAG_VALUE=true STUB_ACTIVE_MATCHES=2 STUB_SUBMITTED_LIVE_SLIPS=3
