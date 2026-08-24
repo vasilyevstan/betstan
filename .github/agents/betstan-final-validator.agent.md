@@ -34,6 +34,22 @@ Read:
   deployment specialists were invoked when their triggers apply.
 - Verify historical-data, mixed-version, feature-flag, rollout, rollback, and
   exact-SHA evidence is complete.
+- Verify raw-created versioned aggregates, versionless historical documents,
+  every board-identity mutation, empty terminal aggregates,
+  published-before-archive recovery, missing legacy publication state, and
+  both rolling client request shapes have executable regression evidence.
+- Verify draft clean/delete and decline restoration are status-and-board
+  compare-and-swap operations that cannot affect a submitted or archived
+  replacement under redelivery.
+- Verify historical live approvals bind immutable submission time to both the
+  exact expiry and earliest authority-ending transition time, including
+  out-of-order and legacy-mirror evidence.
+- Verify bounded SSE backpressure disconnects are paired with unsubscribe,
+  EventSource reconnect, REST fallback, gap reconciliation, and monotonic
+  sequence replacement.
+- Verify maintenance recovery is reachable only after the same run
+  successfully validates the exact data handoff; invalid deployment requests
+  must remain non-mutating.
 - Verify production acceptance fixtures are offline and excluded server-side
   from ordinary REST/SSE, with persisted-administrator checks on scoped reads
   and offline selections.

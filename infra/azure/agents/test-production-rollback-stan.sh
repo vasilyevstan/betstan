@@ -920,8 +920,9 @@ EOF_QUEUES
         printf '%s 0 0 %s\n' "$dynamic_queue_name" "$dynamic_consumers"
       fi
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
-      printf '{"mongoOk":true,"activeMatches":%s,"submittedLiveSlips":%s}\n' \
-        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_SUBMITTED_LIVE_SLIPS:-0}"
+      printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
+        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
+        "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/"* ]]; then
       [[ "${STUB_AUTH_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' "${STUB_NORMALIZED_IDENTIFIER_COUNT:-0}"
@@ -1447,6 +1448,10 @@ run_expect_failure expired-artifact \
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/active-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
+
+run_expect_failure draft-live-refusal \
+  STUB_DRAFT_LIVE_SLIPS=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/draft-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
 
 run_expect_failure rollback-readiness-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run

@@ -11,6 +11,7 @@ import {
   ResultingStatus,
   TeamSide,
 } from "@betstan/common";
+import { randomUUID } from "crypto";
 import SettleSlipPublisher from "../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../event/publisher/SettleSlipRowPublisher";
 import { Bet, BetArchive } from "../model/Bet";
@@ -42,7 +43,15 @@ const TERMINAL_BET_STATUSES = new Set<ResultingStatus>(
   TERMINAL_BET_STATUS_VALUES
 );
 const PUBLICATION_STATE_PENDING = "PENDING";
+const PUBLICATION_STATE_PUBLISHING = "PUBLISHING";
 const PUBLICATION_STATE_PUBLISHED = "PUBLISHED";
+// If a terminal publish claim is never confirmed (process crash between the
+// broker confirming the publish and us persisting PUBLISHED), the sweep is
+// allowed to reclaim it after this long so the slip can never get stuck
+// forever. Downstream consumers must treat repeat settle-slip events for an
+// already-terminal slip as no-ops (see bet/ moderation + settlement guards)
+// so a reclaim that turns out to duplicate a successful publish stays safe.
+const TERMINAL_CLAIM_STALE_MS = 30_000;
 
 const slipLocks = new Map<string, Promise<void>>();
 
@@ -679,23 +688,108 @@ async function confirmTerminalSettlement(
     return false;
   }
 
-  await publishers.settleSlipPublisher.publishWithConfirm({
-    data: {
-      slipId: bet.slipId,
-      result: bet.status,
+  const now = new Date();
+  const staleClaimBefore = new Date(now.getTime() - TERMINAL_CLAIM_STALE_MS);
+  const claimId = randomUUID();
+
+  // Durably claim the right to publish before we actually publish. This
+  // gives us a tombstone (state + timestamp) that survives a crash, and
+  // stops two concurrent reconcile passes (e.g. an event handler racing the
+  // sweep worker) from both calling publishWithConfirm for the same slip.
+  const claimedBet = await Bet.findOneAndUpdate(
+    {
+      _id: bet._id,
+      $or: [
+        {
+          terminalPublicationState: {
+            $exists: false,
+          },
+        },
+        {
+          terminalPublicationState: null,
+        },
+        {
+          terminalPublicationState: {
+            $in: ["", PUBLICATION_STATE_PENDING],
+          },
+        },
+        {
+          terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+          $or: [
+            {
+              terminalPublicationClaimedAt: {
+                $exists: false,
+              },
+            },
+            {
+              terminalPublicationClaimedAt: null,
+            },
+            {
+              terminalPublicationClaimedAt: {
+                $lte: staleClaimBefore,
+              },
+            },
+          ],
+        },
+      ],
     },
-  });
+    {
+      $set: {
+        terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+        terminalPublicationClaimedAt: now,
+        terminalPublicationClaimId: claimId,
+      },
+    },
+    { new: true }
+  );
+
+  if (!claimedBet) {
+    return false;
+  }
+
+  try {
+    await publishers.settleSlipPublisher.publishWithConfirm({
+      data: {
+        slipId: bet.slipId,
+        result: bet.status,
+      },
+    });
+  } catch (error) {
+    // The publish definitely failed, so it is safe to release the claim
+    // immediately rather than waiting out the stale-claim window.
+    await Bet.updateOne(
+      {
+        _id: bet._id,
+        terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+        terminalPublicationClaimId: claimId,
+      },
+      {
+        $set: {
+          terminalPublicationState: PUBLICATION_STATE_PENDING,
+        },
+        $unset: {
+          terminalPublicationClaimedAt: "",
+          terminalPublicationClaimId: "",
+        },
+      }
+    );
+
+    throw error;
+  }
 
   const updatedBet = await Bet.findOneAndUpdate(
     {
       _id: bet._id,
-      terminalPublicationState: {
-        $ne: PUBLICATION_STATE_PUBLISHED,
-      },
+      terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+      terminalPublicationClaimId: claimId,
     },
     {
       $set: {
         terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
+      },
+      $unset: {
+        terminalPublicationClaimedAt: "",
+        terminalPublicationClaimId: "",
       },
     },
     { new: true }
@@ -718,13 +812,13 @@ async function archiveBet(finalizedBet: any): Promise<void> {
     }
   );
 
+  await clearPendingModerationResult(finalizedBet.slipId);
+
   await Bet.deleteOne({
     _id: finalizedBet._id,
     status: finalizedBet.status,
     terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
   });
-
-  await clearPendingModerationResult(finalizedBet.slipId);
 }
 
 async function archivePublishedBet(slipId: string): Promise<boolean> {
@@ -744,7 +838,7 @@ async function archivePublishedBet(slipId: string): Promise<boolean> {
   return true;
 }
 
-async function reconcileSlip(
+export async function reconcileSlip(
   slipId: string,
   publishers: SettlementPublishers
 ): Promise<void> {
@@ -791,6 +885,91 @@ async function reconcileSlip(
       }
     }
   });
+}
+
+/**
+ * Finds slips whose terminal settlement has not fully converged: either fully
+ * resulted but never finalized into a settled status, finalized but not yet
+ * confirmed as published, or published but not yet archived. These slips
+ * cannot always be
+ * rediscovered by replaying the event that originally triggered them - e.g.
+ * a manual-void row is removed from `rows` once published, so a later replay
+ * of that same live update will no longer find a matching row. This sweep
+ * lets the terminal settlement worker recover such slips independently of
+ * any future event arriving for them.
+ */
+export async function findTerminalPendingSlipIds(
+  limit: number = 100
+): Promise<string[]> {
+  const staleClaimBefore = new Date(Date.now() - TERMINAL_CLAIM_STALE_MS);
+  const bets = await Bet.find({
+    $or: [
+      {
+        status: {
+          $in: [...SETTLED_BET_STATUS_VALUES],
+        },
+        $or: [
+          {
+            terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
+          },
+          {
+            terminalPublicationState: {
+              $exists: false,
+            },
+          },
+          {
+            terminalPublicationState: null,
+          },
+          {
+            terminalPublicationState: {
+              $in: ["", PUBLICATION_STATE_PENDING],
+            },
+          },
+          {
+            terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+            $or: [
+              {
+                terminalPublicationClaimedAt: {
+                  $exists: false,
+                },
+              },
+              {
+                terminalPublicationClaimedAt: null,
+              },
+              {
+                terminalPublicationClaimedAt: {
+                  $lte: staleClaimBefore,
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        status: ResultingStatus.BET_APPROVED,
+        rows: {
+          $not: {
+            $elemMatch: {
+              $or: [
+                { result: ResultingStatus.ROW_NO_RESULT },
+                { pendingRemoval: true },
+                {
+                  settlementPublicationState: {
+                    $ne: PUBLICATION_STATE_PUBLISHED,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  })
+    .select({ slipId: 1 })
+    .limit(limit)
+    .lean();
+
+  return bets.map((bet: any) => bet.slipId as string);
 }
 
 async function settleApprovedPreMatchRows(

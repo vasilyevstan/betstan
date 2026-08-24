@@ -189,7 +189,9 @@ it("runs the CLI with logging and disconnects even when collections are empty", 
     expect(report.mode).toBe("apply");
     expect(report.batchSize).toBe(2);
     expect(report.collection).toBe("all");
-    expect(connectSpy).toHaveBeenCalledWith(process.env.MONGO_URI);
+    expect(connectSpy).toHaveBeenCalledWith(process.env.MONGO_URI, {
+      autoIndex: false,
+    });
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
   } finally {

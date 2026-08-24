@@ -210,6 +210,26 @@ const PreMatchEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, ui
   </div>
 </article>;
 
+const NextLiveEvent = ({ event, uiVariant }) => <aside
+  aria-labelledby="next-live-event-title"
+  className={`card event-next-live event-next-live--${uiVariant}`}
+>
+  <div className="card-body event-next-live__body">
+    <div>
+      <div className="event-card__badges mb-2">
+        <span className="event-card__badge event-card__badge--live">NEXT LIVE</span>
+      </div>
+      <h2 className="event-next-live__title" id="next-live-event-title">Next live event</h2>
+      <div className="event-next-live__name">{event.name}</div>
+    </div>
+    <div className="event-next-live__schedule">
+      <span className="text-secondary">Scheduled kickoff</span>
+      <time dateTime={event.time}>{formatEventTime(event.time)}</time>
+      <small className="text-secondary">Pre-match markets are open now. Live markets appear at kickoff.</small>
+    </div>
+  </div>
+</aside>;
+
 const EventSection = ({ children, title, uiVariant }) => <section className={`event-group event-group--${uiVariant}`} aria-labelledby={`event-group-${title.replace(/\s+/g, '-').toLowerCase()}`}>
   <div className="event-group__heading">
     <h2 id={`event-group-${title.replace(/\s+/g, '-').toLowerCase()}`} className="event-group__title">{title}</h2>
@@ -238,6 +258,12 @@ const HandleEventList = ({
 
   const liveEvents = eventItems.filter(isLiveEvent);
   const preMatchEvents = eventItems.filter((event) => !isLiveEvent(event));
+  const nextLiveEvent = liveEvents.length === 0
+    ? preMatchEvents.find((event) => (
+      event.status !== 'RESULTED'
+      && event.live?.phase !== 'FULL_TIME'
+    ))
+    : null;
   const cardClass = buildCardClass(uiVariant);
 
   if (isLoading && eventItems.length === 0) {
@@ -255,6 +281,7 @@ const HandleEventList = ({
 
   const content = <>
     <FeedStatus feedState={feedState} />
+    {nextLiveEvent ? <NextLiveEvent event={nextLiveEvent} uiVariant={uiVariant} /> : null}
     {liveEvents.length > 0 ? <EventSection title="Live now" uiVariant={uiVariant}>
       {liveEvents.map((event) => <div className={cardClass} key={event.eventId}>
         <LiveEventCard

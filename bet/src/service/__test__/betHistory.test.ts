@@ -902,6 +902,10 @@ it("keeps first placement immutable and records conflicting duplicates without r
   const inserted = await upsertPlaceBet(firstEvent);
   expect(inserted.outcome).toBe("inserted");
   expect(inserted.bet.betKind).toBe(BetKind.PRE_MATCH);
+  expect(
+    (await Bet.collection.findOne({ slipId }, { projection: { __v: 1 } }))
+      ?.__v
+  ).toBe(0);
 
   const exactDuplicate = await upsertPlaceBet(firstEvent);
   expect(exactDuplicate.outcome).toBe("exact_duplicate");

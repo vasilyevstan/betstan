@@ -56,6 +56,39 @@ instead of crossing the boundary.
   duplicate fingerprints, with an explicit legacy fallback when old payloads
   lack that field.
 - Use database-enforced invariants for concurrency-sensitive uniqueness.
+- When composing Mongo filters, never let object spread overwrite repeated
+  logical keys such as `$or`. Put independent reusable clauses under `$and`
+  and test that every claim predicate remains enforced after a competing
+  operation completes.
+- Initialize Mongoose version keys on raw inserts/upserts when later writes use
+  optimistic concurrency. Atomically initialize and reload historical
+  versionless documents before mutation, and cover that path in compatibility
+  backfills.
+- Treat revision/fingerprint pairs as stale-write authorization. Rotate both
+  on every aggregate mutation, including row deletion, and test an old
+  confirmation against the changed aggregate.
+- Mutate or delete a draft with one database operation scoped by aggregate ID,
+  owner, kind, `DRAFT` status, revision, and fingerprint. Never call a stale
+  document's `save()` or `deleteOne()` after a read; return a conflict when
+  placement or another board mutation wins.
+- Restore a declined aggregate only while its replacement is still `DRAFT`.
+  Redelivery must treat a submitted or archived replacement as completed,
+  never reset or recreate it.
+- Historical quote validation uses immutable domain time twice: submission
+  must precede both the exact quote expiry and the earliest later transition
+  that ended authority. Persist authority ends from payload `occurredAt`,
+  preserve them under out-of-order delivery, and keep old records readable
+  when the additive field is absent.
+- For rolling clients, prove both old and new request shapes. Scope any legacy
+  confirmation to a bounded hash of the authenticated session and the exact
+  user, aggregate, kind, revision, and fingerprint; never use one
+  session-overwritable aggregate confirmation or let an explicit new-client
+  confirmation fall back after mismatch. Record compatibility evidence only
+  for mutable drafts; submitted-state polling must not refresh it.
+- Include empty-but-terminal aggregates in recovery sweeps when rows can be
+  removed before parent finalization. Also recover missing legacy state and
+  published-but-unarchived aggregates without republishing, and preserve the
+  active record until auxiliary cleanup succeeds.
 - Treat JWT roles as non-authoritative for privileged operations. Revalidate
   current persisted roles through the owning auth service and fail closed.
 - Keep synthetic acceptance records excluded by default in every public read

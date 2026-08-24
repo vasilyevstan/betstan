@@ -37,6 +37,8 @@ const EMPTY_ERRORS = Object.freeze({
 });
 const RETRYABLE_PLACEMENT_ERROR = 'Placement status is still reconciling. Retry with the same wager and selections.';
 const CHANGED_PLACEMENT_ERROR = 'This slip changed after a previous placement attempt. Wait for the board to update before placing it again.';
+const RELOAD_REQUIRED_PLACEMENT_ERROR = 'This board changed before placement. Review the latest selections and try again.';
+const BOARD_CONFIRMATION_MISSING_ERROR = 'Board is refreshing. Wait for the latest selections before placing it again.';
 
 const getBoardId = (board) => board?._id ?? board?.id ?? null;
 const getRowId = (row) => row?._id ?? row?.id ?? null;
@@ -77,6 +79,17 @@ const createPlacementAttemptId = () => {
   ].join('-');
 };
 
+const getBoardRevision = (board) => {
+  const boardRevision = Number(board?.boardRevision);
+  return Number.isSafeInteger(boardRevision) && boardRevision > 0 ? boardRevision : null;
+};
+
+const getBoardFingerprint = (board) => (
+  typeof board?.boardFingerprint === 'string' && board.boardFingerprint.trim()
+    ? board.boardFingerprint
+    : null
+);
+
 const normalizeBoard = (board, fallbackKind) => {
   if (!board || typeof board !== 'object') {
     return null;
@@ -89,6 +102,8 @@ const normalizeBoard = (board, fallbackKind) => {
     ...board,
     betKind,
     status,
+    boardRevision: getBoardRevision(board),
+    boardFingerprint: getBoardFingerprint(board),
     sourceSlipId: board.sourceSlipId ?? null,
     rows: Array.isArray(board.rows)
       ? board.rows.map((row) => ({
@@ -122,37 +137,37 @@ const getSubmittedWagerValue = (board) => {
   return Number.isFinite(wager) && wager > 0 ? String(wager) : null;
 };
 
-const buildPlacementFingerprint = ({ betKind, slipId, wager, rows }) => JSON.stringify({
+const buildPlacementFingerprint = ({
   betKind,
   slipId,
   wager,
-  rows: Array.isArray(rows)
-    ? rows.map((row) => ({
-      rowId: getRowId(row),
-      eventId: row?.eventId ?? null,
-      oddsId: row?.oddsId ?? null,
-      oddsValue: row?.oddsValue ?? null,
-      betKind: normalizeBetKind(row?.betKind ?? betKind),
-      marketId: row?.marketId ?? null,
-      marketVersion: row?.marketVersion ?? null,
-      quoteVersion: row?.quoteVersion ?? null,
-      selectionId: row?.selectionId ?? null,
-    }))
-    : [],
+  boardRevision,
+  boardFingerprint,
+}) => JSON.stringify({
+  betKind,
+  slipId,
+  wager,
+  boardRevision,
+  boardFingerprint,
 });
 
 const buildPlacementSnapshot = ({ betKind, board, wager }) => {
   const slipId = getBoardId(board);
+  const boardRevision = getBoardRevision(board);
+  const boardFingerprint = getBoardFingerprint(board);
 
   return {
     betKind,
     slipId,
     wager,
+    boardRevision,
+    boardFingerprint,
     fingerprint: buildPlacementFingerprint({
       betKind,
       slipId,
       wager,
-      rows: board?.rows,
+      boardRevision,
+      boardFingerprint,
     }),
   };
 };
@@ -171,6 +186,8 @@ const buildPlacementAttempt = ({ betKind, board, wager, placementAttemptId }) =>
       slipId: snapshot.slipId,
       wager,
       placementAttemptId,
+      expectedBoardRevision: snapshot.boardRevision,
+      expectedBoardFingerprint: snapshot.boardFingerprint,
     },
     promise: null,
   };
@@ -206,6 +223,28 @@ const getConflictSubmittedBoard = (error, betKind, slipId) => {
   }
 
   return toAuthoritativeSubmittedBoard(error?.response?.data?.slip, betKind, slipId);
+};
+
+const getReloadConflict = (error, betKind) => {
+  if (error?.response?.status !== 409 || !error?.response?.data?.reload?.required) {
+    return null;
+  }
+
+  const authoritativeBoard = normalizeBoard(error?.response?.data?.slip, betKind);
+  if (
+    authoritativeBoard
+    && (
+      isSubmittedBoard(authoritativeBoard)
+      || normalizeBetKind(authoritativeBoard.betKind ?? betKind) !== betKind
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    board: authoritativeBoard ?? null,
+    message: getErrorMessage(error, RELOAD_REQUIRED_PLACEMENT_ERROR),
+  };
 };
 
 const shouldRetirePlacementAttemptForBoard = (attempt, board, betKind) => {
@@ -304,8 +343,19 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   const [pendingBoards, setPendingBoards] = useState({});
   const [submittingBoards, setSubmittingBoards] = useState({});
 
+  const currentUserId = currentUser?.id ?? '';
+
   const mountedRef = useRef(false);
-  const currentUserIdRef = useRef(currentUser?.id ?? '');
+  const authContextRef = useRef({
+    userId: currentUserId,
+    generation: 0,
+  });
+  if (authContextRef.current.userId !== currentUserId) {
+    authContextRef.current = {
+      userId: currentUserId,
+      generation: authContextRef.current.generation + 1,
+    };
+  }
   const pollTimerRef = useRef(null);
   const refreshTimerRef = useRef(null);
   const pendingBoardsRef = useRef({});
@@ -313,12 +363,6 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
   const previousRefreshSignalRef = useRef(refreshSignal);
   const requestSequenceRef = useRef(0);
   const appliedRequestSequenceRef = useRef(0);
-
-  const currentUserId = currentUser?.id ?? '';
-
-  useEffect(() => {
-    currentUserIdRef.current = currentUserId;
-  }, [currentUserId]);
 
   useEffect(() => {
     pendingBoardsRef.current = pendingBoards;
@@ -338,17 +382,23 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     }
   }, []);
 
-  const canApplyRequest = useCallback((requestId, requestedUserId) => (
+  const getAuthContext = useCallback(() => ({ ...authContextRef.current }), []);
+
+  const hasActiveAuthContext = useCallback((authContext) => (
     mountedRef.current
-    && currentUserIdRef.current === requestedUserId
-    && requestId >= appliedRequestSequenceRef.current
+    && authContextRef.current.userId === authContext.userId
+    && authContextRef.current.generation === authContext.generation
   ), []);
 
-  const canApplyEnrichment = useCallback((requestId, requestedUserId) => (
-    mountedRef.current
-    && currentUserIdRef.current === requestedUserId
+  const canApplyRequest = useCallback((requestId, requestedAuthContext) => (
+    hasActiveAuthContext(requestedAuthContext)
+    && requestId >= appliedRequestSequenceRef.current
+  ), [hasActiveAuthContext]);
+
+  const canApplyEnrichment = useCallback((requestId, requestedAuthContext) => (
+    hasActiveAuthContext(requestedAuthContext)
     && requestId === appliedRequestSequenceRef.current
-  ), []);
+  ), [hasActiveAuthContext]);
 
   const retirePlacementAttempt = useCallback((betKind, placementAttemptId) => {
     const currentAttempt = placementAttemptsRef.current[betKind];
@@ -414,10 +464,39 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     return true;
   }, [onBoardSubmitted]);
 
-  const enrichBoardsWithHistory = useCallback(async ({ requestId, requestedUserId, authoritativeBoards }) => {
+  const applyAuthoritativeDraftBoard = useCallback((betKind, authoritativeBoard) => {
+    const normalizedBoard = normalizeBoard(authoritativeBoard, betKind);
+
+    if (
+      normalizedBoard
+      && (
+        isSubmittedBoard(normalizedBoard)
+        || normalizeBetKind(normalizedBoard.betKind ?? betKind) !== betKind
+      )
+    ) {
+      return false;
+    }
+
+    const nextPendingBoards = { ...pendingBoardsRef.current };
+    delete nextPendingBoards[betKind];
+    pendingBoardsRef.current = nextPendingBoards;
+    setBoards((currentBoards) => ({
+      ...currentBoards,
+      [betKind]: normalizedBoard ?? null,
+    }));
+    setPendingBoards((currentPendingBoards) => {
+      const updatedPendingBoards = { ...currentPendingBoards };
+      delete updatedPendingBoards[betKind];
+      return updatedPendingBoards;
+    });
+
+    return true;
+  }, []);
+
+  const enrichBoardsWithHistory = useCallback(async ({ requestId, requestedAuthContext, authoritativeBoards }) => {
     try {
       const betsResponse = await axios.get('/api/bet');
-      if (!canApplyEnrichment(requestId, requestedUserId)) {
+      if (!canApplyEnrichment(requestId, requestedAuthContext)) {
         return;
       }
 
@@ -434,9 +513,9 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     }
   }, [canApplyEnrichment]);
 
-  const loadBoards = useCallback(async ({ includeBets = true } = {}) => {
-    const requestedUserId = currentUserIdRef.current;
-    if (!requestedUserId) {
+  const loadBoards = useCallback(async ({ includeBets = true, authContext = getAuthContext() } = {}) => {
+    const requestedAuthContext = authContext;
+    if (!requestedAuthContext.userId) {
       return;
     }
 
@@ -446,7 +525,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     try {
       const boardsResponse = await axios.get('/api/slip/boards');
       const authoritativeBoards = normalizeBoardsPayload(boardsResponse.data);
-      if (!canApplyRequest(requestId, requestedUserId)) {
+      if (!canApplyRequest(requestId, requestedAuthContext)) {
         return;
       }
 
@@ -465,23 +544,27 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
         includeBets
         && (hasTrackedPendingBoards(merged.pendingBoards) || hasAuthoritativeSubmittedBoards(authoritativeBoards))
       ) {
-        void enrichBoardsWithHistory({ requestId, requestedUserId, authoritativeBoards });
+        void enrichBoardsWithHistory({ requestId, requestedAuthContext, authoritativeBoards });
       }
     } catch (error) {
-      if (canApplyRequest(requestId, requestedUserId)) {
+      if (canApplyRequest(requestId, requestedAuthContext)) {
         appliedRequestSequenceRef.current = requestId;
         setIsLoading(false);
       }
     }
-  }, [canApplyRequest, enrichBoardsWithHistory, reconcilePlacementAttemptForBoard]);
+  }, [canApplyRequest, enrichBoardsWithHistory, getAuthContext, reconcilePlacementAttemptForBoard]);
 
-  const scheduleRefresh = useCallback((delay = REFRESH_DELAY_MS, options = {}) => {
+  const scheduleRefresh = useCallback((delay = REFRESH_DELAY_MS, options = {}, authContext = getAuthContext()) => {
     clearScheduledRefresh();
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
-      void loadBoards(options);
+      if (!hasActiveAuthContext(authContext)) {
+        return;
+      }
+
+      void loadBoards({ ...options, authContext });
     }, delay);
-  }, [clearScheduledRefresh, loadBoards]);
+  }, [clearScheduledRefresh, getAuthContext, hasActiveAuthContext, loadBoards]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -513,8 +596,8 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
     setErrors(EMPTY_ERRORS);
     setIsLoading(true);
-    void loadBoards({ includeBets: true });
-  }, [clearScheduledRefresh, currentUserId, loadBoards, stopPolling]);
+    void loadBoards({ includeBets: true, authContext: getAuthContext() });
+  }, [clearScheduledRefresh, currentUserId, getAuthContext, loadBoards, stopPolling]);
 
   useEffect(() => {
     if (previousRefreshSignalRef.current === refreshSignal) {
@@ -532,15 +615,20 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     }
 
     if (!pollTimerRef.current) {
+      const pollAuthContext = getAuthContext();
       pollTimerRef.current = setInterval(() => {
-        void loadBoards({ includeBets: true });
+        if (!hasActiveAuthContext(pollAuthContext)) {
+          return;
+        }
+
+        void loadBoards({ includeBets: true, authContext: pollAuthContext });
       }, POLL_INTERVAL_MS);
     }
 
     return () => {
       stopPolling();
     };
-  }, [loadBoards, pendingBoards, stopPolling]);
+  }, [getAuthContext, hasActiveAuthContext, loadBoards, pendingBoards, stopPolling]);
 
   const selectedSelectionKeys = useMemo(() => extractSelectionKeysFromBoards(boards), [boards]);
 
@@ -591,6 +679,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     const board = boards[betKind];
     const slipId = getBoardId(board);
     const wagerValue = Number(wagers[betKind]);
+    const submissionAuthContext = getAuthContext();
 
     clearBoardError(betKind);
 
@@ -611,6 +700,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
       board,
       wager: wagerValue,
     });
+
+    if (currentSnapshot.boardRevision === null || !currentSnapshot.boardFingerprint) {
+      setBoardError(betKind, BOARD_CONFIRMATION_MISSING_ERROR);
+      scheduleRefresh(REFRESH_DELAY_MS, { includeBets: true }, submissionAuthContext);
+      return;
+    }
 
     let currentAttempt = placementAttemptsRef.current[betKind];
     if (currentAttempt) {
@@ -649,6 +744,10 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     const submissionPromise = (async () => {
       try {
         const response = await axios.post('/api/slip/bet', currentAttempt.requestBody);
+        if (!hasActiveAuthContext(submissionAuthContext)) {
+          return;
+        }
+
         const authoritativeBoard = toAuthoritativeSubmittedBoard(
           response?.data,
           betKind,
@@ -666,19 +765,38 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
         applyAuthoritativeSubmittedBoard(betKind, authoritativeBoard);
         retirePlacementAttempt(betKind, currentAttempt.placementAttemptId);
-        await loadBoards({ includeBets: true });
+        if (hasActiveAuthContext(submissionAuthContext)) {
+          await loadBoards({ includeBets: true, authContext: submissionAuthContext });
+        }
       } catch (error) {
+        if (!hasActiveAuthContext(submissionAuthContext)) {
+          return;
+        }
+
         const conflictBoard = getConflictSubmittedBoard(error, betKind, slipId);
         if (conflictBoard) {
           applyAuthoritativeSubmittedBoard(betKind, conflictBoard);
           retirePlacementAttempt(betKind, currentAttempt.placementAttemptId);
-          await loadBoards({ includeBets: true });
+          if (hasActiveAuthContext(submissionAuthContext)) {
+            await loadBoards({ includeBets: true, authContext: submissionAuthContext });
+          }
+          return;
+        }
+
+        const reloadConflict = getReloadConflict(error, betKind);
+        if (reloadConflict) {
+          applyAuthoritativeDraftBoard(betKind, reloadConflict.board);
+          retirePlacementAttempt(betKind, currentAttempt.placementAttemptId);
+          setBoardError(betKind, reloadConflict.message);
+          if (hasActiveAuthContext(submissionAuthContext)) {
+            await loadBoards({ includeBets: true, authContext: submissionAuthContext });
+          }
           return;
         }
 
         if (isRetryablePlacementError(error)) {
           setBoardError(betKind, RETRYABLE_PLACEMENT_ERROR);
-          scheduleRefresh();
+          scheduleRefresh(REFRESH_DELAY_MS, { includeBets: true }, submissionAuthContext);
           return;
         }
 
@@ -690,7 +808,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
           latestAttempt.promise = null;
         }
 
-        if (mountedRef.current) {
+        if (hasActiveAuthContext(submissionAuthContext)) {
           setSubmittingBoards((currentSubmittingBoards) => ({
             ...currentSubmittingBoards,
             [betKind]: false,
@@ -703,9 +821,12 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
 
     await submissionPromise;
   }, [
+    applyAuthoritativeDraftBoard,
     applyAuthoritativeSubmittedBoard,
     boards,
     clearBoardError,
+    getAuthContext,
+    hasActiveAuthContext,
     loadBoards,
     reconcilePlacementAttemptForBoard,
     retirePlacementAttempt,

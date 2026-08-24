@@ -4,9 +4,9 @@ import {
   ISettleSlipRowEvent,
   QueueNames,
 } from "@betstan/common";
-import { Bet } from "../../model/Bet";
 import { PendingBetUpdateKind } from "../../model/PendingBetUpdate";
 import {
+  applyBetEventWithRetry,
   applySettleSlipRow,
   parkPendingBetUpdate,
 } from "../../service/betHistory";
@@ -18,16 +18,17 @@ class SettleSlipRowListener extends AListener<ISettleSlipRowEvent> {
   async onMessage(event: ISettleSlipRowEvent, msg: ConsumeMessage) {
     const { data } = event;
 
-    const bet = await Bet.findOne({ slipId: data.slipId });
+    // Loads, applies and saves under optimistic-concurrency retry so a
+    // concurrent moderation decision or a redelivered duplicate of this
+    // same event can never be silently overwritten by a stale save.
+    const bet = await applyBetEventWithRetry(
+      data.slipId,
+      applySettleSlipRow,
+      event
+    );
 
     if (!bet) {
       await parkPendingBetUpdate(PendingBetUpdateKind.SETTLE_SLIP_ROW, event);
-      this.channel.ack(msg);
-      return;
-    }
-
-    if (applySettleSlipRow(bet, event)) {
-      await bet.save();
     }
 
     this.channel.ack(msg);

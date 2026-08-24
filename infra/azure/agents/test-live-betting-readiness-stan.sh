@@ -28,6 +28,9 @@ assert_eq 0 "$RUN_RC" "dark mode should pass"
 assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'dark summary should report GO'
 assert_contains "$RUN_SUMMARY_FILE" 'mode=dark' 'dark summary should persist mode'
 assert_contains "$RUN_SUMMARY_FILE" 'actual_live_kickoffs_enabled=false' 'dark summary should persist dark flag'
+assert_contains "$RUN_SUMMARY_FILE" 'overdue_unstarted_events=0' 'dark summary should include overdue unstarted events'
+assert_contains "$RUN_SUMMARY_FILE" 'simulation_quarantines=0' 'dark summary should include simulation quarantines'
+assert_contains "$RUN_SUMMARY_FILE" 'unstarted_event_grace_seconds=120' 'dark summary should include the overdue grace period'
 assert_contains "$RUN_SUMMARY_FILE" 'workflow_pending_count_limit=2' 'dark summary should persist pending workflow threshold'
 assert_contains "$RUN_SUMMARY_FILE" 'bet_pending_bet_update_pending_count=1' 'dark summary should include bet pending parking count'
 assert_contains "$RUN_SUMMARY_FILE" 'bet_pending_bet_update_processing_count=1' 'dark summary should include bet processing parking count'
@@ -60,6 +63,9 @@ assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'pendin
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'processing: { statuses: ["PROCESSING"], includeLegacyMissingStatus: false, primaryField: "leasedUntil", fallbackField: "" }' 'retry query should use leasedUntil for processing age'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'deadLetter: { statuses: ["DEAD_LETTER"], includeLegacyMissingStatus: false, primaryField: "deadLetteredAt", fallbackField: "" }' 'retry query should use DEAD_LETTER and deadLetteredAt for terminal age'
 assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'statuses: ["EXHAUSTED"]' 'retry query should not invent an EXHAUSTED status bucket'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" 'time: {$lt: overdueBefore}' 'Gamemaster query should bound overdue unstarted events by time'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '"simulationFailure.quarantinedAt": {$exists: true, $ne: null}' 'Gamemaster query should count only persisted simulation quarantines'
+assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '__UNSTARTED_EVENT_GRACE_SECONDS__' 'Gamemaster query should resolve the configured grace period'
 
 run_live_betting_scenario azure-activate "$SCRIPT" azure MODE=activate STUB_FLAG_VALUE=true STUB_ACTIVE_MATCHES=2 STUB_SUBMITTED_LIVE_SLIPS=3
 assert_eq 0 "$RUN_RC" "activate mode should pass"
@@ -124,6 +130,14 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=sse_contract' 'bad SSE header
 run_live_betting_scenario azure-active-drain "$SCRIPT" azure MODE=rollback-drain STUB_ACTIVE_MATCHES=1
 assert_eq 1 "$RUN_RC" "rollback-drain should fail with active matches"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'active drain should fail Mongo count contract'
+
+run_live_betting_scenario azure-overdue-unstarted "$SCRIPT" azure MODE=dark STUB_OVERDUE_UNSTARTED_EVENTS=1
+assert_eq 1 "$RUN_RC" "dark mode should fail with an overdue unstarted event"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'overdue unstarted events should fail Mongo count contract'
+
+run_live_betting_scenario azure-simulation-quarantine "$SCRIPT" azure MODE=monitor STUB_FLAG_VALUE=true STUB_SIMULATION_QUARANTINES=1
+assert_eq 1 "$RUN_RC" "monitor mode should fail with a simulation quarantine"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'simulation quarantines should fail Mongo count contract'
 
 run_live_betting_scenario azure-bet-pending-over-limit "$SCRIPT" azure MODE=dark STUB_BET_PENDING_COUNT=3
 assert_eq 1 "$RUN_RC" "dark mode should fail on excessive bet parking backlog"

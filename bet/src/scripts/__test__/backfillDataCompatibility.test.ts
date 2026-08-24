@@ -65,12 +65,24 @@ it("supports dry-run, batched apply, explicit LIVE preservation, and idempotence
   expect(applied.collections[0].matched).toBe(2);
 
   const legacyBet = await Bet.findOne({ slipId: legacySlipId }).lean();
+  expect(
+    (await Bet.collection.findOne(
+      { slipId: legacySlipId },
+      { projection: { __v: 1 } }
+    ))?.__v
+  ).toBe(0);
   expect(legacyBet?.betKind).toBe(BetKind.PRE_MATCH);
   expect((legacyBet?.rows as Array<{ betKind?: BetKind }>)[0].betKind).toBe(
     BetKind.PRE_MATCH
   );
 
   const liveBet = await Bet.findOne({ slipId: liveSlipId }).lean();
+  expect(
+    (await Bet.collection.findOne(
+      { slipId: liveSlipId },
+      { projection: { __v: 1 } }
+    ))?.__v
+  ).toBe(0);
   expect(liveBet?.betKind).toBe(BetKind.LIVE);
   expect(
     (liveBet?.rows as Array<{ betKind?: BetKind }>).map((row) => row.betKind)
@@ -147,6 +159,7 @@ it("covers raw document normalization internals for legacy shapes", () => {
       rows: [{}, { betKind: BetKind.LIVE }],
     })
   ).toEqual({
+    __v: 0,
     "rows.0.betKind": BetKind.PRE_MATCH,
   });
   expect(
@@ -154,6 +167,7 @@ it("covers raw document normalization internals for legacy shapes", () => {
       rows: [null, { betKind: BetKind.LIVE }],
     })
   ).toEqual({
+    __v: 0,
     betKind: BetKind.LIVE,
   });
   expect(
@@ -161,6 +175,7 @@ it("covers raw document normalization internals for legacy shapes", () => {
       rows: "not-an-array",
     })
   ).toEqual({
+    __v: 0,
     betKind: BetKind.PRE_MATCH,
   });
 });
@@ -200,7 +215,9 @@ it("handles CLI execution logging and missing MONGO_URI defensively", async () =
 
   expect(report.mode).toBe("apply");
   expect(report.changed).toBe(1);
-  expect(connection.connect).toHaveBeenCalledWith(process.env.MONGO_URI);
+  expect(connection.connect).toHaveBeenCalledWith(process.env.MONGO_URI, {
+    autoIndex: false,
+  });
   expect(connection.disconnect).toHaveBeenCalled();
   expect(logger.log).toHaveBeenCalledWith(JSON.stringify(report, null, 2));
   process.env.MONGO_URI = originalMongoUri;

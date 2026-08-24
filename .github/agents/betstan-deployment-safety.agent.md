@@ -82,6 +82,19 @@ inactive. Fail closed when either query is incomplete or fails.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
+- Keep expression contexts actionlint-valid: status functions belong in
+  `if`; final shell provenance receives validated `${{ job.status }}` through
+  `env`.
+- Validate rollout order per runtime rather than forcing AKS and OCI through
+  one stale expected list. OCI rolls API dependencies before Client and keeps
+  Gamemaster last.
+- Keep Azure and OCI rollback fixtures synchronized with every required
+  readiness safety counter. Missing fixture evidence must remain `unknown`
+  and block rollback before any image mutation. Optional nested safety markers
+  must be queried with explicit existence and non-null predicates.
+- Make integration stubs emit the production command-boundary schema. Shared
+  Mongo lock fixtures return ConfigMap JSON with lease and fencing metadata,
+  never a reduced legacy summary.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.
@@ -169,7 +182,9 @@ After deployment:
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
-  permitting a retry.
+  permitting a retry, but only if that same run first validated and accepted
+  the exact data handoff. If handoff validation did not succeed, failure
+  cleanup must not mutate replicas, fences, or database locks.
 - enable live kickoffs only through a bounded worker-enforced activation lease;
   permit the same run/SHA to remove that lease only after complete acceptance,
   protected evidence upload, and final current-master/provenance revalidation;

@@ -4,6 +4,7 @@ import { Bet } from "../model/Bet";
 
 // Keep the public scoreboard bounded even if bet history keeps growing.
 export const PUBLIC_SCOREBOARD_LIMIT = 100;
+export const LEGACY_PUBLIC_SCOREBOARD_LIMIT = 500;
 
 export interface PublicBetStatsRow {
   userKey: string;
@@ -16,6 +17,17 @@ export interface AggregatedBetStatsRow {
   _id: string;
   betCount: number;
   wagerTotal: number;
+}
+
+interface LegacyBetStatsSourceRow {
+  userId: string;
+  wager: unknown;
+}
+
+export interface LegacyPublicBetStatsRow {
+  userId: string;
+  userName: string;
+  wager: number;
 }
 
 const PUBLIC_USER_KEY_LENGTH = 12;
@@ -89,10 +101,57 @@ export const buildPublicBetStatsPipeline = (): PipelineStage[] => [
   },
 ];
 
+export const buildLegacyPublicBetStatsPipeline = (): PipelineStage[] => [
+  {
+    $match: {
+      userId: {
+        $type: "string",
+        $ne: "",
+      },
+    },
+  },
+  {
+    $sort: {
+      timestamp: -1 as const,
+      _id: -1 as const,
+    },
+  },
+  {
+    $limit: LEGACY_PUBLIC_SCOREBOARD_LIMIT,
+  },
+  {
+    $project: {
+      _id: 0,
+      userId: 1,
+      wager: normalizeWagerExpression,
+    },
+  },
+];
+
 export const getPublicBetStats = async (): Promise<PublicBetStatsRow[]> => {
   const aggregatedRows = await Bet.aggregate<AggregatedBetStatsRow>(
     buildPublicBetStatsPipeline()
   );
 
   return aggregatedRows.map(toPublicStatsRow);
+};
+
+export const getLegacyPublicBetStats = async (): Promise<
+  LegacyPublicBetStatsRow[]
+> => {
+  const rows = await Bet.aggregate<LegacyBetStatsSourceRow>(
+    buildLegacyPublicBetStatsPipeline()
+  );
+
+  return rows.map((row) => {
+    const userId = createPublicUserKey(row.userId);
+
+    return {
+      userId,
+      userName: createPublicDisplayName(userId),
+      wager: typeof row.wager === "number" && Number.isFinite(row.wager)
+        ? row.wager
+        : 0,
+    };
+  });
 };

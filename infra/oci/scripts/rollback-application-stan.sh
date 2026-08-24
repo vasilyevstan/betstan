@@ -19,6 +19,7 @@ OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-}"
 OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
+OCI_INFRASTRUCTURE_PROVENANCE_FILE="${OCI_INFRASTRUCTURE_PROVENANCE_FILE:-}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-20}"
 SSE_TIMEOUT="${SSE_TIMEOUT:-5}"
 SSE_PATH="${SSE_PATH:-/api/event/stream}"
@@ -183,27 +184,81 @@ PY
 
 validate_artifact_listing() {
   local artifacts_file="$1"
-  python3 - "$artifacts_file" "$BASELINE_ARTIFACT_NAME" "$BASELINE_RETENTION_DAYS" <<'PY'
+  local expected_name="$2"
+  local label="$3"
+  python3 - "$artifacts_file" "$expected_name" "$label" "$BASELINE_RETENTION_DAYS" <<'PY'
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 
 artifacts = json.load(open(sys.argv[1], encoding='utf-8')).get('artifacts', [])
 name = sys.argv[2]
-retention_days = int(sys.argv[3])
+label = sys.argv[3]
+retention_days = int(sys.argv[4])
 matching = [artifact for artifact in artifacts if artifact.get('name') == name]
 if len(matching) != 1:
-    raise SystemExit('baseline artifact identity does not resolve to exactly one artifact')
+    raise SystemExit(f'{label} artifact identity does not resolve to exactly one artifact')
 artifact = matching[0]
 if artifact.get('expired'):
-    raise SystemExit('baseline artifact is expired')
+    raise SystemExit(f'{label} artifact is expired')
 created_at = artifact.get('created_at') or artifact.get('updated_at')
 if not created_at:
-    raise SystemExit('baseline artifact is missing a timestamp')
+    raise SystemExit(f'{label} artifact is missing a timestamp')
 created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
 if datetime.now(timezone.utc) - created > timedelta(days=retention_days):
-    raise SystemExit('baseline artifact is outside the rollback retention window')
+    raise SystemExit(f'{label} artifact is outside the rollback retention window')
 PY
+}
+
+validate_evidence_env_file() {
+  local file="$1"
+  local label="$2"
+  python3 - "$file" "$label" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+label = sys.argv[2]
+if not path.is_file():
+    raise SystemExit(f'{label} is missing')
+keys = set()
+for line_number, raw_line in enumerate(
+    path.read_text(encoding='utf-8').splitlines(),
+    start=1,
+):
+    if not raw_line:
+        continue
+    if '=' not in raw_line:
+        raise SystemExit(f'{label} has a malformed line at {line_number}')
+    key, _value = raw_line.split('=', 1)
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+        raise SystemExit(f'{label} has an invalid key at {line_number}')
+    if key in keys:
+        raise SystemExit(f'{label} contains duplicate key {key}')
+    keys.add(key)
+PY
+}
+
+evidence_value() {
+  live_betting_env_file_value "$1" "$2"
+}
+
+checksum_manifest_contains_once() {
+  local directory="$1"
+  local relative_path="$2"
+  awk -v relative_path="$relative_path" '
+    {
+      path = $2
+      sub(/^\*/, "", path)
+      if (path == relative_path) {
+        count += 1
+      }
+    }
+    END {
+      exit(count == 1 ? 0 : 1)
+    }
+  ' "$directory/SHA256SUMS"
 }
 
 verify_checksums() {
@@ -505,19 +560,24 @@ capture_sse() {
     "$status" \
     "$duration_seconds" \
     "$SSE_TIMEOUT"
-  content_type="$(
-    live_betting_validate_sse_connectivity \
-      "$headers_file" \
-      "$body_file" \
-      "$curl_status" \
-      "$status" \
-      "$duration_seconds" \
-      "$SSE_TIMEOUT" \
-      "${base_url}${SSE_PATH}"
-  )" || {
-    printf 'ERROR: SSE connectivity contract failed for %s%s\n' "$label" "$SSE_PATH" >&2
-    return 1
-  }
+  if [[ "$SSE_REQUIRED" == "false" && "$curl_status" == "0" &&
+      ( "$status" == "404" || "$status" == "502" ) ]]; then
+    content_type="legacy-absent"
+  else
+    content_type="$(
+      live_betting_validate_sse_connectivity \
+        "$headers_file" \
+        "$body_file" \
+        "$curl_status" \
+        "$status" \
+        "$duration_seconds" \
+        "$SSE_TIMEOUT" \
+        "${base_url}${SSE_PATH}"
+    )" || {
+      printf 'ERROR: SSE connectivity contract failed for %s%s\n' "$label" "$SSE_PATH" >&2
+      return 1
+    }
+  fi
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$CURRENT_STEP_LABEL" "$label" "$status" "$effective_url" "$(sha256_file "$body_file")" \
     >>"$OUTPUT_DIR/sse-verification.tsv"
@@ -567,6 +627,7 @@ run_live_betting_readiness() {
     OUTPUT_DIR="$readiness_output_dir" \
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     NAMESPACE="$OCI_K8S_NAMESPACE" \
+    SSE_REQUIRED="$SSE_REQUIRED" \
     "$LIVE_BETTING_READINESS_SCRIPT" >"$OUTPUT_DIR/${label}.txt" 2>&1
 }
 
@@ -670,6 +731,38 @@ resolved_target_sha="$(git rev-parse "${TARGET_SHA}^{commit}")"
 git merge-base --is-ancestor "$TARGET_SHA" "$current_master_sha" ||
   oci_die "TARGET_SHA must be an ancestor of current master"
 
+ADMIN_AUTH_EVIDENCE_PATHS=(
+  "backoffice/src/middleware/RequireAdmin.ts"
+  "backoffice/src/service/VerifyAdminSession.ts"
+)
+admin_auth_evidence_present=true
+for admin_auth_evidence_path in "${ADMIN_AUTH_EVIDENCE_PATHS[@]}"; do
+  git cat-file -e "${TARGET_SHA}:${admin_auth_evidence_path}" 2>/dev/null ||
+    admin_auth_evidence_present=false
+done
+if [[ "$admin_auth_evidence_present" == "true" ]]; then
+  ADMIN_AUTH_ROLLBACK_CHECK=persisted-admin-evidence
+else
+  ADMIN_AUTH_CAPABILITY_FILE="${ADMIN_AUTH_CAPABILITY_FILE:-}"
+  [[ -n "$ADMIN_AUTH_CAPABILITY_FILE" ]] ||
+    oci_die "TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied"
+  [[ -f "$ADMIN_AUTH_CAPABILITY_FILE" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE does not exist"
+  admin_auth_capability="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" capability)"
+  admin_auth_source_sha="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" source_sha)"
+  admin_auth_reason="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" reason)"
+  admin_auth_approved_by="$(live_betting_first_env_value "$ADMIN_AUTH_CAPABILITY_FILE" approved_by)"
+  [[ "$admin_auth_capability" == "legacy-admin-auth-accepted" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE capability must be legacy-admin-auth-accepted"
+  [[ "$admin_auth_source_sha" == "$TARGET_SHA" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE source_sha does not match TARGET_SHA"
+  [[ -n "$admin_auth_reason" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE reason must be non-empty"
+  [[ -n "$admin_auth_approved_by" ]] ||
+    oci_die "ADMIN_AUTH_CAPABILITY_FILE approved_by must be non-empty"
+  ADMIN_AUTH_ROLLBACK_CHECK=explicit-capability-override
+fi
+
 source_run_json="$WORK_DIR/source-run.json"
 trusted_source_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
 gh api "repos/$REPO/actions/runs/$BASELINE_SOURCE_RUN_ID/attempts/$BASELINE_SOURCE_RUN_ATTEMPT" >"$source_run_json"
@@ -677,7 +770,10 @@ validate_source_run "$source_run_json" "$trusted_source_workflow_id"
 
 artifacts_json="$WORK_DIR/source-run-artifacts.json"
 gh api "repos/$REPO/actions/runs/$BASELINE_SOURCE_RUN_ID/artifacts" >"$artifacts_json"
-validate_artifact_listing "$artifacts_json"
+validate_artifact_listing \
+  "$artifacts_json" \
+  "$BASELINE_ARTIFACT_NAME" \
+  "baseline"
 
 BASELINE_DIR="$OUTPUT_DIR/baseline"
 prepare_private_dir "$BASELINE_DIR"
@@ -687,27 +783,97 @@ verify_checksums "$BASELINE_DIR"
 [[ -f "$BASELINE_DIR/baseline-provenance.env" ]] || oci_die "baseline artifact is missing baseline-provenance.env"
 [[ -f "$BASELINE_DIR/images.tsv" ]] || oci_die "baseline artifact is missing images.tsv"
 [[ -f "$BASELINE_DIR/queues.tsv" ]] || oci_die "baseline artifact is missing queues.tsv"
-# shellcheck disable=SC1090
-source "$BASELINE_DIR/baseline-provenance.env"
-[[ "${baseline_source_sha:-}" == "$TARGET_SHA" ]] || oci_die "baseline source SHA does not match TARGET_SHA"
-[[ "${baseline_deploy_run_attempt:-}" == "1" ]] || oci_die "baseline deploy provenance is not first-attempt"
-[[ "${baseline_build_run_attempt:-}" == "1" ]] || oci_die "baseline build provenance is not first-attempt"
-validate_positive_int "${baseline_deploy_run_id:-0}" || oci_die "baseline deploy provenance is missing a run ID"
-validate_positive_int "${baseline_build_run_id:-0}" || oci_die "baseline build provenance is missing a run ID"
-[[ "${database_restore:-}" == "disabled" ]] || oci_die "database restore must remain disabled"
-[[ -n "${public_url:-}" && -n "${redirect_url:-}" ]] || oci_die "baseline artifact is missing public URLs"
+validate_evidence_env_file \
+  "$BASELINE_DIR/baseline-provenance.env" \
+  "baseline-provenance.env"
+baseline_source_sha="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_source_sha
+)" || oci_die "baseline provenance is missing baseline_source_sha"
+baseline_deploy_workflow="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_deploy_workflow
+)" || oci_die "baseline provenance is missing baseline_deploy_workflow"
+baseline_deploy_run_id="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_deploy_run_id
+)" || oci_die "baseline deploy provenance is missing a run ID"
+baseline_deploy_run_attempt="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_deploy_run_attempt
+)" || oci_die "baseline deploy provenance is missing a run attempt"
+baseline_build_workflow="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_build_workflow
+)" || oci_die "baseline provenance is missing baseline_build_workflow"
+baseline_build_run_id="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_build_run_id
+)" || oci_die "baseline build provenance is missing a run ID"
+baseline_build_run_attempt="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_build_run_attempt
+)" || oci_die "baseline build provenance is missing a run attempt"
+baseline_capture_run_id="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_capture_run_id
+)" || oci_die "baseline provenance is missing baseline_capture_run_id"
+baseline_capture_run_attempt="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_capture_run_attempt
+)" || oci_die "baseline provenance is missing baseline_capture_run_attempt"
+baseline_namespace="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" namespace
+)" || oci_die "baseline provenance is missing namespace"
+public_url="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" public_url
+)" || oci_die "baseline artifact is missing public_url"
+redirect_url="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" redirect_url
+)" || oci_die "baseline artifact is missing redirect_url"
+diagnostic_url="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" diagnostic_url || true
+)"
+sse_path="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" sse_path || true
+)"
+sse_required="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" sse_required || true
+)"
+database_restore="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" database_restore
+)" || oci_die "baseline provenance is missing database_restore"
+
+[[ "$baseline_source_sha" == "$TARGET_SHA" ]] || oci_die "baseline source SHA does not match TARGET_SHA"
+[[ "$baseline_deploy_workflow" == "oci-production-deploy" ]] ||
+  oci_die "baseline deploy workflow is not trusted"
+[[ "$baseline_deploy_run_attempt" == "1" ]] || oci_die "baseline deploy provenance is not first-attempt"
+[[ "$baseline_build_workflow" == "oci-production-build" ]] ||
+  oci_die "baseline build workflow is not trusted"
+[[ "$baseline_build_run_attempt" == "1" ]] || oci_die "baseline build provenance is not first-attempt"
+validate_positive_int "$baseline_deploy_run_id" || oci_die "baseline deploy provenance is missing a run ID"
+validate_positive_int "$baseline_build_run_id" || oci_die "baseline build provenance is missing a run ID"
+validate_positive_int "$baseline_capture_run_id" ||
+  oci_die "baseline provenance is missing a capture run ID"
+[[ "$baseline_capture_run_attempt" == "1" ]] ||
+  oci_die "baseline capture provenance is not first-attempt"
+[[ "$baseline_namespace" == "$OCI_K8S_NAMESPACE" ]] ||
+  oci_die "baseline namespace does not match the selected namespace"
+[[ "$database_restore" == "disabled" ]] || oci_die "database restore must remain disabled"
+[[ "$public_url" == https://* && "$redirect_url" == https://* ]] ||
+  oci_die "baseline artifact public URLs must use https://"
 if [[ -z "$OCI_PUBLIC_URL" ]]; then
   OCI_PUBLIC_URL="$public_url"
+else
+  [[ "$OCI_PUBLIC_URL" == "$public_url" ]] || oci_die "OCI_PUBLIC_URL does not match the trusted baseline public URL"
 fi
 if [[ -z "$OCI_REDIRECT_URL" ]]; then
   OCI_REDIRECT_URL="$redirect_url"
+else
+  [[ "$OCI_REDIRECT_URL" == "$redirect_url" ]] || oci_die "OCI_REDIRECT_URL does not match the trusted baseline redirect URL"
 fi
 if [[ -z "$OCI_DIAGNOSTIC_URL" ]]; then
   OCI_DIAGNOSTIC_URL="${diagnostic_url:-}"
+elif [[ -n "${diagnostic_url:-}" ]]; then
+  [[ "$OCI_DIAGNOSTIC_URL" == "$diagnostic_url" ]] || oci_die "OCI_DIAGNOSTIC_URL does not match the trusted baseline diagnostic URL"
 fi
 if [[ -n "${sse_path:-}" ]]; then
   SSE_PATH="$sse_path"
 fi
+SSE_REQUIRED="${sse_required:-true}"
+[[ "$SSE_REQUIRED" == "true" || "$SSE_REQUIRED" == "false" ]] ||
+  oci_die "baseline sse_required must be true or false"
 
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
 deploy_run_json="$WORK_DIR/deploy-run.json"
@@ -720,6 +886,254 @@ validate_run_metadata "$build_run_json" "$trusted_build_workflow_id" \
   '.github/workflows/oci-production-build.yml' 'workflow_run' "$TARGET_SHA"
 
 load_baseline_images "$BASELINE_DIR/images.tsv"
+
+INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
+OCI_INFRASTRUCTURE_PROVENANCE_SHA256="${OCI_INFRASTRUCTURE_PROVENANCE_SHA256:-}"
+OCI_RUNTIME_FINGERPRINT="${OCI_RUNTIME_FINGERPRINT:-}"
+validate_positive_int "$INFRASTRUCTURE_RUN_ID" || oci_die "INFRASTRUCTURE_RUN_ID must be positive"
+[[ "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_INFRASTRUCTURE_PROVENANCE_SHA256 must be a sha256 hex digest"
+[[ "$OCI_RUNTIME_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_RUNTIME_FINGERPRINT must be a sha256 hex digest"
+[[ -f "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" ]] ||
+  oci_die "OCI_INFRASTRUCTURE_PROVENANCE_FILE is missing"
+validate_evidence_env_file \
+  "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" \
+  "selected infrastructure provenance"
+selected_infrastructure_run_id="$(
+  evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" infrastructure_run_id
+)" || oci_die "selected infrastructure provenance is missing infrastructure_run_id"
+selected_infrastructure_run_attempt="$(
+  evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" infrastructure_run_attempt
+)" || oci_die "selected infrastructure provenance is missing infrastructure_run_attempt"
+selected_infrastructure_runtime_mode="$(
+  evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" runtime_mode
+)" || oci_die "selected infrastructure provenance is missing runtime_mode"
+selected_infrastructure_namespace="$(
+  evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" namespace
+)" || oci_die "selected infrastructure provenance is missing namespace"
+case "$selected_infrastructure_runtime_mode" in
+  oke)
+    selected_infrastructure_runtime_fingerprint="$(
+      evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" cluster_fingerprint
+    )" || oci_die "selected OKE infrastructure provenance is missing cluster_fingerprint"
+    ;;
+  k3s)
+    selected_infrastructure_runtime_fingerprint="$(
+      evidence_value "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" instance_fingerprint
+    )" || oci_die "selected k3s infrastructure provenance is missing instance_fingerprint"
+    ;;
+  *)
+    oci_die "selected infrastructure provenance runtime_mode is invalid"
+    ;;
+esac
+validate_positive_int "$selected_infrastructure_run_id" ||
+  oci_die "selected infrastructure provenance run ID is invalid"
+[[ "$selected_infrastructure_run_attempt" == "1" ]] ||
+  oci_die "selected infrastructure provenance is not first-attempt"
+[[ "$selected_infrastructure_runtime_fingerprint" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "selected infrastructure provenance runtime fingerprint is invalid"
+[[ "$selected_infrastructure_namespace" == "$OCI_K8S_NAMESPACE" ]] ||
+  oci_die "selected infrastructure provenance namespace does not match"
+
+ORIGINAL_DEPLOY_PROVENANCE_FILE="$BASELINE_DIR/trusted-deploy-provenance.txt"
+DEPLOY_PROVENANCE_ORIGIN=baseline-embedded
+if [[ -f "$ORIGINAL_DEPLOY_PROVENANCE_FILE" ]]; then
+  checksum_manifest_contains_once "$BASELINE_DIR" "trusted-deploy-provenance.txt" ||
+    oci_die "embedded trusted deploy provenance is not covered exactly once by baseline checksums"
+else
+  DEPLOY_PROVENANCE_ORIGIN=reconstructed-exact-deploy-artifact
+  deploy_artifact_name="oci-deploy-provenance-${baseline_deploy_run_id}-1"
+  deploy_artifacts_json="$WORK_DIR/deploy-run-artifacts.json"
+  gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/artifacts" >"$deploy_artifacts_json"
+  validate_artifact_listing \
+    "$deploy_artifacts_json" \
+    "$deploy_artifact_name" \
+    "deploy provenance"
+  DEPLOY_PROVENANCE_DIR="$WORK_DIR/deploy-provenance"
+  prepare_private_dir "$DEPLOY_PROVENANCE_DIR"
+  gh run download "$baseline_deploy_run_id" --repo "$REPO" \
+    --name "$deploy_artifact_name" --dir "$DEPLOY_PROVENANCE_DIR" >/dev/null
+  [[ -z "$(find "$DEPLOY_PROVENANCE_DIR" -type l -print -quit)" ]] ||
+    oci_die "deploy provenance artifact must not contain symbolic links"
+  [[ -f "$DEPLOY_PROVENANCE_DIR/provenance.txt" ]] ||
+    oci_die "deploy provenance artifact is missing provenance.txt"
+  [[ -f "$DEPLOY_PROVENANCE_DIR/images.tsv" ]] ||
+    oci_die "deploy provenance artifact is missing images.tsv"
+  [[ -f "$DEPLOY_PROVENANCE_DIR/rabbitmq-baseline.txt" ]] ||
+    oci_die "deploy provenance artifact is missing rabbitmq-baseline.txt"
+  [[ "$(sha256_file "$DEPLOY_PROVENANCE_DIR/images.tsv")" == \
+     "$(sha256_file "$BASELINE_DIR/images.tsv")" ]] ||
+    oci_die "recovered deploy provenance images do not match the rollback baseline"
+  ORIGINAL_DEPLOY_PROVENANCE_FILE="$DEPLOY_PROVENANCE_DIR/provenance.txt"
+fi
+
+validate_evidence_env_file \
+  "$ORIGINAL_DEPLOY_PROVENANCE_FILE" \
+  "trusted deploy provenance"
+deploy_source_sha="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" source_sha
+)" || oci_die "trusted deploy provenance is missing source_sha"
+deployment_run_id="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" deployment_run_id
+)" || oci_die "trusted deploy provenance is missing deployment_run_id"
+deployment_run_attempt="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" deployment_run_attempt
+)" || oci_die "trusted deploy provenance is missing deployment_run_attempt"
+runtime_mode="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_mode
+)" || oci_die "trusted deploy provenance is missing runtime_mode"
+runtime_fingerprint="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_fingerprint
+)" || oci_die "trusted deploy provenance is missing runtime_fingerprint"
+image_provenance_sha256="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" image_provenance_sha256
+)" || oci_die "trusted deploy provenance is missing image_provenance_sha256"
+rabbitmq_baseline_sha256="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" rabbitmq_baseline_sha256
+)" || oci_die "trusted deploy provenance is missing rabbitmq_baseline_sha256"
+rendered_manifest_sha256="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" rendered_manifest_sha256
+)" || oci_die "trusted deploy provenance is missing rendered_manifest_sha256"
+deploy_public_host="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" public_host
+)" || oci_die "trusted deploy provenance is missing public_host"
+deploy_canonical_host="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" canonical_host
+)" || oci_die "trusted deploy provenance is missing canonical_host"
+deploy_redirect_host="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" redirect_host
+)" || oci_die "trusted deploy provenance is missing redirect_host"
+deploy_diagnostic_host="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" diagnostic_host
+)" || oci_die "trusted deploy provenance is missing diagnostic_host"
+
+[[ "$deploy_source_sha" == "$TARGET_SHA" ]] ||
+  oci_die "trusted deploy provenance source SHA does not match TARGET_SHA"
+[[ "$deployment_run_id" == "$baseline_deploy_run_id" ]] ||
+  oci_die "trusted deploy provenance run does not match baseline provenance"
+[[ "$deployment_run_attempt" == "1" ]] ||
+  oci_die "trusted deploy provenance is not first-attempt"
+[[ "$runtime_mode" == "oke" || "$runtime_mode" == "k3s" ]] ||
+  oci_die "trusted deploy provenance runtime_mode is invalid"
+[[ "$runtime_fingerprint" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing a runtime fingerprint"
+[[ "$image_provenance_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing an image provenance hash"
+[[ "$rabbitmq_baseline_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing a RabbitMQ baseline hash"
+[[ "$rendered_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing a rendered manifest hash"
+[[ "$image_provenance_sha256" == "$(sha256_file "$BASELINE_DIR/images.tsv")" ]] ||
+  oci_die "trusted deploy provenance image hash does not match the rollback baseline"
+if [[ "$DEPLOY_PROVENANCE_ORIGIN" == "reconstructed-exact-deploy-artifact" ]]; then
+  [[ "$rabbitmq_baseline_sha256" == \
+     "$(sha256_file "$DEPLOY_PROVENANCE_DIR/rabbitmq-baseline.txt")" ]] ||
+    oci_die "recovered deploy provenance RabbitMQ hash is invalid"
+fi
+[[ "$deploy_public_host" == "$deploy_canonical_host" ]] ||
+  oci_die "trusted deploy provenance public and canonical hosts differ"
+[[ "$public_url" == "https://${deploy_canonical_host}" ]] ||
+  oci_die "trusted deploy provenance canonical host does not match the baseline"
+[[ "$redirect_url" == "https://${deploy_redirect_host}" ]] ||
+  oci_die "trusted deploy provenance redirect host does not match the baseline"
+if [[ -n "$diagnostic_url" ]]; then
+  [[ "$diagnostic_url" == "https://${deploy_diagnostic_host}" ]] ||
+    oci_die "trusted deploy provenance diagnostic host does not match the baseline"
+fi
+
+recorded_infrastructure_fields=0
+for infrastructure_key in \
+  infrastructure_run_id \
+  infrastructure_run_attempt \
+  infrastructure_provenance_sha256; do
+  if evidence_value \
+      "$ORIGINAL_DEPLOY_PROVENANCE_FILE" \
+      "$infrastructure_key" >/dev/null; then
+    recorded_infrastructure_fields=$((recorded_infrastructure_fields + 1))
+  fi
+done
+
+NORMALIZED_DEPLOY_PROVENANCE_FILE="$OUTPUT_DIR/trusted-deploy-provenance.txt"
+if [[ "$recorded_infrastructure_fields" == "0" ]]; then
+  DEPLOY_PROVENANCE_BINDING=legacy-runtime-fingerprint
+  [[ "$OCI_RUNTIME_FINGERPRINT" == "$runtime_fingerprint" ]] ||
+    oci_die "selected runtime fingerprint does not match the legacy trusted deploy provenance"
+  if [[ -n "${OCI_RUNTIME_MODE:-}" ]]; then
+    [[ "$OCI_RUNTIME_MODE" == "$runtime_mode" ]] ||
+      oci_die "selected runtime mode does not match the legacy trusted deploy provenance"
+  fi
+  {
+    cat "$ORIGINAL_DEPLOY_PROVENANCE_FILE"
+    printf '\n'
+    printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
+    printf 'infrastructure_run_attempt=1\n'
+    printf 'infrastructure_provenance_sha256=%s\n' \
+      "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256"
+    printf 'infrastructure_binding=legacy-runtime-fingerprint\n'
+    printf 'original_deploy_provenance_sha256=%s\n' \
+      "$(sha256_file "$ORIGINAL_DEPLOY_PROVENANCE_FILE")"
+  } | write_text_atomic "$NORMALIZED_DEPLOY_PROVENANCE_FILE"
+elif [[ "$recorded_infrastructure_fields" == "3" ]]; then
+  DEPLOY_PROVENANCE_BINDING=recorded-infrastructure
+  write_text_atomic "$NORMALIZED_DEPLOY_PROVENANCE_FILE" \
+    <"$ORIGINAL_DEPLOY_PROVENANCE_FILE"
+else
+  oci_die "trusted deploy provenance has incomplete infrastructure binding"
+fi
+chmod 600 "$NORMALIZED_DEPLOY_PROVENANCE_FILE"
+validate_evidence_env_file \
+  "$NORMALIZED_DEPLOY_PROVENANCE_FILE" \
+  "normalized trusted deploy provenance"
+infrastructure_run_id="$(
+  evidence_value "$NORMALIZED_DEPLOY_PROVENANCE_FILE" infrastructure_run_id
+)" || oci_die "trusted deploy provenance is missing an infrastructure run ID"
+infrastructure_run_attempt="$(
+  evidence_value "$NORMALIZED_DEPLOY_PROVENANCE_FILE" infrastructure_run_attempt
+)" || oci_die "trusted deploy provenance is missing an infrastructure run attempt"
+infrastructure_provenance_sha256="$(
+  evidence_value "$NORMALIZED_DEPLOY_PROVENANCE_FILE" infrastructure_provenance_sha256
+)" || oci_die "trusted deploy provenance is missing an infrastructure provenance hash"
+validate_positive_int "$infrastructure_run_id" ||
+  oci_die "trusted deploy provenance is missing an infrastructure run ID"
+[[ "$infrastructure_run_attempt" == "1" ]] ||
+  oci_die "trusted deploy provenance infrastructure run is not first-attempt"
+[[ "$infrastructure_provenance_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "trusted deploy provenance is missing an infrastructure provenance hash"
+[[ "$INFRASTRUCTURE_RUN_ID" == "$infrastructure_run_id" ]] ||
+  oci_die "selected infrastructure run does not match the trusted baseline infrastructure run"
+[[ "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" == "$infrastructure_provenance_sha256" ]] ||
+  oci_die "selected infrastructure provenance hash does not match the trusted baseline"
+[[ "$OCI_RUNTIME_FINGERPRINT" == "$runtime_fingerprint" ]] ||
+  oci_die "selected runtime fingerprint does not match the trusted baseline"
+if [[ -n "${OCI_RUNTIME_MODE:-}" ]]; then
+  [[ "$OCI_RUNTIME_MODE" == "$runtime_mode" ]] ||
+    oci_die "selected runtime mode does not match the trusted baseline"
+fi
+[[ "$(sha256_file "$OCI_INFRASTRUCTURE_PROVENANCE_FILE")" == \
+   "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" ]] ||
+  oci_die "selected infrastructure provenance file hash does not match"
+[[ "$selected_infrastructure_run_id" == "$INFRASTRUCTURE_RUN_ID" ]] ||
+  oci_die "selected infrastructure provenance file has the wrong run ID"
+[[ "$selected_infrastructure_runtime_mode" == "$runtime_mode" ]] ||
+  oci_die "selected infrastructure provenance runtime mode does not match the trusted baseline"
+[[ "$selected_infrastructure_runtime_fingerprint" == "$OCI_RUNTIME_FINGERPRINT" ]] ||
+  oci_die "selected infrastructure provenance runtime fingerprint does not match"
+
+write_text_atomic "$OUTPUT_DIR/deploy-provenance-binding.env" <<EOF2
+origin=$DEPLOY_PROVENANCE_ORIGIN
+binding=$DEPLOY_PROVENANCE_BINDING
+source_sha=$deploy_source_sha
+deployment_run_id=$deployment_run_id
+deployment_run_attempt=$deployment_run_attempt
+infrastructure_run_id=$infrastructure_run_id
+infrastructure_run_attempt=$infrastructure_run_attempt
+infrastructure_provenance_sha256=$infrastructure_provenance_sha256
+runtime_mode=$runtime_mode
+runtime_fingerprint=$runtime_fingerprint
+original_deploy_provenance_sha256=$(sha256_file "$ORIGINAL_DEPLOY_PROVENANCE_FILE")
+normalized_deploy_provenance_sha256=$(sha256_file "$NORMALIZED_DEPLOY_PROVENANCE_FILE")
+EOF2
 : >"$OUTPUT_DIR/exact-digest-verification.tsv"
 : >"$OUTPUT_DIR/public-verification.tsv"
 : >"$OUTPUT_DIR/sse-verification.tsv"
@@ -762,6 +1176,10 @@ mode=dry-run
 target_sha=$TARGET_SHA
 baseline_source_run_id=$BASELINE_SOURCE_RUN_ID
 baseline_artifact_name=$BASELINE_ARTIFACT_NAME
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
+deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
+admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 database_restore=disabled
 EOF2
   oci_log "oci_rollback_validation=PASS mode=dry-run target_sha=$TARGET_SHA"
@@ -834,6 +1252,10 @@ mode=execute
 target_sha=$TARGET_SHA
 baseline_source_run_id=$BASELINE_SOURCE_RUN_ID
 baseline_artifact_name=$BASELINE_ARTIFACT_NAME
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
+deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
+admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 completed_services=${completed_services[*]}
 database_restore=disabled
 EOF2

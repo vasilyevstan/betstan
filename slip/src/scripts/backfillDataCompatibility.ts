@@ -45,6 +45,22 @@ const explicitBetKind = (value: unknown): BetKind | undefined =>
     ? value
     : undefined;
 
+const boardRevision = (value: unknown): number | undefined =>
+  typeof value === "number"
+  && Number.isSafeInteger(value)
+  && value >= 1
+    ? value
+    : undefined;
+
+const boardFingerprint = (value: unknown): string | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+};
+
 const inferSlipBetKind = (document: RawDocument): BetKind => {
   const parentKind = explicitBetKind(document.betKind);
   if (parentKind) {
@@ -160,6 +176,29 @@ const buildUpdateSet = (
     updateSet.draftKey = rowFallbackKind;
   }
 
+  if (document.status === SlipStatus.DRAFT) {
+    const normalizedBoardRevision = boardRevision(document.boardRevision) ?? 1;
+    const normalizedBoardFingerprint =
+      boardFingerprint(document.boardFingerprint)
+      ?? new mongoose.Types.ObjectId().toHexString();
+
+    if (boardRevision(document.boardRevision) === undefined) {
+      updateSet.boardRevision = normalizedBoardRevision;
+    }
+    if (boardFingerprint(document.boardFingerprint) === undefined) {
+      updateSet.boardFingerprint = normalizedBoardFingerprint;
+    }
+    if (
+      boardRevision(document.legacyBoardRevision) === undefined
+      || boardFingerprint(document.legacyBoardFingerprint) === undefined
+      || boardFingerprint(document.legacyBoardConfirmedAt) === undefined
+    ) {
+      updateSet.legacyBoardRevision = normalizedBoardRevision;
+      updateSet.legacyBoardFingerprint = normalizedBoardFingerprint;
+      updateSet.legacyBoardConfirmedAt = new Date().toISOString();
+    }
+  }
+
   const rows = Array.isArray(document.rows) ? document.rows : [];
   rows.forEach((row, index) => {
     const rowRecord = asRecord(row);
@@ -195,7 +234,12 @@ async function processCollection(
           _id: 1,
           status: 1,
           betKind: 1,
+          boardFingerprint: 1,
+          boardRevision: 1,
           draftKey: 1,
+          legacyBoardConfirmedAt: 1,
+          legacyBoardFingerprint: 1,
+          legacyBoardRevision: 1,
           rows: 1,
         },
       })

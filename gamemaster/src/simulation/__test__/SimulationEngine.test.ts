@@ -82,6 +82,33 @@ function marketTimeline(homeGoal = false, awayGoal = false): SimTimeline {
   };
 }
 
+function cappedYellowTimeline(): SimTimeline {
+  return {
+    engineVersion: 1,
+    eventId: "market-event",
+    seed: "manual-capped-yellow",
+    durationMs: DURATION,
+    stoppage: { first: 1, second: 2 },
+    config: resolveSimulationConfig({
+      durationMs: DURATION,
+      caps: {
+        yellows: 1,
+        reds: 2,
+        corners: 2,
+        penaltyAwards: 2,
+      },
+    }),
+    entries: [
+      entry(0, 0, LiveIncidentType.KICK_OFF, EventPhase.FIRST_HALF, 0),
+      entry(1, 1000, LiveIncidentType.YELLOW_CARD, EventPhase.FIRST_HALF, 2, "HOME"),
+      entry(2, 30000, LiveIncidentType.HALF_TIME, EventPhase.HALF_TIME, 45),
+      entry(3, 30000, LiveIncidentType.SECOND_HALF_KICK_OFF, EventPhase.SECOND_HALF, 46),
+      entry(4, 40000, LiveIncidentType.CORNER, EventPhase.SECOND_HALF, 60, "HOME"),
+      entry(5, DURATION, LiveIncidentType.FULL_TIME, EventPhase.FULL_TIME, 90),
+    ],
+  };
+}
+
 describe("simulation random sources", () => {
   it("uses deterministic independent SHA-256 streams and one-uniform Poisson draws", () => {
     const first = createNamedRng("seed", "goals");
@@ -260,6 +287,40 @@ describe("simulation timeline", () => {
       }
     });
   });
+
+  it("keeps low-cap simulations plausible while closing exhausted next-event markets", () => {
+    let sawClosedNextMarket = false;
+    let sawFullTimeNone = false;
+
+    for (let seed = 0; seed < 50; seed += 1) {
+      const result = simulateMatch({
+        eventId: `low-cap-${seed}`,
+        seed,
+        config: {
+          caps: {
+            yellows: 1,
+            reds: 1,
+            corners: 1,
+            penaltyAwards: 1,
+          },
+        },
+      });
+      assertSimulationInvariants(result);
+      const fullTime = result.transitions.find(
+        (transition) => transition.incident.type === LiveIncidentType.FULL_TIME
+      )!;
+      sawClosedNextMarket = sawClosedNextMarket || fullTime.markets.some(
+        (market) => market.status === LiveMarketStatus.CLOSED
+      );
+      sawFullTimeNone = sawFullTimeNone || fullTime.settlements.some(
+        (settlement) =>
+          settlement.settlementReason === LiveSettlementReason.FULL_TIME_NONE
+      );
+    }
+
+    expect(sawClosedNextMarket).toBe(true);
+    expect(sawFullTimeNone).toBe(true);
+  });
 });
 
 describe("market projection", () => {
@@ -327,6 +388,43 @@ describe("market projection", () => {
     expect(outcome.markets.map((market) => market.quoteVersion)).toEqual(
       transitions[outcomeIndex - 1].markets.map((market) => market.quoteVersion)
     );
+  });
+
+  it("closes exhausted next-event markets without inventing doomed none-only versions", () => {
+    const timeline = cappedYellowTimeline();
+    const transitions = projectTransitions(timeline);
+    const byType = (type: LiveIncidentType) =>
+      transitions.find((transition) => transition.incident.type === type)!;
+    const nextYellowStatus = (transitionType: LiveIncidentType) =>
+      byType(transitionType).markets.find(
+        (market) => market.marketType === LiveMarketType.NEXT_YELLOW_CARD
+      )!;
+
+    expect(nextYellowStatus(LiveIncidentType.YELLOW_CARD)).toMatchObject({
+      marketVersion: 2,
+      quoteVersion: 1,
+      status: LiveMarketStatus.CLOSED,
+    });
+    expect(nextYellowStatus(LiveIncidentType.HALF_TIME).status).toBe(
+      LiveMarketStatus.CLOSED
+    );
+    expect(
+      nextYellowStatus(LiveIncidentType.SECOND_HALF_KICK_OFF).status
+    ).toBe(LiveMarketStatus.CLOSED);
+    expect(nextYellowStatus(LiveIncidentType.FULL_TIME).status).toBe(
+      LiveMarketStatus.CLOSED
+    );
+
+    const fullTime = byType(LiveIncidentType.FULL_TIME);
+    expect(fullTime.settlements.map((settlement) => settlement.marketId).sort()).toEqual([
+      "market-event:NEXT_CORNER",
+      "market-event:NEXT_PENALTY",
+      "market-event:NEXT_RED_CARD",
+    ]);
+    expect(fullTime.settlements.every((settlement) =>
+      settlement.settlementReason === LiveSettlementReason.FULL_TIME_NONE
+      && settlement.winningSide === "NONE"
+    )).toBe(true);
   });
 
   it("settles the half-time market to home, draw, and away", () => {

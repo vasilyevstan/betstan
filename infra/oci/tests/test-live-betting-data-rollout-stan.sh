@@ -347,11 +347,16 @@ for literal in \
   'production-run-exclusivity-stan.sh' \
   'shared-mongo-operation-lock-stan.sh acquire' \
   'shared-mongo-operation-lock-stan.sh release' \
+  'shared-mongo-operation-lock-stan.sh renew' \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
   'baseline-capture-stan.sh' \
   'SSE_REQUIREMENT: deployed-source' \
+  'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' \
+  'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
+  '(failure() || cancelled())' \
+  "steps.maintenance_enter.outcome == 'success'" \
   'verify-live-betting-data-evidence-stan.sh'; do
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "data workflow is missing safety contract: $literal"
@@ -366,7 +371,8 @@ for literal in \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh verify-held' \
   'live-data-maintenance-stan.sh release' \
-  'live-data-maintenance-stan.sh hold'; do
+  'live-data-maintenance-stan.sh hold' \
+  "steps.handoff.outcome == 'success'"; do
   grep -Fq "$literal" "$DEPLOY_WORKFLOW" ||
     fail "deploy workflow is missing data prerequisite: $literal"
 done
@@ -400,6 +406,7 @@ require_order(
         "Fence writes and quiesce legacy data writers",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
+        "shared-mongo-operation-lock-stan.sh renew",
         "Upload exact sanitized data evidence",
         "Restore runtime if final handoff packaging failed",
         "Release database operation lock unless handed to deploy",
@@ -438,6 +445,27 @@ for literal in (
 ):
     if literal not in deploy:
         raise SystemExit(f"deploy workflow is missing fenced validation contract: {literal}")
+
+deploy_lines = deploy.splitlines()
+acquire_indexes = [
+    index
+    for index, line in enumerate(deploy_lines)
+    if "shared-mongo-operation-lock-stan.sh acquire" in line
+]
+if len(acquire_indexes) != 2:
+    raise SystemExit("deploy workflow must have exactly two guarded lock acquisitions")
+for index in acquire_indexes:
+    invocation = "\n".join(deploy_lines[max(0, index - 6) : index + 1])
+    if (
+        'LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS"'
+        not in invocation
+    ):
+        raise SystemExit("deploy lock acquisition is missing the bounded deploy lease")
+if sum(
+    "shared-mongo-operation-lock-stan.sh renew" in line
+    for line in deploy_lines
+) != 2:
+    raise SystemExit("deploy workflow must renew each verified lock path exactly once")
 PY
 
 echo "live_betting_data_rollout_tests=PASS"

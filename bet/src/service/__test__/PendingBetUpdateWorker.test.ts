@@ -768,3 +768,75 @@ it("logs processing failures and sanitizes stored errors", async () => {
 
   findOneSpy.mockRestore();
 });
+
+// Regression coverage for code-review finding #3: `runNowForSlip` must stop
+// draining after an attempt gets rescheduled with a backoff delay instead of
+// immediately reclaiming (and exhausting) every remaining attempt in the
+// same call, since its loop previously ignored `nextAttemptAt` entirely.
+it("runNowForSlip performs a single forced attempt and honors the backoff delay instead of exhausting all attempts", async () => {
+  const clock = createTestClock();
+  const slipId = new mongoose.Types.ObjectId().toHexString();
+  const worker = createWorker(clock, {
+    maxAttempts: 5,
+  });
+
+  // No matching Bet exists yet, so every attempt fails with
+  // "Bet aggregate is not available yet" and gets rescheduled with backoff
+  // until maxAttempts is reached.
+  await parkPendingBetUpdate(
+    PendingBetUpdateKind.SETTLE_SLIP,
+    buildSettleSlipEvent({ slipId })
+  );
+
+  await worker.runNowForSlip(slipId);
+
+  let pendingUpdate = await PendingBetUpdate.findOne({ slipId });
+  expect(pendingUpdate!.status).toEqual(PendingBetUpdateStatus.PENDING);
+  expect(pendingUpdate!.attemptCount).toEqual(1);
+  expect(pendingUpdate!.nextAttemptAt.getTime() - clock.now().getTime()).toEqual(
+    1_000
+  );
+
+  // Calling it again before the backoff delay elapses still performs
+  // exactly one more forced attempt (the "something changed, try now"
+  // semantics of runNowForSlip) and then stops draining rather than
+  // repeatedly reclaiming the same record until it is exhausted.
+  await worker.runNowForSlip(slipId);
+  pendingUpdate = await PendingBetUpdate.findOne({ slipId });
+  expect(pendingUpdate!.status).toEqual(PendingBetUpdateStatus.PENDING);
+  expect(pendingUpdate!.attemptCount).toEqual(2);
+  expect(pendingUpdate!.nextAttemptAt.getTime() - clock.now().getTime()).toEqual(
+    2_000
+  );
+
+  expect(pendingUpdate!.attemptCount).toBeLessThan(worker["maxAttempts"]);
+});
+
+it("runNowForSlip drains every currently-due record for a slip but stops once the remainder is backed off", async () => {
+  const clock = createTestClock();
+  const slipId = new mongoose.Types.ObjectId().toHexString();
+  const worker = createWorker(clock, {
+    maxAttempts: 5,
+  });
+
+  await parkPendingBetUpdate(
+    PendingBetUpdateKind.SETTLE_SLIP,
+    buildSettleSlipEvent({ slipId })
+  );
+
+  // First forced attempt fails (no Bet yet) and reschedules with backoff.
+  await worker.runNowForSlip(slipId);
+  let pendingUpdate = await PendingBetUpdate.findOne({ slipId });
+  expect(pendingUpdate!.attemptCount).toEqual(1);
+  expect(pendingUpdate!.status).toEqual(PendingBetUpdateStatus.PENDING);
+
+  // Advance the clock past the backoff window and confirm a normal poll
+  // (not a forced replay) now finds the record due and processes it again,
+  // proving the backoff schedule set by runNowForSlip is real and honored
+  // elsewhere too.
+  clock.advanceBy(1_000);
+  await worker.runNow();
+  pendingUpdate = await PendingBetUpdate.findOne({ slipId });
+  expect(pendingUpdate!.attemptCount).toEqual(2);
+  expect(pendingUpdate!.status).toEqual(PendingBetUpdateStatus.PENDING);
+});

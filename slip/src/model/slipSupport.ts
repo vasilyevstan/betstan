@@ -8,7 +8,7 @@ import {
   SlipStatus,
   TeamSide,
 } from "@betstan/common";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { Types } from "mongoose";
 import { Slip, SlipArchive } from "./Slip";
 import { SlipPublicationState } from "./SlipPublicationState";
@@ -65,10 +65,19 @@ export interface MutableSlip extends MutableModel {
   declineReason?: ModerationDeclineReason | null;
   sourceSlipId?: string | null;
   replacementSlipId?: string | null;
+  boardRevision?: number | null;
+  boardFingerprint?: string | null;
+  legacyBoardRevision?: number | null;
+  legacyBoardFingerprint?: string | null;
+  legacyBoardConfirmedAt?: string | null;
+  legacyBoardConfirmations?: unknown;
   submittedEvent?: SubmittedEventData | null;
   publication?: MutablePublicationState | null;
   rows: ArrayLike<MutableSlipRow> & Iterable<MutableSlipRow>;
 }
+
+const MAX_LEGACY_BOARD_CONFIRMATIONS = 8;
+const LEGACY_BOARD_SESSION_SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 
 export interface MutablePublicationState {
   state?: SlipPublicationState | null;
@@ -150,6 +159,11 @@ export interface PlainSlip {
   declineReason?: ModerationDeclineReason | null;
   sourceSlipId?: string | null;
   replacementSlipId?: string | null;
+  boardRevision?: number | null;
+  boardFingerprint?: string | null;
+  legacyBoardRevision?: number | null;
+  legacyBoardFingerprint?: string | null;
+  legacyBoardConfirmedAt?: string | null;
   submittedEvent?: SubmittedEventData | null;
   publication?: MutablePublicationState | null;
   rows: PlainSlipRow[];
@@ -161,6 +175,8 @@ export type PublishedSubmittedEventData = IPlaceBetEvent["data"] & {
 };
 
 const MAX_PLACEMENT_ATTEMPT_ID_LENGTH = 200;
+const MAX_BOARD_FINGERPRINT_LENGTH = 200;
+const MIN_BOARD_REVISION = 1;
 const LEGACY_PLACEMENT_ATTEMPT_PREFIX = "legacy:";
 
 const setField = (target: MutableModel, key: string, value: unknown) => {
@@ -191,13 +207,51 @@ const normalizePlacementAttemptIdValue = (
   return trimmedValue;
 };
 
+const normalizeBoardFingerprintValue = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmedValue = value.trim();
+
+  if (
+    trimmedValue.length === 0
+    || trimmedValue.length > MAX_BOARD_FINGERPRINT_LENGTH
+  ) {
+    return null;
+  }
+
+  return trimmedValue;
+};
+
+const normalizeBoardRevisionValue = (value: unknown): number | null => {
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  if (
+    !Number.isSafeInteger(numericValue)
+    || numericValue < MIN_BOARD_REVISION
+  ) {
+    return null;
+  }
+
+  return numericValue;
+};
+
 export const normalizeBetKind = (betKind?: string | null): BetKind =>
   betKind === BetKind.LIVE ? BetKind.LIVE : BetKind.PRE_MATCH;
 
 export const parsePlacementAttemptId = (value: unknown) =>
   normalizePlacementAttemptIdValue(value);
 
+export const parseExpectedBoardRevision = (value: unknown) =>
+  normalizeBoardRevisionValue(value);
+
+export const parseExpectedBoardFingerprint = (value: unknown) =>
+  normalizeBoardFingerprintValue(value);
+
 export const createPlacementAttemptId = () => randomUUID();
+
+export const createBoardFingerprint = () => new Types.ObjectId().toHexString();
 
 export const buildLegacyPlacementAttemptId = (slipId: string) =>
   `${LEGACY_PLACEMENT_ATTEMPT_PREFIX}${slipId}`;
@@ -218,6 +272,26 @@ export const isValidSlipId = (slipId: unknown): slipId is string =>
   typeof slipId === "string" && Types.ObjectId.isValid(slipId);
 
 export const createSlipId = (): string => new Types.ObjectId().toHexString();
+
+export const boardRevisionOf = (slip?: { boardRevision?: unknown } | null) =>
+  normalizeBoardRevisionValue(slip?.boardRevision) ?? MIN_BOARD_REVISION;
+
+export const boardFingerprintOf = (slip?: {
+  boardFingerprint?: unknown;
+} | null) => normalizeBoardFingerprintValue(slip?.boardFingerprint);
+
+export const buildLegacyBoardSessionScope = (sessionJwt: unknown) => {
+  if (typeof sessionJwt !== "string" || sessionJwt.length === 0) {
+    return null;
+  }
+
+  return createHash("sha256").update(sessionJwt).digest("hex");
+};
+
+export const advanceSlipBoardIdentity = (slip: MutableSlip) => {
+  setField(slip, "boardRevision", boardRevisionOf(slip) + 1);
+  setField(slip, "boardFingerprint", createBoardFingerprint());
+};
 
 export const isDuplicateKeyError = (error: unknown): error is { code: number } =>
   typeof error === "object"
@@ -348,6 +422,167 @@ const canonicalPlacementAttemptId = (value: {
   parsePlacementAttemptId(value.placementAttemptId)
   ?? buildLegacyPlacementAttemptId(value.slipId);
 
+export const ensureSlipBoardIdentity = (slip: MutableSlip) => {
+  let changed = false;
+
+  if (!normalizeBoardRevisionValue(slip.boardRevision)) {
+    setField(slip, "boardRevision", MIN_BOARD_REVISION);
+    changed = true;
+  }
+
+  if (!normalizeBoardFingerprintValue(slip.boardFingerprint)) {
+    setField(slip, "boardFingerprint", createBoardFingerprint());
+    changed = true;
+  }
+
+  return changed;
+};
+
+export const persistSlipBoardIdentityIfNeeded = async (
+  slip: MutableSlip,
+  {
+    legacyConfirmationScope = null,
+  }: {
+    legacyConfirmationScope?: string | null;
+  } = {}
+) => {
+  ensureSlipBoardIdentity(slip);
+
+  const slipId = slipIdOf(slip);
+  if (!slipId || !Types.ObjectId.isValid(slipId)) {
+    return slip;
+  }
+
+  const fallbackRevision = boardRevisionOf(slip);
+  const fallbackFingerprint =
+    boardFingerprintOf(slip) ?? createBoardFingerprint();
+  const updatePipeline: Record<string, unknown>[] = [
+    {
+      $set: {
+        boardRevision: {
+          $let: {
+            vars: {
+              currentRevision: {
+                $convert: {
+                  input: "$boardRevision",
+                  to: "double",
+                  onError: null,
+                  onNull: null,
+                },
+              },
+            },
+            in: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$$currentRevision", null] },
+                    { $gte: ["$$currentRevision", MIN_BOARD_REVISION] },
+                    {
+                      $eq: [
+                        "$$currentRevision",
+                        { $floor: "$$currentRevision" },
+                      ],
+                    },
+                  ],
+                },
+                { $toLong: "$$currentRevision" },
+                fallbackRevision,
+              ],
+            },
+          },
+        },
+        boardFingerprint: {
+          $let: {
+            vars: {
+              currentFingerprint: {
+                $cond: [
+                  { $eq: [{ $type: "$boardFingerprint" }, "string"] },
+                  { $trim: { input: "$boardFingerprint" } },
+                  "",
+                ],
+              },
+            },
+            in: {
+              $cond: [
+                { $gt: [{ $strLenCP: "$$currentFingerprint" }, 0] },
+                "$$currentFingerprint",
+                fallbackFingerprint,
+              ],
+            },
+          },
+        },
+      },
+    },
+  ];
+
+  if (
+    legacyConfirmationScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(legacyConfirmationScope)
+  ) {
+    const confirmedAt = new Date().toISOString();
+    const nextLegacyBoardConfirmations = {
+      $slice: [
+        {
+          $concatArrays: [
+            {
+              $filter: {
+                input: {
+                  $cond: [
+                    { $isArray: "$legacyBoardConfirmations" },
+                    "$legacyBoardConfirmations",
+                    [],
+                  ],
+                },
+                as: "confirmation",
+                cond: {
+                  $ne: [
+                    "$$confirmation.sessionScope",
+                    legacyConfirmationScope,
+                  ],
+                },
+              },
+            },
+            [
+              {
+                sessionScope: legacyConfirmationScope,
+                boardRevision: "$boardRevision",
+                boardFingerprint: "$boardFingerprint",
+                confirmedAt,
+              },
+            ],
+          ],
+        },
+        -MAX_LEGACY_BOARD_CONFIRMATIONS,
+      ],
+    };
+    updatePipeline.push({
+      $set: {
+        legacyBoardConfirmations: {
+          $cond: [
+            { $eq: ["$status", SlipStatus.DRAFT] },
+            nextLegacyBoardConfirmations,
+            "$legacyBoardConfirmations",
+          ],
+        },
+      },
+    });
+  }
+
+  const updated = await Slip.collection.findOneAndUpdate(
+    { _id: new Types.ObjectId(slipId) },
+    updatePipeline,
+    {
+      projection: { legacyBoardConfirmations: 0 },
+      returnDocument: "after",
+    }
+  );
+  const authoritativeSlip = asPlainSlip(
+    (updated as { value?: unknown })?.value ?? updated
+  );
+
+  return authoritativeSlip ?? slip;
+};
+
 export const normalizeSlip = (
   slip: MutableSlip,
   fallbackBetKind?: BetKind
@@ -363,7 +598,16 @@ export const normalizeSlip = (
     }
   }
 
+  ensureSlipBoardIdentity(slip);
+
   return betKind;
+};
+
+export const ensurePlainSlipBoardIdentity = (slip: PlainSlip) => {
+  slip.boardRevision = boardRevisionOf(slip);
+  slip.boardFingerprint = boardFingerprintOf(slip) ?? createBoardFingerprint();
+
+  return slip;
 };
 
 export const normalizePlainSlip = (
@@ -379,7 +623,7 @@ export const normalizePlainSlip = (
     betKind: normalizeBetKind(row.betKind ?? betKind),
   }));
 
-  return slip;
+  return ensurePlainSlipBoardIdentity(slip);
 };
 
 export const selectActiveSlip = (
@@ -460,7 +704,75 @@ export const applyAffectedRows = (
 export const toPlainSlip = (slip: MutableSlip): PlainSlip =>
   JSON.parse(JSON.stringify(slip)) as PlainSlip;
 
-const buildSameMarketCondition = (row: PlainSlipRow) => {
+const asPlainSlip = (value: unknown): PlainSlip | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return value as PlainSlip;
+};
+
+const buildRowBetKindExpression = (rowExpression: string) => ({
+  $ifNull: [`${rowExpression}.betKind`, BetKind.PRE_MATCH],
+});
+
+const buildRowKindCondition = (rowExpression: string, betKind: BetKind) =>
+  betKind === BetKind.LIVE
+    ? { $eq: [buildRowBetKindExpression(rowExpression), BetKind.LIVE] }
+    : { $ne: [buildRowBetKindExpression(rowExpression), BetKind.LIVE] };
+
+const buildCurrentRowsExpression = (betKind: BetKind) => ({
+  $filter: {
+    input: { $ifNull: ["$rows", []] },
+    as: "row",
+    cond: buildRowKindCondition("$$row", betKind),
+  },
+});
+
+const buildBoardRevisionExpression = (boardChangedExpression: unknown) => ({
+  $let: {
+    vars: {
+      currentBoardRevision: { $ifNull: ["$boardRevision", 0] },
+      normalizedBoardRevision: {
+        $ifNull: ["$boardRevision", MIN_BOARD_REVISION],
+      },
+    },
+    in: {
+      $cond: [
+        boardChangedExpression,
+        { $add: ["$$currentBoardRevision", 1] },
+        "$$normalizedBoardRevision",
+      ],
+    },
+  },
+});
+
+const buildBoardFingerprintExpression = (boardChangedExpression: unknown) => {
+  const fallbackBoardFingerprint = createBoardFingerprint();
+  const nextBoardFingerprint = createBoardFingerprint();
+
+  return {
+    $let: {
+      vars: {
+        currentBoardFingerprint: {
+          $ifNull: ["$boardFingerprint", fallbackBoardFingerprint],
+        },
+      },
+      in: {
+        $cond: [
+          boardChangedExpression,
+          nextBoardFingerprint,
+          "$$currentBoardFingerprint",
+        ],
+      },
+    },
+  };
+};
+
+const buildSameMarketCondition = (
+  row: PlainSlipRow,
+  rowExpression = "$$row"
+) => {
   if (
     normalizeBetKind(row.betKind) !== BetKind.LIVE
     || !row.marketId
@@ -471,94 +783,257 @@ const buildSameMarketCondition = (row: PlainSlipRow) => {
   return {
     $and: [
       {
-        $eq: [
-          { $ifNull: ["$$row.betKind", BetKind.PRE_MATCH] },
-          BetKind.LIVE,
-        ],
+        $eq: [buildRowBetKindExpression(rowExpression), BetKind.LIVE],
       },
-      { $eq: ["$$row.marketId", row.marketId] },
+      { $eq: [`${rowExpression}.marketId`, row.marketId] },
     ],
   };
 };
+
+const buildMergedDraftRowsExpression = (
+  currentRowsExpression: Record<string, unknown>,
+  rowsToMerge: PlainSlipRow[]
+) =>
+  rowsToMerge.reduce<Record<string, unknown>>(
+    (mergedRowsExpression, rowToMerge) => {
+      const conflictCondition =
+        normalizeBetKind(rowToMerge.betKind) === BetKind.LIVE
+        && rowToMerge.marketId
+          ? buildSameMarketCondition(rowToMerge, "$$row")
+          : { $eq: ["$$row.oddsId", rowToMerge.oddsId] };
+
+      return {
+        $let: {
+          vars: {
+            currentRows: mergedRowsExpression,
+            hasConflict: {
+              $gt: [
+                {
+                  $size: {
+                    $filter: {
+                      input: currentRowsExpression,
+                      as: "row",
+                      cond: conflictCondition,
+                    },
+                  },
+                },
+                0,
+              ],
+            },
+          },
+          in: {
+            $cond: [
+              "$$hasConflict",
+              "$$currentRows",
+              { $concatArrays: ["$$currentRows", [rowToMerge]] },
+            ],
+          },
+        },
+      };
+    },
+    currentRowsExpression
+  );
 
 export const upsertDraftSlipRow = async (
   userId: string,
   betKind: BetKind,
   row: PlainSlipRow
 ) => {
-  const draftScope = buildSlipScope(SlipStatus.DRAFT, betKind, userId);
+  const activeScope = {
+    userId,
+    status: {
+      $in: [SlipStatus.DRAFT, SlipStatus.SUBMITTED],
+    },
+    ...buildBetKindScope(betKind),
+  };
   const now = new Date().toISOString();
   const sameMarketCondition = buildSameMarketCondition(row);
-  const currentRows = { $ifNull: ["$rows", []] };
+  const currentRows = buildCurrentRowsExpression(betKind);
   const updatePipeline = [
     {
       $set: {
-        userId,
-        status: SlipStatus.DRAFT,
-        betKind,
-        draftKey: betKind,
-        timestamp: { $ifNull: ["$timestamp", now] },
+        userId: {
+          $cond: [{ $eq: ["$status", SlipStatus.SUBMITTED] }, "$userId", userId],
+        },
+        status: {
+          $cond: [{ $eq: ["$status", SlipStatus.SUBMITTED] }, "$status", SlipStatus.DRAFT],
+        },
+        betKind: {
+          $cond: [{ $eq: ["$status", SlipStatus.SUBMITTED] }, "$betKind", betKind],
+        },
+        draftKey: {
+          $cond: [{ $eq: ["$status", SlipStatus.SUBMITTED] }, "$draftKey", betKind],
+        },
+        timestamp: {
+          $cond: [
+            { $eq: ["$status", SlipStatus.SUBMITTED] },
+            "$timestamp",
+            { $ifNull: ["$timestamp", now] },
+          ],
+        },
         rows: {
-          $let: {
-            vars: {
-              currentRows,
-              rowsWithoutSameMarket: {
-                $filter: {
-                  input: currentRows,
-                  as: "row",
-                  cond: { $not: [sameMarketCondition] },
+          $cond: [
+            { $eq: ["$status", SlipStatus.SUBMITTED] },
+            "$rows",
+            {
+              $let: {
+                vars: {
+                  currentRows,
+                  rowsWithoutSameMarket: {
+                    $filter: {
+                      input: currentRows,
+                      as: "row",
+                      cond: { $not: [sameMarketCondition] },
+                    },
+                  },
+                  hasSameMarket: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: sameMarketCondition,
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  hasDuplicateOdds: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: { $eq: ["$$row.oddsId", row.oddsId] },
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
                 },
-              },
-              hasSameMarket: {
-                $gt: [
-                  {
-                    $size: {
-                      $filter: {
-                        input: currentRows,
-                        as: "row",
-                        cond: sameMarketCondition,
-                      },
-                    },
-                  },
-                  0,
-                ],
-              },
-              hasDuplicateOdds: {
-                $gt: [
-                  {
-                    $size: {
-                      $filter: {
-                        input: currentRows,
-                        as: "row",
-                        cond: { $eq: ["$$row.oddsId", row.oddsId] },
-                      },
-                    },
-                  },
-                  0,
-                ],
-              },
-            },
-            in: {
-              $cond: [
-                "$$hasSameMarket",
-                { $concatArrays: ["$$rowsWithoutSameMarket", [row]] },
-                {
+                in: {
                   $cond: [
-                    "$$hasDuplicateOdds",
-                    "$$currentRows",
-                    { $concatArrays: ["$$currentRows", [row]] },
+                    "$$hasSameMarket",
+                    { $concatArrays: ["$$rowsWithoutSameMarket", [row]] },
+                    {
+                      $cond: [
+                        "$$hasDuplicateOdds",
+                        "$$currentRows",
+                        { $concatArrays: ["$$currentRows", [row]] },
+                      ],
+                    },
                   ],
                 },
-              ],
+              },
             },
-          },
+          ],
+        },
+        boardRevision: {
+          $cond: [
+            { $eq: ["$status", SlipStatus.SUBMITTED] },
+            { $ifNull: ["$boardRevision", MIN_BOARD_REVISION] },
+            {
+              $let: {
+                vars: {
+                  currentRows,
+                  hasSameMarket: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: sameMarketCondition,
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  hasDuplicateOdds: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: { $eq: ["$$row.oddsId", row.oddsId] },
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+                in: buildBoardRevisionExpression({
+                  $or: ["$$hasSameMarket", { $not: ["$$hasDuplicateOdds"] }],
+                }),
+              },
+            },
+          ],
+        },
+        boardFingerprint: {
+          $cond: [
+            { $eq: ["$status", SlipStatus.SUBMITTED] },
+            { $ifNull: ["$boardFingerprint", createBoardFingerprint()] },
+            {
+              $let: {
+                vars: {
+                  currentRows,
+                  hasSameMarket: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: sameMarketCondition,
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                  hasDuplicateOdds: {
+                    $gt: [
+                      {
+                        $size: {
+                          $filter: {
+                            input: currentRows,
+                            as: "row",
+                            cond: { $eq: ["$$row.oddsId", row.oddsId] },
+                          },
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+                in: buildBoardFingerprintExpression({
+                  $or: ["$$hasSameMarket", { $not: ["$$hasDuplicateOdds"] }],
+                }),
+              },
+            },
+          ],
         },
       },
     },
   ];
 
   try {
-    await Slip.collection.updateOne(draftScope, updatePipeline, { upsert: true });
+    await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
+      upsert: true,
+      sort: {
+        status: 1,
+        timestamp: -1,
+        _id: -1,
+      },
+      returnDocument: "after",
+    });
     return;
   } catch (error) {
     if (!isDuplicateKeyError(error)) {
@@ -566,7 +1041,15 @@ export const upsertDraftSlipRow = async (
     }
   }
 
-  await Slip.collection.updateOne(draftScope, updatePipeline, { upsert: false });
+  await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
+    upsert: false,
+    sort: {
+      status: 1,
+      timestamp: -1,
+      _id: -1,
+    },
+    returnDocument: "after",
+  });
 };
 
 export const toPlaceBetRows = (
@@ -671,10 +1154,315 @@ export const submissionMatchesPlacementPayload = (
     slip.submittedEvent?.betKind ?? slip.betKind ?? requestPayload.betKind
   ) === requestPayload.betKind;
 
+export const submissionMatchesBoardConfirmation = (
+  slip: {
+    boardRevision?: unknown;
+    boardFingerprint?: unknown;
+  },
+  confirmation: {
+    expectedBoardRevision: unknown;
+    expectedBoardFingerprint: unknown;
+  }
+) => {
+  const expectedBoardRevision = parseExpectedBoardRevision(
+    confirmation.expectedBoardRevision
+  );
+  const expectedBoardFingerprint = parseExpectedBoardFingerprint(
+    confirmation.expectedBoardFingerprint
+  );
+
+  if (expectedBoardRevision === null || !expectedBoardFingerprint) {
+    return false;
+  }
+
+  return (
+    boardRevisionOf(slip) === expectedBoardRevision
+    && boardFingerprintOf(slip) === expectedBoardFingerprint
+  );
+};
+
+const parseLegacyBoardConfirmation = (
+  boardRevision: unknown,
+  boardFingerprint: unknown
+) => {
+  const expectedBoardRevision = parseExpectedBoardRevision(boardRevision);
+  const expectedBoardFingerprint =
+    parseExpectedBoardFingerprint(boardFingerprint);
+
+  if (expectedBoardRevision === null || !expectedBoardFingerprint) {
+    return null;
+  }
+
+  return {
+    expectedBoardRevision,
+    expectedBoardFingerprint,
+  };
+};
+
+export const legacyBoardConfirmationOf = (
+  value: unknown,
+  sessionScope?: string | null
+) => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const slip = value as {
+    legacyBoardRevision?: unknown;
+    legacyBoardFingerprint?: unknown;
+    legacyBoardConfirmations?: unknown;
+  };
+
+  if (
+    sessionScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(sessionScope)
+    && Array.isArray(slip.legacyBoardConfirmations)
+  ) {
+    const scopedConfirmation = slip.legacyBoardConfirmations.find(
+      (value) =>
+        value
+        && typeof value === "object"
+        && (value as { sessionScope?: unknown }).sessionScope === sessionScope
+    ) as {
+      boardRevision?: unknown;
+      boardFingerprint?: unknown;
+    } | undefined;
+
+    if (scopedConfirmation) {
+      return parseLegacyBoardConfirmation(
+        scopedConfirmation.boardRevision,
+        scopedConfirmation.boardFingerprint
+      );
+    }
+  }
+
+  return parseLegacyBoardConfirmation(
+    slip.legacyBoardRevision,
+    slip.legacyBoardFingerprint
+  );
+};
+
+export const findLegacyBoardConfirmationForSlip = async ({
+  slipId,
+  userId,
+  betKind,
+  sessionScope,
+}: {
+  slipId: string;
+  userId: string;
+  betKind: BetKind;
+  sessionScope: string | null;
+}) => {
+  const projection: Record<string, unknown> = {
+    legacyBoardRevision: 1,
+    legacyBoardFingerprint: 1,
+  };
+
+  if (
+    sessionScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(sessionScope)
+  ) {
+    projection.legacyBoardConfirmations = {
+      $elemMatch: { sessionScope },
+    };
+  }
+
+  const slip = await Slip.collection.findOne(
+    {
+      _id: new Types.ObjectId(slipId),
+      userId,
+      status: SlipStatus.DRAFT,
+      ...buildBetKindScope(betKind),
+    },
+    { projection }
+  );
+
+  return slip
+    ? legacyBoardConfirmationOf(slip, sessionScope)
+    : null;
+};
+
 export const clearSubmittedAttemptState = (slip: PlainSlip) => {
   slip.submittedAt = undefined;
   slip.submittedEvent = undefined;
   slip.publication = undefined;
+};
+
+export interface RestoredDraftOutcome {
+  draft: PlainSlip | null;
+  replacementSlipId: string;
+}
+
+export const upsertRestoredDraft = async (
+  payload: PlainSlip
+): Promise<RestoredDraftOutcome> => {
+  const betKind = normalizeBetKind(payload.betKind);
+  const replacementSlipId =
+    typeof payload._id === "string" ? payload._id : payload._id?.toString();
+
+  if (!replacementSlipId || !Types.ObjectId.isValid(replacementSlipId)) {
+    throw new Error("Replacement slip id is missing");
+  }
+
+  const buildUpdatePipeline = () => {
+    const currentRows = buildCurrentRowsExpression(betKind);
+    const mergedRows = buildMergedDraftRowsExpression(currentRows, payload.rows);
+    const boardChanged = {
+      $or: [
+        { $ne: [mergedRows, currentRows] },
+        {
+          $ne: [
+            { $ifNull: ["$declineReason", null] },
+            payload.declineReason ?? null,
+          ],
+        },
+        {
+          $ne: [
+            { $ifNull: ["$sourceSlipId", null] },
+            payload.sourceSlipId ?? null,
+          ],
+        },
+      ],
+    };
+
+    return [
+      {
+        $set: {
+          userId: payload.userId,
+          status: SlipStatus.DRAFT,
+          betKind,
+          draftKey: betKind,
+          timestamp: {
+            $cond: [
+              boardChanged,
+              payload.timestamp,
+              { $ifNull: ["$timestamp", payload.timestamp] },
+            ],
+          },
+          sourceSlipId: payload.sourceSlipId,
+          declineReason: payload.declineReason,
+          rows: mergedRows,
+          boardRevision: buildBoardRevisionExpression(boardChanged),
+          boardFingerprint: buildBoardFingerprintExpression(boardChanged),
+        },
+      },
+      {
+        $unset: ["submittedAt", "submittedEvent", "publication", "replacementSlipId"],
+      },
+    ];
+  };
+
+  const existingDraft = await findDraftSlipForUser(payload.userId, betKind);
+  const initialTargetSlipId = slipIdOf(existingDraft) ?? replacementSlipId;
+
+  const runUpsert = async (targetSlipId: string, upsert: boolean) => {
+    const updated = await Slip.collection.findOneAndUpdate(
+      {
+        _id: new Types.ObjectId(targetSlipId),
+        userId: payload.userId,
+        status: SlipStatus.DRAFT,
+        ...buildBetKindScope(betKind),
+      },
+      buildUpdatePipeline(),
+      {
+        upsert,
+        returnDocument: "after",
+      }
+    );
+
+    return asPlainSlip((updated as { value?: unknown })?.value ?? updated);
+  };
+
+  const completedReplacement = async (
+    targetSlipId: string
+  ): Promise<RestoredDraftOutcome | null> => {
+    const scope = {
+      _id: targetSlipId,
+      userId: payload.userId,
+      ...buildBetKindScope(betKind),
+    };
+    const [activeReplacement, archivedReplacement] = await Promise.all([
+      Slip.findOne(scope).lean(),
+      SlipArchive.findOne(scope).lean(),
+    ]);
+
+    if (
+      archivedReplacement
+      || (
+        activeReplacement
+        && activeReplacement.status !== SlipStatus.DRAFT
+      )
+    ) {
+      return {
+        draft: null,
+        replacementSlipId: targetSlipId,
+      };
+    }
+
+    return null;
+  };
+
+  const restoreExistingDraft = async (
+    targetSlipId: string
+  ): Promise<RestoredDraftOutcome> => {
+    const plainSlip = await runUpsert(targetSlipId, false);
+
+    if (plainSlip) {
+      return {
+        draft: normalizePlainSlip(plainSlip, betKind),
+        replacementSlipId: targetSlipId,
+      };
+    }
+
+    const completed = await completedReplacement(targetSlipId);
+    if (completed) {
+      return completed;
+    }
+
+    throw new Error(
+      `Draft ${targetSlipId} disappeared while restoring declined slip`
+    );
+  };
+
+  if (existingDraft) {
+    return restoreExistingDraft(initialTargetSlipId);
+  }
+
+  const existingReplacement = await completedReplacement(replacementSlipId);
+  if (existingReplacement) {
+    return existingReplacement;
+  }
+
+  try {
+    const plainSlip = await runUpsert(replacementSlipId, true);
+
+    if (!plainSlip) {
+      throw new Error("Failed to restore declined draft slip");
+    }
+
+    return {
+      draft: normalizePlainSlip(plainSlip, betKind),
+      replacementSlipId,
+    };
+  } catch (error) {
+    if (!isDuplicateKeyError(error)) {
+      throw error;
+    }
+
+    const concurrentDraft = await findDraftSlipForUser(payload.userId, betKind);
+    const concurrentDraftId = slipIdOf(concurrentDraft);
+
+    if (concurrentDraftId) {
+      return restoreExistingDraft(concurrentDraftId);
+    }
+
+    const completed = await completedReplacement(replacementSlipId);
+    if (completed) {
+      return completed;
+    }
+
+    throw error;
+  }
 };
 
 export const toPublishedSubmittedEventData = (

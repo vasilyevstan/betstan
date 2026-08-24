@@ -241,8 +241,11 @@ concurrent retirement fixture isolation without masking failed suites.
    still quiesced. It starts the new exact-digest services under the write
    fence, keeps the transferred lock through protected validation, then
    releases the lock and fence in order. Any incomplete apply or validation
-   scales the writers back to zero, restores the fence, and retains or
-   reacquires the same lock for a bounded retry with the same data run.
+   after a successfully validated handoff scales the writers back to zero,
+   restores the fence, and retains or reacquires the same lock for a bounded
+   retry with the same data run. A request that never validates that exact
+   handoff must not enter maintenance, acquire the database lock, or alter
+   writer replicas.
 7. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.

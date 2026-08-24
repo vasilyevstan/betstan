@@ -125,6 +125,7 @@ describe('EventList', () => {
 
     expect(screen.getByRole('heading', { name: 'Live now' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pre-match' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Next live event' })).toBeNull();
     expect(screen.getByRole('progressbar', { name: 'Match progress' })).toHaveAttribute('aria-valuenow', '33');
     expect(screen.getByRole('status')).toHaveTextContent('Live feed reconnecting. Polling fallback is active.');
 
@@ -180,4 +181,46 @@ describe('EventList', () => {
       screen.getByRole('article', { name: preMatchEvent.name }),
     ).toBeInTheDocument();
   });
+
+  it.each(['v1', 'v2', 'v3'])(
+    'shows the earliest scheduled live event when no match is live in %s',
+    (uiVariant) => {
+      const laterEvent = {
+        ...preMatchEvent,
+        eventId: 'prematch-later',
+        name: 'Later Match',
+        time: '2030-01-03T12:00:00.000Z',
+      };
+      const nextEvent = {
+        ...preMatchEvent,
+        eventId: 'prematch-next',
+        name: 'Next Match',
+        time: '2030-01-01T18:30:00.000Z',
+      };
+      useLiveEvents.mockReturnValue({
+        events: [laterEvent, nextEvent],
+        feedState: 'open',
+        isLoading: false,
+      });
+
+      render(
+        <EventList
+          selectedSelectionKeys={new Set()}
+          uiVariant={uiVariant}
+        />,
+      );
+
+      const heading = screen.getByRole('heading', { name: 'Next live event' });
+      const nextLiveCard = heading.closest('aside');
+      expect(nextLiveCard).toHaveTextContent('Next Match');
+      expect(nextLiveCard).not.toHaveTextContent('Later Match');
+      expect(nextLiveCard.querySelector('time')).toHaveAttribute(
+        'datetime',
+        nextEvent.time,
+      );
+      expect(nextLiveCard).toHaveTextContent(
+        'Pre-match markets are open now. Live markets appear at kickoff.',
+      );
+    },
+  );
 });

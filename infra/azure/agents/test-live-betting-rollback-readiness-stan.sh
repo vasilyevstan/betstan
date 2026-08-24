@@ -16,4 +16,8 @@ run_live_betting_scenario azure-rollback-drain-active "$SCRIPT" azure MODE=rollb
 assert_eq 1 "$RUN_RC" "rollback-drain contract should fail with active matches"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'active matches should fail rollback-drain mongo counts'
 
-echo 'live_betting_rollback_readiness_tests=PASS stack=azure scenarios=2'
+run_live_betting_scenario azure-rollback-drain-draft-active "$SCRIPT" azure MODE=rollback-drain STUB_DRAFT_LIVE_SLIPS=1
+assert_eq 1 "$RUN_RC" "rollback-drain contract should fail with draft live slips"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'draft live slips should fail rollback-drain mongo counts'
+
+echo 'live_betting_rollback_readiness_tests=PASS stack=azure scenarios=3'

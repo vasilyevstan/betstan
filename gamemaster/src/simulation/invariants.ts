@@ -4,6 +4,7 @@ import {
   LiveMarketStatus,
   LiveMarketType,
   LiveSettlementReason,
+  NextMarketType,
   SimTimeline,
   SimulationResult,
   SimulationTransition,
@@ -11,11 +12,18 @@ import {
 } from "./types";
 
 const MARKET_TYPES: LiveMarketType[] = [
+  LiveMarketType.HALF_TIME_RESULT,
   LiveMarketType.NEXT_YELLOW_CARD,
   LiveMarketType.NEXT_RED_CARD,
   LiveMarketType.NEXT_CORNER,
   LiveMarketType.NEXT_PENALTY,
-  LiveMarketType.HALF_TIME_RESULT,
+];
+
+const NEXT_MARKET_TYPES: NextMarketType[] = [
+  LiveMarketType.NEXT_YELLOW_CARD,
+  LiveMarketType.NEXT_RED_CARD,
+  LiveMarketType.NEXT_CORNER,
+  LiveMarketType.NEXT_PENALTY,
 ];
 
 const STRUCTURAL_TYPES = new Set<LiveIncidentType>([
@@ -25,6 +33,13 @@ const STRUCTURAL_TYPES = new Set<LiveIncidentType>([
   LiveIncidentType.SECOND_HALF_KICK_OFF,
   LiveIncidentType.FULL_TIME,
 ]);
+
+const NEXT_MARKET_CAPS: Record<NextMarketType, keyof SimTimeline["config"]["caps"]> = {
+  [LiveMarketType.NEXT_YELLOW_CARD]: "yellows",
+  [LiveMarketType.NEXT_RED_CARD]: "reds",
+  [LiveMarketType.NEXT_CORNER]: "corners",
+  [LiveMarketType.NEXT_PENALTY]: "penaltyAwards",
+};
 
 function fail(message: string): never {
   throw new Error(`simulation invariant: ${message}`);
@@ -48,6 +63,23 @@ function sameOdds(
   return left.selections.every(
     (selection, index) => selection.odds === right.selections[index]?.odds
   );
+}
+
+function nextMarketForIncident(
+  type: LiveIncidentType
+): NextMarketType | undefined {
+  switch (type) {
+    case LiveIncidentType.YELLOW_CARD:
+      return LiveMarketType.NEXT_YELLOW_CARD;
+    case LiveIncidentType.RED_CARD:
+      return LiveMarketType.NEXT_RED_CARD;
+    case LiveIncidentType.CORNER:
+      return LiveMarketType.NEXT_CORNER;
+    case LiveIncidentType.PENALTY_AWARDED:
+      return LiveMarketType.NEXT_PENALTY;
+    default:
+      return undefined;
+  }
 }
 
 function assertClock(
@@ -185,8 +217,19 @@ function assertMarkets(
   const settlements = new Set<string>();
   let fullTimeNone = 0;
   let halfTimeSettlements = 0;
+  const nextMarketCounts = new Map<NextMarketType, number>(
+    NEXT_MARKET_TYPES.map((type) => [type, 0])
+  );
 
   transitions.forEach((transition, index) => {
+    const triggeredMarket = nextMarketForIncident(transition.incident.type);
+    if (triggeredMarket) {
+      nextMarketCounts.set(
+        triggeredMarket,
+        (nextMarketCounts.get(triggeredMarket) ?? 0) + 1
+      );
+    }
+
     if (transition.markets.length !== 5) {
       fail(`expected five markets at sequence ${transition.sequence}`);
     }
@@ -252,7 +295,10 @@ function assertMarkets(
         } else if (
           market.marketVersion === prior.marketVersion + 1
           && market.quoteVersion === 1
-          && market.status === LiveMarketStatus.OPEN
+          && (
+            market.status === LiveMarketStatus.OPEN
+            || market.status === LiveMarketStatus.CLOSED
+          )
         ) {
           const expectedKey = `${prior.marketId}:${prior.marketVersion}`;
           if (!transition.settlements.some(
@@ -300,7 +346,12 @@ function assertMarkets(
         const market = current.get(type);
         const expected = type === LiveMarketType.HALF_TIME_RESULT
           ? LiveMarketStatus.SETTLED
-          : LiveMarketStatus.SUSPENDED;
+          : (
+              (nextMarketCounts.get(type as NextMarketType) ?? 0)
+                >= timeline.config.caps[NEXT_MARKET_CAPS[type as NextMarketType]]
+            )
+            ? LiveMarketStatus.CLOSED
+            : LiveMarketStatus.SUSPENDED;
         if (market?.status !== expected) {
           fail(`invalid half-time market status ${type}`);
         }
@@ -315,7 +366,12 @@ function assertMarkets(
         const market = current.get(type);
         const expected = type === LiveMarketType.HALF_TIME_RESULT
           ? LiveMarketStatus.SETTLED
-          : LiveMarketStatus.OPEN;
+          : (
+              (nextMarketCounts.get(type as NextMarketType) ?? 0)
+                >= timeline.config.caps[NEXT_MARKET_CAPS[type as NextMarketType]]
+            )
+            ? LiveMarketStatus.CLOSED
+            : LiveMarketStatus.OPEN;
         if (market?.status !== expected) {
           fail(`invalid second-half market status ${type}`);
         }
@@ -324,11 +380,27 @@ function assertMarkets(
       if (
         transition.bettingStatus !== "CLOSED"
         || transition.markets.some(
-          (market) => market.status !== LiveMarketStatus.SETTLED
+          (market) =>
+            market.status !== LiveMarketStatus.SETTLED
+            && market.status !== LiveMarketStatus.CLOSED
         )
       ) {
-        fail("markets must be settled and betting closed at full-time");
+        fail("markets must be settled or closed and betting closed at full-time");
       }
+      MARKET_TYPES.forEach((type) => {
+        const market = current.get(type);
+        const expected = type === LiveMarketType.HALF_TIME_RESULT
+          ? LiveMarketStatus.SETTLED
+          : (
+              (nextMarketCounts.get(type as NextMarketType) ?? 0)
+                >= timeline.config.caps[NEXT_MARKET_CAPS[type as NextMarketType]]
+            )
+            ? LiveMarketStatus.CLOSED
+            : LiveMarketStatus.SETTLED;
+        if (market?.status !== expected) {
+          fail(`invalid full-time market status ${type}`);
+        }
+      });
     } else {
       if (transition.bettingStatus !== "OPEN") {
         fail(`betting unexpectedly closed at sequence ${transition.sequence}`);
@@ -338,9 +410,16 @@ function assertMarkets(
         || transition.phase === EventPhase.FIRST_HALF_STOPPAGE;
       MARKET_TYPES.forEach((type) => {
         const expected =
-          type === LiveMarketType.HALF_TIME_RESULT && !firstHalf
-            ? LiveMarketStatus.SETTLED
-            : LiveMarketStatus.OPEN;
+          type === LiveMarketType.HALF_TIME_RESULT
+            ? firstHalf
+              ? LiveMarketStatus.OPEN
+              : LiveMarketStatus.SETTLED
+            : (
+                (nextMarketCounts.get(type as NextMarketType) ?? 0)
+                  >= timeline.config.caps[NEXT_MARKET_CAPS[type as NextMarketType]]
+              )
+              ? LiveMarketStatus.CLOSED
+              : LiveMarketStatus.OPEN;
         if (current.get(type)?.status !== expected) {
           fail(`invalid open-play market status ${type}`);
         }
@@ -348,8 +427,12 @@ function assertMarkets(
     }
   });
 
-  if (fullTimeNone !== 4) {
-    fail("expected exactly four full-time none settlements");
+  const expectedFullTimeNone = NEXT_MARKET_TYPES.filter(
+    (type) =>
+      (nextMarketCounts.get(type) ?? 0) < timeline.config.caps[NEXT_MARKET_CAPS[type]]
+  ).length;
+  if (fullTimeNone !== expectedFullTimeNone) {
+    fail(`expected ${expectedFullTimeNone} full-time none settlements`);
   }
   if (halfTimeSettlements !== 1) {
     fail("expected one half-time settlement");

@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import mongoose from "mongoose";
 import {
   BetKind,
   BetStatus,
@@ -126,6 +127,14 @@ const PENDING_UPDATE_PRIORITY: Record<PendingBetUpdateKind, number> = {
   [PendingBetUpdateKind.SETTLE_SLIP_ROW]: 1,
   [PendingBetUpdateKind.SETTLE_SLIP]: 2,
 };
+
+// Bet documents use mongoose optimistic concurrency (see model/Bet.ts). A
+// `save()` racing against another consumer's concurrent write throws a
+// VersionError instead of silently overwriting the other write. This bounds
+// how many times we reload-and-reapply before giving up (a legitimate
+// hot-slip could see moderation + several settlement events land close
+// together, so allow a handful of retries).
+const MAX_BET_SAVE_ATTEMPTS = 5;
 
 const normalizeBetKind = (betKind?: BetKind | null): BetKind =>
   betKind ?? BetKind.PRE_MATCH;
@@ -731,7 +740,10 @@ export const upsertPlaceBet = async (
         slipId: event.data.slipId,
       },
       {
-        $setOnInsert: insertRecord,
+        $setOnInsert: {
+          ...insertRecord,
+          __v: 0,
+        },
       },
       {
         upsert: true,
@@ -775,6 +787,128 @@ export const parkPendingBetUpdate = async (
     { $setOnInsert: pendingUpdate },
     { upsert: true }
   );
+};
+
+const isBetVersionConflict = (error: unknown): boolean =>
+  error instanceof mongoose.Error.VersionError;
+
+const ensureBetVersionKey = async (
+  bet: BetDocument
+): Promise<BetDocument | null> => {
+  const version = bet.get("__v");
+  if (Number.isInteger(version) && version >= 0) {
+    return bet;
+  }
+
+  if (version !== undefined && version !== null) {
+    throw new Error(`Bet ${bet.slipId} has an invalid version key`);
+  }
+
+  await Bet.collection.updateOne(
+    {
+      _id: bet._id,
+      $or: [
+        { __v: { $exists: false } },
+        { __v: null },
+      ],
+    },
+    {
+      $set: { __v: 0 },
+    }
+  );
+
+  return Bet.findById(bet._id);
+};
+
+/**
+ * Applies `applyChanges` to `initialBet` and saves it, retrying against a
+ * freshly reloaded document if another consumer concurrently saved the same
+ * bet in between (VersionError from optimistic concurrency). `applyChanges`
+ * must be safe to invoke repeatedly against different in-memory snapshots of
+ * the same underlying document (all of the `apply*` mutators above are, since
+ * they re-derive "changed" from the current persisted status/rows on every
+ * call rather than assuming their caller's snapshot is fresh) and should
+ * return whether the document actually needs to be persisted.
+ *
+ * This closes the race where two consumers (e.g. a moderation result and a
+ * WIN/LOSS/VOID settlement, or two duplicate/redelivered messages) load the
+ * same stale bet, both compute a change against their own snapshot, and the
+ * second `save()` silently clobbers the first — including regressing an
+ * already-terminal status. On conflict we reload and reapply so the guard
+ * logic in the `apply*` functions runs against genuinely current state.
+ */
+export const saveBetWithOptimisticRetry = async (
+  initialBet: BetDocument,
+  applyChanges: (bet: BetDocument) => boolean | Promise<boolean>,
+  maxAttempts: number = MAX_BET_SAVE_ATTEMPTS
+): Promise<{ bet: BetDocument; saved: boolean }> => {
+  let bet = initialBet;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const versionedBet = await ensureBetVersionKey(bet);
+    if (!versionedBet) {
+      return { bet, saved: false };
+    }
+    bet = versionedBet;
+
+    const shouldSave = await applyChanges(bet);
+
+    if (!shouldSave) {
+      return { bet, saved: false };
+    }
+
+    try {
+      await bet.save();
+      return { bet, saved: true };
+    } catch (error) {
+      if (!isBetVersionConflict(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      const refreshed = await Bet.findOne({ slipId: bet.slipId });
+
+      if (!refreshed) {
+        // The bet disappeared out from under us (should not normally happen
+        // since bets are never deleted); nothing left to save.
+        return { bet, saved: false };
+      }
+
+      bet = refreshed;
+    }
+  }
+
+  // Unreachable given the loop bounds above, but keeps control flow explicit
+  // for TypeScript rather than falling through with an implicit return.
+  throw new Error(
+    `Exceeded optimistic concurrency retries (${maxAttempts}) saving bet ${initialBet.slipId}`
+  );
+};
+
+/**
+ * Loads the bet for `slipId` and applies a single event to it via
+ * `applyEvent`, retrying on optimistic-concurrency conflicts. Returns
+ * `undefined` when no bet exists yet for the slip (caller should park the
+ * event as a pending update), otherwise the (possibly reloaded) bet document.
+ */
+export const applyBetEventWithRetry = async <TEvent>(
+  slipId: string,
+  applyEvent: (bet: BetDocument, event: TEvent) => boolean,
+  event: TEvent,
+  maxAttempts: number = MAX_BET_SAVE_ATTEMPTS
+): Promise<BetDocument | undefined> => {
+  const bet = await Bet.findOne({ slipId });
+
+  if (!bet) {
+    return undefined;
+  }
+
+  const { bet: savedBet } = await saveBetWithOptimisticRetry(
+    bet,
+    (currentBet) => applyEvent(currentBet, event),
+    maxAttempts
+  );
+
+  return savedBet;
 };
 
 export const applyModerationResult = (
@@ -946,48 +1080,63 @@ export const applyPendingBetUpdatesToBet = async (
   control: ApplyPendingBetUpdatesToBetControl = {}
 ): Promise<ApplyPendingBetUpdatesToBetResult> => {
   const orderedUpdates = [...pendingUpdates].sort(comparePendingUpdates);
-  let changed = ensureBetDefaults(bet);
+  let changed = false;
   let ownershipLost = false;
-  const processedPendingUpdates: PendingBetUpdateDocument[] = [];
+  let processedPendingUpdates: PendingBetUpdateDocument[] = [];
 
-  for (const pendingUpdate of orderedUpdates) {
-    if (control.beforeApply) {
-      const shouldContinue = await control.beforeApply(pendingUpdate);
+  // Reapplies the full ordered batch against whatever bet snapshot we
+  // currently hold. `saveBetWithOptimisticRetry` re-invokes this from scratch
+  // (against a freshly reloaded document) if a concurrent moderation/
+  // settlement consumer saved the same bet first (VersionError), so it must
+  // reset the outer accumulators rather than append to a stale run. The
+  // lease `beforeApply` check is re-run on every (re)attempt so a lease lost
+  // during an earlier attempt is not silently ignored on retry.
+  const applyOrderedUpdates = async (currentBet: BetDocument) => {
+    changed = ensureBetDefaults(currentBet);
+    ownershipLost = false;
+    processedPendingUpdates = [];
 
-      if (!shouldContinue) {
-        ownershipLost = true;
-        break;
+    for (const pendingUpdate of orderedUpdates) {
+      if (control.beforeApply) {
+        const shouldContinue = await control.beforeApply(pendingUpdate);
+
+        if (!shouldContinue) {
+          ownershipLost = true;
+          break;
+        }
       }
+
+      switch (pendingUpdate.kind) {
+        case PendingBetUpdateKind.MODERATION_RESULT:
+          changed =
+            applyModerationResult(
+              currentBet,
+              pendingUpdate.payload as IModerationResultEvent
+            ) || changed;
+          break;
+        case PendingBetUpdateKind.SETTLE_SLIP_ROW:
+          changed =
+            applySettleSlipRow(
+              currentBet,
+              pendingUpdate.payload as ISettleSlipRowEvent
+            ) || changed;
+          break;
+        case PendingBetUpdateKind.SETTLE_SLIP:
+          changed =
+            applySettleSlip(
+              currentBet,
+              pendingUpdate.payload as ISettleSlipEvent
+            ) || changed;
+          break;
+      }
+
+      processedPendingUpdates.push(pendingUpdate);
     }
 
-    switch (pendingUpdate.kind) {
-      case PendingBetUpdateKind.MODERATION_RESULT:
-        changed =
-          applyModerationResult(
-            bet,
-            pendingUpdate.payload as IModerationResultEvent
-          ) || changed;
-        break;
-      case PendingBetUpdateKind.SETTLE_SLIP_ROW:
-        changed =
-          applySettleSlipRow(
-            bet,
-            pendingUpdate.payload as ISettleSlipRowEvent
-          ) || changed;
-        break;
-      case PendingBetUpdateKind.SETTLE_SLIP:
-        changed =
-          applySettleSlip(bet, pendingUpdate.payload as ISettleSlipEvent) ||
-          changed;
-        break;
-    }
+    return changed && processedPendingUpdates.length > 0;
+  };
 
-    processedPendingUpdates.push(pendingUpdate);
-  }
-
-  if (changed && processedPendingUpdates.length > 0) {
-    await bet.save();
-  }
+  await saveBetWithOptimisticRetry(bet, applyOrderedUpdates);
 
   return {
     changed,

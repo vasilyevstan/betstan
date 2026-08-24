@@ -14,7 +14,8 @@ export interface EventSchedulerConfig {
 
 export interface SchedulerPublisher {
   init(): Promise<void>;
-  publish(event: INewEventEvent): void | Promise<void>;
+  initConfirmChannel(): Promise<void>;
+  publishWithConfirm(event: INewEventEvent): Promise<void>;
 }
 
 interface EventSchedulerOptions {
@@ -311,17 +312,15 @@ export class EventScheduler {
 
       try {
         const publisher = await this.getPublisher();
-        await Promise.resolve(
-          publisher.publish({
-            data: {
-              id: claimedEvent.eventId,
-              name: claimedEvent.name,
-              time: claimedEvent.time.toISOString(),
-              home: claimedEvent.home as string,
-              away: claimedEvent.away as string,
-            },
-          })
-        );
+        await publisher.publishWithConfirm({
+          data: {
+            id: claimedEvent.eventId,
+            name: claimedEvent.name,
+            time: claimedEvent.time.toISOString(),
+            home: claimedEvent.home as string,
+            away: claimedEvent.away as string,
+          },
+        });
         await Event.updateOne(
           {
             _id: claimedEvent._id,
@@ -359,7 +358,7 @@ export class EventScheduler {
   private async getPublisher(): Promise<SchedulerPublisher> {
     if (!this.publisher) {
       const publisher = this.publisherFactory();
-      await publisher.init();
+      await Promise.all([publisher.init(), publisher.initConfirmChannel()]);
       this.publisher = publisher;
     }
     return this.publisher;

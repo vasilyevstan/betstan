@@ -40,6 +40,10 @@ CURRENT_MASTER_SHA=2222222222222222222222222222222222222222
 SOURCE_RUN_ID=1701
 DEPLOY_RUN_ID=1601
 BUILD_RUN_ID=1501
+CAPTURE_RUN_ID=1401
+INFRASTRUCTURE_RUN_ID=1801
+INFRASTRUCTURE_PROVENANCE_SHA256=""
+RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34"
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
 
@@ -85,6 +89,65 @@ sha256_file() {
   fi
 }
 
+DEPLOY_RABBITMQ_BASELINE_FIXTURE="$FIXTURE_DIR/deploy-rabbitmq-baseline.txt"
+printf '%s\n' 'fixture-rabbitmq-baseline' >"$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
+INFRASTRUCTURE_PROVENANCE_FIXTURE="$FIXTURE_DIR/infrastructure-provenance.env"
+cat >"$INFRASTRUCTURE_PROVENANCE_FIXTURE" <<EOF2
+source_sha=$CURRENT_MASTER_SHA
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+infrastructure_run_attempt=1
+runtime_mode=k3s
+instance_fingerprint=$RUNTIME_FINGERPRINT
+namespace=betstan-oci
+EOF2
+INFRASTRUCTURE_PROVENANCE_SHA256="$(
+  sha256_file "$INFRASTRUCTURE_PROVENANCE_FIXTURE"
+)"
+TAMPERED_INFRASTRUCTURE_PROVENANCE_FIXTURE="$FIXTURE_DIR/infrastructure-provenance-tampered.env"
+cp "$INFRASTRUCTURE_PROVENANCE_FIXTURE" \
+  "$TAMPERED_INFRASTRUCTURE_PROVENANCE_FIXTURE"
+printf '%s\n' 'unexpected_field=tampered' \
+  >>"$TAMPERED_INFRASTRUCTURE_PROVENANCE_FIXTURE"
+
+write_deploy_provenance_fixture() {
+  local output_file="$1"
+  local images_file="$2"
+  local schema="$3"
+  local source_sha="${4:-$TARGET_SHA}"
+  cat >"$output_file" <<EOF2
+source_sha=$source_sha
+runtime_mode=k3s
+runtime_fingerprint=$RUNTIME_FINGERPRINT
+image_provenance_sha256=$(sha256_file "$images_file")
+rendered_manifest_sha256=ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56
+rabbitmq_baseline_sha256=$(sha256_file "$DEPLOY_RABBITMQ_BASELINE_FIXTURE")
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=203.0.113.10.nip.io
+deployment_run_id=$DEPLOY_RUN_ID
+deployment_run_attempt=1
+EOF2
+  case "$schema" in
+    modern)
+      cat >>"$output_file" <<EOF2
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+infrastructure_run_attempt=1
+infrastructure_provenance_sha256=$INFRASTRUCTURE_PROVENANCE_SHA256
+EOF2
+      ;;
+    legacy)
+      ;;
+    partial)
+      printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID" \
+        >>"$output_file"
+      ;;
+    *)
+      fail "unsupported deploy provenance fixture schema: $schema"
+      ;;
+  esac
+}
+
 service_index() {
   local service="$1"
   local index=1
@@ -126,6 +189,27 @@ current_image_ref() {
 create_baseline_fixture() {
   local directory="$1"
   local mode="${2:-good}"
+  local fixture_sse_required=true
+  local provenance_schema=modern
+  local include_trusted_provenance=true
+  local provenance_source_sha="$TARGET_SHA"
+  [[ "$mode" != "legacy-sse" ]] || fixture_sse_required=false
+  case "$mode" in
+    legacy-missing)
+      include_trusted_provenance=false
+      provenance_schema=legacy
+      ;;
+    legacy-embedded)
+      provenance_schema=legacy
+      ;;
+    legacy-source-mismatch)
+      provenance_schema=legacy
+      provenance_source_sha="$CURRENT_MASTER_SHA"
+      ;;
+    partial-infrastructure)
+      provenance_schema=partial
+      ;;
+  esac
   rm -rf "$directory"
   mkdir -p "$directory"
   : >"$directory/images.tsv"
@@ -167,11 +251,13 @@ JSON
   cat >"$directory/migration-backup-references.tsv" <<'REFS'
 state	database-restore-excluded	application-rollback-only
 REFS
-  cat >"$directory/trusted-deploy-provenance.txt" <<EOF2
-source_sha=$TARGET_SHA
-deployment_run_id=$DEPLOY_RUN_ID
-deployment_run_attempt=1
-EOF2
+  if [[ "$include_trusted_provenance" == "true" ]]; then
+    write_deploy_provenance_fixture \
+      "$directory/trusted-deploy-provenance.txt" \
+      "$directory/images.tsv" \
+      "$provenance_schema" \
+      "$provenance_source_sha"
+  fi
   cat >"$directory/baseline-provenance.env" <<EOF2
 baseline_source_sha=$TARGET_SHA
 baseline_deploy_workflow=oci-production-deploy
@@ -180,20 +266,32 @@ baseline_deploy_run_attempt=1
 baseline_build_workflow=oci-production-build
 baseline_build_run_id=$BUILD_RUN_ID
 baseline_build_run_attempt=1
-baseline_capture_run_id=$SOURCE_RUN_ID
+baseline_capture_run_id=$CAPTURE_RUN_ID
 baseline_capture_run_attempt=1
 namespace=betstan-oci
 public_url=https://betstan.xyz
 redirect_url=https://www.betstan.xyz
 diagnostic_url=https://203.0.113.10.nip.io
 sse_path=/api/event/stream
+sse_required=$fixture_sse_required
 database_restore=disabled
 EOF2
   : >"$directory/SHA256SUMS"
   local file
-  for file in baseline-provenance.env images.tsv queues.tsv public-http.tsv sse.tsv \
-    migration-journal.json migration-lock.json migration-backup-references.tsv \
-    trusted-deploy-provenance.txt; do
+  local checksum_files=(
+    baseline-provenance.env
+    images.tsv
+    queues.tsv
+    public-http.tsv
+    sse.tsv
+    migration-journal.json
+    migration-lock.json
+    migration-backup-references.tsv
+  )
+  if [[ "$include_trusted_provenance" == "true" ]]; then
+    checksum_files+=(trusted-deploy-provenance.txt)
+  fi
+  for file in "${checksum_files[@]}"; do
     printf '%s  %s\n' "$(sha256_file "$directory/$file")" "$file" >>"$directory/SHA256SUMS"
   done
 }
@@ -231,6 +329,11 @@ EOF2
 
 create_baseline_fixture "$FIXTURE_DIR/baseline-good"
 create_baseline_fixture "$FIXTURE_DIR/baseline-mutable" mutable
+create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-sse" legacy-sse
+create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-missing" legacy-missing
+create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-embedded" legacy-embedded
+create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-source-mismatch" legacy-source-mismatch
+create_baseline_fixture "$FIXTURE_DIR/baseline-partial-infrastructure" partial-infrastructure
 
 cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
@@ -256,6 +359,12 @@ case "$*" in
     ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/RequireAdmin.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/service/VerifyAdminSession.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
     ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
@@ -357,9 +466,24 @@ case "${1:-} ${2:-}" in
     }'
     ;;
   "api repos/example/repo/actions/runs/${STUB_DEPLOY_RUN_ID}/artifacts")
-    jq -n --arg name "oci-deploy-provenance-${STUB_DEPLOY_RUN_ID}-1" --arg recent "$recent" '{
-      artifacts:[{name:$name, expired:false, created_at:$recent, updated_at:$recent}]
-    }'
+    if [[ "${STUB_DEPLOY_ARTIFACT_MISSING:-0}" == "1" ]]; then
+      printf '{"artifacts":[]}\n'
+    else
+      expired=false
+      [[ "${STUB_DEPLOY_ARTIFACT_EXPIRED:-0}" != "1" ]] || expired=true
+      jq -n \
+        --arg name "oci-deploy-provenance-${STUB_DEPLOY_RUN_ID}-1" \
+        --arg recent "$recent" \
+        --argjson expired "$expired" \
+        '{
+          artifacts:[{
+            name:$name,
+            expired:$expired,
+            created_at:$recent,
+            updated_at:$recent
+          }]
+        }'
+    fi
     ;;
   "api repos/example/repo/actions/runs/${STUB_BUILD_RUN_ID}/artifacts")
     jq -n --arg name "oci-image-provenance-${STUB_TARGET_SHA}-${STUB_BUILD_RUN_ID}-1" --arg recent "$recent" '{
@@ -415,10 +539,10 @@ case "${1:-} ${2:-}" in
       if [[ "$run_id" == "$STUB_SOURCE_RUN_ID" && "$name" == "$STUB_ARTIFACT_NAME" ]]; then
         cp -R "$STUB_BASELINE_FIXTURE"/. "$dir"/
       elif [[ "$run_id" == "$STUB_DEPLOY_RUN_ID" && "$name" == "oci-deploy-provenance-${STUB_DEPLOY_RUN_ID}-1" ]]; then
-        cp "$STUB_BASELINE_FIXTURE/images.tsv" "$dir/images.tsv"
-        cat >"$dir/provenance.txt" <<EOF
-source_sha=$STUB_TARGET_SHA
-EOF
+        deploy_fixture="${STUB_DEPLOY_PROVENANCE_FIXTURE:-$STUB_BASELINE_FIXTURE}"
+        cp "$deploy_fixture/images.tsv" "$dir/images.tsv"
+        cp "$deploy_fixture/trusted-deploy-provenance.txt" "$dir/provenance.txt"
+        cp "$STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE" "$dir/rabbitmq-baseline.txt"
       else
         printf 'unexpected gh run download: run=%s name=%s\n' "$run_id" "$name" >&2
         exit 1
@@ -810,8 +934,9 @@ EOF_QUEUES
         printf '%s 0 0 %s\n' "$dynamic_queue_name" "$dynamic_consumers"
       fi
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
-      printf '{"mongoOk":true,"activeMatches":%s,"submittedLiveSlips":%s}\n' \
-        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_SUBMITTED_LIVE_SLIPS:-0}"
+      printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
+        "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
+        "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/"* ]]; then
       [[ "${STUB_AUTH_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' "${STUB_NORMALIZED_IDENTIFIER_COUNT:-0}"
@@ -1147,6 +1272,12 @@ common_env=(
   "STUB_DEPLOY_RUN_ID=$DEPLOY_RUN_ID"
   "STUB_BUILD_RUN_ID=$BUILD_RUN_ID"
   "STUB_ARTIFACT_NAME=$ARTIFACT_NAME"
+  "INFRASTRUCTURE_RUN_ID=$INFRASTRUCTURE_RUN_ID"
+  "OCI_INFRASTRUCTURE_PROVENANCE_SHA256=$INFRASTRUCTURE_PROVENANCE_SHA256"
+  "OCI_INFRASTRUCTURE_PROVENANCE_FILE=$INFRASTRUCTURE_PROVENANCE_FIXTURE"
+  "OCI_RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT"
+  "OCI_RUNTIME_MODE=k3s"
+  "STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE=$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
 )
@@ -1226,6 +1357,8 @@ ARGV.each do |file|
 end
 puts 'oci_rollback_yaml=PASS'
 RUBY
+assert_contains "$WORKFLOW_FILE" \
+  'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
 
 bash -n "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"
 
@@ -1405,6 +1538,77 @@ assert_contains "$WORK_DIR/mutable-rejection.out" 'baseline image for event is m
 run_expect_failure expired-artifact \
   STUB_ARTIFACT_EXPIRED=1 ROLLBACK_MODE=dry-run
 
+legacy_missing_output="$WORK_DIR/legacy-missing-provenance"
+if ! run_script "$legacy_missing_output" \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-missing" \
+    STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-legacy-embedded" \
+    ROLLBACK_MODE=dry-run >"$WORK_DIR/legacy-missing-provenance.out" 2>&1; then
+  cat "$WORK_DIR/legacy-missing-provenance.out" >&2
+  fail "legacy baseline provenance reconstruction unexpectedly failed"
+fi
+assert_contains "$legacy_missing_output/rollback-summary.env" \
+  'deploy_provenance_origin=reconstructed-exact-deploy-artifact'
+assert_contains "$legacy_missing_output/rollback-summary.env" \
+  'deploy_provenance_binding=legacy-runtime-fingerprint'
+assert_contains "$legacy_missing_output/trusted-deploy-provenance.txt" \
+  "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
+assert_contains "$legacy_missing_output/trusted-deploy-provenance.txt" \
+  "infrastructure_provenance_sha256=$INFRASTRUCTURE_PROVENANCE_SHA256"
+assert_contains "$legacy_missing_output/trusted-deploy-provenance.txt" \
+  'infrastructure_binding=legacy-runtime-fingerprint'
+
+legacy_embedded_output="$WORK_DIR/legacy-embedded-provenance"
+if ! run_script "$legacy_embedded_output" \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-embedded" \
+    ROLLBACK_MODE=dry-run >"$WORK_DIR/legacy-embedded-provenance.out" 2>&1; then
+  cat "$WORK_DIR/legacy-embedded-provenance.out" >&2
+  fail "embedded legacy deploy provenance unexpectedly failed"
+fi
+assert_contains "$legacy_embedded_output/rollback-summary.env" \
+  'deploy_provenance_origin=baseline-embedded'
+assert_contains "$legacy_embedded_output/rollback-summary.env" \
+  'deploy_provenance_binding=legacy-runtime-fingerprint'
+
+run_expect_failure legacy-deploy-provenance-artifact-missing \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-missing" \
+  STUB_DEPLOY_ARTIFACT_MISSING=1 \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/legacy-deploy-provenance-artifact-missing.out" \
+  'deploy provenance artifact identity does not resolve to exactly one artifact'
+
+run_expect_failure legacy-deploy-provenance-source-mismatch \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-missing" \
+  STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-legacy-source-mismatch" \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/legacy-deploy-provenance-source-mismatch.out" \
+  'trusted deploy provenance source SHA does not match TARGET_SHA'
+
+run_expect_failure legacy-deploy-provenance-images-mismatch \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-missing" \
+  STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-mutable" \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/legacy-deploy-provenance-images-mismatch.out" \
+  'recovered deploy provenance images do not match the rollback baseline'
+
+run_expect_failure partial-infrastructure-provenance \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-partial-infrastructure" \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/partial-infrastructure-provenance.out" \
+  'trusted deploy provenance has incomplete infrastructure binding'
+
+run_expect_failure selected-infrastructure-provenance-missing \
+  OCI_INFRASTRUCTURE_PROVENANCE_FILE="$FIXTURE_DIR/missing-infrastructure.env" \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/selected-infrastructure-provenance-missing.out" \
+  'OCI_INFRASTRUCTURE_PROVENANCE_FILE is missing'
+
+run_expect_failure selected-infrastructure-provenance-tampered \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-embedded" \
+  OCI_INFRASTRUCTURE_PROVENANCE_FILE="$TAMPERED_INFRASTRUCTURE_PROVENANCE_FIXTURE" \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/selected-infrastructure-provenance-tampered.out" \
+  'selected infrastructure provenance file hash does not match'
+
 run_expect_failure oci-rollback-readiness-refusal \
   STUB_HISTORY_COUNT=1 ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/oci-rollback-readiness-refusal.out" 'OCI rollback readiness rejected the rollback'
@@ -1433,6 +1637,114 @@ if ! run_script "$WORK_DIR/oci-auth-compatible" \
 fi
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_normalized_identifiers=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+run_expect_failure infra-run-id-mismatch \
+  ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
+assert_contains "$WORK_DIR/infra-run-id-mismatch.out" \
+  'selected infrastructure run does not match the trusted baseline infrastructure run'
+
+MISMATCHED_HEX_DIGEST="$(printf 'ef56%.0s' {1..16})"
+run_expect_failure infra-provenance-hash-mismatch \
+  ROLLBACK_MODE=dry-run OCI_INFRASTRUCTURE_PROVENANCE_SHA256="$MISMATCHED_HEX_DIGEST"
+assert_contains "$WORK_DIR/infra-provenance-hash-mismatch.out" \
+  'selected infrastructure provenance hash does not match the trusted baseline'
+
+run_expect_failure infra-runtime-fingerprint-mismatch \
+  ROLLBACK_MODE=dry-run OCI_RUNTIME_FINGERPRINT="$MISMATCHED_HEX_DIGEST"
+assert_contains "$WORK_DIR/infra-runtime-fingerprint-mismatch.out" \
+  'selected runtime fingerprint does not match the trusted baseline'
+
+run_expect_failure infra-runtime-mode-mismatch \
+  ROLLBACK_MODE=dry-run OCI_RUNTIME_MODE=aks
+assert_contains "$WORK_DIR/infra-runtime-mode-mismatch.out" \
+  'selected runtime mode does not match the trusted baseline'
+
+run_expect_failure oci-public-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_PUBLIC_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-public-url-mismatch.out" \
+  'OCI_PUBLIC_URL does not match the trusted baseline public URL'
+
+run_expect_failure oci-redirect-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_REDIRECT_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-redirect-url-mismatch.out" \
+  'OCI_REDIRECT_URL does not match the trusted baseline redirect URL'
+
+run_expect_failure oci-diagnostic-url-mismatch \
+  ROLLBACK_MODE=dry-run OCI_DIAGNOSTIC_URL='https://impostor.example.invalid'
+assert_contains "$WORK_DIR/oci-diagnostic-url-mismatch.out" \
+  'OCI_DIAGNOSTIC_URL does not match the trusted baseline diagnostic URL'
+
+run_expect_failure admin-auth-missing-no-capability \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/admin-auth-missing-no-capability.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
+
+admin_auth_capability_valid="$WORK_DIR/admin-auth-capability-valid.env"
+cat >"$admin_auth_capability_valid" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$TARGET_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_wrong_sha="$WORK_DIR/admin-auth-capability-wrong-sha.env"
+cat >"$admin_auth_capability_wrong_sha" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$CURRENT_MASTER_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_wrong_value="$WORK_DIR/admin-auth-capability-wrong-value.env"
+cat >"$admin_auth_capability_wrong_value" <<EOF
+capability=some-other-capability
+source_sha=$TARGET_SHA
+reason=pre-admin-auth-release rollback approved by release captain
+approved_by=release-captain
+EOF
+
+admin_auth_capability_missing_reason="$WORK_DIR/admin-auth-capability-missing-reason.env"
+cat >"$admin_auth_capability_missing_reason" <<EOF
+capability=legacy-admin-auth-accepted
+source_sha=$TARGET_SHA
+approved_by=release-captain
+EOF
+
+run_expect_failure admin-auth-capability-missing-file \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$WORK_DIR/does-not-exist.env"
+assert_contains "$WORK_DIR/admin-auth-capability-missing-file.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE does not exist'
+
+run_expect_failure admin-auth-capability-wrong-sha \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_wrong_sha"
+assert_contains "$WORK_DIR/admin-auth-capability-wrong-sha.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE source_sha does not match TARGET_SHA'
+
+run_expect_failure admin-auth-capability-wrong-value \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_wrong_value"
+assert_contains "$WORK_DIR/admin-auth-capability-wrong-value.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE capability must be legacy-admin-auth-accepted'
+
+run_expect_failure admin-auth-capability-missing-reason \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+  ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_missing_reason"
+assert_contains "$WORK_DIR/admin-auth-capability-missing-reason.out" \
+  'ADMIN_AUTH_CAPABILITY_FILE reason must be non-empty'
+
+if ! run_script "$WORK_DIR/admin-auth-capability-accepted" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 ROLLBACK_MODE=dry-run \
+    ADMIN_AUTH_CAPABILITY_FILE="$admin_auth_capability_valid" \
+    >"$WORK_DIR/admin-auth-capability-accepted.out" 2>&1; then
+  cat "$WORK_DIR/admin-auth-capability-accepted.out" >&2
+  fail 'OCI admin-auth explicit-capability dry-run unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/admin-auth-capability-accepted/rollback-summary.env" \
+  'admin_auth_rollback_check=explicit-capability-override'
 
 run_expect_failure oci-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run
@@ -1449,6 +1761,10 @@ assert_contains "$WORK_DIR/migration-transition-block/rollback-readiness/summary
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/active-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
+
+run_expect_failure draft-live-refusal \
+  STUB_DRAFT_LIVE_SLIPS=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/draft-live-refusal.out" 'live-aware rollback drain gate rejected the rollback'
 
 run_expect_failure queue-growth-refusal \
   STUB_BASELINE_QUEUE_READY_AFTER_ROLLBACK=1 ROLLBACK_MODE=execute
@@ -1516,6 +1832,29 @@ assert_contains "$WORK_DIR/sse-content-type-refusal.out" 'SSE verification faile
 run_expect_failure sse-malformed-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=malformed ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-malformed-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
+
+run_expect_failure sse-legacy-absent-required-refusal \
+  STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=legacy-absent ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/sse-legacy-absent-required-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
+
+if ! run_script "$WORK_DIR/legacy-sse-rollback-success" \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-legacy-sse" \
+    STUB_SSE_MODE=legacy-absent \
+    STUB_SHORT_SSE_MODE=legacy-absent \
+    ROLLBACK_MODE=execute >"$WORK_DIR/legacy-sse-rollback-success.out" 2>&1; then
+  cat "$WORK_DIR/legacy-sse-rollback-success.out" >&2
+  fail 'OCI rollback to a pre-SSE baseline unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/legacy-sse-rollback-success.out" 'oci_rollback_status=PASS'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_required=false'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_required=false'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\t502\t'
+[[ "$(wc -l <"$WORK_DIR/legacy-sse-rollback-success/rollout-order.tsv" | tr -d ' ')" == '9' ]] ||
+  fail 'OCI legacy pre-SSE rollback aborted mid-rollout instead of processing every service'
 
 run_expect_failure exact-digest-verification \
   STUB_BAD_DIGEST_SERVICE=event ROLLBACK_MODE=execute

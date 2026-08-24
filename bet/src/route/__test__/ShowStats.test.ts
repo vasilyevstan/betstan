@@ -4,7 +4,10 @@ import mongoose from "mongoose";
 import { app } from "../../app";
 import { Bet } from "../../model/Bet";
 import { BetKind, BetStatus, SlipRowStatus } from "@betstan/common";
-import { PUBLIC_SCOREBOARD_LIMIT } from "../../service/publicBetStats";
+import {
+  LEGACY_PUBLIC_SCOREBOARD_LIMIT,
+  PUBLIC_SCOREBOARD_LIMIT,
+} from "../../service/publicBetStats";
 
 const createPublicUserKey = (userId: string) =>
   createHash("sha256").update(userId).digest("hex").slice(0, 12);
@@ -62,8 +65,8 @@ it("uses a bounded server-side pipeline and keeps raw group keys out of the resp
   );
 
   try {
-    const firstResponse = await request(app).get("/api/bet/stats").send().expect(200);
-    const secondResponse = await request(app).get("/api/bet/stats").send().expect(200);
+    const firstResponse = await request(app).get("/api/bet/stats/v2").send().expect(200);
+    const secondResponse = await request(app).get("/api/bet/stats/v2").send().expect(200);
 
     expect(secondResponse.body).toEqual(firstResponse.body);
     expect(aggregateSpy).toHaveBeenCalledTimes(2);
@@ -139,6 +142,49 @@ it("uses a bounded server-side pipeline and keeps raw group keys out of the resp
   }
 });
 
+it("keeps the old client contract bounded and anonymized during rollout", async () => {
+  const aggregateRows = [
+    {
+      userId: "alpha-user",
+      wager: 5,
+    },
+  ];
+  const aggregateSpy = jest.spyOn(Bet, "aggregate").mockImplementation(
+    ((..._args: unknown[]) => Promise.resolve(aggregateRows)) as any
+  );
+
+  try {
+    const response = await request(app).get("/api/bet/stats").send().expect(200);
+    const userKey = createPublicUserKey("alpha-user");
+    const pipeline = aggregateSpy.mock.calls[0][0] as unknown as Array<
+      Record<string, Record<string, unknown> | number>
+    >;
+
+    expect(response.body).toEqual([
+      {
+        userId: userKey,
+        userName: createDisplayName(userKey),
+        wager: 5,
+      },
+    ]);
+    expect(response.text).not.toContain("alpha-user");
+    expect(pipeline.find((stage) => "$limit" in stage)?.$limit).toEqual(
+      LEGACY_PUBLIC_SCOREBOARD_LIMIT
+    );
+    expect(pipeline.find((stage) => "$project" in stage)?.$project).toEqual(
+      expect.objectContaining({
+        _id: 0,
+        userId: 1,
+      })
+    );
+    expect(
+      pipeline.find((stage) => "$project" in stage)?.$project
+    ).not.toHaveProperty("userName");
+  } finally {
+    aggregateSpy.mockRestore();
+  }
+});
+
 it("returns anonymized grouped stats with deterministic pseudonyms across live and legacy bets", async () => {
   const firstUserId = "alpha-user";
   const secondUserId = "beta-user";
@@ -177,8 +223,8 @@ it("returns anonymized grouped stats with deterministic pseudonyms across live a
     wager: 1,
   });
 
-  const firstResponse = await request(app).get("/api/bet/stats").send().expect(200);
-  const secondResponse = await request(app).get("/api/bet/stats").send().expect(200);
+  const firstResponse = await request(app).get("/api/bet/stats/v2").send().expect(200);
+  const secondResponse = await request(app).get("/api/bet/stats/v2").send().expect(200);
 
   expect(secondResponse.body).toEqual(firstResponse.body);
   expect(Array.isArray(firstResponse.body)).toBe(true);
@@ -230,7 +276,7 @@ it("caps the public scoreboard to the configured top users in deterministic rank
 
   await Bet.collection.insertMany(betDocuments);
 
-  const response = await request(app).get("/api/bet/stats").send().expect(200);
+  const response = await request(app).get("/api/bet/stats/v2").send().expect(200);
 
   expect(response.body).toHaveLength(PUBLIC_SCOREBOARD_LIMIT);
 
@@ -260,8 +306,10 @@ it("caps the public scoreboard to the configured top users in deterministic rank
 });
 
 it("returns empty array when no bets exist", async () => {
-  const response = await request(app).get("/api/bet/stats").send().expect(200);
+  const legacyResponse = await request(app).get("/api/bet/stats").send().expect(200);
+  const response = await request(app).get("/api/bet/stats/v2").send().expect(200);
 
+  expect(legacyResponse.body).toEqual([]);
   expect(Array.isArray(response.body)).toBe(true);
   expect(response.body.length).toEqual(0);
 });

@@ -37,6 +37,18 @@ coverage, stale/demoted administrator checks, auth-unavailable failure, private
 seed invariants, activation lease expiry, same-run/SHA commit ownership,
 ambiguous writes, and automatic flag-plus-lease disable.
 
+For concurrency and timing changes, require executable race tests where
+placement wins clean/delete, a restored board progresses before decline
+redelivery, and terminal/suspension updates arrive before or after their
+historical quote. Test submissions immediately before, equal to, and after the
+authority-ending `occurredAt`, plus legacy history without the additive end
+field. For SSE, verify intentional backpressure disconnect and monotonic
+REST/reconnect recovery together.
+
+Keep browser API fixtures faithful to concurrency contracts: include and
+rotate board revisions/fingerprints, reject mismatched placement
+confirmations, and require stale-quote reselection before resubmission.
+
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.
 
