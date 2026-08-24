@@ -51,6 +51,11 @@ inactive. Fail closed when either query is incomplete or fails.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
+- Production-run exclusivity may ignore an active stale queue artifact only
+  for `oci-capacity-acquire`: require an old jobless and approval-free
+  first-attempt manual dispatch for a non-current SHA plus a later successful
+  first-attempt run for the exact workflow and SHA. Never apply this exception
+  to deployment, activation, rollback, infrastructure, or data workflows.
 - Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
   environments in automatic mode. Exact-title capacity acquisition,
   `validate-registry`, `prune-registry`, infrastructure `finalize`, and the
