@@ -445,6 +445,27 @@ for literal in (
 ):
     if literal not in deploy:
         raise SystemExit(f"deploy workflow is missing fenced validation contract: {literal}")
+
+deploy_lines = deploy.splitlines()
+acquire_indexes = [
+    index
+    for index, line in enumerate(deploy_lines)
+    if "shared-mongo-operation-lock-stan.sh acquire" in line
+]
+if len(acquire_indexes) != 2:
+    raise SystemExit("deploy workflow must have exactly two guarded lock acquisitions")
+for index in acquire_indexes:
+    invocation = "\n".join(deploy_lines[max(0, index - 6) : index + 1])
+    if (
+        'LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS"'
+        not in invocation
+    ):
+        raise SystemExit("deploy lock acquisition is missing the bounded deploy lease")
+if sum(
+    "shared-mongo-operation-lock-stan.sh renew" in line
+    for line in deploy_lines
+) != 2:
+    raise SystemExit("deploy workflow must renew each verified lock path exactly once")
 PY
 
 echo "live_betting_data_rollout_tests=PASS"

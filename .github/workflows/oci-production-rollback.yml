@@ -308,6 +308,7 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.infra.outputs.diagnostic_url }}
           OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
           OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
+          OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           ADMIN_AUTH_CAPABILITY_FILE: artifacts/oci-rollback/admin-auth-capability.env
         run: ./infra/oci/scripts/rollback-application-stan.sh
 

@@ -465,6 +465,11 @@ def validate_oci_rollback_workflow!(file, document, content)
   )
   require_content(
     content,
+    /OCI_INFRASTRUCTURE_PROVENANCE_FILE:\s*artifacts\/infrastructure\/provenance\.env/,
+    "#{name} must pass the downloaded infrastructure provenance to the rollback operator"
+  )
+  require_content(
+    content,
     /oci-production-rollback-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
     "#{name} must upload attempt-bound rollback diagnostics"
   )
@@ -957,6 +962,28 @@ def validate_oci_production_deploy_binding!(name, document, content)
       /#{Regexp.escape(literal)}/,
       "#{name} is missing #{label}"
     )
+  end
+
+  lines = content.lines
+  acquire_indexes = lines.each_index.select do |index|
+    lines[index].include?("shared-mongo-operation-lock-stan.sh acquire")
+  end
+  unless acquire_indexes.length == 2
+    fail_inventory("#{name} must have exactly two guarded deploy-lock acquisition paths")
+  end
+  acquire_indexes.each do |index|
+    invocation = lines[[index - 6, 0].max..index].join
+    unless invocation.include?(
+      'LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS"'
+    )
+      fail_inventory("#{name} deploy-lock acquisition is missing the bounded deploy lease")
+    end
+  end
+  renew_count = lines.count do |line|
+    line.include?("shared-mongo-operation-lock-stan.sh renew")
+  end
+  unless renew_count == 2
+    fail_inventory("#{name} must renew each verified deploy-lock path exactly once")
   end
 end
 

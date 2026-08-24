@@ -375,15 +375,17 @@ jobs:
             NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
             OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          else
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
-          NAMESPACE="$OCI_K8S_NAMESPACE" \
-          LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
-          OPERATION_ID="live-data-apply-slip-index" \
-          LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
-          SOURCE_SHA="$SOURCE_SHA" \
-            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
 
       - name: Upload protected OCI rollback baseline
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -494,8 +496,16 @@ jobs:
             NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
             OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          else
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
 
       - name: Upload sanitized live readiness evidence

@@ -166,6 +166,11 @@ jobs:
           printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
           printf 'infrastructure_run_attempt=1\n'
           printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
           ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           echo "steps.handoff.outcome == 'success'"
           echo "steps.release_runtime.outcome != 'success'"
