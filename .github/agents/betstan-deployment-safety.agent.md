@@ -88,6 +88,9 @@ inactive. Fail closed when either query is incomplete or fails.
 - Validate rollout order per runtime rather than forcing AKS and OCI through
   one stale expected list. OCI rolls API dependencies before Client and keeps
   Gamemaster last.
+- Keep Azure and OCI rollback fixtures synchronized with every required
+  readiness safety counter. Missing fixture evidence must remain `unknown`
+  and block rollback before any image mutation.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.

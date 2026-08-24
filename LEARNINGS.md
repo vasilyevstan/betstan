@@ -180,6 +180,9 @@ cd resulting && npm ci && npm run test:ci
 - Rollout-order contracts are runtime-specific. OCI starts API dependencies
   before Client and keeps Gamemaster last; do not make a stale shared expected
   list override a stricter runtime contract.
+- Readiness evidence is fail-closed. When its required Mongo safety counters
+  expand, update every Azure and OCI rollback fixture in the same change;
+  omitted counters are `unknown`, not zero, and must prevent image mutation.
 
 ## Resolved failures and durable rules
 
