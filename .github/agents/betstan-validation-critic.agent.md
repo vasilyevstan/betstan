@@ -32,6 +32,16 @@ Read:
   mutation, and terminal recovery after all child rows are removed, after
   publication is marked complete but before archival, and from missing legacy
   publication state.
+- Read-then-save/delete races on mutable drafts. Require ID, owner, kind,
+  `DRAFT` status, revision, and fingerprint in the atomic mutation predicate,
+  plus conflict regressions where placement and another row mutation win.
+- Duplicate decline delivery after a replacement becomes submitted or
+  archived. Restoration must not reset, overwrite, or resurrect that
+  replacement.
+- Historical quote decisions made after suspension, full-time, replacement,
+  or other authority-ending transitions. Require immutable `submittedAt` to
+  precede both expiry and the earliest authoritative `occurredAt`, including
+  equal-boundary, out-of-order, restart, and missing-additive-field cases.
 - Old-client/new-API and new-client/old-API rolling combinations. Legacy
   compatibility evidence must be scoped to the authenticated session, exact
   user, and aggregate so another session cannot refresh stale evidence, and
@@ -43,6 +53,9 @@ Read:
 - Authorization, ownership, input trust, and silent-failure behavior.
 - Long-lived stream and synthetic-fixture isolation after stale-role,
   demotion, unavailable-auth, malformed-scope, and ordinary-public requests.
+- Distinguish intentional bounded SSE backpressure disconnects from data loss:
+  require unsubscribe plus tested EventSource reconnect, REST fallback, and
+  monotonic sequence reconciliation rather than unbounded response buffering.
 - Fail-dark control behavior under cancellation, hard process termination,
   expired leases, ambiguous writes, stale master, and mismatched run/SHA
   ownership.

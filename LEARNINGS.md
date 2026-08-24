@@ -44,7 +44,7 @@
 - New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
 - Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
-- Every open quote expires at the next persisted simulation transition. Slip records one immutable server-generated submission time during its atomic draft-to-submitted transition, and Moderation requires both an exact mirrored expiry and `submittedAt < quoteValidUntil`; consumer processing time must never reopen or reject a quote merely because a queue was delayed.
+- Every open quote expires at the next persisted simulation transition. Slip records one immutable server-generated submission time during its atomic draft-to-submitted transition, and Moderation requires an exact mirrored expiry plus `submittedAt` strictly before both `quoteValidUntil` and the first later transition that ended that quote's authority. Persist that authority end from the update payload's domain `occurredAt`, choose the earliest later sequence under out-of-order delivery, and use the current terminal mirror timestamp only as a backward-compatible fallback when old history lacks the additive field.
 - Missing, malformed, or boundary-equal live expiry evidence fails closed at Event, client, and Moderation boundaries. A delayed market mirror may park a provably pre-cutoff submission, but it must not authorize an outcome-known bet.
 
 ### Privileged authorization and synthetic fixtures
@@ -57,6 +57,7 @@
 - A visibility message may arrive before any event row. Persist it as pending on an `OFFLINE` placeholder, then apply it only after authoritative metadata arrives; ambiguous legacy hidden placeholders stay hidden.
 - Competing `NEW_EVENT` and visibility placeholder upserts can race on the unique event ID. Both paths must treat duplicate-key as convergence and retry the pending decision against the winning row before acknowledging.
 - Scoped clients immediately purge cached offline events and refresh authentication when REST or SSE access fails. A bounded authoritative REST reconcile continues while SSE is healthy because visibility removals and pre-match changes may not produce live snapshots.
+- SSE is a bounded delivery hint, not an unbounded per-client queue. Close and unsubscribe a response when `res.write()` applies backpressure; the client must reconnect, poll REST, reconcile sequence gaps, and reject lower/equal snapshots.
 
 ### Fail-dark live activation
 - `LIVE_KICKOFFS_ENABLED=true` is permanent only when no activation lease is present. A temporary activation also carries `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`; malformed or expired leases fail dark inside Gamemaster while already-started matches continue.
@@ -73,6 +74,14 @@
 - A Slip board revision and fingerprint are authorization evidence, not merely
   display metadata. Every row mutation, including deletion, rotates both
   values so a stale tab cannot place a materially changed draft.
+- Draft mutation and deletion must be one atomic database operation scoped by
+  slip ID, owner, kind, `DRAFT` status, revision, and fingerprint. A document
+  loaded as draft must never be saved or deleted later without those
+  predicates; placement or another mutation winning the race returns a
+  conflict instead of changing the submitted/latest board.
+- Decline restoration may merge only into a board that is still `DRAFT`.
+  Duplicate delivery treats a replacement that progressed to `SUBMITTED` or
+  archive as completed and must never reset or resurrect it.
 - During a rolling Client/API upgrade, the boards read endpoint records a
   bounded confirmation scoped to a hash of the authenticated session plus the
   user, kind, slip, revision, and fingerprint. Never overwrite one

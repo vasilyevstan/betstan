@@ -63,6 +63,18 @@ instead of crossing the boundary.
 - Treat revision/fingerprint pairs as stale-write authorization. Rotate both
   on every aggregate mutation, including row deletion, and test an old
   confirmation against the changed aggregate.
+- Mutate or delete a draft with one database operation scoped by aggregate ID,
+  owner, kind, `DRAFT` status, revision, and fingerprint. Never call a stale
+  document's `save()` or `deleteOne()` after a read; return a conflict when
+  placement or another board mutation wins.
+- Restore a declined aggregate only while its replacement is still `DRAFT`.
+  Redelivery must treat a submitted or archived replacement as completed,
+  never reset or recreate it.
+- Historical quote validation uses immutable domain time twice: submission
+  must precede both the exact quote expiry and the earliest later transition
+  that ended authority. Persist authority ends from payload `occurredAt`,
+  preserve them under out-of-order delivery, and keep old records readable
+  when the additive field is absent.
 - For rolling clients, prove both old and new request shapes. Scope any legacy
   confirmation to a bounded hash of the authenticated session and the exact
   user, aggregate, kind, revision, and fingerprint; never use one
