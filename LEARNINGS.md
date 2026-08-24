@@ -221,8 +221,13 @@ cd resulting && npm ci && npm run test:ci
   failing suite cannot appear green.
 - A protected environment wait is active progress. Report the exact run,
   phase, and pending environment instead of presenting a silent wait.
-- A jobless stale GitHub queue record can be an inert provider artifact, but it
-  is never authority to recover data or mutate production.
+- A jobless stale GitHub queue record can be an inert provider artifact, but
+  only the idempotent capacity workflow may ignore one while active: it must
+  be an old first-attempt manual dispatch for a non-current SHA, have no jobs
+  or approvals, and be superseded by a later successful first-attempt run for
+  the same workflow and SHA. Never extend that exception to deploy, activation,
+  rollback, infrastructure, or data workflows, and never treat it as authority
+  to recover data or mutate production.
 - Deleted Entra service principals require a successful list-all,
   client-side exact-ID absence probe; a server-filter 404 is not usable
   evidence. Role-assignment IDs must also bind to their declared parent scope.
