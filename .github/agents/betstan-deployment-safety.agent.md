@@ -82,6 +82,12 @@ inactive. Fail closed when either query is incomplete or fails.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
+- Keep expression contexts actionlint-valid: status functions belong in
+  `if`; final shell provenance receives validated `${{ job.status }}` through
+  `env`.
+- Validate rollout order per runtime rather than forcing AKS and OCI through
+  one stale expected list. OCI rolls API dependencies before Client and keeps
+  Gamemaster last.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.

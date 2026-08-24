@@ -693,8 +693,7 @@ jobs:
       - name: Write final activation provenance
         if: always()
         env:
-          WORKFLOW_FAILED: ${{ failure() }}
-          WORKFLOW_CANCELLED: ${{ cancelled() }}
+          WORKFLOW_RESULT: ${{ job.status }}
           ACCEPTED_OUTCOME: ${{ steps.accepted.outcome }}
           ACCEPTED_EVIDENCE_UPLOAD_OUTCOME: ${{ steps.accepted_evidence_upload.outcome }}
           COMMIT_PREFLIGHT_OUTCOME: ${{ steps.commit_preflight.outcome }}
@@ -721,12 +720,15 @@ jobs:
             awk -F= -v key="$key" '$1 == key {print $2}' "$file"
           }
 
-          workflow_result=success
-          if [ "$WORKFLOW_CANCELLED" = "true" ]; then
-            workflow_result=cancelled
-          elif [ "$WORKFLOW_FAILED" = "true" ]; then
-            workflow_result=failure
-          fi
+          case "$WORKFLOW_RESULT" in
+            success|failure|cancelled)
+              workflow_result="$WORKFLOW_RESULT"
+              ;;
+            *)
+              printf 'Unsupported workflow result: %s\n' "$WORKFLOW_RESULT" >&2
+              exit 1
+              ;;
+          esac
 
           acceptance_sha256="$(
             sha256_or_none artifacts/live-control/acceptance/evidence.json
@@ -767,13 +769,7 @@ jobs:
             activation_lease_until_epoch="$(
               env_value after_lease_until_epoch "$final_control_file"
             )"
-            if [ "$WORKFLOW_CANCELLED" = "true" ]; then
-              post_commit_status=cancelled
-            elif [ "$WORKFLOW_FAILED" = "true" ]; then
-              post_commit_status=failure
-            else
-              post_commit_status=success
-            fi
+            post_commit_status="$workflow_result"
           elif [ -f artifacts/live-control/final-failure-disable/control.env ]; then
             final_control_file=artifacts/live-control/final-failure-disable/control.env
             final_control_sha256="$final_disable_sha256"

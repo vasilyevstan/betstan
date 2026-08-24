@@ -42,7 +42,7 @@ oci_workflow = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 build_workflow = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 oci_deploy_script = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
 
-expected_order = [
+expected_azure_order = [
     "auth",
     "bet",
     "client",
@@ -51,6 +51,17 @@ expected_order = [
     "resulting",
     "slip",
     "backoffice",
+    "gamemaster",
+]
+expected_oci_order = [
+    "auth",
+    "bet",
+    "event",
+    "moderation",
+    "resulting",
+    "slip",
+    "backoffice",
+    "client",
     "gamemaster",
 ]
 approved_action_refs = {
@@ -146,9 +157,9 @@ def mutate_once(text: str, needle: str, replacement: str) -> str:
     return mutated
 
 
-if parse_rollouts(azure_workflow) != expected_order:
+if parse_rollouts(azure_workflow) != expected_azure_order:
     fail("Azure deploy workflow rollout order changed")
-if parse_services(oci_deploy_script) != expected_order:
+if parse_services(oci_deploy_script) != expected_oci_order:
     fail("OCI deploy script rollout order changed")
 
 action_pin_errors = validate_action_pins(build_workflow)

@@ -174,6 +174,12 @@ cd resulting && npm ci && npm run test:ci
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.
 - Workflow-dispatch inputs used by shell steps must enter through a step/job environment binding. A repository-wide parser and adversarial fixtures reject direct `${{ inputs.* }}` and legacy `${{ github.event.inputs.* }}` interpolation inside `run` scripts.
+- GitHub status functions such as `failure()` and `cancelled()` belong in
+  `if`, not a step `env`. For final provenance scripts, bind
+  `${{ job.status }}` and validate its `success`/`failure`/`cancelled` domain.
+- Rollout-order contracts are runtime-specific. OCI starts API dependencies
+  before Client and keeps Gamemaster last; do not make a stale shared expected
+  list override a stricter runtime contract.
 
 ## Resolved failures and durable rules
 

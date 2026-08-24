@@ -86,6 +86,7 @@ for literal in \
   'oci-live-activation-accepted-' \
   'steps.accepted_evidence_upload.outcome != '\''success'\''' \
   'Write final activation provenance' \
+  'WORKFLOW_RESULT: ${{ job.status }}' \
   'activation_state=committed' \
   'post_commit_status=' \
   'workflow_result=' \
