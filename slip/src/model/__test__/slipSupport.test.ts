@@ -414,20 +414,22 @@ describe("slipSupport", () => {
     ).toBe(2);
 
     const duplicateSpy = jest
-      .spyOn(Slip.collection, "updateOne")
+      .spyOn(Slip.collection, "findOneAndUpdate")
       .mockRejectedValueOnce({ code: 11000 } as any)
-      .mockResolvedValueOnce({ acknowledged: true } as any);
+      .mockResolvedValueOnce({ ok: 1 } as any);
     await upsertDraftSlipRow("retry-user", BetKind.PRE_MATCH, buildRow());
     expect(duplicateSpy).toHaveBeenNthCalledWith(
       2,
       expect.any(Object),
       expect.any(Array),
-      { upsert: false }
+      expect.objectContaining({
+        upsert: false,
+      })
     );
     duplicateSpy.mockRestore();
 
     const errorSpy = jest
-      .spyOn(Slip.collection, "updateOne")
+      .spyOn(Slip.collection, "findOneAndUpdate")
       .mockRejectedValueOnce(new Error("update failed"));
     await expect(
       upsertDraftSlipRow("error-user", BetKind.PRE_MATCH, buildRow())

@@ -6,7 +6,7 @@ import {
   SlipStatus,
   TeamSide,
 } from "@betstan/common";
-import { Schema, model } from "mongoose";
+import { Schema, Types, model } from "mongoose";
 import { SlipPublicationState } from "./SlipPublicationState";
 
 const SLIP_DRAFT_UNIQUE_INDEX_NAME = "slip_draft_unique_by_kind";
@@ -279,6 +279,28 @@ const publicationSchema = new Schema(
   { _id: false }
 );
 
+const legacyBoardConfirmationSchema = new Schema(
+  {
+    sessionScope: {
+      type: String,
+      required: true,
+    },
+    boardRevision: {
+      type: Number,
+      required: true,
+    },
+    boardFingerprint: {
+      type: String,
+      required: true,
+    },
+    confirmedAt: {
+      type: String,
+      required: true,
+    },
+  },
+  { _id: false }
+);
+
 const slipSchema = new Schema({
   userId: {
     type: String,
@@ -317,6 +339,28 @@ const slipSchema = new Schema({
   replacementSlipId: {
     type: String,
   },
+  boardRevision: {
+    type: Number,
+    default: 1,
+  },
+  boardFingerprint: {
+    type: String,
+    default: () => new Types.ObjectId().toHexString(),
+  },
+  legacyBoardRevision: {
+    type: Number,
+  },
+  legacyBoardFingerprint: {
+    type: String,
+  },
+  legacyBoardConfirmedAt: {
+    type: String,
+  },
+  legacyBoardConfirmations: {
+    type: [legacyBoardConfirmationSchema],
+    default: undefined,
+    select: false,
+  },
   submittedEvent: submittedEventSchema,
   publication: publicationSchema,
   rows: [slipRowSchema],
@@ -326,6 +370,20 @@ slipSchema.index({ sourceSlipId: 1 }, { sparse: true });
 
 slipSchema.pre("validate", function (next) {
   this.set("draftKey", this.get("betKind") ?? BetKind.PRE_MATCH);
+
+  const currentBoardRevision = this.get("boardRevision");
+  if (!Number.isInteger(currentBoardRevision) || currentBoardRevision < 1) {
+    this.set("boardRevision", 1);
+  }
+
+  const currentBoardFingerprint = this.get("boardFingerprint");
+  if (
+    typeof currentBoardFingerprint !== "string"
+    || currentBoardFingerprint.trim().length === 0
+  ) {
+    this.set("boardFingerprint", new Types.ObjectId().toHexString());
+  }
+
   next();
 });
 

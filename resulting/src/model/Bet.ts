@@ -174,6 +174,14 @@ const betSchema = new Schema({
     required: false,
     default: "",
   },
+  terminalPublicationClaimedAt: {
+    type: Date,
+    required: false,
+  },
+  terminalPublicationClaimId: {
+    type: String,
+    required: false,
+  },
   rows: [rowSchema],
 });
 

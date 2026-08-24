@@ -17,4 +17,8 @@ run_live_betting_scenario oci-rollback-drain-active "$SCRIPT" oci MODE=rollback-
 assert_eq 1 "$RUN_RC" "OCI rollback-drain contract should fail with submitted live slips"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'submitted live slips should fail rollback-drain mongo counts'
 
-echo 'live_betting_rollback_readiness_tests=PASS stack=oci scenarios=2'
+run_live_betting_scenario oci-rollback-drain-draft-active "$SCRIPT" oci MODE=rollback-drain STUB_DRAFT_LIVE_SLIPS=1
+assert_eq 1 "$RUN_RC" "OCI rollback-drain contract should fail with draft live slips"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_counts' 'draft live slips should fail rollback-drain mongo counts'
+
+echo 'live_betting_rollback_readiness_tests=PASS stack=oci scenarios=3'

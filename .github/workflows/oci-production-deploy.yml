@@ -79,6 +79,7 @@ jobs:
       OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
       OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
       OCI_CPU_MAX_PERCENT: "90"
+      SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: "10800"
       OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
       OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
 
@@ -360,16 +361,31 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Verify transferred database lock and maintenance fence
+        id: handoff
         env:
           STATE_FILE: artifacts/oci-deploy/unused-maintenance-state.tsv
         run: |
           set -euo pipefail
-          NAMESPACE="$OCI_K8S_NAMESPACE" \
-          LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
-          OPERATION_ID="live-data-apply-slip-index" \
-          SOURCE_SHA="$SOURCE_SHA" \
-            ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify
           ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh verify; then
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          else
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
+          fi
 
       - name: Upload protected OCI rollback baseline
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -465,11 +481,8 @@ jobs:
         id: rehold
         if: >-
           always() &&
-          (steps.apply.outcome == 'failure' ||
-            steps.bind.outcome == 'failure' ||
-            steps.release_lock.outcome == 'failure' ||
-            steps.health.outcome == 'failure' ||
-            steps.release_runtime.outcome == 'failure')
+          steps.handoff.outcome == 'success' &&
+          steps.release_runtime.outcome != 'success'
         env:
           STATE_FILE: artifacts/oci-deploy/unused-maintenance-state.tsv
         run: |
@@ -483,8 +496,16 @@ jobs:
             NAMESPACE="$OCI_K8S_NAMESPACE" \
             LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
             OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
+          else
+            NAMESPACE="$OCI_K8S_NAMESPACE" \
+            LOCK_TOKEN="live-data-${DATA_RUN_ID}-1" \
+            OPERATION_ID="live-data-apply-slip-index" \
+            LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
+            SOURCE_SHA="$SOURCE_SHA" \
+              ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
 
       - name: Upload sanitized live readiness evidence

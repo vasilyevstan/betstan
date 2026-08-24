@@ -17,7 +17,7 @@ Never push directly to `dev`; integrate focused feature, fix, or operations bran
 
 Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They may use `COPILOT_CLI_AUTO_APPROVE=true` only after the merge-safety script verifies the label, exact refs, trusted required checks, resolved review threads, production workflow inventory, and absence of actionable competing production activity. Unlabelled pull requests and work created outside Copilot CLI require explicit human approval. Automatic mode never skips required checks or immutable-SHA gates.
 
-Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to normal application build/deploy workflows; rollback, migration, and infrastructure workflows remain human-gated.
+Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to application build/deploy/activation, exact-title capacity and registry/finalize phases, and the bounded `oci-live-data-rollout` chain. Broad migration, recovery, rollback, stale-master, rerun, unlabelled, and competing runs remain human-gated.
 
 Schema-dependent OCI releases use the reviewer-gated `oci-live-data-rollout` workflow before deployment. Its exact-SHA phases are chained `dry-run` → `apply-backfills` → `apply-slip-index`; `oci-production-deploy` requires the final hash-bound schema evidence and pre-mutation rollback baseline from the same build and infrastructure runs. Mutating phases fence public writes and quiesce legacy data writers. A successful final phase deliberately retains that maintenance state and the shared-Mongo operation lock until the exact deployment passes protected validation, so dispatch the bound deployment immediately; an incomplete deployment re-enters the same fail-closed state for a safe retry.
 
@@ -29,10 +29,9 @@ Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, stag
 
 ## Trusted-check bootstrap
 
-Do not change the protected quality workflow before its exact Git blob is authorized by the trusted publisher on the default branch. Roll out quality-workflow changes in two phases:
+The trusted publisher currently requires the protected quality workflow to be byte-identical to the default-branch copy. Prefer extending an existing checked-in guard or test entrypoint that `production-build.yml` already invokes; this preserves the trusted workflow identity while still exercising the new validation.
 
-1. Add only the intended workflow blob SHA to `APPROVED_QUALITY_WORKFLOW_BLOBS`, merge that policy change through `dev`, and promote it to protected `master`.
-2. Merge the exact workflow update through `dev`, remove the one-use authorization before promotion, and verify fresh statuses come from the expected workflow IDs.
+If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 

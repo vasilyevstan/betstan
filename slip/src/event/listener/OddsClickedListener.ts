@@ -7,7 +7,6 @@ import {
 } from "@betstan/common";
 import { Types } from "mongoose";
 import {
-  findSubmittedSlipForUser,
   PlainSlipRow,
   upsertDraftSlipRow,
   normalizeBetKind,
@@ -52,13 +51,6 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
     const betKind = normalizeBetKind(event.data.betKind);
 
     if (!userId) {
-      this.ack(msg);
-      return;
-    }
-
-    const submittedSlip = await findSubmittedSlipForUser(userId, betKind);
-
-    if (submittedSlip) {
       this.ack(msg);
       return;
     }

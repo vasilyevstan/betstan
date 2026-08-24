@@ -227,7 +227,32 @@ cat >"$lock_bin/kubectl" <<'SH'
 set -euo pipefail
 
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" ]]; then
-  printf '%s\n' "${STUB_LOCK_STATE:?}"
+  IFS='|' read -r state holder operation_id source_sha <<<"${STUB_LOCK_STATE:?}"
+  jq -cn \
+    --arg state "$state" \
+    --arg holder "$holder" \
+    --arg operation_id "$operation_id" \
+    --arg source_sha "$source_sha" \
+    '{
+      apiVersion:"v1",
+      kind:"ConfigMap",
+      metadata:{
+        name:"gaming-mongo-migration-lock",
+        namespace:"betstan-oci",
+        resourceVersion:"1"
+      },
+      data:{
+        state:$state,
+        holder:$holder,
+        "operation-id":$operation_id,
+        "source-sha":$source_sha,
+        "acquired-at-epoch":"900",
+        "lease-duration-seconds":"200",
+        "lease-until-epoch":"1100",
+        "released-at-epoch":"0",
+        "fencing-generation":"1"
+      }
+    }'
   exit 0
 fi
 echo "unexpected lock kubectl invocation: $*" >&2
@@ -239,6 +264,7 @@ lock_env=(
   LOCK_TOKEN=live-data-4003-1
   OPERATION_ID=live-data-apply-slip-index
   SOURCE_SHA=1111111111111111111111111111111111111111
+  NOW_EPOCH=1000
 )
 PATH="$lock_bin:$PATH" \
 STUB_LOCK_STATE='active|live-data-4003-1|live-data-apply-slip-index|1111111111111111111111111111111111111111' \

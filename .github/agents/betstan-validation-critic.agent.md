@@ -27,12 +27,43 @@ Read:
 - Incorrect behavior and unmet acceptance criteria.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
+- Raw-write/Mongoose-version interactions, including historical documents
+  without `__v`, stale aggregate revision/fingerprint reuse after every
+  mutation, and terminal recovery after all child rows are removed, after
+  publication is marked complete but before archival, and from missing legacy
+  publication state.
+- Read-then-save/delete races on mutable drafts. Require ID, owner, kind,
+  `DRAFT` status, revision, and fingerprint in the atomic mutation predicate,
+  plus conflict regressions where placement and another row mutation win.
+- Duplicate decline delivery after a replacement becomes submitted or
+  archived. Restoration must not reset, overwrite, or resurrect that
+  replacement.
+- Mongo filters assembled from reusable objects with repeated `$or` or other
+  logical keys. Require explicit `$and` composition so an unpublished,
+  ownership, or lease predicate cannot be overwritten before an atomic claim.
+- Historical quote decisions made after suspension, full-time, replacement,
+  or other authority-ending transitions. Require immutable `submittedAt` to
+  precede both expiry and the earliest authoritative `occurredAt`, including
+  equal-boundary, out-of-order, restart, and missing-additive-field cases.
+- Old-client/new-API and new-client/old-API rolling combinations. Legacy
+  compatibility evidence must be scoped to the authenticated session, exact
+  user, and aggregate so another session cannot refresh stale evidence, and
+  must not override an explicit mismatched new-client confirmation. Check that
+  submitted-board polling does not create recurring compatibility writes.
+- Domain ordering or idempotency that accidentally depends on mutable
+  publisher-stamped envelope metadata; require retries with identical domain
+  data and changed transport timestamps.
 - Authorization, ownership, input trust, and silent-failure behavior.
 - Long-lived stream and synthetic-fixture isolation after stale-role,
   demotion, unavailable-auth, malformed-scope, and ordinary-public requests.
+- Distinguish intentional bounded SSE backpressure disconnects from data loss:
+  require unsubscribe plus tested EventSource reconnect, REST fallback, and
+  monotonic sequence reconciliation rather than unbounded response buffering.
 - Fail-dark control behavior under cancellation, hard process termination,
   expired leases, ambiguous writes, stale master, and mismatched run/SHA
   ownership.
+- Deployment failure cleanup that can acquire a lock, fence writes, or
+  quiesce workloads before the same run has validated the exact handoff.
 - Missing negative, boundary, integration, and regression tests.
 - Unrelated scope or path-ownership violations.
 

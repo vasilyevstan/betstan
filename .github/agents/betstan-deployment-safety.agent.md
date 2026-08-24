@@ -52,10 +52,12 @@ inactive. Fail closed when either query is incomplete or fails.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
-  environments in automatic mode. The only infrastructure exceptions are an
-  exact-title `validate-registry` or `prune-registry` run on current
-  CLI-managed `master`; never auto-approve other infrastructure, rollback,
-  migration, stale-master, rerun, unlabelled, or competing workflow activity.
+  environments in automatic mode. Exact-title capacity acquisition,
+  `validate-registry`, `prune-registry`, infrastructure `finalize`, and the
+  bounded live-data phases may also run automatically on current CLI-managed
+  `master`. Never auto-approve infrastructure `prepare`, broad migration,
+  recovery, rollback, stale-master, rerun, unlabelled, or competing workflow
+  activity.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
@@ -80,6 +82,19 @@ inactive. Fail closed when either query is incomplete or fails.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
+- Keep expression contexts actionlint-valid: status functions belong in
+  `if`; final shell provenance receives validated `${{ job.status }}` through
+  `env`.
+- Validate rollout order per runtime rather than forcing AKS and OCI through
+  one stale expected list. OCI rolls API dependencies before Client and keeps
+  Gamemaster last.
+- Keep Azure and OCI rollback fixtures synchronized with every required
+  readiness safety counter. Missing fixture evidence must remain `unknown`
+  and block rollback before any image mutation. Optional nested safety markers
+  must be queried with explicit existence and non-null predicates.
+- Make integration stubs emit the production command-boundary schema. Shared
+  Mongo lock fixtures return ConfigMap JSON with lease and fencing metadata,
+  never a reduced legacy summary.
 - Never invoke a retired workflow as a fallback. Azure deployment remains a
   separately approved dormant/revival path and cannot replace OCI implicitly.
 - Deploy only a SHA whose required build completed successfully on `master`.
@@ -110,6 +125,11 @@ inactive. Fail closed when either query is incomplete or fails.
   fresh validation. Bind the artifact to the exact candidate, deployed,
   fallback, and every obsolete SHA/run pair; matching SHAs with different run
   IDs are not interchangeable.
+- Treat exact manifest lineage and provider layer accounting as separate
+  gates. OCIR may retain deleted, unreferenced layers after all target OCIDs
+  are absent. Never prune a protected rollback generation or waive the storage
+  ceiling to compensate; return `NO_GO` until provider accounting converges or
+  a separately reviewed image-size change satisfies the limit.
 
 ## Deployment gates
 
@@ -162,7 +182,9 @@ After deployment:
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
-  permitting a retry.
+  permitting a retry, but only if that same run first validated and accepted
+  the exact data handoff. If handoff validation did not succeed, failure
+  cleanup must not mutate replicas, fences, or database locks.
 - enable live kickoffs only through a bounded worker-enforced activation lease;
   permit the same run/SHA to remove that lease only after complete acceptance,
   protected evidence upload, and final current-master/provenance revalidation;

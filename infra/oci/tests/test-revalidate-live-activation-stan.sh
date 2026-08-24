@@ -3,11 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/revalidate-live-activation-stan.sh"
+WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 SOURCE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 mkdir -p "$WORK_DIR/bin"
+
+fail() {
+  echo "live activation revalidation contract failed: $*" >&2
+  exit 1
+}
 
 cat >"$WORK_DIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
@@ -71,5 +77,62 @@ if STUB_RUN_ATTEMPT=2 run_revalidation >/dev/null 2>&1; then
   echo "revalidation accepted rerun provenance" >&2
   exit 1
 fi
+
+for literal in \
+  'Write accepted activation lease evidence' \
+  'activation_state=leased' \
+  'accepted.env' \
+  'Upload protected accepted activation evidence' \
+  'oci-live-activation-accepted-' \
+  'steps.accepted_evidence_upload.outcome != '\''success'\''' \
+  'Write final activation provenance' \
+  'WORKFLOW_RESULT: ${{ job.status }}' \
+  'activation_state=committed' \
+  'post_commit_status=' \
+  'workflow_result=' \
+  '!cancelled()' \
+  'steps.commit_preflight.outcome != '\''success'\''' \
+  'failure() || cancelled()'; do
+  grep -Fq "$literal" "$WORKFLOW" ||
+    fail "activation workflow is missing safety contract: $literal"
+done
+
+if grep -Fq "steps.evidence_upload.outcome != 'success'" "$WORKFLOW"; then
+  fail "activation workflow still disables live based on post-commit evidence upload"
+fi
+
+python3 - "$WORKFLOW" <<'PY'
+import sys
+from pathlib import Path
+
+content = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+
+def require_order(markers: list[str], label: str) -> None:
+    positions: list[int] = []
+    for marker in markers:
+        position = content.find(marker)
+        if position < 0:
+            raise SystemExit(f"{label} is missing ordered marker: {marker}")
+        positions.append(position)
+    if positions != sorted(positions):
+        raise SystemExit(f"{label} ordered markers are out of sequence")
+
+
+require_order(
+    [
+        "Write accepted activation lease evidence",
+        "Upload protected accepted activation evidence",
+        "Revalidate release head before permanent activation",
+        "Commit accepted live activation",
+        "Enforce dark mode unless activation committed",
+        "Revoke exact OKE runner rule",
+        "Close ephemeral OCI Bastion access",
+        "Write final activation provenance",
+        "Upload protected activation evidence",
+    ],
+    "activation workflow",
+)
+PY
 
 echo "live activation revalidation contract: PASS"

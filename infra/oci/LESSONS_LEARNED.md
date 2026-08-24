@@ -20,6 +20,10 @@ conversation summaries are not authority.
 - Recovery uses the interrupted migration journal SHA and fencing generation.
   Do not replace it with a newer `master` SHA.
 - Only one mutation-producing release or migration workflow may run at once.
+- Deployment cleanup may re-enter maintenance only if that run first
+  validated and accepted the exact data handoff. A stale, unauthorized, or
+  otherwise invalid request must not independently quiesce writers, acquire
+  the shared database lock, or fence production.
 
 ## Live feature activation
 
@@ -54,6 +58,19 @@ conversation summaries are not authority.
 - OCI deletion and registry layer reclamation are asynchronous. Wait for
   terminal provider state and accounting instead of assuming a successful
   delete response completed the operation.
+- Manifest convergence and billable-layer convergence are independent.
+  A registry can contain only the exact candidate, deployed rollback, and
+  fallback manifests while `layers-size-in-bytes` still includes deleted,
+  unreferenced layers. Never delete a protected rollback generation or bypass
+  the 500 MB gate to make accounting appear green; retain the proven lineage
+  and wait for provider garbage collection or reduce image weight in a
+  separately reviewed build.
+- OCIR exposes image/repository deletion and retention controls, but no
+  user-triggered garbage-collection operation. Oracle documents that
+  repository deletion and storage release can take up to 48 hours. Re-run the
+  read-only registry validation while waiting; if accounting remains stale
+  beyond that window, contact Oracle Support rather than deleting a protected
+  generation or weakening the storage gate.
 - A build that fails after publishing can leave a complete source-tagged image
   generation without a provenance artifact. Before pruning accumulated
   generations, protect the exact candidate, deployed, and fallback digest

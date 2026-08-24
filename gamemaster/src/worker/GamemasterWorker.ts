@@ -28,6 +28,7 @@ const DEFAULT_WORK_CADENCE_MS = 1000;
 const DEFAULT_LEASE_DURATION_MS = 30000;
 const LIVE_KICKOFF_CUTOVER_WINDOW_MS = 10 * 60 * 1000;
 const MAX_EVENTS_PER_TICK = 100;
+const MAX_SIMULATION_FAILURES = 3;
 
 type TimerHandle = unknown;
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
@@ -313,7 +314,7 @@ export class GamemasterWorker {
     try {
       await this.checkEventsOnce();
     } catch (err) {
-      console.log("Gamemaster tick failed", err);
+      console.error("GAMEMASTER_TICK_FAILED", err);
     } finally {
       this.running = false;
       this.scheduleNextTick(this.cadenceMs);
@@ -352,18 +353,17 @@ export class GamemasterWorker {
         { liveNextTransitionAt: 1, time: 1 },
         now
       )
-      ?? (this.liveKickoffsEnabled(now)
-        ? await this.claimEvent(
-          {
-            status: EventStatus.NO_RESULT,
-            "pendingResult.source": { $ne: LiveResultSource.MANUAL },
-            "liveTransitions.0": { $exists: false },
-            time: { $lte: now },
-          },
-          { time: 1 },
-          now
-        )
-        : null)
+      ?? await this.claimEvent(
+        {
+          status: EventStatus.NO_RESULT,
+          "pendingResult.source": { $ne: LiveResultSource.MANUAL },
+          "liveTransitions.0": { $exists: false },
+          "simulationFailure.quarantinedAt": null,
+          time: { $lte: now },
+        },
+        { time: 1 },
+        now
+      )
     );
   }
 
@@ -474,21 +474,26 @@ export class GamemasterWorker {
       return event;
     }
 
-    if (!this.liveKickoffsEnabled(now)) {
-      return event;
-    }
-
     const seed = isPrivateLiveSeed(event.liveSeed)
       ? event.liveSeed
       : this.createLiveSeed();
-    const simulation = this.simulate({
-      eventId: event.eventId,
-      seed,
-    });
-    const persistencePlan = this.initialSimulationPersistencePlan(
-      kickoffAt,
-      simulation
-    );
+    let simulation: SimulationResult;
+    let persistencePlan: {
+      confirmedSequence: number;
+      liveEndedAt?: Date;
+    };
+    try {
+      simulation = this.simulate({
+        eventId: event.eventId,
+        seed,
+      });
+      persistencePlan = this.liveKickoffsEnabled(now)
+        ? this.initialSimulationPersistencePlan(kickoffAt, simulation)
+        : this.completedSimulationPersistencePlan(simulation);
+    } catch (error) {
+      await this.recordSimulationFailure(event);
+      throw error;
+    }
 
     return (
       await Event.findOneAndUpdate(
@@ -507,10 +512,81 @@ export class GamemasterWorker {
             persistencePlan.liveEndedAt,
             seed
           ),
+          $unset: {
+            simulationFailure: "",
+          },
         },
         { new: true }
       )
       ?? await this.refreshClaimedEvent(event._id, event.processingLease?.token)
+    );
+  }
+
+  private completedSimulationPersistencePlan(
+    simulation: SimulationResult
+  ): {
+    confirmedSequence: number;
+    liveEndedAt: Date;
+  } {
+    const finalTransition =
+      simulation.transitions[simulation.transitions.length - 1];
+    if (!finalTransition || finalTransition.phase !== EventPhase.FULL_TIME) {
+      throw new Error("Simulation does not contain a full-time transition");
+    }
+
+    return {
+      confirmedSequence: finalTransition.sequence,
+      liveEndedAt: this.clock.now(),
+    };
+  }
+
+  private async recordSimulationFailure(event: any): Promise<void> {
+    const failedAt = this.clock.now();
+    const failedEvent = await Event.findOneAndUpdate(
+      {
+        _id: event._id,
+        "processingLease.token": event.processingLease?.token,
+        status: EventStatus.NO_RESULT,
+        "liveTransitions.0": { $exists: false },
+      },
+      {
+        $inc: {
+          "simulationFailure.attemptCount": 1,
+        },
+        $set: {
+          "simulationFailure.lastFailedAt": failedAt,
+        },
+      },
+      { new: true }
+    );
+
+    const attemptCount = Number(
+      failedEvent?.simulationFailure?.attemptCount ?? 0
+    );
+    const quarantined = attemptCount >= MAX_SIMULATION_FAILURES;
+    if (quarantined && failedEvent) {
+      await Event.updateOne(
+        {
+          _id: failedEvent._id,
+          "processingLease.token": event.processingLease?.token,
+          "simulationFailure.quarantinedAt": null,
+        },
+        {
+          $set: {
+            "simulationFailure.quarantinedAt": failedAt,
+          },
+        }
+      );
+    }
+
+    console.error(
+      quarantined
+        ? "GAMEMASTER_SIMULATION_QUARANTINED"
+        : "GAMEMASTER_SIMULATION_FAILED",
+      JSON.stringify({
+        attemptCount,
+        eventId: event.eventId,
+      })
     );
   }
 
@@ -989,6 +1065,7 @@ export class GamemasterWorker {
           liveMarkets: event.liveMarkets,
           processingLease: event.processingLease,
           pendingResult: event.pendingResult,
+          simulationFailure: event.simulationFailure,
           resultPublishedAt: event.resultPublishedAt,
           ...overrides,
         },

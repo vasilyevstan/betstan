@@ -7,6 +7,7 @@ import PlaceBetListener from "../event/listener/PlaceBetListener";
 import { replayPendingModerationResult } from "./resulting";
 import { PendingModerationReplayWorker } from "./pendingModeration";
 import { RetryWorker } from "./retry";
+import { TerminalSettlementSweepWorker } from "./terminalSettlementSweep";
 
 export interface ResultingServiceConfig {
   mongoUri: string;
@@ -98,6 +99,7 @@ function createDefaultDependencies(): Required<StartupDependencies> {
         connection,
         replayPendingModerationResult
       ),
+      new TerminalSettlementSweepWorker(connection),
     ],
     disconnectDb: async () => {
       await mongoose.disconnect();

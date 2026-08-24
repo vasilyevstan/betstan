@@ -265,10 +265,92 @@ it("declines only the targeted LIVE board, preserves the attempt, and restores a
       marketStatus: LiveMarketStatus.OPEN,
     })
   );
-  expect(restoredLiveSlip!.rows[1].moderation).toBeUndefined();
+  expect(restoredLiveSlip!.rows[1].moderation ?? undefined).toBeUndefined();
 
   const unchangedPreMatchSlip = await Slip.findById(siblingPreMatchSlip.id);
   expect(unchangedPreMatchSlip!.status).toEqual(SlipStatus.SUBMITTED);
+});
+
+it("merges a declined LIVE attempt into an existing draft of the same kind", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  const submittedRows = [
+    {
+      ...buildRow(BetKind.LIVE),
+      oddsId: 'submitted-home',
+      selectionId: 'event-one:NEXT_CORNER:1:HOME',
+    },
+    {
+      ...buildRow(BetKind.LIVE),
+      marketId: 'event-three:NEXT_CORNER',
+      oddsId: 'submitted-extra',
+      selectionId: 'event-three:NEXT_CORNER:1:AWAY',
+    },
+  ];
+  const submittedSlip = await createSubmittedSlip(userId, BetKind.LIVE, submittedRows);
+  const existingDraft = await Slip.create({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    rows: [
+      {
+        ...buildRow(BetKind.LIVE),
+        oddsId: 'existing-home',
+        oddsName: 'Away',
+        oddsValue: 2.4,
+        quoteVersion: 3,
+        selectionId: 'event-one:NEXT_CORNER:1:AWAY',
+      },
+      {
+        ...buildRow(BetKind.LIVE),
+        marketId: 'event-two:NEXT_CORNER',
+        oddsId: 'draft-extra',
+        selectionId: 'event-two:NEXT_CORNER:1:HOME',
+      },
+    ],
+  });
+  const affectedRow = submittedSlip.rows[0];
+
+  await listener.onMessage(
+    buildEvent({
+      slipId: submittedSlip.id,
+      result: ModerationStatus.DECLINED,
+      betKind: BetKind.LIVE,
+      declineReason: ModerationDeclineReason.STALE_QUOTE,
+      affectedRows: [
+        {
+          rowId: affectedRow.id,
+          declineReason: ModerationDeclineReason.STALE_QUOTE,
+          marketId: affectedRow.marketId ?? undefined,
+          marketVersion: affectedRow.marketVersion ?? undefined,
+          quoteVersion: (affectedRow.quoteVersion ?? 1) + 1,
+          currentOdds: 2.1,
+          marketStatus: LiveMarketStatus.OPEN,
+          selectionId: affectedRow.selectionId ?? undefined,
+        },
+      ],
+    }),
+    buildMessage()
+  );
+
+  const mergedDraft = await Slip.findById(existingDraft.id);
+  const archivedDeclinedSlip = await SlipArchive.findById(submittedSlip.id);
+
+  expect(mergedDraft).not.toBeNull();
+  expect(mergedDraft!.sourceSlipId).toEqual(submittedSlip.id);
+  expect(mergedDraft!.declineReason).toEqual(ModerationDeclineReason.STALE_QUOTE);
+  expect(mergedDraft!.rows.map((row) => row.oddsId).sort()).toEqual([
+    'draft-extra',
+    'existing-home',
+    'submitted-extra',
+  ]);
+  expect(mergedDraft!.rows.every((row) => row.betKind === BetKind.LIVE)).toBe(true);
+  expect(archivedDeclinedSlip!.replacementSlipId).toEqual(existingDraft.id);
+  expect(await Slip.findById(submittedSlip.id)).toBeNull();
 });
 
 it("treats duplicate decline delivery as idempotent for the restored draft", async () => {
@@ -319,6 +401,138 @@ it("treats duplicate decline delivery as idempotent for the restored draft", asy
   expect(drafts).toHaveLength(1);
   expect(drafts[0].id).toEqual(firstRestoredDraft!.id);
   expect(archivedDeclinedSlip!.replacementSlipId).toEqual(firstRestoredDraft!.id);
+});
+
+it("never reverts a restored draft after it is resubmitted during decline replay", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  const sourceSlip = await createSubmittedSlip(userId, BetKind.LIVE, [
+    buildRow(BetKind.LIVE),
+  ]);
+  const replacementSlip = await Slip.create({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    sourceSlipId: sourceSlip.id,
+    rows: [
+      {
+        ...buildRow(BetKind.LIVE),
+        oddsId: "replacement-selection",
+      },
+    ],
+  });
+  const declineEvent = buildEvent({
+    slipId: sourceSlip.id,
+    result: ModerationStatus.DECLINED,
+    betKind: BetKind.LIVE,
+    declineReason: ModerationDeclineReason.STALE_QUOTE,
+  });
+  const originalFindOneAndUpdate =
+    Slip.collection.findOneAndUpdate.bind(Slip.collection);
+  const updateSpy = jest.spyOn(
+    Slip.collection,
+    "findOneAndUpdate"
+  ) as jest.SpyInstance;
+
+  updateSpy.mockImplementationOnce(async (...args: unknown[]) => {
+    await Slip.collection.updateOne(
+      { _id: replacementSlip._id },
+      {
+        $set: {
+          status: SlipStatus.SUBMITTED,
+          submittedAt: new Date().toISOString(),
+        },
+      }
+    );
+    return originalFindOneAndUpdate(...(args as Parameters<
+      typeof originalFindOneAndUpdate
+    >));
+  });
+
+  try {
+    await listener.onMessage(declineEvent, buildMessage());
+  } finally {
+    updateSpy.mockRestore();
+  }
+
+  await listener.onMessage(declineEvent, buildMessage());
+
+  const progressedReplacement = await Slip.findById(replacementSlip.id);
+  expect(progressedReplacement).not.toBeNull();
+  expect(progressedReplacement!.status).toEqual(SlipStatus.SUBMITTED);
+  expect(progressedReplacement!.rows).toHaveLength(1);
+  expect(progressedReplacement!.rows[0].oddsId).toEqual(
+    "replacement-selection"
+  );
+  expect(
+    await Slip.countDocuments({
+      userId,
+      betKind: BetKind.LIVE,
+      status: SlipStatus.DRAFT,
+    })
+  ).toEqual(0);
+  expect((await SlipArchive.findById(sourceSlip.id))!.replacementSlipId).toEqual(
+    replacementSlip.id
+  );
+});
+
+it("never resurrects a restored draft after it is archived during decline replay", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new ModerationResultListener(messengerWrapper.connection);
+  await listener.init();
+  const sourceSlip = await createSubmittedSlip(userId, BetKind.LIVE, [
+    buildRow(BetKind.LIVE),
+  ]);
+  const replacementSlip = await Slip.create({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+    draftKey: BetKind.LIVE,
+    timestamp: new Date().toISOString(),
+    sourceSlipId: sourceSlip.id,
+    rows: [buildRow(BetKind.LIVE)],
+  });
+  const declineEvent = buildEvent({
+    slipId: sourceSlip.id,
+    result: ModerationStatus.DECLINED,
+    betKind: BetKind.LIVE,
+    declineReason: ModerationDeclineReason.STALE_QUOTE,
+  });
+  const originalFindOneAndUpdate =
+    Slip.collection.findOneAndUpdate.bind(Slip.collection);
+  const updateSpy = jest.spyOn(
+    Slip.collection,
+    "findOneAndUpdate"
+  ) as jest.SpyInstance;
+
+  updateSpy.mockImplementationOnce(async (...args: unknown[]) => {
+    const replacement = await Slip.findById(replacementSlip.id).lean();
+    await SlipArchive.create({
+      ...replacement,
+      status: SlipStatus.COMPLETE,
+    });
+    await Slip.deleteOne({ _id: replacementSlip.id });
+    return originalFindOneAndUpdate(...(args as Parameters<
+      typeof originalFindOneAndUpdate
+    >));
+  });
+
+  try {
+    await listener.onMessage(declineEvent, buildMessage());
+  } finally {
+    updateSpy.mockRestore();
+  }
+
+  await listener.onMessage(declineEvent, buildMessage());
+
+  expect(await Slip.findById(replacementSlip.id)).toBeNull();
+  expect(await SlipArchive.findById(replacementSlip.id)).not.toBeNull();
+  expect((await SlipArchive.findById(sourceSlip.id))!.replacementSlipId).toEqual(
+    replacementSlip.id
+  );
 });
 
 it("acks invalid ids, archived approvals, archived declines without replacement ids, and unknown results", async () => {

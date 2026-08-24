@@ -14,6 +14,17 @@ beforeAll(async () => {
 
   mockedCurrentUser.mockImplementation((req, _res, next) => {
     const currentUserHeader = req.headers.currentuser as string | undefined;
+    const sessionJwtHeader = req.headers[
+      "x-test-session-jwt"
+    ] as string | undefined;
+
+    if (sessionJwtHeader) {
+      req.session = {
+        ...(req.session ?? {}),
+        jwt: sessionJwtHeader,
+      };
+    }
+
     if (currentUserHeader) {
       req.currentUser = JSON.parse(currentUserHeader);
     }

@@ -114,9 +114,43 @@ it("deletes the slip when only one row remains", async () => {
   expect(await Slip.findById(slip.id)).toBeNull();
 });
 
+it("returns 409 without deleting when placement wins the one-row race", async () => {
+  const slip = await createSlipWithRows(1);
+  const originalDeleteOne = Slip.deleteOne.bind(Slip);
+  const deleteSpy = jest.spyOn(Slip, "deleteOne") as jest.SpyInstance;
+
+  deleteSpy.mockImplementationOnce(async (filter: unknown) => {
+    await Slip.collection.updateOne(
+      { _id: slip._id },
+      { $set: { status: SlipStatus.SUBMITTED } }
+    );
+    return originalDeleteOne(filter as never);
+  });
+
+  try {
+    const response = await request(app)
+      .post("/api/slip/row")
+      .set("currentUser", currentUserHeader)
+      .send({ slipId: slip.id, slipRowId: slip.rows[0].id })
+      .expect(409);
+
+    expect(response.body.message).toEqual(
+      "This board changed before the row was removed. Reload and try again."
+    );
+    const submittedSlip = await Slip.findById(slip.id);
+    expect(submittedSlip).not.toBeNull();
+    expect(submittedSlip!.status).toEqual(SlipStatus.SUBMITTED);
+    expect(submittedSlip!.rows).toHaveLength(1);
+  } finally {
+    deleteSpy.mockRestore();
+  }
+});
+
 it("removes only the specified row from a LIVE board when multiple rows exist", async () => {
   const liveSlip = await createSlipWithRows(3, BetKind.LIVE);
   const rowToRemove = liveSlip.rows[0].id;
+  const previousBoardRevision = liveSlip.boardRevision;
+  const previousBoardFingerprint = liveSlip.boardFingerprint;
 
   await request(app)
     .post("/api/slip/row")
@@ -131,4 +165,49 @@ it("removes only the specified row from a LIVE board when multiple rows exist", 
   const updatedSlip = await Slip.findById(liveSlip.id);
   expect(updatedSlip!.rows.length).toEqual(2);
   expect(updatedSlip!.rows.find((row) => row.id === rowToRemove)).toBeUndefined();
+  expect(updatedSlip!.boardRevision).toEqual(previousBoardRevision + 1);
+  expect(updatedSlip!.boardFingerprint).not.toEqual(previousBoardFingerprint);
+});
+
+it("returns 409 without changing rows when placement wins the update race", async () => {
+  const liveSlip = await createSlipWithRows(3, BetKind.LIVE);
+  const originalFindOneAndUpdate = Slip.findOneAndUpdate.bind(Slip);
+  const updateSpy = jest.spyOn(Slip, "findOneAndUpdate") as jest.SpyInstance;
+
+  updateSpy.mockImplementationOnce(
+    async (filter: unknown, update: unknown, options: unknown) => {
+      await Slip.collection.updateOne(
+        { _id: liveSlip._id },
+        { $set: { status: SlipStatus.SUBMITTED } }
+      );
+      return originalFindOneAndUpdate(
+        filter as never,
+        update as never,
+        options as never
+      );
+    }
+  );
+
+  try {
+    await request(app)
+      .post("/api/slip/row")
+      .set("currentUser", currentUserHeader)
+      .send({
+        slipId: liveSlip.id,
+        slipRowId: liveSlip.rows[0].id,
+        betKind: BetKind.LIVE,
+      })
+      .expect(409);
+
+    const submittedSlip = await Slip.findById(liveSlip.id);
+    expect(submittedSlip).not.toBeNull();
+    expect(submittedSlip!.status).toEqual(SlipStatus.SUBMITTED);
+    expect(submittedSlip!.rows).toHaveLength(3);
+    expect(submittedSlip!.boardRevision).toEqual(liveSlip.boardRevision);
+    expect(submittedSlip!.boardFingerprint).toEqual(
+      liveSlip.boardFingerprint
+    );
+  } finally {
+    updateSpy.mockRestore();
+  }
 });

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Purpose: fail-closed validation and optional approval of a normal
-#          Copilot CLI-managed production build or application deploy gate.
+# Purpose: fail-closed validation and optional approval of a bounded
+#          Copilot CLI-managed production workflow gate.
 # Usage:
 #   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=production-build.yml \
 #     EXPECTED_ENVIRONMENT=production-emergency \
@@ -12,6 +12,10 @@ set -euo pipefail
 #   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=oci-infrastructure.yml \
 #     EXPECTED_ENVIRONMENT=oci-infrastructure \
 #     EXPECTED_DISPLAY_TITLE="oci-infrastructure validate-registry <sha>" \
+#     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
+#   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=oci-live-data-rollout.yml \
+#     EXPECTED_ENVIRONMENT=oci-migration \
+#     EXPECTED_DISPLAY_TITLE="oci-live-data dry-run <sha>" \
 #     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
 
 REPO="${REPO:-vasilyevstan/betstan}"
@@ -65,10 +69,29 @@ case "$EXPECTED_WORKFLOW:$EXPECTED_ENVIRONMENT" in
     expected_event="workflow_dispatch"
     case "$EXPECTED_DISPLAY_TITLE" in
       "oci-infrastructure validate-registry $EXPECTED_SHA" | \
-        "oci-infrastructure prune-registry $EXPECTED_SHA")
+        "oci-infrastructure prune-registry $EXPECTED_SHA" | \
+        "oci-infrastructure finalize $EXPECTED_SHA")
         ;;
       *)
-        fail "OCI infrastructure approval requires an exact validation or prune run title"
+        fail "OCI infrastructure approval requires an exact validation, prune, or finalize run title"
+        ;;
+    esac
+    ;;
+  oci-capacity-acquire.yml:oci-capacity-acquire)
+    expected_event="workflow_dispatch"
+    [[ "$EXPECTED_DISPLAY_TITLE" == \
+      "oci-capacity-acquire $EXPECTED_SHA" ]] ||
+      fail "OCI capacity approval requires the exact current-master run title"
+    ;;
+  oci-live-data-rollout.yml:oci-migration)
+    expected_event="workflow_dispatch"
+    case "$EXPECTED_DISPLAY_TITLE" in
+      "oci-live-data dry-run $EXPECTED_SHA" | \
+        "oci-live-data apply-backfills $EXPECTED_SHA" | \
+        "oci-live-data apply-slip-index $EXPECTED_SHA")
+        ;;
+      *)
+        fail "OCI live-data approval requires an exact bounded phase run title"
         ;;
     esac
     ;;

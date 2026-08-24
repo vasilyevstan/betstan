@@ -1082,6 +1082,46 @@ body {
   background: color-mix(in srgb, var(--surface-soft) 92%, var(--surface-elevated));
 }
 
+.event-next-live {
+  margin-bottom: 1rem;
+  border-color: color-mix(in srgb, var(--danger) 22%, var(--border-subtle));
+  background: linear-gradient(
+    120deg,
+    color-mix(in srgb, var(--danger) 10%, var(--surface-elevated)),
+    var(--surface-elevated)
+  );
+}
+
+.event-next-live__body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.event-next-live__title {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.event-next-live__name {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.event-next-live__schedule {
+  display: grid;
+  gap: 0.2rem;
+  text-align: right;
+}
+
+.event-next-live__schedule time {
+  font-weight: 700;
+}
+
 .event-group {
   display: grid;
   gap: 0.75rem;
@@ -1410,6 +1450,15 @@ body {
   .event-group__heading {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .event-next-live__body {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .event-next-live__schedule {
+    text-align: left;
   }
 
   .event-market-button {

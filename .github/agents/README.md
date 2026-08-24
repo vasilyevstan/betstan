@@ -104,6 +104,10 @@ Required invariants:
 - Every prior blocking finding is resolved with evidence before approval.
 - `from_agent` never appears in `approvals`.
 - Feature flags remain dark until the approved activation gate.
+- Draft writes/deletes require owner, kind, status, and board-identity CAS;
+  decline replay never rewinds a progressed replacement.
+- Historical live approval requires immutable submission before both quote
+  expiry and the persisted authority-ending transition.
 - Privileged access is revalidated against persisted auth state; JWT role
   claims and client-side filtering are not authorization boundaries.
 - Synthetic acceptance data is offline and server-scoped to exact IDs.

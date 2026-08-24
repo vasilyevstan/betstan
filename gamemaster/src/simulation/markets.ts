@@ -2,6 +2,7 @@ import {
   BettingStatus,
   CompetingSide,
   EventPhase,
+  IncidentCaps,
   LiveIncidentType,
   LiveMarketSelection,
   LiveMarketSettlement,
@@ -42,6 +43,13 @@ const ALL_MARKETS: LiveMarketType[] = [
   ...NEXT_MARKETS,
   LiveMarketType.HALF_TIME_RESULT,
 ];
+
+const NEXT_MARKET_CAPS: Record<NextMarketType, keyof IncidentCaps> = {
+  [LiveMarketType.NEXT_YELLOW_CARD]: "yellows",
+  [LiveMarketType.NEXT_RED_CARD]: "reds",
+  [LiveMarketType.NEXT_CORNER]: "corners",
+  [LiveMarketType.NEXT_PENALTY]: "penaltyAwards",
+};
 
 function marketId(eventId: string, marketType: LiveMarketType): string {
   return `${eventId}:${marketType}`;
@@ -219,6 +227,23 @@ function createMarket(
   };
 }
 
+function closeMarket(state: MarketState): MarketState {
+  return {
+    ...state,
+    marketVersion: state.marketVersion + 1,
+    quoteVersion: 1,
+    status: LiveMarketStatus.CLOSED,
+  };
+}
+
+function hasIncidentCapacityRemaining(
+  type: NextMarketType,
+  count: number,
+  timeline: SimTimeline
+): boolean {
+  return count < timeline.config.caps[NEXT_MARKET_CAPS[type]];
+}
+
 function snapshot(eventId: string, state: MarketState): LiveMarketSnapshot {
   const marketSides = sides(state.marketType);
   const selections: LiveMarketSelection[] = marketSides.map((side, index) => ({
@@ -304,6 +329,7 @@ function isMaterialIncident(type: LiveIncidentType): boolean {
 export function projectTransitions(timeline: SimTimeline): SimulationTransition[] {
   const markets = new Map<LiveMarketType, MarketState>();
   const transitions: SimulationTransition[] = [];
+  const triggeredCounts = new Map<NextMarketType, number>();
   let homeScore = 0;
   let awayScore = 0;
   let bettingStatus: BettingStatus = BettingStatus.OPEN;
@@ -348,16 +374,20 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
           LiveSettlementReason.INCIDENT
         )
       );
+      const count = (triggeredCounts.get(triggered) ?? 0) + 1;
+      triggeredCounts.set(triggered, count);
       markets.set(
         triggered,
-        createMarket(
-          triggered,
-          current.marketVersion + 1,
-          entry.offsetMs,
-          homeScore,
-          awayScore,
-          timeline
-        )
+        hasIncidentCapacityRemaining(triggered, count, timeline)
+          ? createMarket(
+              triggered,
+              current.marketVersion + 1,
+              entry.offsetMs,
+              homeScore,
+              awayScore,
+              timeline
+            )
+          : closeMarket(current)
       );
       freshMarkets.add(triggered);
     }
@@ -380,7 +410,7 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
       halfTime.status = LiveMarketStatus.SETTLED;
       NEXT_MARKETS.forEach((type) => {
         const market = markets.get(type);
-        if (market) {
+        if (market?.status === LiveMarketStatus.OPEN) {
           market.status = LiveMarketStatus.SUSPENDED;
         }
       });
@@ -402,6 +432,12 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
         const market = markets.get(type);
         if (!market) {
           throw new Error(`missing market ${type}`);
+        }
+        if (market.status === LiveMarketStatus.CLOSED) {
+          return;
+        }
+        if (market.status !== LiveMarketStatus.OPEN) {
+          throw new Error(`unexpected market status for ${type} at full-time`);
         }
         settlements.push(
           marketSettlement(

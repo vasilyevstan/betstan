@@ -114,7 +114,9 @@ it("runs the CLI backfill with logging and still disconnects on completion", asy
     const report = await runBackfillCli(["--apply", "--batch-size=1"], logger);
 
     expect(report.mode).toBe("apply");
-    expect(connectSpy).toHaveBeenCalledWith("mongodb://memory");
+    expect(connectSpy).toHaveBeenCalledWith("mongodb://memory", {
+      autoIndex: false,
+    });
     expect(disconnectSpy).toHaveBeenCalledTimes(1);
     expect(logger.log).toHaveBeenCalledWith(
       expect.stringContaining('"mode": "apply"')

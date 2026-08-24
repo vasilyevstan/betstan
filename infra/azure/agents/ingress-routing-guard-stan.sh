@@ -56,6 +56,9 @@ require_in_file "secretName:[[:space:]]*betstan-tls" "TLS secret betstan-tls"
 require_in_file "^[[:space:]]*-[[:space:]]*betstan\\.xyz$" "TLS host betstan.xyz"
 require_in_file "^[[:space:]]*-[[:space:]]*www\\.betstan\\.xyz$" "TLS host www.betstan.xyz"
 require_in_file 'nginx\.ingress\.kubernetes\.io/ssl-redirect:[[:space:]]*"true"' "HTTPS redirect"
+require_in_file 'nginx\.ingress\.kubernetes\.io/proxy-buffering:[[:space:]]*"off"' "disabled SSE proxy buffering"
+require_in_file 'nginx\.ingress\.kubernetes\.io/proxy-read-timeout:[[:space:]]*"75"' "SSE proxy read timeout"
+require_in_file 'nginx\.ingress\.kubernetes\.io/proxy-send-timeout:[[:space:]]*"75"' "SSE proxy send timeout"
 
 if grep -qE '^    - http:[[:space:]]*$' "$INGRESS_FILE"; then
   echo "ERROR: hostless production ingress rule exposes the load-balancer IP" >&2

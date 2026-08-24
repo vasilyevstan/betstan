@@ -33,6 +33,9 @@ Never rely on a prior conversation, stale plan, or branch name as current truth.
 - Separate product decisions from implementation choices.
 - Identify mixed-version, historical-data, concurrency, ordering, restart, and
   failure-recovery constraints.
+- For time-sensitive commands, identify the authoritative transition cutoff
+  and immutable ingress timestamp; never make a delayed consumer's wall clock
+  the acceptance boundary.
 - Produce bounded slices with explicit inputs, outputs, acceptance criteria,
   dependencies, and out-of-scope work.
 - Route specialist questions rather than re-adjudicating them.

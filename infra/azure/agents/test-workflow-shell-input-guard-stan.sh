@@ -20,13 +20,15 @@ on:
         required: true
         type: string
 env:
-  CONFIRMATION: ${{ inputs.confirmation }}
+  CONFIRMATION: ${{ inputs['confirmation'] }}
+  LEGACY_CONFIRMATION: ${{ github.event.inputs['confirmation'] }}
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - run: |
           [ "$CONFIRMATION" = "EXPECTED" ]
+          [ "$LEGACY_CONFIRMATION" = "EXPECTED" ]
       - uses: actions/checkout@0000000000000000000000000000000000000000
         with:
           ref: ${{ inputs.confirmation }}
@@ -70,6 +72,26 @@ assert_rejected whitespace 8 \
   '      - run: |' \
   '          echo "${{   inputs.confirmation }}"'
 
+assert_rejected bracket 8 \
+  'name: bracket' \
+  'on: workflow_dispatch' \
+  'jobs:' \
+  '  validate:' \
+  '    runs-on: ubuntu-latest' \
+  '    steps:' \
+  '      - run: |' \
+  '          echo "${{ inputs['"'"'confirmation'"'"'] }}"'
+
+assert_rejected double_quote_bracket 8 \
+  'name: double_quote_bracket' \
+  'on: workflow_dispatch' \
+  'jobs:' \
+  '  validate:' \
+  '    runs-on: ubuntu-latest' \
+  '    steps:' \
+  '      - run: |' \
+  '          echo "${{ inputs["confirmation"] }}"'
+
 assert_rejected legacy 7 \
   'name: legacy' \
   'on: workflow_dispatch' \
@@ -78,5 +100,14 @@ assert_rejected legacy 7 \
   '    runs-on: ubuntu-latest' \
   '    steps:' \
   '      - run: echo "${{ github.event.inputs.confirmation }}"'
+
+assert_rejected legacy_bracket 7 \
+  'name: legacy_bracket' \
+  'on: workflow_dispatch' \
+  'jobs:' \
+  '  validate:' \
+  '    runs-on: ubuntu-latest' \
+  '    steps:' \
+  '      - run: echo "${{ github.event.inputs['"'"'confirmation'"'"'] }}"'
 
 echo "workflow_shell_input_guard_tests=PASS"

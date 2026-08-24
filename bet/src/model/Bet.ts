@@ -180,46 +180,56 @@ const betRowSchema = new Schema<BetRowRecord>({
   },
 });
 
-const betSchema = new Schema<BetRecord>({
-  userId: {
-    type: String,
-    required: true,
+const betSchema = new Schema<BetRecord>(
+  {
+    userId: {
+      type: String,
+      required: true,
+    },
+    userName: {
+      type: String,
+      required: true,
+    },
+    slipId: {
+      type: String,
+      required: true,
+    },
+    status: {
+      type: String,
+      required: true,
+      enum: Object.values(BetStatus),
+      default: BetStatus.PENDING,
+    },
+    wager: {
+      type: Number,
+      required: true,
+    },
+    timestamp: {
+      type: String,
+      required: true,
+    },
+    betKind: {
+      type: String,
+      required: false,
+      enum: Object.values(BetKind),
+      default: BetKind.PRE_MATCH,
+    },
+    declineReason: {
+      type: String,
+      required: false,
+      enum: Object.values(ModerationDeclineReason),
+    },
+    rows: [betRowSchema],
   },
-  userName: {
-    type: String,
-    required: true,
-  },
-  slipId: {
-    type: String,
-    required: true,
-  },
-  status: {
-    type: String,
-    required: true,
-    enum: Object.values(BetStatus),
-    default: BetStatus.PENDING,
-  },
-  wager: {
-    type: Number,
-    required: true,
-  },
-  timestamp: {
-    type: String,
-    required: true,
-  },
-  betKind: {
-    type: String,
-    required: false,
-    enum: Object.values(BetKind),
-    default: BetKind.PRE_MATCH,
-  },
-  declineReason: {
-    type: String,
-    required: false,
-    enum: Object.values(ModerationDeclineReason),
-  },
-  rows: [betRowSchema],
-});
+  // Moderation/settlement consumers (ModerationResultListener,
+  // SettleSlipListener, SettleSlipRowListener, PendingBetUpdateWorker) all
+  // load-mutate-save this document concurrently. Optimistic concurrency
+  // makes a stale `save()` fail with a VersionError instead of silently
+  // overwriting a terminal status written by a concurrent consumer; callers
+  // must reload the fresh document and reapply their guarded/idempotent
+  // mutation on conflict (see betHistory.saveBetWithOptimisticRetry).
+  { optimisticConcurrency: true }
+);
 
 const normalizeSerializedBet = (record: SerializedBet) => {
   const betKind = record.betKind ?? BetKind.PRE_MATCH;

@@ -26,7 +26,7 @@
 - `validation-loop-stan.sh` — repeats health + HTTPS + E2E checks until pass/fail limit.
 - `ingress-routing-guard-stan.sh` — static guard that fails when prod ingress host/path routing is unsafe.
 - `shared-mongo-topology-guard-stan.sh` — blocks normal deployment unless the validated one-Mongo topology and eight shared URIs are live.
-- `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock.
+- `shared-mongo-operation-lock-stan.sh` — serializes migration, rollback, cleanup, and deployment through a resource-versioned ConfigMap lock with a bounded lease/expiry handoff.
 - `consolidate-production-mongo-stan.sh` — exact-SHA preflight, migrate, cleanup, and rollback operator for the seven-database move into auth Mongo.
 - `test-shared-mongo-consolidation-stan.sh` — validates manifests/mappings and runs a synthetic eight-database dump/restore parity test.
 - `provision-stage-stan.sh` — creates isolated `betstan-rg-stage` AKS and configures autoscaler 1→3 with a larger baseline node size for 1-node stage operation.
@@ -269,7 +269,7 @@ EXPECTED_ENVIRONMENT=production-emergency \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
-The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic rollback, migration, and infrastructure approval is unsupported.
+The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments or phase titles, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic mode supports the normal application build/deploy/activation path, exact-title OCI capacity and registry/finalize runs, and the bounded `dry-run` → `apply-backfills` → `apply-slip-index` workflow. Broad migration, recovery, and rollback remain human-gated.
 
 ## Post-merge production verification
 
