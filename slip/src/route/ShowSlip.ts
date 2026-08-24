@@ -1,6 +1,7 @@
 import express, { Request, Response } from "express";
 import { BetKind } from "@betstan/common";
 import {
+  buildLegacyBoardSessionScope,
   findActiveSlipForUser,
   findDraftSlipForUser,
   normalizeSlip,
@@ -13,10 +14,10 @@ const router = express.Router();
 const prepareSlipForResponse = async (
   slip: Parameters<typeof normalizeSlip>[0],
   betKind: Parameters<typeof normalizeSlip>[1],
-  recordLegacyConfirmation = false
+  legacyConfirmationScope: string | null = null
 ) => {
   const authoritativeSlip = await persistSlipBoardIdentityIfNeeded(slip, {
-    recordLegacyConfirmation,
+    legacyConfirmationScope,
   });
   normalizeSlip(authoritativeSlip, betKind);
   return authoritativeSlip;
@@ -34,13 +35,24 @@ router.get("/api/slip/boards", async (req: Request, res: Response) => {
     findActiveSlipForUser(req.currentUser.id, BetKind.PRE_MATCH),
     findActiveSlipForUser(req.currentUser.id, BetKind.LIVE),
   ]);
+  const legacyConfirmationScope = buildLegacyBoardSessionScope(
+    req.session?.jwt
+  );
 
   const [preMatchSlip, liveSlip] = await Promise.all([
     foundPreMatchSlip
-      ? prepareSlipForResponse(foundPreMatchSlip, BetKind.PRE_MATCH, true)
+      ? prepareSlipForResponse(
+          foundPreMatchSlip,
+          BetKind.PRE_MATCH,
+          legacyConfirmationScope
+        )
       : Promise.resolve(null),
     foundLiveSlip
-      ? prepareSlipForResponse(foundLiveSlip, BetKind.LIVE, true)
+      ? prepareSlipForResponse(
+          foundLiveSlip,
+          BetKind.LIVE,
+          legacyConfirmationScope
+        )
       : Promise.resolve(null),
   ]);
 
@@ -62,11 +74,14 @@ router.get("/api/slip", async (req: Request, res: Response) => {
   }
 
   const foundSlip = await findDraftSlipForUser(req.currentUser.id, betKind);
+  const legacyConfirmationScope = buildLegacyBoardSessionScope(
+    req.session?.jwt
+  );
   const slip = foundSlip
     ? await prepareSlipForResponse(
         foundSlip,
         betKind,
-        betKind === BetKind.PRE_MATCH
+        legacyConfirmationScope
       )
     : null;
 

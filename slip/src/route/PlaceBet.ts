@@ -1,11 +1,12 @@
 import express, { Request, Response } from "express";
 import { BetKind, messengerWrapper } from "@betstan/common";
 import {
+  buildLegacyBoardSessionScope,
   createPlacementAttemptId,
   findDraftSlipByIdForUser,
+  findLegacyBoardConfirmationForSlip,
   findSubmittedSlipByIdForUser,
   isValidSlipId,
-  legacyBoardConfirmationOf,
   normalizeSlip,
   parseExpectedBoardFingerprint,
   parseExpectedBoardRevision,
@@ -313,6 +314,9 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
   const placementAttemptId =
     requestedPlacementAttemptId ?? createPlacementAttemptId();
   const userName = req.currentUser.email ?? req.currentUser.id;
+  const legacyConfirmationScope = buildLegacyBoardSessionScope(
+    req.session?.jwt
+  );
   let boardConfirmation = boardConfirmationResult.confirmation;
 
   let authoritativeDraft = await findDraftSlipByIdForUser(
@@ -329,7 +333,12 @@ router.post("/api/slip/bet", async (req: Request, res: Response) => {
     authoritativeDraft = preparedDraft;
     boardConfirmation =
       boardConfirmation
-      ?? legacyBoardConfirmationOf(preparedDraft);
+      ?? await findLegacyBoardConfirmationForSlip({
+        slipId,
+        userId: req.currentUser.id,
+        betKind,
+        sessionScope: legacyConfirmationScope,
+      });
 
     if (!boardConfirmation) {
       return res.status(400).send({ message: "Missing board confirmation" });

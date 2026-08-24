@@ -279,6 +279,28 @@ const publicationSchema = new Schema(
   { _id: false }
 );
 
+const legacyBoardConfirmationSchema = new Schema(
+  {
+    sessionScope: {
+      type: String,
+      required: true,
+    },
+    boardRevision: {
+      type: Number,
+      required: true,
+    },
+    boardFingerprint: {
+      type: String,
+      required: true,
+    },
+    confirmedAt: {
+      type: String,
+      required: true,
+    },
+  },
+  { _id: false }
+);
+
 const slipSchema = new Schema({
   userId: {
     type: String,
@@ -333,6 +355,11 @@ const slipSchema = new Schema({
   },
   legacyBoardConfirmedAt: {
     type: String,
+  },
+  legacyBoardConfirmations: {
+    type: [legacyBoardConfirmationSchema],
+    default: undefined,
+    select: false,
   },
   submittedEvent: submittedEventSchema,
   publication: publicationSchema,

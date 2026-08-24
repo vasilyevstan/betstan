@@ -74,9 +74,12 @@
   display metadata. Every row mutation, including deletion, rotates both
   values so a stale tab cannot place a materially changed draft.
 - During a rolling Client/API upgrade, the boards read endpoint records a
-  user-, kind-, slip-, revision-, and fingerprint-scoped legacy confirmation.
-  The quiesced compatibility backfill seeds the same confirmation for active
-  drafts so tabs opened before the API rollout remain placeable. Explicit
+  bounded confirmation scoped to a hash of the authenticated session plus the
+  user, kind, slip, revision, and fingerprint. Never overwrite one
+  slip-global confirmation from every session: another device could otherwise
+  authorize a stale tab. The quiesced compatibility backfill seeds a separate
+  one-time fallback for active drafts so tabs opened before the API rollout
+  remain placeable; normal reads do not overwrite that fallback. Explicit
   confirmation fields from a new Client remain authoritative.
 - A zero-row approved aggregate is a valid recoverable state after all
   manual-void rows were published and removed before a crash. Terminal sweeps

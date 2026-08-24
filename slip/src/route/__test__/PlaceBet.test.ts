@@ -14,6 +14,7 @@ import {
 import PlaceBetEventPublisher from "../../event/publisher/PlaceBetEventPublisher";
 import ModerationResultListener from "../../event/listener/ModerationResultListener";
 import { SlipPublicationState } from "../../model/SlipPublicationState";
+import { buildLegacyBoardSessionScope } from "../../model/slipSupport";
 
 const userId = new mongoose.Types.ObjectId().toHexString();
 const otherUserId = new mongoose.Types.ObjectId().toHexString();
@@ -25,6 +26,8 @@ const otherUserHeader = JSON.stringify({
   id: otherUserId,
   email: "other@test.com",
 });
+const primarySessionJwt = "primary-session-jwt";
+const secondarySessionJwt = "secondary-session-jwt";
 
 const buildRow = ({
   betKind = BetKind.PRE_MATCH,
@@ -202,6 +205,7 @@ const getBoardConfirmation = (slip?: {
 
 const placeBet = ({
   currentUser = currentUserHeader,
+  sessionJwt,
   slipId,
   wager,
   betKind,
@@ -211,6 +215,7 @@ const placeBet = ({
   expectedBoardFingerprint,
 }: {
   currentUser?: string;
+  sessionJwt?: string;
   slipId: string;
   wager: number;
   betKind?: BetKind;
@@ -223,6 +228,10 @@ const placeBet = ({
 
   if (currentUser) {
     requestBuilder = requestBuilder.set("currentUser", currentUser);
+  }
+
+  if (sessionJwt) {
+    requestBuilder = requestBuilder.set("x-test-session-jwt", sessionJwt);
   }
 
   if (placementAttemptId && useHeaderAttemptId) {
@@ -336,29 +345,42 @@ it("lets a loaded legacy PRE_MATCH client submit only the board it fetched", asy
   const boardResponse = await request(app)
     .get("/api/slip")
     .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
     .expect(200);
 
   expect(boardResponse.body._id).toEqual(slipId);
   expect(boardResponse.body.boardRevision).toEqual(1);
   expect(boardResponse.body.boardFingerprint).toEqual(expect.any(String));
 
-  const preparedSlip = await Slip.findById(slipId).lean();
+  const preparedSlip = await Slip.collection.findOne(
+    { _id: new mongoose.Types.ObjectId(slipId) },
+    {
+      projection: {
+        boardRevision: 1,
+        boardFingerprint: 1,
+        legacyBoardConfirmations: 1,
+      },
+    }
+  );
   expect(preparedSlip!.boardRevision).toEqual(
     boardResponse.body.boardRevision
   );
   expect(preparedSlip!.boardFingerprint).toEqual(
     boardResponse.body.boardFingerprint
   );
-  expect(preparedSlip!.legacyBoardRevision).toEqual(
-    boardResponse.body.boardRevision
+  expect(preparedSlip!.legacyBoardConfirmations).toContainEqual(
+    expect.objectContaining({
+      sessionScope: buildLegacyBoardSessionScope(primarySessionJwt),
+      boardRevision: boardResponse.body.boardRevision,
+      boardFingerprint: boardResponse.body.boardFingerprint,
+    })
   );
-  expect(preparedSlip!.legacyBoardFingerprint).toEqual(
-    boardResponse.body.boardFingerprint
-  );
+  expect(boardResponse.body.legacyBoardConfirmations).toBeUndefined();
 
   const placementResponse = await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
     .send({ slipId, wager: 5 })
     .expect(200);
 
@@ -378,6 +400,7 @@ it.each([BetKind.PRE_MATCH, BetKind.LIVE])(
     const boardResponse = await request(app)
       .get("/api/slip/boards")
       .set("currentUser", currentUserHeader)
+      .set("x-test-session-jwt", primarySessionJwt)
       .expect(200);
 
     expect(boardResponse.body[betKind]._id).toEqual(slip.id);
@@ -387,6 +410,7 @@ it.each([BetKind.PRE_MATCH, BetKind.LIVE])(
       wager: 5,
       betKind,
       placementAttemptId: buildPlacementAttemptId(`rolling-${betKind}`),
+      sessionJwt: primarySessionJwt,
     }).expect(200);
 
     expect(placementResponse.body.status).toEqual(SlipStatus.SUBMITTED);
@@ -428,6 +452,7 @@ it("rejects a previously deployed boards client after its fetched board changes"
   await request(app)
     .get("/api/slip/boards")
     .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
     .expect(200);
 
   await Slip.updateOne(
@@ -449,6 +474,128 @@ it("rejects a previously deployed boards client after its fetched board changes"
     wager: 5,
     betKind: BetKind.LIVE,
     placementAttemptId: buildPlacementAttemptId("rolling-stale-live"),
+    sessionJwt: primarySessionJwt,
+  }).expect(409);
+
+  expect(response.body.reload).toEqual({
+    required: true,
+    reason: "board-mismatch",
+  });
+  expect((await Slip.findById(slip.id))!.status).toEqual(SlipStatus.DRAFT);
+});
+
+it("does not let another session refresh a stale rolling-client confirmation", async () => {
+  const slip = await createSlip({ betKind: BetKind.LIVE });
+
+  await request(app)
+    .get("/api/slip/boards")
+    .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
+    .expect(200);
+
+  await Slip.updateOne(
+    { _id: slip.id },
+    {
+      $set: {
+        rows: [
+          ...slip.rows.map((row) => row.toObject()),
+          buildRow({ betKind: BetKind.LIVE }),
+        ],
+        boardRevision: (slip.boardRevision ?? 1) + 1,
+        boardFingerprint: new mongoose.Types.ObjectId().toHexString(),
+      },
+    }
+  );
+
+  await request(app)
+    .get("/api/slip/boards")
+    .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", secondarySessionJwt)
+    .expect(200);
+
+  const staleResponse = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    placementAttemptId: buildPlacementAttemptId("stale-primary-session"),
+    sessionJwt: primarySessionJwt,
+  }).expect(409);
+
+  expect(staleResponse.body.reload).toEqual({
+    required: true,
+    reason: "board-mismatch",
+  });
+
+  const currentResponse = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    placementAttemptId: buildPlacementAttemptId("current-secondary-session"),
+    sessionJwt: secondarySessionJwt,
+  }).expect(200);
+
+  expect(currentResponse.body.status).toEqual(SlipStatus.SUBMITTED);
+});
+
+it("bounds internal rolling-client confirmations without exposing them", async () => {
+  const slip = await createSlip({ betKind: BetKind.LIVE });
+
+  for (let index = 0; index < 10; index += 1) {
+    const response = await request(app)
+      .get("/api/slip/boards")
+      .set("currentUser", currentUserHeader)
+      .set("x-test-session-jwt", `bounded-session-${index}`)
+      .expect(200);
+
+    expect(
+      response.body[BetKind.LIVE].legacyBoardConfirmations
+    ).toBeUndefined();
+  }
+
+  const persistedSlip = await Slip.collection.findOne(
+    { _id: slip._id },
+    { projection: { legacyBoardConfirmations: 1 } }
+  );
+  const confirmations = persistedSlip?.legacyBoardConfirmations ?? [];
+
+  expect(confirmations).toHaveLength(8);
+  expect(confirmations.map(({ sessionScope }: { sessionScope: string }) =>
+    sessionScope
+  )).toEqual(
+    Array.from(
+      { length: 8 },
+      (_, index) =>
+        buildLegacyBoardSessionScope(`bounded-session-${index + 2}`)
+    )
+  );
+});
+
+it("rejects a board confirmation captured before a row deletion", async () => {
+  const slip = await createSlip({
+    betKind: BetKind.LIVE,
+    rows: [
+      buildRow({ betKind: BetKind.LIVE }),
+      buildRow({ betKind: BetKind.LIVE }),
+    ],
+  });
+  const staleConfirmation = getBoardConfirmation(slip);
+
+  await request(app)
+    .post("/api/slip/row")
+    .set("currentUser", currentUserHeader)
+    .send({
+      slipId: slip.id,
+      slipRowId: slip.rows[0].id,
+      betKind: BetKind.LIVE,
+    })
+    .expect(200);
+
+  const response = await placeBet({
+    slipId: slip.id,
+    wager: 5,
+    betKind: BetKind.LIVE,
+    placementAttemptId: buildPlacementAttemptId("stale-after-delete"),
+    ...staleConfirmation,
   }).expect(409);
 
   expect(response.body.reload).toEqual({
@@ -464,6 +611,7 @@ it("rejects a legacy PRE_MATCH placement when its fetched board changed", async 
   const boardResponse = await request(app)
     .get("/api/slip")
     .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
     .expect(200);
   const nextFingerprint = new mongoose.Types.ObjectId().toHexString();
 
@@ -481,6 +629,7 @@ it("rejects a legacy PRE_MATCH placement when its fetched board changed", async 
   const response = await request(app)
     .post("/api/slip/bet")
     .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
     .send({ slipId: slip.id, wager: 5 })
     .expect(409);
 

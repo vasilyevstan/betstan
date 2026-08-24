@@ -31,7 +31,8 @@ Read:
   without `__v`, stale aggregate revision/fingerprint reuse after every
   mutation, and terminal recovery after all child rows are removed.
 - Old-client/new-API and new-client/old-API rolling combinations. Legacy
-  compatibility evidence must be scoped to the exact user and aggregate, and
+  compatibility evidence must be scoped to the authenticated session, exact
+  user, and aggregate so another session cannot refresh stale evidence, and
   must not override an explicit mismatched new-client confirmation.
 - Domain ordering or idempotency that accidentally depends on mutable
   publisher-stamped envelope metadata; require retries with identical domain

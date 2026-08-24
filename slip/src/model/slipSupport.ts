@@ -8,7 +8,7 @@ import {
   SlipStatus,
   TeamSide,
 } from "@betstan/common";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { Types } from "mongoose";
 import { Slip, SlipArchive } from "./Slip";
 import { SlipPublicationState } from "./SlipPublicationState";
@@ -70,10 +70,14 @@ export interface MutableSlip extends MutableModel {
   legacyBoardRevision?: number | null;
   legacyBoardFingerprint?: string | null;
   legacyBoardConfirmedAt?: string | null;
+  legacyBoardConfirmations?: unknown;
   submittedEvent?: SubmittedEventData | null;
   publication?: MutablePublicationState | null;
   rows: ArrayLike<MutableSlipRow> & Iterable<MutableSlipRow>;
 }
+
+const MAX_LEGACY_BOARD_CONFIRMATIONS = 8;
+const LEGACY_BOARD_SESSION_SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 
 export interface MutablePublicationState {
   state?: SlipPublicationState | null;
@@ -276,6 +280,14 @@ export const boardFingerprintOf = (slip?: {
   boardFingerprint?: unknown;
 } | null) => normalizeBoardFingerprintValue(slip?.boardFingerprint);
 
+export const buildLegacyBoardSessionScope = (sessionJwt: unknown) => {
+  if (typeof sessionJwt !== "string" || sessionJwt.length === 0) {
+    return null;
+  }
+
+  return createHash("sha256").update(sessionJwt).digest("hex");
+};
+
 export const advanceSlipBoardIdentity = (slip: MutableSlip) => {
   setField(slip, "boardRevision", boardRevisionOf(slip) + 1);
   setField(slip, "boardFingerprint", createBoardFingerprint());
@@ -429,9 +441,9 @@ export const ensureSlipBoardIdentity = (slip: MutableSlip) => {
 export const persistSlipBoardIdentityIfNeeded = async (
   slip: MutableSlip,
   {
-    recordLegacyConfirmation = false,
+    legacyConfirmationScope = null,
   }: {
-    recordLegacyConfirmation?: boolean;
+    legacyConfirmationScope?: string | null;
   } = {}
 ) => {
   ensureSlipBoardIdentity(slip);
@@ -503,12 +515,48 @@ export const persistSlipBoardIdentityIfNeeded = async (
     },
   ];
 
-  if (recordLegacyConfirmation) {
+  if (
+    legacyConfirmationScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(legacyConfirmationScope)
+  ) {
+    const confirmedAt = new Date().toISOString();
     updatePipeline.push({
       $set: {
-        legacyBoardRevision: "$boardRevision",
-        legacyBoardFingerprint: "$boardFingerprint",
-        legacyBoardConfirmedAt: new Date().toISOString(),
+        legacyBoardConfirmations: {
+          $slice: [
+            {
+              $concatArrays: [
+                {
+                  $filter: {
+                    input: {
+                      $cond: [
+                        { $isArray: "$legacyBoardConfirmations" },
+                        "$legacyBoardConfirmations",
+                        [],
+                      ],
+                    },
+                    as: "confirmation",
+                    cond: {
+                      $ne: [
+                        "$$confirmation.sessionScope",
+                        legacyConfirmationScope,
+                      ],
+                    },
+                  },
+                },
+                [
+                  {
+                    sessionScope: legacyConfirmationScope,
+                    boardRevision: "$boardRevision",
+                    boardFingerprint: "$boardFingerprint",
+                    confirmedAt,
+                  },
+                ],
+              ],
+            },
+            -MAX_LEGACY_BOARD_CONFIRMATIONS,
+          ],
+        },
       },
     });
   }
@@ -516,7 +564,10 @@ export const persistSlipBoardIdentityIfNeeded = async (
   const updated = await Slip.collection.findOneAndUpdate(
     { _id: new Types.ObjectId(slipId) },
     updatePipeline,
-    { returnDocument: "after" }
+    {
+      projection: { legacyBoardConfirmations: 0 },
+      returnDocument: "after",
+    }
   );
   const authoritativeSlip = asPlainSlip(
     (updated as { value?: unknown })?.value ?? updated
@@ -1123,16 +1174,13 @@ export const submissionMatchesBoardConfirmation = (
   );
 };
 
-export const legacyBoardConfirmationOf = (slip: {
-  legacyBoardRevision?: unknown;
-  legacyBoardFingerprint?: unknown;
-}) => {
-  const expectedBoardRevision = parseExpectedBoardRevision(
-    slip.legacyBoardRevision
-  );
-  const expectedBoardFingerprint = parseExpectedBoardFingerprint(
-    slip.legacyBoardFingerprint
-  );
+const parseLegacyBoardConfirmation = (
+  boardRevision: unknown,
+  boardFingerprint: unknown
+) => {
+  const expectedBoardRevision = parseExpectedBoardRevision(boardRevision);
+  const expectedBoardFingerprint =
+    parseExpectedBoardFingerprint(boardFingerprint);
 
   if (expectedBoardRevision === null || !expectedBoardFingerprint) {
     return null;
@@ -1142,6 +1190,89 @@ export const legacyBoardConfirmationOf = (slip: {
     expectedBoardRevision,
     expectedBoardFingerprint,
   };
+};
+
+export const legacyBoardConfirmationOf = (
+  value: unknown,
+  sessionScope?: string | null
+) => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const slip = value as {
+    legacyBoardRevision?: unknown;
+    legacyBoardFingerprint?: unknown;
+    legacyBoardConfirmations?: unknown;
+  };
+
+  if (
+    sessionScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(sessionScope)
+    && Array.isArray(slip.legacyBoardConfirmations)
+  ) {
+    const scopedConfirmation = slip.legacyBoardConfirmations.find(
+      (value) =>
+        value
+        && typeof value === "object"
+        && (value as { sessionScope?: unknown }).sessionScope === sessionScope
+    ) as {
+      boardRevision?: unknown;
+      boardFingerprint?: unknown;
+    } | undefined;
+
+    if (scopedConfirmation) {
+      return parseLegacyBoardConfirmation(
+        scopedConfirmation.boardRevision,
+        scopedConfirmation.boardFingerprint
+      );
+    }
+  }
+
+  return parseLegacyBoardConfirmation(
+    slip.legacyBoardRevision,
+    slip.legacyBoardFingerprint
+  );
+};
+
+export const findLegacyBoardConfirmationForSlip = async ({
+  slipId,
+  userId,
+  betKind,
+  sessionScope,
+}: {
+  slipId: string;
+  userId: string;
+  betKind: BetKind;
+  sessionScope: string | null;
+}) => {
+  const projection: Record<string, unknown> = {
+    legacyBoardRevision: 1,
+    legacyBoardFingerprint: 1,
+  };
+
+  if (
+    sessionScope
+    && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(sessionScope)
+  ) {
+    projection.legacyBoardConfirmations = {
+      $elemMatch: { sessionScope },
+    };
+  }
+
+  const slip = await Slip.collection.findOne(
+    {
+      _id: new Types.ObjectId(slipId),
+      userId,
+      status: SlipStatus.DRAFT,
+      ...buildBetKindScope(betKind),
+    },
+    { projection }
+  );
+
+  return slip
+    ? legacyBoardConfirmationOf(slip, sessionScope)
+    : null;
 };
 
 export const clearSubmittedAttemptState = (slip: PlainSlip) => {
