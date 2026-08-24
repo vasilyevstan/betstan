@@ -67,7 +67,8 @@ instead of crossing the boundary.
   confirmation to a bounded hash of the authenticated session and the exact
   user, aggregate, kind, revision, and fingerprint; never use one
   session-overwritable aggregate confirmation or let an explicit new-client
-  confirmation fall back after mismatch.
+  confirmation fall back after mismatch. Record compatibility evidence only
+  for mutable drafts; submitted-state polling must not refresh it.
 - Include empty-but-terminal aggregates in recovery sweeps when rows can be
   removed before parent finalization.
 - Treat JWT roles as non-authoritative for privileged operations. Revalidate

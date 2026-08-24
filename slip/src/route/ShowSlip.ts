@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { BetKind } from "@betstan/common";
+import { BetKind, SlipStatus } from "@betstan/common";
 import {
   buildLegacyBoardSessionScope,
   findActiveSlipForUser,
@@ -17,7 +17,10 @@ const prepareSlipForResponse = async (
   legacyConfirmationScope: string | null = null
 ) => {
   const authoritativeSlip = await persistSlipBoardIdentityIfNeeded(slip, {
-    legacyConfirmationScope,
+    legacyConfirmationScope:
+      slip.status === SlipStatus.DRAFT
+        ? legacyConfirmationScope
+        : null,
   });
   normalizeSlip(authoritativeSlip, betKind);
   return authoritativeSlip;

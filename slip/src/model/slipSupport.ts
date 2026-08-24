@@ -520,41 +520,48 @@ export const persistSlipBoardIdentityIfNeeded = async (
     && LEGACY_BOARD_SESSION_SCOPE_PATTERN.test(legacyConfirmationScope)
   ) {
     const confirmedAt = new Date().toISOString();
+    const nextLegacyBoardConfirmations = {
+      $slice: [
+        {
+          $concatArrays: [
+            {
+              $filter: {
+                input: {
+                  $cond: [
+                    { $isArray: "$legacyBoardConfirmations" },
+                    "$legacyBoardConfirmations",
+                    [],
+                  ],
+                },
+                as: "confirmation",
+                cond: {
+                  $ne: [
+                    "$$confirmation.sessionScope",
+                    legacyConfirmationScope,
+                  ],
+                },
+              },
+            },
+            [
+              {
+                sessionScope: legacyConfirmationScope,
+                boardRevision: "$boardRevision",
+                boardFingerprint: "$boardFingerprint",
+                confirmedAt,
+              },
+            ],
+          ],
+        },
+        -MAX_LEGACY_BOARD_CONFIRMATIONS,
+      ],
+    };
     updatePipeline.push({
       $set: {
         legacyBoardConfirmations: {
-          $slice: [
-            {
-              $concatArrays: [
-                {
-                  $filter: {
-                    input: {
-                      $cond: [
-                        { $isArray: "$legacyBoardConfirmations" },
-                        "$legacyBoardConfirmations",
-                        [],
-                      ],
-                    },
-                    as: "confirmation",
-                    cond: {
-                      $ne: [
-                        "$$confirmation.sessionScope",
-                        legacyConfirmationScope,
-                      ],
-                    },
-                  },
-                },
-                [
-                  {
-                    sessionScope: legacyConfirmationScope,
-                    boardRevision: "$boardRevision",
-                    boardFingerprint: "$boardFingerprint",
-                    confirmedAt,
-                  },
-                ],
-              ],
-            },
-            -MAX_LEGACY_BOARD_CONFIRMATIONS,
+          $cond: [
+            { $eq: ["$status", SlipStatus.DRAFT] },
+            nextLegacyBoardConfirmations,
+            "$legacyBoardConfirmations",
           ],
         },
       },

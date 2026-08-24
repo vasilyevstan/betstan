@@ -80,7 +80,9 @@
   authorize a stale tab. The quiesced compatibility backfill seeds a separate
   one-time fallback for active drafts so tabs opened before the API rollout
   remain placeable; normal reads do not overwrite that fallback. Explicit
-  confirmation fields from a new Client remain authoritative.
+  confirmation fields from a new Client remain authoritative. Record
+  compatibility confirmations only for `DRAFT` boards; submitted-board polling
+  must remain read-only with respect to this evidence.
 - A zero-row approved aggregate is a valid recoverable state after all
   manual-void rows were published and removed before a crash. Terminal sweeps
   must discover it and finalize the parent as void instead of filtering it out

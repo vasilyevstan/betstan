@@ -570,6 +570,46 @@ it("bounds internal rolling-client confirmations without exposing them", async (
   );
 });
 
+it("does not refresh rolling-client confirmations while a board is submitted", async () => {
+  const slip = await createSlip({
+    betKind: BetKind.LIVE,
+    status: SlipStatus.SUBMITTED,
+  });
+  const persistedConfirmation = {
+    sessionScope: buildLegacyBoardSessionScope(primarySessionJwt),
+    boardRevision: slip.boardRevision,
+    boardFingerprint: slip.boardFingerprint,
+    confirmedAt: "2025-01-01T00:00:00.000Z",
+  };
+  await Slip.collection.updateOne(
+    { _id: slip._id },
+    {
+      $set: {
+        legacyBoardConfirmations: [persistedConfirmation],
+      },
+    }
+  );
+
+  const response = await request(app)
+    .get("/api/slip/boards")
+    .set("currentUser", currentUserHeader)
+    .set("x-test-session-jwt", primarySessionJwt)
+    .expect(200);
+
+  expect(response.body[BetKind.LIVE].status).toEqual(SlipStatus.SUBMITTED);
+  expect(
+    response.body[BetKind.LIVE].legacyBoardConfirmations
+  ).toBeUndefined();
+
+  const persistedSlip = await Slip.collection.findOne(
+    { _id: slip._id },
+    { projection: { legacyBoardConfirmations: 1 } }
+  );
+  expect(persistedSlip?.legacyBoardConfirmations).toEqual([
+    persistedConfirmation,
+  ]);
+});
+
 it("rejects a board confirmation captured before a row deletion", async () => {
   const slip = await createSlip({
     betKind: BetKind.LIVE,
