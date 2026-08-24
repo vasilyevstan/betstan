@@ -35,8 +35,9 @@ Read:
 - Verify historical-data, mixed-version, feature-flag, rollout, rollback, and
   exact-SHA evidence is complete.
 - Verify raw-created versioned aggregates, versionless historical documents,
-  every board-identity mutation, empty terminal aggregates, and both rolling
-  client request shapes have executable regression evidence.
+  every board-identity mutation, empty terminal aggregates,
+  published-before-archive recovery, missing legacy publication state, and
+  both rolling client request shapes have executable regression evidence.
 - Verify maintenance recovery is reachable only after the same run
   successfully validates the exact data handoff; invalid deployment requests
   must remain non-mutating.

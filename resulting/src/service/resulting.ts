@@ -702,14 +702,34 @@ async function confirmTerminalSettlement(
       $or: [
         {
           terminalPublicationState: {
+            $exists: false,
+          },
+        },
+        {
+          terminalPublicationState: null,
+        },
+        {
+          terminalPublicationState: {
             $in: ["", PUBLICATION_STATE_PENDING],
           },
         },
         {
           terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
-          terminalPublicationClaimedAt: {
-            $lte: staleClaimBefore,
-          },
+          $or: [
+            {
+              terminalPublicationClaimedAt: {
+                $exists: false,
+              },
+            },
+            {
+              terminalPublicationClaimedAt: null,
+            },
+            {
+              terminalPublicationClaimedAt: {
+                $lte: staleClaimBefore,
+              },
+            },
+          ],
         },
       ],
     },
@@ -792,13 +812,13 @@ async function archiveBet(finalizedBet: any): Promise<void> {
     }
   );
 
+  await clearPendingModerationResult(finalizedBet.slipId);
+
   await Bet.deleteOne({
     _id: finalizedBet._id,
     status: finalizedBet.status,
     terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
   });
-
-  await clearPendingModerationResult(finalizedBet.slipId);
 }
 
 async function archivePublishedBet(slipId: string): Promise<boolean> {
@@ -868,9 +888,10 @@ export async function reconcileSlip(
 }
 
 /**
- * Finds slips whose settlement is "terminal-pending": either fully resulted
- * but never finalized into a settled status, or finalized but not yet
- * confirmed as published (and archived). These slips cannot always be
+ * Finds slips whose terminal settlement has not fully converged: either fully
+ * resulted but never finalized into a settled status, finalized but not yet
+ * confirmed as published, or published but not yet archived. These slips
+ * cannot always be
  * rediscovered by replaying the event that originally triggered them - e.g.
  * a manual-void row is removed from `rows` once published, so a later replay
  * of that same live update will no longer find a matching row. This sweep
@@ -880,15 +901,49 @@ export async function reconcileSlip(
 export async function findTerminalPendingSlipIds(
   limit: number = 100
 ): Promise<string[]> {
+  const staleClaimBefore = new Date(Date.now() - TERMINAL_CLAIM_STALE_MS);
   const bets = await Bet.find({
     $or: [
       {
         status: {
           $in: [...SETTLED_BET_STATUS_VALUES],
         },
-        terminalPublicationState: {
-          $ne: PUBLICATION_STATE_PUBLISHED,
-        },
+        $or: [
+          {
+            terminalPublicationState: PUBLICATION_STATE_PUBLISHED,
+          },
+          {
+            terminalPublicationState: {
+              $exists: false,
+            },
+          },
+          {
+            terminalPublicationState: null,
+          },
+          {
+            terminalPublicationState: {
+              $in: ["", PUBLICATION_STATE_PENDING],
+            },
+          },
+          {
+            terminalPublicationState: PUBLICATION_STATE_PUBLISHING,
+            $or: [
+              {
+                terminalPublicationClaimedAt: {
+                  $exists: false,
+                },
+              },
+              {
+                terminalPublicationClaimedAt: null,
+              },
+              {
+                terminalPublicationClaimedAt: {
+                  $lte: staleClaimBefore,
+                },
+              },
+            ],
+          },
+        ],
       },
       {
         status: ResultingStatus.BET_APPROVED,

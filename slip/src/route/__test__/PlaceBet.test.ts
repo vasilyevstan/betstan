@@ -14,7 +14,10 @@ import {
 import PlaceBetEventPublisher from "../../event/publisher/PlaceBetEventPublisher";
 import ModerationResultListener from "../../event/listener/ModerationResultListener";
 import { SlipPublicationState } from "../../model/SlipPublicationState";
-import { buildLegacyBoardSessionScope } from "../../model/slipSupport";
+import {
+  buildLegacyBoardSessionScope,
+  persistSlipBoardIdentityIfNeeded,
+} from "../../model/slipSupport";
 
 const userId = new mongoose.Types.ObjectId().toHexString();
 const otherUserId = new mongoose.Types.ObjectId().toHexString();
@@ -608,6 +611,31 @@ it("does not refresh rolling-client confirmations while a board is submitted", a
   expect(persistedSlip?.legacyBoardConfirmations).toEqual([
     persistedConfirmation,
   ]);
+});
+
+it("rechecks live draft status before recording a rolling-client confirmation", async () => {
+  const staleDraft = await createSlip({ betKind: BetKind.LIVE });
+  await Slip.updateOne(
+    { _id: staleDraft._id },
+    {
+      $set: {
+        status: SlipStatus.SUBMITTED,
+        submittedAt: new Date().toISOString(),
+      },
+    }
+  );
+
+  await persistSlipBoardIdentityIfNeeded(staleDraft, {
+    legacyConfirmationScope:
+      buildLegacyBoardSessionScope(primarySessionJwt),
+  });
+
+  const persistedSlip = await Slip.collection.findOne(
+    { _id: staleDraft._id },
+    { projection: { legacyBoardConfirmations: 1, status: 1 } }
+  );
+  expect(persistedSlip?.status).toEqual(SlipStatus.SUBMITTED);
+  expect(persistedSlip?.legacyBoardConfirmations).toBeUndefined();
 });
 
 it("rejects a board confirmation captured before a row deletion", async () => {

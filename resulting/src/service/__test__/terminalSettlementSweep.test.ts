@@ -174,6 +174,106 @@ it(
   }
 );
 
+it("archives a published terminal bet left active by a crash", async () => {
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [],
+    status: ResultingStatus.BET_VOID,
+  });
+  await Bet.updateOne(
+    { _id: bet._id },
+    {
+      $set: {
+        terminalPublicationState: "PUBLISHED",
+      },
+    }
+  );
+  const publishWithConfirm =
+    SettleSlipPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockResolvedValue(undefined);
+
+  const sweepWorker = await createSweepWorker();
+  const processed = await sweepWorker.runOnce();
+
+  expect(processed).toEqual(1);
+  expect(publishWithConfirm).not.toHaveBeenCalled();
+  expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(
+    (await BetArchive.findOne({ slipId: bet.slipId }))
+      ?.terminalPublicationState
+  ).toEqual("PUBLISHED");
+});
+
+it("claims and publishes a legacy terminal bet with no publication state", async () => {
+  const bet = await createBet({
+    betKind: BetKind.PRE_MATCH,
+    rows: [],
+    status: ResultingStatus.BET_WIN,
+  });
+  await Bet.collection.updateOne(
+    { _id: bet._id },
+    {
+      $unset: {
+        terminalPublicationState: "",
+      },
+    }
+  );
+  expect(
+    (await Bet.collection.findOne(
+      { _id: bet._id },
+      { projection: { terminalPublicationState: 1 } }
+    ))?.terminalPublicationState
+  ).toBeUndefined();
+  const publishWithConfirm =
+    SettleSlipPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockResolvedValue(undefined);
+
+  const sweepWorker = await createSweepWorker();
+  const processed = await sweepWorker.runOnce();
+
+  expect(processed).toEqual(1);
+  expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(
+    (await BetArchive.findOne({ slipId: bet.slipId }))
+      ?.terminalPublicationState
+  ).toEqual("PUBLISHED");
+});
+
+it("reclaims a terminal publishing state with no claim timestamp", async () => {
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [],
+    status: ResultingStatus.BET_VOID,
+  });
+  await Bet.updateOne(
+    { _id: bet._id },
+    {
+      $set: {
+        terminalPublicationState: "PUBLISHING",
+        terminalPublicationClaimId: "legacy-claim",
+      },
+      $unset: {
+        terminalPublicationClaimedAt: "",
+      },
+    }
+  );
+  const publishWithConfirm =
+    SettleSlipPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockResolvedValue(undefined);
+
+  const sweepWorker = await createSweepWorker();
+  const processed = await sweepWorker.runOnce();
+
+  expect(processed).toEqual(1);
+  expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
+  expect(
+    (await BetArchive.findOne({ slipId: bet.slipId }))
+      ?.terminalPublicationState
+  ).toEqual("PUBLISHED");
+});
+
 it("recovers an approved all-void slip after its last row was removed", async () => {
   const bet = await createBet({
     betKind: BetKind.LIVE,
@@ -222,9 +322,9 @@ it(
     const sweepWorker = await createSweepWorker();
     const processed = await sweepWorker.runOnce();
 
-    // The slip is still considered terminal-pending (found by the sweep),
-    // but the active claim must not be stolen, so no publish happens.
-    expect(processed).toEqual(1);
+    // Active claims are omitted until they become stale, so they cannot
+    // monopolize a bounded sweep batch.
+    expect(processed).toEqual(0);
     expect(publishWithConfirm).not.toHaveBeenCalled();
 
     const untouchedBet = await Bet.findOne({ slipId: bet.slipId });

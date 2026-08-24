@@ -29,7 +29,9 @@ Read:
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
 - Raw-write/Mongoose-version interactions, including historical documents
   without `__v`, stale aggregate revision/fingerprint reuse after every
-  mutation, and terminal recovery after all child rows are removed.
+  mutation, and terminal recovery after all child rows are removed, after
+  publication is marked complete but before archival, and from missing legacy
+  publication state.
 - Old-client/new-API and new-client/old-API rolling combinations. Legacy
   compatibility evidence must be scoped to the authenticated session, exact
   user, and aggregate so another session cannot refresh stale evidence, and

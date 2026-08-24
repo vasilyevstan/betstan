@@ -70,7 +70,9 @@ instead of crossing the boundary.
   confirmation fall back after mismatch. Record compatibility evidence only
   for mutable drafts; submitted-state polling must not refresh it.
 - Include empty-but-terminal aggregates in recovery sweeps when rows can be
-  removed before parent finalization.
+  removed before parent finalization. Also recover missing legacy state and
+  published-but-unarchived aggregates without republishing, and preserve the
+  active record until auxiliary cleanup succeeds.
 - Treat JWT roles as non-authoritative for privileged operations. Revalidate
   current persisted roles through the owning auth service and fail closed.
 - Keep synthetic acceptance records excluded by default in every public read

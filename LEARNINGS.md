@@ -87,6 +87,12 @@
   manual-void rows were published and removed before a crash. Terminal sweeps
   must discover it and finalize the parent as void instead of filtering it out
   as having no unsettled rows.
+- Terminal recovery must cover every persisted boundary: missing legacy
+  publication state, pending state, stale or timestampless publishing claims,
+  and `PUBLISHED` records left active by a crash before archival. Archive an
+  already-published record without republishing it, exclude live claims from
+  bounded sweep batches, and finish auxiliary cleanup before deleting the
+  active recovery anchor.
 
 ---
 
