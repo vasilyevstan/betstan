@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 # shellcheck source=../../azure/agents/live-betting-readiness-lib.sh
 source "$OCI_ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh"
 
@@ -147,6 +149,96 @@ if not valid:
 PY
 }
 
+validate_recovery_run() {
+  local run_json_file="$1"
+  local workflow_id="$2"
+  python3 - "$run_json_file" "$workflow_id" "$REPO" "$BASELINE_RETENTION_DAYS" <<'PY'
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))
+workflow_id, repository, retention_days = sys.argv[2:5]
+created_at = run.get("created_at") or run.get("run_started_at") or run.get("updated_at")
+if not created_at:
+    raise SystemExit("recovery run metadata is missing a timestamp")
+created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+if datetime.now(timezone.utc) - created > timedelta(days=int(retention_days)):
+    raise SystemExit("recovery run is outside the rollback retention window")
+valid = (
+    str(run.get("workflow_id", "")) == workflow_id and
+    run.get("path") == ".github/workflows/oci-ghcr-cache-recovery.yml" and
+    run.get("event") == "workflow_dispatch" and
+    run.get("head_branch") == "master" and
+    ((run.get("head_repository") or {}).get("full_name") == repository) and
+    run.get("status") == "completed" and
+    run.get("conclusion") == "success" and
+    run.get("run_attempt") == 1
+)
+if not valid:
+    raise SystemExit("recovery run is not exact first-attempt GHCR cache recovery metadata")
+PY
+}
+
+validate_recovery_transition_provenance() {
+  local file="$1"
+  local expected_run_id="$2"
+  python3 - "$file" "$expected_run_id" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+run_id = sys.argv[2]
+required = {
+    "schema", "transition_workflow", "transition_run_id", "transition_run_attempt",
+    "source_sha", "images_sha256", "infrastructure_run_id",
+    "infrastructure_run_attempt", "infrastructure_provenance_sha256",
+    "runtime_mode", "runtime_fingerprint", "registry_provider", "registry_host",
+    "registry_repository", "registry_public_anonymous", "public_host",
+    "canonical_host", "redirect_host", "diagnostic_host",
+    "transition_plan_state_sha256", "rabbitmq_baseline_sha256",
+    "credential_retirement", "ocir_repository_retirement", "transition_status",
+}
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("recovery transition provenance is missing")
+values = {}
+for raw in path.read_text(encoding="utf-8").splitlines():
+    if not raw or "=" not in raw:
+        raise SystemExit("recovery transition provenance is malformed")
+    key, value = raw.split("=", 1)
+    if key in values or key not in required:
+        raise SystemExit("recovery transition provenance key set is invalid")
+    values[key] = value
+if set(values) != required:
+    raise SystemExit("recovery transition provenance key set is incomplete")
+if (values["schema"] != "betstan.ghcr-cache-recovery-transition.v1" or
+        values["transition_workflow"] != "oci-ghcr-cache-recovery" or
+        values["transition_run_id"] != run_id or
+        values["transition_run_attempt"] != "1" or
+        values["runtime_mode"] != "k3s" or
+        values["registry_provider"] != "ghcr" or
+        values["registry_host"] != "ghcr.io" or
+        values["registry_repository"] != "ghcr.io/vasilyevstan/betstan-images" or
+        values["registry_public_anonymous"] != "true" or
+        values["credential_retirement"] != "pass" or
+        values["ocir_repository_retirement"] != "pass" or
+        values["transition_status"] != "PASS"):
+    raise SystemExit("recovery transition provenance is not an exact completed recovery")
+if not re.fullmatch(r"[0-9a-f]{40}", values["source_sha"]):
+    raise SystemExit("recovery transition source SHA is invalid")
+if not re.fullmatch(r"[1-9][0-9]*", values["infrastructure_run_id"]):
+    raise SystemExit("recovery transition infrastructure run is invalid")
+if values["infrastructure_run_attempt"] != "1":
+    raise SystemExit("recovery transition infrastructure run is not first attempt")
+for key in ("images_sha256", "infrastructure_provenance_sha256",
+            "runtime_fingerprint", "transition_plan_state_sha256",
+            "rabbitmq_baseline_sha256"):
+    if not re.fullmatch(r"[0-9a-f]{64}", values[key]):
+        raise SystemExit("recovery transition hash is invalid")
+PY
+}
+
 validate_run_metadata() {
   local run_json_file="$1"
   local workflow_id="$2"
@@ -277,10 +369,21 @@ verify_checksums() {
 
 load_baseline_images() {
   BASELINE_IMAGES_FILE="$1"
-  local count=0
-  while IFS=$'\t' read -r service _repository image_ref digest platform_digest; do
+  local count=0 service repository image_ref digest platform_digest
+  application_registry_require_ghcr
+  while IFS=$'\t' read -r service repository image_ref digest platform_digest; do
     [[ -n "$service" ]] || continue
+    [[ "$service" =~ ^(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)$ ]] ||
+      oci_die "baseline contains an unexpected service"
     [[ "$image_ref" =~ @sha256:[0-9a-f]{64}$ ]] || oci_die "baseline image for ${service} is mutable"
+    application_registry_validate_repository "$repository"
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ &&
+       "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+      oci_die "baseline image digest is invalid"
+    [[ "$image_ref" == "${repository}@${digest}" ]] ||
+      oci_die "baseline image reference does not bind its GHCR manifest digest"
+    [[ "$repository" == "ghcr.io/vasilyevstan/betstan-images" ]] ||
+      oci_die "rollback rejects legacy OCIR references after GHCR migration"
     count=$((count + 1))
   done <"$BASELINE_IMAGES_FILE"
   [[ "$count" == "9" ]] || oci_die "baseline image provenance must contain exactly nine services"
@@ -779,6 +882,10 @@ BASELINE_DIR="$OUTPUT_DIR/baseline"
 prepare_private_dir "$BASELINE_DIR"
 gh run download "$BASELINE_SOURCE_RUN_ID" --repo "$REPO" \
   --name "$BASELINE_ARTIFACT_NAME" --dir "$BASELINE_DIR" >/dev/null
+BASELINE_DIR="$BASELINE_DIR" \
+EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+  "$SCRIPT_DIR/validate-rollback-baseline-stan.sh" >/dev/null
 verify_checksums "$BASELINE_DIR"
 [[ -f "$BASELINE_DIR/baseline-provenance.env" ]] || oci_die "baseline artifact is missing baseline-provenance.env"
 [[ -f "$BASELINE_DIR/images.tsv" ]] || oci_die "baseline artifact is missing images.tsv"
@@ -807,6 +914,15 @@ baseline_build_run_id="$(
 baseline_build_run_attempt="$(
   evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_build_run_attempt
 )" || oci_die "baseline build provenance is missing a run attempt"
+baseline_recovery_run_id="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_recovery_run_id || true
+)"
+baseline_recovery_run_attempt="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_recovery_run_attempt || true
+)"
+baseline_transition_provenance_file="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_transition_provenance_file || true
+)"
 baseline_capture_run_id="$(
   evidence_value "$BASELINE_DIR/baseline-provenance.env" baseline_capture_run_id
 )" || oci_die "baseline provenance is missing baseline_capture_run_id"
@@ -834,9 +950,22 @@ sse_required="$(
 database_restore="$(
   evidence_value "$BASELINE_DIR/baseline-provenance.env" database_restore
 )" || oci_die "baseline provenance is missing database_restore"
+baseline_registry_provider="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" registry_provider
+)" || oci_die "baseline provenance is missing registry_provider"
+baseline_registry_host="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" registry_host
+)" || oci_die "baseline provenance is missing registry_host"
+baseline_registry_repository="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" registry_repository
+)" || oci_die "baseline provenance is missing registry_repository"
+baseline_registry_public_anonymous="$(
+  evidence_value "$BASELINE_DIR/baseline-provenance.env" registry_public_anonymous
+)" || oci_die "baseline provenance is missing registry_public_anonymous"
 
 [[ "$baseline_source_sha" == "$TARGET_SHA" ]] || oci_die "baseline source SHA does not match TARGET_SHA"
-[[ "$baseline_deploy_workflow" == "oci-production-deploy" ]] ||
+[[ "$baseline_deploy_workflow" == "oci-production-deploy" ||
+   "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]] ||
   oci_die "baseline deploy workflow is not trusted"
 [[ "$baseline_deploy_run_attempt" == "1" ]] || oci_die "baseline deploy provenance is not first-attempt"
 [[ "$baseline_build_workflow" == "oci-production-build" ]] ||
@@ -844,6 +973,20 @@ database_restore="$(
 [[ "$baseline_build_run_attempt" == "1" ]] || oci_die "baseline build provenance is not first-attempt"
 validate_positive_int "$baseline_deploy_run_id" || oci_die "baseline deploy provenance is missing a run ID"
 validate_positive_int "$baseline_build_run_id" || oci_die "baseline build provenance is missing a run ID"
+if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
+  [[ "$baseline_recovery_run_id" == "$baseline_deploy_run_id" &&
+     "$baseline_recovery_run_attempt" == "1" &&
+     "$baseline_transition_provenance_file" == "trusted-recovery-transition-provenance.env" ]] ||
+    oci_die "recovery baseline does not bind the exact first-attempt transition evidence"
+else
+  [[ ( -z "$baseline_recovery_run_id" &&
+       -z "$baseline_recovery_run_attempt" &&
+       -z "$baseline_transition_provenance_file" ) ||
+     ( "$baseline_recovery_run_id" == "0" &&
+       "$baseline_recovery_run_attempt" == "0" &&
+       "$baseline_transition_provenance_file" == "none" ) ]] ||
+    oci_die "ordinary deploy baseline carries unauthorized recovery authority"
+fi
 validate_positive_int "$baseline_capture_run_id" ||
   oci_die "baseline provenance is missing a capture run ID"
 [[ "$baseline_capture_run_attempt" == "1" ]] ||
@@ -851,6 +994,11 @@ validate_positive_int "$baseline_capture_run_id" ||
 [[ "$baseline_namespace" == "$OCI_K8S_NAMESPACE" ]] ||
   oci_die "baseline namespace does not match the selected namespace"
 [[ "$database_restore" == "disabled" ]] || oci_die "database restore must remain disabled"
+[[ "$baseline_registry_provider" == "ghcr" &&
+   "$baseline_registry_host" == "ghcr.io" &&
+   "$baseline_registry_repository" == "ghcr.io/vasilyevstan/betstan-images" &&
+   "$baseline_registry_public_anonymous" == "true" ]] ||
+  oci_die "rollback baseline is not a public GHCR generation"
 [[ "$public_url" == https://* && "$redirect_url" == https://* ]] ||
   oci_die "baseline artifact public URLs must use https://"
 if [[ -z "$OCI_PUBLIC_URL" ]]; then
@@ -876,12 +1024,21 @@ SSE_REQUIRED="${sse_required:-true}"
   oci_die "baseline sse_required must be true or false"
 
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
-deploy_run_json="$WORK_DIR/deploy-run.json"
 build_run_json="$WORK_DIR/build-run.json"
-gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$deploy_run_json"
 gh api "repos/$REPO/actions/runs/$baseline_build_run_id/attempts/1" >"$build_run_json"
-validate_run_metadata "$deploy_run_json" "$trusted_source_workflow_id" \
-  '.github/workflows/oci-production-deploy.yml' 'workflow_dispatch' "$TARGET_SHA"
+if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
+  trusted_recovery_workflow_id="$(
+    gh api "repos/$REPO/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
+  )"
+  recovery_run_json="$WORK_DIR/recovery-run.json"
+  gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$recovery_run_json"
+  validate_recovery_run "$recovery_run_json" "$trusted_recovery_workflow_id"
+else
+  deploy_run_json="$WORK_DIR/deploy-run.json"
+  gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$deploy_run_json"
+  validate_run_metadata "$deploy_run_json" "$trusted_source_workflow_id" \
+    '.github/workflows/oci-production-deploy.yml' 'workflow_dispatch' "$TARGET_SHA"
+fi
 validate_run_metadata "$build_run_json" "$trusted_build_workflow_id" \
   '.github/workflows/oci-production-build.yml' 'workflow_run' "$TARGET_SHA"
 
@@ -936,6 +1093,57 @@ validate_positive_int "$selected_infrastructure_run_id" ||
 [[ "$selected_infrastructure_namespace" == "$OCI_K8S_NAMESPACE" ]] ||
   oci_die "selected infrastructure provenance namespace does not match"
 
+if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
+  ORIGINAL_DEPLOY_PROVENANCE_FILE="$BASELINE_DIR/$baseline_transition_provenance_file"
+  checksum_manifest_contains_once "$BASELINE_DIR" "$baseline_transition_provenance_file" ||
+    oci_die "embedded recovery transition provenance is not covered exactly once by baseline checksums"
+  validate_recovery_transition_provenance \
+    "$ORIGINAL_DEPLOY_PROVENANCE_FILE" "$baseline_deploy_run_id"
+
+  deploy_source_sha="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" source_sha)"
+  deployment_run_id="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" transition_run_id)"
+  deployment_run_attempt="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" transition_run_attempt)"
+  runtime_mode="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_mode)"
+  runtime_fingerprint="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_fingerprint)"
+  image_provenance_sha256="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" images_sha256)"
+  rabbitmq_baseline_sha256="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" rabbitmq_baseline_sha256)"
+  deploy_public_host="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" public_host)"
+  deploy_canonical_host="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" canonical_host)"
+  deploy_redirect_host="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" redirect_host)"
+  deploy_diagnostic_host="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" diagnostic_host)"
+  deploy_registry_provider="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_provider)"
+  deploy_registry_host="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_host)"
+  deploy_registry_repository="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_repository)"
+  deploy_registry_public_anonymous="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_public_anonymous)"
+  infrastructure_run_id="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_run_id)"
+  infrastructure_run_attempt="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_run_attempt)"
+  infrastructure_provenance_sha256="$(evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_provenance_sha256)"
+
+  [[ "$deploy_source_sha" == "$TARGET_SHA" &&
+     "$deployment_run_id" == "$baseline_deploy_run_id" &&
+     "$deployment_run_attempt" == "1" &&
+     "$image_provenance_sha256" == "$(sha256_file "$BASELINE_DIR/images.tsv")" &&
+     "$runtime_mode" == "k3s" &&
+     "$runtime_fingerprint" =~ ^[0-9a-f]{64}$ &&
+     "$deploy_registry_provider" == "ghcr" &&
+     "$deploy_registry_host" == "ghcr.io" &&
+     "$deploy_registry_repository" == "ghcr.io/vasilyevstan/betstan-images" &&
+     "$deploy_registry_public_anonymous" == "true" ]] ||
+    oci_die "recovery transition provenance does not bind the selected GHCR rollback baseline"
+  [[ "$deploy_public_host" == "$deploy_canonical_host" &&
+     "$public_url" == "https://${deploy_canonical_host}" &&
+     "$redirect_url" == "https://${deploy_redirect_host}" ]] ||
+    oci_die "recovery transition endpoints do not match the rollback baseline"
+  if [[ -n "$diagnostic_url" ]]; then
+    [[ "$diagnostic_url" == "https://${deploy_diagnostic_host}" ]] ||
+      oci_die "recovery transition diagnostic endpoint does not match the rollback baseline"
+  fi
+  DEPLOY_PROVENANCE_ORIGIN=recovery-transition
+  DEPLOY_PROVENANCE_BINDING=recorded-recovery-infrastructure
+  # Recovery evidence stays in its dedicated schema; it is never reconstructed
+  # or augmented as an ordinary oci-production-deploy artifact.
+  NORMALIZED_DEPLOY_PROVENANCE_FILE="$ORIGINAL_DEPLOY_PROVENANCE_FILE"
+else
 ORIGINAL_DEPLOY_PROVENANCE_FILE="$BASELINE_DIR/trusted-deploy-provenance.txt"
 DEPLOY_PROVENANCE_ORIGIN=baseline-embedded
 if [[ -f "$ORIGINAL_DEPLOY_PROVENANCE_FILE" ]]; then
@@ -974,6 +1182,9 @@ validate_evidence_env_file \
 deploy_source_sha="$(
   evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" source_sha
 )" || oci_die "trusted deploy provenance is missing source_sha"
+deployment_workflow="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" deployment_workflow || true
+)"
 deployment_run_id="$(
   evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" deployment_run_id
 )" || oci_die "trusted deploy provenance is missing deployment_run_id"
@@ -1007,9 +1218,29 @@ deploy_redirect_host="$(
 deploy_diagnostic_host="$(
   evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" diagnostic_host
 )" || oci_die "trusted deploy provenance is missing diagnostic_host"
+deploy_registry_provider="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_provider
+)" || oci_die "trusted deploy provenance is missing registry_provider"
+deploy_registry_host="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_host
+)" || oci_die "trusted deploy provenance is missing registry_host"
+deploy_registry_repository="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_repository
+)" || oci_die "trusted deploy provenance is missing registry_repository"
+deploy_registry_public_anonymous="$(
+  evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_public_anonymous
+)" || oci_die "trusted deploy provenance is missing registry_public_anonymous"
 
 [[ "$deploy_source_sha" == "$TARGET_SHA" ]] ||
   oci_die "trusted deploy provenance source SHA does not match TARGET_SHA"
+if [[ -n "$deployment_workflow" ]]; then
+  [[ "$deployment_workflow" == "oci-production-deploy" ]] ||
+    oci_die "trusted deploy provenance workflow identity is invalid"
+else
+  [[ "$DEPLOY_PROVENANCE_ORIGIN" == "baseline-embedded" ||
+     "$DEPLOY_PROVENANCE_ORIGIN" == "reconstructed-exact-deploy-artifact" ]] ||
+    oci_die "only a previously trusted exact deploy artifact may omit deployment_workflow"
+fi
 [[ "$deployment_run_id" == "$baseline_deploy_run_id" ]] ||
   oci_die "trusted deploy provenance run does not match baseline provenance"
 [[ "$deployment_run_attempt" == "1" ]] ||
@@ -1026,6 +1257,11 @@ deploy_diagnostic_host="$(
   oci_die "trusted deploy provenance is missing a rendered manifest hash"
 [[ "$image_provenance_sha256" == "$(sha256_file "$BASELINE_DIR/images.tsv")" ]] ||
   oci_die "trusted deploy provenance image hash does not match the rollback baseline"
+[[ "$deploy_registry_provider" == "ghcr" &&
+   "$deploy_registry_host" == "ghcr.io" &&
+   "$deploy_registry_repository" == "ghcr.io/vasilyevstan/betstan-images" &&
+   "$deploy_registry_public_anonymous" == "true" ]] ||
+  oci_die "trusted deploy provenance does not authorize public GHCR rollback"
 if [[ "$DEPLOY_PROVENANCE_ORIGIN" == "reconstructed-exact-deploy-artifact" ]]; then
   [[ "$rabbitmq_baseline_sha256" == \
      "$(sha256_file "$DEPLOY_PROVENANCE_DIR/rabbitmq-baseline.txt")" ]] ||
@@ -1080,6 +1316,7 @@ elif [[ "$recorded_infrastructure_fields" == "3" ]]; then
     <"$ORIGINAL_DEPLOY_PROVENANCE_FILE"
 else
   oci_die "trusted deploy provenance has incomplete infrastructure binding"
+fi
 fi
 chmod 600 "$NORMALIZED_DEPLOY_PROVENANCE_FILE"
 validate_evidence_env_file \

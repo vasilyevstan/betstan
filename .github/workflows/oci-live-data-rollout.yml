@@ -29,6 +29,11 @@ on:
         required: true
         default: "0"
         type: string
+      baseline_recovery_run_id:
+        description: Exact first-attempt oci-ghcr-cache-recovery run authorizing a historical GHCR baseline, or 0
+        required: true
+        default: "0"
+        type: string
       confirmation:
         description: Type the exact confirmation phrase for the selected phase
         required: true
@@ -55,6 +60,7 @@ jobs:
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       PHASE: ${{ inputs.phase }}
       PREREQUISITE_RUN_ID: ${{ inputs.prerequisite_run_id }}
+      BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -67,9 +73,11 @@ jobs:
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
       OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
-      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
-      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
-      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
       OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
       OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
       OCI_CPU_MAX_PERCENT: "90"
@@ -91,6 +99,7 @@ jobs:
             artifacts/build \
             artifacts/infrastructure \
             artifacts/prerequisite \
+            artifacts/recovery \
             artifacts/oci-live-data-rollout \
             artifacts/oci-data-baseline-before \
             artifacts/oci-data-baseline-after
@@ -103,6 +112,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate exact SHA phase and trusted upstream runs
+        id: provenance_request
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -113,6 +123,8 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
+             "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           case "$PHASE" in
             dry-run)
               [ "$CONFIRMATION" = "DRY RUN LIVE DATA EXACT SHA" ]
@@ -159,6 +171,28 @@ jobs:
 
           validate_run oci-production-build.yml "$BUILD_RUN_ID" workflow_run
           validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            recovery_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
+            )"
+            read -r workflow_id path event head_branch repository status conclusion attempt <<<"$(
+              gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            )"
+            [ "$workflow_id" = "$recovery_workflow_id" ]
+            [ "$path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]
+            [ "$event" = "workflow_dispatch" ]
+            [ "$head_branch" = "master" ]
+            [ "$repository" = "$REPOSITORY" ]
+            [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
+            recovery_artifact_name="$(
+              gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/artifacts?per_page=100" \
+                --jq '.artifacts[] | select(.expired == false) | .name' |
+                awk -v run_id="$BASELINE_RECOVERY_RUN_ID" \
+                  '$0 ~ ("^ghcr-cache-recovery-[0-9a-f]{40}-" run_id "-1$") { count++; name=$0 } END { if (count != 1) exit 1; print name }'
+            )"
+            printf 'recovery_artifact_name=%s\n' "$recovery_artifact_name" >> "$GITHUB_OUTPUT"
+          fi
           if [ "$PHASE" != "dry-run" ]; then
             validate_run oci-live-data-rollout.yml "$PREREQUISITE_RUN_ID" workflow_dispatch
             artifact_name="oci-live-data-rollout-${PREREQUISITE_RUN_ID}-1"
@@ -204,8 +238,48 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.prerequisite_run_id }}
 
+      - name: Download explicitly selected recovery baseline authority
+        if: inputs.baseline_recovery_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.provenance_request.outputs.recovery_artifact_name }}
+          path: artifacts/recovery
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.baseline_recovery_run_id }}
+
+      - name: Bind historical recovery source through its exact artifact
+        id: recovery_authority
+        if: inputs.baseline_recovery_run_id != '0'
+        run: |
+          set -euo pipefail
+          recovery=artifacts/recovery
+          evidence="$recovery/recovery-evidence.env"
+          transition="$recovery/transition-provenance.env"
+          [ -f "$evidence" ] && [ -f "$transition" ] && [ -f "$recovery/images.tsv" ]
+          source_sha="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+          recovery_run_id="$(awk -F= '$1 == "recovery_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+          recovery_attempt="$(awk -F= '$1 == "recovery_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+          transition_source="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+          transition_run_id="$(awk -F= '$1 == "transition_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+          transition_attempt="$(awk -F= '$1 == "transition_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+          image_hash="$(awk -F= '$1 == "images_sha256" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [ "$recovery_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
+          [ "$recovery_attempt" = "1" ]
+          [ "$transition_source" = "$source_sha" ]
+          [ "$transition_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
+          [ "$transition_attempt" = "1" ]
+          [ "$image_hash" = "$(sha256sum "$recovery/images.tsv" | awk '{print $1}')" ]
+          grep -Fxq 'credential_retirement=pass' "$transition"
+          grep -Fxq 'ocir_repository_retirement=pass' "$transition"
+          grep -Fxq 'transition_status=PASS' "$transition"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
       - name: Verify immutable release and phase provenance
         id: provenance
+        env:
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
         run: |
           set -euo pipefail
           PROVENANCE_DIR=artifacts/build \
@@ -225,6 +299,11 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$application_registry_provider" = "ghcr" ]
+          [ "$application_registry_host" = "ghcr.io" ]
+          [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
+          [ "$application_registry_public_anonymous" = "true" ]
+          [ "$ocir_application_repository_absent" = "true" ]
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
@@ -248,6 +327,8 @@ jobs:
             EXPECTED_PHASE="$expected_phase" \
             EXPECTED_RUN_ID="$PREREQUISITE_RUN_ID" \
             EXPECTED_RUN_ATTEMPT=1 \
+            EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+            EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
               ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
           fi
 
@@ -333,16 +414,7 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
-      - name: Acquire database operation lock
-        run: |
-          NAMESPACE="$OCI_K8S_NAMESPACE" \
-          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
-          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
-          LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
-          SOURCE_SHA="$SOURCE_SHA" \
-            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
-
-      - name: Capture pre-mutation rollback baseline
+      - name: Capture and validate pre-mutation rollback baseline
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -352,10 +424,25 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
         run: |
-          ./infra/oci/scripts/baseline-capture-stan.sh
+          if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
+            ./infra/oci/scripts/baseline-capture-stan.sh
+          else
+            BASELINE_RECOVERY_DIR=artifacts/recovery \
+              ./infra/oci/scripts/baseline-capture-stan.sh
+          fi
           printf 'BASELINE_SHA256=%s\n' \
             "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
             >> "$GITHUB_ENV"
+
+      - name: Acquire database operation lock
+        id: operation_lock
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
       - name: Fence writes and quiesce legacy data writers
         id: maintenance_enter
@@ -376,6 +463,8 @@ jobs:
           RUNTIME_HELD_FOR_DEPLOY: ${{ inputs.phase == 'apply-slip-index' }}
           OPERATION_LOCK_ENFORCED: "true"
           OPERATION_LOCK_HANDOFF: ${{ inputs.phase == 'apply-slip-index' }}
+          BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
         run: ./infra/oci/scripts/live-betting-data-rollout-stan.sh
 
       - name: Restore runtime or verify final deploy handoff
@@ -425,7 +514,13 @@ jobs:
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
-        run: ./infra/oci/scripts/baseline-capture-stan.sh
+        run: |
+          if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
+            ./infra/oci/scripts/baseline-capture-stan.sh
+          else
+            BASELINE_RECOVERY_DIR=artifacts/recovery \
+              ./infra/oci/scripts/baseline-capture-stan.sh
+          fi
 
       - name: Upload exact sanitized data evidence
         if: always()
@@ -461,6 +556,7 @@ jobs:
       - name: Release database operation lock unless handed to deploy
         if: >-
           always() &&
+          steps.operation_lock.outcome == 'success' &&
           (!(inputs.phase == 'apply-slip-index' &&
              steps.data.outcome == 'success' &&
              steps.maintenance.outcome == 'success') ||

@@ -39,6 +39,10 @@ gh() {
       path=.github/workflows/oci-live-betting-activate.yml
     elif [[ "$mode" == "disable-active" ]]; then
       path=.github/workflows/oci-live-betting-disable.yml
+    elif [[ "$mode" == "ghcr-package-active" ]]; then
+      path=.github/workflows/ghcr-package-management.yml
+    elif [[ "$mode" == "cache-recovery-active" ]]; then
+      path=.github/workflows/oci-ghcr-cache-recovery.yml
     elif [[ "$mode" == "superseded-deploy" ]]; then
       path=.github/workflows/oci-production-deploy.yml
       run_status=queued
@@ -111,6 +115,10 @@ gh() {
       path=.github/workflows/oci-live-betting-activate.yml
     elif [[ "$STUB_MODE" == "disable-active" ]]; then
       path=.github/workflows/oci-live-betting-disable.yml
+    elif [[ "$STUB_MODE" == "ghcr-package-active" ]]; then
+      path=.github/workflows/ghcr-package-management.yml
+    elif [[ "$STUB_MODE" == "cache-recovery-active" ]]; then
+      path=.github/workflows/oci-ghcr-cache-recovery.yml
     elif [[ "$STUB_MODE" == "superseded-deploy" ]]; then
       path=.github/workflows/oci-production-deploy.yml
     elif [[ "$STUB_MODE" == *capacity* ]]; then
@@ -162,7 +170,8 @@ REPO=example/repo NOW_EPOCH=2000 STUB_MODE=active EXCLUDE_RUN_ID=$RUN_ID \
 REPO=example/repo NOW_EPOCH=2000 STUB_MODE=superseded-capacity \
   "$EXCLUSIVITY" >/dev/null
 
-for mode in active data-active activation-active disable-active recent-disabled \
+for mode in active data-active activation-active disable-active ghcr-package-active \
+  cache-recovery-active recent-disabled \
   pending-disabled jobs-disabled overflow unsuperseded-capacity \
   current-superseded-capacity recent-superseded-capacity \
   pending-superseded-capacity jobs-superseded-capacity \

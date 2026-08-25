@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 # shellcheck source=../../azure/agents/live-betting-readiness-lib.sh
 source "$OCI_ROOT_DIR/infra/azure/agents/live-betting-readiness-lib.sh"
 
@@ -26,6 +28,8 @@ MIGRATION_STATE_CONFIGMAP="${MIGRATION_STATE_CONFIGMAP:-betstan-oci-migration-jo
 MIGRATION_LOCK_CONFIGMAP="${MIGRATION_LOCK_CONFIGMAP:-betstan-oci-migration-lock}"
 MIGRATION_EVIDENCE_REFERENCE="${MIGRATION_EVIDENCE_REFERENCE:-}"
 RUN_LOOKBACK="${RUN_LOOKBACK:-40}"
+BASELINE_RECOVERY_RUN_ID="${BASELINE_RECOVERY_RUN_ID:-0}"
+BASELINE_RECOVERY_DIR="${BASELINE_RECOVERY_DIR:-}"
 ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
 API_CONTRACTS=(
   "/|html"
@@ -55,6 +59,162 @@ sha256_file() {
 
 validate_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+env_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    $1 == key {
+      if (found++) exit 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (found != 1) exit 1
+      print value
+    }
+  ' "$file"
+}
+
+validate_selected_recovery_artifact() {
+  local directory="$1"
+  python3 - "$directory" "$BASELINE_RECOVERY_RUN_ID" <<'PY'
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+run_id = sys.argv[2]
+services = ("auth", "bet", "backoffice", "client", "event", "gamemaster",
+            "moderation", "resulting", "slip")
+required_files = {
+    *(f"{service}.env" for service in services),
+    "images.tsv", "recovery-evidence.env", "transition-plan.tsv",
+    "transition-plan-evidence.env", "rabbitmq-baseline.txt",
+    "rebind-provenance.env",
+    "transition-provenance.env", "SHA256SUMS",
+}
+if not root.is_dir() or root.is_symlink():
+    raise SystemExit("recovery artifact directory is invalid")
+files = {path.name for path in root.iterdir() if path.is_file() and not path.is_symlink()}
+if files != required_files:
+    raise SystemExit("recovery artifact has an unexpected file set")
+manifest = {}
+for raw in (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)", raw)
+    if not match or match.group(2) in manifest:
+        raise SystemExit("recovery checksum manifest is malformed")
+    manifest[match.group(2)] = match.group(1)
+if set(manifest) != required_files - {"SHA256SUMS"}:
+    raise SystemExit("recovery checksum manifest does not bind the exact evidence set")
+for name, digest in manifest.items():
+    if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"recovery checksum mismatch for {name}")
+
+def exact_env(name, expected_keys):
+    path = root / name
+    values = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw or "=" not in raw:
+            raise SystemExit(f"{name} is malformed")
+        key, value = raw.split("=", 1)
+        if key in values or key not in expected_keys:
+            raise SystemExit(f"{name} has an unexpected key")
+        values[key] = value
+    if set(values) != expected_keys:
+        raise SystemExit(f"{name} key set is incomplete")
+    return values
+
+recovery = exact_env("recovery-evidence.env", {
+    "schema", "recovery_origin", "registry_provider", "registry_repository",
+    "anonymous_pull", "source_sha", "trusted_build_run_id",
+    "trusted_upstream_run_id", "recovery_run_id", "recovery_run_attempt",
+    "images_sha256",
+})
+if recovery["schema"] != "betstan.ghcr-cache-recovery.v1":
+    raise SystemExit("recovery evidence schema is invalid")
+if recovery["recovery_origin"] != "containerd-cache" or recovery["anonymous_pull"] != "pass":
+    raise SystemExit("recovery evidence does not prove verified cache promotion")
+if recovery["registry_provider"] != "ghcr" or recovery["registry_repository"] != "ghcr.io/vasilyevstan/betstan-images":
+    raise SystemExit("recovery evidence registry is invalid")
+if recovery["recovery_run_id"] != run_id or recovery["recovery_run_attempt"] != "1":
+    raise SystemExit("recovery evidence does not bind the explicitly selected first attempt")
+if not re.fullmatch(r"[0-9a-f]{40}", recovery["source_sha"]):
+    raise SystemExit("recovery source SHA is invalid")
+for key in ("trusted_build_run_id", "trusted_upstream_run_id"):
+    if not re.fullmatch(r"[1-9][0-9]*", recovery[key]):
+        raise SystemExit("recovery historical build lineage is invalid")
+images = (root / "images.tsv").read_bytes()
+if hashlib.sha256(images).hexdigest() != recovery["images_sha256"]:
+    raise SystemExit("recovery image hash does not match recovery evidence")
+
+plan = exact_env("transition-plan-evidence.env", {
+    "schema", "source_sha", "plan_origin_recovery_run_id",
+    "plan_carrier_recovery_run_id", "plan_carrier_recovery_run_attempt",
+    "images_sha256", "infrastructure_provenance_sha256",
+    "transition_plan_sha256", "rabbitmq_baseline_sha256",
+})
+if (plan["schema"] != "betstan.ghcr-cache-transition-plan.v1" or
+        plan["source_sha"] != recovery["source_sha"] or
+        plan["plan_carrier_recovery_run_id"] != run_id or
+        plan["plan_carrier_recovery_run_attempt"] != "1" or
+        plan["images_sha256"] != recovery["images_sha256"]):
+    raise SystemExit("transition plan evidence identity is invalid")
+if not re.fullmatch(r"[1-9][0-9]*", plan["plan_origin_recovery_run_id"]):
+    raise SystemExit("transition plan origin run is invalid")
+for key in ("infrastructure_provenance_sha256", "transition_plan_sha256",
+            "rabbitmq_baseline_sha256"):
+    if not re.fullmatch(r"[0-9a-f]{64}", plan[key]):
+        raise SystemExit("transition plan evidence hash is invalid")
+if hashlib.sha256((root / "transition-plan.tsv").read_bytes()).hexdigest() != plan["transition_plan_sha256"]:
+    raise SystemExit("immutable transition plan hash differs")
+if hashlib.sha256((root / "rabbitmq-baseline.txt").read_bytes()).hexdigest() != plan["rabbitmq_baseline_sha256"]:
+    raise SystemExit("immutable RabbitMQ baseline hash differs")
+
+transition = exact_env("transition-provenance.env", {
+    "schema", "transition_workflow", "transition_run_id", "transition_run_attempt",
+    "source_sha", "images_sha256", "infrastructure_run_id",
+    "infrastructure_run_attempt", "infrastructure_provenance_sha256",
+    "runtime_mode", "runtime_fingerprint", "registry_provider", "registry_host",
+    "registry_repository", "registry_public_anonymous", "public_host",
+    "canonical_host", "redirect_host", "diagnostic_host",
+    "transition_plan_state_sha256", "rabbitmq_baseline_sha256",
+    "credential_retirement", "ocir_repository_retirement", "transition_status",
+})
+if (transition["schema"] != "betstan.ghcr-cache-recovery-transition.v1" or
+        transition["transition_workflow"] != "oci-ghcr-cache-recovery" or
+        transition["transition_run_id"] != run_id or
+        transition["transition_run_attempt"] != "1" or
+        transition["source_sha"] != recovery["source_sha"] or
+        transition["images_sha256"] != recovery["images_sha256"] or
+        transition["runtime_mode"] != "k3s" or
+        transition["registry_provider"] != "ghcr" or
+        transition["registry_host"] != "ghcr.io" or
+        transition["registry_repository"] != "ghcr.io/vasilyevstan/betstan-images" or
+        transition["registry_public_anonymous"] != "true" or
+        transition["credential_retirement"] != "pass" or
+        transition["ocir_repository_retirement"] != "pass" or
+        transition["transition_status"] != "PASS"):
+    raise SystemExit("recovery transition provenance is not an exact completed recovery")
+if (plan["infrastructure_provenance_sha256"] != transition["infrastructure_provenance_sha256"] or
+        plan["transition_plan_sha256"] != transition["transition_plan_state_sha256"] or
+        plan["rabbitmq_baseline_sha256"] != transition["rabbitmq_baseline_sha256"]):
+    raise SystemExit("terminal transition does not match the immutable pre-rebind plan")
+for key in ("infrastructure_run_id",):
+    if not re.fullmatch(r"[1-9][0-9]*", transition[key]):
+        raise SystemExit("transition infrastructure run is invalid")
+if transition["infrastructure_run_attempt"] != "1":
+    raise SystemExit("transition infrastructure evidence is not first attempt")
+for key in ("infrastructure_provenance_sha256", "runtime_fingerprint",
+            "transition_plan_state_sha256", "rabbitmq_baseline_sha256"):
+    if not re.fullmatch(r"[0-9a-f]{64}", transition[key]):
+        raise SystemExit("transition hash is invalid")
+if hashlib.sha256((root / "transition-plan.tsv").read_bytes()).hexdigest() != transition["transition_plan_state_sha256"]:
+    raise SystemExit("transition plan hash does not match exact transition state")
+if hashlib.sha256((root / "rabbitmq-baseline.txt").read_bytes()).hexdigest() != transition["rabbitmq_baseline_sha256"]:
+    raise SystemExit("RabbitMQ baseline hash does not match transition evidence")
+PY
 }
 
 capture_configmap() {
@@ -362,6 +522,91 @@ if candidate != live:
 PY
 }
 
+validate_ghcr_image_inventory() {
+  local image_file="$1"
+  python3 - "$image_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+expected_services = {
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip",
+}
+repository = "ghcr.io/vasilyevstan/betstan-images"
+digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+rows = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not raw:
+        continue
+    fields = raw.split("\t")
+    if len(fields) != 5:
+        raise SystemExit("image provenance must contain exactly five columns")
+    service, row_repository, image_ref, manifest_digest, platform_digest = fields
+    if service in rows or service not in expected_services:
+        raise SystemExit("image provenance service set is invalid")
+    if row_repository != repository:
+        raise SystemExit("image provenance repository is not the public GHCR repository")
+    if not digest_pattern.fullmatch(manifest_digest):
+        raise SystemExit("image provenance manifest digest is invalid")
+    if not digest_pattern.fullmatch(platform_digest):
+        raise SystemExit("image provenance ARM64 platform digest is invalid")
+    if image_ref != f"{repository}@{manifest_digest}":
+        raise SystemExit("image provenance reference does not match its GHCR manifest digest")
+    rows[service] = image_ref
+if set(rows) != expected_services:
+    raise SystemExit("image provenance does not contain exactly the nine application services")
+PY
+}
+
+validate_live_ghcr_inventory() {
+  local live_file="$1"
+  python3 - "$live_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+expected_services = {
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip",
+}
+reference_pattern = re.compile(
+    r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}"
+)
+rows = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not raw:
+        continue
+    fields = raw.split("\t")
+    if len(fields) != 2:
+        raise SystemExit("live image inventory must contain exactly two columns")
+    service, image_ref = fields
+    if service in rows or service not in expected_services:
+        raise SystemExit("live image inventory service set is invalid")
+    if not reference_pattern.fullmatch(image_ref):
+        raise SystemExit("live image inventory is not an immutable public GHCR generation")
+    rows[service] = image_ref
+if set(rows) != expected_services:
+    raise SystemExit("live image inventory does not contain exactly the nine application services")
+PY
+}
+
+validate_trusted_ghcr_deploy_provenance() {
+  local provenance_file="$1"
+  local image_file="$2"
+  local source_sha="$3"
+  local deploy_run_id="$4"
+  [[ "$(env_value "$provenance_file" source_sha)" == "$source_sha" &&
+     "$(env_value "$provenance_file" deployment_workflow)" == "oci-production-deploy" &&
+     "$(env_value "$provenance_file" deployment_run_id)" == "$deploy_run_id" &&
+     "$(env_value "$provenance_file" deployment_run_attempt)" == "1" &&
+     "$(env_value "$provenance_file" image_provenance_sha256)" == "$(sha256_file "$image_file")" &&
+     "$(env_value "$provenance_file" registry_provider)" == "ghcr" &&
+     "$(env_value "$provenance_file" registry_host)" == "ghcr.io" &&
+     "$(env_value "$provenance_file" registry_repository)" == "ghcr.io/vasilyevstan/betstan-images" &&
+     "$(env_value "$provenance_file" registry_public_anonymous)" == "true" ]]
+}
+
 prepare_private_dir "$OUTPUT_DIR"
 WORK_PARENT_DIR="$OUTPUT_DIR/.workdirs"
 prepare_private_dir "$WORK_PARENT_DIR"
@@ -374,9 +619,20 @@ oci_require_command kubectl
 oci_require_command curl
 oci_require_command python3
 oci_require_command jq
+application_registry_require_ghcr
 validate_positive_int "$BASELINE_RETENTION_DAYS" || oci_die "BASELINE_RETENTION_DAYS must be positive"
 validate_positive_int "$RUN_LOOKBACK" || oci_die "RUN_LOOKBACK must be positive"
 validate_positive_int "$HTTP_ATTEMPTS" || oci_die "HTTP_ATTEMPTS must be positive"
+[[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
+   "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+  oci_die "BASELINE_RECOVERY_RUN_ID must be 0 or an explicit recovery run ID"
+if [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
+  [[ -z "$BASELINE_RECOVERY_DIR" ]] ||
+    oci_die "BASELINE_RECOVERY_DIR is forbidden without an explicit recovery run"
+else
+  [[ -n "$BASELINE_RECOVERY_DIR" ]] ||
+    oci_die "baseline recovery requires the explicitly selected recovery artifact directory"
+fi
 [[ "$HTTP_RETRY_SECONDS" =~ ^[0-9]+$ ]] ||
   oci_die "HTTP_RETRY_SECONDS must be a nonnegative integer"
 [[ "$OCI_PUBLIC_URL" == https://* ]] || oci_die "OCI_PUBLIC_URL must be https://"
@@ -420,6 +676,41 @@ PY
     "$service" "$image" "$revision" "$desired" "$ready" "$available" >>"$OUTPUT_DIR/deployments.tsv"
 done
 
+if ! validate_live_ghcr_inventory "$OUTPUT_DIR/live-images.tsv"; then
+  if [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
+    oci_die "non-GHCR live images require explicit completed cache-recovery authority before baseline capture"
+  fi
+  oci_die "live images are not the completed immutable GHCR recovery generation"
+fi
+
+matched_deploy_run_id=""
+matched_source_sha=""
+matched_build_run_id=""
+baseline_deploy_workflow=oci-production-deploy
+baseline_recovery_run_id=0
+baseline_recovery_run_attempt=0
+baseline_transition_provenance_file=""
+trusted_provenance_file=trusted-deploy-provenance.txt
+
+if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
+  validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
+    oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
+  validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+    oci_die "selected recovery image provenance is not an immutable public GHCR generation"
+  compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+    oci_die "live deployment GHCR digests do not match the selected recovery artifact"
+  matched_source_sha="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" source_sha)"
+  matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
+  matched_build_run_id="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" trusted_build_run_id)"
+  baseline_deploy_workflow=oci-ghcr-cache-recovery
+  baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+  baseline_recovery_run_attempt=1
+  baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
+  trusted_provenance_file="$baseline_transition_provenance_file"
+  cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+  cp "$BASELINE_RECOVERY_DIR/transition-provenance.env" \
+    "$OUTPUT_DIR/$baseline_transition_provenance_file"
+else
 trusted_deploy_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
 runs_json="$WORK_DIR/deploy-runs.json"
@@ -443,9 +734,6 @@ for run in runs:
         print(run.get('databaseId'))
 PY
 
-matched_deploy_run_id=""
-matched_source_sha=""
-matched_build_run_id=""
 while IFS= read -r run_id; do
   [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || continue
   metadata_file="$WORK_DIR/deploy-run-${run_id}.json"
@@ -465,11 +753,21 @@ while IFS= read -r run_id; do
   candidate_images_file="$(find "$candidate_dir" -type f -name images.tsv | head -n 1)"
   candidate_provenance_file="$(find "$candidate_dir" -type f -name provenance.txt | head -n 1)"
   [[ -f "$candidate_images_file" && -f "$candidate_provenance_file" ]] || continue
+  if ! validate_ghcr_image_inventory "$candidate_images_file"; then
+    continue
+  fi
   if ! compare_live_images "$candidate_images_file"; then
     continue
   fi
-  matched_source_sha="$(sed -n 's/^source_sha=//p' "$candidate_provenance_file")"
+  matched_source_sha="$(env_value "$candidate_provenance_file" source_sha || true)"
   [[ "$matched_source_sha" =~ ^[0-9a-f]{40}$ ]] || continue
+  if ! validate_trusted_ghcr_deploy_provenance \
+      "$candidate_provenance_file" \
+      "$candidate_images_file" \
+      "$matched_source_sha" \
+      "$run_id"; then
+    continue
+  fi
   matched_deploy_run_id="$run_id"
   cp "$candidate_images_file" "$OUTPUT_DIR/images.tsv"
   cp "$candidate_provenance_file" "$OUTPUT_DIR/trusted-deploy-provenance.txt"
@@ -515,6 +813,7 @@ while IFS= read -r run_id; do
 done <"$WORK_DIR/build-candidates.txt"
 
 [[ -n "$matched_build_run_id" ]] || oci_die "unable to find trusted OCI build provenance for ${matched_source_sha}"
+fi
 
 if [[ "$SSE_REQUIREMENT" == "deployed-source" ]]; then
   git cat-file -e "${matched_source_sha}^{commit}" ||
@@ -598,12 +897,15 @@ fi
 
 cat >"$OUTPUT_DIR/baseline-provenance.env" <<EOF2
 baseline_source_sha=$matched_source_sha
-baseline_deploy_workflow=oci-production-deploy
+baseline_deploy_workflow=$baseline_deploy_workflow
 baseline_deploy_run_id=$matched_deploy_run_id
 baseline_deploy_run_attempt=1
 baseline_build_workflow=oci-production-build
 baseline_build_run_id=$matched_build_run_id
 baseline_build_run_attempt=1
+baseline_recovery_run_id=$baseline_recovery_run_id
+baseline_recovery_run_attempt=$baseline_recovery_run_attempt
+baseline_transition_provenance_file=${baseline_transition_provenance_file:-none}
 baseline_capture_run_id=${GITHUB_RUN_ID:-local}
 baseline_capture_run_attempt=${GITHUB_RUN_ATTEMPT:-1}
 namespace=$OCI_K8S_NAMESPACE
@@ -617,6 +919,10 @@ sse_path=$SSE_PATH
 sse_requirement=$SSE_REQUIREMENT
 sse_required=$SSE_REQUIRED
 database_restore=disabled
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
 EOF2
 
 required_files=(
@@ -631,7 +937,7 @@ required_files=(
   migration-journal.json
   migration-lock.json
   migration-backup-references.tsv
-  trusted-deploy-provenance.txt
+  "$trusted_provenance_file"
 )
 : >"$OUTPUT_DIR/SHA256SUMS"
 for file in "${required_files[@]}"; do
@@ -639,5 +945,14 @@ for file in "${required_files[@]}"; do
   printf '%s  %s\n' "$(sha256_file "$OUTPUT_DIR/$file")" "$file" >>"$OUTPUT_DIR/SHA256SUMS"
 done
 chmod 600 "$OUTPUT_DIR"/*
+allow_local_capture=false
+[[ -n "${GITHUB_RUN_ID:-}" ]] || allow_local_capture=true
+BASELINE_DIR="$OUTPUT_DIR" \
+EXPECTED_SOURCE_SHA="$matched_source_sha" \
+EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+EXPECTED_RECOVERY_RUN_ID="$baseline_recovery_run_id" \
+REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+ALLOW_LOCAL_CAPTURE="$allow_local_capture" \
+  "$SCRIPT_DIR/validate-rollback-baseline-stan.sh" >/dev/null
 
 oci_log "oci_baseline_capture=PASS source_sha=${matched_source_sha} deploy_run_id=${matched_deploy_run_id} build_run_id=${matched_build_run_id}"

@@ -13,15 +13,13 @@ on:
         required: true
         type: string
       phase:
-        description: Prepare/finalize infrastructure or validate/prune image generations
+        description: Prepare or finalize infrastructure (legacy OCIR registry controls are retired)
         required: true
         default: prepare
         type: choice
         options:
           - prepare
           - finalize
-          - validate-registry
-          - prune-registry
       candidate_build_run_id:
         description: Current-master OCI build run protected during registry pruning
         required: false
@@ -67,6 +65,16 @@ on:
         required: false
         default: ""
         type: string
+      ghcr_build_run_id:
+        description: Successful first-attempt public GHCR build required before finalization
+        required: false
+        default: ""
+        type: string
+      ghcr_package_validation_run_id:
+        description: Successful first-attempt public GHCR package validation required before finalization
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -78,9 +86,8 @@ concurrency:
 
 jobs:
   prune-registry:
-    if: >-
-      github.run_attempt == 1 &&
-      (inputs.phase == 'validate-registry' || inputs.phase == 'prune-registry')
+    name: Retired legacy OCIR registry controls
+    if: ${{ inputs.phase == 'retired-ocir-registry-controls' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -690,6 +697,14 @@ jobs:
       OCI_BASTION_MAX_SESSION_TTL: "10800"
       OCI_NODE_SHAPE: VM.Standard.A1.Flex
       OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
+      APPLICATION_REGISTRY_EVIDENCE_FILE: artifacts/oci-infrastructure/application-registry-evidence.env
+      GHCR_BUILD_RUN_ID: ${{ inputs.ghcr_build_run_id }}
+      GHCR_PACKAGE_VALIDATION_RUN_ID: ${{ inputs.ghcr_package_validation_run_id }}
       OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
       OCI_WORKER_SUBNET_CIDR: ${{ vars.OCI_WORKER_SUBNET_CIDR || '10.42.16.0/20' }}
       OCI_LB_SUBNET_CIDR: ${{ vars.OCI_LB_SUBNET_CIDR || '10.42.32.0/24' }}
@@ -767,6 +782,72 @@ jobs:
               --raw-output
           )"
           [ "$home_region" = "$OCI_CLI_REGION" ]
+
+      - name: Bind finalization to public GHCR build and package validation
+        if: inputs.phase == 'finalize'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$GHCR_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$GHCR_PACKAGE_VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          build_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id')"
+          build_run="$(gh api "repos/$REPOSITORY/actions/runs/$GHCR_BUILD_RUN_ID/attempts/1")"
+          jq -e --argjson workflow_id "$build_workflow_id" --arg sha "$SOURCE_SHA" --arg repo "$REPOSITORY" '
+            .workflow_id == $workflow_id and
+            .path == ".github/workflows/oci-production-build.yml" and
+            .event == "workflow_run" and .head_sha == $sha and
+            .head_branch == "master" and .head_repository.full_name == $repo and
+            .status == "completed" and .conclusion == "success" and .run_attempt == 1
+          ' <<<"$build_run" >/dev/null
+          package_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/ghcr-package-management.yml" --jq '.id')"
+          package_run="$(gh api "repos/$REPOSITORY/actions/runs/$GHCR_PACKAGE_VALIDATION_RUN_ID/attempts/1")"
+          jq -e --argjson workflow_id "$package_workflow_id" --arg sha "$SOURCE_SHA" --arg repo "$REPOSITORY" '
+            .workflow_id == $workflow_id and
+            .path == ".github/workflows/ghcr-package-management.yml" and
+            .event == "workflow_dispatch" and .head_sha == $sha and
+            .head_branch == "master" and .head_repository.full_name == $repo and
+            .status == "completed" and .conclusion == "success" and .run_attempt == 1 and
+            .display_title == ("ghcr-package validate " + $sha)
+          ' <<<"$package_run" >/dev/null
+          build_artifact="oci-image-provenance-${SOURCE_SHA}-${GHCR_BUILD_RUN_ID}-1"
+          package_artifact="ghcr-package-management-validate-${GHCR_PACKAGE_VALIDATION_RUN_ID}-1"
+          for item in "$GHCR_BUILD_RUN_ID:$build_artifact:artifacts/ghcr-build" \
+            "$GHCR_PACKAGE_VALIDATION_RUN_ID:$package_artifact:artifacts/ghcr-package"; do
+            IFS=: read -r run_id artifact destination <<<"$item"
+            count="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq "[.artifacts[] | select(.name == \"$artifact\" and .expired == false)] | length")"
+            [ "$count" = 1 ]
+            mkdir -p "$destination"
+            gh run download "$run_id" --name "$artifact" --dir "$destination"
+          done
+          build_chain="$(find artifacts/ghcr-build -type f -name build-chain.txt)"
+          [ "$(printf '%s\n' "$build_chain" | wc -l | tr -d ' ')" = 1 ]
+          grep -Fxq 'registry_provider=ghcr' "$build_chain"
+          grep -Fxq 'registry_host=ghcr.io' "$build_chain"
+          grep -Fxq 'registry_repository=ghcr.io/vasilyevstan/betstan-images' "$build_chain"
+          grep -Fxq 'registry_public=true' "$build_chain"
+          grep -Fxq 'anonymous_pull=pass' "$build_chain"
+          validation_summary="$(find artifacts/ghcr-package -type f -name validation-summary.json)"
+          [ "$(printf '%s\n' "$validation_summary" | wc -l | tr -d ' ')" = 1 ]
+          jq -e '
+            .terminal_status == "VALIDATED" and .registry_provider == "ghcr" and
+            .registry_host == "ghcr.io" and
+            .repository == "ghcr.io/vasilyevstan/betstan-images" and
+            .package_visibility == "public" and .repository_linked == true
+          ' "$validation_summary" >/dev/null
+          mkdir -p artifacts/oci-infrastructure
+          printf '%s\n' \
+            'registry_provider=ghcr' \
+            'registry_host=ghcr.io' \
+            'registry_repository=ghcr.io/vasilyevstan/betstan-images' \
+            'package_visibility=public' \
+            'anonymous_pull=pass' \
+            'build_first_attempt=true' \
+            "build_run_id=$GHCR_BUILD_RUN_ID" \
+            "package_validation_run_id=$GHCR_PACKAGE_VALIDATION_RUN_ID" \
+            > artifacts/oci-infrastructure/application-registry-evidence.env
 
       - name: Zero-cost preflight and cloud reconciliation
         id: cloud
@@ -949,6 +1030,7 @@ jobs:
           path: |
             artifacts/oci-infrastructure/provenance.env
             artifacts/oci-infrastructure/inventory.json
+            artifacts/oci-infrastructure/application-registry-evidence.env
           if-no-files-found: error
           retention-days: 30
 

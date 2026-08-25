@@ -1,0 +1,722 @@
+name: ghcr-package-management
+run-name: ${{ inputs.phase == 'repair-build' && format('ghcr-package repair-build {0} upstream-{1} failed-{2}', inputs.approved_sha, inputs.trusted_upstream_run_id, inputs.failed_build_run_id) || format('ghcr-package {0} {1}', inputs.phase, inputs.approved_sha) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact current master SHA
+        required: true
+        type: string
+      phase:
+        description: Create sentinel, validate public package, or prune explicit obsolete generations
+        required: true
+        type: choice
+        options: [bootstrap, validate, prune, repair-build]
+      confirmation:
+        description: Exact confirmation for the selected phase
+        required: true
+        type: string
+      candidate_build_run_id:
+        description: Trusted first-attempt GHCR candidate build run (validate/prune)
+        required: false
+        default: ""
+        type: string
+      deployed_sha:
+        description: Deployed source SHA protected from pruning (validate/prune)
+        required: false
+        default: ""
+        type: string
+      deployed_build_run_id:
+        description: Trusted deployed GHCR build run; exclusive with deployed recovery run
+        required: false
+        default: ""
+        type: string
+      deployed_deploy_run_id:
+        description: Successful deployment run required with deployed build provenance
+        required: false
+        default: ""
+        type: string
+      deployed_recovery_run_id:
+        description: Trusted deployed GHCR cache-recovery run; exclusive with deployed build run
+        required: false
+        default: ""
+        type: string
+      last_known_good_sha:
+        description: Compatible GHCR source SHA protected from pruning (validate/prune)
+        required: false
+        default: ""
+        type: string
+      last_known_good_build_run_id:
+        description: Trusted last-known-good GHCR build run; exclusive with recovery run
+        required: false
+        default: ""
+        type: string
+      last_known_good_deploy_run_id:
+        description: Successful deployment run required with last-known-good build provenance
+        required: false
+        default: ""
+        type: string
+      last_known_good_recovery_run_id:
+        description: Trusted last-known-good GHCR cache-recovery run; exclusive with build run
+        required: false
+        default: ""
+        type: string
+      obsolete_generations:
+        description: JSON SHA/build-run pairs to prune after validation
+        required: false
+        default: ""
+        type: string
+      validation_run_id:
+        description: Exact successful ghcr-package-management validate run required by prune
+        required: false
+        default: ""
+        type: string
+      failed_build_run_id:
+        description: Failed first-attempt OCI build to repair
+        required: false
+        default: ""
+        type: string
+      trusted_upstream_run_id:
+        description: Successful first-attempt production-build run for build repair
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  manage:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: oci-infrastructure
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      PHASE: ${{ inputs.phase }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      CANDIDATE_BUILD_RUN_ID: ${{ inputs.candidate_build_run_id }}
+      DEPLOYED_SHA: ${{ inputs.deployed_sha }}
+      DEPLOYED_BUILD_RUN_ID: ${{ inputs.deployed_build_run_id }}
+      DEPLOYED_DEPLOY_RUN_ID: ${{ inputs.deployed_deploy_run_id }}
+      DEPLOYED_RECOVERY_RUN_ID: ${{ inputs.deployed_recovery_run_id }}
+      LAST_KNOWN_GOOD_SHA: ${{ inputs.last_known_good_sha }}
+      LAST_KNOWN_GOOD_BUILD_RUN_ID: ${{ inputs.last_known_good_build_run_id }}
+      LAST_KNOWN_GOOD_DEPLOY_RUN_ID: ${{ inputs.last_known_good_deploy_run_id }}
+      LAST_KNOWN_GOOD_RECOVERY_RUN_ID: ${{ inputs.last_known_good_recovery_run_id }}
+      OBSOLETE_GENERATIONS: ${{ inputs.obsolete_generations }}
+      VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+      FAILED_BUILD_RUN_ID: ${{ inputs.failed_build_run_id }}
+      TRUSTED_UPSTREAM_RUN_ID: ${{ inputs.trusted_upstream_run_id }}
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
+      REPO: ${{ github.repository }}
+      PACKAGE_NAME: betstan-images
+      OUTPUT_DIR: artifacts/ghcr-package-management
+      PREFLIGHT_OUTPUT_DIR: artifacts/ghcr-package-preflight
+
+    steps:
+      - name: Checkout exact current master
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate bounded package-management request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          case "$PHASE" in
+            bootstrap)
+              [ "$CONFIRMATION" = "BOOTSTRAP GHCR PACKAGE SENTINEL" ]
+              [ -z "$VALIDATION_RUN_ID" ]
+              ;;
+            validate)
+              [ "$CONFIRMATION" = "VALIDATE PUBLIC GHCR PACKAGE" ]
+              [ -z "$VALIDATION_RUN_ID" ]
+              ;;
+            prune)
+              [ "$CONFIRMATION" = "PRUNE OBSOLETE GHCR PACKAGE GENERATIONS" ]
+              [[ "$VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [ "$VALIDATION_RUN_ID" != "$GITHUB_RUN_ID" ]
+              validation_workflow_id="$(
+                gh api "repos/$REPO/actions/workflows/ghcr-package-management.yml" --jq '.id'
+              )"
+              validation_run="$(
+                gh api "repos/$REPO/actions/runs/$VALIDATION_RUN_ID/attempts/1"
+              )"
+              jq -e \
+                --argjson workflow_id "$validation_workflow_id" \
+                --arg sha "$SOURCE_SHA" \
+                --arg repo "$REPO" \
+                --arg title "ghcr-package validate $SOURCE_SHA" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/ghcr-package-management.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_sha == $sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .run_attempt == 1 and
+                  .display_title == $title
+                ' <<<"$validation_run" >/dev/null
+              validation_artifact_name="ghcr-package-management-validate-${VALIDATION_RUN_ID}-1"
+              validation_artifact_count="$(
+                gh api "repos/$REPO/actions/runs/$VALIDATION_RUN_ID/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(
+                    .name == \"$validation_artifact_name\" and .expired == false
+                  )] | length"
+              )"
+              [ "$validation_artifact_count" = "1" ]
+              ;;
+            repair-build)
+              [ "$CONFIRMATION" = "REPAIR PARTIAL GHCR BUILD" ]
+              [[ "$FAILED_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [[ "$TRUSTED_UPSTREAM_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [ "$FAILED_BUILD_RUN_ID" != "$GITHUB_RUN_ID" ]
+              for value in \
+                "$CANDIDATE_BUILD_RUN_ID" "$DEPLOYED_SHA" \
+                  "$DEPLOYED_BUILD_RUN_ID" "$DEPLOYED_DEPLOY_RUN_ID" \
+                  "$DEPLOYED_RECOVERY_RUN_ID" \
+                  "$LAST_KNOWN_GOOD_SHA" "$LAST_KNOWN_GOOD_BUILD_RUN_ID" \
+                  "$LAST_KNOWN_GOOD_DEPLOY_RUN_ID" "$LAST_KNOWN_GOOD_RECOVERY_RUN_ID" \
+                  "$OBSOLETE_GENERATIONS" "$VALIDATION_RUN_ID"; do
+                  [ -z "$value" ]
+                done
+
+              upstream_workflow_id="$(
+                gh api "repos/$REPO/actions/workflows/production-build.yml" --jq '.id'
+              )"
+              upstream_run="$(
+                gh api "repos/$REPO/actions/runs/$TRUSTED_UPSTREAM_RUN_ID/attempts/1"
+              )"
+              jq -e \
+                --argjson workflow_id "$upstream_workflow_id" \
+                --arg sha "$SOURCE_SHA" \
+                --arg repo "$REPO" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/production-build.yml" and
+                  .event == "push" and
+                  .head_sha == $sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .run_attempt == 1
+                ' <<<"$upstream_run" >/dev/null
+
+              build_workflow_id="$(
+                gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id'
+              )"
+              failed_run="$(
+                gh api "repos/$REPO/actions/runs/$FAILED_BUILD_RUN_ID/attempts/1"
+              )"
+              jq -e \
+                --argjson workflow_id "$build_workflow_id" \
+                --arg sha "$SOURCE_SHA" \
+                --arg repo "$REPO" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-build.yml" and
+                  .event == "workflow_run" and
+                  .head_sha == $sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "failure" and
+                  .run_attempt == 1
+                ' <<<"$failed_run" >/dev/null
+              failed_title="$(jq -r '.display_title' <<<"$failed_run")"
+              case "$failed_title" in
+                "oci-build $SOURCE_SHA upstream-$TRUSTED_UPSTREAM_RUN_ID")
+                  ;;
+                "oci-build $SOURCE_SHA repair-"*)
+                  repair_trigger_run_id="${failed_title##*repair-}"
+                  [[ "$repair_trigger_run_id" =~ ^[1-9][0-9]*$ ]]
+                  repair_trigger="$(
+                    gh api "repos/$REPO/actions/runs/$repair_trigger_run_id/attempts/1"
+                  )"
+                  package_workflow_id="$(
+                    gh api "repos/$REPO/actions/workflows/ghcr-package-management.yml" --jq '.id'
+                  )"
+                  jq -e \
+                    --argjson workflow_id "$package_workflow_id" \
+                    --arg sha "$SOURCE_SHA" \
+                    --arg repo "$REPO" \
+                    --arg upstream "$TRUSTED_UPSTREAM_RUN_ID" '
+                      .workflow_id == $workflow_id and
+                      .path == ".github/workflows/ghcr-package-management.yml" and
+                      .event == "workflow_dispatch" and
+                      .head_sha == $sha and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repo and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .run_attempt == 1 and
+                      (.display_title | test(
+                        "^ghcr-package repair-build " + $sha +
+                        " upstream-" + $upstream + " failed-[1-9][0-9]*$"
+                      ))
+                    ' <<<"$repair_trigger" >/dev/null
+                  ;;
+                *)
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *) exit 1 ;;
+          esac
+          if [ "$PHASE" != repair-build ]; then
+            [ -z "$FAILED_BUILD_RUN_ID" ]
+            [ -z "$TRUSTED_UPSTREAM_RUN_ID" ]
+          fi
+          if [ "$PHASE" = validate ] || [ "$PHASE" = prune ]; then
+            [[ "$CANDIDATE_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            for value in "$DEPLOYED_SHA" "$LAST_KNOWN_GOOD_SHA"; do
+              [[ "$value" =~ ^[0-9a-f]{40}$ ]]
+            done
+            require_one_generation_origin() {
+              local build_run_id="$1"
+              local recovery_run_id="$2"
+              local deploy_run_id="$3"
+              if [[ "$build_run_id" =~ ^[1-9][0-9]*$ ]]; then
+                [ -z "$recovery_run_id" ]
+                [[ "$deploy_run_id" =~ ^[1-9][0-9]*$ ]]
+              else
+                [ -z "$build_run_id" ]
+                [ -z "$deploy_run_id" ]
+                [[ "$recovery_run_id" =~ ^[1-9][0-9]*$ ]]
+              fi
+            }
+            require_one_generation_origin \
+              "$DEPLOYED_BUILD_RUN_ID" "$DEPLOYED_RECOVERY_RUN_ID" \
+              "$DEPLOYED_DEPLOY_RUN_ID"
+            require_one_generation_origin \
+              "$LAST_KNOWN_GOOD_BUILD_RUN_ID" "$LAST_KNOWN_GOOD_RECOVERY_RUN_ID" \
+              "$LAST_KNOWN_GOOD_DEPLOY_RUN_ID"
+            if [ -n "$OBSOLETE_GENERATIONS" ]; then
+              jq -e '
+                type == "array" and length >= 1 and length <= 10 and
+                all(
+                  .[];
+                  type == "object" and
+                  (keys | sort) == ["build_run_id", "sha"] and
+                  (.sha | test("^[0-9a-f]{40}$")) and
+                  (.build_run_id | test("^[1-9][0-9]*$"))
+                ) and
+                ([.[].sha] | unique | length) == length
+              ' <<<"$OBSOLETE_GENERATIONS" >/dev/null
+            fi
+          fi
+
+      - name: Set up Docker Buildx
+        if: inputs.phase == 'bootstrap' || inputs.phase == 'validate' || inputs.phase == 'prune' || inputs.phase == 'repair-build'
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Bootstrap repository-linked sentinel without claiming visibility
+        if: inputs.phase == 'bootstrap'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin >/dev/null
+          sentinel=ghcr.io/vasilyevstan/betstan-images:bootstrap-sentinel-v1
+          if ! docker buildx imagetools inspect "$sentinel" >/dev/null 2>&1; then
+            printf '%s\n' 'FROM scratch' |
+              docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+              --label "org.opencontainers.image.source=https://github.com/$REPO" \
+              --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+              --label "io.betstan.package-sentinel=true" \
+              --tag "$sentinel" --push -
+          fi
+          docker logout ghcr.io >/dev/null
+          mkdir -p "$OUTPUT_DIR"
+          package_owner="${REPO%%/*}"
+          gh api -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "users/$package_owner/packages/container/betstan-images" \
+            > "$OUTPUT_DIR/package-metadata.json"
+          jq -r '
+            "schema=betstan.ghcr-package-bootstrap.v1",
+            "registry_provider=ghcr",
+            "registry_host=ghcr.io",
+            "repository=ghcr.io/vasilyevstan/betstan-images",
+            "sentinel_tag=bootstrap-sentinel-v1",
+            ("package_visibility=" + (.visibility // "unknown")),
+            ("repository_linked=" + (((.repository.full_name // "") == "vasilyevstan/betstan") | tostring))
+          ' "$OUTPUT_DIR/package-metadata.json" > "$OUTPUT_DIR/bootstrap-evidence.env"
+          echo "The sentinel exists. Validate will remain blocked until Package settings makes it public."
+
+      - name: Verify trusted GHCR generation origins to protect
+        if: inputs.phase == 'validate' || inputs.phase == 'prune'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          validate_build() {
+            local source_sha="$1" run_id="$2" role="$3"
+            local workflow_id run artifact_name artifact_count artifact_dir
+            workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
+            run="$(gh api "repos/$REPO/actions/runs/$run_id/attempts/1")"
+            jq -e --argjson workflow_id "$workflow_id" --arg sha "$source_sha" --arg repo "$REPO" '
+              .workflow_id == $workflow_id and
+              .path == ".github/workflows/oci-production-build.yml" and
+              .event == "workflow_run" and
+              .head_sha == $sha and
+              .head_branch == "master" and
+              .head_repository.full_name == $repo and
+              .status == "completed" and .conclusion == "success" and
+              .run_attempt == 1
+            ' <<<"$run" >/dev/null
+            artifact_name="oci-image-provenance-${source_sha}-${run_id}-1"
+            artifact_count="$(
+              gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+            artifact_dir="$RUNNER_TEMP/protected-${role}-build-${run_id}"
+            rm -rf "$artifact_dir"
+            mkdir -p "$artifact_dir"
+            gh run download "$run_id" --repo "$REPO" \
+              --name "$artifact_name" --dir "$artifact_dir"
+            [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
+            PROVENANCE_DIR="$artifact_dir" SOURCE_SHA="$source_sha" \
+            EXPECTED_BUILD_RUN_ID="$run_id" EXPECTED_BUILD_RUN_ATTEMPT=1 \
+            OUTPUT_FILE="$artifact_dir/verified-images.tsv" \
+            VERIFY_REMOTE=1 BOOT_IMAGES=0 ANONYMOUS_PULL=1 \
+              ./infra/oci/scripts/verify-images.sh
+          }
+          validate_recovery() {
+            local source_sha="$1" run_id="$2" role="$3"
+            local workflow_id run control_sha artifact_name artifact_count artifact_dir
+            workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id')"
+            run="$(gh api "repos/$REPO/actions/runs/$run_id/attempts/1")"
+            jq -e --argjson workflow_id "$workflow_id" --arg source_sha "$source_sha" \
+              --arg repo "$REPO" --arg title "oci-ghcr-cache-recovery $source_sha" '
+                .workflow_id == $workflow_id and
+                .path == ".github/workflows/oci-ghcr-cache-recovery.yml" and
+                .event == "workflow_dispatch" and
+                .head_branch == "master" and
+                .head_repository.full_name == $repo and
+                .display_title == $title and
+                .status == "completed" and .conclusion == "success" and
+                .run_attempt == 1
+              ' <<<"$run" >/dev/null
+            control_sha="$(jq -r '.head_sha' <<<"$run")"
+            [[ "$control_sha" =~ ^[0-9a-f]{40}$ ]]
+            git cat-file -e "${control_sha}^{commit}"
+            git merge-base --is-ancestor "$control_sha" "$SOURCE_SHA"
+            artifact_name="ghcr-cache-recovery-${source_sha}-${run_id}-1"
+            artifact_count="$(
+              gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+            artifact_dir="$RUNNER_TEMP/protected-${role}-recovery-${run_id}"
+            rm -rf "$artifact_dir"
+            mkdir -p "$artifact_dir"
+            gh run download "$run_id" --repo "$REPO" \
+              --name "$artifact_name" --dir "$artifact_dir"
+            [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
+            PROVENANCE_DIR="$artifact_dir" SOURCE_SHA="$source_sha" \
+            PROVENANCE_MODE=recovery EXPECTED_RECOVERY_RUN_ID="$run_id" \
+            EXPECTED_RECOVERY_RUN_ATTEMPT=1 \
+            OUTPUT_FILE="$artifact_dir/verified-images.tsv" \
+            VERIFY_REMOTE=1 BOOT_IMAGES=0 ANONYMOUS_PULL=1 \
+              ./infra/oci/scripts/verify-images.sh
+            transition="$artifact_dir/transition-provenance.env"
+            [ -f "$transition" ] && [ ! -L "$transition" ]
+            grep -Fxq "source_sha=$source_sha" "$transition"
+            grep -Fxq "transition_run_id=$run_id" "$transition"
+            grep -Fxq 'transition_run_attempt=1' "$transition"
+            grep -Fxq 'registry_repository=ghcr.io/vasilyevstan/betstan-images' "$transition"
+            grep -Fxq 'registry_public_anonymous=true' "$transition"
+            grep -Fxq 'credential_retirement=pass' "$transition"
+            grep -Fxq 'ocir_repository_retirement=pass' "$transition"
+            grep -Fxq 'transition_status=PASS' "$transition"
+          }
+          validate_deploy() {
+            local source_sha="$1" build_run_id="$2" deploy_run_id="$3" role="$4"
+            local workflow_id run artifact_name artifact_count artifact_dir provenance
+            workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
+            run="$(gh api "repos/$REPO/actions/runs/$deploy_run_id/attempts/1")"
+            jq -e \
+              --argjson workflow_id "$workflow_id" \
+              --arg sha "$source_sha" \
+              --arg repo "$REPO" \
+              --arg title "oci-deploy $source_sha" '
+                .workflow_id == $workflow_id and
+                .path == ".github/workflows/oci-production-deploy.yml" and
+                .event == "workflow_dispatch" and
+                .head_sha == $sha and
+                .head_branch == "master" and
+                .head_repository.full_name == $repo and
+                .status == "completed" and
+                .conclusion == "success" and
+                .run_attempt == 1 and
+                .display_title == $title
+              ' <<<"$run" >/dev/null
+            artifact_name="oci-deploy-provenance-${deploy_run_id}-1"
+            artifact_count="$(
+              gh api "repos/$REPO/actions/runs/$deploy_run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+            artifact_dir="$RUNNER_TEMP/protected-${role}-deploy-${deploy_run_id}"
+            rm -rf "$artifact_dir"
+            mkdir -p "$artifact_dir"
+            gh run download "$deploy_run_id" --repo "$REPO" \
+              --name "$artifact_name" --dir "$artifact_dir"
+            [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
+            provenance="$artifact_dir/provenance.txt"
+            [ -f "$provenance" ]
+            grep -Fxq "source_sha=$source_sha" "$provenance"
+            grep -Fxq "deployment_run_id=$deploy_run_id" "$provenance"
+            grep -Fxq 'deployment_run_attempt=1' "$provenance"
+            cmp -s \
+              "$artifact_dir/images.tsv" \
+              "$RUNNER_TEMP/protected-${role}-build-${build_run_id}/verified-images.tsv"
+          }
+          validate_origin() {
+            local source_sha="$1" build_run_id="$2" recovery_run_id="$3"
+            local deploy_run_id="$4" role="$5"
+            if [ -n "$build_run_id" ]; then
+              validate_build "$source_sha" "$build_run_id" "$role"
+              validate_deploy "$source_sha" "$build_run_id" "$deploy_run_id" "$role"
+            else
+              validate_recovery "$source_sha" "$recovery_run_id" "$role"
+            fi
+          }
+          validate_build "$SOURCE_SHA" "$CANDIDATE_BUILD_RUN_ID" candidate
+          validate_origin "$DEPLOYED_SHA" "$DEPLOYED_BUILD_RUN_ID" \
+            "$DEPLOYED_RECOVERY_RUN_ID" "$DEPLOYED_DEPLOY_RUN_ID" deployed
+          validate_origin "$LAST_KNOWN_GOOD_SHA" "$LAST_KNOWN_GOOD_BUILD_RUN_ID" \
+            "$LAST_KNOWN_GOOD_RECOVERY_RUN_ID" "$LAST_KNOWN_GOOD_DEPLOY_RUN_ID" \
+            last-known-good
+          if [ "$PHASE" = validate ] && [ -n "$OBSOLETE_GENERATIONS" ]; then
+            while IFS=$'\t' read -r obsolete_sha obsolete_build_run_id; do
+              validate_build \
+                "$obsolete_sha" "$obsolete_build_run_id" "obsolete-$obsolete_sha"
+            done < <(
+              jq -r 'sort_by(.sha)[] | [.sha, .build_run_id] | @tsv' \
+                <<<"$OBSOLETE_GENERATIONS"
+            )
+          fi
+
+      - name: Verify public package metadata and anonymous sentinel pull
+        if: inputs.phase == 'validate' || inputs.phase == 'prune' || inputs.phase == 'repair-build'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf "$PREFLIGHT_OUTPUT_DIR"
+          mkdir -p "$PREFLIGHT_OUTPUT_DIR"
+          package_owner="${REPO%%/*}"
+          gh api -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "users/$package_owner/packages/container/betstan-images" \
+            > "$PREFLIGHT_OUTPUT_DIR/package-metadata.json"
+          jq -e --arg repo "$REPO" '
+            .package_type == "container" and .name == "betstan-images" and
+            .visibility == "public" and ((.repository.full_name // "") == $repo)
+          ' "$PREFLIGHT_OUTPUT_DIR/package-metadata.json" >/dev/null
+          anonymous_config="$RUNNER_TEMP/ghcr-anonymous-package-check"
+          rm -rf "$anonymous_config"
+          mkdir -m 700 "$anonymous_config"
+          cleanup() { rm -rf "$anonymous_config"; }
+          trap cleanup EXIT
+          DOCKER_CONFIG="$anonymous_config" docker buildx imagetools inspect \
+            ghcr.io/vasilyevstan/betstan-images:bootstrap-sentinel-v1 \
+            --format '{{.Manifest.Digest}}' |
+            tr -d '"' | grep -Ex 'sha256:[0-9a-f]{64}' \
+            > "$PREFLIGHT_OUTPUT_DIR/sentinel-digest.txt"
+          rm -rf "$anonymous_config"
+
+      - name: Record exact partial-build repair authorization
+        if: inputs.phase == 'repair-build'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          versions="$OUTPUT_DIR/repair-package-versions.json"
+          tags="$OUTPUT_DIR/repair-existing-tags.txt"
+          package_owner="${REPO%%/*}"
+          gh api --paginate -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "users/$package_owner/packages/container/$PACKAGE_NAME/versions?per_page=100" |
+            jq -s '
+              if length == 1 and (.[0] | type) == "array" then .[0]
+              elif all(.[]; type == "array") then flatten
+              else error("unexpected package-version response")
+              end
+            ' > "$versions"
+          jq -r --arg sha "$SOURCE_SHA" '
+            [
+              .[].metadata.container.tags[]? |
+              select(test(
+                "^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-" +
+                $sha + "$"
+              ))
+            ] |
+            if length > 9 or length != (unique | length) then
+              error("current source has duplicate or excessive exact tags")
+            else
+              sort[]
+            end
+          ' "$versions" > "$tags"
+          tags_sha256="$(sha256sum "$tags" | awk '{print $1}')"
+          printf '%s\n' \
+            'schema=betstan.ghcr-build-repair.v1' \
+            "source_sha=$SOURCE_SHA" \
+            "failed_build_run_id=$FAILED_BUILD_RUN_ID" \
+            "trusted_upstream_run_id=$TRUSTED_UPSTREAM_RUN_ID" \
+            "authorization_run_id=$GITHUB_RUN_ID" \
+            'authorization_run_attempt=1' \
+            "existing_tag_count=$(awk 'END { print NR }' "$tags")" \
+            "existing_tags_sha256=$tags_sha256" \
+            > "$OUTPUT_DIR/repair-build-evidence.env"
+
+      - name: Download exact read-only package validation
+        if: inputs.phase == 'prune'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ghcr-package-management-validate-${{ inputs.validation_run_id }}-1
+          path: artifacts/validated-ghcr-package-management
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.validation_run_id }}
+
+      - name: Verify exact read-only package validation evidence
+        if: inputs.phase == 'prune'
+        run: |
+          set -euo pipefail
+          validation_dir=artifacts/validated-ghcr-package-management
+          [ -z "$(find "$validation_dir" -type l -print -quit)" ]
+          mapfile -t before_summaries < <(
+            find "$validation_dir" -type f -name before-summary.json
+          )
+          mapfile -t validation_summaries < <(
+            find "$validation_dir" -type f -name validation-summary.json
+          )
+          mapfile -t package_states < <(
+            find "$validation_dir" -type f -name package-state.json
+          )
+          mapfile -t deletion_plans < <(
+            find "$validation_dir" -type f -name planned-delete-version-ids.txt
+          )
+          mapfile -t generation_plans < <(
+            find "$validation_dir" -type f -name generations.tsv
+          )
+          [ "${#before_summaries[@]}" = "1" ]
+          [ "${#validation_summaries[@]}" = "1" ]
+          [ "${#package_states[@]}" = "1" ]
+          [ "${#deletion_plans[@]}" = "1" ]
+          [ "${#generation_plans[@]}" = "1" ]
+          if [ -n "$OBSOLETE_GENERATIONS" ]; then
+            jq -cS 'sort_by(.sha)' <<<"$OBSOLETE_GENERATIONS" \
+              > "$RUNNER_TEMP/requested-obsolete-origins.json"
+          else
+            printf '[]\n' > "$RUNNER_TEMP/requested-obsolete-origins.json"
+          fi
+          jq -e \
+            --arg sha "$SOURCE_SHA" \
+            --arg deployed "$DEPLOYED_SHA" \
+            --arg lkg "$LAST_KNOWN_GOOD_SHA" \
+            --slurpfile obsolete "$RUNNER_TEMP/requested-obsolete-origins.json" '
+              .schema == "betstan.ghcr-package-management.v1" and
+              .registry_provider == "ghcr" and
+              .registry_host == "ghcr.io" and
+              .repository == "ghcr.io/vasilyevstan/betstan-images" and
+              .package_repository == "vasilyevstan/betstan" and
+              .package_name == "betstan-images" and
+              .package_visibility == "public" and
+              .repository_linked == true and
+              .sentinel_tag == "bootstrap-sentinel-v1" and
+              .mode == "validate" and
+              .terminal_status == "VALIDATED" and
+              (.protected_sources | sort) == ([$sha, $deployed, $lkg] | unique | sort) and
+              .obsolete_origins == $obsolete[0] and
+              (.package_state_sha256 | test("^[0-9a-f]{64}$")) and
+              (.generations_sha256 | test("^[0-9a-f]{64}$")) and
+              (.deletion_plan_sha256 | test("^[0-9a-f]{64}$"))
+            ' "${validation_summaries[0]}" >/dev/null
+          jq -S 'del(.terminal_status)' "${validation_summaries[0]}" \
+            > "$RUNNER_TEMP/validated-summary-without-status.json"
+          jq -S . "${before_summaries[0]}" \
+            > "$RUNNER_TEMP/validated-before-summary.json"
+          cmp -s \
+            "$RUNNER_TEMP/validated-summary-without-status.json" \
+            "$RUNNER_TEMP/validated-before-summary.json"
+          [ "$(sha256sum "${package_states[0]}" | awk '{print $1}')" = \
+            "$(jq -r .package_state_sha256 "${before_summaries[0]}")" ]
+          [ "$(sha256sum "${generation_plans[0]}" | awk '{print $1}')" = \
+            "$(jq -r .generations_sha256 "${before_summaries[0]}")" ]
+          [ "$(sha256sum "${deletion_plans[0]}" | awk '{print $1}')" = \
+            "$(jq -r .deletion_plan_sha256 "${before_summaries[0]}")" ]
+          [ "$(awk 'END { print NR+0 }' "${deletion_plans[0]}")" = \
+            "$(jq -r .planned_deletions "${before_summaries[0]}")" ]
+
+      - name: Validate then apply explicit package-generation prune
+        if: inputs.phase == 'validate' || inputs.phase == 'prune'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token }}
+          PRUNE_MODE: ${{ inputs.phase == 'prune' && 'apply' || 'validate' }}
+          CURRENT_SOURCE_SHA: ${{ inputs.approved_sha }}
+          DEPLOYED_SOURCE_SHA: ${{ inputs.deployed_sha }}
+          LAST_KNOWN_GOOD_SOURCE_SHA: ${{ inputs.last_known_good_sha }}
+          VALIDATED_BEFORE_SUMMARY_FILE: artifacts/validated-ghcr-package-management/before-summary.json
+          VALIDATED_PACKAGE_STATE_FILE: artifacts/validated-ghcr-package-management/package-state.json
+          VALIDATED_DELETE_IDS_FILE: artifacts/validated-ghcr-package-management/planned-delete-version-ids.txt
+          VALIDATED_GENERATIONS_FILE: artifacts/validated-ghcr-package-management/generations.tsv
+        run: |
+          set -euo pipefail
+          if [ "$PHASE" = validate ]; then
+            export VALIDATED_BEFORE_SUMMARY_FILE=""
+          fi
+          ./infra/oci/scripts/manage-ghcr-package.sh
+
+      - name: Attach public-package validation evidence
+        if: inputs.phase == 'validate' || inputs.phase == 'prune' || inputs.phase == 'repair-build'
+        run: |
+          set -euo pipefail
+          [ -f "$PREFLIGHT_OUTPUT_DIR/package-metadata.json" ]
+          [ -f "$PREFLIGHT_OUTPUT_DIR/sentinel-digest.txt" ]
+          mkdir -p "$OUTPUT_DIR/public-package"
+          cp \
+            "$PREFLIGHT_OUTPUT_DIR/package-metadata.json" \
+            "$PREFLIGHT_OUTPUT_DIR/sentinel-digest.txt" \
+            "$OUTPUT_DIR/public-package/"
+
+      - name: Upload immutable package-management evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-package-management-${{ inputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-package-management
+          if-no-files-found: error
+          retention-days: 30

@@ -30,6 +30,8 @@ readonly WORKFLOW_INFRASTRUCTURE="oci-infrastructure.yml"
 readonly WORKFLOW_OCI_BUILD="oci-production-build.yml"
 readonly WORKFLOW_DATA="oci-live-data-rollout.yml"
 readonly WORKFLOW_DEPLOY="oci-production-deploy.yml"
+readonly WORKFLOW_GHCR_PACKAGE="ghcr-package-management.yml"
+readonly WORKFLOW_GHCR_RECOVERY="oci-ghcr-cache-recovery.yml"
 readonly WORKFLOW_AZURE_BUILD="production-build.yml"
 readonly WORKFLOW_AZURE_DEPLOY="production-deploy.yml"
 readonly BILLING_MIN_WINDOWS=3
@@ -1559,6 +1561,8 @@ _expected_workflow_state() {
     "$WORKFLOW_OCI_BUILD") echo "active" ;;
     "$WORKFLOW_DATA") echo "active" ;;
     "$WORKFLOW_DEPLOY") echo "active" ;;
+    "$WORKFLOW_GHCR_PACKAGE") echo "active" ;;
+    "$WORKFLOW_GHCR_RECOVERY") echo "active" ;;
     "$WORKFLOW_AZURE_BUILD") echo "active" ;;
     "$WORKFLOW_AZURE_DEPLOY") echo "active" ;;
     *) echo "unknown" ;;
@@ -1574,6 +1578,8 @@ check_workflows() {
     "$WORKFLOW_OCI_BUILD"
     "$WORKFLOW_DATA"
     "$WORKFLOW_DEPLOY"
+    "$WORKFLOW_GHCR_PACKAGE"
+    "$WORKFLOW_GHCR_RECOVERY"
     "$WORKFLOW_AZURE_BUILD"
     "$WORKFLOW_AZURE_DEPLOY"
   )

@@ -4,6 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# Inventory keeps legacy OCIR retirement evidence separate from forward
+# application-registry authority.
+APPLICATION_REGISTRY_PROVIDER="${APPLICATION_REGISTRY_PROVIDER:-ocir}"
+if [[ "$APPLICATION_REGISTRY_PROVIDER" == "ghcr" ]]; then
+  # shellcheck source=application-registry.sh
+  source "$SCRIPT_DIR/application-registry.sh"
+  application_registry_require_ghcr
+elif [[ "$APPLICATION_REGISTRY_PROVIDER" != "ocir" ]]; then
+  oci_die "APPLICATION_REGISTRY_PROVIDER must be ghcr or explicit legacy ocir"
+fi
 
 INVENTORY_MODE="${INVENTORY_MODE:-${1:-preflight}}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
@@ -23,6 +33,26 @@ oci_require_vars \
   OCI_A1_OCPUS OCI_A1_MEMORY_GB OCI_LB_MIN_MBPS OCI_LB_MAX_MBPS \
   OCI_REGISTRY_MAX_BYTES OCI_IMAGE_PREFIX OCI_BOOT_VOLUME_GB OCI_MONGO_VOLUME_GB
 oci_require_ocid OCI_COMPARTMENT_OCID
+
+ghcr_evidence_valid=false
+if [[ "$APPLICATION_REGISTRY_PROVIDER" == "ghcr" &&
+      "$INVENTORY_MODE" == "complete" ]]; then
+  APPLICATION_REGISTRY_EVIDENCE_FILE="${APPLICATION_REGISTRY_EVIDENCE_FILE:-}"
+  [[ -f "$APPLICATION_REGISTRY_EVIDENCE_FILE" &&
+     ! -L "$APPLICATION_REGISTRY_EVIDENCE_FILE" ]] ||
+    oci_die "GHCR infrastructure finalization requires exact public-package validation evidence"
+  awk -F= '
+    $1 == "registry_provider" && $2 == "ghcr" { provider=1 }
+    $1 == "registry_host" && $2 == "ghcr.io" { host=1 }
+    $1 == "registry_repository" && $2 == "ghcr.io/vasilyevstan/betstan-images" { repository=1 }
+    $1 == "package_visibility" && $2 == "public" { visibility=1 }
+    $1 == "anonymous_pull" && $2 == "pass" { anonymous=1 }
+    $1 == "build_first_attempt" && $2 == "true" { build=1 }
+    END { exit(provider && host && repository && visibility && anonymous && build ? 0 : 1) }
+  ' "$APPLICATION_REGISTRY_EVIDENCE_FILE" ||
+    oci_die "GHCR evidence does not bind a successful public anonymous build"
+  ghcr_evidence_valid=true
+fi
 
 clusters="$(oci ce cluster list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 node_pools="$(oci ce node-pool list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
@@ -45,12 +75,6 @@ public_ips="$(
 )"
 bastions="$(oci bastion bastion list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 repositories="$(oci artifacts container repository list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
-images="$(
-  oci artifacts container image list \
-    --compartment-id "$OCI_COMPARTMENT_OCID" \
-    --repository-name "${OCI_IMAGE_PREFIX}_images" \
-    --all
-)"
 buckets="$(oci os bucket list --compartment-id "$OCI_COMPARTMENT_OCID" --all)"
 clusters="$(oci_normalize_list_json "$clusters")"
 node_pools="$(oci_normalize_list_json "$node_pools")"
@@ -65,7 +89,17 @@ service_gateways="$(oci_normalize_list_json "$service_gateways")"
 public_ips="$(oci_normalize_list_json "$public_ips")"
 bastions="$(oci_normalize_list_json "$bastions")"
 repositories="$(oci_normalize_list_json "$repositories" items)"
-images="$(oci_normalize_list_json "$images" items)"
+if [[ "$APPLICATION_REGISTRY_PROVIDER" == "ocir" ]]; then
+  images="$(
+    oci artifacts container image list \
+      --compartment-id "$OCI_COMPARTMENT_OCID" \
+      --repository-name "${OCI_IMAGE_PREFIX}_images" \
+      --all
+  )"
+  images="$(oci_normalize_list_json "$images" items)"
+else
+  images='{"data":{"items":[]}}'
+fi
 images="$(
   jq -c '{
     data: {
@@ -108,6 +142,9 @@ inventory="$(
     --argjson registry_max_generations "$REGISTRY_MAX_GENERATIONS" \
     --argjson registry_services "$REGISTRY_SERVICES_JSON" \
     --arg expected_repository "${OCI_IMAGE_PREFIX}_images" \
+    --arg application_registry_provider "$APPLICATION_REGISTRY_PROVIDER" \
+    --arg application_registry_repository "ghcr.io/vasilyevstan/betstan-images" \
+    --argjson ghcr_evidence_valid "$ghcr_evidence_valid" \
     --arg mode "$INVENTORY_MODE" \
     --arg runtime_mode "$OCI_RUNTIME_MODE" \
     --argjson expected_cost "$OCI_EXPECTED_MONTHLY_COST" '
@@ -319,6 +356,16 @@ inventory="$(
         registry_images_per_generation: $registry_images_per_generation,
         registry_max_generations: $registry_max_generations,
         expected_registry_repositories: $expected_repositories,
+        application_registry: {
+          provider: $application_registry_provider,
+          repository: $application_registry_repository,
+          public_anonymous: ($application_registry_provider == "ghcr"),
+          validated_build_evidence: $ghcr_evidence_valid,
+          ocir_application_repository_absent: (
+            [$repositories.data.items[]? | ."display-name"] |
+            index($expected_repository) == null
+          )
+        },
         object_storage_buckets: [
           $buckets.data[]? | {name, storage_tier: ."storage-tier"}
         ]
@@ -329,6 +376,7 @@ inventory="$(
 jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
   --argjson lb_min "$OCI_LB_MIN_MBPS" --argjson lb_max "$OCI_LB_MAX_MBPS" \
   --argjson boot_vpus "$OCI_BOOT_VOLUME_VPUS_PER_GB" \
+  --arg expected_repository "${OCI_IMAGE_PREFIX}_images" \
   --argjson registry_max "$OCI_REGISTRY_MAX_BYTES" \
   --argjson registry_images_per_generation "$REGISTRY_IMAGES_PER_GENERATION" \
   --argjson registry_max_generations "$REGISTRY_MAX_GENERATIONS" '
@@ -363,28 +411,54 @@ jq -e --argjson ocpus "$OCI_A1_OCPUS" --argjson memory "$OCI_A1_MEMORY_GB" \
     )] | length) == 0 and
     (([.block_volumes[].size_gb] | add // 0) +
      ([.boot_volumes[].size_gb] | add // 0)) <= 200 and
-    .registry_measurement_complete == true and
-    .registry_layers_size_bytes <= $registry_max and
-    ([.registry_repositories[].name] | sort) ==
-      (.expected_registry_repositories | sort) and
-    ([.registry_repositories[] | select(
-      .image_count < $registry_images_per_generation or
-      .image_count > ($registry_images_per_generation * $registry_max_generations) or
-      (.image_count % $registry_images_per_generation) != 0
-    )] | length) == 0 and
-    .registry_image_analysis.listed_tag_count ==
-      .registry_image_analysis.valid_tag_count and
-    .registry_image_analysis.incomplete_tag_generation_count == 0 and
-    .registry_image_analysis.digest_service_conflict_count == 0 and
-    .registry_image_analysis.unique_service_distribution_valid == true and
-    .registry_image_analysis.unique_image_count ==
-      ([.registry_repositories[].image_count] | add // 0) and
-    .registry_image_analysis.unique_generation_count ==
-      (.registry_image_analysis.unique_image_count /
-       $registry_images_per_generation) and
-    ([.registry_repositories[] | select(
-      .public != false or (.immutable != true and .immutable != null)
-    )] | length) == 0 and
+    (
+      if .application_registry.provider == "ocir" then
+        .registry_measurement_complete == true and
+        .registry_layers_size_bytes <= $registry_max and
+        ([.registry_repositories[].name] | sort) ==
+          (.expected_registry_repositories | sort) and
+        ([.registry_repositories[] | select(
+          .image_count < $registry_images_per_generation or
+          .image_count > ($registry_images_per_generation * $registry_max_generations) or
+          (.image_count % $registry_images_per_generation) != 0
+        )] | length) == 0 and
+        .registry_image_analysis.listed_tag_count ==
+          .registry_image_analysis.valid_tag_count and
+        .registry_image_analysis.incomplete_tag_generation_count == 0 and
+        .registry_image_analysis.digest_service_conflict_count == 0 and
+        .registry_image_analysis.unique_service_distribution_valid == true and
+        .registry_image_analysis.unique_image_count ==
+          ([.registry_repositories[].image_count] | add // 0) and
+        .registry_image_analysis.unique_generation_count ==
+          (.registry_image_analysis.unique_image_count /
+           $registry_images_per_generation) and
+        ([.registry_repositories[] | select(
+          .public != false or (.immutable != true and .immutable != null)
+        )] | length) == 0
+      else
+        .application_registry.repository == "ghcr.io/vasilyevstan/betstan-images" and
+        .application_registry.public_anonymous == true and
+        .registry_measurement_complete == true and
+        (
+          if .mode == "complete" then
+            .application_registry.validated_build_evidence == true and
+            .application_registry.ocir_application_repository_absent == true and
+            (.registry_repositories | length) == 0 and
+            .registry_layers_size_bytes == 0
+          else
+            (.registry_repositories | length) <= 1 and
+            .registry_layers_size_bytes <= $registry_max and
+            all(
+              .registry_repositories[];
+              .name == $expected_repository and
+              .image_count <= ($registry_images_per_generation * $registry_max_generations) and
+              .layers_size_bytes <= $registry_max and
+              .public == false
+            )
+          end
+        )
+      end
+    ) and
     (.object_storage_buckets | length) == 0
   ' <<<"$inventory" >/dev/null ||
   oci_die "OCI inventory violates the approved zero-cost allowlist"

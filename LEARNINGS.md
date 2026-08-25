@@ -196,6 +196,93 @@ cd resulting && npm ci && npm run test:ci
 
 ## OCI cutover and Azure retirement
 
+### Public GHCR application images
+
+- OCI runtime identity and application-registry identity are separate
+  authorities. Production application references must be
+  `ghcr.io/vasilyevstan/betstan-images@sha256:...`; verify the GHCR provider,
+  host, exact package, exact full-SHA `arm64-<service>-<sha>` tag, manifest
+  digest, and ARM64 platform digest independently.
+- Bootstrap the tiny repository-linked sentinel with `GITHUB_TOKEN`, then a
+  human sets Package visibility to Public once. A successful build must prove
+  a clean-config anonymous pull; never infer public visibility from a
+  successful authenticated push. Public GHCR runtime pulls need no
+  `imagePullSecret`, PAT, or node credential. GitHub Packages REST operations
+  for this user-owned container package use `/users/{owner}/packages`, never a
+  nonexistent repository-scoped package route.
+- OCIR deletion means there is no remote fallback. Before an application
+  rollout, recover a still-running OCIR baseline only by comparing all nine
+  cached k3s image IDs against trusted provenance and exporting exact
+  containerd images through the protected Bastion tunnel. Validate each OCI
+  archive and upload its exact ARM64 manifest/config/layer bytes; a Docker
+  load/push conversion is not digest-preserving authority. Do not rebuild and
+  relabel it as cache recovery.
+- Build and recovery workflows need terminal resume paths before they mutate
+  a registry or Deployment. Stage normal builds by digest; repair a partial
+  generation only through a new human-authorized first-attempt run that
+  rebuilds and compares existing ARM64 platform digests while preserving each
+  verified tag manifest. Reproducible repair requires commit-derived
+  `SOURCE_DATE_EPOCH` plus pinned timestamp, compatibility, media-type, and
+  compression exporter behavior. Recovery may adopt and skip work only after
+  re-proving the trusted ARM64 digest and live pod identity.
+- Durable recovery planning must precede every workload mutation. Upload the
+  original transition plan and queue baseline first; a redispatch explicitly
+  selects the prior failed/cancelled first attempt, verifies immutable source,
+  image, infrastructure, plan, and baseline hashes, and rewrites only carrier
+  lineage. Never recapture a post-mutation state as the rollback baseline.
+- Registry retention must bind each protected source to its truthful origin
+  artifact. A normal deployed generation requires both build and deployment
+  evidence. A recovered baseline is authorized by its successful terminal
+  cache-recovery run and recovery provenance, never by relabeling its
+  historical OCIR build as a GHCR build. Untagged child or interrupted-staging
+  manifests are tracked separately and cannot make a complete tagged
+  generation ambiguous.
+- Container registry version IDs can own tags from multiple source
+  generations after image reuse. Never delete a version that carries any
+  protected tag. Authenticate obsolete generations before planning, persist
+  and hash-bind the exact normalized state, generation-to-version map, and
+  deletion IDs, resume only missing planned deletions, and re-read the registry
+  before claiming terminal convergence.
+- Registry publication and account-scoped Packages REST administration are
+  distinct token capabilities. Use repository `GITHUB_TOKEN` for publication
+  and by default for package metadata/retention; a protected least-privilege
+  classic PAT may be a metadata/retention fallback only, never a push or
+  runtime credential.
+- Keep one application-image control plane. Once GHCR owns publication and
+  retention, remove legacy OCIR registry phases from dispatch choices and
+  hard-disable their retained audit-only job rather than leaving two
+  production-capable cleanup paths.
+- Keep the trusted `production-build.yml` byte-identical to the default branch
+  when adding release validation. Route new GHCR contracts through an existing
+  checked-in test entrypoint that workflow already invokes, while
+  `oci-validate` exercises the complete OCI matrix; do not weaken the
+  branch-policy blob check or edit the trusted workflow only to add test lines.
+- A failed `kubectl get` is not evidence that an optional resource is absent.
+  Use `--ignore-not-found`, accept only empty successful output as NotFound,
+  and block mutation on API, timeout, or authorization errors.
+- A green recovery requires more than Kubernetes rollout status. Keep the
+  recovery run incomplete until API contracts, RabbitMQ queue readiness, and
+  public Playwright checks pass. Keep legacy pull credentials through those
+  checks; retire them and the exact empty OCIR repository only afterward.
+  Downstream rollback authority may trust only that successful terminal run.
+- Pin privileged helper containers as well as Actions. In particular, a
+  digest-pinned `docker/setup-qemu-action` still inherits risk from a mutable
+  default `tonistiigi/binfmt` image unless its `image` input is also a digest.
+- Production SSH must not use trust on first use. Derive the Bastion host key
+  from authenticated OCI session metadata and the target key from OCI Instance
+  Agent Run Command, then require strict matching. Normalize any remote
+  kubeconfig to one loopback server with inline certificates and reject exec,
+  auth-provider, token, proxy, and external-file directives before `kubectl`
+  contacts the API.
+- Capture rollback evidence before any database lock or workload/data
+  mutation. A zero-recovery baseline is valid only when all nine live
+  references and exact deploy provenance are public GHCR digests; otherwise
+  require the exact completed recovery run and its transition evidence.
+- GitHub currently documents public Container Registry package storage and
+  bandwidth as free, but this is policy rather than permanent capacity.
+  Monitor the documented one-month policy-change notice and never weaken
+  immutable rollback gates to avoid a future pricing change.
+
 - Cross-cloud cutover safety comes from independent fences: close public
   writes, freeze producers, preserve exact queue consumers, lock Mongo, bind
   every phase to immutable run/SHA provenance, and recover stop-only.

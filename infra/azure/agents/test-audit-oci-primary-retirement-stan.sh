@@ -991,6 +991,8 @@ case "${1:-}" in
         *oci-production-build.yml*) state="active" ;;
         *oci-live-data-rollout.yml*) state="active" ;;
         *oci-production-deploy.yml*) state="active" ;;
+        *ghcr-package-management.yml*) state="active" ;;
+        *oci-ghcr-cache-recovery.yml*) state="active" ;;
         *production-build.yml*) state="active" ;;
         *production-deploy.yml*) state="${STUB_AZURE_DEPLOY_STATE:-active}" ;;
         *) exit 65 ;;
@@ -1324,6 +1326,10 @@ assert_contains "$RUN_OUTPUT" "workflow_oci-production-build_state=correct" \
   "OCI build workflow is governed"
 assert_contains "$RUN_OUTPUT" "workflow_oci-live-data-rollout_state=correct" \
   "OCI data rollout workflow is governed"
+assert_contains "$RUN_OUTPUT" "workflow_ghcr-package-management_state=correct" \
+  "GHCR package-management workflow is governed"
+assert_contains "$RUN_OUTPUT" "workflow_oci-ghcr-cache-recovery_state=correct" \
+  "GHCR cache-recovery workflow is governed"
 
 new_case mature
 mature_cutoff_date="$(epoch_date "$MATURE_CUTOFF_EPOCH")"

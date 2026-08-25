@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 MODE="${1:-cloud}"
 PROVENANCE_DIR="${PROVENANCE_DIR:-$OCI_ROOT_DIR/artifacts/oci-infrastructure}"
@@ -22,6 +24,7 @@ OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
   oci_die "usage: provision.sh [cloud|addons]"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be the exact approved commit"
 oci_require_cli_version
+application_registry_require_ghcr
 oci_require_command jq
 oci_require_vars \
   OCI_COMPARTMENT_OCID OCI_COMPARTMENT_NAME OCI_REGION \
@@ -821,7 +824,7 @@ jq -e --arg ip "$ingress_ipv4" --argjson min "$OCI_LB_MIN_MBPS" --argjson max "$
   ([.data."ip-addresses"[]."ip-address" | select(. == $ip)] | length) == 1
 ' <<<"$lb" >/dev/null || oci_die "OCI load balancer shape or ingress IPv4 violates provenance"
 
-grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|canonical_host|redirect_host|diagnostic_host|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
+grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|canonical_host|redirect_host|diagnostic_host|application_registry_(provider|host|repository|public_anonymous)|ocir_application_repository_absent|ingress_nginx_chart_(version|sha256)|cert_manager_(chart_(version|sha256)|(controller|webhook|cainjector|acmesolver|startup)_digest))=' \
   "$PROVENANCE_FILE" > "$work_dir/provenance.env"
 {
   printf 'infrastructure_finalized=%q\n' "true"
@@ -831,6 +834,11 @@ grep -v -E '^(infrastructure_finalized|lb_ocid|ingress_ipv4|public_host|canonica
   printf 'canonical_host=%q\n' "$OCI_CANONICAL_HOST"
   printf 'redirect_host=%q\n' "$OCI_REDIRECT_HOST"
   printf 'diagnostic_host=%q\n' "${ingress_ipv4}.nip.io"
+  printf 'application_registry_provider=%q\n' "$APPLICATION_REGISTRY_PROVIDER"
+  printf 'application_registry_host=%q\n' "$APPLICATION_REGISTRY_HOST"
+  printf 'application_registry_repository=%q\n' "$(application_registry_repository)"
+  printf 'application_registry_public_anonymous=%q\n' "true"
+  printf 'ocir_application_repository_absent=%q\n' "true"
   printf 'ingress_nginx_chart_version=%q\n' "$OCI_INGRESS_NGINX_CHART_VERSION"
   printf 'ingress_nginx_chart_sha256=%q\n' "$OCI_INGRESS_NGINX_CHART_SHA256"
   printf 'cert_manager_chart_version=%q\n' "$OCI_CERT_MANAGER_CHART_VERSION"

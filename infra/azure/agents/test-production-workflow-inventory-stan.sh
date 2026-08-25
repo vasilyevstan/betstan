@@ -83,7 +83,7 @@ YAML
 name: oci-production-build
 on:
   workflow_run:
-    workflows: ["production-build"]
+    workflows: ["production-build", "ghcr-package-management"]
     types: [completed]
 env:
   IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
@@ -107,6 +107,9 @@ jobs:
         with:
           push: true
           tags: iad.ocir.io/example/betstan:${{ env.IMAGE_TAG }}
+      - env:
+          REPAIR_EXISTING_TAGS: ${{ steps.trust.outputs.repair_mode }}
+        run: echo repair-guard
 YAML
 
   cat > "$tmp_dir/oci-infrastructure.yml" <<'YAML'
@@ -265,6 +268,8 @@ YAML
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" "$tmp_dir/"
 }
 
 assert_pass() {
@@ -672,7 +677,7 @@ PY
 }
 
 azure_set="production-build,production-deploy,production-rollback"
-full_set="oci-capacity-acquire,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+full_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 reset_fixtures
@@ -681,6 +686,24 @@ assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^      resume_recovery_run_id:/,/^        type: string$/d' \
+  "$tmp_dir/oci-ghcr-cache-recovery.yml"
+rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
+assert_fail "cache recovery without resume selector" \
+  "oci-ghcr-cache-recovery must expose exactly these workflow_dispatch inputs"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/Upload immutable pre-rebind plan before rollout/Upload transition plan after rollout/' \
+  "$tmp_dir/oci-ghcr-cache-recovery.yml"
+rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
+assert_fail "cache recovery without pre-mutation plan upload" \
+  "oci-ghcr-cache-recovery is missing pre-mutation plan persistence"
 
 reset_fixtures
 write_complete_oci_set
