@@ -37,14 +37,36 @@ oci_live_disable_workflow=".github/workflows/oci-live-betting-disable.yml"
 oci_migrate_workflow=".github/workflows/oci-migrate.yml"
 oci_recovery_workflow=".github/workflows/oci-migration-recovery.yml"
 oci_rollback_workflow=".github/workflows/oci-production-rollback.yml"
+ghcr_package_workflow=".github/workflows/ghcr-package-management.yml"
+ghcr_cache_recovery_workflow=".github/workflows/oci-ghcr-cache-recovery.yml"
 
 for file in \
   "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
   "$rollback_workflow" "$oci_data_workflow" "$oci_migrate_workflow" \
   "$oci_recovery_workflow" "$oci_rollback_workflow" \
-  "$oci_live_activate_workflow" "$oci_live_disable_workflow"; do
+  "$oci_live_activate_workflow" "$oci_live_disable_workflow" \
+  "$ghcr_package_workflow" "$ghcr_cache_recovery_workflow"; do
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
+
+for workflow in "$ghcr_package_workflow" "$ghcr_cache_recovery_workflow"; do
+  require_literal "$workflow" "  workflow_dispatch:" "manual GHCR control trigger"
+  reject_literal "$workflow" "  push:" "push-triggered GHCR control mutation"
+  require_literal "$workflow" "github.run_attempt == 1" "first-attempt GHCR control guard"
+done
+require_literal "$ghcr_package_workflow" "packages: write" "scoped GHCR package publication permission"
+require_literal "$ghcr_package_workflow" "BOOTSTRAP GHCR PACKAGE SENTINEL" "bounded bootstrap confirmation"
+require_literal "$ghcr_package_workflow" "VALIDATE PUBLIC GHCR PACKAGE" "bounded validation confirmation"
+require_literal "$ghcr_package_workflow" "PRUNE OBSOLETE GHCR PACKAGE GENERATIONS" "bounded prune confirmation"
+require_literal "$ghcr_cache_recovery_workflow" "RECOVER K3S CACHED BASELINE TO GHCR" "exact cache recovery confirmation"
+require_literal "$ghcr_cache_recovery_workflow" "name: oci-production" "protected cache recovery environment"
+require_literal "$ghcr_cache_recovery_workflow" "K3S_SSH_KNOWN_HOSTS=\"\$target_known_hosts\"" "dedicated target known-hosts handoff"
+require_literal "$ghcr_cache_recovery_workflow" "K3S_SSH_HOST_KEY_ALIAS=\"\$instance_ocid\"" "exact instance host-key alias handoff"
+require_literal "$ghcr_cache_recovery_workflow" "Sequentially rebind verified GHCR digests" "verified image-rebind phase"
+require_literal "$ghcr_cache_recovery_workflow" "needs: [recover, public-validate]" "public validation before OCIR retirement"
+require_literal "$ghcr_cache_recovery_workflow" "Retire OCIR credentials and empty repository after public validation" "deferred OCIR retirement phase"
+require_literal "$ghcr_cache_recovery_workflow" "transition-k3s-cached-images.sh" "one-time credential retirement operator"
+reject_literal "$ghcr_cache_recovery_workflow" "artifacts/ghcr-cache-recovery/k3s-access.env" "secret-bearing access state artifact"
 
 python3 -m py_compile \
   infra/azure/agents/workflow-shell-input-guard-stan.py
@@ -235,6 +257,11 @@ require_literal "$oci_data_workflow" "APPLY LIVE SLIP INDEX EXACT SHA" "exact in
 require_literal "$oci_data_workflow" "live-data-maintenance-stan.sh enter" "legacy writer quiescence"
 require_literal "$oci_data_workflow" "shared-mongo-operation-lock-stan.sh acquire" "database lock acquisition"
 require_literal "$oci_data_workflow" "verify-live-betting-data-evidence-stan.sh" "tamper-evident data evidence"
+require_literal "$oci_data_workflow" "baseline_recovery_run_id:" "bounded recovery baseline input"
+require_literal "$oci_data_workflow" "ghcr-cache-recovery-" "exact recovery artifact binding"
+require_literal "$oci_data_workflow" "EXPECTED_BASELINE_RECOVERY_RUN_ID=\"\$BASELINE_RECOVERY_RUN_ID\"" "recovery authority chain verification"
+require_literal "$oci_data_workflow" "Bind historical recovery source through its exact artifact" "historical recovery source binding"
+require_literal "$oci_data_workflow" "BASELINE_RECOVERY_DIR=artifacts/recovery" "explicit recovery baseline handoff"
 
 require_literal "$oci_migrate_workflow" "build_run_id:" "exact OCI build provenance input"
 require_literal "$oci_migrate_workflow" "replace_oci_data:" "explicit destructive replacement input"
@@ -286,7 +313,7 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="oci-capacity-acquire,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+oci_workflow_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 

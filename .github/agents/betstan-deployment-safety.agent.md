@@ -20,6 +20,8 @@ Before changing or assessing deployment behavior, read:
 - `.github/workflows/oci-live-betting-activate.yml`
 - `.github/workflows/oci-live-betting-disable.yml`
 - `.github/workflows/oci-production-deploy.yml`
+- `.github/workflows/ghcr-package-management.yml`
+- `.github/workflows/oci-ghcr-cache-recovery.yml`
 - `infra/oci/scripts/live-betting-control-stan.sh`
 - `infra/oci/scripts/revalidate-live-activation-stan.sh`
 - `infra/azure/LESSONS_LEARNED.md`
@@ -58,11 +60,11 @@ inactive. Fail closed when either query is incomplete or fails.
   to deployment, activation, rollback, infrastructure, or data workflows.
 - Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
   environments in automatic mode. Exact-title capacity acquisition,
-  `validate-registry`, `prune-registry`, infrastructure `finalize`, and the
-  bounded live-data phases may also run automatically on current CLI-managed
-  `master`. Never auto-approve infrastructure `prepare`, broad migration,
-  recovery, rollback, stale-master, rerun, unlabelled, or competing workflow
-  activity.
+  infrastructure `finalize`, and the bounded live-data phases may also run
+  automatically on current CLI-managed `master`. Legacy OCIR registry
+  validation/pruning is retired and must never be approved. Never
+  auto-approve infrastructure `prepare`, broad migration, recovery, rollback,
+  stale-master, rerun, unlabelled, or competing workflow activity.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
@@ -83,6 +85,62 @@ inactive. Fail closed when either query is incomplete or fails.
   authority when it changes.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
+- OCI application images are public GHCR only:
+  `ghcr.io/vasilyevstan/betstan-images@sha256:...`. Require provider, host,
+  exact package, immutable full-SHA service tag, manifest/platform digests,
+  first-attempt build lineage, and a clean-config anonymous pull. Do not
+  accept legacy OCIR image provenance for a GHCR build reuse or normal
+  rollback. GitHub Packages REST calls for the user-owned container package
+  must use the account-scoped `/users/{owner}/packages` API, not a repository-
+  scoped route. A protected least-privilege classic PAT may fall back only for
+  package metadata/retention if repository package-admin access is absent; it
+  must never publish images or reach the runtime.
+- `ghcr-package-management` bootstrap/validate/prune/repair-build and
+  `oci-ghcr-cache-recovery` are production-capable, human-approved workflows.
+  They remain in production-run exclusivity but are never Copilot
+  auto-approvable. The sentinel may establish package linkage but does not
+  prove public visibility. Build repair must bind an exact failed
+  first-attempt build to its successful first-attempt upstream, then rebuild
+  and compare every existing exact tag's ARM64 platform digest while
+  preserving its verified manifest identity. Require commit-derived
+  `SOURCE_DATE_EPOCH` and pinned digest-affecting BuildKit exporter settings
+  before treating rebuild equality as authoritative. Package validation must bind
+  normal generations to exact build and successful deployment artifacts and
+  recovered generations to exact terminal cache-recovery artifacts; never
+  substitute historical OCIR build lineage for GHCR recovery lineage. Bind
+  every obsolete generation to its exact build artifact before pruning.
+  Treat tags and package version IDs separately: retain any aliased version
+  referenced by a protected generation, hash-bind the normalized pre-delete
+  state, generation-to-version map, and plan, allow a retry to find only
+  planned IDs absent, and re-fetch GHCR before accepting terminal prune
+  evidence.
+- After OCIR deletion, do not restart the cached baseline. Cache recovery
+  must compare all nine live k3s image IDs to historical trusted provenance,
+  export exact containerd images over protected Bastion access, validate each
+  OCI archive, upload its exact ARM64 manifest/config/layer bytes without a
+  Docker load/push conversion, keep GHCR credentials off-node, and prove
+  anonymous GHCR pulls. A rebuild is a
+  different, separately approved fallback. Treat recovery as resumable only
+  when a hash-bound transition plan and original RabbitMQ baseline were
+  uploaded before the first Deployment mutation. Redispatch must explicitly
+  select the prior failed/cancelled first attempt, validate its immutable
+  source/image/infrastructure/plan hashes, preserve the original baseline
+  bytes, and update only carrier lineage. For a recognized OCIR/GHCR mixed
+  state, reverify already-rebound services, keep `ocir-pull` intact while any
+  OCIR service remains, and trust the run only after API/queue readiness and
+  public browser validation pass. Bind
+  access to the exact successful infrastructure finalization for the running
+  baseline SHA. Retire `ocir-pull` and delete only the exact empty legacy OCIR
+  repository after those health gates, never before them.
+- Treat privileged helper images as executable supply-chain inputs: require
+  immutable action SHAs and immutable helper-image digests. Reject SSH TOFU;
+  require OCI-attested Bastion and target host keys, strict checking, and a
+  normalized loopback-only kubeconfig with no executable, provider, proxy,
+  token, or external credential-file directives.
+- Require a rollback baseline to pass the shared rollback validator before any
+  database lock, fence, scaling, or data mutation. Zero-recovery capture is
+  allowed only for nine matching public-GHCR live references and exact GHCR
+  deploy provenance; OCIR or mixed state requires completed recovery authority.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
@@ -106,35 +164,11 @@ inactive. Fail closed when either query is incomplete or fails.
 - Do not deploy `latest` as the source of truth.
 - Verify every application Deployment uses the intended SHA after rollout.
 - If several commits were built, state whether an older SHA was skipped or superseded.
-- Treat a failed OCI build that published before verification as registry
-  state, not reusable release provenance. Before approving a batch prune,
-  require terminal first-attempt run bindings for every explicit target,
-  immutable artifacts for successful targets, source-tagged service rows for
-  failed targets, and exhaustive preservation of the candidate, deployed, and
-  fallback digest sets. Accept a partial target subset only as bounded
-  convergence after an interrupted prune.
-- Treat OCIR list rows as tag aliases, not unique images. Before any delete,
-  group by image OCID and digest, prove their one-to-one service mapping,
-  require every alias source set to match one trusted protected or target
-  generation, and require the canonical candidate, deployed, and fallback
-  tags. Approve deletion only for the exact unique target OCIDs and require
-  before/after alias evidence, equality of the exact protected OCID set, and
-  terminal unique-image accounting; matching counts alone are insufficient.
-  Allow canonical protected source generations to share a complete
-  nine-image OCID/digest set after reuse, but reject partial protected
-  overlap.
-- Require a successful exact-master `validate-registry` artifact before
-  approving `prune-registry`. The apply run must receive that validation run
-  ID and prove its complete live before-summary is byte-identical before any
-  delete; a new alias, OCID, digest, lineage, or accounting value requires a
-  fresh validation. Bind the artifact to the exact candidate, deployed,
-  fallback, and every obsolete SHA/run pair; matching SHAs with different run
-  IDs are not interchangeable.
-- Treat exact manifest lineage and provider layer accounting as separate
-  gates. OCIR may retain deleted, unreferenced layers after all target OCIDs
-  are absent. Never prune a protected rollback generation or waive the storage
-  ceiling to compensate; return `NO_GO` until provider accounting converges or
-  a separately reviewed image-size change satisfies the limit.
+- Treat legacy OCIR validation/prune code as non-dispatchable audit history.
+  Application package validation and retention belong exclusively to the
+  protected GHCR package-management workflow. Recovery may delete only the
+  exact empty legacy OCIR repository after terminal public validation; no
+  agent may reactivate the old registry phases as a storage workaround.
 
 ## Deployment gates
 

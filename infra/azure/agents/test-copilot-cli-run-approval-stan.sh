@@ -80,20 +80,18 @@ env \
   STUB_ENVIRONMENT=oci-production \
     "$APPROVER" "$RUN_ID" >/dev/null
 
-for phase in validate-registry prune-registry finalize; do
-  env \
-    REPO=example/repo \
-    EXPECTED_SHA="$SHA" \
-    EXPECTED_WORKFLOW=oci-infrastructure.yml \
-    EXPECTED_ENVIRONMENT=oci-infrastructure \
-    EXPECTED_DISPLAY_TITLE="oci-infrastructure $phase $SHA" \
-    PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
-    STUB_WORKFLOW=oci-infrastructure.yml \
-    STUB_EVENT=workflow_dispatch \
-    STUB_ENVIRONMENT=oci-infrastructure \
-    STUB_DISPLAY_TITLE="oci-infrastructure $phase $SHA" \
-      "$APPROVER" "$RUN_ID" >/dev/null
-done
+env \
+  REPO=example/repo \
+  EXPECTED_SHA="$SHA" \
+  EXPECTED_WORKFLOW=oci-infrastructure.yml \
+  EXPECTED_ENVIRONMENT=oci-infrastructure \
+  EXPECTED_DISPLAY_TITLE="oci-infrastructure finalize $SHA" \
+  PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+  STUB_WORKFLOW=oci-infrastructure.yml \
+  STUB_EVENT=workflow_dispatch \
+  STUB_ENVIRONMENT=oci-infrastructure \
+  STUB_DISPLAY_TITLE="oci-infrastructure finalize $SHA" \
+    "$APPROVER" "$RUN_ID" >/dev/null
 
 env \
   REPO=example/repo \
@@ -128,12 +126,12 @@ if env \
   EXPECTED_SHA="$SHA" \
   EXPECTED_WORKFLOW=oci-infrastructure.yml \
   EXPECTED_ENVIRONMENT=oci-infrastructure \
-  EXPECTED_DISPLAY_TITLE="oci-infrastructure validate-registry $SHA" \
+  EXPECTED_DISPLAY_TITLE="oci-infrastructure finalize $SHA" \
   PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
   STUB_WORKFLOW=oci-infrastructure.yml \
   STUB_EVENT=workflow_dispatch \
   STUB_ENVIRONMENT=oci-infrastructure \
-  STUB_DISPLAY_TITLE="oci-infrastructure prune-registry $SHA" \
+  STUB_DISPLAY_TITLE="oci-infrastructure prepare $SHA" \
     "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
   echo "run approver accepted a different infrastructure phase" >&2
   exit 1
@@ -170,6 +168,25 @@ if env \
   echo "run approver accepted the broad OCI migration workflow" >&2
   exit 1
 fi
+
+for workflow_environment in \
+  'ghcr-package-management.yml:oci-infrastructure' \
+  'oci-ghcr-cache-recovery.yml:oci-production'; do
+  IFS=: read -r workflow environment <<<"$workflow_environment"
+  if env \
+    REPO=example/repo \
+    EXPECTED_SHA="$SHA" \
+    EXPECTED_WORKFLOW="$workflow" \
+    EXPECTED_ENVIRONMENT="$environment" \
+    PRODUCTION_RUN_EXCLUSIVITY="$tmp_dir/production-exclusivity" \
+    STUB_WORKFLOW="$workflow" \
+    STUB_EVENT=workflow_dispatch \
+    STUB_ENVIRONMENT="$environment" \
+      "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
+    echo "run approver accepted human-gated GHCR workflow $workflow" >&2
+    exit 1
+  fi
+done
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$APPROVER" "$RUN_ID" --approve >/dev/null

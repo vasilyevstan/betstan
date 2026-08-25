@@ -75,9 +75,11 @@ jobs:
       OCI_K3S_IMAGE_OCID: ${{ vars.OCI_K3S_IMAGE_OCID }}
       OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
-      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
-      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
-      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
       OCI_REGISTRY_MAX_BYTES: ${{ vars.OCI_REGISTRY_MAX_BYTES || '500000000' }}
       OCI_BOOT_VOLUME_GB: ${{ vars.OCI_BOOT_VOLUME_GB }}
       OCI_MONGO_VOLUME_GB: ${{ vars.OCI_MONGO_VOLUME_GB }}
@@ -190,6 +192,11 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$application_registry_provider" = "ghcr" ]
+          [ "$application_registry_host" = "ghcr.io" ]
+          [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
+          [ "$application_registry_public_anonymous" = "true" ]
+          [ "$ocir_application_repository_absent" = "true" ]
           [ "$public_host" = "$OCI_CANONICAL_HOST" ]
           [ "$canonical_host" = "$OCI_CANONICAL_HOST" ]
           [ "$redirect_host" = "$OCI_REDIRECT_HOST" ]

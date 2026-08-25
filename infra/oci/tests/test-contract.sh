@@ -75,6 +75,30 @@ for agent in \
     grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
       fail "recovery agent does not read OCI lessons: $agent"
 done
+conductor_agent="$ROOT_DIR/.github/agents/betstan-conductor.agent.md"
+agent_readme="$ROOT_DIR/.github/agents/README.md"
+[[ -f "$conductor_agent" ]] || fail "required conductor agent is missing"
+grep -Fq 'name: betstan-conductor' "$conductor_agent" ||
+  fail "conductor agent frontmatter has the wrong name"
+grep -Fq 'tools: [read, search, execute, web]' "$conductor_agent" ||
+  fail "conductor agent does not remain read-only"
+for conductor_contract in \
+    'Do not tight-poll' \
+    'A running agent with recent tool activity is active' \
+    'A GitHub environment approval wait is active external work' \
+    'After two missed checkpoints, return' \
+    'a duplicate reviewer merely because the first is slow' \
+    'terminal or explicitly cancelled and prove that concurrent side effects' \
+    'Never use name-based process discovery or termination' \
+    'Conductor status is coordination evidence only'; do
+  grep -Fq "$conductor_contract" "$conductor_agent" ||
+    fail "conductor agent omits orchestration contract: $conductor_contract"
+done
+grep -Fq 'Start `betstan-conductor` before parallel agents' "$agent_readme" ||
+  fail "agent workflow does not start with conductor registration"
+grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
+    "$agent_readme" ||
+  fail "agent workflow lacks stalled-work escalation"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
@@ -231,18 +255,27 @@ index=1
 for service in "${services[@]}"; do
   digit="$index"
   digest="$(printf '%064d' "$digit")"
-  repository="fixture.invalid/namespace/betstan_images"
+  repository="ghcr.io/vasilyevstan/betstan-images"
   cat > "$WORK_DIR/provenance/${service}.env" <<ENV
 service=${service}
+schema=betstan.application-image-provenance.v1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_tag_prefix=arm64
+registry_tag_schema=v1
 repository=${repository}
 source_sha=1111111111111111111111111111111111111111
-tag=${repository}:oci-${service}-1111111111111111111111111111111111111111
+tag=${repository}:arm64-${service}-1111111111111111111111111111111111111111
 digest=sha256:${digest}
 platform_digest=sha256:${digest}
 image_ref=${repository}@sha256:${digest}
 platform=linux/arm64
 build_run_id=fixture
 build_run_attempt=1
+build_workflow=oci-production-build
+upstream_workflow=production-build
+upstream_run_id=local
+upstream_run_attempt=1
 ENV
   index=$((index + 1))
 done
@@ -538,11 +571,11 @@ verify_images="$OCI_DIR/scripts/verify-images.sh"
 build_images="$OCI_DIR/scripts/build-images.sh"
 reuse_images="$OCI_DIR/scripts/reuse-images.sh"
 compare_image_inputs="$OCI_DIR/scripts/compare-image-inputs.sh"
-grep -Fq 'repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"' \
+grep -Fq 'repository="$(application_registry_repository)"' \
   "$build_images" ||
-  fail "OCI builds must share one repository so common layers stay inside the Free Tier allowance"
-grep -Fq 'tag="${repository}:oci-${service}-${SOURCE_SHA}"' "$build_images" ||
-  fail "shared OCI repository tags must bind the service and exact source SHA"
+  fail "GHCR builds must use the single approved public package"
+grep -Fq 'application_registry_tag "$service" "$SOURCE_SHA"' "$build_images" ||
+  fail "GHCR tags must bind ARM64 service and exact source SHA"
 grep -Fq -- '--prefer-index=false' "$reuse_images" ||
   fail "unchanged OCI images are not reused by immutable digest"
 grep -Fq 'oci_(die|log|require_command|require_vars|prepare_private_dir)' \
@@ -553,7 +586,11 @@ grep -Fq 'untracked helper dependency' "$compare_image_inputs" ||
 inventory="$OCI_DIR/scripts/inventory.sh"
 registry_pruner="$OCI_DIR/scripts/prune-registry-generation.sh"
 grep -Fq '[$prefix + "_images"]' "$inventory" ||
-  fail "OCI inventory must allow only the shared image repository"
+  fail "legacy OCI retirement inventory must name the former application repository"
+grep -Fq 'ocir_application_repository_absent' "$inventory" ||
+  fail "GHCR inventory does not require former OCIR application repository absence"
+grep -Fq 'validated_build_evidence' "$inventory" ||
+  fail "GHCR inventory does not require public build validation evidence"
 grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=9' "$inventory" ||
   fail "OCI inventory must require complete nine-image generations"
 grep -Fq 'REGISTRY_MAX_GENERATIONS=3' "$inventory" ||
@@ -663,6 +700,7 @@ infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 data_workflow="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
+disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
@@ -683,21 +721,40 @@ if grep -Eiq 'at least (eight|8) Mongo PVC' \
 fi
 
 grep -Fq 'workflow_run:' "$build_workflow"
-grep -Fq 'workflows: ["production-build"]' "$build_workflow"
+grep -Fq 'workflows: ["production-build", "ghcr-package-management"]' "$build_workflow"
 grep -Fq 'github.event.workflow_run.head_sha' "$build_workflow"
 grep -Fq 'environment:' "$build_workflow"
 grep -Fq 'name: oci-build' "$build_workflow"
-grep -Fq 'docker login "$OCI_REGISTRY_HOST"' "$build_workflow"
-grep -Fq 'exact OCI tag already exists; refusing overwrite' "$OCI_DIR/scripts/build-images.sh"
+grep -Fq 'docker login ghcr.io' "$build_workflow"
+grep -Fq 'packages: write' "$build_workflow"
+grep -Fq 'Require a pre-existing public GHCR package' "$build_workflow"
+grep -Fq 'ANONYMOUS_PULL=1' "$build_workflow"
+grep -Fq 'exact GHCR tag already exists; refusing overwrite' "$OCI_DIR/scripts/build-images.sh"
 grep -Fq 'OCI_REUSE_SOURCE_SHA' "$build_workflow"
 grep -Fq 'OCI_REUSE_BUILD_RUN_ID' "$build_workflow"
 grep -Fq 'compare-image-inputs.sh' "$build_workflow"
 grep -Fq 'reuse-images.sh' "$build_workflow"
 grep -Fq 'for reuse_attempt in 1 2 3' "$build_workflow"
-grep -Fq 'upstream-${{ github.event.workflow_run.id }}' "$build_workflow"
+grep -Fq 'repair-build-evidence.env' "$build_workflow"
+grep -Fq 'REPAIR_EXISTING_TAGS: ${{ steps.trust.outputs.repair_mode }}' "$build_workflow"
+grep -Fq 'Reusable build has inconsistent normal/repair trigger lineage.' "$build_workflow"
+grep -Fq 'oci-build $REUSE_SOURCE_SHA repair-$reuse_trigger_run_id' "$build_workflow"
+grep -Fq 'existing GHCR exact tag differs from the rebuilt ARM64 platform' \
+  "$OCI_DIR/scripts/build-images.sh"
+grep -Fq 'push-by-digest=true' "$OCI_DIR/scripts/build-images.sh"
 grep -Fq 'group: oci-build-${{ github.event.workflow_run.head_sha }}' "$build_workflow"
 ! grep -Eq 'OCI_CLI_|OCI_CI_PRIVATE_KEY_PEM' "$build_workflow" ||
   fail "OCI build workflow receives an API signing key"
+for workflow in "$deploy_workflow" "$migrate_workflow"; do
+  grep -Fq \
+    'APPLICATION_REGISTRY_EVIDENCE_FILE: artifacts/infrastructure/application-registry-evidence.env' \
+    "$workflow" ||
+    fail "GHCR health validation lacks finalized public-package evidence: $workflow"
+done
+grep -Fq 'NF != 5 { exit 1 }' "$disable_workflow" ||
+  fail "live disable does not accept five-column GHCR image provenance"
+grep -Fq '$5 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }' "$disable_workflow" ||
+  fail "live disable does not validate the GHCR platform digest"
 
 grep -Fq 'schedule:' "$capacity_workflow"
 grep -Fq 'cron: "*/5 * * * *"' "$capacity_workflow"
@@ -806,10 +863,15 @@ migration_post_cloud_credentials="$(
   fail "post-commit browser validation receives cloud credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
-grep -Fq -- '- prune-registry' "$infra_workflow"
+! grep -Fq -- '- prune-registry' "$infra_workflow" ||
+  fail "retired OCIR prune phase remains dispatchable"
 grep -Fq 'PRUNE OBSOLETE OCI IMAGE GENERATION' "$infra_workflow"
-grep -Fq -- '- validate-registry' "$infra_workflow"
+! grep -Fq -- '- validate-registry' "$infra_workflow" ||
+  fail "retired OCIR validation phase remains dispatchable"
 grep -Fq 'VALIDATE OCI IMAGE GENERATIONS' "$infra_workflow"
+grep -A3 -F 'prune-registry:' "$infra_workflow" |
+  grep -Fq "if: \${{ inputs.phase == 'retired-ocir-registry-controls' }}" ||
+  fail "legacy OCIR registry job is not hard-disabled"
 grep -Fq 'validation_run_id:' "$infra_workflow"
 grep -Fq 'validated-registry/before-summary.json' "$infra_workflow"
 grep -Fq 'betstan.oci-registry-prune-request.v1' "$infra_workflow"
@@ -851,7 +913,13 @@ grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq 'data_run_id:' "$deploy_workflow"
+grep -Fq 'baseline_recovery_run_id:' "$deploy_workflow"
+grep -Fq 'baseline_recovery_source_sha:' "$deploy_workflow"
 grep -Fq 'EXPECTED_PHASE=apply-slip-index' "$deploy_workflow"
+grep -Fq 'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
+  "$deploy_workflow"
+grep -Fq 'EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA"' \
+  "$deploy_workflow"
 grep -Fq 'name: oci-migration' "$migrate_workflow"
 grep -Fq 'REPLACE OCI DATA FROM AZURE' "$migrate_workflow"
 grep -Fq 'replace_oci_data:' "$migrate_workflow"
@@ -1046,12 +1114,22 @@ expected_syntax_targets = [
   "infra/azure/agents/test-production-rollback-stan.sh",
   "infra/oci/agents/deploy-validation-loop-stan.sh",
   "infra/oci/agents/live-betting-readiness-stan.sh",
+  "infra/oci/scripts/application-registry.sh",
+  "infra/oci/scripts/build-images.sh",
+  "infra/oci/scripts/configure-k3s-access.sh",
   "infra/oci/scripts/deploy.sh",
+  "infra/oci/scripts/manage-ghcr-package.sh",
+  "infra/oci/scripts/recover-k3s-cached-images.sh",
+  "infra/oci/scripts/transition-k3s-cached-images.sh",
+  "infra/oci/scripts/verify-public-registry-credentials.sh",
+  "infra/oci/scripts/verify-images.sh",
   "infra/oci/scripts/live-data-maintenance-stan.sh",
   "infra/oci/scripts/live-betting-control-stan.sh",
   "infra/oci/scripts/revalidate-live-activation-stan.sh",
   "infra/oci/scripts/live-betting-data-rollout-stan.sh",
   "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
+  "infra/oci/scripts/validate-k3s-kubeconfig.sh",
+  "infra/oci/scripts/validate-rollback-baseline-stan.sh",
   "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
   "infra/oci/tests/test-deploy-validation-loop-stan.sh",
   "infra/oci/tests/test-live-data-maintenance-stan.sh",
@@ -1061,6 +1139,7 @@ expected_syntax_targets = [
   "infra/oci/tests/test-live-betting-readiness-stan.sh",
   "infra/oci/tests/rollback-live-readiness-contract.sh",
   "infra/oci/tests/rollback-contract.sh",
+  "infra/oci/tests/test-ghcr-contract.sh",
 ]
 expected_exec_targets = [
   "./infra/azure/agents/pre-commit-infra-check-stan.sh",
@@ -1077,8 +1156,13 @@ expected_exec_targets = [
   "./infra/oci/tests/test-live-betting-readiness-stan.sh",
   "./infra/oci/tests/rollback-live-readiness-contract.sh",
   "./infra/oci/tests/rollback-contract.sh",
+  "./infra/oci/tests/test-ghcr-contract.sh",
 ]
 expected_yaml_targets = [
+  ".github/workflows/ghcr-package-management.yml",
+  ".github/workflows/oci-ghcr-cache-recovery.yml",
+  ".github/workflows/oci-infrastructure.yml",
+  ".github/workflows/oci-production-build.yml",
   ".github/workflows/production-build.yml",
   ".github/workflows/production-deploy.yml",
   ".github/workflows/oci-live-betting-activate.yml",

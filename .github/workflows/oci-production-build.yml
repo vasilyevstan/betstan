@@ -1,15 +1,16 @@
 name: oci-production-build
-run-name: oci-build ${{ github.event.workflow_run.head_sha }} upstream-${{ github.event.workflow_run.id }}
+run-name: ${{ github.event.workflow_run.name == 'production-build' && format('oci-build {0} upstream-{1}', github.event.workflow_run.head_sha, github.event.workflow_run.id) || format('oci-build {0} repair-{1}', github.event.workflow_run.head_sha, github.event.workflow_run.id) }}
 
 on:
   workflow_run:
-    workflows: ["production-build"]
+    workflows: ["production-build", "ghcr-package-management"]
     types: [completed]
     branches: [master]
 
 permissions:
   actions: read
   contents: read
+  packages: write
 
 concurrency:
   group: oci-build-${{ github.event.workflow_run.head_sha }}
@@ -19,21 +20,41 @@ jobs:
   build:
     if: >
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'master' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.run_attempt == 1 &&
-      github.run_attempt == 1
+      github.run_attempt == 1 &&
+      (
+        (
+          github.event.workflow_run.name == 'production-build' &&
+          github.event.workflow_run.event == 'push'
+        ) ||
+        (
+          github.event.workflow_run.name == 'ghcr-package-management' &&
+          github.event.workflow_run.event == 'workflow_dispatch' &&
+          startsWith(
+            github.event.workflow_run.display_title,
+            format(
+              'ghcr-package repair-build {0} upstream-',
+              github.event.workflow_run.head_sha
+            )
+          )
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 180
     environment:
       name: oci-build
     env:
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-      UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
-      OCI_REGISTRY_HOST: ${{ vars.OCI_REGISTRY_HOST }}
-      OCI_REGISTRY_NAMESPACE: ${{ vars.OCI_REGISTRY_NAMESPACE }}
-      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+      TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
+      UPSTREAM_RUN_ID: ${{ github.event.workflow_run.name == 'production-build' && github.event.workflow_run.id || '' }}
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
       REUSE_SOURCE_SHA: ${{ vars.OCI_REUSE_SOURCE_SHA }}
       REUSE_BUILD_RUN_ID: ${{ vars.OCI_REUSE_BUILD_RUN_ID }}
 
@@ -44,28 +65,164 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Verify trusted production-build provenance
+      - name: Verify trusted production-build or repair provenance
+        id: trust
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TRIGGER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [ "${{ github.event.workflow_run.head_repository.full_name }}" = "$REPOSITORY" ]
-          trusted_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/production-build.yml" --jq '.id')"
-          read -r workflow_id workflow_path event head_sha head_branch head_repository status conclusion run_attempt <<<"$(
-            gh api "repos/$REPOSITORY/actions/runs/$UPSTREAM_RUN_ID/attempts/1" \
-              --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+          trigger_run="$(
+            gh api "repos/$REPOSITORY/actions/runs/$TRIGGER_RUN_ID/attempts/1"
           )"
-          [ "$workflow_id" = "$trusted_workflow_id" ]
-          [ "$workflow_path" = ".github/workflows/production-build.yml" ]
-          [ "$event" = "push" ]
+          read -r workflow_id workflow_path event head_sha head_branch head_repository status conclusion run_attempt <<<"$(
+            jq -r \
+              '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv' \
+              <<<"$trigger_run"
+          )"
           [ "$head_sha" = "$SOURCE_SHA" ]
           [ "$head_branch" = "master" ]
           [ "$head_repository" = "$REPOSITORY" ]
           [ "$status" = "completed" ]
           [ "$conclusion" = "success" ]
           [ "$run_attempt" = "1" ]
+
+          if [ "$TRIGGER_WORKFLOW" = "production-build" ]; then
+            trusted_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/production-build.yml" --jq '.id'
+            )"
+            [ "$workflow_id" = "$trusted_workflow_id" ]
+            [ "$workflow_path" = ".github/workflows/production-build.yml" ]
+            [ "$event" = "push" ]
+            [ "$UPSTREAM_RUN_ID" = "$TRIGGER_RUN_ID" ]
+            echo "repair_mode=0" >> "$GITHUB_OUTPUT"
+          elif [ "$TRIGGER_WORKFLOW" = "ghcr-package-management" ]; then
+            package_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/ghcr-package-management.yml" --jq '.id'
+            )"
+            [ "$workflow_id" = "$package_workflow_id" ]
+            [ "$workflow_path" = ".github/workflows/ghcr-package-management.yml" ]
+            [ "$event" = "workflow_dispatch" ]
+            artifact_name="ghcr-package-management-repair-build-${TRIGGER_RUN_ID}-1"
+            artifact_count="$(
+              gh api "repos/$REPOSITORY/actions/runs/$TRIGGER_RUN_ID/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(
+                  .name == \"$artifact_name\" and .expired == false
+                )] | length"
+            )"
+            [ "$artifact_count" = "1" ]
+            repair_dir=artifacts/ghcr-build-repair
+            mkdir -p "$repair_dir"
+            gh run download "$TRIGGER_RUN_ID" --repo "$REPOSITORY" \
+              --name "$artifact_name" --dir "$repair_dir"
+            [ -z "$(find "$repair_dir" -type l -print -quit)" ]
+            evidence="$repair_dir/repair-build-evidence.env"
+            tags="$repair_dir/repair-existing-tags.txt"
+            python3 - "$evidence" "$tags" "$SOURCE_SHA" "$TRIGGER_RUN_ID" <<'PY'
+          import hashlib
+          import re
+          import sys
+          from pathlib import Path
+
+          evidence_path, tags_path = map(Path, sys.argv[1:3])
+          source_sha, run_id = sys.argv[3:]
+          required = {
+              "schema", "source_sha", "failed_build_run_id", "trusted_upstream_run_id",
+              "authorization_run_id", "authorization_run_attempt", "existing_tag_count",
+              "existing_tags_sha256",
+          }
+          values = {}
+          for raw in evidence_path.read_text(encoding="utf-8").splitlines():
+              if not raw or "=" not in raw:
+                  raise SystemExit("build-repair evidence is malformed")
+              key, value = raw.split("=", 1)
+              if key in values or key not in required:
+                  raise SystemExit("build-repair evidence key set is invalid")
+              values[key] = value
+          if set(values) != required:
+              raise SystemExit("build-repair evidence key set is incomplete")
+          if values["schema"] != "betstan.ghcr-build-repair.v1":
+              raise SystemExit("build-repair evidence schema is invalid")
+          if values["source_sha"] != source_sha or values["authorization_run_id"] != run_id:
+              raise SystemExit("build-repair evidence identity is invalid")
+          if values["authorization_run_attempt"] != "1":
+              raise SystemExit("build-repair authorization is not first-attempt")
+          for key in ("failed_build_run_id", "trusted_upstream_run_id"):
+              if not re.fullmatch(r"[1-9][0-9]*", values[key]):
+                  raise SystemExit("build-repair run lineage is invalid")
+          tags = tags_path.read_bytes()
+          lines = tags.decode("utf-8").splitlines()
+          if len(lines) > 9 or len(lines) != len(set(lines)):
+              raise SystemExit("build-repair exact tag set is invalid")
+          expected = re.compile(
+              rf"arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-{source_sha}"
+          )
+          if any(not expected.fullmatch(line) for line in lines):
+              raise SystemExit("build-repair exact tag identity is invalid")
+          if values["existing_tag_count"] != str(len(lines)):
+              raise SystemExit("build-repair exact tag count is invalid")
+          if values["existing_tags_sha256"] != hashlib.sha256(tags).hexdigest():
+              raise SystemExit("build-repair exact tag hash is invalid")
+          PY
+            failed_build_run_id="$(
+              awk -F= '$1 == "failed_build_run_id" {print $2}' "$evidence"
+            )"
+            UPSTREAM_RUN_ID="$(
+              awk -F= '$1 == "trusted_upstream_run_id" {print $2}' "$evidence"
+            )"
+            expected_title="ghcr-package repair-build $SOURCE_SHA upstream-$UPSTREAM_RUN_ID failed-$failed_build_run_id"
+            [ "$(jq -r '.display_title' <<<"$trigger_run")" = "$expected_title" ]
+
+            upstream_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/production-build.yml" --jq '.id'
+            )"
+            upstream_run="$(
+              gh api "repos/$REPOSITORY/actions/runs/$UPSTREAM_RUN_ID/attempts/1"
+            )"
+            jq -e \
+              --argjson workflow_id "$upstream_workflow_id" \
+              --arg sha "$SOURCE_SHA" \
+              --arg repo "$REPOSITORY" '
+                .workflow_id == $workflow_id and
+                .path == ".github/workflows/production-build.yml" and
+                .event == "push" and
+                .head_sha == $sha and
+                .head_branch == "master" and
+                .head_repository.full_name == $repo and
+                .status == "completed" and
+                .conclusion == "success" and
+                .run_attempt == 1
+              ' <<<"$upstream_run" >/dev/null
+
+            failed_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id'
+            )"
+            failed_run="$(
+              gh api "repos/$REPOSITORY/actions/runs/$failed_build_run_id/attempts/1"
+            )"
+            jq -e \
+              --argjson workflow_id "$failed_workflow_id" \
+              --arg sha "$SOURCE_SHA" \
+              --arg repo "$REPOSITORY" '
+                .workflow_id == $workflow_id and
+                .path == ".github/workflows/oci-production-build.yml" and
+                .event == "workflow_run" and
+                .head_sha == $sha and
+                .head_branch == "master" and
+                .head_repository.full_name == $repo and
+                .status == "completed" and
+                .conclusion == "failure" and
+                .run_attempt == 1
+              ' <<<"$failed_run" >/dev/null
+            printf 'UPSTREAM_RUN_ID=%s\n' "$UPSTREAM_RUN_ID" >> "$GITHUB_ENV"
+            echo "repair_mode=1" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
           git fetch --quiet origin master:refs/remotes/origin/master
           [ "$SOURCE_SHA" = "$(git rev-parse HEAD)" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ] || {
@@ -73,15 +230,38 @@ jobs:
             exit 1
           }
 
+      - name: Set up Docker Buildx for public package preflight
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Require a pre-existing public GHCR package
+        id: package
+        run: |
+          set -euo pipefail
+          anonymous_config="$RUNNER_TEMP/ghcr-anonymous-package-check"
+          rm -rf "$anonymous_config"
+          mkdir -m 700 "$anonymous_config"
+          cleanup() { rm -rf "$anonymous_config"; }
+          trap cleanup EXIT
+          DOCKER_CONFIG="$anonymous_config" \
+            docker buildx imagetools inspect \
+              ghcr.io/vasilyevstan/betstan-images:bootstrap-sentinel-v1 \
+              --format '{{.Manifest.Digest}}' |
+            tr -d '"' |
+            grep -Ex 'sha256:[0-9a-f]{64}'
+          printf 'visibility=public\nanonymous_sentinel_pull=pass\n' >> "$GITHUB_OUTPUT"
+
       - name: Select immutable image source
         id: image_source
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          BUILD_REPAIR_MODE: ${{ steps.trust.outputs.repair_mode }}
         run: |
           set -euo pipefail
           mode=build
-          if [ -n "$REUSE_SOURCE_SHA" ] || [ -n "$REUSE_BUILD_RUN_ID" ]; then
+          if [ "$BUILD_REPAIR_MODE" = "1" ]; then
+            :
+          elif [ -n "$REUSE_SOURCE_SHA" ] || [ -n "$REUSE_BUILD_RUN_ID" ]; then
             [[ "$REUSE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$REUSE_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             [ "$REUSE_SOURCE_SHA" != "$SOURCE_SHA" ]
@@ -141,11 +321,59 @@ jobs:
                 awk -F= '$1 == "upstream_run_id" {print $2}' \
                   artifacts/reuse-source/build-chain.txt
               )"
+              reuse_trigger_workflow="$(
+                awk -F= '$1 == "build_trigger_workflow" {print $2}' \
+                  artifacts/reuse-source/build-chain.txt
+              )"
+              reuse_trigger_run_id="$(
+                awk -F= '$1 == "build_trigger_run_id" {print $2}' \
+                  artifacts/reuse-source/build-chain.txt
+              )"
+              reuse_repair_mode="$(
+                awk -F= '$1 == "repair_mode" {print $2}' \
+                  artifacts/reuse-source/build-chain.txt
+              )"
               [[ "$reuse_upstream_run_id" =~ ^[1-9][0-9]*$ ]]
               reuse_display_title="$(jq -r '.display_title' <<<"$reuse_run")"
-              if [ "$reuse_display_title" != "oci-build $REUSE_SOURCE_SHA" ]; then
+              if [ "$reuse_trigger_workflow" = "production-build" ] &&
+                  [ "$reuse_repair_mode" = "0" ]; then
+                [ "$reuse_trigger_run_id" = "$reuse_upstream_run_id" ]
                 [ "$reuse_display_title" = \
                   "oci-build $REUSE_SOURCE_SHA upstream-$reuse_upstream_run_id" ]
+              elif [ "$reuse_trigger_workflow" = "ghcr-package-management" ] &&
+                  [ "$reuse_repair_mode" = "1" ]; then
+                [[ "$reuse_trigger_run_id" =~ ^[1-9][0-9]*$ ]]
+                [ "$reuse_display_title" = \
+                  "oci-build $REUSE_SOURCE_SHA repair-$reuse_trigger_run_id" ]
+                repair_workflow_id="$(
+                  gh api "repos/$REPOSITORY/actions/workflows/ghcr-package-management.yml" \
+                    --jq '.id'
+                )"
+                repair_run="$(
+                  gh api "repos/$REPOSITORY/actions/runs/$reuse_trigger_run_id/attempts/1"
+                )"
+                jq -e \
+                  --argjson workflow_id "$repair_workflow_id" \
+                  --arg sha "$REUSE_SOURCE_SHA" \
+                  --arg repo "$REPOSITORY" \
+                  --arg upstream "$reuse_upstream_run_id" '
+                    .workflow_id == $workflow_id and
+                    .path == ".github/workflows/ghcr-package-management.yml" and
+                    .event == "workflow_dispatch" and
+                    .head_sha == $sha and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repo and
+                    .status == "completed" and
+                    .conclusion == "success" and
+                    .run_attempt == 1 and
+                    (.display_title | test(
+                      "^ghcr-package repair-build " + $sha +
+                      " upstream-" + $upstream + " failed-[1-9][0-9]*$"
+                    ))
+                  ' <<<"$repair_run" >/dev/null
+              else
+                echo "Reusable build has inconsistent normal/repair trigger lineage." >&2
+                exit 1
               fi
               mode=reuse
             elif [ "$input_diff_status" = "1" ]; then
@@ -164,36 +392,39 @@ jobs:
       - name: Set up QEMU for ARM64 verification
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
         with:
+          image: tonistiigi/binfmt@sha256:8db0f28060565399642110b798c6c35efcac7c5b3b48c56d36503d3b4d8f93c8
           platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Verify reusable ARM64 image provenance
         if: steps.image_source.outputs.mode == 'reuse'
-        env:
-          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
-          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
         run: |
           set -euo pipefail
-          printf '%s' "$OCI_REGISTRY_AUTH_TOKEN" |
-            docker login "$OCI_REGISTRY_HOST" \
-              --username "$OCI_REGISTRY_USERNAME" --password-stdin >/dev/null
           PROVENANCE_DIR=artifacts/reuse-source \
           SOURCE_SHA="$REUSE_SOURCE_SHA" \
           EXPECTED_BUILD_RUN_ID="$REUSE_BUILD_RUN_ID" \
           EXPECTED_BUILD_RUN_ATTEMPT=1 \
           OUTPUT_FILE=artifacts/reuse-source/images.tsv \
-          VERIFY_REMOTE=1 BOOT_IMAGES=0 \
+          VERIFY_REMOTE=1 BOOT_IMAGES=0 ANONYMOUS_PULL=1 \
             ./infra/oci/scripts/verify-images.sh
-          docker logout "$OCI_REGISTRY_HOST" >/dev/null
+
+      - name: Authenticate GitHub Actions to GHCR
+        env:
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin >/dev/null
 
       - name: Publish exact ARM64 OCI images
         env:
-          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
-          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
           OUTPUT_DIR: artifacts/oci-image-provenance
           IMAGE_MODE: ${{ steps.image_source.outputs.mode }}
+          APPLICATION_REGISTRY_ALREADY_AUTHENTICATED: "true"
+          REPAIR_EXISTING_TAGS: ${{ steps.trust.outputs.repair_mode }}
+          BUILD_WORKFLOW_IDENTITY: oci-production-build
+          UPSTREAM_BUILD_WORKFLOW: production-build
+          UPSTREAM_RUN_ATTEMPT: "1"
         run: |
           set -euo pipefail
           if [ "$IMAGE_MODE" = "reuse" ]; then
@@ -219,21 +450,19 @@ jobs:
               ./infra/oci/scripts/build-images.sh
           fi
 
-      - name: Verify remote digests and boot emitted JavaScript
-        env:
-          OCI_REGISTRY_USERNAME: ${{ secrets.OCI_REGISTRY_USERNAME }}
-          OCI_REGISTRY_AUTH_TOKEN: ${{ secrets.OCI_REGISTRY_AUTH_TOKEN }}
+      - name: Remove GHCR credentials before public verification
+        run: docker logout ghcr.io >/dev/null
+
+      - name: Verify public GHCR digests and boot emitted JavaScript
         run: |
           set -euo pipefail
-          printf '%s' "$OCI_REGISTRY_AUTH_TOKEN" |
-            docker login "$OCI_REGISTRY_HOST" \
-              --username "$OCI_REGISTRY_USERNAME" --password-stdin >/dev/null
           PROVENANCE_DIR=artifacts/oci-image-provenance \
           SOURCE_SHA="$SOURCE_SHA" \
           EXPECTED_BUILD_RUN_ID="$GITHUB_RUN_ID" \
           EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          EXPECTED_UPSTREAM_RUN_ID="$UPSTREAM_RUN_ID" \
           OUTPUT_FILE=artifacts/oci-image-provenance/images.tsv \
-          VERIFY_REMOTE=1 BOOT_IMAGES=1 \
+          VERIFY_REMOTE=1 BOOT_IMAGES=1 ANONYMOUS_PULL=1 \
             ./infra/oci/scripts/verify-images.sh
 
       - name: Record exact build chain
@@ -247,8 +476,16 @@ jobs:
             "upstream_run_attempt=1" \
             "build_run_id=$GITHUB_RUN_ID" \
             "build_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "build_trigger_workflow=$TRIGGER_WORKFLOW" \
+            "build_trigger_run_id=$TRIGGER_RUN_ID" \
+            "repair_mode=${{ steps.trust.outputs.repair_mode }}" \
             "image_mode=$IMAGE_MODE" \
             "platform=linux/arm64" \
+            "registry_provider=ghcr" \
+            "registry_host=ghcr.io" \
+            "registry_repository=ghcr.io/vasilyevstan/betstan-images" \
+            "registry_public=true" \
+            "anonymous_pull=pass" \
             > artifacts/oci-image-provenance/build-chain.txt
           if [ "$IMAGE_MODE" = "reuse" ]; then
             printf '%s\n' \
@@ -267,4 +504,4 @@ jobs:
 
       - name: Remove registry session
         if: always()
-        run: docker logout "$OCI_REGISTRY_HOST" >/dev/null 2>&1 || true
+        run: docker logout ghcr.io >/dev/null 2>&1 || true

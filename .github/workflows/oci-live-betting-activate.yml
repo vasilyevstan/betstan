@@ -182,6 +182,11 @@ jobs:
           [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
           [ "$infrastructure_run_attempt" = "1" ]
           [ "$infrastructure_finalized" = "true" ]
+          [ "$application_registry_provider" = "ghcr" ]
+          [ "$application_registry_host" = "ghcr.io" ]
+          [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
+          [ "$application_registry_public_anonymous" = "true" ]
+          [ "$ocir_application_repository_absent" = "true" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           selected_runtime_mode="$runtime_mode"

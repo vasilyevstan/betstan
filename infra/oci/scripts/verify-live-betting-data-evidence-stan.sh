@@ -8,6 +8,8 @@ EXPECTED_INFRASTRUCTURE_RUN_ID="${EXPECTED_INFRASTRUCTURE_RUN_ID:-}"
 EXPECTED_PHASE="${EXPECTED_PHASE:-}"
 EXPECTED_RUN_ID="${EXPECTED_RUN_ID:-}"
 EXPECTED_RUN_ATTEMPT="${EXPECTED_RUN_ATTEMPT:-1}"
+EXPECTED_BASELINE_RECOVERY_RUN_ID="${EXPECTED_BASELINE_RECOVERY_RUN_ID:-0}"
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="${EXPECTED_BASELINE_RECOVERY_SOURCE_SHA:-none}"
 
 fail() {
   echo "live_betting_data_evidence=FAIL reason=$*" >&2
@@ -25,6 +27,16 @@ fail() {
   fail "expected workflow run ID must be a positive integer"
 [[ "$EXPECTED_RUN_ATTEMPT" == "1" ]] ||
   fail "only first-attempt evidence is accepted"
+[[ "$EXPECTED_BASELINE_RECOVERY_RUN_ID" == "0" ||
+   "$EXPECTED_BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+  fail "expected baseline recovery run ID is invalid"
+if [[ "$EXPECTED_BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
+  [[ "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" == "none" ]] ||
+    fail "normal evidence cannot carry recovery source authority"
+else
+  [[ "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "expected recovery source SHA is invalid"
+fi
 case "$EXPECTED_PHASE" in
   dry-run|apply-backfills|apply-slip-index) ;;
   *) fail "unexpected evidence phase" ;;
@@ -36,7 +48,9 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_INFRASTRUCTURE_RUN_ID" \
   "$EXPECTED_PHASE" \
   "$EXPECTED_RUN_ID" \
-  "$EXPECTED_RUN_ATTEMPT" <<'PY'
+  "$EXPECTED_RUN_ATTEMPT" \
+  "$EXPECTED_BASELINE_RECOVERY_RUN_ID" \
+  "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" <<'PY'
 import hashlib
 import json
 import re
@@ -51,6 +65,8 @@ expected = {
     "phase": sys.argv[5],
     "workflow_run_id": sys.argv[6],
     "workflow_run_attempt": sys.argv[7],
+    "baseline_recovery_run_id": sys.argv[8],
+    "baseline_recovery_source_sha": sys.argv[9],
 }
 
 
@@ -118,6 +134,8 @@ provenance_keys = {
     "build_run_id",
     "infrastructure_run_id",
     "baseline_sha256",
+    "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
     "workflow_run_id",
     "workflow_run_attempt",
     "phase",
@@ -279,6 +297,8 @@ if phase == "apply-slip-index":
         "build_run_id",
         "infrastructure_run_id",
         "baseline_sha256",
+        "baseline_recovery_run_id",
+        "baseline_recovery_source_sha",
         "data_run_id",
         "data_run_attempt",
         "backfill_complete",
@@ -296,6 +316,8 @@ if phase == "apply-slip-index":
         "build_run_id": expected["build_run_id"],
         "infrastructure_run_id": expected["infrastructure_run_id"],
         "baseline_sha256": provenance["baseline_sha256"],
+        "baseline_recovery_run_id": expected["baseline_recovery_run_id"],
+        "baseline_recovery_source_sha": expected["baseline_recovery_source_sha"],
         "data_run_id": expected["workflow_run_id"],
         "data_run_attempt": expected["workflow_run_attempt"],
         "backfill_complete": "true",

@@ -11,7 +11,7 @@ set -euo pipefail
 #     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 #   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=oci-infrastructure.yml \
 #     EXPECTED_ENVIRONMENT=oci-infrastructure \
-#     EXPECTED_DISPLAY_TITLE="oci-infrastructure validate-registry <sha>" \
+#     EXPECTED_DISPLAY_TITLE="oci-infrastructure finalize <sha>" \
 #     ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
 #   EXPECTED_SHA=<sha> EXPECTED_WORKFLOW=oci-live-data-rollout.yml \
 #     EXPECTED_ENVIRONMENT=oci-migration \
@@ -67,15 +67,9 @@ case "$EXPECTED_WORKFLOW:$EXPECTED_ENVIRONMENT" in
     ;;
   oci-infrastructure.yml:oci-infrastructure)
     expected_event="workflow_dispatch"
-    case "$EXPECTED_DISPLAY_TITLE" in
-      "oci-infrastructure validate-registry $EXPECTED_SHA" | \
-        "oci-infrastructure prune-registry $EXPECTED_SHA" | \
-        "oci-infrastructure finalize $EXPECTED_SHA")
-        ;;
-      *)
-        fail "OCI infrastructure approval requires an exact validation, prune, or finalize run title"
-        ;;
-    esac
+    [[ "$EXPECTED_DISPLAY_TITLE" == \
+      "oci-infrastructure finalize $EXPECTED_SHA" ]] ||
+      fail "OCI infrastructure approval requires the exact finalize run title"
     ;;
   oci-capacity-acquire.yml:oci-capacity-acquire)
     expected_event="workflow_dispatch"
@@ -90,10 +84,14 @@ case "$EXPECTED_WORKFLOW:$EXPECTED_ENVIRONMENT" in
         "oci-live-data apply-backfills $EXPECTED_SHA" | \
         "oci-live-data apply-slip-index $EXPECTED_SHA")
         ;;
-      *)
-        fail "OCI live-data approval requires an exact bounded phase run title"
-        ;;
+        *)
+          fail "OCI live-data approval requires an exact bounded phase run title"
+          ;;
     esac
+    ;;
+  ghcr-package-management.yml:oci-infrastructure | \
+  oci-ghcr-cache-recovery.yml:oci-production)
+    fail "GHCR bootstrap, validation, prune, build repair, and cache recovery require current-user approval"
     ;;
   *)
     fail "workflow/environment pair is not eligible for automatic approval"

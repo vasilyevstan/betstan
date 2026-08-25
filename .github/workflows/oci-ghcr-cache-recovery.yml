@@ -1,0 +1,619 @@
+name: oci-ghcr-cache-recovery
+run-name: oci-ghcr-cache-recovery ${{ inputs.baseline_source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_source_sha:
+        description: Exact historical source SHA proven by the running cached images
+        required: true
+        type: string
+      trusted_build_run_id:
+        description: Successful first-attempt historical oci-production-build run
+        required: true
+        type: string
+      trusted_deploy_run_id:
+        description: Successful first-attempt historical oci-production-deploy run
+        required: true
+        type: string
+      infrastructure_run_id:
+        description: Successful baseline-SHA finalize run identifying the live k3s node
+        required: true
+        type: string
+      resume_recovery_run_id:
+        description: Failed or cancelled first-attempt recovery run carrying the immutable pre-rebind plan; 0 starts fresh
+        required: true
+        default: '0'
+        type: string
+      confirmation:
+        description: Type RECOVER K3S CACHED BASELINE TO GHCR
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    outputs:
+      public_url: ${{ steps.endpoints.outputs.public_url }}
+      redirect_url: ${{ steps.endpoints.outputs.redirect_url }}
+      diagnostic_url: ${{ steps.endpoints.outputs.diagnostic_url }}
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ inputs.baseline_source_sha }}
+      TRUSTED_BUILD_RUN_ID: ${{ inputs.trusted_build_run_id }}
+      TRUSTED_DEPLOY_RUN_ID: ${{ inputs.trusted_deploy_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      RESUME_RECOVERY_RUN_ID: ${{ inputs.resume_recovery_run_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout current master safety implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate exact recovery request and historical workflow provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = master ]
+          [ "$CONFIRMATION" = "RECOVER K3S CACHED BASELINE TO GHCR" ]
+          [ "$OCI_RUNTIME_MODE" = k3s ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for id in "$TRUSTED_BUILD_RUN_ID" "$TRUSTED_DEPLOY_RUN_ID" "$INFRASTRUCTURE_RUN_ID"; do
+            [[ "$id" =~ ^[1-9][0-9]*$ ]]
+          done
+          [[ "$RESUME_RECOVERY_RUN_ID" =~ ^(0|[1-9][0-9]*)$ &&
+             "$RESUME_RECOVERY_RUN_ID" != "$GITHUB_RUN_ID" ]]
+          [ "$GITHUB_RUN_ATTEMPT" = 1 ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ]
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+          validate_run() {
+            local workflow="$1" run_id="$2" event="$3" source_sha="$4" expected_title="${5:-}"
+            workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/$workflow" --jq .id)"
+            run="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1")"
+            jq -e --argjson workflow_id "$workflow_id" --arg path ".github/workflows/$workflow" \
+              --arg event "$event" --arg sha "$source_sha" --arg repo "$REPOSITORY" \
+              --arg expected_title "$expected_title" '
+              .workflow_id == $workflow_id and .path == $path and .event == $event and
+              .head_sha == $sha and .head_branch == "master" and
+              .head_repository.full_name == $repo and .status == "completed" and
+              .conclusion == "success" and .run_attempt == 1 and
+              ($expected_title == "" or .display_title == $expected_title)
+            ' <<<"$run" >/dev/null
+          }
+          validate_run oci-production-build.yml "$TRUSTED_BUILD_RUN_ID" workflow_run "$SOURCE_SHA"
+          validate_run oci-production-deploy.yml "$TRUSTED_DEPLOY_RUN_ID" workflow_dispatch "$SOURCE_SHA"
+          validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \
+            "$SOURCE_SHA" "oci-infrastructure finalize $SOURCE_SHA"
+          if [[ "$RESUME_RECOVERY_RUN_ID" != "0" ]]; then
+            recovery_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq .id
+            )"
+            resume_run="$(
+              gh api "repos/$REPOSITORY/actions/runs/$RESUME_RECOVERY_RUN_ID/attempts/1"
+            )"
+            jq -e --argjson workflow_id "$recovery_workflow_id" \
+              --arg path ".github/workflows/oci-ghcr-cache-recovery.yml" \
+              --arg repo "$REPOSITORY" '
+              .workflow_id == $workflow_id and .path == $path and
+              .event == "workflow_dispatch" and
+              (.head_sha | test("^[0-9a-f]{40}$")) and
+              .head_branch == "master" and .head_repository.full_name == $repo and
+              .status == "completed" and
+              (.conclusion == "failure" or .conclusion == "cancelled") and
+              .run_attempt == 1
+            ' <<<"$resume_run" >/dev/null
+            git merge-base --is-ancestor "$(jq -r .head_sha <<<"$resume_run")" HEAD
+          fi
+
+      - name: Download immutable historical image and deployment provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ inputs.baseline_source_sha }}-${{ inputs.trusted_build_run_id }}-1
+          path: artifacts/historical-build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.trusted_build_run_id }}
+
+      - name: Download exact historical deployment provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-deploy-provenance-${{ inputs.trusted_deploy_run_id }}-1
+          path: artifacts/historical-deploy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.trusted_deploy_run_id }}
+
+      - name: Bind historical OCIR artifact to its truthful build chain
+        run: |
+          set -euo pipefail
+          historical=artifacts/historical-build
+          deploy=artifacts/historical-deploy/provenance.txt
+          [ -f "$deploy" ]
+          [ "$(awk -F= '$1 == "source_sha" { print $2 }' "$deploy")" = "$SOURCE_SHA" ]
+          [ "$(awk -F= '$1 == "deployment_run_id" { print $2 }' "$deploy")" = "$TRUSTED_DEPLOY_RUN_ID" ]
+          [ "$(awk -F= '$1 == "deployment_run_attempt" { print $2 }' "$deploy")" = "1" ]
+          deployment_workflow="$(awk -F= '$1 == "deployment_workflow" { print $2 }' "$deploy")"
+          [ -z "$deployment_workflow" ] || [ "$deployment_workflow" = "oci-production-deploy" ]
+          python3 ./infra/oci/scripts/validate-legacy-oci-provenance.py \
+            "$historical" "$SOURCE_SHA" "$TRUSTED_BUILD_RUN_ID" \
+            > "$RUNNER_TEMP/trusted-upstream.env"
+          cat "$RUNNER_TEMP/trusted-upstream.env" >> "$GITHUB_ENV"
+
+      - name: Download exact current infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Download immutable pre-rebind plan selected for resume
+        if: inputs.resume_recovery_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ghcr-cache-recovery-plan-${{ inputs.baseline_source_sha }}-${{ inputs.resume_recovery_run_id }}-1
+          path: artifacts/prior-transition-plan
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.resume_recovery_run_id }}
+
+      - name: Bind public endpoints to infrastructure provenance
+        id: endpoints
+        run: |
+          set -euo pipefail
+          provenance=artifacts/infrastructure/provenance.env
+          deploy_provenance=artifacts/historical-deploy/provenance.txt
+          [ -f "$provenance" ] && [ ! -L "$provenance" ]
+          [ -f "$deploy_provenance" ] && [ ! -L "$deploy_provenance" ]
+          read_value() {
+            awk -F= -v key="$1" '
+              $1 == key { count++; value=substr($0, length(key) + 2) }
+              END { if (count != 1) exit 1; print value }
+            ' "$provenance"
+          }
+          [ "$(read_value source_sha)" = "$SOURCE_SHA" ]
+          [ "$(read_value infrastructure_run_id)" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$(read_value infrastructure_run_attempt)" = "1" ]
+          [ "$(read_value infrastructure_finalized)" = "true" ]
+          [ "$(read_value runtime_mode)" = "k3s" ]
+          [ "$(read_value instance_fingerprint)" = \
+            "$(awk -F= '$1 == "runtime_fingerprint" { print $2 }' "$deploy_provenance")" ]
+          public_host="$(read_value public_host)"
+          redirect_host="$(read_value redirect_host)"
+          diagnostic_host="$(read_value diagnostic_host)"
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [[ "$diagnostic_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+          [ "$public_host" = \
+            "$(awk -F= '$1 == "public_host" { print $2 }' "$deploy_provenance")" ]
+          [ "$redirect_host" = \
+            "$(awk -F= '$1 == "redirect_host" { print $2 }' "$deploy_provenance")" ]
+          [ "$diagnostic_host" = \
+            "$(awk -F= '$1 == "diagnostic_host" { print $2 }' "$deploy_provenance")" ]
+          {
+            echo "public_url=https://$public_host"
+            echo "redirect_url=https://$redirect_host"
+            echo "diagnostic_url=https://$diagnostic_host"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Open retained protected k3s access
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/ghcr-cache-recovery/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Prove exact cached live images before export
+        run: |
+          set -euo pipefail
+          input_dir=artifacts/ghcr-cache-recovery-inputs
+          mkdir -p "$input_dir"
+          : > "$input_dir/live-images.tsv"
+          : > "$input_dir/live-platform-ids.tsv"
+          historical=artifacts/historical-build
+          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
+            file="$historical/$service.env"
+            [ -f "$file" ]
+            expected_ref="$(awk -F= '$1 == "image_ref" { print $2 }' "$file")"
+            expected_platform="$(awk -F= '$1 == "platform_digest" { print $2 }' "$file")"
+            [[ "$expected_ref" =~ \.ocir\.io/.+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$expected_platform" =~ ^sha256:[0-9a-f]{64}$ ]]
+            actual_ref="$(kubectl get deployment "gaming-${service}-depl" -n "$OCI_K8S_NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            if [ "$actual_ref" != "$expected_ref" ]; then
+              [[ "$actual_ref" =~ ^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$ ]]
+            fi
+            image_ids="$(kubectl get pods -n "$OCI_K8S_NAMESPACE" -l "app=gaming-${service}" \
+              -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' |
+              sed '/^$/d' | sort -u)"
+            [ -n "$image_ids" ]
+            [ "$(wc -l <<<"$image_ids" | tr -d ' ')" = "1" ]
+            actual_platform="${image_ids##*@}"
+            [ "$actual_platform" = "$expected_platform" ]
+            actual_repository="${actual_ref%@sha256:*}"
+            actual_digest="sha256:${actual_ref##*@sha256:}"
+            [[ "$actual_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$service" "$actual_repository" "$actual_ref" "$actual_digest" "$actual_platform" \
+              >> "$input_dir/live-images.tsv"
+            while IFS= read -r image_id; do
+              [[ "$image_id" == *"@$expected_platform" ]]
+              printf '%s\t%s\n' "$service" "$image_id" >> "$input_dir/live-platform-ids.tsv"
+            done <<<"$image_ids"
+          done
+          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
+            awk -F= -v service="$service" '
+              $1 == "repository" { repository = $2 }
+              $1 == "image_ref" { image_ref = $2 }
+              $1 == "digest" { digest = $2 }
+              $1 == "platform_digest" { platform_digest = $2 }
+              END { print service "\t" repository "\t" image_ref "\t" digest "\t" platform_digest }
+            ' "$historical/$service.env"
+          done > "$input_dir/trusted-legacy-images.tsv"
+
+      - name: Set up ARM64 verification
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          image: tonistiigi/binfmt@sha256:8db0f28060565399642110b798c6c35efcac7c5b3b48c56d36503d3b4d8f93c8
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Promote exact containerd cache bytes to public GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_ACTOR: ${{ github.actor }}
+          LIVE_IMAGES_FILE: artifacts/ghcr-cache-recovery-inputs/live-images.tsv
+          TRUSTED_LEGACY_IMAGES_FILE: artifacts/ghcr-cache-recovery-inputs/trusted-legacy-images.tsv
+          LIVE_PLATFORM_IDS_FILE: artifacts/ghcr-cache-recovery-inputs/live-platform-ids.tsv
+          OUTPUT_DIR: artifacts/ghcr-cache-recovery
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/ghcr-cache-recovery/k3s-access.env"
+          K3S_SSH_PRIVATE_KEY="$target_private_key" \
+          K3S_SSH_KNOWN_HOSTS="$target_known_hosts" \
+          K3S_SSH_HOST_KEY_ALIAS="$instance_ocid" \
+          K3S_SSH_PORT="$local_ssh_port" \
+          K3S_SSH_USER="$os_user" \
+          ./infra/oci/scripts/recover-k3s-cached-images.sh
+
+      - name: Restore selected immutable pre-rebind plan
+        if: inputs.resume_recovery_run_id != '0'
+        run: |
+          set -euo pipefail
+          prior=artifacts/prior-transition-plan
+          recovery=artifacts/ghcr-cache-recovery
+          python3 - "$prior" <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = {
+              "rabbitmq-baseline.txt",
+              "transition-plan-evidence.env",
+              "transition-plan.tsv",
+          }
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit("prior transition plan directory is invalid")
+          entries = {path.name: path for path in root.iterdir()}
+          if set(entries) != expected:
+              raise SystemExit("prior transition plan artifact has an unexpected file set")
+          if any(not path.is_file() or path.is_symlink() for path in entries.values()):
+              raise SystemExit("prior transition plan artifact contains an unsafe entry")
+          PY
+          install -m 600 \
+            "$prior/transition-plan.tsv" \
+            "$prior/rabbitmq-baseline.txt" \
+            "$prior/transition-plan-evidence.env" \
+            "$recovery/"
+
+      - name: Capture immutable plan before any Deployment mutation
+        env:
+          RECOVERY_DIR: artifacts/ghcr-cache-recovery
+          OUTPUT_DIR: artifacts/ghcr-cache-recovery
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          RECOVERY_RUN_ID: ${{ github.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RESUME_RECOVERY_RUN_ID: ${{ inputs.resume_recovery_run_id }}
+          TRANSITION_PHASE: plan
+        run: ./infra/oci/scripts/transition-k3s-cached-images.sh
+
+      - name: Upload immutable pre-rebind plan before rollout
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-plan-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/ghcr-cache-recovery/transition-plan.tsv
+            artifacts/ghcr-cache-recovery/rabbitmq-baseline.txt
+            artifacts/ghcr-cache-recovery/transition-plan-evidence.env
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Sequentially rebind verified GHCR digests
+        env:
+          RECOVERY_DIR: artifacts/ghcr-cache-recovery
+          OUTPUT_DIR: artifacts/ghcr-cache-recovery
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          RECOVERY_RUN_ID: ${{ github.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RESUME_RECOVERY_RUN_ID: ${{ inputs.resume_recovery_run_id }}
+          TRANSITION_PHASE: rebind
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/transition-k3s-cached-images.sh
+          rm -rf -- artifacts/ghcr-cache-recovery-inputs
+
+      - name: Require post-transition API, queue, and rollback readiness
+        env:
+          TARGET_SHA: ${{ inputs.baseline_source_sha }}
+          OCI_PUBLIC_URL: ${{ steps.endpoints.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.endpoints.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.endpoints.outputs.diagnostic_url }}
+          OUTPUT_DIR: artifacts/ghcr-cache-recovery-readiness
+        run: ./infra/oci/scripts/rollback-readiness-stan.sh
+
+      - name: Upload verified recovery stage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-stage-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload recovery readiness diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery-readiness
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Close retained protected k3s access
+        if: always()
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: ${{ runner.temp }}/ghcr-cache-recovery/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+  public-validate:
+    needs: recover
+    if: github.run_attempt == 1 && needs.recover.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    steps:
+      - name: Checkout exact recovery control commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate recovery public-check identity
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+          OCI_PUBLIC_URL: ${{ needs.recover.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.recover.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.recover.outputs.diagnostic_url }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$(git rev-parse HEAD)" = "$CONTROL_SHA" ]
+          [ "$OCI_PUBLIC_URL" = "https://betstan.xyz" ]
+          [ "$OCI_REDIRECT_URL" = "https://www.betstan.xyz" ]
+          [[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
+
+      - name: Install browser validation dependencies
+        run: |
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run public recovery validation without cloud credentials
+        env:
+          OCI_PUBLIC_URL: ${{ needs.recover.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.recover.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.recover.outputs.diagnostic_url }}
+          OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
+          MAX_LOOPS: "3"
+          SLEEP_SECONDS: "20"
+          OUTPUT_DIR: artifacts/oci-ghcr-recovery-public-validation
+        run: ./infra/oci/agents/validation-loop-stan.sh
+
+      - name: Upload public recovery validation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-ghcr-recovery-public-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-ghcr-recovery-public-validation
+          if-no-files-found: ignore
+          retention-days: 14
+
+  retire-ocir:
+    needs: [recover, public-validate]
+    if: >-
+      github.run_attempt == 1 &&
+      needs.recover.result == 'success' &&
+      needs.public-validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ inputs.baseline_source_sha }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      APPLICATION_REGISTRY_PROVIDER: ghcr
+      APPLICATION_REGISTRY_HOST: ghcr.io
+      APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
+      APPLICATION_REGISTRY_TAG_PREFIX: arm64
+      APPLICATION_REGISTRY_TAG_SCHEMA: v1
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/oci-home/.kube"
+          chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
+
+      - name: Checkout exact recovery control commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Validate deferred retirement identity
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+
+      - name: Download verified recovery stage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ghcr-cache-recovery-stage-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery
+
+      - name: Download exact historical infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Open retained protected k3s access
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/ghcr-cache-retirement/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Retire OCIR credentials and empty repository after public validation
+        env:
+          RECOVERY_DIR: artifacts/ghcr-cache-recovery
+          OUTPUT_DIR: artifacts/ghcr-cache-recovery
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          RECOVERY_RUN_ID: ${{ github.run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          TRANSITION_PHASE: retire
+          RETIRE_OCIR_REPOSITORY: "1"
+        run: ./infra/oci/scripts/transition-k3s-cached-images.sh
+
+      - name: Close retained protected k3s access
+        if: always()
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: ${{ runner.temp }}/ghcr-cache-retirement/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Upload first-attempt recovery provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery
+          if-no-files-found: error
+          retention-days: 30

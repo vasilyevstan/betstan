@@ -6,19 +6,36 @@ specialist agents; they do not replace specialist authority or user approval.
 
 ## Core workflow
 
-1. `betstan-architect` maps the solution and routes specialist decisions.
-2. `betstan-simplifier` removes unnecessary scope without changing accepted
+1. `betstan-conductor` registers active work, follows dependencies, monitors
+   bounded progress, and escalates suspected stalls.
+2. `betstan-architect` maps the solution and routes specialist decisions.
+3. `betstan-simplifier` removes unnecessary scope without changing accepted
    behavior.
-3. `betstan-backend-developer` and `betstan-frontend-developer` implement
+4. `betstan-backend-developer` and `betstan-frontend-developer` implement
    disjoint, bounded slices.
-4. `betstan-validation-critic` reviews each immutable slice diff.
-5. `betstan-test-engineer` independently executes targeted and regression tests.
-6. `betstan-final-validator` checks acceptance and evidence completeness.
-7. `betstan-deployment-safety` owns branch, PR, exact-SHA deploy, and rollback
+5. `betstan-validation-critic` reviews each immutable slice diff.
+6. `betstan-test-engineer` independently executes targeted and regression tests.
+7. `betstan-final-validator` checks acceptance and evidence completeness.
+8. `betstan-deployment-safety` owns branch, PR, exact-SHA deploy, and rollback
    decisions. Runtime changes remain with the AKS or OCI operator.
 
 No agent status is permission to merge or deploy. Exact user approval is still
 required for the target SHA and complete production-capable workflow set.
+
+## Conductor loop
+
+Start `betstan-conductor` before parallel agents, background validation, or a
+long GitHub Actions operation. Register each unit with one owner, a bounded
+objective, dependencies, an exact private runtime reference, a progress signal,
+a checkpoint, a next-check trigger, and a stop condition. Keep those references
+in private session handoffs, not repository files or public reports.
+
+The conductor monitors completion events and bounded checkpoints rather than
+tight-polling. Recent tool/log/job progress means active work; an environment
+approval wait is external progress, not a hang. One missed checkpoint is a
+suspected stall. Two missed checkpoints require an explicit safe recovery
+action. Never replace a slow unit until the original is terminal or cancelled
+and overlapping side effects are impossible.
 
 ## Ownership
 
@@ -35,6 +52,7 @@ allowed only with disjoint ownership and a stable shared contract.
 
 ## Specialist routing
 
+- Active-work coordination: `betstan-conductor`
 - Shared contracts and mixed versions: `betstan-service-contract-reviewer`
 - CI, coverage, and false-green gates: `betstan-quality-gate-reviewer`
 - Branch policy and ancestry: `betstan-branch-governance-reviewer`
@@ -95,10 +113,22 @@ findings:
 
 risks: []
 approvals: []
+
+orchestration:
+  work_id: <stable-kebab-id>
+  owner: <single-owner>
+  dependencies: []
+  progress_signal: <event-or-state>
+  checkpoint_due_at: <utc>
+  next_check_trigger: <event-or-time>
+  stop_condition: <terminal-result>
 ```
 
 Required invariants:
 
+- Every parallel/background unit is registered with one owner, a checkpoint,
+  and a stop condition.
+- No replacement unit starts while the original can still produce side effects.
 - `out_of_ownership_touched` is empty.
 - A critic receives a non-null immutable `head_sha`.
 - Every prior blocking finding is resolved with evidence before approval.
@@ -119,6 +149,7 @@ Required invariants:
 
 | Agent | Status |
 |---|---|
+| Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
 | Backend/frontend developer | `IMPLEMENTED_LOCAL`, `BLOCKED` |
 | Simplifier | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND` |
@@ -127,4 +158,5 @@ Required invariants:
 | Final validator | `READY_FOR_RELEASE_REVIEW`, `NO_GO` |
 
 Status lines should be namespaced with the agent name. Final validation is
-evidence for deployment safety, not a release action.
+evidence for deployment safety, not a release action. Conductor status is
+coordination evidence, not specialist or release approval.

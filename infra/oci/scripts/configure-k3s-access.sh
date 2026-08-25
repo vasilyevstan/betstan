@@ -14,6 +14,8 @@ KUBECONFIG="${KUBECONFIG:-$WORK_DIR/kubeconfig}"
 OCI_K3S_LOCAL_SSH_PORT="${OCI_K3S_LOCAL_SSH_PORT:-12222}"
 OCI_K3S_LOCAL_API_PORT="${OCI_K3S_LOCAL_API_PORT:-16443}"
 OCI_BASTION_SESSION_TTL="${OCI_BASTION_SESSION_TTL:-10800}"
+OCI_INSTANCE_COMMAND_TIMEOUT="${OCI_INSTANCE_COMMAND_TIMEOUT:-120}"
+OCI_INSTANCE_COMMAND_POLL_ATTEMPTS="${OCI_INSTANCE_COMMAND_POLL_ATTEMPTS:-30}"
 OCI_K3S_OS_USER="${OCI_K3S_OS_USER:-ubuntu}"
 OCI_K3S_RETAIN_TARGET_SSH="${OCI_K3S_RETAIN_TARGET_SSH:-false}"
 OCI_BASTION_DEFAULT_CLIENT_CIDR="${OCI_BASTION_DEFAULT_CLIENT_CIDR:-192.0.2.1/32}"
@@ -119,10 +121,116 @@ wait_active_session_id() {
   oci_die "OCI Bastion session did not become ACTIVE"
 }
 
-session_endpoint() {
+normalize_host_public_key() {
+  local raw_key="$1"
+  local normalized key_file
+  normalized="$(
+    awk '
+      NF {
+        if ($1 ~ /^(ssh-(ed25519|rsa)|rsa-sha2-(256|512)|ecdsa-sha2-nistp(256|384|521))$/) {
+          print $1 " " $2
+        } else if ($2 ~ /^(ssh-(ed25519|rsa)|rsa-sha2-(256|512)|ecdsa-sha2-nistp(256|384|521))$/) {
+          print $2 " " $3
+        }
+      }
+    ' <<<"$raw_key"
+  )"
+  [[ "$(wc -l <<<"$normalized" | tr -d ' ')" == "1" ]] ||
+    oci_die "OCI host-key evidence did not contain exactly one supported public key"
+  key_file="$(mktemp "$WORK_DIR/.host-key.XXXXXX")"
+  printf '%s\n' "$normalized" >"$key_file"
+  ssh-keygen -l -f "$key_file" >/dev/null ||
+    oci_die "OCI host-key evidence is not a valid SSH public key"
+  rm -f -- "$key_file"
+  printf '%s\n' "$normalized"
+}
+
+write_known_host() {
+  local host="$1"
+  local port="$2"
+  local public_key="$3"
+  local output_file="$4"
+  local marker="$host"
+  [[ "$host" =~ ^[A-Za-z0-9._:-]+$ ]] ||
+    oci_die "known-host identity contains unsupported characters"
+  [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le 65535 ]] ||
+    oci_die "known-host port is invalid"
+  if [[ "$port" != "22" ]]; then
+    marker="[${host}]:${port}"
+  fi
+  printf '%s %s\n' "$marker" "$public_key" >"$output_file"
+  chmod 600 "$output_file"
+}
+
+attest_target_host_key() {
+  local command_text content target command_id execution_json lifecycle_state
+  local output_file expected_sha actual_sha exit_code output_type attempt
+  command_text='set -eu
+test -f /etc/ssh/ssh_host_ed25519_key.pub
+cat /etc/ssh/ssh_host_ed25519_key.pub'
+  content="$(
+    jq -cn --arg text "$command_text" \
+      '{source:{sourceType:"TEXT",text:$text},output:{outputType:"TEXT"}}'
+  )"
+  target="$(jq -cn --arg instance_id "$instance_ocid" '{instanceId:$instance_id}')"
+  command_id="$(
+    oci instance-agent command create \
+      --compartment-id "$OCI_COMPARTMENT_OCID" \
+      --timeout-in-seconds "$OCI_INSTANCE_COMMAND_TIMEOUT" \
+      --target "$target" \
+      --content "$content" \
+      --display-name "betstan-host-key-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}" \
+      --query 'data.id' \
+      --raw-output
+  )"
+  oci_require_ocid command_id
+
+  execution_json="$WORK_DIR/target-host-key-command.json"
+  lifecycle_state=""
+  for attempt in $(seq 1 "$OCI_INSTANCE_COMMAND_POLL_ATTEMPTS"); do
+    oci instance-agent command-execution get \
+      --command-id "$command_id" \
+      --instance-id "$instance_ocid" >"$execution_json"
+    lifecycle_state="$(jq -r '.data."lifecycle-state" // empty' "$execution_json")"
+    case "$lifecycle_state" in
+      SUCCEEDED)
+        break
+        ;;
+      FAILED|TIMED_OUT|CANCELED)
+        oci_die "OCI-attested target host-key command ended in state $lifecycle_state"
+        ;;
+      ACCEPTED|IN_PROGRESS|'')
+        sleep 2
+        ;;
+      *)
+        oci_die "OCI-attested target host-key command returned unexpected state $lifecycle_state"
+        ;;
+    esac
+  done
+  [[ "$lifecycle_state" == "SUCCEEDED" ]] ||
+    oci_die "OCI-attested target host-key command did not complete in time"
+  [[ "$(jq -r '.data."instance-agent-command-id" // empty' "$execution_json")" == "$command_id" &&
+     "$(jq -r '.data."instance-id" // empty' "$execution_json")" == "$instance_ocid" ]] ||
+    oci_die "OCI-attested target host-key response identity does not match the request"
+
+  output_type="$(jq -r '.data.content."output-type" // empty' "$execution_json")"
+  exit_code="$(jq -r '.data.content."exit-code" // empty' "$execution_json")"
+  expected_sha="$(jq -r '.data.content."text-sha256" // empty' "$execution_json")"
+  [[ "$output_type" == "TEXT" && "$exit_code" == "0" &&
+     "$expected_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    oci_die "OCI-attested target host-key response is incomplete"
+  output_file="$WORK_DIR/target-host-key-output"
+  jq -j '.data.content.text // empty' "$execution_json" >"$output_file"
+  actual_sha="$(oci_sha256 <"$output_file")"
+  [[ "$actual_sha" == "$expected_sha" ]] ||
+    oci_die "OCI-attested target host-key output checksum does not match"
+  normalize_host_public_key "$(cat "$output_file")"
+}
+
+session_connection_metadata() {
   local session_id="$1"
   local target_port="$2"
-  local session expected_endpoint expected_command actual_command
+  local session expected_endpoint expected_command actual_command public_key
   expected_endpoint="host.bastion.${OCI_CLI_REGION}.oci.oraclecloud.com"
   expected_command="ssh -i <privateKey> -N -L <localPort>:${instance_private_ip}:${target_port} -p 22 ${session_id}@${expected_endpoint}"
   session="$(oci bastion session get --session-id "$session_id")"
@@ -142,7 +250,12 @@ session_endpoint() {
   actual_command="$(jq -r '.data."ssh-metadata".command // empty' <<<"$session")"
   [[ "$actual_command" == "$expected_command" ]] ||
     oci_die "OCI Bastion SSH metadata differs from the requested port forward"
-  printf '%s' "$expected_endpoint"
+  public_key="$(
+    normalize_host_public_key "$(
+      jq -r '.data."bastion-public-host-key-info" // empty' <<<"$session"
+    )"
+  )"
+  printf '%s\t%s\n' "$expected_endpoint" "$public_key"
 }
 
 write_session_state() {
@@ -161,6 +274,7 @@ write_session_state() {
     printf 'bastion_endpoint=%q\n' "$bastion_endpoint"
     printf 'target_private_key=%q\n' "$target_private_key"
     printf 'target_known_hosts=%q\n' "$target_known_hosts"
+    printf 'instance_ocid=%q\n' "$instance_ocid"
     printf 'instance_private_ip=%q\n' "$instance_private_ip"
     printf 'os_user=%q\n' "$OCI_K3S_OS_USER"
     printf 'local_ssh_port=%q\n' "$OCI_K3S_LOCAL_SSH_PORT"
@@ -267,6 +381,14 @@ validate_local_port OCI_K3S_LOCAL_API_PORT "$OCI_K3S_LOCAL_API_PORT"
 [[ "$OCI_K3S_RETAIN_TARGET_SSH" == "true" ||
    "$OCI_K3S_RETAIN_TARGET_SSH" == "false" ]] ||
   oci_die "OCI_K3S_RETAIN_TARGET_SSH must be true or false"
+[[ "$OCI_INSTANCE_COMMAND_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+  oci_die "OCI_INSTANCE_COMMAND_TIMEOUT must be a positive integer"
+(( OCI_INSTANCE_COMMAND_TIMEOUT <= 300 )) ||
+  oci_die "OCI_INSTANCE_COMMAND_TIMEOUT exceeds 300 seconds"
+[[ "$OCI_INSTANCE_COMMAND_POLL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
+  oci_die "OCI_INSTANCE_COMMAND_POLL_ATTEMPTS must be a positive integer"
+(( OCI_INSTANCE_COMMAND_POLL_ATTEMPTS <= 150 )) ||
+  oci_die "OCI_INSTANCE_COMMAND_POLL_ATTEMPTS exceeds 150"
 [[ "$OCI_BASTION_SESSION_TTL" =~ ^[1-9][0-9]*$ ]] ||
   oci_die "OCI_BASTION_SESSION_TTL must be a positive integer"
 (( OCI_BASTION_SESSION_TTL >= 1800 )) ||
@@ -399,6 +521,8 @@ actual_target_ssh_public_key_sha256="$(
 [[ "$actual_target_ssh_public_key_sha256" == \
    "$expected_target_ssh_public_key_sha256" ]] ||
   oci_die "target SSH private key does not match acquisition provenance"
+target_host_public_key="$(attest_target_host_key)"
+write_known_host "$instance_ocid" 22 "$target_host_public_key" "$target_known_hosts"
 
 oci bastion session create-port-forwarding \
   --bastion-id "$bastion_ocid" \
@@ -414,7 +538,10 @@ oci bastion session create-port-forwarding \
 ssh_session_id="$(
   wait_active_session_id "$bastion_ocid" "$ssh_session_name"
 )"
-bastion_endpoint="$(session_endpoint "$ssh_session_id" 22)"
+IFS=$'\t' read -r bastion_endpoint bastion_host_public_key < <(
+  session_connection_metadata "$ssh_session_id" 22
+)
+write_known_host "$bastion_endpoint" 22 "$bastion_host_public_key" "$bastion_known_hosts"
 write_session_state
 
 start_bastion_ssh_tunnel() {
@@ -428,7 +555,7 @@ start_bastion_ssh_tunnel() {
     -o IdentitiesOnly=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
-    -o StrictHostKeyChecking=accept-new \
+    -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$bastion_known_hosts" \
     -p 22 \
     "${ssh_session_id}@${bastion_endpoint}" \
@@ -447,7 +574,7 @@ target_ssh_options=(
   -o IdentitiesOnly=yes
   -o PasswordAuthentication=no
   -o PreferredAuthentications=publickey
-  -o StrictHostKeyChecking=accept-new
+  -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="$target_known_hosts"
 )
 ssh_ready=0
@@ -495,10 +622,9 @@ ssh \
     "s#server: https://[^:]+:6443#server: https://127.0.0.1:${OCI_K3S_LOCAL_API_PORT}#" \
     > "$KUBECONFIG"
 chmod 600 "$KUBECONFIG"
-grep -Fq "server: https://127.0.0.1:${OCI_K3S_LOCAL_API_PORT}" "$KUBECONFIG" ||
-  oci_die "retrieved k3s kubeconfig has an unexpected server"
-KUBECONFIG="$KUBECONFIG" kubectl config view --raw --minify >/dev/null ||
-  oci_die "retrieved k3s kubeconfig is invalid"
+EXPECTED_K3S_SERVER="https://127.0.0.1:${OCI_K3S_LOCAL_API_PORT}" \
+  KUBECONFIG="$KUBECONFIG" \
+  "$SCRIPT_DIR/validate-k3s-kubeconfig.sh"
 
 ssh \
   "${target_ssh_options[@]}" \
