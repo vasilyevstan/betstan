@@ -165,9 +165,14 @@ write_known_host() {
 attest_target_host_key() {
   local command_text content target command_id execution_json lifecycle_state
   local output_file expected_sha actual_sha exit_code output_type attempt
+  local public_key reported_public_key_sha256 actual_public_key_sha256
+  local output_line_count
   command_text='set -eu
-test -f /etc/ssh/ssh_host_ed25519_key.pub
-cat /etc/ssh/ssh_host_ed25519_key.pub'
+key_file=/etc/ssh/ssh_host_ed25519_key.pub
+test -f "$key_file"
+public_key="$(cat "$key_file")"
+public_key_sha256="$(printf "%s\n" "$public_key" | sha256sum | cut -d " " -f 1)"
+printf "%s\n%s\n" "$public_key" "$public_key_sha256"'
   content="$(
     jq -cn --arg text "$command_text" \
       '{source:{sourceType:"TEXT",text:$text},output:{outputType:"TEXT"}}'
@@ -216,15 +221,29 @@ cat /etc/ssh/ssh_host_ed25519_key.pub'
   output_type="$(jq -r '.data.content."output-type" // empty' "$execution_json")"
   exit_code="$(jq -r '.data.content."exit-code" // empty' "$execution_json")"
   expected_sha="$(jq -r '.data.content."text-sha256" // empty' "$execution_json")"
-  [[ "$output_type" == "TEXT" && "$exit_code" == "0" &&
-     "$expected_sha" =~ ^[0-9a-f]{64}$ ]] ||
+  [[ "$output_type" == "TEXT" && "$exit_code" == "0" ]] ||
     oci_die "OCI-attested target host-key response is incomplete"
   output_file="$WORK_DIR/target-host-key-output"
   jq -j '.data.content.text // empty' "$execution_json" >"$output_file"
-  actual_sha="$(oci_sha256 <"$output_file")"
-  [[ "$actual_sha" == "$expected_sha" ]] ||
-    oci_die "OCI-attested target host-key output checksum does not match"
-  normalize_host_public_key "$(cat "$output_file")"
+  if [[ -n "$expected_sha" ]]; then
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] ||
+      oci_die "OCI-attested target host-key response checksum is malformed"
+    actual_sha="$(oci_sha256 <"$output_file")"
+    [[ "$actual_sha" == "$expected_sha" ]] ||
+      oci_die "OCI-attested target host-key output checksum does not match"
+  fi
+
+  output_line_count="$(wc -l <"$output_file" | tr -d ' ')"
+  [[ "$output_line_count" == "2" ]] ||
+    oci_die "OCI-attested target host-key payload is incomplete"
+  public_key="$(sed -n '1p' "$output_file")"
+  reported_public_key_sha256="$(sed -n '2p' "$output_file")"
+  [[ "$reported_public_key_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    oci_die "OCI-attested target host-key payload checksum is malformed"
+  actual_public_key_sha256="$(printf '%s\n' "$public_key" | oci_sha256)"
+  [[ "$actual_public_key_sha256" == "$reported_public_key_sha256" ]] ||
+    oci_die "OCI-attested target host-key payload checksum does not match"
+  normalize_host_public_key "$public_key"
 }
 
 session_connection_metadata() {

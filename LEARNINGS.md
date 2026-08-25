@@ -274,6 +274,10 @@ cd resulting && npm ci && npm run test:ci
   kubeconfig to one loopback server with inline certificates and reject exec,
   auth-provider, token, proxy, and external-file directives before `kubectl`
   contacts the API.
+- Oracle Cloud Agent 1.61 can return successful `TEXT` output with an empty
+  `text-sha256`. Keep host-key attestation fail closed by having the target emit
+  the key plus its SHA-256, requiring the exact two-line payload, and verifying
+  both that checksum and any OCI response checksum that is present.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise
