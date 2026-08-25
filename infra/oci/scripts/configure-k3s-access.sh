@@ -123,7 +123,7 @@ wait_active_session_id() {
 
 normalize_host_public_key() {
   local raw_key="$1"
-  local normalized key_file
+  local normalized
   normalized="$(
     awk '
       NF {
@@ -137,11 +137,11 @@ normalize_host_public_key() {
   )"
   [[ "$(wc -l <<<"$normalized" | tr -d ' ')" == "1" ]] ||
     oci_die "OCI host-key evidence did not contain exactly one supported public key"
-  key_file="$(mktemp "$WORK_DIR/.host-key.XXXXXX")"
-  printf '%s\n' "$normalized" >"$key_file"
-  ssh-keygen -l -f "$key_file" >/dev/null ||
+  [[ -n "$normalized" ]] ||
+    oci_die "OCI host-key evidence did not contain a supported public key"
+  printf '%s\n' "$normalized" |
+    ssh-keygen -l -f - >/dev/null ||
     oci_die "OCI host-key evidence is not a valid SSH public key"
-  rm -f -- "$key_file"
   printf '%s\n' "$normalized"
 }
 

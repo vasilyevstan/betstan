@@ -282,6 +282,10 @@ cd resulting && npm ci && npm run test:ci
   agent before executing. Poll for the existing bounded five-minute window and
   distinguish acceptance latency from terminal command failure; do not retry a
   production workflow merely because a shorter client poll expired.
+- Validate normalized OCI host keys through `ssh-keygen` standard input, matching
+  the retained SSH public-key validation path. A runner-specific temporary-file
+  parse can reject a key whose checksummed bytes match independently attested
+  evidence.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise

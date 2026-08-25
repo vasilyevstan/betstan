@@ -661,6 +661,7 @@ for literal in \
   'public_key_sha256="$(printf "%s\n" "$public_key" | sha256sum' \
   'if [[ -n "$expected_sha" ]]; then' \
   '"$actual_public_key_sha256" == "$reported_public_key_sha256"' \
+  'ssh-keygen -l -f -' \
   'write_known_host "$instance_ocid" 22' \
   'StrictHostKeyChecking=yes' \
   'validate-k3s-kubeconfig.sh'; do
