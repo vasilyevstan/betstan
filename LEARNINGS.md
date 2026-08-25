@@ -278,6 +278,10 @@ cd resulting && npm ci && npm run test:ci
   `text-sha256`. Keep host-key attestation fail closed by having the target emit
   the key plus its SHA-256, requiring the exact two-line payload, and verifying
   both that checksum and any OCI response checksum that is present.
+- OCI Run Command can remain `ACCEPTED` for more than three minutes on a healthy
+  agent before executing. Poll for the existing bounded five-minute window and
+  distinguish acceptance latency from terminal command failure; do not retry a
+  production workflow merely because a shorter client poll expired.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise
