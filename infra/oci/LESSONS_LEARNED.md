@@ -181,6 +181,10 @@ conversation summaries are not authority.
   deletion IDs. Checking only that a file exists lets artifact tampering
   survive into terminal evidence even when deletion selection uses fresh
   provider state.
+- A pull request that changes the trusted quality workflow cannot authenticate
+  its own checks. Keep `production-build.yml` byte-identical to the default
+  branch and add GHCR coverage through an existing script it already invokes;
+  use the separate OCI validation workflow for the complete matrix.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.

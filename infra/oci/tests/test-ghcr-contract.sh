@@ -727,16 +727,19 @@ grep -Fq "inputs.phase == 'prune'" \
 grep -Fq 'secrets.GHCR_PACKAGE_ADMIN_TOKEN || github.token' \
   "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" ||
   fail "account-scoped package administration lacks the bounded token fallback"
+deployment_safety_ci="$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh"
 for literal in \
-  'bash -n infra/oci/scripts/recover-k3s-cached-images.sh' \
-  'bash -n infra/oci/scripts/transition-k3s-cached-images.sh' \
-  'bash -n infra/oci/scripts/verify-public-registry-credentials.sh' \
-  '.github/workflows/ghcr-package-management.yml' \
-  '.github/workflows/oci-ghcr-cache-recovery.yml' \
-  './infra/oci/tests/test-ghcr-contract.sh'; do
-  grep -Fq -- "$literal" "$ROOT_DIR/.github/workflows/production-build.yml" ||
-    fail "master-push production CI omits GHCR migration validation: $literal"
+  'GHCR_CONTRACT_TEST="$ROOT_DIR/infra/oci/tests/test-ghcr-contract.sh"' \
+  '"$GHCR_CONTRACT_TEST"'; do
+  grep -Fq -- "$literal" "$deployment_safety_ci" ||
+    fail "trusted deployment-safety entrypoint omits GHCR validation: $literal"
 done
+grep -Fq './infra/azure/agents/test-deployment-safety-ci-stan.sh' \
+  "$ROOT_DIR/.github/workflows/production-build.yml" ||
+  fail "trusted production quality workflow omits its deployment-safety entrypoint"
+grep -Fq './infra/oci/tests/run-contracts.sh' \
+  "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
+  fail "OCI pull-request validation omits the complete contract entrypoint"
 for literal in \
   'transition_plan_state_sha256' \
   'TRANSITION_PHASE must be plan, rebind, or retire' \

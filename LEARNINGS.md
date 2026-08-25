@@ -252,6 +252,11 @@ cd resulting && npm ci && npm run test:ci
   retention, remove legacy OCIR registry phases from dispatch choices and
   hard-disable their retained audit-only job rather than leaving two
   production-capable cleanup paths.
+- Keep the trusted `production-build.yml` byte-identical to the default branch
+  when adding release validation. Route new GHCR contracts through an existing
+  checked-in test entrypoint that workflow already invokes, while
+  `oci-validate` exercises the complete OCI matrix; do not weaken the
+  branch-policy blob check or edit the trusted workflow only to add test lines.
 - A failed `kubectl get` is not evidence that an optional resource is absent.
   Use `--ignore-not-found`, accept only empty successful output as NotFound,
   and block mutation on API, timeout, or authorization errors.

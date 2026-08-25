@@ -127,22 +127,12 @@ jobs:
           bash -n infra/azure/agents/test-production-rollback-stan.sh
           bash -n infra/oci/agents/deploy-validation-loop-stan.sh
           bash -n infra/oci/agents/live-betting-readiness-stan.sh
-          bash -n infra/oci/scripts/application-registry.sh
-          bash -n infra/oci/scripts/build-images.sh
-          bash -n infra/oci/scripts/configure-k3s-access.sh
           bash -n infra/oci/scripts/deploy.sh
-          bash -n infra/oci/scripts/manage-ghcr-package.sh
-          bash -n infra/oci/scripts/recover-k3s-cached-images.sh
-          bash -n infra/oci/scripts/transition-k3s-cached-images.sh
-          bash -n infra/oci/scripts/verify-public-registry-credentials.sh
-          bash -n infra/oci/scripts/verify-images.sh
           bash -n infra/oci/scripts/live-data-maintenance-stan.sh
           bash -n infra/oci/scripts/live-betting-control-stan.sh
           bash -n infra/oci/scripts/revalidate-live-activation-stan.sh
           bash -n infra/oci/scripts/live-betting-data-rollout-stan.sh
           bash -n infra/oci/scripts/shared-mongo-operation-lock-stan.sh
-          bash -n infra/oci/scripts/validate-k3s-kubeconfig.sh
-          bash -n infra/oci/scripts/validate-rollback-baseline-stan.sh
           bash -n infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
           bash -n infra/oci/tests/test-deploy-validation-loop-stan.sh
           bash -n infra/oci/tests/test-live-data-maintenance-stan.sh
@@ -152,15 +142,10 @@ jobs:
           bash -n infra/oci/tests/test-live-betting-readiness-stan.sh
           bash -n infra/oci/tests/rollback-live-readiness-contract.sh
           bash -n infra/oci/tests/rollback-contract.sh
-          bash -n infra/oci/tests/test-ghcr-contract.sh
           ruby -ryaml -e '
             %w[
-              .github/workflows/ghcr-package-management.yml
-              .github/workflows/oci-ghcr-cache-recovery.yml
-              .github/workflows/oci-infrastructure.yml
               .github/workflows/production-build.yml
               .github/workflows/production-deploy.yml
-              .github/workflows/oci-production-build.yml
               .github/workflows/oci-live-data-rollout.yml
               .github/workflows/oci-live-betting-activate.yml
               .github/workflows/oci-live-betting-disable.yml
@@ -181,7 +166,6 @@ jobs:
           ./infra/oci/tests/test-live-betting-readiness-stan.sh
           ./infra/oci/tests/rollback-live-readiness-contract.sh
           ./infra/oci/tests/rollback-contract.sh
-          ./infra/oci/tests/test-ghcr-contract.sh
 
   auth-container-smoke:
     runs-on: ubuntu-latest

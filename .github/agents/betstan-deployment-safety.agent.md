@@ -145,6 +145,10 @@ inactive. Fail closed when either query is incomplete or fails.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
+- Do not edit trusted `production-build.yml` merely to add migration syntax or
+  contract targets. Extend an existing checked-in test entrypoint that the
+  byte-identical workflow already invokes, and keep full OCI coverage in
+  `oci-validate`.
 - Keep expression contexts actionlint-valid: status functions belong in
   `if`; final shell provenance receives validated `${{ job.status }}` through
   `env`.
