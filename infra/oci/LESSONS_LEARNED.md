@@ -75,6 +75,10 @@ conversation summaries are not authority.
   kubeconfig as untrusted input: reject executable/provider, token, proxy, and
   external-file directives, then reconstruct one loopback-only configuration
   from inline certificates before the first Kubernetes API request.
+- Oracle Cloud Agent 1.61 can complete a `TEXT` Run Command with valid output
+  while leaving `text-sha256` empty. Make the bounded command emit the host key
+  and its own SHA-256, validate the exact payload shape and checksum, and still
+  require OCI's response checksum to match whenever OCI supplies one.
 - Capture and validate rollback evidence before acquiring a database lock or
   changing a workload. An ordinary baseline is valid only when all nine live
   references and its exact deploy provenance identify public GHCR digests;
