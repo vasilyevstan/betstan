@@ -656,11 +656,16 @@ grep -Fq '(( OCI_INSTANCE_COMMAND_POLL_ATTEMPTS <= 150 ))' \
   fail "k3s finalization weakens the attested target host-key policy"
 for literal in \
   '.data."bastion-public-host-key-info"' \
+  '$key_info."public-host-key"' \
   'oci instance-agent command create' \
   'oci instance-agent command-execution get' \
-  'public_key_sha256="$(printf "%s\n" "$public_key" | sha256sum' \
+  'ssh-keyscan -T 10 -t ed25519 "$bastion_endpoint"' \
+  'target_public_key_sha256="$(printf "%s\n" "$target_public_key" | sha256sum' \
+  'bastion_public_key_sha256="$(printf "%s\n" "$bastion_public_key" | sha256sum' \
+  'printf "%s\n%s\n%s\n%s\n"' \
   'if [[ -n "$expected_sha" ]]; then' \
-  '"$actual_public_key_sha256" == "$reported_public_key_sha256"' \
+  '"$actual_target_public_key_sha256" == "$reported_target_public_key_sha256"' \
+  '"$actual_bastion_public_key_sha256" == "$reported_bastion_public_key_sha256"' \
   'ssh-keygen -l -f -' \
   'write_known_host "$instance_ocid" 22' \
   'StrictHostKeyChecking=yes' \

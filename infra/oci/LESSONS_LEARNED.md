@@ -69,12 +69,15 @@ conversation summaries are not authority.
   before retiring `ocir-pull` or deleting the exact empty OCIR repository.
 - Privileged build helpers are part of the release supply chain. Pin both the
   QEMU setup action and its `tonistiigi/binfmt` image by immutable digest.
-- Never establish production SSH trust with TOFU. Bind the Bastion host key to
-  authenticated OCI session metadata, retrieve the target host key through
-  OCI Instance Agent Run Command, and use strict host checking. Treat a remote
-  kubeconfig as untrusted input: reject executable/provider, token, proxy, and
-  external-file directives, then reconstruct one loopback-only configuration
-  from inline certificates before the first Kubernetes API request.
+- Never establish production SSH trust with TOFU. Retrieve the target key
+  through OCI Instance Agent Run Command. Have that authenticated channel also
+  observe the regional Bastion key because an ACTIVE port-forwarding session
+  may return null `bastion-public-host-key-info`; prefer authenticated session
+  metadata whenever OCI supplies it. Verify node-generated checksums and use
+  strict host checking. Treat a remote kubeconfig as untrusted input: reject
+  executable/provider, token, proxy, and external-file directives, then
+  reconstruct one loopback-only configuration from inline certificates before
+  the first Kubernetes API request.
 - Oracle Cloud Agent 1.61 can complete a `TEXT` Run Command with valid output
   while leaving `text-sha256` empty. Make the bounded command emit the host key
   and its own SHA-256, validate the exact payload shape and checksum, and still
