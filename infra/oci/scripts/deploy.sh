@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-${2:-}}"
@@ -22,24 +24,34 @@ oci_require_command jq
 oci_require_command ruby
 oci_require_cli_version
 oci_require_vars \
-  OCI_JWT_KEY OCI_REGISTRY_HOST OCI_REGISTRY_USERNAME OCI_REGISTRY_AUTH_TOKEN \
-  OCI_K8S_NAMESPACE OCI_CERT_EMAIL OCI_COMPARTMENT_OCID
+  OCI_JWT_KEY OCI_K8S_NAMESPACE OCI_CERT_EMAIL OCI_COMPARTMENT_OCID
+application_registry_require_ghcr
 
 unset source_sha runtime_mode infrastructure_finalized
 unset cluster_ocid cluster_fingerprint instance_ocid instance_fingerprint
 unset compartment_ocid ingress_ipv4 public_host canonical_host redirect_host diagnostic_host
 unset lb_ocid k3s_node_name
+unset application_registry_provider application_registry_host application_registry_repository
+unset application_registry_public_anonymous ocir_application_repository_absent
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
 [[ "${source_sha:-}" == "$SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
 oci_require_vars \
   runtime_mode infrastructure_finalized compartment_ocid ingress_ipv4 \
-  public_host canonical_host redirect_host diagnostic_host
+  public_host canonical_host redirect_host diagnostic_host \
+  application_registry_provider application_registry_host application_registry_repository \
+  application_registry_public_anonymous ocir_application_repository_absent
 [[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
   oci_die "infrastructure provenance runtime mismatch"
 [[ "$infrastructure_finalized" == "true" ]] ||
   oci_die "infrastructure provenance is not finalized"
+[[ "$application_registry_provider" == "ghcr" &&
+   "$application_registry_host" == "ghcr.io" &&
+   "$application_registry_repository" == "ghcr.io/vasilyevstan/betstan-images" &&
+   "$application_registry_public_anonymous" == "true" &&
+   "$ocir_application_repository_absent" == "true" ]] ||
+  oci_die "infrastructure provenance does not authorize public GHCR deployment"
 [[ "$node_shape" == "VM.Standard.A1.Flex" && "$node_ocpus" == "2" &&
    "$node_memory_gb" == "12" && "$mongo_volume_gb" == "50" &&
    "$lb_min_mbps" == "10" && "$lb_max_mbps" == "10" &&
@@ -156,32 +168,15 @@ mongo_upgrade_state_file="$OUTPUT_DIR/mongo-upgrade.env"
 
 apply_documents "Namespace:^${OCI_K8S_NAMESPACE}$"
 
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+  "$SCRIPT_DIR/verify-public-registry-credentials.sh"
+
 printf '%s' "$OCI_JWT_KEY" |
   kubectl create secret generic jwt-secret \
     --namespace "$OCI_K8S_NAMESPACE" \
     --from-file=JWT_KEY=/dev/stdin \
     --dry-run=client -o yaml |
   kubectl apply -f - >/dev/null
-
-python3 - "$OCI_REGISTRY_HOST" "$OCI_REGISTRY_USERNAME" <<'PY' |
-import base64
-import json
-import os
-import sys
-
-host, username = sys.argv[1:3]
-password = os.environ["OCI_REGISTRY_AUTH_TOKEN"]
-auth = base64.b64encode(f"{username}:{password}".encode()).decode()
-print(json.dumps({"auths": {host: {"username": username, "password": password, "auth": auth}}}))
-PY
-  kubectl create secret generic ocir-pull \
-    --namespace "$OCI_K8S_NAMESPACE" \
-    --type=kubernetes.io/dockerconfigjson \
-    --from-file=.dockerconfigjson=/dev/stdin \
-    --dry-run=client -o yaml |
-  kubectl apply -f - >/dev/null
-kubectl patch serviceaccount default -n "$OCI_K8S_NAMESPACE" --type merge \
-  -p '{"imagePullSecrets":[{"name":"ocir-pull"}]}' >/dev/null
 
 apply_documents 'PersistentVolume:^gaming-auth-mongo-data$'
 apply_documents 'PersistentVolumeClaim:^gaming-auth-mongo-data$'
@@ -348,8 +343,13 @@ public_data_services="$(
   printf 'canonical_host=%s\n' "$canonical_host"
   printf 'redirect_host=%s\n' "$redirect_host"
   printf 'diagnostic_host=%s\n' "$diagnostic_host"
+  printf 'deployment_workflow=oci-production-deploy\n'
   printf 'deployment_run_id=%s\n' "${GITHUB_RUN_ID:-local}"
   printf 'deployment_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT:-1}"
+  printf 'registry_provider=%s\n' "$APPLICATION_REGISTRY_PROVIDER"
+  printf 'registry_host=%s\n' "$APPLICATION_REGISTRY_HOST"
+  printf 'registry_repository=%s\n' "$(application_registry_repository)"
+  printf 'registry_public_anonymous=%s\n' "true"
 } > "$OUTPUT_DIR/provenance.txt"
 rm -f "$RENDERED_FILE"
 

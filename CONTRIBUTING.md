@@ -19,6 +19,14 @@ Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They ma
 
 Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to application build/deploy/activation, exact-title capacity and registry/finalize phases, and the bounded `oci-live-data-rollout` chain. Broad migration, recovery, rollback, stale-master, rerun, unlabelled, and competing runs remain human-gated.
 
+Public GHCR package bootstrap/validation/prune, partial-build repair, and
+cached-image recovery are also production-capable and remain in the
+exclusivity inventory, but are always human-gated. A package sentinel does not
+replace the one-time Package settings visibility change or the required
+anonymous-pull proof. Build repair must cite the exact failed first-attempt
+build and its successful first-attempt `production-build`; it rebuilds and
+digest-compares existing tags instead of trusting or overwriting them.
+
 Schema-dependent OCI releases use the reviewer-gated `oci-live-data-rollout` workflow before deployment. Its exact-SHA phases are chained `dry-run` → `apply-backfills` → `apply-slip-index`; `oci-production-deploy` requires the final hash-bound schema evidence and pre-mutation rollback baseline from the same build and infrastructure runs. Mutating phases fence public writes and quiesce legacy data writers. A successful final phase deliberately retains that maintenance state and the shared-Mongo operation lock until the exact deployment passes protected validation, so dispatch the bound deployment immediately; an incomplete deployment re-enters the same fail-closed state for a safe retry.
 
 ## Production safety

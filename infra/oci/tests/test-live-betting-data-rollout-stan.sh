@@ -53,8 +53,19 @@ fi
 
 if [[ "${1:-}" == "get" ]]; then
   case "${2:-}" in
-    namespace|service|secret)
+    namespace|service)
       printf '{}\n'
+      exit 0
+      ;;
+    secret)
+      if [[ "$scenario" == "secret-api-error" ]]; then
+        echo "forbidden" >&2
+        exit 9
+      fi
+      exit 0
+      ;;
+    serviceaccount)
+      printf '{"imagePullSecrets":[]}\n'
       exit 0
       ;;
     job)
@@ -280,6 +291,7 @@ grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
 grep -Fxq 'runtime_held_for_deploy=true' "$final_output/schema.env"
 grep -Fxq 'operation_lock_handoff=true' "$final_output/schema.env"
+grep -Fxq 'baseline_recovery_source_sha=none' "$final_output/schema.env"
 EVIDENCE_DIR="$final_output" \
 EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
 EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
@@ -302,6 +314,18 @@ if EVIDENCE_DIR="$final_output" \
   fail "tampered schema evidence was accepted"
 fi
 mv "$work_dir/schema.env" "$final_output/schema.env"
+
+if EVIDENCE_DIR="$final_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+  EXPECTED_BASELINE_RECOVERY_RUN_ID=799 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "data evidence accepted a switched recovery authority"
+fi
 
 duplicates_output="$work_dir/duplicates"
 if run_phase dry-run duplicates 4004 "$duplicates_output" >/dev/null 2>&1; then
@@ -339,6 +363,17 @@ if grep -Fq 'secret registry detail' "$image_pull_output"; then
   fail "image pull diagnostics leaked the provider message"
 fi
 
+secret_error_output="$work_dir/secret-api-error.out"
+if run_phase dry-run secret-api-error 4006 "$work_dir/secret-api-error" \
+    >"$secret_error_output" 2>&1; then
+  fail "Kubernetes secret API failure was treated as secret absence"
+fi
+grep -Fq 'could not determine whether the legacy OCIR pull secret exists' \
+  "$secret_error_output" ||
+  fail "Kubernetes secret API failure did not preserve the fail-closed reason"
+[[ ! -d "$stub_state/jobs" || -z "$(find "$stub_state/jobs" -type f -print -quit)" ]] ||
+  fail "secret API failure reached live data job creation"
+
 for literal in \
   'name: oci-migration' \
   'DRY RUN LIVE DATA EXACT SHA' \
@@ -352,6 +387,15 @@ for literal in \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
   'baseline-capture-stan.sh' \
+  'Capture and validate pre-mutation rollback baseline' \
+  "steps.operation_lock.outcome == 'success'" \
+  'baseline_recovery_run_id:' \
+  'oci-ghcr-cache-recovery.yml' \
+  'ghcr-cache-recovery-' \
+  'BASELINE_RECOVERY_DIR=artifacts/recovery' \
+  'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
+  'Bind historical recovery source through its exact artifact' \
+  'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
   'SSE_REQUIREMENT: deployed-source' \
   'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' \
   'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
@@ -365,8 +409,14 @@ done
   fail "data workflow does not source-gate both baseline SSE checks"
 for literal in \
   'data_run_id:' \
+  'baseline_recovery_run_id:' \
+  'baseline_recovery_source_sha:' \
+  'oci-ghcr-cache-recovery.yml' \
+  'ghcr-cache-recovery-${BASELINE_RECOVERY_SOURCE_SHA}-${BASELINE_RECOVERY_RUN_ID}-1' \
   'oci-live-data-rollout.yml' \
   'EXPECTED_PHASE=apply-slip-index' \
+  'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
+  'EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA"' \
   'artifacts/data/schema.env' \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh verify-held' \
@@ -401,8 +451,8 @@ def require_order(text: str, markers: list[str], label: str) -> None:
 require_order(
     data,
     [
+        "Capture and validate pre-mutation rollback baseline",
         "Acquire database operation lock",
-        "Capture pre-mutation rollback baseline",
         "Fence writes and quiesce legacy data writers",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",

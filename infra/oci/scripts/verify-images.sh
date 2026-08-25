@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 PROVENANCE_DIR="${PROVENANCE_DIR:-${1:-}}"
 SOURCE_SHA="${SOURCE_SHA:-${2:-}}"
@@ -12,6 +14,11 @@ VERIFY_REMOTE="${VERIFY_REMOTE:-1}"
 BOOT_IMAGES="${BOOT_IMAGES:-0}"
 EXPECTED_BUILD_RUN_ID="${EXPECTED_BUILD_RUN_ID:-}"
 EXPECTED_BUILD_RUN_ATTEMPT="${EXPECTED_BUILD_RUN_ATTEMPT:-}"
+EXPECTED_UPSTREAM_RUN_ID="${EXPECTED_UPSTREAM_RUN_ID:-}"
+PROVENANCE_MODE="${PROVENANCE_MODE:-build}"
+EXPECTED_RECOVERY_RUN_ID="${EXPECTED_RECOVERY_RUN_ID:-}"
+EXPECTED_RECOVERY_RUN_ATTEMPT="${EXPECTED_RECOVERY_RUN_ATTEMPT:-}"
+ANONYMOUS_PULL="${ANONYMOUS_PULL:-0}"
 
 [[ -d "$PROVENANCE_DIR" ]] || oci_die "provenance directory not found"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
@@ -19,34 +26,156 @@ oci_require_command jq
 if [[ "$VERIFY_REMOTE" == "1" || "$BOOT_IMAGES" == "1" ]]; then
   oci_require_command docker
 fi
+[[ "$ANONYMOUS_PULL" == "0" || "$ANONYMOUS_PULL" == "1" ]] ||
+  oci_die "ANONYMOUS_PULL must be 0 or 1"
+[[ "$PROVENANCE_MODE" == "build" || "$PROVENANCE_MODE" == "recovery" ]] ||
+  oci_die "PROVENANCE_MODE must be build or recovery"
+if [[ "$PROVENANCE_MODE" == "recovery" ]]; then
+  [[ "$EXPECTED_RECOVERY_RUN_ID" =~ ^([1-9][0-9]*|local)$ &&
+     "$EXPECTED_RECOVERY_RUN_ATTEMPT" == "1" ]] ||
+    oci_die "recovery provenance requires an explicit first-attempt recovery run"
+else
+  [[ -z "$EXPECTED_RECOVERY_RUN_ID" && -z "$EXPECTED_RECOVERY_RUN_ATTEMPT" ]] ||
+    oci_die "normal build provenance cannot carry recovery expectations"
+fi
+if [[ "$ANONYMOUS_PULL" == "1" ]]; then
+  [[ "$VERIFY_REMOTE" == "1" ]] ||
+    oci_die "anonymous pull verification requires remote digest verification"
+  anonymous_docker_config="${ANONYMOUS_DOCKER_CONFIG:-$PROVENANCE_DIR/.anonymous-docker-config}"
+  [[ ! -e "$anonymous_docker_config" ]] ||
+    oci_die "anonymous Docker configuration path already exists"
+  mkdir -p "$anonymous_docker_config"
+  chmod 700 "$anonymous_docker_config"
+  export DOCKER_CONFIG="$anonymous_docker_config"
+  trap cleanup_anonymous_docker_config EXIT
+fi
+
+cleanup_anonymous_docker_config() {
+  if [[ -n "${anonymous_docker_config:-}" ]]; then
+    rm -rf -- "$anonymous_docker_config"
+  fi
+}
 
 expected=(auth bet backoffice client event gamemaster moderation resulting slip)
 seen_services=" "
 rows=()
+application_registry_require_ghcr
 
-for file in "$PROVENANCE_DIR"/*.env; do
-  [[ -f "$file" ]] || continue
-  unset service repository source_sha tag digest platform_digest image_ref platform build_run_id build_run_attempt
-  # shellcheck disable=SC1090
-  source "$file"
-  [[ " ${expected[*]} " == *" ${service:-} "* ]] || oci_die "unexpected service provenance"
+provenance_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    $1 == key {
+      if (found++) exit 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (found != 1) exit 1
+      print value
+    }
+  ' "$file"
+}
+
+validate_provenance_shape() {
+  local file="$1"
+  awk -F= '
+    /^[A-Za-z_][A-Za-z0-9_]*=[^[:cntrl:]]*$/ {
+      if (seen[$1]++) exit 1
+      next
+    }
+    { exit 1 }
+  ' "$file"
+}
+
+for expected_service in "${expected[@]}"; do
+  file="$PROVENANCE_DIR/${expected_service}.env"
+  [[ -f "$file" && ! -L "$file" ]] ||
+    oci_die "missing regular application image provenance for $expected_service"
+  validate_provenance_shape "$file" ||
+    oci_die "malformed application image provenance"
+  if [[ "$PROVENANCE_MODE" == "build" ]]; then
+    ! grep -Eq '^recovery_(workflow|run_id|run_attempt|origin|origin_repository|origin_manifest_digest|origin_platform_digest)=' "$file" ||
+      oci_die "normal build provenance cannot be satisfied by recovery metadata"
+  fi
+  schema="$(provenance_value "$file" schema)" ||
+    oci_die "application image provenance is missing schema"
+  registry_provider="$(provenance_value "$file" registry_provider)" ||
+    oci_die "application image provenance is missing provider"
+  registry_host="$(provenance_value "$file" registry_host)" ||
+    oci_die "application image provenance is missing host"
+  registry_tag_prefix="$(provenance_value "$file" registry_tag_prefix)" ||
+    oci_die "application image provenance is missing tag prefix"
+  registry_tag_schema="$(provenance_value "$file" registry_tag_schema)" ||
+    oci_die "application image provenance is missing tag schema"
+  service="$(provenance_value "$file" service)" ||
+    oci_die "application image provenance is missing service"
+  repository="$(provenance_value "$file" repository)" ||
+    oci_die "application image provenance is missing repository"
+  source_sha="$(provenance_value "$file" source_sha)" ||
+    oci_die "application image provenance is missing source SHA"
+  tag="$(provenance_value "$file" tag)" ||
+    oci_die "application image provenance is missing tag"
+  digest="$(provenance_value "$file" digest)" ||
+    oci_die "application image provenance is missing digest"
+  platform_digest="$(provenance_value "$file" platform_digest)" ||
+    oci_die "application image provenance is missing platform digest"
+  image_ref="$(provenance_value "$file" image_ref)" ||
+    oci_die "application image provenance is missing image reference"
+  platform="$(provenance_value "$file" platform)" ||
+    oci_die "application image provenance is missing platform"
+  build_run_id="$(provenance_value "$file" build_run_id)" ||
+    oci_die "application image provenance is missing build run"
+  build_run_attempt="$(provenance_value "$file" build_run_attempt)" ||
+    oci_die "application image provenance is missing build attempt"
+  build_workflow="$(provenance_value "$file" build_workflow)" ||
+    oci_die "application image provenance is missing workflow identity"
+  upstream_workflow="$(provenance_value "$file" upstream_workflow)" ||
+    oci_die "application image provenance is missing upstream workflow"
+  upstream_run_id="$(provenance_value "$file" upstream_run_id)" ||
+    oci_die "application image provenance is missing upstream run"
+  upstream_run_attempt="$(provenance_value "$file" upstream_run_attempt)" ||
+    oci_die "application image provenance is missing upstream attempt"
+  if [[ "$PROVENANCE_MODE" == "recovery" ]]; then
+    recovery_workflow="$(provenance_value "$file" recovery_workflow)" ||
+      oci_die "recovery provenance is missing recovery workflow"
+    recovery_run_id="$(provenance_value "$file" recovery_run_id)" ||
+      oci_die "recovery provenance is missing recovery run ID"
+    recovery_run_attempt="$(provenance_value "$file" recovery_run_attempt)" ||
+      oci_die "recovery provenance is missing recovery attempt"
+    recovery_origin="$(provenance_value "$file" recovery_origin)" ||
+      oci_die "recovery provenance is missing origin"
+    recovery_origin_repository="$(provenance_value "$file" recovery_origin_repository)" ||
+      oci_die "recovery provenance is missing origin repository"
+    recovery_origin_manifest_digest="$(provenance_value "$file" recovery_origin_manifest_digest)" ||
+      oci_die "recovery provenance is missing origin manifest digest"
+    recovery_origin_platform_digest="$(provenance_value "$file" recovery_origin_platform_digest)" ||
+      oci_die "recovery provenance is missing origin platform digest"
+  fi
+  [[ " ${expected[*]} " == *" $service "* ]] || oci_die "unexpected service provenance"
   [[ "$seen_services" != *" $service "* ]] || oci_die "duplicate provenance for $service"
   seen_services+="$service "
+  [[ "$schema" == "betstan.application-image-provenance.v1" ]] ||
+    oci_die "image provenance schema is not current"
+  [[ "$registry_provider" == "$APPLICATION_REGISTRY_PROVIDER" &&
+     "$registry_host" == "$APPLICATION_REGISTRY_HOST" &&
+     "$registry_tag_prefix" == "$APPLICATION_REGISTRY_TAG_PREFIX" &&
+     "$registry_tag_schema" == "$APPLICATION_REGISTRY_TAG_SCHEMA" ]] ||
+    oci_die "image provenance registry identity is mixed or incomplete"
   [[ "$source_sha" == "$SOURCE_SHA" ]] || oci_die "source SHA mismatch for $service"
   [[ "$platform" == "linux/arm64" ]] || oci_die "platform mismatch for $service"
-  [[ "$tag" == "${repository}:oci-${service}-${SOURCE_SHA}" ]] ||
-    oci_die "non-exact OCI tag for $service"
+  application_registry_validate_repository "$repository"
+  application_registry_validate_tag "$service" "$SOURCE_SHA" "$tag"
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || oci_die "invalid digest for $service"
   [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     oci_die "invalid linux/arm64 platform digest for $service"
   [[ "$image_ref" == "${repository}@${digest}" ]] || oci_die "image reference mismatch for $service"
-  [[ "$repository" != *docker.io/stanvasilyev* ]] || oci_die "OCI provenance points at Docker Hub"
-  if [[ -n "${OCI_REGISTRY_HOST:-}" || -n "${OCI_REGISTRY_NAMESPACE:-}" || -n "${OCI_IMAGE_PREFIX:-}" ]]; then
-    oci_require_vars OCI_REGISTRY_HOST OCI_REGISTRY_NAMESPACE OCI_IMAGE_PREFIX
-    expected_repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"
-    [[ "$repository" == "$expected_repository" ]] ||
-      oci_die "image repository differs from the approved OCIR path for $service"
-  fi
+  [[ "$build_workflow" == "oci-production-build" &&
+     "$build_run_attempt" == "1" &&
+     "$upstream_workflow" == "production-build" &&
+     "$upstream_run_attempt" == "1" ]] ||
+    oci_die "image provenance has untrusted build lineage"
+  [[ "$upstream_run_id" =~ ^([1-9][0-9]*|local)$ ]] ||
+    oci_die "image provenance upstream run is invalid"
   if [[ -n "$EXPECTED_BUILD_RUN_ID" ]]; then
     [[ "$build_run_id" == "$EXPECTED_BUILD_RUN_ID" ]] ||
       oci_die "build run ID mismatch for $service"
@@ -54,6 +183,20 @@ for file in "$PROVENANCE_DIR"/*.env; do
   if [[ -n "$EXPECTED_BUILD_RUN_ATTEMPT" ]]; then
     [[ "$build_run_attempt" == "$EXPECTED_BUILD_RUN_ATTEMPT" ]] ||
       oci_die "build run attempt mismatch for $service"
+  fi
+  if [[ -n "$EXPECTED_UPSTREAM_RUN_ID" ]]; then
+    [[ "$upstream_run_id" == "$EXPECTED_UPSTREAM_RUN_ID" ]] ||
+      oci_die "upstream production-build run mismatch for $service"
+  fi
+  if [[ "$PROVENANCE_MODE" == "recovery" ]]; then
+    [[ "$recovery_workflow" == "oci-ghcr-cache-recovery" &&
+       "$recovery_run_id" == "$EXPECTED_RECOVERY_RUN_ID" &&
+       "$recovery_run_attempt" == "$EXPECTED_RECOVERY_RUN_ATTEMPT" &&
+       "$recovery_origin" == "containerd-cache" &&
+       "$recovery_origin_repository" =~ ^[a-z0-9.-]+\.ocir\.io/[a-z0-9._/-]+$ &&
+       "$recovery_origin_manifest_digest" =~ ^sha256:[0-9a-f]{64}$ &&
+       "$recovery_origin_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+      oci_die "recovery provenance does not match the exact trusted recovery"
   fi
 
   if [[ "$VERIFY_REMOTE" == "1" ]]; then
@@ -106,6 +249,7 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
       [[ -n "$name" ]] && docker rm -f "$name" >/dev/null 2>&1 || true
     done
     docker network rm "$network" >/dev/null 2>&1 || true
+    cleanup_anonymous_docker_config
   }
   trap cleanup EXIT
   started=()
@@ -169,4 +313,5 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
   done < "$OUTPUT_FILE"
 fi
 
-oci_log "oci_image_verification=PASS services=${#expected[@]} platform=linux/arm64"
+cleanup_anonymous_docker_config
+oci_log "application_image_verification=PASS provider=ghcr services=${#expected[@]} platform=linux/arm64 anonymous_pull=$ANONYMOUS_PULL provenance_mode=$PROVENANCE_MODE"

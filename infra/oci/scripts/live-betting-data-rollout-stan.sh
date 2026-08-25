@@ -17,6 +17,8 @@ JOB_TIMEOUT_SECONDS="${JOB_TIMEOUT_SECONDS:-1800}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
 BASELINE_SHA256="${BASELINE_SHA256:-}"
+BASELINE_RECOVERY_RUN_ID="${BASELINE_RECOVERY_RUN_ID:-0}"
+BASELINE_RECOVERY_SOURCE_SHA="${BASELINE_RECOVERY_SOURCE_SHA:-none}"
 MAINTENANCE_FENCE_ENFORCED="${MAINTENANCE_FENCE_ENFORCED:-false}"
 WRITERS_QUIESCED="${WRITERS_QUIESCED:-false}"
 RUNTIME_HELD_FOR_DEPLOY="${RUNTIME_HELD_FOR_DEPLOY:-false}"
@@ -83,6 +85,16 @@ esac
   fail "OUTPUT_DIR is unsafe"
 [[ "$BASELINE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   fail "BASELINE_SHA256 must bind the protected pre-mutation baseline"
+[[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
+   "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+  fail "BASELINE_RECOVERY_RUN_ID must be 0 or an exact recovery run ID"
+if [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
+  [[ "$BASELINE_RECOVERY_SOURCE_SHA" == "none" ]] ||
+    fail "normal data rollout cannot carry recovery source authority"
+else
+  [[ "$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "recovery data rollout must bind the historical recovery source SHA"
+fi
 for boolean_name in \
   MAINTENANCE_FENCE_ENFORCED WRITERS_QUIESCED RUNTIME_HELD_FOR_DEPLOY \
   OPERATION_LOCK_ENFORCED OPERATION_LOCK_HANDOFF; do
@@ -121,8 +133,10 @@ mkdir -p "$OUTPUT_DIR/reports"
 kubectl get namespace "$OCI_K8S_NAMESPACE" >/dev/null
 kubectl get service gaming-shared-mongo-srv \
   -n "$OCI_K8S_NAMESPACE" >/dev/null
-kubectl get secret ocir-pull \
-  -n "$OCI_K8S_NAMESPACE" >/dev/null
+if ! OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+    "$SCRIPT_DIR/verify-public-registry-credentials.sh"; then
+  fail "public GHCR registry credential validation failed"
+fi
 
 image_for_service() {
   local service="$1"
@@ -191,8 +205,7 @@ spec:
       restartPolicy: Never
       nodeSelector:
         kubernetes.io/arch: arm64
-      imagePullSecrets:
-        - name: ocir-pull
+
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -672,6 +685,8 @@ source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 baseline_sha256=$BASELINE_SHA256
+baseline_recovery_run_id=$BASELINE_RECOVERY_RUN_ID
+baseline_recovery_source_sha=$BASELINE_RECOVERY_SOURCE_SHA
 workflow_run_id=$RUN_ID
 workflow_run_attempt=$RUN_ATTEMPT
 phase=$PHASE
@@ -691,6 +706,8 @@ jq -s \
   --arg build_run_id "$BUILD_RUN_ID" \
   --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" \
   --arg baseline_sha256 "$BASELINE_SHA256" \
+  --arg baseline_recovery_run_id "$BASELINE_RECOVERY_RUN_ID" \
+  --arg baseline_recovery_source_sha "$BASELINE_RECOVERY_SOURCE_SHA" \
   --arg workflow_run_id "$RUN_ID" \
   --arg workflow_run_attempt "$RUN_ATTEMPT" \
   --arg phase "$PHASE" \
@@ -708,6 +725,8 @@ jq -s \
       build_run_id: $build_run_id,
       infrastructure_run_id: $infrastructure_run_id,
       baseline_sha256: $baseline_sha256,
+      baseline_recovery_run_id: $baseline_recovery_run_id,
+      baseline_recovery_source_sha: $baseline_recovery_source_sha,
       workflow_run_id: $workflow_run_id,
       workflow_run_attempt: $workflow_run_attempt,
       phase: $phase,
@@ -731,6 +750,8 @@ source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 baseline_sha256=$BASELINE_SHA256
+baseline_recovery_run_id=$BASELINE_RECOVERY_RUN_ID
+baseline_recovery_source_sha=$BASELINE_RECOVERY_SOURCE_SHA
 data_run_id=$RUN_ID
 data_run_attempt=$RUN_ATTEMPT
 backfill_complete=true

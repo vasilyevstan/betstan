@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 env_value() {
   local file="$1"
@@ -58,9 +60,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-build}"
 PLATFORM="${PLATFORM:-linux/arm64}"
 
 oci_require_command docker
-oci_require_vars \
-  OCI_REGISTRY_HOST OCI_REGISTRY_NAMESPACE OCI_IMAGE_PREFIX \
-  OCI_REGISTRY_USERNAME OCI_REGISTRY_AUTH_TOKEN
+application_registry_require_ghcr
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "SOURCE_SHA must be a full lowercase commit SHA"
 [[ "$REUSE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
@@ -73,20 +73,21 @@ oci_require_vars \
   oci_die "reusable provenance directory not found"
 [[ "$PLATFORM" == "linux/arm64" ]] ||
   oci_die "OCI images must target linux/arm64"
-[[ "$OCI_REGISTRY_HOST" != *"://"* ]] ||
-  oci_die "OCI_REGISTRY_HOST must not contain a URL scheme"
-[[ "$OCI_IMAGE_PREFIX" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] ||
-  oci_die "OCI_IMAGE_PREFIX contains unsupported repository characters"
 
 oci_prepare_private_dir "$OUTPUT_DIR"
 if compgen -G "$OUTPUT_DIR/*.env" >/dev/null; then
   oci_die "output directory already contains image provenance"
 fi
 
-repository="${OCI_REGISTRY_HOST}/${OCI_REGISTRY_NAMESPACE}/${OCI_IMAGE_PREFIX}_images"
+repository="$(application_registry_repository)"
 services=(auth bet backoffice client event gamemaster moderation resulting slip)
 plan_file="$OUTPUT_DIR/reuse-plan.tsv"
 artifact_service=""
+artifact_schema=""
+artifact_registry_provider=""
+artifact_registry_host=""
+artifact_registry_tag_prefix=""
+artifact_registry_tag_schema=""
 artifact_repository=""
 artifact_source_sha=""
 artifact_tag=""
@@ -99,14 +100,22 @@ artifact_build_run_attempt=""
 : > "$plan_file"
 chmod 600 "$plan_file"
 
-printf '%s' "$OCI_REGISTRY_AUTH_TOKEN" |
-  docker login "$OCI_REGISTRY_HOST" \
-    --username "$OCI_REGISTRY_USERNAME" --password-stdin >/dev/null
-trap 'docker logout "$OCI_REGISTRY_HOST" >/dev/null 2>&1 || true' EXIT
+if [[ "${APPLICATION_REGISTRY_ALREADY_AUTHENTICATED:-false}" != "true" ]]; then
+  oci_require_vars APPLICATION_REGISTRY_USERNAME APPLICATION_REGISTRY_TOKEN
+  printf '%s' "$APPLICATION_REGISTRY_TOKEN" |
+    docker login "$APPLICATION_REGISTRY_HOST" \
+      --username "$APPLICATION_REGISTRY_USERNAME" --password-stdin >/dev/null
+  trap 'docker logout "$APPLICATION_REGISTRY_HOST" >/dev/null 2>&1 || true' EXIT
+fi
 
 for expected_service in "${services[@]}"; do
   provenance="$REUSE_PROVENANCE_DIR/${expected_service}.env"
   [[ -f "$provenance" ]] || oci_die "missing reusable provenance for $expected_service"
+  artifact_schema="$(env_value "$provenance" schema)"
+  artifact_registry_provider="$(env_value "$provenance" registry_provider)"
+  artifact_registry_host="$(env_value "$provenance" registry_host)"
+  artifact_registry_tag_prefix="$(env_value "$provenance" registry_tag_prefix)"
+  artifact_registry_tag_schema="$(env_value "$provenance" registry_tag_schema)"
   artifact_service="$(env_value "$provenance" service)"
   artifact_repository="$(env_value "$provenance" repository)"
   artifact_source_sha="$(env_value "$provenance" source_sha)"
@@ -119,6 +128,12 @@ for expected_service in "${services[@]}"; do
   artifact_build_run_attempt="$(env_value "$provenance" build_run_attempt)"
   [[ "$artifact_service" == "$expected_service" ]] ||
     oci_die "reusable service mismatch for $expected_service"
+  [[ "$artifact_schema" == "betstan.application-image-provenance.v1" &&
+     "$artifact_registry_provider" == "ghcr" &&
+     "$artifact_registry_host" == "ghcr.io" &&
+     "$artifact_registry_tag_prefix" == "arm64" &&
+     "$artifact_registry_tag_schema" == "v1" ]] ||
+    oci_die "reusable provenance is not a trusted GHCR application generation"
   [[ "$artifact_source_sha" == "$REUSE_SOURCE_SHA" ]] ||
     oci_die "reusable source SHA mismatch for $expected_service"
   [[ "$artifact_build_run_id" == "$REUSE_BUILD_RUN_ID" &&
@@ -126,8 +141,8 @@ for expected_service in "${services[@]}"; do
     oci_die "reusable build provenance mismatch for $expected_service"
   [[ "$artifact_repository" == "$repository" ]] ||
     oci_die "reusable repository mismatch for $expected_service"
-  [[ "$artifact_tag" == "${repository}:oci-${expected_service}-${REUSE_SOURCE_SHA}" ]] ||
-    oci_die "reusable tag mismatch for $expected_service"
+  application_registry_validate_tag \
+    "$expected_service" "$REUSE_SOURCE_SHA" "$artifact_tag"
   [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     oci_die "reusable digest is invalid for $expected_service"
   [[ "$artifact_platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
@@ -137,7 +152,7 @@ for expected_service in "${services[@]}"; do
   [[ "$artifact_platform" == "$PLATFORM" ]] ||
     oci_die "reusable platform mismatch for $expected_service"
 
-  new_tag="${repository}:oci-${expected_service}-${SOURCE_SHA}"
+  new_tag="${repository}:$(application_registry_tag "$expected_service" "$SOURCE_SHA")"
   inspect_error="$OUTPUT_DIR/${expected_service}.tag-inspect.log"
   set +e
   observed_digest="$(inspect_image_tag_digest "$new_tag" "$inspect_error")"
@@ -163,7 +178,7 @@ for expected_service in "${services[@]}"; do
 done
 
 while IFS=$'\t' read -r action service service_repository digest platform_digest image_ref; do
-  new_tag="${service_repository}:oci-${service}-${SOURCE_SHA}"
+  new_tag="${service_repository}:$(application_registry_tag "$service" "$SOURCE_SHA")"
   if [[ "$action" == "create" ]]; then
     docker buildx imagetools create \
       --prefer-index=false \
@@ -182,6 +197,11 @@ while IFS=$'\t' read -r action service service_repository digest platform_digest
     oci_die "reused tag digest differs from approved provenance for $service"
   {
     printf 'service=%q\n' "$service"
+    printf 'schema=%q\n' "betstan.application-image-provenance.v1"
+    printf 'registry_provider=%q\n' "$APPLICATION_REGISTRY_PROVIDER"
+    printf 'registry_host=%q\n' "$APPLICATION_REGISTRY_HOST"
+    printf 'registry_tag_prefix=%q\n' "$APPLICATION_REGISTRY_TAG_PREFIX"
+    printf 'registry_tag_schema=%q\n' "$APPLICATION_REGISTRY_TAG_SCHEMA"
     printf 'repository=%q\n' "$service_repository"
     printf 'source_sha=%q\n' "$SOURCE_SHA"
     printf 'tag=%q\n' "$new_tag"
@@ -191,6 +211,10 @@ while IFS=$'\t' read -r action service service_repository digest platform_digest
     printf 'platform=%q\n' "$PLATFORM"
     printf 'build_run_id=%q\n' "${GITHUB_RUN_ID:-local}"
     printf 'build_run_attempt=%q\n' "${GITHUB_RUN_ATTEMPT:-1}"
+    printf 'build_workflow=%q\n' "${BUILD_WORKFLOW_IDENTITY:-oci-production-build}"
+    printf 'upstream_workflow=%q\n' "${UPSTREAM_BUILD_WORKFLOW:-production-build}"
+    printf 'upstream_run_id=%q\n' "${UPSTREAM_RUN_ID:-local}"
+    printf 'upstream_run_attempt=%q\n' "${UPSTREAM_RUN_ATTEMPT:-1}"
     printf 'reuse_source_sha=%q\n' "$REUSE_SOURCE_SHA"
     printf 'reuse_build_run_id=%q\n' "$REUSE_BUILD_RUN_ID"
   } > "$OUTPUT_DIR/${service}.env"

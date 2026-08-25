@@ -17,6 +17,8 @@ OCI_WORKFLOWS = %w[
   oci-live-data-rollout
   oci-migrate
   oci-migration-recovery
+  ghcr-package-management
+  oci-ghcr-cache-recovery
   oci-production-build
   oci-production-deploy
   oci-production-rollback
@@ -31,6 +33,8 @@ PROTECTED_ENVIRONMENTS = {
   "oci-live-data-rollout" => "oci-migration",
   "oci-migrate" => "oci-migration",
   "oci-migration-recovery" => "azure-migration-recovery",
+  "ghcr-package-management" => "oci-infrastructure",
+  "oci-ghcr-cache-recovery" => "oci-production",
   "oci-production-build" => "oci-build",
   "oci-production-deploy" => "oci-production",
   "oci-production-rollback" => "oci-production"
@@ -490,6 +494,52 @@ def validate_oci_rollback_workflow!(file, document, content)
   )
 end
 
+def validate_ghcr_cache_recovery_workflow!(name, document, content)
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      baseline_source_sha
+      trusted_build_run_id
+      trusted_deploy_run_id
+      infrastructure_run_id
+      resume_recovery_run_id
+      confirmation
+    ]
+  )
+  validate_exact_permissions!(
+    name,
+    document,
+    { "actions" => "read", "contents" => "read", "packages" => "write" }
+  )
+  {
+    "RECOVER K3S CACHED BASELINE TO GHCR" => "exact recovery confirmation",
+    "recover-k3s-cached-images.sh" => "reviewed cache exporter",
+    "oci-production-build.yml" => "historical build provenance",
+    "oci-production-deploy.yml" => "historical deployment provenance",
+    "oci-infrastructure.yml" => "protected k3s infrastructure provenance",
+    "resume_recovery_run_id" => "explicit failed-run resume selector",
+    "Download immutable pre-rebind plan selected for resume" => "prior plan recovery",
+    "Upload immutable pre-rebind plan before rollout" => "pre-mutation plan persistence",
+    "TRANSITION_PHASE: plan" => "non-mutating transition planning",
+    "OCI_K3S_RETAIN_TARGET_SSH: \"true\"" => "bounded retained SSH access",
+    "GHCR_TOKEN: ${{ github.token }}" => "runner-only GHCR publication token",
+    "public-validate" => "credential-retirement health gate",
+    "retire-ocir" => "deferred OCIR retirement",
+    "TRANSITION_PHASE: retire" => "two-phase transition",
+    "group: oci-control-plane" => "control-plane serialization",
+    "cancel-in-progress: false" => "non-cancelling recovery serialization"
+  }.each do |literal, label|
+    require_content(content, /#{Regexp.escape(literal)}/, "#{name} is missing #{label}")
+  end
+  require_content(
+    content,
+    /\^\[0-9a-f\]\{40\}\$/,
+    "#{name} must validate the historical source SHA"
+  )
+end
+
 def validate_manual_oci_workflow!(name, document, content)
   triggers = workflow_triggers(document)
   fail_inventory("#{name} must be workflow_dispatch-only") unless triggers.keys == ["workflow_dispatch"]
@@ -503,7 +553,7 @@ def validate_manual_oci_workflow!(name, document, content)
 
   require_content(
     content,
-    %r{run-name:\s*.*\$\{\{\s*inputs\.approved_sha\s*\}\}},
+    %r{run-name:\s*.*(?:\$\{\{\s*inputs\.approved_sha\s*\}\}|inputs\.approved_sha)},
     "#{name} run name must identify the approved SHA"
   )
   require_content(
@@ -734,6 +784,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
       infrastructure_run_id
       phase
       prerequisite_run_id
+      baseline_recovery_run_id
       confirmation
     ]
   )
@@ -754,6 +805,9 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "oci-production-build.yml" => "exact build provenance",
     "oci-infrastructure.yml" => "exact infrastructure provenance",
     "oci-live-data-rollout.yml" => "phase-chain provenance",
+    "oci-ghcr-cache-recovery.yml" => "explicit recovery baseline authority",
+    "ghcr-cache-recovery-" => "exact recovery artifact binding",
+    "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
     "production-run-exclusivity-stan.sh" => "production run exclusivity",
     "baseline-capture-stan.sh" => "before and after rollback baselines",
     "shared-mongo-operation-lock-stan.sh acquire" => "database operation lock acquisition",
@@ -1007,9 +1061,10 @@ def validate_oci_workflow!(name, file, document, content)
     workflow_run = triggers["workflow_run"]
     workflows = workflow_run.is_a?(Hash) ? Array(workflow_run["workflows"]) : []
     types = workflow_run.is_a?(Hash) ? Array(workflow_run["types"]) : []
-    unless workflows == ["production-build"] && types == ["completed"]
+    unless workflows.sort == ["ghcr-package-management", "production-build"] &&
+        types == ["completed"]
       fail_inventory(
-        "#{name} must run only after completed production-build workflows"
+        "#{name} must run only after completed production-build or repair-authority workflows"
       )
     end
 
@@ -1046,6 +1101,11 @@ def validate_oci_workflow!(name, file, document, content)
       /github\.run_attempt\s*==\s*1/,
       "#{name} must reject downstream rerun attempts"
     )
+    require_content(
+      content,
+      /REPAIR_EXISTING_TAGS:\s*\$\{\{\s*steps\.trust\.outputs\.repair_mode\s*\}\}/,
+      "#{name} must bind partial-tag adoption to reviewed repair evidence"
+    )
   elsif name == "oci-production-rollback"
     validate_oci_rollback_workflow!(file, document, content)
   elsif name == "oci-capacity-acquire"
@@ -1060,6 +1120,8 @@ def validate_oci_workflow!(name, file, document, content)
     validate_live_betting_disable_workflow!(file, document, content)
   elsif name == "oci-production-deploy"
     validate_oci_production_deploy_binding!(name, document, content)
+  elsif name == "oci-ghcr-cache-recovery"
+    validate_ghcr_cache_recovery_workflow!(name, document, content)
   else
     validate_manual_oci_workflow!(name, document, content)
   end

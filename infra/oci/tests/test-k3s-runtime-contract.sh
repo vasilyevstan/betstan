@@ -286,6 +286,52 @@ jq -e '
 ' "$WORK_DIR/k3s-inventory.json" >/dev/null ||
   fail "valid direct-k3s inventory was rejected"
 
+cat > "$WORK_DIR/ghcr-evidence.env" <<'ENV'
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+package_visibility=public
+anonymous_pull=pass
+build_first_attempt=true
+ENV
+env "${inventory_env[@]}" \
+  APPLICATION_REGISTRY_PROVIDER=ghcr \
+  INVENTORY_MODE=preflight \
+  OUTPUT_FILE="$WORK_DIR/ghcr-pre-recovery-inventory.json" \
+  "$OCI_DIR/scripts/inventory.sh"
+jq -e '
+  .mode == "preflight" and
+  .application_registry.provider == "ghcr" and
+  .application_registry.ocir_application_repository_absent == false and
+  (.registry_repositories | length) == 1
+' "$WORK_DIR/ghcr-pre-recovery-inventory.json" >/dev/null ||
+  fail "GHCR preflight forced legacy OCIR repository retirement before recovery"
+cat > "$WORK_DIR/responses/repositories.json" <<'JSON'
+{"data":{"items":[]}}
+JSON
+env "${inventory_env[@]}" \
+  APPLICATION_REGISTRY_PROVIDER=ghcr \
+  APPLICATION_REGISTRY_EVIDENCE_FILE="$WORK_DIR/ghcr-evidence.env" \
+  INVENTORY_MODE=complete \
+  OUTPUT_FILE="$WORK_DIR/ghcr-inventory.json" \
+  "$OCI_DIR/scripts/inventory.sh"
+jq -e '
+  .application_registry.provider == "ghcr" and
+  .application_registry.public_anonymous == true and
+  .application_registry.ocir_application_repository_absent == true and
+  .application_registry.validated_build_evidence == true and
+  (.registry_repositories | length) == 0
+' "$WORK_DIR/ghcr-inventory.json" >/dev/null ||
+  fail "explicit public GHCR policy did not accept an absent OCIR application repository"
+if env "${inventory_env[@]}" \
+    APPLICATION_REGISTRY_PROVIDER=ghcr \
+    INVENTORY_MODE=complete \
+    OUTPUT_FILE="$WORK_DIR/ghcr-missing-evidence.json" \
+    "$OCI_DIR/scripts/inventory.sh" >/dev/null 2>&1; then
+  fail "GHCR inventory accepted absent OCIR without public build validation evidence"
+fi
+set_registry_fixture 1
+
 set_registry_fixture 2 4
 [[ "$(wc -c < "$WORK_DIR/responses/images.json" | tr -d ' ')" -gt 2000000 ]] ||
   fail "registry fixture does not exceed the runner argument limit"
@@ -596,6 +642,96 @@ grep -Fq 'ssh_tunnel_pid=""' \
 grep -Fq '(( OCI_BASTION_SESSION_TTL >= 1800 ))' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access does not enforce the OCI Bastion minimum session TTL"
+! grep -Fq 'StrictHostKeyChecking=accept-new' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access still trusts first-use SSH host keys"
+! grep -Fq 'StrictHostKeyChecking=accept-new' \
+  "$OCI_DIR/scripts/finalize-k3s.sh" ||
+  fail "k3s finalization weakens the attested target host-key policy"
+for literal in \
+  '.data."bastion-public-host-key-info"' \
+  'oci instance-agent command create' \
+  'oci instance-agent command-execution get' \
+  'write_known_host "$instance_ocid" 22' \
+  'StrictHostKeyChecking=yes' \
+  'validate-k3s-kubeconfig.sh'; do
+  grep -Fq "$literal" "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+    fail "k3s access lacks an attested SSH or kubeconfig boundary: $literal"
+done
+
+cat >"$WORK_DIR/bin/kubectl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "config view --kubeconfig "*" --raw --minify -o json" ]] ||
+  exit 98
+cat "${MOCK_KUBECONFIG_VIEW:?}"
+MOCK
+chmod +x "$WORK_DIR/bin/kubectl"
+cat >"$WORK_DIR/valid-kubeconfig-view.json" <<'JSON'
+{
+  "apiVersion": "v1",
+  "kind": "Config",
+  "preferences": {},
+  "clusters": [{
+    "name": "default",
+    "cluster": {
+      "certificate-authority-data": "Q0E=",
+      "server": "https://127.0.0.1:16443"
+    }
+  }],
+  "contexts": [{
+    "name": "default",
+    "context": {"cluster": "default", "user": "default"}
+  }],
+  "current-context": "default",
+  "users": [{
+    "name": "default",
+    "user": {
+      "client-certificate-data": "Q0VSVA==",
+      "client-key-data": "S0VZ"
+    }
+  }]
+}
+JSON
+printf '%s\n' 'apiVersion: v1' >"$WORK_DIR/valid-kubeconfig"
+PATH="$WORK_DIR/bin:$PATH" \
+MOCK_KUBECONFIG_VIEW="$WORK_DIR/valid-kubeconfig-view.json" \
+KUBECONFIG="$WORK_DIR/valid-kubeconfig" \
+EXPECTED_K3S_SERVER='https://127.0.0.1:16443' \
+  "$OCI_DIR/scripts/validate-k3s-kubeconfig.sh" >/dev/null ||
+  fail "valid inline-certificate k3s kubeconfig was rejected"
+jq -e '
+  .clusters[0].cluster.server == "https://127.0.0.1:16443" and
+  (.users[0].user | keys | sort) ==
+    ["client-certificate-data", "client-key-data"]
+' "$WORK_DIR/valid-kubeconfig" >/dev/null ||
+  fail "k3s kubeconfig was not reduced to the safe normalized shape"
+
+jq '.users[0].user.exec = {"command":"/tmp/untrusted"}' \
+  "$WORK_DIR/valid-kubeconfig-view.json" >"$WORK_DIR/exec-kubeconfig-view.json"
+printf '%s\n' 'apiVersion: v1' >"$WORK_DIR/exec-kubeconfig"
+if PATH="$WORK_DIR/bin:$PATH" \
+    MOCK_KUBECONFIG_VIEW="$WORK_DIR/exec-kubeconfig-view.json" \
+    KUBECONFIG="$WORK_DIR/exec-kubeconfig" \
+    EXPECTED_K3S_SERVER='https://127.0.0.1:16443' \
+      "$OCI_DIR/scripts/validate-k3s-kubeconfig.sh" >/dev/null 2>&1; then
+  fail "k3s kubeconfig accepted an executable credential plugin"
+fi
+
+cat >"$WORK_DIR/external-key-kubeconfig" <<'YAML'
+apiVersion: v1
+users:
+- name: default
+  user:
+    client-key: /tmp/untrusted
+YAML
+if PATH="$WORK_DIR/bin:$PATH" \
+    MOCK_KUBECONFIG_VIEW="$WORK_DIR/valid-kubeconfig-view.json" \
+    KUBECONFIG="$WORK_DIR/external-key-kubeconfig" \
+    EXPECTED_K3S_SERVER='https://127.0.0.1:16443' \
+      "$OCI_DIR/scripts/validate-k3s-kubeconfig.sh" >/dev/null 2>&1; then
+  fail "k3s kubeconfig accepted an external credential file"
+fi
 
 finalizer="$OCI_DIR/scripts/finalize-k3s.sh"
 for access_field in \

@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 NETWORK_PROVENANCE_FILE="${NETWORK_PROVENANCE_FILE:-}"
 ACQUISITION_PROVENANCE_FILE="${ACQUISITION_PROVENANCE_FILE:-}"
@@ -33,6 +35,7 @@ oci_assert_repository_root
   oci_die "OCI_MONGO_DEVICE differs from the reviewed attachment path"
 
 oci_require_cli_version
+application_registry_require_ghcr
 oci_require_command jq
 oci_require_command kubectl
 oci_require_command helm
@@ -380,7 +383,7 @@ ssh \
   -o IdentitiesOnly=yes \
   -o PasswordAuthentication=no \
   -o PreferredAuthentications=publickey \
-  -o StrictHostKeyChecking=accept-new \
+  -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$target_known_hosts" \
   "${os_user}@127.0.0.1" \
   "bash -s -- '$OCI_MONGO_DEVICE'" <<'REMOTE'
@@ -767,6 +770,11 @@ oci_prepare_private_dir "$PROVENANCE_DIR"
   printf 'canonical_host=%q\n' "$OCI_CANONICAL_HOST"
   printf 'redirect_host=%q\n' "$OCI_REDIRECT_HOST"
   printf 'diagnostic_host=%q\n' "${lb_public_ip}.nip.io"
+  printf 'application_registry_provider=%q\n' "$APPLICATION_REGISTRY_PROVIDER"
+  printf 'application_registry_host=%q\n' "$APPLICATION_REGISTRY_HOST"
+  printf 'application_registry_repository=%q\n' "$(application_registry_repository)"
+  printf 'application_registry_public_anonymous=%q\n' "true"
+  printf 'ocir_application_repository_absent=%q\n' "true"
   printf 'namespace=%q\n' "$OCI_K8S_NAMESPACE"
   printf 'k3s_node_name=%q\n' "$OCI_K3S_NODE_NAME"
   printf 'k3s_version=%q\n' "$OCI_K3S_VERSION"

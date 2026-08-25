@@ -28,30 +28,45 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   `OCI_MONGO_VOLUME_GB=50`, `OCI_LB_MIN_MBPS=10`,
   `OCI_LB_MAX_MBPS=10`, and `OCI_EXPECTED_MONTHLY_COST=0` are immutable
   Free Tier gates.
-- OCIR repository layer storage must remain at or below
-  `OCI_REGISTRY_MAX_BYTES=500000000`. The inventory accepts only one to three
-  complete nine-image generations: the exact candidate and up to two retained
-  rollback generations. It verifies complete service tag sets and unique
-  service/digest mappings; partial or fourth unique generations fail closed.
-  Exact-SHA tags created by image reuse are aliases and do not increase the
-  provider's unique image count, but every alias must resolve to one complete
-  trusted generation.
-- Frankfurt OCIR does not currently support repository-level immutability.
-  One private `${OCI_IMAGE_PREFIX}_images` repository is precreated so the
-  eight backend images share their identical Node layers instead of charging
-  the Free Tier allowance for those layers eight times. Service-specific,
-  exact-SHA tags remain independently digest-pinned. The CI policy grants
-  `manage repos` only in the dedicated compartment and only when
-  `target.repo.name=/betstan_*/`; it does not cover other repositories or
-  root-compartment repository creation. The protected build has no deletion
-  path and fails unless every exact-SHA tag is proven absent before its single
-  first-attempt push.
+- Application images are public GHCR images in exactly
+  `ghcr.io/vasilyevstan/betstan-images`; OCI remains the runtime provider, not
+  the application registry. Each service uses the immutable
+  `arm64-<service>-<full-source-sha>` tag only as publication evidence and is
+  deployed by `@sha256` digest only. The public package must first be made
+  public once in GitHub Package settings after the protected sentinel
+  bootstrap; workflow validation proves metadata, repository linkage, and an
+  unauthenticated pull before a build or infrastructure finalization succeeds.
+  k3s uses no GHCR imagePullSecret or long-lived registry token.
+- `ghcr-package-management` validates before pruning. It protects the
+  bootstrap sentinel, current candidate, deployed generation, and one
+  compatible last-known-good generation. Each protected generation is rebound
+  to its exact unexpired build plus successful deployment, or to its exact
+  completed cache-recovery artifact, and is anonymously reverified; a
+  recovered baseline is never represented as a normal GHCR build. Package
+  metadata uses the account-scoped GitHub Packages API. Untagged child/staging
+  manifests are recorded but do not invalidate otherwise complete immutable
+  generations. Mixed, partial, ambiguous, or all-version deletion plans fail
+  closed.
+  Legacy OCIR inventory/prune evidence remains retirement-only and has no
+  forward deployment authority. In GHCR mode OCI finalization requires the
+  former `${OCI_IMAGE_PREFIX}_images` repository to be absent with zero
+  application images.
+- [GitHub Packages billing documentation](https://docs.github.com/billing/concepts/product-billing/github-packages)
+  currently describes public Container Registry package storage and bandwidth
+  as free. This is not a perpetual-cost guarantee: retain GitHub's documented
+  one-month notice policy for pricing-policy changes in operational review,
+  and do not add a paid registry as fallback.
 - OCI CLI execution is fail-closed on the reviewed `3.90.0` client version.
 - There is no paid shape, enhanced-cluster, NAT gateway, extra node, extra
   Mongo, or alternate load-balancer fallback.
 - Only the OCI load balancer exposes ports 80/443. In k3s mode, ingress-nginx
   uses fixed NodePorts 30080/30443 and the Kubernetes API is reachable only
   through a short-lived OCI Bastion SSH session and a target-loopback tunnel.
+  The runner pins the Bastion host key from authenticated session metadata and
+  the target host key from OCI Instance Agent Run Command before either SSH
+  connection. Imported k3s kubeconfigs are reduced to one loopback cluster and
+  inline certificates; executable providers, tokens, proxies, and external
+  credential files are rejected before any API request.
   Mongo and RabbitMQ remain `ClusterIP`.
 - The apex and `www` A records must equal exact load-balancer provenance and
   must not have a conflicting AAAA record. Canonical and diagnostic
@@ -60,7 +75,7 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
 - The Kustomize overlay explicitly lists nine application manifests,
   RabbitMQ, and `auth-mongo-depl.yaml`. It never traverses
   `infra/k8s/legacy-mongo`.
-- Application images use immutable OCIR digests. The upstream Node, nginx,
+- Application images use immutable public GHCR digests. The upstream Node, nginx,
   Mongo, and RabbitMQ images are also pinned by verified multi-architecture
   index digest.
 
@@ -78,9 +93,15 @@ The GitHub environments use the variables and secrets approved in the plan:
 - OCI CLI mapping:
   `OCI_CLI_USER`, `OCI_CLI_TENANCY`, `OCI_CLI_FINGERPRINT`,
   `OCI_CLI_KEY_CONTENT`, and `OCI_CLI_REGION`.
-- Registry authentication is direct `docker login` with
-  `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_AUTH_TOKEN`. The build workflow
-  never receives an OCI API signing key.
+- GHCR publication uses only the repository-scoped `GITHUB_TOKEN` with
+  `packages: write`, authenticated as the workflow actor. Package metadata
+  and retention REST calls use that token by default; if GitHub has not
+  granted this repository package-admin access, the optional protected
+  `GHCR_PACKAGE_ADMIN_TOKEN` secret may contain a classic PAT scoped only to
+  `read:packages` and `delete:packages`. That fallback is never used to push
+  images or by the runtime. No OCI registry credential or runtime registry
+  credential is accepted. The build workflow never receives an OCI API
+  signing key.
 - Direct k3s uses one unencrypted ED25519 host key pair. Store only
   `OCI_K3S_SSH_PUBLIC_KEY` in `oci-capacity-acquire`; store
   `OCI_K3S_SSH_PRIVATE_KEY` as a protected secret in `oci-infrastructure`,
@@ -156,47 +177,95 @@ concurrent retirement fixture isolation without masking failed suites.
 
 1. Set `OCI_RUNTIME_MODE=k3s`. `scripts/preflight.sh` validates constants,
    identity, home region, pinned image, and existing inventory.
-2. `scripts/build-images.sh` builds ARM64 OCI-only images; the production
-   workflow records and verifies immutable digests with
-   `scripts/verify-images.sh`.
-   If fresh or failed builds leave more than three complete generations,
-   first dispatch `oci-infrastructure` with phase `validate-registry` and the
-   exact confirmation `VALIDATE OCI IMAGE GENERATIONS`. Bind the request to
-   the exact current candidate build, the currently deployed release, one
-   compatible fallback build, and a bounded JSON list of explicit obsolete
-   SHA/run pairs. The successful validation artifact contains the complete
-   live alias inventory, exact protected OCIDs, target deletion plan, digest
-   lineage, and provider accounting without issuing a delete. Dispatch phase
-   `prune-registry` only with that validation run ID and identical inputs; the
-   apply run requires its freshly observed before-summary to match the
-   validated summary byte for byte.
+2. After the migration commit reaches `master`, run the protected
+   `ghcr-package-management` bootstrap once, then change the package
+   visibility to **Public** in GitHub Package settings. Do not dispatch its
+   validate phase yet: validation requires both a complete candidate
+   generation and a recovered or deployed generation. The first automatic
+   `oci-production-build` may have failed before the package existed; in that
+   case dispatch the bounded `repair-build` phase against that exact failed
+   first attempt and its successful `production-build` upstream.
+   `scripts/build-images.sh` then builds ARM64 images into public GHCR; the
+   production workflow records immutable
+   provider/host/repository/tag/manifest/platform/build lineage and proves
+   every digest can be pulled anonymously after logout. The workflow cannot
+   reuse OCIR provenance; reuse is limited to a trusted first-attempt GHCR
+   generation with unchanged image inputs. Publication stages each image by
+   digest before assigning its exact tag. If a first-attempt build terminates
+   after publishing only part of a generation, do not rerun it: dispatch the
+   human-gated `repair-build` package phase with that failed run and its exact
+   successful `production-build` upstream. The resulting new first-attempt
+   build rebuilds every existing tag, adopts it only when the rebuilt ARM64
+   platform digest is identical, preserves the verified existing manifest
+   identity, and publishes the missing tags. Full and repair builds derive
+   `SOURCE_DATE_EPOCH` from the source commit and pin BuildKit timestamp,
+   compatibility, media-type, and compression behavior so this equality test
+   is a reproducible-build check rather than an assumption.
 
-   Successful obsolete builds are cross-checked against their immutable
-   artifacts; failed first-attempt builds are eligible only for their
-   source-tagged service rows. The protected job also accepts an explicit
-   target subset left by an interrupted prior deletion, but deletes nothing
-   unless the protected and target sets are pairwise disjoint and exhaust
-   every unique image ID/digest. All tag aliases must map consistently to one
-   trusted protected or target generation, and each canonical candidate,
-   deployed, and fallback tag must remain present. Complete protected source
-   generations may alias the same nine immutable images after reuse; partial
-   protected overlap is rejected. The apply run rechecks an unchanged alias
-   snapshot immediately before deletion, deletes each target image ID once,
-   records the complete before/after alias inventory, and waits until all
-   target digests are absent, the exact pre-delete protected set of 9, 18, or
-   27 image OCIDs/digests remains, provider image accounting matches that
-   unique manifest set, and retained layers are within the configured Free
-   Tier ceiling. Read-only validation records an over-ceiling layer total
-   because reducing that total is the purpose of the subsequent prune.
-   OCIR has no supported user-triggered garbage-collection command, and Oracle
-   documents that repository deletion and storage release can take up to 48
-   hours. If the exact protected manifest inventory is already converged,
-   continue read-only validation while provider accounting catches up; never
-   delete candidate, deployed, or fallback images merely to pass the storage
-   gate. Escalate to Oracle Support if accounting remains stale beyond the
-   documented window. Moving application images to GHCR while retaining
-   exact-digest rollback is tracked in
-   [issue #284](https://github.com/vasilyevstan/betstan/issues/284).
+   Before any restart or deployment after OCIR deletion, prioritize the
+   reviewer-gated
+   `oci-ghcr-cache-recovery` workflow if the live k3s baseline is still OCIR.
+   Select the successful infrastructure **finalize** run for the same
+   historical baseline SHA; recovery binds its runtime fingerprint and public
+   endpoints to the historical deployment while executing the current master
+   safety code, so no new infrastructure finalization is required first. It
+   compares an independently captured nine-service live deployment/image-ID
+   inventory to historical trusted provenance, exports those exact containerd
+   cache images over the protected Bastion tunnel, and uploads the exact
+   ARM64 manifest/config/layer blobs from each validated OCI archive without a
+   Docker load/repack cycle. It pushes only from the runner, never sends a
+   GHCR token to the node, and never silently rebuilds a historical baseline.
+   Target SSH uses the retained dedicated known-hosts
+   file and the exact instance OCID as `HostKeyAlias`. Only after anonymous
+   remote verification of all nine recovered GHCR digests does it capture and
+   upload a hash-bound transition plan plus the original RabbitMQ queue
+   baseline. That upload completes before the first Deployment mutation. The
+   workflow then rebinds the nine application Deployments sequentially and
+   verifies each rollout's serving ARM64 platform digest; Mongo and RabbitMQ
+   are not changed.
+   Rollback-readiness and public Playwright checks then run while `ocir-pull`
+   remains intact. Only after both pass does the final job remove the
+   service-account reference and secret and delete the exact empty
+   `${OCI_IMAGE_PREFIX}_images` repository. Its final artifact records
+   historical build lineage separately from recovery/transition lineage and
+   a hash-bound transition plan. An interrupted run is safely redispatched by
+   explicitly selecting its failed or cancelled first-attempt run ID. The new
+   run validates that run and its source/image/infrastructure hashes,
+   downloads the immutable plan artifact, preserves the original transition
+   plan and RabbitMQ baseline byte-for-byte, and changes only the plan carrier
+   lineage before upload. Existing exact tags are adopted only after their
+   ARM64 digest matches the trusted cached platform, already rebound
+   Deployments are reverified, and credentials remain intact while any OCIR
+   Deployment is pending. A
+   cache/provenance mismatch, non-empty repository at retirement, or
+   unrecognized mixed runtime/credential state remains a `NO_GO`.
+
+   Once candidate publication and baseline recovery are both complete,
+   dispatch `ghcr-package-management` phase `validate`. Bind the candidate to
+   its build artifact, a normally deployed generation to both build and
+   deployment artifacts, and a recovered generation to its terminal recovery
+   artifact. Every explicitly obsolete generation is also bound to its exact
+   successful build artifact during validation. The immutable validation
+   artifact records normalized package/tag state, the derived
+   generation-to-version map, and a deletion plan; its summary hash-binds all
+   three files before apply or archival.
+   Reused images may place tags from several source SHAs on one GHCR version;
+   any version referenced by a protected generation is retained rather than
+   deleting all aliases. A prune retry accepts only the planned version IDs
+   already missing, deletes the remaining IDs, then re-reads GHCR and proves
+   the terminal state equals the validated state minus the plan. Then run
+   current-master infrastructure finalization with that
+   package-validation evidence. A later data baseline may use the recovery
+   only by passing its exact successful first-attempt recovery run ID;
+   ordinary releases use `0`.
+
+   The legacy `validate-registry` and `prune-registry` OCIR controls are no
+   longer dispatchable and their job is hard-disabled. Historical code remains
+   temporarily for audit continuity only. Forward package validation and
+   retention use `ghcr-package-management`; recovery deletes only the exact
+   empty legacy OCIR repository after public validation. This implements
+   [issue #284](https://github.com/vasilyevstan/betstan/issues/284) without
+   preserving a second application-image control plane.
 3. Dispatch `oci-infrastructure` with phase `prepare`.
    `scripts/provision.sh cloud` creates/reconciles only the VCN, Internet
    Gateway, public/restricted subnets, NSGs, and OCI Bastion.
@@ -224,8 +293,12 @@ concurrent retirement fixture isolation without masking failed suites.
    reviewer-gated phases in order: `dry-run`, `apply-backfills`, then
    `apply-slip-index`, passing each successful run ID to the next phase.
    The workflow runs only compiled CLIs from the approved immutable image
-   digests, binds its pre-mutation rollback baseline by digest, holds the shared
-   Mongo operation lock, and uploads sanitized hash-bound evidence. Mutating
+   digests. Before acquiring the shared Mongo operation lock, it captures and
+   validates a rollback baseline whose nine live references and provenance
+   are the same immutable public GHCR generation. An OCIR or mixed live
+   generation requires the exact successful cache-recovery authority and
+   cannot be labeled as a normal GHCR baseline. It then binds that baseline by
+   digest, holds the lock, and uploads sanitized hash-bound evidence. Mutating
    phases first install the ingress write fence and scale the event,
    gamemaster, moderation, resulting, bet, and slip writers to zero, preventing
    legacy documents from racing the backfill or index. The backfill-only phase
@@ -305,6 +378,9 @@ exact-SHA tags without uploading duplicate layers and records both build runs
 in provenance. The comparison also fingerprints the exact `lib.sh` functions
 called by `build-images.sh`; unrelated infrastructure helpers do not force a
 rebuild, while any transitive image-recipe change fails closed.
+The privileged QEMU helper used by normal builds and cache recovery is pinned
+by image digest as well as the setup action SHA; a mutable `binfmt` tag is not
+release authority.
 
 For OKE fallback, set `OCI_RUNTIME_MODE=oke`; the existing Basic-cluster,
 runner-NSG, and managed-node-pool flow remains available.

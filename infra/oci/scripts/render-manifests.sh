@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=application-registry.sh
+source "$SCRIPT_DIR/application-registry.sh"
 
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-${1:-}}"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-${2:-}}"
@@ -26,6 +28,7 @@ WORK_DIR="${WORK_DIR:-$(dirname "$OUTPUT_FILE")/.oci-render-work}"
 [[ "$OCI_CERT_EMAIL" == *@*.* ]] || oci_die "OCI_CERT_EMAIL is required for ACME"
 oci_require_command kubectl
 oci_require_command ruby
+application_registry_require_ghcr
 
 unset OCI_MONGO_VOLUME_OCID source_sha cluster_ocid compartment_ocid ingress_ipv4
 unset public_host canonical_host redirect_host diagnostic_host
@@ -61,14 +64,15 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 ruby -ryaml - "$raw_manifest" "$IMAGE_PROVENANCE_FILE" "$OUTPUT_FILE" \
   "$OCI_K8S_NAMESPACE" "$canonical_host" "$redirect_host" "$diagnostic_host" \
-  "$OCI_CERT_EMAIL" \
+  "$OCI_CERT_EMAIL" "$(application_registry_repository)" \
   "$OCI_MONGO_VOLUME_OCID" "$OCI_K3S_NODE_NAME" <<'RUBY'
 raw_file, images_file, output_file, namespace, canonical_host, redirect_host,
-  diagnostic_host, cert_email, volume_ocid, node_name = ARGV
+  diagnostic_host, cert_email, application_repository, volume_ocid, node_name = ARGV
 images = {}
 File.readlines(images_file, chomp: true).reject(&:empty?).each do |line|
-  service, _repository, image_ref, digest, platform_digest = line.split("\t", 5)
+  service, repository, image_ref, digest, platform_digest = line.split("\t", 5)
   abort "invalid image provenance row" unless service && image_ref && digest && platform_digest
+  abort "image provenance repository is not public GHCR" unless repository == application_repository
   abort "invalid immutable image reference for #{service}" unless image_ref.end_with?("@#{digest}") &&
     digest.match?(/\Asha256:[0-9a-f]{64}\z/) &&
     platform_digest.match?(/\Asha256:[0-9a-f]{64}\z/)

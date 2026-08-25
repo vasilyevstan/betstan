@@ -4,6 +4,85 @@ These rules summarize proven BetStan OCI failure modes. Re-read live provider,
 GitHub, DNS, and Kubernetes state before applying them; old run IDs and
 conversation summaries are not authority.
 
+## GHCR migration after OCIR deletion
+
+- OCIR absence is not rollback capacity. A running k3s pod can survive only
+  from containerd cache, so normal rollout remains blocked until the exact
+  nine-image baseline is recovered to public GHCR or a separately reviewed
+  historical rebuild is authorized.
+- The one durable package is
+  `ghcr.io/vasilyevstan/betstan-images`. Bootstrap creates a tiny
+  repository-linked sentinel, but GitHub initially makes a package private;
+  only the Package settings visibility change is authoritative. Validate
+  package metadata through the account-scoped `/users/{owner}/packages`
+  endpoint, observable repository linkage, and a clean Docker-config anonymous
+  digest pull before treating it as public. GHCR does not expose repository-
+  scoped package REST routes.
+- A k3s node never receives a GHCR token. Recovery exports exact containerd
+  cache images over existing protected Bastion access; the GitHub runner
+  validates the OCI archive and uploads its ARM64 manifest and blobs unchanged
+  with scoped `GITHUB_TOKEN`, then verifies anonymous pulls. Do not use a
+  Docker load/push conversion when digest identity is the recovery authority.
+  A source rebuild is not cache recovery.
+- Registry publication is not transactional. Stage by digest, and authorize a
+  new first-attempt repair run only from an exact failed build plus its trusted
+  upstream. Rebuild and compare the ARM64 platform digest before adopting an
+  existing exact tag; matching names, labels, or a non-deterministic wrapper
+  index are not sufficient authority. Derive `SOURCE_DATE_EPOCH` from the
+  source commit and pin digest-affecting BuildKit exporter behavior before
+  treating rebuild equality as a repair mechanism.
+- A rollback baseline captured in the same mutating job is not resumable
+  evidence: cancellation can strand the mutation before artifact upload.
+  Capture and upload the transition plan and RabbitMQ baseline in a separate
+  pre-mutation phase. Redispatch must select the prior failed or cancelled
+  first attempt, validate its immutable plan hashes, preserve the original
+  baseline bytes, and update only artifact-carrier lineage.
+- Account-scoped GitHub Packages REST access is a separate capability from
+  registry push. Prefer the repository `GITHUB_TOKEN`, but allow a protected,
+  least-privilege classic PAT fallback for metadata/retention only when package
+  administration was not inherited; never use that PAT for image publication
+  or runtime pulls.
+- Do not retain two mutable image control planes after migration. Remove OCIR
+  registry phases from workflow dispatch and hard-disable audit-only legacy
+  code; GHCR package management is the sole forward retention authority.
+- Optional Kubernetes resources need an explicit NotFound contract. Use
+  `kubectl get --ignore-not-found`, treat successful empty output as absence,
+  and fail on every nonzero API or authorization result before mutation.
+- Package retention must preserve truthful generation origins. Verify a normal
+  generation against its exact build and successful deployment artifacts, and
+  a recovered generation against its exact successful terminal cache-recovery
+  artifact; never pass a legacy OCIR build run as if it had published the
+  recovered GHCR bytes. Record untagged child/staging manifests without
+  treating them as incomplete tagged generations.
+- GHCR package versions and generation tags are not one-to-one. Reuse can put
+  several source-SHA tags on one version ID, so retain every version referenced
+  by a protected generation. Bind every obsolete generation to its build
+  artifact, persist the normalized package snapshot and deletion IDs before
+  mutation, tolerate only those planned IDs already absent on retry, and
+  re-fetch the package before recording terminal prune success.
+- Production recovery must be redispatch-safe. Reverify already-published
+  digests and already-rebound Deployments, require legacy credentials while
+  any OCIR Deployment remains, and use the exact successful infrastructure
+  finalization from the historical running SHA rather than requiring a new
+  GHCR-finalized infrastructure run. Kubernetes rollout success alone is
+  insufficient: require API shapes, queue readiness, and public browser E2E
+  before retiring `ocir-pull` or deleting the exact empty OCIR repository.
+- Privileged build helpers are part of the release supply chain. Pin both the
+  QEMU setup action and its `tonistiigi/binfmt` image by immutable digest.
+- Never establish production SSH trust with TOFU. Bind the Bastion host key to
+  authenticated OCI session metadata, retrieve the target host key through
+  OCI Instance Agent Run Command, and use strict host checking. Treat a remote
+  kubeconfig as untrusted input: reject executable/provider, token, proxy, and
+  external-file directives, then reconstruct one loopback-only configuration
+  from inline certificates before the first Kubernetes API request.
+- Capture and validate rollback evidence before acquiring a database lock or
+  changing a workload. An ordinary baseline is valid only when all nine live
+  references and its exact deploy provenance identify public GHCR digests;
+  OCIR or mixed state must first complete the explicitly selected recovery.
+- GitHub currently documents public Container Registry storage/bandwidth as
+  free and documents a one-month notice policy for pricing changes. Record
+  that policy without claiming a perpetual free service.
+
 ## Identity and approvals
 
 - Bind every mutation to one full current source SHA and one internally
@@ -97,6 +176,15 @@ conversation summaries are not authority.
   any delete. The read-only phase may attest storage above the configured
   ceiling; enforce that ceiling after the approved obsolete identities have
   been deleted and provider accounting converges.
+- Hash-bind every persisted validation input that apply consumes or archives,
+  including the normalized package state, generation-to-version map, and
+  deletion IDs. Checking only that a file exists lets artifact tampering
+  survive into terminal evidence even when deletion selection uses fresh
+  provider state.
+- A pull request that changes the trusted quality workflow cannot authenticate
+  its own checks. Keep `production-build.yml` byte-identical to the default
+  branch and add GHCR coverage through an existing script it already invokes;
+  use the separate OCI validation workflow for the complete matrix.
 - Normalize documented case-insensitive provider enums before comparing them.
   OCI has returned values such as `paravirtualized` in lowercase.
 - A healthy load-balancer control plane does not prove a healthy data plane.

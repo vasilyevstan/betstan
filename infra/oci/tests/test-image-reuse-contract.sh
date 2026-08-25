@@ -30,10 +30,10 @@ tag_key() {
 }
 
 case "${1:-} ${2:-}" in
-  "login fixture.invalid")
+  "login ghcr.io")
     cat >/dev/null
     ;;
-  "logout fixture.invalid")
+  "logout ghcr.io")
     ;;
   "buildx imagetools")
     case "${3:-}" in
@@ -83,20 +83,29 @@ chmod +x "$WORK_DIR/bin/docker"
 
 services=(auth bet backoffice client event gamemaster moderation resulting slip)
 index=1
-repository=fixture.invalid/namespace/betstan_images
+repository=ghcr.io/vasilyevstan/betstan-images
 for service in "${services[@]}"; do
   digest="$(printf '%064d' "$index")"
   cat > "$WORK_DIR/source/${service}.env" <<ENV
 service=${service}
+schema=betstan.application-image-provenance.v1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_tag_prefix=arm64
+registry_tag_schema=v1
 repository=${repository}
 source_sha=${OLD_SHA}
-tag=${repository}:oci-${service}-${OLD_SHA}
+tag=${repository}:arm64-${service}-${OLD_SHA}
 digest=sha256:${digest}
 platform_digest=sha256:${digest}
 image_ref=${repository}@sha256:${digest}
 platform=linux/arm64
 build_run_id=${OLD_RUN_ID}
 build_run_attempt=1
+build_workflow=oci-production-build
+upstream_workflow=production-build
+upstream_run_id=99
+upstream_run_attempt=1
 ENV
   index=$((index + 1))
 done
@@ -110,11 +119,13 @@ REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
 REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
 OUTPUT_DIR="$WORK_DIR/output" \
 PLATFORM=linux/arm64 \
-OCI_REGISTRY_HOST=fixture.invalid \
-OCI_REGISTRY_NAMESPACE=namespace \
-OCI_IMAGE_PREFIX=betstan \
-OCI_REGISTRY_USERNAME=fixture \
-OCI_REGISTRY_AUTH_TOKEN=fixture \
+APPLICATION_REGISTRY_PROVIDER=ghcr \
+APPLICATION_REGISTRY_HOST=ghcr.io \
+APPLICATION_REGISTRY_REPOSITORY=vasilyevstan/betstan-images \
+APPLICATION_REGISTRY_TAG_PREFIX=arm64 \
+APPLICATION_REGISTRY_TAG_SCHEMA=v1 \
+APPLICATION_REGISTRY_USERNAME=fixture \
+APPLICATION_REGISTRY_TOKEN=fixture \
 GITHUB_RUN_ID="$NEW_RUN_ID" \
 GITHUB_RUN_ATTEMPT=1 \
   "$OCI_DIR/scripts/reuse-images.sh" >/dev/null
@@ -126,7 +137,7 @@ for service in "${services[@]}"; do
   [[ -s "$provenance" ]] || fail "reuse provenance is missing for $service"
   grep -Fxq "service=$service" "$provenance"
   grep -Fxq "source_sha=$NEW_SHA" "$provenance"
-  grep -Fxq "tag=${repository}:oci-${service}-${NEW_SHA}" "$provenance"
+  grep -Fxq "tag=${repository}:arm64-${service}-${NEW_SHA}" "$provenance"
   grep -Fxq "build_run_id=$NEW_RUN_ID" "$provenance"
   grep -Fxq "reuse_source_sha=$OLD_SHA" "$provenance"
   grep -Fxq "reuse_build_run_id=$OLD_RUN_ID" "$provenance"
@@ -135,36 +146,30 @@ done
 if PATH="$WORK_DIR/bin:$PATH" \
     MOCK_DOCKER_LOG="$WORK_DIR/docker.log" \
     MOCK_DOCKER_STATE="$WORK_DIR/state" \
-    MOCK_DOCKER_FAIL_TAG="oci-event-${RETRY_SHA}" \
+    MOCK_DOCKER_FAIL_TAG="arm64-event-${RETRY_SHA}" \
     SOURCE_SHA="$RETRY_SHA" \
     REUSE_SOURCE_SHA="$OLD_SHA" \
     REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
     REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
     OUTPUT_DIR="$WORK_DIR/retry-first" \
     PLATFORM=linux/arm64 \
-    OCI_REGISTRY_HOST=fixture.invalid \
-    OCI_REGISTRY_NAMESPACE=namespace \
-    OCI_IMAGE_PREFIX=betstan \
-    OCI_REGISTRY_USERNAME=fixture \
-    OCI_REGISTRY_AUTH_TOKEN=fixture \
+    APPLICATION_REGISTRY_USERNAME=fixture \
+    APPLICATION_REGISTRY_TOKEN=fixture \
     "$OCI_DIR/scripts/reuse-images.sh" >/dev/null 2>&1; then
   fail "injected mid-publication failure unexpectedly succeeded"
 fi
 PATH="$WORK_DIR/bin:$PATH" \
 MOCK_DOCKER_LOG="$WORK_DIR/docker.log" \
 MOCK_DOCKER_STATE="$WORK_DIR/state" \
-MOCK_DOCKER_FAIL_TAG="oci-event-${RETRY_SHA}" \
+MOCK_DOCKER_FAIL_TAG="arm64-event-${RETRY_SHA}" \
 SOURCE_SHA="$RETRY_SHA" \
 REUSE_SOURCE_SHA="$OLD_SHA" \
 REUSE_BUILD_RUN_ID="$OLD_RUN_ID" \
 REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
 OUTPUT_DIR="$WORK_DIR/retry-second" \
 PLATFORM=linux/arm64 \
-OCI_REGISTRY_HOST=fixture.invalid \
-OCI_REGISTRY_NAMESPACE=namespace \
-OCI_IMAGE_PREFIX=betstan \
-OCI_REGISTRY_USERNAME=fixture \
-OCI_REGISTRY_AUTH_TOKEN=fixture \
+APPLICATION_REGISTRY_USERNAME=fixture \
+APPLICATION_REGISTRY_TOKEN=fixture \
 GITHUB_RUN_ID="$NEW_RUN_ID" \
 GITHUB_RUN_ATTEMPT=1 \
   "$OCI_DIR/scripts/reuse-images.sh" >/dev/null
@@ -173,7 +178,7 @@ for service in "${services[@]}"; do
     fail "retry did not recover provenance for $service"
 done
 
-auth_tag="${repository}:oci-auth-${MISMATCH_SHA}"
+auth_tag="${repository}:arm64-auth-${MISMATCH_SHA}"
 auth_key="$(printf '%s' "$auth_tag" | cksum | awk '{print $1}')"
 printf '%s\n' "sha256:$(printf '%064d' 99)" > "$WORK_DIR/state/$auth_key"
 create_count_before="$(
@@ -188,11 +193,8 @@ if PATH="$WORK_DIR/bin:$PATH" \
     REUSE_PROVENANCE_DIR="$WORK_DIR/source" \
     OUTPUT_DIR="$WORK_DIR/existing-output" \
     PLATFORM=linux/arm64 \
-    OCI_REGISTRY_HOST=fixture.invalid \
-    OCI_REGISTRY_NAMESPACE=namespace \
-    OCI_IMAGE_PREFIX=betstan \
-    OCI_REGISTRY_USERNAME=fixture \
-    OCI_REGISTRY_AUTH_TOKEN=fixture \
+    APPLICATION_REGISTRY_USERNAME=fixture \
+    APPLICATION_REGISTRY_TOKEN=fixture \
     "$OCI_DIR/scripts/reuse-images.sh" >/dev/null 2>&1; then
   fail "reuse accepted an existing exact target tag with a mismatched digest"
 fi

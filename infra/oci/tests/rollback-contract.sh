@@ -127,10 +127,15 @@ redirect_host=www.betstan.xyz
 diagnostic_host=203.0.113.10.nip.io
 deployment_run_id=$DEPLOY_RUN_ID
 deployment_run_attempt=1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
 EOF2
   case "$schema" in
     modern)
       cat >>"$output_file" <<EOF2
+deployment_workflow=oci-production-deploy
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 infrastructure_run_attempt=1
 infrastructure_provenance_sha256=$INFRASTRUCTURE_PROVENANCE_SHA256
@@ -178,12 +183,12 @@ current_digest() {
 
 target_image_ref() {
   local service="$1"
-  printf 'fixture.invalid/namespace/%s@%s\n' "$service" "$(service_digest "$service")"
+  printf 'ghcr.io/vasilyevstan/betstan-images@%s\n' "$(service_digest "$service")"
 }
 
 current_image_ref() {
   local service="$1"
-  printf 'fixture.invalid/namespace/%s@%s\n' "$service" "$(current_digest "$service")"
+  printf 'ghcr.io/vasilyevstan/betstan-images@%s\n' "$(current_digest "$service")"
 }
 
 create_baseline_fixture() {
@@ -222,7 +227,7 @@ create_baseline_fixture() {
       image_ref="fixture.invalid/namespace/${service}:latest"
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$service" "fixture.invalid/namespace/${service}" "$image_ref" "$digest" "$platform_digest" >>"$directory/images.tsv"
+      "$service" "ghcr.io/vasilyevstan/betstan-images" "$image_ref" "$digest" "$platform_digest" >>"$directory/images.tsv"
   done
   cat >"$directory/queues.tsv" <<'QUEUES'
 event_new_event	0	0	1
@@ -233,9 +238,8 @@ moderation_live_event_update	0	0	1
 resulting_live_event_update	0	0	1
 event_live_update.fixture-pod	0	0	2
 QUEUES
-  cat >"$directory/live-images.tsv" <<'LIVE'
-auth	fixture.invalid/namespace/auth@sha256:0000000000000000000000000000000000000000000000000000000000000001
-LIVE
+  awk -F '\t' '{ print $1 "\t" $3 }' \
+    "$directory/images.tsv" >"$directory/live-images.tsv"
   cat >"$directory/public-http.tsv" <<'HTTP'
 canonical	/	200	https://betstan.xyz/	text/html	html:fixture
 HTTP
@@ -275,12 +279,17 @@ diagnostic_url=https://203.0.113.10.nip.io
 sse_path=/api/event/stream
 sse_required=$fixture_sse_required
 database_restore=disabled
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
 EOF2
   : >"$directory/SHA256SUMS"
   local file
   local checksum_files=(
     baseline-provenance.env
     images.tsv
+    live-images.tsv
     queues.tsv
     public-http.tsv
     sse.tsv
@@ -327,6 +336,57 @@ EOF2
   done
 }
 
+create_recovery_baseline_fixture() {
+  local directory="$1"
+  cp -R "$FIXTURE_DIR/baseline-good" "$directory"
+  rm -f "$directory/trusted-deploy-provenance.txt"
+  printf 'auth\tfixture.ocir.io/tenant/betstan/auth@sha256:%064d\t%s\n' \
+    91 "$(target_image_ref auth)" >"$directory/transition-plan.tsv"
+  printf '%s\n' 'event_new_event' >"$directory/rabbitmq-baseline.txt"
+  cat >"$directory/trusted-recovery-transition-provenance.env" <<EOF2
+schema=betstan.ghcr-cache-recovery-transition.v1
+transition_workflow=oci-ghcr-cache-recovery
+transition_run_id=$DEPLOY_RUN_ID
+transition_run_attempt=1
+source_sha=$TARGET_SHA
+images_sha256=$(sha256_file "$directory/images.tsv")
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+infrastructure_run_attempt=1
+infrastructure_provenance_sha256=$INFRASTRUCTURE_PROVENANCE_SHA256
+runtime_mode=k3s
+runtime_fingerprint=$RUNTIME_FINGERPRINT
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=203.0.113.10.nip.io
+transition_plan_state_sha256=$(sha256_file "$directory/transition-plan.tsv")
+rabbitmq_baseline_sha256=$(sha256_file "$directory/rabbitmq-baseline.txt")
+credential_retirement=pass
+ocir_repository_retirement=pass
+transition_status=PASS
+EOF2
+  cat >>"$directory/baseline-provenance.env" <<EOF2
+baseline_recovery_run_id=$DEPLOY_RUN_ID
+baseline_recovery_run_attempt=1
+baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
+EOF2
+  sed -i.bak 's/^baseline_deploy_workflow=.*/baseline_deploy_workflow=oci-ghcr-cache-recovery/' \
+    "$directory/baseline-provenance.env"
+  rm -f "$directory/baseline-provenance.env.bak"
+  : >"$directory/SHA256SUMS"
+  local file
+  for file in \
+    baseline-provenance.env images.tsv live-images.tsv queues.tsv public-http.tsv sse.tsv \
+    migration-journal.json migration-lock.json migration-backup-references.tsv \
+    transition-plan.tsv rabbitmq-baseline.txt trusted-recovery-transition-provenance.env; do
+    printf '%s  %s\n' "$(sha256_file "$directory/$file")" "$file" >>"$directory/SHA256SUMS"
+  done
+}
+
 create_baseline_fixture "$FIXTURE_DIR/baseline-good"
 create_baseline_fixture "$FIXTURE_DIR/baseline-mutable" mutable
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-sse" legacy-sse
@@ -334,6 +394,7 @@ create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-missing" legacy-missing
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-embedded" legacy-embedded
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-source-mismatch" legacy-source-mismatch
 create_baseline_fixture "$FIXTURE_DIR/baseline-partial-infrastructure" partial-infrastructure
+create_recovery_baseline_fixture "$FIXTURE_DIR/baseline-recovery"
 
 cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
@@ -407,6 +468,9 @@ case "${1:-} ${2:-}" in
   "api repos/example/repo/actions/workflows/oci-production-build.yml")
     printf '801\n'
     ;;
+  "api repos/example/repo/actions/workflows/oci-ghcr-cache-recovery.yml")
+    printf '701\n'
+    ;;
   "api repos/example/repo/actions/runs/${STUB_SOURCE_RUN_ID}/attempts/1")
     workflow_id=901
     [[ "${STUB_SOURCE_RUN_BAD_WORKFLOW:-0}" != "1" ]] || workflow_id=999
@@ -425,6 +489,24 @@ case "${1:-} ${2:-}" in
     }'
     ;;
   "api repos/example/repo/actions/runs/${STUB_DEPLOY_RUN_ID}/attempts/1")
+    if [[ "${STUB_RECOVERY_MODE:-0}" == "1" ]]; then
+      workflow_id=701
+      [[ "${STUB_RECOVERY_BAD_WORKFLOW:-0}" != "1" ]] || workflow_id=999
+      jq -n --argjson workflow_id "$workflow_id" --arg recent "$recent" '{
+        workflow_id:$workflow_id,
+        path:".github/workflows/oci-ghcr-cache-recovery.yml",
+        event:"workflow_dispatch",
+        head_sha:"3333333333333333333333333333333333333333",
+        head_branch:"master",
+        head_repository:{full_name:"example/repo"},
+        status:"completed",
+        conclusion:"success",
+        run_attempt:1,
+        created_at:$recent,
+        updated_at:$recent
+      }'
+      exit 0
+    fi
     head_sha="$STUB_TARGET_SHA"
     [[ "${STUB_DEPLOY_BAD_HEAD_SHA:-0}" != "1" ]] || head_sha="$STUB_CURRENT_MASTER_SHA"
     jq -n --arg head_sha "$head_sha" --arg recent "$recent" '{
@@ -590,18 +672,20 @@ read_state() {
 
 service_platform_digest_from_image() {
   local image="$1"
-  local service="${image#fixture.invalid/namespace/}"
-  service="${service%@*}"
-  local index=31
-  local candidate
-  for candidate in auth bet backoffice client event moderation resulting slip gamemaster; do
-    if [[ "$candidate" == "$service" ]]; then
-      printf 'sha256:%064d\n' "$index"
-      return 0
-    fi
-    index=$((index + 1))
-  done
-  printf '%s\n' "${image##*@}"
+  local suffix="${image##*sha256:}" ordinal
+  [[ "$suffix" =~ ^[0-9]{64}$ ]] || {
+    printf '%s\n' "${image##*@}"
+    return
+  }
+  ordinal=$((10#$suffix))
+  if ((ordinal >= 201 && ordinal <= 209)); then
+    ordinal=$((ordinal - 200))
+  fi
+  ((ordinal >= 1 && ordinal <= 9)) || {
+    printf '%s\n' "${image##*@}"
+    return
+  }
+  printf 'sha256:%064d\n' "$((30 + ordinal))"
 }
 
 print_all_workloads() {
@@ -1321,11 +1405,19 @@ run_expect_failure() {
 run_capture() {
   local output_dir="$1"
   shift
-  local scenario_name capture_state_dir capture_kubectl_log
+  local scenario_name capture_state_dir capture_kubectl_log option
   scenario_name="$(basename "$output_dir")"
   capture_state_dir="$STATE_DIR/$scenario_name/current"
   capture_kubectl_log="$STATE_DIR/$scenario_name/kubectl.log"
   set_target_state "$capture_state_dir"
+  for option in "$@"; do
+    if [[ "$option" == "STUB_CAPTURE_OCIR=1" ]]; then
+      write_text_atomic "$capture_state_dir/auth.env" <<EOF2
+image=fixture.ocir.io/tenant/betstan/auth@$(service_digest auth)
+revision=8
+EOF2
+    fi
+  done
   rm -f "$capture_kubectl_log"
   env -i HOME="$HOME" "${common_env[@]}" \
     STUB_STATE_DIR="$capture_state_dir" \
@@ -1359,8 +1451,35 @@ puts 'oci_rollback_yaml=PASS'
 RUBY
 assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
+for literal in \
+  'validate_recovery_run' \
+  'validate_recovery_transition_provenance' \
+  'oci-ghcr-cache-recovery.yml' \
+  'trusted-recovery-transition-provenance.env' \
+  'recovery-transition' \
+  'only a previously trusted exact deploy artifact may omit deployment_workflow'; do
+  assert_contains "$SCRIPT" "$literal"
+done
+assert_contains "$ROOT_DIR/infra/oci/scripts/deploy.sh" 'deployment_workflow=oci-production-deploy'
 
 bash -n "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"
+
+if ! run_script "$WORK_DIR/recovery-baseline-success" \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
+    STUB_RECOVERY_MODE=1 \
+    ROLLBACK_MODE=dry-run >"$WORK_DIR/recovery-baseline-success.out" 2>&1; then
+  cat "$WORK_DIR/recovery-baseline-success.out" >&2
+  fail "exact first-attempt GHCR recovery baseline was rejected"
+fi
+assert_contains "$WORK_DIR/recovery-baseline-success/deploy-provenance-binding.env" \
+  'origin=recovery-transition'
+run_expect_failure recovery-baseline-wrong-workflow \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
+  STUB_RECOVERY_MODE=1 \
+  STUB_RECOVERY_BAD_WORKFLOW=1 \
+  ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/recovery-baseline-wrong-workflow.out" \
+  'recovery run is not exact first-attempt GHCR cache recovery metadata'
 
 repeat_capture_dir="$WORK_DIR/capture-repeat-safe"
 if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-repeat-safe-1.out" 2>&1; then
@@ -1392,6 +1511,10 @@ run_capture_expect_failure capture-declared-sse-absence \
   SSE_REQUIREMENT=deployed-source \
   STUB_DEPLOYED_SOURCE_HAS_SSE=1 \
   STUB_SHORT_SSE_MODE=legacy-absent
+run_capture_expect_failure capture-ocir-without-recovery \
+  STUB_CAPTURE_OCIR=1
+assert_contains "$WORK_DIR/capture-ocir-without-recovery.out" \
+  'non-GHCR live images require explicit completed cache-recovery authority'
 run_capture_expect_failure capture-legacy-sse-unexpected-status \
   SSE_REQUIREMENT=deployed-source \
   STUB_DEPLOYED_SOURCE_HAS_SSE=0 \
@@ -1533,7 +1656,8 @@ run_expect_failure checksum-mismatch \
 
 run_expect_failure mutable-rejection \
   STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-mutable" ROLLBACK_MODE=dry-run
-assert_contains "$WORK_DIR/mutable-rejection.out" 'baseline image for event is mutable'
+assert_contains "$WORK_DIR/mutable-rejection.out" \
+  'rollback image provenance is not an immutable GHCR reference'
 
 run_expect_failure expired-artifact \
   STUB_ARTIFACT_EXPIRED=1 ROLLBACK_MODE=dry-run
