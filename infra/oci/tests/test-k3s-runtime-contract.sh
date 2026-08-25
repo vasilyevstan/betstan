@@ -642,6 +642,12 @@ grep -Fq 'ssh_tunnel_pid=""' \
 grep -Fq '(( OCI_BASTION_SESSION_TTL >= 1800 ))' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access does not enforce the OCI Bastion minimum session TTL"
+grep -Fq 'OCI_INSTANCE_COMMAND_POLL_ATTEMPTS="${OCI_INSTANCE_COMMAND_POLL_ATTEMPTS:-150}"' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not tolerate the bounded Run Command acceptance window"
+grep -Fq '(( OCI_INSTANCE_COMMAND_POLL_ATTEMPTS <= 150 ))' \
+  "$OCI_DIR/scripts/configure-k3s-access.sh" ||
+  fail "k3s access does not bound Run Command polling"
 ! grep -Fq 'StrictHostKeyChecking=accept-new' \
   "$OCI_DIR/scripts/configure-k3s-access.sh" ||
   fail "k3s access still trusts first-use SSH host keys"

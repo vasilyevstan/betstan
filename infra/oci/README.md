@@ -66,10 +66,12 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   the target host key from OCI Instance Agent Run Command before either SSH
   connection. The target command returns the key with a node-generated SHA-256
   because Oracle Cloud Agent 1.61 can omit the response `text-sha256`; any OCI
-  checksum that is present is verified as an additional integrity boundary.
-  Imported k3s kubeconfigs are reduced to one loopback cluster and inline
-  certificates; executable providers, tokens, proxies, and external credential
-  files are rejected before any API request.
+  checksum that is present is verified as an additional integrity boundary. A
+  healthy command may remain `ACCEPTED` for more than three minutes, so access
+  setup uses a bounded five-minute poll window. Imported k3s kubeconfigs are
+  reduced to one loopback cluster and inline certificates; executable
+  providers, tokens, proxies, and external credential files are rejected
+  before any API request.
   Mongo and RabbitMQ remain `ClusterIP`.
 - The apex and `www` A records must equal exact load-balancer provenance and
   must not have a conflicting AAAA record. Canonical and diagnostic
