@@ -83,6 +83,10 @@ conversation summaries are not authority.
   Use the bounded five-minute poll allowance already enforced by the access
   script, and inspect late command state before diagnosing agent failure or
   dispatching another production workflow.
+- Feed normalized host keys to `ssh-keygen` through standard input, as the
+  retained SSH-key validator already does. Preserve checksum, exact-line, and
+  supported-key-type validation rather than trusting a runner-specific
+  temporary-file parse result.
 - Capture and validate rollback evidence before acquiring a database lock or
   changing a workload. An ordinary baseline is valid only when all nine live
   references and its exact deploy provenance identify public GHCR digests;
