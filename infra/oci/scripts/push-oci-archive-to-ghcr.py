@@ -30,8 +30,7 @@ TAG_RE = re.compile(
 )
 UPLOAD_LOCATION_PATH_RE = re.compile(
     rf"/v2/{re.escape(REPOSITORY)}/blobs/uploads?/"
-    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
-    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+    r"[A-Za-z0-9][A-Za-z0-9._~-]{15,255}"
 )
 
 

@@ -99,9 +99,10 @@ conversation summaries are not authority.
   traverse the tar remotely, and require identical bounded size and SHA-256
   after transfer before deleting the node file and contacting GHCR.
 - GHCR's successful `POST /blobs/uploads/` response uses the singular
-  `/blobs/upload/<uuid>` session path. Validate that response against the exact
-  registry, repository, path forms, and UUID rather than assuming the request
-  and response paths use the same plural spelling.
+  `/blobs/upload/<id>` session path, and the identifier is opaque rather than
+  guaranteed to have RFC UUID shape. Validate a bounded URL-unreserved segment
+  against the exact registry, repository, and path forms rather than assuming
+  either the request spelling or an identifier representation.
 - Boot every published image against clean pinned dependencies before granting
   build authority. MongoDB index inspection returns error 26 when a collection
   has never existed; handle only that exact empty-namespace case as no indexes
