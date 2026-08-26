@@ -160,7 +160,7 @@ for service in "${SERVICES[@]}"; do
     printf -v remote_ref '%q' "$old_ref"
     archive="$archive_dir/${service}.tar"
     ssh "${ssh_options[@]}" "${K3S_SSH_USER}@127.0.0.1" \
-      "sudo k3s ctr -n k8s.io images export - -- $remote_ref" > "$archive"
+      "sudo k3s ctr -n k8s.io images export - $remote_ref" > "$archive"
     [[ -s "$archive" && ! -L "$archive" ]] ||
       oci_die "containerd cache export did not produce a regular OCI archive"
     OCI_ARCHIVE_FILE="$archive" \

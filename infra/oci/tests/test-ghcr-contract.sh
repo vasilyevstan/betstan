@@ -600,6 +600,12 @@ grep -Fq 'containerd-cache' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
   fail "exact cached-image recovery path is missing"
 grep -Fq 'push-oci-archive-to-ghcr.py' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
   fail "cache recovery does not use the exact OCI archive publisher"
+grep -Fq '"sudo k3s ctr -n k8s.io images export - $remote_ref"' \
+  "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
+  fail "cache recovery does not pass the exact image reference in the ctr export argv"
+! grep -Eq 'ctr -n k8s\.io images export - --' \
+  "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
+  fail "cache recovery passes an unsupported option terminator as a ctr image name"
 if grep -Eq 'docker (load|tag|push)' "$OCI_DIR/scripts/recover-k3s-cached-images.sh"; then
   fail "cache recovery still depends on digest-changing Docker conversion"
 fi
