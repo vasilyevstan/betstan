@@ -225,10 +225,11 @@ concurrent retirement fixture isolation without masking failed suites.
    exact ARM64 manifest/config/layer blobs from each validated OCI archive
    without a Docker load/repack cycle. It pushes only from the runner, never
    sends a GHCR token to the node, and never silently rebuilds a historical
-   baseline. GHCR upload sessions must remain on its exact registry/repository
-   and use a UUID-bound singular `upload` or plural `uploads` path. Target SSH
-   uses the retained dedicated known-hosts file and the exact instance OCID as
-   `HostKeyAlias`. Only after anonymous
+   baseline. GHCR upload sessions must remain on its exact registry/repository,
+   use a singular `upload` or plural `uploads` path, and end in one bounded
+   URL-unreserved opaque identifier. Target SSH uses the retained dedicated
+   known-hosts file and the exact instance OCID as `HostKeyAlias`. Only after
+   anonymous
    remote verification of all nine recovered GHCR digests does it capture and
    upload a hash-bound transition plan plus the original RabbitMQ queue
    baseline. That upload completes before the first Deployment mutation. The
