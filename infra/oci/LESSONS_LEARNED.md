@@ -94,6 +94,10 @@ conversation summaries are not authority.
   than an option terminator. Pass the already shell-escaped immutable image
   reference directly after the archive path and exercise that exact argv in
   the GHCR recovery contract.
+- Boot every published image against clean pinned dependencies before granting
+  build authority. MongoDB index inspection returns error 26 when a collection
+  has never existed; handle only that exact empty-namespace case as no indexes
+  and keep all other readiness failures closed.
 - Capture and validate rollback evidence before acquiring a database lock or
   changing a workload. An ordinary baseline is valid only when all nine live
   references and its exact deploy provenance identify public GHCR digests;
