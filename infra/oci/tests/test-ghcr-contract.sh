@@ -838,6 +838,34 @@ for credential in (
         raise SystemExit(
             f"OCIR retirement lacks required step-scoped OCI credential: {credential}"
         )
+terminal_upload = workflow_text.split(
+    "      - name: Upload first-attempt recovery provenance", 1
+)[1]
+terminal_paths = [
+    line.strip()
+    for line in terminal_upload.splitlines()
+    if line.strip().startswith("artifacts/ghcr-cache-recovery/")
+]
+expected_terminal_paths = {
+    "artifacts/ghcr-cache-recovery/SHA256SUMS",
+    *(f"artifacts/ghcr-cache-recovery/{service}.env" for service in (
+        "auth", "bet", "backoffice", "client", "event", "gamemaster",
+        "moderation", "resulting", "slip",
+    )),
+    "artifacts/ghcr-cache-recovery/images.tsv",
+    "artifacts/ghcr-cache-recovery/rabbitmq-baseline.txt",
+    "artifacts/ghcr-cache-recovery/rebind-provenance.env",
+    "artifacts/ghcr-cache-recovery/recovery-evidence.env",
+    "artifacts/ghcr-cache-recovery/transition-plan-evidence.env",
+    "artifacts/ghcr-cache-recovery/transition-plan.tsv",
+    "artifacts/ghcr-cache-recovery/transition-provenance.env",
+}
+if len(terminal_paths) != len(set(terminal_paths)):
+    raise SystemExit("terminal recovery authority contains duplicate paths")
+if set(terminal_paths) != expected_terminal_paths:
+    raise SystemExit("terminal recovery authority does not match its exact checksum-bound file set")
+if "          path: artifacts/ghcr-cache-recovery\n" in terminal_upload:
+    raise SystemExit("terminal recovery authority still uploads unbound diagnostics")
 if 'validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \\\n            "$SOURCE_SHA"' not in workflow_text:
     raise SystemExit("cache recovery is not bound to baseline infrastructure provenance")
 
