@@ -88,6 +88,21 @@ const detectExistingIndex = (indexes: any[]): DraftIndexReport["existingIndex"] 
   return "missing";
 };
 
+const listExistingIndexes = async (): Promise<any[]> => {
+  try {
+    return await Slip.collection.indexes();
+  } catch (error: unknown) {
+    if (
+      error instanceof mongoose.mongo.MongoServerError
+      && error.code === 26
+    ) {
+      return [];
+    }
+
+    throw error;
+  }
+};
+
 const countNonZeroBlocks = (
   existingIndex: DraftIndexReport["existingIndex"],
   blocking: DraftNormalizationCounts
@@ -243,7 +258,7 @@ export const ensureSlipDraftIndex = async (
   options: Partial<ParsedEnsureArgs> = {}
 ): Promise<DraftIndexReport> => {
   const apply = options.apply ?? false;
-  const existingIndex = detectExistingIndex(await Slip.collection.indexes());
+  const existingIndex = detectExistingIndex(await listExistingIndexes());
   const blocking = await scanDraftNormalization();
   const ready = existingIndex !== "conflicting" && blocking.unnormalizedDraftCount === 0;
 

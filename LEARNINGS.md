@@ -66,6 +66,10 @@
 - Deployment provenance must bind source SHA, build/deploy attempts, infrastructure artifact digest, runtime mode, and runtime fingerprint. Rechecking current `master` immediately before mutation and commit closes the preflight-to-mutation race.
 
 ### Mongo aggregate concurrency and rolling compatibility
+- Mongo index introspection fails with `NamespaceNotFound` on a brand-new
+  database. Readiness guards may treat only error code 26 as an empty index
+  set, then create the guarded index; every other inspection error remains a
+  startup failure.
 - Raw Mongo inserts and upserts that bypass Mongoose `save()` must initialize
   `__v: 0` when later mutations rely on optimistic concurrency. Before
   mutating a historical versionless document, atomically initialize the
