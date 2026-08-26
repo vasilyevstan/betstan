@@ -125,6 +125,18 @@ it("creates the exact guarded index only after normalization and keeps repeated 
   expect(repeated.existingIndex).toBe("matching");
 });
 
+it("creates the guarded index when the slips collection does not exist yet", async () => {
+  await Slip.collection.drop();
+
+  const report = await ensureSlipDraftIndex({ apply: true });
+
+  expect(report.ready).toBe(true);
+  expect(report.scanned).toBe(0);
+  expect(report.changed).toBe(1);
+  expect(report.existingIndex).toBe("missing");
+  expect(await guardedIndex()).toBeTruthy();
+});
+
 it("fails closed when a conflicting guarded index shape already exists", async () => {
   await Slip.collection.insertOne({
     ...buildLegacyDraft("conflict-user"),
