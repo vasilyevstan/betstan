@@ -720,6 +720,7 @@ for literal in \
   'retire-ocir:' \
   'TRANSITION_PHASE: retire' \
   'RETIRE_OCIR_REPOSITORY: "1"' \
+  'OCI_ALLOW_LEGACY_ADMIN_UI: "1"' \
   './infra/oci/agents/validation-loop-stan.sh'; do
   grep -Fq -- "$literal" "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" ||
     fail "recovery workflow lacks resumable inputs or terminal health validation: $literal"
@@ -801,7 +802,8 @@ for artifact in ("transition-plan.tsv", "rabbitmq-baseline.txt",
     if artifact not in text:
         raise SystemExit(f"recovery transition omits immutable plan artifact: {artifact}")
 
-workflow = Path(sys.argv[1]).parents[3] / ".github/workflows/oci-ghcr-cache-recovery.yml"
+root = Path(sys.argv[1]).parents[3]
+workflow = root / ".github/workflows/oci-ghcr-cache-recovery.yml"
 workflow_text = workflow.read_text(encoding="utf-8")
 if workflow_text.index("Upload immutable pre-rebind plan before rollout") > workflow_text.index(
     "Sequentially rebind verified GHCR digests"
@@ -809,6 +811,17 @@ if workflow_text.index("Upload immutable pre-rebind plan before rollout") > work
     raise SystemExit("pre-rebind plan is not uploaded before Deployment mutation")
 if workflow_text.index("public-validate:") > workflow_text.index("retire-ocir:"):
     raise SystemExit("OCIR retirement is not deferred until public validation")
+public_validation = workflow_text.split("  public-validate:", 1)[1].split(
+    "  retire-ocir:", 1
+)[0]
+if public_validation.count('OCI_ALLOW_LEGACY_ADMIN_UI: "1"') != 1:
+    raise SystemExit("historical baseline UI compatibility is not scoped to public validation")
+smoke = root / "infra/oci/agents/oci-live-smoke.spec.js"
+smoke_text = smoke.read_text(encoding="utf-8")
+if "process.env.OCI_ALLOW_LEGACY_ADMIN_UI === '1'" not in smoke_text:
+    raise SystemExit("browser smoke does not consume the historical UI compatibility control")
+if "if (!allowLegacyAdminUi)" not in smoke_text:
+    raise SystemExit("browser smoke does not default to strict Backoffice authorization")
 if 'needs: [recover, public-validate]' not in workflow_text:
     raise SystemExit("OCIR retirement does not depend on successful public validation")
 if 'validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \\\n            "$SOURCE_SHA"' not in workflow_text:

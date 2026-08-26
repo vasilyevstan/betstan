@@ -481,6 +481,7 @@ jobs:
           OCI_REDIRECT_URL: ${{ needs.recover.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ needs.recover.outputs.diagnostic_url }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
+          OCI_ALLOW_LEGACY_ADMIN_UI: "1"
           MAX_LOOPS: "3"
           SLEEP_SECONDS: "20"
           OUTPUT_DIR: artifacts/oci-ghcr-recovery-public-validation
