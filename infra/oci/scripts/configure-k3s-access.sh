@@ -162,17 +162,37 @@ write_known_host() {
   chmod 600 "$output_file"
 }
 
-attest_target_host_key() {
+attest_ssh_host_keys() {
   local command_text content target command_id execution_json lifecycle_state
   local output_file expected_sha actual_sha exit_code output_type attempt
-  local public_key reported_public_key_sha256 actual_public_key_sha256
+  local target_public_key reported_target_public_key_sha256
+  local actual_target_public_key_sha256 normalized_target_public_key
+  local bastion_endpoint bastion_public_key reported_bastion_public_key_sha256
+  local actual_bastion_public_key_sha256 normalized_bastion_public_key
   local output_line_count
+  bastion_endpoint="host.bastion.${OCI_CLI_REGION}.oci.oraclecloud.com"
   command_text='set -eu
 key_file=/etc/ssh/ssh_host_ed25519_key.pub
 test -f "$key_file"
-public_key="$(cat "$key_file")"
-public_key_sha256="$(printf "%s\n" "$public_key" | sha256sum | cut -d " " -f 1)"
-printf "%s\n%s\n" "$public_key" "$public_key_sha256"'
+target_public_key="$(cat "$key_file")"
+target_public_key_sha256="$(printf "%s\n" "$target_public_key" | sha256sum | cut -d " " -f 1)"
+bastion_endpoint="'"$bastion_endpoint"'"
+bastion_public_key="$(
+  ssh-keyscan -T 10 -t ed25519 "$bastion_endpoint" 2>/dev/null |
+    while read -r _ algorithm key extra; do
+      if test "$algorithm" = "ssh-ed25519" &&
+         test -n "$key" &&
+         test -z "${extra:-}"; then
+        printf "%s %s\n" "$algorithm" "$key"
+      fi
+    done |
+    sort -u
+)"
+test "$(printf "%s\n" "$bastion_public_key" | grep -c .)" -eq 1
+bastion_public_key_sha256="$(printf "%s\n" "$bastion_public_key" | sha256sum | cut -d " " -f 1)"
+printf "%s\n%s\n%s\n%s\n" \
+  "$target_public_key" "$target_public_key_sha256" \
+  "$bastion_public_key" "$bastion_public_key_sha256"'
   content="$(
     jq -cn --arg text "$command_text" \
       '{source:{sourceType:"TEXT",text:$text},output:{outputType:"TEXT"}}'
@@ -234,22 +254,35 @@ printf "%s\n%s\n" "$public_key" "$public_key_sha256"'
   fi
 
   output_line_count="$(wc -l <"$output_file" | tr -d ' ')"
-  [[ "$output_line_count" == "2" ]] ||
-    oci_die "OCI-attested target host-key payload is incomplete"
-  public_key="$(sed -n '1p' "$output_file")"
-  reported_public_key_sha256="$(sed -n '2p' "$output_file")"
-  [[ "$reported_public_key_sha256" =~ ^[0-9a-f]{64}$ ]] ||
-    oci_die "OCI-attested target host-key payload checksum is malformed"
-  actual_public_key_sha256="$(printf '%s\n' "$public_key" | oci_sha256)"
-  [[ "$actual_public_key_sha256" == "$reported_public_key_sha256" ]] ||
-    oci_die "OCI-attested target host-key payload checksum does not match"
-  normalize_host_public_key "$public_key"
+  [[ "$output_line_count" == "4" ]] ||
+    oci_die "OCI-attested SSH host-key payload is incomplete"
+  target_public_key="$(sed -n '1p' "$output_file")"
+  reported_target_public_key_sha256="$(sed -n '2p' "$output_file")"
+  bastion_public_key="$(sed -n '3p' "$output_file")"
+  reported_bastion_public_key_sha256="$(sed -n '4p' "$output_file")"
+  [[ "$reported_target_public_key_sha256" =~ ^[0-9a-f]{64}$ &&
+     "$reported_bastion_public_key_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    oci_die "OCI-attested SSH host-key payload checksum is malformed"
+  actual_target_public_key_sha256="$(
+    printf '%s\n' "$target_public_key" | oci_sha256
+  )"
+  actual_bastion_public_key_sha256="$(
+    printf '%s\n' "$bastion_public_key" | oci_sha256
+  )"
+  [[ "$actual_target_public_key_sha256" == "$reported_target_public_key_sha256" &&
+     "$actual_bastion_public_key_sha256" == "$reported_bastion_public_key_sha256" ]] ||
+    oci_die "OCI-attested SSH host-key payload checksum does not match"
+  normalized_target_public_key="$(normalize_host_public_key "$target_public_key")"
+  normalized_bastion_public_key="$(normalize_host_public_key "$bastion_public_key")"
+  printf '%s\t%s\n' "$normalized_target_public_key" "$normalized_bastion_public_key"
 }
 
 session_connection_metadata() {
   local session_id="$1"
   local target_port="$2"
-  local session expected_endpoint expected_command actual_command public_key
+  local attested_public_key="$3"
+  local session expected_endpoint expected_command actual_command
+  local api_public_key public_key
   expected_endpoint="host.bastion.${OCI_CLI_REGION}.oci.oraclecloud.com"
   expected_command="ssh -i <privateKey> -N -L <localPort>:${instance_private_ip}:${target_port} -p 22 ${session_id}@${expected_endpoint}"
   session="$(oci bastion session get --session-id "$session_id")"
@@ -269,11 +302,23 @@ session_connection_metadata() {
   actual_command="$(jq -r '.data."ssh-metadata".command // empty' <<<"$session")"
   [[ "$actual_command" == "$expected_command" ]] ||
     oci_die "OCI Bastion SSH metadata differs from the requested port forward"
-  public_key="$(
-    normalize_host_public_key "$(
-      jq -r '.data."bastion-public-host-key-info" // empty' <<<"$session"
-    )"
+  api_public_key="$(
+    jq -r '
+      .data."bastion-public-host-key-info" as $key_info |
+      if ($key_info | type) == "object" then
+        $key_info."public-host-key" // empty
+      elif ($key_info | type) == "string" then
+        $key_info
+      else
+        empty
+      end
+    ' <<<"$session"
   )"
+  if [[ -n "$api_public_key" ]]; then
+    public_key="$(normalize_host_public_key "$api_public_key")"
+  else
+    public_key="$attested_public_key"
+  fi
   printf '%s\t%s\n' "$expected_endpoint" "$public_key"
 }
 
@@ -391,6 +436,8 @@ oci_require_vars \
   OCI_COMPARTMENT_OCID OCI_CLI_REGION OCI_K3S_SSH_PRIVATE_KEY \
   RUNNER_PUBLIC_IPV4
 oci_require_ocid OCI_COMPARTMENT_OCID
+[[ "$OCI_CLI_REGION" =~ ^[a-z0-9-]+$ ]] ||
+  oci_die "OCI_CLI_REGION contains unsupported characters"
 oci_validate_public_ipv4 "$RUNNER_PUBLIC_IPV4" ||
   oci_die "RUNNER_PUBLIC_IPV4 must be a globally routable IPv4"
 validate_local_port OCI_K3S_LOCAL_SSH_PORT "$OCI_K3S_LOCAL_SSH_PORT"
@@ -540,7 +587,10 @@ actual_target_ssh_public_key_sha256="$(
 [[ "$actual_target_ssh_public_key_sha256" == \
    "$expected_target_ssh_public_key_sha256" ]] ||
   oci_die "target SSH private key does not match acquisition provenance"
-target_host_public_key="$(attest_target_host_key)"
+attested_host_keys="$(attest_ssh_host_keys)"
+IFS=$'\t' read -r target_host_public_key bastion_host_public_key <<<"$attested_host_keys"
+[[ -n "$target_host_public_key" && -n "$bastion_host_public_key" ]] ||
+  oci_die "OCI-attested SSH host-key evidence is incomplete"
 write_known_host "$instance_ocid" 22 "$target_host_public_key" "$target_known_hosts"
 
 oci bastion session create-port-forwarding \
@@ -557,9 +607,12 @@ oci bastion session create-port-forwarding \
 ssh_session_id="$(
   wait_active_session_id "$bastion_ocid" "$ssh_session_name"
 )"
-IFS=$'\t' read -r bastion_endpoint bastion_host_public_key < <(
-  session_connection_metadata "$ssh_session_id" 22
-)
+session_metadata="$(
+  session_connection_metadata "$ssh_session_id" 22 "$bastion_host_public_key"
+)"
+IFS=$'\t' read -r bastion_endpoint bastion_host_public_key <<<"$session_metadata"
+[[ -n "$bastion_endpoint" && -n "$bastion_host_public_key" ]] ||
+  oci_die "OCI Bastion connection metadata is incomplete"
 write_known_host "$bastion_endpoint" 22 "$bastion_host_public_key" "$bastion_known_hosts"
 write_session_state
 

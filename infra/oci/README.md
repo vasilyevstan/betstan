@@ -62,16 +62,19 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
 - Only the OCI load balancer exposes ports 80/443. In k3s mode, ingress-nginx
   uses fixed NodePorts 30080/30443 and the Kubernetes API is reachable only
   through a short-lived OCI Bastion SSH session and a target-loopback tunnel.
-  The runner pins the Bastion host key from authenticated session metadata and
-  the target host key from OCI Instance Agent Run Command before either SSH
-  connection. The target command returns the key with a node-generated SHA-256
-  because Oracle Cloud Agent 1.61 can omit the response `text-sha256`; any OCI
-  checksum that is present is verified as an additional integrity boundary. A
-  healthy command may remain `ACCEPTED` for more than three minutes, so access
-  setup uses a bounded five-minute poll window. Imported k3s kubeconfigs are
-  reduced to one loopback cluster and inline certificates; executable
-  providers, tokens, proxies, and external credential files are rejected
-  before any API request.
+  The runner pins the target host key through OCI Instance Agent Run Command
+  before SSH. The same authenticated command independently observes the
+  regional Bastion ED25519 key; authenticated session metadata takes
+  precedence when OCI supplies it, while the command-attested key is the
+  fail-closed fallback because ACTIVE port-forwarding sessions can return null
+  `bastion-public-host-key-info`. The command returns both keys with
+  node-generated SHA-256 values because Oracle Cloud Agent 1.61 can omit the
+  response `text-sha256`; any OCI checksum that is present is verified as an
+  additional integrity boundary. A healthy command may remain `ACCEPTED` for
+  more than three minutes, so access setup uses a bounded five-minute poll
+  window. Imported k3s kubeconfigs are reduced to one loopback cluster and
+  inline certificates; executable providers, tokens, proxies, and external
+  credential files are rejected before any API request.
   Mongo and RabbitMQ remain `ClusterIP`.
 - The apex and `www` A records must equal exact load-balancer provenance and
   must not have a conflicting AAAA record. Canonical and diagnostic
