@@ -28,6 +28,11 @@ DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 TAG_RE = re.compile(
     r"arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-[0-9a-f]{40}"
 )
+UPLOAD_LOCATION_PATH_RE = re.compile(
+    rf"/v2/{re.escape(REPOSITORY)}/blobs/uploads?/"
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
 
 
 def die(message):
@@ -209,10 +214,28 @@ def obtain_bearer_token(actor, package_token):
 def validate_upload_location(location):
     url = urllib.parse.urljoin(f"https://{REGISTRY}", location)
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname != REGISTRY or parsed.port is not None:
+    try:
+        port = parsed.port
+    except ValueError:
         die("GHCR returned an untrusted blob-upload location")
-    if not parsed.path.startswith(f"/v2/{REPOSITORY}/blobs/uploads/"):
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != REGISTRY
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        die("GHCR returned an untrusted blob-upload location")
+    if not UPLOAD_LOCATION_PATH_RE.fullmatch(parsed.path):
         die("GHCR returned a blob-upload location outside the target repository")
+    if any(
+        key.lower() == "digest"
+        for key, _value in urllib.parse.parse_qsl(
+            parsed.query, keep_blank_values=True
+        )
+    ):
+        die("GHCR blob-upload location already contains a digest")
     return url
 
 
