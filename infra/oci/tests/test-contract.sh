@@ -86,6 +86,8 @@ for conductor_contract in \
     'Do not tight-poll' \
     'A running agent with recent tool activity is active' \
     'A GitHub environment approval wait is active external work' \
+    'inspect both jobs and `pending_deployments` immediately' \
+    'have documented preauthorization, immediately return' \
     'After two missed checkpoints, return' \
     'a duplicate reviewer merely because the first is slow' \
     'terminal or explicitly cancelled and prove that concurrent side effects' \
@@ -96,9 +98,13 @@ for conductor_contract in \
 done
 grep -Fq 'Start `betstan-conductor` before parallel agents' "$agent_readme" ||
   fail "agent workflow does not start with conductor registration"
+agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
 grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
-    "$agent_readme" ||
+    <<<"$agent_readme_flat" ||
   fail "agent workflow lacks stalled-work escalation"
+grep -Fq 'the conductor checks jobs plus `pending_deployments`' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can leave protected environment gates unattended"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"

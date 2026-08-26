@@ -32,10 +32,14 @@ in private session handoffs, not repository files or public reports.
 
 The conductor monitors completion events and bounded checkpoints rather than
 tight-polling. Recent tool/log/job progress means active work; an environment
-approval wait is external progress, not a hang. One missed checkpoint is a
-suspected stall. Two missed checkpoints require an explicit safe recovery
-action. Never replace a slow unit until the original is terminal or cancelled
-and overlapping side effects are impossible.
+approval wait is external progress, not a hang, but it is an immediate
+actionable gate. For every dispatched run and state transition, the conductor
+checks jobs plus `pending_deployments`. It immediately hands a documented,
+preauthorized approval to the orchestrator, or names the human approval owner
+and blocks; it never leaves the gate until a later routine checkpoint. One
+missed checkpoint is a suspected stall. Two missed checkpoints require an
+explicit safe recovery action. Never replace a slow unit until the original is
+terminal or cancelled and overlapping side effects are impossible.
 
 ## Ownership
 
