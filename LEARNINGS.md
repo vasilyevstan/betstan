@@ -297,6 +297,10 @@ cd resulting && npm ci && npm run test:ci
   option terminator; it tries to export an image literally named `--`. Pass the
   validated, shell-escaped immutable reference directly and lock the exact
   remote argv in the recovery contract.
+- A successful SSH exit does not prove a complete `ctr` stdout archive. The
+  live stdout path truncated 77,824 bytes while a node-staged export was valid.
+  Validate the staged tar remotely, stream it with keepalives, compare exact
+  remote/local size and SHA-256, and remove the temporary file before upload.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise

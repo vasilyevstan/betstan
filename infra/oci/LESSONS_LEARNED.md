@@ -94,6 +94,10 @@ conversation summaries are not authority.
   than an option terminator. Pass the already shell-escaped immutable image
   reference directly after the archive path and exercise that exact argv in
   the GHCR recovery contract.
+- `ctr images export -` can exit zero after delivering a truncated archive over
+  managed SSH. Stage each exact export in a unique root-owned node file,
+  traverse the tar remotely, and require identical bounded size and SHA-256
+  after transfer before deleting the node file and contacting GHCR.
 - Boot every published image against clean pinned dependencies before granting
   build authority. MongoDB index inspection returns error 26 when a collection
   has never existed; handle only that exact empty-namespace case as no indexes
