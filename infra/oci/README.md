@@ -236,6 +236,10 @@ concurrent retirement fixture isolation without masking failed suites.
    workflow then rebinds the nine application Deployments sequentially and
    verifies each rollout's serving ARM64 platform digest; Mongo and RabbitMQ
    are not changed.
+   Public recovery validation permits the historical baseline's legacy
+   Backoffice navigation only for that job. All ordinary validation retains
+   the strict persisted-role UI assertion, which current client and backoffice
+   authorization suites cover independently.
    Rollback-readiness and public Playwright checks then run while `ocir-pull`
    remains intact. Only after both pass does the final job remove the
    service-account reference and secret and delete the exact empty

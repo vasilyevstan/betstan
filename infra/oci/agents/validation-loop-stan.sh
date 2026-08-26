@@ -13,6 +13,7 @@ PLAYWRIGHT_BIN="${PLAYWRIGHT_BIN:-$ROOT_DIR/client/node_modules/.bin/playwright}
 OCI_PUBLIC_CHECKS_ALREADY_PASSED="${OCI_PUBLIC_CHECKS_ALREADY_PASSED:-0}"
 OCI_E2E_ALREADY_PASSED="${OCI_E2E_ALREADY_PASSED:-0}"
 OCI_CLUSTER_CHECKS_ALREADY_PASSED="${OCI_CLUSTER_CHECKS_ALREADY_PASSED:-0}"
+OCI_ALLOW_LEGACY_ADMIN_UI="${OCI_ALLOW_LEGACY_ADMIN_UI:-0}"
 
 [[ "$MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] || {
   echo "NO_GO validation_reason=MAX_LOOPS must be positive" >&2
@@ -28,7 +29,7 @@ OCI_CLUSTER_CHECKS_ALREADY_PASSED="${OCI_CLUSTER_CHECKS_ALREADY_PASSED:-0}"
 }
 for value in \
   OCI_PUBLIC_CHECKS_ALREADY_PASSED OCI_E2E_ALREADY_PASSED \
-  OCI_CLUSTER_CHECKS_ALREADY_PASSED; do
+  OCI_CLUSTER_CHECKS_ALREADY_PASSED OCI_ALLOW_LEGACY_ADMIN_UI; do
   [[ "${!value}" == "0" || "${!value}" == "1" ]] || {
     echo "NO_GO validation_reason=$value must be 0 or 1" >&2
     exit 1
@@ -60,6 +61,7 @@ for attempt in $(seq 1 "$MAX_LOOPS"); do
       NODE_PATH="$ROOT_DIR/client/node_modules" \
       E2E_BASE_URL="$OCI_PUBLIC_URL" \
       OCI_E2E_OUTPUT_DIR="$OUTPUT_DIR/e2e-${attempt}" \
+      OCI_ALLOW_LEGACY_ADMIN_UI="$OCI_ALLOW_LEGACY_ADMIN_UI" \
         "$PLAYWRIGHT_BIN" test --config "$OCI_DIR/agents/playwright.config.js"
     ); then
       public_ok=true
