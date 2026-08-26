@@ -289,6 +289,10 @@ cd resulting && npm ci && npm run test:ci
   the retained SSH public-key validation path. A runner-specific temporary-file
   parse can reject a key whose checksummed bytes match independently attested
   evidence.
+- k3s `ctr images export` does not consume a post-output `--` as a generic
+  option terminator; it tries to export an image literally named `--`. Pass the
+  validated, shell-escaped immutable reference directly and lock the exact
+  remote argv in the recovery contract.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise

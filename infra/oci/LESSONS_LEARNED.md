@@ -90,6 +90,10 @@ conversation summaries are not authority.
   retained SSH-key validator already does. Preserve checksum, exact-line, and
   supported-key-type validation rather than trusting a runner-specific
   temporary-file parse result.
+- k3s `ctr images export` treats a post-output `--` as an image name rather
+  than an option terminator. Pass the already shell-escaped immutable image
+  reference directly after the archive path and exercise that exact argv in
+  the GHCR recovery contract.
 - Capture and validate rollback evidence before acquiring a database lock or
   changing a workload. An ordinary baseline is valid only when all nine live
   references and its exact deploy provenance identify public GHCR digests;
