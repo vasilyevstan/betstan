@@ -268,16 +268,19 @@ cd resulting && npm ci && npm run test:ci
 - Pin privileged helper containers as well as Actions. In particular, a
   digest-pinned `docker/setup-qemu-action` still inherits risk from a mutable
   default `tonistiigi/binfmt` image unless its `image` input is also a digest.
-- Production SSH must not use trust on first use. Derive the Bastion host key
-  from authenticated OCI session metadata and the target key from OCI Instance
-  Agent Run Command, then require strict matching. Normalize any remote
-  kubeconfig to one loopback server with inline certificates and reject exec,
-  auth-provider, token, proxy, and external-file directives before `kubectl`
-  contacts the API.
+- Production SSH must not use trust on first use. Retrieve the target key
+  through OCI Instance Agent Run Command. Use that authenticated channel to
+  observe the regional Bastion key when an ACTIVE session returns null
+  `bastion-public-host-key-info`, while preferring authenticated session
+  metadata whenever OCI supplies it. Require strict matching. Normalize any
+  remote kubeconfig to one loopback server with inline certificates and reject
+  exec, auth-provider, token, proxy, and external-file directives before
+  `kubectl` contacts the API.
 - Oracle Cloud Agent 1.61 can return successful `TEXT` output with an empty
   `text-sha256`. Keep host-key attestation fail closed by having the target emit
-  the key plus its SHA-256, requiring the exact two-line payload, and verifying
-  both that checksum and any OCI response checksum that is present.
+  the target and Bastion keys plus their SHA-256 values, requiring the exact
+  four-line payload, and verifying both checksums plus any OCI response
+  checksum that is present.
 - OCI Run Command can remain `ACCEPTED` for more than three minutes on a healthy
   agent before executing. Poll for the existing bounded five-minute window and
   distinguish acceptance latency from terminal command failure; do not retry a
