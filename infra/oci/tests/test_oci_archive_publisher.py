@@ -167,7 +167,38 @@ class ArchivePublisherTest(unittest.TestCase):
     def test_rejects_upload_location_outside_target_repository(self):
         with self.assertRaisesRegex(SystemExit, "outside the target repository"):
             PUBLISHER.validate_upload_location(
-                "https://ghcr.io/v2/vasilyevstan/other/blobs/uploads/id"
+                "https://ghcr.io/v2/vasilyevstan/other/blobs/upload/"
+                "7d8507d3-d549-4fad-9113-aaea462eeb23"
+            )
+
+    def test_accepts_ghcr_singular_upload_location(self):
+        location = (
+            "/v2/vasilyevstan/betstan-images/blobs/upload/"
+            "7d8507d3-d549-4fad-9113-aaea462eeb23"
+        )
+        self.assertEqual(
+            PUBLISHER.validate_upload_location(location),
+            f"https://ghcr.io{location}",
+        )
+
+    def test_accepts_repository_bound_plural_upload_location(self):
+        location = (
+            "https://ghcr.io/v2/vasilyevstan/betstan-images/blobs/uploads/"
+            "7d8507d3-d549-4fad-9113-aaea462eeb23?_state=fixture"
+        )
+        self.assertEqual(PUBLISHER.validate_upload_location(location), location)
+
+    def test_rejects_non_uuid_upload_location(self):
+        with self.assertRaisesRegex(SystemExit, "outside the target repository"):
+            PUBLISHER.validate_upload_location(
+                "/v2/vasilyevstan/betstan-images/blobs/upload/not-an-upload-id"
+            )
+
+    def test_rejects_upload_location_with_digest(self):
+        with self.assertRaisesRegex(SystemExit, "already contains a digest"):
+            PUBLISHER.validate_upload_location(
+                "/v2/vasilyevstan/betstan-images/blobs/upload/"
+                "7d8507d3-d549-4fad-9113-aaea462eeb23?digest=untrusted"
             )
 
 

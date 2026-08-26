@@ -301,6 +301,10 @@ cd resulting && npm ci && npm run test:ci
   live stdout path truncated 77,824 bytes while a node-staged export was valid.
   Validate the staged tar remotely, stream it with keepalives, compare exact
   remote/local size and SHA-256, and remove the temporary file before upload.
+- GHCR starts blob uploads at `/blobs/uploads/` but returns the session under
+  singular `/blobs/upload/<uuid>`. Accept both exact repository-bound forms,
+  require a UUID-shaped session, and continue rejecting other hosts, paths,
+  embedded credentials, fragments, ports, and preselected digests.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise
