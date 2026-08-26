@@ -620,6 +620,23 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ghcr-cache-recovery-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/ghcr-cache-recovery
+          path: |
+            artifacts/ghcr-cache-recovery/SHA256SUMS
+            artifacts/ghcr-cache-recovery/auth.env
+            artifacts/ghcr-cache-recovery/backoffice.env
+            artifacts/ghcr-cache-recovery/bet.env
+            artifacts/ghcr-cache-recovery/client.env
+            artifacts/ghcr-cache-recovery/event.env
+            artifacts/ghcr-cache-recovery/gamemaster.env
+            artifacts/ghcr-cache-recovery/images.tsv
+            artifacts/ghcr-cache-recovery/moderation.env
+            artifacts/ghcr-cache-recovery/rabbitmq-baseline.txt
+            artifacts/ghcr-cache-recovery/rebind-provenance.env
+            artifacts/ghcr-cache-recovery/recovery-evidence.env
+            artifacts/ghcr-cache-recovery/resulting.env
+            artifacts/ghcr-cache-recovery/slip.env
+            artifacts/ghcr-cache-recovery/transition-plan-evidence.env
+            artifacts/ghcr-cache-recovery/transition-plan.tsv
+            artifacts/ghcr-cache-recovery/transition-provenance.env
           if-no-files-found: error
           retention-days: 30
