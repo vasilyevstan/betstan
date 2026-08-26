@@ -590,6 +590,11 @@ jobs:
 
       - name: Retire OCIR credentials and empty repository after public validation
         env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           RECOVERY_DIR: artifacts/ghcr-cache-recovery
           OUTPUT_DIR: artifacts/ghcr-cache-recovery
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env

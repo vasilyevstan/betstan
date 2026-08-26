@@ -310,6 +310,11 @@ cd resulting && npm ci && npm run test:ci
   actually had. Keep current authorization checks strict by default, but scope
   an explicit compatibility switch to historical recovery validation when a
   later UI capability is independently covered by current service/client tests.
+- GitHub Actions step-scoped OCI credentials do not persist into later steps.
+  Every OCI CLI step must map the reviewed user, tenancy, fingerprint,
+  private-key content, and region explicitly; otherwise a noninteractive run
+  may report only `Abort:`. Lock the complete credential mapping in a workflow
+  contract rather than relying on an earlier authenticated step.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise
