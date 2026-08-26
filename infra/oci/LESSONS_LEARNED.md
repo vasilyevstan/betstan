@@ -103,6 +103,10 @@ conversation summaries are not authority.
   guaranteed to have RFC UUID shape. Validate a bounded URL-unreserved segment
   against the exact registry, repository, and path forms rather than assuming
   either the request spelling or an identifier representation.
+- Do not apply a capability added after a historical image to that image's
+  recovery smoke. Default the current browser journey to strict persisted-role
+  checks, and allow the legacy UI only in the recovery public-validation job;
+  current client and backoffice authorization tests remain mandatory.
 - Boot every published image against clean pinned dependencies before granting
   build authority. MongoDB index inspection returns error 26 when a collection
   has never existed; handle only that exact empty-namespace case as no indexes

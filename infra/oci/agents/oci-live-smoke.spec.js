@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
 test('OCI signup, logout, login, and navigation journey', async ({ page }) => {
+  const allowLegacyAdminUi = process.env.OCI_ALLOW_LEGACY_ADMIN_UI === '1';
   const suffix = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
   const username = `oci-smoke-${suffix}`.slice(0, 40);
   const password = `Oc1-${suffix}`.slice(0, 20);
@@ -15,7 +16,9 @@ test('OCI signup, logout, login, and navigation journey', async ({ page }) => {
 
   await page.getByTitle('My bets').click();
   await expect(page).toHaveURL(/\/bets/);
-  await expect(page.getByTitle('Backoffice')).toHaveCount(0);
+  if (!allowLegacyAdminUi) {
+    await expect(page.getByTitle('Backoffice')).toHaveCount(0);
+  }
 
   await page.getByTitle('Log out').click();
   await expect(page.getByTitle('Log in')).toBeVisible();

@@ -306,6 +306,10 @@ cd resulting && npm ci && npm run test:ci
   to have RFC UUID shape. Accept one bounded URL-unreserved segment on either
   exact repository-bound path while still rejecting other hosts, paths,
   credentials, fragments, ports, and preselected digests.
+- Recovery smoke tests must validate capabilities the historical target
+  actually had. Keep current authorization checks strict by default, but scope
+  an explicit compatibility switch to historical recovery validation when a
+  later UI capability is independently covered by current service/client tests.
 - Capture rollback evidence before any database lock or workload/data
   mutation. A zero-recovery baseline is valid only when all nine live
   references and exact deploy provenance are public GHCR digests; otherwise
