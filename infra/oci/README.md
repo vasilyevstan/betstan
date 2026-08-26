@@ -219,12 +219,14 @@ concurrent retirement fixture isolation without masking failed suites.
    safety code, so no new infrastructure finalization is required first. It
    compares an independently captured nine-service live deployment/image-ID
    inventory to historical trusted provenance, exports those exact containerd
-   cache images over the protected Bastion tunnel, and uploads the exact
-   ARM64 manifest/config/layer blobs from each validated OCI archive without a
-   Docker load/repack cycle. It pushes only from the runner, never sends a
-   GHCR token to the node, and never silently rebuilds a historical baseline.
-   Target SSH uses the retained dedicated known-hosts
-   file and the exact instance OCID as `HostKeyAlias`. Only after anonymous
+   cache images to unique temporary node files, validates each tar remotely,
+   streams it over the protected Bastion tunnel, and requires matching bounded
+   remote/local size and SHA-256 before deleting the node copy. It uploads the
+   exact ARM64 manifest/config/layer blobs from each validated OCI archive
+   without a Docker load/repack cycle. It pushes only from the runner, never
+   sends a GHCR token to the node, and never silently rebuilds a historical
+   baseline. Target SSH uses the retained dedicated known-hosts file and the
+   exact instance OCID as `HostKeyAlias`. Only after anonymous
    remote verification of all nine recovered GHCR digests does it capture and
    upload a hash-bound transition plan plus the original RabbitMQ queue
    baseline. That upload completes before the first Deployment mutation. The

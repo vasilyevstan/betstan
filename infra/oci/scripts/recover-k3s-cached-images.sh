@@ -130,6 +130,8 @@ ssh_options=(
   -o IdentitiesOnly=yes
   -o PasswordAuthentication=no
   -o PreferredAuthentications=publickey
+  -o ServerAliveCountMax=3
+  -o ServerAliveInterval=30
   -o UserKnownHostsFile="$K3S_SSH_KNOWN_HOSTS"
   -o HostKeyAlias="$K3S_SSH_HOST_KEY_ALIAS"
   -o StrictHostKeyChecking=yes
@@ -140,9 +142,34 @@ adopted_count=0
 archive_dir="$(mktemp -d)"
 anonymous_docker_config="$(mktemp -d)"
 chmod 700 "$archive_dir" "$anonymous_docker_config"
-cleanup() { rm -rf "$archive_dir" "$anonymous_docker_config"; }
+remote_archive=""
+cleanup_remote_archive() {
+  local remote_archive_q
+  [[ -n "$remote_archive" ]] || return 0
+  printf -v remote_archive_q '%q' "$remote_archive"
+  if ! ssh "${ssh_options[@]}" "${K3S_SSH_USER}@127.0.0.1" \
+      "sudo rm -f -- $remote_archive_q && sudo test ! -e $remote_archive_q" \
+      >/dev/null; then
+    return 1
+  fi
+  remote_archive=""
+}
+cleanup() {
+  local status=$?
+  local cleanup_failed=0
+  trap - EXIT
+  set +e
+  cleanup_remote_archive >/dev/null 2>&1 || cleanup_failed=1
+  rm -rf "$archive_dir" "$anonymous_docker_config" || cleanup_failed=1
+  if [[ "$status" == "0" && "$cleanup_failed" != "0" ]]; then
+    echo "ERROR: cache recovery temporary archives could not be fully removed" >&2
+    exit 1
+  fi
+  exit "$status"
+}
 trap cleanup EXIT
 export DOCKER_CONFIG="$anonymous_docker_config"
+printf 'service\tmode\tbytes\tsha256\n' > "$OUTPUT_DIR/archive-transfers.tsv"
 for service in "${SERVICES[@]}"; do
   live_row="$(awk -F '\t' -v service="$service" '$1 == service { print; exit }' "$LIVE_IMAGES_FILE")"
   trusted_row="$(awk -F '\t' -v service="$service" '$1 == service { print; exit }' "$TRUSTED_LEGACY_IMAGES_FILE")"
@@ -158,11 +185,50 @@ for service in "${SERVICES[@]}"; do
       oci_die "unable to determine whether the recovered GHCR exact tag exists: $service"
     fi
     printf -v remote_ref '%q' "$old_ref"
+    remote_archive="/tmp/betstan-ghcr-cache-${RECOVERY_RUN_ID}-${RECOVERY_RUN_ATTEMPT}-${service}-$$.tar"
+    printf -v remote_archive_q '%q' "$remote_archive"
     archive="$archive_dir/${service}.tar"
+    remote_metadata="$archive_dir/${service}.remote"
+    if ! ssh "${ssh_options[@]}" "${K3S_SSH_USER}@127.0.0.1" \
+        "sudo rm -f -- $remote_archive_q &&
+         sudo install -o root -g root -m 600 /dev/null $remote_archive_q &&
+         sudo k3s ctr -n k8s.io images export $remote_archive_q $remote_ref &&
+         sudo test -s $remote_archive_q &&
+         sudo stat -c '%u:%g:%a' $remote_archive_q | grep -qx '0:0:600' &&
+         sudo tar -tf $remote_archive_q >/dev/null &&
+         sudo stat -c '%s' $remote_archive_q &&
+         sudo sha256sum $remote_archive_q" > "$remote_metadata"; then
+      oci_die "containerd cache export did not produce a complete remote OCI archive"
+    fi
+    [[ "$(wc -l < "$remote_metadata" | tr -d ' ')" == "2" ]] ||
+      oci_die "containerd cache export metadata has an unexpected shape"
+    remote_size="$(sed -n '1p' "$remote_metadata")"
+    read -r remote_sha256 remote_sha_path remote_sha_extra < <(
+      sed -n '2p' "$remote_metadata"
+    )
+    [[ "$remote_size" =~ ^[1-9][0-9]*$ ]] ||
+      oci_die "containerd cache export size is invalid"
+    (( remote_size <= 4000000000 )) ||
+      oci_die "containerd cache export exceeds the bounded recovery size"
+    [[ "$remote_sha256" =~ ^[0-9a-f]{64}$ &&
+       "$remote_sha_path" == "$remote_archive" &&
+       -z "${remote_sha_extra:-}" ]] ||
+      oci_die "containerd cache export digest evidence is invalid"
     ssh "${ssh_options[@]}" "${K3S_SSH_USER}@127.0.0.1" \
-      "sudo k3s ctr -n k8s.io images export - $remote_ref" > "$archive"
+      "sudo cat -- $remote_archive_q" > "$archive"
     [[ -s "$archive" && ! -L "$archive" ]] ||
       oci_die "containerd cache export did not produce a regular OCI archive"
+    local_size="$(wc -c < "$archive" | tr -d ' ')"
+    local_sha256="$(oci_sha256 < "$archive")"
+    [[ "$local_size" == "$remote_size" &&
+       "$local_sha256" == "$remote_sha256" ]] ||
+      oci_die "containerd cache archive changed during protected transfer"
+    printf '%s\tstaged\t%s\t%s\n' \
+      "$service" "$local_size" "$local_sha256" \
+      >> "$OUTPUT_DIR/archive-transfers.tsv"
+    cleanup_remote_archive ||
+      oci_die "containerd cache temporary archive could not be removed"
+    rm -f -- "$remote_metadata"
     OCI_ARCHIVE_FILE="$archive" \
       GHCR_TARGET_TAG="$(application_registry_tag "$service" "$SOURCE_SHA")" \
       EXPECTED_PLATFORM_DIGEST="$old_platform_digest" \

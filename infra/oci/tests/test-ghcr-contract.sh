@@ -600,12 +600,27 @@ grep -Fq 'containerd-cache' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
   fail "exact cached-image recovery path is missing"
 grep -Fq 'push-oci-archive-to-ghcr.py' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
   fail "cache recovery does not use the exact OCI archive publisher"
-grep -Fq '"sudo k3s ctr -n k8s.io images export - $remote_ref"' \
+grep -Fq 'sudo k3s ctr -n k8s.io images export $remote_archive_q $remote_ref' \
   "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
-  fail "cache recovery does not pass the exact image reference in the ctr export argv"
-! grep -Eq 'ctr -n k8s\.io images export - --' \
+  fail "cache recovery does not stage the exact image reference on the node"
+! grep -Eq 'ctr -n k8s\.io images export -([[:space:]]|")' \
   "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
-  fail "cache recovery passes an unsupported option terminator as a ctr image name"
+  fail "cache recovery uses the truncating ctr stdout export path"
+for literal in \
+  'sudo install -o root -g root -m 600 /dev/null $remote_archive_q' \
+  "grep -qx '0:0:600'" \
+  'sudo tar -tf $remote_archive_q' \
+  'sudo sha256sum $remote_archive_q' \
+  'sudo cat -- $remote_archive_q' \
+  'local_size" == "$remote_size' \
+  'local_sha256" == "$remote_sha256' \
+  'cleanup_remote_archive' \
+  'archive-transfers.tsv' \
+  '-o ServerAliveCountMax=3' \
+  '-o ServerAliveInterval=30'; do
+  grep -Fq -- "$literal" "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
+    fail "cache recovery lacks staged archive transfer contract: $literal"
+done
 if grep -Eq 'docker (load|tag|push)' "$OCI_DIR/scripts/recover-k3s-cached-images.sh"; then
   fail "cache recovery still depends on digest-changing Docker conversion"
 fi
