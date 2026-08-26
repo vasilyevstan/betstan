@@ -107,6 +107,11 @@ conversation summaries are not authority.
   recovery smoke. Default the current browser journey to strict persisted-role
   checks, and allow the legacy UI only in the recovery public-validation job;
   current client and backoffice authorization tests remain mandatory.
+- GitHub Actions step-scoped OCI credentials do not carry into a later step.
+  Every step that invokes OCI CLI must explicitly receive the reviewed user,
+  tenancy, fingerprint, private-key content, and region variables. Otherwise
+  a noninteractive runner can emit only `Abort:` instead of an actionable
+  authentication error; enforce the complete mapping in workflow contracts.
 - Boot every published image against clean pinned dependencies before granting
   build authority. MongoDB index inspection returns error 26 when a collection
   has never existed; handle only that exact empty-namespace case as no indexes

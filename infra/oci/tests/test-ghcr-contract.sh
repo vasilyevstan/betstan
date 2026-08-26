@@ -824,6 +824,20 @@ if "if (!allowLegacyAdminUi)" not in smoke_text:
     raise SystemExit("browser smoke does not default to strict Backoffice authorization")
 if 'needs: [recover, public-validate]' not in workflow_text:
     raise SystemExit("OCIR retirement does not depend on successful public validation")
+retirement = workflow_text.split(
+    "      - name: Retire OCIR credentials and empty repository after public validation", 1
+)[1].split("      - name: Close retained protected k3s access", 1)[0]
+for credential in (
+    "OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}",
+    "OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}",
+    "OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}",
+    "OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}",
+    "OCI_CLI_REGION: ${{ vars.OCI_REGION }}",
+):
+    if credential not in retirement:
+        raise SystemExit(
+            f"OCIR retirement lacks required step-scoped OCI credential: {credential}"
+        )
 if 'validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \\\n            "$SOURCE_SHA"' not in workflow_text:
     raise SystemExit("cache recovery is not bound to baseline infrastructure provenance")
 
