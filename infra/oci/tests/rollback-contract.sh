@@ -1145,6 +1145,10 @@ event_mode="${STUB_EVENT_MODE:-good}"
 if [[ -n "${STUB_EVENT_MODE_AFTER_ROLLBACK:-}" && "$after_rollback" == "1" ]]; then
   event_mode="$STUB_EVENT_MODE_AFTER_ROLLBACK"
 fi
+backoffice_mode="${STUB_BACKOFFICE_MODE:-public}"
+if [[ -n "${STUB_BACKOFFICE_MODE_AFTER_ROLLBACK:-}" && "$after_rollback" == "1" ]]; then
+  backoffice_mode="$STUB_BACKOFFICE_MODE_AFTER_ROLLBACK"
+fi
 if [[ "$url" == "$secondary_url"*'/api/auth/currentuser?live-betting-redirect=1' ]]; then
   status='308'
   body=''
@@ -1302,7 +1306,26 @@ elif [[ "$url" == *'/api/bet/stats' ]]; then
 elif [[ "$url" == *'/api/bet' ]]; then
   body='{}'
 elif [[ "$url" == *'/api/backoffice' ]]; then
-  body='[]'
+  case "$backoffice_mode" in
+    protected)
+      status='401'
+      body='{"errors":[{"message":"Authentication required"}]}'
+      header_block=$'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    malformed-protected)
+      status='401'
+      body='{}'
+      header_block=$'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    forbidden)
+      status='403'
+      body='{"errors":[{"message":"Administrator role required"}]}'
+      header_block=$'HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    *)
+      body='[]'
+      ;;
+  esac
 elif [[ "$url" == */ ]]; then
   content_type='text/html'
   body='<html>BetStan</html>'
@@ -1456,6 +1479,9 @@ assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
 assert_contains "$WORKFLOW_FILE" \
   'ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env'
+for script in "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"; do
+  assert_contains "$script" '"/api/backoffice|backoffice"'
+done
 if grep -Fq 'artifacts/oci-rollback/admin-auth-capability.env' "$WORKFLOW_FILE"; then
   fail 'rollback workflow stores admin capability inside its recreated output directory'
 fi
@@ -1580,6 +1606,24 @@ assert_line "$repeat_capture_dir/curl-trace.tsv" $'https://betstan.xyz/api/event
 assert_line "$repeat_capture_dir/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
 assert_line "$repeat_capture_dir/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 [[ ! -d "$repeat_capture_dir/.workdirs" ]] || fail 'OCI repeat-safe capture left workdirs behind'
+
+protected_capture_dir="$WORK_DIR/capture-protected-backoffice"
+if ! run_capture "$protected_capture_dir" \
+    STUB_BACKOFFICE_MODE=protected \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-protected-backoffice.out" 2>&1; then
+  cat "$WORK_DIR/capture-protected-backoffice.out" >&2
+  fail 'OCI baseline capture rejected the protected Backoffice endpoint'
+fi
+grep -Fq $'canonical\t/api/backoffice\t401\t' "$protected_capture_dir/public-http.tsv" ||
+  fail 'OCI baseline capture did not record the protected Backoffice status'
+grep -Fq $'\tunauthorized.errors:' "$protected_capture_dir/public-http.tsv" ||
+  fail 'OCI baseline capture did not validate the protected Backoffice payload'
+
+run_capture_expect_failure capture-malformed-protected-backoffice \
+  STUB_BACKOFFICE_MODE=malformed-protected \
+  STUB_SHORT_SSE_MODE=quiet-timeout
+assert_contains "$WORK_DIR/capture-malformed-protected-backoffice.out" \
+  'invalid Backoffice JSON'
 
 if ! run_capture "$WORK_DIR/capture-exact-window-eof" STUB_SHORT_SSE_MODE=headers-only-exact-window-eof >"$WORK_DIR/capture-exact-window-eof.out" 2>&1; then
   cat "$WORK_DIR/capture-exact-window-eof.out" >&2
@@ -1796,6 +1840,32 @@ assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" '
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_normalized_identifiers=false'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+protected_backoffice_output="$WORK_DIR/protected-backoffice-transition"
+if ! run_script "$protected_backoffice_output" \
+    STUB_BACKOFFICE_MODE=protected \
+    STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=public \
+    ROLLBACK_MODE=execute >"$WORK_DIR/protected-backoffice-transition.out" 2>&1; then
+  cat "$WORK_DIR/protected-backoffice-transition.out" >&2
+  fail 'OCI rollback rejected the protected-to-historical Backoffice transition'
+fi
+grep -Fq $'canonical\t/api/backoffice\t401\t' \
+  "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
+  fail 'OCI rollback readiness did not record the protected Backoffice status'
+grep -Fq $'\tunauthorized.errors' \
+  "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
+  fail 'OCI rollback readiness did not validate the protected Backoffice payload'
+assert_route_row "$protected_backoffice_output/public-verification.tsv" canonical /api/backoffice
+
+run_expect_failure malformed-protected-backoffice \
+  STUB_BACKOFFICE_MODE=malformed-protected ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/malformed-protected-backoffice/rollback-readiness/failures.txt" \
+  'incompatible Backoffice payload'
+
+run_expect_failure forbidden-backoffice \
+  STUB_BACKOFFICE_MODE=forbidden ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/forbidden-backoffice/rollback-readiness/failures.txt" \
+  'expected 200 or protected 401 got 403'
 
 run_expect_failure infra-run-id-mismatch \
   ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
