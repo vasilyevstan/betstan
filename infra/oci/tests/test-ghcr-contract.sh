@@ -596,6 +596,15 @@ for literal in \
 done
 grep -Fq 'create secret generic ocir-pull' "$OCI_DIR/scripts/deploy.sh" &&
   fail "forward deploy still creates an OCIR pull secret"
+grep -Fq '"$image_id" == *"@$actual_digest" ||' \
+  "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" ||
+  fail "cache recovery does not accept a CRI-reported immutable GHCR manifest digest"
+grep -Fq 'manifest_digest = image_ref.rsplit("@", 1)[-1]' \
+  "$OCI_DIR/scripts/transition-k3s-cached-images.sh" ||
+  fail "cache transition does not bind CRI manifest image IDs to the approved reference"
+grep -Fq '$2 !~ ("@" manifest "$") && $2 !~ ("@" platform "$")' \
+  "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
+  fail "cache recovery input validation rejects CRI-reported immutable manifest digests"
 grep -Fq 'containerd-cache' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||
   fail "exact cached-image recovery path is missing"
 grep -Fq 'push-oci-archive-to-ghcr.py' "$OCI_DIR/scripts/recover-k3s-cached-images.sh" ||

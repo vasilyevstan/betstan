@@ -74,6 +74,7 @@ import sys
 deployment_path, pods_path, container, image_ref, platform_digest = sys.argv[1:]
 deployment = json.loads(open(deployment_path, encoding="utf-8").read())
 pods = json.loads(open(pods_path, encoding="utf-8").read())
+manifest_digest = image_ref.rsplit("@", 1)[-1]
 images = [
     item.get("image", "")
     for item in deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
@@ -88,8 +89,12 @@ for pod in pods.get("items", []):
     for status in pod.get("status", {}).get("containerStatuses", []):
         if status.get("name") != container:
             continue
-        if not status.get("ready") or not status.get("imageID", "").endswith("@" + platform_digest):
-            raise SystemExit("Pod does not serve the verified linux/arm64 platform digest")
+        image_id = status.get("imageID", "")
+        if not status.get("ready") or not (
+            image_id.endswith("@" + manifest_digest)
+            or image_id.endswith("@" + platform_digest)
+        ):
+            raise SystemExit("Pod does not serve the verified manifest/platform digest")
         ready += 1
 if ready == 0:
     raise SystemExit("No ready application pod serves the verified GHCR digest")

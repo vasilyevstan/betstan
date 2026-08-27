@@ -34,6 +34,11 @@ on:
         required: true
         default: "0"
         type: string
+      failed_deploy_run_id:
+        description: Failed dark deploy to resume after data was already applied, or 0
+        required: true
+        default: "0"
+        type: string
       confirmation:
         description: Type the exact confirmation phrase for the selected phase
         required: true
@@ -61,6 +66,7 @@ jobs:
       PHASE: ${{ inputs.phase }}
       PREREQUISITE_RUN_ID: ${{ inputs.prerequisite_run_id }}
       BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
+      FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -100,6 +106,7 @@ jobs:
             artifacts/infrastructure \
             artifacts/prerequisite \
             artifacts/recovery \
+            artifacts/resume-build \
             artifacts/oci-live-data-rollout \
             artifacts/oci-data-baseline-before \
             artifacts/oci-data-baseline-after
@@ -125,18 +132,27 @@ jobs:
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
              "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$FAILED_DEPLOY_RUN_ID" == "0" ||
+             "$FAILED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           case "$PHASE" in
             dry-run)
               [ "$CONFIRMATION" = "DRY RUN LIVE DATA EXACT SHA" ]
               [ "$PREREQUISITE_RUN_ID" = "0" ]
+              [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
               ;;
             apply-backfills)
               [ "$CONFIRMATION" = "APPLY LIVE BACKFILLS EXACT SHA" ]
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
               ;;
             apply-slip-index)
-              [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+                [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
+              else
+                [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
+                [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]
+              fi
               ;;
             *)
               exit 1
@@ -150,6 +166,8 @@ jobs:
             local workflow_file="$1"
             local run_id="$2"
             local expected_event="$3"
+            local expected_sha="$4"
+            local expected_conclusion="$5"
             local workflow_id
             workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/$workflow_file" --jq '.id'
@@ -161,16 +179,19 @@ jobs:
             [ "$observed_workflow" = "$workflow_id" ]
             [ "$path" = ".github/workflows/$workflow_file" ]
             [ "$event" = "$expected_event" ]
-            [ "$head_sha" = "$SOURCE_SHA" ]
+            [ "$head_sha" = "$expected_sha" ]
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ]
-            [ "$conclusion" = "success" ]
+            [ "$conclusion" = "$expected_conclusion" ]
             [ "$attempt" = "1" ]
           }
 
-          validate_run oci-production-build.yml "$BUILD_RUN_ID" workflow_run
-          validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch
+          validate_run \
+            oci-production-build.yml "$BUILD_RUN_ID" workflow_run "$SOURCE_SHA" success
+          validate_run \
+            oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \
+            "$SOURCE_SHA" success
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
             recovery_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
@@ -194,13 +215,35 @@ jobs:
             printf 'recovery_artifact_name=%s\n' "$recovery_artifact_name" >> "$GITHUB_OUTPUT"
           fi
           if [ "$PHASE" != "dry-run" ]; then
-            validate_run oci-live-data-rollout.yml "$PREREQUISITE_RUN_ID" workflow_dispatch
+            prerequisite_source_sha="$SOURCE_SHA"
+            if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+              prerequisite_source_sha="$(
+                gh api "repos/$REPOSITORY/actions/runs/$PREREQUISITE_RUN_ID/attempts/1" \
+                  --jq '.head_sha'
+              )"
+              [[ "$prerequisite_source_sha" =~ ^[0-9a-f]{40}$ ]]
+            fi
+            validate_run \
+              oci-live-data-rollout.yml "$PREREQUISITE_RUN_ID" \
+              workflow_dispatch "$prerequisite_source_sha" success
             artifact_name="oci-live-data-rollout-${PREREQUISITE_RUN_ID}-1"
             artifact_count="$(
               gh api "repos/$REPOSITORY/actions/runs/$PREREQUISITE_RUN_ID/artifacts?per_page=100" \
                 --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length"
             )"
             [ "$artifact_count" = "1" ]
+            if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+              validate_run \
+                oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
+                workflow_dispatch "$prerequisite_source_sha" failure
+              baseline_artifact_name="oci-production-baseline-${FAILED_DEPLOY_RUN_ID}-1"
+              baseline_artifact_count="$(
+                gh api "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"$baseline_artifact_name\" and .expired == false)] | length"
+              )"
+              [ "$baseline_artifact_count" = "1" ]
+              printf 'resume_source_sha=%s\n' "$prerequisite_source_sha" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Reject competing production activity
@@ -237,6 +280,16 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.prerequisite_run_id }}
+
+      - name: Download failed deploy protected baseline
+        if: inputs.failed_deploy_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1
+          path: artifacts/oci-data-baseline-before
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.failed_deploy_run_id }}
 
       - name: Download explicitly selected recovery baseline authority
         if: inputs.baseline_recovery_run_id != '0'
@@ -280,8 +333,14 @@ jobs:
         id: provenance
         env:
           BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
+          RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha || 'none' }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          set_output() {
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
           PROVENANCE_DIR=artifacts/build \
           SOURCE_SHA="$SOURCE_SHA" \
           EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
@@ -307,17 +366,17 @@ jobs:
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
-            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
-            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+            set_output cluster_ocid "$cluster_ocid"
+            set_output endpoint_nsg_ocid "$endpoint_nsg_ocid"
           else
             echo "::add-mask::$instance_ocid"
-            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+            set_output instance_ocid "$instance_ocid"
           fi
-          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
-          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
-          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+          set_output public_url "https://$public_host"
+          set_output redirect_url "https://$redirect_host"
+          set_output diagnostic_url "https://$diagnostic_host"
 
-          if [ "$PHASE" != "dry-run" ]; then
+          if [ "$PHASE" != "dry-run" ] && [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
             expected_phase=dry-run
             [ "$PHASE" != "apply-slip-index" ] || expected_phase=apply-backfills
             EVIDENCE_DIR=artifacts/prerequisite \
@@ -330,6 +389,65 @@ jobs:
             EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
             EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
               ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+          elif [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+            evidence_value() {
+              local key="$1"
+              awk -F= -v key="$key" '
+                $1 == key {
+                  if (found++) exit 1
+                  value = substr($0, length(key) + 2)
+                }
+                END {
+                  if (found != 1) exit 1
+                  print value
+                }
+              ' artifacts/prerequisite/provenance.env
+            }
+
+            prior_source_sha="$(evidence_value source_sha)"
+            prior_build_run_id="$(evidence_value build_run_id)"
+            prior_infrastructure_run_id="$(evidence_value infrastructure_run_id)"
+            prior_baseline_recovery_run_id="$(evidence_value baseline_recovery_run_id)"
+            prior_baseline_recovery_source_sha="$(
+              evidence_value baseline_recovery_source_sha
+            )"
+            [ "$prior_source_sha" = "$RESUME_SOURCE_SHA" ]
+            [ "$prior_baseline_recovery_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
+            [ "$prior_baseline_recovery_source_sha" = "$BASELINE_RECOVERY_SOURCE_SHA" ]
+            git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"
+            while IFS= read -r changed_path; do
+              case "$changed_path" in
+                .github/*|infra/*|*.md) ;;
+                *)
+                  echo "Application path changed after applied data: $changed_path" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(git diff --name-only "$prior_source_sha" "$SOURCE_SHA" --)
+
+            EVIDENCE_DIR=artifacts/prerequisite \
+            EXPECTED_SOURCE_SHA="$prior_source_sha" \
+            EXPECTED_BUILD_RUN_ID="$prior_build_run_id" \
+            EXPECTED_INFRASTRUCTURE_RUN_ID="$prior_infrastructure_run_id" \
+            EXPECTED_PHASE=apply-slip-index \
+            EXPECTED_RUN_ID="$PREREQUISITE_RUN_ID" \
+            EXPECTED_RUN_ATTEMPT=1 \
+            EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+            EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+              ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+
+            resume_artifact_name="oci-image-provenance-${prior_source_sha}-${prior_build_run_id}-1"
+            gh run download "$prior_build_run_id" \
+              --repo "$REPOSITORY" \
+              --name "$resume_artifact_name" \
+              --dir artifacts/resume-build
+            PROVENANCE_DIR=artifacts/resume-build \
+            SOURCE_SHA="$prior_source_sha" \
+            EXPECTED_BUILD_RUN_ID="$prior_build_run_id" \
+            EXPECTED_BUILD_RUN_ATTEMPT=1 \
+            OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv \
+            VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+              ./infra/oci/scripts/verify-images.sh
           fi
 
       - name: Install pinned OCI CLI
@@ -414,6 +532,121 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Verify exact failed-deploy resume state
+        if: inputs.failed_deploy_run_id != '0'
+        env:
+          RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
+          prior_evidence=artifacts/prerequisite/provenance.env
+          baseline_dir=artifacts/oci-data-baseline-before
+          [ -f "$resume_images" ] && [ -f "$prior_evidence" ]
+          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
+            expected_ref="$(
+              awk -F '\t' -v service="$service" '
+                $1 == service { count++; value=$3 }
+                END { if (count != 1) exit 1; print value }
+              ' "$resume_images"
+            )"
+            expected_manifest="$(
+              awk -F '\t' -v service="$service" '
+                $1 == service { count++; value=$4 }
+                END { if (count != 1) exit 1; print value }
+              ' "$resume_images"
+            )"
+            expected_platform="$(
+              awk -F '\t' -v service="$service" '
+                $1 == service { count++; value=$5 }
+                END { if (count != 1) exit 1; print value }
+              ' "$resume_images"
+            )"
+            deployment="gaming-${service}-depl"
+            container="gaming-${service}"
+            actual_ref="$(
+              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}'
+            )"
+            if [ "$actual_ref" != "$expected_ref" ]; then
+              echo "::error::Resume deployment image mismatch for ${service}: expected ${expected_ref}, observed ${actual_ref}"
+              exit 1
+            fi
+            kubectl rollout status "deployment/$deployment" \
+              -n "$OCI_K8S_NAMESPACE" --timeout=2m >/dev/null
+            pods_json="$(
+              kubectl get pods -n "$OCI_K8S_NAMESPACE" \
+                -l "app=gaming-${service}" -o json
+            )"
+            if ! jq -e \
+                --arg container "$container" \
+                --arg manifest "$expected_manifest" \
+                --arg platform "$expected_platform" '
+                  [
+                    .items[] |
+                    select(.metadata.deletionTimestamp == null) |
+                    .status.containerStatuses[]? |
+                    select(.name == $container)
+                  ] as $statuses |
+                  ($statuses | length) > 0 and
+                  ($statuses | all(
+                    .ready == true and
+                    (
+                      (.imageID | endswith("@" + $manifest)) or
+                      (.imageID | endswith("@" + $platform))
+                    )
+                  ))
+                ' <<<"$pods_json" >/dev/null; then
+              observed_image_ids="$(
+                jq -r \
+                  --arg container "$container" '
+                    [
+                      .items[] |
+                      select(.metadata.deletionTimestamp == null) |
+                      .status.containerStatuses[]? |
+                      select(.name == $container) |
+                      (.imageID // "missing")
+                    ] | unique | join(",")
+                  ' <<<"$pods_json"
+              )"
+              echo "::error::Resume pod image mismatch for ${service}: expected manifest ${expected_manifest} or ARM64 child ${expected_platform}, observed ${observed_image_ids:-none}"
+              exit 1
+            fi
+          done
+
+          expected_baseline_sha="$(
+            awk -F= '$1 == "baseline_sha256" {
+              if (found++) exit 1
+              value=$2
+            } END {
+              if (found != 1) exit 1
+              print value
+            }' "$prior_evidence"
+          )"
+          observed_baseline_sha="$(
+            sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}'
+          )"
+          [ "$observed_baseline_sha" = "$expected_baseline_sha" ]
+          BASELINE_DIR="$baseline_dir" \
+          EXPECTED_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+          EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+          EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+          REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
+
+          mkdir -p artifacts/oci-live-data-rollout/evidence
+          cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
+          schema_version=live-betting-data-resume-v1
+          applied_data_run_id=$PREREQUISITE_RUN_ID
+          applied_source_sha=$RESUME_SOURCE_SHA
+          failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          current_source_sha=$SOURCE_SHA
+          baseline_sha256=$observed_baseline_sha
+          runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
+          application_change_scope=github-infra-docs-only
+          status=PASS
+          EOF
+
       - name: Capture and validate pre-mutation rollback baseline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -424,7 +657,9 @@ jobs:
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
           SSE_REQUIREMENT: deployed-source
         run: |
-          if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
+          if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then
+            [ -f artifacts/oci-data-baseline-before/SHA256SUMS ]
+          elif [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
             ./infra/oci/scripts/baseline-capture-stan.sh
           else
             BASELINE_RECOVERY_DIR=artifacts/recovery \

@@ -91,6 +91,13 @@ for conductor_contract in \
     'After two missed checkpoints, return' \
     'a duplicate reviewer merely because the first is slow' \
     'terminal or explicitly cancelled and prove that concurrent side effects' \
+    'Treat a completed first-attempt-only run failure as terminal, not stalled' \
+    'If downstream provenance requires' \
+    'never recommend rerunning that run' \
+    'report `BLOCKED` rather than manufacture an empty' \
+    'Never bypass a trusted publisher that rejects changes to its own' \
+    'leaves a production maintenance fence, operation' \
+    'health recovery precedes candidate replacement' \
     'Never use name-based process discovery or termination' \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
@@ -105,6 +112,15 @@ grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
 grep -Fq 'the conductor checks jobs plus `pending_deployments`' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave protected environment gates unattended"
+grep -Fq 'A failed release run whose consumers require `run_attempt == 1` is terminal' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can rerun terminal first-attempt release evidence"
+grep -Fq 'It never invents an empty commit or bypasses a trusted publisher' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can bypass trusted publication to replace a failed run"
+grep -Fq 'treats that state as an active production incident' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can leave a failed release maintenance hold unattended"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
@@ -190,6 +206,11 @@ grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
 grep -Fq 'queue_names=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits observed queue names"
+grep -Fq '"@${expected_digests[$service]}" ||' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not accept a CRI-reported immutable manifest digest"
+grep -Fq 'image_id.endswith('\''@'\'' + manifest_digest)' \
+  "$OCI_DIR/scripts/baseline-capture-stan.sh" ||
+  fail "OCI baseline capture does not accept a CRI-reported immutable manifest digest"
 for queue_probe in \
   "$OCI_DIR/scripts/baseline-capture-stan.sh" \
   "$OCI_DIR/scripts/rollback-readiness-stan.sh" \
@@ -534,6 +555,14 @@ grep -Fq '"$SCRIPT_DIR/upgrade-mongo.sh" finalize' "$OCI_DIR/scripts/deploy.sh" 
   fail "OCI deployment does not finalize the staged Mongo upgrade"
 grep -Fq '"$SCRIPT_DIR/upgrade-mongo.sh" resume' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not reopen ingress after staged Mongo maintenance"
+grep -Fq 'restore_deploy_access_on_exit()' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not recover public access after a staged failure"
+grep -Fq 'apply_cleanup_documents()' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment cleanup cannot preserve the original deploy failure"
+grep -Fq 'for service in auth backoffice client; do' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment failure cleanup does not restore safe reader services"
+grep -Fq 'mongo_upgrade_recovery_required=true' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not arm staged failure recovery before Mongo preparation"
 grep -Fq 'readOnly: true' "$mongo_upgrade" ||
   fail "Mongo fresh-storage inspection is not read-only"
 grep -Fq "trap 'cleanup 143' TERM" "$mongo_upgrade" ||
@@ -544,13 +573,16 @@ python3 - "$OCI_DIR/scripts/deploy.sh" <<'PY'
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
+armed = text.index("mongo_upgrade_recovery_required=true")
 prepare = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" prepare')
 apply_target = text.index("apply_documents 'StatefulSet:^gaming-auth-mongo-depl$'", prepare)
 finalize = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" finalize', apply_target)
 provenance = text.index('} > "$OUTPUT_DIR/provenance.txt"', finalize)
 resume = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" resume', provenance)
-completed = text.index('oci_log "oci_deploy=PASS', resume)
-if not prepare < apply_target < finalize < provenance < resume < completed:
+disarmed = text.index("mongo_upgrade_recovery_required=false", resume)
+rendered_removed = text.index('rm -f "$RENDERED_FILE"', disarmed)
+completed = text.index('oci_log "oci_deploy=PASS', rendered_removed)
+if not armed < prepare < apply_target < finalize < provenance < resume < disarmed < rendered_removed < completed:
     raise SystemExit("Mongo maintenance/deploy ordering differs")
 PY
 grep -Fq 'sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b' \
@@ -715,6 +747,8 @@ migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
+grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
+  fail "OCI deployment validation omits the image-prefix inventory contract"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
@@ -927,6 +961,14 @@ grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq 'data_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_source_sha:' "$deploy_workflow"
+grep -Fq 'git cat-file -e "${recovery_control_sha}^{commit}"' \
+  "$deploy_workflow" ||
+  fail "deployment does not validate the historical recovery control commit"
+grep -Fq 'git merge-base --is-ancestor "$recovery_control_sha" "$SOURCE_SHA"' \
+  "$deploy_workflow" ||
+  fail "deployment rejects a trusted historical recovery created by an ancestor master"
+! grep -Fq '[ "$recovery_control_sha" = "$SOURCE_SHA" ]' "$deploy_workflow" ||
+  fail "deployment incorrectly requires historical recovery to run at candidate master"
 grep -Fq 'EXPECTED_PHASE=apply-slip-index' "$deploy_workflow"
 grep -Fq 'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
   "$deploy_workflow"

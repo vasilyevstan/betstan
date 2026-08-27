@@ -914,6 +914,9 @@ case "${1:-}" in
           service="${selector#app=gaming-}"
           read_state "$service"
           digest="$(service_platform_digest_from_image "$image")"
+          if [[ "${STUB_POD_IMAGE_ID_MODE:-platform}" == "manifest" ]]; then
+            digest="${image##*@}"
+          fi
           if [[ -z "${MODE:-}" && "${STUB_BAD_DIGEST_SERVICE:-}" == "$service" ]]; then
             digest='sha256:9999999999999999999999999999999999999999999999999999999999999999'
           fi
@@ -1451,6 +1454,11 @@ puts 'oci_rollback_yaml=PASS'
 RUBY
 assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
+assert_contains "$WORKFLOW_FILE" \
+  'ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env'
+if grep -Fq 'artifacts/oci-rollback/admin-auth-capability.env' "$WORKFLOW_FILE"; then
+  fail 'rollback workflow stores admin capability inside its recreated output directory'
+fi
 for literal in \
   'validate_recovery_run' \
   'validate_recovery_transition_provenance' \
@@ -1486,6 +1494,15 @@ if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK
   cat "$WORK_DIR/capture-repeat-safe-1.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on first run'
 fi
+
+manifest_capture_dir="$WORK_DIR/capture-manifest-image-id"
+if ! run_capture "$manifest_capture_dir" \
+    STUB_POD_IMAGE_ID_MODE=manifest \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-manifest-image-id.out" 2>&1; then
+  cat "$WORK_DIR/capture-manifest-image-id.out" >&2
+  fail 'OCI baseline capture rejected CRI-reported immutable manifest image IDs'
+fi
+assert_contains "$WORK_DIR/capture-manifest-image-id.out" 'oci_baseline_capture=PASS'
 
 legacy_capture_dir="$WORK_DIR/capture-legacy-sse-absence"
 if ! run_capture "$legacy_capture_dir" \
@@ -1982,7 +1999,17 @@ assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\
 
 run_expect_failure exact-digest-verification \
   STUB_BAD_DIGEST_SERVICE=event ROLLBACK_MODE=execute
-assert_contains "$WORK_DIR/exact-digest-verification.out" 'does not serve the expected platform digest'
+assert_contains "$WORK_DIR/exact-digest-verification.out" 'does not serve the expected manifest/platform digest'
+
+if ! run_script "$WORK_DIR/manifest-image-id-success" \
+    STUB_POD_IMAGE_ID_MODE=manifest \
+    STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \
+    STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=headers-only-exact-window-eof \
+    ROLLBACK_MODE=execute >"$WORK_DIR/manifest-image-id-success.out" 2>&1; then
+  cat "$WORK_DIR/manifest-image-id-success.out" >&2
+  fail 'OCI rollback rejected CRI-reported immutable manifest image IDs'
+fi
+assert_contains "$WORK_DIR/manifest-image-id-success.out" 'oci_rollback_status=PASS'
 
 if ! run_script "$WORK_DIR/success-exact-window-eof" \
     STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \

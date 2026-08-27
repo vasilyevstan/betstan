@@ -41,6 +41,19 @@ missed checkpoint is a suspected stall. Two missed checkpoints require an
 explicit safe recovery action. Never replace a slow unit until the original is
 terminal or cancelled and overlapping side effects are impossible.
 
+A failed release run whose consumers require `run_attempt == 1` is terminal;
+rerunning it cannot create valid provenance. The conductor inspects the failed
+step once, preserves the run as evidence, and routes a fresh exact-master
+candidate through the normal branch path. It never invents an empty commit or
+bypasses a trusted publisher that prevents a workflow from approving its own
+change.
+
+A terminal release run can still leave an intentional maintenance fence,
+operation lock, zero-replica workload, or unavailable ingress. The conductor
+treats that state as an active production incident and routes the exact runtime
+owner to restore service or complete the verified handoff before starting a
+replacement candidate.
+
 ## Ownership
 
 | Area | Editor |

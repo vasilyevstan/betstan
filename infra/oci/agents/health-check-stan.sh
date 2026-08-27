@@ -296,8 +296,8 @@ with open(sys.argv[2], encoding="utf-8") as handle:
     for row in csv.reader(handle, delimiter="\t"):
         if not row:
             continue
-        service, _, _, _, platform_digest = row
-        expected[f"gaming-{service}"] = {platform_digest}
+        service, _, _, manifest_digest, platform_digest = row
+        expected[f"gaming-{service}"] = {manifest_digest, platform_digest}
 
 result = []
 for pod in pods.get("items", []):

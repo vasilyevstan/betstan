@@ -397,6 +397,7 @@ for literal in \
   'DRY RUN LIVE DATA EXACT SHA' \
   'APPLY LIVE BACKFILLS EXACT SHA' \
   'APPLY LIVE SLIP INDEX EXACT SHA' \
+  'RESUME APPLIED LIVE DATA EXACT SHA' \
   'production-run-exclusivity-stan.sh' \
   'shared-mongo-operation-lock-stan.sh acquire' \
   'shared-mongo-operation-lock-stan.sh release' \
@@ -414,6 +415,20 @@ for literal in \
   'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
   'Bind historical recovery source through its exact artifact' \
   'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
+  'failed_deploy_run_id:' \
+  'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
+  'Verify exact failed-deploy resume state' \
+  'git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"' \
+  '.github/*|infra/*|*.md' \
+  'Application path changed after applied data' \
+  'EXPECTED_PHASE=apply-slip-index' \
+  'OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv' \
+  'expected_manifest=' \
+  'endswith("@" + $manifest)' \
+  'Resume pod image mismatch' \
+  'runtime_images_sha256=' \
+  'application_change_scope=github-infra-docs-only' \
+  'validate-rollback-baseline-stan.sh' \
   'SSE_REQUIREMENT: deployed-source' \
   'SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"' \
   'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
@@ -469,6 +484,7 @@ def require_order(text: str, markers: list[str], label: str) -> None:
 require_order(
     data,
     [
+        "Verify exact failed-deploy resume state",
         "Capture and validate pre-mutation rollback baseline",
         "Acquire database operation lock",
         "Fence writes and quiesce legacy data writers",
@@ -501,6 +517,9 @@ for literal in (
     "SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}",
     "SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}",
     "OPERATION_LOCK_HANDOFF: ${{ inputs.phase == 'apply-slip-index' }}",
+    "FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}",
+    "if: inputs.failed_deploy_run_id != '0'",
+    "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")

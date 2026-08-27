@@ -95,6 +95,23 @@ without a checkpoint.
   latest transition, and whether progress is approval-bound, provider-bound,
   queued, or executing. Include whether the approval is preauthorized and who
   owns the immediate action. Never infer state from the top-level run alone.
+- Treat a completed first-attempt-only run failure as terminal, not stalled.
+  Inspect its bounded failed-step evidence once and record whether the cause is
+  repository-bound or provider-bound. If downstream provenance requires
+  `run_attempt == 1`, never recommend rerunning that run: retain it as failed
+  evidence and return `ATTENTION_REQUIRED` with the owning specialist and the
+  normal path to a fresh exact-master candidate.
+- Register replacement work only after the prior run is terminal and the new
+  candidate SHA exists. Reuse another independently required change when one is
+  already ready; otherwise report `BLOCKED` rather than manufacture an empty
+  commit. Never bypass a trusted publisher that rejects changes to its own
+  workflow; use its documented authorization bootstrap or keep the trusted
+  workflow unchanged.
+- Treat a terminal run that leaves a production maintenance fence, operation
+  lock, zero-replica workload, or unavailable ingress as an active incident,
+  not merely failed release evidence. Immediately return `ATTENTION_REQUIRED`
+  with the exact runtime owner and bounded restore-or-handoff action; production
+  health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
 - Surface a blocker immediately when it affects the critical path. Keep
