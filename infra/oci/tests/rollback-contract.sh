@@ -1459,6 +1459,15 @@ assert_contains "$WORKFLOW_FILE" \
 if grep -Fq 'artifacts/oci-rollback/admin-auth-capability.env' "$WORKFLOW_FILE"; then
   fail 'rollback workflow stores admin capability inside its recreated output directory'
 fi
+if [[ "$(grep -Fc 'RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env' "$WORKFLOW_FILE")" != "2" ]]; then
+  fail 'rollback workflow does not preserve runner-rule state through cleanup'
+fi
+if [[ "$(grep -Fc 'SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env' "$WORKFLOW_FILE")" != "2" ]]; then
+  fail 'rollback workflow does not preserve k3s access state through cleanup'
+fi
+if grep -Eq 'artifacts/oci-rollback/(runner-rule|k3s-access)\.env' "$WORKFLOW_FILE"; then
+  fail 'rollback workflow stores cleanup state inside its recreated output directory'
+fi
 for literal in \
   'validate_recovery_run' \
   'validate_recovery_transition_provenance' \

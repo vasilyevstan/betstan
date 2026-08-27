@@ -487,6 +487,29 @@ def validate_oci_rollback_workflow!(file, document, content)
     /ADMIN_AUTH_CAPABILITY_FILE:\s*artifacts\/admin-auth-capability\.env/,
     "#{name} must bind any legacy admin-auth override to the rollback operator"
   )
+  runner_rule_state = %r{
+    RULE_STATE_FILE:\s*
+    \$\{\{\s*runner\.temp\s*\}\}/betstan-rollback-control/runner-rule\.env
+  }x
+  unless content.scan(runner_rule_state).length == 2
+    fail_inventory(
+      "#{name} must preserve the runner-rule state until its always-run cleanup"
+    )
+  end
+  k3s_access_state = %r{
+    SESSION_STATE_FILE:\s*
+    \$\{\{\s*runner\.temp\s*\}\}/betstan-rollback-control/k3s-access\.env
+  }x
+  unless content.scan(k3s_access_state).length == 2
+    fail_inventory(
+      "#{name} must preserve the k3s access state until its always-run cleanup"
+    )
+  end
+  reject_content(
+    content,
+    %r{artifacts/oci-rollback/(?:runner-rule|k3s-access)\.env},
+    "#{name} must keep cleanup state outside the recreated rollback output directory"
+  )
   require_content(
     content,
     /if:\s*inputs\.allow_legacy_admin_auth/,
