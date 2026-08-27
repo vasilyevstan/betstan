@@ -182,14 +182,16 @@ jobs:
             recovery_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
             )"
-            read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt display_title <<<"$(
+            read -r workflow_id workflow_path event recovery_control_sha head_branch repository status conclusion attempt display_title <<<"$(
               gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" \
                 --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
             )"
             [ "$workflow_id" = "$recovery_workflow_id" ]
             [ "$workflow_path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]
             [ "$event" = "workflow_dispatch" ]
-            [ "$head_sha" = "$SOURCE_SHA" ]
+            [[ "$recovery_control_sha" =~ ^[0-9a-f]{40}$ ]]
+            git cat-file -e "${recovery_control_sha}^{commit}"
+            git merge-base --is-ancestor "$recovery_control_sha" "$SOURCE_SHA"
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
