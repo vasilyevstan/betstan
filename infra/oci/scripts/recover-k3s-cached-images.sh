@@ -111,11 +111,17 @@ for service in "${SERVICES[@]}"; do
     [[ "$live_repository" == "$(application_registry_repository)" ]] ||
       oci_die "live deployment is neither the trusted OCIR image nor the target GHCR repository"
   fi
-  awk -F '\t' -v service="$service" -v platform="$live_platform_digest" '
-    $1 == service { count++; if ($2 !~ ("@" platform "$")) invalid=1 }
+  awk -F '\t' \
+    -v service="$service" \
+    -v manifest="$live_digest" \
+    -v platform="$live_platform_digest" '
+    $1 == service {
+      count++
+      if ($2 !~ ("@" manifest "$") && $2 !~ ("@" platform "$")) invalid=1
+    }
     END { exit(count >= 1 && !invalid ? 0 : 1) }
   ' "$LIVE_PLATFORM_IDS_FILE" ||
-    oci_die "live pod image ID does not prove the trusted linux/arm64 platform digest"
+    oci_die "live pod image ID does not match the trusted manifest/platform digest"
 done
 
 [[ "$GHCR_ACTOR" =~ ^[A-Za-z0-9-]+$ && -n "$GHCR_TOKEN" ]] ||

@@ -190,6 +190,11 @@ grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
 grep -Fq 'queue_names=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits observed queue names"
+grep -Fq '"@${expected_digests[$service]}" ||' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment does not accept a CRI-reported immutable manifest digest"
+grep -Fq 'image_id.endswith('\''@'\'' + manifest_digest)' \
+  "$OCI_DIR/scripts/baseline-capture-stan.sh" ||
+  fail "OCI baseline capture does not accept a CRI-reported immutable manifest digest"
 for queue_probe in \
   "$OCI_DIR/scripts/baseline-capture-stan.sh" \
   "$OCI_DIR/scripts/rollback-readiness-stan.sh" \
