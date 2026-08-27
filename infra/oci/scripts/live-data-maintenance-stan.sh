@@ -228,8 +228,7 @@ capture_state() {
       replicas="$(deployment_replicas "$service")"
       [[ "$replicas" =~ ^[1-9][0-9]*$ ]] ||
         fail "$(deployment_name "$service") must be running before maintenance"
-      deployment_is_stable "$service" "$replicas" ||
-        fail "$(deployment_name "$service") is not stable before maintenance"
+      wait_for_deployment "$service" "$replicas"
       printf 'service\t%s\t%s\n' "$service" "$replicas"
     done
   } >"$temporary"
