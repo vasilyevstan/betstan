@@ -1469,6 +1469,13 @@ if grep -Eq 'artifacts/oci-rollback/(runner-rule|k3s-access)\.env' "$WORKFLOW_FI
   fail 'rollback workflow stores cleanup state inside its recreated output directory'
 fi
 for literal in \
+  'registry_evidence_count=0' \
+  '[ "$source_sha" = "$TARGET_SHA" ]' \
+  'legacy infrastructure registry authorization is deferred to checksum-bound rollback evidence' \
+  'infrastructure registry evidence is incomplete'; do
+  assert_contains "$WORKFLOW_FILE" "$literal"
+done
+for literal in \
   'validate_recovery_run' \
   'validate_recovery_transition_provenance' \
   'oci-ghcr-cache-recovery.yml' \
