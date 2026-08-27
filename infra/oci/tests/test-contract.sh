@@ -932,6 +932,14 @@ grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq 'data_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_source_sha:' "$deploy_workflow"
+grep -Fq 'git cat-file -e "${recovery_control_sha}^{commit}"' \
+  "$deploy_workflow" ||
+  fail "deployment does not validate the historical recovery control commit"
+grep -Fq 'git merge-base --is-ancestor "$recovery_control_sha" "$SOURCE_SHA"' \
+  "$deploy_workflow" ||
+  fail "deployment rejects a trusted historical recovery created by an ancestor master"
+! grep -Fq '[ "$recovery_control_sha" = "$SOURCE_SHA" ]' "$deploy_workflow" ||
+  fail "deployment incorrectly requires historical recovery to run at candidate master"
 grep -Fq 'EXPECTED_PHASE=apply-slip-index' "$deploy_workflow"
 grep -Fq 'EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID"' \
   "$deploy_workflow"
