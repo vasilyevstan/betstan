@@ -192,11 +192,34 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
-          [ "$application_registry_provider" = "ghcr" ]
-          [ "$application_registry_host" = "ghcr.io" ]
-          [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
-          [ "$application_registry_public_anonymous" = "true" ]
-          [ "$ocir_application_repository_absent" = "true" ]
+          registry_evidence_count=0
+          for value in \
+            "${application_registry_provider:-}" \
+            "${application_registry_host:-}" \
+            "${application_registry_repository:-}" \
+            "${application_registry_public_anonymous:-}" \
+            "${ocir_application_repository_absent:-}"; do
+            if [ -n "$value" ]; then
+              registry_evidence_count=$((registry_evidence_count + 1))
+            fi
+          done
+          case "$registry_evidence_count" in
+            0)
+              [ "$source_sha" = "$TARGET_SHA" ]
+              echo "legacy infrastructure registry authorization is deferred to checksum-bound rollback evidence"
+              ;;
+            5)
+              [ "$application_registry_provider" = "ghcr" ]
+              [ "$application_registry_host" = "ghcr.io" ]
+              [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
+              [ "$application_registry_public_anonymous" = "true" ]
+              [ "$ocir_application_repository_absent" = "true" ]
+              ;;
+            *)
+              echo "infrastructure registry evidence is incomplete" >&2
+              exit 1
+              ;;
+          esac
           [ "$public_host" = "$OCI_CANONICAL_HOST" ]
           [ "$canonical_host" = "$OCI_CANONICAL_HOST" ]
           [ "$redirect_host" = "$OCI_REDIRECT_HOST" ]
