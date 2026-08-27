@@ -19,12 +19,12 @@ describe('Statistics', () => {
     axios.get.mockReset();
   });
 
-  it('renders aggregate stats directly and redacts email-like display names', async () => {
+  it('renders the previous visible user name unchanged and redacts email-like values', async () => {
     axios.get.mockResolvedValue({
       data: [
         {
           userKey: 'safe-user',
-          displayName: 'Top Player',
+          displayName: 'stanislav',
           betCount: 4,
           wagerTotal: 120,
         },
@@ -40,7 +40,8 @@ describe('Statistics', () => {
     await renderStatistics();
 
     expect(axios.get).toHaveBeenCalledWith('/api/bet/stats/v2');
-    const safeRow = (await screen.findByTitle('Top Player')).closest('.stat-row');
+    const safeRow = (await screen.findByTitle('stanislav')).closest('.stat-row');
+    expect(within(safeRow).getByText('stanislav')).toBeInTheDocument();
     expect(within(safeRow).getByText('4')).toBeInTheDocument();
     expect(within(safeRow).getByText('120')).toBeInTheDocument();
     expect(screen.getByText('Anonymous player')).toBeInTheDocument();
