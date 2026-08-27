@@ -283,6 +283,35 @@ if [[ "$args" == *"get configmap gaming-mongo-topology"* ]]; then
     "${STUB_TOPOLOGY_MODE:-shared}" "${STUB_TOPOLOGY_VALIDATED:-true}"
   exit 0
 fi
+if [[ "$args" == *"get configmap betstan-oci-migration-journal"* ]]; then
+  case "${STUB_OCI_MIGRATION_EVIDENCE:-missing}" in
+    valid)
+      printf '%s\n' '{
+        "data": {
+          "phase": "completed",
+          "logical-parity": "true",
+          "database-count": "8",
+          "recovery-required": "false",
+          "mongo-write-lock": "false",
+          "rabbitmq-write-lock": "false",
+          "migration-id": "fixture-oci-migration",
+          "active-source-sha": "1111111111111111111111111111111111111111",
+          "oci-cluster-fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target-mongo-image-id": "docker.io/library/mongo@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "oci-baseline": "ingress=1,rabbitmq=1,auth=1,bet=1,backoffice=1,event=1,gamemaster=1,moderation=1,resulting=1,slip=1,client=1"
+        }
+      }'
+      ;;
+    invalid)
+      printf '%s\n' '{"data":{"phase":"completed","logical-parity":"false"}}'
+      ;;
+    *)
+      echo 'Error from server (NotFound): configmaps "betstan-oci-migration-journal" not found' >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 if [[ "$args" == *"get configmap gaming-mongo-migration-lock"* ]]; then
   [[ "$fail_command" != "lock" ]] || exit 1
   if [[ "${STUB_LOCK_MISSING:-0}" == "1" ]]; then
@@ -509,6 +538,12 @@ elif [[ "$url" == *"/api/event/stream" ]]; then
     good)
       headers=$'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Accel-Buffering: no\r\n\r\n'
       ;;
+    hidden-buffering-header)
+      headers=$'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\n\r\n'
+      ;;
+    buffering-enabled)
+      headers=$'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Accel-Buffering: yes\r\n\r\n'
+      ;;
     bad-headers)
       headers=$'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: max-age=60\r\nX-Accel-Buffering: yes\r\n\r\n'
       ;;
@@ -585,6 +620,7 @@ run_live_betting_scenario() {
     export STUB_TOPOLOGY_MODE=shared
     export STUB_TOPOLOGY_VALIDATED=true
     export STUB_TOPOLOGY_MISSING=0
+    export STUB_OCI_MIGRATION_EVIDENCE=missing
     export STUB_MONGO_PVC_PHASE=Bound
     export STUB_EXTRA_MONGO_PVC=
     export STUB_MONGO_PVC_MISSING=0
