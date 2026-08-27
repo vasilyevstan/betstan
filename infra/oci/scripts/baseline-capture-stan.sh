@@ -38,7 +38,7 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
-  "/api/backoffice|array"
+  "/api/backoffice|backoffice"
 )
 SSE_PATH="${SSE_PATH:-/api/event/stream}"
 REDIRECT_PATH="${REDIRECT_PATH:-/api/auth/currentuser?live-betting-redirect=1}"
@@ -235,14 +235,19 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local attempt curl_status expected_status location meta status effective_url content_type shape
+  local attempt curl_status expected_status expected_status_label location meta status effective_url content_type shape
   local -a curl_options=(--silent --show-error --max-time "$REQUEST_TIMEOUT")
 
   expected_status=200
+  expected_status_label=200
   if [[ "$expected_kind" == "redirect" ]]; then
     expected_status=308
+    expected_status_label=308
   else
     curl_options+=(--location)
+    if [[ "$expected_kind" == "backoffice" ]]; then
+      expected_status_label="200 or protected 401"
+    fi
   fi
   status=""
   for ((attempt = 1; attempt <= HTTP_ATTEMPTS; attempt++)); do
@@ -254,7 +259,10 @@ capture_http() {
     )"; then
       curl_status=0
       IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-      [[ "$status" == "$expected_status" ]] && break
+      if [[ "$status" == "$expected_status" ||
+          ("$expected_kind" == "backoffice" && "$status" == "401") ]]; then
+        break
+      fi
     else
       curl_status=$?
       status=""
@@ -264,11 +272,11 @@ capture_http() {
       if [[ "$curl_status" != "0" ]]; then
         oci_die "HTTP probe failed for ${base_url}${path} after ${HTTP_ATTEMPTS} attempts"
       fi
-      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
+      oci_die "expected HTTP ${expected_status_label} for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
     fi
     if [[ "$curl_status" == "0" &&
         ! "$status" =~ ^(429|500|502|503|504)$ ]]; then
-      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status}"
+      oci_die "expected HTTP ${expected_status_label} for ${base_url}${path}, got ${status}"
     fi
     sleep "$HTTP_RETRY_SECONDS"
   done
@@ -319,6 +327,35 @@ if not isinstance(payload, list):
 print('array')
 PY
 )" || oci_die "invalid array JSON for ${base_url}${path}"
+      ;;
+    backoffice)
+      [[ "$content_type" == application/json* ]] || oci_die "expected JSON for ${base_url}${path}"
+      shape="$(python3 - "$body_file" "$status" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+status = sys.argv[2]
+if status == '200':
+    if not isinstance(payload, list):
+        raise SystemExit(1)
+    print('array')
+else:
+    errors = payload.get('errors') if isinstance(payload, dict) else None
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or any(
+            not isinstance(error, dict)
+            or not isinstance(error.get('message'), str)
+            or not error['message']
+            for error in errors
+        )
+    ):
+        raise SystemExit(1)
+    print('unauthorized.errors')
+PY
+)" || oci_die "invalid Backoffice JSON for ${base_url}${path}"
       ;;
     object)
       [[ "$content_type" == application/json* ]] || oci_die "expected JSON for ${base_url}${path}"

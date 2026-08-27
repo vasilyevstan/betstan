@@ -40,7 +40,7 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
-  "/api/backoffice|array"
+  "/api/backoffice|backoffice"
 )
 
 prepare_private_dir() {
@@ -536,7 +536,8 @@ capture_http() {
     return 1
   }
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-  [[ "$status" == "200" ]] || {
+  [[ "$status" == "200" ||
+     ("$expected_kind" == "backoffice" && "$status" == "401") ]] || {
     printf 'ERROR: HTTP %s for %s%s\n' "$status" "$base_url" "$path" >&2
     return 1
   }
@@ -607,6 +608,41 @@ print('array')
 PY
 )" || {
         printf 'ERROR: invalid array JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      ;;
+    backoffice)
+      [[ "$content_type" == application/json* ]] || {
+        printf 'ERROR: expected JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      shape="$(python3 - "$body_file" "$status" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+status = sys.argv[2]
+if status == '200':
+    if not isinstance(payload, list):
+        raise SystemExit(1)
+    print('array')
+else:
+    errors = payload.get('errors') if isinstance(payload, dict) else None
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or any(
+            not isinstance(error, dict)
+            or not isinstance(error.get('message'), str)
+            or not error['message']
+            for error in errors
+        )
+    ):
+        raise SystemExit(1)
+    print('unauthorized.errors')
+PY
+)" || {
+        printf 'ERROR: invalid Backoffice JSON for %s%s\n' "$base_url" "$path" >&2
         return 1
       }
       ;;
