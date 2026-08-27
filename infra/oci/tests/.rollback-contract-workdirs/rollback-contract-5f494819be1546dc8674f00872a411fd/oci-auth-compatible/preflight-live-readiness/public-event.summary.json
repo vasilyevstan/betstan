@@ -1,0 +1,22 @@
+{
+  "body_sha256": "d6d7218a2cb6b7ebe6296b37b9a1a63db7caeaff304ec98bdb6fe3907abd018d",
+  "cache_control": "no-cache, no-transform",
+  "content_type": "application/json; charset=utf-8",
+  "items": 1,
+  "legacy_prematch_1x2_odds": 3,
+  "legacy_prematch_correct_score_odds": 3,
+  "legacy_prematch_event_id": "legacy-event",
+  "legacy_prematch_events": 1,
+  "live_items": 0,
+  "location": "",
+  "sample_keys": [
+    "away",
+    "eventId",
+    "home",
+    "name",
+    "products",
+    "time"
+  ],
+  "status": 200,
+  "x_accel_buffering": "no"
+}

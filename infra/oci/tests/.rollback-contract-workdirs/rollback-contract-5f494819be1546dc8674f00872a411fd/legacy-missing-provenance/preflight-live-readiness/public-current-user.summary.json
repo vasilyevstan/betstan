@@ -1,0 +1,10 @@
+{
+  "body_sha256": "cbc734d4ebd1599431095023df02edc731960ea59872520aec73ec072b6cf6a9",
+  "cache_control": "no-cache, no-transform",
+  "content_type": "application/json; charset=utf-8",
+  "currentUser_type": "NoneType",
+  "has_currentUser": true,
+  "location": "",
+  "status": 200,
+  "x_accel_buffering": "no"
+}

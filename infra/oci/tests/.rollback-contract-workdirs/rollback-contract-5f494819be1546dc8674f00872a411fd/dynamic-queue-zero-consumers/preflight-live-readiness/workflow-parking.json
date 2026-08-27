@@ -1,0 +1,76 @@
+{
+  "active_matches": 0,
+  "collections": {
+    "bet_pending_bet_update": {
+      "exhausted": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "pending": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "processing": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      }
+    },
+    "moderation_parked_place_bet": {
+      "exhausted": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "pending": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "processing": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      }
+    },
+    "resulting_pending_moderation_result": {
+      "exhausted": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "pending": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "processing": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      }
+    },
+    "resulting_retry_record": {
+      "exhausted": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "pending": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      },
+      "processing": {
+        "count": 0,
+        "oldestAgeSeconds": 0
+      }
+    },
+    "resulting_retry_record_dead_letter": {
+      "count": 0,
+      "oldestAgeSeconds": 0
+    }
+  },
+  "draft_live_slips": 0,
+  "limits": {
+    "workflow_exhausted_count_limit": 0,
+    "workflow_pending_age_limit_seconds": 600,
+    "workflow_pending_count_limit": 4,
+    "workflow_processing_age_limit_seconds": 300,
+    "workflow_processing_count_limit": 2
+  },
+  "overdue_unstarted_events": 0,
+  "simulation_quarantines": 0,
+  "submitted_live_slips": 0
+}

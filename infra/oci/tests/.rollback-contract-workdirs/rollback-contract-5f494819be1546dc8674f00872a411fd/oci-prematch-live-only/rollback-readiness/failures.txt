@@ -1,0 +1,3 @@
+http canonical/api/event: incompatible legacy PRE_MATCH payload
+http redirect/api/event: incompatible legacy PRE_MATCH payload
+http diagnostic/api/event: incompatible legacy PRE_MATCH payload

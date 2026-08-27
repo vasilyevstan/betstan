@@ -1,0 +1,2 @@
+SSE stream closed too early after initial event-stream traffic for https://betstan.xyz/api/event/stream
+ERROR: SSE connectivity contract failed for https://betstan.xyz/api/event/stream

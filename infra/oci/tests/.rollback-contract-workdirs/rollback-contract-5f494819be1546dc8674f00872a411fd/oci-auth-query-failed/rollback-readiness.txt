@@ -1,0 +1,19 @@
+total_ready=0
+total_unack=0
+rollback_readiness=NO_GO
+mode=application-rollback
+phase=steady-state
+namespace=betstan-oci
+public_url=https://betstan.xyz
+redirect_url=https://www.betstan.xyz
+diagnostic_url=https://203.0.113.10.nip.io
+max_queue_ready=80
+max_queue_unack=80
+min_rollout_revisions=2
+required_queues=event_new_event,gamemaster_new_event,bet_place_bet
+target_sha=1111111111111111111111111111111111111111
+auth_identifier_rollback_check=query-failed
+auth_normalized_identifier_count=unknown
+target_supports_normalized_identifiers=false
+rollback_operator=
+auth rollback compatibility: unable to count normalized auth identifiers

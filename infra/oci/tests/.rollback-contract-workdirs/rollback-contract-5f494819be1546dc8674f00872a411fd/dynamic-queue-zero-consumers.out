@@ -1,0 +1,2 @@
+event_live_update.: consumers 0 below required 2; dynamic:event_live_update.: consumers 0 below baseline 2
+ERROR: RabbitMQ verification failed after gaming-auth-depl

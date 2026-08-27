@@ -1,0 +1,7 @@
+event_new_event	0	0	1
+gamemaster_new_event	0	0	1
+bet_place_bet	0	0	1
+event_live_projection	0	0	1
+moderation_live_event_update	0	0	1
+resulting_live_event_update	0	0	1
+event_live_update.fixture-pod	0	0	2

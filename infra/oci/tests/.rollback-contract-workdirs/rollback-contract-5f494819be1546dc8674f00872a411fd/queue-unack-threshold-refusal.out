@@ -1,0 +1,2 @@
+bet_place_bet: unack 6 exceeds bound 5; bet_place_bet: unack growth 6 exceeds bound 0; event_new_event: unack 6 exceeds bound 5; event_new_event: unack growth 6 exceeds bound 0; gamemaster_new_event: unack 6 exceeds bound 5; gamemaster_new_event: unack growth 6 exceeds bound 0
+ERROR: RabbitMQ verification failed after gaming-auth-depl

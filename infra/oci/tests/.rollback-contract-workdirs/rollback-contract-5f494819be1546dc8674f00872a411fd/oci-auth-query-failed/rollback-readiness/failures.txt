@@ -1,0 +1,1 @@
+auth rollback compatibility: unable to count normalized auth identifiers

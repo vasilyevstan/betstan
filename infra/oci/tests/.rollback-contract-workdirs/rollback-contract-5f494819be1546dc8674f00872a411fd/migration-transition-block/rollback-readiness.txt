@@ -1,0 +1,4 @@
+rollback_readiness=GO
+mode=migration-transition
+phase=backing-up
+rollback_operator=infra/oci/scripts/reviewed-topology-rollback-stan.sh

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "fetch --quiet origin master:refs/remotes/origin/master")
+    exit 0
+    ;;
+  "rev-parse HEAD")
+    printf '%s\n' "$STUB_CURRENT_MASTER_SHA"
+    ;;
+  "rev-parse origin/master")
+    printf '%s\n' "$STUB_CURRENT_MASTER_SHA"
+    ;;
+  "rev-parse ${STUB_TARGET_SHA}^{commit}")
+    printf '%s\n' "$STUB_TARGET_SHA"
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}^{commit}")
+    exit 0
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:event/src/route/EventLiveStream.ts")
+    [[ "${STUB_DEPLOYED_SOURCE_HAS_SSE:-1}" == "1" ]]
+    ;;
+  "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
+    exit 0
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/RequireAdmin.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
+    ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/service/VerifyAdminSession.ts")
+    [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
+    ;;
+  "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
+    case "${STUB_TARGET_LOGIN_MODE:-current}" in
+      current)
+        cat <<'EOF_LOGIN'
+import { normalizeIdentifier } from '../data/normalizeIdentifier'
+const identifierNormalized = normalizeIdentifier(identifier)
+await User.findOne({ identifierNormalized })
+EOF_LOGIN
+        ;;
+      legacy)
+        cat <<'EOF_LOGIN'
+await User.findOne({ username: identifier })
+EOF_LOGIN
+        ;;
+      missing)
+        exit 1
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    printf 'unexpected git invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac

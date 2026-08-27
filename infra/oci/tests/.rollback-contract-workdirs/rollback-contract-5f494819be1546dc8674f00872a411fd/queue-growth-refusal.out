@@ -1,0 +1,2 @@
+bet_place_bet: ready growth 1 exceeds bound 0; event_new_event: ready growth 1 exceeds bound 0; gamemaster_new_event: ready growth 1 exceeds bound 0
+ERROR: RabbitMQ verification failed after gaming-auth-depl

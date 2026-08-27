@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "generation": 8,
+    "annotations": {
+      "deployment.kubernetes.io/revision": "7"
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "gaming-resulting",
+            "image": "ghcr.io/vasilyevstan/betstan-images@sha256:0000000000000000000000000000000000000000000000000000000000000207"
+          }
+        ]
+      }
+    }
+  },
+  "status": {
+    "observedGeneration": 8,
+    "readyReplicas": 1,
+    "availableReplicas": 1,
+    "updatedReplicas": 1
+  }
+}
