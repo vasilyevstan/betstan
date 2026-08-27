@@ -1261,6 +1261,74 @@ PY
   return 0
 }
 
+live_betting_render_shared_topology_from_migration() {
+  local evidence_file="$1"
+  local topology_file="$2"
+  python3 - "$evidence_file" "$topology_file" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+evidence_path, topology_path = map(Path, sys.argv[1:])
+evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+data = evidence.get("data") or {}
+required = {
+    "phase": "completed",
+    "logical-parity": "true",
+    "database-count": "8",
+    "recovery-required": "false",
+    "mongo-write-lock": "false",
+    "rabbitmq-write-lock": "false",
+}
+for key, expected in required.items():
+    if str(data.get(key, "")) != expected:
+        raise SystemExit(f"OCI migration evidence has incompatible {key}")
+
+migration_id = str(data.get("migration-id", ""))
+source_sha = str(data.get("active-source-sha", ""))
+fingerprint = str(data.get("oci-cluster-fingerprint", ""))
+image_id = str(data.get("target-mongo-image-id", ""))
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", migration_id):
+    raise SystemExit("OCI migration evidence has an invalid migration ID")
+if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+    raise SystemExit("OCI migration evidence has an invalid source SHA")
+if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    raise SystemExit("OCI migration evidence has an invalid cluster fingerprint")
+if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image_id):
+    raise SystemExit("OCI migration evidence has an invalid target Mongo image")
+
+expected_components = {
+    "ingress", "rabbitmq", "auth", "bet", "backoffice", "event",
+    "gamemaster", "moderation", "resulting", "slip", "client",
+}
+try:
+    baseline = dict(
+        component.split("=", 1)
+        for component in str(data.get("oci-baseline", "")).split(",")
+    )
+except ValueError as error:
+    raise SystemExit("OCI migration evidence has a malformed workload baseline") from error
+if set(baseline) != expected_components or any(value != "1" for value in baseline.values()):
+    raise SystemExit("OCI migration evidence does not prove the complete OCI workload baseline")
+
+topology_path.write_text(
+    json.dumps(
+        {
+            "data": {
+                "mode": "shared",
+                "validated": "true",
+                "migration-id": migration_id,
+                "source-sha": source_sha,
+            }
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
 live_betting_pod_name_for_app() {
   local app="$1"
   local fallback="$2"
@@ -1894,7 +1962,7 @@ PY
     live_betting_record_failure sse_contract "SSE cache-control must include no-cache for $prefix"
     return 1
   }
-  [[ "$no_buffer" == "no" ]] || {
+  [[ -z "$no_buffer" || "$no_buffer" == "no" ]] || {
     live_betting_record_failure sse_contract "SSE must disable buffering for $prefix"
     return 1
   }
@@ -1928,6 +1996,7 @@ app_deployments_verified=$LIVE_BETTING_APP_DEPLOYMENTS_VERIFIED
 aux_workloads_ready=$LIVE_BETTING_AUX_WORKLOADS_READY
 topology_mode=$LIVE_BETTING_TOPOLOGY_MODE
 topology_validated=$LIVE_BETTING_TOPOLOGY_VALIDATED
+topology_evidence=$LIVE_BETTING_TOPOLOGY_EVIDENCE
 lock_state=$LIVE_BETTING_LOCK_STATE
 mongo_pvc_name=$LIVE_BETTING_MONGO_PVC_NAME
 mongo_pvc_phase=$LIVE_BETTING_MONGO_PVC_PHASE
@@ -1991,6 +2060,7 @@ live_betting_readiness_main() {
   LIVE_BETTING_EXPECTED_OPERATION_LOCK_SOURCE_SHA="${EXPECTED_OPERATION_LOCK_SOURCE_SHA:-}"
   LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE="${REQUIRED_MONGO_TOPOLOGY_MODE:-}"
   LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC="${EXPECTED_SHARED_MONGO_PVC:-}"
+  LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP="${SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP:-}"
   LIVE_BETTING_PUBLIC_HOSTS_REQUIRED="${PUBLIC_HOSTS_REQUIRED:-0}"
   LIVE_BETTING_DIAGNOSTIC_URL_REQUIRED="${DIAGNOSTIC_URL_REQUIRED:-0}"
   LIVE_BETTING_REQUIRE_HTTPS_PRIMARY="${REQUIRE_HTTPS_PRIMARY:-0}"
@@ -2043,6 +2113,7 @@ live_betting_readiness_main() {
   LIVE_BETTING_MONGO_PING_OK="unknown"
   LIVE_BETTING_TOPOLOGY_MODE="unknown"
   LIVE_BETTING_TOPOLOGY_VALIDATED="unknown"
+  LIVE_BETTING_TOPOLOGY_EVIDENCE="unknown"
   LIVE_BETTING_LOCK_STATE="unknown"
   LIVE_BETTING_MONGO_PVC_NAME="unknown"
   LIVE_BETTING_MONGO_PVC_PHASE="unknown"
@@ -2103,6 +2174,10 @@ live_betting_readiness_main() {
     [[ "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
       live_betting_record_failure preflight "EXPECTED_SHARED_MONGO_PVC is invalid"
   fi
+  if [[ -n "$LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP" ]]; then
+    [[ "$LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] ||
+      live_betting_record_failure preflight "SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP is invalid"
+  fi
   if [[ "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" == "shared" &&
         -z "$LIVE_BETTING_EXPECTED_SHARED_MONGO_PVC" ]]; then
     live_betting_record_failure preflight "EXPECTED_SHARED_MONGO_PVC is required for shared topology"
@@ -2143,7 +2218,7 @@ live_betting_readiness_main() {
   live_betting_check_schema_evidence || true
   live_betting_check_rollback_baseline || true
 
-  local workloads_json pods_json pvcs_json topology_stderr lock_stderr rabbit_stderr
+  local workloads_json pods_json pvcs_json topology_stderr migration_topology_stderr lock_stderr rabbit_stderr
   if workloads_json="$(live_betting_capture_command workloads kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get deploy,sts -n "$LIVE_BETTING_NAMESPACE" -o json)"; then
     printf '%s\n' "$workloads_json" >"$LIVE_BETTING_WORK_DIR/workloads.json"
   else
@@ -2168,10 +2243,32 @@ live_betting_readiness_main() {
   topology_stderr="$LIVE_BETTING_WORK_DIR/topology.stderr"
   if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get configmap gaming-mongo-topology -n "$LIVE_BETTING_NAMESPACE" -o json >"$LIVE_BETTING_WORK_DIR/topology.json" 2>"$topology_stderr"; then
     live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
+    LIVE_BETTING_TOPOLOGY_EVIDENCE=gaming-mongo-topology
+  elif grep -Eqi 'not[ -]?found' "$topology_stderr" &&
+      [[ "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" == "shared" &&
+         -n "$LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP" ]]; then
+    live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
+    migration_topology_stderr="$LIVE_BETTING_WORK_DIR/migration-topology.stderr"
+    if kubectl --request-timeout="$LIVE_BETTING_KUBECTL_TIMEOUT" get configmap \
+        "$LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP" \
+        -n "$LIVE_BETTING_NAMESPACE" -o json \
+        >"$LIVE_BETTING_WORK_DIR/migration-topology.json" 2>"$migration_topology_stderr" &&
+        live_betting_render_shared_topology_from_migration \
+          "$LIVE_BETTING_WORK_DIR/migration-topology.json" \
+          "$LIVE_BETTING_WORK_DIR/topology.json" \
+          2>>"$migration_topology_stderr"; then
+      LIVE_BETTING_TOPOLOGY_EVIDENCE="$LIVE_BETTING_SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP"
+    else
+      live_betting_record_failure topology_lock "completed shared Mongo migration evidence is unavailable"
+    fi
+    live_betting_write_sanitized_file \
+      "$migration_topology_stderr" \
+      "$LIVE_BETTING_OUTPUT_DIR/migration-topology.stderr"
   elif grep -Eqi 'not[ -]?found' "$topology_stderr" &&
       [[ "$LIVE_BETTING_REQUIRED_MONGO_TOPOLOGY_MODE" != "shared" ]]; then
     live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
     printf '{"data":{"mode":"legacy","validated":"true"}}\n' >"$LIVE_BETTING_WORK_DIR/topology.json"
+    LIVE_BETTING_TOPOLOGY_EVIDENCE=legacy-default
   else
     live_betting_write_sanitized_file "$topology_stderr" "$LIVE_BETTING_OUTPUT_DIR/topology.stderr"
     live_betting_record_failure topology_lock "unable to inspect Mongo topology"
