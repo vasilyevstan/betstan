@@ -184,6 +184,12 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
+[[ "$(oci_application_rabbitmq_queue_count)" == "22" ]] ||
+  fail "current RabbitMQ application queue count omits live consumers"
+grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment queue failure omits zero-consumer diagnostics"
+grep -Fq 'queue_names=' "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment queue failure omits observed queue names"
 for queue_probe in \
   "$OCI_DIR/scripts/baseline-capture-stan.sh" \
   "$OCI_DIR/scripts/rollback-readiness-stan.sh" \

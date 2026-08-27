@@ -250,6 +250,10 @@ rabbit_pod="$(
 [[ -n "$rabbit_pod" ]] || oci_die "RabbitMQ pod is missing after rollout"
 rabbit_baseline_ready=0
 queue_rows=""
+queue_count=0
+queue_names=none
+zero_consumer_queues=none
+expected_queue_count="$(oci_application_rabbitmq_queue_count)"
 for _ in $(seq 1 60); do
   queue_state="$(
     kubectl exec -n "$OCI_K8S_NAMESPACE" "$rabbit_pod" -- \
@@ -258,7 +262,13 @@ for _ in $(seq 1 60); do
   )"
   if queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_state")"; then
     queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$queue_rows")"
-    if [[ "$queue_count" == "17" ]] &&
+    queue_names="$(awk '{print $1}' <<<"$queue_rows" | sort | paste -sd, -)"
+    zero_consumer_queues="$(
+      awk '$4 < 1 {print $1}' <<<"$queue_rows" | sort | paste -sd, -
+    )"
+    [[ -n "$queue_names" ]] || queue_names=none
+    [[ -n "$zero_consumer_queues" ]] || zero_consumer_queues=none
+    if [[ "$queue_count" == "$expected_queue_count" ]] &&
         awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows"; then
       rabbit_baseline_ready=1
       break
@@ -267,7 +277,7 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 [[ "$rabbit_baseline_ready" == "1" ]] ||
-  oci_die "RabbitMQ did not establish the expected 17-consumer baseline"
+  oci_die "RabbitMQ consumer baseline is not ready: expected_queues=$expected_queue_count observed_queues=$queue_count zero_consumer_queues=$zero_consumer_queues queue_names=$queue_names"
 awk '{print $1}' <<<"$queue_rows" | sort > "$OUTPUT_DIR/rabbitmq-baseline.txt"
 
 apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'
