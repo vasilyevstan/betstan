@@ -827,15 +827,15 @@ if [[ "$SSE_REQUIREMENT" == "deployed-source" ]]; then
 fi
 
 : >"$OUTPUT_DIR/pod-images.tsv"
-while IFS=$'\t' read -r service _repository _image_ref _digest platform_digest; do
+while IFS=$'\t' read -r service _repository _image_ref manifest_digest platform_digest; do
   pods_json="$WORK_DIR/${service}-pods.json"
   kubectl get pods -n "$OCI_K8S_NAMESPACE" -l "app=gaming-${service}" -o json >"$pods_json"
-  python3 - "$pods_json" "$service" "$platform_digest" >>"$OUTPUT_DIR/pod-images.tsv" <<'PY'
+  python3 - "$pods_json" "$service" "$manifest_digest" "$platform_digest" >>"$OUTPUT_DIR/pod-images.tsv" <<'PY'
 import json
 import sys
 
 doc = json.load(open(sys.argv[1], encoding='utf-8'))
-service, platform_digest = sys.argv[2:4]
+service, manifest_digest, platform_digest = sys.argv[2:5]
 ready_pods = 0
 for item in doc.get('items', []):
     if item.get('metadata', {}).get('deletionTimestamp') is not None:
@@ -847,8 +847,13 @@ for item in doc.get('items', []):
         if not status.get('ready'):
             raise SystemExit(f'{service}: pod {pod} is not Ready')
         image_id = status.get('imageID', '')
-        if not image_id.endswith('@' + platform_digest):
-            raise SystemExit(f'{service}: pod {pod} does not serve {platform_digest}')
+        if not (
+            image_id.endswith('@' + manifest_digest)
+            or image_id.endswith('@' + platform_digest)
+        ):
+            raise SystemExit(
+                f'{service}: pod {pod} does not serve the expected manifest/platform digest'
+            )
         ready_pods += 1
         print(service, pod, image_id, sep='\t')
 if ready_pods == 0:
