@@ -118,7 +118,7 @@ When queues or consumers are missing:
 1. Confirm Mongo and RabbitMQ pods are ready.
 2. Restart backend Deployments sequentially, never all at once.
 3. Wait for each rollout before continuing.
-4. Verify all expected 17 queues have consumers and no unexpected backlog.
+4. Verify all 22 current queues (21 durable plus one pod-scoped event queue) have consumers and no unexpected backlog.
 5. Re-run both-host API checks.
 
 Do not declare recovery based only on a Running RabbitMQ pod.

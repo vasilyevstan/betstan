@@ -421,7 +421,7 @@ if [[ -n "${OCI_RABBITMQ_BASELINE_FILE:-}" ]]; then
   observed_names="$(awk '{print $1}' <<<"$queue_rows" | sort)"
   expected_names="$(sort "$OCI_RABBITMQ_BASELINE_FILE")"
   [[ "$observed_names" == "$expected_names" ]] && queue_baseline_match=true
-elif [[ "$queue_count" == "17" ]]; then
+elif [[ "$queue_count" == "$(oci_application_rabbitmq_queue_count)" ]]; then
   queue_baseline_match=true
 fi
 
