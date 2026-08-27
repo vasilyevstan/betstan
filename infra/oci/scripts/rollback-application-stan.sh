@@ -389,6 +389,7 @@ load_baseline_images() {
   [[ "$count" == "9" ]] || oci_die "baseline image provenance must contain exactly nine services"
   for service in "${ROLLBACK_ORDER[@]}"; do
     expected_ref "$service" >/dev/null
+    expected_manifest_digest "$service" >/dev/null
     expected_platform_digest "$service" >/dev/null
   done
 }
@@ -412,6 +413,10 @@ baseline_lookup() {
 
 expected_ref() {
   baseline_lookup "$1" 3 || oci_die "baseline image provenance is missing $1"
+}
+
+expected_manifest_digest() {
+  baseline_lookup "$1" 4 || oci_die "baseline image provenance is missing $1"
 }
 
 expected_platform_digest() {
@@ -469,13 +474,16 @@ verify_exact_digest() {
   local pods_json="$WORK_DIR/${service}-verify-pods.json"
   kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" -o json >"$deployment_json"
   kubectl get pods -n "$OCI_K8S_NAMESPACE" -l "app=${container}" -o json >"$pods_json"
-  python3 - "$deployment_json" "$pods_json" "$container" "$service" "$(expected_ref "$service")" "$(expected_platform_digest "$service")" >>"$OUTPUT_DIR/exact-digest-verification.tsv" <<'PY'
+  python3 - "$deployment_json" "$pods_json" "$container" "$service" \
+    "$(expected_ref "$service")" "$(expected_manifest_digest "$service")" \
+    "$(expected_platform_digest "$service")" \
+    >>"$OUTPUT_DIR/exact-digest-verification.tsv" <<'PY'
 import json
 import sys
 
 deployment = json.load(open(sys.argv[1], encoding='utf-8'))
 pods = json.load(open(sys.argv[2], encoding='utf-8'))
-container, service, expected_ref, platform_digest = sys.argv[3:7]
+container, service, expected_ref, manifest_digest, platform_digest = sys.argv[3:8]
 images = [
     item.get('image', '')
     for item in deployment.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
@@ -494,8 +502,13 @@ for pod in pods.get('items', []):
         if not status.get('ready'):
             raise SystemExit(f'{service}: pod {pod_name} is not ready')
         image_id = status.get('imageID', '')
-        if not image_id.endswith('@' + platform_digest):
-            raise SystemExit(f'{service}: pod {pod_name} does not serve the expected platform digest')
+        if not (
+            image_id.endswith('@' + manifest_digest)
+            or image_id.endswith('@' + platform_digest)
+        ):
+            raise SystemExit(
+                f'{service}: pod {pod_name} does not serve the expected manifest/platform digest'
+            )
         ready_pods += 1
         print(service, pod_name, image_id, sep='\t')
 if ready_pods == 0:

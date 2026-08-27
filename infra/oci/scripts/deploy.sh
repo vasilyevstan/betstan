@@ -318,8 +318,9 @@ for service in "${services[@]}"; do
   )"
   [[ -n "$image_ids" ]] || oci_die "no serving pod image ID found for $service"
   while IFS= read -r image_id; do
-    [[ "$image_id" == *"@${expected_platform_digests[$service]}" ]] ||
-      oci_die "serving pod platform digest differs from provenance: $service"
+    [[ "$image_id" == *"@${expected_digests[$service]}" ||
+       "$image_id" == *"@${expected_platform_digests[$service]}" ]] ||
+      oci_die "serving pod manifest/platform digest differs from provenance: $service"
   done <<<"$image_ids"
 done
 

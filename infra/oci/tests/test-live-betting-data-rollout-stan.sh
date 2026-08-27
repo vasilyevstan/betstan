@@ -423,6 +423,9 @@ for literal in \
   'Application path changed after applied data' \
   'EXPECTED_PHASE=apply-slip-index' \
   'OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv' \
+  'expected_manifest=' \
+  'endswith("@" + $manifest)' \
+  'Resume pod image mismatch' \
   'runtime_images_sha256=' \
   'application_change_scope=github-infra-docs-only' \
   'validate-rollback-baseline-stan.sh' \

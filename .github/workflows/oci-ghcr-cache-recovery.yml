@@ -284,16 +284,15 @@ jobs:
               sed '/^$/d' | sort -u)"
             [ -n "$image_ids" ]
             [ "$(wc -l <<<"$image_ids" | tr -d ' ')" = "1" ]
-            actual_platform="${image_ids##*@}"
-            [ "$actual_platform" = "$expected_platform" ]
             actual_repository="${actual_ref%@sha256:*}"
             actual_digest="sha256:${actual_ref##*@sha256:}"
             [[ "$actual_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             printf '%s\t%s\t%s\t%s\t%s\n' \
-              "$service" "$actual_repository" "$actual_ref" "$actual_digest" "$actual_platform" \
+              "$service" "$actual_repository" "$actual_ref" "$actual_digest" "$expected_platform" \
               >> "$input_dir/live-images.tsv"
             while IFS= read -r image_id; do
-              [[ "$image_id" == *"@$expected_platform" ]]
+              [[ "$image_id" == *"@$actual_digest" ||
+                 "$image_id" == *"@$expected_platform" ]]
               printf '%s\t%s\n' "$service" "$image_id" >> "$input_dir/live-platform-ids.tsv"
             done <<<"$image_ids"
           done
