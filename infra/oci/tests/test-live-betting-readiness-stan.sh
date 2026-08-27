@@ -42,10 +42,19 @@ assert_contains "$RUN_SUMMARY_FILE" 'resulting_retry_record_dead_letter_count=0'
 assert_contains "$RUN_SUMMARY_FILE" 'workflow_processing_count_limit=6' 'OCI monitor should surface workflow processing threshold'
 assert_contains "$RUN_SUMMARY_FILE" 'overdue_unstarted_events=0' 'OCI monitor should surface overdue unstarted events'
 assert_contains "$RUN_SUMMARY_FILE" 'simulation_quarantines=0' 'OCI monitor should surface simulation quarantines'
+assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" 'phase: {$in: [' 'OCI active-match query should include only explicit live phases'
+assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '$nin' 'OCI active-match query should treat missing legacy phase as PRE_MATCH'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-active.js" '"simulationFailure.quarantinedAt": {$exists: true, $ne: null}' 'OCI Gamemaster query should count only persisted simulation quarantines'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-moderation-parked-place-bet.js" 'processing: { statuses: ["PROCESSING"], includeLegacyMissingStatus: false, primaryField: "leaseUntil", fallbackField: "" }' 'OCI moderation query should use leaseUntil for processing age'
 assert_not_contains "$RUN_QUERY_CAPTURE_DIR/mongo-moderation-parked-place-bet.js" 'parkedAt' 'OCI moderation query should not reference nonexistent parkedAt fields'
 assert_contains "$RUN_QUERY_CAPTURE_DIR/mongo-resulting-retry-record.js" 'deadLetter: { statuses: ["DEAD_LETTER"], includeLegacyMissingStatus: false, primaryField: "deadLetteredAt", fallbackField: "" }' 'OCI retry query should use DEAD_LETTER and deadLetteredAt for terminal age'
+
+run_live_betting_scenario oci-legacy-phaseless-events "$SCRIPT" oci \
+  MODE=rollback-drain \
+  STUB_FLAG_VALUE=false \
+  STUB_LEGACY_PHASELESS_EVENTS=9
+assert_eq 0 "$RUN_RC" "OCI rollback drain should treat legacy events without phase as PRE_MATCH"
+assert_contains "$RUN_SUMMARY_FILE" 'active_matches=0' 'legacy phase-less events should not count as active matches'
 
 run_live_betting_scenario oci-activate "$SCRIPT" oci MODE=activate STUB_FLAG_VALUE=true STUB_ACTIVE_MATCHES=1 STUB_SUBMITTED_LIVE_SLIPS=2
 assert_eq 0 "$RUN_RC" "OCI activate mode should pass"
@@ -152,4 +161,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=17'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=18'
