@@ -89,6 +89,37 @@ run_live_betting_scenario oci-missing-topology-marker "$SCRIPT" oci \
 assert_eq 1 "$RUN_RC" "OCI monitor should fail closed when the shared topology marker is missing"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'missing shared topology marker should fail the topology contract'
 
+run_live_betting_scenario oci-completed-migration-topology "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_TOPOLOGY_MISSING=1 \
+  STUB_OCI_MIGRATION_EVIDENCE=valid
+assert_eq 0 "$RUN_RC" "OCI monitor should accept the completed OCI migration journal as shared topology evidence"
+assert_contains "$RUN_SUMMARY_FILE" 'topology_mode=shared' 'OCI migration evidence should resolve to shared topology'
+assert_contains "$RUN_SUMMARY_FILE" 'topology_evidence=betstan-oci-migration-journal' 'OCI readiness should identify its migration evidence'
+
+run_live_betting_scenario oci-invalid-migration-topology "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_TOPOLOGY_MISSING=1 \
+  STUB_OCI_MIGRATION_EVIDENCE=invalid
+assert_eq 1 "$RUN_RC" "OCI monitor should reject incomplete OCI migration evidence"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=topology_lock' 'invalid OCI migration evidence should fail the topology contract'
+
+run_live_betting_scenario oci-sse-hidden-buffering-header "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_SSE_MODE=hidden-buffering-header
+assert_eq 0 "$RUN_RC" "OCI monitor should accept a streamed heartbeat when ingress hides its control header"
+assert_contains "$RUN_SUMMARY_FILE" 'sse_primary_heartbeat=1' 'OCI readiness should retain heartbeat evidence'
+
+run_live_betting_scenario oci-sse-buffering-enabled "$SCRIPT" oci \
+  MODE=monitor \
+  STUB_FLAG_VALUE=true \
+  STUB_SSE_MODE=buffering-enabled
+assert_eq 1 "$RUN_RC" "OCI monitor should reject an explicit buffering-enabled response"
+assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=sse_contract' 'enabled buffering should fail the SSE contract'
+
 run_live_betting_scenario oci-sse-heartbeat "$SCRIPT" oci MODE=monitor STUB_FLAG_VALUE=true STUB_SSE_MODE=bad-heartbeat
 assert_eq 1 "$RUN_RC" "OCI monitor should fail without SSE heartbeat"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=sse_contract' 'missing SSE heartbeat should fail SSE contract'
@@ -121,4 +152,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=13'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=17'

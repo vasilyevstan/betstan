@@ -761,6 +761,8 @@ grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"
 grep -Fq 'export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data' \
   "$oci_live_readiness"
+grep -Fq 'export SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP=betstan-oci-migration-journal' \
+  "$oci_live_readiness"
 if grep -Eiq 'at least (eight|8) Mongo PVC' \
   "$deployment_safety_agent" "$azure_deploy_workflow" "$deploy_workflow"; then
   fail "current production safety sources retain the retired eight-PVC gate"
