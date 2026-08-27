@@ -343,6 +343,12 @@ for manifest in "$stub_state"/jobs/*.yaml; do
     fail "job mounted a Kubernetes API token"
   grep -Fq 'kubernetes.io/arch: arm64' "$manifest" ||
     fail "job was not bound to the approved image architecture"
+  grep -Fq 'runAsNonRoot: true' "$manifest" ||
+    fail "job did not require a non-root identity"
+  grep -Fq 'runAsUser: 1000' "$manifest" ||
+    fail "job did not use the backend runtime UID"
+  grep -Fq 'runAsGroup: 1000' "$manifest" ||
+    fail "job did not use the backend runtime GID"
   grep -Fq 'readOnlyRootFilesystem: true' "$manifest" ||
     fail "job filesystem was writable"
   if grep -Fq 'src/scripts/' "$manifest"; then
