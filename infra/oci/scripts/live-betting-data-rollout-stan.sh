@@ -789,6 +789,8 @@ EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
 EXPECTED_PHASE="$PHASE" \
 EXPECTED_RUN_ID="$RUN_ID" \
 EXPECTED_RUN_ATTEMPT="$RUN_ATTEMPT" \
+EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
   "$SCRIPT_DIR/verify-live-betting-data-evidence-stan.sh" >/dev/null
 
 echo "live_betting_data_rollout=PASS phase=$PHASE backfill_complete=$backfill_complete index_ready=$index_ready"
