@@ -33,7 +33,7 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
-  "/api/backoffice|array"
+  "/api/backoffice|backoffice"
 )
 
 prepare_private_dir() {
@@ -83,7 +83,7 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local meta status effective_url content_type shape
+  local meta status effective_url content_type shape expected_status_label
 
   meta="$({
     curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
@@ -95,8 +95,13 @@ capture_http() {
     return 1
   }
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-  if [[ "$status" != "200" ]]; then
-    failures_file_append "http ${label}${path}: expected 200 got ${status}"
+  expected_status_label=200
+  if [[ "$expected_kind" == "backoffice" ]]; then
+    expected_status_label="200 or protected 401"
+  fi
+  if [[ "$status" != "200" &&
+      ! ("$expected_kind" == "backoffice" && "$status" == "401") ]]; then
+    failures_file_append "http ${label}${path}: expected ${expected_status_label} got ${status}"
     return 1
   fi
   case "$expected_kind" in
@@ -166,6 +171,41 @@ print('array')
 PY
 )" || {
         failures_file_append "http ${label}${path}: incompatible array payload"
+        return 1
+      }
+      ;;
+    backoffice)
+      [[ "$content_type" == application/json* ]] || {
+        failures_file_append "http ${label}${path}: expected JSON content"
+        return 1
+      }
+      shape="$(python3 - "$body_file" "$status" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+status = sys.argv[2]
+if status == '200':
+    if not isinstance(payload, list):
+        raise SystemExit(1)
+    print('array')
+else:
+    errors = payload.get('errors') if isinstance(payload, dict) else None
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or any(
+            not isinstance(error, dict)
+            or not isinstance(error.get('message'), str)
+            or not error['message']
+            for error in errors
+        )
+    ):
+        raise SystemExit(1)
+    print('unauthorized.errors')
+PY
+)" || {
+        failures_file_append "http ${label}${path}: incompatible Backoffice payload"
         return 1
       }
       ;;
