@@ -785,6 +785,7 @@ def validate_live_data_rollout_workflow!(file, document, content)
       phase
       prerequisite_run_id
       baseline_recovery_run_id
+      failed_deploy_run_id
       confirmation
     ]
   )
@@ -802,12 +803,21 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "DRY RUN LIVE DATA EXACT SHA" => "read-only confirmation",
     "APPLY LIVE BACKFILLS EXACT SHA" => "backfill confirmation",
     "APPLY LIVE SLIP INDEX EXACT SHA" => "index confirmation",
+    "RESUME APPLIED LIVE DATA EXACT SHA" => "failed-deploy resume confirmation",
     "oci-production-build.yml" => "exact build provenance",
     "oci-infrastructure.yml" => "exact infrastructure provenance",
     "oci-live-data-rollout.yml" => "phase-chain provenance",
     "oci-ghcr-cache-recovery.yml" => "explicit recovery baseline authority",
     "ghcr-cache-recovery-" => "exact recovery artifact binding",
     "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
+    "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
+      "failed-deploy rollback baseline binding",
+    "git merge-base --is-ancestor" => "applied-data ancestry proof",
+    "Application path changed after applied data" =>
+      "application-change rejection",
+    "Verify exact failed-deploy resume state" => "running digest verification",
+    "application_change_scope=github-infra-docs-only" =>
+      "resume evidence scope",
     "production-run-exclusivity-stan.sh" => "production run exclusivity",
     "baseline-capture-stan.sh" => "before and after rollback baselines",
     "shared-mongo-operation-lock-stan.sh acquire" => "database operation lock acquisition",
