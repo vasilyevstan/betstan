@@ -1454,6 +1454,11 @@ puts 'oci_rollback_yaml=PASS'
 RUBY
 assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
+assert_contains "$WORKFLOW_FILE" \
+  'ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env'
+if grep -Fq 'artifacts/oci-rollback/admin-auth-capability.env' "$WORKFLOW_FILE"; then
+  fail 'rollback workflow stores admin capability inside its recreated output directory'
+fi
 for literal in \
   'validate_recovery_run' \
   'validate_recovery_transition_provenance' \
