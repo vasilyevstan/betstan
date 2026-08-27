@@ -376,8 +376,12 @@ if [[ "$args" == *"mongosh --quiet --norc --eval"* ]]; then
       if [[ "$malformed_target" == "$target" ]]; then
         printf '{"mongoOk":true,"activeMatches":"oops","overdueUnstartedEvents":0,"simulationQuarantines":0}\n'
       else
+        active_matches="${STUB_ACTIVE_MATCHES:-0}"
+        if [[ "${STUB_LEGACY_PHASELESS_EVENTS:-0}" -gt 0 && "$query_script" == *'$nin'* ]]; then
+          active_matches=$((active_matches + STUB_LEGACY_PHASELESS_EVENTS))
+        fi
         printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s}\n' \
-          "${STUB_ACTIVE_MATCHES:-0}" \
+          "$active_matches" \
           "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" \
           "${STUB_SIMULATION_QUARANTINES:-0}"
       fi
@@ -639,6 +643,7 @@ run_live_betting_scenario() {
     export STUB_DROP_DYNAMIC_QUEUE=0
     export STUB_DROP_DURABLE_QUEUE=
     export STUB_ACTIVE_MATCHES=0
+    export STUB_LEGACY_PHASELESS_EVENTS=0
     export STUB_SUBMITTED_LIVE_SLIPS=0
     export STUB_DRAFT_LIVE_SLIPS=0
     export STUB_BET_PENDING_COUNT=0

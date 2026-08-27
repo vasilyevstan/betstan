@@ -2322,7 +2322,15 @@ const gm = db.getSiblingDB("gaming_gamemaster");
 const overdueBefore = new Date(Date.now() - (__UNSTARTED_EVENT_GRACE_SECONDS__ * 1000));
 print(JSON.stringify({
   mongoOk: db.adminCommand({ping: 1}).ok === 1,
-  activeMatches: gm.events.countDocuments({phase: {$nin: ["PRE_MATCH", "FULL_TIME"]}}),
+  activeMatches: gm.events.countDocuments({
+    phase: {$in: [
+      "FIRST_HALF",
+      "FIRST_HALF_STOPPAGE",
+      "HALF_TIME",
+      "SECOND_HALF",
+      "SECOND_HALF_STOPPAGE"
+    ]}
+  }),
   overdueUnstartedEvents: gm.events.countDocuments({
     status: "NO_RESULT",
     time: {$lt: overdueBefore},
