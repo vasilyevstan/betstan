@@ -150,6 +150,49 @@ apply_documents() {
   printf '%s' "$rendered" | kubectl apply -f -
 }
 
+apply_cleanup_documents() {
+  local selector="$1"
+  local rendered
+  rendered="$(emit_documents "$selector")" || return 1
+  [[ -n "$rendered" ]] || return 1
+  printf '%s' "$rendered" | kubectl apply -f -
+}
+
+mongo_upgrade_recovery_required=false
+restore_deploy_access_on_exit() {
+  local rc="$1"
+  local cleanup_failed=0
+  local service
+  trap - EXIT INT TERM
+  if [[ "$rc" != "0" && "$mongo_upgrade_recovery_required" == "true" ]]; then
+    set +e
+    OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+    MONGO_TARGET_IMAGE="$mongo_target_image" \
+    MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
+      "$SCRIPT_DIR/upgrade-mongo.sh" resume || cleanup_failed=1
+    if [[ -f "$RENDERED_FILE" ]]; then
+      for service in auth backoffice client; do
+        apply_cleanup_documents "Service:^gaming-${service}-srv$" &&
+          apply_cleanup_documents "Deployment:^gaming-${service}-depl$" &&
+          kubectl rollout status "deployment/gaming-${service}-depl" \
+            -n "$OCI_K8S_NAMESPACE" --timeout=10m ||
+          cleanup_failed=1
+      done
+    else
+      cleanup_failed=1
+    fi
+    if [[ "$cleanup_failed" == "0" ]]; then
+      oci_log "oci_deploy_failure_cleanup=PASS ingress=restored readers=restored"
+    else
+      oci_log "oci_deploy_failure_cleanup=FAIL manual_recovery_required=true"
+    fi
+  fi
+  exit "$rc"
+}
+trap 'restore_deploy_access_on_exit "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 mongo_target_image="$(
   ruby -ryaml - "$RENDERED_FILE" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
@@ -184,6 +227,7 @@ kubectl wait pvc/gaming-auth-mongo-data -n "$OCI_K8S_NAMESPACE" \
   --for=jsonpath='{.status.phase}'=Bound --timeout=10m
 apply_documents 'ClusterIssuer:^letsencrypt-prod$'
 apply_documents 'Service:^gaming-(auth-mongo|shared-mongo)-srv$'
+mongo_upgrade_recovery_required=true
 OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
 MONGO_TARGET_IMAGE="$mongo_target_image" \
 MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
@@ -362,11 +406,12 @@ public_data_services="$(
   printf 'registry_repository=%s\n' "$(application_registry_repository)"
   printf 'registry_public_anonymous=%s\n' "true"
 } > "$OUTPUT_DIR/provenance.txt"
-rm -f "$RENDERED_FILE"
 
 OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
 MONGO_TARGET_IMAGE="$mongo_target_image" \
 MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
   "$SCRIPT_DIR/upgrade-mongo.sh" resume
+mongo_upgrade_recovery_required=false
+rm -f "$RENDERED_FILE"
 
 oci_log "oci_deploy=PASS source_sha=$SOURCE_SHA workloads_sequential=1"
