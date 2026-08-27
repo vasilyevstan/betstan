@@ -107,6 +107,11 @@ without a checkpoint.
   commit. Never bypass a trusted publisher that rejects changes to its own
   workflow; use its documented authorization bootstrap or keep the trusted
   workflow unchanged.
+- Treat a terminal run that leaves a production maintenance fence, operation
+  lock, zero-replica workload, or unavailable ingress as an active incident,
+  not merely failed release evidence. Immediately return `ATTENTION_REQUIRED`
+  with the exact runtime owner and bounded restore-or-handoff action; production
+  health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
 - Surface a blocker immediately when it affects the critical path. Keep
