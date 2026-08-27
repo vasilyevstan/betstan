@@ -11,7 +11,7 @@ work_dir="$(mktemp -d "$WORK_PARENT/test.XXXXXX")"
 stub_bin="$work_dir/bin"
 stub_state="$work_dir/state"
 state_file="$work_dir/maintenance.tsv"
-mkdir -p "$stub_bin" "$stub_state/replicas"
+mkdir -p "$stub_bin" "$stub_state/replicas" "$stub_state/unstable"
 
 cleanup() {
   rm -rf -- "$work_dir"
@@ -82,6 +82,27 @@ fi
 if [[ "${1:-}" == "get" && "${2:-}" == "deployment" ]]; then
   service="$(service_from_deployment "${3:-}")"
   replicas="$(cat "$state/replicas/$service")"
+  unstable_file="$state/unstable/$service"
+  unstable=0
+  if [[ -f "$unstable_file" ]]; then
+    remaining="$(cat "$unstable_file")"
+    if (( remaining > 0 )); then
+      unstable=1
+      printf '%s\n' "$((remaining - 1))" >"$unstable_file"
+    fi
+  fi
+  if [[ "$unstable" == "1" ]]; then
+    jq -cn --argjson replicas "$replicas" '{
+      spec:{replicas:$replicas},
+      status:{
+        replicas:$replicas,
+        updatedReplicas:$replicas,
+        readyReplicas:0,
+        availableReplicas:0
+      }
+    }'
+    exit 0
+  fi
   jq -cn --argjson replicas "$replicas" '{
     spec:{replicas:$replicas},
     status:{
@@ -165,7 +186,10 @@ assert_replicas() {
   done
 }
 
+printf '2\n' >"$stub_state/unstable/event"
 run_maintenance enter
+[[ "$(cat "$stub_state/unstable/event")" == "0" ]] ||
+  fail "maintenance entry did not wait for transient deployment stability"
 grep -Fq 'request_method' "$stub_state/server-snippet" ||
   fail "maintenance entry did not install the HTTP write fence"
 assert_replicas 0
@@ -178,6 +202,16 @@ if grep -Fq 'request_method' "$stub_state/server-snippet"; then
 fi
 assert_replicas 1
 [[ ! -e "$state_file" ]] || fail "maintenance restoration retained stale state"
+
+printf '10\n' >"$stub_state/unstable/event"
+if run_maintenance enter >/dev/null 2>&1; then
+  fail "persistently unstable deployment was accepted"
+fi
+rm -f -- "$stub_state/unstable/event"
+assert_replicas 1
+if grep -Fq 'request_method' "$stub_state/server-snippet"; then
+  fail "unstable preflight changed the HTTP write fence"
+fi
 
 run_maintenance enter
 for service in bet event moderation resulting slip gamemaster; do
