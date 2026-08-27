@@ -484,7 +484,7 @@ def validate_oci_rollback_workflow!(file, document, content)
   )
   require_content(
     content,
-    /ADMIN_AUTH_CAPABILITY_FILE:\s*artifacts\/oci-rollback\/admin-auth-capability\.env/,
+    /ADMIN_AUTH_CAPABILITY_FILE:\s*artifacts\/admin-auth-capability\.env/,
     "#{name} must bind any legacy admin-auth override to the rollback operator"
   )
   require_content(
