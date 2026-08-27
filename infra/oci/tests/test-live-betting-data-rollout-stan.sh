@@ -230,6 +230,8 @@ run_phase() {
   local scenario="$2"
   local run_id="$3"
   local output="$4"
+  local recovery_run_id="${5:-0}"
+  local recovery_source_sha="${6:-none}"
   local maintenance_fence=false
   local writers_quiesced=false
   local runtime_handoff=false
@@ -258,6 +260,8 @@ run_phase() {
   GITHUB_RUN_ID="$run_id" \
   GITHUB_RUN_ATTEMPT=1 \
   BASELINE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  BASELINE_RECOVERY_RUN_ID="$recovery_run_id" \
+  BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
   MAINTENANCE_FENCE_ENFORCED="$maintenance_fence" \
   WRITERS_QUIESCED="$writers_quiesced" \
   RUNTIME_HELD_FOR_DEPLOY="$runtime_handoff" \
@@ -276,6 +280,14 @@ grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
 if grep -R -E 'secret-user|secret-slip|mongodb://' "$pending_output" >/dev/null; then
   fail "sanitized dry-run evidence leaked sensitive data"
 fi
+
+recovery_output="$work_dir/recovery"
+recovery_source_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+run_phase dry-run pending 4007 "$recovery_output" 799 "$recovery_source_sha"
+grep -Fxq 'baseline_recovery_run_id=799' "$recovery_output/provenance.env"
+grep -Fxq \
+  "baseline_recovery_source_sha=$recovery_source_sha" \
+  "$recovery_output/provenance.env"
 
 backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
