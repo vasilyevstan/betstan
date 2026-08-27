@@ -23,6 +23,9 @@ OCI_WORKFLOWS = %w[
   oci-production-deploy
   oci-production-rollback
 ].freeze
+OBSERVATION_WORKFLOWS = %w[
+  oci-production-monitor
+].freeze
 REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
   "production-rollback" => "production-emergency",
@@ -585,6 +588,94 @@ def validate_manual_oci_workflow!(name, document, content)
     content,
     /\$\{\{\s*github\.sha\s*\}\}/,
     "#{name} must not use the dispatch workflow github.sha"
+  )
+end
+
+def validate_oci_production_monitor_workflow!(file, document, content)
+  name = "oci-production-monitor"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  triggers = workflow_triggers(document)
+  unless triggers.keys.sort == ["schedule", "workflow_dispatch"]
+    fail_inventory("#{name} must have schedule and workflow_dispatch only")
+  end
+  schedules = triggers["schedule"]
+  unless schedules.is_a?(Array) &&
+         schedules.length == 1 &&
+         schedules[0].is_a?(Hash) &&
+         schedules[0]["cron"] == "7,22,37,52 * * * *"
+    fail_inventory("#{name} must use the reviewed fifteen-minute schedule")
+  end
+  dispatch = triggers["workflow_dispatch"]
+  unless dispatch.nil? || (dispatch.is_a?(Hash) && dispatch.empty?)
+    fail_inventory("#{name} workflow_dispatch must not accept inputs")
+  end
+
+  validate_exact_permissions!(
+    name,
+    document,
+    {
+      "contents" => "read",
+      "actions" => "read",
+      "issues" => "write",
+      "pull-requests" => "read"
+    }
+  )
+  concurrency = document["concurrency"]
+  unless concurrency == {
+    "group" => "oci-production-observer",
+    "cancel-in-progress" => false
+  }
+    fail_inventory("#{name} must use the non-cancelling observer concurrency group")
+  end
+
+  jobs = document["jobs"]
+  unless jobs.is_a?(Hash) && jobs.keys == ["observe"]
+    fail_inventory("#{name} must contain only the observe job")
+  end
+  job = jobs["observe"]
+  if !job.is_a?(Hash) || job.key?("environment") || job.key?("uses")
+    fail_inventory("#{name} must not use an environment or reusable workflow")
+  end
+  if job["timeout-minutes"] != 10
+    fail_inventory("#{name} must retain the bounded ten-minute timeout")
+  end
+
+  uses = uses_entries(content)
+  unless uses.length == 1 &&
+         uses[0][1] ==
+           "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+    fail_inventory("#{name} must use only the reviewed pinned checkout action")
+  end
+  {
+    "github.run_attempt == 1" => "first-attempt guard",
+    "github.repository == 'vasilyevstan/betstan'" => "repository guard",
+    "github.ref == 'refs/heads/master'" => "master guard",
+    "github.event.repository.default_branch == 'master'" => "default-branch guard",
+    'ref: ${{ github.sha }}' => "exact trigger revision checkout",
+    "origin/master" => "current-master binding",
+    "collect-public" => "public-only collection",
+    "--mode observation" => "observation-only incident handling",
+    'test ! -s "$WORK_DIR/claim.json"' => "empty repair claim gate"
+  }.each do |literal, label|
+    require_content(content, /#{Regexp.escape(literal)}/, "#{name} is missing #{label}")
+  end
+  require_content(
+    content,
+    /\^\[0-9a-f\]\{40\}\$/,
+    "#{name} must validate a complete lowercase SHA"
+  )
+  reject_content(
+    content,
+    %r{
+      \bid-token:|\bdeployments:|\bpackages:|\benvironment:|
+      secrets\.|OCI_CLI_|OCI_K3S_|kubectl\s|
+      \sclaim\s|set-status|--mode\s+(?:ownership|draft-fix|auto-redeploy|self-heal)|
+      workflow_call:|repository_dispatch:|continue-on-error:
+    }ix,
+    "#{name} contains forbidden production access or repair capability"
   )
 end
 
@@ -1209,6 +1300,8 @@ names = workflow_files.each_with_object([]) do |file, result|
   manual_production = triggers.key?("workflow_dispatch")
   scheduled_production = triggers.key?("schedule")
 
+  next if OBSERVATION_WORKFLOWS.include?(name)
+
   next unless production_capable &&
               (push_master || chained_production || manual_production || scheduled_production)
 
@@ -1220,6 +1313,11 @@ unless names == REQUIRED_SET
   fail_inventory(
     "expected #{REQUIRED_SET.join(",")}; found #{names.join(",")}"
   )
+end
+
+OBSERVATION_WORKFLOWS.each do |name|
+  file, document, content = documents.fetch(name)
+  validate_oci_production_monitor_workflow!(file, document, content)
 end
 
 file, document, content = documents.fetch("production-rollback")

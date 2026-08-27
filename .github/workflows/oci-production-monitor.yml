@@ -1,0 +1,106 @@
+name: oci-production-monitor
+run-name: oci-observe ${{ github.sha }}
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: oci-production-observer
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    if: >-
+      github.run_attempt == 1 &&
+      github.repository == 'vasilyevstan/betstan' &&
+      github.ref == 'refs/heads/master' &&
+      github.event.repository.default_branch == 'master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout exact monitor revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Validate exact current master execution
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+          [ "$GITHUB_SHA" = "$(git rev-parse origin/master)" ]
+          command -v curl >/dev/null
+          command -v gh >/dev/null
+          command -v python3 >/dev/null
+          work_dir="$RUNNER_TEMP/production-observer"
+          printf 'WORK_DIR=%s\n' "$work_dir" >> "$GITHUB_ENV"
+          mkdir -p "$work_dir/provenance"
+          chmod 700 "$work_dir"
+
+      - name: Resolve trusted production deployment
+        run: |
+          set -euo pipefail
+          python3 infra/oci/agents/production_monitor_stan.py \
+            resolve-deployment \
+            --artifact-dir "$WORK_DIR/provenance/deployment" \
+            --output "$WORK_DIR/deployment.json"
+
+      - name: Collect public production observations
+        run: |
+          set -euo pipefail
+          python3 infra/oci/agents/production_monitor_stan.py \
+            collect-public \
+            --deployment "$WORK_DIR/deployment.json" \
+            --monitor-run-id "$GITHUB_RUN_ID" \
+            --monitor-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$WORK_DIR/snapshot.json"
+          python3 infra/oci/agents/production_monitor_stan.py \
+            classify \
+            --snapshot "$WORK_DIR/snapshot.json" \
+            --output "$WORK_DIR/findings.json"
+
+      - name: Record deduplicated observations
+        run: |
+          set -euo pipefail
+          python3 infra/oci/agents/production_monitor_stan.py \
+            observe \
+            --snapshot "$WORK_DIR/snapshot.json" \
+            --mode observation \
+            --claim-output "$WORK_DIR/claim.json"
+          test ! -s "$WORK_DIR/claim.json"
+
+      - name: Summarize observation
+        if: always()
+        run: |
+          {
+            echo "### OCI production observer"
+            echo
+            echo "Mode: \`observation-only\`"
+            if [ -f "$WORK_DIR/findings.json" ]; then
+              count="$(
+                python3 -c \
+                  'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
+                  "$WORK_DIR/findings.json"
+              )"
+              echo "Public anomalies: \`$count\`"
+              echo "Evidence: \`sha256:$(sha256sum "$WORK_DIR/snapshot.json" | cut -d ' ' -f 1)\`"
+            else
+              echo "Observation did not complete."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

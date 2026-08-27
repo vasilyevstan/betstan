@@ -221,6 +221,25 @@ class ProductionMonitorTest(unittest.TestCase):
     def test_healthy_snapshot_has_no_anomalies(self) -> None:
         self.assertEqual([], classify(healthy_snapshot(), NOW))
 
+    def test_public_snapshot_skips_cluster_observations(self) -> None:
+        snapshot = healthy_snapshot()
+        snapshot["scope"] = "public"
+        snapshot["cluster"] = None
+
+        self.assertEqual([], classify(snapshot, NOW))
+        snapshot["public"][2]["valid"] = False
+        findings = classify(snapshot, NOW)
+
+        self.assertEqual(1, len(findings))
+        self.assertEqual("public-check-event-api-failed", findings[0]["type"])
+
+    def test_public_snapshot_rejects_cluster_data(self) -> None:
+        snapshot = healthy_snapshot()
+        snapshot["scope"] = "public"
+
+        with self.assertRaisesRegex(MonitorError, "must not contain cluster"):
+            classify(snapshot, NOW)
+
     def test_groups_crash_and_detects_restricted_drift(self) -> None:
         snapshot = healthy_snapshot()
         client_pod = next(

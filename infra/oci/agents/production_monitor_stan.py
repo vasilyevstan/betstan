@@ -864,13 +864,8 @@ def http_check(
     }
 
 
-def collect_snapshot(
-    deployment: dict[str, Any],
-    namespace: str,
-    monitor_run_id: int,
-    monitor_run_attempt: int,
-) -> dict[str, Any]:
-    public = [
+def collect_public_checks(deployment: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
         http_check("canonical-home", "https://betstan.xyz/", {200}, "home"),
         http_check(
             "auth-currentuser",
@@ -891,14 +886,40 @@ def collect_snapshot(
             "array",
         ),
     ]
+
+
+def collect_snapshot(
+    deployment: dict[str, Any],
+    namespace: str,
+    monitor_run_id: int,
+    monitor_run_attempt: int,
+) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
+        "scope": "cluster-and-public",
         "observed_at": timestamp(utc_now()),
         "monitor_run_id": monitor_run_id,
         "monitor_run_attempt": monitor_run_attempt,
         "deployment": deployment,
         "cluster": collect_cluster(namespace, deployment["runtime_fingerprint"]),
-        "public": public,
+        "public": collect_public_checks(deployment),
+    }
+
+
+def collect_public_snapshot(
+    deployment: dict[str, Any],
+    monitor_run_id: int,
+    monitor_run_attempt: int,
+) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "scope": "public",
+        "observed_at": timestamp(utc_now()),
+        "monitor_run_id": monitor_run_id,
+        "monitor_run_attempt": monitor_run_attempt,
+        "deployment": deployment,
+        "cluster": None,
+        "public": collect_public_checks(deployment),
     }
 
 
@@ -933,8 +954,15 @@ def classify(snapshot: dict[str, Any], now: dt.datetime | None = None) -> list[d
     deployment = snapshot.get("deployment")
     cluster = snapshot.get("cluster")
     public = snapshot.get("public")
-    if not isinstance(deployment, dict) or not isinstance(cluster, dict):
-        raise MonitorError("snapshot deployment or cluster document is missing")
+    scope = snapshot.get("scope", "cluster-and-public")
+    if scope not in {"cluster-and-public", "public"}:
+        raise MonitorError("snapshot scope is unsupported")
+    if not isinstance(deployment, dict):
+        raise MonitorError("snapshot deployment document is missing")
+    if scope == "cluster-and-public" and not isinstance(cluster, dict):
+        raise MonitorError("snapshot cluster document is missing")
+    if scope == "public" and cluster is not None:
+        raise MonitorError("public snapshot must not contain cluster observations")
     sha = deployment.get("sha")
     if not SHA.fullmatch(str(sha)):
         raise MonitorError("snapshot deployment SHA is malformed")
@@ -968,6 +996,57 @@ def classify(snapshot: dict[str, Any], now: dt.datetime | None = None) -> list[d
         if key not in grouped:
             grouped[key] = (severity, automation_class, [])
         grouped[key][2].append(evidence)
+
+    def add_public_findings() -> None:
+        if not isinstance(public, list):
+            raise MonitorError("snapshot public checks are malformed")
+        public_map = {
+            "canonical-home": "client",
+            "auth-currentuser": "auth",
+            "event-api": "event",
+            "www-redirect": "ingress",
+            "diagnostic-event": "event",
+        }
+        public_names = [check.get("name") for check in public]
+        if len(public_names) != len(set(public_names)) or set(public_names) != set(
+            public_map
+        ):
+            raise MonitorError("snapshot public check inventory is incomplete")
+        for check in public:
+            if check.get("name") not in public_map:
+                raise MonitorError("snapshot public check name is unsupported")
+            if not check.get("valid"):
+                service = public_map[check["name"]]
+                automation = (
+                    "draft-only"
+                    if service not in {"auth", "ingress"}
+                    else "restricted"
+                )
+                add(
+                    service,
+                    f"public-check-{check['name']}-failed",
+                    "high",
+                    automation,
+                    check,
+                )
+
+    def findings() -> list[dict[str, Any]]:
+        result = [
+            anomaly(sha, service, kind, severity, automation, evidence)
+            for (service, kind), (severity, automation, evidence) in grouped.items()
+        ]
+        return sorted(
+            result,
+            key=lambda item: (
+                SEVERITY_ORDER[item["severity"]],
+                item["service"],
+                item["type"],
+            ),
+        )
+
+    if scope == "public":
+        add_public_findings()
+        return findings()
 
     if not cluster.get("api_ready"):
         add("platform", "kubernetes-api-unready", "critical", "restricted", {})
@@ -1283,50 +1362,8 @@ def classify(snapshot: dict[str, Any], now: dt.datetime | None = None) -> list[d
             )
     elif lock.get("state") != "released" or lock.get("holder"):
         add("data", "shared-mongo-lock-invalid", "critical", "restricted", lock)
-    public_checks = public
-    if not isinstance(public_checks, list):
-        raise MonitorError("snapshot public checks are malformed")
-    public_map = {
-        "canonical-home": "client",
-        "auth-currentuser": "auth",
-        "event-api": "event",
-        "www-redirect": "ingress",
-        "diagnostic-event": "event",
-    }
-    public_names = [check.get("name") for check in public_checks]
-    if len(public_names) != len(set(public_names)) or set(public_names) != set(
-        public_map
-    ):
-        raise MonitorError("snapshot public check inventory is incomplete")
-    for check in public_checks:
-        if check.get("name") not in public_map:
-            raise MonitorError("snapshot public check name is unsupported")
-        if not check.get("valid"):
-            service = public_map[check["name"]]
-            automation = (
-                "draft-only"
-                if service not in {"auth", "ingress"}
-                else "restricted"
-            )
-            add(
-                service,
-                f"public-check-{check['name']}-failed",
-                "high",
-                automation,
-                check,
-            )
-    result = [
-        anomaly(sha, service, kind, severity, automation, evidence)
-        for (service, kind), (severity, automation, evidence) in grouped.items()
-    ]
-    return sorted(
-        result,
-        key=lambda item: (
-            SEVERITY_ORDER[item["severity"]],
-            item["service"],
-            item["type"],
-        ),
-    )
+    add_public_findings()
+    return findings()
 
 
 def validate_incident(document: dict[str, Any]) -> dict[str, Any]:
@@ -1730,6 +1767,12 @@ def cli_parser() -> argparse.ArgumentParser:
     collect.add_argument("--monitor-run-attempt", required=True, type=int)
     collect.add_argument("--output", required=True, type=Path)
 
+    collect_public = commands.add_parser("collect-public")
+    collect_public.add_argument("--deployment", required=True, type=Path)
+    collect_public.add_argument("--monitor-run-id", required=True, type=int)
+    collect_public.add_argument("--monitor-run-attempt", required=True, type=int)
+    collect_public.add_argument("--output", required=True, type=Path)
+
     classify_command = commands.add_parser("classify")
     classify_command.add_argument("--snapshot", required=True, type=Path)
     classify_command.add_argument("--output", required=True, type=Path)
@@ -1780,6 +1823,17 @@ def main() -> int:
                 json.dumps(snapshot, sort_keys=True) + "\n", encoding="utf-8"
             )
             print("production_monitor_collect=PASS")
+        elif args.command == "collect-public":
+            snapshot = collect_public_snapshot(
+                load_json(args.deployment),
+                args.monitor_run_id,
+                args.monitor_run_attempt,
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(snapshot, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            print("production_monitor_collect_public=PASS")
         elif args.command == "classify":
             findings = classify(load_json(args.snapshot))
             args.output.write_text(

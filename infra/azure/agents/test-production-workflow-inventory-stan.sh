@@ -268,6 +268,7 @@ YAML
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-monitor.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" "$tmp_dir/"
 }
@@ -1196,6 +1197,33 @@ path.write_text(text.replace(
 ))
 PY
 assert_fail "reusable workflow from governed OCI job" "must not call a reusable workflow"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/issues: write/issues: read/' \
+  "$tmp_dir/oci-production-monitor.yml"
+rm "$tmp_dir/oci-production-monitor.yml.bak"
+assert_fail \
+  "observer without incident write boundary" \
+  "must set exact permissions"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's#7,22,37,52 \* \* \* \*#*/5 * * * *#' \
+  "$tmp_dir/oci-production-monitor.yml"
+rm "$tmp_dir/oci-production-monitor.yml.bak"
+assert_fail \
+  "observer with unreviewed cadence" \
+  "must use the reviewed fifteen-minute schedule"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/command -v python3/a\
+          kubectl get pods' "$tmp_dir/oci-production-monitor.yml"
+rm "$tmp_dir/oci-production-monitor.yml.bak"
+assert_fail \
+  "observer with cluster access" \
+  "contains forbidden production access or repair capability"
 
 prepare_pr_remote
 assert_pr_pass "$full_set"
