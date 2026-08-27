@@ -18,6 +18,16 @@ cat >"$tmp_dir/production-exclusivity" <<'SH'
 SH
 chmod +x "$tmp_dir/production-exclusivity"
 
+cat >"$tmp_dir/work-lease" <<'SH'
+#!/usr/bin/env bash
+[[ "${STUB_LEASE_VALID:-true}" == "true" ]] || exit 1
+[[ "$*" == *"verify"* ]]
+[[ "$*" == *"--owner-task task-225"* ]]
+[[ "$*" == *"--owner-pr 225"* ]]
+[[ "$*" == *"--repair-sha $SHA"* ]]
+SH
+chmod +x "$tmp_dir/work-lease"
+
 gh() {
   if [[ "$*" == *"--method POST"* ]]; then
     [[ "$*" == *"environment_ids[]=456"* ]]
@@ -47,6 +57,8 @@ gh() {
 }
 export -f gh
 export SHA RUN_ID STUB_APPROVAL_LOG="$approval_log"
+export PRODUCTION_WORK_LEASE="$tmp_dir/work-lease"
+export PRODUCTION_WORK_LEASE_OWNER_TASK=task-225
 
 common_env=(
   "REPO=example/repo"
@@ -54,6 +66,8 @@ common_env=(
   "EXPECTED_WORKFLOW=production-build.yml"
   "EXPECTED_ENVIRONMENT=production-emergency"
   "PRODUCTION_RUN_EXCLUSIVITY=$tmp_dir/production-exclusivity"
+  "PRODUCTION_WORK_LEASE=$tmp_dir/work-lease"
+  "PRODUCTION_WORK_LEASE_OWNER_TASK=task-225"
 )
 
 env "${common_env[@]}" "$APPROVER" "$RUN_ID" >/dev/null
@@ -201,6 +215,12 @@ fi
 if env "${common_env[@]}" STUB_ACTIVE=true \
   "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
   echo "run approver accepted competing production activity" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" STUB_LEASE_VALID=false \
+  "$APPROVER" "$RUN_ID" >/dev/null 2>&1; then
+  echo "run approver accepted an invalid work lease" >&2
   exit 1
 fi
 

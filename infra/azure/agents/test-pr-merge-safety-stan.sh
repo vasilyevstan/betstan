@@ -32,6 +32,17 @@ cat >"$tmp_dir/production-exclusivity" <<'SH'
 SH
 chmod +x "$tmp_dir/production-exclusivity"
 
+cat >"$tmp_dir/work-lease" <<'SH'
+#!/usr/bin/env bash
+[[ "${STUB_LEASE_VALID:-true}" == "true" ]] || exit 1
+[[ "$*" == *"verify"* ]]
+[[ "$*" == *"--owner-task task-224"* ]]
+[[ "$*" == *"--owner-pr 224"* ]]
+[[ "$*" == *"--owner-branch dev"* ]]
+[[ "$*" == *"--head-sha $HEAD_SHA"* ]]
+SH
+chmod +x "$tmp_dir/work-lease"
+
 gh() {
   if [[ "$1 $2" == "pr view" ]]; then
     if [[ "$*" == *"--json headRefOid,baseRefOid"* ]]; then
@@ -69,6 +80,8 @@ common_env=(
   "PR_VALIDATOR=$tmp_dir/pr-validator"
   "WORKFLOW_INVENTORY=$tmp_dir/workflow-inventory"
   "PRODUCTION_RUN_EXCLUSIVITY=$tmp_dir/production-exclusivity"
+  "PRODUCTION_WORK_LEASE=$tmp_dir/work-lease"
+  "PRODUCTION_WORK_LEASE_OWNER_TASK=task-224"
 )
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
@@ -89,6 +102,12 @@ fi
 if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true STUB_ACTIVE=true \
   "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
   echo "automatic merge safety accepted competing production activity" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true STUB_LEASE_VALID=false \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "automatic merge safety accepted an invalid work lease" >&2
   exit 1
 fi
 

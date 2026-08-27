@@ -16,6 +16,8 @@ BRANCH_POLICY_GUARD="${BRANCH_POLICY_GUARD:-./infra/azure/agents/branch-policy-g
 PR_VALIDATOR="${PR_VALIDATOR:-./infra/azure/agents/pr-validation-stan.sh}"
 WORKFLOW_INVENTORY="${WORKFLOW_INVENTORY:-./infra/azure/agents/production-workflow-inventory-stan.sh}"
 PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
+PRODUCTION_WORK_LEASE="${PRODUCTION_WORK_LEASE:-./infra/azure/agents/production_work_lease_stan.py}"
+LEASE_OWNER_TASK="${PRODUCTION_WORK_LEASE_OWNER_TASK:-}"
 if [[ -z "$PR_NUMBER" ]]; then
   echo "usage: $0 <pr-number>" >&2
   exit 1
@@ -116,6 +118,14 @@ if [[ "$AUTO_APPROVE" == "true" ]]; then
     fail "automatic approval requires the $CLI_MANAGED_LABEL label"
   [[ "$head_repository" == "$REPO" ]] ||
     fail "automatic approval requires a branch in $REPO"
+  [[ -n "$LEASE_OWNER_TASK" ]] ||
+    fail "automatic approval requires PRODUCTION_WORK_LEASE_OWNER_TASK"
+  "$PRODUCTION_WORK_LEASE" --repository "$REPO" verify \
+    --owner-task "$LEASE_OWNER_TASK" \
+    --owner-pr "$PR_NUMBER" \
+    --owner-branch "$head_ref" \
+    --head-sha "$head_sha" >/dev/null ||
+    fail "automatic approval requires a current matching production work lease"
 fi
 
 owner="${REPO%%/*}"
@@ -215,6 +225,14 @@ PY
 )"
 [[ "$latest_head_sha" == "$head_sha" && "$latest_base_sha" == "$base_sha" ]] ||
   fail "pull request changed while safety gates were running"
+if [[ "$AUTO_APPROVE" == "true" ]]; then
+  "$PRODUCTION_WORK_LEASE" --repository "$REPO" verify \
+    --owner-task "$LEASE_OWNER_TASK" \
+    --owner-pr "$PR_NUMBER" \
+    --owner-branch "$head_ref" \
+    --head-sha "$head_sha" >/dev/null ||
+    fail "production work lease changed while safety gates were running"
+fi
 
 section "recommendation"
 echo "safe_to_merge=yes"

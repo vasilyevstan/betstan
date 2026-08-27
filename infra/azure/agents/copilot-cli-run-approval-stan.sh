@@ -28,6 +28,8 @@ EXPECTED_DISPLAY_TITLE="${EXPECTED_DISPLAY_TITLE:-}"
 CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
 PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"
+PRODUCTION_WORK_LEASE="${PRODUCTION_WORK_LEASE:-./infra/azure/agents/production_work_lease_stan.py}"
+LEASE_OWNER_TASK="${PRODUCTION_WORK_LEASE_OWNER_TASK:-}"
 
 fail() {
   echo "safe_to_approve=no"
@@ -157,7 +159,7 @@ run_json="$(read_run)"
 validate_run "$run_json" || fail "run provenance validation failed"
 
 promotion_json="$(gh api "repos/$REPO/commits/$EXPECTED_SHA/pulls")"
-if ! python3 - "$promotion_json" "$EXPECTED_SHA" "$CLI_MANAGED_LABEL" <<'PY'
+if ! promotion_pr="$(python3 - "$promotion_json" "$EXPECTED_SHA" "$CLI_MANAGED_LABEL" <<'PY'
 import json
 import sys
 
@@ -177,11 +179,20 @@ for pull in pulls:
         matches.append(pull.get("number"))
 if len(matches) != 1:
     raise SystemExit(f"expected one CLI-managed promotion, found {matches}")
-print(f"promotion_pr={matches[0]}")
+print(matches[0])
 PY
-then
+)"; then
   fail "current master is not bound to one merged CLI-managed dev promotion"
 fi
+[[ "$promotion_pr" =~ ^[1-9][0-9]*$ ]] ||
+  fail "promotion PR identity is malformed"
+[[ -n "$LEASE_OWNER_TASK" ]] ||
+  fail "automatic workflow approval requires PRODUCTION_WORK_LEASE_OWNER_TASK"
+"$PRODUCTION_WORK_LEASE" --repository "$REPO" verify \
+  --owner-task "$LEASE_OWNER_TASK" \
+  --owner-pr "$promotion_pr" \
+  --repair-sha "$EXPECTED_SHA" >/dev/null ||
+  fail "automatic workflow approval requires a current matching production work lease"
 
 REPO="$REPO" EXCLUDE_RUN_ID="$RUN_ID" "$PRODUCTION_RUN_EXCLUSIVITY" ||
   fail "another actionable production-capable workflow is active"
@@ -218,6 +229,11 @@ validate_run "$latest_run_json" || fail "run changed while approval gates were r
 latest_pending_json="$(read_pending)"
 [[ "$latest_pending_json" == "$pending_json" ]] ||
   fail "pending environment changed while approval gates were running"
+"$PRODUCTION_WORK_LEASE" --repository "$REPO" verify \
+  --owner-task "$LEASE_OWNER_TASK" \
+  --owner-pr "$promotion_pr" \
+  --repair-sha "$EXPECTED_SHA" >/dev/null ||
+  fail "production work lease changed while approval gates were running"
 
 echo "safe_to_approve=yes"
 echo "run_id=$RUN_ID"
