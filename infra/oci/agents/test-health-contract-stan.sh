@@ -12,6 +12,14 @@ WORK_DIR="$(mktemp -d "$_SAFE_PARENT/health-contract-XXXXXX")"
 mkdir -p "$WORK_DIR/bin"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+grep -Fq 'service, _, _, manifest_digest, platform_digest = row' "$HEALTH" &&
+  grep -Fq \
+    'expected[f"gaming-{service}"] = {manifest_digest, platform_digest}' \
+    "$HEALTH" || {
+  echo "application pod health omits a provenance-bound CRI digest" >&2
+  exit 1
+}
+
 OCI_HEALTH_FIXTURE_FILE="$HEALTHY" "$HEALTH" | grep -qx DEPLOYED_HEALTHY
 jq '
   .context.runtime_mode="k3s" |

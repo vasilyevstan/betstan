@@ -15,12 +15,14 @@ export interface PublicBetStatsRow {
 
 export interface AggregatedBetStatsRow {
   _id: string;
+  userName?: unknown;
   betCount: number;
   wagerTotal: number;
 }
 
 interface LegacyBetStatsSourceRow {
   userId: string;
+  userName?: unknown;
   wager: unknown;
 }
 
@@ -32,6 +34,7 @@ export interface LegacyPublicBetStatsRow {
 
 const PUBLIC_USER_KEY_LENGTH = 12;
 const PUBLIC_DISPLAY_SUFFIX_LENGTH = 6;
+const PUBLIC_DISPLAY_NAME_LIMIT = 16;
 
 const normalizeWagerExpression = {
   $let: {
@@ -57,8 +60,22 @@ export const createPublicUserKey = (userId: string) =>
     .digest("hex")
     .slice(0, PUBLIC_USER_KEY_LENGTH);
 
-export const createPublicDisplayName = (userKey: string) =>
-  `Player ${userKey.slice(-PUBLIC_DISPLAY_SUFFIX_LENGTH).toUpperCase()}`;
+export const createPublicDisplayName = (
+  userName: unknown,
+  userKey: string
+) => {
+  const localPart = typeof userName === "string"
+    ? userName.trim().split("@")[0]
+    : "";
+
+  if (!localPart) {
+    return `Player ${userKey.slice(-PUBLIC_DISPLAY_SUFFIX_LENGTH).toUpperCase()}`;
+  }
+
+  return localPart.length > PUBLIC_DISPLAY_NAME_LIMIT
+    ? `${localPart.slice(0, PUBLIC_DISPLAY_NAME_LIMIT)}…`
+    : localPart;
+};
 
 const toPublicStatsRow = (
   aggregateRow: AggregatedBetStatsRow
@@ -67,7 +84,7 @@ const toPublicStatsRow = (
 
   return {
     userKey,
-    displayName: createPublicDisplayName(userKey),
+    displayName: createPublicDisplayName(aggregateRow.userName, userKey),
     betCount: aggregateRow.betCount,
     wagerTotal: aggregateRow.wagerTotal,
   };
@@ -85,6 +102,7 @@ export const buildPublicBetStatsPipeline = (): PipelineStage[] => [
   {
     $group: {
       _id: "$userId",
+      userName: { $max: "$userName" },
       betCount: { $sum: 1 },
       wagerTotal: { $sum: normalizeWagerExpression },
     },
@@ -123,6 +141,7 @@ export const buildLegacyPublicBetStatsPipeline = (): PipelineStage[] => [
     $project: {
       _id: 0,
       userId: 1,
+      userName: 1,
       wager: normalizeWagerExpression,
     },
   },
@@ -148,7 +167,7 @@ export const getLegacyPublicBetStats = async (): Promise<
 
     return {
       userId,
-      userName: createPublicDisplayName(userId),
+      userName: createPublicDisplayName(row.userName, userId),
       wager: typeof row.wager === "number" && Number.isFinite(row.wager)
         ? row.wager
         : 0,
