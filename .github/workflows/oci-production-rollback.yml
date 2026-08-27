@@ -265,7 +265,7 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_ENDPOINT_NSG_OCID: ${{ steps.infra.outputs.endpoint_nsg_ocid }}
-          RULE_STATE_FILE: artifacts/oci-rollback/runner-rule.env
+          RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env
         run: |
           set -euo pipefail
           ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
@@ -295,7 +295,7 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
-          SESSION_STATE_FILE: artifacts/oci-rollback/k3s-access.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: |
           set -euo pipefail
@@ -336,7 +336,7 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          RULE_STATE_FILE: artifacts/oci-rollback/runner-rule.env
+          RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env
         run: |
           if [ -f "$RULE_STATE_FILE" ]; then
             ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
@@ -350,10 +350,13 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          SESSION_STATE_FILE: artifacts/oci-rollback/k3s-access.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Remove isolated OCI client state
         if: always()
-        run: rm -rf "$HOME"
+        run: >-
+          rm -rf "$HOME"
+          "$RUNNER_TEMP/betstan-rollback-control"
+          "$RUNNER_TEMP/betstan-k3s-access"
