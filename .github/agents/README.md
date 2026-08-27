@@ -48,6 +48,12 @@ candidate through the normal branch path. It never invents an empty commit or
 bypasses a trusted publisher that prevents a workflow from approving its own
 change.
 
+A terminal release run can still leave an intentional maintenance fence,
+operation lock, zero-replica workload, or unavailable ingress. The conductor
+treats that state as an active production incident and routes the exact runtime
+owner to restore service or complete the verified handoff before starting a
+replacement candidate.
+
 ## Ownership
 
 | Area | Editor |
