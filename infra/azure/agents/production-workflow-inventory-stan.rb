@@ -474,6 +474,21 @@ def validate_oci_rollback_workflow!(file, document, content)
   )
   require_content(
     content,
+    /\[\s*"\$source_sha"\s*=\s*"\$TARGET_SHA"\s*\]/,
+    "#{name} must bind legacy infrastructure provenance to the rollback target"
+  )
+  require_content(
+    content,
+    /legacy infrastructure registry authorization is deferred to checksum-bound rollback evidence/,
+    "#{name} must defer only legacy registry authorization to immutable rollback evidence"
+  )
+  require_content(
+    content,
+    /infrastructure registry evidence is incomplete/,
+    "#{name} must reject partially populated infrastructure registry evidence"
+  )
+  require_content(
+    content,
     /oci-production-rollback-\$\{\{\s*github\.run_id\s*\}\}-\$\{\{\s*github\.run_attempt\s*\}\}/,
     "#{name} must upload attempt-bound rollback diagnostics"
   )
