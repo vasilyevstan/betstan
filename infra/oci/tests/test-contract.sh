@@ -91,6 +91,11 @@ for conductor_contract in \
     'After two missed checkpoints, return' \
     'a duplicate reviewer merely because the first is slow' \
     'terminal or explicitly cancelled and prove that concurrent side effects' \
+    'Treat a completed first-attempt-only run failure as terminal, not stalled' \
+    'If downstream provenance requires' \
+    'never recommend rerunning that run' \
+    'report `BLOCKED` rather than manufacture an empty' \
+    'Never bypass a trusted publisher that rejects changes to its own' \
     'Never use name-based process discovery or termination' \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
@@ -105,6 +110,12 @@ grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
 grep -Fq 'the conductor checks jobs plus `pending_deployments`' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave protected environment gates unattended"
+grep -Fq 'A failed release run whose consumers require `run_attempt == 1` is terminal' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can rerun terminal first-attempt release evidence"
+grep -Fq 'It never invents an empty commit or bypasses a trusted publisher' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can bypass trusted publication to replace a failed run"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
