@@ -236,6 +236,10 @@ oci_rabbitmq_queue_rows() {
   '
 }
 
+oci_application_rabbitmq_queue_count() {
+  printf '22\n'
+}
+
 oci_assert_repository_root() {
   [[ -f "$OCI_ROOT_DIR/CONTRIBUTING.md" && -d "$OCI_ROOT_DIR/infra/k8s" ]] ||
     oci_die "unable to identify the BetStan repository root"
