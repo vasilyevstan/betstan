@@ -711,6 +711,7 @@ for workflow in "$ROOT_DIR/.github/workflows"/oci-*.yml; do
     fail "Azure credential/reference exists outside OCI migration: $workflow"
 done
 
+source_build_workflow="$ROOT_DIR/.github/workflows/production-build.yml"
 build_workflow="$ROOT_DIR/.github/workflows/oci-production-build.yml"
 capacity_workflow="$ROOT_DIR/.github/workflows/oci-capacity-acquire.yml"
 infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
@@ -746,6 +747,24 @@ grep -Fq 'docker login ghcr.io' "$build_workflow"
 grep -Fq 'packages: write' "$build_workflow"
 grep -Fq 'Require a pre-existing public GHCR package' "$build_workflow"
 grep -Fq 'ANONYMOUS_PULL=1' "$build_workflow"
+grep -Fq 'name: Pre-pull BuildKit with bounded retries' "$source_build_workflow"
+grep -Fq 'for attempt in 1 2 3' "$source_build_workflow"
+grep -Fq 'docker pull moby/buildkit:buildx-stable-1' "$source_build_workflow"
+docker_login_line="$(
+  grep -n -m1 'name: Log in to Docker Hub' "$source_build_workflow" |
+    cut -d: -f1
+)"
+buildkit_pull_line="$(
+  grep -n -m1 'name: Pre-pull BuildKit with bounded retries' \
+    "$source_build_workflow" | cut -d: -f1
+)"
+buildx_setup_line="$(
+  grep -n -m1 'name: Set up Docker Buildx' "$source_build_workflow" |
+    cut -d: -f1
+)"
+[[ "$docker_login_line" -lt "$buildkit_pull_line" &&
+    "$buildkit_pull_line" -lt "$buildx_setup_line" ]] ||
+  fail "production build does not authenticate and pre-pull BuildKit before setup"
 grep -Fq 'exact GHCR tag already exists; refusing overwrite' "$OCI_DIR/scripts/build-images.sh"
 grep -Fq 'OCI_REUSE_SOURCE_SHA' "$build_workflow"
 grep -Fq 'OCI_REUSE_BUILD_RUN_ID' "$build_workflow"

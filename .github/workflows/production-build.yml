@@ -379,14 +379,28 @@ jobs:
             exit 1
           }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-
       - name: Log in to Docker Hub
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
+
+      - name: Pre-pull BuildKit with bounded retries
+        run: |
+          set -euo pipefail
+          pulled=false
+          for attempt in 1 2 3; do
+            if docker pull moby/buildkit:buildx-stable-1; then
+              pulled=true
+              break
+            fi
+            [ "$attempt" -lt 3 ] || break
+            sleep $((attempt * 10))
+          done
+          [ "$pulled" = true ]
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Build and push ${{ matrix.service }}
         id: build
