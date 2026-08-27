@@ -262,13 +262,13 @@ class ProductionMonitorTest(unittest.TestCase):
             any(item["type"] == "recent-pod-restart" for item in classify(snapshot, NOW))
         )
 
-    def test_observations_deduplicate_and_become_claimable(self) -> None:
+    def test_observations_deduplicate_without_claiming(self) -> None:
         gh = MemoryGh()
         manager = IncidentManager(gh, NOW)
         first = healthy_snapshot(200)
         first["public"][0]["valid"] = False
         first["public"][0]["status"] = 503
-        incidents = manager.observe(first, "ownership", False)
+        incidents = manager.observe(first, "observation", False)
         self.assertEqual("observing", incidents[0].document["status"])
 
         second = copy.deepcopy(first)
@@ -277,50 +277,32 @@ class ProductionMonitorTest(unittest.TestCase):
         manager = IncidentManager(
             gh, NOW + dt.timedelta(minutes=15)
         )
-        incidents = manager.observe(second, "ownership", False)
+        incidents = manager.observe(second, "observation", False)
 
         self.assertEqual(1, len(gh.issues))
-        self.assertEqual("claimable", incidents[0].document["status"])
+        self.assertEqual("observing", incidents[0].document["status"])
         self.assertEqual(2, incidents[0].document["total_observations"])
         self.assertEqual(2, len(gh.comments))
 
-    def test_active_delivery_blocks_claim_without_dropping_evidence(self) -> None:
+    def test_ownership_mode_is_disabled(self) -> None:
         gh = MemoryGh()
         first = healthy_snapshot(200)
         first["public"][2]["valid"] = False
-        IncidentManager(gh, NOW).observe(first, "ownership", True)
-        second = copy.deepcopy(first)
-        second["observed_at"] = "2026-08-27T12:15:00Z"
-        second["monitor_run_id"] = 201
-        incidents = IncidentManager(
-            gh, NOW + dt.timedelta(minutes=15)
-        ).observe(second, "ownership", True)
+        with self.assertRaisesRegex(MonitorError, "observation-only"):
+            IncidentManager(gh, NOW).observe(first, "ownership", True)
+        self.assertEqual({}, gh.issues)
 
-        self.assertEqual("observing", incidents[0].document["status"])
-        self.assertEqual(2, incidents[0].document["total_observations"])
-
-    def test_claim_is_bound_once_to_lease(self) -> None:
+    def test_claim_is_disabled(self) -> None:
         gh = MemoryGh()
         snapshot = healthy_snapshot(200)
         snapshot["public"][2]["valid"] = False
-        IncidentManager(gh, NOW).observe(snapshot, "ownership", False)
-        snapshot["observed_at"] = "2026-08-27T12:15:00Z"
-        snapshot["monitor_run_id"] = 201
-        manager = IncidentManager(gh, NOW + dt.timedelta(minutes=15))
-        incident = manager.observe(snapshot, "ownership", False)[0]
-
-        claimed = manager.claim(
-            incident.document["incident_issue"],
-            incident.document["fingerprint"],
-            88,
-        )
-        self.assertEqual("claimed", claimed.document["status"])
-        self.assertEqual(88, claimed.document["lease_issue"])
-        with self.assertRaises(MonitorError):
+        manager = IncidentManager(gh, NOW)
+        incident = manager.observe(snapshot, "observation", False)[0]
+        with self.assertRaisesRegex(MonitorError, "observation-only"):
             manager.claim(
                 incident.document["incident_issue"],
                 incident.document["fingerprint"],
-                89,
+                88,
             )
 
     def test_resolution_requires_sustained_health(self) -> None:
@@ -422,7 +404,7 @@ class ProductionMonitorTest(unittest.TestCase):
 
     def test_collector_uses_only_read_only_cluster_queries(self) -> None:
         resources: dict[str, dict[str, Any]] = {
-            "nodes": {
+            "node": {
                 "metadata": {
                     "name": "betstan-k3s",
                     "labels": {"betstan.io/runtime": "k3s"},
@@ -499,7 +481,17 @@ class ProductionMonitorTest(unittest.TestCase):
                             "template": {
                                 "metadata": {
                                     "labels": {"app": "gaming-auth-mongo"}
-                                }
+                                },
+                                "spec": {
+                                    "containers": [
+                                        {
+                                            "name": "gaming-auth-mongo",
+                                            "image": PLATFORM_IMAGES[
+                                                "auth-mongo"
+                                            ]["image"],
+                                        }
+                                    ]
+                                },
                             },
                         },
                         "status": {

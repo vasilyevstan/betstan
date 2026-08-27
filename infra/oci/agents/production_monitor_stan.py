@@ -1194,6 +1194,14 @@ def classify(snapshot: dict[str, Any], now: dt.datetime | None = None) -> list[d
                 "restricted",
                 pod,
             )
+        if pod.get("last_terminated_reason") == "OOMKilled":
+            add(
+                owner,
+                f"{service}-pod-oom",
+                "critical",
+                "restricted",
+                pod,
+            )
     for service, count in platform_pod_counts.items():
         if count != 1:
             add(
@@ -1202,14 +1210,6 @@ def classify(snapshot: dict[str, Any], now: dt.datetime | None = None) -> list[d
                 "critical",
                 "restricted",
                 {"count": count},
-            )
-        if pod.get("last_terminated_reason") == "OOMKilled":
-            add(
-                owner,
-                f"{service}-pod-oom",
-                "critical",
-                "restricted",
-                pod,
             )
     endpoints = cluster.get("endpoints")
     if not isinstance(endpoints, dict):

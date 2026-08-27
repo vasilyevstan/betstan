@@ -20,6 +20,8 @@ suites=(
   "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
+  "$ROOT_DIR/infra/oci/agents/test_production_monitor_stan.py"
+  "$ROOT_DIR/infra/azure/agents/test_production_work_lease_stan.py"
   "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-record-azure-retirement-billing-stan.sh"
@@ -32,7 +34,9 @@ failed_names=()
 
 run_suite() {
   local suite="$1"
-  if [[ "$(basename "$suite")" == "test-contract.sh" ]]; then
+  if [[ "$suite" == *.py ]]; then
+    python3 "$suite"
+  elif [[ "$(basename "$suite")" == "test-contract.sh" ]]; then
     BETSTAN_CONTRACT_ORCHESTRATED=1 "$suite"
   else
     "$suite"
