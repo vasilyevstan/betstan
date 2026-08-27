@@ -169,8 +169,8 @@ jobs:
             "source_sha=$TARGET_SHA" \
             "reason=$LEGACY_ADMIN_AUTH_REASON" \
             "approved_by=$GITHUB_ACTOR" \
-            > artifacts/oci-rollback/admin-auth-capability.env
-          chmod 600 artifacts/oci-rollback/admin-auth-capability.env
+            > artifacts/admin-auth-capability.env
+          chmod 600 artifacts/admin-auth-capability.env
 
       - name: Download exact OCI infrastructure provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -316,7 +316,7 @@ jobs:
           OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
           OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
           OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
-          ADMIN_AUTH_CAPABILITY_FILE: artifacts/oci-rollback/admin-auth-capability.env
+          ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env
         run: ./infra/oci/scripts/rollback-application-stan.sh
 
       - name: Upload rollback diagnostics and provenance
