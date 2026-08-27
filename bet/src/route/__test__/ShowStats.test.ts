@@ -12,9 +12,6 @@ import {
 const createPublicUserKey = (userId: string) =>
   createHash("sha256").update(userId).digest("hex").slice(0, 12);
 
-const createDisplayName = (userKey: string) =>
-  `Player ${userKey.slice(-6).toUpperCase()}`;
-
 const buildRow = (overrides: Record<string, unknown> = {}) => ({
   eventId: new mongoose.Types.ObjectId().toHexString(),
   eventName: "Team A - Team B",
@@ -46,15 +43,17 @@ const createBet = async (overrides: Record<string, unknown> = {}) => {
   return bet;
 };
 
-it("uses a bounded server-side pipeline and keeps raw group keys out of the response", async () => {
+it("keeps the previous visible user names while hiding raw IDs and full emails", async () => {
   const aggregateRows = [
     {
       _id: "alpha-user",
+      userName: "alpha@example.com",
       betCount: 2,
       wagerTotal: 5,
     },
     {
       _id: "beta-user",
+      userName: "beta@example.com",
       betCount: 2,
       wagerTotal: 5,
     },
@@ -84,6 +83,7 @@ it("uses a bounded server-side pipeline and keeps raw group keys out of the resp
       {
         $group: {
           _id: "$userId",
+          userName: { $max: "$userName" },
           betCount: { $sum: 1 },
           wagerTotal: {
             $sum: {
@@ -123,29 +123,31 @@ it("uses a bounded server-side pipeline and keeps raw group keys out of the resp
     expect(firstResponse.body).toEqual([
       {
         userKey: firstUserKey,
-        displayName: createDisplayName(firstUserKey),
+        displayName: "alpha",
         betCount: 2,
         wagerTotal: 5,
       },
       {
         userKey: secondUserKey,
-        displayName: createDisplayName(secondUserKey),
+        displayName: "beta",
         betCount: 2,
         wagerTotal: 5,
       },
     ]);
     expect(firstResponse.text).not.toContain("alpha-user");
     expect(firstResponse.text).not.toContain("beta-user");
+    expect(firstResponse.text).not.toContain("@example.com");
     expect(firstResponse.text).not.toContain("_id");
   } finally {
     aggregateSpy.mockRestore();
   }
 });
 
-it("keeps the old client contract bounded and anonymized during rollout", async () => {
+it("keeps the old client contract and its previous display-name truncation", async () => {
   const aggregateRows = [
     {
       userId: "alpha-user",
+      userName: "abcdefghijklmnopq@example.com",
       wager: 5,
     },
   ];
@@ -163,7 +165,7 @@ it("keeps the old client contract bounded and anonymized during rollout", async 
     expect(response.body).toEqual([
       {
         userId: userKey,
-        userName: createDisplayName(userKey),
+        userName: "abcdefghijklmnop…",
         wager: 5,
       },
     ]);
@@ -175,17 +177,16 @@ it("keeps the old client contract bounded and anonymized during rollout", async 
       expect.objectContaining({
         _id: 0,
         userId: 1,
+        userName: 1,
       })
     );
-    expect(
-      pipeline.find((stage) => "$project" in stage)?.$project
-    ).not.toHaveProperty("userName");
+    expect(response.text).not.toContain("@example.com");
   } finally {
     aggregateSpy.mockRestore();
   }
 });
 
-it("returns anonymized grouped stats with deterministic pseudonyms across live and legacy bets", async () => {
+it("returns grouped previous display names across live and legacy bets", async () => {
   const firstUserId = "alpha-user";
   const secondUserId = "beta-user";
   const firstLegacySlipId = new mongoose.Types.ObjectId().toHexString();
@@ -234,13 +235,13 @@ it("returns anonymized grouped stats with deterministic pseudonyms across live a
   const secondUserKey = createPublicUserKey(secondUserId);
   expect(firstResponse.body[0]).toEqual({
     userKey: firstUserKey,
-    displayName: createDisplayName(firstUserKey),
+    displayName: "alpha",
     betCount: 2,
     wagerTotal: 5,
   });
   expect(firstResponse.body[1]).toEqual({
     userKey: secondUserKey,
-    displayName: createDisplayName(secondUserKey),
+    displayName: "beta",
     betCount: 2,
     wagerTotal: 5,
   });
@@ -288,13 +289,13 @@ it("caps the public scoreboard to the configured top users in deterministic rank
 
   expect(response.body[0]).toEqual({
     userKey: highestRankedUserKey,
-    displayName: createDisplayName(highestRankedUserKey),
+    displayName: "private0",
     betCount: 1,
     wagerTotal: PUBLIC_SCOREBOARD_LIMIT + 5,
   });
   expect(response.body[PUBLIC_SCOREBOARD_LIMIT - 1]).toEqual({
     userKey: lastIncludedUserKey,
-    displayName: createDisplayName(lastIncludedUserKey),
+    displayName: `private${PUBLIC_SCOREBOARD_LIMIT - 1}`,
     betCount: 1,
     wagerTotal: 6,
   });
