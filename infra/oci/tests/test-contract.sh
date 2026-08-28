@@ -977,6 +977,11 @@ grep -Fq '.name == ("Re-enter maintenance after an incomplete " + "deployment")'
 grep -Fq 'Load reviewed queue contract for failed validation recovery' \
   "$deploy_workflow" ||
   fail "deployment recovery does not load the corrected contract from current master"
+grep -Fq 'install -m 755 "$RUNNER_TEMP/test-health-contract-stan.sh" "$contract_test"' \
+  "$deploy_workflow" ||
+  fail "deployment recovery strips the corrected contract test executable mode"
+grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||
+  fail "deployment can run Bastion cleanup before the OCI CLI is installed"
 grep -Fq 'data_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_source_sha:' "$deploy_workflow"

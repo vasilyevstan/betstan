@@ -352,13 +352,15 @@ jobs:
         if: inputs.failed_deploy_run_id != '0'
         run: |
           set -euo pipefail
-          for file in \
-            infra/oci/agents/health-contract.py \
-            infra/oci/agents/test-health-contract-stan.sh \
-            infra/oci/tests/fixtures/health/healthy.json; do
-            git show "${GITHUB_SHA}:${file}" > "${file}.recovery"
-            mv "${file}.recovery" "$file"
-          done
+          contract=infra/oci/agents/health-contract.py
+          contract_test=infra/oci/agents/test-health-contract-stan.sh
+          fixture=infra/oci/tests/fixtures/health/healthy.json
+          git show "${GITHUB_SHA}:${contract}" > "$RUNNER_TEMP/health-contract.py"
+          git show "${GITHUB_SHA}:${contract_test}" > "$RUNNER_TEMP/test-health-contract-stan.sh"
+          git show "${GITHUB_SHA}:${fixture}" > "$RUNNER_TEMP/healthy.json"
+          install -m 755 "$RUNNER_TEMP/health-contract.py" "$contract"
+          install -m 755 "$RUNNER_TEMP/test-health-contract-stan.sh" "$contract_test"
+          install -m 644 "$RUNNER_TEMP/healthy.json" "$fixture"
           ./infra/oci/agents/test-health-contract-stan.sh
 
       - name: Download exact OCI image provenance
@@ -468,6 +470,7 @@ jobs:
           printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
+        id: oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Verify OKE identity
@@ -788,7 +791,10 @@ jobs:
           fi
 
       - name: Close ephemeral OCI Bastion access
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.oci_cli.outcome == 'success'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
