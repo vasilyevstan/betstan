@@ -389,6 +389,8 @@ public_data_services="$(
 
 {
   printf 'source_sha=%s\n' "$SOURCE_SHA"
+  printf 'source_ref=%s\n' "${GITHUB_REF:-refs/heads/master}"
+  printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT:-1}"
   printf 'runtime_mode=%s\n' "$runtime_mode"
   printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
   printf 'image_provenance_sha256=%s\n' "$(oci_sha256 < "$IMAGE_PROVENANCE_FILE")"
