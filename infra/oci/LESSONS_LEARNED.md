@@ -155,6 +155,12 @@ conversation summaries are not authority.
   canonical identity fields. Emit `source_sha`, `source_ref`, and `run_attempt`
   in the deployment artifact, retain namespaced fields for existing consumers,
   and test the produced schema through activation readiness.
+- Commands executed inside immutable production containers must use the
+  compiled `dist/` layout shipped by those images, not development-only
+  TypeScript paths or `ts-node` package scripts. Contract tests must bind both
+  the grant and cleanup paths to that runtime artifact. Disposable validation
+  accounts must be demoted and explicitly deleted on every exit; cleanup
+  failure keeps activation dark.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.

@@ -1144,6 +1144,24 @@ assert_fail \
 
 reset_fixtures
 write_complete_oci_set
+sed -i.bak 's#node dist/scripts/SetUserRole.js#node missing/SetUserRole.js#g' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation without compiled role operator" \
+  "is missing compiled disposable administrator operator"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's#node dist/scripts/DeleteUser.js#node missing/DeleteUser.js#' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation without compiled deletion operator" \
+  "is missing compiled disposable account deletion operator"
+
+reset_fixtures
+write_complete_oci_set
 python3 - "$tmp_dir/oci-live-betting-activate.yml" <<'PY'
 from pathlib import Path
 import sys
