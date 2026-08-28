@@ -619,7 +619,7 @@ case "${1:-} ${2:-}" in
     jq -n \
       --arg recent "$recent" \
       --arg head_sha "$STUB_CURRENT_MASTER_SHA" \
-      --arg display_title "oci-production-rollback $STUB_PARTIAL_RECOVERY_TARGET_SHA" '{
+      --arg display_title "oci-rollback $STUB_PARTIAL_RECOVERY_TARGET_SHA" '{
         workflow_id:601,
         path:".github/workflows/oci-production-rollback.yml",
         event:"workflow_dispatch",
@@ -1641,6 +1641,8 @@ assert_contains "$WORKFLOW_FILE" \
 assert_contains "$WORKFLOW_FILE" \
   'PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}'
 assert_contains "$WORKFLOW_FILE" \
+  'run-name: oci-rollback ${{ inputs.target_sha }}'
+assert_contains "$WORKFLOW_FILE" \
   'PRE_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}'
 assert_contains "$WORKFLOW_FILE" \
   'oci-image-provenance-${pre_recovery_source_sha}-${PRE_RECOVERY_BUILD_RUN_ID}-1'
@@ -1652,6 +1654,8 @@ assert_contains "$DEPLOY_WORKFLOW_FILE" \
   '.github/workflows/oci-production-rollback.yml'
 assert_contains "$DEPLOY_WORKFLOW_FILE" \
   'oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1'
+assert_contains "$DEPLOY_WORKFLOW_FILE" \
+  '[[ "$display_title" =~ ^oci-rollback\ [0-9a-f]{40}$ ]]'
 assert_contains "$DEPLOY_WORKFLOW_FILE" \
   './infra/oci/scripts/validate-rollback-baseline-stan.sh'
 for script in "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"; do

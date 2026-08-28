@@ -211,7 +211,7 @@ valid = (
     and run.get("status") == "completed"
     and run.get("conclusion") == "success"
     and run.get("run_attempt") == 1
-    and run.get("display_title") == f"oci-production-rollback {target_sha}"
+    and run.get("display_title") == f"oci-rollback {target_sha}"
 )
 if not valid:
     raise SystemExit(
