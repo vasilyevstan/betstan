@@ -169,6 +169,9 @@ jobs:
           printf 'infrastructure_run_id=%s\n' "$INFRASTRUCTURE_RUN_ID"
           printf 'infrastructure_run_attempt=1\n'
           printf 'infrastructure_provenance_sha256=%s\n' "$INFRASTRUCTURE_SHA256"
+          echo ".github/workflows/oci-production-rollback.yml"
+          echo 'oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1'
+          ./infra/oci/scripts/validate-rollback-baseline-stan.sh
           LOCK_LEASE_SECONDS="$SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" \
             ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh acquire
           ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
@@ -950,6 +953,15 @@ assert_fail "OCI rollback without partial recovery input" \
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
+  's/pre_recovery_build_run_id:/disabled_pre_recovery_build_run_id:/' \
+  "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback without pre-recovery build input" \
+  "oci-production-rollback must expose exactly these workflow_dispatch inputs"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
   's#recover-partial-rollback-stan.sh#disabled-partial-rollback-operator.sh#' \
   "$tmp_dir/oci-production-rollback.yml"
 rm "$tmp_dir/oci-production-rollback.yml.bak"
@@ -1181,6 +1193,33 @@ rm "$tmp_dir/oci-production-deploy.yml.bak"
 assert_fail \
   "deployment without infrastructure artifact binding" \
   "is missing infrastructure artifact digest binding"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\.github\/workflows\/oci-production-rollback\.yml/d' \
+  "$tmp_dir/oci-production-deploy.yml"
+rm "$tmp_dir/oci-production-deploy.yml.bak"
+assert_fail \
+  "deployment without partial recovery workflow binding" \
+  "is missing partial-recovery workflow binding"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1/d' \
+  "$tmp_dir/oci-production-deploy.yml"
+rm "$tmp_dir/oci-production-deploy.yml.bak"
+assert_fail \
+  "deployment without partial recovery artifact binding" \
+  "is missing partial-recovery artifact binding"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/validate-rollback-baseline-stan.sh/d' \
+  "$tmp_dir/oci-production-deploy.yml"
+rm "$tmp_dir/oci-production-deploy.yml.bak"
+assert_fail \
+  "deployment without executable rollback baseline validation" \
+  "is missing executable pre-deploy rollback validation"
 
 reset_fixtures
 write_complete_oci_set

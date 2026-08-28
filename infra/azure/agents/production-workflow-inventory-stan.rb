@@ -354,6 +354,7 @@ def validate_oci_rollback_workflow!(file, document, content)
       baseline_artifact_name
       infrastructure_run_id
       partial_rollback_run_id
+      pre_recovery_build_run_id
       allow_legacy_admin_auth
       legacy_admin_auth_reason
       confirmation
@@ -425,6 +426,11 @@ def validate_oci_rollback_workflow!(file, document, content)
   )
   require_content(
     content,
+    /\[\[\s*"\$PRE_RECOVERY_BUILD_RUN_ID"\s*=~\s*\^\(0\|\[1-9\]\[0-9\]\*\)\$\s*\]\]/,
+    "#{name} must validate the optional pre-recovery build run ID"
+  )
+  require_content(
+    content,
     /\[\s*"\$CONFIRMATION"\s*=\s*"RECOVER OCI PARTIAL ROLLBACK"\s*\]/,
     "#{name} must require the exact partial rollback recovery confirmation phrase"
   )
@@ -432,6 +438,21 @@ def validate_oci_rollback_workflow!(file, document, content)
     content,
     %r{actions/runs/\$PARTIAL_ROLLBACK_RUN_ID/attempts/1},
     "#{name} must inspect the immutable failed rollback attempt"
+  )
+  require_content(
+    content,
+    %r{actions/runs/\$PRE_RECOVERY_BUILD_RUN_ID/attempts/1},
+    "#{name} must inspect the immutable pre-recovery build attempt"
+  )
+  require_content(
+    content,
+    %r{actions/workflows/oci-production-build\.yml},
+    "#{name} must resolve the reviewed OCI build workflow identity"
+  )
+  require_content(
+    content,
+    /oci-image-provenance-\$\{pre_recovery_source_sha\}-\$\{PRE_RECOVERY_BUILD_RUN_ID\}-1/,
+    "#{name} must bind recovery to the exact pre-run image artifact"
   )
   require_content(
     content,
@@ -868,6 +889,11 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "oci-live-data-rollout.yml" => "phase-chain provenance",
     "oci-ghcr-cache-recovery.yml" => "explicit recovery baseline authority",
     "ghcr-cache-recovery-" => "exact recovery artifact binding",
+    "oci-production-rollback.yml" => "protected partial-recovery baseline authority",
+    "oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1" =>
+      "exact partial-recovery artifact binding",
+    "validate-partial-recovery-authority-stan.sh" =>
+      "partial-recovery evidence validation",
     "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
     "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
       "failed-deploy rollback baseline binding",
@@ -1075,6 +1101,9 @@ def validate_oci_production_deploy_binding!(name, document, content)
     "infrastructure_run_id=%s" => "infrastructure run binding",
     "infrastructure_run_attempt=1" => "first-attempt infrastructure binding",
     "infrastructure_provenance_sha256=%s" => "infrastructure artifact digest binding",
+    ".github/workflows/oci-production-rollback.yml" => "partial-recovery workflow binding",
+    "oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1" => "partial-recovery artifact binding",
+    "validate-rollback-baseline-stan.sh" => "executable pre-deploy rollback validation",
     "SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS" => "bounded deploy lock lease",
     "shared-mongo-operation-lock-stan.sh renew" => "deploy lock lease renewal",
     "steps.handoff.outcome == 'success'" => "verified handoff recovery",

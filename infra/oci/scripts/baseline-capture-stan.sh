@@ -728,25 +728,83 @@ baseline_recovery_run_id=0
 baseline_recovery_run_attempt=0
 baseline_transition_provenance_file=""
 trusted_provenance_file=trusted-deploy-provenance.txt
+partial_recovery_files=()
 
 if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
-  validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
-    oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
-  validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
-    oci_die "selected recovery image provenance is not an immutable public GHCR generation"
-  compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
-    oci_die "live deployment GHCR digests do not match the selected recovery artifact"
-  matched_source_sha="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" source_sha)"
-  matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
-  matched_build_run_id="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" trusted_build_run_id)"
-  baseline_deploy_workflow=oci-ghcr-cache-recovery
-  baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
-  baseline_recovery_run_attempt=1
-  baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
-  trusted_provenance_file="$baseline_transition_provenance_file"
-  cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
-  cp "$BASELINE_RECOVERY_DIR/transition-provenance.env" \
-    "$OUTPUT_DIR/$baseline_transition_provenance_file"
+  cache_recovery_marker="$BASELINE_RECOVERY_DIR/recovery-evidence.env"
+  partial_recovery_marker="$BASELINE_RECOVERY_DIR/partial-recovery-authority.env"
+  if [[ -f "$cache_recovery_marker" && -f "$partial_recovery_marker" ]]; then
+    oci_die "selected recovery artifact has ambiguous authority"
+  elif [[ -f "$partial_recovery_marker" ]]; then
+    PARTIAL_RECOVERY_DIR="$BASELINE_RECOVERY_DIR" \
+    EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+      "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null ||
+      oci_die "selected partial recovery artifact is not exact completed recovery evidence"
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "selected partial recovery images are not immutable public GHCR provenance"
+    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "live deployment GHCR digests do not match the selected partial recovery"
+    matched_source_sha="$(
+      env_value "$partial_recovery_marker" restored_source_sha
+    )"
+    matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
+    matched_build_run_id="$(
+      env_value "$partial_recovery_marker" restored_build_run_id
+    )"
+    baseline_deploy_workflow=oci-production-rollback
+    baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+    baseline_recovery_run_attempt=1
+    baseline_transition_provenance_file=partial-recovery/partial-recovery-authority.env
+    trusted_provenance_file="$baseline_transition_provenance_file"
+    partial_recovery_files=(
+      partial-recovery/partial-recovery-SHA256SUMS
+      partial-recovery/partial-recovery-summary.env
+      partial-recovery/recovery-plan.tsv
+      partial-recovery/recovery-rollout-order.tsv
+      partial-recovery/final-state.tsv
+      partial-recovery/rollback-readiness/summary.env
+      partial-recovery/rollback-readiness/workload-state.tsv
+      partial-recovery/rollback-readiness/failures.txt
+    )
+    mkdir -p "$OUTPUT_DIR/partial-recovery/rollback-readiness"
+    cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-authority.env" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-authority.env"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-SHA256SUMS" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-SHA256SUMS"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-summary.env" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-summary.env"
+    cp "$BASELINE_RECOVERY_DIR/recovery-plan.tsv" \
+      "$OUTPUT_DIR/partial-recovery/recovery-plan.tsv"
+    cp "$BASELINE_RECOVERY_DIR/recovery-rollout-order.tsv" \
+      "$OUTPUT_DIR/partial-recovery/recovery-rollout-order.tsv"
+    cp "$BASELINE_RECOVERY_DIR/final-state.tsv" \
+      "$OUTPUT_DIR/partial-recovery/final-state.tsv"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/summary.env" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/summary.env"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/workload-state.tsv" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/workload-state.tsv"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/failures.txt" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/failures.txt"
+  else
+    validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
+      oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "selected recovery image provenance is not an immutable public GHCR generation"
+    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "live deployment GHCR digests do not match the selected recovery artifact"
+    matched_source_sha="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" source_sha)"
+    matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
+    matched_build_run_id="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" trusted_build_run_id)"
+    baseline_deploy_workflow=oci-ghcr-cache-recovery
+    baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+    baseline_recovery_run_attempt=1
+    baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
+    trusted_provenance_file="$baseline_transition_provenance_file"
+    cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+    cp "$BASELINE_RECOVERY_DIR/transition-provenance.env" \
+      "$OUTPUT_DIR/$baseline_transition_provenance_file"
+  fi
 else
 trusted_deploy_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
@@ -981,12 +1039,21 @@ required_files=(
   migration-backup-references.tsv
   "$trusted_provenance_file"
 )
+if ((${#partial_recovery_files[@]} > 0)); then
+  required_files+=("${partial_recovery_files[@]}")
+fi
 : >"$OUTPUT_DIR/SHA256SUMS"
 for file in "${required_files[@]}"; do
-  [[ -s "$OUTPUT_DIR/$file" ]] || oci_die "required baseline artifact file is missing: $file"
+  [[ -f "$OUTPUT_DIR/$file" && ! -L "$OUTPUT_DIR/$file" ]] ||
+    oci_die "required baseline artifact file is missing: $file"
+  if [[ "$file" != "partial-recovery/rollback-readiness/failures.txt" ]]; then
+    [[ -s "$OUTPUT_DIR/$file" ]] ||
+      oci_die "required baseline artifact file is empty: $file"
+  fi
   printf '%s  %s\n' "$(sha256_file "$OUTPUT_DIR/$file")" "$file" >>"$OUTPUT_DIR/SHA256SUMS"
 done
-chmod 600 "$OUTPUT_DIR"/*
+find "$OUTPUT_DIR" -type d -exec chmod 700 {} +
+find "$OUTPUT_DIR" -type f -exec chmod 600 {} +
 allow_local_capture=false
 [[ -n "${GITHUB_RUN_ID:-}" ]] || allow_local_capture=true
 BASELINE_DIR="$OUTPUT_DIR" \

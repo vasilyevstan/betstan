@@ -29,6 +29,11 @@ on:
         required: true
         default: '0'
         type: string
+      pre_recovery_build_run_id:
+        description: Successful first-attempt OCI build matching the failed rollback pre-run state, or 0
+        required: true
+        default: '0'
+        type: string
       allow_legacy_admin_auth:
         description: Explicitly allow rollback to a release without persisted Backoffice admin authorization
         required: true
@@ -66,6 +71,7 @@ jobs:
       BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}
+      PRE_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}
       ALLOW_LEGACY_ADMIN_AUTH: ${{ inputs.allow_legacy_admin_auth }}
       LEGACY_ADMIN_AUTH_REASON: ${{ inputs.legacy_admin_auth_reason }}
       CONFIRMATION: ${{ inputs.confirmation }}
@@ -120,6 +126,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate rollback request and trusted infrastructure run
+        id: request
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -127,11 +134,14 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [[ "$PARTIAL_ROLLBACK_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "$PRE_RECOVERY_BUILD_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
           if [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ]; then
             [ "$CONFIRMATION" = "ROLLBACK OCI EXACT DIGEST" ]
+            [ "$PRE_RECOVERY_BUILD_RUN_ID" = "0" ]
           else
             [ "$CONFIRMATION" = "RECOVER OCI PARTIAL ROLLBACK" ]
             [ "$PARTIAL_ROLLBACK_RUN_ID" != "$GITHUB_RUN_ID" ]
+            [ "$PRE_RECOVERY_BUILD_RUN_ID" != "0" ]
           fi
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BASELINE_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -184,6 +194,39 @@ jobs:
                 ($matches | length) == 1 and
                 $matches[0].expired == false
               ' >/dev/null
+
+            build_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id'
+            )"
+            read -r build_observed_workflow build_path build_event \
+              pre_recovery_source_sha build_head_branch build_repository \
+              build_status build_conclusion build_attempt <<<"$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$PRE_RECOVERY_BUILD_RUN_ID/attempts/1" \
+                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+              )"
+            [ "$build_observed_workflow" = "$build_workflow_id" ]
+            [ "$build_path" = ".github/workflows/oci-production-build.yml" ]
+            [ "$build_event" = "workflow_run" ]
+            [[ "$pre_recovery_source_sha" =~ ^[0-9a-f]{40}$ ]]
+            [ "$build_head_branch" = "master" ]
+            [ "$build_repository" = "$REPOSITORY" ]
+            [ "$build_status" = "completed" ]
+            [ "$build_conclusion" = "success" ]
+            [ "$build_attempt" = "1" ]
+            git cat-file -e "${pre_recovery_source_sha}^{commit}"
+            git merge-base --is-ancestor "$pre_recovery_source_sha" "$current_master"
+            pre_recovery_artifact_name="oci-image-provenance-${pre_recovery_source_sha}-${PRE_RECOVERY_BUILD_RUN_ID}-1"
+            gh api "repos/$REPOSITORY/actions/runs/$PRE_RECOVERY_BUILD_RUN_ID/artifacts" |
+              jq -e --arg name "$pre_recovery_artifact_name" '
+                [.artifacts[] | select(.name == $name)] as $matches |
+                ($matches | length) == 1 and
+                $matches[0].expired == false
+              ' >/dev/null
+            printf 'pre_recovery_source_sha=%s\n' \
+              "$pre_recovery_source_sha" >> "$GITHUB_OUTPUT"
+            printf 'pre_recovery_artifact_name=%s\n' \
+              "$pre_recovery_artifact_name" >> "$GITHUB_OUTPUT"
           fi
 
           infra_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-infrastructure.yml" --jq '.id')"
@@ -197,7 +240,11 @@ jobs:
           [ "$head_branch" = "master" ]
           [ "$repository" = "$REPOSITORY" ]
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
-          mkdir -p "$HOME/.kube" artifacts/infrastructure artifacts/oci-rollback
+          mkdir -p \
+            "$HOME/.kube" \
+            artifacts/infrastructure \
+            artifacts/oci-rollback \
+            artifacts/pre-recovery-build
           chmod 700 "$HOME" "$HOME/.kube"
 
       - name: Record explicit legacy admin-auth rollback capability
@@ -240,6 +287,16 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.partial_rollback_run_id }}
+
+      - name: Download exact pre-recovery OCI image provenance
+        if: inputs.partial_rollback_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.request.outputs.pre_recovery_artifact_name }}
+          path: artifacts/pre-recovery-build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.pre_recovery_build_run_id }}
 
       - name: Verify current OCI infrastructure provenance
         id: infra
@@ -407,10 +464,15 @@ jobs:
         if: inputs.partial_rollback_run_id != '0'
         env:
           PARTIAL_ROLLBACK_SOURCE_DIR: artifacts/partial-rollback-source
+          PARTIAL_RECOVERY_BUILD_DIR: artifacts/pre-recovery-build
+          PARTIAL_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}
+          PARTIAL_RECOVERY_SOURCE_SHA: ${{ steps.request.outputs.pre_recovery_source_sha }}
           OUTPUT_DIR: artifacts/oci-rollback
           OCI_PUBLIC_URL: ${{ steps.infra.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.infra.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.infra.outputs.diagnostic_url }}
+          OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
+          OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
           OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
         run: ./infra/oci/scripts/recover-partial-rollback-stan.sh
 

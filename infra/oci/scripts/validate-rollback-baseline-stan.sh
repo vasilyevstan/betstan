@@ -53,14 +53,17 @@ required_files = {
     "queues.tsv",
 }
 
-if any(path.is_symlink() for path in root.iterdir()):
+if any(path.is_symlink() for path in root.rglob("*")):
     raise SystemExit("rollback baseline contains a symlink")
 manifest_path = root / "SHA256SUMS"
 if not manifest_path.is_file() or manifest_path.is_symlink():
     raise SystemExit("rollback baseline checksum manifest is missing")
 manifest = {}
 for raw in manifest_path.read_text(encoding="utf-8").splitlines():
-    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)", raw)
+    match = re.fullmatch(
+        r"([0-9a-f]{64})  ((?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+)",
+        raw,
+    )
     if not match or match.group(2) in manifest:
         raise SystemExit("rollback baseline checksum manifest is malformed")
     manifest[match.group(2)] = match.group(1)
@@ -236,11 +239,89 @@ elif deploy_workflow == "oci-ghcr-cache-recovery":
         != hashlib.sha256((root / "images.tsv").read_bytes()).hexdigest()
     ):
         raise SystemExit("recovery rollback baseline transition provenance is invalid")
+elif deploy_workflow == "oci-production-rollback":
+    partial_files = {
+        "partial-recovery/partial-recovery-authority.env",
+        "partial-recovery/partial-recovery-SHA256SUMS",
+        "partial-recovery/partial-recovery-summary.env",
+        "partial-recovery/recovery-plan.tsv",
+        "partial-recovery/recovery-rollout-order.tsv",
+        "partial-recovery/final-state.tsv",
+        "partial-recovery/rollback-readiness/summary.env",
+        "partial-recovery/rollback-readiness/workload-state.tsv",
+        "partial-recovery/rollback-readiness/failures.txt",
+    }
+    if (
+        not re.fullmatch(r"[1-9][0-9]*", recovery_run_id)
+        or recovery_run_id != baseline["baseline_deploy_run_id"]
+        or recovery_attempt != "1"
+        or transition_file
+        != "partial-recovery/partial-recovery-authority.env"
+        or not partial_files.issubset(manifest)
+    ):
+        raise SystemExit("partial recovery baseline does not bind exact recovery authority")
+    authority = env_file(transition_file)
+    if (
+        authority.get("schema")
+        != "betstan.partial-rollback-recovery-authority.v1"
+        or authority.get("recovery_workflow") != "oci-production-rollback"
+        or authority.get("recovery_run_id") != recovery_run_id
+        or authority.get("recovery_run_attempt") != "1"
+        or authority.get("restored_source_sha") != source_sha
+        or authority.get("restored_build_workflow") != "oci-production-build"
+        or authority.get("restored_build_run_id")
+        != baseline["baseline_build_run_id"]
+        or authority.get("restored_build_run_attempt") != "1"
+        or authority.get("images_sha256")
+        != hashlib.sha256((root / "images.tsv").read_bytes()).hexdigest()
+        or authority.get("database_restore") != "disabled"
+        or authority.get("status") != "PASS"
+    ):
+        raise SystemExit("partial recovery baseline authority is invalid")
 else:
     raise SystemExit("rollback baseline deploy workflow is not trusted")
-
-print(
-    "rollback_baseline_validation=PASS "
-    f"source_sha={source_sha} recovery_run_id={recovery_run_id or '0'}"
-)
 PY
+
+baseline_value() {
+  local key="$1"
+  awk -F= -v key="$key" '
+    $1 == key {
+      if (found++) exit 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (found != 1) exit 1
+      print value
+    }
+  ' "$BASELINE_DIR/baseline-provenance.env"
+}
+
+baseline_optional_value() {
+  local key="$1"
+  local default_value="$2"
+  awk -F= -v key="$key" -v default_value="$default_value" '
+    $1 == key {
+      if (found++) exit 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (found > 1) exit 1
+      print (found == 1 ? value : default_value)
+    }
+  ' "$BASELINE_DIR/baseline-provenance.env"
+}
+
+source_sha="$(baseline_value baseline_source_sha)"
+deploy_workflow="$(baseline_value baseline_deploy_workflow)"
+recovery_run_id="$(baseline_optional_value baseline_recovery_run_id 0)"
+if [[ "$deploy_workflow" == "oci-production-rollback" ]]; then
+  PARTIAL_RECOVERY_DIR="$BASELINE_DIR/partial-recovery" \
+  PARTIAL_RECOVERY_IMAGES_FILE="$BASELINE_DIR/images.tsv" \
+  EXPECTED_RECOVERY_RUN_ID="$recovery_run_id" \
+  EXPECTED_SOURCE_SHA="$source_sha" \
+  EXPECTED_BUILD_RUN_ID="$(baseline_value baseline_build_run_id)" \
+    "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null
+fi
+
+printf 'rollback_baseline_validation=PASS source_sha=%s recovery_run_id=%s\n' \
+  "$source_sha" "${recovery_run_id:-0}"

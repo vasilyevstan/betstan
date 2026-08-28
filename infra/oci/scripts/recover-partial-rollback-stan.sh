@@ -8,12 +8,19 @@ source "$SCRIPT_DIR/lib.sh"
 TARGET_SHA="${TARGET_SHA:-}"
 PARTIAL_ROLLBACK_RUN_ID="${PARTIAL_ROLLBACK_RUN_ID:-}"
 PARTIAL_ROLLBACK_SOURCE_DIR="${PARTIAL_ROLLBACK_SOURCE_DIR:-}"
+PARTIAL_RECOVERY_BUILD_DIR="${PARTIAL_RECOVERY_BUILD_DIR:-}"
+PARTIAL_RECOVERY_BUILD_RUN_ID="${PARTIAL_RECOVERY_BUILD_RUN_ID:-}"
+PARTIAL_RECOVERY_SOURCE_SHA="${PARTIAL_RECOVERY_SOURCE_SHA:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-rollback}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-https://betstan.xyz}"
 OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-https://www.betstan.xyz}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 OCI_INFRASTRUCTURE_PROVENANCE_FILE="${OCI_INFRASTRUCTURE_PROVENANCE_FILE:-}"
+INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
+OCI_RUNTIME_MODE="${OCI_RUNTIME_MODE:-}"
+OCI_RUNTIME_FINGERPRINT="${OCI_RUNTIME_FINGERPRINT:-}"
+OCI_INFRASTRUCTURE_PROVENANCE_SHA256="${OCI_INFRASTRUCTURE_PROVENANCE_SHA256:-}"
 ROLLBACK_READINESS_SCRIPT="${ROLLBACK_READINESS_SCRIPT:-$SCRIPT_DIR/rollback-readiness-stan.sh}"
 SERVICE_OPS_SCRIPT="${SERVICE_OPS_SCRIPT:-$OCI_ROOT_DIR/infra/oci/agents/service-ops-stan.sh}"
 CONFIRMATION="${CONFIRMATION:-}"
@@ -24,6 +31,33 @@ write_text_atomic() {
   local temporary="${target}.tmp.$$.$RANDOM"
   cat >"$temporary"
   mv "$temporary" "$target"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+provenance_value() {
+  local key="$1"
+  python3 - "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" "$key" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+matches = [
+    raw.split("=", 1)[1]
+    for raw in path.read_text(encoding="utf-8").splitlines()
+    if raw.startswith(f"{key}=")
+]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit(f"infrastructure provenance has invalid {key}")
+print(matches[0])
+PY
 }
 
 capture_runtime_state() {
@@ -175,11 +209,36 @@ oci_require_vars \
   TARGET_SHA \
   PARTIAL_ROLLBACK_RUN_ID \
   PARTIAL_ROLLBACK_SOURCE_DIR \
+  PARTIAL_RECOVERY_BUILD_DIR \
+  PARTIAL_RECOVERY_BUILD_RUN_ID \
+  PARTIAL_RECOVERY_SOURCE_SHA \
+  INFRASTRUCTURE_RUN_ID \
+  OCI_RUNTIME_MODE \
+  OCI_RUNTIME_FINGERPRINT \
+  OCI_INFRASTRUCTURE_PROVENANCE_SHA256 \
   OCI_INFRASTRUCTURE_PROVENANCE_FILE
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "TARGET_SHA must be a full lowercase commit SHA"
 oci_is_positive_int "$PARTIAL_ROLLBACK_RUN_ID" ||
   oci_die "PARTIAL_ROLLBACK_RUN_ID must be positive"
+oci_is_positive_int "$PARTIAL_RECOVERY_BUILD_RUN_ID" ||
+  oci_die "PARTIAL_RECOVERY_BUILD_RUN_ID must be positive"
+oci_is_positive_int "$INFRASTRUCTURE_RUN_ID" ||
+  oci_die "INFRASTRUCTURE_RUN_ID must be positive"
+[[ "$PARTIAL_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  oci_die "PARTIAL_RECOVERY_SOURCE_SHA must be a full lowercase commit SHA"
+[[ "$OCI_RUNTIME_MODE" == "oke" || "$OCI_RUNTIME_MODE" == "k3s" ]] ||
+  oci_die "OCI_RUNTIME_MODE must be oke or k3s"
+[[ "$OCI_RUNTIME_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_RUNTIME_FINGERPRINT must be a sha256 hex digest"
+[[ "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  oci_die "OCI_INFRASTRUCTURE_PROVENANCE_SHA256 must be a sha256 hex digest"
+oci_is_positive_int "${GITHUB_RUN_ID:-}" ||
+  oci_die "partial recovery authority requires a numeric workflow run ID"
+[[ "${GITHUB_RUN_ATTEMPT:-}" == "1" ]] ||
+  oci_die "partial recovery authority requires workflow attempt 1"
+[[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
+  oci_die "partial recovery authority requires the exact workflow commit SHA"
 [[ "$CONFIRMATION" == "RECOVER OCI PARTIAL ROLLBACK" ]] ||
   oci_die "partial rollback recovery confirmation is invalid"
 if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
@@ -193,15 +252,58 @@ fi
 [[ -f "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" &&
    ! -L "$OCI_INFRASTRUCTURE_PROVENANCE_FILE" ]] ||
   oci_die "infrastructure provenance file is invalid"
+[[ "$(sha256_file "$OCI_INFRASTRUCTURE_PROVENANCE_FILE")" == \
+   "$OCI_INFRASTRUCTURE_PROVENANCE_SHA256" ]] ||
+  oci_die "infrastructure provenance hash does not match the selected artifact"
 
-python3 - "$PARTIAL_ROLLBACK_SOURCE_DIR" "$OUTPUT_DIR" <<'PY'
+url_host() {
+  local url="$1"
+  local host="${url#https://}"
+  [[ "$url" == https://* && -n "$host" && "$host" != */* ]] ||
+    oci_die "partial recovery public URLs must be host-only https URLs"
+  printf '%s\n' "$host"
+}
+
+public_host="$(url_host "$OCI_PUBLIC_URL")"
+redirect_host="$(url_host "$OCI_REDIRECT_URL")"
+diagnostic_host="$(url_host "$OCI_DIAGNOSTIC_URL")"
+[[ "$(provenance_value infrastructure_run_id)" == "$INFRASTRUCTURE_RUN_ID" &&
+   "$(provenance_value infrastructure_run_attempt)" == "1" &&
+   "$(provenance_value runtime_mode)" == "$OCI_RUNTIME_MODE" &&
+   "$(provenance_value namespace)" == "$OCI_K8S_NAMESPACE" &&
+   "$(provenance_value public_host)" == "$public_host" &&
+   "$(provenance_value canonical_host)" == "$public_host" &&
+   "$(provenance_value redirect_host)" == "$redirect_host" &&
+   "$(provenance_value diagnostic_host)" == "$diagnostic_host" &&
+   "$(provenance_value application_registry_provider)" == "ghcr" &&
+   "$(provenance_value application_registry_host)" == "ghcr.io" &&
+   "$(provenance_value application_registry_repository)" == \
+     "ghcr.io/vasilyevstan/betstan-images" &&
+   "$(provenance_value application_registry_public_anonymous)" == "true" ]] ||
+  oci_die "infrastructure provenance does not match the selected runtime"
+if [[ "$OCI_RUNTIME_MODE" == "oke" ]]; then
+  [[ "$(provenance_value cluster_fingerprint)" == "$OCI_RUNTIME_FINGERPRINT" ]] ||
+    oci_die "infrastructure provenance cluster fingerprint does not match"
+else
+  [[ "$(provenance_value instance_fingerprint)" == "$OCI_RUNTIME_FINGERPRINT" ]] ||
+    oci_die "infrastructure provenance instance fingerprint does not match"
+fi
+
+python3 - \
+  "$PARTIAL_ROLLBACK_SOURCE_DIR" \
+  "$PARTIAL_RECOVERY_BUILD_DIR" \
+  "$OUTPUT_DIR" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).resolve()
-output = Path(sys.argv[2]).resolve()
-if source == output or source in output.parents or output in source.parents:
-    raise SystemExit("partial rollback source and output directories must not overlap")
+build = Path(sys.argv[2]).resolve()
+output = Path(sys.argv[3]).resolve()
+paths = (source, build, output)
+for index, left in enumerate(paths):
+    for right in paths[index + 1:]:
+        if left == right or left in right.parents or right in left.parents:
+            raise SystemExit("partial recovery input and output directories must not overlap")
 PY
 oci_prepare_safe_private_dir "$OUTPUT_DIR"
 
@@ -311,6 +413,72 @@ trap 'rm -rf -- "$WORK_DIR"' EXIT
 
 chmod 600 "$OUTPUT_DIR/recovery-plan.tsv"
 
+python3 - \
+  "$PARTIAL_RECOVERY_BUILD_DIR/images.tsv" \
+  "$PARTIAL_ROLLBACK_SOURCE_DIR/pre-rollback-state.tsv" \
+  "$WORK_DIR/images.tsv" <<'PY'
+import csv
+import re
+import sys
+from pathlib import Path
+
+build_path, pre_path, output_path = map(Path, sys.argv[1:4])
+services = {
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip",
+}
+repository = "ghcr.io/vasilyevstan/betstan-images"
+digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+if not build_path.is_file() or build_path.is_symlink():
+    raise SystemExit("partial recovery build images.tsv is invalid")
+
+def rows(path, width):
+    with path.open(encoding="utf-8", newline="") as handle:
+        parsed = list(csv.reader(handle, delimiter="\t"))
+    if not parsed or any(len(row) != width for row in parsed):
+        raise SystemExit(f"{path}: malformed TSV evidence")
+    return parsed
+
+build_rows = rows(build_path, 5)
+pre_rows = rows(pre_path, 5)
+build = {}
+for row in build_rows:
+    service, row_repository, image_ref, manifest_digest, platform_digest = row
+    if service in build or service not in services:
+        raise SystemExit("partial recovery build service set is invalid")
+    if (
+        row_repository != repository
+        or not digest_pattern.fullmatch(manifest_digest)
+        or not digest_pattern.fullmatch(platform_digest)
+        or image_ref != f"{repository}@{manifest_digest}"
+    ):
+        raise SystemExit(f"{service}: partial recovery build image is invalid")
+    build[service] = row
+if set(build) != services:
+    raise SystemExit("partial recovery build does not contain exactly nine services")
+
+pre = {}
+for row in pre_rows:
+    service, deployment, image_ref, _revision, readiness = row
+    if service in pre or service not in services:
+        raise SystemExit("partial recovery pre-run service set is invalid")
+    if (
+        deployment != f"gaming-{service}-depl"
+        or readiness != "1/1"
+        or image_ref != build.get(service, ["", "", ""])[2]
+    ):
+        raise SystemExit(f"{service}: pre-run image does not match the selected build")
+    pre[service] = row
+if set(pre) != services:
+    raise SystemExit("partial recovery pre-run state does not contain nine services")
+
+with output_path.open("w", encoding="utf-8", newline="") as handle:
+    writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+    for service in sorted(build):
+        writer.writerow(build[service])
+PY
+
 capture_runtime_state "$OUTPUT_DIR/observed-pre-recovery-state.tsv"
 validate_runtime_progress "$OUTPUT_DIR/observed-pre-recovery-state.tsv" ||
   oci_die "runtime does not match an authorized partial recovery state"
@@ -391,4 +559,72 @@ source_rollback_run_id=$PARTIAL_ROLLBACK_RUN_ID
 recovered_services=$recovered_services
 database_restore=disabled
 EOF
+
+cp "$WORK_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+write_text_atomic "$OUTPUT_DIR/partial-recovery-authority.env" <<EOF
+schema=betstan.partial-rollback-recovery-authority.v1
+recovery_workflow=oci-production-rollback
+recovery_run_id=$GITHUB_RUN_ID
+recovery_run_attempt=$GITHUB_RUN_ATTEMPT
+recovery_head_sha=$GITHUB_SHA
+source_rollback_run_id=$PARTIAL_ROLLBACK_RUN_ID
+target_sha=$TARGET_SHA
+restored_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA
+restored_build_workflow=oci-production-build
+restored_build_run_id=$PARTIAL_RECOVERY_BUILD_RUN_ID
+restored_build_run_attempt=1
+restored_build_artifact=oci-image-provenance-${PARTIAL_RECOVERY_SOURCE_SHA}-${PARTIAL_RECOVERY_BUILD_RUN_ID}-1
+infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
+infrastructure_run_attempt=1
+infrastructure_provenance_sha256=$OCI_INFRASTRUCTURE_PROVENANCE_SHA256
+runtime_mode=$OCI_RUNTIME_MODE
+runtime_fingerprint=$OCI_RUNTIME_FINGERPRINT
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
+public_host=$public_host
+canonical_host=$public_host
+redirect_host=$redirect_host
+diagnostic_host=$diagnostic_host
+images_sha256=$(sha256_file "$OUTPUT_DIR/images.tsv")
+final_state_sha256=$(sha256_file "$OUTPUT_DIR/final-state.tsv")
+recovery_plan_sha256=$(sha256_file "$OUTPUT_DIR/recovery-plan.tsv")
+recovery_rollout_order_sha256=$(sha256_file "$OUTPUT_DIR/recovery-rollout-order.tsv")
+recovery_summary_sha256=$(sha256_file "$OUTPUT_DIR/partial-recovery-summary.env")
+rollback_readiness_summary_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/summary.env")
+rollback_readiness_workload_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/workload-state.tsv")
+rollback_readiness_failures_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/failures.txt")
+database_restore=disabled
+status=PASS
+EOF
+
+authority_files=(
+  images.tsv
+  partial-recovery-authority.env
+  partial-recovery-summary.env
+  recovery-plan.tsv
+  recovery-rollout-order.tsv
+  final-state.tsv
+  rollback-readiness/summary.env
+  rollback-readiness/workload-state.tsv
+  rollback-readiness/failures.txt
+)
+: >"$OUTPUT_DIR/partial-recovery-SHA256SUMS"
+for file in "${authority_files[@]}"; do
+  [[ -f "$OUTPUT_DIR/$file" && ! -L "$OUTPUT_DIR/$file" ]] ||
+    oci_die "partial recovery authority evidence is missing: $file"
+  printf '%s  %s\n' \
+    "$(sha256_file "$OUTPUT_DIR/$file")" \
+    "$file" >>"$OUTPUT_DIR/partial-recovery-SHA256SUMS"
+done
+find "$OUTPUT_DIR" -type d -exec chmod 700 {} +
+find "$OUTPUT_DIR" -type f -exec chmod 600 {} +
+PARTIAL_RECOVERY_DIR="$OUTPUT_DIR" \
+EXPECTED_RECOVERY_RUN_ID="$GITHUB_RUN_ID" \
+EXPECTED_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$PARTIAL_RECOVERY_BUILD_RUN_ID" \
+EXPECTED_SOURCE_ROLLBACK_RUN_ID="$PARTIAL_ROLLBACK_RUN_ID" \
+  "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null
+
 oci_log "oci_partial_rollback_recovery=PASS source_run=$PARTIAL_ROLLBACK_RUN_ID services=$recovered_services"
