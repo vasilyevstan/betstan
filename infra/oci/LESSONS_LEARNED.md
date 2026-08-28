@@ -161,6 +161,15 @@ conversation summaries are not authority.
   the grant and cleanup paths to that runtime artifact. Disposable validation
   accounts must be demoted and explicitly deleted on every exit; cleanup
   failure keeps activation dark.
+- Browser `requestfailed` events are not sufficient evidence that a
+  long-lived `EventSource` failed: navigation, explicit close, and reconnects
+  terminate SSE requests through that event. Exclude only the exact SSE route
+  from the generic API-failure list and prove it independently through ordered
+  snapshots, phases, incidents, final scores, and heartbeat readiness.
+- Post-deletion login checks must preserve the public authentication contract:
+  unknown credentials return `400`, while a deleted account's previously
+  authenticated administrator session returns `401`. Cleanup assertions must
+  not silently redefine either status.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.
