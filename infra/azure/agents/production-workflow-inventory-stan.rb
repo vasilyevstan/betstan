@@ -985,7 +985,8 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
     "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
     "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
-    "role:set" => "protected disposable administrator operator",
+    "node dist/scripts/SetUserRole.js" => "compiled disposable administrator operator",
+    "node dist/scripts/DeleteUser.js" => "compiled disposable account deletion operator",
     "playwright-live-acceptance.config.js" => "production browser acceptance",
     "service-ops-stan.sh" => "sanitized runtime log inspection"
   }.each do |literal, label|

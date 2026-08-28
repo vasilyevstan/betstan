@@ -825,6 +825,24 @@ for workflow in "$activation_workflow" "$disable_workflow"; do
   grep -Fq "steps.oci_cli.outcome == 'success'" "$workflow" ||
     fail "live-control Bastion cleanup can run before OCI CLI install: $workflow"
 done
+[[ "$(grep -Fc 'node dist/scripts/SetUserRole.js' "$activation_workflow")" == "2" ]] ||
+  fail "live activation must grant and revoke through the compiled auth role command"
+grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow" ||
+  fail "live activation account cleanup does not run after acceptance failure"
+[[ "$(grep -Fc 'node dist/scripts/DeleteUser.js' "$activation_workflow")" == "1" ]] ||
+  fail "live activation must explicitly delete its disposable account"
+grep -Fq '"USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME"' "$activation_workflow" ||
+  fail "live activation account deletion is not bound to the exact synthetic identity"
+grep -Fq '"USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME"' \
+  "$activation_workflow" ||
+  fail "live activation account deletion lacks exact confirmation"
+! grep -Fq 'npm run role:set' "$activation_workflow" ||
+  fail "live activation still invokes a development-only auth role command"
+grep -Fq '"src/**/*.ts"' "$OCI_DIR/build/tsconfig.production.json" ||
+  fail "OCI production compilation excludes the auth role command"
+grep -Fq 'COPY --from=build --chown=node:node /app/dist ./dist' \
+  "$OCI_DIR/build/Dockerfile.backend" ||
+  fail "OCI runtime images do not contain compiled service commands"
 grep -Fq "steps.oci_cli.outcome == 'success'" "$data_workflow" ||
   fail "live-data Bastion cleanup can run before OCI CLI install"
 
