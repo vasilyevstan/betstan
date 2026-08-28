@@ -21,12 +21,12 @@ on:
         required: true
         type: string
       baseline_recovery_run_id:
-        description: Exact cache-recovery run bound through the data chain, or 0
+        description: Exact trusted recovery run bound through the data chain, or 0
         required: true
         default: "0"
         type: string
       baseline_recovery_source_sha:
-        description: Historical source SHA recovered to GHCR, or none
+        description: Historical source SHA restored by the trusted recovery, or none
         required: true
         default: none
         type: string
@@ -180,15 +180,16 @@ jobs:
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
 
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
-            recovery_workflow_id="$(
+            cache_recovery_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
+            )"
+            partial_recovery_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-rollback.yml" --jq '.id'
             )"
             read -r workflow_id workflow_path event recovery_control_sha head_branch repository status conclusion attempt display_title <<<"$(
               gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" \
                 --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
             )"
-            [ "$workflow_id" = "$recovery_workflow_id" ]
-            [ "$workflow_path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]
             [ "$event" = "workflow_dispatch" ]
             [[ "$recovery_control_sha" =~ ^[0-9a-f]{40}$ ]]
             git cat-file -e "${recovery_control_sha}^{commit}"
@@ -196,8 +197,18 @@ jobs:
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
-            [ "$display_title" = "oci-ghcr-cache-recovery $BASELINE_RECOVERY_SOURCE_SHA" ]
-            recovery_artifact_name="ghcr-cache-recovery-${BASELINE_RECOVERY_SOURCE_SHA}-${BASELINE_RECOVERY_RUN_ID}-1"
+            if [ "$workflow_id" = "$cache_recovery_workflow_id" ] &&
+               [ "$workflow_path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]; then
+              [ "$display_title" = "oci-ghcr-cache-recovery $BASELINE_RECOVERY_SOURCE_SHA" ]
+              recovery_artifact_name="ghcr-cache-recovery-${BASELINE_RECOVERY_SOURCE_SHA}-${BASELINE_RECOVERY_RUN_ID}-1"
+            elif [ "$workflow_id" = "$partial_recovery_workflow_id" ] &&
+                 [ "$workflow_path" = ".github/workflows/oci-production-rollback.yml" ]; then
+              [[ "$display_title" =~ ^oci-rollback\ [0-9a-f]{40}$ ]]
+              recovery_artifact_name="oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1"
+            else
+              echo "::error::Baseline recovery run is not a trusted recovery workflow"
+              exit 1
+            fi
             recovery_artifact_count="$(
               gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/artifacts?per_page=100" \
                 --jq "[.artifacts[] | select(.name == \"$recovery_artifact_name\" and .expired == false)] | length"
@@ -443,6 +454,22 @@ jobs:
             SOURCE_SHA="$SOURCE_SHA" \
               ./infra/oci/scripts/shared-mongo-operation-lock-stan.sh renew
           fi
+
+      - name: Validate executable pre-deploy rollback baseline
+        run: |
+          set -euo pipefail
+          expected_source_sha=
+          expected_recovery_run_id=
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            expected_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
+            expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+          fi
+          BASELINE_DIR=artifacts/oci-baseline \
+          EXPECTED_SOURCE_SHA="$expected_source_sha" \
+          EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+          EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
+          REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
       - name: Upload protected OCI rollback baseline
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
