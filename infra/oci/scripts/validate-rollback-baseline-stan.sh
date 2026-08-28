@@ -200,13 +200,15 @@ if deploy_workflow == "oci-production-deploy":
             raise SystemExit("ordinary rollback baseline omits current deploy-workflow provenance")
         if workflow not in ("", "oci-production-deploy"):
             raise SystemExit("ordinary rollback baseline deploy workflow is not trusted")
+        # One historical deploy writer emitted the key with an empty value.
+        deploy_repository = deploy.get("registry_repository")
         if (
             deploy.get("source_sha") != source_sha
             or deploy.get("deployment_run_id") != baseline["baseline_deploy_run_id"]
             or deploy.get("deployment_run_attempt") != "1"
             or deploy.get("registry_provider") != "ghcr"
             or deploy.get("registry_host") != "ghcr.io"
-            or deploy.get("registry_repository") != repository
+            or deploy_repository not in ("", repository)
             or deploy.get("registry_public_anonymous") != "true"
             or deploy.get("image_provenance_sha256")
             != hashlib.sha256((root / "images.tsv").read_bytes()).hexdigest()
