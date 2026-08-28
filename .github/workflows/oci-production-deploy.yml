@@ -156,11 +156,12 @@ jobs:
             mapfile -t recovery_changes < <(
               git diff --name-only "$SOURCE_SHA" "$GITHUB_SHA"
             )
-            [ "${#recovery_changes[@]}" = "5" ]
+            [ "${#recovery_changes[@]}" = "6" ]
             printf '%s\n' "${recovery_changes[@]}" | sort -u | cmp -s - <(
               printf '%s\n' \
                 .github/workflows/oci-production-deploy.yml \
                 infra/oci/agents/health-contract.py \
+                infra/oci/agents/live-betting-readiness-stan.sh \
                 infra/oci/agents/test-health-contract-stan.sh \
                 infra/oci/tests/test-contract.sh \
                 infra/oci/tests/fixtures/health/healthy.json |
@@ -355,12 +356,15 @@ jobs:
           contract=infra/oci/agents/health-contract.py
           contract_test=infra/oci/agents/test-health-contract-stan.sh
           fixture=infra/oci/tests/fixtures/health/healthy.json
+          readiness=infra/oci/agents/live-betting-readiness-stan.sh
           git show "${GITHUB_SHA}:${contract}" > "$RUNNER_TEMP/health-contract.py"
           git show "${GITHUB_SHA}:${contract_test}" > "$RUNNER_TEMP/test-health-contract-stan.sh"
           git show "${GITHUB_SHA}:${fixture}" > "$RUNNER_TEMP/healthy.json"
+          git show "${GITHUB_SHA}:${readiness}" > "$RUNNER_TEMP/live-betting-readiness-stan.sh"
           install -m 755 "$RUNNER_TEMP/health-contract.py" "$contract"
           install -m 755 "$RUNNER_TEMP/test-health-contract-stan.sh" "$contract_test"
           install -m 644 "$RUNNER_TEMP/healthy.json" "$fixture"
+          install -m 755 "$RUNNER_TEMP/live-betting-readiness-stan.sh" "$readiness"
           ./infra/oci/agents/test-health-contract-stan.sh
 
       - name: Download exact OCI image provenance

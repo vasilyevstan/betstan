@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LIVE_BETTING_STACK="oci"
+export NAMESPACE="${NAMESPACE:-${OCI_K8S_NAMESPACE:-betstan-oci}}"
 export REQUIRED_MONGO_TOPOLOGY_MODE=shared
 export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data
 export SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP=betstan-oci-migration-journal
