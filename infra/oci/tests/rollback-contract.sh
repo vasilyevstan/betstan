@@ -67,6 +67,14 @@ assert_contains() {
   grep -Fq "$pattern" "$file" || fail "missing pattern '$pattern' in $file"
 }
 
+assert_not_contains() {
+  local file="$1"
+  local pattern="$2"
+  if grep -Fq "$pattern" "$file"; then
+    fail "unexpected pattern '$pattern' in $file"
+  fi
+}
+
 assert_line() {
   local file="$1"
   local line="$2"
@@ -238,6 +246,11 @@ moderation_live_event_update	0	0	1
 resulting_live_event_update	0	0	1
 event_live_update.fixture-pod	0	0	2
 QUEUES
+  if [[ "$fixture_sse_required" == "false" ]]; then
+    grep -v '^event_live_update\.' "$directory/queues.tsv" \
+      >"$directory/queues-without-sse.tsv"
+    mv "$directory/queues-without-sse.tsv" "$directory/queues.tsv"
+  fi
   awk -F '\t' '{ print $1 "\t" $3 }' \
     "$directory/images.tsv" >"$directory/live-images.tsv"
   cat >"$directory/public-http.tsv" <<'HTTP'
@@ -2080,6 +2093,8 @@ assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.en
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\t502\t'
+assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/baseline/queues.tsv" 'event_live_update.'
+assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/queue-verification.tsv" 'dynamic:event_live_update.'
 [[ "$(wc -l <"$WORK_DIR/legacy-sse-rollback-success/rollout-order.tsv" | tr -d ' ')" == '9' ]] ||
   fail 'OCI legacy pre-SSE rollback aborted mid-rollout instead of processing every service'
 
