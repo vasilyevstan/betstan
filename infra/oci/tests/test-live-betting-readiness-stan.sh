@@ -63,6 +63,24 @@ assert_contains "$RUN_SUMMARY_FILE" 'rollback_baseline_verified=true' 'OCI activ
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=none' 'OCI activate should report no failed checks'
 assert_contains "$RUN_SUMMARY_FILE" 'legacy_prematch_events=1' 'OCI activate should persist prematch evidence'
 
+deploy_provenance_fixture="$TEST_ROOT/oci-deploy-provenance.env"
+cat >"$deploy_provenance_fixture" <<'EOF_PROVENANCE'
+source_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+source_ref=refs/heads/master
+run_attempt=1
+deployment_workflow=oci-production-deploy
+deployment_run_id=123456
+deployment_run_attempt=1
+EOF_PROVENANCE
+run_live_betting_scenario oci-activate-deploy-provenance "$SCRIPT" oci \
+  MODE=activate \
+  STUB_FLAG_VALUE=true \
+  EXACT_MASTER_PROVENANCE_FILE="$deploy_provenance_fixture"
+assert_eq 0 "$RUN_RC" "OCI activate mode should accept deployment-produced provenance"
+assert_contains "$RUN_SUMMARY_FILE" \
+  'provenance_source_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  'OCI activate should retain the deployment source SHA'
+
 run_live_betting_scenario oci-legacy-topology "$SCRIPT" oci \
   MODE=monitor \
   STUB_TOPOLOGY_MODE=legacy \
@@ -161,4 +179,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=18'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=19'
