@@ -439,7 +439,7 @@ jobs:
               "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
               USER_ROLE=ADMIN \
               "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$LIVE_ACCEPTANCE_USER_ID:ADMIN" \
-              npm run role:set
+              node dist/scripts/SetUserRole.js
           status="$(
             jq -n \
               --arg email "$LIVE_ACCEPTANCE_USERNAME" \
@@ -466,22 +466,35 @@ jobs:
             ./client/node_modules/.bin/playwright test \
               --config infra/oci/agents/playwright-live-acceptance.config.js
 
-      - name: Revoke disposable administrator role
+      - name: Revoke and delete disposable validation account
         if: always() && steps.account.outcome == 'success'
         env:
           BASE_URL: ${{ steps.provenance.outputs.public_url }}
         run: |
           set -euo pipefail
-          kubectl exec -n "$OCI_K8S_NAMESPACE" \
-            deployment/gaming-auth-depl \
-            -c gaming-auth -- \
-            env \
-              "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
-              USER_ROLE=USER \
-              "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$LIVE_ACCEPTANCE_USER_ID:USER" \
-              npm run role:set
+          cleanup_failed=0
+          if ! kubectl exec -n "$OCI_K8S_NAMESPACE" \
+              deployment/gaming-auth-depl \
+              -c gaming-auth -- \
+              env \
+                "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
+                USER_ROLE=USER \
+                "USER_ROLE_CHANGE_CONFIRMATION=SET_ROLE:$LIVE_ACCEPTANCE_USER_ID:USER" \
+                node dist/scripts/SetUserRole.js; then
+            cleanup_failed=1
+          fi
+          if ! kubectl exec -n "$OCI_K8S_NAMESPACE" \
+              deployment/gaming-auth-depl \
+              -c gaming-auth -- \
+              env \
+                "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
+                "USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME" \
+                "USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME" \
+                node dist/scripts/DeleteUser.js; then
+            cleanup_failed=1
+          fi
           if [ -s "$LIVE_ACCEPTANCE_COOKIE_JAR" ]; then
-            status="$(
+            if status="$(
               curl --silent --show-error \
                 --output /dev/null \
                 --write-out '%{http_code}' \
@@ -489,10 +502,30 @@ jobs:
                 --header 'Content-Type: application/json' \
                 --data '{"eventId":"revoked-admin-check","homeResult":1,"awayResult":0}' \
                 "$BASE_URL/api/backoffice/result"
-            )"
-            [ "$status" = "403" ]
+            )"; then
+              [ "$status" = "401" ] || cleanup_failed=1
+            else
+              cleanup_failed=1
+            fi
+          fi
+          if status="$(
+            jq -n \
+              --arg email "$LIVE_ACCEPTANCE_USERNAME" \
+              --arg password "$LIVE_ACCEPTANCE_PASSWORD" \
+              '{email:$email,password:$password}' |
+              curl --silent --show-error \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --header 'Content-Type: application/json' \
+                --data-binary @- \
+                "$BASE_URL/api/auth/login"
+          )"; then
+            [ "$status" = "401" ] || cleanup_failed=1
+          else
+            cleanup_failed=1
           fi
           rm -f "$LIVE_ACCEPTANCE_COOKIE_JAR"
+          [ "$cleanup_failed" = "0" ]
 
       - name: Verify settled queues and runtime
         env:
