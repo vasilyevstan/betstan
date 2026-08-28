@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-application-stan.sh"
+RECOVERY_SCRIPT="$ROOT_DIR/infra/oci/scripts/recover-partial-rollback-stan.sh"
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
@@ -1492,6 +1493,12 @@ assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
 assert_contains "$WORKFLOW_FILE" \
   'ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env'
+assert_contains "$WORKFLOW_FILE" \
+  'PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}'
+assert_contains "$WORKFLOW_FILE" \
+  'run: ./infra/oci/scripts/recover-partial-rollback-stan.sh'
+assert_contains "$WORKFLOW_FILE" \
+  'if: inputs.partial_rollback_run_id != '\''0'\'''
 for script in "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"; do
   assert_contains "$script" '"/api/backoffice|backoffice"'
 done
@@ -1525,7 +1532,7 @@ for literal in \
 done
 assert_contains "$ROOT_DIR/infra/oci/scripts/deploy.sh" 'deployment_workflow=oci-production-deploy'
 
-bash -n "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"
+bash -n "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT" "$RECOVERY_SCRIPT"
 
 if ! run_script "$WORK_DIR/recovery-baseline-success" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
@@ -2178,5 +2185,137 @@ assert_route_row "$WORK_DIR/success/public-verification.tsv" redirect /api/bet
 assert_route_row "$WORK_DIR/success/public-verification.tsv" redirect /api/backoffice
 assert_route_row "$WORK_DIR/success/public-verification.tsv" diagnostic /api/bet
 assert_route_row "$WORK_DIR/success/public-verification.tsv" diagnostic /api/backoffice
+
+partial_source="$WORK_DIR/partial-recovery-source"
+mkdir -p "$partial_source/baseline"
+cat >"$partial_source/baseline/baseline-provenance.env" <<EOF
+baseline_source_sha=$TARGET_SHA
+EOF
+cat >"$partial_source/failure-state.env" <<'EOF'
+status=FAIL
+failed_service=event
+failed_deployment=gaming-event-depl
+failed_stage=public-api
+failed_step_label=failed-event
+message=public API verification failed after gaming-event-depl
+EOF
+: >"$partial_source/pre-rollback-state.tsv"
+: >"$partial_source/partial-state.tsv"
+for service in "${SERVICES[@]}"; do
+  pre_image="$(current_image_ref "$service")"
+  partial_image="$pre_image"
+  case "$service" in
+    bet|backoffice|client|event)
+      partial_image="$(target_image_ref "$service")"
+      ;;
+  esac
+  printf '%s\tgaming-%s-depl\t%s\t7\t1/1\n' \
+    "$service" "$service" "$pre_image" \
+    >>"$partial_source/pre-rollback-state.tsv"
+  printf '%s\t%s\t8\n' \
+    "$service" "$partial_image" \
+    >>"$partial_source/partial-state.tsv"
+done
+printf '%s\n' auth bet backoffice client event \
+  >"$partial_source/rollout-order.tsv"
+
+cat >"$BIN_DIR/partial-recovery-readiness-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$OUTPUT_DIR"
+printf '%s\n' 'rollback_readiness=GO' 'mode=application-rollback' \
+  >"$OUTPUT_DIR/summary.env"
+STUB
+chmod +x "$BIN_DIR/partial-recovery-readiness-stub.sh"
+
+cat >"$BIN_DIR/partial-recovery-service-ops-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'event-pod CrashLoopBackOff'
+STUB
+chmod +x "$BIN_DIR/partial-recovery-service-ops-stub.sh"
+
+set_partial_recovery_state() {
+  local state_root="$1"
+  rm -rf "$state_root"
+  mkdir -p "$state_root"
+  for service in "${SERVICES[@]}"; do
+    image="$(current_image_ref "$service")"
+    case "$service" in
+      bet|backoffice|client|event)
+        image="$(target_image_ref "$service")"
+        ;;
+    esac
+    write_text_atomic "$state_root/${service}.env" <<EOF
+image=$image
+revision=8
+EOF
+  done
+}
+
+run_partial_recovery() {
+  local label="$1"
+  local state_dir="$STATE_DIR/$label/current"
+  local output_dir="$WORK_DIR/$label"
+  shift
+  if [[ "${PRESERVE_PARTIAL_RECOVERY_STATE:-0}" != "1" ]]; then
+    set_partial_recovery_state "$state_dir"
+  fi
+  rm -rf "$output_dir"
+  rm -f "$STATE_DIR/$label/kubectl.log"
+  env -i HOME="$HOME" \
+    PATH="$BIN_DIR:$PATH" \
+    STUB_STATE_DIR="$state_dir" \
+    STUB_KUBECTL_LOG="$STATE_DIR/$label/kubectl.log" \
+    TARGET_SHA="$TARGET_SHA" \
+    PARTIAL_ROLLBACK_RUN_ID=33131321686 \
+    PARTIAL_ROLLBACK_SOURCE_DIR="$partial_source" \
+    OUTPUT_DIR="$output_dir" \
+    OCI_K8S_NAMESPACE=betstan-oci \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OCI_INFRASTRUCTURE_PROVENANCE_FILE="$INFRASTRUCTURE_PROVENANCE_FIXTURE" \
+    ROLLBACK_READINESS_SCRIPT="$BIN_DIR/partial-recovery-readiness-stub.sh" \
+    SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
+    CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
+    GITHUB_REF_NAME=master \
+    "$@" "$RECOVERY_SCRIPT"
+}
+
+if ! run_partial_recovery partial-recovery-success \
+    >"$WORK_DIR/partial-recovery-success.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-success.out" >&2
+  fail 'OCI partial rollback recovery unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/partial-recovery-success.out" \
+  'oci_partial_rollback_recovery=PASS'
+assert_line "$STATE_DIR/partial-recovery-success/kubectl.log" event
+[[ "$(sed -n '2p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == client ]] ||
+  fail 'OCI partial rollback recovery did not restore the client second'
+[[ "$(sed -n '3p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == backoffice ]] ||
+  fail 'OCI partial rollback recovery did not restore Backoffice third'
+[[ "$(sed -n '4p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == bet ]] ||
+  fail 'OCI partial rollback recovery did not restore Bet fourth'
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-summary.env" \
+  'mode=abort-partial-rollback'
+assert_contains "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" \
+  'CrashLoopBackOff'
+
+stale_state="$STATE_DIR/partial-recovery-stale/current"
+set_partial_recovery_state "$stale_state"
+write_text_atomic "$stale_state/event.env" <<EOF
+image=ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+revision=9
+EOF
+if PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+    run_partial_recovery partial-recovery-stale \
+    >"$WORK_DIR/partial-recovery-stale.out" 2>&1; then
+  fail 'OCI partial rollback recovery accepted stale runtime state'
+fi
+assert_contains "$WORK_DIR/partial-recovery-stale.out" \
+  'runtime does not match an authorized partial recovery state'
+[[ ! -s "$STATE_DIR/partial-recovery-stale/kubectl.log" ]] ||
+  fail 'OCI stale partial rollback recovery mutated a deployment'
 
 echo 'oci_rollback_contract=PASS'

@@ -353,6 +353,7 @@ def validate_oci_rollback_workflow!(file, document, content)
       baseline_source_run_attempt
       baseline_artifact_name
       infrastructure_run_id
+      partial_rollback_run_id
       allow_legacy_admin_auth
       legacy_admin_auth_reason
       confirmation
@@ -416,6 +417,26 @@ def validate_oci_rollback_workflow!(file, document, content)
     content,
     /\[\[\s*"\$INFRASTRUCTURE_RUN_ID"\s*=~\s*\^\[1-9\]\[0-9\]\*\$\s*\]\]/,
     "#{name} must validate a numeric infrastructure run ID"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$PARTIAL_ROLLBACK_RUN_ID"\s*=~\s*\^\(0\|\[1-9\]\[0-9\]\*\)\$\s*\]\]/,
+    "#{name} must validate an optional partial rollback run ID"
+  )
+  require_content(
+    content,
+    /\[\s*"\$CONFIRMATION"\s*=\s*"RECOVER OCI PARTIAL ROLLBACK"\s*\]/,
+    "#{name} must require the exact partial rollback recovery confirmation phrase"
+  )
+  require_content(
+    content,
+    %r{actions/runs/\$PARTIAL_ROLLBACK_RUN_ID/attempts/1},
+    "#{name} must inspect the immutable failed rollback attempt"
+  )
+  require_content(
+    content,
+    /recover-partial-rollback-stan\.sh/,
+    "#{name} must call the reviewed partial rollback recovery operator"
   )
   require_content(
     content,
