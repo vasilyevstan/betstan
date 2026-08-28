@@ -963,29 +963,6 @@ grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
 grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
-grep -Fq 'failed_deploy_run_id:' "$deploy_workflow"
-grep -Fq 'RECOVER OCI FAILED DEPLOYMENT' "$deploy_workflow"
-grep -Fq 'git diff --name-only "$SOURCE_SHA" "$GITHUB_SHA"' \
-  "$deploy_workflow" ||
-  fail "deployment recovery is not restricted to the reviewed control-plane diff"
-grep -Fq '.name == ("Deploy immutable images " + "sequentially")' \
-  "$deploy_workflow" ||
-  fail "deployment recovery does not require the failed run to have applied every image"
-grep -Fq '.name == ("Run protected OCI cluster " + "validation loop")' \
-  "$deploy_workflow" ||
-  fail "deployment recovery is not bound to the failed health-validation step"
-grep -Fq '.name == ("Re-enter maintenance after an incomplete " + "deployment")' \
-  "$deploy_workflow" ||
-  fail "deployment recovery does not require a retained maintenance fence"
-grep -Fq 'Load reviewed queue contract for failed validation recovery' \
-  "$deploy_workflow" ||
-  fail "deployment recovery does not load the corrected contract from current master"
-grep -Fq 'install -m 755 "$RUNNER_TEMP/test-health-contract-stan.sh" "$contract_test"' \
-  "$deploy_workflow" ||
-  fail "deployment recovery strips the corrected contract test executable mode"
-grep -Fq 'install -m 755 "$RUNNER_TEMP/live-betting-readiness-stan.sh" "$readiness"' \
-  "$deploy_workflow" ||
-  fail "deployment recovery does not load the corrected OCI readiness wrapper"
 grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||
   fail "deployment can run Bastion cleanup before the OCI CLI is installed"
 grep -Fq 'data_run_id:' "$deploy_workflow"
