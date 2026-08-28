@@ -692,6 +692,8 @@ capture_sse() {
   local status_file="$WORK_DIR/sse-status"
   local curl_status status effective_url content_type duration_seconds
 
+  : >"$body_file"
+  : >"$headers_file"
   if curl --location --silent --show-error --max-time "$SSE_TIMEOUT" \
       --header 'Accept: text/event-stream' \
       --output "$body_file" --dump-header "$headers_file" \
@@ -737,8 +739,12 @@ capture_sse() {
 
 verify_queue_state() {
   local baseline_file="$1"
-  local rabbit_pod current_queue_file
+  local rabbit_pod current_queue_file dynamic_queue_prefixes
   current_queue_file="$WORK_DIR/current-queues.tsv"
+  dynamic_queue_prefixes="${REQUIRED_LIVE_QUEUE_PREFIXES:-event_live_update.}"
+  if [[ "$SSE_REQUIRED" == "false" ]]; then
+    dynamic_queue_prefixes=""
+  fi
   rabbit_pod="$(kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$RABBIT_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [[ -n "$rabbit_pod" ]] || {
     printf 'ERROR: RabbitMQ pod not found\n' >&2
@@ -758,7 +764,7 @@ verify_queue_state() {
     "$MAX_POST_ROLLBACK_QUEUE_UNACK" \
     "$MAX_POST_ROLLBACK_QUEUE_READY_GROWTH" \
     "$MAX_POST_ROLLBACK_QUEUE_UNACK_GROWTH" \
-    "${REQUIRED_LIVE_QUEUE_PREFIXES:-event_live_update.}" \
+    "$dynamic_queue_prefixes" \
     "${MIN_DYNAMIC_LIVE_QUEUE_CONSUMERS:-1}" \
     >>"$OUTPUT_DIR/queue-verification.tsv"
 }
