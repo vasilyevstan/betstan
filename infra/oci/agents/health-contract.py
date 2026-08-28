@@ -51,6 +51,7 @@ EXPECTED_PLATFORM_DIGESTS = {
     "cert-manager/cert-manager-webhook": "sha256:d8b3961b51c8c7320633f8208dc46bf88aa13804d0f7cbe48a096b2c523cee42",
     "cert-manager/cert-manager-cainjector": "sha256:ccf6b919ec0500745a47a910118f834f9636d0aac1ff221245cd2557ed8c7c98",
 }
+EXPECTED_RABBITMQ_QUEUE_COUNT = 22
 
 
 class ContractFailure(Exception):
@@ -206,7 +207,11 @@ def validate(snapshot):
         require(service.get("type") == "ClusterIP", "public-data-service", "application/data service is public")
 
     rabbit = snapshot.get("rabbitmq", {})
-    require(rabbit.get("queue_count") == 17, "queue-count", "RabbitMQ does not expose the expected 17 queues")
+    require(
+        rabbit.get("queue_count") == EXPECTED_RABBITMQ_QUEUE_COUNT,
+        "queue-count",
+        f"RabbitMQ does not expose the expected {EXPECTED_RABBITMQ_QUEUE_COUNT} queues",
+    )
     require(rabbit.get("baseline_match") is True, "queue-baseline", "RabbitMQ queue set differs from baseline")
     require(rabbit.get("all_consumers") is True, "queue-consumers", "RabbitMQ queue consumer is missing")
     require(int(rabbit.get("backlog", -1)) == 0, "queue-backlog", "RabbitMQ has unexpected backlog")

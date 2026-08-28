@@ -122,7 +122,7 @@
     {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true}
   ],
   "rabbitmq": {
-    "queue_count": 17,
+    "queue_count": 22,
     "baseline_match": true,
     "all_consumers": true,
     "backlog": 0
