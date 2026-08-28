@@ -131,6 +131,7 @@ jobs:
           bash -n infra/oci/scripts/live-data-maintenance-stan.sh
           bash -n infra/oci/scripts/live-betting-control-stan.sh
           bash -n infra/oci/scripts/revalidate-live-activation-stan.sh
+          bash -n infra/oci/scripts/recover-partial-rollback-stan.sh
           bash -n infra/oci/scripts/live-betting-data-rollout-stan.sh
           bash -n infra/oci/scripts/shared-mongo-operation-lock-stan.sh
           bash -n infra/oci/scripts/verify-live-betting-data-evidence-stan.sh

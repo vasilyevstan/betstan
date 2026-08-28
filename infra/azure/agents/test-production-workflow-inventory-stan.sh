@@ -940,6 +940,24 @@ assert_fail "OCI rollback without immutable infrastructure provenance" \
 
 reset_fixtures
 write_complete_oci_set
+sed -i.bak \
+  's/partial_rollback_run_id:/disabled_partial_rollback_run_id:/' \
+  "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback without partial recovery input" \
+  "oci-production-rollback must expose exactly these workflow_dispatch inputs"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#recover-partial-rollback-stan.sh#disabled-partial-rollback-operator.sh#' \
+  "$tmp_dir/oci-production-rollback.yml"
+rm "$tmp_dir/oci-production-rollback.yml.bak"
+assert_fail "OCI rollback without partial recovery operator" \
+  "oci-production-rollback must call the reviewed partial rollback recovery operator"
+
+reset_fixtures
+write_complete_oci_set
 python3 - "$tmp_dir/oci-production-deploy.yml" <<'PY'
 from pathlib import Path
 path = Path(__import__("sys").argv[1])
