@@ -585,6 +585,9 @@ completed = text.index('oci_log "oci_deploy=PASS', rendered_removed)
 if not armed < prepare < apply_target < finalize < provenance < resume < disarmed < rendered_removed < completed:
     raise SystemExit("Mongo maintenance/deploy ordering differs")
 PY
+grep -Fq "printf 'registry_repository=%s\\n' \"\$application_registry_repository\"" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment provenance does not preserve the validated GHCR repository"
 grep -Fq 'sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
   fail "RabbitMQ health identity differs from the requested immutable index"
