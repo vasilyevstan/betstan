@@ -44,7 +44,10 @@ grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
   grep -Fq 'expect(publicBackoffice.status()).toBe(401)' "$acceptance_spec" ||
   fail "OCI live acceptance does not prove anonymous backoffice reads fail closed"
-for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
+  grep -Fq "pathname === '/api/event/stream'" "$acceptance_spec" &&
+    grep -Fq '!expectedStreamDisconnect' "$acceptance_spec" ||
+    fail "OCI live acceptance treats expected long-lived SSE disconnects as API failures"
+  for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
   grep -Fq "'$phase'" "$acceptance_spec" ||
     fail "OCI live acceptance omits runtime phase $phase"
 done
@@ -836,6 +839,33 @@ grep -Fq '"USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME"' "$activation_workflow" ||
 grep -Fq '"USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME"' \
   "$activation_workflow" ||
   fail "live activation account deletion lacks exact confirmation"
+if ! python3 - "$activation_workflow" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+cleanup = text.split(
+    "- name: Revoke and delete disposable validation account", 1
+)[1]
+
+for endpoint, expected_status in (
+    ('"$BASE_URL/api/backoffice/result"', "401"),
+    ('"$BASE_URL/api/auth/login"', "400"),
+):
+    tail = cleanup.split(endpoint, 1)[1]
+    match = re.search(
+        r'\[ "\$status" = "([0-9]{3})" \] \|\| cleanup_failed=1',
+        tail,
+    )
+    if match is None or match.group(1) != expected_status:
+        raise SystemExit(
+            f"{endpoint} must be followed by status {expected_status}"
+        )
+PY
+then
+  fail "live activation account cleanup status checks are not endpoint-bound"
+fi
 ! grep -Fq 'npm run role:set' "$activation_workflow" ||
   fail "live activation still invokes a development-only auth role command"
 grep -Fq '"src/**/*.ts"' "$OCI_DIR/build/tsconfig.production.json" ||
