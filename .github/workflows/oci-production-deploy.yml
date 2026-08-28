@@ -20,6 +20,11 @@ on:
         description: Successful first-attempt final oci-live-data-rollout run ID
         required: true
         type: string
+      failed_deploy_run_id:
+        description: Failed first-attempt deploy to reapply after a queue-contract-only validation failure, or 0
+        required: true
+        default: "0"
+        type: string
       baseline_recovery_run_id:
         description: Exact trusted recovery run bound through the data chain, or 0
         required: true
@@ -31,7 +36,7 @@ on:
         default: none
         type: string
       confirmation:
-        description: Type DEPLOY OCI EXACT SHA
+        description: Type DEPLOY OCI EXACT SHA or RECOVER OCI FAILED DEPLOYMENT
         required: true
         type: string
 
@@ -59,6 +64,7 @@ jobs:
       BUILD_RUN_ID: ${{ inputs.build_run_id }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       DATA_RUN_ID: ${{ inputs.data_run_id }}
+      FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
       BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
       BASELINE_RECOVERY_SOURCE_SHA: ${{ inputs.baseline_recovery_source_sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
@@ -123,11 +129,12 @@ jobs:
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
-          [ "$CONFIRMATION" = "DEPLOY OCI EXACT SHA" ]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$FAILED_DEPLOY_RUN_ID" == "0" ||
+             "$FAILED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ||
              "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
@@ -137,8 +144,111 @@ jobs:
           fi
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           git fetch --quiet origin master:refs/remotes/origin/master
-          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
-          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$GITHUB_SHA" = "$(git rev-parse origin/master)" ]
+          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+            [ "$CONFIRMATION" = "DEPLOY OCI EXACT SHA" ]
+            [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          else
+            [ "$CONFIRMATION" = "RECOVER OCI FAILED DEPLOYMENT" ]
+            git cat-file -e "${SOURCE_SHA}^{commit}"
+            git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+
+            mapfile -t recovery_changes < <(
+              git diff --name-only "$SOURCE_SHA" "$GITHUB_SHA"
+            )
+            [ "${#recovery_changes[@]}" = "5" ]
+            printf '%s\n' "${recovery_changes[@]}" | sort -u | cmp -s - <(
+              printf '%s\n' \
+                .github/workflows/oci-production-deploy.yml \
+                infra/oci/agents/health-contract.py \
+                infra/oci/agents/test-health-contract-stan.sh \
+                infra/oci/tests/test-contract.sh \
+                infra/oci/tests/fixtures/health/healthy.json |
+                sort
+            )
+
+            deploy_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-deploy.yml" \
+                --jq '.id'
+            )"
+            read -r failed_workflow_id failed_path failed_event \
+              failed_head_sha failed_head_branch failed_repository failed_status \
+              failed_conclusion failed_attempt failed_title <<<"$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/attempts/1" \
+                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
+              )"
+            [ "$failed_workflow_id" = "$deploy_workflow_id" ]
+            [ "$failed_path" = ".github/workflows/oci-production-deploy.yml" ]
+            [ "$failed_event" = "workflow_dispatch" ]
+            [ "$failed_head_sha" = "$SOURCE_SHA" ]
+            [ "$failed_head_branch" = "master" ]
+            [ "$failed_repository" = "$REPOSITORY" ]
+            [ "$failed_status" = "completed" ]
+            [ "$failed_conclusion" = "failure" ]
+            [ "$failed_attempt" = "1" ]
+            [ "$failed_title" = "oci-deploy $SOURCE_SHA" ]
+
+            failed_jobs="$(
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/jobs?filter=latest&per_page=100"
+            )"
+            jq -e '
+              [.jobs[] | select(.name == "deploy")] as $deploy_jobs |
+              ($deploy_jobs | length) == 1 and
+              $deploy_jobs[0].conclusion == "failure" and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Deploy immutable images " + "sequentially") and
+                  .conclusion == "success"
+                )
+              ] | length) == 1 and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Bind schema evidence to deployment " + "provenance") and
+                  .conclusion == "success"
+                )
+              ] | length) == 1 and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Run protected OCI cluster " + "validation loop") and
+                  .conclusion == "failure"
+                )
+              ] | length) == 1 and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Release transferred lock after protected " + "validation") and
+                  .conclusion == "skipped"
+                )
+              ] | length) == 1 and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Release live data maintenance " + "fence") and
+                  .conclusion == "skipped"
+                )
+              ] | length) == 1 and
+              ([
+                $deploy_jobs[0].steps[] |
+                select(
+                  .name == ("Re-enter maintenance after an incomplete " + "deployment") and
+                  .conclusion == "success"
+                )
+              ] | length) == 1
+            ' <<<"$failed_jobs" >/dev/null
+
+            diagnostics_name="oci-deploy-diagnostics-${FAILED_DEPLOY_RUN_ID}-1"
+            diagnostics_count="$(
+              gh api \
+                "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(.name == \"$diagnostics_name\" and .expired == false)] | length"
+            )"
+            [ "$diagnostics_count" = "1" ]
+          fi
 
           build_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id')"
           read -r workflow_id workflow_path event head_sha head_branch repository status conclusion attempt <<<"$(
@@ -237,6 +347,19 @@ jobs:
             artifacts/oci-baseline \
             artifacts/oci-deploy
           chmod 700 "$HOME" "$HOME/.kube"
+
+      - name: Load reviewed queue contract for failed validation recovery
+        if: inputs.failed_deploy_run_id != '0'
+        run: |
+          set -euo pipefail
+          for file in \
+            infra/oci/agents/health-contract.py \
+            infra/oci/agents/test-health-contract-stan.sh \
+            infra/oci/tests/fixtures/health/healthy.json; do
+            git show "${GITHUB_SHA}:${file}" > "${file}.recovery"
+            mv "${file}.recovery" "$file"
+          done
+          ./infra/oci/agents/test-health-contract-stan.sh
 
       - name: Download exact OCI image provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
