@@ -519,6 +519,16 @@ create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-embedded" legacy-embedded
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-source-mismatch" legacy-source-mismatch
 create_baseline_fixture "$FIXTURE_DIR/baseline-partial-infrastructure" partial-infrastructure
 create_recovery_baseline_fixture "$FIXTURE_DIR/baseline-recovery"
+create_baseline_fixture "$FIXTURE_DIR/baseline-empty-deploy-repository"
+sed -i.bak \
+  's|^registry_repository=.*|registry_repository=|' \
+  "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt"
+rm -f "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt.bak"
+create_baseline_fixture "$FIXTURE_DIR/baseline-wrong-deploy-repository"
+sed -i.bak \
+  's|^registry_repository=.*|registry_repository=ghcr.io/example/other-images|' \
+  "$FIXTURE_DIR/baseline-wrong-deploy-repository/trusted-deploy-provenance.txt"
+rm -f "$FIXTURE_DIR/baseline-wrong-deploy-repository/trusted-deploy-provenance.txt.bak"
 
 cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
@@ -1720,6 +1730,21 @@ if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK
   cat "$WORK_DIR/capture-repeat-safe-1.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on first run'
 fi
+
+legacy_repository_capture_dir="$WORK_DIR/capture-empty-deploy-repository"
+if ! run_capture "$legacy_repository_capture_dir" \
+    STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-empty-deploy-repository" \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-empty-deploy-repository.out" 2>&1; then
+  cat "$WORK_DIR/capture-empty-deploy-repository.out" >&2
+  fail 'OCI baseline capture rejected exact legacy provenance with an empty repository value'
+fi
+assert_contains "$legacy_repository_capture_dir/trusted-deploy-provenance.txt" \
+  'registry_repository='
+run_capture_expect_failure capture-wrong-deploy-repository \
+  STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-wrong-deploy-repository" \
+  STUB_SHORT_SSE_MODE=quiet-timeout
+assert_contains "$WORK_DIR/capture-wrong-deploy-repository.out" \
+  'unable to find trusted OCI deploy provenance for the live digest set'
 
 manifest_capture_dir="$WORK_DIR/capture-manifest-image-id"
 if ! run_capture "$manifest_capture_dir" \

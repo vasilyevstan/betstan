@@ -633,6 +633,13 @@ validate_trusted_ghcr_deploy_provenance() {
   local image_file="$2"
   local source_sha="$3"
   local deploy_run_id="$4"
+  local repository
+  repository="$(env_value "$provenance_file" registry_repository)"
+  # A historical writer emitted this key empty; the exact GHCR images remain authoritative.
+  if [[ -z "$repository" ]] &&
+     ! grep -Fxq 'registry_repository=' "$provenance_file"; then
+    return 1
+  fi
   [[ "$(env_value "$provenance_file" source_sha)" == "$source_sha" &&
      "$(env_value "$provenance_file" deployment_workflow)" == "oci-production-deploy" &&
      "$(env_value "$provenance_file" deployment_run_id)" == "$deploy_run_id" &&
@@ -640,7 +647,8 @@ validate_trusted_ghcr_deploy_provenance() {
      "$(env_value "$provenance_file" image_provenance_sha256)" == "$(sha256_file "$image_file")" &&
      "$(env_value "$provenance_file" registry_provider)" == "ghcr" &&
      "$(env_value "$provenance_file" registry_host)" == "ghcr.io" &&
-     "$(env_value "$provenance_file" registry_repository)" == "ghcr.io/vasilyevstan/betstan-images" &&
+     ( -z "$repository" ||
+       "$repository" == "ghcr.io/vasilyevstan/betstan-images" ) &&
      "$(env_value "$provenance_file" registry_public_anonymous)" == "true" ]]
 }
 

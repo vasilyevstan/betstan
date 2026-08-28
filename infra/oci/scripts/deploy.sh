@@ -403,7 +403,7 @@ public_data_services="$(
   printf 'deployment_run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT:-1}"
   printf 'registry_provider=%s\n' "$APPLICATION_REGISTRY_PROVIDER"
   printf 'registry_host=%s\n' "$APPLICATION_REGISTRY_HOST"
-  printf 'registry_repository=%s\n' "$(application_registry_repository)"
+  printf 'registry_repository=%s\n' "$application_registry_repository"
   printf 'registry_public_anonymous=%s\n' "true"
 } > "$OUTPUT_DIR/provenance.txt"
 
