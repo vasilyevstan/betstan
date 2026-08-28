@@ -588,6 +588,12 @@ PY
 grep -Fq "printf 'registry_repository=%s\\n' \"\$application_registry_repository\"" \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment provenance does not preserve the validated GHCR repository"
+grep -Fq "printf 'source_ref=%s\\n' \"\${GITHUB_REF:-refs/heads/master}\"" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment provenance does not bind activation to master"
+grep -Fq "printf 'run_attempt=%s\\n' \"\${GITHUB_RUN_ATTEMPT:-1}\"" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment provenance does not expose the canonical activation attempt"
 grep -Fq 'sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
   fail "RabbitMQ health identity differs from the requested immutable index"

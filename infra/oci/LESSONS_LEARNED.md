@@ -151,6 +151,10 @@ conversation summaries are not authority.
   Bind activation to the exact first-attempt build, infrastructure, and deploy
   runs, the infrastructure artifact digest, and the selected runtime
   fingerprint; revalidate current `master` immediately before each mutation.
+- Deployment provenance producers and activation consumers must share the same
+  canonical identity fields. Emit `source_sha`, `source_ref`, and `run_attempt`
+  in the deployment artifact, retain namespaced fields for existing consumers,
+  and test the produced schema through activation readiness.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.
