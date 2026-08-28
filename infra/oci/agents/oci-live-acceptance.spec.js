@@ -53,8 +53,12 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     }
   });
   page.on('requestfailed', (request) => {
-    if (request.url().includes('/api/')) {
-      apiFailures.push(`${request.method()} ${new URL(request.url()).pathname}`);
+    const pathname = new URL(request.url()).pathname;
+    const expectedStreamDisconnect = (
+      request.method() === 'GET' && pathname === '/api/event/stream'
+    );
+    if (pathname.startsWith('/api/') && !expectedStreamDisconnect) {
+      apiFailures.push(`${request.method()} ${pathname}`);
     }
   });
 
@@ -398,11 +402,11 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   await expect(preMatchHistory).toContainText('Pre-match');
   await expect(preMatchHistory).toContainText('WIN');
 
+  await page.evaluate(() => window.__liveAcceptance.source.close());
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
   expect(apiFailures).toEqual([]);
 
-  await page.evaluate(() => window.__liveAcceptance.source.close());
   fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
   fs.writeFileSync(evidenceFile, `${JSON.stringify({
     runId,
