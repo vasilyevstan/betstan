@@ -759,6 +759,9 @@ grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
 grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
   "$azure_deploy_workflow"
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"
+grep -Fq 'export NAMESPACE="${NAMESPACE:-${OCI_K8S_NAMESPACE:-betstan-oci}}"' \
+  "$oci_live_readiness" ||
+  fail "OCI live readiness defaults to a namespace other than betstan-oci"
 grep -Fq 'export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data' \
   "$oci_live_readiness"
 grep -Fq 'export SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP=betstan-oci-migration-journal' \
@@ -980,6 +983,9 @@ grep -Fq 'Load reviewed queue contract for failed validation recovery' \
 grep -Fq 'install -m 755 "$RUNNER_TEMP/test-health-contract-stan.sh" "$contract_test"' \
   "$deploy_workflow" ||
   fail "deployment recovery strips the corrected contract test executable mode"
+grep -Fq 'install -m 755 "$RUNNER_TEMP/live-betting-readiness-stan.sh" "$readiness"' \
+  "$deploy_workflow" ||
+  fail "deployment recovery does not load the corrected OCI readiness wrapper"
 grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||
   fail "deployment can run Bastion cleanup before the OCI CLI is installed"
 grep -Fq 'data_run_id:' "$deploy_workflow"
