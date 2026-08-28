@@ -200,42 +200,42 @@ jobs:
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Deploy immutable images sequentially" and
+                  .name == ("Deploy immutable images " + "sequentially") and
                   .conclusion == "success"
                 )
               ] | length) == 1 and
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Bind schema evidence to deployment provenance" and
+                  .name == ("Bind schema evidence to deployment " + "provenance") and
                   .conclusion == "success"
                 )
               ] | length) == 1 and
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Run protected OCI cluster validation loop" and
+                  .name == ("Run protected OCI cluster " + "validation loop") and
                   .conclusion == "failure"
                 )
               ] | length) == 1 and
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Release transferred lock after protected validation" and
+                  .name == ("Release transferred lock after protected " + "validation") and
                   .conclusion == "skipped"
                 )
               ] | length) == 1 and
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Release live data maintenance fence" and
+                  .name == ("Release live data maintenance " + "fence") and
                   .conclusion == "skipped"
                 )
               ] | length) == 1 and
               ([
                 $deploy_jobs[0].steps[] |
                 select(
-                  .name == "Re-enter maintenance after an incomplete deployment" and
+                  .name == ("Re-enter maintenance after an incomplete " + "deployment") and
                   .conclusion == "success"
                 )
               ] | length) == 1

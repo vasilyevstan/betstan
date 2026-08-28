@@ -965,11 +965,13 @@ grep -Fq 'RECOVER OCI FAILED DEPLOYMENT' "$deploy_workflow"
 grep -Fq 'git diff --name-only "$SOURCE_SHA" "$GITHUB_SHA"' \
   "$deploy_workflow" ||
   fail "deployment recovery is not restricted to the reviewed control-plane diff"
-grep -Fq 'Deploy immutable images sequentially" and' "$deploy_workflow" ||
+grep -Fq '.name == ("Deploy immutable images " + "sequentially")' \
+  "$deploy_workflow" ||
   fail "deployment recovery does not require the failed run to have applied every image"
-grep -Fq 'Run protected OCI cluster validation loop" and' "$deploy_workflow" ||
+grep -Fq '.name == ("Run protected OCI cluster " + "validation loop")' \
+  "$deploy_workflow" ||
   fail "deployment recovery is not bound to the failed health-validation step"
-grep -Fq 'Re-enter maintenance after an incomplete deployment" and' \
+grep -Fq '.name == ("Re-enter maintenance after an incomplete " + "deployment")' \
   "$deploy_workflow" ||
   fail "deployment recovery does not require a retained maintenance fence"
 grep -Fq 'Load reviewed queue contract for failed validation recovery' \
