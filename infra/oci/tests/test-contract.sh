@@ -744,6 +744,7 @@ infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 data_workflow="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
+activation_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
@@ -806,6 +807,17 @@ grep -Fq 'NF != 5 { exit 1 }' "$disable_workflow" ||
   fail "live disable does not accept five-column GHCR image provenance"
 grep -Fq '$5 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }' "$disable_workflow" ||
   fail "live disable does not validate the GHCR platform digest"
+for workflow in "$activation_workflow" "$disable_workflow"; do
+  grep -Fq 'OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}' \
+    "$workflow" ||
+    fail "k3s live control lacks its OCI compartment: $workflow"
+  grep -Fq "steps.k3s_access.outcome == 'success'" "$workflow" ||
+    fail "live-control fail-safe mutation can run without k3s access: $workflow"
+  grep -Fq "steps.oci_cli.outcome == 'success'" "$workflow" ||
+    fail "live-control Bastion cleanup can run before OCI CLI install: $workflow"
+done
+grep -Fq "steps.oci_cli.outcome == 'success'" "$data_workflow" ||
+  fail "live-data Bastion cleanup can run before OCI CLI install"
 
 grep -Fq 'schedule:' "$capacity_workflow"
 grep -Fq 'cron: "*/5 * * * *"' "$capacity_workflow"
