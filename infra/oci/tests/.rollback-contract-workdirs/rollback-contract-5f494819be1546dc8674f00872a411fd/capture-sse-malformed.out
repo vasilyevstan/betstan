@@ -1,2 +1,0 @@
-SSE endpoint returned malformed event-stream frames for https://betstan.xyz/api/event/stream
-ERROR: SSE connectivity contract failed for https://betstan.xyz/api/event/stream

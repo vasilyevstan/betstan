@@ -1,2 +1,0 @@
-live image inventory is not an immutable public GHCR generation
-ERROR: non-GHCR live images require explicit completed cache-recovery authority before baseline capture

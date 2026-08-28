@@ -1,1 +1,0 @@
-ERROR: rollback readiness entered migration-transition at phase backing-up; do not roll application images. Run the reviewed topology rollback operator instead: infra/oci/scripts/reviewed-topology-rollback-stan.sh

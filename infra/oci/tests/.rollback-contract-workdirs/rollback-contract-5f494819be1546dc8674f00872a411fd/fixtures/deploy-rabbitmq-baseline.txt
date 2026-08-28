@@ -1,1 +1,0 @@
-fixture-rabbitmq-baseline

@@ -1,6 +1,0 @@
-post-apply	bet_place_bet	0	0	0	0	0	0	1	1	1	1
-post-apply	event_live_projection	0	0	0	0	0	0	1	1	1	1
-post-apply	event_new_event	0	0	0	0	0	0	1	1	1	1
-post-apply	gamemaster_new_event	0	0	0	0	0	0	1	1	1	1
-post-apply	moderation_live_event_update	0	0	0	0	0	0	1	1	1	1
-post-apply	resulting_live_event_update	0	0	0	0	0	0	1	1	1	1

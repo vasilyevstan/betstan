@@ -1,9 +1,0 @@
-auth
-bet
-backoffice
-client
-event
-moderation
-resulting
-slip
-gamemaster

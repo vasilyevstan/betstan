@@ -1,7 +1,0 @@
-canonical	/	200	https://betstan.xyz/	text/html	html:3747a5ed4bd603c954fa188111041b64da235ad2fd78535103f2cb64ab11d0da
-canonical	/api/auth/currentuser	200	https://betstan.xyz/api/auth/currentuser	application/json	object.currentUser:cbc734d4ebd1599431095023df02edc731960ea59872520aec73ec072b6cf6a9
-canonical	/api/event	200	https://betstan.xyz/api/event	application/json	legacy-prematch:events=1:1x2=3:cs=3:d6d7218a2cb6b7ebe6296b37b9a1a63db7caeaff304ec98bdb6fe3907abd018d
-canonical	/api/slip	200	https://betstan.xyz/api/slip	application/json	object:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
-canonical	/api/bet	200	https://betstan.xyz/api/bet	application/json	object:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
-canonical	/api/bet/stats	200	https://betstan.xyz/api/bet/stats	application/json	array:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
-canonical	/api/backoffice	200	https://betstan.xyz/api/backoffice	application/json	array:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945

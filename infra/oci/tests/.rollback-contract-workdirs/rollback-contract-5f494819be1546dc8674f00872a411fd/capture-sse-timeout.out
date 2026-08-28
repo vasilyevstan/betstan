@@ -1,2 +1,0 @@
-expected SSE HTTP 200 for https://betstan.xyz/api/event/stream, got 000
-ERROR: SSE connectivity contract failed for https://betstan.xyz/api/event/stream
