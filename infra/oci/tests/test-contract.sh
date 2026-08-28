@@ -585,6 +585,9 @@ completed = text.index('oci_log "oci_deploy=PASS', rendered_removed)
 if not armed < prepare < apply_target < finalize < provenance < resume < disarmed < rendered_removed < completed:
     raise SystemExit("Mongo maintenance/deploy ordering differs")
 PY
+grep -Fq "printf 'registry_repository=%s\\n' \"\$application_registry_repository\"" \
+  "$OCI_DIR/scripts/deploy.sh" ||
+  fail "OCI deployment provenance does not preserve the validated GHCR repository"
 grep -Fq 'sha256:6033d0c2f4e9eb49dda9623067a96d317bc7b550513bd18532fbd3cd9a941c1b' \
   "$OCI_DIR/agents/health-check-stan.sh" ||
   fail "RabbitMQ health identity differs from the requested immutable index"
@@ -744,6 +747,7 @@ infra_workflow="$ROOT_DIR/.github/workflows/oci-infrastructure.yml"
 data_workflow="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 deploy_workflow="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
+activation_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
@@ -759,7 +763,12 @@ grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
 grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
   "$azure_deploy_workflow"
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"
+grep -Fq 'export NAMESPACE="${NAMESPACE:-${OCI_K8S_NAMESPACE:-betstan-oci}}"' \
+  "$oci_live_readiness" ||
+  fail "OCI live readiness defaults to a namespace other than betstan-oci"
 grep -Fq 'export EXPECTED_SHARED_MONGO_PVC=gaming-auth-mongo-data' \
+  "$oci_live_readiness"
+grep -Fq 'export SHARED_MONGO_MIGRATION_EVIDENCE_CONFIGMAP=betstan-oci-migration-journal' \
   "$oci_live_readiness"
 if grep -Eiq 'at least (eight|8) Mongo PVC' \
   "$deployment_safety_agent" "$azure_deploy_workflow" "$deploy_workflow"; then
@@ -801,6 +810,17 @@ grep -Fq 'NF != 5 { exit 1 }' "$disable_workflow" ||
   fail "live disable does not accept five-column GHCR image provenance"
 grep -Fq '$5 !~ /^sha256:[0-9a-f]{64}$/ { exit 1 }' "$disable_workflow" ||
   fail "live disable does not validate the GHCR platform digest"
+for workflow in "$activation_workflow" "$disable_workflow"; do
+  grep -Fq 'OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}' \
+    "$workflow" ||
+    fail "k3s live control lacks its OCI compartment: $workflow"
+  grep -Fq "steps.k3s_access.outcome == 'success'" "$workflow" ||
+    fail "live-control fail-safe mutation can run without k3s access: $workflow"
+  grep -Fq "steps.oci_cli.outcome == 'success'" "$workflow" ||
+    fail "live-control Bastion cleanup can run before OCI CLI install: $workflow"
+done
+grep -Fq "steps.oci_cli.outcome == 'success'" "$data_workflow" ||
+  fail "live-data Bastion cleanup can run before OCI CLI install"
 
 grep -Fq 'schedule:' "$capacity_workflow"
 grep -Fq 'cron: "*/5 * * * *"' "$capacity_workflow"
@@ -958,6 +978,8 @@ grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
 grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
+grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||
+  fail "deployment can run Bastion cleanup before the OCI CLI is installed"
 grep -Fq 'data_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_run_id:' "$deploy_workflow"
 grep -Fq 'baseline_recovery_source_sha:' "$deploy_workflow"

@@ -24,6 +24,16 @@ on:
         description: Successful first-attempt oci-infrastructure run ID for the active runtime
         required: true
         type: string
+      partial_rollback_run_id:
+        description: Failed first-attempt rollback run to abort and restore, or 0 for a new rollback
+        required: true
+        default: '0'
+        type: string
+      pre_recovery_build_run_id:
+        description: Successful first-attempt OCI build matching the failed rollback pre-run state, or 0
+        required: true
+        default: '0'
+        type: string
       allow_legacy_admin_auth:
         description: Explicitly allow rollback to a release without persisted Backoffice admin authorization
         required: true
@@ -35,7 +45,7 @@ on:
         type: string
         default: not-requested
       confirmation:
-        description: Type ROLLBACK OCI EXACT DIGEST
+        description: Type ROLLBACK OCI EXACT DIGEST or RECOVER OCI PARTIAL ROLLBACK
         required: true
         type: string
 
@@ -60,6 +70,8 @@ jobs:
       BASELINE_SOURCE_RUN_ATTEMPT: ${{ inputs.baseline_source_run_attempt }}
       BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}
+      PRE_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}
       ALLOW_LEGACY_ADMIN_AUTH: ${{ inputs.allow_legacy_admin_auth }}
       LEGACY_ADMIN_AUTH_REASON: ${{ inputs.legacy_admin_auth_reason }}
       CONFIRMATION: ${{ inputs.confirmation }}
@@ -114,13 +126,23 @@ jobs:
           fetch-depth: 0
 
       - name: Validate rollback request and trusted infrastructure run
+        id: request
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
-          [ "$CONFIRMATION" = "ROLLBACK OCI EXACT DIGEST" ]
+          [[ "$PARTIAL_ROLLBACK_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "$PRE_RECOVERY_BUILD_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
+          if [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ]; then
+            [ "$CONFIRMATION" = "ROLLBACK OCI EXACT DIGEST" ]
+            [ "$PRE_RECOVERY_BUILD_RUN_ID" = "0" ]
+          else
+            [ "$CONFIRMATION" = "RECOVER OCI PARTIAL ROLLBACK" ]
+            [ "$PARTIAL_ROLLBACK_RUN_ID" != "$GITHUB_RUN_ID" ]
+            [ "$PRE_RECOVERY_BUILD_RUN_ID" != "0" ]
+          fi
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BASELINE_SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [ "$BASELINE_SOURCE_RUN_ATTEMPT" = "1" ]
@@ -136,6 +158,77 @@ jobs:
           [ "$(git rev-parse "${TARGET_SHA}^{commit}")" = "$TARGET_SHA" ]
           git merge-base --is-ancestor "$TARGET_SHA" "$current_master"
 
+          if [ "$PARTIAL_ROLLBACK_RUN_ID" != "0" ]; then
+            rollback_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-rollback.yml" --jq '.id'
+            )"
+            recovery_run="$(
+              gh api "repos/$REPOSITORY/actions/runs/$PARTIAL_ROLLBACK_RUN_ID/attempts/1"
+            )"
+            recovery_head_sha="$(
+              jq -er \
+                --argjson workflow_id "$rollback_workflow_id" \
+                --arg repo "$REPOSITORY" \
+                --arg title "oci-rollback $TARGET_SHA" '
+                select(
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-rollback.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "failure" and
+                  .run_attempt == 1 and
+                  .display_title == $title
+                ) |
+                .head_sha |
+                select(test("^[0-9a-f]{40}$"))
+              ' <<<"$recovery_run"
+            )"
+            git cat-file -e "${recovery_head_sha}^{commit}"
+            git merge-base --is-ancestor "$recovery_head_sha" "$current_master"
+            recovery_artifact_name="oci-production-rollback-${PARTIAL_ROLLBACK_RUN_ID}-1"
+            gh api "repos/$REPOSITORY/actions/runs/$PARTIAL_ROLLBACK_RUN_ID/artifacts" |
+              jq -e --arg name "$recovery_artifact_name" '
+                [.artifacts[] | select(.name == $name)] as $matches |
+                ($matches | length) == 1 and
+                $matches[0].expired == false
+              ' >/dev/null
+
+            build_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id'
+            )"
+            read -r build_observed_workflow build_path build_event \
+              pre_recovery_source_sha build_head_branch build_repository \
+              build_status build_conclusion build_attempt <<<"$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$PRE_RECOVERY_BUILD_RUN_ID/attempts/1" \
+                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+              )"
+            [ "$build_observed_workflow" = "$build_workflow_id" ]
+            [ "$build_path" = ".github/workflows/oci-production-build.yml" ]
+            [ "$build_event" = "workflow_run" ]
+            [[ "$pre_recovery_source_sha" =~ ^[0-9a-f]{40}$ ]]
+            [ "$build_head_branch" = "master" ]
+            [ "$build_repository" = "$REPOSITORY" ]
+            [ "$build_status" = "completed" ]
+            [ "$build_conclusion" = "success" ]
+            [ "$build_attempt" = "1" ]
+            git cat-file -e "${pre_recovery_source_sha}^{commit}"
+            git merge-base --is-ancestor "$pre_recovery_source_sha" "$current_master"
+            pre_recovery_artifact_name="oci-image-provenance-${pre_recovery_source_sha}-${PRE_RECOVERY_BUILD_RUN_ID}-1"
+            gh api "repos/$REPOSITORY/actions/runs/$PRE_RECOVERY_BUILD_RUN_ID/artifacts" |
+              jq -e --arg name "$pre_recovery_artifact_name" '
+                [.artifacts[] | select(.name == $name)] as $matches |
+                ($matches | length) == 1 and
+                $matches[0].expired == false
+              ' >/dev/null
+            printf 'pre_recovery_source_sha=%s\n' \
+              "$pre_recovery_source_sha" >> "$GITHUB_OUTPUT"
+            printf 'pre_recovery_artifact_name=%s\n' \
+              "$pre_recovery_artifact_name" >> "$GITHUB_OUTPUT"
+          fi
+
           infra_workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/oci-infrastructure.yml" --jq '.id')"
           read -r workflow_id workflow_path event head_branch repository status conclusion attempt <<<"$(
             gh api "repos/$REPOSITORY/actions/runs/$INFRASTRUCTURE_RUN_ID/attempts/1" \
@@ -147,11 +240,15 @@ jobs:
           [ "$head_branch" = "master" ]
           [ "$repository" = "$REPOSITORY" ]
           [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
-          mkdir -p "$HOME/.kube" artifacts/infrastructure artifacts/oci-rollback
+          mkdir -p \
+            "$HOME/.kube" \
+            artifacts/infrastructure \
+            artifacts/oci-rollback \
+            artifacts/pre-recovery-build
           chmod 700 "$HOME" "$HOME/.kube"
 
       - name: Record explicit legacy admin-auth rollback capability
-        if: inputs.allow_legacy_admin_auth
+        if: inputs.allow_legacy_admin_auth && inputs.partial_rollback_run_id == '0'
         run: |
           set -euo pipefail
           [ "$LEGACY_ADMIN_AUTH_REASON" != "not-requested" ]
@@ -181,6 +278,26 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.infrastructure_run_id }}
 
+      - name: Download immutable failed rollback state
+        if: inputs.partial_rollback_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-production-rollback-${{ inputs.partial_rollback_run_id }}-1
+          path: artifacts/partial-rollback-source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.partial_rollback_run_id }}
+
+      - name: Download exact pre-recovery OCI image provenance
+        if: inputs.partial_rollback_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.request.outputs.pre_recovery_artifact_name }}
+          path: artifacts/pre-recovery-build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.pre_recovery_build_run_id }}
+
       - name: Verify current OCI infrastructure provenance
         id: infra
         run: |
@@ -192,11 +309,34 @@ jobs:
           [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
           [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
           [ "$infrastructure_finalized" = "true" ]
-          [ "$application_registry_provider" = "ghcr" ]
-          [ "$application_registry_host" = "ghcr.io" ]
-          [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
-          [ "$application_registry_public_anonymous" = "true" ]
-          [ "$ocir_application_repository_absent" = "true" ]
+          registry_evidence_count=0
+          for value in \
+            "${application_registry_provider:-}" \
+            "${application_registry_host:-}" \
+            "${application_registry_repository:-}" \
+            "${application_registry_public_anonymous:-}" \
+            "${ocir_application_repository_absent:-}"; do
+            if [ -n "$value" ]; then
+              registry_evidence_count=$((registry_evidence_count + 1))
+            fi
+          done
+          case "$registry_evidence_count" in
+            0)
+              [ "$source_sha" = "$TARGET_SHA" ]
+              echo "legacy infrastructure registry authorization is deferred to checksum-bound rollback evidence"
+              ;;
+            5)
+              [ "$application_registry_provider" = "ghcr" ]
+              [ "$application_registry_host" = "ghcr.io" ]
+              [ "$application_registry_repository" = "ghcr.io/vasilyevstan/betstan-images" ]
+              [ "$application_registry_public_anonymous" = "true" ]
+              [ "$ocir_application_repository_absent" = "true" ]
+              ;;
+            *)
+              echo "infrastructure registry evidence is incomplete" >&2
+              exit 1
+              ;;
+          esac
           [ "$public_host" = "$OCI_CANONICAL_HOST" ]
           [ "$canonical_host" = "$OCI_CANONICAL_HOST" ]
           [ "$redirect_host" = "$OCI_REDIRECT_HOST" ]
@@ -265,7 +405,7 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_ENDPOINT_NSG_OCID: ${{ steps.infra.outputs.endpoint_nsg_ocid }}
-          RULE_STATE_FILE: artifacts/oci-rollback/runner-rule.env
+          RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env
         run: |
           set -euo pipefail
           ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
@@ -295,7 +435,7 @@ jobs:
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
           OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
           INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
-          SESSION_STATE_FILE: artifacts/oci-rollback/k3s-access.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: |
           set -euo pipefail
@@ -306,6 +446,7 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Roll back exact immutable OCI images
+        if: inputs.partial_rollback_run_id == '0'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -318,6 +459,22 @@ jobs:
           OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
           ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env
         run: ./infra/oci/scripts/rollback-application-stan.sh
+
+      - name: Restore exact pre-run state from failed partial rollback
+        if: inputs.partial_rollback_run_id != '0'
+        env:
+          PARTIAL_ROLLBACK_SOURCE_DIR: artifacts/partial-rollback-source
+          PARTIAL_RECOVERY_BUILD_DIR: artifacts/pre-recovery-build
+          PARTIAL_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}
+          PARTIAL_RECOVERY_SOURCE_SHA: ${{ steps.request.outputs.pre_recovery_source_sha }}
+          OUTPUT_DIR: artifacts/oci-rollback
+          OCI_PUBLIC_URL: ${{ steps.infra.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.infra.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.infra.outputs.diagnostic_url }}
+          OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
+          OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
+          OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+        run: ./infra/oci/scripts/recover-partial-rollback-stan.sh
 
       - name: Upload rollback diagnostics and provenance
         if: always()
@@ -336,7 +493,7 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          RULE_STATE_FILE: artifacts/oci-rollback/runner-rule.env
+          RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env
         run: |
           if [ -f "$RULE_STATE_FILE" ]; then
             ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
@@ -350,10 +507,13 @@ jobs:
           OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          SESSION_STATE_FILE: artifacts/oci-rollback/k3s-access.env
+          SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env
           WORK_DIR: ${{ runner.temp }}/betstan-k3s-access
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Remove isolated OCI client state
         if: always()
-        run: rm -rf "$HOME"
+        run: >-
+          rm -rf "$HOME"
+          "$RUNNER_TEMP/betstan-rollback-control"
+          "$RUNNER_TEMP/betstan-k3s-access"

@@ -40,7 +40,7 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
-  "/api/backoffice|array"
+  "/api/backoffice|backoffice"
 )
 
 prepare_private_dir() {
@@ -177,6 +177,46 @@ valid = (
 )
 if not valid:
     raise SystemExit("recovery run is not exact first-attempt GHCR cache recovery metadata")
+PY
+}
+
+validate_partial_recovery_run() {
+  local run_json_file="$1"
+  local workflow_id="$2"
+  local recovery_target_sha="$3"
+  python3 - \
+    "$run_json_file" \
+    "$workflow_id" \
+    "$recovery_target_sha" \
+    "$REPO" \
+    "$BASELINE_RETENTION_DAYS" <<'PY'
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+
+run = json.load(open(sys.argv[1], encoding="utf-8"))
+workflow_id, target_sha, repository, retention_days = sys.argv[2:6]
+created_at = run.get("created_at") or run.get("run_started_at") or run.get("updated_at")
+if not created_at:
+    raise SystemExit("partial recovery run metadata is missing a timestamp")
+created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+if datetime.now(timezone.utc) - created > timedelta(days=int(retention_days)):
+    raise SystemExit("partial recovery run is outside the rollback retention window")
+valid = (
+    str(run.get("workflow_id", "")) == workflow_id
+    and run.get("path") == ".github/workflows/oci-production-rollback.yml"
+    and run.get("event") == "workflow_dispatch"
+    and run.get("head_branch") == "master"
+    and ((run.get("head_repository") or {}).get("full_name") == repository)
+    and run.get("status") == "completed"
+    and run.get("conclusion") == "success"
+    and run.get("run_attempt") == 1
+    and run.get("display_title") == f"oci-rollback {target_sha}"
+)
+if not valid:
+    raise SystemExit(
+        "partial recovery run is not exact first-attempt protected recovery metadata"
+    )
 PY
 }
 
@@ -536,7 +576,8 @@ capture_http() {
     return 1
   }
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-  [[ "$status" == "200" ]] || {
+  [[ "$status" == "200" ||
+     ("$expected_kind" == "backoffice" && "$status" == "401") ]] || {
     printf 'ERROR: HTTP %s for %s%s\n' "$status" "$base_url" "$path" >&2
     return 1
   }
@@ -610,6 +651,41 @@ PY
         return 1
       }
       ;;
+    backoffice)
+      [[ "$content_type" == application/json* ]] || {
+        printf 'ERROR: expected JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      shape="$(python3 - "$body_file" "$status" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+status = sys.argv[2]
+if status == '200':
+    if not isinstance(payload, list):
+        raise SystemExit(1)
+    print('array')
+else:
+    errors = payload.get('errors') if isinstance(payload, dict) else None
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or any(
+            not isinstance(error, dict)
+            or not isinstance(error.get('message'), str)
+            or not error['message']
+            for error in errors
+        )
+    ):
+        raise SystemExit(1)
+    print('unauthorized.errors')
+PY
+)" || {
+        printf 'ERROR: invalid Backoffice JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      ;;
     object)
       [[ "$content_type" == application/json* ]] || {
         printf 'ERROR: expected JSON for %s%s\n' "$base_url" "$path" >&2
@@ -656,6 +732,8 @@ capture_sse() {
   local status_file="$WORK_DIR/sse-status"
   local curl_status status effective_url content_type duration_seconds
 
+  : >"$body_file"
+  : >"$headers_file"
   if curl --location --silent --show-error --max-time "$SSE_TIMEOUT" \
       --header 'Accept: text/event-stream' \
       --output "$body_file" --dump-header "$headers_file" \
@@ -701,8 +779,12 @@ capture_sse() {
 
 verify_queue_state() {
   local baseline_file="$1"
-  local rabbit_pod current_queue_file
+  local rabbit_pod current_queue_file dynamic_queue_prefixes
   current_queue_file="$WORK_DIR/current-queues.tsv"
+  dynamic_queue_prefixes="${REQUIRED_LIVE_QUEUE_PREFIXES:-event_live_update.}"
+  if [[ "$SSE_REQUIRED" == "false" ]]; then
+    dynamic_queue_prefixes=""
+  fi
   rabbit_pod="$(kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$RABBIT_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [[ -n "$rabbit_pod" ]] || {
     printf 'ERROR: RabbitMQ pod not found\n' >&2
@@ -722,7 +804,7 @@ verify_queue_state() {
     "$MAX_POST_ROLLBACK_QUEUE_UNACK" \
     "$MAX_POST_ROLLBACK_QUEUE_READY_GROWTH" \
     "$MAX_POST_ROLLBACK_QUEUE_UNACK_GROWTH" \
-    "${REQUIRED_LIVE_QUEUE_PREFIXES:-event_live_update.}" \
+    "$dynamic_queue_prefixes" \
     "${MIN_DYNAMIC_LIVE_QUEUE_CONSUMERS:-1}" \
     >>"$OUTPUT_DIR/queue-verification.tsv"
 }
@@ -978,7 +1060,8 @@ baseline_registry_public_anonymous="$(
 
 [[ "$baseline_source_sha" == "$TARGET_SHA" ]] || oci_die "baseline source SHA does not match TARGET_SHA"
 [[ "$baseline_deploy_workflow" == "oci-production-deploy" ||
-   "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]] ||
+   "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ||
+   "$baseline_deploy_workflow" == "oci-production-rollback" ]] ||
   oci_die "baseline deploy workflow is not trusted"
 [[ "$baseline_deploy_run_attempt" == "1" ]] || oci_die "baseline deploy provenance is not first-attempt"
 [[ "$baseline_build_workflow" == "oci-production-build" ]] ||
@@ -991,6 +1074,12 @@ if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
      "$baseline_recovery_run_attempt" == "1" &&
      "$baseline_transition_provenance_file" == "trusted-recovery-transition-provenance.env" ]] ||
     oci_die "recovery baseline does not bind the exact first-attempt transition evidence"
+elif [[ "$baseline_deploy_workflow" == "oci-production-rollback" ]]; then
+  [[ "$baseline_recovery_run_id" == "$baseline_deploy_run_id" &&
+     "$baseline_recovery_run_attempt" == "1" &&
+     "$baseline_transition_provenance_file" == \
+       "partial-recovery/partial-recovery-authority.env" ]] ||
+    oci_die "partial recovery baseline does not bind the exact first-attempt authority"
 else
   [[ ( -z "$baseline_recovery_run_id" &&
        -z "$baseline_recovery_run_attempt" &&
@@ -1046,6 +1135,21 @@ if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
   recovery_run_json="$WORK_DIR/recovery-run.json"
   gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$recovery_run_json"
   validate_recovery_run "$recovery_run_json" "$trusted_recovery_workflow_id"
+elif [[ "$baseline_deploy_workflow" == "oci-production-rollback" ]]; then
+  trusted_recovery_workflow_id="$(
+    gh api "repos/$REPO/actions/workflows/oci-production-rollback.yml" --jq '.id'
+  )"
+  recovery_run_json="$WORK_DIR/recovery-run.json"
+  gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$recovery_run_json"
+  partial_recovery_target_sha="$(
+    evidence_value \
+      "$BASELINE_DIR/$baseline_transition_provenance_file" \
+      target_sha
+  )" || oci_die "partial recovery authority is missing its rollback target"
+  validate_partial_recovery_run \
+    "$recovery_run_json" \
+    "$trusted_recovery_workflow_id" \
+    "$partial_recovery_target_sha"
 else
   deploy_run_json="$WORK_DIR/deploy-run.json"
   gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/attempts/1" >"$deploy_run_json"
@@ -1156,6 +1260,132 @@ if [[ "$baseline_deploy_workflow" == "oci-ghcr-cache-recovery" ]]; then
   # Recovery evidence stays in its dedicated schema; it is never reconstructed
   # or augmented as an ordinary oci-production-deploy artifact.
   NORMALIZED_DEPLOY_PROVENANCE_FILE="$ORIGINAL_DEPLOY_PROVENANCE_FILE"
+elif [[ "$baseline_deploy_workflow" == "oci-production-rollback" ]]; then
+  PARTIAL_RECOVERY_AUTHORITY_DIR="$BASELINE_DIR/partial-recovery"
+  ORIGINAL_DEPLOY_PROVENANCE_FILE="$BASELINE_DIR/$baseline_transition_provenance_file"
+  checksum_manifest_contains_once "$BASELINE_DIR" "$baseline_transition_provenance_file" ||
+    oci_die "embedded partial recovery authority is not covered exactly once by baseline checksums"
+  [[ -d "$PARTIAL_RECOVERY_AUTHORITY_DIR" &&
+     ! -L "$PARTIAL_RECOVERY_AUTHORITY_DIR" ]] ||
+    oci_die "embedded partial recovery authority directory is invalid"
+  PARTIAL_RECOVERY_DIR="$PARTIAL_RECOVERY_AUTHORITY_DIR" \
+  PARTIAL_RECOVERY_IMAGES_FILE="$BASELINE_DIR/images.tsv" \
+  EXPECTED_RECOVERY_RUN_ID="$baseline_deploy_run_id" \
+  EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+  EXPECTED_BUILD_RUN_ID="$baseline_build_run_id" \
+    "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null
+  [[ "$(sha256_file "$ORIGINAL_DEPLOY_PROVENANCE_FILE")" == \
+     "$(sha256_file "$PARTIAL_RECOVERY_AUTHORITY_DIR/partial-recovery-authority.env")" ]] ||
+    oci_die "trusted partial recovery authority does not match its detailed evidence"
+
+  partial_recovery_artifact_name="oci-production-rollback-${baseline_deploy_run_id}-1"
+  partial_recovery_artifacts_json="$WORK_DIR/partial-recovery-run-artifacts.json"
+  gh api "repos/$REPO/actions/runs/$baseline_deploy_run_id/artifacts" \
+    >"$partial_recovery_artifacts_json"
+  validate_artifact_listing \
+    "$partial_recovery_artifacts_json" \
+    "$partial_recovery_artifact_name" \
+    "partial recovery authority"
+
+  deploy_source_sha="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" restored_source_sha
+  )"
+  deployment_run_id="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" recovery_run_id
+  )"
+  deployment_run_attempt="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" recovery_run_attempt
+  )"
+  recovery_head_sha="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" recovery_head_sha
+  )"
+  runtime_mode="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_mode
+  )"
+  runtime_fingerprint="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" runtime_fingerprint
+  )"
+  image_provenance_sha256="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" images_sha256
+  )"
+  deploy_public_host="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" public_host
+  )"
+  deploy_canonical_host="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" canonical_host
+  )"
+  deploy_redirect_host="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" redirect_host
+  )"
+  deploy_diagnostic_host="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" diagnostic_host
+  )"
+  deploy_registry_provider="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_provider
+  )"
+  deploy_registry_host="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_host
+  )"
+  deploy_registry_repository="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_repository
+  )"
+  deploy_registry_public_anonymous="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" registry_public_anonymous
+  )"
+  infrastructure_run_id="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_run_id
+  )"
+  infrastructure_run_attempt="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_run_attempt
+  )"
+  infrastructure_provenance_sha256="$(
+    evidence_value "$ORIGINAL_DEPLOY_PROVENANCE_FILE" infrastructure_provenance_sha256
+  )"
+  metadata_recovery_head_sha="$(jq -r '.head_sha // empty' "$recovery_run_json")"
+
+  [[ "$deploy_source_sha" == "$TARGET_SHA" &&
+     "$deployment_run_id" == "$baseline_deploy_run_id" &&
+     "$deployment_run_attempt" == "1" &&
+     "$recovery_head_sha" == "$metadata_recovery_head_sha" &&
+     "$image_provenance_sha256" == "$(sha256_file "$BASELINE_DIR/images.tsv")" &&
+     "$runtime_mode" =~ ^(oke|k3s)$ &&
+     "$runtime_fingerprint" =~ ^[0-9a-f]{64}$ &&
+     "$deploy_registry_provider" == "ghcr" &&
+     "$deploy_registry_host" == "ghcr.io" &&
+     "$deploy_registry_repository" == "ghcr.io/vasilyevstan/betstan-images" &&
+     "$deploy_registry_public_anonymous" == "true" ]] ||
+    oci_die "partial recovery authority does not bind the selected GHCR rollback baseline"
+  [[ "$deploy_public_host" == "$deploy_canonical_host" &&
+     "$public_url" == "https://${deploy_canonical_host}" &&
+     "$redirect_url" == "https://${deploy_redirect_host}" ]] ||
+    oci_die "partial recovery endpoints do not match the rollback baseline"
+  if [[ -n "$diagnostic_url" ]]; then
+    [[ "$diagnostic_url" == "https://${deploy_diagnostic_host}" ]] ||
+      oci_die "partial recovery diagnostic endpoint does not match the rollback baseline"
+  fi
+
+  DEPLOY_PROVENANCE_ORIGIN=partial-recovery-authority
+  DEPLOY_PROVENANCE_BINDING=recorded-partial-recovery-infrastructure
+  NORMALIZED_DEPLOY_PROVENANCE_FILE="$OUTPUT_DIR/trusted-deploy-provenance.txt"
+  write_text_atomic "$NORMALIZED_DEPLOY_PROVENANCE_FILE" <<EOF2
+source_sha=$deploy_source_sha
+runtime_mode=$runtime_mode
+runtime_fingerprint=$runtime_fingerprint
+image_provenance_sha256=$image_provenance_sha256
+public_host=$deploy_public_host
+canonical_host=$deploy_canonical_host
+redirect_host=$deploy_redirect_host
+diagnostic_host=$deploy_diagnostic_host
+deployment_run_id=$deployment_run_id
+deployment_run_attempt=$deployment_run_attempt
+registry_provider=$deploy_registry_provider
+registry_host=$deploy_registry_host
+registry_repository=$deploy_registry_repository
+registry_public_anonymous=$deploy_registry_public_anonymous
+infrastructure_run_id=$infrastructure_run_id
+infrastructure_run_attempt=$infrastructure_run_attempt
+infrastructure_provenance_sha256=$infrastructure_provenance_sha256
+EOF2
 else
 ORIGINAL_DEPLOY_PROVENANCE_FILE="$BASELINE_DIR/trusted-deploy-provenance.txt"
 DEPLOY_PROVENANCE_ORIGIN=baseline-embedded

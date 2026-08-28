@@ -364,6 +364,10 @@ elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
     "$path" > "$headers"
   : > "$output"
   printf 308
+elif [[ "$url" == */api/backoffice ]]; then
+  printf 'HTTP/2 401\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+  printf '%s\n' '{"errors":[{"message":"Authentication required"}]}' > "$output"
+  printf 401
 elif [[ "$url" == */api/* ]]; then
   printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
   if [[ "$url" == */api/auth/currentuser* ]]; then

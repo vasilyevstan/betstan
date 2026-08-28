@@ -74,7 +74,7 @@ run_failure cluster-issuer-failure '.ingress.cluster_issuer_ready=false' cluster
 run_failure www-redirect-failure '.ingress.www_redirect=false' www-redirect
 run_failure diagnostic-https-failure '.ingress.diagnostic_https_trusted=false' diagnostic-https
 run_failure canonical-dns-failure '.ingress.dns_match=false' canonical-dns
-run_failure queue-loss '.rabbitmq.queue_count=16' queue-count
+run_failure queue-loss '.rabbitmq.queue_count=21' queue-count
 run_failure consumer-loss '.rabbitmq.all_consumers=false' queue-consumers
 run_failure resource-breach '.node.memory_percent=71' memory-threshold
 run_failure wrong-lb-shape '.inventory.lb_shape="100Mbps"' lb-shape
@@ -133,6 +133,16 @@ elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
   printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: %s\r\n\r\n' "$location" > "$headers"
   : > "$output"
   printf '308'
+elif [[ "$url" == */api/backoffice ]]; then
+  if [[ "${STUB_PUBLIC_BACKOFFICE:-0}" == "1" ]]; then
+    printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+    printf '[]' > "$output"
+    printf '200'
+  else
+    printf 'HTTP/2 401\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+    printf '{"errors":[{"message":"Authentication required"}]}' > "$output"
+    printf '401'
+  fi
 elif [[ "$url" == */api/* ]]; then
   printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
   if [[ "${STUB_BAD_API:-0}" == "1" && "$url" == */api/auth/currentuser ]]; then
@@ -226,6 +236,18 @@ PATH="$WORK_DIR/bin:$PATH" \
   OCI_REDIRECT_URL=https://www.betstan.xyz \
   OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
   OUTPUT_DIR="$WORK_DIR/smoke-good" "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null
+if PATH="$WORK_DIR/bin:$PATH" STUB_PUBLIC_BACKOFFICE=1 \
+  OCI_PUBLIC_URL=https://betstan.xyz \
+  OCI_REDIRECT_URL=https://www.betstan.xyz \
+  OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+  OUTPUT_DIR="$WORK_DIR/smoke-public-backoffice" \
+    "$OCI_DIR/agents/smoke-liveness-stan.sh" \
+    >"$WORK_DIR/smoke-public-backoffice.out" 2>&1; then
+  echo "public Backoffice API unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq 'Backoffice API did not reject an unauthenticated request' \
+  "$WORK_DIR/smoke-public-backoffice.out"
 PATH="$WORK_DIR/bin:$PATH" \
 STUB_MUTATION_FENCE=1 \
 OCI_EXPECT_HTTP_MUTATION_FENCE=1 \

@@ -30,7 +30,7 @@ on:
         default: "0"
         type: string
       baseline_recovery_run_id:
-        description: Exact first-attempt oci-ghcr-cache-recovery run authorizing a historical GHCR baseline, or 0
+        description: Exact first-attempt cache or partial-rollback recovery authorizing the live GHCR baseline, or 0
         required: true
         default: "0"
         type: string
@@ -193,26 +193,49 @@ jobs:
             oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \
             "$SOURCE_SHA" success
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
-            recovery_workflow_id="$(
+            cache_recovery_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq '.id'
             )"
-            read -r workflow_id path event head_branch repository status conclusion attempt <<<"$(
-              gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" \
-                --jq '[.workflow_id,.path,.event,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+            rollback_recovery_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-rollback.yml" --jq '.id'
             )"
-            [ "$workflow_id" = "$recovery_workflow_id" ]
-            [ "$path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]
+            read -r workflow_id path event recovery_head_sha head_branch \
+              repository status conclusion attempt display_title <<<"$(
+              gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" \
+                --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
+            )"
             [ "$event" = "workflow_dispatch" ]
+            [[ "$recovery_head_sha" =~ ^[0-9a-f]{40}$ ]]
             [ "$head_branch" = "master" ]
             [ "$repository" = "$REPOSITORY" ]
             [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ "$attempt" = "1" ]
-            recovery_artifact_name="$(
-              gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/artifacts?per_page=100" \
-                --jq '.artifacts[] | select(.expired == false) | .name' |
-                awk -v run_id="$BASELINE_RECOVERY_RUN_ID" \
-                  '$0 ~ ("^ghcr-cache-recovery-[0-9a-f]{40}-" run_id "-1$") { count++; name=$0 } END { if (count != 1) exit 1; print name }'
-            )"
+            git cat-file -e "${recovery_head_sha}^{commit}"
+            git merge-base --is-ancestor "$recovery_head_sha" "$SOURCE_SHA"
+            if [ "$workflow_id" = "$cache_recovery_workflow_id" ] &&
+               [ "$path" = ".github/workflows/oci-ghcr-cache-recovery.yml" ]; then
+              recovery_kind=ghcr-cache
+              recovery_artifact_name="$(
+                gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/artifacts?per_page=100" \
+                  --jq '.artifacts[] | select(.expired == false) | .name' |
+                  awk -v run_id="$BASELINE_RECOVERY_RUN_ID" \
+                    '$0 ~ ("^ghcr-cache-recovery-[0-9a-f]{40}-" run_id "-1$") { count++; name=$0 } END { if (count != 1) exit 1; print name }'
+              )"
+            elif [ "$workflow_id" = "$rollback_recovery_workflow_id" ] &&
+                 [ "$path" = ".github/workflows/oci-production-rollback.yml" ]; then
+              recovery_kind=partial-rollback
+              [[ "$display_title" =~ ^oci-rollback\ [0-9a-f]{40}$ ]]
+              recovery_artifact_name="oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1"
+              artifact_count="$(
+                gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"$recovery_artifact_name\" and .expired == false)] | length"
+              )"
+              [ "$artifact_count" = "1" ]
+            else
+              echo "selected baseline recovery workflow is not trusted" >&2
+              exit 1
+            fi
             printf 'recovery_artifact_name=%s\n' "$recovery_artifact_name" >> "$GITHUB_OUTPUT"
+            printf 'recovery_kind=%s\n' "$recovery_kind" >> "$GITHUB_OUTPUT"
           fi
           if [ "$PHASE" != "dry-run" ]; then
             prerequisite_source_sha="$SOURCE_SHA"
@@ -304,29 +327,112 @@ jobs:
       - name: Bind historical recovery source through its exact artifact
         id: recovery_authority
         if: inputs.baseline_recovery_run_id != '0'
+        env:
+          BASELINE_RECOVERY_KIND: ${{ steps.provenance_request.outputs.recovery_kind }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           recovery=artifacts/recovery
-          evidence="$recovery/recovery-evidence.env"
-          transition="$recovery/transition-provenance.env"
-          [ -f "$evidence" ] && [ -f "$transition" ] && [ -f "$recovery/images.tsv" ]
-          source_sha="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
-          recovery_run_id="$(awk -F= '$1 == "recovery_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
-          recovery_attempt="$(awk -F= '$1 == "recovery_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
-          transition_source="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
-          transition_run_id="$(awk -F= '$1 == "transition_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
-          transition_attempt="$(awk -F= '$1 == "transition_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
-          image_hash="$(awk -F= '$1 == "images_sha256" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
-          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
-          [ "$recovery_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
-          [ "$recovery_attempt" = "1" ]
-          [ "$transition_source" = "$source_sha" ]
-          [ "$transition_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
-          [ "$transition_attempt" = "1" ]
-          [ "$image_hash" = "$(sha256sum "$recovery/images.tsv" | awk '{print $1}')" ]
-          grep -Fxq 'credential_retirement=pass' "$transition"
-          grep -Fxq 'ocir_repository_retirement=pass' "$transition"
-          grep -Fxq 'transition_status=PASS' "$transition"
+          if [ "$BASELINE_RECOVERY_KIND" = "partial-rollback" ]; then
+            authority="$recovery/partial-recovery-authority.env"
+            PARTIAL_RECOVERY_DIR="$recovery" \
+            EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+              ./infra/oci/scripts/validate-partial-recovery-authority-stan.sh
+            source_sha="$(awk -F= '$1 == "restored_source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$authority")"
+            build_run_id="$(awk -F= '$1 == "restored_build_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$authority")"
+            recovery_head_sha="$(awk -F= '$1 == "recovery_head_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$authority")"
+            source_rollback_run_id="$(awk -F= '$1 == "source_rollback_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$authority")"
+            target_sha="$(awk -F= '$1 == "target_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$authority")"
+            rollback_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-rollback.yml" --jq '.id'
+            )"
+            gh api "repos/$REPOSITORY/actions/runs/$BASELINE_RECOVERY_RUN_ID/attempts/1" |
+              jq -e \
+                --argjson workflow_id "$rollback_workflow_id" \
+                --arg repo "$REPOSITORY" \
+                --arg head_sha "$recovery_head_sha" \
+                --arg title "oci-rollback $target_sha" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-rollback.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_sha == $head_sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .run_attempt == 1 and
+                  .display_title == $title
+                ' >/dev/null
+            gh api "repos/$REPOSITORY/actions/runs/$source_rollback_run_id/attempts/1" |
+              jq -e \
+                --argjson workflow_id "$rollback_workflow_id" \
+                --arg repo "$REPOSITORY" \
+                --arg title "oci-rollback $target_sha" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-rollback.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "failure" and
+                  .run_attempt == 1 and
+                  .display_title == $title
+                ' >/dev/null
+            source_artifact_name="oci-production-rollback-${source_rollback_run_id}-1"
+            [ "$(
+              gh api "repos/$REPOSITORY/actions/runs/$source_rollback_run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(.name == \"$source_artifact_name\" and .expired == false)] | length"
+            )" = "1" ]
+            build_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id'
+            )"
+            gh api "repos/$REPOSITORY/actions/runs/$build_run_id/attempts/1" |
+              jq -e \
+                --argjson workflow_id "$build_workflow_id" \
+                --arg repo "$REPOSITORY" \
+                --arg source_sha "$source_sha" '
+                  .workflow_id == $workflow_id and
+                  .path == ".github/workflows/oci-production-build.yml" and
+                  .event == "workflow_run" and
+                  .head_sha == $source_sha and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repo and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .run_attempt == 1
+                ' >/dev/null
+            build_artifact_name="oci-image-provenance-${source_sha}-${build_run_id}-1"
+            [ "$(
+              gh api "repos/$REPOSITORY/actions/runs/$build_run_id/artifacts?per_page=100" \
+                --jq "[.artifacts[] | select(.name == \"$build_artifact_name\" and .expired == false)] | length"
+            )" = "1" ]
+            git cat-file -e "${source_sha}^{commit}"
+            git cat-file -e "${recovery_head_sha}^{commit}"
+            git merge-base --is-ancestor "$source_sha" "$SOURCE_SHA"
+            git merge-base --is-ancestor "$recovery_head_sha" "$SOURCE_SHA"
+          else
+            evidence="$recovery/recovery-evidence.env"
+            transition="$recovery/transition-provenance.env"
+            [ -f "$evidence" ] && [ -f "$transition" ] && [ -f "$recovery/images.tsv" ]
+            source_sha="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+            recovery_run_id="$(awk -F= '$1 == "recovery_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+            recovery_attempt="$(awk -F= '$1 == "recovery_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+            transition_source="$(awk -F= '$1 == "source_sha" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+            transition_run_id="$(awk -F= '$1 == "transition_run_id" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+            transition_attempt="$(awk -F= '$1 == "transition_run_attempt" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$transition")"
+            image_hash="$(awk -F= '$1 == "images_sha256" { count++; value=$2 } END { if (count != 1) exit 1; print value }' "$evidence")"
+            [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+            [ "$recovery_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
+            [ "$recovery_attempt" = "1" ]
+            [ "$transition_source" = "$source_sha" ]
+            [ "$transition_run_id" = "$BASELINE_RECOVERY_RUN_ID" ]
+            [ "$transition_attempt" = "1" ]
+            [ "$image_hash" = "$(sha256sum "$recovery/images.tsv" | awk '{print $1}')" ]
+            grep -Fxq 'credential_retirement=pass' "$transition"
+            grep -Fxq 'ocir_repository_retirement=pass' "$transition"
+            grep -Fxq 'transition_status=PASS' "$transition"
+          fi
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify immutable release and phase provenance
@@ -451,6 +557,7 @@ jobs:
           fi
 
       - name: Install pinned OCI CLI
+        id: oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Verify OKE identity
@@ -823,7 +930,10 @@ jobs:
           fi
 
       - name: Close ephemeral OCI Bastion access
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.oci_cli.outcome == 'success'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}

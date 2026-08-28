@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-application-stan.sh"
+RECOVERY_SCRIPT="$ROOT_DIR/infra/oci/scripts/recover-partial-rollback-stan.sh"
+PARTIAL_AUTHORITY_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-partial-recovery-authority-stan.sh"
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
@@ -37,11 +39,13 @@ FIXTURE_DIR="$WORK_DIR/fixtures"
 STATE_DIR="$WORK_DIR/state"
 TARGET_SHA=1111111111111111111111111111111111111111
 CURRENT_MASTER_SHA=2222222222222222222222222222222222222222
+PARTIAL_RECOVERY_SOURCE_SHA=4444444444444444444444444444444444444444
 SOURCE_RUN_ID=1701
 DEPLOY_RUN_ID=1601
 BUILD_RUN_ID=1501
 CAPTURE_RUN_ID=1401
 INFRASTRUCTURE_RUN_ID=1801
+PARTIAL_RECOVERY_RUN_ID=1901
 INFRASTRUCTURE_PROVENANCE_SHA256=""
 RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34"
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
@@ -67,6 +71,14 @@ assert_contains() {
   grep -Fq "$pattern" "$file" || fail "missing pattern '$pattern' in $file"
 }
 
+assert_not_contains() {
+  local file="$1"
+  local pattern="$2"
+  if grep -Fq "$pattern" "$file"; then
+    fail "unexpected pattern '$pattern' in $file"
+  fi
+}
+
 assert_line() {
   local file="$1"
   local line="$2"
@@ -89,6 +101,105 @@ sha256_file() {
   fi
 }
 
+replace_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  python3 - "$file" "$key" "$value" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key, value = sys.argv[2:4]
+lines = path.read_text(encoding="utf-8").splitlines()
+matches = [index for index, line in enumerate(lines) if line.startswith(f"{key}=")]
+if len(matches) != 1:
+    raise SystemExit(f"{path}: expected exactly one {key}")
+lines[matches[0]] = f"{key}={value}"
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
+refresh_partial_authority_manifest() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+authority_path = root / "partial-recovery-authority.env"
+hash_bindings = {
+    "images_sha256": "images.tsv",
+    "final_state_sha256": "final-state.tsv",
+    "recovery_plan_sha256": "recovery-plan.tsv",
+    "recovery_rollout_order_sha256": "recovery-rollout-order.tsv",
+    "recovery_summary_sha256": "partial-recovery-summary.env",
+    "rollback_readiness_summary_sha256": "rollback-readiness/summary.env",
+    "rollback_readiness_workload_sha256": "rollback-readiness/workload-state.tsv",
+    "rollback_readiness_failures_sha256": "rollback-readiness/failures.txt",
+}
+values = []
+for raw in authority_path.read_text(encoding="utf-8").splitlines():
+    key, value = raw.split("=", 1)
+    if key in hash_bindings:
+        value = hashlib.sha256((root / hash_bindings[key]).read_bytes()).hexdigest()
+    values.append((key, value))
+authority_path.write_text(
+    "".join(f"{key}={value}\n" for key, value in values),
+    encoding="utf-8",
+)
+
+files = [
+    "images.tsv",
+    "partial-recovery-authority.env",
+    "partial-recovery-summary.env",
+    "recovery-plan.tsv",
+    "recovery-rollout-order.tsv",
+    "final-state.tsv",
+    "rollback-readiness/summary.env",
+    "rollback-readiness/workload-state.tsv",
+    "rollback-readiness/failures.txt",
+]
+(root / "partial-recovery-SHA256SUMS").write_text(
+    "".join(
+        f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in files
+    ),
+    encoding="utf-8",
+)
+PY
+}
+
+refresh_partial_manifest_only() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+files = [
+    "images.tsv",
+    "partial-recovery-authority.env",
+    "partial-recovery-summary.env",
+    "recovery-plan.tsv",
+    "recovery-rollout-order.tsv",
+    "final-state.tsv",
+    "rollback-readiness/summary.env",
+    "rollback-readiness/workload-state.tsv",
+    "rollback-readiness/failures.txt",
+]
+(root / "partial-recovery-SHA256SUMS").write_text(
+    "".join(
+        f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in files
+    ),
+    encoding="utf-8",
+)
+PY
+}
+
 DEPLOY_RABBITMQ_BASELINE_FIXTURE="$FIXTURE_DIR/deploy-rabbitmq-baseline.txt"
 printf '%s\n' 'fixture-rabbitmq-baseline' >"$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
 INFRASTRUCTURE_PROVENANCE_FIXTURE="$FIXTURE_DIR/infrastructure-provenance.env"
@@ -99,6 +210,14 @@ infrastructure_run_attempt=1
 runtime_mode=k3s
 instance_fingerprint=$RUNTIME_FINGERPRINT
 namespace=betstan-oci
+public_host=betstan.xyz
+canonical_host=betstan.xyz
+redirect_host=www.betstan.xyz
+diagnostic_host=203.0.113.10.nip.io
+application_registry_provider=ghcr
+application_registry_host=ghcr.io
+application_registry_repository=ghcr.io/vasilyevstan/betstan-images
+application_registry_public_anonymous=true
 EOF2
 INFRASTRUCTURE_PROVENANCE_SHA256="$(
   sha256_file "$INFRASTRUCTURE_PROVENANCE_FIXTURE"
@@ -238,6 +357,11 @@ moderation_live_event_update	0	0	1
 resulting_live_event_update	0	0	1
 event_live_update.fixture-pod	0	0	2
 QUEUES
+  if [[ "$fixture_sse_required" == "false" ]]; then
+    grep -v '^event_live_update\.' "$directory/queues.tsv" \
+      >"$directory/queues-without-sse.tsv"
+    mv "$directory/queues-without-sse.tsv" "$directory/queues.tsv"
+  fi
   awk -F '\t' '{ print $1 "\t" $3 }' \
     "$directory/images.tsv" >"$directory/live-images.tsv"
   cat >"$directory/public-http.tsv" <<'HTTP'
@@ -395,6 +519,16 @@ create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-embedded" legacy-embedded
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-source-mismatch" legacy-source-mismatch
 create_baseline_fixture "$FIXTURE_DIR/baseline-partial-infrastructure" partial-infrastructure
 create_recovery_baseline_fixture "$FIXTURE_DIR/baseline-recovery"
+create_baseline_fixture "$FIXTURE_DIR/baseline-empty-deploy-repository"
+sed -i.bak \
+  's|^registry_repository=.*|registry_repository=|' \
+  "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt"
+rm -f "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt.bak"
+create_baseline_fixture "$FIXTURE_DIR/baseline-wrong-deploy-repository"
+sed -i.bak \
+  's|^registry_repository=.*|registry_repository=ghcr.io/example/other-images|' \
+  "$FIXTURE_DIR/baseline-wrong-deploy-repository/trusted-deploy-provenance.txt"
+rm -f "$FIXTURE_DIR/baseline-wrong-deploy-repository/trusted-deploy-provenance.txt.bak"
 
 cat >"$BIN_DIR/git" <<'STUB'
 #!/usr/bin/env bash
@@ -471,6 +605,9 @@ case "${1:-} ${2:-}" in
   "api repos/example/repo/actions/workflows/oci-ghcr-cache-recovery.yml")
     printf '701\n'
     ;;
+  "api repos/example/repo/actions/workflows/oci-production-rollback.yml")
+    printf '601\n'
+    ;;
   "api repos/example/repo/actions/runs/${STUB_SOURCE_RUN_ID}/attempts/1")
     workflow_id=901
     [[ "${STUB_SOURCE_RUN_BAD_WORKFLOW:-0}" != "1" ]] || workflow_id=999
@@ -487,6 +624,25 @@ case "${1:-} ${2:-}" in
       created_at:$recent,
       updated_at:$recent
     }'
+    ;;
+  "api repos/example/repo/actions/runs/${STUB_PARTIAL_RECOVERY_RUN_ID}/attempts/1")
+    jq -n \
+      --arg recent "$recent" \
+      --arg head_sha "$STUB_CURRENT_MASTER_SHA" \
+      --arg display_title "oci-rollback $STUB_PARTIAL_RECOVERY_TARGET_SHA" '{
+        workflow_id:601,
+        path:".github/workflows/oci-production-rollback.yml",
+        event:"workflow_dispatch",
+        head_sha:$head_sha,
+        head_branch:"master",
+        head_repository:{full_name:"example/repo"},
+        status:"completed",
+        conclusion:"success",
+        run_attempt:1,
+        display_title:$display_title,
+        created_at:$recent,
+        updated_at:$recent
+      }'
     ;;
   "api repos/example/repo/actions/runs/${STUB_DEPLOY_RUN_ID}/attempts/1")
     if [[ "${STUB_RECOVERY_MODE:-0}" == "1" ]]; then
@@ -522,6 +678,13 @@ case "${1:-} ${2:-}" in
       created_at:$recent,
       updated_at:$recent
     }'
+    ;;
+  "api repos/example/repo/actions/runs/${STUB_PARTIAL_RECOVERY_RUN_ID}/artifacts")
+    jq -n \
+      --arg name "oci-production-rollback-${STUB_PARTIAL_RECOVERY_RUN_ID}-1" \
+      --arg recent "$recent" '{
+        artifacts:[{name:$name, expired:false, created_at:$recent, updated_at:$recent}]
+      }'
     ;;
   "api repos/example/repo/actions/runs/${STUB_BUILD_RUN_ID}/attempts/1")
     head_sha="$STUB_TARGET_SHA"
@@ -1145,6 +1308,10 @@ event_mode="${STUB_EVENT_MODE:-good}"
 if [[ -n "${STUB_EVENT_MODE_AFTER_ROLLBACK:-}" && "$after_rollback" == "1" ]]; then
   event_mode="$STUB_EVENT_MODE_AFTER_ROLLBACK"
 fi
+backoffice_mode="${STUB_BACKOFFICE_MODE:-public}"
+if [[ -n "${STUB_BACKOFFICE_MODE_AFTER_ROLLBACK:-}" && "$after_rollback" == "1" ]]; then
+  backoffice_mode="$STUB_BACKOFFICE_MODE_AFTER_ROLLBACK"
+fi
 if [[ "$url" == "$secondary_url"*'/api/auth/currentuser?live-betting-redirect=1' ]]; then
   status='308'
   body=''
@@ -1302,7 +1469,26 @@ elif [[ "$url" == *'/api/bet/stats' ]]; then
 elif [[ "$url" == *'/api/bet' ]]; then
   body='{}'
 elif [[ "$url" == *'/api/backoffice' ]]; then
-  body='[]'
+  case "$backoffice_mode" in
+    protected)
+      status='401'
+      body='{"errors":[{"message":"Authentication required"}]}'
+      header_block=$'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    malformed-protected)
+      status='401'
+      body='{}'
+      header_block=$'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    forbidden)
+      status='403'
+      body='{"errors":[{"message":"Administrator role required"}]}'
+      header_block=$'HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\n\r\n'
+      ;;
+    *)
+      body='[]'
+      ;;
+  esac
 elif [[ "$url" == */ ]]; then
   content_type='text/html'
   body='<html>BetStan</html>'
@@ -1358,6 +1544,8 @@ common_env=(
   "STUB_SOURCE_RUN_ID=$SOURCE_RUN_ID"
   "STUB_DEPLOY_RUN_ID=$DEPLOY_RUN_ID"
   "STUB_BUILD_RUN_ID=$BUILD_RUN_ID"
+  "STUB_PARTIAL_RECOVERY_RUN_ID=$PARTIAL_RECOVERY_RUN_ID"
+  "STUB_PARTIAL_RECOVERY_TARGET_SHA=$TARGET_SHA"
   "STUB_ARTIFACT_NAME=$ARTIFACT_NAME"
   "INFRASTRUCTURE_RUN_ID=$INFRASTRUCTURE_RUN_ID"
   "OCI_INFRASTRUCTURE_PROVENANCE_SHA256=$INFRASTRUCTURE_PROVENANCE_SHA256"
@@ -1412,7 +1600,11 @@ run_capture() {
   scenario_name="$(basename "$output_dir")"
   capture_state_dir="$STATE_DIR/$scenario_name/current"
   capture_kubectl_log="$STATE_DIR/$scenario_name/kubectl.log"
-  set_target_state "$capture_state_dir"
+  if [[ " $* " == *" STUB_CAPTURE_CURRENT=1 "* ]]; then
+    reset_live_state "$capture_state_dir"
+  else
+    set_target_state "$capture_state_dir"
+  fi
   for option in "$@"; do
     if [[ "$option" == "STUB_CAPTURE_OCIR=1" ]]; then
       write_text_atomic "$capture_state_dir/auth.env" <<EOF2
@@ -1456,9 +1648,48 @@ assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
 assert_contains "$WORKFLOW_FILE" \
   'ADMIN_AUTH_CAPABILITY_FILE: artifacts/admin-auth-capability.env'
+assert_contains "$WORKFLOW_FILE" \
+  'PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}'
+assert_contains "$WORKFLOW_FILE" \
+  'run-name: oci-rollback ${{ inputs.target_sha }}'
+assert_contains "$WORKFLOW_FILE" \
+  'PRE_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}'
+assert_contains "$WORKFLOW_FILE" \
+  'oci-image-provenance-${pre_recovery_source_sha}-${PRE_RECOVERY_BUILD_RUN_ID}-1'
+assert_contains "$WORKFLOW_FILE" \
+  'run: ./infra/oci/scripts/recover-partial-rollback-stan.sh'
+assert_contains "$WORKFLOW_FILE" \
+  'if: inputs.partial_rollback_run_id != '\''0'\'''
+assert_contains "$DEPLOY_WORKFLOW_FILE" \
+  '.github/workflows/oci-production-rollback.yml'
+assert_contains "$DEPLOY_WORKFLOW_FILE" \
+  'oci-production-rollback-${BASELINE_RECOVERY_RUN_ID}-1'
+assert_contains "$DEPLOY_WORKFLOW_FILE" \
+  '[[ "$display_title" =~ ^oci-rollback\ [0-9a-f]{40}$ ]]'
+assert_contains "$DEPLOY_WORKFLOW_FILE" \
+  './infra/oci/scripts/validate-rollback-baseline-stan.sh'
+for script in "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"; do
+  assert_contains "$script" '"/api/backoffice|backoffice"'
+done
 if grep -Fq 'artifacts/oci-rollback/admin-auth-capability.env' "$WORKFLOW_FILE"; then
   fail 'rollback workflow stores admin capability inside its recreated output directory'
 fi
+if [[ "$(grep -Fc 'RULE_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/runner-rule.env' "$WORKFLOW_FILE")" != "2" ]]; then
+  fail 'rollback workflow does not preserve runner-rule state through cleanup'
+fi
+if [[ "$(grep -Fc 'SESSION_STATE_FILE: ${{ runner.temp }}/betstan-rollback-control/k3s-access.env' "$WORKFLOW_FILE")" != "2" ]]; then
+  fail 'rollback workflow does not preserve k3s access state through cleanup'
+fi
+if grep -Eq 'artifacts/oci-rollback/(runner-rule|k3s-access)\.env' "$WORKFLOW_FILE"; then
+  fail 'rollback workflow stores cleanup state inside its recreated output directory'
+fi
+for literal in \
+  'registry_evidence_count=0' \
+  '[ "$source_sha" = "$TARGET_SHA" ]' \
+  'legacy infrastructure registry authorization is deferred to checksum-bound rollback evidence' \
+  'infrastructure registry evidence is incomplete'; do
+  assert_contains "$WORKFLOW_FILE" "$literal"
+done
 for literal in \
   'validate_recovery_run' \
   'validate_recovery_transition_provenance' \
@@ -1470,7 +1701,12 @@ for literal in \
 done
 assert_contains "$ROOT_DIR/infra/oci/scripts/deploy.sh" 'deployment_workflow=oci-production-deploy'
 
-bash -n "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"
+bash -n \
+  "$CAPTURE_SCRIPT" \
+  "$READINESS_SCRIPT" \
+  "$SCRIPT" \
+  "$RECOVERY_SCRIPT" \
+  "$PARTIAL_AUTHORITY_VALIDATOR"
 
 if ! run_script "$WORK_DIR/recovery-baseline-success" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-recovery" \
@@ -1494,6 +1730,21 @@ if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK
   cat "$WORK_DIR/capture-repeat-safe-1.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on first run'
 fi
+
+legacy_repository_capture_dir="$WORK_DIR/capture-empty-deploy-repository"
+if ! run_capture "$legacy_repository_capture_dir" \
+    STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-empty-deploy-repository" \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-empty-deploy-repository.out" 2>&1; then
+  cat "$WORK_DIR/capture-empty-deploy-repository.out" >&2
+  fail 'OCI baseline capture rejected exact legacy provenance with an empty repository value'
+fi
+assert_contains "$legacy_repository_capture_dir/trusted-deploy-provenance.txt" \
+  'registry_repository='
+run_capture_expect_failure capture-wrong-deploy-repository \
+  STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-wrong-deploy-repository" \
+  STUB_SHORT_SSE_MODE=quiet-timeout
+assert_contains "$WORK_DIR/capture-wrong-deploy-repository.out" \
+  'unable to find trusted OCI deploy provenance for the live digest set'
 
 manifest_capture_dir="$WORK_DIR/capture-manifest-image-id"
 if ! run_capture "$manifest_capture_dir" \
@@ -1564,6 +1815,24 @@ assert_line "$repeat_capture_dir/curl-trace.tsv" $'https://betstan.xyz/api/event
 assert_line "$repeat_capture_dir/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
 assert_line "$repeat_capture_dir/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 [[ ! -d "$repeat_capture_dir/.workdirs" ]] || fail 'OCI repeat-safe capture left workdirs behind'
+
+protected_capture_dir="$WORK_DIR/capture-protected-backoffice"
+if ! run_capture "$protected_capture_dir" \
+    STUB_BACKOFFICE_MODE=protected \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-protected-backoffice.out" 2>&1; then
+  cat "$WORK_DIR/capture-protected-backoffice.out" >&2
+  fail 'OCI baseline capture rejected the protected Backoffice endpoint'
+fi
+grep -Fq $'canonical\t/api/backoffice\t401\t' "$protected_capture_dir/public-http.tsv" ||
+  fail 'OCI baseline capture did not record the protected Backoffice status'
+grep -Fq $'\tunauthorized.errors:' "$protected_capture_dir/public-http.tsv" ||
+  fail 'OCI baseline capture did not validate the protected Backoffice payload'
+
+run_capture_expect_failure capture-malformed-protected-backoffice \
+  STUB_BACKOFFICE_MODE=malformed-protected \
+  STUB_SHORT_SSE_MODE=quiet-timeout
+assert_contains "$WORK_DIR/capture-malformed-protected-backoffice.out" \
+  'invalid Backoffice JSON'
 
 if ! run_capture "$WORK_DIR/capture-exact-window-eof" STUB_SHORT_SSE_MODE=headers-only-exact-window-eof >"$WORK_DIR/capture-exact-window-eof.out" 2>&1; then
   cat "$WORK_DIR/capture-exact-window-eof.out" >&2
@@ -1781,6 +2050,32 @@ assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" '
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
 
+protected_backoffice_output="$WORK_DIR/protected-backoffice-transition"
+if ! run_script "$protected_backoffice_output" \
+    STUB_BACKOFFICE_MODE=protected \
+    STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=public \
+    ROLLBACK_MODE=execute >"$WORK_DIR/protected-backoffice-transition.out" 2>&1; then
+  cat "$WORK_DIR/protected-backoffice-transition.out" >&2
+  fail 'OCI rollback rejected the protected-to-historical Backoffice transition'
+fi
+grep -Fq $'canonical\t/api/backoffice\t401\t' \
+  "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
+  fail 'OCI rollback readiness did not record the protected Backoffice status'
+grep -Fq $'\tunauthorized.errors' \
+  "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
+  fail 'OCI rollback readiness did not validate the protected Backoffice payload'
+assert_route_row "$protected_backoffice_output/public-verification.tsv" canonical /api/backoffice
+
+run_expect_failure malformed-protected-backoffice \
+  STUB_BACKOFFICE_MODE=malformed-protected ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/malformed-protected-backoffice/rollback-readiness/failures.txt" \
+  'incompatible Backoffice payload'
+
+run_expect_failure forbidden-backoffice \
+  STUB_BACKOFFICE_MODE=forbidden ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/forbidden-backoffice/rollback-readiness/failures.txt" \
+  'expected 200 or protected 401 got 403'
+
 run_expect_failure infra-run-id-mismatch \
   ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
 assert_contains "$WORK_DIR/infra-run-id-mismatch.out" \
@@ -1994,6 +2289,8 @@ assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.en
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\t502\t'
+assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/baseline/queues.tsv" 'event_live_update.'
+assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/queue-verification.tsv" 'dynamic:event_live_update.'
 [[ "$(wc -l <"$WORK_DIR/legacy-sse-rollback-success/rollout-order.tsv" | tr -d ' ')" == '9' ]] ||
   fail 'OCI legacy pre-SSE rollback aborted mid-rollout instead of processing every service'
 
@@ -2077,5 +2374,420 @@ assert_route_row "$WORK_DIR/success/public-verification.tsv" redirect /api/bet
 assert_route_row "$WORK_DIR/success/public-verification.tsv" redirect /api/backoffice
 assert_route_row "$WORK_DIR/success/public-verification.tsv" diagnostic /api/bet
 assert_route_row "$WORK_DIR/success/public-verification.tsv" diagnostic /api/backoffice
+
+partial_source="$WORK_DIR/partial-recovery-source"
+mkdir -p "$partial_source/baseline"
+cat >"$partial_source/baseline/baseline-provenance.env" <<EOF
+baseline_source_sha=$TARGET_SHA
+EOF
+cat >"$partial_source/failure-state.env" <<'EOF'
+status=FAIL
+failed_service=event
+failed_deployment=gaming-event-depl
+failed_stage=public-api
+failed_step_label=failed-event
+message=public API verification failed after gaming-event-depl
+EOF
+: >"$partial_source/pre-rollback-state.tsv"
+: >"$partial_source/partial-state.tsv"
+for service in "${SERVICES[@]}"; do
+  pre_image="$(current_image_ref "$service")"
+  partial_image="$pre_image"
+  case "$service" in
+    bet|backoffice|client|event)
+      partial_image="$(target_image_ref "$service")"
+      ;;
+  esac
+  printf '%s\tgaming-%s-depl\t%s\t7\t1/1\n' \
+    "$service" "$service" "$pre_image" \
+    >>"$partial_source/pre-rollback-state.tsv"
+  printf '%s\t%s\t8\n' \
+    "$service" "$partial_image" \
+    >>"$partial_source/partial-state.tsv"
+done
+printf '%s\n' auth bet backoffice client event \
+  >"$partial_source/rollout-order.tsv"
+
+partial_recovery_build="$WORK_DIR/partial-recovery-build"
+mkdir -p "$partial_recovery_build"
+: >"$partial_recovery_build/images.tsv"
+for service in "${SERVICES[@]}"; do
+  image_ref="$(current_image_ref "$service")"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$service" \
+    ghcr.io/vasilyevstan/betstan-images \
+    "$image_ref" \
+    "${image_ref##*@}" \
+    "$(service_platform_digest "$service")" \
+    >>"$partial_recovery_build/images.tsv"
+done
+
+cat >"$BIN_DIR/partial-recovery-readiness-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$OUTPUT_DIR"
+printf '%s\n' \
+  'rollback_readiness=GO' \
+  'mode=application-rollback' \
+  "target_sha=$TARGET_SHA" \
+  >"$OUTPUT_DIR/summary.env"
+: >"$OUTPUT_DIR/workload-state.tsv"
+while IFS=$'\t' read -r service _repository image_ref _manifest _platform; do
+  printf '%s\t%s\t1\t1\t1\t1\n' "$service" "$image_ref" \
+    >>"$OUTPUT_DIR/workload-state.tsv"
+done <"$STUB_BUILD_IMAGES_FILE"
+: >"$OUTPUT_DIR/failures.txt"
+STUB
+chmod +x "$BIN_DIR/partial-recovery-readiness-stub.sh"
+
+cat >"$BIN_DIR/partial-recovery-service-ops-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'event-pod CrashLoopBackOff'
+STUB
+chmod +x "$BIN_DIR/partial-recovery-service-ops-stub.sh"
+
+set_partial_recovery_state() {
+  local state_root="$1"
+  rm -rf "$state_root"
+  mkdir -p "$state_root"
+  for service in "${SERVICES[@]}"; do
+    image="$(current_image_ref "$service")"
+    case "$service" in
+      bet|backoffice|client|event)
+        image="$(target_image_ref "$service")"
+        ;;
+    esac
+    write_text_atomic "$state_root/${service}.env" <<EOF
+image=$image
+revision=8
+EOF
+  done
+}
+
+run_partial_recovery() {
+  local label="$1"
+  local state_dir="$STATE_DIR/$label/current"
+  local output_dir="$WORK_DIR/$label"
+  shift
+  if [[ "${PRESERVE_PARTIAL_RECOVERY_STATE:-0}" != "1" ]]; then
+    set_partial_recovery_state "$state_dir"
+  fi
+  rm -rf "$output_dir"
+  rm -f "$STATE_DIR/$label/kubectl.log"
+  env -i HOME="$HOME" \
+    PATH="$BIN_DIR:$PATH" \
+    STUB_STATE_DIR="$state_dir" \
+    STUB_KUBECTL_LOG="$STATE_DIR/$label/kubectl.log" \
+    TARGET_SHA="$TARGET_SHA" \
+    PARTIAL_ROLLBACK_RUN_ID=33131321686 \
+    PARTIAL_ROLLBACK_SOURCE_DIR="$partial_source" \
+    PARTIAL_RECOVERY_BUILD_DIR="${PARTIAL_RECOVERY_BUILD_DIR_OVERRIDE:-$partial_recovery_build}" \
+    PARTIAL_RECOVERY_BUILD_RUN_ID="$BUILD_RUN_ID" \
+    PARTIAL_RECOVERY_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
+    OUTPUT_DIR="$output_dir" \
+    OCI_K8S_NAMESPACE=betstan-oci \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+    OCI_RUNTIME_MODE=k3s \
+    OCI_RUNTIME_FINGERPRINT="$RUNTIME_FINGERPRINT" \
+    OCI_INFRASTRUCTURE_PROVENANCE_SHA256="$INFRASTRUCTURE_PROVENANCE_SHA256" \
+    OCI_INFRASTRUCTURE_PROVENANCE_FILE="$INFRASTRUCTURE_PROVENANCE_FIXTURE" \
+    ROLLBACK_READINESS_SCRIPT="$BIN_DIR/partial-recovery-readiness-stub.sh" \
+    SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
+    CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
+    GITHUB_REF_NAME=master \
+    GITHUB_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_SHA="$CURRENT_MASTER_SHA" \
+    STUB_BUILD_IMAGES_FILE="$partial_recovery_build/images.tsv" \
+    "$@" "$RECOVERY_SCRIPT"
+}
+
+run_partial_authority_validation() {
+  local directory="$1"
+  env -i HOME="$HOME" PATH="$BIN_DIR:$PATH" \
+    PARTIAL_RECOVERY_DIR="$directory" \
+    EXPECTED_RECOVERY_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
+    EXPECTED_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
+    EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+    EXPECTED_SOURCE_ROLLBACK_RUN_ID=33131321686 \
+    "$PARTIAL_AUTHORITY_VALIDATOR"
+}
+
+run_partial_authority_expect_failure() {
+  local label="$1"
+  local directory="$2"
+  if run_partial_authority_validation "$directory" \
+      >"$WORK_DIR/$label.out" 2>&1; then
+    fail "partial recovery authority unexpectedly passed: $label"
+  fi
+}
+
+if ! run_partial_recovery partial-recovery-success \
+    >"$WORK_DIR/partial-recovery-success.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-success.out" >&2
+  fail 'OCI partial rollback recovery unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/partial-recovery-success.out" \
+  'oci_partial_rollback_recovery=PASS'
+assert_line "$STATE_DIR/partial-recovery-success/kubectl.log" event
+[[ "$(sed -n '2p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == client ]] ||
+  fail 'OCI partial rollback recovery did not restore the client second'
+[[ "$(sed -n '3p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == backoffice ]] ||
+  fail 'OCI partial rollback recovery did not restore Backoffice third'
+[[ "$(sed -n '4p' "$STATE_DIR/partial-recovery-success/kubectl.log")" == bet ]] ||
+  fail 'OCI partial rollback recovery did not restore Bet fourth'
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-summary.env" \
+  'mode=abort-partial-rollback'
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.env" \
+  "restored_build_run_id=$BUILD_RUN_ID"
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.env" \
+  "restored_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA"
+assert_contains "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" \
+  'CrashLoopBackOff'
+run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
+  >"$WORK_DIR/partial-recovery-authority-success.out"
+assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
+  'partial_recovery_authority_validation=PASS'
+
+partial_capture_dir="$WORK_DIR/partial-recovery-baseline-capture"
+if ! run_capture "$partial_capture_dir" \
+    STUB_CAPTURE_CURRENT=1 \
+    STUB_SHORT_SSE_MODE=quiet-timeout \
+    BASELINE_RECOVERY_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
+    BASELINE_RECOVERY_DIR="$WORK_DIR/partial-recovery-success" \
+    GITHUB_RUN_ID="$CAPTURE_RUN_ID" \
+    GITHUB_RUN_ATTEMPT=1 \
+    >"$WORK_DIR/partial-recovery-baseline-capture.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-baseline-capture.out" >&2
+  fail 'trusted partial recovery baseline capture unexpectedly failed'
+fi
+assert_contains "$partial_capture_dir/baseline-provenance.env" \
+  'baseline_deploy_workflow=oci-production-rollback'
+assert_contains "$partial_capture_dir/baseline-provenance.env" \
+  "baseline_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA"
+assert_contains "$partial_capture_dir/baseline-provenance.env" \
+  "baseline_build_run_id=$BUILD_RUN_ID"
+assert_contains "$partial_capture_dir/baseline-provenance.env" \
+  "baseline_recovery_run_id=$PARTIAL_RECOVERY_RUN_ID"
+
+if ! run_script "$WORK_DIR/partial-recovery-baseline-dry-run" \
+    TARGET_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
+    STUB_TARGET_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
+    STUB_BASELINE_FIXTURE="$partial_capture_dir" \
+    STUB_PARTIAL_RECOVERY_MODE=1 \
+    ROLLBACK_MODE=dry-run \
+    >"$WORK_DIR/partial-recovery-baseline-dry-run.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-baseline-dry-run.out" >&2
+  fail 'OCI rollback operator rejected the trusted partial recovery baseline'
+fi
+assert_contains "$WORK_DIR/partial-recovery-baseline-dry-run.out" \
+  'oci_rollback_validation=PASS mode=dry-run'
+assert_contains \
+  "$WORK_DIR/partial-recovery-baseline-dry-run/deploy-provenance-binding.env" \
+  'origin=partial-recovery-authority'
+assert_contains \
+  "$WORK_DIR/partial-recovery-baseline-dry-run/deploy-provenance-binding.env" \
+  'binding=recorded-partial-recovery-infrastructure'
+
+partial_tamper_root="$WORK_DIR/partial-authority-tamper"
+mkdir -p "$partial_tamper_root"
+
+copy_partial_authority_fixture() {
+  local label="$1"
+  local directory="$partial_tamper_root/$label"
+  cp -R "$WORK_DIR/partial-recovery-success" "$directory"
+  printf '%s\n' "$directory"
+}
+
+tamper_dir="$(copy_partial_authority_fixture wrong-workflow)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  recovery_workflow rogue-workflow
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-wrong-workflow "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-wrong-workflow.out" \
+  'partial recovery authority identity is invalid'
+
+tamper_dir="$(copy_partial_authority_fixture wrong-attempt)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  recovery_run_attempt 2
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-wrong-attempt "$tamper_dir"
+
+tamper_dir="$(copy_partial_authority_fixture failed-recovery)"
+replace_env_value "$tamper_dir/partial-recovery-authority.env" status FAIL
+replace_env_value "$tamper_dir/partial-recovery-summary.env" status FAIL
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-failed-recovery "$tamper_dir"
+
+tamper_dir="$(copy_partial_authority_fixture wrong-source-run)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  source_rollback_run_id 33131321687
+replace_env_value \
+  "$tamper_dir/partial-recovery-summary.env" \
+  source_rollback_run_id 33131321687
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-wrong-source-run "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-wrong-source-run.out" \
+  'partial recovery authority failed source run does not match'
+
+tamper_dir="$(copy_partial_authority_fixture image-mismatch)"
+python3 - "$tamper_dir/images.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = list(csv.reader(path.open(encoding="utf-8", newline=""), delimiter="\t"))
+for row in rows:
+    if row[0] == "auth":
+        row[3] = "sha256:" + ("a" * 64)
+        row[2] = f"{row[1]}@{row[3]}"
+with path.open("w", encoding="utf-8", newline="") as handle:
+    csv.writer(handle, delimiter="\t", lineterminator="\n").writerows(rows)
+PY
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-image-mismatch "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-image-mismatch.out" \
+  'final state is not the restored build image'
+
+tamper_dir="$(copy_partial_authority_fixture incomplete-readiness)"
+python3 - "$tamper_dir/rollback-readiness/workload-state.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = list(csv.reader(path.open(encoding="utf-8", newline=""), delimiter="\t"))
+rows[0][3] = "0"
+with path.open("w", encoding="utf-8", newline="") as handle:
+    csv.writer(handle, delimiter="\t", lineterminator="\n").writerows(rows)
+PY
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-incomplete-readiness "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-incomplete-readiness.out" \
+  'readiness workload is not fully ready'
+
+tamper_dir="$(copy_partial_authority_fixture readiness-failure)"
+printf '%s\n' 'event: failed readiness' \
+  >"$tamper_dir/rollback-readiness/failures.txt"
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-readiness-failure "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-readiness-failure.out" \
+  'partial recovery readiness contains failures'
+
+tamper_dir="$(copy_partial_authority_fixture database-restore)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  database_restore enabled
+replace_env_value \
+  "$tamper_dir/partial-recovery-summary.env" \
+  database_restore enabled
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-database-restore "$tamper_dir"
+
+tamper_dir="$(copy_partial_authority_fixture substituted-source)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  restored_source_sha 3333333333333333333333333333333333333333
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-substituted-source "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-substituted-source.out" \
+  'partial recovery authority source does not match'
+
+tamper_dir="$(copy_partial_authority_fixture substituted-build)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  restored_build_run_id 1502
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-substituted-build "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-substituted-build.out" \
+  'partial recovery authority build does not match'
+
+tamper_dir="$(copy_partial_authority_fixture substituted-build-artifact)"
+replace_env_value \
+  "$tamper_dir/partial-recovery-authority.env" \
+  restored_build_artifact rogue-artifact
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure \
+  partial-authority-substituted-build-artifact \
+  "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-substituted-build-artifact.out" \
+  'partial recovery authority build artifact identity is invalid'
+
+tamper_dir="$(copy_partial_authority_fixture duplicate-evidence)"
+printf '%s\n' 'status=PASS' \
+  >>"$tamper_dir/partial-recovery-authority.env"
+refresh_partial_manifest_only "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-duplicate-evidence "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-duplicate-evidence.out" \
+  'partial-recovery-authority.env has an unexpected or duplicate key'
+
+tamper_dir="$(copy_partial_authority_fixture duplicate-plan)"
+head -n 1 "$tamper_dir/recovery-plan.tsv" \
+  >>"$tamper_dir/recovery-plan.tsv"
+refresh_partial_authority_manifest "$tamper_dir"
+run_partial_authority_expect_failure partial-authority-duplicate-plan "$tamper_dir"
+assert_contains "$WORK_DIR/partial-authority-duplicate-plan.out" \
+  'partial recovery plan service set is invalid'
+
+wrong_build_dir="$WORK_DIR/wrong-build-fixture"
+cp -R "$partial_recovery_build" "$wrong_build_dir"
+python3 - "$wrong_build_dir/images.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = list(csv.reader(path.open(encoding="utf-8", newline=""), delimiter="\t"))
+for row in rows:
+    if row[0] == "event":
+        row[3] = "sha256:" + ("b" * 64)
+        row[2] = f"{row[1]}@{row[3]}"
+with path.open("w", encoding="utf-8", newline="") as handle:
+    csv.writer(handle, delimiter="\t", lineterminator="\n").writerows(rows)
+PY
+if PARTIAL_RECOVERY_BUILD_DIR_OVERRIDE="$wrong_build_dir" \
+    PRESERVE_PARTIAL_RECOVERY_STATE=0 \
+    run_partial_recovery partial-recovery-wrong-build \
+    >"$WORK_DIR/partial-recovery-wrong-build.out" 2>&1; then
+  fail 'OCI partial recovery accepted a substituted pre-recovery build'
+fi
+assert_contains "$WORK_DIR/partial-recovery-wrong-build.out" \
+  'pre-run image does not match the selected build'
+[[ ! -s "$STATE_DIR/partial-recovery-wrong-build/kubectl.log" ]] ||
+  fail 'OCI partial recovery mutated a deployment before build validation'
+
+if run_partial_recovery partial-recovery-infrastructure-mismatch \
+    OCI_INFRASTRUCTURE_PROVENANCE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    >"$WORK_DIR/partial-recovery-infrastructure-mismatch.out" 2>&1; then
+  fail 'OCI partial recovery accepted substituted infrastructure provenance'
+fi
+assert_contains "$WORK_DIR/partial-recovery-infrastructure-mismatch.out" \
+  'infrastructure provenance hash does not match the selected artifact'
+[[ ! -s "$STATE_DIR/partial-recovery-infrastructure-mismatch/kubectl.log" ]] ||
+  fail 'OCI partial recovery mutated a deployment before infrastructure validation'
+
+stale_state="$STATE_DIR/partial-recovery-stale/current"
+set_partial_recovery_state "$stale_state"
+write_text_atomic "$stale_state/event.env" <<EOF
+image=ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+revision=9
+EOF
+if PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+    run_partial_recovery partial-recovery-stale \
+    >"$WORK_DIR/partial-recovery-stale.out" 2>&1; then
+  fail 'OCI partial rollback recovery accepted stale runtime state'
+fi
+assert_contains "$WORK_DIR/partial-recovery-stale.out" \
+  'runtime does not match an authorized partial recovery state'
+[[ ! -s "$STATE_DIR/partial-recovery-stale/kubectl.log" ]] ||
+  fail 'OCI stale partial rollback recovery mutated a deployment'
 
 echo 'oci_rollback_contract=PASS'

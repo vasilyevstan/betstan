@@ -38,7 +38,7 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
-  "/api/backoffice|array"
+  "/api/backoffice|backoffice"
 )
 SSE_PATH="${SSE_PATH:-/api/event/stream}"
 REDIRECT_PATH="${REDIRECT_PATH:-/api/auth/currentuser?live-betting-redirect=1}"
@@ -235,14 +235,19 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local attempt curl_status expected_status location meta status effective_url content_type shape
+  local attempt curl_status expected_status expected_status_label location meta status effective_url content_type shape
   local -a curl_options=(--silent --show-error --max-time "$REQUEST_TIMEOUT")
 
   expected_status=200
+  expected_status_label=200
   if [[ "$expected_kind" == "redirect" ]]; then
     expected_status=308
+    expected_status_label=308
   else
     curl_options+=(--location)
+    if [[ "$expected_kind" == "backoffice" ]]; then
+      expected_status_label="200 or protected 401"
+    fi
   fi
   status=""
   for ((attempt = 1; attempt <= HTTP_ATTEMPTS; attempt++)); do
@@ -254,7 +259,10 @@ capture_http() {
     )"; then
       curl_status=0
       IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-      [[ "$status" == "$expected_status" ]] && break
+      if [[ "$status" == "$expected_status" ||
+          ("$expected_kind" == "backoffice" && "$status" == "401") ]]; then
+        break
+      fi
     else
       curl_status=$?
       status=""
@@ -264,11 +272,11 @@ capture_http() {
       if [[ "$curl_status" != "0" ]]; then
         oci_die "HTTP probe failed for ${base_url}${path} after ${HTTP_ATTEMPTS} attempts"
       fi
-      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
+      oci_die "expected HTTP ${expected_status_label} for ${base_url}${path}, got ${status} after ${HTTP_ATTEMPTS} attempts"
     fi
     if [[ "$curl_status" == "0" &&
         ! "$status" =~ ^(429|500|502|503|504)$ ]]; then
-      oci_die "expected HTTP ${expected_status} for ${base_url}${path}, got ${status}"
+      oci_die "expected HTTP ${expected_status_label} for ${base_url}${path}, got ${status}"
     fi
     sleep "$HTTP_RETRY_SECONDS"
   done
@@ -319,6 +327,35 @@ if not isinstance(payload, list):
 print('array')
 PY
 )" || oci_die "invalid array JSON for ${base_url}${path}"
+      ;;
+    backoffice)
+      [[ "$content_type" == application/json* ]] || oci_die "expected JSON for ${base_url}${path}"
+      shape="$(python3 - "$body_file" "$status" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding='utf-8'))
+status = sys.argv[2]
+if status == '200':
+    if not isinstance(payload, list):
+        raise SystemExit(1)
+    print('array')
+else:
+    errors = payload.get('errors') if isinstance(payload, dict) else None
+    if (
+        not isinstance(errors, list)
+        or not errors
+        or any(
+            not isinstance(error, dict)
+            or not isinstance(error.get('message'), str)
+            or not error['message']
+            for error in errors
+        )
+    ):
+        raise SystemExit(1)
+    print('unauthorized.errors')
+PY
+)" || oci_die "invalid Backoffice JSON for ${base_url}${path}"
       ;;
     object)
       [[ "$content_type" == application/json* ]] || oci_die "expected JSON for ${base_url}${path}"
@@ -596,6 +633,13 @@ validate_trusted_ghcr_deploy_provenance() {
   local image_file="$2"
   local source_sha="$3"
   local deploy_run_id="$4"
+  local repository
+  repository="$(env_value "$provenance_file" registry_repository)"
+  # A historical writer emitted this key empty; the exact GHCR images remain authoritative.
+  if [[ -z "$repository" ]] &&
+     ! grep -Fxq 'registry_repository=' "$provenance_file"; then
+    return 1
+  fi
   [[ "$(env_value "$provenance_file" source_sha)" == "$source_sha" &&
      "$(env_value "$provenance_file" deployment_workflow)" == "oci-production-deploy" &&
      "$(env_value "$provenance_file" deployment_run_id)" == "$deploy_run_id" &&
@@ -603,7 +647,8 @@ validate_trusted_ghcr_deploy_provenance() {
      "$(env_value "$provenance_file" image_provenance_sha256)" == "$(sha256_file "$image_file")" &&
      "$(env_value "$provenance_file" registry_provider)" == "ghcr" &&
      "$(env_value "$provenance_file" registry_host)" == "ghcr.io" &&
-     "$(env_value "$provenance_file" registry_repository)" == "ghcr.io/vasilyevstan/betstan-images" &&
+     ( -z "$repository" ||
+       "$repository" == "ghcr.io/vasilyevstan/betstan-images" ) &&
      "$(env_value "$provenance_file" registry_public_anonymous)" == "true" ]]
 }
 
@@ -691,25 +736,83 @@ baseline_recovery_run_id=0
 baseline_recovery_run_attempt=0
 baseline_transition_provenance_file=""
 trusted_provenance_file=trusted-deploy-provenance.txt
+partial_recovery_files=()
 
 if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
-  validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
-    oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
-  validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
-    oci_die "selected recovery image provenance is not an immutable public GHCR generation"
-  compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
-    oci_die "live deployment GHCR digests do not match the selected recovery artifact"
-  matched_source_sha="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" source_sha)"
-  matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
-  matched_build_run_id="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" trusted_build_run_id)"
-  baseline_deploy_workflow=oci-ghcr-cache-recovery
-  baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
-  baseline_recovery_run_attempt=1
-  baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
-  trusted_provenance_file="$baseline_transition_provenance_file"
-  cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
-  cp "$BASELINE_RECOVERY_DIR/transition-provenance.env" \
-    "$OUTPUT_DIR/$baseline_transition_provenance_file"
+  cache_recovery_marker="$BASELINE_RECOVERY_DIR/recovery-evidence.env"
+  partial_recovery_marker="$BASELINE_RECOVERY_DIR/partial-recovery-authority.env"
+  if [[ -f "$cache_recovery_marker" && -f "$partial_recovery_marker" ]]; then
+    oci_die "selected recovery artifact has ambiguous authority"
+  elif [[ -f "$partial_recovery_marker" ]]; then
+    PARTIAL_RECOVERY_DIR="$BASELINE_RECOVERY_DIR" \
+    EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+      "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null ||
+      oci_die "selected partial recovery artifact is not exact completed recovery evidence"
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "selected partial recovery images are not immutable public GHCR provenance"
+    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "live deployment GHCR digests do not match the selected partial recovery"
+    matched_source_sha="$(
+      env_value "$partial_recovery_marker" restored_source_sha
+    )"
+    matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
+    matched_build_run_id="$(
+      env_value "$partial_recovery_marker" restored_build_run_id
+    )"
+    baseline_deploy_workflow=oci-production-rollback
+    baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+    baseline_recovery_run_attempt=1
+    baseline_transition_provenance_file=partial-recovery/partial-recovery-authority.env
+    trusted_provenance_file="$baseline_transition_provenance_file"
+    partial_recovery_files=(
+      partial-recovery/partial-recovery-SHA256SUMS
+      partial-recovery/partial-recovery-summary.env
+      partial-recovery/recovery-plan.tsv
+      partial-recovery/recovery-rollout-order.tsv
+      partial-recovery/final-state.tsv
+      partial-recovery/rollback-readiness/summary.env
+      partial-recovery/rollback-readiness/workload-state.tsv
+      partial-recovery/rollback-readiness/failures.txt
+    )
+    mkdir -p "$OUTPUT_DIR/partial-recovery/rollback-readiness"
+    cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-authority.env" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-authority.env"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-SHA256SUMS" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-SHA256SUMS"
+    cp "$BASELINE_RECOVERY_DIR/partial-recovery-summary.env" \
+      "$OUTPUT_DIR/partial-recovery/partial-recovery-summary.env"
+    cp "$BASELINE_RECOVERY_DIR/recovery-plan.tsv" \
+      "$OUTPUT_DIR/partial-recovery/recovery-plan.tsv"
+    cp "$BASELINE_RECOVERY_DIR/recovery-rollout-order.tsv" \
+      "$OUTPUT_DIR/partial-recovery/recovery-rollout-order.tsv"
+    cp "$BASELINE_RECOVERY_DIR/final-state.tsv" \
+      "$OUTPUT_DIR/partial-recovery/final-state.tsv"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/summary.env" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/summary.env"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/workload-state.tsv" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/workload-state.tsv"
+    cp "$BASELINE_RECOVERY_DIR/rollback-readiness/failures.txt" \
+      "$OUTPUT_DIR/partial-recovery/rollback-readiness/failures.txt"
+  else
+    validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
+      oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "selected recovery image provenance is not an immutable public GHCR generation"
+    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+      oci_die "live deployment GHCR digests do not match the selected recovery artifact"
+    matched_source_sha="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" source_sha)"
+    matched_deploy_run_id="$BASELINE_RECOVERY_RUN_ID"
+    matched_build_run_id="$(env_value "$BASELINE_RECOVERY_DIR/recovery-evidence.env" trusted_build_run_id)"
+    baseline_deploy_workflow=oci-ghcr-cache-recovery
+    baseline_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+    baseline_recovery_run_attempt=1
+    baseline_transition_provenance_file=trusted-recovery-transition-provenance.env
+    trusted_provenance_file="$baseline_transition_provenance_file"
+    cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
+    cp "$BASELINE_RECOVERY_DIR/transition-provenance.env" \
+      "$OUTPUT_DIR/$baseline_transition_provenance_file"
+  fi
 else
 trusted_deploy_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
 trusted_build_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
@@ -944,12 +1047,21 @@ required_files=(
   migration-backup-references.tsv
   "$trusted_provenance_file"
 )
+if ((${#partial_recovery_files[@]} > 0)); then
+  required_files+=("${partial_recovery_files[@]}")
+fi
 : >"$OUTPUT_DIR/SHA256SUMS"
 for file in "${required_files[@]}"; do
-  [[ -s "$OUTPUT_DIR/$file" ]] || oci_die "required baseline artifact file is missing: $file"
+  [[ -f "$OUTPUT_DIR/$file" && ! -L "$OUTPUT_DIR/$file" ]] ||
+    oci_die "required baseline artifact file is missing: $file"
+  if [[ "$file" != "partial-recovery/rollback-readiness/failures.txt" ]]; then
+    [[ -s "$OUTPUT_DIR/$file" ]] ||
+      oci_die "required baseline artifact file is empty: $file"
+  fi
   printf '%s  %s\n' "$(sha256_file "$OUTPUT_DIR/$file")" "$file" >>"$OUTPUT_DIR/SHA256SUMS"
 done
-chmod 600 "$OUTPUT_DIR"/*
+find "$OUTPUT_DIR" -type d -exec chmod 700 {} +
+find "$OUTPUT_DIR" -type f -exec chmod 600 {} +
 allow_local_capture=false
 [[ -n "${GITHUB_RUN_ID:-}" ]] || allow_local_capture=true
 BASELINE_DIR="$OUTPUT_DIR" \
