@@ -50,6 +50,7 @@ jobs:
       OCI_CLI_VERSION: "3.90.0"
       OCI_REGION: ${{ vars.OCI_REGION }}
       OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
       OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
       OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
@@ -239,6 +240,7 @@ jobs:
           fi
 
       - name: Install pinned OCI CLI
+        id: oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Verify OKE identity
@@ -289,6 +291,7 @@ jobs:
           ./infra/oci/scripts/authorize-github-runner.sh authorize
 
       - name: Configure kubectl from exact OKE cluster
+        id: oke_access
         if: env.OCI_RUNTIME_MODE == 'oke'
         uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
         env:
@@ -301,6 +304,7 @@ jobs:
           cluster: ${{ steps.provenance.outputs.cluster_ocid }}
 
       - name: Open ephemeral OCI Bastion access to k3s
+        id: k3s_access
         if: env.OCI_RUNTIME_MODE == 'k3s'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -602,6 +606,10 @@ jobs:
         id: failure_disable
         if: >-
           always() &&
+          ((env.OCI_RUNTIME_MODE == 'oke' &&
+            steps.oke_access.outcome == 'success') ||
+           (env.OCI_RUNTIME_MODE == 'k3s' &&
+            steps.k3s_access.outcome == 'success')) &&
           (steps.accepted.outcome != 'success' ||
             steps.accepted_evidence_upload.outcome != 'success')
         env:
@@ -654,6 +662,10 @@ jobs:
         id: final_disable
         if: >-
           always() &&
+          ((env.OCI_RUNTIME_MODE == 'oke' &&
+            steps.oke_access.outcome == 'success') ||
+           (env.OCI_RUNTIME_MODE == 'k3s' &&
+            steps.k3s_access.outcome == 'success')) &&
           (steps.accepted.outcome != 'success' ||
             steps.accepted_evidence_upload.outcome != 'success' ||
             steps.commit_preflight.outcome != 'success' ||
@@ -684,7 +696,10 @@ jobs:
 
       - name: Close ephemeral OCI Bastion access
         id: close_bastion
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.oci_cli.outcome == 'success'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}

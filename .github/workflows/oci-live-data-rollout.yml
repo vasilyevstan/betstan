@@ -557,6 +557,7 @@ jobs:
           fi
 
       - name: Install pinned OCI CLI
+        id: oci_cli
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Verify OKE identity
@@ -929,7 +930,10 @@ jobs:
           fi
 
       - name: Close ephemeral OCI Bastion access
-        if: always() && env.OCI_RUNTIME_MODE == 'k3s'
+        if: >-
+          always() &&
+          env.OCI_RUNTIME_MODE == 'k3s' &&
+          steps.oci_cli.outcome == 'success'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
