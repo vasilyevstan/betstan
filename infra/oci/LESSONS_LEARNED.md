@@ -433,6 +433,13 @@ conversation summaries are not authority.
   and unchanged timestamps even when its workflow is disabled. Treat that as
   a reported provider artifact only after exact provenance checks; never
   re-enable or approve production work just to clear the record.
+- A long-running `gh run watch` can hide an actionable protected-environment
+  gate: the mutation job may already be complete while a downstream public
+  validation job is `waiting`. The watcher's continued execution is not
+  progress. At every bounded checkpoint, and immediately when status is
+  requested, inspect the exact jobs and `pending_deployments`; route a
+  documented preauthorized approval in the same turn or identify the human
+  approval owner.
 - Fixed repository fixture directories are not safe when contract suites run
   concurrently. Use unique temporary directories and ensure output filtering
   cannot mask a non-zero test exit.

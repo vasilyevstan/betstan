@@ -110,6 +110,12 @@ grep -Fq 'tools: [read, search, execute, web]' "$conductor_agent" ||
   fail "conductor agent does not remain read-only"
 for conductor_contract in \
     'Do not tight-poll' \
+    'blocking watcher such as `gh run watch` as notification transport' \
+    'Its continued execution is not a progress signal' \
+    'A user request for status or a suspicion that work is stuck is an immediate' \
+    'completed deploy job' \
+    'waiting public-validation job is an approval-bound gate' \
+    "defer that handoff behind the watcher's timeout" \
     'A running agent with recent tool activity is active' \
     'A GitHub environment approval wait is active external work' \
     'inspect both jobs and `pending_deployments` immediately' \
@@ -138,6 +144,15 @@ grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
 grep -Fq 'the conductor checks jobs plus `pending_deployments`' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave protected environment gates unattended"
+grep -Fq 'A still-running `gh run watch` is notification transport, not evidence of progress' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can mistake a blocking watcher for progress"
+grep -Fq 'A user asking for status or whether work is stuck triggers that checkpoint immediately' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not force an immediate checkpoint on status requests"
+grep -Fq 'terminal job followed by a downstream `waiting` job with no executing step' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can miss a downstream protected-environment gate"
 grep -Fq 'A failed release run whose consumers require `run_attempt == 1` is terminal' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can rerun terminal first-attempt release evidence"
