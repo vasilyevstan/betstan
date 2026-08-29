@@ -25,7 +25,17 @@ class EventResultListener extends AListener<IEventResultEvent> {
     }
 
     storedEvent.status = EventStatus.RESULTED;
-    storedEvent.visibility = EventVisibility.OFFLINE;
+    // A completed live-simulated event (one that ever entered the live
+    // pipeline -- `live` is populated, whether still mid-match or already
+    // FULL_TIME) must stay visible with its retained live snapshot across
+    // refresh/reconnect. It is only ever hidden later, when the next
+    // event's own T-10 pre-kickoff window becomes authoritative (see
+    // `applyLiveEventUpdate`'s PRE_MATCH handoff, which retires it back to
+    // OFFLINE). Ordinary pre-match results -- events that never went
+    // live -- are unaffected and go OFFLINE exactly as before.
+    if (!storedEvent.live) {
+      storedEvent.visibility = EventVisibility.OFFLINE;
+    }
     await storedEvent.save();
     this.channel.ack(msg);
   }

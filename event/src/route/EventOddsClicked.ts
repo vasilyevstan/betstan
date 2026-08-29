@@ -22,7 +22,19 @@ const LIVE_MARKET_NAMES: Record<LiveMarketType, string> = {
   [LiveMarketType.NEXT_CORNER]: "Next Corner",
   [LiveMarketType.NEXT_PENALTY]: "Next Penalty",
   [LiveMarketType.HALF_TIME_RESULT]: "Half Time Result",
+  [LiveMarketType.KICKOFF_TEAM]: "Kickoff Team",
+  [LiveMarketType.FIRST_MINUTE_GOAL]: "Goal In First Minute",
 };
+
+/**
+ * The two pre-kickoff live-slip markets are the only markets ever published
+ * under phase PRE_MATCH; every other live market requires a genuinely
+ * in-play phase.
+ */
+const PRE_KICKOFF_MARKET_TYPES = new Set<LiveMarketType>([
+  LiveMarketType.KICKOFF_TEAM,
+  LiveMarketType.FIRST_MINUTE_GOAL,
+]);
 
 let _publisher: EventOddsSelectedPublisher | null = null;
 const getPublisher = async (): Promise<EventOddsSelectedPublisher> => {
@@ -46,10 +58,20 @@ const parseInteger = (value: unknown): number | null => {
   return null;
 };
 
-const isLiveSelectionPhase = (phase: EventPhase | undefined): boolean =>
-  phase !== undefined &&
-  phase !== EventPhase.PRE_MATCH &&
-  phase !== EventPhase.FULL_TIME;
+const isLiveSelectionPhase = (
+  phase: EventPhase | undefined,
+  marketType?: LiveMarketType
+): boolean => {
+  if (phase === undefined || phase === EventPhase.FULL_TIME) {
+    return false;
+  }
+  if (phase === EventPhase.PRE_MATCH) {
+    // Pre-kickoff candidacy: only the two dedicated pre-kickoff markets are
+    // selectable while the event is still in phase PRE_MATCH.
+    return marketType !== undefined && PRE_KICKOFF_MARKET_TYPES.has(marketType);
+  }
+  return true;
+};
 
 const getSelectionName = (
   side: TeamSide,
@@ -63,6 +85,12 @@ const getSelectionName = (
   }
   if (side === TeamSide.DRAW) {
     return "Draw";
+  }
+  if (side === TeamSide.YES) {
+    return "Yes";
+  }
+  if (side === TeamSide.NO) {
+    return "No";
   }
   return "None";
 };
@@ -172,17 +200,18 @@ router.post(
       }
 
       const live = event.live;
+      const selectedMarket =
+        live && Array.isArray(live.currentMarkets)
+          ? live.currentMarkets.find((market) => market.marketId === marketId)
+          : undefined;
+
       if (
         !live ||
-        !isLiveSelectionPhase(live.phase) ||
+        !isLiveSelectionPhase(live.phase, selectedMarket?.marketType) ||
         live.bettingStatus !== BettingStatus.OPEN
       ) {
         return next(new BadRequestError("Live betting is not open for this event"));
       }
-
-      const selectedMarket = Array.isArray(live.currentMarkets)
-        ? live.currentMarkets.find((market) => market.marketId === marketId)
-        : undefined;
 
       if (!selectedMarket) {
         return next(new BadRequestError("Market does not exist"));

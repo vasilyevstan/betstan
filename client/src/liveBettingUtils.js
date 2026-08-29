@@ -26,6 +26,30 @@ export const SLIP_ROW_STATUS = Object.freeze({
   VOID: 'VOID',
 });
 
+/**
+ * Live-slip-only markets that the server may open ahead of actual kickoff,
+ * during the T-10 pre-kickoff countdown window. They are ordinary entries in
+ * `event.live.currentMarkets`/quote-selection payloads (same market/selection
+ * shape and `/api/event/odds` live routing as any other live market); only
+ * their `marketType` and eligibility window are special. Keeping these IDs as
+ * named constants documents the exact contract the client depends on.
+ */
+export const COUNTDOWN_LIVE_MARKET_TYPE = Object.freeze({
+  KICKOFF_TEAM: 'KICKOFF_TEAM',
+  FIRST_MINUTE_GOAL: 'FIRST_MINUTE_GOAL',
+});
+
+const COUNTDOWN_LIVE_MARKET_TYPES = new Set(Object.values(COUNTDOWN_LIVE_MARKET_TYPE));
+
+/** Selections for a yes/no countdown market (e.g. first-minute goal) are identified by `selectionId` since `TeamSide` has no yes/no value. */
+const YES_NO_SELECTION_LABELS = Object.freeze({
+  yes: 'Yes',
+  no: 'No',
+});
+
+/** Inclusive lead time before scheduled kickoff during which an event surfaces in the live area with a countdown. */
+export const COUNTDOWN_WINDOW_MS = 10 * 60 * 1000;
+
 const EVENT_PHASE_LABELS = Object.freeze({
   PRE_MATCH: 'Pre-match',
   FIRST_HALF: 'First half',
@@ -42,6 +66,8 @@ const LIVE_MARKET_LABELS = Object.freeze({
   NEXT_CORNER: 'Next Corner',
   NEXT_PENALTY: 'Next Penalty',
   HALF_TIME_RESULT: 'Half Time Result',
+  KICKOFF_TEAM: 'Kickoff Team',
+  FIRST_MINUTE_GOAL: 'Goal in First Minute',
 });
 
 const DECLINE_REASON_LABELS = Object.freeze({
@@ -102,6 +128,36 @@ export const isLiveEvent = (event) => isLivePhase(event?.live?.phase);
 export const getLiveSequence = (event) => (
   typeof event?.live?.sequence === 'number' ? event.live.sequence : null
 );
+
+export const isFinishedLiveEvent = (event) => event?.live?.phase === 'FULL_TIME';
+
+export const isCountdownMarketType = (marketType) => COUNTDOWN_LIVE_MARKET_TYPES.has(marketType);
+
+/** Scheduled kickoff falls back to `event.time` so the countdown window works even before any `live` snapshot exists. */
+export const getScheduledKickoffTime = (event) => {
+  const rawKickoff = event?.live?.kickoffAt ?? event?.time;
+  const parsedKickoff = Date.parse(rawKickoff ?? '');
+  return Number.isNaN(parsedKickoff) ? null : parsedKickoff;
+};
+
+/**
+ * True from T-10 (inclusive) up until the server authoritatively marks the event
+ * as live (`isLiveEvent`) or resulted/finished. This purely schedules *where* an
+ * event is displayed; it must never be used to gate bet placement, which relies
+ * on authoritative market/event fields (see `isLiveMarketSelectable`).
+ */
+export const isInCountdownWindow = (event, now = Date.now()) => {
+  if (isLiveEvent(event) || isFinishedLiveEvent(event) || event?.status === 'RESULTED') {
+    return false;
+  }
+
+  const kickoffTime = getScheduledKickoffTime(event);
+  if (kickoffTime === null) {
+    return false;
+  }
+
+  return now >= kickoffTime - COUNTDOWN_WINDOW_MS;
+};
 
 export const sortEvents = (events) => [...(Array.isArray(events) ? events : [])].sort((left, right) => {
   const leftLive = isLiveEvent(left);
@@ -271,6 +327,16 @@ export const formatMinute = (minute, addedTime) => {
   return `${safeMinute}'`;
 };
 
+/** Formats the remaining milliseconds to kickoff as a clamped `mm:ss` string, never negative. */
+export const formatCountdownDuration = (remainingMs) => {
+  const safeRemainingMs = Number.isFinite(remainingMs) ? Math.max(0, remainingMs) : 0;
+  const totalSeconds = Math.floor(safeRemainingMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
 export const getMatchProgressValue = (liveState) => {
   if (!liveState) {
     return 0;
@@ -295,6 +361,13 @@ export const getSideLabel = (side, event) => {
   }
   if (side === 'NONE') {
     return 'None';
+  }
+  // TeamSide.YES/NO back the first-minute-goal countdown market's selections.
+  if (side === 'YES') {
+    return 'Yes';
+  }
+  if (side === 'NO') {
+    return 'No';
   }
   return '';
 };
@@ -343,16 +416,58 @@ export const isMarketStale = (market, now = Date.now()) => {
   return expirationTime <= now;
 };
 
-export const isLiveMarketSelectable = (event, market, now = Date.now()) => (
-  isLiveEvent(event)
-  && event?.live?.bettingStatus === 'OPEN'
-  && market?.status === LIVE_MARKET_STATUS.OPEN
-  && !isMarketStale(market, now)
-);
+/**
+ * Authoritative selectability for both in-play live markets and the two
+ * countdown-only live-slip markets. The countdown markets reuse the exact
+ * same gating fields (`bettingStatus`, `market.status`, `quoteValidUntil`) as
+ * any other live market; only their eligibility window differs (T-10 through
+ * kickoff instead of in-play). This means the server's `status`/`quoteValidUntil`
+ * transition at kickoff is what closes them out, never the client clock alone.
+ */
+export const isLiveMarketSelectable = (event, market, now = Date.now()) => {
+  const isCountdownEligible = isCountdownMarketType(market?.marketType) && isInCountdownWindow(event, now);
+
+  return (
+    (isLiveEvent(event) || isCountdownEligible)
+    && event?.live?.bettingStatus === 'OPEN'
+    && market?.status === LIVE_MARKET_STATUS.OPEN
+    && !isMarketStale(market, now)
+  );
+};
+
+/**
+ * Resolves a selection's display label. `ILiveMarketSelection.side` (a
+ * `TeamSide`, including the `YES`/`NO` values backing the first-minute-goal
+ * countdown market) is the authoritative, required field and is checked
+ * first via the shared `getSideLabel` helper used by every other market. An
+ * optional server-supplied `label` takes precedence if present, and a
+ * `selectionId`-based yes/no fallback covers the unlikely case where `side`
+ * is missing or unrecognized.
+ */
+export const getMarketSelectionLabel = (market, selection, event) => {
+  const explicitLabel = normalizeText(selection?.label);
+  if (explicitLabel) {
+    return explicitLabel;
+  }
+
+  const sideLabel = getSideLabel(selection?.side, event);
+  if (sideLabel) {
+    return sideLabel;
+  }
+
+  if (market?.marketType === COUNTDOWN_LIVE_MARKET_TYPE.FIRST_MINUTE_GOAL) {
+    const normalizedSelectionId = normalizeText(selection?.selectionId).toLowerCase();
+    if (YES_NO_SELECTION_LABELS[normalizedSelectionId]) {
+      return YES_NO_SELECTION_LABELS[normalizedSelectionId];
+    }
+  }
+
+  return '';
+};
 
 export const buildLiveMarketButtonLabel = (event, market, selection) => {
   const marketLabel = formatLiveMarketType(market?.marketType);
-  const selectionLabel = getSideLabel(selection?.side, event) || 'Selection';
+  const selectionLabel = getMarketSelectionLabel(market, selection, event) || 'Selection';
   return `Select ${marketLabel}: ${selectionLabel} at ${selection?.odds}`;
 };
 
@@ -389,9 +504,12 @@ export const formatRowOutcome = (row) => {
   return normalizeText(row?.status).replace(/_/g, ' ').toLowerCase();
 };
 
-export const getMarketAvailabilityLabel = (event, market) => {
-  if (!isLiveEvent(event)) {
-    return 'Live markets open in-play only';
+export const getMarketAvailabilityLabel = (event, market, now = Date.now()) => {
+  const isCountdownMarket = isCountdownMarketType(market?.marketType);
+  const isCountdownActive = isCountdownMarket && isInCountdownWindow(event, now);
+
+  if (!isLiveEvent(event) && !isCountdownActive) {
+    return isCountdownMarket ? 'Opens during the kickoff countdown' : 'Live markets open in-play only';
   }
 
   if (event?.live?.bettingStatus !== 'OPEN') {

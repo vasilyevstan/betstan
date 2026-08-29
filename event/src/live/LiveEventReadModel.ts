@@ -751,9 +751,92 @@ export const applyLiveEventUpdate = async (
     return null;
   }
 
-  const snapshot = createPublicEventSnapshot(
-    currentEvent as unknown as UnknownRecord
-  );
+  const currentRecord = currentEvent as unknown as UnknownRecord;
 
-  return snapshot.live?.sequence === event.data.sequence ? snapshot : null;
+  // "Accepted" means this exact call's sequence is the one now stored --
+  // i.e. the sequence gate above did not reject it as stale/duplicate.
+  // Every side effect below must only run for an accepted update: a
+  // delayed/duplicate message keeps the phase it originally carried (e.g.
+  // PRE_MATCH) even after being rejected, so gating on `event.data.phase`
+  // alone (without also requiring acceptance) would let a late, rejected
+  // message for one event still mutate a *different* event's visibility.
+  const liveRecord = currentRecord.live as UnknownRecord | undefined;
+  const accepted = liveRecord?.sequence === event.data.sequence;
+
+  if (accepted) {
+    const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
+
+    if (
+      currentRecord.visibility === EventVisibility.OFFLINE &&
+      currentRecord.status === EventStatus.RESULTED &&
+      !wasIntentionallyRetired
+    ) {
+      // Provenance-aware resurrection: within this service, `status` is
+      // only ever set to RESULTED by `EventResultListener`, which is also
+      // the only path that forces an event OFFLINE purely because
+      // `storedEvent.live` was still falsy at the time (either an
+      // ordinary never-live event, or -- since independent queues give
+      // no cross-service ordering guarantee -- a result that raced ahead
+      // of this event's very first live projection). Gating on
+      // `status === RESULTED` avoids resurrecting the *other* OFFLINE
+      // case: a brand-new event discovered only through the live
+      // pipeline itself, which intentionally defaults OFFLINE
+      // (`visibilityInitialized: false`) pending its own separate
+      // onboarding/visibility decision. Since this is a genuine, accepted
+      // live update for the same event, and it was never *intentionally*
+      // retired by a newer event's PRE_MATCH handoff (no tombstone),
+      // restore visibility so the live/eventually-FULL_TIME event is not
+      // permanently hidden.
+      await Event.updateOne(
+        { eventId: event.data.eventId },
+        { $set: { visibility: EventVisibility.ONLINE } }
+      );
+      currentRecord.visibility = EventVisibility.ONLINE;
+    }
+
+    if (event.data.phase === EventPhase.PRE_MATCH) {
+      const kickoffAt = toIsoString(event.data.kickoffAt) ?? event.data.kickoffAt;
+      const kickoffDate = new Date(kickoffAt);
+
+      if (!Number.isNaN(kickoffDate.getTime())) {
+        // A new event's T-10 pre-kickoff snapshot becoming authoritative
+        // is the handoff point that retires any previously retained
+        // finished live event: `EventResultListener` keeps a completed
+        // live-simulated event ONLINE (with its FULL_TIME snapshot) so it
+        // survives refresh/reconnect, but retention is bounded to at most
+        // one such event at a time, so it must be hidden again the
+        // moment the next event's own countdown becomes authoritative.
+        // Scoped to events strictly *older* (by scheduled kickoff time)
+        // than this one, never "every other event" -- an out-of-order
+        // arriving PRE_MATCH for a chronologically older fixture must
+        // never retire a genuinely newer retained event. `eventId: { $ne
+        // }` guarantees this never retires the event whose own PRE_MATCH
+        // snapshot just landed (including on a restart replaying the
+        // same snapshot). `liveRetiredAt` is stamped as the permanent
+        // tombstone: late/duplicate updates for the retired event must
+        // never resurrect it (see the resurrection branch above).
+        await Event.updateMany(
+          {
+            eventId: { $ne: event.data.eventId },
+            visibility: EventVisibility.ONLINE,
+            "live.phase": EventPhase.FULL_TIME,
+            time: { $lt: kickoffDate },
+          },
+          {
+            $set: {
+              visibility: EventVisibility.OFFLINE,
+              liveRetiredAt: new Date(),
+            },
+          }
+        );
+      }
+    }
+  }
+
+  if (!accepted) {
+    return null;
+  }
+
+  return createPublicEventSnapshot(currentRecord);
 };
+

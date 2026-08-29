@@ -93,6 +93,71 @@ it("approves a live bet whose valid quote predates a newer snapshot that already
   ).toBe(true);
 });
 
+it("declines a live bet against an ordinary market's frozen PRE_MATCH-phase history entry, even though it was recorded OPEN", async () => {
+  const publisher = createPublisher();
+  const service = new ModerationService(publisher);
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const submittedAt = timelineAt(5_000);
+  // Default createLiveMarket() is LiveMarketType.NEXT_CORNER -- an ordinary
+  // live market that must never be treated as live while phase is
+  // PRE_MATCH, regardless of what its frozen history entry recorded.
+  const oldMarket = createLiveMarket(eventId, {
+    marketVersion: 1,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(30_000),
+  });
+  const newMarket = createLiveMarket(eventId, {
+    marketVersion: 2,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(60_000),
+  });
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      phase: EventPhase.PRE_MATCH,
+      markets: [oldMarket],
+    })
+  );
+  // A newer snapshot supersedes the old identity, archiving it into
+  // history with phase PRE_MATCH (the phase that was current when it was
+  // captured as OPEN).
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      phase: EventPhase.PRE_MATCH,
+      markets: [newMarket],
+    })
+  );
+
+  const mirror = await LiveEventMirror.findOne({ eventId });
+  expect(
+    mirror!.marketHistory!.some(
+      (entry) =>
+        entry.marketVersion === 1
+        && entry.quoteVersion === 1
+        && entry.phase === EventPhase.PRE_MATCH
+        && entry.status === LiveMarketStatus.OPEN
+    )
+  ).toBe(true);
+
+  const placeBet = createLivePlaceBetEvent(oldMarket, {
+    data: { submittedAt },
+  });
+
+  await service.handlePlaceBet(placeBet);
+
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_NOT_LIVE);
+});
+
 it("declines a live bet whose quote had already expired at submission, even though its market state is retained in history", async () => {
   const publisher = createPublisher();
   const service = new ModerationService(publisher);

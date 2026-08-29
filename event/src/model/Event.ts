@@ -231,6 +231,19 @@ const eventSchema = new Schema({
     required: false,
     enum: Object.values(EventVisibility),
   },
+  liveRetiredAt: {
+    // Retention tombstone: set only when the T-10 PRE_MATCH handoff for a
+    // newer event intentionally retires an older retained live full-time
+    // event (see `applyLiveEventUpdate`). Distinguishes an intentional
+    // retirement (permanent -- never auto-restored) from an ordinary
+    // OFFLINE result or a "result arrived before any live projection"
+    // race (transient -- restored to ONLINE by the next accepted live
+    // update). Additive/optional; absent/null on all pre-existing and
+    // ordinary (never-live) events.
+    type: Date,
+    required: false,
+    default: null,
+  },
   products: [
     new Schema({
       id: {

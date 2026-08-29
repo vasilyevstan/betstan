@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import { ConsumeMessage } from "amqplib";
 import {
+  BettingStatus,
+  EventPhase,
   EventStatus,
   EventVisibility,
   IEventResultEvent,
@@ -64,6 +66,45 @@ it("marks event as resulted and offline when EventResult arrives", async () => {
   const updatedEvent = await Event.findOne({ eventId });
   expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
   expect(updatedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+});
+
+it("retains a live-simulated event ONLINE with its full-time snapshot when EventResult arrives", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId,
+    name: "A - B",
+    time: new Date(),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 12,
+      occurredAt: new Date().toISOString(),
+      kickoffAt: new Date().toISOString(),
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 2,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  const event: IEventResultEvent = {
+    timestamp: new Date().toISOString(),
+    data: { eventId, homeScore: 2, awayScore: 0, home: "A", away: "B" },
+  };
+
+  await listener.onMessage(event, buildMessage());
+
+  const updatedEvent = await Event.findOne({ eventId });
+  expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(updatedEvent!.visibility).toEqual(EventVisibility.ONLINE);
+  expect(updatedEvent!.live?.phase).toEqual(EventPhase.FULL_TIME);
 });
 
 it("acks without error when event is not found", async () => {

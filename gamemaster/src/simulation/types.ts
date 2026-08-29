@@ -24,6 +24,8 @@ export const TeamSide = {
   AWAY: "AWAY",
   DRAW: "DRAW",
   NONE: "NONE",
+  YES: "YES",
+  NO: "NO",
 } as const;
 export type TeamSide = (typeof TeamSide)[keyof typeof TeamSide];
 export type CompetingSide = typeof TeamSide.HOME | typeof TeamSide.AWAY;
@@ -42,6 +44,7 @@ export const LiveIncidentType = {
   HALF_TIME: "HALF_TIME",
   SECOND_HALF_KICK_OFF: "SECOND_HALF_KICK_OFF",
   FULL_TIME: "FULL_TIME",
+  FIRST_MINUTE_ELAPSED: "FIRST_MINUTE_ELAPSED",
 } as const;
 export type LiveIncidentType =
   (typeof LiveIncidentType)[keyof typeof LiveIncidentType];
@@ -52,6 +55,8 @@ export const LiveMarketType = {
   NEXT_CORNER: "NEXT_CORNER",
   NEXT_PENALTY: "NEXT_PENALTY",
   HALF_TIME_RESULT: "HALF_TIME_RESULT",
+  KICKOFF_TEAM: "KICKOFF_TEAM",
+  FIRST_MINUTE_GOAL: "FIRST_MINUTE_GOAL",
 } as const;
 export type LiveMarketType =
   (typeof LiveMarketType)[keyof typeof LiveMarketType];
@@ -60,6 +65,9 @@ export type NextMarketType =
   | typeof LiveMarketType.NEXT_RED_CARD
   | typeof LiveMarketType.NEXT_CORNER
   | typeof LiveMarketType.NEXT_PENALTY;
+export type PreKickoffMarketType =
+  | typeof LiveMarketType.KICKOFF_TEAM
+  | typeof LiveMarketType.FIRST_MINUTE_GOAL;
 
 export const LiveMarketStatus = {
   OPEN: "OPEN",
@@ -75,6 +83,8 @@ export const LiveSettlementReason = {
   HALF_TIME: "HALF_TIME",
   FULL_TIME_NONE: "FULL_TIME_NONE",
   MANUAL_VOID: "MANUAL_VOID",
+  KICK_OFF: "KICK_OFF",
+  FIRST_MINUTE_GOAL: "FIRST_MINUTE_GOAL",
 } as const;
 export type LiveSettlementReason =
   (typeof LiveSettlementReason)[keyof typeof LiveSettlementReason];
