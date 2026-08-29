@@ -1367,6 +1367,19 @@ body {
   gap: 0.55rem;
 }
 
+.event-market-grid--compact {
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  align-items: start;
+}
+
+.event-market-grid--compact .event-market-card .card-body {
+  padding: 0.75rem;
+}
+
+.event-card--active-live .event-card__live-body {
+  gap: 0.75rem;
+}
+
 .event-market-card {
   margin: 0;
   border-color: color-mix(in srgb, var(--border-subtle) 80%, var(--accent) 20%);

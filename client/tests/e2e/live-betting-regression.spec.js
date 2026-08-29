@@ -30,6 +30,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await installAppApiMocks(page, state);
   const diagnostics = trackClientIssues(page);
 
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto('/?ui=v2', { waitUntil: 'domcontentloaded' });
   await liveFeed.waitForSource();
   await liveFeed.openAll();
@@ -54,6 +55,16 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(liveArticle.getByText('Next Penalty', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Half Time Result', { exact: true })).toBeVisible();
   await expect(preMatchArticle.getByRole('button', { name: state.fixtures.preMatchSelectionLabel })).toBeVisible();
+  await expect(liveArticle.locator('..')).not.toHaveClass(/col-xl-4/);
+  await expect(preMatchArticle.locator('..')).toHaveClass(/col-xl-4/);
+  const liveBounds = await liveArticle.boundingBox();
+  const preMatchBounds = await preMatchArticle.boundingBox();
+  const marketColumns = await liveArticle.locator('.event-market-grid').evaluate((element) => (
+    getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+  ));
+  expect(liveBounds.width).toBeGreaterThan(preMatchBounds.width * 2.5);
+  expect(liveBounds.height).toBeLessThan(800);
+  expect(marketColumns).toBeGreaterThanOrEqual(4);
 
   await page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel }).click();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');
@@ -165,6 +176,82 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   expect(state.unhandledRequests).toEqual([]);
   expect(diagnostics.pageErrors).toEqual([]);
   expect(diagnostics.apiFailures).toEqual([]);
+});
+
+test('kickoff countdown markets stay compact across responsive widths', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const liveFeed = await installFakeEventSource(page);
+  const kickoffTime = Date.now() + 5 * 60_000;
+  const kickoffAt = new Date(kickoffTime).toISOString();
+  const quoteValidUntil = new Date(kickoffTime + 60_000).toISOString();
+
+  state.events = [{
+    eventId: 'countdown-1',
+    name: 'South Henriton - Pfefferberg',
+    time: kickoffAt,
+    visibility: 'ONLINE',
+    status: 'NO_RESULT',
+    home: 'South Henriton',
+    away: 'Pfefferberg',
+    products: [],
+    live: {
+      kickoffAt,
+      bettingStatus: 'OPEN',
+      currentMarkets: [
+        {
+          marketId: 'kickoff-team',
+          marketType: 'KICKOFF_TEAM',
+          marketVersion: 1,
+          quoteVersion: 1,
+          status: 'OPEN',
+          quoteValidUntil,
+          selections: [
+            { selectionId: 'home', side: 'HOME', odds: 1.85 },
+            { selectionId: 'away', side: 'AWAY', odds: 2.05 },
+          ],
+        },
+        {
+          marketId: 'first-minute-goal',
+          marketType: 'FIRST_MINUTE_GOAL',
+          marketVersion: 1,
+          quoteVersion: 1,
+          status: 'OPEN',
+          quoteValidUntil,
+          selections: [
+            { selectionId: 'yes', side: 'YES', odds: 6.5 },
+            { selectionId: 'no', side: 'NO', odds: 1.1 },
+          ],
+        },
+      ],
+    },
+  }];
+  await installAppApiMocks(page, state);
+
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?ui=v2', { waitUntil: 'domcontentloaded' });
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+
+  const countdownArticle = page.getByRole('article', { name: 'South Henriton - Pfefferberg' });
+  const marketCards = countdownArticle.locator('.event-market-card');
+  const getWidestMarketRatio = async () => countdownArticle.evaluate((article) => {
+    const articleWidth = article.getBoundingClientRect().width;
+    return Math.max(
+      ...Array.from(article.querySelectorAll('.event-market-card'))
+        .map((card) => card.getBoundingClientRect().width / articleWidth),
+    );
+  });
+
+  await expect(page.getByRole('timer')).toBeVisible();
+  await expect(countdownArticle.locator('..')).not.toHaveClass(/col-xl-4/);
+  await expect(marketCards).toHaveCount(2);
+  await expect.poll(getWidestMarketRatio).toBeLessThan(0.3);
+
+  await page.setViewportSize({ width: 768, height: 1000 });
+  await expect.poll(getWidestMarketRatio).toBeLessThan(0.45);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test('live betting layout stays usable on a mobile v3 viewport', async ({ page }) => {

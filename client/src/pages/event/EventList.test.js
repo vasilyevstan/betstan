@@ -124,6 +124,10 @@ describe('EventList', () => {
     const articles = screen.getAllByRole('article');
     expect(articles[0]).toHaveAccessibleName('Live Derby');
     expect(articles[1]).toHaveAccessibleName('Pre-match Clash');
+    expect(articles[0].parentElement).toHaveClass('col-12');
+    expect(articles[0].parentElement).not.toHaveClass('col-xl-4');
+    expect(articles[1].parentElement).toHaveClass('col-xl-4');
+    expect(articles[0].querySelector('.event-market-grid')).toHaveClass('event-market-grid--compact');
 
     expect(screen.getByRole('heading', { name: 'Live now' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pre-match' })).toBeInTheDocument();
@@ -326,8 +330,11 @@ describe('EventList kickoff countdown', () => {
     expect(screen.queryByRole('heading', { name: 'Pre-match' })).toBeNull();
 
     const timer = screen.getByRole('timer');
+    const countdownArticle = screen.getByRole('article', { name: 'Countdown Derby' });
     expect(timer).toHaveAccessibleName('Kickoff countdown: 10:00');
     expect(screen.getByText('KICKOFF SOON')).toBeInTheDocument();
+    expect(countdownArticle.parentElement).toHaveClass('col-12');
+    expect(countdownArticle.querySelector('.event-market-grid')).toHaveClass('event-market-grid--compact');
   });
 
   it('ticks the countdown down every second without leaking timers', async () => {
