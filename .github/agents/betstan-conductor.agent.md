@@ -65,13 +65,26 @@ without a checkpoint.
   promotion while its evidence-producing dependency is incomplete.
 - Monitor event-first: completion notifications, job transitions, new bounded
   logs, tool-call progress, and handoffs are progress. Do not tight-poll.
+- Treat a blocking watcher such as `gh run watch` as notification transport,
+  not as proof of progress. Its continued execution is not a progress signal.
+  Never let a watcher outlive the registered checkpoint without independently
+  inspecting the exact run's jobs and `pending_deployments`; use a bounded wait
+  or background execution so the conductor retains control at the checkpoint.
 - At a checkpoint, inspect each exact reference once. Record elapsed time,
   current phase, the latest real progress signal, the next expected event, and
   who owns the next action.
+- A user request for status or a suspicion that work is stuck is an immediate
+  checkpoint for every active critical-path unit. Answer from the underlying
+  agent, process, or GitHub job state, never only from a still-running watcher.
 - For every GitHub run, inspect both jobs and `pending_deployments` immediately
   after dispatch and after each top-level state transition. A top-level
   `queued` run can contain jobs waiting for a protected environment, so never
   schedule a long wait from run status alone.
+- If an earlier job is terminal while a downstream job is `waiting`, `pending`,
+  or `queued` with no executing step, classify the run before waiting again.
+  Query `pending_deployments` in the same checkpoint. A completed deploy job
+  followed by a waiting public-validation job is an approval-bound gate, not
+  healthy execution and not a reason to keep blocking on the watcher.
 - A running agent with recent tool activity is active even before its first
   response. A GitHub environment approval wait is active external work, not a
   stall, but it is an actionable gate. If the exact workflow, environment, SHA,
@@ -80,6 +93,9 @@ without a checkpoint.
   and exact bounded approval handoff to the orchestrator. Otherwise report
   `BLOCKED` and identify the required human approval owner. Never leave either
   case until the next ordinary progress checkpoint.
+- After handing off a preauthorized approval, set the next trigger to the
+  approval submission or job transition and reclassify the run then. Do not
+  defer that handoff behind the watcher's timeout or the next user message.
 - Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint.
   Ask the orchestrator to request a concise checkpoint from the same agent or
   inspect the same process/run reference. After two missed checkpoints, return
