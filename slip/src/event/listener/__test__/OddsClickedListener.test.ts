@@ -3,6 +3,7 @@ import { ConsumeMessage } from "amqplib";
 import {
   BetKind,
   IEventOddsSelectedEvent,
+  LiveMarketType,
   SlipStatus,
   messengerWrapper,
 } from "@betstan/common";
@@ -157,6 +158,56 @@ it("coalesces simultaneous PRE_MATCH clicks into one shared draft", async () => 
   expect(slips).toHaveLength(1);
   expect(slips[0].betKind).toEqual(BetKind.PRE_MATCH);
   expect(slips[0].rows).toHaveLength(2);
+});
+
+it("retains five LIVE markets from each of two events under concurrent delivery", async () => {
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  const listener = new OddsClickedListener(messengerWrapper.connection);
+  const eventIds = ["event-one", "event-two"];
+  const marketTypes = [
+    LiveMarketType.NEXT_YELLOW_CARD,
+    LiveMarketType.NEXT_RED_CARD,
+    LiveMarketType.NEXT_CORNER,
+    LiveMarketType.NEXT_PENALTY,
+    LiveMarketType.HALF_TIME_RESULT,
+  ];
+  await listener.init();
+  await createGuardedDraftIndex();
+
+  await Promise.all(eventIds.flatMap((eventId) => (
+    marketTypes.map((marketType) => {
+      const marketId = `${eventId}:${marketType}`;
+      return listener.onMessage(
+        buildEvent(userId, {
+          eventId,
+          eventName: `${eventId}-home - ${eventId}-away`,
+          betKind: BetKind.LIVE,
+          marketId,
+          marketType,
+          marketVersion: 1,
+          quoteVersion: 1,
+          selectionId: `${marketId}:1:HOME`,
+          oddsId: `${marketId}:HOME`,
+          productId: marketId,
+          productName: marketType,
+        }),
+        buildMessage()
+      );
+    })
+  )));
+
+  const slips = await Slip.find({
+    userId,
+    status: SlipStatus.DRAFT,
+    betKind: BetKind.LIVE,
+  });
+  expect(slips).toHaveLength(1);
+  expect(slips[0].rows).toHaveLength(10);
+  expect(new Set(slips[0].rows.map((row) => row.marketId))).toEqual(
+    new Set(eventIds.flatMap((eventId) => (
+      marketTypes.map((marketType) => `${eventId}:${marketType}`)
+    )))
+  );
 });
 
 it("appends a row to an existing draft board of the same kind", async () => {

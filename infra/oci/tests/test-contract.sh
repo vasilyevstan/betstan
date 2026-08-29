@@ -47,7 +47,23 @@ grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
   grep -Fq "pathname === '/api/event/stream'" "$acceptance_spec" &&
     grep -Fq '!expectedStreamDisconnect' "$acceptance_spec" ||
     fail "OCI live acceptance treats expected long-lived SSE disconnects as API failures"
-  for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
+grep -Fq 'const LIVE_FIXTURE_KICKOFF_DELAY_SECONDS = 90;' "$acceptance_spec" &&
+  [[ "$(grep -Fc 'kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS' "$acceptance_spec")" -eq 2 ]] ||
+  fail "OCI live acceptance does not start both live fixtures together"
+for selection_contract in \
+    'const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([' \
+    "'Live quote is stale'" \
+    "'Market version mismatch'" \
+    'const response = await responsePromise;' \
+    'if (response.ok()) {' \
+    'row.eventId === fixture.eventId && row.marketId === marketId' \
+    'expect(selectedBoards.LIVE.rows).toHaveLength(LIVE_MARKETS.length * 2);' \
+    'await liveBoard.getByRole('\''button'\'', { name: '\''CLEAN'\'' }).click();' \
+    'expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);'; do
+  grep -Fq "$selection_contract" "$acceptance_spec" ||
+    fail "OCI live acceptance omits moving-quote selection contract: $selection_contract"
+done
+for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
   grep -Fq "'$phase'" "$acceptance_spec" ||
     fail "OCI live acceptance omits runtime phase $phase"
 done
