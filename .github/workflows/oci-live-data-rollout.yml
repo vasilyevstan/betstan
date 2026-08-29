@@ -724,7 +724,7 @@ jobs:
             fi
           done
 
-          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
 
           for service in auth backoffice client; do
             expected_manifest="$(
@@ -870,7 +870,7 @@ jobs:
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
-      - name: Enter or verify live data maintenance
+      - name: Enter or re-establish live data maintenance
         id: maintenance_enter
         if: inputs.phase != 'dry-run'
         env:
@@ -880,7 +880,7 @@ jobs:
           if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh enter
           else
-            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+            ./infra/oci/scripts/live-data-maintenance-stan.sh hold
           fi
 
       - name: Delete exact orphaned live-acceptance slips

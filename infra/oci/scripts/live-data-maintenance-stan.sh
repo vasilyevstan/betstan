@@ -268,16 +268,20 @@ state_replicas() {
   ' "$STATE_FILE"
 }
 
-verify_held() {
-  [[ "$(fence_config_status)" == "true" ]] ||
-    fail "HTTP mutation fence is not configured"
-  [[ "$(runtime_fence_status)" == "true" ]] ||
-    fail "HTTP mutation fence is not active in ingress"
+verify_quiesced() {
   local service
   for service in "${writer_services[@]}"; do
     deployment_is_stable "$service" 0 ||
       fail "$(deployment_name "$service") is not quiesced"
   done
+}
+
+verify_held() {
+  [[ "$(fence_config_status)" == "true" ]] ||
+    fail "HTTP mutation fence is not configured"
+  [[ "$(runtime_fence_status)" == "true" ]] ||
+    fail "HTTP mutation fence is not active in ingress"
+  verify_quiesced
 }
 
 hold_runtime() {
@@ -332,6 +336,10 @@ case "$ACTION" in
     verify_held
     echo "live_data_maintenance=verify-held status=PASS http_mutation_fence=true writers_quiesced=true"
     ;;
+  verify-quiesced)
+    verify_quiesced
+    echo "live_data_maintenance=verify-quiesced status=PASS writers_quiesced=true"
+    ;;
   restore)
     restore_runtime
     echo "live_data_maintenance=restore status=PASS http_mutation_fence=false writers_quiesced=false"
@@ -345,7 +353,7 @@ case "$ACTION" in
     echo "live_data_maintenance=release status=PASS http_mutation_fence=false writers_quiesced=false"
     ;;
   *)
-    echo "usage: $0 {enter|verify-held|restore|hold|release}" >&2
+    echo "usage: $0 {enter|verify-held|verify-quiesced|restore|hold|release}" >&2
     exit 2
     ;;
 esac

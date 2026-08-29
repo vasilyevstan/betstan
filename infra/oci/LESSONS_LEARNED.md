@@ -190,11 +190,14 @@ conversation summaries are not authority.
   capture run, and zero-recovery lineage instead, while retaining the
   infrastructure-only descendant rule.
 - A failed deployment's maintenance hold intentionally leaves data-writing
-  Deployments at zero replicas. Resume must verify every retained Deployment
-  image template, the active ingress fence, the quiesced writer set, and only
-  the non-writing support pods; it must not require writer pods or enter
-  maintenance again. On failure, preserve and reverify that inherited hold
-  rather than restoring from a state file owned by the earlier run.
+  Deployments at zero replicas. Infrastructure reconciliation can later reset
+  the ingress configuration while those writers remain quiesced. Resume must
+  verify every retained Deployment image template, the zero-replica writer
+  set, and only the non-writing support pods before acquiring the lock; it then
+  idempotently re-establishes the full fence under that lock. It must not
+  require writer pods or enter maintenance again. On failure, preserve and
+  reverify that hold rather than restoring from a state file owned by the
+  earlier run.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.

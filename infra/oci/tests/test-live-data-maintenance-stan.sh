@@ -229,6 +229,19 @@ fi
 run_maintenance hold
 assert_replicas 0
 run_maintenance verify-held
+run_maintenance verify-quiesced
+
+cat >"$stub_state/server-snippet" <<'EOF'
+if ($host = "www.betstan.xyz") {
+  return 308 https://betstan.xyz$request_uri;
+}
+EOF
+if run_maintenance verify-held >/dev/null 2>&1; then
+  fail "quiesced writers without the HTTP fence were treated as fully held"
+fi
+run_maintenance verify-quiesced
+run_maintenance hold
+run_maintenance verify-held
 
 for service in bet event moderation resulting slip gamemaster; do
   printf '1\n' >"$stub_state/replicas/$service"
@@ -238,6 +251,9 @@ if ($host = "www.betstan.xyz") {
   return 308 https://betstan.xyz$request_uri;
 }
 EOF
+if run_maintenance verify-quiesced >/dev/null 2>&1; then
+  fail "running writers were treated as quiesced"
+fi
 rm -f -- "$state_file" "$stub_state/scale-failed-once"
 if PATH="$stub_bin:$PATH" \
     STUB_STATE_DIR="$stub_state" \

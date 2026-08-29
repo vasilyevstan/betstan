@@ -408,6 +408,8 @@ for literal in \
   'shared-mongo-operation-lock-stan.sh verify' \
   'live-data-maintenance-stan.sh enter' \
   'live-data-maintenance-stan.sh verify-held' \
+  'live-data-maintenance-stan.sh verify-quiesced' \
+  'live-data-maintenance-stan.sh hold' \
   'baseline-capture-stan.sh' \
   'Capture and validate pre-mutation rollback baseline' \
   "steps.operation_lock.outcome == 'success'" \
@@ -505,7 +507,7 @@ require_order(
         "Verify exact failed-deploy resume state",
         "Capture and validate pre-mutation rollback baseline",
         "Acquire database operation lock",
-        "Enter or verify live data maintenance",
+        "Enter or re-establish live data maintenance",
         "Delete exact orphaned live-acceptance slips",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
@@ -556,7 +558,7 @@ require_order(
     [
         "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
         "Resume deployment image mismatch",
-        "live-data-maintenance-stan.sh verify-held",
+        "live-data-maintenance-stan.sh verify-quiesced",
         "for service in auth backoffice client; do",
         "kubectl rollout status",
         "Resume supporting pod image mismatch",
@@ -567,17 +569,17 @@ if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
 
 maintenance = data[
-    data.index("- name: Enter or verify live data maintenance"):
+    data.index("- name: Enter or re-establish live data maintenance"):
     data.index("- name: Delete exact orphaned live-acceptance slips")
 ]
 for literal in (
     'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then',
     "live-data-maintenance-stan.sh enter",
-    "live-data-maintenance-stan.sh verify-held",
+    "live-data-maintenance-stan.sh hold",
 ):
     if literal not in maintenance:
         raise SystemExit(
-            f"data workflow does not preserve failed-deploy maintenance: {literal}"
+            f"data workflow does not re-establish failed-deploy maintenance: {literal}"
         )
 
 abort = data[
