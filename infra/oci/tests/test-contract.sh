@@ -162,6 +162,26 @@ grep -Fq 'It never invents an empty commit or bypasses a trusted publisher' \
 grep -Fq 'treats that state as an active production incident' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave a failed release maintenance hold unattended"
+ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
+[[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
+grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
+  fail "UX/UI expert frontmatter has the wrong name"
+grep -Fq 'tools: [read, search, execute]' "$ux_agent" ||
+  fail "UX/UI expert does not remain read-only"
+ux_agent_flat="$(tr '\n' ' ' <"$ux_agent")"
+for ux_contract in \
+    'Never infer usability from screenshots alone' \
+    'all three UI variants and both themes' \
+    'Preserve DOM, reading, and keyboard order' \
+    'live updates do not steal focus' \
+    'Define measurable rendered acceptance criteria' \
+    'Hand implementation to `betstan-frontend-developer`'; do
+  grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
+    fail "UX/UI expert omits usability contract: $ux_contract"
+done
+grep -Fq '`betstan-ux-ui-expert` specifies responsive, accessible, measurable' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not route user-facing slices through UX review"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"

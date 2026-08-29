@@ -11,12 +11,14 @@ specialist agents; they do not replace specialist authority or user approval.
 2. `betstan-architect` maps the solution and routes specialist decisions.
 3. `betstan-simplifier` removes unnecessary scope without changing accepted
    behavior.
-4. `betstan-backend-developer` and `betstan-frontend-developer` implement
+4. `betstan-ux-ui-expert` specifies responsive, accessible, measurable
+   usability for user-facing slices.
+5. `betstan-backend-developer` and `betstan-frontend-developer` implement
    disjoint, bounded slices.
-5. `betstan-validation-critic` reviews each immutable slice diff.
-6. `betstan-test-engineer` independently executes targeted and regression tests.
-7. `betstan-final-validator` checks acceptance and evidence completeness.
-8. `betstan-deployment-safety` owns branch, PR, exact-SHA deploy, and rollback
+6. `betstan-validation-critic` reviews each immutable slice diff.
+7. `betstan-test-engineer` independently executes targeted and regression tests.
+8. `betstan-final-validator` checks acceptance and evidence completeness.
+9. `betstan-deployment-safety` owns branch, PR, exact-SHA deploy, and rollback
    decisions. Runtime changes remain with the AKS or OCI operator.
 
 No agent status is permission to merge or deploy. Exact user approval is still
@@ -76,6 +78,8 @@ allowed only with disjoint ownership and a stable shared contract.
 ## Specialist routing
 
 - Active-work coordination: `betstan-conductor`
+- User-facing hierarchy, accessibility, and responsive density:
+  `betstan-ux-ui-expert`
 - Shared contracts and mixed versions: `betstan-service-contract-reviewer`
 - CI, coverage, and false-green gates: `betstan-quality-gate-reviewer`
 - Branch policy and ancestry: `betstan-branch-governance-reviewer`
@@ -174,6 +178,7 @@ Required invariants:
 |---|---|
 | Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
+| UX/UI expert | `UX_SPEC_READY`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
 | Backend/frontend developer | `IMPLEMENTED_LOCAL`, `BLOCKED` |
 | Simplifier | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND` |
 | Validation critic | `APPROVE_SLICE`, `CHANGES_REQUIRED` |
