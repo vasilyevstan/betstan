@@ -258,10 +258,22 @@ export function generateTimeline(input: SimulateMatchInput): SimTimeline {
   );
   const drafts: EntryDraft[] = [];
 
+  const kickoffTeamSide = side(
+    createNamedRng(input.seed, "kickoff-team.side"),
+    0.5
+  );
   withIncident(drafts, 0, EventPhase.FIRST_HALF, 0, {
     id: "kick-off",
     type: LiveIncidentType.KICK_OFF,
+    side: kickoffTeamSide,
   });
+  withIncident(
+    drafts,
+    offsetForFootballMinute(true, 1, firstStoppage, halfDurationMs),
+    EventPhase.FIRST_HALF,
+    1,
+    { id: "first-minute-elapsed", type: LiveIncidentType.FIRST_MINUTE_ELAPSED }
+  );
   withIncident(
     drafts,
     Math.round((45 / (45 + firstStoppage)) * halfDurationMs),

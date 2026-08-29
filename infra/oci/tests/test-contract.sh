@@ -28,6 +28,22 @@ node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
 node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
 node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
+grep -Fq "'betstan-e2e'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not reuse the dedicated E2E account"
+grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not require the protected E2E credential"
+! grep -Fq "'test1234'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check exposes the reusable account password"
+! grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD ||' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check still has a source credential fallback"
+grep -Fq "page.request.post('/api/auth/login'" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not resolve the reusable account by login"
+! grep -Eq 'Date\.now\(\)|Math\.random\(\)' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check still creates per-run user identities"
 grep -Fq "getByRole('link', { name: 'BetStan', exact: true })" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not use the accessible BetStan brand"
@@ -113,6 +129,15 @@ for conductor_contract in \
     'blocking watcher such as `gh run watch` as notification transport' \
     'Its continued execution is not a progress signal' \
     'A user request for status or a suspicion that work is stuck is an immediate' \
+    'Never become passive after launch' \
+    'maximum wall-clock checkpoint' \
+    'Reconstruct observation from the registry after interruption' \
+    'A terminal unit without a confirmed downstream handoff is a stall' \
+    'must never answer a detected stall with observation alone' \
+    'Do not extend a checkpoint without new underlying progress evidence' \
+    'At the second missed checkpoint, escalate the same registered unit' \
+    '`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue' \
+    '`ORCHESTRATION_COMPLETE` requires terminal evidence and accepted handoff' \
     'completed deploy job' \
     'waiting public-validation job is an approval-bound gate' \
     "defer that handoff behind the watcher's timeout" \
@@ -150,6 +175,21 @@ grep -Fq 'A still-running `gh run watch` is notification transport, not evidence
 grep -Fq 'A user asking for status or whether work is stuck triggers that checkpoint immediately' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow does not force an immediate checkpoint on status requests"
+grep -Fq 'remains proactive from before a registered job starts through its terminal evidence and accepted downstream handoff' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not retain start-to-terminal conductor ownership"
+grep -Fq 'Every event trigger is paired with a maximum wall-clock checkpoint' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow permits an event-only indefinite wait"
+grep -Fq 'completed unit with no confirmed next-owner handoff is itself a stall' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can stall between completion and handoff"
+grep -Fq 'At the second missed checkpoint it escalates the same unit' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can replace or indefinitely defer stalled work"
+grep -Fq 'orchestration completes only when every registered unit has terminal evidence and an accepted handoff' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow permits premature orchestration completion"
 grep -Fq 'terminal job followed by a downstream `waiting` job with no executing step' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can miss a downstream protected-environment gate"
@@ -162,6 +202,29 @@ grep -Fq 'It never invents an empty commit or bypasses a trusted publisher' \
 grep -Fq 'treats that state as an active production incident' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave a failed release maintenance hold unattended"
+ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
+[[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
+grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
+  fail "UX/UI expert frontmatter has the wrong name"
+grep -Fq 'tools: [read, search]' "$ux_agent" ||
+  fail "UX/UI expert does not remain read-only"
+if grep -Eq '^tools:.*execute' "$ux_agent"; then
+  fail "UX/UI expert exposes mutation-capable command execution"
+fi
+ux_agent_flat="$(tr '\n' ' ' <"$ux_agent")"
+for ux_contract in \
+    'Never infer usability from screenshots alone' \
+    'all three UI variants and both themes' \
+    'Preserve DOM, reading, and keyboard order' \
+    'live updates do not steal focus' \
+    'Define measurable rendered acceptance criteria' \
+    'Hand implementation to `betstan-frontend-developer`'; do
+  grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
+    fail "UX/UI expert omits usability contract: $ux_contract"
+done
+grep -Fq '`betstan-ux-ui-expert` specifies responsive, accessible, measurable' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not route user-facing slices through UX review"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
@@ -797,6 +860,7 @@ migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 activation_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
+ghcr_recovery_workflow="$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
   fail "OCI deployment validation omits the image-prefix inventory contract"
@@ -870,13 +934,27 @@ done
   fail "live activation must grant and revoke through the compiled auth role command"
 grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow" ||
   fail "live activation account cleanup does not run after acceptance failure"
-[[ "$(grep -Fc 'node dist/scripts/DeleteUser.js' "$activation_workflow")" == "1" ]] ||
-  fail "live activation must explicitly delete its disposable account"
-grep -Fq '"USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME"' "$activation_workflow" ||
-  fail "live activation account deletion is not bound to the exact synthetic identity"
-grep -Fq '"USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME"' \
-  "$activation_workflow" ||
-  fail "live activation account deletion lacks exact confirmation"
+grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e' "$activation_workflow" ||
+  fail "live activation does not reuse the dedicated E2E account"
+[[ "$(grep -Fc \
+  'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
+  "$activation_workflow")" == "4" ]] ||
+  fail "live activation does not scope the protected E2E credential to four steps"
+! grep -Fq 'node dist/scripts/DeleteUser.js' "$activation_workflow" ||
+  fail "live activation still deletes the reusable E2E account"
+for workflow in \
+  "$deploy_workflow" "$migrate_workflow" "$ghcr_recovery_workflow"; do
+  [[ "$(grep -Fc \
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
+    "$workflow")" == "1" ]] ||
+    fail "OCI browser validation lacks the protected E2E credential: $workflow"
+done
+for script in \
+  "$OCI_DIR/agents/validation-loop-stan.sh" \
+  "$OCI_DIR/agents/health-check-stan.sh"; do
+  grep -Fq 'unset LIVE_ACCEPTANCE_PASSWORD' "$script" ||
+    fail "OCI browser validation leaks the E2E credential to unrelated commands: $script"
+done
 if ! python3 - "$activation_workflow" <<'PY'
 import re
 import sys
@@ -891,28 +969,43 @@ if re.search(r"^\s+cache(?:-dependency-path)?:", node_setup, re.MULTILINE):
         "live activation cannot cache npm before deleting its isolated HOME"
     )
 
-cleanup = text.split(
-    "- name: Revoke, clean, and delete disposable validation account", 1
-)[1]
+account = text.split(
+    "- name: Resolve reusable validation account", 1
+)[1].split("- name: Grant and verify reusable administrator role", 1)[0]
+if account.index('"$BASE_URL/api/auth/login"') > account.index(
+    '"$BASE_URL/api/auth/new"'
+):
+    raise SystemExit("live activation does not attempt reusable login first")
+if "openssl rand" in account:
+    raise SystemExit("live activation still generates a per-run password")
+for literal in (
+    'username="$LIVE_ACCEPTANCE_USERNAME"',
+    'password="$LIVE_ACCEPTANCE_PASSWORD"',
+    '[ -n "$password" ]',
+    '[ "$status" = "200" ]',
+    '[ "$status" = "201" ]',
+):
+    if literal not in account:
+        raise SystemExit(
+            f"live activation account resolution is missing: {literal}"
+        )
 
-slip_cleanup = cleanup.index(
-    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh"
-)
-account_delete = cleanup.index("node dist/scripts/DeleteUser.js")
-if slip_cleanup >= account_delete:
-    raise SystemExit("active Slip cleanup must precede Auth account deletion")
+cleanup = text.split(
+    "- name: Revoke and clean reusable validation account", 1
+)[1]
 for literal in (
     'EXPECTED_AUTH_USER_COUNT=1',
     'ALLOWED_BET_KINDS=LIVE,PRE_MATCH',
     'MAX_ACTIVE_SLIPS=2',
-    'if [ "$slip_cleanup_succeeded" = "1" ]; then',
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+    '.id == $user_id and .email == $username and .role == "USER"',
 ):
     if literal not in cleanup:
         raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
     ('"$BASE_URL/api/backoffice/result"', "401"),
-    ('"$BASE_URL/api/auth/login"', "400"),
+    ('"$BASE_URL/api/auth/login"', "200"),
 ):
     tail = cleanup.split(endpoint, 1)[1]
     match = re.search(
@@ -925,7 +1018,7 @@ for endpoint, expected_status in (
         )
 PY
 then
-  fail "live activation account cleanup status checks are not endpoint-bound"
+  fail "live activation reusable-account lifecycle contract failed"
 fi
 ! grep -Fq 'npm run role:set' "$activation_workflow" ||
   fail "live activation still invokes a development-only auth role command"
@@ -982,7 +1075,13 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   [[ -n "$next_job_line" ]] || next_job_line=$(( $(wc -l <"$workflow") + 1 ))
   public_secrets="$(
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
-      grep -c 'secrets\.' || true
+      awk '
+        /secrets\./ &&
+        !/LIVE_ACCEPTANCE_PASSWORD:.*secrets\.LIVE_ACCEPTANCE_PASSWORD/ {
+          count += 1
+        }
+        END { print count + 0 }
+      '
   )"
   public_cloud_credentials="$(
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
@@ -992,7 +1091,7 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   )"
   [[ -n "$public_job_line" && "$public_secrets" == "0" &&
       "$public_cloud_credentials" == "0" ]] ||
-    fail "public validation shares a job with cloud credentials: $(basename "$workflow")"
+    fail "public validation receives cloud or unreviewed credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
   grep -Fq 'OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"' "$workflow" ||
@@ -1010,7 +1109,7 @@ deploy_dependency_line="$(
     "$deploy_workflow" | cut -d: -f1
 )"
 [[ "$deploy_dependency_line" -gt "$deploy_public_job_line" ]] ||
-  fail "deployment browser validation is not in its credential-free public job"
+  fail "deployment browser validation is not in its cloud-credential-free public job"
 migration_public_job_line="$(
   grep -n -m1 '^  public-validate:' "$migrate_workflow" | cut -d: -f1
 )"
@@ -1031,7 +1130,13 @@ migration_dependency_line="$(
   fail "migration browser validation is not isolated after finalization"
 migration_post_secrets="$(
   sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
-    grep -c 'secrets\.' || true
+    awk '
+      /secrets\./ &&
+      !/LIVE_ACCEPTANCE_PASSWORD:.*secrets\.LIVE_ACCEPTANCE_PASSWORD/ {
+        count += 1
+      }
+      END { print count + 0 }
+    '
 )"
 migration_post_cloud_credentials="$(
   sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
@@ -1041,7 +1146,7 @@ migration_post_cloud_credentials="$(
 )"
 [[ "$migration_post_secrets" == "0" &&
     "$migration_post_cloud_credentials" == "0" ]] ||
-  fail "post-commit browser validation receives cloud credentials"
+  fail "post-commit browser validation receives cloud or unreviewed credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 ! grep -Fq -- '- prune-registry' "$infra_workflow" ||

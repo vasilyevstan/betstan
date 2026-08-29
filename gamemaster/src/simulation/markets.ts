@@ -44,6 +44,25 @@ const ALL_MARKETS: LiveMarketType[] = [
   LiveMarketType.HALF_TIME_RESULT,
 ];
 
+/**
+ * The two live-slip products exposed as "live-betting candidates" from
+ * T-10 minutes before kickoff up to the atomic kickoff transition: which
+ * team kicks off, and whether a goal is scored in the first simulated
+ * minute. Both are settled exactly once (kickoff-team at kickoff, first-
+ * minute-goal after simulated minute 1) and are intentionally kept out of
+ * `ALL_MARKETS`, which drives the generic in-match creation/settlement
+ * loops below that do not apply to these two.
+ */
+const PRE_KICKOFF_MARKETS: LiveMarketType[] = [
+  LiveMarketType.KICKOFF_TEAM,
+  LiveMarketType.FIRST_MINUTE_GOAL,
+];
+
+const SNAPSHOT_MARKETS: LiveMarketType[] = [
+  ...ALL_MARKETS,
+  ...PRE_KICKOFF_MARKETS,
+];
+
 const NEXT_MARKET_CAPS: Record<NextMarketType, keyof IncidentCaps> = {
   [LiveMarketType.NEXT_YELLOW_CARD]: "yellows",
   [LiveMarketType.NEXT_RED_CARD]: "reds",
@@ -56,9 +75,16 @@ function marketId(eventId: string, marketType: LiveMarketType): string {
 }
 
 function sides(marketType: LiveMarketType): TeamSide[] {
-  return marketType === LiveMarketType.HALF_TIME_RESULT
-    ? ["HOME", "DRAW", "AWAY"]
-    : ["HOME", "AWAY", "NONE"];
+  switch (marketType) {
+    case LiveMarketType.HALF_TIME_RESULT:
+      return ["HOME", "DRAW", "AWAY"];
+    case LiveMarketType.KICKOFF_TEAM:
+      return ["HOME", "AWAY"];
+    case LiveMarketType.FIRST_MINUTE_GOAL:
+      return ["YES", "NO"];
+    default:
+      return ["HOME", "AWAY", "NONE"];
+  }
 }
 
 function selectionId(
@@ -198,6 +224,34 @@ function halfTimeOdds(
   ];
 }
 
+/**
+ * Kickoff-team is a fair coin: no in-match evidence exists yet at the point
+ * it is priced (pre-kickoff), so both sides are priced at the same 50/50
+ * probability regardless of offset/scores.
+ */
+function kickoffTeamOdds(timeline: SimTimeline): number[] {
+  return [price(0.5, timeline), price(0.5, timeline)];
+}
+
+/**
+ * Goal-in-first-minute is priced once, before kickoff, as a fixed prop bet:
+ * the Poisson probability of at least one goal in a single simulated
+ * football minute, derived from the same goal rate/attack-factor pricing
+ * inputs used for in-match markets.
+ */
+function firstMinuteGoalOdds(timeline: SimTimeline): number[] {
+  const pricing = factors(timeline);
+  const totalFootballMinutes = 90;
+  const perMinuteGoalRate =
+    (timeline.config.rates.goals * timeline.config.rateScale * pricing.attackFactor)
+    / totalFootballMinutes;
+  const probabilityYes = 1 - Math.exp(-perMinuteGoalRate);
+  return [
+    price(probabilityYes, timeline),
+    price(1 - probabilityYes, timeline),
+  ];
+}
+
 function oddsFor(
   type: LiveMarketType,
   offsetMs: number,
@@ -205,9 +259,16 @@ function oddsFor(
   awayScore: number,
   timeline: SimTimeline
 ): number[] {
-  return type === LiveMarketType.HALF_TIME_RESULT
-    ? halfTimeOdds(offsetMs, homeScore, awayScore, timeline)
-    : nextEventOdds(type, offsetMs, timeline);
+  switch (type) {
+    case LiveMarketType.HALF_TIME_RESULT:
+      return halfTimeOdds(offsetMs, homeScore, awayScore, timeline);
+    case LiveMarketType.KICKOFF_TEAM:
+      return kickoffTeamOdds(timeline);
+    case LiveMarketType.FIRST_MINUTE_GOAL:
+      return firstMinuteGoalOdds(timeline);
+    default:
+      return nextEventOdds(type, offsetMs, timeline);
+  }
 }
 
 function createMarket(
@@ -259,6 +320,26 @@ function snapshot(eventId: string, state: MarketState): LiveMarketSnapshot {
     status: state.status,
     selections,
   };
+}
+
+/**
+ * Builds the two live-slip pre-kickoff markets (kickoff team, goal in first
+ * minute) at their standalone, standing quote: version 1, quote version 1,
+ * OPEN. Used to publish a synthetic pre-kickoff snapshot independently of
+ * `projectTransitions`, for the T-10-to-kickoff countdown window during
+ * which no other in-match market exists yet. Both markets are priced as
+ * fixed, offset-independent props (see `kickoffTeamOdds`/
+ * `firstMinuteGoalOdds`), so this can safely be called at any point before
+ * kickoff without needing an elapsed-offset argument. `marketVersion` is
+ * never incremented for either market for the rest of their lifecycle
+ * (kickoff-team settles, and first-minute-goal closes then settles, always
+ * in place at version 1) -- this is what lets settlement match a bet placed
+ * against this exact pre-kickoff snapshot.
+ */
+export function buildPreKickoffMarkets(timeline: SimTimeline): LiveMarketSnapshot[] {
+  return PRE_KICKOFF_MARKETS.map((type) =>
+    snapshot(timeline.eventId, createMarket(type, 1, 0, 0, 0, timeline))
+  );
 }
 
 function winningHalfTimeSide(homeScore: number, awayScore: number): TeamSide {
@@ -323,7 +404,8 @@ function repriceOpenMarkets(
 function isMaterialIncident(type: LiveIncidentType): boolean {
   return type !== LiveIncidentType.KICK_OFF
     && type !== LiveIncidentType.HALF_TIME
-    && type !== LiveIncidentType.FULL_TIME;
+    && type !== LiveIncidentType.FULL_TIME
+    && type !== LiveIncidentType.FIRST_MINUTE_ELAPSED;
 }
 
 export function projectTransitions(timeline: SimTimeline): SimulationTransition[] {
@@ -334,7 +416,19 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
   let awayScore = 0;
   let bettingStatus: BettingStatus = BettingStatus.OPEN;
 
-  sortTimelineEntries(timeline.entries).forEach((entry, index) => {
+  const sortedEntries = sortTimelineEntries(timeline.entries);
+  // First-minute-goal settles on whether any goal fell strictly before this
+  // cutoff (the offset marking the end of simulated minute 1, i.e. the
+  // half-open window [0:00, 1:00)). Computed up front, independent of
+  // iteration/tie-break order, so a goal recorded at exactly the same
+  // offset as the marker (a theoretical tie) is still correctly excluded.
+  const firstMinuteMarker = sortedEntries.find(
+    (item) => item.incident.type === LiveIncidentType.FIRST_MINUTE_ELAPSED
+  );
+  const firstMinuteCutoffMs = firstMinuteMarker ? firstMinuteMarker.offsetMs : 0;
+  let firstMinuteGoalScored = false;
+
+  sortedEntries.forEach((entry, index) => {
     const sequence = index + 1;
     const settlements: LiveMarketSettlement[] = [];
     const freshMarkets = new Set<LiveMarketType>();
@@ -346,6 +440,9 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
       } else if (incident.side === "AWAY") {
         awayScore += 1;
       }
+      if (entry.offsetMs < firstMinuteCutoffMs) {
+        firstMinuteGoalScored = true;
+      }
     }
 
     if (incident.type === LiveIncidentType.KICK_OFF) {
@@ -355,7 +452,66 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
           createMarket(type, 1, entry.offsetMs, homeScore, awayScore, timeline)
         );
       });
+
+      // Kickoff team and first-minute-goal close atomically at kickoff.
+      // Kickoff team settles immediately (the side is already decided in
+      // the timeline); first-minute-goal only closes here and settles later
+      // at the FIRST_MINUTE_ELAPSED marker. Neither market's marketVersion
+      // is ever bumped away from 1 -- both are mutated in place through
+      // their status transitions (the same pattern HALF_TIME_RESULT uses
+      // for its own settle-in-place), so a bet placed against the pre-
+      // kickoff snapshot (also published at version 1) always matches the
+      // eventual settlement by (marketId, marketVersion).
+      const kickoffTeam = createMarket(
+        LiveMarketType.KICKOFF_TEAM,
+        1,
+        entry.offsetMs,
+        homeScore,
+        awayScore,
+        timeline
+      );
+      const kickoffSide = incident.side as CompetingSide;
+      settlements.push(
+        marketSettlement(
+          timeline.eventId,
+          kickoffTeam,
+          sequence,
+          kickoffSide,
+          LiveSettlementReason.KICK_OFF
+        )
+      );
+      kickoffTeam.status = LiveMarketStatus.SETTLED;
+      markets.set(LiveMarketType.KICKOFF_TEAM, kickoffTeam);
+
+      const firstMinuteGoal = createMarket(
+        LiveMarketType.FIRST_MINUTE_GOAL,
+        1,
+        entry.offsetMs,
+        homeScore,
+        awayScore,
+        timeline
+      );
+      firstMinuteGoal.status = LiveMarketStatus.CLOSED;
+      markets.set(LiveMarketType.FIRST_MINUTE_GOAL, firstMinuteGoal);
+
       bettingStatus = BettingStatus.OPEN;
+    }
+
+    if (incident.type === LiveIncidentType.FIRST_MINUTE_ELAPSED) {
+      const firstMinuteGoal = markets.get(LiveMarketType.FIRST_MINUTE_GOAL);
+      if (firstMinuteGoal && firstMinuteGoal.status === LiveMarketStatus.CLOSED) {
+        const winner: TeamSide = firstMinuteGoalScored ? "YES" : "NO";
+        settlements.push(
+          marketSettlement(
+            timeline.eventId,
+            firstMinuteGoal,
+            sequence,
+            winner,
+            LiveSettlementReason.FIRST_MINUTE_GOAL
+          )
+        );
+        firstMinuteGoal.status = LiveMarketStatus.SETTLED;
+      }
     }
 
     const triggered = trigger(incident.type);
@@ -476,7 +632,7 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
       scores: { home: homeScore, away: awayScore },
       bettingStatus,
       incident: { ...incident },
-      markets: ALL_MARKETS.map((type) => {
+      markets: SNAPSHOT_MARKETS.map((type) => {
         const market = markets.get(type);
         if (!market) {
           throw new Error(`missing market ${type}`);

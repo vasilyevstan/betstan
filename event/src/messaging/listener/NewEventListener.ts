@@ -17,6 +17,9 @@ class NewEventListener extends AListener<INewEventEvent> {
     const requestedVisibility = (
       data as typeof data & { visibility?: EventVisibility }
     ).visibility;
+    const hasExplicitVisibility =
+      requestedVisibility === EventVisibility.OFFLINE
+      || requestedVisibility === EventVisibility.ONLINE;
     const visibility =
       requestedVisibility === EventVisibility.OFFLINE
         ? EventVisibility.OFFLINE
@@ -54,6 +57,7 @@ class NewEventListener extends AListener<INewEventEvent> {
             visibility,
             visibilityInitialized: true,
             eventMetadataInitialized: true,
+            ...(hasExplicitVisibility ? { visibilityDecision: visibility } : {}),
           },
         },
         { upsert: true }
@@ -130,6 +134,7 @@ class NewEventListener extends AListener<INewEventEvent> {
         $set: {
           visibility,
           visibilityInitialized: true,
+          ...(hasExplicitVisibility ? { visibilityDecision: visibility } : {}),
         },
       }
     );

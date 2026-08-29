@@ -994,10 +994,18 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
     "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
     "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
-    "node dist/scripts/SetUserRole.js" => "compiled disposable administrator operator",
+    "LIVE_ACCEPTANCE_USERNAME: betstan-e2e" =>
+      "dedicated reusable validation account",
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' =>
+      "protected reusable-account credential",
+    "Resolve reusable validation account" => "login-or-create account resolution",
+    "node dist/scripts/SetUserRole.js" => "compiled reusable administrator operator",
     "cleanup-live-acceptance-slips-stan.sh" =>
-      "disposable account Slip cleanup",
-    "node dist/scripts/DeleteUser.js" => "compiled disposable account deletion operator",
+      "reusable account Slip cleanup",
+    "Revoke and clean reusable validation account" =>
+      "reusable account privilege revocation",
+    '.id == $user_id and .email == $username and .role == "USER"' =>
+      "retained low-privilege identity verification",
     "playwright-live-acceptance.config.js" => "production browser acceptance",
     "service-ops-stan.sh" => "sanitized runtime log inspection"
   }.each do |literal, label|
@@ -1007,6 +1015,26 @@ def validate_live_betting_activation_workflow!(file, document, content)
       "#{name} is missing #{label}"
     )
   end
+
+  credential_binding =
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}'
+  unless content.scan(credential_binding).length == 4
+    fail_inventory(
+      "#{name} must scope the protected reusable-account credential to four exact steps"
+    )
+  end
+  job_env = document.dig("jobs", "activate-and-validate", "env")
+  if job_env.is_a?(Hash) && job_env.key?("LIVE_ACCEPTANCE_PASSWORD")
+    fail_inventory(
+      "#{name} must not expose the reusable-account credential at job scope"
+    )
+  end
+
+  reject_content(
+    content,
+    /node dist\/scripts\/DeleteUser\.js/,
+    "#{name} must retain the reusable validation account"
+  )
 
   require_content(
     content,

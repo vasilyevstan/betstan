@@ -81,7 +81,9 @@ it("keeps an acceptance event offline from its first projection", async () => {
 
   await listener.onMessage(event, buildMessage());
 
-  expect((await Event.findOne({ eventId }))!.visibility).toEqual(
+  const storedEvent = await Event.findOne({ eventId });
+  expect(storedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent!.get("visibilityDecision")).toEqual(
     EventVisibility.OFFLINE
   );
 });
@@ -119,6 +121,9 @@ it("repairs a fail-dark live projection when event metadata arrives later", asyn
 
   const storedEvent = await Event.findOne({ eventId });
   expect(storedEvent!.visibility).toEqual(EventVisibility.ONLINE);
+  expect(storedEvent!.get("visibilityDecision")).toEqual(
+    EventVisibility.ONLINE
+  );
   expect(storedEvent!.get("visibilityInitialized")).toBe(true);
   expect(storedEvent!.get("eventMetadataInitialized")).toBe(true);
   expect(storedEvent!.products.length).toBeGreaterThan(0);
@@ -159,6 +164,9 @@ it("repairs legacy live projections whose initialization markers are missing", a
   const storedEvent = await Event.findOne({ eventId });
   expect(storedEvent!.name).toEqual("Hidden A - Hidden B");
   expect(storedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent!.get("visibilityDecision")).toEqual(
+    EventVisibility.OFFLINE
+  );
   expect(storedEvent!.get("visibilityInitialized")).toBe(true);
   expect(storedEvent!.get("eventMetadataInitialized")).toBe(true);
   expect(storedEvent!.products.length).toBeGreaterThan(0);
@@ -205,6 +213,9 @@ it("repairs metadata without undoing a newer visibility message", async () => {
   expect(storedEvent!.name).toEqual("Team A - Team B");
   expect(storedEvent!.products.length).toBeGreaterThan(0);
   expect(storedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent!.get("visibilityDecision")).toEqual(
+    EventVisibility.OFFLINE
+  );
   expect(storedEvent!.get("visibilityInitialized")).toBe(true);
   expect(storedEvent!.get("eventMetadataInitialized")).toBe(true);
   expect(storedEvent!.get("pendingVisibility")).toBeUndefined();

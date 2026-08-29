@@ -93,6 +93,71 @@ it("approves a live bet whose valid quote predates a newer snapshot that already
   ).toBe(true);
 });
 
+it("declines a live bet against an ordinary market's frozen PRE_MATCH-phase history entry, even though it was recorded OPEN", async () => {
+  const publisher = createPublisher();
+  const service = new ModerationService(publisher);
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const submittedAt = timelineAt(5_000);
+  // Default createLiveMarket() is LiveMarketType.NEXT_CORNER -- an ordinary
+  // live market that must never be treated as live while phase is
+  // PRE_MATCH, regardless of what its frozen history entry recorded.
+  const oldMarket = createLiveMarket(eventId, {
+    marketVersion: 1,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(30_000),
+  });
+  const newMarket = createLiveMarket(eventId, {
+    marketVersion: 2,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(60_000),
+  });
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      phase: EventPhase.PRE_MATCH,
+      markets: [oldMarket],
+    })
+  );
+  // A newer snapshot supersedes the old identity, archiving it into
+  // history with phase PRE_MATCH (the phase that was current when it was
+  // captured as OPEN).
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      phase: EventPhase.PRE_MATCH,
+      markets: [newMarket],
+    })
+  );
+
+  const mirror = await LiveEventMirror.findOne({ eventId });
+  expect(
+    mirror!.marketHistory!.some(
+      (entry) =>
+        entry.marketVersion === 1
+        && entry.quoteVersion === 1
+        && entry.phase === EventPhase.PRE_MATCH
+        && entry.status === LiveMarketStatus.OPEN
+    )
+  ).toBe(true);
+
+  const placeBet = createLivePlaceBetEvent(oldMarket, {
+    data: { submittedAt },
+  });
+
+  await service.handlePlaceBet(placeBet);
+
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_NOT_LIVE);
+});
+
 it("declines a live bet whose quote had already expired at submission, even though its market state is retained in history", async () => {
   const publisher = createPublisher();
   const service = new ModerationService(publisher);
@@ -715,6 +780,125 @@ it("still declines EVENT_RESULTED even when a perfectly valid historical quote e
   expect(savedBet).not.toBeNull();
   expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
   expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
+});
+
+it("never deletes the terminal Resulted guard when delayed live projections arrive afterward", async () => {
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+
+  // EVENT_RESULT wins its queue race before moderation observes any live
+  // projection. It is still terminal domain authority.
+  await Resulted.create({ eventId, timestamp: new Date().toISOString() });
+
+  const decliningPlaceBet = createLivePlaceBetEvent(
+    createLiveMarket(eventId, { marketVersion: 1, quoteVersion: 1 }),
+    { data: { submittedAt: new Date().toISOString() } }
+  );
+  await service.handlePlaceBet(decliningPlaceBet);
+  const declinedBet = await Bet.findOne({ slipId: decliningPlaceBet.data.slipId });
+  expect(declinedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(declinedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
+
+  // Earlier live snapshots then arrive late on the independent queue.
+  const openMarket = createLiveMarket(eventId, {
+    marketVersion: 1,
+    quoteVersion: 1,
+    quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      phase: EventPhase.FIRST_HALF,
+      bettingStatus: BettingStatus.OPEN,
+      markets: [openMarket],
+    })
+  );
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 180,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [],
+    })
+  );
+
+  expect(await Resulted.findOne({ eventId }).lean()).not.toBeNull();
+
+  const laterPlaceBet = createLivePlaceBetEvent(openMarket, {
+    data: { submittedAt: new Date().toISOString() },
+  });
+  await service.handlePlaceBet(laterPlaceBet);
+  const laterBet = await Bet.findOne({ slipId: laterPlaceBet.data.slipId });
+  expect(laterBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(laterBet!.declineReason).toEqual(
+    ModerationDeclineReason.EVENT_RESULTED
+  );
+});
+
+it("keeps declining EVENT_RESULTED when the very first live projection ever observed for the event is already FULL_TIME", async () => {
+  // Edge case mirroring event service's own symmetric guard: if the very
+  // first live update moderation ever sees for an event is already its
+  // FULL_TIME conclusion, any existing Resulted marker is a genuine final
+  // result and must never be reversed.
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+
+  await Resulted.create({ eventId, timestamp: new Date().toISOString() });
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 180,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [createLiveMarket(eventId, { marketVersion: 1, quoteVersion: 1 })],
+    })
+  );
+
+  expect(await Resulted.findOne({ eventId }).lean()).not.toBeNull();
+
+  const placeBet = createLivePlaceBetEvent(
+    createLiveMarket(eventId, { marketVersion: 1, quoteVersion: 1 }),
+    { data: { submittedAt: new Date().toISOString() } }
+  );
+  await service.handlePlaceBet(placeBet);
+  const savedBet = await Bet.findOne({ slipId: placeBet.data.slipId });
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
+});
+
+it("does not reverse Resulted once a live mirror already existed before the result arrived (genuine final result)", async () => {
+  const service = new ModerationService(createPublisher());
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+
+  // The event genuinely went live first...
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      phase: EventPhase.FIRST_HALF,
+      bettingStatus: BettingStatus.OPEN,
+      markets: [createLiveMarket(eventId, { marketVersion: 1, quoteVersion: 1 })],
+    })
+  );
+  // ...and only then does its genuine final result arrive.
+  await Resulted.create({ eventId, timestamp: new Date().toISOString() });
+
+  // A subsequent live update can no longer be the "very first ever" one, so
+  // it must never clear the now-genuine Resulted marker.
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [createLiveMarket(eventId, { marketVersion: 2, quoteVersion: 1 })],
+    })
+  );
+
+  expect(await Resulted.findOne({ eventId }).lean()).not.toBeNull();
 });
 
 it("declines EVENT_NOT_LIVE for an exact historical match that was itself never live when recorded", async () => {

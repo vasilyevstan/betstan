@@ -40,6 +40,21 @@
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
+- A single live, countdown, or retained-finished event should use the full
+  desktop event-row width instead of one pre-match card column. Keep every
+  score, incident, market, and selection visible, and compact by reflowing
+  market cards responsively rather than hiding betting information.
+- Read-only review roles must be read-only in their declared capabilities,
+  not only in prose. UX reviewers consume rendered evidence from the test
+  owner; they do not need unrestricted command execution to assess it.
+- `EVENT_RESULT` is terminal domain authority even when it reaches a consumer
+  before delayed live snapshots. Earlier snapshots may fill bounded history,
+  but only the matching `FULL_TIME` projection may restore the retained result
+  card; no live update may reset `RESULTED` or delete Moderation's resulted
+  guard.
+- Persist the last explicit visibility decision separately from current
+  runtime visibility and transient pending delivery. A completed OFFLINE
+  decision must survive result retention and delayed live-update races.
 - The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
 - New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
@@ -50,6 +65,7 @@
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
 - Signup never accepts an administrator role. Persisted demotion or deletion revokes privileged mutations immediately, and `/currentuser` invalidates expired, deleted, or role-mismatched sessions, including bounded legacy tokens without `exp`.
+- Routine production E2E checks reuse the dedicated low-privilege `betstan-e2e` account with one stable credential supplied identically by the reviewer-gated `oci-production` and `oci-migration` environments: rotate both bindings together, log in first and create the account only when absent, never keep a source fallback, elevate it only for the bounded administrator action, always revoke it to `USER`, and delete only exact proven acceptance drafts rather than deleting the account.
 - Synthetic production-acceptance events remain `OFFLINE`. Ordinary REST and SSE queries exclude them server-side; an acceptance view may request at most ten exact lowercase ObjectIDs and only a currently persisted administrator may receive them.
 - Offline-event odds requests repeat authoritative administrator verification. Client filtering and a stale JWT claim are never security boundaries.
 - Administrative catalog reads are privileged too: `/api/backoffice` revalidates the persisted role and must not return fixture metadata in an unauthorized error.
@@ -173,6 +189,13 @@ cd resulting && npm ci && npm run test:ci
 - Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
 - Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
+- The conductor owns every registered unit from before launch through terminal
+  evidence and accepted handoff. Pair event notifications with a maximum
+  wall-clock checkpoint, reconstruct lost observation from exact references,
+  and treat an unstarted downstream handoff as a stall.
+- A stalled watcher is not a stalled job, and a running watcher is not job
+  progress. Recover read-side observation directly; route mutations to one
+  exact owner with a deadline and keep the same unit open until evidence moves.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.

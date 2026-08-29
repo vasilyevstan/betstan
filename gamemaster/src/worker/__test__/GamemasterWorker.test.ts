@@ -114,7 +114,11 @@ function buildMarket(
   const sides =
     marketType === LiveMarketType.HALF_TIME_RESULT
       ? [TeamSide.HOME, TeamSide.DRAW, TeamSide.AWAY]
-      : [TeamSide.HOME, TeamSide.AWAY, TeamSide.NONE];
+      : marketType === LiveMarketType.KICKOFF_TEAM
+        ? [TeamSide.HOME, TeamSide.AWAY]
+        : marketType === LiveMarketType.FIRST_MINUTE_GOAL
+          ? [TeamSide.YES, TeamSide.NO]
+          : [TeamSide.HOME, TeamSide.AWAY, TeamSide.NONE];
 
   return {
     marketId: `${eventId}:${marketType}`,
@@ -753,6 +757,372 @@ it("persists a simulation before kickoff publication and replays it after restar
   expect(archived?.liveConfirmedReplayCursor).toBe(5);
 });
 
+it("treats an event as a live-betting candidate exactly 10 minutes before kickoff (T-10 inclusive) and exposes only the two pre-kickoff markets", async () => {
+  const event = await createEvent(baseKickoff);
+  const simulation = buildSimulationResult(event.eventId);
+  const simulate = jest.fn(() => simulation);
+  const tMinusTenClock = createStaticClock(
+    new Date(baseKickoff.getTime() - 10 * 60 * 1000)
+  );
+
+  const worker = new GamemasterWorker({ clock: tMinusTenClock, simulate });
+  await worker.checkEventsOnce();
+
+  expect(simulate).toHaveBeenCalledTimes(1);
+  const stored = await Event.findOne({ eventId: event.eventId });
+  expect(stored?.liveTransitions?.length).toBeGreaterThan(0);
+  expect(stored?.liveConfirmedReplayCursor).toBe(0);
+  expect(stored?.phase).toBe(EventPhase.PRE_MATCH);
+  expect(stored?.livePreKickoffPublishedAt).not.toBeNull();
+
+  const liveMarkets = stored?.liveMarkets ?? [];
+  expect(liveMarkets.map((market: any) => market.marketType).sort()).toEqual(
+    [LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketType.KICKOFF_TEAM].sort()
+  );
+  expect(
+    liveMarkets.every(
+      (market: any) =>
+        market.status === LiveMarketStatus.OPEN && market.marketVersion === 1
+    )
+  ).toBe(true);
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+  const snapshot = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls[0][0];
+  expect(snapshot.data.sequence).toBe(0);
+  expect(snapshot.data.phase).toBe(EventPhase.PRE_MATCH);
+  expect(snapshot.data.markets.map((market: any) => market.marketType).sort()).toEqual(
+    [LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketType.KICKOFF_TEAM].sort()
+  );
+  expect(
+    snapshot.data.markets.every(
+      (market: any) => market.quoteValidUntil === baseKickoff.toISOString()
+    )
+  ).toBe(true);
+});
+
+it("does not treat an event as a live-betting candidate before the 10 minute pre-kickoff window opens (T-10 exclusive boundary)", async () => {
+  const event = await createEvent(baseKickoff);
+  const simulate = jest.fn(() => buildSimulationResult(event.eventId));
+  const justBeforeTenClock = createStaticClock(
+    new Date(baseKickoff.getTime() - 10 * 60 * 1000 - 1000)
+  );
+
+  const worker = new GamemasterWorker({ clock: justBeforeTenClock, simulate });
+  await worker.checkEventsOnce();
+
+  expect(simulate).not.toHaveBeenCalled();
+  const stored = await Event.findOne({ eventId: event.eventId });
+  expect(stored?.liveTransitions ?? []).toHaveLength(0);
+  expect(stored?.livePreKickoffPublishedAt).toBeNull();
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).not.toHaveBeenCalled();
+});
+
+it("settles kickoff team and first-minute-goal exactly once even after a worker restart replays the same claim", async () => {
+  const event = await createEvent(baseKickoff);
+  const kickoffMarkets = [
+    buildMarket(event.eventId, LiveMarketType.KICKOFF_TEAM, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketStatus.CLOSED),
+  ];
+  const firstMinuteMarkets = [
+    buildMarket(event.eventId, LiveMarketType.KICKOFF_TEAM, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketStatus.SETTLED),
+  ];
+  const fullTimeMarkets = firstMinuteMarkets;
+
+  const kickoffSettlement = {
+    marketId: `${event.eventId}:${LiveMarketType.KICKOFF_TEAM}`,
+    marketVersion: 1,
+    settlementReason: LiveSettlementReason.KICK_OFF,
+    settlementSequence: 1,
+    winningSide: TeamSide.HOME,
+    winningSelection: selectionId(
+      event.eventId,
+      LiveMarketType.KICKOFF_TEAM,
+      1,
+      TeamSide.HOME
+    ),
+  };
+  const firstMinuteSettlement = {
+    marketId: `${event.eventId}:${LiveMarketType.FIRST_MINUTE_GOAL}`,
+    marketVersion: 1,
+    settlementReason: LiveSettlementReason.FIRST_MINUTE_GOAL,
+    settlementSequence: 2,
+    winningSide: TeamSide.NO,
+    winningSelection: selectionId(
+      event.eventId,
+      LiveMarketType.FIRST_MINUTE_GOAL,
+      1,
+      TeamSide.NO
+    ),
+  };
+
+  const simulation: SimulationResult = {
+    engineVersion: 1,
+    timeline: {
+      engineVersion: 1,
+      eventId: event.eventId,
+      seed: `seed-${event.eventId}`,
+      durationMs: 120000,
+      stoppage: { first: 1, second: 2 },
+      config: buildSimulationResult(event.eventId).timeline.config,
+      entries: [],
+    },
+    transitions: [
+      buildTransition(
+        event.eventId,
+        1,
+        0,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.KICK_OFF,
+        kickoffMarkets,
+        { minute: 0, side: TeamSide.HOME, settlements: [kickoffSettlement] }
+      ),
+      buildTransition(
+        event.eventId,
+        2,
+        60000,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.FIRST_MINUTE_ELAPSED,
+        firstMinuteMarkets,
+        { minute: 1, settlements: [firstMinuteSettlement] }
+      ),
+      buildTransition(
+        event.eventId,
+        3,
+        120000,
+        EventPhase.FULL_TIME,
+        LiveIncidentType.FULL_TIME,
+        fullTimeMarkets,
+        { minute: 90, bettingStatus: BettingStatus.CLOSED }
+      ),
+    ],
+    finalScore: { home: 0, away: 0 },
+  };
+
+  await storeSimulation(event, simulation, 0, {
+    liveNextTransitionAt: baseKickoff,
+  });
+
+  const pastFirstMinuteClock = createStaticClock(
+    new Date(baseKickoff.getTime() + 65000)
+  );
+  const firstWorker = new GamemasterWorker({ clock: pastFirstMinuteClock });
+  await firstWorker.checkEventsOnce();
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(2);
+  const calls = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls;
+  expect(calls[0][0].data.sequence).toBe(1);
+  expect(calls[0][0].data.settlements).toEqual([kickoffSettlement]);
+  expect(calls[1][0].data.sequence).toBe(2);
+  expect(calls[1][0].data.settlements).toEqual([firstMinuteSettlement]);
+
+  const afterFirstRun = await Event.findOne({ eventId: event.eventId });
+  expect(afterFirstRun?.liveConfirmedReplayCursor).toBe(2);
+
+  // Restart: a brand new worker instance re-claims the same event at the
+  // same point in time (no new transition is due yet -- FULL_TIME is at
+  // +120s). Neither the kickoff-team nor the first-minute-goal settlement
+  // may be re-emitted.
+  const restartWorker = new GamemasterWorker({ clock: pastFirstMinuteClock });
+  await restartWorker.checkEventsOnce();
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(2);
+  const afterRestart = await Event.findOne({ eventId: event.eventId });
+  expect(afterRestart?.liveConfirmedReplayCursor).toBe(2);
+
+  // Advancing to full-time must publish exactly one more transition (no
+  // replay of the earlier two settlements).
+  const fullTimeClock = createStaticClock(
+    new Date(baseKickoff.getTime() + 125000)
+  );
+  const finalWorker = new GamemasterWorker({ clock: fullTimeClock });
+  await finalWorker.checkEventsOnce();
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(3);
+  const finalCall = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls[2][0];
+  expect(finalCall.data.sequence).toBe(3);
+  expect(
+    finalCall.data.settlements.some(
+      (settlement: { settlementReason: string }) =>
+        settlement.settlementReason === LiveSettlementReason.KICK_OFF
+        || settlement.settlementReason === LiveSettlementReason.FIRST_MINUTE_GOAL
+    )
+  ).toBe(false);
+});
+
+it("does not advance quoteValidUntil for an unaffected OPEN market's identity across the FIRST_MINUTE_ELAPSED transition", async () => {
+  const event = await createEvent(baseKickoff);
+  // NEXT_YELLOW_CARD is completely unaffected by kickoff or the
+  // first-minute-elapsed marker: it stays OPEN at the exact same
+  // (marketId, marketVersion, quoteVersion) identity across both
+  // snapshots.
+  const unaffectedYellowCard = buildMarket(
+    event.eventId,
+    LiveMarketType.NEXT_YELLOW_CARD,
+    LiveMarketStatus.OPEN
+  );
+  const kickoffMarkets = [
+    buildMarket(event.eventId, LiveMarketType.KICKOFF_TEAM, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketStatus.CLOSED),
+    unaffectedYellowCard,
+  ];
+  const firstMinuteMarkets = [
+    buildMarket(event.eventId, LiveMarketType.KICKOFF_TEAM, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketStatus.SETTLED),
+    unaffectedYellowCard,
+  ];
+  const fullTimeMarkets = [
+    buildMarket(event.eventId, LiveMarketType.KICKOFF_TEAM, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketStatus.SETTLED),
+    buildMarket(event.eventId, LiveMarketType.NEXT_YELLOW_CARD, LiveMarketStatus.SETTLED),
+  ];
+
+  const kickoffSettlement = {
+    marketId: `${event.eventId}:${LiveMarketType.KICKOFF_TEAM}`,
+    marketVersion: 1,
+    settlementReason: LiveSettlementReason.KICK_OFF,
+    settlementSequence: 1,
+    winningSide: TeamSide.HOME,
+    winningSelection: selectionId(event.eventId, LiveMarketType.KICKOFF_TEAM, 1, TeamSide.HOME),
+  };
+  const firstMinuteSettlement = {
+    marketId: `${event.eventId}:${LiveMarketType.FIRST_MINUTE_GOAL}`,
+    marketVersion: 1,
+    settlementReason: LiveSettlementReason.FIRST_MINUTE_GOAL,
+    settlementSequence: 2,
+    winningSide: TeamSide.NO,
+    winningSelection: selectionId(event.eventId, LiveMarketType.FIRST_MINUTE_GOAL, 1, TeamSide.NO),
+  };
+
+  const simulation: SimulationResult = {
+    engineVersion: 1,
+    timeline: {
+      engineVersion: 1,
+      eventId: event.eventId,
+      seed: `seed-${event.eventId}`,
+      durationMs: 120000,
+      stoppage: { first: 1, second: 2 },
+      config: buildSimulationResult(event.eventId).timeline.config,
+      entries: [],
+    },
+    transitions: [
+      buildTransition(
+        event.eventId,
+        1,
+        0,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.KICK_OFF,
+        kickoffMarkets,
+        { minute: 0, side: TeamSide.HOME, settlements: [kickoffSettlement] }
+      ),
+      buildTransition(
+        event.eventId,
+        2,
+        60000,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.FIRST_MINUTE_ELAPSED,
+        firstMinuteMarkets,
+        { minute: 1, settlements: [firstMinuteSettlement] }
+      ),
+      buildTransition(
+        event.eventId,
+        3,
+        120000,
+        EventPhase.FULL_TIME,
+        LiveIncidentType.FULL_TIME,
+        fullTimeMarkets,
+        { minute: 90, bettingStatus: BettingStatus.CLOSED }
+      ),
+    ],
+    finalScore: { home: 0, away: 0 },
+  };
+
+  await storeSimulation(event, simulation, 0, {
+    liveNextTransitionAt: baseKickoff,
+  });
+
+  const pastFirstMinuteClock = createStaticClock(
+    new Date(baseKickoff.getTime() + 65000)
+  );
+  const worker = new GamemasterWorker({ clock: pastFirstMinuteClock });
+  await worker.checkEventsOnce();
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(2);
+  const calls = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls;
+
+  const yellowCardAtKickoff = calls[0][0].data.markets.find(
+    (market: any) => market.marketType === LiveMarketType.NEXT_YELLOW_CARD
+  );
+  const yellowCardAtFirstMinuteElapsed = calls[1][0].data.markets.find(
+    (market: any) => market.marketType === LiveMarketType.NEXT_YELLOW_CARD
+  );
+
+  // Same (marketId, marketVersion, quoteVersion) identity observed at both
+  // the KICK_OFF and FIRST_MINUTE_ELAPSED snapshots must carry the exact
+  // same quoteValidUntil -- FIRST_MINUTE_ELAPSED must not be treated as a
+  // quote-cutoff boundary for a market it never touches.
+  expect(yellowCardAtKickoff.quoteValidUntil).toBeDefined();
+  expect(yellowCardAtKickoff.quoteValidUntil).toBe(
+    yellowCardAtFirstMinuteElapsed.quoteValidUntil
+  );
+  // Both must resolve to the genuinely next (material) transition boundary
+  // -- FULL_TIME at +120s -- not the FIRST_MINUTE_ELAPSED marker itself
+  // (+60s).
+  expect(yellowCardAtKickoff.quoteValidUntil).toBe(
+    new Date(baseKickoff.getTime() + 120000).toISOString()
+  );
+});
+
+it("deserializes and processes an existing event document that predates the pre-kickoff fields", async () => {
+  const event = await createEvent(baseKickoff);
+  // Simulate a document written before `livePreKickoffPublishedAt` existed
+  // by unsetting it directly at the driver level (bypassing Mongoose
+  // schema defaults entirely).
+  await Event.collection.updateOne(
+    { _id: event._id },
+    { $unset: { livePreKickoffPublishedAt: "" } }
+  );
+
+  const raw = await Event.collection.findOne({ _id: event._id });
+  expect(raw).not.toHaveProperty("livePreKickoffPublishedAt");
+
+  const simulation = buildSimulationResult(event.eventId);
+  const simulate = jest.fn(() => simulation);
+  const tMinusTenClock = createStaticClock(
+    new Date(baseKickoff.getTime() - 10 * 60 * 1000)
+  );
+
+  const worker = new GamemasterWorker({ clock: tMinusTenClock, simulate });
+  await expect(worker.checkEventsOnce()).resolves.not.toThrow();
+
+  expect(simulate).toHaveBeenCalledTimes(1);
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+  const stored = await Event.findOne({ eventId: event.eventId });
+  expect(stored?.livePreKickoffPublishedAt).toBeInstanceOf(Date);
+});
+
 it("uses a guarded fake-clock loop without overlapping publishes", async () => {
   const event = await createEvent(baseKickoff);
   const simulation = buildDelayedSimulationResult(event.eventId);
@@ -1067,6 +1437,97 @@ it("voids remaining markets and archives once when a manual result arrives", asy
   expect(archived?.awayResult).toBe(5);
   expect(archived?.pendingResult?.publishedSequence).toBe(5);
   expect(await Event.countDocuments({ eventId: event.eventId })).toBe(0);
+});
+
+it("explicitly voids a pending CLOSED first-minute-goal market on a manual result, without disturbing an already terminal cap-closed market", async () => {
+  const event = await createEvent(baseKickoff);
+  const simulation = buildSimulationResult(event.eventId);
+  // A generic NEXT_* market that already reached its incident cap: it is
+  // CLOSED, but its own settlement was already recorded via
+  // LiveSettlementReason.INCIDENT at the moment it closed (marketVersion
+  // bumped away from 1) -- a terminal state that a manual result must
+  // never re-settle.
+  const capClosedNextYellowCard = buildMarket(
+    event.eventId,
+    LiveMarketType.NEXT_YELLOW_CARD,
+    LiveMarketStatus.CLOSED,
+    3
+  );
+  // FIRST_MINUTE_GOAL closes atomically at kickoff (status CLOSED,
+  // marketVersion pinned at 1) but is only actually settled later, at the
+  // FIRST_MINUTE_ELAPSED marker -- this manual result arrives before that
+  // marker, so this market is still genuinely pending settlement.
+  const pendingFirstMinuteGoal = buildMarket(
+    event.eventId,
+    LiveMarketType.FIRST_MINUTE_GOAL,
+    LiveMarketStatus.CLOSED
+  );
+  const settledKickoffTeam = buildMarket(
+    event.eventId,
+    LiveMarketType.KICKOFF_TEAM,
+    LiveMarketStatus.SETTLED
+  );
+
+  await storeSimulation(event, simulation, 1, {
+    phase: EventPhase.FIRST_HALF,
+    liveMarkets: [settledKickoffTeam, pendingFirstMinuteGoal, capClosedNextYellowCard],
+    liveHomeScore: 0,
+    liveAwayScore: 0,
+  });
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  await listener.onMessage(manualResultEvent(event.eventId, 2, 0), buildMessage());
+
+  const worker = new GamemasterWorker({
+    clock: createStaticClock(new Date(baseKickoff.getTime() + 5000)),
+  });
+  await worker.checkEventsOnce();
+
+  expect(
+    LiveEventUpdatePublisher.prototype.publishWithConfirm
+  ).toHaveBeenCalledTimes(1);
+  const liveUpdate = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls[0][0];
+
+  const firstMinuteGoalMarket = liveUpdate.data.markets.find(
+    (market: any) => market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+  );
+  expect(firstMinuteGoalMarket.status).toBe(LiveMarketStatus.SETTLED);
+
+  const firstMinuteGoalSettlement = liveUpdate.data.settlements.find(
+    (settlement: any) =>
+      settlement.marketId
+      === `${event.eventId}:${LiveMarketType.FIRST_MINUTE_GOAL}`
+  );
+  expect(firstMinuteGoalSettlement).toBeDefined();
+  expect(firstMinuteGoalSettlement.settlementReason).toBe(
+    LiveSettlementReason.MANUAL_VOID
+  );
+  expect(firstMinuteGoalSettlement.winningSide).toBe(TeamSide.NONE);
+
+  // The already-terminal cap-closed market must stay untouched: still
+  // CLOSED, and never re-settled by the manual-void path.
+  const capClosedResult = liveUpdate.data.markets.find(
+    (market: any) => market.marketType === LiveMarketType.NEXT_YELLOW_CARD
+  );
+  expect(capClosedResult.status).toBe(LiveMarketStatus.CLOSED);
+  expect(
+    liveUpdate.data.settlements.some(
+      (settlement: any) =>
+        settlement.marketId
+        === `${event.eventId}:${LiveMarketType.NEXT_YELLOW_CARD}`
+    )
+  ).toBe(false);
+
+  // The already-settled kickoff-team market must not be re-settled either.
+  expect(
+    liveUpdate.data.settlements.some(
+      (settlement: any) =>
+        settlement.marketId === `${event.eventId}:${LiveMarketType.KICKOFF_TEAM}`
+    )
+  ).toBe(false);
 });
 
 it("publishes a single cutover snapshot for overdue events still inside the rollout window", async () => {
@@ -1482,9 +1943,11 @@ it("covers claim selection and persistence planning helper branches", async () =
     (persistenceWorker as any).ensureSimulationPersisted(manualEvent)
   ).resolves.toBe(manualEvent);
 
+  // Outside the 10-minute pre-kickoff window even though live kickoffs are
+  // enabled: still gates out with no simulation attempt.
   const futureEvent = {
     eventId: "future-event",
-    time: new Date(baseKickoff.getTime() + 1000),
+    time: new Date(baseKickoff.getTime() + 10 * 60 * 1000 + 1000),
     liveTransitions: [],
   };
   await expect(

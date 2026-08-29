@@ -3,12 +3,14 @@ import {
   EventPhase,
   EventStatus,
   EventVisibility,
-  LiveIncidentType,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
 } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import {
+  LiveIncidentType,
+  LiveMarketType,
+  TeamSide,
+} from "../compat/LiveContract";
 
 const liveIncidentSchema = new Schema(
   {
@@ -230,6 +232,39 @@ const eventSchema = new Schema({
     type: String,
     required: false,
     enum: Object.values(EventVisibility),
+  },
+  visibilityDecision: {
+    // Last explicit backoffice visibility intent, retained after a pending
+    // decision is applied. Runtime result/retention transitions may change
+    // `visibility`, so that current value alone cannot distinguish an
+    // intentional OFFLINE event from a temporary fail-dark state.
+    type: String,
+    required: false,
+    enum: Object.values(EventVisibility),
+  },
+  liveRaceResultedAt: {
+    // Explicit provenance for the result/live-queue race: stamped by
+    // `EventResultListener` when a terminal result arrives before its
+    // FULL_TIME projection. Delayed non-terminal snapshots must never
+    // reverse that result; the marker is consumed only when the matching
+    // FULL_TIME projection arrives. Additive/optional and absent/null on
+    // pre-existing events.
+    type: Date,
+    required: false,
+    default: null,
+  },
+  liveRetiredAt: {
+    // Retention tombstone: set only when the T-10 PRE_MATCH handoff for a
+    // newer event intentionally retires an older retained live full-time
+    // event (see `applyLiveEventUpdate`). Distinguishes an intentional
+    // retirement (permanent -- never auto-restored) from an ordinary
+    // OFFLINE result or a "result arrived before any live projection"
+    // race (transient -- restored to ONLINE by the next accepted live
+    // update). Additive/optional; absent/null on all pre-existing and
+    // ordinary (never-live) events.
+    type: Date,
+    required: false,
+    default: null,
   },
   products: [
     new Schema({

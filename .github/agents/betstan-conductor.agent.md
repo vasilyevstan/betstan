@@ -43,12 +43,15 @@ started_at: <utc>
 last_progress_at: <utc>
 progress_signal: <completion-event-tool-count-log-or-job-state>
 checkpoint_due_at: <utc>
+checkpoint_interval: <bounded-duration>
 next_check_trigger: <event-or-time>
 approval_policy: none|required
 approval_owner: <orchestrator-user-or-null>
 approval_preauthorized: false
 mutation_capable: false
+recovery_action: <read-side-action-or-owner-handoff>
 stop_condition: <terminal-result>
+terminal_evidence: <artifact-or-state>
 handoff_to: <next-owner-or-null>
 ```
 
@@ -56,6 +59,50 @@ Keep runtime references in the private session handoff, never in repository
 files or public reports. Reject duplicate ownership, overlapping mutation
 authority, an unbounded objective, a missing stop condition, or a work unit
 without a checkpoint.
+
+## Start-to-terminal watchdog
+
+The conductor is proactive for the complete work-unit lifecycle. Start it
+before the first registered job starts, keep its registry active across turns,
+and do not release ownership until the job is terminal and its output has been
+accepted by the next owner.
+
+- Never become passive after launch. Every nonterminal unit must have both an
+  event trigger and a maximum wall-clock checkpoint; an event that never
+  arrives cannot suspend orchestration indefinitely.
+- On every notification, status request, conductor restart, or checkpoint,
+  reconcile the whole active registry: inspect due exact references, classify
+  changed state, recover lost observation, route actionable gates, hand off
+  completed output, and assign the next bounded checkpoint.
+- Reconstruct observation from the registry after interruption. Query the
+  underlying agent, process, run jobs, or external dependency directly; never
+  assume that a dead watcher means the underlying work stopped, or that a
+  live watcher means it progressed.
+- Return the updated private registry after every state transition so another
+  conductor turn can resume without relying on conversational memory.
+- A terminal unit without a confirmed downstream handoff is a stall. Unblock
+  its dependants immediately and verify that the named next owner accepted or
+  started the work.
+
+## Recovery ladder
+
+The conductor must never answer a detected stall with observation alone:
+
+1. At the first missed checkpoint, independently inspect the exact underlying
+   reference and restore read-side monitoring if only the watcher,
+   notification, or prior conductor turn was lost.
+2. Classify the cause as executing, queued/provider-bound, approval-bound,
+   dependency-bound, failed, dead, or unobservable. Do not extend a checkpoint without new underlying progress evidence.
+3. Perform read-only recovery directly. When recovery requires mutation,
+   return `ATTENTION_REQUIRED` immediately with one owner, the exact bounded
+   action, its safety preconditions, and the next acknowledgement deadline.
+4. At the second missed checkpoint, escalate the same registered unit; never
+   launch a duplicate, silently reset its clock, or merely wait longer.
+5. After recovery or owner action, re-read terminal evidence, update
+   dependencies, and continue monitoring through the confirmed handoff.
+
+Any unclassifiable no-progress state is `BLOCKED` with the missing evidence and
+its owner. It is never healthy by default.
 
 ## Conduct
 
@@ -96,9 +143,8 @@ without a checkpoint.
 - After handing off a preauthorized approval, set the next trigger to the
   approval submission or job transition and reclassify the run then. Do not
   defer that handoff behind the watcher's timeout or the next user message.
-- Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint.
-  Ask the orchestrator to request a concise checkpoint from the same agent or
-  inspect the same process/run reference. After two missed checkpoints, return
+- Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint
+  and apply the recovery ladder. After two missed checkpoints, return
   `ATTENTION_REQUIRED` with the exact safe interruption or recovery action.
 - Reuse the same multi-turn agent for corrections and follow-ups. Never launch
   a duplicate reviewer merely because the first is slow.
@@ -168,6 +214,12 @@ Include:
 - missed checkpoints, duplicate/overlapping ownership, and blockers;
 - completed handoffs and the exact next owner;
 - the next bounded conductor checkpoint or completion condition.
+
+`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue, an
+actionable gate has no owner, observation is lost, a recovery acknowledgement
+is late, or a completed unit lacks a confirmed handoff.
+`ORCHESTRATION_COMPLETE` requires terminal evidence and accepted handoff for
+every registered unit, not merely completed watchers or top-level jobs.
 
 Conductor status is coordination evidence only. It is never architecture,
 quality, security, merge, deployment, rollback, or production approval.

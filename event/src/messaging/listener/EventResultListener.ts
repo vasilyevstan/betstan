@@ -1,6 +1,7 @@
 import { ConsumeMessage } from "amqplib";
 import {
   AListener,
+  EventPhase,
   EventStatus,
   EventVisibility,
   IEventResultEvent,
@@ -25,7 +26,38 @@ class EventResultListener extends AListener<IEventResultEvent> {
     }
 
     storedEvent.status = EventStatus.RESULTED;
-    storedEvent.visibility = EventVisibility.OFFLINE;
+    // A completed live event stays visible only once its matching FULL_TIME
+    // projection is present. If EVENT_RESULT wins the queue race while the
+    // projection is absent or still non-terminal, hide it and retain
+    // provenance so delayed snapshots cannot present a resulted match as
+    // active. `applyLiveEventUpdate` restores the retained card when
+    // FULL_TIME eventually arrives.
+    if (storedEvent.live?.phase !== EventPhase.FULL_TIME) {
+      // Capture explicit intent before forcing the runtime projection dark.
+      // A pending ONLINE decision is the normal fail-dark onboarding path,
+      // while an explicit/pending OFFLINE decision must remain authoritative.
+      // The final predicate preserves legacy initialized OFFLINE documents
+      // created before visibility-decision provenance existed.
+      const pendingVisibility = storedEvent.pendingVisibility;
+      const visibilityDecision = storedEvent.visibilityDecision;
+      const hasExplicitOfflineIntent =
+        visibilityDecision === EventVisibility.OFFLINE
+        || pendingVisibility === EventVisibility.OFFLINE
+        || (
+          visibilityDecision == null
+          && pendingVisibility == null
+          && storedEvent.visibilityInitialized === true
+          && storedEvent.visibility === EventVisibility.OFFLINE
+        );
+
+      storedEvent.visibility = EventVisibility.OFFLINE;
+
+      if (!hasExplicitOfflineIntent) {
+        storedEvent.liveRaceResultedAt = new Date(
+          event.timestamp ?? Date.now()
+        );
+      }
+    }
     await storedEvent.save();
     this.channel.ack(msg);
   }

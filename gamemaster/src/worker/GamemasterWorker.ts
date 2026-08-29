@@ -5,10 +5,7 @@ import {
   EventStatus,
   IEventResultEvent,
   ILiveEventUpdateEvent,
-  LiveIncidentType,
   LiveMarketStatus,
-  LiveSettlementReason,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
 
@@ -18,23 +15,63 @@ import LiveEventUpdatePublisher from "../event/publisher/LiveEventUpdatePublishe
 import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { LiveResultSource } from "../model/liveStateFields";
 import {
+  buildPreKickoffMarkets,
+  LiveIncidentType,
+  LiveMarketType,
+  LiveSettlementReason,
   SimulationResult,
   SimulationTransition,
   simulateMatch,
+  TeamSide,
 } from "../simulation";
 import { createLiveSeed, isPrivateLiveSeed } from "../simulation/liveSeed";
 
 const DEFAULT_WORK_CADENCE_MS = 1000;
 const DEFAULT_LEASE_DURATION_MS = 30000;
 const LIVE_KICKOFF_CUTOVER_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * How far ahead of kickoff an event becomes a live-betting candidate: the
+ * simulation is generated early and the two pre-kickoff live-slip markets
+ * (kickoff team, goal in first minute) are published, OPEN, at sequence 0.
+ * Distinct from `LIVE_KICKOFF_CUTOVER_WINDOW_MS`, which governs unrelated
+ * post-kickoff catch-up/fast-forward behavior for events claimed late.
+ */
+const LIVE_PRE_KICKOFF_WINDOW_MS = 10 * 60 * 1000;
 const MAX_EVENTS_PER_TICK = 100;
 const MAX_SIMULATION_FAILURES = 3;
 
 type TimerHandle = unknown;
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
+type LiveUpdateMarket = ILiveEventUpdateEvent["data"]["markets"][number];
+type LiveUpdateSettlement =
+  ILiveEventUpdateEvent["data"]["settlements"][number];
 type LiveUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
 };
+
+function asPublishedIncidentType(
+  value: LiveIncidentType
+): LiveUpdateIncident["type"] {
+  return value as unknown as LiveUpdateIncident["type"];
+}
+
+function asPublishedMarketType(
+  value: LiveMarketType
+): LiveUpdateMarket["marketType"] {
+  return value as unknown as LiveUpdateMarket["marketType"];
+}
+
+function asPublishedTeamSide(
+  value: TeamSide
+): LiveUpdateMarket["selections"][number]["side"] {
+  return value as unknown as LiveUpdateMarket["selections"][number]["side"];
+}
+
+function asPublishedSettlementReason(
+  value: LiveSettlementReason
+): LiveUpdateSettlement["settlementReason"] {
+  return value as unknown as LiveUpdateSettlement["settlementReason"];
+}
 
 export interface WorkerClock {
   now(): Date;
@@ -105,6 +142,10 @@ function currentPhase(event: any): EventPhase {
 
 function hasStoredSimulation(event: any): boolean {
   return Array.isArray(event.liveTransitions) && event.liveTransitions.length > 0;
+}
+
+function hasPublishedPreKickoffMarkets(event: any): boolean {
+  return Boolean(event.livePreKickoffPublishedAt);
 }
 
 function confirmedReplayCursor(event: any): number {
@@ -182,8 +223,11 @@ function buildPublishedIncident(
   return {
     id: transition.incident.id,
     relatedIncidentId: transition.incident.linkedIncidentId,
-    type: transition.incident.type as LiveIncidentType,
-    side: transition.incident.side as TeamSide | undefined,
+    type: asPublishedIncidentType(transition.incident.type),
+    side:
+      transition.incident.side === undefined
+        ? undefined
+        : asPublishedTeamSide(transition.incident.side),
     occurredAt: occurredAtIso,
     minute: transition.minute,
     addedTime: transition.addedTime,
@@ -323,6 +367,9 @@ export class GamemasterWorker {
 
   private async claimNextEvent(): Promise<any | null> {
     const now = this.clock.now();
+    const preKickoffWindowMs = this.liveKickoffsEnabled(now)
+      ? LIVE_PRE_KICKOFF_WINDOW_MS
+      : 0;
 
     return (
       await this.claimEvent(
@@ -348,6 +395,16 @@ export class GamemasterWorker {
               liveNextTransitionAt: null,
               resultPublishedAt: { $ne: null },
             },
+            // A stored simulation whose pre-kickoff snapshot has not yet
+            // been published: reclaim it even though `liveNextTransitionAt`
+            // (the kick-off transition itself) is still in the future.
+            // `liveConfirmedReplayCursor: 0` scopes this to events still in
+            // the pre-kickoff window/awaiting kick-off, so it never causes
+            // repeated reclaiming of already-replayed matches.
+            {
+              livePreKickoffPublishedAt: null,
+              liveConfirmedReplayCursor: 0,
+            },
           ],
         },
         { liveNextTransitionAt: 1, time: 1 },
@@ -359,7 +416,11 @@ export class GamemasterWorker {
           "pendingResult.source": { $ne: LiveResultSource.MANUAL },
           "liveTransitions.0": { $exists: false },
           "simulationFailure.quarantinedAt": null,
-          time: { $lte: now },
+          // An event becomes a live-betting candidate up to
+          // `LIVE_PRE_KICKOFF_WINDOW_MS` before kickoff (when live kickoffs
+          // are enabled), mirroring the same lead time
+          // `ensureSimulationPersisted` uses to generate its simulation.
+          time: { $lte: new Date(now.getTime() + preKickoffWindowMs) },
         },
         { time: 1 },
         now
@@ -437,6 +498,11 @@ export class GamemasterWorker {
       return;
     }
 
+    current = await this.publishPendingPreKickoffMarkets(current);
+    if (!current) {
+      return;
+    }
+
     current = await this.publishDueTransitions(current);
     if (!current) {
       return;
@@ -470,7 +536,15 @@ export class GamemasterWorker {
 
     const kickoffAt = asDate(event.time);
     const now = this.clock.now();
-    if (kickoffAt.getTime() > now.getTime()) {
+    // An event only becomes a live-betting candidate (simulation generated
+    // and, per `publishPendingPreKickoffMarkets`, its pre-kickoff markets
+    // published) starting `LIVE_PRE_KICKOFF_WINDOW_MS` before kickoff -- and
+    // only while live kickoffs are enabled; preserves the exact prior
+    // "wait until kickoff" gate when the feature is off.
+    const simulationLeadTimeMs = this.liveKickoffsEnabled(now)
+      ? LIVE_PRE_KICKOFF_WINDOW_MS
+      : 0;
+    if (kickoffAt.getTime() - now.getTime() > simulationLeadTimeMs) {
       return event;
     }
 
@@ -661,7 +735,15 @@ export class GamemasterWorker {
       liveTransitions: simulation.transitions,
       liveMarkets:
         confirmedTransition?.markets
-        ?? simulation.transitions[0]?.markets
+        ?? (
+          confirmedSequence === 0 && kickoffAt.getTime() > this.clock.now().getTime()
+            // Still in the pre-kickoff countdown: expose the standalone
+            // pre-kickoff snapshot (both markets OPEN), not the already
+            // closed/settled version-1 state `transitions[0]` holds for
+            // them post-kickoff.
+            ? buildPreKickoffMarkets(simulation.timeline)
+            : simulation.transitions[0]?.markets
+        )
         ?? [],
     };
   }
@@ -745,7 +827,7 @@ export class GamemasterWorker {
   ): ILiveEventUpdateEvent {
     const occurredAtIso = occurredAt.toISOString();
     const incident = buildPublishedIncident(transition, occurredAtIso);
-    const quoteValidUntil = this.nextTransitionAt(
+    const quoteValidUntil = this.nextQuoteCutoffAt(
       this.kickoffAt(event),
       storedTransitions(event),
       transition.sequence
@@ -765,7 +847,7 @@ export class GamemasterWorker {
       incidents: this.buildCumulativeIncidents(event, transition.sequence, incident),
       markets: transition.markets.map((market) => ({
         marketId: market.marketId,
-        marketType: market.marketType as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["marketType"],
+        marketType: asPublishedMarketType(market.marketType),
         marketVersion: market.marketVersion,
         quoteVersion: market.quoteVersion,
         quoteValidUntil:
@@ -775,20 +857,112 @@ export class GamemasterWorker {
         status: market.status as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["status"],
         selections: market.selections.map((selection) => ({
           selectionId: selection.selectionId,
-          side: selection.side as unknown as TeamSide,
+          side: asPublishedTeamSide(selection.side),
           odds: selection.odds,
         })),
       })),
       settlements: transition.settlements.map((settlement) => ({
         marketId: settlement.marketId,
         marketVersion: settlement.marketVersion,
-        settlementReason:
-          settlement.settlementReason as unknown as ILiveEventUpdateEvent["data"]["settlements"][number]["settlementReason"],
+        settlementReason: asPublishedSettlementReason(
+          settlement.settlementReason
+        ),
         settlementSequence: settlement.settlementSequence,
-        winningSide:
-          settlement.winningSide as unknown as TeamSide,
+        winningSide: asPublishedTeamSide(settlement.winningSide),
         winningSelection: settlement.winningSelection,
       })),
+      eventName: event.name,
+      home: event.home,
+      away: event.away,
+    };
+
+    return {
+      data,
+    };
+  }
+
+  /**
+   * Publishes the standalone pre-kickoff live-slip snapshot (kickoff team,
+   * goal in first minute; both OPEN at marketVersion 1) once, at sequence 0,
+   * for events that have a stored simulation but have not yet reached
+   * kickoff. Independently guarded by `livePreKickoffPublishedAt` (rather
+   * than folded into `ensureSimulationPersisted`'s `hasStoredSimulation`
+   * guard) so a crash between persisting the simulation and publishing this
+   * snapshot can still be retried on the next claim.
+   */
+  private async publishPendingPreKickoffMarkets(event: any): Promise<any> {
+    if (
+      hasPublishedPreKickoffMarkets(event)
+      || hasPendingManualResult(event)
+      || !hasStoredSimulation(event)
+    ) {
+      return event;
+    }
+
+    const kickoffAt = this.kickoffAt(event);
+    const now = this.clock.now();
+
+    if (kickoffAt.getTime() > now.getTime()) {
+      await this.init();
+      await this.livePublisher.publishWithConfirm(
+        this.buildPreKickoffLiveUpdatePayload(event, kickoffAt, now)
+      );
+    }
+    // If kickoff has already passed (e.g. the worker was unavailable for the
+    // entire pre-kickoff window), there is no pre-kickoff snapshot left to
+    // publish -- but the marker still must be set so this event is not
+    // reclaimed for this step indefinitely.
+
+    return (
+      await Event.findOneAndUpdate(
+        {
+          _id: event._id,
+          "processingLease.token": event.processingLease?.token,
+          livePreKickoffPublishedAt: null,
+        },
+        { $set: { livePreKickoffPublishedAt: now } },
+        { new: true }
+      )
+      ?? await this.refreshClaimedEvent(event._id, event.processingLease?.token)
+    );
+  }
+
+  private buildPreKickoffLiveUpdatePayload(
+    event: any,
+    kickoffAt: Date,
+    occurredAt: Date
+  ): ILiveEventUpdateEvent {
+    const occurredAtIso = occurredAt.toISOString();
+    const kickoffAtIso = kickoffAt.toISOString();
+    const markets = currentMarkets(event);
+    const data: LiveUpdateData = {
+      eventId: event.eventId,
+      sequence: 0,
+      occurredAt: occurredAtIso,
+      kickoffAt: kickoffAtIso,
+      minute: 0,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidents: [],
+      markets: markets.map((market) => ({
+        marketId: market.marketId,
+        marketType: market.marketType as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["marketType"],
+        marketVersion: market.marketVersion,
+        quoteVersion: market.quoteVersion,
+        // Pre-kickoff quotes are valid up to the atomic kickoff transition,
+        // which is exactly when both markets close.
+        quoteValidUntil:
+          market.status === LiveMarketStatus.OPEN ? kickoffAtIso : undefined,
+        status: market.status as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["status"],
+        selections: market.selections.map((selection: any) => ({
+          selectionId: selection.selectionId,
+          side: selection.side as unknown as TeamSide,
+          odds: selection.odds,
+        })),
+      })),
+      settlements: [],
       eventName: event.name,
       home: event.home,
       away: event.away,
@@ -851,21 +1025,49 @@ export class GamemasterWorker {
     );
   }
 
+  /**
+   * Whether a market must be explicitly voided (settled with
+   * `LiveSettlementReason.MANUAL_VOID`) when a manual full-time result
+   * pre-empts the simulation. OPEN/SUSPENDED markets are always live and
+   * unsettled, so they always need this. FIRST_MINUTE_GOAL is the one
+   * market type whose CLOSED status is *not* terminal: it closes
+   * atomically at kickoff (see `markets.ts`) but is only actually settled
+   * later, at the FIRST_MINUTE_ELAPSED marker -- a manual result landing
+   * in that in-between window would otherwise archive the event leaving it
+   * permanently unsettled. Every other market type only ever reaches
+   * CLOSED once its own settlement has already been recorded (e.g.
+   * cap-exhausted NEXT_* markets settle via `LiveSettlementReason.INCIDENT`
+   * at the very moment they close), so this must not also void those.
+   */
+  private needsManualVoid(market: {
+    marketType: LiveMarketType;
+    status: LiveMarketStatus;
+  }): boolean {
+    if (
+      market.status === LiveMarketStatus.OPEN
+      || market.status === LiveMarketStatus.SUSPENDED
+    ) {
+      return true;
+    }
+
+    return (
+      market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+      && market.status === LiveMarketStatus.CLOSED
+    );
+  }
+
   private buildManualLiveUpdatePayload(event: any): ILiveEventUpdateEvent {
     const pending = event.pendingResult;
     const sequence = currentSequence(event) + 1;
     const occurredAt = asDate(pending?.requestedAt ?? this.clock.now());
     const incident: LiveUpdateIncident = {
       id: `manual-full-time-${sequence}`,
-      type: LiveIncidentType.FULL_TIME,
+      type: asPublishedIncidentType(LiveIncidentType.FULL_TIME),
       occurredAt: occurredAt.toISOString(),
       minute: 90,
     };
     const markets = currentMarkets(event).map((market) => {
-      if (
-        market.status === LiveMarketStatus.OPEN
-        || market.status === LiveMarketStatus.SUSPENDED
-      ) {
+      if (this.needsManualVoid(market)) {
         return {
           ...market,
           status: LiveMarketStatus.SETTLED,
@@ -875,17 +1077,15 @@ export class GamemasterWorker {
       return { ...market };
     });
     const settlements = currentMarkets(event)
-      .filter(
-        (market) =>
-          market.status === LiveMarketStatus.OPEN
-          || market.status === LiveMarketStatus.SUSPENDED
-      )
+      .filter((market) => this.needsManualVoid(market))
       .map((market) => ({
         marketId: market.marketId,
         marketVersion: market.marketVersion,
-        settlementReason: LiveSettlementReason.MANUAL_VOID,
+        settlementReason: asPublishedSettlementReason(
+          LiveSettlementReason.MANUAL_VOID
+        ),
         settlementSequence: sequence,
-        winningSide: TeamSide.NONE,
+        winningSide: asPublishedTeamSide(TeamSide.NONE),
       }));
     const data: LiveUpdateData = {
       eventId: event.eventId,
@@ -1168,6 +1368,41 @@ export class GamemasterWorker {
     confirmedSequence: number
   ): Date | null {
     const next = transitions[confirmedSequence];
+    return next
+      ? new Date(kickoffAt.getTime() + next.offsetMs)
+      : null;
+  }
+
+  /**
+   * Like `nextTransitionAt`, but skips over any FIRST_MINUTE_ELAPSED
+   * transition when searching for the boundary a market's `quoteValidUntil`
+   * should be pinned to.
+   *
+   * FIRST_MINUTE_ELAPSED is a non-material marker (it settles
+   * FIRST_MINUTE_GOAL in place but never reprices/re-versions any other
+   * market) that, unlike prior incident types, is now deterministic and
+   * guaranteed to occur very soon after kickoff on every match. If it were
+   * left in the search, every OPEN market unrelated to it would have its
+   * `quoteValidUntil` recomputed to a *new* value at the FIRST_MINUTE_ELAPSED
+   * transition without any change to its (marketId, marketVersion,
+   * quoteVersion) identity. Moderation's market history freezes the first
+   * open+live observation of a given identity forever, so a bet submitted
+   * against the later (correct, current) `quoteValidUntil` could then be
+   * rejected as stale against the earlier frozen value. Skipping
+   * FIRST_MINUTE_ELAPSED here keeps `quoteValidUntil` for an unaffected
+   * market's identity stable across it, exactly preserving pre-existing
+   * behavior for every other transition/incident type.
+   */
+  private nextQuoteCutoffAt(
+    kickoffAt: Date,
+    transitions: SimulationTransition[],
+    confirmedSequence: number
+  ): Date | null {
+    const next = transitions
+      .slice(confirmedSequence)
+      .find(
+        (transition) => transition.incident.type !== LiveIncidentType.FIRST_MINUTE_ELAPSED
+      );
     return next
       ? new Date(kickoffAt.getTime() + next.offsetMs)
       : null;

@@ -1,5 +1,10 @@
 import mongoose from "mongoose";
 import { BetKind, BetStatus, SlipRowStatus } from "@betstan/common";
+import {
+  LiveMarketType,
+  LiveSettlementReason,
+  TeamSide,
+} from "../../compat/LiveContract";
 import { Bet } from "../Bet";
 
 const buildBet = (overrides: Record<string, unknown> = {}) =>
@@ -61,4 +66,76 @@ it("preserves explicitly populated serialized values", () => {
   expect(serialized.betKind).toEqual(BetKind.LIVE);
   expect(serialized.rows[0].betKind).toEqual(BetKind.LIVE);
   expect(serialized.rows[0].winningSelection).toEqual("Away");
+});
+
+it("persists additive live market, side, and settlement values", async () => {
+  const bet = buildBet({
+    betKind: BetKind.LIVE,
+    rows: [
+      {
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        eventName: "Live Event",
+        oddsId: new mongoose.Types.ObjectId().toHexString(),
+        oddsValue: 2.2,
+        oddsName: "Yes",
+        productName: "Kickoff team",
+        productId: new mongoose.Types.ObjectId().toHexString(),
+        status: SlipRowStatus.WIN,
+        timestamp: new Date().toISOString(),
+        winningSelection: "Yes",
+        id: new mongoose.Types.ObjectId().toHexString(),
+        betKind: BetKind.LIVE,
+        marketId: "kickoff-market",
+        marketType: LiveMarketType.KICKOFF_TEAM,
+        marketVersion: 1,
+        quoteVersion: 1,
+        selectionId: "kickoff-yes",
+        side: TeamSide.YES,
+        winningSide: TeamSide.YES,
+        settlementReason: LiveSettlementReason.KICK_OFF,
+        settlementSequence: 1,
+      },
+      {
+        eventId: new mongoose.Types.ObjectId().toHexString(),
+        eventName: "Live Event",
+        oddsId: new mongoose.Types.ObjectId().toHexString(),
+        oddsValue: 1.8,
+        oddsName: "No",
+        productName: "First-minute goal",
+        productId: new mongoose.Types.ObjectId().toHexString(),
+        status: SlipRowStatus.WIN,
+        timestamp: new Date().toISOString(),
+        winningSelection: "No",
+        id: new mongoose.Types.ObjectId().toHexString(),
+        betKind: BetKind.LIVE,
+        marketId: "first-minute-market",
+        marketType: LiveMarketType.FIRST_MINUTE_GOAL,
+        marketVersion: 1,
+        quoteVersion: 1,
+        selectionId: "first-minute-no",
+        side: TeamSide.NO,
+        winningSide: TeamSide.NO,
+        settlementReason: LiveSettlementReason.FIRST_MINUTE_GOAL,
+        settlementSequence: 2,
+      },
+    ],
+  });
+
+  await bet.save();
+  const persisted = await Bet.findById(bet._id).lean();
+
+  expect(persisted?.rows).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        marketType: "KICKOFF_TEAM",
+        side: "YES",
+        settlementReason: "KICK_OFF",
+      }),
+      expect.objectContaining({
+        marketType: "FIRST_MINUTE_GOAL",
+        side: "NO",
+        settlementReason: "FIRST_MINUTE_GOAL",
+      }),
+    ])
+  );
 });

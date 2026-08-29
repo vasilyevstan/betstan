@@ -152,6 +152,21 @@ export const liveStateFields = {
     required: false,
     default: [],
   },
+  /**
+   * Idempotency marker for the synthetic pre-kickoff live-slip snapshot
+   * (kickoff team + goal-in-first-minute, published at sequence 0 during
+   * the T-10-to-kickoff countdown). Deliberately independent of
+   * `hasStoredSimulation`/`liveConfirmedReplayCursor`: if the worker
+   * crashes between persisting the simulation and publishing this
+   * snapshot, a later retry must still be able to publish it, which a
+   * shared flag would prevent once the simulation itself is already
+   * stored.
+   */
+  livePreKickoffPublishedAt: {
+    type: Date,
+    required: false,
+    default: null,
+  },
   processingLease: {
     type: processingLeaseSchema,
     required: false,

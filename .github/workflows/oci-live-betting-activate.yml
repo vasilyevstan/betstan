@@ -56,6 +56,7 @@ jobs:
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       LIVE_ACTIVATION_LEASE_SECONDS: "1800"
+      LIVE_ACCEPTANCE_USERNAME: betstan-e2e
 
     steps:
       - name: Initialize isolated OCI paths
@@ -392,42 +393,63 @@ jobs:
           OUTPUT_DIR: artifacts/live-control/readiness-activated
         run: ./infra/oci/agents/live-betting-readiness-stan.sh
 
-      - name: Create disposable validation account
+      - name: Resolve reusable validation account
         id: account
         env:
           BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
         run: |
           set -euo pipefail
           umask 077
-          username="live-e2e-${GITHUB_RUN_ID}"
-          password="Lv1-$(openssl rand -hex 7)"
+          username="$LIVE_ACCEPTANCE_USERNAME"
+          password="$LIVE_ACCEPTANCE_PASSWORD"
+          [ -n "$password" ] || {
+            echo "LIVE_ACCEPTANCE_PASSWORD is not configured" >&2
+            exit 1
+          }
           echo "::add-mask::$password"
-          response_file="$RUNNER_TEMP/live-acceptance-signup.json"
+          response_file="$RUNNER_TEMP/live-acceptance-account.json"
+          cookie_jar="$RUNNER_TEMP/live-acceptance.cookies"
           status="$(
             jq -n --arg email "$username" --arg password "$password" \
               '{email:$email,password:$password}' |
-              curl --fail-with-body --silent --show-error \
+              curl --silent --show-error \
                 --output "$response_file" \
                 --write-out '%{http_code}' \
+                --cookie-jar "$cookie_jar" \
                 --header 'Content-Type: application/json' \
                 --data-binary @- \
-                "$BASE_URL/api/auth/new"
+                "$BASE_URL/api/auth/login"
           )"
-          [ "$status" = "201" ]
+          if [ "$status" = "400" ]; then
+            rm -f "$cookie_jar"
+            status="$(
+              jq -n --arg email "$username" --arg password "$password" \
+                '{email:$email,password:$password}' |
+                curl --fail-with-body --silent --show-error \
+                  --output "$response_file" \
+                  --write-out '%{http_code}' \
+                  --cookie-jar "$cookie_jar" \
+                  --header 'Content-Type: application/json' \
+                  --data-binary @- \
+                  "$BASE_URL/api/auth/new"
+            )"
+            [ "$status" = "201" ]
+          else
+            [ "$status" = "200" ]
+          fi
           user_id="$(jq -er '.id | select(test("^[0-9a-f]{24}$"))' "$response_file")"
-          cookie_jar="$RUNNER_TEMP/live-acceptance.cookies"
           {
-            echo "LIVE_ACCEPTANCE_USERNAME=$username"
-            echo "LIVE_ACCEPTANCE_PASSWORD=$password"
             echo "LIVE_ACCEPTANCE_USER_ID=$user_id"
             echo "LIVE_ACCEPTANCE_COOKIE_JAR=$cookie_jar"
           } >> "$GITHUB_ENV"
           printf 'user_id=%s\n' "$user_id" >> "$GITHUB_OUTPUT"
           rm -f "$response_file"
 
-      - name: Grant and verify disposable administrator role
+      - name: Grant and verify reusable administrator role
         env:
           BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
         run: |
           set -euo pipefail
           kubectl exec -n "$OCI_K8S_NAMESPACE" \
@@ -459,15 +481,17 @@ jobs:
           LIVE_ACCEPTANCE_RUN_ID: ${{ github.run_id }}
           LIVE_ACCEPTANCE_EVIDENCE_FILE: ${{ github.workspace }}/artifacts/live-control/acceptance/evidence.json
           OCI_E2E_OUTPUT_DIR: ${{ github.workspace }}/artifacts/live-control/playwright
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
         run: |
           NODE_PATH="$GITHUB_WORKSPACE/client/node_modules" \
             ./client/node_modules/.bin/playwright test \
               --config infra/oci/agents/playwright-live-acceptance.config.js
 
-      - name: Revoke, clean, and delete disposable validation account
+      - name: Revoke and clean reusable validation account
         if: always() && steps.account.outcome == 'success'
         env:
           BASE_URL: ${{ steps.provenance.outputs.public_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
         run: |
           set -euo pipefail
           cleanup_failed=0
@@ -481,7 +505,6 @@ jobs:
                 node dist/scripts/SetUserRole.js; then
             cleanup_failed=1
           fi
-          slip_cleanup_succeeded=0
           if NAMESPACE="$OCI_K8S_NAMESPACE" \
               FAILED_ACTIVATION_RUN_ID="$GITHUB_RUN_ID" \
               FAILED_ACTIVATION_USER_ID="$LIVE_ACCEPTANCE_USER_ID" \
@@ -491,21 +514,9 @@ jobs:
               MAX_ACTIVE_SLIPS=2 \
               OUTPUT_FILE=artifacts/live-control/cleanup/active-slips.json \
               ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh; then
-            slip_cleanup_succeeded=1
+            :
           else
             cleanup_failed=1
-          fi
-          if [ "$slip_cleanup_succeeded" = "1" ]; then
-            if ! kubectl exec -n "$OCI_K8S_NAMESPACE" \
-                deployment/gaming-auth-depl \
-                -c gaming-auth -- \
-                env \
-                  "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
-                  "USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME" \
-                  "USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME" \
-                  node dist/scripts/DeleteUser.js; then
-              cleanup_failed=1
-            fi
           fi
           if [ -s "$LIVE_ACCEPTANCE_COOKIE_JAR" ]; then
             if status="$(
@@ -522,23 +533,31 @@ jobs:
               cleanup_failed=1
             fi
           fi
+          retained_response_file="$RUNNER_TEMP/live-acceptance-retained-login.json"
           if status="$(
             jq -n \
               --arg email "$LIVE_ACCEPTANCE_USERNAME" \
               --arg password "$LIVE_ACCEPTANCE_PASSWORD" \
               '{email:$email,password:$password}' |
               curl --silent --show-error \
-                --output /dev/null \
+                --output "$retained_response_file" \
                 --write-out '%{http_code}' \
                 --header 'Content-Type: application/json' \
                 --data-binary @- \
                 "$BASE_URL/api/auth/login"
           )"; then
-            [ "$status" = "400" ] || cleanup_failed=1
+            [ "$status" = "200" ] || cleanup_failed=1
+            if [ "$status" = "200" ]; then
+              jq -e \
+                --arg user_id "$LIVE_ACCEPTANCE_USER_ID" \
+                --arg username "$LIVE_ACCEPTANCE_USERNAME" \
+                '.id == $user_id and .email == $username and .role == "USER"' \
+                "$retained_response_file" >/dev/null || cleanup_failed=1
+            fi
           else
             cleanup_failed=1
           fi
-          rm -f "$LIVE_ACCEPTANCE_COOKIE_JAR"
+          rm -f "$LIVE_ACCEPTANCE_COOKIE_JAR" "$retained_response_file"
           [ "$cleanup_failed" = "0" ]
 
       - name: Verify settled queues and runtime

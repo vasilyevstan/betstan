@@ -33,6 +33,6 @@ export {
   samplePoisson,
 } from "./rng";
 export { generateTimeline } from "./timeline";
-export { projectTransitions } from "./markets";
+export { projectTransitions, buildPreKickoffMarkets } from "./markets";
 export { assertSimulationInvariants } from "./invariants";
 export * from "./types";

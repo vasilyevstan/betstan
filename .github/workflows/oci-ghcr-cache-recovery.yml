@@ -479,6 +479,7 @@ jobs:
           OCI_PUBLIC_URL: ${{ needs.recover.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ needs.recover.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ needs.recover.outputs.diagnostic_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           OCI_ALLOW_LEGACY_ADMIN_UI: "1"
           MAX_LOOPS: "3"

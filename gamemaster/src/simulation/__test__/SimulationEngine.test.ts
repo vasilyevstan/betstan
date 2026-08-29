@@ -22,6 +22,13 @@ import {
 
 const DURATION = 60000;
 
+const NEXT_MARKET_TYPES: LiveMarketType[] = [
+  LiveMarketType.NEXT_YELLOW_CARD,
+  LiveMarketType.NEXT_RED_CARD,
+  LiveMarketType.NEXT_CORNER,
+  LiveMarketType.NEXT_PENALTY,
+];
+
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -141,7 +148,7 @@ describe("simulation timeline", () => {
     expect(first).toEqual(second);
     expect(first).not.toEqual(different);
     expect(first.engineVersion).toBe(1);
-    expect(digest(first)).toBe("cf34b5884cc5967f297ae82115ed2a4d54d60711a5a7822f8bf67bb196455822");
+    expect(digest(first)).toBe("7c1a4e3c43634c6e745c596c5890ff1754571be8bad4efd30d1b9475bf99aa7c");
   });
 
   it("has exact structural anchors and ordered structural ties", () => {
@@ -360,20 +367,20 @@ describe("market projection", () => {
       winningSide: "HOME",
     });
     expect(halfTime.markets.filter((market) =>
-      market.marketType !== LiveMarketType.HALF_TIME_RESULT
+      NEXT_MARKET_TYPES.includes(market.marketType)
     ).every((market) => market.status === LiveMarketStatus.SUSPENDED)).toBe(true);
     expect(secondKick.markets.filter((market) =>
-      market.marketType !== LiveMarketType.HALF_TIME_RESULT
+      NEXT_MARKET_TYPES.includes(market.marketType)
     ).every((market) => market.status === LiveMarketStatus.OPEN)).toBe(true);
     expect(halfTime.markets.filter((market) =>
-      market.marketType !== LiveMarketType.HALF_TIME_RESULT
+      NEXT_MARKET_TYPES.includes(market.marketType)
     ).map((market) => market.quoteVersion)).toEqual(
       beforeHalfTime.markets.filter((market) =>
-        market.marketType !== LiveMarketType.HALF_TIME_RESULT
+        NEXT_MARKET_TYPES.includes(market.marketType)
       ).map((market) => market.quoteVersion)
     );
     expect(secondKick.markets.some((market, index) =>
-      market.marketType !== LiveMarketType.HALF_TIME_RESULT
+      NEXT_MARKET_TYPES.includes(market.marketType)
       && market.quoteVersion
         > halfTime.markets[index].quoteVersion
     )).toBe(true);

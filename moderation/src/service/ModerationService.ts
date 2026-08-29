@@ -8,12 +8,11 @@ import {
   IModerationResultEvent,
   IPlaceBetEvent,
   LiveMarketStatus,
-  LiveMarketType,
   ModerationDeclineReason,
   ModerationStatus,
   SlipRow,
-  TeamSide,
 } from "@betstan/common";
+import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import { Bet } from "../model/Bet";
 import { LiveEventMirror } from "../model/LiveEventMirror";
 import { ParkedPlaceBet, ParkedPlaceBetStatus } from "../model/ParkedPlaceBet";
@@ -216,12 +215,46 @@ export const MAX_MARKET_HISTORY_VERSIONS_PER_MARKET = 100;
 /** Bounded optimistic-concurrency retries when two updates race to append history. */
 export const MAX_MARKET_HISTORY_WRITE_ATTEMPTS = 5;
 const LIVE_PHASES = new Set<EventPhase>([
+  // Pre-kickoff live-slip candidacy: from `LIVE_PRE_KICKOFF_WINDOW_MS`
+  // before kickoff, gamemaster publishes a PRE_MATCH-phase snapshot
+  // exposing exactly the two pre-kickoff live markets (kickoff team, goal
+  // in first minute). This set alone is used only for whole-event/record
+  // level "is this event still in an authoritative live window" checks
+  // (e.g. whether to close out market history on a phase change); it is
+  // deliberately NOT sufficient, on its own, to decide whether any given
+  // *market* row is eligible while PRE_MATCH -- see
+  // `isMarketLiveEligibleForPhase` below, which every per-market/per-row
+  // check must go through instead so a forged or stale row can never be
+  // treated as live merely because the event happens to be PRE_MATCH.
+  EventPhase.PRE_MATCH,
   EventPhase.FIRST_HALF,
   EventPhase.FIRST_HALF_STOPPAGE,
   EventPhase.HALF_TIME,
   EventPhase.SECOND_HALF,
   EventPhase.SECOND_HALF_STOPPAGE,
 ]);
+/**
+ * By construction, gamemaster never publishes any market type other than
+ * these two while phase is PRE_MATCH. Every per-market/per-row live-phase
+ * check must gate PRE_MATCH eligibility on market type through
+ * `isMarketLiveEligibleForPhase` rather than relying on `LIVE_PHASES`
+ * alone, so an ordinary NEXT_* live market can never be treated as live
+ * during PRE_MATCH regardless of what a submitted row happens to claim.
+ */
+const PRE_KICKOFF_MARKET_TYPES = new Set<LiveMarketType>([
+  LiveMarketType.KICKOFF_TEAM,
+  LiveMarketType.FIRST_MINUTE_GOAL,
+]);
+
+function isMarketLiveEligibleForPhase(
+  phase: EventPhase,
+  marketType: LiveMarketType
+): boolean {
+  if (phase === EventPhase.PRE_MATCH) {
+    return PRE_KICKOFF_MARKET_TYPES.has(marketType);
+  }
+  return LIVE_PHASES.has(phase);
+}
 
 class ModerationService {
   private readonly publicationLeaseOwner: string;
@@ -1733,6 +1766,24 @@ class ModerationService {
     return this.isLiveSnapshotOpen(mirror);
   }
 
+  /**
+   * Market-aware counterpart of `isLiveOpen`: used anywhere a *specific*
+   * market's live eligibility is being decided, so PRE_MATCH only ever
+   * authorises KICKOFF_TEAM/FIRST_MINUTE_GOAL rather than any live market
+   * type. `isLiveOpen`/`isLiveSnapshotOpen` remain in use for genuinely
+   * whole-event/record-level checks (e.g. "has this event's live window
+   * ended at all") that are not about any one market's type.
+   */
+  private isLiveOpenForMarket(
+    mirror: LiveEventMirrorRecord,
+    marketType: LiveMarketType
+  ): boolean {
+    return (
+      isMarketLiveEligibleForPhase(mirror.phase, marketType)
+      && mirror.bettingStatus === BettingStatus.OPEN
+    );
+  }
+
   private isLiveSnapshotOpen(snapshot: {
     phase: EventPhase;
     bettingStatus: BettingStatus;
@@ -1791,7 +1842,10 @@ class ModerationService {
     );
 
     if (inCurrentMirror) {
-      return { market: inCurrentMirror, live: this.isLiveOpen(mirror) };
+      return {
+        market: inCurrentMirror,
+        live: this.isLiveOpenForMarket(mirror, inCurrentMirror.marketType),
+      };
     }
 
     return historical
@@ -1816,7 +1870,7 @@ class ModerationService {
 
     if (
       mirror.sequence > historical.sequence
-      && !this.isLiveOpen(mirror)
+      && !this.isLiveOpenForMarket(mirror, historical.marketType)
     ) {
       return mirror.occurredAt;
     }
@@ -1825,7 +1879,10 @@ class ModerationService {
   }
 
   private wasHistoricallyLive(entry: MirrorMarketHistoryEntry): boolean {
-    return LIVE_PHASES.has(entry.phase) && entry.bettingStatus === BettingStatus.OPEN;
+    return (
+      isMarketLiveEligibleForPhase(entry.phase, entry.marketType)
+      && entry.bettingStatus === BettingStatus.OPEN
+    );
   }
 
   private wasHistoricallyOpenAndLive(entry: MirrorMarketHistoryEntry): boolean {

@@ -1167,16 +1167,51 @@ sed -i.bak 's#node dist/scripts/SetUserRole.js#node missing/SetUserRole.js#g' \
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
   "activation without compiled role operator" \
-  "is missing compiled disposable administrator operator"
+  "is missing compiled reusable administrator operator"
 
 reset_fixtures
 write_complete_oci_set
-sed -i.bak 's#node dist/scripts/DeleteUser.js#node missing/DeleteUser.js#' \
+sed -i.bak 's#LIVE_ACCEPTANCE_USERNAME: betstan-e2e#LIVE_ACCEPTANCE_USERNAME: live-e2e-${GITHUB_RUN_ID}#' \
   "$tmp_dir/oci-live-betting-activate.yml"
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
-  "activation without compiled deletion operator" \
-  "is missing compiled disposable account deletion operator"
+  "activation without dedicated reusable account" \
+  "is missing dedicated reusable validation account"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/secrets.LIVE_ACCEPTANCE_PASSWORD/d' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation without protected reusable credential" \
+  "is missing protected reusable-account credential"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-live-betting-activate.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+binding = "LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}"
+replacement = "LIVE_ACCEPTANCE_PASSWORD" + ": omitted"
+path.write_text(text.replace(binding, replacement, 1))
+PY
+assert_fail \
+  "activation with incomplete credential scoping" \
+  "must scope the protected reusable-account credential to four exact steps"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/cleanup-live-acceptance-slips-stan.sh/a\
+              node dist/scripts/DeleteUser.js' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation deleting reusable account" \
+  "must retain the reusable validation account"
 
 reset_fixtures
 write_complete_oci_set
