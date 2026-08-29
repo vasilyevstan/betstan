@@ -6,10 +6,12 @@ import {
   EventVisibility,
   IEventResultEvent,
   ILiveEventUpdateEvent,
+  INewEventEvent,
   messengerWrapper,
 } from "@betstan/common";
 import { applyLiveEventUpdate, listPublicEvents } from "../LiveEventReadModel";
 import EventResultListener from "../../messaging/listener/EventResultListener";
+import NewEventListener from "../../messaging/listener/NewEventListener";
 import { Event } from "../../model/Event";
 
 // Regression coverage for independently reported ordering/reconciliation
@@ -308,20 +310,36 @@ it("keeps status RESULTED when the very first accepted live update after a resul
   expect(afterLive?.liveRaceResultedAt ?? null).toBeNull();
 });
 
-it("never auto-restores an intentionally OFFLINE admin/acceptance-gated fixture even when an accepted live update arrives after it is resulted", async () => {
+it("never auto-restores an intentionally OFFLINE admin/acceptance-gated fixture (onboarded via the real NewEventListener path) even when an accepted live update arrives after it is resulted", async () => {
   const eventId = "admin-gated-offline-fixture";
-  // An explicit admin/backoffice visibility decision (`visibilityInitialized:
-  // true`) already governs this event's OFFLINE state -- e.g. a synthetic
-  // production-acceptance fixture -- independent of any result race.
-  await Event.create({
-    eventId,
-    name: "Admin Gated Offline Fixture",
-    time: new Date("2030-01-01T12:00:00.000Z"),
-    status: EventStatus.NO_RESULT,
-    visibility: EventVisibility.OFFLINE,
-    visibilityInitialized: true,
-    products: [],
-  });
+  // An explicit admin/backoffice visibility decision already governs this
+  // event's OFFLINE state -- e.g. a synthetic production-acceptance
+  // fixture onboarded OFFLINE through the real `NewEventListener` path --
+  // independent of any result race. `visibilityInitialized` ends up true
+  // here exactly as it would for an ordinary ONLINE onboarded event, so
+  // the actual OFFLINE *visibility value* is what must gate the marker,
+  // not `visibilityInitialized` alone.
+  const newEventListener = new NewEventListener(messengerWrapper.connection);
+  await newEventListener.init();
+  await newEventListener.onMessage(
+    {
+      sender: "backoffice_new_event",
+      timestamp: new Date().toISOString(),
+      data: {
+        id: eventId,
+        name: "Admin Gated Offline Fixture",
+        time: "2030-01-01T12:00:00.000Z",
+        home: "Team C",
+        away: "Team D",
+        visibility: EventVisibility.OFFLINE,
+      },
+    } as unknown as INewEventEvent,
+    buildMessage()
+  );
+
+  const onboarded = await Event.findOne({ eventId }).lean();
+  expect(onboarded?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(onboarded?.visibilityInitialized).toBe(true);
 
   const listener = new EventResultListener(messengerWrapper.connection);
   await listener.init();
@@ -350,6 +368,37 @@ it("never auto-restores an intentionally OFFLINE admin/acceptance-gated fixture 
 
   const listed = await listPublicEvents(new Date("2030-01-01T12:05:00.000Z"));
   expect(listed.map((entry) => entry.eventId)).not.toContain(eventId);
+});
+
+it("refuses to auto-restore when a currently explicit (pending) visibility decision governs the event, even though it was legitimately marked as a race", async () => {
+  // Defense in depth: `liveRaceResultedAt` was legitimately stamped at
+  // result time (a genuine race, no explicit decision existed then), but
+  // an independent `EventVisibilityListener` decision landed afterward --
+  // and before the live update -- leaving `pendingVisibility` queued. This
+  // proves an admin decision is now actively in flight for this exact
+  // event, so resurrection must defer to it rather than silently
+  // overriding it, even though the race marker is present.
+  const eventId = "race-then-pending-visibility-decision";
+  await Event.create({
+    eventId,
+    name: "Race Then Pending Visibility Decision",
+    time: new Date("2030-01-01T12:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.OFFLINE,
+    liveRaceResultedAt: new Date("2030-01-01T11:00:00.000Z"),
+    pendingVisibility: EventVisibility.OFFLINE,
+    products: [],
+  });
+
+  await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate(eventId, "2030-01-01T12:00:00.000Z", 0)
+  );
+
+  const afterLive = await Event.findOne({ eventId }).lean();
+  expect(afterLive?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(afterLive?.status).toEqual(EventStatus.RESULTED);
+  // The marker itself is left untouched -- resurrection never ran at all.
+  expect(afterLive?.liveRaceResultedAt).toBeTruthy();
 });
 
 it("keeps a retained finished event visible past the kickoff-time history bound until it is actually retired", async () => {

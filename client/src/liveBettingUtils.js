@@ -198,6 +198,46 @@ export const shouldReplaceEvent = (currentEvent, nextEvent) => {
   return true;
 };
 
+/**
+ * Authoritative-source counterpart of `shouldReplaceEvent`, used only for
+ * merging a fresh REST snapshot (a direct, fully-consistent read of the
+ * server's current projection -- see `listPublicEvents`). Server-side
+ * recovery (e.g. reversing a premature RESULTED/OFFLINE state once a race
+ * is reconciled -- see `applyLiveEventUpdate`) can settle non-sequence
+ * metadata (`status`, `visibility`) *after* the SSE broadcast for that same
+ * live sequence has already reached the client (the per-pod SSE broadcaster
+ * and the durable projection writer are independent listeners with no
+ * ordering guarantee between them). `shouldReplaceEvent`'s strict `>` would
+ * then permanently ignore every later authoritative REST read at that same
+ * sequence, leaving the client stuck on the stale snapshot until the live
+ * sequence itself advances. Accepting an *equal* sequence here is safe: an
+ * authoritative REST read can never move sequence backwards, so this can
+ * only ever repair stale metadata at the same point in the timeline, never
+ * regress it.
+ */
+export const shouldReplaceEventFromAuthoritativeSource = (currentEvent, nextEvent) => {
+  if (!currentEvent) {
+    return true;
+  }
+
+  const currentSequence = getLiveSequence(currentEvent);
+  const nextSequence = getLiveSequence(nextEvent);
+
+  if (nextSequence !== null) {
+    if (currentSequence === null) {
+      return true;
+    }
+
+    return nextSequence >= currentSequence;
+  }
+
+  if (currentSequence !== null) {
+    return false;
+  }
+
+  return true;
+};
+
 export const applyLiveSnapshotUpdate = (currentEvents, nextEvent) => {
   const existingEvents = Array.isArray(currentEvents) ? currentEvents : [];
   const eventId = normalizeText(nextEvent?.eventId);
@@ -252,7 +292,9 @@ export const mergeAuthoritativeEventList = (currentEvents, nextEvents) => {
     .filter((event) => normalizeText(event?.eventId))
     .map((event) => {
       const currentEvent = currentById.get(event.eventId);
-      return shouldReplaceEvent(currentEvent, event) ? event : currentEvent;
+      return shouldReplaceEventFromAuthoritativeSource(currentEvent, event)
+        ? event
+        : currentEvent;
     })
     .filter(Boolean);
 

@@ -784,12 +784,21 @@ export const applyLiveEventUpdate = async (
   if (accepted) {
     const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
     const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
+    // Defense in depth: refuse restoration if a currently explicit
+    // visibility decision now governs this event. `pendingVisibility` is
+    // set only by `EventVisibilityListener` (an independent admin/
+    // backoffice action, never by this code path), so its presence here
+    // proves a fresh decision is actively in flight for this exact event
+    // since the race marker was stamped -- resurrection must defer to it
+    // rather than silently overriding it.
+    const hasCurrentVisibilityDecision = currentRecord.pendingVisibility != null;
 
     if (
       currentRecord.visibility === EventVisibility.OFFLINE &&
       currentRecord.status === EventStatus.RESULTED &&
       isRaceResulted &&
-      !wasIntentionallyRetired
+      !wasIntentionallyRetired &&
+      !hasCurrentVisibilityDecision
     ) {
       // Provenance-aware resurrection, gated on the explicit
       // `liveRaceResultedAt` marker `EventResultListener` stamps only for

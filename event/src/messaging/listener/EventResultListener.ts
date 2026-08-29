@@ -34,16 +34,29 @@ class EventResultListener extends AListener<IEventResultEvent> {
     // OFFLINE). Ordinary pre-match results -- events that never went
     // live -- are unaffected and go OFFLINE exactly as before.
     if (!storedEvent.live) {
+      // Capture provenance from the *actual pre-result* state, before this
+      // exact update forces visibility OFFLINE below. `visibilityInitialized`
+      // alone is the wrong signal: an ordinary event onboarded through
+      // `NewEventListener` already has `visibilityInitialized: true`
+      // regardless of its chosen visibility (so gating on it would wrongly
+      // exclude a perfectly ordinary ONLINE event from ever being marked as
+      // a race), while `EventVisibilityListener` can leave an explicit
+      // *pending* decision in place with `visibilityInitialized` still
+      // false (so gating on it alone would wrongly let an intentionally
+      // OFFLINE fixture be misclassified as a race). What actually
+      // distinguishes "no explicit visibility decision at all" is: the
+      // event's own current visibility was not already OFFLINE (i.e. this
+      // update is a genuine ONLINE-to-OFFLINE transition, not a redundant
+      // no-op over an already-decided OFFLINE state), and no pending
+      // decision (`pendingVisibility`, set only by `EventVisibilityListener`)
+      // is queued, regardless of whether it targets ONLINE or OFFLINE.
+      const hasExplicitVisibilityDecision =
+        storedEvent.visibility === EventVisibility.OFFLINE
+        || storedEvent.pendingVisibility != null;
+
       storedEvent.visibility = EventVisibility.OFFLINE;
 
-      // Only stamp the race-provenance marker when no explicit admin/
-      // backoffice visibility decision already governs this event
-      // (`visibilityInitialized` unset/false). An intentionally OFFLINE
-      // admin/acceptance-gated fixture must never be auto-restored later
-      // by `applyLiveEventUpdate`'s resurrection branch, so it must never
-      // receive this marker even though it is forced OFFLINE here exactly
-      // like the genuine race case.
-      if (storedEvent.visibilityInitialized !== true) {
+      if (!hasExplicitVisibilityDecision) {
         storedEvent.liveRaceResultedAt = new Date(
           event.timestamp ?? Date.now()
         );
