@@ -883,6 +883,14 @@ import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
+node_setup = text.split(
+    "- name: Install browser acceptance dependencies", 1
+)[1].split("- name: Install locked client and Chromium", 1)[0]
+if re.search(r"^\s+cache(?:-dependency-path)?:", node_setup, re.MULTILINE):
+    raise SystemExit(
+        "live activation cannot cache npm before deleting its isolated HOME"
+    )
+
 cleanup = text.split(
     "- name: Revoke, clean, and delete disposable validation account", 1
 )[1]

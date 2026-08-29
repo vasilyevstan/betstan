@@ -440,6 +440,13 @@ conversation summaries are not authority.
   requested, inspect the exact jobs and `pending_deployments`; route a
   documented preauthorized approval in the same turn or identify the human
   approval owner.
+- `actions/setup-node` saves its npm cache in a post-job action. If an
+  activation workflow deletes its isolated `HOME` first, every functional,
+  cleanup, evidence, and permanent-activation step can pass while the later
+  cache save changes the run conclusion to failure because the cache path no
+  longer exists. Production control workflows that must delete isolated
+  client state should not enable the setup-node npm cache; the ephemeral
+  runner is the cache boundary.
 - Fixed repository fixture directories are not safe when contract suites run
   concurrently. Use unique temporary directories and ensure output filtering
   cannot mask a non-zero test exit.
