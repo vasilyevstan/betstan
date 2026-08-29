@@ -862,8 +862,23 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
 cleanup = text.split(
-    "- name: Revoke and delete disposable validation account", 1
+    "- name: Revoke, clean, and delete disposable validation account", 1
 )[1]
+
+slip_cleanup = cleanup.index(
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh"
+)
+account_delete = cleanup.index("node dist/scripts/DeleteUser.js")
+if slip_cleanup >= account_delete:
+    raise SystemExit("active Slip cleanup must precede Auth account deletion")
+for literal in (
+    'EXPECTED_AUTH_USER_COUNT=1',
+    'ALLOWED_BET_KINDS=LIVE,PRE_MATCH',
+    'MAX_ACTIVE_SLIPS=2',
+    'if [ "$slip_cleanup_succeeded" = "1" ]; then',
+):
+    if literal not in cleanup:
+        raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
     ('"$BASE_URL/api/backoffice/result"', "401"),
@@ -1260,6 +1275,7 @@ expected_syntax_targets = [
   "infra/azure/agents/test-production-rollback-stan.sh",
   "infra/oci/agents/deploy-validation-loop-stan.sh",
   "infra/oci/agents/live-betting-readiness-stan.sh",
+  "infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
   "infra/oci/scripts/deploy.sh",
   "infra/oci/scripts/live-data-maintenance-stan.sh",
   "infra/oci/scripts/live-betting-control-stan.sh",
@@ -1268,6 +1284,7 @@ expected_syntax_targets = [
   "infra/oci/scripts/shared-mongo-operation-lock-stan.sh",
   "infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
   "infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh",
   "infra/oci/tests/test-live-data-maintenance-stan.sh",
   "infra/oci/tests/test-live-betting-control-stan.sh",
   "infra/oci/tests/test-revalidate-live-activation-stan.sh",
@@ -1284,6 +1301,7 @@ expected_exec_targets = [
   "./infra/azure/agents/test-live-betting-rollback-readiness-stan.sh",
   "./infra/azure/agents/test-production-rollback-stan.sh",
   "./infra/oci/tests/test-deploy-validation-loop-stan.sh",
+  "./infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh",
   "./infra/oci/tests/test-live-data-maintenance-stan.sh",
   "./infra/oci/tests/test-live-betting-control-stan.sh",
   "./infra/oci/tests/test-revalidate-live-activation-stan.sh",

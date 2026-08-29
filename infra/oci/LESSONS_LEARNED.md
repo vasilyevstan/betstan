@@ -177,6 +177,18 @@ conversation summaries are not authority.
   unknown credentials return `400`, while a deleted account's previously
   authenticated administrator session returns `401`. Cleanup assertions must
   not silently redefine either status.
+- Disposable-account cleanup must remove that exact user's active Slip
+  documents before deleting the Auth identity. Bind direct cleanup to the
+  failed activation run, exact synthetic user ID, run-derived fixture names,
+  and a small draft-only kind/count allowlist; otherwise an acceptance failure
+  can leave an ownerless live draft that correctly blocks later dark
+  readiness. Refuse to delete a submitted Slip while moderation may still be
+  processing it.
+- A failed-deploy resume does not require invented recovery authority when the
+  applied data chain and protected rollback baseline both record recovery run
+  `0`. Validate that ordinary baseline's own deploy provenance, exact checksum,
+  capture run, and zero-recovery lineage instead, while retaining the
+  infrastructure-only descendant rule.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.
