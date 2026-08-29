@@ -47,13 +47,15 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(articles.nth(1)).toHaveAttribute('aria-label', state.fixtures.preMatchEventName);
   await expect(liveArticle.getByLabel('Score Raptors 1, Sharks 0')).toBeVisible();
   await expect(liveArticle.getByText("11' Sharks yellow card")).toBeVisible();
-  await expect(liveArticle.getByText('Top 5 of 5')).toBeVisible();
-  await expect(liveArticle.locator('.event-market-card')).toHaveCount(5);
+  await expect(liveArticle.getByText('7 markets')).toBeVisible();
+  await expect(liveArticle.locator('.event-market-card')).toHaveCount(7);
   await expect(liveArticle.getByText('Next Corner', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Yellow Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Red Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Penalty', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Half Time Result', { exact: true })).toBeVisible();
+  await expect(liveArticle.getByText('Kickoff Team', { exact: true })).toBeVisible();
+  await expect(liveArticle.getByText('Goal in First Minute', { exact: true })).toBeVisible();
   await expect(preMatchArticle.getByRole('button', { name: state.fixtures.preMatchSelectionLabel })).toBeVisible();
   await expect(liveArticle.locator('..')).not.toHaveClass(/col-xl-4/);
   await expect(preMatchArticle.locator('..')).toHaveClass(/col-xl-4/);
@@ -62,9 +64,13 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   const marketColumns = await liveArticle.locator('.event-market-grid').evaluate((element) => (
     getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
   ));
+  const marketRows = await liveArticle.locator('.event-market-grid').evaluate((element) => (
+    new Set(Array.from(element.children).map((card) => card.offsetTop)).size
+  ));
   expect(liveBounds.width).toBeGreaterThan(preMatchBounds.width * 2.5);
   expect(liveBounds.height).toBeLessThan(800);
-  expect(marketColumns).toBeGreaterThanOrEqual(4);
+  expect(marketColumns).toBe(7);
+  expect(marketRows).toBe(1);
 
   await page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel }).click();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');

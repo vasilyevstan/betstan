@@ -128,6 +128,7 @@ describe('EventList', () => {
     expect(articles[0].parentElement).not.toHaveClass('col-xl-4');
     expect(articles[1].parentElement).toHaveClass('col-xl-4');
     expect(articles[0].querySelector('.event-market-grid')).toHaveClass('event-market-grid--compact');
+    expect(articles[0].querySelectorAll('.event-market-card')).toHaveLength(6);
 
     expect(screen.getByRole('heading', { name: 'Live now' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Pre-match' })).toBeInTheDocument();
@@ -147,7 +148,8 @@ describe('EventList', () => {
     expect(staleSelection).toBeDisabled();
     expect(missingExpirySelection).toBeDisabled();
     expect(screen.getByText('Quote v5')).toBeInTheDocument();
-    expect(screen.queryByText('Quote v6')).toBeNull();
+    expect(screen.getByText('Quote v6')).toBeInTheDocument();
+    expect(screen.getByText('6 markets')).toBeInTheDocument();
 
     fireEvent.click(liveSelection);
 

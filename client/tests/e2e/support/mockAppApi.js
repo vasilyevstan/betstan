@@ -9,6 +9,8 @@ const MARKET_LABELS = Object.freeze({
   NEXT_CORNER: 'Next Corner',
   NEXT_PENALTY: 'Next Penalty',
   HALF_TIME_RESULT: 'Half Time Result',
+  KICKOFF_TEAM: 'Kickoff Team',
+  FIRST_MINUTE_GOAL: 'Goal in First Minute',
 });
 
 const deepClone = (value) => JSON.parse(JSON.stringify(value));
@@ -86,6 +88,30 @@ const buildLiveMarkets = ({ cornerHomeOdds, cornerAwayOdds, cornerQuoteVersion }
       { selectionId: 'home', side: 'HOME', odds: 2.2 },
       { selectionId: 'draw', side: 'DRAW', odds: 1.9 },
       { selectionId: 'away', side: 'AWAY', odds: 2.8 },
+    ],
+  },
+  {
+    marketId: 'market-kickoff-team',
+    marketType: 'KICKOFF_TEAM',
+    marketVersion: 1,
+    quoteVersion: cornerQuoteVersion + 5,
+    status: 'SETTLED',
+    quoteValidUntil: '2030-01-01T12:00:00.000Z',
+    selections: [
+      { selectionId: 'home', side: 'HOME', odds: 1.85 },
+      { selectionId: 'away', side: 'AWAY', odds: 2.05 },
+    ],
+  },
+  {
+    marketId: 'market-first-minute-goal',
+    marketType: 'FIRST_MINUTE_GOAL',
+    marketVersion: 1,
+    quoteVersion: cornerQuoteVersion + 6,
+    status: 'SETTLED',
+    quoteValidUntil: '2030-01-01T12:01:00.000Z',
+    selections: [
+      { selectionId: 'yes', side: 'YES', odds: 6.5 },
+      { selectionId: 'no', side: 'NO', odds: 1.1 },
     ],
   },
 ]);

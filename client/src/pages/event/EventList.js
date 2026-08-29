@@ -165,7 +165,7 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
     .filter(Boolean)
     .slice(-5)
     .reverse();
-  const liveMarkets = (event.live?.currentMarkets ?? []).slice(0, 5);
+  const liveMarkets = event.live?.currentMarkets ?? [];
   const progressValue = getMatchProgressValue(event.live);
 
   return <article className="card event-card event-card--live event-card--active-live h-100" aria-label={event.name}>
@@ -219,7 +219,7 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
       <div className="event-card__section">
         <div className="d-flex justify-content-between align-items-center gap-2 mb-2">
           <div className="event-card__section-title">Current markets</div>
-          <small className="text-secondary">Top {liveMarkets.length || 0} of 5</small>
+          <small className="text-secondary">{liveMarkets.length} markets</small>
         </div>
         {liveMarkets.length === 0 ? (
           <div className="event-card__empty text-secondary">Waiting for the next live quote…</div>
