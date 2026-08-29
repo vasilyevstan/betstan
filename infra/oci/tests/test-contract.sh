@@ -28,6 +28,16 @@ node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
 node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
 node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
+grep -Fq "'betstan-e2e'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not reuse the dedicated E2E account"
+grep -Fq "'test1234'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not use the stable non-secret E2E password"
+grep -Fq "page.request.post('/api/auth/login'" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not resolve the reusable account by login"
+! grep -Eq 'Date\.now\(\)|Math\.random\(\)' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check still creates per-run user identities"
 grep -Fq "getByRole('link', { name: 'BetStan', exact: true })" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not use the accessible BetStan brand"
@@ -917,13 +927,12 @@ done
   fail "live activation must grant and revoke through the compiled auth role command"
 grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow" ||
   fail "live activation account cleanup does not run after acceptance failure"
-[[ "$(grep -Fc 'node dist/scripts/DeleteUser.js' "$activation_workflow")" == "1" ]] ||
-  fail "live activation must explicitly delete its disposable account"
-grep -Fq '"USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME"' "$activation_workflow" ||
-  fail "live activation account deletion is not bound to the exact synthetic identity"
-grep -Fq '"USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME"' \
-  "$activation_workflow" ||
-  fail "live activation account deletion lacks exact confirmation"
+grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e' "$activation_workflow" ||
+  fail "live activation does not reuse the dedicated E2E account"
+grep -Fq 'LIVE_ACCEPTANCE_PASSWORD: test1234' "$activation_workflow" ||
+  fail "live activation does not use the stable non-secret E2E password"
+! grep -Fq 'node dist/scripts/DeleteUser.js' "$activation_workflow" ||
+  fail "live activation still deletes the reusable E2E account"
 if ! python3 - "$activation_workflow" <<'PY'
 import re
 import sys
@@ -938,28 +947,42 @@ if re.search(r"^\s+cache(?:-dependency-path)?:", node_setup, re.MULTILINE):
         "live activation cannot cache npm before deleting its isolated HOME"
     )
 
-cleanup = text.split(
-    "- name: Revoke, clean, and delete disposable validation account", 1
-)[1]
+account = text.split(
+    "- name: Resolve reusable validation account", 1
+)[1].split("- name: Grant and verify reusable administrator role", 1)[0]
+if account.index('"$BASE_URL/api/auth/login"') > account.index(
+    '"$BASE_URL/api/auth/new"'
+):
+    raise SystemExit("live activation does not attempt reusable login first")
+if "openssl rand" in account:
+    raise SystemExit("live activation still generates a per-run password")
+for literal in (
+    'username="$LIVE_ACCEPTANCE_USERNAME"',
+    'password="$LIVE_ACCEPTANCE_PASSWORD"',
+    '[ "$status" = "200" ]',
+    '[ "$status" = "201" ]',
+):
+    if literal not in account:
+        raise SystemExit(
+            f"live activation account resolution is missing: {literal}"
+        )
 
-slip_cleanup = cleanup.index(
-    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh"
-)
-account_delete = cleanup.index("node dist/scripts/DeleteUser.js")
-if slip_cleanup >= account_delete:
-    raise SystemExit("active Slip cleanup must precede Auth account deletion")
+cleanup = text.split(
+    "- name: Revoke and clean reusable validation account", 1
+)[1]
 for literal in (
     'EXPECTED_AUTH_USER_COUNT=1',
     'ALLOWED_BET_KINDS=LIVE,PRE_MATCH',
     'MAX_ACTIVE_SLIPS=2',
-    'if [ "$slip_cleanup_succeeded" = "1" ]; then',
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+    '.id == $user_id and .email == $username and .role == "USER"',
 ):
     if literal not in cleanup:
         raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
     ('"$BASE_URL/api/backoffice/result"', "401"),
-    ('"$BASE_URL/api/auth/login"', "400"),
+    ('"$BASE_URL/api/auth/login"', "200"),
 ):
     tail = cleanup.split(endpoint, 1)[1]
     match = re.search(
@@ -972,7 +995,7 @@ for endpoint, expected_status in (
         )
 PY
 then
-  fail "live activation account cleanup status checks are not endpoint-bound"
+  fail "live activation reusable-account lifecycle contract failed"
 fi
 ! grep -Fq 'npm run role:set' "$activation_workflow" ||
   fail "live activation still invokes a development-only auth role command"
