@@ -189,6 +189,12 @@ conversation summaries are not authority.
   `0`. Validate that ordinary baseline's own deploy provenance, exact checksum,
   capture run, and zero-recovery lineage instead, while retaining the
   infrastructure-only descendant rule.
+- A failed deployment's maintenance hold intentionally leaves data-writing
+  Deployments at zero replicas. Resume must verify every retained Deployment
+  image template, the active ingress fence, the quiesced writer set, and only
+  the non-writing support pods; it must not require writer pods or enter
+  maintenance again. On failure, preserve and reverify that inherited hold
+  rather than restoring from a state file owned by the earlier run.
 - Activate with a bounded `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`, not an
   unbounded boolean. Gamemaster must stop only new kickoffs when that lease is
   malformed or expired and continue persisted active simulations.
