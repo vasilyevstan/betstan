@@ -166,6 +166,13 @@ conversation summaries are not authority.
   terminate SSE requests through that event. Exclude only the exact SSE route
   from the generic API-failure list and prove it independently through ordered
   snapshots, phases, incidents, final scores, and heartbeat readiness.
+- Live acceptance must not mistake a moving quote for lost slip persistence.
+  Start synthetic concurrent fixtures together, assert every odds response,
+  retry only exact stale-quote/version races after the rendered quote advances,
+  and confirm each event-scoped market row through the boards API. Exercise all
+  products on the draft, then submit a fresh quote rather than an intentionally
+  stale ten-row accumulator; never weaken server-side quote validation to make
+  acceptance pass.
 - Post-deletion login checks must preserve the public authentication contract:
   unknown credentials return `400`, while a deleted account's previously
   authenticated administrator session returns `401`. Cleanup assertions must
