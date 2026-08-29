@@ -56,7 +56,14 @@ for selection_contract in \
     "'Market version mismatch'" \
     'const response = await responsePromise;' \
     'if (response.ok()) {' \
-    'row.eventId === fixture.eventId && row.marketId === marketId' \
+    'row.marketVersion === acceptedQuote.marketVersion' \
+    'row.quoteVersion === acceptedQuote.quoteVersion' \
+    'row.selectionId === acceptedQuote.selectionId' \
+    'const MAX_LIVE_PLACEMENT_ATTEMPTS = 5;' \
+    "expect(submittedLiveBet.declineReason).toBe('STALE_QUOTE');" \
+    "submittedLiveBet.rows.some((row) => row.declineReason === 'STALE_QUOTE')," \
+    'declinedLiveSlipIds.push(liveSlipId);' \
+    ').toBe(`DRAFT:${liveSlipId}`);' \
     'expect(selectedBoards.LIVE.rows).toHaveLength(LIVE_MARKETS.length * 2);' \
     'await liveBoard.getByRole('\''button'\'', { name: '\''CLEAN'\'' }).click();' \
     'expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);'; do
