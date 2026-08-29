@@ -113,6 +113,15 @@ for conductor_contract in \
     'blocking watcher such as `gh run watch` as notification transport' \
     'Its continued execution is not a progress signal' \
     'A user request for status or a suspicion that work is stuck is an immediate' \
+    'Never become passive after launch' \
+    'maximum wall-clock checkpoint' \
+    'Reconstruct observation from the registry after interruption' \
+    'A terminal unit without a confirmed downstream handoff is a stall' \
+    'must never answer a detected stall with observation alone' \
+    'Do not extend a checkpoint without new underlying progress evidence' \
+    'At the second missed checkpoint, escalate the same registered unit' \
+    '`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue' \
+    '`ORCHESTRATION_COMPLETE` requires terminal evidence and accepted handoff' \
     'completed deploy job' \
     'waiting public-validation job is an approval-bound gate' \
     "defer that handoff behind the watcher's timeout" \
@@ -150,6 +159,21 @@ grep -Fq 'A still-running `gh run watch` is notification transport, not evidence
 grep -Fq 'A user asking for status or whether work is stuck triggers that checkpoint immediately' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow does not force an immediate checkpoint on status requests"
+grep -Fq 'remains proactive from before a registered job starts through its terminal evidence and accepted downstream handoff' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not retain start-to-terminal conductor ownership"
+grep -Fq 'Every event trigger is paired with a maximum wall-clock checkpoint' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow permits an event-only indefinite wait"
+grep -Fq 'completed unit with no confirmed next-owner handoff is itself a stall' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can stall between completion and handoff"
+grep -Fq 'At the second missed checkpoint it escalates the same unit' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can replace or indefinitely defer stalled work"
+grep -Fq 'orchestration completes only when every registered unit has terminal evidence and an accepted handoff' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow permits premature orchestration completion"
 grep -Fq 'terminal job followed by a downstream `waiting` job with no executing step' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can miss a downstream protected-environment gate"

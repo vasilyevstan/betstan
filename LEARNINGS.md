@@ -188,6 +188,13 @@ cd resulting && npm ci && npm run test:ci
 - Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
 - Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
+- The conductor owns every registered unit from before launch through terminal
+  evidence and accepted handoff. Pair event notifications with a maximum
+  wall-clock checkpoint, reconstruct lost observation from exact references,
+  and treat an unstarted downstream handoff as a stall.
+- A stalled watcher is not a stalled job, and a running watcher is not job
+  progress. Recover read-side observation directly; route mutations to one
+  exact owner with a deadline and keep the same unit open until evidence moves.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.

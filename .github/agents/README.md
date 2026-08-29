@@ -38,6 +38,22 @@ evidence of progress, and may not outlive the registered checkpoint without an
 independent jobs and `pending_deployments` inspection. A user asking for status
 or whether work is stuck triggers that checkpoint immediately.
 
+The conductor remains proactive from before a registered job starts through
+its terminal evidence and accepted downstream handoff. Every event trigger is
+paired with a maximum wall-clock checkpoint. On notification, restart, status
+request, or checkpoint it reconciles the complete active registry, reconstructs
+lost observation from exact underlying references, and assigns the next
+bounded check. A completed unit with no confirmed next-owner handoff is itself
+a stall; a still-running watcher never closes conductor ownership.
+
+At the first missed checkpoint the conductor restores read-side monitoring,
+classifies the underlying job, and routes any mutation to one exact owner with
+a deadline. At the second missed checkpoint it escalates the same unit instead
+of resetting the timer, waiting longer, or launching a duplicate. A healthy
+status is forbidden while a checkpoint, acknowledgement, actionable gate, or
+handoff is overdue; orchestration completes only when every registered unit
+has terminal evidence and an accepted handoff.
+
 Recent tool/log/job progress means active work; an environment approval wait is
 external progress, not a hang, but it is an immediate actionable gate. A
 terminal job followed by a downstream `waiting` job with no executing step must
@@ -154,7 +170,8 @@ orchestration:
 Required invariants:
 
 - Every parallel/background unit is registered with one owner, a checkpoint,
-  and a stop condition.
+  a maximum checkpoint interval, a recovery action, a stop condition, and
+  required terminal evidence.
 - No replacement unit starts while the original can still produce side effects.
 - `out_of_ownership_touched` is empty.
 - A critic receives a non-null immutable `head_sha`.
