@@ -154,13 +154,17 @@ it("does not stamp the race-provenance marker for an event explicitly onboarded 
   expect(updatedEvent!.liveRaceResultedAt ?? null).toBeNull();
 });
 
-it("does not stamp the race-provenance marker while an explicit pending visibility decision is queued through the real EventVisibilityListener path, even though visibilityInitialized is still false", async () => {
-  // The other admin/acceptance-gating case: a visibility decision has
-  // already arrived for a brand-new event via `EventVisibilityListener`
-  // alone (no metadata yet), leaving `pendingVisibility` set and
-  // `visibilityInitialized` still false because finalization requires
-  // metadata that has not arrived yet. Gating the marker on
-  // `visibilityInitialized` alone would misclassify this as a race.
+it("stamps the race-provenance marker for the normal fail-dark ONLINE onboarding ordering, even though a pending visibility decision is queued and visibilityInitialized is still false", async () => {
+  // The normal "fail-dark" onboarding ordering: an admin's real (visible)
+  // intent has already arrived for a brand-new event via
+  // `EventVisibilityListener` alone (no metadata yet), leaving
+  // `pendingVisibility: ONLINE` queued and `visibilityInitialized` still
+  // false/current visibility still the transient OFFLINE safety
+  // placeholder, because finalization requires metadata that has not
+  // arrived yet. A pending decision of ONLINE is not a deliberate intent
+  // to hide this event -- it must not block the race-before-live
+  // recovery this event will still need once `NewEventListener`'s
+  // metadata (and eventually a live update) arrive.
   const eventId = new mongoose.Types.ObjectId().toHexString();
   const visibilityListener = new EventVisibilityListener(
     messengerWrapper.connection
@@ -177,6 +181,40 @@ it("does not stamp the race-provenance marker while an explicit pending visibili
   expect(pending!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(pending!.get("visibilityInitialized")).toBe(false);
   expect(pending!.get("pendingVisibility")).toEqual(EventVisibility.ONLINE);
+
+  const resultListener = new EventResultListener(messengerWrapper.connection);
+  await resultListener.init();
+  await resultListener.onMessage(buildResultEvent(eventId), buildMessage());
+
+  const updatedEvent = await Event.findOne({ eventId });
+  expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(updatedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(updatedEvent!.liveRaceResultedAt).toBeTruthy();
+});
+
+it("does not stamp the race-provenance marker when a pending OFFLINE visibility decision is queued through the real EventVisibilityListener path", async () => {
+  // The genuinely admin/acceptance-gating case: the admin's real intent,
+  // as queued via `EventVisibilityListener`, is to keep this event
+  // hidden. This must never be marked as a race, even though
+  // `visibilityInitialized` is still false exactly like the ONLINE case
+  // above -- the pending *value* itself, not its mere presence, is what
+  // distinguishes deliberate hiding from fail-dark ONLINE onboarding.
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const visibilityListener = new EventVisibilityListener(
+    messengerWrapper.connection
+  );
+  await visibilityListener.init();
+
+  const visibilityEvent: IEventVibibilityEvent = {
+    timestamp: new Date().toISOString(),
+    data: { eventId, visibility: EventVisibility.OFFLINE },
+  };
+  await visibilityListener.onMessage(visibilityEvent, buildMessage());
+
+  const pending = await Event.findOne({ eventId });
+  expect(pending!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(pending!.get("visibilityInitialized")).toBe(false);
+  expect(pending!.get("pendingVisibility")).toEqual(EventVisibility.OFFLINE);
 
   const resultListener = new EventResultListener(messengerWrapper.connection);
   await resultListener.init();

@@ -35,28 +35,38 @@ class EventResultListener extends AListener<IEventResultEvent> {
     // live -- are unaffected and go OFFLINE exactly as before.
     if (!storedEvent.live) {
       // Capture provenance from the *actual pre-result* state, before this
-      // exact update forces visibility OFFLINE below. `visibilityInitialized`
-      // alone is the wrong signal: an ordinary event onboarded through
-      // `NewEventListener` already has `visibilityInitialized: true`
-      // regardless of its chosen visibility (so gating on it would wrongly
-      // exclude a perfectly ordinary ONLINE event from ever being marked as
-      // a race), while `EventVisibilityListener` can leave an explicit
-      // *pending* decision in place with `visibilityInitialized` still
-      // false (so gating on it alone would wrongly let an intentionally
-      // OFFLINE fixture be misclassified as a race). What actually
-      // distinguishes "no explicit visibility decision at all" is: the
-      // event's own current visibility was not already OFFLINE (i.e. this
-      // update is a genuine ONLINE-to-OFFLINE transition, not a redundant
-      // no-op over an already-decided OFFLINE state), and no pending
-      // decision (`pendingVisibility`, set only by `EventVisibilityListener`)
-      // is queued, regardless of whether it targets ONLINE or OFFLINE.
-      const hasExplicitVisibilityDecision =
-        storedEvent.visibility === EventVisibility.OFFLINE
-        || storedEvent.pendingVisibility != null;
+      // exact update forces visibility OFFLINE below. Neither
+      // `visibilityInitialized` nor "any pending decision" is the right
+      // signal:
+      //  - `NewEventListener` sets `visibilityInitialized: true` for every
+      //    event it onboards regardless of chosen visibility, so gating on
+      //    it alone would wrongly exclude an ordinary ONLINE event.
+      //  - A pending decision of ONLINE (`pendingVisibility:
+      //    EventVisibility.ONLINE`) is the normal "fail-dark" onboarding
+      //    path -- `EventVisibilityListener` may have recorded the admin's
+      //    real (visible) intent before `NewEventListener`'s metadata ever
+      //    arrives, defaulting the event OFFLINE only as a transient,
+      //    unfinalized safety placeholder. Treating a pending ONLINE
+      //    decision the same as a deliberate OFFLINE one would permanently
+      //    block the race-before-live recovery this event still needs once
+      //    it does go live -- `NewEventListener` alone would only fix
+      //    `visibility`, never `status`.
+      // What actually indicates a *deliberate intent to keep this OFFLINE*
+      // is: a pending decision that is itself OFFLINE, or -- with no
+      // pending decision in flight -- an already-finalized
+      // (`visibilityInitialized: true`) current visibility of OFFLINE.
+      const pendingVisibility = storedEvent.pendingVisibility;
+      const hasExplicitOfflineIntent =
+        pendingVisibility === EventVisibility.OFFLINE
+        || (
+          pendingVisibility == null
+          && storedEvent.visibilityInitialized === true
+          && storedEvent.visibility === EventVisibility.OFFLINE
+        );
 
       storedEvent.visibility = EventVisibility.OFFLINE;
 
-      if (!hasExplicitVisibilityDecision) {
+      if (!hasExplicitOfflineIntent) {
         storedEvent.liveRaceResultedAt = new Date(
           event.timestamp ?? Date.now()
         );

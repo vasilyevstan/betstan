@@ -199,6 +199,18 @@ export const shouldReplaceEvent = (currentEvent, nextEvent) => {
 };
 
 /**
+ * True for the exact premature race signature `applyLiveEventUpdate`'s
+ * result-before-live recovery repairs server-side: RESULTED status paired
+ * with OFFLINE visibility. Used only to keep an equal-sequence
+ * authoritative replacement one-directional (see
+ * `shouldReplaceEventFromAuthoritativeSource`), never to gate anything
+ * else.
+ */
+const isPrematureRaceState = (event) => (
+  event?.status === 'RESULTED' && event?.visibility === 'OFFLINE'
+);
+
+/**
  * Authoritative-source counterpart of `shouldReplaceEvent`, used only for
  * merging a fresh REST snapshot (a direct, fully-consistent read of the
  * server's current projection -- see `listPublicEvents`). Server-side
@@ -210,10 +222,17 @@ export const shouldReplaceEvent = (currentEvent, nextEvent) => {
  * ordering guarantee between them). `shouldReplaceEvent`'s strict `>` would
  * then permanently ignore every later authoritative REST read at that same
  * sequence, leaving the client stuck on the stale snapshot until the live
- * sequence itself advances. Accepting an *equal* sequence here is safe: an
- * authoritative REST read can never move sequence backwards, so this can
- * only ever repair stale metadata at the same point in the timeline, never
- * regress it.
+ * sequence itself advances. Accepting an *equal* sequence here is safe for
+ * a strictly newer sequence, and for an equal one only as a one-directional
+ * repair: two concurrent REST requests can resolve out of issue order (a
+ * slower, earlier-issued request reflecting an older, pre-recovery read can
+ * arrive *after* a faster one -- or after SSE -- already settled a healthy
+ * state at the same sequence), so an equal-sequence read is only accepted
+ * when it does not regress a healthy cached snapshot back into the
+ * premature RESULTED/OFFLINE race signature. The legitimate FULL_TIME
+ * terminal state (e.g. a retained finished event, including an
+ * acceptance-scoped OFFLINE view of an already-retired one) is always
+ * authoritative regardless of direction.
  */
 export const shouldReplaceEventFromAuthoritativeSource = (currentEvent, nextEvent) => {
   if (!currentEvent) {
@@ -228,7 +247,15 @@ export const shouldReplaceEventFromAuthoritativeSource = (currentEvent, nextEven
       return true;
     }
 
-    return nextSequence >= currentSequence;
+    if (nextSequence !== currentSequence) {
+      return nextSequence > currentSequence;
+    }
+
+    if (isFinishedLiveEvent(nextEvent)) {
+      return true;
+    }
+
+    return !(isPrematureRaceState(nextEvent) && !isPrematureRaceState(currentEvent));
   }
 
   if (currentSequence !== null) {

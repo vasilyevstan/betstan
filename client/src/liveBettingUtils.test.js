@@ -10,6 +10,7 @@ import {
   isInCountdownWindow,
   isLiveMarketSelectable,
   LIVE_MARKET_STATUS,
+  shouldReplaceEventFromAuthoritativeSource,
 } from './liveBettingUtils';
 
 const KICKOFF_ISO = '2030-06-01T15:00:00.000Z';
@@ -238,5 +239,75 @@ describe('formatCountdownDuration', () => {
     expect(formatCountdownDuration(-5_000)).toBe('00:00');
     expect(formatCountdownDuration(undefined)).toBe('00:00');
     expect(formatCountdownDuration(Number.NaN)).toBe('00:00');
+  });
+});
+
+describe('shouldReplaceEventFromAuthoritativeSource', () => {
+  const buildEvent = (overrides = {}) => ({
+    eventId: 'event-1',
+    visibility: 'ONLINE',
+    status: 'NO_RESULT',
+    live: { sequence: 3, phase: 'FIRST_HALF' },
+    ...overrides,
+  });
+
+  it('always accepts a strictly newer sequence, and rejects a strictly older one', () => {
+    const current = buildEvent({ live: { sequence: 3, phase: 'FIRST_HALF' } });
+    expect(shouldReplaceEventFromAuthoritativeSource(
+      current,
+      buildEvent({ live: { sequence: 4, phase: 'FIRST_HALF' } }),
+    )).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(
+      current,
+      buildEvent({ live: { sequence: 2, phase: 'FIRST_HALF' } }),
+    )).toBe(false);
+  });
+
+  it('accepts an equal-sequence repair from the premature RESULTED/OFFLINE race signature to a healthy state', () => {
+    const stale = buildEvent({ visibility: 'OFFLINE', status: 'RESULTED' });
+    const settled = buildEvent({ visibility: 'ONLINE', status: 'NO_RESULT' });
+    expect(shouldReplaceEventFromAuthoritativeSource(stale, settled)).toBe(true);
+  });
+
+  it('rejects an equal-sequence regression from a healthy state back into the premature RESULTED/OFFLINE race signature', () => {
+    // A slower, earlier-issued REST response reflecting an older,
+    // pre-recovery read must never overwrite an already-settled healthy
+    // cached snapshot just because it resolves later.
+    const settled = buildEvent({ visibility: 'ONLINE', status: 'NO_RESULT' });
+    const stale = buildEvent({ visibility: 'OFFLINE', status: 'RESULTED' });
+    expect(shouldReplaceEventFromAuthoritativeSource(settled, stale)).toBe(false);
+  });
+
+  it('always accepts an equal-sequence read reflecting the legitimate FULL_TIME terminal state, regardless of direction', () => {
+    const online = buildEvent({
+      visibility: 'ONLINE',
+      status: 'NO_RESULT',
+      live: { sequence: 5, phase: 'FULL_TIME' },
+    });
+    const retired = buildEvent({
+      visibility: 'OFFLINE',
+      status: 'RESULTED',
+      live: { sequence: 5, phase: 'FULL_TIME' },
+    });
+    // e.g. an acceptance-scoped view of an already-retired retained event.
+    expect(shouldReplaceEventFromAuthoritativeSource(online, retired)).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(retired, online)).toBe(true);
+  });
+
+  it('accepts an equal-sequence read that does not change the race-state direction (no-op refresh)', () => {
+    const stale = buildEvent({ visibility: 'OFFLINE', status: 'RESULTED' });
+    const alsoStale = buildEvent({ visibility: 'OFFLINE', status: 'RESULTED', home: 'Renamed' });
+    const healthy = buildEvent({ visibility: 'ONLINE', status: 'NO_RESULT' });
+    const alsoHealthy = buildEvent({ visibility: 'ONLINE', status: 'NO_RESULT', home: 'Renamed' });
+    expect(shouldReplaceEventFromAuthoritativeSource(stale, alsoStale)).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(healthy, alsoHealthy)).toBe(true);
+  });
+
+  it('is backward compatible with the existing null/undefined-current and null-sequence edge cases', () => {
+    const next = buildEvent();
+    expect(shouldReplaceEventFromAuthoritativeSource(null, next)).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(undefined, next)).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(buildEvent({ live: undefined }), next)).toBe(true);
+    expect(shouldReplaceEventFromAuthoritativeSource(next, buildEvent({ live: undefined }))).toBe(false);
   });
 });
