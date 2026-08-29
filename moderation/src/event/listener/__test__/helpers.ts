@@ -8,10 +8,12 @@ import {
   ILiveEventUpdateEvent,
   IPlaceBetEvent,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
+import {
+  LiveMarketType,
+  TeamSide,
+} from "../../../compat/LiveContract";
 import BetModerationResultPublisher from "../../publisher/BetModerationResultPublisher";
 import ModerationService from "../../../service/ModerationService";
 import ParkedPlaceBetReplayWorker, {

@@ -5,9 +5,12 @@ import {
   LiveMarketStatus,
   ModerationDeclineReason,
   ModerationStatus,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
+import {
+  LiveMarketType,
+  TeamSide,
+} from "../../../compat/LiveContract";
 import { Bet } from "../../../model/Bet";
 import { LiveEventMirror } from "../../../model/LiveEventMirror";
 import { Resulted } from "../../../model/Resulted";
@@ -120,6 +123,78 @@ it("mixed top-level and row kinds are declined with a stable reason", async () =
   expect(listener.ack).toHaveBeenCalled();
 });
 
+it("declines a slip mixing a pre-match row with a pre-kickoff live row (kickoff team)", async () => {
+  // Isolation guard for the new pre-kickoff live markets: they are tagged
+  // BetKind.LIVE exactly like every other live market, so they must be
+  // caught by the same generic mixed-bet-kinds guard as any other
+  // live+pre-match mix, never allowed to slip through as a special case.
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const kickoffTeamMarket = createLiveMarket(eventId, {
+    marketType: LiveMarketType.KICKOFF_TEAM,
+  });
+  const liveSelection = kickoffTeamMarket.selections[0];
+  const message = createMessage();
+  const futureKickoff = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const data = createPlaceBetEvent({
+    data: {
+      betKind: BetKind.LIVE,
+      submittedAt: new Date().toISOString(),
+    },
+    rows: [
+      {
+        eventId,
+        eventName: "Test Match",
+        oddsId: new mongoose.Types.ObjectId().toHexString(),
+        oddsValue: 1.5,
+        oddsName: "Home",
+        productName: "1X2",
+        productId: new mongoose.Types.ObjectId().toHexString(),
+        timestamp: futureKickoff,
+        eventTime: futureKickoff,
+        id: new mongoose.Types.ObjectId().toHexString(),
+        betKind: BetKind.PRE_MATCH,
+      },
+      {
+        eventId,
+        eventName: "Test Match",
+        oddsId: new mongoose.Types.ObjectId().toHexString(),
+        oddsValue: liveSelection.odds,
+        oddsName: "Home",
+        productName: "Kickoff Team",
+        productId: kickoffTeamMarket.marketId,
+        timestamp: futureKickoff,
+        eventTime: futureKickoff,
+        id: new mongoose.Types.ObjectId().toHexString(),
+        betKind: BetKind.LIVE,
+        marketId: kickoffTeamMarket.marketId,
+        marketType: kickoffTeamMarket.marketType,
+        marketVersion: kickoffTeamMarket.marketVersion,
+        quoteVersion: kickoffTeamMarket.quoteVersion,
+        selectionId: liveSelection.selectionId,
+        side: liveSelection.side,
+      },
+    ],
+  });
+
+  await listener.onMessage(data, message);
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  const publishMock =
+    BetModerationResultPublisher.prototype.publishWithConfirm as jest.Mock;
+  const publishedEvent = publishMock.mock.calls[0][0];
+
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(
+    ModerationDeclineReason.MIXED_BET_KINDS
+  );
+  expect(publishedEvent.data.declineReason).toEqual(
+    ModerationDeclineReason.MIXED_BET_KINDS
+  );
+  expect(listener.ack).toHaveBeenCalled();
+});
+
 it("PRE_MATCH rows are declined at or after kickoff", async () => {
   const { listener } = await setup();
   const pastKickoff = new Date(Date.now() - 1_000).toISOString();
@@ -151,9 +226,12 @@ it("PRE_MATCH rows are declined at or after kickoff", async () => {
 
 it.each([
   {
+    // PRE_MATCH is now itself a live phase (the pre-kickoff live-slip
+    // window), so FULL_TIME -- the only other genuinely non-live phase --
+    // is used here to represent "event is not live".
     name: "event is not live",
     reason: ModerationDeclineReason.EVENT_NOT_LIVE,
-    phase: EventPhase.PRE_MATCH,
+    phase: EventPhase.FULL_TIME,
     status: LiveMarketStatus.OPEN,
   },
   {
@@ -199,6 +277,73 @@ it.each([
     selectionId: market.selections[0].selectionId,
     currentOdds: market.selections[0].odds,
   });
+});
+
+it.each([
+  { marketType: LiveMarketType.KICKOFF_TEAM, side: TeamSide.HOME },
+  { marketType: LiveMarketType.KICKOFF_TEAM, side: TeamSide.AWAY },
+  { marketType: LiveMarketType.FIRST_MINUTE_GOAL, side: TeamSide.YES },
+  { marketType: LiveMarketType.FIRST_MINUTE_GOAL, side: TeamSide.NO },
+])(
+  "approves a pre-kickoff $marketType bet for $side while the event is in PRE_MATCH phase",
+  async ({ marketType, side }) => {
+    const { listener } = await setup();
+    const eventId = new mongoose.Types.ObjectId().toHexString();
+    const marketId = `${eventId}:${marketType}`;
+    const otherSide =
+      marketType === LiveMarketType.KICKOFF_TEAM
+        ? side === TeamSide.HOME
+          ? TeamSide.AWAY
+          : TeamSide.HOME
+        : side === TeamSide.YES
+          ? TeamSide.NO
+          : TeamSide.YES;
+    const preKickoffMarket = createLiveMarket(eventId, {
+      marketType,
+      marketId,
+      marketVersion: 1,
+      quoteVersion: 1,
+      selections: [
+        { selectionId: `${marketId}:1:${side}`, side, odds: 1.95 },
+        { selectionId: `${marketId}:1:${otherSide}`, side: otherSide, odds: 1.95 },
+      ],
+    });
+    const market = await saveMirror(eventId, preKickoffMarket, EventPhase.PRE_MATCH);
+    const selection = market.selections.find(
+      (candidate) => candidate.side === side
+    )!;
+    const message = createMessage();
+    const data = createLivePlaceBetEvent(market, {
+      row: { selectionId: selection.selectionId, side: selection.side },
+    });
+
+    await listener.onMessage(data, message);
+
+    const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+    expect(savedBet).not.toBeNull();
+    expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+    expect(savedBet!.affectedRows).toHaveLength(0);
+    expect(listener.ack).toHaveBeenCalled();
+  }
+);
+
+it("declines an ordinary live market bet during PRE_MATCH even though the mirror is currently open", async () => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  // Default createLiveMarket() is LiveMarketType.NEXT_CORNER, OPEN -- an
+  // ordinary live market that must never be reachable while phase is
+  // PRE_MATCH, unlike KICKOFF_TEAM/FIRST_MINUTE_GOAL.
+  const market = await saveMirror(eventId, createLiveMarket(eventId), EventPhase.PRE_MATCH);
+  const message = createMessage();
+  const data = createLivePlaceBetEvent(market);
+
+  await listener.onMessage(data, message);
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_NOT_LIVE);
+  expect(listener.ack).toHaveBeenCalled();
 });
 
 it("live bets keep the existing resulted guard", async () => {

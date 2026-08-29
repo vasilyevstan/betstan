@@ -74,6 +74,8 @@ const Harness = ({ visibleOfflineEventIds, onScopedAccessFailure }) => {
     <div data-testid="event-count">{events.length}</div>
     <div data-testid="feed-state">{feedState}</div>
     <div data-testid="loading-state">{String(isLoading)}</div>
+    <div data-testid="visibility">{events[0]?.visibility ?? 'none'}</div>
+    <div data-testid="status">{events[0]?.status ?? 'none'}</div>
   </div>;
 };
 
@@ -252,6 +254,172 @@ describe('useLiveEvents', () => {
     });
     expect(screen.getByTestId('sequence')).toHaveTextContent('none');
     await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
+
+    unmount();
+  });
+
+  it('replaces a stale RESULTED/OFFLINE snapshot cached from SSE with a same-sequence authoritative REST read once server-side recovery settles', async () => {
+    // Regression: `LiveEventProjectionListener` (the durable projection
+    // writer) and `LiveEventUpdateListener` (the per-pod SSE broadcaster)
+    // are independent listeners with no ordering guarantee between them.
+    // If the SSE broadcast for a live update reaches the client *before*
+    // `applyLiveEventUpdate`'s result-before-live race recovery has fully
+    // settled `status`/`visibility` in the projection, the client can cache
+    // a stale RESULTED/OFFLINE snapshot at that live sequence. A later
+    // authoritative REST read (via polling/reconcile) reflecting the now-
+    // settled projection must still be able to replace it, even though the
+    // live sequence itself has not advanced.
+    const staleRaceSnapshot = {
+      eventId: 'race-event',
+      name: 'Team A - Team B',
+      time: '2030-01-01T12:00:00.000Z',
+      visibility: 'OFFLINE',
+      status: 'RESULTED',
+      products: [],
+      home: 'Team A',
+      away: 'Team B',
+      live: {
+        sequence: 0,
+        kickoffAt: '2030-01-01T12:00:00.000Z',
+        occurredAt: '2030-01-01T12:00:00.000Z',
+        minute: 0,
+        phase: 'PRE_MATCH',
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: 'OPEN',
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    };
+    const settledRecoverySnapshot = {
+      ...staleRaceSnapshot,
+      visibility: 'ONLINE',
+      status: 'NO_RESULT',
+    };
+
+    // The client's very first authoritative REST read (on mount) can itself
+    // land while the race is still unresolved -- independent listeners give
+    // no guarantee the projection's recovery has settled by the time any
+    // given reader observes it.
+    axios.get
+      .mockResolvedValueOnce({ data: [staleRaceSnapshot] })
+      .mockResolvedValueOnce({ data: [settledRecoverySnapshot] });
+
+    const { unmount } = render(<Harness />);
+    // A positive, non-default signal (not just "still empty") proves the
+    // first REST response has actually resolved and been applied before
+    // any further steps run.
+    await waitFor(() => expect(screen.getByTestId('sequence')).toHaveTextContent('0'));
+    expect(screen.getByTestId('visibility')).toHaveTextContent('OFFLINE');
+    expect(screen.getByTestId('status')).toHaveTextContent('RESULTED');
+
+    act(() => {
+      createdSources[0].emitOpen();
+    });
+
+    // The SSE broadcast for this same live sequence also still reflects the
+    // pre-recovery projection (the per-pod SSE broadcaster and the durable
+    // projection writer are independent listeners with no ordering
+    // guarantee between them) -- applying it is a no-op here, exactly
+    // mirroring the dedicated same-sequence dedupe SSE already guarantees.
+    act(() => {
+      createdSources[0].emitSnapshot(staleRaceSnapshot);
+    });
+    expect(screen.getByTestId('sequence')).toHaveTextContent('0');
+    expect(screen.getByTestId('visibility')).toHaveTextContent('OFFLINE');
+    expect(screen.getByTestId('status')).toHaveTextContent('RESULTED');
+
+    // A subsequent authoritative REST poll, at the very same live sequence,
+    // reflects the now fully-settled projection and must replace the stale
+    // cached metadata rather than being ignored for lacking a strictly
+    // greater sequence.
+    await act(async () => {
+      jest.advanceTimersByTime(POLL_FALLBACK_MS);
+    });
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByTestId('sequence')).toHaveTextContent('0');
+    expect(screen.getByTestId('visibility')).toHaveTextContent('ONLINE');
+    expect(screen.getByTestId('status')).toHaveTextContent('NO_RESULT');
+
+    unmount();
+  });
+
+  it('does not regress a healthy same-sequence SSE state when a slower, earlier-issued REST response resolves later with stale RESULTED/OFFLINE data', async () => {
+    // Regression: same-sequence authoritative replacement must be a
+    // one-directional repair, never an unconditional "last write wins".
+    // Two independent reads of the server's projection can resolve out of
+    // order relative to when they were issued (a slower request reflecting
+    // an older, pre-recovery Mongo read can finish *after* a faster read --
+    // or SSE -- already observed and applied the settled, healthy state at
+    // the very same live sequence). Accepting that late, stale response
+    // unconditionally would regress a correct cached snapshot back into
+    // the premature RESULTED/OFFLINE race signature.
+    const healthySnapshot = {
+      eventId: 'race-event-reverse',
+      name: 'Team A - Team B',
+      time: '2030-01-01T12:00:00.000Z',
+      visibility: 'ONLINE',
+      status: 'NO_RESULT',
+      products: [],
+      home: 'Team A',
+      away: 'Team B',
+      live: {
+        sequence: 3,
+        kickoffAt: '2030-01-01T12:00:00.000Z',
+        occurredAt: '2030-01-01T12:20:00.000Z',
+        minute: 20,
+        phase: 'FIRST_HALF',
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: 'OPEN',
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    };
+    const staleSnapshot = {
+      ...healthySnapshot,
+      visibility: 'OFFLINE',
+      status: 'RESULTED',
+    };
+
+    // The client's very first REST request is issued on mount but resolves
+    // later, under manual control, so its (stale) response can be made to
+    // arrive strictly after the SSE snapshot below.
+    let resolveMountFetch;
+    axios.get.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveMountFetch = resolve;
+    }));
+
+    const { unmount } = render(<Harness />);
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      createdSources[0].emitOpen();
+    });
+
+    // The per-pod SSE broadcaster independently observes the already-
+    // settled, healthy projection and delivers it first -- accepted
+    // because there is no cached entry for this event yet.
+    act(() => {
+      createdSources[0].emitSnapshot(healthySnapshot);
+    });
+    expect(screen.getByTestId('sequence')).toHaveTextContent('3');
+    expect(screen.getByTestId('visibility')).toHaveTextContent('ONLINE');
+    expect(screen.getByTestId('status')).toHaveTextContent('NO_RESULT');
+
+    // The slower, earlier-issued mount REST request now finally resolves,
+    // reflecting a Mongo read taken before the race recovery ever settled,
+    // at the very same live sequence.
+    await act(async () => {
+      resolveMountFetch({ data: [staleSnapshot] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('sequence')).toHaveTextContent('3');
+    expect(screen.getByTestId('visibility')).toHaveTextContent('ONLINE');
+    expect(screen.getByTestId('status')).toHaveTextContent('NO_RESULT');
 
     unmount();
   });

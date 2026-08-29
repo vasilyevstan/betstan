@@ -2,13 +2,15 @@ import {
   BetKind,
   BetStatus,
   LiveMarketStatus,
-  LiveMarketType,
-  LiveSettlementReason,
   ModerationDeclineReason,
   SlipRowStatus,
-  TeamSide,
 } from "@betstan/common";
 import { HydratedDocument, Schema, model } from "mongoose";
+import {
+  LiveMarketType,
+  LiveSettlementReason,
+  TeamSide,
+} from "../compat/LiveContract";
 
 export interface BetRowRecord {
   id: string;

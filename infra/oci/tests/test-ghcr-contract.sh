@@ -730,6 +730,7 @@ for literal in \
   'TRANSITION_PHASE: retire' \
   'RETIRE_OCIR_REPOSITORY: "1"' \
   'OCI_ALLOW_LEGACY_ADMIN_UI: "1"' \
+  'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
   './infra/oci/agents/validation-loop-stan.sh'; do
   grep -Fq -- "$literal" "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" ||
     fail "recovery workflow lacks resumable inputs or terminal health validation: $literal"
@@ -825,6 +826,10 @@ public_validation = workflow_text.split("  public-validate:", 1)[1].split(
 )[0]
 if public_validation.count('OCI_ALLOW_LEGACY_ADMIN_UI: "1"') != 1:
     raise SystemExit("historical baseline UI compatibility is not scoped to public validation")
+if public_validation.count(
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}'
+) != 1:
+    raise SystemExit("public recovery validation lacks the protected E2E credential")
 smoke = root / "infra/oci/agents/oci-live-smoke.spec.js"
 smoke_text = smoke.read_text(encoding="utf-8")
 if "process.env.OCI_ALLOW_LEGACY_ADMIN_UI === '1'" not in smoke_text:

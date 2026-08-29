@@ -19,6 +19,25 @@ const MARKET_TYPES: LiveMarketType[] = [
   LiveMarketType.NEXT_PENALTY,
 ];
 
+/**
+ * The two pre-kickoff live-slip markets. These are intentionally validated
+ * separately from the generic `MARKET_TYPES` in-match lifecycle checks
+ * below (`assertMarkets`'s per-incident status-expectation branches) --
+ * their lifecycle (settle/close atomically at kick-off, first-minute-goal
+ * settles once after simulated minute 1, both pinned at marketVersion 1
+ * forever) does not follow the generic next-market/half-time pattern. See
+ * `assertPreKickoffMarkets`.
+ */
+const PRE_KICKOFF_MARKET_TYPES: LiveMarketType[] = [
+  LiveMarketType.KICKOFF_TEAM,
+  LiveMarketType.FIRST_MINUTE_GOAL,
+];
+
+const SNAPSHOT_MARKET_TYPES: LiveMarketType[] = [
+  ...MARKET_TYPES,
+  ...PRE_KICKOFF_MARKET_TYPES,
+];
+
 const NEXT_MARKET_TYPES: NextMarketType[] = [
   LiveMarketType.NEXT_YELLOW_CARD,
   LiveMarketType.NEXT_RED_CARD,
@@ -230,22 +249,29 @@ function assertMarkets(
       );
     }
 
-    if (transition.markets.length !== 5) {
-      fail(`expected five markets at sequence ${transition.sequence}`);
+    if (transition.markets.length !== SNAPSHOT_MARKET_TYPES.length) {
+      fail(`expected ${SNAPSHOT_MARKET_TYPES.length} markets at sequence ${transition.sequence}`);
     }
     const current = new Map(
       transition.markets.map((market) => [market.marketType, market])
     );
-    if (current.size !== 5 || MARKET_TYPES.some((type) => !current.has(type))) {
+    if (
+      current.size !== SNAPSHOT_MARKET_TYPES.length
+      || SNAPSHOT_MARKET_TYPES.some((type) => !current.has(type))
+    ) {
       fail(`market types are incomplete at sequence ${transition.sequence}`);
     }
     transition.markets.forEach((market) => {
       if (market.marketId !== `${timeline.eventId}:${market.marketType}`) {
         fail(`invalid market identity at sequence ${transition.sequence}`);
       }
+      const expectedSelectionCount = PRE_KICKOFF_MARKET_TYPES.includes(market.marketType)
+        ? 2
+        : 3;
       if (
-        market.selections.length !== 3
-        || new Set(market.selections.map((selection) => selection.selectionId)).size !== 3
+        market.selections.length !== expectedSelectionCount
+        || new Set(market.selections.map((selection) => selection.selectionId)).size
+          !== expectedSelectionCount
       ) {
         fail(`invalid selections at sequence ${transition.sequence}`);
       }
@@ -455,6 +481,120 @@ function assertMarkets(
   }
 }
 
+/**
+ * Validates the two pre-kickoff live-slip markets' dedicated lifecycle,
+ * independent of the generic `MARKET_TYPES` in-match checks above:
+ * kickoff-team and first-minute-goal must both be created at the kick-off
+ * transition (marketVersion 1), close atomically there (kickoff-team goes
+ * straight to SETTLED, first-minute-goal to CLOSED), stay pinned at
+ * marketVersion 1 for their entire lifecycle, and first-minute-goal must
+ * settle exactly once -- at the FIRST_MINUTE_ELAPSED transition -- with a
+ * winning side that matches whether any goal fell strictly before that
+ * transition's offset (the first simulated minute, [0:00, 1:00)).
+ */
+function assertPreKickoffMarkets(
+  transitions: SimulationTransition[]
+): void {
+  const kickOff = transitions[0];
+  if (!kickOff || kickOff.incident.type !== LiveIncidentType.KICK_OFF) {
+    fail("first transition must be kick-off");
+  }
+
+  const firstMinuteElapsed = transitions.find(
+    (transition) => transition.incident.type === LiveIncidentType.FIRST_MINUTE_ELAPSED
+  );
+  if (!firstMinuteElapsed) {
+    fail("missing first-minute-elapsed transition");
+  }
+  if (firstMinuteElapsed.sequence <= kickOff.sequence) {
+    fail("first-minute-elapsed must occur after kick-off");
+  }
+
+  const kickOffMarket = kickOff.markets.find(
+    (market) => market.marketType === LiveMarketType.KICKOFF_TEAM
+  );
+  const firstMinuteMarketAtKickOff = kickOff.markets.find(
+    (market) => market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+  );
+  if (
+    !kickOffMarket
+    || kickOffMarket.marketVersion !== 1
+    || kickOffMarket.status !== LiveMarketStatus.SETTLED
+    || !firstMinuteMarketAtKickOff
+    || firstMinuteMarketAtKickOff.marketVersion !== 1
+    || firstMinuteMarketAtKickOff.status !== LiveMarketStatus.CLOSED
+  ) {
+    fail("kickoff-team and first-minute-goal must close atomically at kick-off");
+  }
+
+  const kickOffSettlements = transitions.flatMap((transition) =>
+    transition.settlements.filter(
+      (settlement) => settlement.settlementReason === LiveSettlementReason.KICK_OFF
+    )
+  );
+  if (
+    kickOffSettlements.length !== 1
+    || kickOffSettlements[0].marketId !== kickOffMarket.marketId
+    || kickOffSettlements[0].marketVersion !== 1
+    || kickOffSettlements[0].settlementSequence !== kickOff.sequence
+    || kickOffSettlements[0].winningSide !== kickOff.incident.side
+  ) {
+    fail("kickoff-team must settle exactly once at kick-off, matching the kick-off incident's side");
+  }
+
+  let firstMinuteGoalScored = false;
+  transitions.forEach((transition) => {
+    if (
+      transition.incident.type === LiveIncidentType.GOAL
+      && transition.offsetMs < firstMinuteElapsed.offsetMs
+    ) {
+      firstMinuteGoalScored = true;
+    }
+  });
+
+  transitions.forEach((transition) => {
+    const kickoffTeam = transition.markets.find(
+      (market) => market.marketType === LiveMarketType.KICKOFF_TEAM
+    );
+    const firstMinuteGoal = transition.markets.find(
+      (market) => market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+    );
+    if (
+      !kickoffTeam
+      || kickoffTeam.marketVersion !== 1
+      || kickoffTeam.status !== LiveMarketStatus.SETTLED
+    ) {
+      fail(`kickoff-team market must stay settled at sequence ${transition.sequence}`);
+    }
+    if (!firstMinuteGoal || firstMinuteGoal.marketVersion !== 1) {
+      fail(`first-minute-goal market missing or re-versioned at sequence ${transition.sequence}`);
+    }
+    const expectedStatus =
+      transition.sequence < firstMinuteElapsed.sequence
+        ? LiveMarketStatus.CLOSED
+        : LiveMarketStatus.SETTLED;
+    if (firstMinuteGoal.status !== expectedStatus) {
+      fail(`first-minute-goal market has unexpected status at sequence ${transition.sequence}`);
+    }
+  });
+
+  const firstMinuteSettlements = transitions.flatMap((transition) =>
+    transition.settlements.filter(
+      (settlement) => settlement.settlementReason === LiveSettlementReason.FIRST_MINUTE_GOAL
+    )
+  );
+  const expectedWinner = firstMinuteGoalScored ? TeamSide.YES : TeamSide.NO;
+  if (
+    firstMinuteSettlements.length !== 1
+    || firstMinuteSettlements[0].marketId !== firstMinuteMarketAtKickOff.marketId
+    || firstMinuteSettlements[0].marketVersion !== 1
+    || firstMinuteSettlements[0].settlementSequence !== firstMinuteElapsed.sequence
+    || firstMinuteSettlements[0].winningSide !== expectedWinner
+  ) {
+    fail("first-minute-goal must settle exactly once, matching the goal-in-window computation");
+  }
+}
+
 export function assertSimulationInvariants(result: SimulationResult): void {
   const { timeline, transitions } = result;
   if (timeline.engineVersion !== 1 || result.engineVersion !== 1) {
@@ -562,6 +702,7 @@ export function assertSimulationInvariants(result: SimulationResult): void {
 
   assertPenalties(transitions);
   assertMarkets(timeline, transitions);
+  assertPreKickoffMarkets(transitions);
 
   const counts = {
     goals: transitions.filter((t) => t.incident.type === LiveIncidentType.GOAL).length,

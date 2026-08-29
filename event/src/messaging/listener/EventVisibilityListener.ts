@@ -19,7 +19,10 @@ class EventVisibilityListener extends AListener<IEventVibibilityEvent> {
       await Event.updateOne(
         { eventId: data.eventId },
         {
-          $set: { pendingVisibility: data.visibility },
+          $set: {
+            pendingVisibility: data.visibility,
+            visibilityDecision: data.visibility,
+          },
           $setOnInsert: {
             eventId: data.eventId,
             name: data.eventId,
@@ -41,7 +44,12 @@ class EventVisibilityListener extends AListener<IEventVibibilityEvent> {
 
       await Event.updateOne(
         { eventId: data.eventId },
-        { $set: { pendingVisibility: data.visibility } }
+        {
+          $set: {
+            pendingVisibility: data.visibility,
+            visibilityDecision: data.visibility,
+          },
+        }
       );
     }
 

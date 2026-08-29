@@ -5,13 +5,15 @@ import {
   IModerationResultEvent,
   IPlaceBetEvent,
   ISettleSlipRowEvent,
-  LiveMarketType,
-  LiveSettlementReason,
   ModerationStatus,
   ResultingStatus,
-  TeamSide,
 } from "@betstan/common";
 import { randomUUID } from "crypto";
+import {
+  LiveMarketType,
+  LiveSettlementReason,
+  TeamSide,
+} from "../compat/LiveContract";
 import SettleSlipPublisher from "../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../event/publisher/SettleSlipRowPublisher";
 import { Bet, BetArchive } from "../model/Bet";

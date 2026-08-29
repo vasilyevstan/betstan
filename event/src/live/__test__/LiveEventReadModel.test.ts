@@ -700,3 +700,211 @@ it("retries duplicate key races and handles mismatch, missing document, and non-
     code: 500,
   });
 });
+
+const buildPreMatchLiveUpdate = (
+  eventId: string,
+  kickoffAt: string
+): ILiveEventUpdateEvent =>
+  ({
+    timestamp: new Date().toISOString(),
+    data: {
+      eventId,
+      sequence: 0,
+      occurredAt: kickoffAt,
+      kickoffAt,
+      minute: 0,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidents: [],
+      markets: [],
+      settlements: [],
+      home: "Team C",
+      away: "Team D",
+    },
+  } as unknown as ILiveEventUpdateEvent);
+
+it("retires a previously retained finished live event once a different event's T-10 PRE_MATCH snapshot becomes authoritative", async () => {
+  await Event.create({
+    eventId: "retained-full-time",
+    name: "Finished Live Match",
+    time: new Date("2030-01-01T10:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 40,
+      occurredAt: "2030-01-01T11:45:00.000Z",
+      kickoffAt: "2030-01-01T10:00:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 3,
+      awayScore: 1,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  // Represents the normal onboarding pipeline (scheduler/backoffice)
+  // creating the upcoming event as ONLINE well before its own T-10
+  // countdown starts populating `live`.
+  const kickoffAt = "2030-01-01T14:00:00.000Z";
+  await Event.create({
+    eventId: "next-event",
+    name: "Next Event",
+    time: new Date(kickoffAt),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+  });
+
+  await applyLiveEventUpdate(buildPreMatchLiveUpdate("next-event", kickoffAt));
+
+  const retired = await Event.findOne({ eventId: "retained-full-time" }).lean();
+  expect(retired?.visibility).toEqual(EventVisibility.OFFLINE);
+
+  const next = await Event.findOne({ eventId: "next-event" }).lean();
+  expect(next?.visibility).toEqual(EventVisibility.ONLINE);
+  expect((next?.live as any)?.phase).toEqual(EventPhase.PRE_MATCH);
+});
+
+it("does not retire an event's own retained full-time snapshot when its PRE_MATCH update is replayed after a restart", async () => {
+  const kickoffAt = "2030-01-01T14:00:00.000Z";
+  await Event.create({
+    eventId: "self-event",
+    name: "Self Event",
+    time: new Date(kickoffAt),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 40,
+      occurredAt: "2030-01-01T13:45:00.000Z",
+      kickoffAt,
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 1,
+      awayScore: 1,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  // A restart replaying this event's own opening PRE_MATCH snapshot (e.g.
+  // sequence renumbered from 0) must never retire the event's own
+  // retained full-time record; the handoff only ever targets *other*
+  // events.
+  await applyLiveEventUpdate(buildPreMatchLiveUpdate("self-event", kickoffAt));
+
+  const stillRetained = await Event.findOne({ eventId: "self-event" }).lean();
+  expect(stillRetained?.visibility).toEqual(EventVisibility.ONLINE);
+});
+
+it("bounds retention to one by clearing every stale retained full-time event on the next PRE_MATCH handoff", async () => {
+  await Event.create({
+    eventId: "stale-a",
+    name: "Stale A",
+    time: new Date("2030-01-01T09:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 40,
+      occurredAt: "2030-01-01T10:45:00.000Z",
+      kickoffAt: "2030-01-01T09:00:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 2,
+      awayScore: 2,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+  await Event.create({
+    eventId: "stale-b",
+    name: "Stale B",
+    time: new Date("2030-01-01T09:30:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 40,
+      occurredAt: "2030-01-01T11:15:00.000Z",
+      kickoffAt: "2030-01-01T09:30:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate("newest-event", "2030-01-01T14:00:00.000Z")
+  );
+
+  const staleA = await Event.findOne({ eventId: "stale-a" }).lean();
+  const staleB = await Event.findOne({ eventId: "stale-b" }).lean();
+  expect(staleA?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(staleB?.visibility).toEqual(EventVisibility.OFFLINE);
+});
+
+it("keeps the retained full-time event visible to listPublicEvents purely from persisted state (restart/refresh safety)", async () => {
+  await Event.create({
+    eventId: "retained-persisted",
+    name: "Retained Persisted",
+    time: new Date("2030-01-01T10:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 40,
+      occurredAt: "2030-01-01T11:45:00.000Z",
+      kickoffAt: "2030-01-01T10:00:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 1,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  // No in-memory hub/cache is involved here: listPublicEvents reads
+  // straight from Mongo, so this proves the retention survives a
+  // simulated process restart/refresh.
+  const listed = await listPublicEvents(new Date("2030-01-01T10:05:00.000Z"));
+  expect(listed.map((entry) => entry.eventId)).toContain("retained-persisted");
+
+  // Normal onboarding already created the upcoming event as ONLINE before
+  // its T-10 countdown starts populating `live`.
+  await Event.create({
+    eventId: "handoff-event",
+    name: "Handoff Event",
+    time: new Date("2030-01-01T14:00:00.000Z"),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+  });
+
+  await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate("handoff-event", "2030-01-01T14:00:00.000Z")
+  );
+
+  const listedAfterHandoff = await listPublicEvents(
+    new Date("2030-01-01T10:05:00.000Z")
+  );
+  expect(listedAfterHandoff.map((entry) => entry.eventId)).not.toContain(
+    "retained-persisted"
+  );
+  expect(listedAfterHandoff.map((entry) => entry.eventId)).toContain(
+    "handoff-event"
+  );
+});

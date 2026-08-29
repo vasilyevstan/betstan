@@ -697,9 +697,27 @@ export const listPublicEvents = async (
           ],
         }
       : { visibility: { $ne: EventVisibility.OFFLINE } };
+  // The single currently-retained finished (FULL_TIME) event's *only*
+  // eligibility rule is the `liveRetiredAt` tombstone stamped by the next
+  // event's own accepted T-10 PRE_MATCH handoff (see `applyLiveEventUpdate`)
+  // -- never the generic kickoff-`time` history bound above, which would
+  // otherwise silently drop it once its scheduled kickoff falls outside
+  // `historyMinutes` even though nothing has retired it yet. Retention
+  // guarantees at most one ONLINE, untombstoned FULL_TIME event exists at
+  // any moment, so this clause stays inherently bounded to that single row
+  // and a retired card (tombstoned, flipped OFFLINE) can never leak back
+  // in through it.
+  const retainedFinishedFilter = {
+    visibility: EventVisibility.ONLINE,
+    "live.phase": EventPhase.FULL_TIME,
+    liveRetiredAt: null,
+  };
+
   const events = await Event.find({
-    time: { $gte: lowerBound, $lte: upperBound },
-    ...visibilityFilter,
+    $or: [
+      { time: { $gte: lowerBound, $lte: upperBound }, ...visibilityFilter },
+      retainedFinishedFilter,
+    ],
   }).lean();
 
   return events
@@ -751,9 +769,104 @@ export const applyLiveEventUpdate = async (
     return null;
   }
 
-  const snapshot = createPublicEventSnapshot(
-    currentEvent as unknown as UnknownRecord
-  );
+  const currentRecord = currentEvent as unknown as UnknownRecord;
 
-  return snapshot.live?.sequence === event.data.sequence ? snapshot : null;
+  // "Accepted" means this exact call's sequence is the one now stored --
+  // i.e. the sequence gate above did not reject it as stale/duplicate.
+  // Every side effect below must only run for an accepted update: a
+  // delayed/duplicate message keeps the phase it originally carried (e.g.
+  // PRE_MATCH) even after being rejected, so gating on `event.data.phase`
+  // alone (without also requiring acceptance) would let a late, rejected
+  // message for one event still mutate a *different* event's visibility.
+  const liveRecord = currentRecord.live as UnknownRecord | undefined;
+  const accepted = liveRecord?.sequence === event.data.sequence;
+
+  if (accepted) {
+    const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
+    const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
+    // A completed visibility decision is retained separately from the
+    // mutable runtime visibility. `pendingVisibility` covers the same intent
+    // while metadata onboarding is still in flight.
+    const hasCurrentOfflineIntent =
+      currentRecord.visibilityDecision === EventVisibility.OFFLINE
+      || currentRecord.pendingVisibility === EventVisibility.OFFLINE;
+
+    if (
+      currentRecord.status === EventStatus.RESULTED &&
+      isRaceResulted &&
+      !wasIntentionallyRetired
+    ) {
+      // EVENT_RESULT is terminal domain authority even when it wins the
+      // queue race. Earlier live snapshots may still fill bounded history,
+      // but they cannot reopen or publicly resurrect the event. Only the
+      // matching FULL_TIME projection completes the retained-card view.
+      if (event.data.phase === EventPhase.FULL_TIME) {
+        const finalProjectionUpdate: UnknownRecord = {
+          liveRaceResultedAt: null,
+        };
+        if (!hasCurrentOfflineIntent) {
+          finalProjectionUpdate.visibility = EventVisibility.ONLINE;
+        }
+
+        await Event.updateOne(
+          { eventId: event.data.eventId },
+          { $set: finalProjectionUpdate }
+        );
+        currentRecord.liveRaceResultedAt = null;
+        if (finalProjectionUpdate.visibility) {
+          currentRecord.visibility = finalProjectionUpdate.visibility;
+        }
+      } else if (currentRecord.visibility !== EventVisibility.OFFLINE) {
+        await Event.updateOne(
+          { eventId: event.data.eventId },
+          { $set: { visibility: EventVisibility.OFFLINE } }
+        );
+        currentRecord.visibility = EventVisibility.OFFLINE;
+      }
+    }
+
+    if (event.data.phase === EventPhase.PRE_MATCH) {
+      const kickoffAt = toIsoString(event.data.kickoffAt) ?? event.data.kickoffAt;
+      const kickoffDate = new Date(kickoffAt);
+
+      if (!Number.isNaN(kickoffDate.getTime())) {
+        // A new event's T-10 pre-kickoff snapshot becoming authoritative
+        // is the handoff point that retires any previously retained
+        // finished live event: `EventResultListener` keeps a completed
+        // live-simulated event ONLINE (with its FULL_TIME snapshot) so it
+        // survives refresh/reconnect, but retention is bounded to at most
+        // one such event at a time, so it must be hidden again the
+        // moment the next event's own countdown becomes authoritative.
+        // Scoped to events strictly *older* (by scheduled kickoff time)
+        // than this one, never "every other event" -- an out-of-order
+        // arriving PRE_MATCH for a chronologically older fixture must
+        // never retire a genuinely newer retained event. `eventId: { $ne
+        // }` guarantees this never retires the event whose own PRE_MATCH
+        // snapshot just landed (including on a restart replaying the
+        // same snapshot). `liveRetiredAt` is stamped as the permanent
+        // tombstone: late/duplicate updates for the retired event must
+        // never resurrect it (see the resurrection branch above).
+        await Event.updateMany(
+          {
+            eventId: { $ne: event.data.eventId },
+            visibility: EventVisibility.ONLINE,
+            "live.phase": EventPhase.FULL_TIME,
+            time: { $lt: kickoffDate },
+          },
+          {
+            $set: {
+              visibility: EventVisibility.OFFLINE,
+              liveRetiredAt: new Date(),
+            },
+          }
+        );
+      }
+    }
+  }
+
+  if (!accepted) {
+    return null;
+  }
+
+  return createPublicEventSnapshot(currentRecord);
 };

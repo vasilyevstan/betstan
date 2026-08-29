@@ -14,6 +14,8 @@ OCI_PUBLIC_CHECKS_ALREADY_PASSED="${OCI_PUBLIC_CHECKS_ALREADY_PASSED:-0}"
 OCI_E2E_ALREADY_PASSED="${OCI_E2E_ALREADY_PASSED:-0}"
 OCI_CLUSTER_CHECKS_ALREADY_PASSED="${OCI_CLUSTER_CHECKS_ALREADY_PASSED:-0}"
 OCI_ALLOW_LEGACY_ADMIN_UI="${OCI_ALLOW_LEGACY_ADMIN_UI:-0}"
+live_acceptance_password="${LIVE_ACCEPTANCE_PASSWORD:-}"
+unset LIVE_ACCEPTANCE_PASSWORD
 
 [[ "$MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] || {
   echo "NO_GO validation_reason=MAX_LOOPS must be positive" >&2
@@ -39,6 +41,10 @@ done
   echo "NO_GO validation_reason=public and e2e prechecks must be paired" >&2
   exit 1
 }
+[[ "$OCI_E2E_ALREADY_PASSED" == "1" || -n "$live_acceptance_password" ]] || {
+  echo "NO_GO validation_reason=LIVE_ACCEPTANCE_PASSWORD is required for browser checks" >&2
+  exit 1
+}
 [[ "$OCI_PUBLIC_CHECKS_ALREADY_PASSED" != "1" ||
    "$OCI_CLUSTER_CHECKS_ALREADY_PASSED" != "1" ]] || {
   echo "NO_GO validation_reason=validation cannot skip both public and cluster checks" >&2
@@ -62,6 +68,7 @@ for attempt in $(seq 1 "$MAX_LOOPS"); do
       E2E_BASE_URL="$OCI_PUBLIC_URL" \
       OCI_E2E_OUTPUT_DIR="$OUTPUT_DIR/e2e-${attempt}" \
       OCI_ALLOW_LEGACY_ADMIN_UI="$OCI_ALLOW_LEGACY_ADMIN_UI" \
+      LIVE_ACCEPTANCE_PASSWORD="$live_acceptance_password" \
         "$PLAYWRIGHT_BIN" test --config "$OCI_DIR/agents/playwright.config.js"
     ); then
       public_ok=true

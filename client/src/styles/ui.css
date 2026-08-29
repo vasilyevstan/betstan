@@ -1208,6 +1208,51 @@ body {
   border-color: color-mix(in srgb, var(--danger) 20%, var(--border-subtle));
 }
 
+.event-card--countdown {
+  border-color: color-mix(in srgb, var(--warning) 26%, var(--border-subtle));
+}
+
+.event-card--finished {
+  border-color: var(--border-subtle);
+  opacity: 0.92;
+}
+
+.event-card__badge--countdown {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: color-mix(in srgb, var(--warning) 82%, var(--text-main));
+}
+
+.event-card__badge--finished {
+  background: color-mix(in srgb, var(--surface-elevated) 88%, transparent);
+  color: var(--text-subtle);
+  border: 1px solid var(--border-subtle);
+}
+
+.event-countdown {
+  min-width: 7.5rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.9rem;
+  text-align: right;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface-elevated));
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border-subtle));
+}
+
+.event-countdown__eyebrow {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.event-countdown__value {
+  display: block;
+  font-size: 1.35rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
 .event-card__live-body {
   display: grid;
   gap: 1rem;
@@ -1322,6 +1367,19 @@ body {
   gap: 0.55rem;
 }
 
+.event-market-grid--compact {
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  align-items: start;
+}
+
+.event-market-grid--compact .event-market-card .card-body {
+  padding: 0.75rem;
+}
+
+.event-card--active-live .event-card__live-body {
+  gap: 0.75rem;
+}
+
 .event-market-card {
   margin: 0;
   border-color: color-mix(in srgb, var(--border-subtle) 80%, var(--accent) 20%);
@@ -1354,6 +1412,21 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
+}
+
+@media (min-width: 1400px) {
+  .event-card--active-live .event-market-grid--compact {
+    grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  }
+
+  .event-card--active-live .event-market-grid--compact .event-market-card .card-body {
+    padding: 0.6rem;
+  }
+
+  .event-card--active-live .event-market-button {
+    gap: 0.35rem;
+    padding-inline: 0.5rem;
+  }
 }
 
 .slip-boards {

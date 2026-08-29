@@ -1,12 +1,11 @@
 import {
   BetKind,
   LiveMarketStatus,
-  LiveMarketType,
   ModerationDeclineReason,
   SlipStatus,
-  TeamSide,
 } from "@betstan/common";
 import { Schema, Types, model } from "mongoose";
+import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import { SlipPublicationState } from "./SlipPublicationState";
 
 const SLIP_DRAFT_UNIQUE_INDEX_NAME = "slip_draft_unique_by_kind";

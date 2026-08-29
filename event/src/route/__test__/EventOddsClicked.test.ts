@@ -9,9 +9,8 @@ import {
   EventStatus,
   EventVisibility,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
 } from "@betstan/common";
+import { LiveMarketType, TeamSide } from "../../compat/LiveContract";
 import EventOddsSelectedPublisher from "../../messaging/publisher/EventOddsSelectedPublisher";
 import { setAdminSessionVerifierForTests } from "../../service/VerifyAdminSession";
 
@@ -181,7 +180,6 @@ it("rejects a demoted administrator for an offline acceptance event", async () =
 
   expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
 });
-
 it("returns 400 when event not found", async () => {
   await request(app)
     .post("/api/event/odds")
@@ -657,4 +655,190 @@ it("uses public fallback labels for live selections when team names or mappings 
       }),
     }
   );
+});
+
+const createPreKickoffLiveEvent = async (
+  overrides: Partial<Record<string, unknown>> = {}
+) => {
+  const now = Date.now();
+  // Within the 10-minute pre-kickoff live-betting window: kickoff is still
+  // ahead, but the two pre-kickoff markets have already been published.
+  const kickoffAt = new Date(now + 5 * 60 * 1000);
+  return Event.create({
+    eventId: "test-event-id",
+    name: "Team A - Team B",
+    home: "Team A",
+    away: "Team B",
+    time: kickoffAt,
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 0,
+      occurredAt: new Date(now).toISOString(),
+      kickoffAt: kickoffAt.toISOString(),
+      minute: 0,
+      phase: EventPhase.PRE_MATCH,
+      homeScore: 0,
+      awayScore: 0,
+      bettingStatus: BettingStatus.OPEN,
+      incidentHistory: [],
+      currentMarkets: [
+        {
+          marketId: "test-event-id:KICKOFF_TEAM",
+          marketType: LiveMarketType.KICKOFF_TEAM,
+          marketVersion: 1,
+          quoteVersion: 1,
+          quoteValidUntil: kickoffAt.toISOString(),
+          status: LiveMarketStatus.OPEN,
+          selections: [
+            {
+              selectionId: "test-event-id:KICKOFF_TEAM:1:HOME",
+              side: TeamSide.HOME,
+              odds: 1.95,
+            },
+            {
+              selectionId: "test-event-id:KICKOFF_TEAM:1:AWAY",
+              side: TeamSide.AWAY,
+              odds: 1.95,
+            },
+          ],
+        },
+        {
+          marketId: "test-event-id:FIRST_MINUTE_GOAL",
+          marketType: LiveMarketType.FIRST_MINUTE_GOAL,
+          marketVersion: 1,
+          quoteVersion: 1,
+          quoteValidUntil: kickoffAt.toISOString(),
+          status: LiveMarketStatus.OPEN,
+          selections: [
+            {
+              selectionId: "test-event-id:FIRST_MINUTE_GOAL:1:YES",
+              side: TeamSide.YES,
+              odds: 12.5,
+            },
+            {
+              selectionId: "test-event-id:FIRST_MINUTE_GOAL:1:NO",
+              side: TeamSide.NO,
+              odds: 1.05,
+            },
+          ],
+        },
+      ],
+      ...overrides,
+    },
+  });
+};
+
+it.each([
+  [LiveMarketType.KICKOFF_TEAM, "test-event-id:KICKOFF_TEAM", "test-event-id:KICKOFF_TEAM:1:HOME", TeamSide.HOME, "Team A"],
+  [LiveMarketType.KICKOFF_TEAM, "test-event-id:KICKOFF_TEAM", "test-event-id:KICKOFF_TEAM:1:AWAY", TeamSide.AWAY, "Team B"],
+  [LiveMarketType.FIRST_MINUTE_GOAL, "test-event-id:FIRST_MINUTE_GOAL", "test-event-id:FIRST_MINUTE_GOAL:1:YES", TeamSide.YES, "Yes"],
+  [LiveMarketType.FIRST_MINUTE_GOAL, "test-event-id:FIRST_MINUTE_GOAL", "test-event-id:FIRST_MINUTE_GOAL:1:NO", TeamSide.NO, "No"],
+])(
+  "publishes a %s selection (%s) during the pre-kickoff PRE_MATCH phase",
+  async (marketType, marketId, selectionId, side, expectedOddsName) => {
+    await createPreKickoffLiveEvent();
+
+    await request(app)
+      .post("/api/event/odds")
+      .send({
+        eventId: "test-event-id",
+        marketId,
+        marketVersion: 1,
+        quoteVersion: 1,
+        selectionId,
+      })
+      .expect(200);
+
+    expect(EventOddsSelectedPublisher.prototype.publish).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventId: "test-event-id",
+        betKind: BetKind.LIVE,
+        marketId,
+        marketType,
+        marketVersion: 1,
+        quoteVersion: 1,
+        selectionId,
+        side,
+        oddsName: expectedOddsName,
+        productName:
+          marketType === LiveMarketType.KICKOFF_TEAM
+            ? "Kickoff Team"
+            : "Goal In First Minute",
+      }),
+    });
+  }
+);
+
+it("rejects a pre-kickoff market selection once its quote has expired at kickoff", async () => {
+  const now = Date.now();
+  const kickoffAt = new Date(now - 1000);
+  await createPreKickoffLiveEvent({
+    kickoffAt: kickoffAt.toISOString(),
+    currentMarkets: [
+      {
+        marketId: "test-event-id:KICKOFF_TEAM",
+        marketType: LiveMarketType.KICKOFF_TEAM,
+        marketVersion: 1,
+        quoteVersion: 1,
+        quoteValidUntil: kickoffAt.toISOString(),
+        status: LiveMarketStatus.OPEN,
+        selections: [
+          {
+            selectionId: "test-event-id:KICKOFF_TEAM:1:HOME",
+            side: TeamSide.HOME,
+            odds: 1.95,
+          },
+        ],
+      },
+    ],
+  });
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      marketId: "test-event-id:KICKOFF_TEAM",
+      marketVersion: 1,
+      quoteVersion: 1,
+      selectionId: "test-event-id:KICKOFF_TEAM:1:HOME",
+    })
+    .expect(400);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
+});
+
+it("rejects a pre-kickoff market selection once it has closed at kickoff", async () => {
+  await createPreKickoffLiveEvent({
+    currentMarkets: [
+      {
+        marketId: "test-event-id:KICKOFF_TEAM",
+        marketType: LiveMarketType.KICKOFF_TEAM,
+        marketVersion: 1,
+        quoteVersion: 1,
+        status: LiveMarketStatus.SETTLED,
+        selections: [
+          {
+            selectionId: "test-event-id:KICKOFF_TEAM:1:HOME",
+            side: TeamSide.HOME,
+            odds: 1.95,
+          },
+        ],
+      },
+    ],
+  });
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      marketId: "test-event-id:KICKOFF_TEAM",
+      marketVersion: 1,
+      quoteVersion: 1,
+      selectionId: "test-event-id:KICKOFF_TEAM:1:HOME",
+    })
+    .expect(400);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).not.toHaveBeenCalled();
 });
