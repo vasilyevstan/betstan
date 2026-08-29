@@ -713,6 +713,20 @@ jobs:
                 END { if (count != 1) exit 1; print value }
               ' "$resume_images"
             )"
+            deployment="gaming-${service}-depl"
+            actual_ref="$(
+              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}'
+            )"
+            if [ "$actual_ref" != "$expected_ref" ]; then
+              echo "::error::Resume deployment image mismatch for ${service}: expected ${expected_ref}, observed ${actual_ref}"
+              exit 1
+            fi
+          done
+
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+
+          for service in auth backoffice client; do
             expected_manifest="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$4 }
@@ -727,14 +741,6 @@ jobs:
             )"
             deployment="gaming-${service}-depl"
             container="gaming-${service}"
-            actual_ref="$(
-              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
-                -o jsonpath='{.spec.template.spec.containers[0].image}'
-            )"
-            if [ "$actual_ref" != "$expected_ref" ]; then
-              echo "::error::Resume deployment image mismatch for ${service}: expected ${expected_ref}, observed ${actual_ref}"
-              exit 1
-            fi
             kubectl rollout status "deployment/$deployment" \
               -n "$OCI_K8S_NAMESPACE" --timeout=2m >/dev/null
             pods_json="$(
@@ -772,7 +778,7 @@ jobs:
                     ] | unique | join(",")
                   ' <<<"$pods_json"
               )"
-              echo "::error::Resume pod image mismatch for ${service}: expected manifest ${expected_manifest} or ARM64 child ${expected_platform}, observed ${observed_image_ids:-none}"
+              echo "::error::Resume supporting pod image mismatch for ${service}: expected manifest ${expected_manifest} or ARM64 child ${expected_platform}, observed ${observed_image_ids:-none}"
               exit 1
             fi
           done
@@ -864,12 +870,18 @@ jobs:
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
-      - name: Fence writes and quiesce legacy data writers
+      - name: Enter or verify live data maintenance
         id: maintenance_enter
         if: inputs.phase != 'dry-run'
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
-        run: ./infra/oci/scripts/live-data-maintenance-stan.sh enter
+        run: |
+          set -euo pipefail
+          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+            ./infra/oci/scripts/live-data-maintenance-stan.sh enter
+          else
+            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          fi
 
       - name: Delete exact orphaned live-acceptance slips
         if: inputs.failed_activation_run_id != '0'
@@ -909,9 +921,16 @@ jobs:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
+          restore_or_verify_retained_hold() {
+            if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+            else
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+            fi
+          }
           if [[ "$PHASE" == "apply-slip-index" && "$DATA_OUTCOME" == "success" ]]; then
             if ! ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held; then
-              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              restore_or_verify_retained_hold
               exit 1
             fi
             if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
@@ -919,7 +938,7 @@ jobs:
               OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
               SOURCE_SHA="$SOURCE_SHA" \
                 ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify; then
-              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              restore_or_verify_retained_hold
               exit 1
             fi
             if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
@@ -928,11 +947,11 @@ jobs:
               LOCK_LEASE_SECONDS="$SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS" \
               SOURCE_SHA="$SOURCE_SHA" \
                 ./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew; then
-              ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+              restore_or_verify_retained_hold
               exit 1
             fi
           else
-            ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+            restore_or_verify_retained_hold
           fi
 
       - name: Capture post-phase runtime baseline
@@ -976,7 +995,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Restore runtime if final handoff packaging failed
+      - name: Restore runtime or retain hold if final handoff packaging failed
         id: abort_handoff
         if: >-
           always() &&
@@ -985,7 +1004,13 @@ jobs:
           steps.maintenance_enter.outcome == 'success'
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
-        run: ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+        run: |
+          set -euo pipefail
+          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+            ./infra/oci/scripts/live-data-maintenance-stan.sh restore
+          else
+            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          fi
 
       - name: Release database operation lock unless handed to deploy
         if: >-
