@@ -12,6 +12,8 @@ SOURCE_SHA=1111111111111111111111111111111111111111
 BUILD_RUN_ID=2001
 INFRASTRUCTURE_RUN_ID=3001
 
+"$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
+
 mkdir -p "$WORK_PARENT"
 work_dir="$(mktemp -d "$WORK_PARENT/test.XXXXXX")"
 stub_bin="$work_dir/bin"
