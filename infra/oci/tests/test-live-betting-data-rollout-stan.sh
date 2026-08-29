@@ -432,11 +432,13 @@ for literal in \
   'OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv' \
   'expected_manifest=' \
   'endswith("@" + $manifest)' \
-  'Resume pod image mismatch' \
+  'for service in auth backoffice client; do' \
+  'Resume supporting pod image mismatch' \
   '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' \
   '[ "$(baseline_value baseline_recovery_run_id)" = "$BASELINE_RECOVERY_RUN_ID" ]' \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
   'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
+  'restore_or_verify_retained_hold' \
   'Delete exact orphaned live-acceptance slips' \
   'cleanup-live-acceptance-slips-stan.sh' \
   'EXPECTED_AUTH_USER_COUNT=0' \
@@ -503,13 +505,13 @@ require_order(
         "Verify exact failed-deploy resume state",
         "Capture and validate pre-mutation rollback baseline",
         "Acquire database operation lock",
-        "Fence writes and quiesce legacy data writers",
+        "Enter or verify live data maintenance",
         "Delete exact orphaned live-acceptance slips",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
         "shared-mongo-operation-lock-stan.sh renew",
         "Upload exact sanitized data evidence",
-        "Restore runtime if final handoff packaging failed",
+        "Restore runtime or retain hold if final handoff packaging failed",
         "Release database operation lock unless handed to deploy",
     ],
     "data workflow",
@@ -544,6 +546,54 @@ for literal in (
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")
+
+resume = data[
+    data.index("- name: Verify exact failed-deploy resume state"):
+    data.index("- name: Capture and validate pre-mutation rollback baseline")
+]
+require_order(
+    resume,
+    [
+        "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
+        "Resume deployment image mismatch",
+        "live-data-maintenance-stan.sh verify-held",
+        "for service in auth backoffice client; do",
+        "kubectl rollout status",
+        "Resume supporting pod image mismatch",
+    ],
+    "failed-deploy resume",
+)
+if "Resume pod image mismatch" in resume:
+    raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
+
+maintenance = data[
+    data.index("- name: Enter or verify live data maintenance"):
+    data.index("- name: Delete exact orphaned live-acceptance slips")
+]
+for literal in (
+    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then',
+    "live-data-maintenance-stan.sh enter",
+    "live-data-maintenance-stan.sh verify-held",
+):
+    if literal not in maintenance:
+        raise SystemExit(
+            f"data workflow does not preserve failed-deploy maintenance: {literal}"
+        )
+
+abort = data[
+    data.index("- name: Restore runtime or retain hold if final handoff packaging failed"):
+    data.index("- name: Release database operation lock unless handed to deploy")
+]
+for literal in (
+    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then',
+    "live-data-maintenance-stan.sh restore",
+    "live-data-maintenance-stan.sh verify-held",
+):
+    if literal not in abort:
+        raise SystemExit(
+            f"data workflow does not retain a failed-deploy hold on abort: {literal}"
+        )
+
 for literal in (
     "EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ inputs.data_run_id }}-1",
     "EXPECTED_OPERATION_LOCK_ID: live-data-apply-slip-index",
