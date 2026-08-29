@@ -866,6 +866,8 @@ def validate_live_data_rollout_workflow!(file, document, content)
       prerequisite_run_id
       baseline_recovery_run_id
       failed_deploy_run_id
+      failed_activation_run_id
+      failed_activation_user_id
       confirmation
     ]
   )
@@ -884,6 +886,8 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "APPLY LIVE BACKFILLS EXACT SHA" => "backfill confirmation",
     "APPLY LIVE SLIP INDEX EXACT SHA" => "index confirmation",
     "RESUME APPLIED LIVE DATA EXACT SHA" => "failed-deploy resume confirmation",
+    "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" =>
+      "failed-activation cleanup confirmation",
     "oci-production-build.yml" => "exact build provenance",
     "oci-infrastructure.yml" => "exact infrastructure provenance",
     "oci-live-data-rollout.yml" => "phase-chain provenance",
@@ -897,6 +901,11 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "EXPECTED_BASELINE_RECOVERY_RUN_ID" => "recovery authority phase-chain binding",
     "oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1" =>
       "failed-deploy rollback baseline binding",
+    "oci-live-betting-activate.yml" => "failed-activation workflow binding",
+    "oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1" =>
+      "failed-activation artifact binding",
+    "cleanup-live-acceptance-slips-stan.sh" =>
+      "exact synthetic Slip cleanup",
     "git merge-base --is-ancestor" => "applied-data ancestry proof",
     "Application path changed after applied data" =>
       "application-change rejection",
@@ -986,6 +995,8 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
     "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
     "node dist/scripts/SetUserRole.js" => "compiled disposable administrator operator",
+    "cleanup-live-acceptance-slips-stan.sh" =>
+      "disposable account Slip cleanup",
     "node dist/scripts/DeleteUser.js" => "compiled disposable account deletion operator",
     "playwright-live-acceptance.config.js" => "production browser acceptance",
     "service-ops-stan.sh" => "sanitized runtime log inspection"

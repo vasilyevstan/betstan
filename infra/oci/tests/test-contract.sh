@@ -862,8 +862,23 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
 cleanup = text.split(
-    "- name: Revoke and delete disposable validation account", 1
+    "- name: Revoke, clean, and delete disposable validation account", 1
 )[1]
+
+slip_cleanup = cleanup.index(
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh"
+)
+account_delete = cleanup.index("node dist/scripts/DeleteUser.js")
+if slip_cleanup >= account_delete:
+    raise SystemExit("active Slip cleanup must precede Auth account deletion")
+for literal in (
+    'EXPECTED_AUTH_USER_COUNT=1',
+    'ALLOWED_BET_KINDS=LIVE,PRE_MATCH',
+    'MAX_ACTIVE_SLIPS=2',
+    'if [ "$slip_cleanup_succeeded" = "1" ]; then',
+):
+    if literal not in cleanup:
+        raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
     ('"$BASE_URL/api/backoffice/result"', "401"),

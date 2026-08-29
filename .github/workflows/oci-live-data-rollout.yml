@@ -39,6 +39,16 @@ on:
         required: true
         default: "0"
         type: string
+      failed_activation_run_id:
+        description: Failed live activation that left exact synthetic Slip data, or 0
+        required: true
+        default: "0"
+        type: string
+      failed_activation_user_id:
+        description: Exact synthetic user ID from that failed activation, or 0
+        required: true
+        default: "0"
+        type: string
       confirmation:
         description: Type the exact confirmation phrase for the selected phase
         required: true
@@ -67,6 +77,8 @@ jobs:
       PREREQUISITE_RUN_ID: ${{ inputs.prerequisite_run_id }}
       BASELINE_RECOVERY_RUN_ID: ${{ inputs.baseline_recovery_run_id }}
       FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
+      FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}
+      FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
       OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
       OCI_CLI_VERSION: "3.90.0"
@@ -134,24 +146,36 @@ jobs:
              "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$FAILED_DEPLOY_RUN_ID" == "0" ||
              "$FAILED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$FAILED_ACTIVATION_RUN_ID" == "0" ||
+             "$FAILED_ACTIVATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          if [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
+            [ "$FAILED_ACTIVATION_USER_ID" = "0" ]
+          else
+            [[ "$FAILED_ACTIVATION_USER_ID" =~ ^[0-9a-f]{24}$ ]]
+          fi
           case "$PHASE" in
             dry-run)
               [ "$CONFIRMATION" = "DRY RUN LIVE DATA EXACT SHA" ]
               [ "$PREREQUISITE_RUN_ID" = "0" ]
               [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
+              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
               ;;
             apply-backfills)
               [ "$CONFIRMATION" = "APPLY LIVE BACKFILLS EXACT SHA" ]
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
               [ "$FAILED_DEPLOY_RUN_ID" = "0" ]
+              [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
               ;;
             apply-slip-index)
               [[ "$PREREQUISITE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
               if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
                 [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
-              else
+                [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
+              elif [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
                 [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
-                [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]
+              else
+                [ "$CONFIRMATION" = \
+                  "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" ]
               fi
               ;;
             *)
@@ -266,6 +290,38 @@ jobs:
               )"
               [ "$baseline_artifact_count" = "1" ]
               printf 'resume_source_sha=%s\n' "$prerequisite_source_sha" >> "$GITHUB_OUTPUT"
+              if [ "$FAILED_ACTIVATION_RUN_ID" != "0" ]; then
+                activation_workflow_id="$(
+                  gh api "repos/$REPOSITORY/actions/workflows/oci-live-betting-activate.yml" --jq '.id'
+                )"
+                read -r activation_workflow_id_observed activation_path activation_event \
+                  activation_source_sha activation_branch activation_repository \
+                  activation_status activation_conclusion activation_attempt activation_title <<<"$(
+                    gh api \
+                      "repos/$REPOSITORY/actions/runs/$FAILED_ACTIVATION_RUN_ID/attempts/1" \
+                      --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt,.display_title] | @tsv'
+                  )"
+                [ "$activation_workflow_id_observed" = "$activation_workflow_id" ]
+                [ "$activation_path" = ".github/workflows/oci-live-betting-activate.yml" ]
+                [ "$activation_event" = "workflow_dispatch" ]
+                [[ "$activation_source_sha" =~ ^[0-9a-f]{40}$ ]]
+                [ "$activation_branch" = "master" ]
+                [ "$activation_repository" = "$REPOSITORY" ]
+                [ "$activation_status" = "completed" ]
+                [ "$activation_conclusion" = "failure" ]
+                [ "$activation_attempt" = "1" ]
+                [ "$activation_title" = "oci-live-activate $activation_source_sha" ]
+                git cat-file -e "${activation_source_sha}^{commit}"
+                git merge-base --is-ancestor \
+                  "$activation_source_sha" "$prerequisite_source_sha"
+                activation_artifact_name="oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1"
+                activation_artifact_count="$(
+                  gh api \
+                    "repos/$REPOSITORY/actions/runs/$FAILED_ACTIVATION_RUN_ID/artifacts?per_page=100" \
+                    --jq "[.artifacts[] | select(.name == \"$activation_artifact_name\" and .expired == false)] | length"
+                )"
+                [ "$activation_artifact_count" = "1" ]
+              fi
             fi
           fi
 
@@ -643,7 +699,7 @@ jobs:
         if: inputs.failed_deploy_run_id != '0'
         env:
           RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}
-          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha }}
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
         run: |
           set -euo pipefail
           resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
@@ -734,10 +790,31 @@ jobs:
             sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}'
           )"
           [ "$observed_baseline_sha" = "$expected_baseline_sha" ]
+          baseline_value() {
+            local key="$1"
+            awk -F= -v key="$key" '
+              $1 == key {
+                if (found++) exit 1
+                value = substr($0, length(key) + 2)
+              }
+              END {
+                if (found != 1) exit 1
+                print value
+              }
+            ' "$baseline_dir/baseline-provenance.env"
+          }
+          [ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]
+          [ "$(baseline_value baseline_recovery_run_id)" = "$BASELINE_RECOVERY_RUN_ID" ]
+          expected_baseline_source_sha=
+          expected_recovery_run_id=
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
+            expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+          fi
           BASELINE_DIR="$baseline_dir" \
-          EXPECTED_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+          EXPECTED_SOURCE_SHA="$expected_baseline_source_sha" \
           EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
-          EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
+          EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
           REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
             ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
@@ -747,6 +824,7 @@ jobs:
           applied_data_run_id=$PREREQUISITE_RUN_ID
           applied_source_sha=$RESUME_SOURCE_SHA
           failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
           current_source_sha=$SOURCE_SHA
           baseline_sha256=$observed_baseline_sha
           runtime_images_sha256=$(sha256sum "$resume_images" | awk '{print $1}')
@@ -792,6 +870,20 @@ jobs:
         env:
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: ./infra/oci/scripts/live-data-maintenance-stan.sh enter
+
+      - name: Delete exact orphaned live-acceptance slips
+        if: inputs.failed_activation_run_id != '0'
+        env:
+          OUTPUT_FILE: artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-cleanup.json
+        run: |
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          FAILED_ACTIVATION_RUN_ID="$FAILED_ACTIVATION_RUN_ID" \
+          FAILED_ACTIVATION_USER_ID="$FAILED_ACTIVATION_USER_ID" \
+          CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$FAILED_ACTIVATION_RUN_ID:$FAILED_ACTIVATION_USER_ID" \
+          EXPECTED_AUTH_USER_COUNT=0 \
+          ALLOWED_BET_KINDS=LIVE,PRE_MATCH \
+          MAX_ACTIVE_SLIPS=2 \
+            ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh
 
       - name: Execute exact-digest live data phase
         id: data

@@ -12,6 +12,8 @@ SOURCE_SHA=1111111111111111111111111111111111111111
 BUILD_RUN_ID=2001
 INFRASTRUCTURE_RUN_ID=3001
 
+"$ROOT_DIR/infra/oci/tests/test-cleanup-live-acceptance-slips-stan.sh" >/dev/null
+
 mkdir -p "$WORK_PARENT"
 work_dir="$(mktemp -d "$WORK_PARENT/test.XXXXXX")"
 stub_bin="$work_dir/bin"
@@ -398,6 +400,7 @@ for literal in \
   'APPLY LIVE BACKFILLS EXACT SHA' \
   'APPLY LIVE SLIP INDEX EXACT SHA' \
   'RESUME APPLIED LIVE DATA EXACT SHA' \
+  'RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA' \
   'production-run-exclusivity-stan.sh' \
   'shared-mongo-operation-lock-stan.sh acquire' \
   'shared-mongo-operation-lock-stan.sh release' \
@@ -416,7 +419,11 @@ for literal in \
   'Bind historical recovery source through its exact artifact' \
   'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
   'failed_deploy_run_id:' \
+  'failed_activation_run_id:' \
+  'failed_activation_user_id:' \
   'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
+  'oci-live-betting-activate.yml' \
+  'oci-live-activation-${FAILED_ACTIVATION_RUN_ID}-1' \
   'Verify exact failed-deploy resume state' \
   'git merge-base --is-ancestor "$prior_source_sha" "$SOURCE_SHA"' \
   '.github/*|infra/*|*.md' \
@@ -426,6 +433,15 @@ for literal in \
   'expected_manifest=' \
   'endswith("@" + $manifest)' \
   'Resume pod image mismatch' \
+  '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' \
+  '[ "$(baseline_value baseline_recovery_run_id)" = "$BASELINE_RECOVERY_RUN_ID" ]' \
+  'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
+  'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
+  'Delete exact orphaned live-acceptance slips' \
+  'cleanup-live-acceptance-slips-stan.sh' \
+  'EXPECTED_AUTH_USER_COUNT=0' \
+  'ALLOWED_BET_KINDS=LIVE,PRE_MATCH' \
+  'MAX_ACTIVE_SLIPS=2' \
   'runtime_images_sha256=' \
   'application_change_scope=github-infra-docs-only' \
   'validate-rollback-baseline-stan.sh' \
@@ -488,6 +504,7 @@ require_order(
         "Capture and validate pre-mutation rollback baseline",
         "Acquire database operation lock",
         "Fence writes and quiesce legacy data writers",
+        "Delete exact orphaned live-acceptance slips",
         "Execute exact-digest live data phase",
         "Restore runtime or verify final deploy handoff",
         "shared-mongo-operation-lock-stan.sh renew",
@@ -518,8 +535,12 @@ for literal in (
     "SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}",
     "OPERATION_LOCK_HANDOFF: ${{ inputs.phase == 'apply-slip-index' }}",
     "FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}",
+    "FAILED_ACTIVATION_RUN_ID: ${{ inputs.failed_activation_run_id }}",
+    "FAILED_ACTIVATION_USER_ID: ${{ inputs.failed_activation_user_id }}",
     "if: inputs.failed_deploy_run_id != '0'",
+    "if: inputs.failed_activation_run_id != '0'",
     "failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID",
+    "failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID",
 ):
     if literal not in data:
         raise SystemExit(f"data workflow is missing lock handoff contract: {literal}")
