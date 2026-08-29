@@ -57,7 +57,7 @@ jobs:
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       LIVE_ACTIVATION_LEASE_SECONDS: "1800"
       LIVE_ACCEPTANCE_USERNAME: betstan-e2e
-      LIVE_ACCEPTANCE_PASSWORD: test1234
+      LIVE_ACCEPTANCE_PASSWORD: test1234 # Non-secret dedicated E2E credential.
 
     steps:
       - name: Initialize isolated OCI paths

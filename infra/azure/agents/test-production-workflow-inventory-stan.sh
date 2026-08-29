@@ -1167,16 +1167,26 @@ sed -i.bak 's#node dist/scripts/SetUserRole.js#node missing/SetUserRole.js#g' \
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
   "activation without compiled role operator" \
-  "is missing compiled disposable administrator operator"
+  "is missing compiled reusable administrator operator"
 
 reset_fixtures
 write_complete_oci_set
-sed -i.bak 's#node dist/scripts/DeleteUser.js#node missing/DeleteUser.js#' \
+sed -i.bak 's#LIVE_ACCEPTANCE_USERNAME: betstan-e2e#LIVE_ACCEPTANCE_USERNAME: live-e2e-${GITHUB_RUN_ID}#' \
   "$tmp_dir/oci-live-betting-activate.yml"
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
-  "activation without compiled deletion operator" \
-  "is missing compiled disposable account deletion operator"
+  "activation without dedicated reusable account" \
+  "is missing dedicated reusable validation account"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/cleanup-live-acceptance-slips-stan.sh/a\
+              node dist/scripts/DeleteUser.js' \
+  "$tmp_dir/oci-live-betting-activate.yml"
+rm "$tmp_dir/oci-live-betting-activate.yml.bak"
+assert_fail \
+  "activation deleting reusable account" \
+  "must retain the reusable validation account"
 
 reset_fixtures
 write_complete_oci_set
