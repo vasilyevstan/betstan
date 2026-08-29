@@ -328,6 +328,24 @@ class ModerationService {
       markets?: MirrorMarket[];
     } | null;
 
+    if (before === null && data.phase !== EventPhase.FULL_TIME) {
+      // This is the very first live projection moderation has ever
+      // observed for this event -- proof gamemaster is genuinely
+      // live-simulating it now. A genuine final result is only ever
+      // published once the match's own live pipeline has already produced
+      // at least one update, so any existing `Resulted` tombstone for this
+      // event id at this exact moment can only be the "result arrived
+      // before any live projection" race (mirroring event service's own
+      // `EventResultListener`/`applyLiveEventUpdate` reconciliation).
+      // Reversing it here keeps countdown/live bets on this event from
+      // being permanently declined for the rest of the match. Deleting a
+      // document that does not exist is a no-op, so this stays safe and
+      // idempotent whether or not a `Resulted` row was ever created, and
+      // whether or not this specific message ultimately wins the "current"
+      // mirror race below.
+      await Resulted.deleteOne({ eventId: data.eventId });
+    }
+
     let historyChanged = false;
 
     if (

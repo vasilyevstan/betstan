@@ -231,6 +231,23 @@ const eventSchema = new Schema({
     required: false,
     enum: Object.values(EventVisibility),
   },
+  liveRaceResultedAt: {
+    // Explicit provenance for the "result arrived before any live
+    // projection" race: stamped only by `EventResultListener` when it
+    // forces an event OFFLINE purely because `storedEvent.live` was still
+    // falsy *and* no explicit admin/backoffice visibility decision
+    // (`visibilityInitialized: true`) already governs this event. This is
+    // the only signal `applyLiveEventUpdate`'s resurrection branch may
+    // rely on to auto-restore ONLINE/NO_RESULT: an intentionally OFFLINE
+    // admin/acceptance-gated fixture never gets this marker set, so it
+    // stays OFFLINE and admin-gated even if it is later (re)resulted or
+    // unexpectedly receives a live update. Additive/optional; absent/null
+    // on all pre-existing events and consumed (reset to null) the moment
+    // resurrection applies it.
+    type: Date,
+    required: false,
+    default: null,
+  },
   liveRetiredAt: {
     // Retention tombstone: set only when the T-10 PRE_MATCH handoff for a
     // newer event intentionally retires an older retained live full-time

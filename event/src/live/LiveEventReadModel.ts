@@ -697,9 +697,27 @@ export const listPublicEvents = async (
           ],
         }
       : { visibility: { $ne: EventVisibility.OFFLINE } };
+  // The single currently-retained finished (FULL_TIME) event's *only*
+  // eligibility rule is the `liveRetiredAt` tombstone stamped by the next
+  // event's own accepted T-10 PRE_MATCH handoff (see `applyLiveEventUpdate`)
+  // -- never the generic kickoff-`time` history bound above, which would
+  // otherwise silently drop it once its scheduled kickoff falls outside
+  // `historyMinutes` even though nothing has retired it yet. Retention
+  // guarantees at most one ONLINE, untombstoned FULL_TIME event exists at
+  // any moment, so this clause stays inherently bounded to that single row
+  // and a retired card (tombstoned, flipped OFFLINE) can never leak back
+  // in through it.
+  const retainedFinishedFilter = {
+    visibility: EventVisibility.ONLINE,
+    "live.phase": EventPhase.FULL_TIME,
+    liveRetiredAt: null,
+  };
+
   const events = await Event.find({
-    time: { $gte: lowerBound, $lte: upperBound },
-    ...visibilityFilter,
+    $or: [
+      { time: { $gte: lowerBound, $lte: upperBound }, ...visibilityFilter },
+      retainedFinishedFilter,
+    ],
   }).lean();
 
   return events
@@ -765,33 +783,49 @@ export const applyLiveEventUpdate = async (
 
   if (accepted) {
     const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
+    const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
 
     if (
       currentRecord.visibility === EventVisibility.OFFLINE &&
       currentRecord.status === EventStatus.RESULTED &&
+      isRaceResulted &&
       !wasIntentionallyRetired
     ) {
-      // Provenance-aware resurrection: within this service, `status` is
-      // only ever set to RESULTED by `EventResultListener`, which is also
-      // the only path that forces an event OFFLINE purely because
-      // `storedEvent.live` was still falsy at the time (either an
-      // ordinary never-live event, or -- since independent queues give
-      // no cross-service ordering guarantee -- a result that raced ahead
-      // of this event's very first live projection). Gating on
-      // `status === RESULTED` avoids resurrecting the *other* OFFLINE
-      // case: a brand-new event discovered only through the live
-      // pipeline itself, which intentionally defaults OFFLINE
-      // (`visibilityInitialized: false`) pending its own separate
-      // onboarding/visibility decision. Since this is a genuine, accepted
-      // live update for the same event, and it was never *intentionally*
-      // retired by a newer event's PRE_MATCH handoff (no tombstone),
-      // restore visibility so the live/eventually-FULL_TIME event is not
-      // permanently hidden.
+      // Provenance-aware resurrection, gated on the explicit
+      // `liveRaceResultedAt` marker `EventResultListener` stamps only for
+      // the genuine "result arrived before any live projection" race
+      // (never for an intentionally OFFLINE admin/acceptance-gated
+      // fixture, which is never marked and so can never reach this
+      // branch -- it stays OFFLINE and admin-gated regardless of any
+      // live update). Since this is a genuine, accepted live update for
+      // the same event, and it was never *intentionally* retired by a
+      // newer event's PRE_MATCH handoff (no tombstone), restore
+      // visibility so the live/eventually-FULL_TIME event is not
+      // permanently hidden, consume the marker (reset to null so it can
+      // never re-fire or linger stale), and -- unless this very update is
+      // already the match's own FULL_TIME conclusion, which is a genuine
+      // final result and must be preserved as-is -- reverse the
+      // premature `status` back to NO_RESULT so the event is not treated
+      // as resulted while it is actually about to be/being live-played.
+      // The live pipeline (or its own later `EVENT_RESULT`) sets the real
+      // final status when the match genuinely concludes.
+      const restoreUpdate: UnknownRecord = {
+        visibility: EventVisibility.ONLINE,
+        liveRaceResultedAt: null,
+      };
+      if (event.data.phase !== EventPhase.FULL_TIME) {
+        restoreUpdate.status = EventStatus.NO_RESULT;
+      }
+
       await Event.updateOne(
         { eventId: event.data.eventId },
-        { $set: { visibility: EventVisibility.ONLINE } }
+        { $set: restoreUpdate }
       );
       currentRecord.visibility = EventVisibility.ONLINE;
+      currentRecord.liveRaceResultedAt = null;
+      if (restoreUpdate.status) {
+        currentRecord.status = restoreUpdate.status;
+      }
     }
 
     if (event.data.phase === EventPhase.PRE_MATCH) {
@@ -839,4 +873,3 @@ export const applyLiveEventUpdate = async (
 
   return createPublicEventSnapshot(currentRecord);
 };
-

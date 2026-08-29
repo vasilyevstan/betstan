@@ -66,6 +66,40 @@ it("marks event as resulted and offline when EventResult arrives", async () => {
   const updatedEvent = await Event.findOne({ eventId });
   expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
   expect(updatedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  // No explicit admin/backoffice visibility decision governs this ordinary
+  // event, so the race-provenance marker is stamped, making it eligible
+  // for `applyLiveEventUpdate`'s auto-restoration if it later goes live.
+  expect(updatedEvent!.liveRaceResultedAt).toBeTruthy();
+});
+
+it("does not stamp the race-provenance marker when an explicit admin/backoffice visibility decision already governs the event", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId,
+    name: "A - B",
+    time: new Date(),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.OFFLINE,
+    visibilityInitialized: true,
+    products: [],
+  });
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+
+  const event: IEventResultEvent = {
+    timestamp: new Date().toISOString(),
+    data: { eventId, homeScore: 2, awayScore: 0, home: "A", away: "B" },
+  };
+
+  await listener.onMessage(event, buildMessage());
+
+  const updatedEvent = await Event.findOne({ eventId });
+  expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(updatedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  // Admin/acceptance-gated OFFLINE, not a race artifact -- must never be
+  // auto-restored later, so no marker is stamped.
+  expect(updatedEvent!.liveRaceResultedAt ?? null).toBeNull();
 });
 
 it("retains a live-simulated event ONLINE with its full-time snapshot when EventResult arrives", async () => {
