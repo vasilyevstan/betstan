@@ -31,15 +31,21 @@ a checkpoint, a next-check trigger, and a stop condition. Keep those references
 in private session handoffs, not repository files or public reports.
 
 The conductor monitors completion events and bounded checkpoints rather than
-tight-polling. Recent tool/log/job progress means active work; an environment
-approval wait is external progress, not a hang, but it is an immediate
-actionable gate. For every dispatched run and state transition, the conductor
-checks jobs plus `pending_deployments`. It immediately hands a documented,
-preauthorized approval to the orchestrator, or names the human approval owner
-and blocks; it never leaves the gate until a later routine checkpoint. One
-missed checkpoint is a suspected stall. Two missed checkpoints require an
-explicit safe recovery action. Never replace a slow unit until the original is
-terminal or cancelled and overlapping side effects are impossible.
+tight-polling. A still-running `gh run watch` is notification transport, not
+evidence of progress, and may not outlive the registered checkpoint without an
+independent jobs and `pending_deployments` inspection. A user asking for status
+or whether work is stuck triggers that checkpoint immediately.
+
+Recent tool/log/job progress means active work; an environment approval wait is
+external progress, not a hang, but it is an immediate actionable gate. A
+terminal job followed by a downstream `waiting` job with no executing step must
+be classified before waiting again. For every dispatched run and state
+transition, the conductor checks jobs plus `pending_deployments`. It immediately
+hands a documented, preauthorized approval to the orchestrator, or names the
+human approval owner and blocks; it never leaves the gate until a later routine
+checkpoint. One missed checkpoint is a suspected stall. Two missed checkpoints
+require an explicit safe recovery action. Never replace a slow unit until the
+original is terminal or cancelled and overlapping side effects are impossible.
 
 A failed release run whose consumers require `run_attempt == 1` is terminal;
 rerunning it cannot create valid provenance. The conductor inspects the failed
