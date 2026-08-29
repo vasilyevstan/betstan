@@ -21,17 +21,12 @@ import { Event } from "../../model/Event";
 //      *accepted* update (one that actually won the sequence race), and
 //      must only ever retire events strictly older (by scheduled kickoff
 //      time) than the event whose PRE_MATCH just landed.
-//   2. A result event that races ahead of an event's very first live
-//      projection (independent queues give no ordering guarantee) must
-//      not permanently hide it: the next accepted live update restores
-//      visibility and status consistently, unless the event carries the
-//      permanent `liveRetiredAt` tombstone written by an intentional
-//      PRE_MATCH handoff retirement.
-//   3. Only the genuine result-before-live race (marked by the explicit
-//      `liveRaceResultedAt` provenance field) is ever auto-restored --
-//      an intentionally OFFLINE admin/acceptance-gated fixture must stay
-//      OFFLINE and admin-gated even if it is later resulted or receives
-//      an unexpected live update.
+//   2. A result event that races ahead of live projections remains terminal:
+//      delayed non-FULL_TIME updates may fill history but stay hidden, and
+//      only the matching FULL_TIME projection restores the retained card.
+//   3. Explicit OFFLINE intent is persisted independently from transient
+//      runtime visibility, so neither pending nor completed admin decisions
+//      can be overridden by delayed live updates.
 //   4. The single currently-retained finished (FULL_TIME) event must keep
 //      showing in `listPublicEvents` regardless of how long ago its
 //      scheduled kickoff was, until it is actually retired (tombstoned).
@@ -80,6 +75,31 @@ const buildPreMatchLiveUpdate = (
       homeScore: 0,
       awayScore: 0,
       bettingStatus: BettingStatus.OPEN,
+      incidents: [],
+      markets: [],
+      settlements: [],
+      home: "Team C",
+      away: "Team D",
+    },
+  } as unknown as ILiveEventUpdateEvent);
+
+const buildFullTimeLiveUpdate = (
+  eventId: string,
+  kickoffAt: string,
+  sequence = 180
+): ILiveEventUpdateEvent =>
+  ({
+    timestamp: new Date().toISOString(),
+    data: {
+      eventId,
+      sequence,
+      occurredAt: new Date(Date.parse(kickoffAt) + 105 * 60_000).toISOString(),
+      kickoffAt,
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 1,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
       incidents: [],
       markets: [],
       settlements: [],
@@ -204,7 +224,7 @@ it("only retires events strictly older (by scheduled kickoff time) than the even
   expect(retainedLater?.liveRetiredAt ?? null).toBeNull();
 });
 
-it("restores visibility to ONLINE and reverses the premature status to NO_RESULT when an accepted non-FULL_TIME live update arrives after a result-before-live race set it OFFLINE", async () => {
+it("keeps a terminal result hidden through delayed non-FULL_TIME updates and restores only its FULL_TIME projection", async () => {
   const eventId = "result-before-live";
   await Event.create({
     eventId,
@@ -232,25 +252,36 @@ it("restores visibility to ONLINE and reverses the premature status to NO_RESULT
   expect(afterResult?.live).toBeFalsy();
   expect(afterResult?.liveRaceResultedAt).toBeTruthy();
 
-  // The live pipeline's own opening snapshot then lands (independently
-  // published, arriving after the result in this ordering).
+  // An earlier live snapshot arrives late on its independent queue.
   await applyLiveEventUpdate(
     buildPreMatchLiveUpdate(eventId, "2030-01-01T12:00:00.000Z", 0)
   );
 
-  const afterLive = await Event.findOne({ eventId }).lean();
-  expect(afterLive?.visibility).toEqual(EventVisibility.ONLINE);
-  expect(afterLive?.live?.phase).toEqual(EventPhase.PRE_MATCH);
-  // The premature RESULTED status must be reversed consistently with
-  // visibility -- otherwise the event stays permanently (and incorrectly)
-  // treated as resulted while it is actually about to be live-played.
-  expect(afterLive?.status).toEqual(EventStatus.NO_RESULT);
-  // The race marker is consumed exactly once so it can never re-fire or
-  // linger stale.
-  expect(afterLive?.liveRaceResultedAt ?? null).toBeNull();
+  const afterDelayedLive = await Event.findOne({ eventId }).lean();
+  expect(afterDelayedLive?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(afterDelayedLive?.live?.phase).toEqual(EventPhase.PRE_MATCH);
+  expect(afterDelayedLive?.status).toEqual(EventStatus.RESULTED);
+  expect(afterDelayedLive?.liveRaceResultedAt).toBeTruthy();
 
-  const listed = await listPublicEvents(new Date("2030-01-01T12:05:00.000Z"));
-  expect(listed.map((entry) => entry.eventId)).toContain(eventId);
+  const beforeFullTime = await listPublicEvents(
+    new Date("2030-01-01T12:05:00.000Z")
+  );
+  expect(beforeFullTime.map((entry) => entry.eventId)).not.toContain(eventId);
+
+  await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  const afterFullTime = await Event.findOne({ eventId }).lean();
+  expect(afterFullTime?.visibility).toEqual(EventVisibility.ONLINE);
+  expect(afterFullTime?.live?.phase).toEqual(EventPhase.FULL_TIME);
+  expect(afterFullTime?.status).toEqual(EventStatus.RESULTED);
+  expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
+
+  const afterFullTimeList = await listPublicEvents(
+    new Date("2030-01-01T13:46:00.000Z")
+  );
+  expect(afterFullTimeList.map((entry) => entry.eventId)).toContain(eventId);
 });
 
 it("keeps status RESULTED when the very first accepted live update after a result-before-live race is already FULL_TIME", async () => {
@@ -341,6 +372,7 @@ it("never auto-restores an intentionally OFFLINE admin/acceptance-gated fixture 
   const onboarded = await Event.findOne({ eventId }).lean();
   expect(onboarded?.visibility).toEqual(EventVisibility.OFFLINE);
   expect(onboarded?.visibilityInitialized).toBe(true);
+  expect(onboarded?.visibilityDecision).toEqual(EventVisibility.OFFLINE);
 
   const listener = new EventResultListener(messengerWrapper.connection);
   await listener.init();
@@ -403,9 +435,61 @@ it("refuses to auto-restore when a currently explicit pending OFFLINE visibility
   expect(afterLive?.liveRaceResultedAt).toBeTruthy();
 });
 
-it("still auto-restores when a currently pending ONLINE visibility decision governs the event -- a pending ONLINE is never a reason to refuse", async () => {
-  // A pending ONLINE decision is not a deliberate hide -- it must never
-  // block resurrection the way a pending OFFLINE decision does.
+it("keeps a completed OFFLINE decision authoritative after it supersedes an earlier result-race marker", async () => {
+  const eventId = "race-then-completed-offline-decision";
+  await Event.create({
+    eventId,
+    name: "Race Then Completed Offline Decision",
+    time: new Date("2030-01-01T12:00:00.000Z"),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    visibilityInitialized: true,
+    eventMetadataInitialized: true,
+    products: [],
+  });
+
+  const resultListener = new EventResultListener(messengerWrapper.connection);
+  await resultListener.init();
+  await resultListener.onMessage(
+    {
+      timestamp: new Date().toISOString(),
+      data: { eventId, homeScore: 1, awayScore: 0, home: "Team C", away: "Team D" },
+    },
+    buildMessage()
+  );
+
+  const visibilityListener = new EventVisibilityListener(
+    messengerWrapper.connection
+  );
+  await visibilityListener.init();
+  await visibilityListener.onMessage(
+    {
+      timestamp: new Date().toISOString(),
+      data: { eventId, visibility: EventVisibility.OFFLINE },
+    },
+    buildMessage()
+  );
+
+  const afterVisibility = await Event.findOne({ eventId }).lean();
+  expect(afterVisibility?.pendingVisibility).toBeUndefined();
+  expect(afterVisibility?.visibilityDecision).toEqual(EventVisibility.OFFLINE);
+  expect(afterVisibility?.liveRaceResultedAt).toBeTruthy();
+
+  await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate(eventId, "2030-01-01T12:00:00.000Z", 0)
+  );
+  await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  const afterFullTime = await Event.findOne({ eventId }).lean();
+  expect(afterFullTime?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(afterFullTime?.status).toEqual(EventStatus.RESULTED);
+  expect(afterFullTime?.live?.phase).toEqual(EventPhase.FULL_TIME);
+  expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
+});
+
+it("keeps a pending ONLINE result hidden until FULL_TIME, then restores the retained card without reopening the result", async () => {
   const eventId = "race-then-pending-online-decision";
   await Event.create({
     eventId,
@@ -422,19 +506,22 @@ it("still auto-restores when a currently pending ONLINE visibility decision gove
     buildPreMatchLiveUpdate(eventId, "2030-01-01T12:00:00.000Z", 0)
   );
 
-  const afterLive = await Event.findOne({ eventId }).lean();
-  expect(afterLive?.visibility).toEqual(EventVisibility.ONLINE);
-  expect(afterLive?.status).toEqual(EventStatus.NO_RESULT);
-  expect(afterLive?.liveRaceResultedAt ?? null).toBeNull();
+  const afterDelayedLive = await Event.findOne({ eventId }).lean();
+  expect(afterDelayedLive?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(afterDelayedLive?.status).toEqual(EventStatus.RESULTED);
+  expect(afterDelayedLive?.liveRaceResultedAt).toBeTruthy();
+
+  await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  const afterFullTime = await Event.findOne({ eventId }).lean();
+  expect(afterFullTime?.visibility).toEqual(EventVisibility.ONLINE);
+  expect(afterFullTime?.status).toEqual(EventStatus.RESULTED);
+  expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
 });
 
-it("recovers status even when NewEventListener has already restored visibility to ONLINE ahead of the live update (EventVisibility(ONLINE) -> EventResult -> NewEvent -> live update)", async () => {
-  // Regression: the exact real-world listener ordering that previously
-  // left an event permanently stuck RESULTED. `NewEventListener`'s own
-  // pending-visibility finalization already fixes `visibility` back to
-  // ONLINE before the live update ever arrives, so the resurrection
-  // branch must repair `status` on its own merit rather than requiring
-  // `visibility` to still be OFFLINE.
+it("re-hides a delayed non-terminal update after NewEvent restored visibility, then exposes only FULL_TIME", async () => {
   const eventId = "visibility-online-result-newevent-live-ordering";
 
   const visibilityListener = new EventVisibilityListener(
@@ -486,8 +573,6 @@ it("recovers status even when NewEventListener has already restored visibility t
   );
 
   const afterNewEvent = await Event.findOne({ eventId }).lean();
-  // NewEventListener's own finalization already fixed visibility, but
-  // status is still incorrectly stuck RESULTED at this point.
   expect(afterNewEvent?.visibility).toEqual(EventVisibility.ONLINE);
   expect(afterNewEvent?.status).toEqual(EventStatus.RESULTED);
   expect(afterNewEvent?.liveRaceResultedAt).toBeTruthy();
@@ -496,13 +581,24 @@ it("recovers status even when NewEventListener has already restored visibility t
     buildPreMatchLiveUpdate(eventId, "2030-01-01T12:00:00.000Z", 0)
   );
 
-  const afterLive = await Event.findOne({ eventId }).lean();
-  expect(afterLive?.visibility).toEqual(EventVisibility.ONLINE);
-  expect(afterLive?.status).toEqual(EventStatus.NO_RESULT);
-  expect(afterLive?.liveRaceResultedAt ?? null).toBeNull();
+  const afterDelayedLive = await Event.findOne({ eventId }).lean();
+  expect(afterDelayedLive?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(afterDelayedLive?.status).toEqual(EventStatus.RESULTED);
+  expect(afterDelayedLive?.liveRaceResultedAt).toBeTruthy();
 
-  const listed = await listPublicEvents(new Date("2030-01-01T11:55:00.000Z"));
-  expect(listed.map((entry) => entry.eventId)).toContain(eventId);
+  const beforeFullTime = await listPublicEvents(
+    new Date("2030-01-01T11:55:00.000Z")
+  );
+  expect(beforeFullTime.map((entry) => entry.eventId)).not.toContain(eventId);
+
+  await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  const afterFullTime = await Event.findOne({ eventId }).lean();
+  expect(afterFullTime?.visibility).toEqual(EventVisibility.ONLINE);
+  expect(afterFullTime?.status).toEqual(EventStatus.RESULTED);
+  expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
 });
 
 it("keeps a retained finished event visible past the kickoff-time history bound until it is actually retired", async () => {

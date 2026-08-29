@@ -231,19 +231,22 @@ const eventSchema = new Schema({
     required: false,
     enum: Object.values(EventVisibility),
   },
+  visibilityDecision: {
+    // Last explicit backoffice visibility intent, retained after a pending
+    // decision is applied. Runtime result/retention transitions may change
+    // `visibility`, so that current value alone cannot distinguish an
+    // intentional OFFLINE event from a temporary fail-dark state.
+    type: String,
+    required: false,
+    enum: Object.values(EventVisibility),
+  },
   liveRaceResultedAt: {
-    // Explicit provenance for the "result arrived before any live
-    // projection" race: stamped only by `EventResultListener` when it
-    // forces an event OFFLINE purely because `storedEvent.live` was still
-    // falsy *and* no explicit admin/backoffice visibility decision
-    // (`visibilityInitialized: true`) already governs this event. This is
-    // the only signal `applyLiveEventUpdate`'s resurrection branch may
-    // rely on to auto-restore ONLINE/NO_RESULT: an intentionally OFFLINE
-    // admin/acceptance-gated fixture never gets this marker set, so it
-    // stays OFFLINE and admin-gated even if it is later (re)resulted or
-    // unexpectedly receives a live update. Additive/optional; absent/null
-    // on all pre-existing events and consumed (reset to null) the moment
-    // resurrection applies it.
+    // Explicit provenance for the result/live-queue race: stamped by
+    // `EventResultListener` when a terminal result arrives before its
+    // FULL_TIME projection. Delayed non-terminal snapshots must never
+    // reverse that result; the marker is consumed only when the matching
+    // FULL_TIME projection arrives. Additive/optional and absent/null on
+    // pre-existing events.
     type: Date,
     required: false,
     default: null,

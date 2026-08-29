@@ -784,69 +784,44 @@ export const applyLiveEventUpdate = async (
   if (accepted) {
     const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
     const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
-    // Defense in depth: refuse restoration if a currently explicit
-    // *OFFLINE* decision now governs this event. `pendingVisibility` is set
-    // only by `EventVisibilityListener` (an independent admin/backoffice
-    // action, never by this code path), so a value of OFFLINE here proves a
-    // fresh, deliberate hide decision is actively in flight for this exact
-    // event since the race marker was stamped -- resurrection must defer to
-    // it rather than silently overriding it. A pending value of ONLINE is
-    // not a reason to refuse: it is the normal fail-dark onboarding
-    // ordering (see `EventResultListener`) and this event still needs its
-    // `status` repaired regardless.
+    // A completed visibility decision is retained separately from the
+    // mutable runtime visibility. `pendingVisibility` covers the same intent
+    // while metadata onboarding is still in flight.
     const hasCurrentOfflineIntent =
-      currentRecord.pendingVisibility === EventVisibility.OFFLINE;
+      currentRecord.visibilityDecision === EventVisibility.OFFLINE
+      || currentRecord.pendingVisibility === EventVisibility.OFFLINE;
 
     if (
       currentRecord.status === EventStatus.RESULTED &&
       isRaceResulted &&
-      !wasIntentionallyRetired &&
-      !hasCurrentOfflineIntent
+      !wasIntentionallyRetired
     ) {
-      // Provenance-aware resurrection, gated on the explicit
-      // `liveRaceResultedAt` marker `EventResultListener` stamps only for
-      // the genuine "result arrived before any live projection" race
-      // (never for an intentionally OFFLINE admin/acceptance-gated
-      // fixture, which is never marked and so can never reach this
-      // branch -- it stays OFFLINE and admin-gated regardless of any
-      // live update). Since this is a genuine, accepted live update for
-      // the same event, and it was never *intentionally* retired by a
-      // newer event's PRE_MATCH handoff (no tombstone), consume the
-      // marker (reset to null so it can never re-fire or linger stale)
-      // and -- unless this very update is already the match's own
-      // FULL_TIME conclusion, which is a genuine final result and must be
-      // preserved as-is -- reverse the premature `status` back to
-      // NO_RESULT so the event is not treated as resulted while it is
-      // actually about to be/being live-played. The live pipeline (or its
-      // own later `EVENT_RESULT`) sets the real final status when the
-      // match genuinely concludes. `visibility` only needs restoring here
-      // if it is still OFFLINE: the ordinary "result raced ahead of live"
-      // case leaves it OFFLINE, but the fail-dark-onboarding ordering
-      // (`EventVisibility(ONLINE)` -> `EventResult` -> `NewEvent` -> live
-      // update) can have already restored it to ONLINE via
-      // `NewEventListener`'s own pending-visibility finalization before
-      // this live update ever arrives -- only `status` is then left to
-      // repair.
-      const restoreUpdate: UnknownRecord = {
-        liveRaceResultedAt: null,
-      };
-      if (currentRecord.visibility === EventVisibility.OFFLINE) {
-        restoreUpdate.visibility = EventVisibility.ONLINE;
-      }
-      if (event.data.phase !== EventPhase.FULL_TIME) {
-        restoreUpdate.status = EventStatus.NO_RESULT;
-      }
+      // EVENT_RESULT is terminal domain authority even when it wins the
+      // queue race. Earlier live snapshots may still fill bounded history,
+      // but they cannot reopen or publicly resurrect the event. Only the
+      // matching FULL_TIME projection completes the retained-card view.
+      if (event.data.phase === EventPhase.FULL_TIME) {
+        const finalProjectionUpdate: UnknownRecord = {
+          liveRaceResultedAt: null,
+        };
+        if (!hasCurrentOfflineIntent) {
+          finalProjectionUpdate.visibility = EventVisibility.ONLINE;
+        }
 
-      await Event.updateOne(
-        { eventId: event.data.eventId },
-        { $set: restoreUpdate }
-      );
-      if (restoreUpdate.visibility) {
-        currentRecord.visibility = restoreUpdate.visibility;
-      }
-      currentRecord.liveRaceResultedAt = null;
-      if (restoreUpdate.status) {
-        currentRecord.status = restoreUpdate.status;
+        await Event.updateOne(
+          { eventId: event.data.eventId },
+          { $set: finalProjectionUpdate }
+        );
+        currentRecord.liveRaceResultedAt = null;
+        if (finalProjectionUpdate.visibility) {
+          currentRecord.visibility = finalProjectionUpdate.visibility;
+        }
+      } else if (currentRecord.visibility !== EventVisibility.OFFLINE) {
+        await Event.updateOne(
+          { eventId: event.data.eventId },
+          { $set: { visibility: EventVisibility.OFFLINE } }
+        );
+        currentRecord.visibility = EventVisibility.OFFLINE;
       }
     }
 

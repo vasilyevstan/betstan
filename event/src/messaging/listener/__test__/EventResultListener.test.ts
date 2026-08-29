@@ -141,6 +141,7 @@ it("does not stamp the race-provenance marker for an event explicitly onboarded 
   const onboarded = await Event.findOne({ eventId });
   expect(onboarded!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(onboarded!.get("visibilityInitialized")).toBe(true);
+  expect(onboarded!.get("visibilityDecision")).toEqual(EventVisibility.OFFLINE);
 
   const resultListener = new EventResultListener(messengerWrapper.connection);
   await resultListener.init();
@@ -181,6 +182,7 @@ it("stamps the race-provenance marker for the normal fail-dark ONLINE onboarding
   expect(pending!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(pending!.get("visibilityInitialized")).toBe(false);
   expect(pending!.get("pendingVisibility")).toEqual(EventVisibility.ONLINE);
+  expect(pending!.get("visibilityDecision")).toEqual(EventVisibility.ONLINE);
 
   const resultListener = new EventResultListener(messengerWrapper.connection);
   await resultListener.init();
@@ -215,6 +217,7 @@ it("does not stamp the race-provenance marker when a pending OFFLINE visibility 
   expect(pending!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(pending!.get("visibilityInitialized")).toBe(false);
   expect(pending!.get("pendingVisibility")).toEqual(EventVisibility.OFFLINE);
+  expect(pending!.get("visibilityDecision")).toEqual(EventVisibility.OFFLINE);
 
   const resultListener = new EventResultListener(messengerWrapper.connection);
   await resultListener.init();
@@ -258,6 +261,39 @@ it("retains a live-simulated event ONLINE with its full-time snapshot when Event
   expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
   expect(updatedEvent!.visibility).toEqual(EventVisibility.ONLINE);
   expect(updatedEvent!.live?.phase).toEqual(EventPhase.FULL_TIME);
+});
+
+it("hides a resulted event whose latest live projection is still non-terminal", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId,
+    name: "A - B",
+    time: new Date(),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 12,
+      occurredAt: new Date().toISOString(),
+      kickoffAt: new Date().toISOString(),
+      minute: 45,
+      phase: EventPhase.HALF_TIME,
+      homeScore: 1,
+      awayScore: 0,
+      bettingStatus: BettingStatus.SUSPENDED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  await listener.onMessage(buildResultEvent(eventId), buildMessage());
+
+  const updatedEvent = await Event.findOne({ eventId });
+  expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(updatedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(updatedEvent!.liveRaceResultedAt).toBeTruthy();
 });
 
 it("acks without error when event is not found", async () => {

@@ -782,17 +782,12 @@ it("still declines EVENT_RESULTED even when a perfectly valid historical quote e
   expect(savedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
 });
 
-it("reverses a premature EVENT_RESULTED decline once the event's very first live projection lands with a non-FULL_TIME phase", async () => {
-  // Regression: a result that races ahead of an event's very first live
-  // projection (independent queues give no cross-service ordering
-  // guarantee -- mirroring event service's own `EventResultListener`/
-  // `applyLiveEventUpdate` reconciliation) must not permanently decline
-  // countdown/live bets on that event for the rest of the match.
+it("never deletes the terminal Resulted guard when delayed live projections arrive afterward", async () => {
   const service = new ModerationService(createPublisher());
   const eventId = new mongoose.Types.ObjectId().toHexString();
 
-  // The premature result arrives before moderation has ever observed any
-  // live projection for this event.
+  // EVENT_RESULT wins its queue race before moderation observes any live
+  // projection. It is still terminal domain authority.
   await Resulted.create({ eventId, timestamp: new Date().toISOString() });
 
   const decliningPlaceBet = createLivePlaceBetEvent(
@@ -804,12 +799,7 @@ it("reverses a premature EVENT_RESULTED decline once the event's very first live
   expect(declinedBet!.status).toEqual(ModerationStatus.DECLINED);
   expect(declinedBet!.declineReason).toEqual(ModerationDeclineReason.EVENT_RESULTED);
 
-  // The live pipeline's own opening in-play snapshot then lands -- the
-  // very first live projection moderation has ever seen for this event,
-  // proving the earlier result was the race, not a genuine final. (Phase
-  // FIRST_HALF here keeps this test scoped purely to the Resulted-guard
-  // reversal, independent of the separate PRE_MATCH-phase market-type
-  // eligibility gate covered elsewhere.)
+  // Earlier live snapshots then arrive late on the independent queue.
   const openMarket = createLiveMarket(eventId, {
     marketVersion: 1,
     quoteVersion: 1,
@@ -824,15 +814,27 @@ it("reverses a premature EVENT_RESULTED decline once the event's very first live
       markets: [openMarket],
     })
   );
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 180,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [],
+    })
+  );
 
-  expect(await Resulted.findOne({ eventId }).lean()).toBeNull();
+  expect(await Resulted.findOne({ eventId }).lean()).not.toBeNull();
 
-  const approvedPlaceBet = createLivePlaceBetEvent(openMarket, {
+  const laterPlaceBet = createLivePlaceBetEvent(openMarket, {
     data: { submittedAt: new Date().toISOString() },
   });
-  await service.handlePlaceBet(approvedPlaceBet);
-  const approvedBet = await Bet.findOne({ slipId: approvedPlaceBet.data.slipId });
-  expect(approvedBet!.status).toEqual(ModerationStatus.APPROVED);
+  await service.handlePlaceBet(laterPlaceBet);
+  const laterBet = await Bet.findOne({ slipId: laterPlaceBet.data.slipId });
+  expect(laterBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(laterBet!.declineReason).toEqual(
+    ModerationDeclineReason.EVENT_RESULTED
+  );
 });
 
 it("keeps declining EVENT_RESULTED when the very first live projection ever observed for the event is already FULL_TIME", async () => {

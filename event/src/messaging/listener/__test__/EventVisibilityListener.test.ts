@@ -66,6 +66,7 @@ it("marks event as offline when visibility OFFLINE arrives", async () => {
   const updated = await Event.findOne({ eventId });
   expect(updated!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(updated!.get("visibilityInitialized")).toBe(true);
+  expect(updated!.get("visibilityDecision")).toEqual(EventVisibility.OFFLINE);
 });
 
 it("marks event as online when visibility ONLINE arrives", async () => {
@@ -85,6 +86,7 @@ it("marks event as online when visibility ONLINE arrives", async () => {
   const updated = await Event.findOne({ eventId });
   expect(updated!.visibility).toEqual(EventVisibility.ONLINE);
   expect(updated!.get("visibilityInitialized")).toBe(true);
+  expect(updated!.get("visibilityDecision")).toEqual(EventVisibility.ONLINE);
 });
 
 it("stores a fail-dark pending visibility when event metadata has not arrived", async () => {
@@ -107,6 +109,7 @@ it("stores a fail-dark pending visibility when event metadata has not arrived", 
   expect(events[0].eventId).toEqual(eventId);
   expect(events[0].visibility).toEqual(EventVisibility.OFFLINE);
   expect(events[0].get("pendingVisibility")).toEqual(EventVisibility.ONLINE);
+  expect(events[0].get("visibilityDecision")).toEqual(EventVisibility.ONLINE);
   expect(events[0].get("visibilityInitialized")).toBe(false);
   expect(events[0].get("eventMetadataInitialized")).toBe(false);
 });
@@ -131,5 +134,8 @@ it("retries the pending decision after a duplicate-key upsert race", async () =>
   const storedEvent = await Event.findOne({ eventId });
   expect(storedEvent!.visibility).toEqual(EventVisibility.OFFLINE);
   expect(storedEvent!.get("pendingVisibility")).toBeUndefined();
+  expect(storedEvent!.get("visibilityDecision")).toEqual(
+    EventVisibility.OFFLINE
+  );
   expect((listener as any).channel.ack).toHaveBeenCalledTimes(1);
 });
