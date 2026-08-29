@@ -466,7 +466,7 @@ jobs:
             ./client/node_modules/.bin/playwright test \
               --config infra/oci/agents/playwright-live-acceptance.config.js
 
-      - name: Revoke and delete disposable validation account
+      - name: Revoke, clean, and delete disposable validation account
         if: always() && steps.account.outcome == 'success'
         env:
           BASE_URL: ${{ steps.provenance.outputs.public_url }}
@@ -483,15 +483,31 @@ jobs:
                 node dist/scripts/SetUserRole.js; then
             cleanup_failed=1
           fi
-          if ! kubectl exec -n "$OCI_K8S_NAMESPACE" \
-              deployment/gaming-auth-depl \
-              -c gaming-auth -- \
-              env \
-                "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
-                "USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME" \
-                "USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME" \
-                node dist/scripts/DeleteUser.js; then
+          slip_cleanup_succeeded=0
+          if NAMESPACE="$OCI_K8S_NAMESPACE" \
+              FAILED_ACTIVATION_RUN_ID="$GITHUB_RUN_ID" \
+              FAILED_ACTIVATION_USER_ID="$LIVE_ACCEPTANCE_USER_ID" \
+              CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$GITHUB_RUN_ID:$LIVE_ACCEPTANCE_USER_ID" \
+              EXPECTED_AUTH_USER_COUNT=1 \
+              ALLOWED_BET_KINDS=LIVE,PRE_MATCH \
+              MAX_ACTIVE_SLIPS=2 \
+              OUTPUT_FILE=artifacts/live-control/cleanup/active-slips.json \
+              ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh; then
+            slip_cleanup_succeeded=1
+          else
             cleanup_failed=1
+          fi
+          if [ "$slip_cleanup_succeeded" = "1" ]; then
+            if ! kubectl exec -n "$OCI_K8S_NAMESPACE" \
+                deployment/gaming-auth-depl \
+                -c gaming-auth -- \
+                env \
+                  "USER_ID=$LIVE_ACCEPTANCE_USER_ID" \
+                  "USER_EMAIL=$LIVE_ACCEPTANCE_USERNAME" \
+                  "USER_DELETE_CONFIRMATION=DELETE_USER:$LIVE_ACCEPTANCE_USER_ID:$LIVE_ACCEPTANCE_USERNAME" \
+                  node dist/scripts/DeleteUser.js; then
+              cleanup_failed=1
+            fi
           fi
           if [ -s "$LIVE_ACCEPTANCE_COOKIE_JAR" ]; then
             if status="$(

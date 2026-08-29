@@ -702,6 +702,24 @@ assert_fail "live data rollout without failed-deploy selector" \
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
+  '/^      failed_activation_run_id:/,/^        type: string$/d' \
+  "$tmp_dir/oci-live-data-rollout.yml"
+rm "$tmp_dir/oci-live-data-rollout.yml.bak"
+assert_fail "live data rollout without failed-activation selector" \
+  "oci-live-data-rollout must expose exactly these workflow_dispatch inputs"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^      failed_activation_user_id:/,/^        type: string$/d' \
+  "$tmp_dir/oci-live-data-rollout.yml"
+rm "$tmp_dir/oci-live-data-rollout.yml.bak"
+assert_fail "live data rollout without failed-activation user binding" \
+  "oci-live-data-rollout must expose exactly these workflow_dispatch inputs"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
   '/^      resume_recovery_run_id:/,/^        type: string$/d' \
   "$tmp_dir/oci-ghcr-cache-recovery.yml"
 rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
