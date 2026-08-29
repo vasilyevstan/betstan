@@ -19,6 +19,7 @@ const STRUCTURAL_INCIDENTS = [
 const TERMINAL_BET_STATUSES = ['WIN', 'LOSS', 'VOID'];
 const LIVE_FIXTURE_KICKOFF_DELAY_SECONDS = 90;
 const EXPECTED_LIVE_SETTLEMENT_ROWS = 2;
+const MAX_LIVE_PLACEMENT_ATTEMPTS = 5;
 const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([
   'Live quote is stale',
   'Market version mismatch',
@@ -86,18 +87,24 @@ const selectLiveMarket = async ({
     await selection.click();
     const response = await responsePromise;
     if (response.ok()) {
+      const acceptedQuote = response.request().postDataJSON();
       await expect.poll(async () => {
         const boardsResponse = await page.request.get('/api/slip/boards');
         expect(boardsResponse.ok()).toBeTruthy();
         const boards = await boardsResponse.json();
         return boards.LIVE?.rows?.some((row) => (
-          row.eventId === fixture.eventId && row.marketId === marketId
+          row.eventId === fixture.eventId
+          && row.marketId === marketId
+          && row.marketVersion === acceptedQuote.marketVersion
+          && row.quoteVersion === acceptedQuote.quoteVersion
+          && row.selectionId === acceptedQuote.selectionId
+          && !row.moderation
         )) ?? false;
       }, {
         timeout: 10000,
         intervals: [250, 500, 1000],
       }).toBe(true);
-      return;
+      return acceptedQuote;
     }
 
     const errorMessage = await responseErrorMessage(response);
@@ -327,44 +334,89 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
   await liveBoard.getByRole('button', { name: 'CLEAN' }).click();
   await expect(liveBoard.locator('.slip-row-card')).toHaveCount(0);
-  await selectLiveMarket({
-    fixture: fixtures[0],
-    marketIndex: 0,
-    page,
-  });
-  await selectLiveMarket({
-    fixture: fixtures[1],
-    marketIndex: 0,
-    page,
-  });
-  await selectLiveMarket({
-    fixture: fixtures[1],
-    marketIndex: 0,
-    page,
-  });
-  await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
-    EXPECTED_LIVE_SETTLEMENT_ROWS,
-    { timeout: 10000 },
-  );
+  const declinedLiveSlipIds = [];
+  let liveSlipId;
+  let acceptedLiveBet;
 
-  await page.getByLabel('Wager for LIVE SLIP').fill('5');
-  const boardsBeforeLiveSubmit = await (
-    await page.request.get('/api/slip/boards')
-  ).json();
-  const liveSlipId = boardsBeforeLiveSubmit.LIVE._id;
-  await liveBoard.getByRole('button', { name: 'BET!' }).click();
+  for (
+    let placementAttempt = 1;
+    placementAttempt <= MAX_LIVE_PLACEMENT_ATTEMPTS;
+    placementAttempt += 1
+  ) {
+    for (const fixture of fixtures.slice(0, 2)) {
+      await selectLiveMarket({
+        fixture,
+        marketIndex: 0,
+        page,
+      });
+    }
+
+    // Reselect the last row so the UI refresh follows both confirmed writes.
+    await selectLiveMarket({
+      fixture: fixtures[1],
+      marketIndex: 0,
+      page,
+    });
+    await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
+      EXPECTED_LIVE_SETTLEMENT_ROWS,
+      { timeout: 10000 },
+    );
+
+    await page.getByLabel('Wager for LIVE SLIP').fill('5');
+    const boardsBeforeLiveSubmit = await (
+      await page.request.get('/api/slip/boards')
+    ).json();
+    liveSlipId = boardsBeforeLiveSubmit.LIVE._id;
+
+    const placementResponsePromise = page.waitForResponse((response) => (
+      new URL(response.url()).pathname === '/api/slip/bet'
+      && response.request().method() === 'POST'
+    ));
+    await liveBoard.getByRole('button', { name: 'BET!' }).click();
+    const placementResponse = await placementResponsePromise;
+    expect(placementResponse.ok()).toBeTruthy();
+
+    await expect.poll(async () => {
+      const bets = await (await page.request.get('/api/bet')).json();
+      return findBySlipId(bets, liveSlipId)?.status;
+    }, {
+      timeout: 30000,
+      intervals: [500, 1000, 2000],
+    }).toMatch(/^(CONFIRMED|WIN|LOSS|VOID|DECLINED)$/);
+
+    const submittedBets = await (await page.request.get('/api/bet')).json();
+    const submittedLiveBet = findBySlipId(submittedBets, liveSlipId);
+    expect(submittedLiveBet).toBeDefined();
+
+    if (submittedLiveBet.status !== 'DECLINED') {
+      acceptedLiveBet = submittedLiveBet;
+      break;
+    }
+
+    expect(submittedLiveBet.declineReason).toBe('STALE_QUOTE');
+    expect(
+      submittedLiveBet.rows.some((row) => row.declineReason === 'STALE_QUOTE'),
+    ).toBe(true);
+    declinedLiveSlipIds.push(liveSlipId);
+
+    await expect.poll(async () => {
+      const boards = await (await page.request.get('/api/slip/boards')).json();
+      const restoredLiveBoard = boards.LIVE;
+      return restoredLiveBoard
+        ? `${restoredLiveBoard.status}:${restoredLiveBoard.sourceSlipId}`
+        : 'missing';
+    }, {
+      timeout: 30000,
+      intervals: [500, 1000, 2000],
+    }).toBe(`DRAFT:${liveSlipId}`);
+  }
+
+  expect(acceptedLiveBet).toBeDefined();
+  expect(liveSlipId).toBeDefined();
 
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toHaveValue('10');
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toBeEnabled();
   await expect(preMatchBoard.getByRole('button', { name: 'BET!' })).toBeEnabled();
-
-  await expect.poll(async () => {
-    const bets = await (await page.request.get('/api/bet')).json();
-    return findBySlipId(bets, liveSlipId)?.status;
-  }, {
-    timeout: 30000,
-    intervals: [500, 1000, 2000],
-  }).toMatch(/^(CONFIRMED|WIN|LOSS|VOID)$/);
 
   await expect.poll(async () => {
     const events = await (await page.request.get('/api/backoffice')).json();
@@ -529,6 +581,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     runId,
     events: eventEvidence,
     liveSlipId,
+    declinedLiveSlipIds,
     liveBetStatus: liveBet.status,
     liveRowStatuses: liveBet.rows.map((row) => row.status),
     preMatchSlipId,

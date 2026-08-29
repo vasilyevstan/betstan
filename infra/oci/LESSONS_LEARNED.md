@@ -169,10 +169,14 @@ conversation summaries are not authority.
 - Live acceptance must not mistake a moving quote for lost slip persistence.
   Start synthetic concurrent fixtures together, assert every odds response,
   retry only exact stale-quote/version races after the rendered quote advances,
-  and confirm each event-scoped market row through the boards API. Exercise all
-  products on the draft, then submit a fresh quote rather than an intentionally
-  stale ten-row accumulator; never weaken server-side quote validation to make
-  acceptance pass.
+  and confirm the accepted market version, quote version, and selection reached
+  the boards API. Row existence alone is not confirmation because a duplicate
+  reselection may still be in flight while the previous row is visible. Exercise
+  all products on the draft, then submit fresh quotes rather than an
+  intentionally stale ten-row accumulator. If a material update wins the final
+  submit race, require the exact `STALE_QUOTE` decline, wait for the replacement
+  draft, reselect, and retry with a small bound; never weaken server-side quote
+  validation to make acceptance pass.
 - Post-deletion login checks must preserve the public authentication contract:
   unknown credentials return `400`, while a deleted account's previously
   authenticated administrator session returns `401`. Cleanup assertions must
