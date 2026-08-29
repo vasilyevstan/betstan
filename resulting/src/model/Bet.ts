@@ -1,11 +1,13 @@
 import {
   BetKind,
-  LiveMarketType,
-  LiveSettlementReason,
   ResultingStatus,
-  TeamSide,
 } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import {
+  LiveMarketType,
+  LiveSettlementReason,
+  TeamSide,
+} from "../compat/LiveContract";
 
 const rowSchema = new Schema({
   id: {

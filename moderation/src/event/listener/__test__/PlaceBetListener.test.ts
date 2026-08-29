@@ -3,12 +3,14 @@ import {
   BetKind,
   EventPhase,
   LiveMarketStatus,
-  LiveMarketType,
   ModerationDeclineReason,
   ModerationStatus,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
+import {
+  LiveMarketType,
+  TeamSide,
+} from "../../../compat/LiveContract";
 import { Bet } from "../../../model/Bet";
 import { LiveEventMirror } from "../../../model/LiveEventMirror";
 import { Resulted } from "../../../model/Resulted";

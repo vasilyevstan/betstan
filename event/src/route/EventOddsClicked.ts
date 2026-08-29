@@ -7,10 +7,9 @@ import {
   EventPhase,
   EventVisibility,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
+import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import EventOddsSelectedPublisher from "../messaging/publisher/EventOddsSelectedPublisher";
 import { verifyAdminRequest } from "../service/VerifyAdminSession";
 

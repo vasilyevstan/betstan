@@ -8,12 +8,11 @@ import {
   IModerationResultEvent,
   IPlaceBetEvent,
   LiveMarketStatus,
-  LiveMarketType,
   ModerationDeclineReason,
   ModerationStatus,
   SlipRow,
-  TeamSide,
 } from "@betstan/common";
+import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 import { Bet } from "../model/Bet";
 import { LiveEventMirror } from "../model/LiveEventMirror";
 import { ParkedPlaceBet, ParkedPlaceBetStatus } from "../model/ParkedPlaceBet";

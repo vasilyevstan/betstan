@@ -3,12 +3,14 @@ import {
   EventPhase,
   EventStatus,
   EventVisibility,
-  LiveIncidentType,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
 } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import {
+  LiveIncidentType,
+  LiveMarketType,
+  TeamSide,
+} from "../compat/LiveContract";
 
 const liveIncidentSchema = new Schema(
   {

@@ -5,11 +5,7 @@ import {
   EventStatus,
   IEventResultEvent,
   ILiveEventUpdateEvent,
-  LiveIncidentType,
   LiveMarketStatus,
-  LiveMarketType,
-  LiveSettlementReason,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
 
@@ -20,9 +16,13 @@ import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { LiveResultSource } from "../model/liveStateFields";
 import {
   buildPreKickoffMarkets,
+  LiveIncidentType,
+  LiveMarketType,
+  LiveSettlementReason,
   SimulationResult,
   SimulationTransition,
   simulateMatch,
+  TeamSide,
 } from "../simulation";
 import { createLiveSeed, isPrivateLiveSeed } from "../simulation/liveSeed";
 
@@ -42,9 +42,36 @@ const MAX_SIMULATION_FAILURES = 3;
 
 type TimerHandle = unknown;
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
+type LiveUpdateMarket = ILiveEventUpdateEvent["data"]["markets"][number];
+type LiveUpdateSettlement =
+  ILiveEventUpdateEvent["data"]["settlements"][number];
 type LiveUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
 };
+
+function asPublishedIncidentType(
+  value: LiveIncidentType
+): LiveUpdateIncident["type"] {
+  return value as unknown as LiveUpdateIncident["type"];
+}
+
+function asPublishedMarketType(
+  value: LiveMarketType
+): LiveUpdateMarket["marketType"] {
+  return value as unknown as LiveUpdateMarket["marketType"];
+}
+
+function asPublishedTeamSide(
+  value: TeamSide
+): LiveUpdateMarket["selections"][number]["side"] {
+  return value as unknown as LiveUpdateMarket["selections"][number]["side"];
+}
+
+function asPublishedSettlementReason(
+  value: LiveSettlementReason
+): LiveUpdateSettlement["settlementReason"] {
+  return value as unknown as LiveUpdateSettlement["settlementReason"];
+}
 
 export interface WorkerClock {
   now(): Date;
@@ -196,8 +223,11 @@ function buildPublishedIncident(
   return {
     id: transition.incident.id,
     relatedIncidentId: transition.incident.linkedIncidentId,
-    type: transition.incident.type as LiveIncidentType,
-    side: transition.incident.side as TeamSide | undefined,
+    type: asPublishedIncidentType(transition.incident.type),
+    side:
+      transition.incident.side === undefined
+        ? undefined
+        : asPublishedTeamSide(transition.incident.side),
     occurredAt: occurredAtIso,
     minute: transition.minute,
     addedTime: transition.addedTime,
@@ -817,7 +847,7 @@ export class GamemasterWorker {
       incidents: this.buildCumulativeIncidents(event, transition.sequence, incident),
       markets: transition.markets.map((market) => ({
         marketId: market.marketId,
-        marketType: market.marketType as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["marketType"],
+        marketType: asPublishedMarketType(market.marketType),
         marketVersion: market.marketVersion,
         quoteVersion: market.quoteVersion,
         quoteValidUntil:
@@ -827,18 +857,18 @@ export class GamemasterWorker {
         status: market.status as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["status"],
         selections: market.selections.map((selection) => ({
           selectionId: selection.selectionId,
-          side: selection.side as unknown as TeamSide,
+          side: asPublishedTeamSide(selection.side),
           odds: selection.odds,
         })),
       })),
       settlements: transition.settlements.map((settlement) => ({
         marketId: settlement.marketId,
         marketVersion: settlement.marketVersion,
-        settlementReason:
-          settlement.settlementReason as unknown as ILiveEventUpdateEvent["data"]["settlements"][number]["settlementReason"],
+        settlementReason: asPublishedSettlementReason(
+          settlement.settlementReason
+        ),
         settlementSequence: settlement.settlementSequence,
-        winningSide:
-          settlement.winningSide as unknown as TeamSide,
+        winningSide: asPublishedTeamSide(settlement.winningSide),
         winningSelection: settlement.winningSelection,
       })),
       eventName: event.name,
@@ -1032,7 +1062,7 @@ export class GamemasterWorker {
     const occurredAt = asDate(pending?.requestedAt ?? this.clock.now());
     const incident: LiveUpdateIncident = {
       id: `manual-full-time-${sequence}`,
-      type: LiveIncidentType.FULL_TIME,
+      type: asPublishedIncidentType(LiveIncidentType.FULL_TIME),
       occurredAt: occurredAt.toISOString(),
       minute: 90,
     };
@@ -1051,9 +1081,11 @@ export class GamemasterWorker {
       .map((market) => ({
         marketId: market.marketId,
         marketVersion: market.marketVersion,
-        settlementReason: LiveSettlementReason.MANUAL_VOID,
+        settlementReason: asPublishedSettlementReason(
+          LiveSettlementReason.MANUAL_VOID
+        ),
         settlementSequence: sequence,
-        winningSide: TeamSide.NONE,
+        winningSide: asPublishedTeamSide(TeamSide.NONE),
       }));
     const data: LiveUpdateData = {
       eventId: event.eventId,

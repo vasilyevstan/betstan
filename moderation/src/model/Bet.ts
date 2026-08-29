@@ -1,12 +1,11 @@
 import {
   BetKind,
   LiveMarketStatus,
-  LiveMarketType,
   ModerationDeclineReason,
   ModerationStatus,
-  TeamSide,
 } from "@betstan/common";
 import { Schema, model } from "mongoose";
+import { LiveMarketType, TeamSide } from "../compat/LiveContract";
 
 const affectedRowSchema = new Schema(
   {

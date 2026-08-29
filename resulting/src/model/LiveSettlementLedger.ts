@@ -1,9 +1,9 @@
+import { Schema, model } from "mongoose";
 import {
   LiveMarketType,
   LiveSettlementReason,
   TeamSide,
-} from "@betstan/common";
-import { Schema, model } from "mongoose";
+} from "../compat/LiveContract";
 
 const liveSettlementLedgerSchema = new Schema({
   eventId: {

@@ -9,9 +9,8 @@ import {
   EventStatus,
   EventVisibility,
   LiveMarketStatus,
-  LiveMarketType,
-  TeamSide,
 } from "@betstan/common";
+import { LiveMarketType, TeamSide } from "../../compat/LiveContract";
 import EventOddsSelectedPublisher from "../../messaging/publisher/EventOddsSelectedPublisher";
 import { setAdminSessionVerifierForTests } from "../../service/VerifyAdminSession";
 
