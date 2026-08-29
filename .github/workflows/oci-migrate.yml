@@ -1529,6 +1529,7 @@ jobs:
           OCI_PUBLIC_URL: ${{ needs.migrate.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ needs.migrate.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ needs.migrate.outputs.diagnostic_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
           OCI_EXPECT_HTTP_MUTATION_FENCE: "0"
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           MAX_LOOPS: "3"

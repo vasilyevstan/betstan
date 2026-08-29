@@ -996,8 +996,8 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
     "LIVE_ACCEPTANCE_USERNAME: betstan-e2e" =>
       "dedicated reusable validation account",
-    "LIVE_ACCEPTANCE_PASSWORD: test1234" =>
-      "stable non-secret validation credential",
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' =>
+      "protected reusable-account credential",
     "Resolve reusable validation account" => "login-or-create account resolution",
     "node dist/scripts/SetUserRole.js" => "compiled reusable administrator operator",
     "cleanup-live-acceptance-slips-stan.sh" =>
@@ -1013,6 +1013,20 @@ def validate_live_betting_activation_workflow!(file, document, content)
       content,
       /#{Regexp.escape(literal)}/,
       "#{name} is missing #{label}"
+    )
+  end
+
+  credential_binding =
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}'
+  unless content.scan(credential_binding).length == 4
+    fail_inventory(
+      "#{name} must scope the protected reusable-account credential to four exact steps"
+    )
+  end
+  job_env = document.dig("jobs", "activate-and-validate", "env")
+  if job_env.is_a?(Hash) && job_env.key?("LIVE_ACCEPTANCE_PASSWORD")
+    fail_inventory(
+      "#{name} must not expose the reusable-account credential at job scope"
     )
   end
 

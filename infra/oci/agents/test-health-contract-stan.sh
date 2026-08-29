@@ -299,6 +299,9 @@ set -euo pipefail
 printf 'playwright-ran\n' >> "${STUB_PLAYWRIGHT_LOG:?}"
 printf 'legacy-admin-ui=%s\n' "${OCI_ALLOW_LEGACY_ADMIN_UI:?}" \
   >> "${STUB_PLAYWRIGHT_LOG:?}"
+printf 'acceptance-password-present=%s\n' \
+  "$([[ -n "${LIVE_ACCEPTANCE_PASSWORD:-}" ]] && printf 1 || printf 0)" \
+  >> "${STUB_PLAYWRIGHT_LOG:?}"
 STUB
 chmod +x "$WORK_DIR/bin/playwright"
 : > "$WORK_DIR/playwright.log"
@@ -324,6 +327,7 @@ OCI_PUBLIC_URL=https://betstan.xyz \
 OCI_REDIRECT_URL=https://www.betstan.xyz \
 OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
 OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
+LIVE_ACCEPTANCE_PASSWORD=test-fixture \
 MAX_LOOPS=1 \
 SLEEP_SECONDS=1 \
 OUTPUT_DIR="$WORK_DIR/public-only" \
@@ -333,6 +337,8 @@ grep -Fq 'playwright-ran' "$WORK_DIR/playwright.log" ||
   { echo "public-only validation skipped browser checks" >&2; exit 1; }
 grep -Fq 'legacy-admin-ui=0' "$WORK_DIR/playwright.log" ||
   { echo "public validation did not default to strict admin UI checks" >&2; exit 1; }
+grep -Fq 'acceptance-password-present=1' "$WORK_DIR/playwright.log" ||
+  { echo "public validation did not pass the acceptance credential" >&2; exit 1; }
 : > "$WORK_DIR/playwright.log"
 PATH="$WORK_DIR/bin:$PATH" \
 PLAYWRIGHT_BIN="$WORK_DIR/bin/playwright" \
@@ -342,6 +348,7 @@ OCI_REDIRECT_URL=https://www.betstan.xyz \
 OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
 OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
 OCI_ALLOW_LEGACY_ADMIN_UI=1 \
+LIVE_ACCEPTANCE_PASSWORD=test-fixture \
 MAX_LOOPS=1 \
 SLEEP_SECONDS=1 \
 OUTPUT_DIR="$WORK_DIR/legacy-public" \
@@ -349,6 +356,20 @@ OUTPUT_DIR="$WORK_DIR/legacy-public" \
   grep -q 'oci_validation_loop=PASS'
 grep -Fq 'legacy-admin-ui=1' "$WORK_DIR/playwright.log" ||
   { echo "historical recovery UI control did not reach browser checks" >&2; exit 1; }
+
+if PATH="$WORK_DIR/bin:$PATH" \
+    PLAYWRIGHT_BIN="$WORK_DIR/bin/playwright" \
+    STUB_PLAYWRIGHT_LOG="$WORK_DIR/playwright.log" \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OCI_CLUSTER_CHECKS_ALREADY_PASSED=1 \
+    MAX_LOOPS=1 \
+    SLEEP_SECONDS=1 \
+      "$OCI_DIR/agents/validation-loop-stan.sh" >/dev/null 2>&1; then
+  echo "validation loop accepted browser checks without an acceptance credential" >&2
+  exit 1
+fi
 
 if OCI_PUBLIC_URL=https://betstan.xyz \
     OCI_REDIRECT_URL=https://www.betstan.xyz \
@@ -373,4 +394,4 @@ if OCI_ALLOW_LEGACY_ADMIN_UI=unexpected \
   exit 1
 fi
 
-echo "oci_health_fixture_contract=PASS scenarios=42"
+echo "oci_health_fixture_contract=PASS scenarios=43"

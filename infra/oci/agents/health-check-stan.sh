@@ -22,6 +22,8 @@ OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 OCI_EXPECTED_SOURCE_SHA="${OCI_EXPECTED_SOURCE_SHA:-}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
+live_acceptance_password="${LIVE_ACCEPTANCE_PASSWORD:-}"
+unset LIVE_ACCEPTANCE_PASSWORD
 OCI_MEMORY_MAX_PERCENT="${OCI_MEMORY_MAX_PERCENT:-70}"
 OCI_DISK_MAX_PERCENT="${OCI_DISK_MAX_PERCENT:-70}"
 OCI_CPU_MAX_PERCENT="${OCI_CPU_MAX_PERCENT:-90}"
@@ -33,6 +35,8 @@ oci_require_command python3
 oci_require_vars \
   INFRA_PROVENANCE_FILE IMAGE_PROVENANCE_FILE OCI_PUBLIC_URL OCI_REDIRECT_URL \
   OCI_DIAGNOSTIC_URL OCI_EXPECTED_SOURCE_SHA
+[[ "${OCI_E2E_ALREADY_PASSED:-0}" == "1" || -n "$live_acceptance_password" ]] ||
+  oci_die "LIVE_ACCEPTANCE_PASSWORD is required for browser checks"
 [[ "$OCI_EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "OCI_EXPECTED_SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$INFRA_PROVENANCE_FILE" && -f "$IMAGE_PROVENANCE_FILE" ]] ||
@@ -111,6 +115,7 @@ else
     NODE_PATH="$ROOT_DIR/client/node_modules" \
     E2E_BASE_URL="$OCI_PUBLIC_URL" \
     OCI_E2E_OUTPUT_DIR="$WORK_DIR/e2e" \
+    LIVE_ACCEPTANCE_PASSWORD="$live_acceptance_password" \
       "$playwright" test --config "$OCI_DIR/agents/playwright.config.js"
   ) >/dev/null 2>&1; then
     e2e_ok=true

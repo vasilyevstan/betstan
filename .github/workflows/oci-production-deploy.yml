@@ -727,6 +727,7 @@ jobs:
           OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
           OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
           MAX_LOOPS: "3"
           SLEEP_SECONDS: "20"

@@ -30,8 +30,14 @@ node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
 node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
 grep -Fq "'betstan-e2e'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not reuse the dedicated E2E account"
-grep -Fq "'test1234'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
-  fail "OCI browser check does not use the stable non-secret E2E password"
+grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not require the protected E2E credential"
+! grep -Fq "'test1234'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check exposes the reusable account password"
+! grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD ||' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check still has a source credential fallback"
 grep -Fq "page.request.post('/api/auth/login'" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not resolve the reusable account by login"
@@ -854,6 +860,7 @@ migrate_workflow="$ROOT_DIR/.github/workflows/oci-migrate.yml"
 activation_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml"
 disable_workflow="$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml"
 recovery_workflow="$ROOT_DIR/.github/workflows/oci-migration-recovery.yml"
+ghcr_recovery_workflow="$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml"
 validate_workflow="$ROOT_DIR/.github/workflows/oci-validate.yml"
 grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
   fail "OCI deployment validation omits the image-prefix inventory contract"
@@ -929,10 +936,25 @@ grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow"
   fail "live activation account cleanup does not run after acceptance failure"
 grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e' "$activation_workflow" ||
   fail "live activation does not reuse the dedicated E2E account"
-grep -Fq 'LIVE_ACCEPTANCE_PASSWORD: test1234' "$activation_workflow" ||
-  fail "live activation does not use the stable non-secret E2E password"
+[[ "$(grep -Fc \
+  'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
+  "$activation_workflow")" == "4" ]] ||
+  fail "live activation does not scope the protected E2E credential to four steps"
 ! grep -Fq 'node dist/scripts/DeleteUser.js' "$activation_workflow" ||
   fail "live activation still deletes the reusable E2E account"
+for workflow in \
+  "$deploy_workflow" "$migrate_workflow" "$ghcr_recovery_workflow"; do
+  [[ "$(grep -Fc \
+    'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
+    "$workflow")" == "1" ]] ||
+    fail "OCI browser validation lacks the protected E2E credential: $workflow"
+done
+for script in \
+  "$OCI_DIR/agents/validation-loop-stan.sh" \
+  "$OCI_DIR/agents/health-check-stan.sh"; do
+  grep -Fq 'unset LIVE_ACCEPTANCE_PASSWORD' "$script" ||
+    fail "OCI browser validation leaks the E2E credential to unrelated commands: $script"
+done
 if ! python3 - "$activation_workflow" <<'PY'
 import re
 import sys
@@ -959,6 +981,7 @@ if "openssl rand" in account:
 for literal in (
     'username="$LIVE_ACCEPTANCE_USERNAME"',
     'password="$LIVE_ACCEPTANCE_PASSWORD"',
+    '[ -n "$password" ]',
     '[ "$status" = "200" ]',
     '[ "$status" = "201" ]',
 ):
@@ -1052,7 +1075,13 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   [[ -n "$next_job_line" ]] || next_job_line=$(( $(wc -l <"$workflow") + 1 ))
   public_secrets="$(
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
-      grep -c 'secrets\.' || true
+      awk '
+        /secrets\./ &&
+        !/LIVE_ACCEPTANCE_PASSWORD:.*secrets\.LIVE_ACCEPTANCE_PASSWORD/ {
+          count += 1
+        }
+        END { print count + 0 }
+      '
   )"
   public_cloud_credentials="$(
     sed -n "${public_job_line},$((next_job_line - 1))p" "$workflow" |
@@ -1062,7 +1091,7 @@ for workflow in "$deploy_workflow" "$migrate_workflow"; do
   )"
   [[ -n "$public_job_line" && "$public_secrets" == "0" &&
       "$public_cloud_credentials" == "0" ]] ||
-    fail "public validation shares a job with cloud credentials: $(basename "$workflow")"
+    fail "public validation receives cloud or unreviewed credentials: $(basename "$workflow")"
   grep -Fq 'persist-credentials: false' "$workflow" ||
     fail "public validation checkout persists a GitHub credential: $(basename "$workflow")"
   grep -Fq 'OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"' "$workflow" ||
@@ -1080,7 +1109,7 @@ deploy_dependency_line="$(
     "$deploy_workflow" | cut -d: -f1
 )"
 [[ "$deploy_dependency_line" -gt "$deploy_public_job_line" ]] ||
-  fail "deployment browser validation is not in its credential-free public job"
+  fail "deployment browser validation is not in its cloud-credential-free public job"
 migration_public_job_line="$(
   grep -n -m1 '^  public-validate:' "$migrate_workflow" | cut -d: -f1
 )"
@@ -1101,7 +1130,13 @@ migration_dependency_line="$(
   fail "migration browser validation is not isolated after finalization"
 migration_post_secrets="$(
   sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
-    grep -c 'secrets\.' || true
+    awk '
+      /secrets\./ &&
+      !/LIVE_ACCEPTANCE_PASSWORD:.*secrets\.LIVE_ACCEPTANCE_PASSWORD/ {
+        count += 1
+      }
+      END { print count + 0 }
+    '
 )"
 migration_post_cloud_credentials="$(
   sed -n "${migration_post_job_line},\$p" "$migrate_workflow" |
@@ -1111,7 +1146,7 @@ migration_post_cloud_credentials="$(
 )"
 [[ "$migration_post_secrets" == "0" &&
     "$migration_post_cloud_credentials" == "0" ]] ||
-  fail "post-commit browser validation receives cloud credentials"
+  fail "post-commit browser validation receives cloud or unreviewed credentials"
 grep -Fq 'name: oci-infrastructure' "$infra_workflow"
 grep -Fq 'PROVISION OCI ZERO COST' "$infra_workflow"
 ! grep -Fq -- '- prune-registry' "$infra_workflow" ||
