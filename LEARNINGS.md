@@ -44,6 +44,17 @@
   desktop event-row width instead of one pre-match card column. Keep every
   score, incident, market, and selection visible, and compact by reflowing
   market cards responsively rather than hiding betting information.
+- Read-only review roles must be read-only in their declared capabilities,
+  not only in prose. UX reviewers consume rendered evidence from the test
+  owner; they do not need unrestricted command execution to assess it.
+- `EVENT_RESULT` is terminal domain authority even when it reaches a consumer
+  before delayed live snapshots. Earlier snapshots may fill bounded history,
+  but only the matching `FULL_TIME` projection may restore the retained result
+  card; no live update may reset `RESULTED` or delete Moderation's resulted
+  guard.
+- Persist the last explicit visibility decision separately from current
+  runtime visibility and transient pending delivery. A completed OFFLINE
+  decision must survive result retention and delayed live-update races.
 - The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
 - New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.

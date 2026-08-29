@@ -166,8 +166,11 @@ ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
 [[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
 grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
   fail "UX/UI expert frontmatter has the wrong name"
-grep -Fq 'tools: [read, search, execute]' "$ux_agent" ||
+grep -Fq 'tools: [read, search]' "$ux_agent" ||
   fail "UX/UI expert does not remain read-only"
+if grep -Eq '^tools:.*execute' "$ux_agent"; then
+  fail "UX/UI expert exposes mutation-capable command execution"
+fi
 ux_agent_flat="$(tr '\n' ' ' <"$ux_agent")"
 for ux_contract in \
     'Never infer usability from screenshots alone' \
