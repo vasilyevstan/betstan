@@ -1171,7 +1171,7 @@ assert_fail \
 
 reset_fixtures
 write_complete_oci_set
-sed -i.bak 's#LIVE_ACCEPTANCE_USERNAME: betstan-e2e#LIVE_ACCEPTANCE_USERNAME: live-e2e-${GITHUB_RUN_ID}#' \
+sed -i.bak 's#LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected#LIVE_ACCEPTANCE_USERNAME: live-e2e-${GITHUB_RUN_ID}#' \
   "$tmp_dir/oci-live-betting-activate.yml"
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
