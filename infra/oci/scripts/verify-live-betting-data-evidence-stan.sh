@@ -10,6 +10,10 @@ EXPECTED_RUN_ID="${EXPECTED_RUN_ID:-}"
 EXPECTED_RUN_ATTEMPT="${EXPECTED_RUN_ATTEMPT:-1}"
 EXPECTED_BASELINE_RECOVERY_RUN_ID="${EXPECTED_BASELINE_RECOVERY_RUN_ID:-0}"
 EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="${EXPECTED_BASELINE_RECOVERY_SOURCE_SHA:-none}"
+RESUME_BASELINE_DIR="${RESUME_BASELINE_DIR:-}"
+RESOLVED_RESUME_AUTHORITY_FILE="${RESOLVED_RESUME_AUTHORITY_FILE:-}"
+VERIFY_RESUME_APPLIED_RUN="${VERIFY_RESUME_APPLIED_RUN:-false}"
+RESUME_REPOSITORY="${RESUME_REPOSITORY:-}"
 
 fail() {
   echo "live_betting_data_evidence=FAIL reason=$*" >&2
@@ -37,6 +41,19 @@ else
   [[ "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
     fail "expected recovery source SHA is invalid"
 fi
+if [[ -n "$RESUME_BASELINE_DIR" || -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]]; then
+  [[ -n "$RESUME_BASELINE_DIR" && -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]] ||
+    fail "resume baseline resolution requires both input and output paths"
+fi
+[[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ||
+   "$VERIFY_RESUME_APPLIED_RUN" == "false" ]] ||
+  fail "VERIFY_RESUME_APPLIED_RUN must be true or false"
+if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
+  [[ -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]] ||
+    fail "resume applied-run verification requires resolved authority"
+  [[ "$RESUME_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+    fail "RESUME_REPOSITORY is invalid"
+fi
 case "$EXPECTED_PHASE" in
   dry-run|apply-backfills|apply-slip-index) ;;
   *) fail "unexpected evidence phase" ;;
@@ -50,7 +67,9 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_RUN_ID" \
   "$EXPECTED_RUN_ATTEMPT" \
   "$EXPECTED_BASELINE_RECOVERY_RUN_ID" \
-  "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" <<'PY'
+  "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" \
+  "$RESUME_BASELINE_DIR" \
+  "$RESOLVED_RESUME_AUTHORITY_FILE" <<'PY'
 import hashlib
 import json
 import re
@@ -68,13 +87,15 @@ expected = {
     "baseline_recovery_run_id": sys.argv[8],
     "baseline_recovery_source_sha": sys.argv[9],
 }
+resume_baseline_dir = sys.argv[10]
+resolved_resume_authority_file = sys.argv[11]
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-def read_env(path: Path, allowed: set[str]) -> dict[str, str]:
+def read_env(path: Path, allowed=None) -> dict[str, str]:
     if not path.is_file() or path.is_symlink():
         fail(f"required evidence file is missing: {path.name}")
     values: dict[str, str] = {}
@@ -84,12 +105,12 @@ def read_env(path: Path, allowed: set[str]) -> dict[str, str]:
         if not raw_line or "=" not in raw_line:
             fail(f"{path.name} line {line_number} is malformed")
         key, value = raw_line.split("=", 1)
-        if key not in allowed:
+        if allowed is not None and key not in allowed:
             fail(f"{path.name} contains unexpected key {key}")
         if key in values:
             fail(f"{path.name} contains duplicate key {key}")
         values[key] = value
-    if set(values) != allowed:
+    if allowed is not None and set(values) != allowed:
         fail(f"{path.name} does not contain the exact reviewed key set")
     return values
 
@@ -178,6 +199,125 @@ if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", provenance["complet
     fail("completed_at is not an exact UTC timestamp")
 
 phase = expected["phase"]
+resolved_applied_data_run_id = expected["workflow_run_id"]
+resolved_applied_source_sha = expected["source_sha"]
+resume_authority_path = root / "resume-authority.env"
+if resume_authority_path.exists():
+    if phase != "apply-slip-index":
+        fail("only final data evidence may carry resume authority")
+    resume_authority_keys = {
+        "schema_version",
+        "applied_data_run_id",
+        "applied_source_sha",
+        "failed_deploy_run_id",
+        "resume_maintenance_mode",
+        "failed_deploy_job_conclusion",
+        "public_validate_job_conclusion",
+        "release_step_conclusion",
+        "rehold_step_conclusion",
+        "failed_activation_run_id",
+        "current_source_sha",
+        "baseline_sha256",
+        "runtime_images_sha256",
+        "application_change_scope",
+        "status",
+    }
+    resume_authority = read_env(resume_authority_path, resume_authority_keys)
+    if resume_authority["schema_version"] != "live-betting-data-resume-v1":
+        fail("unexpected live data resume authority version")
+    if not re.fullmatch(r"[1-9][0-9]*", resume_authority["applied_data_run_id"]):
+        fail("resume authority applied data run ID is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", resume_authority["applied_source_sha"]):
+        fail("resume authority applied source SHA is invalid")
+    if not re.fullmatch(r"[1-9][0-9]*", resume_authority["failed_deploy_run_id"]):
+        fail("resume authority failed deploy run ID is invalid")
+    failed_activation_run_id = resume_authority["failed_activation_run_id"]
+    if failed_activation_run_id != "0" and not re.fullmatch(
+        r"[1-9][0-9]*", failed_activation_run_id
+    ):
+        fail("resume authority failed activation run ID is invalid")
+    if resume_authority["current_source_sha"] != expected["source_sha"]:
+        fail("resume authority current source differs from data evidence")
+    if resume_authority["baseline_sha256"] != provenance["baseline_sha256"]:
+        fail("resume authority baseline digest differs from data evidence")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", resume_authority["runtime_images_sha256"]
+    ):
+        fail("resume authority runtime image digest is invalid")
+    if resume_authority["application_change_scope"] != "github-infra-docs-only":
+        fail("resume authority application change scope is invalid")
+    if resume_authority["status"] != "PASS":
+        fail("resume authority did not complete successfully")
+    outcome = (
+        resume_authority["failed_deploy_job_conclusion"],
+        resume_authority["public_validate_job_conclusion"],
+        resume_authority["release_step_conclusion"],
+        resume_authority["rehold_step_conclusion"],
+    )
+    mode = resume_authority["resume_maintenance_mode"]
+    if mode == "released-runtime":
+        if outcome != ("success", "failure", "success", "skipped"):
+            fail("released-runtime resume authority has an invalid outcome tuple")
+    elif mode == "retained-hold":
+        if outcome not in {
+            ("failure", "skipped", "failure", "success"),
+            ("failure", "skipped", "skipped", "success"),
+        }:
+            fail("retained-hold resume authority has an invalid outcome tuple")
+    else:
+        fail("resume authority maintenance mode is invalid")
+    resolved_applied_data_run_id = resume_authority["applied_data_run_id"]
+    resolved_applied_source_sha = resume_authority["applied_source_sha"]
+
+resolved_output_path = None
+if bool(resume_baseline_dir) != bool(resolved_resume_authority_file):
+    fail("resume baseline resolution paths are inconsistent")
+if resume_baseline_dir:
+    if phase != "apply-slip-index":
+        fail("resume baseline resolution requires final data evidence")
+    baseline_input = Path(resume_baseline_dir)
+    if baseline_input.is_symlink():
+        fail("resume rollback baseline directory is invalid")
+    baseline_root = baseline_input.resolve(strict=True)
+    if not baseline_root.is_dir():
+        fail("resume rollback baseline directory is invalid")
+    if any(path.is_symlink() for path in baseline_root.rglob("*")):
+        fail("resume rollback baseline contains a symbolic link")
+    baseline_manifest = baseline_root / "SHA256SUMS"
+    if not baseline_manifest.is_file() or baseline_manifest.is_symlink():
+        fail("resume rollback baseline checksum manifest is missing")
+    observed_baseline_sha256 = hashlib.sha256(
+        baseline_manifest.read_bytes()
+    ).hexdigest()
+    if observed_baseline_sha256 != provenance["baseline_sha256"]:
+        fail("resume rollback baseline digest differs from data evidence")
+    baseline_provenance = read_env(baseline_root / "baseline-provenance.env")
+    baseline_capture_run_id = baseline_provenance.get("baseline_capture_run_id", "")
+    if baseline_capture_run_id != resolved_applied_data_run_id:
+        fail(
+            "resume rollback baseline capture run differs from the original "
+            "applied data authority"
+        )
+    baseline_recovery_run_id = baseline_provenance.get(
+        "baseline_recovery_run_id", "0"
+    )
+    if baseline_recovery_run_id != expected["baseline_recovery_run_id"]:
+        fail("resume rollback baseline recovery authority differs from the selected run")
+
+    output_path = Path(resolved_resume_authority_file)
+    output_parent = output_path.parent.resolve(strict=True)
+    output_path = output_parent / output_path.name
+    if output_path.exists() and output_path.is_symlink():
+        fail("resolved resume authority output is a symbolic link")
+    if (
+        output_path == root
+        or root in output_path.parents
+        or output_path == baseline_root
+        or baseline_root in output_path.parents
+    ):
+        fail("resolved resume authority output must not modify input evidence")
+    resolved_output_path = output_path
+
 if phase in {"apply-backfills", "apply-slip-index"}:
     if provenance["backfill_complete"] != "true":
         fail("mutating phase did not prove completed backfills")
@@ -332,6 +472,73 @@ if phase == "apply-slip-index":
         fail("schema.env does not bind final readiness to the exact rollout")
 elif (root / "schema.env").exists():
     fail("non-final phase must not emit schema.env")
+
+if resolved_output_path is not None:
+    resolved_output_path.write_text(
+        "\n".join(
+            (
+                "schema_version=live-betting-data-resume-resolution-v1",
+                f"prerequisite_data_run_id={expected['workflow_run_id']}",
+                f"prerequisite_source_sha={expected['source_sha']}",
+                f"applied_data_run_id={resolved_applied_data_run_id}",
+                f"applied_source_sha={resolved_applied_source_sha}",
+                f"baseline_sha256={provenance['baseline_sha256']}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 PY
+
+if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
+  command -v gh >/dev/null 2>&1 ||
+    fail "gh is required to verify the original applied data run"
+  command -v jq >/dev/null 2>&1 ||
+    fail "jq is required to verify the original applied data run"
+  resolved_value() {
+    local key="$1"
+    awk -F= -v key="$key" '
+      $1 == key {
+        if (found++) exit 1
+        value = substr($0, length(key) + 2)
+      }
+      END {
+        if (found != 1) exit 1
+        print value
+      }
+    ' "$RESOLVED_RESUME_AUTHORITY_FILE"
+  }
+  applied_data_run_id="$(resolved_value applied_data_run_id)"
+  applied_source_sha="$(resolved_value applied_source_sha)"
+  [[ "$applied_data_run_id" =~ ^[1-9][0-9]*$ ]] ||
+    fail "resolved applied data run ID is invalid"
+  [[ "$applied_source_sha" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "resolved applied source SHA is invalid"
+  workflow_id="$(
+    gh api \
+      "repos/$RESUME_REPOSITORY/actions/workflows/oci-live-data-rollout.yml" |
+      jq -er '.id | select(type == "number" and . > 0)'
+  )"
+  gh api \
+    "repos/$RESUME_REPOSITORY/actions/runs/$applied_data_run_id/attempts/1" |
+    jq -e \
+      --argjson workflow_id "$workflow_id" \
+      --argjson run_id "$applied_data_run_id" \
+      --arg repository "$RESUME_REPOSITORY" \
+      --arg source_sha "$applied_source_sha" '
+        .id == $run_id and
+        .workflow_id == $workflow_id and
+        .path == ".github/workflows/oci-live-data-rollout.yml" and
+        .event == "workflow_dispatch" and
+        .head_sha == $source_sha and
+        .head_branch == "master" and
+        .head_repository.full_name == $repository and
+        .status == "completed" and
+        .conclusion == "success" and
+        .run_attempt == 1 and
+        .display_title == ("oci-live-data apply-slip-index " + $source_sha)
+      ' >/dev/null ||
+    fail "original applied data run does not match the resolved source authority"
+fi
 
 echo "live_betting_data_evidence=PASS phase=$EXPECTED_PHASE"

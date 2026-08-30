@@ -31,6 +31,38 @@ fail() {
   exit 1
 }
 
+write_manifest() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = root / "SHA256SUMS"
+rows = []
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path == manifest:
+        continue
+    relative = path.relative_to(root).as_posix()
+    rows.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
+manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+PY
+}
+
+make_resume_baseline() {
+  local directory="$1"
+  local capture_run_id="$2"
+  local recovery_run_id="$3"
+  mkdir -p "$directory"
+  cat >"$directory/baseline-provenance.env" <<EOF
+baseline_capture_run_id=$capture_run_id
+baseline_recovery_run_id=$recovery_run_id
+EOF
+  write_manifest "$directory"
+  shasum -a 256 "$directory/SHA256SUMS" | awk '{print $1}'
+}
+
 cat >"$stub_bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -222,6 +254,48 @@ exit 1
 SH
 chmod +x "$stub_bin/kubectl"
 
+cat >"$stub_bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "api" ]]
+endpoint="${2:-}"
+case "$endpoint" in
+  */actions/workflows/oci-live-data-rollout.yml)
+    printf '{"id":339733789}\n'
+    ;;
+  */actions/runs/*/attempts/1)
+    requested_run_id="${endpoint%/attempts/1}"
+    requested_run_id="${requested_run_id##*/}"
+    jq -n \
+      --argjson id "${STUB_RESUME_RUN_ID:?}" \
+      --argjson workflow_id 339733789 \
+      --arg source_sha "${STUB_RESUME_RUN_SOURCE:?}" \
+      --arg repository "${STUB_RESUME_REPOSITORY:?}" \
+      --arg title "oci-live-data apply-slip-index ${STUB_RESUME_RUN_SOURCE}" \
+      --arg requested_run_id "$requested_run_id" '{
+        id: $id,
+        workflow_id: $workflow_id,
+        path: ".github/workflows/oci-live-data-rollout.yml",
+        event: "workflow_dispatch",
+        head_sha: $source_sha,
+        head_branch: "master",
+        head_repository: {full_name: $repository},
+        status: "completed",
+        conclusion: "success",
+        run_attempt: 1,
+        display_title: $title,
+        requested_run_id: $requested_run_id
+      }'
+    ;;
+  *)
+    echo "unexpected gh api endpoint: $endpoint" >&2
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$stub_bin/gh"
+
 for service in auth bet backoffice client event gamemaster moderation resulting slip; do
   printf '%s\tregistry.example/betstan\tregistry.example/betstan@sha256:%064d\tsha256:%064d\tsha256:%064d\n' \
     "$service" 1 1 1 >>"$images_file"
@@ -234,6 +308,7 @@ run_phase() {
   local output="$4"
   local recovery_run_id="${5:-0}"
   local recovery_source_sha="${6:-none}"
+  local baseline_sha="${7:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
   local maintenance_fence=false
   local writers_quiesced=false
   local runtime_handoff=false
@@ -261,7 +336,7 @@ run_phase() {
   JOB_TIMEOUT_SECONDS=10 \
   GITHUB_RUN_ID="$run_id" \
   GITHUB_RUN_ATTEMPT=1 \
-  BASELINE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  BASELINE_SHA256="$baseline_sha" \
   BASELINE_RECOVERY_RUN_ID="$recovery_run_id" \
   BASELINE_RECOVERY_SOURCE_SHA="$recovery_source_sha" \
   MAINTENANCE_FENCE_ENFORCED="$maintenance_fence" \
@@ -298,8 +373,10 @@ grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
 [[ ! -e "$backfill_output/schema.env" ]] ||
   fail "backfill phase emitted final schema evidence"
 
+normal_baseline="$work_dir/normal-baseline"
+normal_baseline_sha="$(make_resume_baseline "$normal_baseline" 4003 0)"
 final_output="$work_dir/final"
-run_phase apply-slip-index final 4003 "$final_output"
+run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_sha"
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
@@ -313,7 +390,117 @@ EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
 EXPECTED_PHASE=apply-slip-index \
 EXPECTED_RUN_ID=4003 \
 EXPECTED_RUN_ATTEMPT=1 \
+RESUME_BASELINE_DIR="$normal_baseline" \
+RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/normal-resume-resolution.env" \
+VERIFY_RESUME_APPLIED_RUN=true \
+RESUME_REPOSITORY=vasilyevstan/betstan \
+PATH="$stub_bin:$PATH" \
+STUB_RESUME_RUN_ID=4003 \
+STUB_RESUME_RUN_SOURCE="$SOURCE_SHA" \
+STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
   "$VERIFIER" >/dev/null
+grep -Fxq \
+  'schema_version=live-betting-data-resume-resolution-v1' \
+  "$work_dir/normal-resume-resolution.env"
+grep -Fxq 'prerequisite_data_run_id=4003' \
+  "$work_dir/normal-resume-resolution.env"
+grep -Fxq 'applied_data_run_id=4003' \
+  "$work_dir/normal-resume-resolution.env"
+grep -Fxq "applied_source_sha=$SOURCE_SHA" \
+  "$work_dir/normal-resume-resolution.env"
+
+original_applied_source=2222222222222222222222222222222222222222
+chained_baseline="$work_dir/chained-baseline"
+chained_baseline_sha="$(make_resume_baseline "$chained_baseline" 3999 0)"
+chained_output="$work_dir/chained"
+run_phase apply-slip-index final 4008 "$chained_output" 0 none "$chained_baseline_sha"
+cat >"$chained_output/resume-authority.env" <<EOF
+schema_version=live-betting-data-resume-v1
+applied_data_run_id=3999
+applied_source_sha=$original_applied_source
+failed_deploy_run_id=4999
+resume_maintenance_mode=released-runtime
+failed_deploy_job_conclusion=success
+public_validate_job_conclusion=failure
+release_step_conclusion=success
+rehold_step_conclusion=skipped
+failed_activation_run_id=0
+current_source_sha=$SOURCE_SHA
+baseline_sha256=$chained_baseline_sha
+runtime_images_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+application_change_scope=github-infra-docs-only
+status=PASS
+EOF
+write_manifest "$chained_output"
+EVIDENCE_DIR="$chained_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_PHASE=apply-slip-index \
+EXPECTED_RUN_ID=4008 \
+EXPECTED_RUN_ATTEMPT=1 \
+RESUME_BASELINE_DIR="$chained_baseline" \
+RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/chained-resume-resolution.env" \
+VERIFY_RESUME_APPLIED_RUN=true \
+RESUME_REPOSITORY=vasilyevstan/betstan \
+PATH="$stub_bin:$PATH" \
+STUB_RESUME_RUN_ID=3999 \
+STUB_RESUME_RUN_SOURCE="$original_applied_source" \
+STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
+  "$VERIFIER" >/dev/null
+grep -Fxq 'prerequisite_data_run_id=4008' \
+  "$work_dir/chained-resume-resolution.env"
+grep -Fxq 'applied_data_run_id=3999' \
+  "$work_dir/chained-resume-resolution.env"
+grep -Fxq "applied_source_sha=$original_applied_source" \
+  "$work_dir/chained-resume-resolution.env"
+
+switched_source=3333333333333333333333333333333333333333
+source_tampered_output="$work_dir/chained-source-tampered"
+cp -R "$chained_output" "$source_tampered_output"
+sed -i.bak \
+  "s/^applied_source_sha=$original_applied_source$/applied_source_sha=$switched_source/" \
+  "$source_tampered_output/resume-authority.env"
+rm "$source_tampered_output/resume-authority.env.bak"
+write_manifest "$source_tampered_output"
+if EVIDENCE_DIR="$source_tampered_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4008 \
+  EXPECTED_RUN_ATTEMPT=1 \
+  RESUME_BASELINE_DIR="$chained_baseline" \
+  RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/source-tampered-resolution.env" \
+  VERIFY_RESUME_APPLIED_RUN=true \
+  RESUME_REPOSITORY=vasilyevstan/betstan \
+  PATH="$stub_bin:$PATH" \
+  STUB_RESUME_RUN_ID=3999 \
+  STUB_RESUME_RUN_SOURCE="$original_applied_source" \
+  STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "chained resume evidence switched the original applied source authority"
+fi
+
+tampered_chained_output="$work_dir/chained-tampered"
+cp -R "$chained_output" "$tampered_chained_output"
+sed -i.bak \
+  's/^applied_data_run_id=3999$/applied_data_run_id=3998/' \
+  "$tampered_chained_output/resume-authority.env"
+rm "$tampered_chained_output/resume-authority.env.bak"
+write_manifest "$tampered_chained_output"
+if EVIDENCE_DIR="$tampered_chained_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4008 \
+  EXPECTED_RUN_ATTEMPT=1 \
+  RESUME_BASELINE_DIR="$chained_baseline" \
+  RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/tampered-resume-resolution.env" \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "chained resume evidence switched the original applied data authority"
+fi
 
 cp "$final_output/schema.env" "$work_dir/schema.env"
 printf 'index_ready=false\n' >>"$final_output/schema.env"
@@ -448,8 +635,14 @@ for literal in \
   'endswith("@" + $manifest)' \
   'for service in auth backoffice client; do' \
   'Resume supporting pod image mismatch' \
-  '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' \
-  '[ "$(baseline_value baseline_recovery_run_id)" = "$BASELINE_RECOVERY_RUN_ID" ]' \
+  'RESUME_BASELINE_DIR=artifacts/oci-data-baseline-before' \
+  'RESOLVED_RESUME_AUTHORITY_FILE=artifacts/oci-live-data-rollout/resolved-prerequisite-authority.env' \
+  'VERIFY_RESUME_APPLIED_RUN=true' \
+  'RESUME_REPOSITORY="$REPOSITORY"' \
+  'resolved_applied_data_run_id="$(resolved_value applied_data_run_id)"' \
+  'resolved_applied_source_sha="$(resolved_value applied_source_sha)"' \
+  'applied_data_run_id=$resolved_applied_data_run_id' \
+  'applied_source_sha=$resolved_applied_source_sha' \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
   'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
   'restore_or_verify_retained_hold' \
@@ -582,6 +775,10 @@ require_order(
 )
 if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
+if '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' in resume:
+    raise SystemExit(
+        "failed-deploy resume still rejects a checksum-bound chained authority"
+    )
 
 maintenance = data[
     data.index("- name: Enter or re-establish live data maintenance"):

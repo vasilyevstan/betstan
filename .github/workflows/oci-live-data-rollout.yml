@@ -704,6 +704,10 @@ jobs:
             EXPECTED_RUN_ATTEMPT=1 \
             EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
             EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
+            RESUME_BASELINE_DIR=artifacts/oci-data-baseline-before \
+            RESOLVED_RESUME_AUTHORITY_FILE=artifacts/oci-live-data-rollout/resolved-prerequisite-authority.env \
+            VERIFY_RESUME_APPLIED_RUN=true \
+            RESUME_REPOSITORY="$REPOSITORY" \
               ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
 
             resume_artifact_name="oci-image-provenance-${prior_source_sha}-${prior_build_run_id}-1"
@@ -813,8 +817,11 @@ jobs:
           set -euo pipefail
           resume_images=artifacts/oci-live-data-rollout/resume-images.tsv
           prior_evidence=artifacts/prerequisite/provenance.env
+          resolved_authority=artifacts/oci-live-data-rollout/resolved-prerequisite-authority.env
           baseline_dir=artifacts/oci-data-baseline-before
-          [ -f "$resume_images" ] && [ -f "$prior_evidence" ]
+          [ -f "$resume_images" ] &&
+            [ -f "$prior_evidence" ] &&
+            [ -f "$resolved_authority" ]
           for service in auth bet backoffice client event gamemaster moderation resulting slip; do
             expected_ref="$(
               awk -F '\t' -v service="$service" '
@@ -914,8 +921,11 @@ jobs:
           observed_baseline_sha="$(
             sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}'
           )"
-          [ "$observed_baseline_sha" = "$expected_baseline_sha" ]
-          baseline_value() {
+          if [ "$observed_baseline_sha" != "$expected_baseline_sha" ]; then
+            echo "::error::Resume rollback baseline digest differs from the prerequisite data evidence"
+            exit 1
+          fi
+          resolved_value() {
             local key="$1"
             awk -F= -v key="$key" '
               $1 == key {
@@ -926,10 +936,16 @@ jobs:
                 if (found != 1) exit 1
                 print value
               }
-            ' "$baseline_dir/baseline-provenance.env"
+            ' "$resolved_authority"
           }
-          [ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]
-          [ "$(baseline_value baseline_recovery_run_id)" = "$BASELINE_RECOVERY_RUN_ID" ]
+          [ "$(resolved_value schema_version)" = "live-betting-data-resume-resolution-v1" ]
+          [ "$(resolved_value prerequisite_data_run_id)" = "$PREREQUISITE_RUN_ID" ]
+          [ "$(resolved_value prerequisite_source_sha)" = "$RESUME_SOURCE_SHA" ]
+          resolved_applied_data_run_id="$(resolved_value applied_data_run_id)"
+          resolved_applied_source_sha="$(resolved_value applied_source_sha)"
+          [ "$(resolved_value baseline_sha256)" = "$observed_baseline_sha" ]
+          git merge-base --is-ancestor \
+            "$resolved_applied_source_sha" "$RESUME_SOURCE_SHA"
           expected_baseline_source_sha=
           expected_recovery_run_id=
           if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
@@ -946,8 +962,8 @@ jobs:
           mkdir -p artifacts/oci-live-data-rollout/evidence
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF
           schema_version=live-betting-data-resume-v1
-          applied_data_run_id=$PREREQUISITE_RUN_ID
-          applied_source_sha=$RESUME_SOURCE_SHA
+          applied_data_run_id=$resolved_applied_data_run_id
+          applied_source_sha=$resolved_applied_source_sha
           failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
           resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
           failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}

@@ -365,6 +365,12 @@ cd resulting && npm ci && npm run test:ci
   exact job outcomes and running images, then reacquire the lock and enter
   maintenance from the released healthy runtime so any pre-handoff failure can
   restore the captured replica state.
+- A successful resume handoff can itself become the prerequisite for another
+  failed-deployment recovery. Its protected rollback baseline remains bound to
+  the original applied-data run, not the newer prerequisite run. Validate the
+  checksum-covered prior resume authority, preserve its original run and source
+  through each hop, and compare the baseline capture against that root
+  authority rather than rejecting a valid chain.
 - Azure resource-ID fingerprints are case-preserving. AKS exposes `eTag`, and
   provider/SDK transformations of `If-Match` must not replace the exact
   optimistic-concurrency value or fall back to a wildcard.
