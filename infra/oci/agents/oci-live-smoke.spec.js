@@ -2,7 +2,8 @@ const { test, expect } = require('@playwright/test');
 
 test('OCI reusable-user login and navigation journey', async ({ page }) => {
   const allowLegacyAdminUi = process.env.OCI_ALLOW_LEGACY_ADMIN_UI === '1';
-  const username = process.env.LIVE_ACCEPTANCE_USERNAME || 'betstan-e2e';
+  const username =
+    process.env.LIVE_ACCEPTANCE_USERNAME || 'betstan-e2e-protected';
   const password = process.env.LIVE_ACCEPTANCE_PASSWORD;
   if (!password) {
     throw new Error('LIVE_ACCEPTANCE_PASSWORD must be set');

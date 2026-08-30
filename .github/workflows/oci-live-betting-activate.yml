@@ -56,7 +56,7 @@ jobs:
       OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       LIVE_ACTIVATION_LEASE_SECONDS: "1800"
-      LIVE_ACCEPTANCE_USERNAME: betstan-e2e
+      LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected
 
     steps:
       - name: Initialize isolated OCI paths
