@@ -172,10 +172,23 @@ jobs:
                 [ "$CONFIRMATION" = "APPLY LIVE SLIP INDEX EXACT SHA" ]
                 [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]
               elif [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
-                [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
+                case "$CONFIRMATION" in
+                  "RESUME APPLIED LIVE DATA EXACT SHA" | \
+                    "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA")
+                    ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
               else
-                [ "$CONFIRMATION" = \
-                  "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" ]
+                case "$CONFIRMATION" in
+                  "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" | \
+                    "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA")
+                    ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
               fi
               ;;
             *)
@@ -283,6 +296,101 @@ jobs:
               validate_run \
                 oci-production-deploy.yml "$FAILED_DEPLOY_RUN_ID" \
                 workflow_dispatch "$prerequisite_source_sha" failure
+              failed_deploy_jobs="$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/attempts/1/jobs?per_page=100"
+              )"
+              deploy_job_count="$(
+                jq '[.jobs[] | select(.name == "deploy")] | length' \
+                  <<<"$failed_deploy_jobs"
+              )"
+              public_validate_job_count="$(
+                jq '[.jobs[] | select(.name == "public-validate")] | length' \
+                  <<<"$failed_deploy_jobs"
+              )"
+              [ "$deploy_job_count" = "1" ]
+              [ "$public_validate_job_count" = "1" ]
+              deploy_job_conclusion="$(
+                jq -r '.jobs[] | select(.name == "deploy") | .conclusion' \
+                  <<<"$failed_deploy_jobs"
+              )"
+              public_validate_job_conclusion="$(
+                jq -r \
+                  '.jobs[] | select(.name == "public-validate") | .conclusion' \
+                  <<<"$failed_deploy_jobs"
+              )"
+              release_step_count="$(
+                jq '[
+                  .jobs[] |
+                  select(.name == "deploy") |
+                  .steps[] |
+                  select(.name == "Release live data maintenance fence")
+                ] | length' <<<"$failed_deploy_jobs"
+              )"
+              rehold_step_count="$(
+                jq '[
+                  .jobs[] |
+                  select(.name == "deploy") |
+                  .steps[] |
+                  select(.name == "Re-enter maintenance after an incomplete deployment")
+                ] | length' <<<"$failed_deploy_jobs"
+              )"
+              [ "$release_step_count" = "1" ]
+              [ "$rehold_step_count" = "1" ]
+              release_step_conclusion="$(
+                jq -r '
+                  .jobs[] |
+                  select(.name == "deploy") |
+                  .steps[] |
+                  select(.name == "Release live data maintenance fence") |
+                  .conclusion
+                ' <<<"$failed_deploy_jobs"
+              )"
+              rehold_step_conclusion="$(
+                jq -r '
+                  .jobs[] |
+                  select(.name == "deploy") |
+                  .steps[] |
+                  select(.name == "Re-enter maintenance after an incomplete deployment") |
+                  .conclusion
+                ' <<<"$failed_deploy_jobs"
+              )"
+              case "$deploy_job_conclusion:$public_validate_job_conclusion:$release_step_conclusion:$rehold_step_conclusion" in
+                success:failure:success:skipped)
+                  resume_maintenance_mode=released-runtime
+                  ;;
+                failure:skipped:failure:success | \
+                  failure:skipped:skipped:success)
+                  resume_maintenance_mode=retained-hold
+                  ;;
+                *)
+                  echo "Unsupported failed deployment outcomes: deploy=$deploy_job_conclusion public-validate=$public_validate_job_conclusion release=$release_step_conclusion rehold=$rehold_step_conclusion" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "$FAILED_ACTIVATION_RUN_ID" = "0" ]; then
+                if [ "$resume_maintenance_mode" = "released-runtime" ]; then
+                  [ "$CONFIRMATION" = \
+                    "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA" ]
+                else
+                  [ "$CONFIRMATION" = "RESUME APPLIED LIVE DATA EXACT SHA" ]
+                fi
+              elif [ "$resume_maintenance_mode" = "released-runtime" ]; then
+                [ "$CONFIRMATION" = \
+                  "RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA" ]
+              else
+                [ "$CONFIRMATION" = \
+                  "RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA" ]
+              fi
+              printf 'resume_maintenance_mode=%s\n' \
+                "$resume_maintenance_mode" >> "$GITHUB_OUTPUT"
+              {
+                printf 'failed_deploy_job_conclusion=%s\n' "$deploy_job_conclusion"
+                printf 'public_validate_job_conclusion=%s\n' \
+                  "$public_validate_job_conclusion"
+                printf 'release_step_conclusion=%s\n' "$release_step_conclusion"
+                printf 'rehold_step_conclusion=%s\n' "$rehold_step_conclusion"
+              } >> "$GITHUB_OUTPUT"
               baseline_artifact_name="oci-production-baseline-${FAILED_DEPLOY_RUN_ID}-1"
               baseline_artifact_count="$(
                 gh api "repos/$REPOSITORY/actions/runs/$FAILED_DEPLOY_RUN_ID/artifacts?per_page=100" \
@@ -699,6 +807,7 @@ jobs:
         if: inputs.failed_deploy_run_id != '0'
         env:
           RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
           BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
         run: |
           set -euo pipefail
@@ -724,7 +833,17 @@ jobs:
             fi
           done
 
-          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
+          case "$RESUME_MAINTENANCE_MODE" in
+            released-runtime)
+              ;;
+            retained-hold)
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced
+              ;;
+            *)
+              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+              exit 1
+              ;;
+          esac
 
           for service in auth backoffice client; do
             expected_manifest="$(
@@ -830,6 +949,11 @@ jobs:
           applied_data_run_id=$PREREQUISITE_RUN_ID
           applied_source_sha=$RESUME_SOURCE_SHA
           failed_deploy_run_id=$FAILED_DEPLOY_RUN_ID
+          resume_maintenance_mode=$RESUME_MAINTENANCE_MODE
+          failed_deploy_job_conclusion=${{ steps.provenance_request.outputs.failed_deploy_job_conclusion }}
+          public_validate_job_conclusion=${{ steps.provenance_request.outputs.public_validate_job_conclusion }}
+          release_step_conclusion=${{ steps.provenance_request.outputs.release_step_conclusion }}
+          rehold_step_conclusion=${{ steps.provenance_request.outputs.rehold_step_conclusion }}
           failed_activation_run_id=$FAILED_ACTIVATION_RUN_ID
           current_source_sha=$SOURCE_SHA
           baseline_sha256=$observed_baseline_sha
@@ -874,12 +998,18 @@ jobs:
         id: maintenance_enter
         if: inputs.phase != 'dry-run'
         env:
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
-          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
+             [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh enter
           else
+            [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] || {
+              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+              exit 1
+            }
             ./infra/oci/scripts/live-data-maintenance-stan.sh hold
           fi
 
@@ -918,13 +1048,19 @@ jobs:
         if: always() && steps.maintenance_enter.outcome == 'success'
         env:
           DATA_OUTCOME: ${{ steps.data.outcome }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
           restore_or_verify_retained_hold() {
-            if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+            if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
+               [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
               ./infra/oci/scripts/live-data-maintenance-stan.sh restore
             else
+              [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] || {
+                echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+                exit 1
+              }
               ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
             fi
           }
@@ -1003,12 +1139,18 @@ jobs:
           inputs.phase == 'apply-slip-index' &&
           steps.maintenance_enter.outcome == 'success'
         env:
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
-          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
+             [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
             ./infra/oci/scripts/live-data-maintenance-stan.sh restore
           else
+            [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] || {
+              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
+              exit 1
+            }
             ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
           fi
 

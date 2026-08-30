@@ -359,6 +359,12 @@ cd resulting && npm ci && npm run test:ci
   validated and accepted the exact data handoff. An invalid, stale, or
   unauthorized deployment request must not independently quiesce writers,
   acquire the database lock, or extend an outage.
+- A deployment-job failure and a later public-validation failure have different
+  maintenance state. Resume the former only from a proven retained hold; when
+  deployment and cleanup succeeded but `public-validate` failed, prove those
+  exact job outcomes and running images, then reacquire the lock and enter
+  maintenance from the released healthy runtime so any pre-handoff failure can
+  restore the captured replica state.
 - Azure resource-ID fingerprints are case-preserving. AKS exposes `eTag`, and
   provider/SDK transformations of `If-Match` must not replace the exact
   optimistic-concurrency value or fall back to a wildcard.
