@@ -383,37 +383,35 @@ grep -Fxq 'index_ready=true' "$final_output/schema.env"
 grep -Fxq 'runtime_held_for_deploy=true' "$final_output/schema.env"
 grep -Fxq 'operation_lock_handoff=true' "$final_output/schema.env"
 grep -Fxq 'baseline_recovery_source_sha=none' "$final_output/schema.env"
-EVIDENCE_DIR="$final_output" \
-EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
-EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
-EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
-EXPECTED_PHASE=apply-slip-index \
-EXPECTED_RUN_ID=4003 \
-EXPECTED_RUN_ATTEMPT=1 \
-RESUME_BASELINE_DIR="$normal_baseline" \
-RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/normal-resume-resolution.env" \
-VERIFY_RESUME_APPLIED_RUN=true \
-RESUME_REPOSITORY=vasilyevstan/betstan \
-PATH="$stub_bin:$PATH" \
-STUB_RESUME_RUN_ID=4003 \
-STUB_RESUME_RUN_SOURCE="$SOURCE_SHA" \
-STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
-  "$VERIFIER" >/dev/null
+normal_resolution="$(
+  EVIDENCE_DIR="$final_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+  RESUME_BASELINE_DIR="$normal_baseline" \
+  VERIFY_RESUME_APPLIED_RUN=true \
+  RESUME_REPOSITORY=vasilyevstan/betstan \
+  PATH="$stub_bin:$PATH" \
+  STUB_RESUME_RUN_ID=4003 \
+  STUB_RESUME_RUN_SOURCE="$SOURCE_SHA" \
+  STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
+    "$VERIFIER"
+)"
 grep -Fxq \
   'schema_version=live-betting-data-resume-resolution-v1' \
-  "$work_dir/normal-resume-resolution.env"
-grep -Fxq 'prerequisite_data_run_id=4003' \
-  "$work_dir/normal-resume-resolution.env"
-grep -Fxq 'applied_data_run_id=4003' \
-  "$work_dir/normal-resume-resolution.env"
-grep -Fxq "applied_source_sha=$SOURCE_SHA" \
-  "$work_dir/normal-resume-resolution.env"
+  <<<"$normal_resolution"
+grep -Fxq 'prerequisite_data_run_id=4003' <<<"$normal_resolution"
+grep -Fxq 'applied_data_run_id=4003' <<<"$normal_resolution"
+grep -Fxq "applied_source_sha=$SOURCE_SHA" <<<"$normal_resolution"
 
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"
 chained_baseline_sha="$(make_resume_baseline "$chained_baseline" 3999 0)"
 chained_output="$work_dir/chained"
-run_phase apply-slip-index final 4008 "$chained_output" 0 none "$chained_baseline_sha"
+mkdir -p "$chained_output"
 cat >"$chained_output/resume-authority.env" <<EOF
 schema_version=live-betting-data-resume-v1
 applied_data_run_id=3999
@@ -431,29 +429,29 @@ runtime_images_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 application_change_scope=github-infra-docs-only
 status=PASS
 EOF
-write_manifest "$chained_output"
-EVIDENCE_DIR="$chained_output" \
-EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
-EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
-EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
-EXPECTED_PHASE=apply-slip-index \
-EXPECTED_RUN_ID=4008 \
-EXPECTED_RUN_ATTEMPT=1 \
-RESUME_BASELINE_DIR="$chained_baseline" \
-RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/chained-resume-resolution.env" \
-VERIFY_RESUME_APPLIED_RUN=true \
-RESUME_REPOSITORY=vasilyevstan/betstan \
-PATH="$stub_bin:$PATH" \
-STUB_RESUME_RUN_ID=3999 \
-STUB_RESUME_RUN_SOURCE="$original_applied_source" \
-STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
-  "$VERIFIER" >/dev/null
-grep -Fxq 'prerequisite_data_run_id=4008' \
-  "$work_dir/chained-resume-resolution.env"
-grep -Fxq 'applied_data_run_id=3999' \
-  "$work_dir/chained-resume-resolution.env"
-grep -Fxq "applied_source_sha=$original_applied_source" \
-  "$work_dir/chained-resume-resolution.env"
+run_phase apply-slip-index final 4008 "$chained_output" 0 none "$chained_baseline_sha"
+chained_resolution="$(
+  EVIDENCE_DIR="$chained_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4008 \
+  EXPECTED_RUN_ATTEMPT=1 \
+  RESUME_BASELINE_DIR="$chained_baseline" \
+  VERIFY_RESUME_APPLIED_RUN=true \
+  RESUME_REPOSITORY=vasilyevstan/betstan \
+  PATH="$stub_bin:$PATH" \
+  STUB_RESUME_RUN_ID=3999 \
+  STUB_RESUME_RUN_SOURCE="$original_applied_source" \
+  STUB_RESUME_REPOSITORY=vasilyevstan/betstan \
+    "$VERIFIER"
+)"
+grep -Fxq 'prerequisite_data_run_id=4008' <<<"$chained_resolution"
+grep -Fxq 'applied_data_run_id=3999' <<<"$chained_resolution"
+grep -Fxq \
+  "applied_source_sha=$original_applied_source" \
+  <<<"$chained_resolution"
 
 switched_source=3333333333333333333333333333333333333333
 source_tampered_output="$work_dir/chained-source-tampered"
@@ -471,7 +469,6 @@ if EVIDENCE_DIR="$source_tampered_output" \
   EXPECTED_RUN_ID=4008 \
   EXPECTED_RUN_ATTEMPT=1 \
   RESUME_BASELINE_DIR="$chained_baseline" \
-  RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/source-tampered-resolution.env" \
   VERIFY_RESUME_APPLIED_RUN=true \
   RESUME_REPOSITORY=vasilyevstan/betstan \
   PATH="$stub_bin:$PATH" \
@@ -497,7 +494,6 @@ if EVIDENCE_DIR="$tampered_chained_output" \
   EXPECTED_RUN_ID=4008 \
   EXPECTED_RUN_ATTEMPT=1 \
   RESUME_BASELINE_DIR="$chained_baseline" \
-  RESOLVED_RESUME_AUTHORITY_FILE="$work_dir/tampered-resume-resolution.env" \
     "$VERIFIER" >/dev/null 2>&1; then
   fail "chained resume evidence switched the original applied data authority"
 fi
@@ -636,13 +632,14 @@ for literal in \
   'for service in auth backoffice client; do' \
   'Resume supporting pod image mismatch' \
   'RESUME_BASELINE_DIR=artifacts/oci-data-baseline-before' \
-  'RESOLVED_RESUME_AUTHORITY_FILE=artifacts/oci-live-data-rollout/resolved-prerequisite-authority.env' \
   'VERIFY_RESUME_APPLIED_RUN=true' \
   'RESUME_REPOSITORY="$REPOSITORY"' \
-  'resolved_applied_data_run_id="$(resolved_value applied_data_run_id)"' \
-  'resolved_applied_source_sha="$(resolved_value applied_source_sha)"' \
-  'applied_data_run_id=$resolved_applied_data_run_id' \
-  'applied_source_sha=$resolved_applied_source_sha' \
+  'resume_applied_data_run_id' \
+  'resume_applied_source_sha' \
+  'RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}' \
+  'RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}' \
+  'applied_data_run_id=$RESOLVED_APPLIED_DATA_RUN_ID' \
+  'applied_source_sha=$RESOLVED_APPLIED_SOURCE_SHA' \
   'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"' \
   'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"' \
   'restore_or_verify_retained_hold' \

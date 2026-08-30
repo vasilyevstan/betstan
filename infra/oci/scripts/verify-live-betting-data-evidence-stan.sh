@@ -11,7 +11,6 @@ EXPECTED_RUN_ATTEMPT="${EXPECTED_RUN_ATTEMPT:-1}"
 EXPECTED_BASELINE_RECOVERY_RUN_ID="${EXPECTED_BASELINE_RECOVERY_RUN_ID:-0}"
 EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="${EXPECTED_BASELINE_RECOVERY_SOURCE_SHA:-none}"
 RESUME_BASELINE_DIR="${RESUME_BASELINE_DIR:-}"
-RESOLVED_RESUME_AUTHORITY_FILE="${RESOLVED_RESUME_AUTHORITY_FILE:-}"
 VERIFY_RESUME_APPLIED_RUN="${VERIFY_RESUME_APPLIED_RUN:-false}"
 RESUME_REPOSITORY="${RESUME_REPOSITORY:-}"
 
@@ -41,16 +40,12 @@ else
   [[ "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
     fail "expected recovery source SHA is invalid"
 fi
-if [[ -n "$RESUME_BASELINE_DIR" || -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]]; then
-  [[ -n "$RESUME_BASELINE_DIR" && -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]] ||
-    fail "resume baseline resolution requires both input and output paths"
-fi
 [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ||
    "$VERIFY_RESUME_APPLIED_RUN" == "false" ]] ||
   fail "VERIFY_RESUME_APPLIED_RUN must be true or false"
 if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
-  [[ -n "$RESOLVED_RESUME_AUTHORITY_FILE" ]] ||
-    fail "resume applied-run verification requires resolved authority"
+  [[ -n "$RESUME_BASELINE_DIR" ]] ||
+    fail "resume applied-run verification requires a rollback baseline"
   [[ "$RESUME_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
     fail "RESUME_REPOSITORY is invalid"
 fi
@@ -59,6 +54,7 @@ case "$EXPECTED_PHASE" in
   *) fail "unexpected evidence phase" ;;
 esac
 
+resolution="$(
 python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_SOURCE_SHA" \
   "$EXPECTED_BUILD_RUN_ID" \
@@ -68,8 +64,7 @@ python3 - "$EVIDENCE_DIR" \
   "$EXPECTED_RUN_ATTEMPT" \
   "$EXPECTED_BASELINE_RECOVERY_RUN_ID" \
   "$EXPECTED_BASELINE_RECOVERY_SOURCE_SHA" \
-  "$RESUME_BASELINE_DIR" \
-  "$RESOLVED_RESUME_AUTHORITY_FILE" <<'PY'
+  "$RESUME_BASELINE_DIR" <<'PY'
 import hashlib
 import json
 import re
@@ -88,7 +83,6 @@ expected = {
     "baseline_recovery_source_sha": sys.argv[9],
 }
 resume_baseline_dir = sys.argv[10]
-resolved_resume_authority_file = sys.argv[11]
 
 
 def fail(message: str) -> None:
@@ -269,9 +263,6 @@ if resume_authority_path.exists():
     resolved_applied_data_run_id = resume_authority["applied_data_run_id"]
     resolved_applied_source_sha = resume_authority["applied_source_sha"]
 
-resolved_output_path = None
-if bool(resume_baseline_dir) != bool(resolved_resume_authority_file):
-    fail("resume baseline resolution paths are inconsistent")
 if resume_baseline_dir:
     if phase != "apply-slip-index":
         fail("resume baseline resolution requires final data evidence")
@@ -303,20 +294,6 @@ if resume_baseline_dir:
     )
     if baseline_recovery_run_id != expected["baseline_recovery_run_id"]:
         fail("resume rollback baseline recovery authority differs from the selected run")
-
-    output_path = Path(resolved_resume_authority_file)
-    output_parent = output_path.parent.resolve(strict=True)
-    output_path = output_parent / output_path.name
-    if output_path.exists() and output_path.is_symlink():
-        fail("resolved resume authority output is a symbolic link")
-    if (
-        output_path == root
-        or root in output_path.parents
-        or output_path == baseline_root
-        or baseline_root in output_path.parents
-    ):
-        fail("resolved resume authority output must not modify input evidence")
-    resolved_output_path = output_path
 
 if phase in {"apply-backfills", "apply-slip-index"}:
     if provenance["backfill_complete"] != "true":
@@ -473,8 +450,8 @@ if phase == "apply-slip-index":
 elif (root / "schema.env").exists():
     fail("non-final phase must not emit schema.env")
 
-if resolved_output_path is not None:
-    resolved_output_path.write_text(
+if resume_baseline_dir:
+    print(
         "\n".join(
             (
                 "schema_version=live-betting-data-resume-resolution-v1",
@@ -485,10 +462,9 @@ if resolved_output_path is not None:
                 f"baseline_sha256={provenance['baseline_sha256']}",
             )
         )
-        + "\n",
-        encoding="utf-8",
     )
 PY
+)"
 
 if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
   command -v gh >/dev/null 2>&1 ||
@@ -506,7 +482,7 @@ if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
         if (found != 1) exit 1
         print value
       }
-    ' "$RESOLVED_RESUME_AUTHORITY_FILE"
+    ' <<<"$resolution"
   }
   applied_data_run_id="$(resolved_value applied_data_run_id)"
   applied_source_sha="$(resolved_value applied_source_sha)"
@@ -541,4 +517,7 @@ if [[ "$VERIFY_RESUME_APPLIED_RUN" == "true" ]]; then
     fail "original applied data run does not match the resolved source authority"
 fi
 
+if [[ -n "$resolution" ]]; then
+  printf '%s\n' "$resolution"
+fi
 echo "live_betting_data_evidence=PASS phase=$EXPECTED_PHASE"
