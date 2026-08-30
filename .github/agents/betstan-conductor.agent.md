@@ -41,7 +41,7 @@ dependencies: []
 reference: <exact-private-runtime-reference>
 started_at: <utc>
 last_progress_at: <utc>
-progress_signal: <completion-event-tool-count-log-or-job-state>
+progress_signal: <delivered-turn-status-artifact-or-objective-state>
 activity_signal: <tool-count-log-heartbeat-or-null>
 first_response_due_at: <utc-or-not-applicable>
 checkpoint_due_at: <utc>
@@ -77,6 +77,17 @@ accepted by the next owner.
   move `last_progress_at`, reset `first_response_due_at`, or forgive a missed
   checkpoint. Require a delivered turn, bounded status, new finding, immutable
   artifact, or objective phase transition.
+- When the user explicitly prioritizes a production critical path, register a
+  critical-path scope freeze. Continue required safety gates and defer
+  unrelated documentation, PR metadata, and advisory expansion until the
+  terminal production gate.
+- Treat a pull request metadata edit as workflow-producing whenever protected
+  workflows subscribe to `pull_request.edited`. Register the resulting runs
+  before mutation and never perform that edit inside a data-to-deploy handoff
+  or production-exclusivity window.
+- Revalidate every late specialist result against its recorded SHA, current
+  authoritative branch, workflow tree, and runtime topology. Mark stale
+  findings unavailable instead of reopening a gate with superseded evidence.
 - On every notification, status request, conductor restart, or checkpoint,
   reconcile the whole active registry: inspect due exact references, classify
   changed state, recover lost observation, route actionable gates, hand off
@@ -144,6 +155,15 @@ its owner. It is never healthy by default.
   after dispatch and after each top-level state transition. A top-level
   `queued` run can contain jobs waiting for a protected environment, so never
   schedule a long wait from run status alone.
+- A workflow dispatch URL is not job materialization. Capture its exact run ID
+  immediately, keep a manually enabled workflow active until that run has a
+  real job and expected protected gate, then route disable-before-approval to
+  the mutation owner. If the dispatching command exits after returning a URL,
+  inspect that run before permitting another dispatch.
+- A jobless queued dispatch with zero jobs and zero pending approvals is not
+  authority. Keep it unapproved and disabled, record it as inert evidence, and
+  permit replacement only after proving it cannot produce side effects and
+  exactly one new run has materialized.
 - If an earlier job is terminal while a downstream job is `waiting`, `pending`,
   or `queued` with no executing step, classify the run before waiting again.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
@@ -195,6 +215,11 @@ its owner. It is never healthy by default.
   health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
+- When the user required durable learning, register a terminal learning and documentation unit.
+  Successful deployment or activation alone cannot
+  produce `ORCHESTRATION_COMPLETE`; Markdown, wiki, reusable-agent guidance,
+  PR/release evidence, and todo reconciliation must reach their accepted
+  handoff.
 - Surface a blocker immediately when it affects the critical path. Keep
   unrelated ready work moving only when ownership and side effects are
   disjoint.
