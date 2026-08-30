@@ -40,7 +40,8 @@ gh() {
   if [[ "$1 $2" == "pr view" ]]; then
     if [[ "$*" == *"--json headRefOid,baseRefOid"* ]]; then
       printf '{"headRefOid":"%s","baseRefOid":"%s"}\n' \
-        "${STUB_LATEST_HEAD_SHA:-$HEAD_SHA}" "$BASE_SHA"
+        "${STUB_LATEST_HEAD_SHA:-$HEAD_SHA}" \
+        "${STUB_LATEST_BASE_SHA:-$BASE_SHA}"
       return
     fi
 
@@ -109,6 +110,13 @@ if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   exit 1
 fi
 
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_LATEST_BASE_SHA=3333333333333333333333333333333333333333 \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "automatic merge safety accepted a changed PR base" >&2
+  exit 1
+fi
+
 human_master_inspection=""
 if human_master_inspection="$(
   env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=false \
@@ -148,6 +156,15 @@ if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=false \
   STUB_LATEST_HEAD_SHA=2222222222222222222222222222222222222222 \
   "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
   echo "human exact-SHA approval accepted a changed PR head" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=false \
+  APPROVED_SHA="$HEAD_SHA" \
+  STUB_BASE_REF=dev STUB_HEAD_REF=docs/governance \
+  STUB_LATEST_BASE_SHA=3333333333333333333333333333333333333333 \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "human exact-SHA approval accepted a changed PR base" >&2
   exit 1
 fi
 

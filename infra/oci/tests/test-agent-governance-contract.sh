@@ -161,6 +161,10 @@ require_flat_literal "$CONDUCTOR" \
 
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'
+require_flat_literal "$FINAL_VALIDATOR" \
+  'the single synthesized simplifier artifact and its three sealed pass records'
+require_flat_literal "$FINAL_VALIDATOR" \
+  'one `SIMPLIFICATION_READY` synthesis'
 require_literal "$FINAL_VALIDATOR" '`SIMPLIFICATION_INCOMPLETE` or `SIMPLIFICATION_DISPUTED`'
 require_literal "$BRANCH_REVIEWER" '`master` is the GitHub default and production branch'
 require_flat_literal "$BRANCH_REVIEWER" \
