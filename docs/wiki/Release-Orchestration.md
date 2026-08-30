@@ -29,9 +29,9 @@ GitHub runs, approvals, external waits, and durable documentation are monitored
 supporting units.
 
 Three independent simplifier passes use distinct model families and high
-reasoning. One xhigh synthesis produces the only developer handoff. Fewer than
-three completed passes blocks the gate, and unresolved material disagreement
-is reported rather than averaged away.
+reasoning. One xhigh synthesis produces the only developer-gate handoff. Fewer
+than three eligible completed passes blocks the gate, and unresolved material
+disagreement is reported rather than averaged away.
 
 ## Conductor rules
 
