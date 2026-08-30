@@ -160,6 +160,10 @@ for conductor_contract in \
     'Reconstruct observation from the registry after interruption' \
     'A terminal unit without a confirmed downstream handoff is a stall' \
     'must never answer a detected stall with observation alone' \
+    'Raw tool-call growth alone is not deliverable progress' \
+    'zero completed turns after its first-response deadline' \
+    'stop further investigation and return the bounded verdict' \
+    'Continue dependency-safe work immediately' \
     'Do not extend a checkpoint without new underlying progress evidence' \
     'At the second missed checkpoint, escalate the same registered unit' \
     '`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue' \
@@ -167,7 +171,8 @@ for conductor_contract in \
     'completed deploy job' \
     'waiting public-validation job is an approval-bound gate' \
     "defer that handoff behind the watcher's timeout" \
-    'A running agent with recent tool activity is active' \
+    'A running agent with recent tool activity is observable' \
+    'Enforce its first-response deadline' \
     'A GitHub environment approval wait is active external work' \
     'inspect both jobs and `pending_deployments` immediately' \
     'have documented preauthorization, immediately return' \
