@@ -994,7 +994,7 @@ def validate_live_betting_activation_workflow!(file, document, content)
     "infrastructure_provenance_sha256" => "exact infrastructure artifact binding",
     "revalidate-live-activation-stan.sh" => "immediate master and provenance revalidation",
     "ROLLBACK_BASELINE_FILE" => "dark rollback baseline validation",
-    "LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected" =>
+    "LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected-v2" =>
       "dedicated reusable validation account",
     'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' =>
       "protected reusable-account credential",

@@ -28,11 +28,14 @@ node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
 node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
 node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
-grep -Fq "'betstan-e2e-protected'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+grep -Fq "'betstan-e2e-protected-v2'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not reuse the dedicated E2E account"
 grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD' \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not require the protected E2E credential"
+grep -Fq 'password.length < 4 || password.length > 20' \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not enforce the signup password contract"
 ! grep -Fq "'test1234'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check exposes the reusable account password"
 ! grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD ||' \
@@ -41,6 +44,15 @@ grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD' \
 grep -Fq "page.request.post('/api/auth/login'" \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not resolve the reusable account by login"
+grep -Fq "page.request.post('/api/auth/new'" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not create the reusable account through the API"
+grep -Fq "passwordInput.fill('')" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check does not clear a failed UI-login password"
+! grep -Fq "getByTitle('Create account').click()" \
+  "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+  fail "OCI browser check can still truncate the protected password in the signup form"
 ! grep -Eq 'Date\.now\(\)|Math\.random\(\)' \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check still creates per-run user identities"
@@ -55,6 +67,11 @@ acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
 grep -Fq 'const publicContext = await browser.newContext({' "$acceptance_spec" &&
   grep -Fq 'baseURL: process.env.E2E_BASE_URL' "$acceptance_spec" ||
   fail "OCI live acceptance public context is not bound to the configured base URL"
+grep -Fq "passwordInput.fill('')" "$acceptance_spec" ||
+  fail "OCI live acceptance does not clear a failed UI-login password"
+grep -Fq "new URL(response.url()).pathname === '/api/auth/login'" \
+  "$acceptance_spec" ||
+  fail "OCI live acceptance does not bind login to the exact API response"
 grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
   fail "OCI live acceptance does not pass scoped event IDs into the browser context"
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
@@ -934,7 +951,7 @@ done
   fail "live activation must grant and revoke through the compiled auth role command"
 grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow" ||
   fail "live activation account cleanup does not run after acceptance failure"
-grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected' \
+grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected-v2' \
   "$activation_workflow" ||
   fail "live activation does not reuse the dedicated E2E account"
 [[ "$(grep -Fc \
@@ -983,6 +1000,8 @@ for literal in (
     'username="$LIVE_ACCEPTANCE_USERNAME"',
     'password="$LIVE_ACCEPTANCE_PASSWORD"',
     '[ -n "$password" ]',
+    '[ "${#password}" -ge 4 ]',
+    '[ "${#password}" -le 20 ]',
     '[ "$status" = "200" ]',
     '[ "$status" = "201" ]',
 ):

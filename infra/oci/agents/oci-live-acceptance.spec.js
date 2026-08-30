@@ -159,8 +159,27 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
   await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
   await page.getByLabel('Username or email').fill(username);
-  await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'Log in', exact: true }).click();
+  const passwordInput = page.getByLabel('Password', { exact: true });
+  let loginResponse;
+  try {
+    await passwordInput.fill(password);
+    [loginResponse] = await Promise.all([
+      page.waitForResponse((response) => {
+        const request = response.request();
+        return (
+          new URL(response.url()).pathname === '/api/auth/login' &&
+          request.method() === 'POST'
+        );
+      }),
+      page.getByRole('button', { name: 'Log in', exact: true }).click(),
+    ]);
+  } finally {
+    if (await passwordInput.isVisible().catch(() => false)) {
+      await passwordInput.fill('');
+    }
+  }
+  expect(loginResponse).toBeTruthy();
+  expect(loginResponse.ok()).toBeTruthy();
   await expect(page.getByTitle('Backoffice')).toBeVisible();
 
   const suffix = String(runId).slice(-10);
