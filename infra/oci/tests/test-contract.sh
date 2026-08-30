@@ -28,7 +28,7 @@ node --check "$OCI_DIR/agents/playwright.config.js"
 node --check "$OCI_DIR/agents/oci-live-smoke.spec.js"
 node --check "$OCI_DIR/agents/playwright-live-acceptance.config.js"
 node --check "$OCI_DIR/agents/oci-live-acceptance.spec.js"
-grep -Fq "'betstan-e2e'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
+grep -Fq "'betstan-e2e-protected'" "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
   fail "OCI browser check does not reuse the dedicated E2E account"
 grep -Fq 'process.env.LIVE_ACCEPTANCE_PASSWORD' \
   "$OCI_DIR/agents/oci-live-smoke.spec.js" ||
@@ -934,7 +934,8 @@ done
   fail "live activation must grant and revoke through the compiled auth role command"
 grep -Fq "always() && steps.account.outcome == 'success'" "$activation_workflow" ||
   fail "live activation account cleanup does not run after acceptance failure"
-grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e' "$activation_workflow" ||
+grep -Fq 'LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected' \
+  "$activation_workflow" ||
   fail "live activation does not reuse the dedicated E2E account"
 [[ "$(grep -Fc \
   'LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}' \
