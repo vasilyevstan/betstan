@@ -42,6 +42,8 @@ reference: <exact-private-runtime-reference>
 started_at: <utc>
 last_progress_at: <utc>
 progress_signal: <completion-event-tool-count-log-or-job-state>
+activity_signal: <tool-count-log-heartbeat-or-null>
+first_response_due_at: <utc-or-not-applicable>
 checkpoint_due_at: <utc>
 checkpoint_interval: <bounded-duration>
 next_check_trigger: <event-or-time>
@@ -70,6 +72,11 @@ accepted by the next owner.
 - Never become passive after launch. Every nonterminal unit must have both an
   event trigger and a maximum wall-clock checkpoint; an event that never
   arrives cannot suspend orchestration indefinitely.
+- For an agent, set a first-response deadline independently of its activity
+  signal. Raw tool-call growth alone is not deliverable progress and cannot
+  move `last_progress_at`, reset `first_response_due_at`, or forgive a missed
+  checkpoint. Require a delivered turn, bounded status, new finding, immutable
+  artifact, or objective phase transition.
 - On every notification, status request, conductor restart, or checkpoint,
   reconcile the whole active registry: inspect due exact references, classify
   changed state, recover lost observation, route actionable gates, hand off
@@ -93,12 +100,21 @@ The conductor must never answer a detected stall with observation alone:
    notification, or prior conductor turn was lost.
 2. Classify the cause as executing, queued/provider-bound, approval-bound,
    dependency-bound, failed, dead, or unobservable. Do not extend a checkpoint without new underlying progress evidence.
-3. Perform read-only recovery directly. When recovery requires mutation,
+3. When an agent has zero completed turns after its first-response deadline,
+   route one bounded instruction to the same agent owner:
+   `stop further investigation and return the bounded verdict` from evidence
+   already collected. Set a short acknowledgement deadline; tool activity
+   does not reset it.
+4. Perform read-only recovery directly. When recovery requires mutation,
    return `ATTENTION_REQUIRED` immediately with one owner, the exact bounded
    action, its safety preconditions, and the next acknowledgement deadline.
-4. At the second missed checkpoint, escalate the same registered unit; never
+5. At the second missed checkpoint, escalate the same registered unit; never
    launch a duplicate, silently reset its clock, or merely wait longer.
-5. After recovery or owner action, re-read terminal evidence, update
+   Continue dependency-safe work immediately. If the stalled unit is
+   read-only and advisory, close its unavailable result explicitly and route
+   its gate to an already-authoritative owner; if its evidence is mandatory,
+   block only its dependants.
+6. After recovery or owner action, re-read terminal evidence, update
    dependencies, and continue monitoring through the confirmed handoff.
 
 Any unclassifiable no-progress state is `BLOCKED` with the missing evidence and
@@ -110,8 +126,9 @@ its owner. It is never healthy by default.
   an accepted handoff.
 - Follow the dependency graph. Do not start downstream review, mutation, or
   promotion while its evidence-producing dependency is incomplete.
-- Monitor event-first: completion notifications, job transitions, new bounded
-  logs, tool-call progress, and handoffs are progress. Do not tight-poll.
+- Monitor event-first: completion notifications, job transitions, delivered
+  agent turns, new bounded logs tied to objective phase changes, and handoffs
+  are progress. Tool-call count alone is only activity. Do not tight-poll.
 - Treat a blocking watcher such as `gh run watch` as notification transport,
   not as proof of progress. Its continued execution is not a progress signal.
   Never let a watcher outlive the registered checkpoint without independently
@@ -132,10 +149,12 @@ its owner. It is never healthy by default.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
   followed by a waiting public-validation job is an approval-bound gate, not
   healthy execution and not a reason to keep blocking on the watcher.
-- A running agent with recent tool activity is active even before its first
-  response. A GitHub environment approval wait is active external work, not a
-  stall, but it is an actionable gate. If the exact workflow, environment, SHA,
-  and operation have documented preauthorization, immediately return
+- A running agent with recent tool activity is observable before its first
+  response, but activity is not a result. Enforce its first-response deadline
+  and the zero-turn recovery path even while its tool count rises.
+- A GitHub environment approval wait is active external work, not a stall, but
+  it is an actionable gate. If the exact workflow, environment, SHA, and
+  operation have documented preauthorization, immediately return
   `ATTENTION_REQUIRED` with the run ID, environment ID/name, approving owner,
   and exact bounded approval handoff to the orchestrator. Otherwise report
   `BLOCKED` and identify the required human approval owner. Never leave either

@@ -38,6 +38,14 @@ evidence of progress, and may not outlive the registered checkpoint without an
 independent jobs and `pending_deployments` inspection. A user asking for status
 or whether work is stuck triggers that checkpoint immediately.
 
+For agents, tool-call growth is activity rather than deliverable progress.
+Every agent has a separate first-response deadline. Zero completed turns at
+that deadline triggers one bounded instruction to stop further investigation
+and return the verdict already supported by collected evidence. A second miss
+closes advisory read-only work as unavailable and routes its gate to an
+existing authoritative owner; mandatory evidence blocks only its dependants
+while all dependency-safe work continues.
+
 The conductor remains proactive from before a registered job starts through
 its terminal evidence and accepted downstream handoff. Every event trigger is
 paired with a maximum wall-clock checkpoint. On notification, restart, status
@@ -161,7 +169,9 @@ orchestration:
   work_id: <stable-kebab-id>
   owner: <single-owner>
   dependencies: []
-  progress_signal: <event-or-state>
+  progress_signal: <delivered-turn-status-artifact-or-objective-state>
+  activity_signal: <tool-count-log-heartbeat-or-null>
+  first_response_due_at: <utc-or-not-applicable>
   checkpoint_due_at: <utc>
   next_check_trigger: <event-or-time>
   stop_condition: <terminal-result>
