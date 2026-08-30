@@ -15,6 +15,28 @@ Use this flow:
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
+## Pull request evidence
+
+Treat every pull request description as durable review and release evidence,
+not as a short notification. Use `.github/pull_request_template.md` and include:
+
+- why the change exists and the failure or requirement that triggered it;
+- exact base/head SHAs and, for promotions or ancestry syncs, the resulting
+  merge SHA;
+- changed scope, compatibility effects, and explicit exclusions;
+- commands and exact validation outcomes;
+- production, data, feature-flag, and rollback impact, including an explicit
+  statement when there is none;
+- the reason for an intentional closure, replacement, or zero-diff ancestry
+  change.
+
+Keep this detail on implementation, promotion, synchronization, and closed
+attempt PRs. `production-build`, `oci-validate`, and branch policy run on
+`pull_request.edited`, so title/body restoration is workflow-producing work.
+Do not edit historical PR metadata during an active data-to-deploy handoff or
+other production-exclusivity window. Make the edit before or after that window
+and wait for the resulting checks to become terminal.
+
 Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They may use `COPILOT_CLI_AUTO_APPROVE=true` only after the merge-safety script verifies the label, exact refs, trusted required checks, resolved review threads, production workflow inventory, and absence of actionable competing production activity. Unlabelled pull requests and work created outside Copilot CLI require explicit human approval. Automatic mode never skips required checks or immutable-SHA gates.
 
 Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to application build/deploy/activation, exact-title capacity and registry/finalize phases, and the bounded `oci-live-data-rollout` chain. Broad migration, recovery, rollback, stale-master, rerun, unlabelled, and competing runs remain human-gated.
@@ -27,11 +49,31 @@ anonymous-pull proof. Build repair must cite the exact failed first-attempt
 build and its successful first-attempt `production-build`; it rebuilds and
 digest-compares existing tags instead of trusting or overwriting them.
 
-Schema-dependent OCI releases use the reviewer-gated `oci-live-data-rollout` workflow before deployment. Its exact-SHA phases are chained `dry-run` → `apply-backfills` → `apply-slip-index`; `oci-production-deploy` requires the final hash-bound schema evidence and pre-mutation rollback baseline from the same build and infrastructure runs. Mutating phases fence public writes and quiesce legacy data writers. A successful final phase deliberately retains that maintenance state and the shared-Mongo operation lock until the exact deployment passes protected validation, so dispatch the bound deployment immediately; an incomplete deployment re-enters the same fail-closed state for a safe retry.
+Every OCI release requires a new exact-SHA final
+`oci-live-data-rollout` handoff before deployment. Application or schema
+changes chain `dry-run` → `apply-backfills` → `apply-slip-index`; only the
+workflow's validated GitHub/infra/Markdown-only descendant resume may reuse an
+already applied chain, and it still produces a new final handoff.
+`oci-production-deploy` requires that hash-bound evidence and pre-mutation
+rollback baseline from the same build and infrastructure runs. Mutating phases
+fence public writes and quiesce legacy data writers. A successful final phase
+deliberately retains that maintenance state and the shared-Mongo operation lock
+until the exact deployment passes protected validation, so dispatch the bound
+deployment immediately; an incomplete deployment re-enters the same
+fail-closed state for a safe retry.
 
 ## Production safety
 
 Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.
+
+For a manually disabled production workflow, a successful dispatch command or
+returned run URL proves only that GitHub accepted the event. Keep the workflow
+enabled until the captured exact run has a real job and, when protected, the
+expected `pending_deployments` gate. Then disable it before approval. Capture
+the run ID from the returned URL instead of depending on an early display
+title. If a local command fails after returning a URL, inspect that exact run
+before any retry. A jobless queued record with zero jobs and zero pending
+deployments is not release authority and must never be approved or rerun.
 
 Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, staged, and untracked work.
 

@@ -304,11 +304,14 @@ concurrent retirement fixture isolation without masking failed suites.
    `scripts/finalize-k3s.sh` then mounts the Mongo volume, installs
    ingress-nginx and cert-manager, and reconciles the fixed 10/10 Mbps OCI
    load balancer.
-6. Before a schema-dependent application deploy, dispatch
-   `oci-live-data-rollout` against the same exact current master SHA,
-   first-attempt OCI build, and finalized infrastructure run. Run the
-   reviewer-gated phases in order: `dry-run`, `apply-backfills`, then
-   `apply-slip-index`, passing each successful run ID to the next phase.
+6. Before every OCI application deploy, produce a successful final
+   `apply-slip-index` data handoff for the same exact current master SHA,
+   first-attempt OCI build, and finalized infrastructure run. Application or
+   schema changes use the reviewer-gated phases in order: `dry-run`,
+   `apply-backfills`, then `apply-slip-index`, passing each successful run ID
+   to the next phase. Only the workflow's explicitly validated
+   GitHub/infra/docs-only descendant resume may reuse an already applied data
+   chain; deployment still requires the resulting new exact-SHA final handoff.
    The workflow runs only compiled CLIs from the approved immutable image
    digests. Before acquiring the shared Mongo operation lock, it captures and
    validates a rollback baseline whose nine live references and provenance
@@ -401,6 +404,31 @@ release authority.
 
 For OKE fallback, set `OCI_RUNTIME_MODE=oke`; the existing Basic-cluster,
 runner-NSG, and managed-node-pool flow remains available.
+
+### Controlled manual workflow lifecycle
+
+For workflows that are normally disabled:
+
+1. Prove the exact current master SHA, inputs, upstream attempt-1 evidence, and
+   absence of competing production work.
+2. Enable the workflow and dispatch exactly once.
+3. Capture the run ID from the returned URL. A returned URL is not proof that
+   GitHub created a job.
+4. Keep the workflow enabled until the exact run has a real job and, for a
+   protected operation, the expected `pending_deployments` environment.
+5. Disable the workflow before approving that exact run.
+6. Revalidate SHA, attempt, job, environment, and workflow state before
+   approval.
+
+If a command fails after returning a URL, inspect that exact run before any
+retry. A queued record with zero jobs and zero pending approvals is not
+provenance. Keep it unapproved and record it as inert; never relabel it as a
+successful attempt.
+
+PR title/body edits are also workflow-producing because the protected
+validation workflows subscribe to `pull_request.edited`. Do not make those
+edits between live-data handoff and deployment, or during another
+production-exclusivity window.
 
 ## Recovery and retirement
 

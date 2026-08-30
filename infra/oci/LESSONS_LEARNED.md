@@ -499,3 +499,68 @@ conversation summaries are not authority.
   automation defect, or safety invariant, and name the exact safe next action.
 - When a new failure class is proven, add a regression fixture and update the
   owning agent before retrying production.
+
+## Live activation recovery — 2026-08-30
+
+### Acceptance corrections
+
+- The implemented live card has two phases: exactly two enabled countdown
+  products before kickoff, then seven retained cards after kickoff—five
+  in-play markets plus two non-selectable countdown products. `KICKOFF_TEAM`
+  settles at kickoff; `FIRST_MINUTE_GOAL` remains closed until the first-minute
+  transition and then settles. An assertion that expected only five
+  post-kickoff cards was a test defect, not a product failure.
+- A JWT that still claims `ADMIN` after the persisted account is demoted is an
+  invalid privileged session. Clear it and return `401`; a current ordinary
+  `USER` requesting an administrator route still receives `403`.
+- Keep failed activation `33303355082` immutable. Its cleanup disabled new
+  kickoffs, restored the account to `USER`, removed the exact synthetic slip,
+  and cleared the lease before the corrected candidate was built.
+
+### Workflow orchestration
+
+- `production-build`, `oci-validate`, and branch policy subscribe to
+  `pull_request.edited`. Restoring detailed bodies on merged or closed PRs can
+  therefore start production-capable CI. Do that work outside a live data,
+  deploy, activation, or exclusivity window and wait for those runs to become
+  terminal.
+- A workflow-dispatch URL is not job materialization. For a manually disabled
+  workflow, capture the exact run ID from the URL, keep the workflow enabled
+  until that run has at least one job and the expected protected environment,
+  then disable before approval. Disabling immediately can leave a permanent
+  jobless queued record.
+- If a local command exits after printing a run URL, query that exact run
+  before dispatching again. Display titles can remain generic before inputs
+  materialize, so title matching alone can falsely report that no run exists.
+- A jobless queued activation record with zero jobs and zero pending approvals
+  is not authority and cannot be made valid by approval or rerun. Preserve it
+  as inert evidence and create one fresh materialized dispatch only after
+  proving no overlapping side effects.
+- A late advisory verdict is stale until revalidated against its recorded
+  source SHA, the current authoritative workflow tree, and runtime topology.
+  The one-retained-PVC shared-Mongo journal and contract tests outrank an old
+  eight-PVC assumption.
+- When the user chooses the fastest safe go-live path, apply a critical-path
+  scope freeze: continue required gates and recovery, but defer unrelated PR
+  metadata and documentation until activation is terminal.
+
+### Terminal evidence
+
+Master `0bf1d01981e454cd6ca661d8e6d99997462c558c` reached production through
+build `33307059664`, OCI build `33307558371`, GHCR validation `33308076137`,
+capacity `33308191145`, infrastructure `33308306279`, data runs
+`33308673229`/`33309055711`/`33309897271`, deployment `33310369637`, and
+activation `33311534616`.
+
+The activation completed its browser journey, settlement, cleanup,
+queue/runtime, restart, accepted-evidence, and permanent-commit gates. Final
+readiness was `GO`: live kickoffs enabled with no lease, zero active synthetic
+slips, zero pending/retry/dead-letter residue, no pod restart delta, and
+successful public REST, legacy pre-match, and SSE checks. Rollback authority
+remains source `3ce5ddcc031081f1658e91fa658000aa9a9f9ab4`, build
+`33249834065`, and deployment `33252255145` only while their immutable
+artifacts remain retained. The earliest current required artifact expires at
+`2026-09-28T11:28:54Z`, but build run `33249834065` reaches the workflow's
+30-day age limit earlier at `2026-09-28T11:18:50Z`. Rotate or recertify the
+fallback before the earlier cutoff or when a newer release becomes the
+accepted rollback target.

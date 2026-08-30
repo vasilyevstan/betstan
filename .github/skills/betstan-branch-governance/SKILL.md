@@ -15,6 +15,12 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
 - Only an up-to-date `dev` branch may open a pull request into `master`.
 - A production promotion requires green trusted `branch-policy/master` and `pr-quality-gates/master` statuses on both its current head and unique merge snapshot.
 - Before promotion, identify the exact head SHA and every production-capable workflow triggered by the diff. Require explicit approval covering that exact set.
+- Keep PR bodies detailed: why, exact source/ancestry, scope and exclusions,
+  validation outcomes, release impact, rollback evidence, and intentional
+  closure or zero-diff rationale.
+- Treat PR title/body edits as workflow-producing when protected workflows
+  subscribe to `pull_request.edited`; schedule them outside production
+  exclusivity and data-to-deploy handoff windows.
 - Manual central production workflow dispatches are approval-gated through `production-emergency` and require an exact full master SHA. Legacy per-service deploy workflows are not manually dispatchable.
 - After a squash promotion, immediately merge `master` back into `dev` and verify `master` is an ancestor of `dev`.
 
@@ -28,6 +34,7 @@ Before recommending an action:
 4. Inspect PR base, head, exact head SHA, mergeability, and check conclusions.
 5. Use ancestry checks rather than comparing branch tips.
 6. Use `pr-validation-stan.sh` to bind the current head SHA, base SHA, merge snapshot, and trusted workflow IDs; use `pr-merge-safety-stan.sh` for the final recommendation.
+7. Verify the PR body satisfies `.github/pull_request_template.md`.
 
 When changing required checks, bootstrap in two phases: first merge the trusted workflow into default `dev` under the existing gates; then verify a fresh status from the new workflow identity before changing protection or disabling the retired identity.
 

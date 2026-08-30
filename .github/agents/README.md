@@ -46,6 +46,25 @@ closes advisory read-only work as unavailable and routes its gate to an
 existing authoritative owner; mandatory evidence blocks only its dependants
 while all dependency-safe work continues.
 
+An explicit user request to prioritize production establishes a critical-path
+scope freeze. Continue required safety work, but defer unrelated documentation,
+PR metadata, and advisory expansion until the production gate is terminal.
+Pull-request metadata edits are workflow-producing when validation subscribes
+to `pull_request.edited`; register those runs and never create them inside a
+data-to-deploy handoff or production-exclusivity window.
+
+For manually disabled workflows, a workflow dispatch URL is acceptance, not
+materialization. Capture the exact run ID from the URL, keep the workflow
+enabled until the run has a real job and expected `pending_deployments` gate,
+then disable it before approval. If a command fails after printing a URL,
+inspect that run before dispatching again. A jobless queued record with no jobs
+or approvals is inert evidence, not release authority.
+
+Revalidate a late specialist result against its recorded SHA, current workflow
+tree, and runtime topology before accepting it. A result that arrives after
+those authorities changed cannot block the critical path with stale
+assumptions.
+
 The conductor remains proactive from before a registered job starts through
 its terminal evidence and accepted downstream handoff. Every event trigger is
 paired with a maximum wall-clock checkpoint. On notification, restart, status
@@ -85,6 +104,11 @@ operation lock, zero-replica workload, or unavailable ingress. The conductor
 treats that state as an active production incident and routes the exact runtime
 owner to restore service or complete the verified handoff before starting a
 replacement candidate.
+
+When durable learning was requested, activation is followed by a registered
+terminal documentation handoff. Orchestration is incomplete until the relevant
+Markdown, wiki, reusable agents, PR/release evidence, and todos are updated and
+validated.
 
 ## Ownership
 
