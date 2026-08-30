@@ -3,7 +3,10 @@ set -euo pipefail
 
 # Purpose: enforce branch policy and give a conservative merge recommendation.
 # Usage:
+#   # Inspection-only human mode; for master it also prints production_workflows.
 #   ./infra/azure/agents/pr-merge-safety-stan.sh 41
+#   # After explicitly reviewing and copying that exact head SHA:
+#   APPROVED_SHA=<sha> ./infra/azure/agents/pr-merge-safety-stan.sh 41
 #   APPROVED_SHA=<sha> APPROVED_WORKFLOWS=production-build,production-deploy \
 #     ./infra/azure/agents/pr-merge-safety-stan.sh 41
 #   COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh 41
@@ -11,6 +14,8 @@ set -euo pipefail
 REPO="${REPO:-vasilyevstan/betstan}"
 PR_NUMBER="${1:-${PR:-}}"
 AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
+# Copilot CLI and human gh calls share one GitHub identity, so this label is an
+# operational classifier rather than cryptographic provenance.
 CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 BRANCH_POLICY_GUARD="${BRANCH_POLICY_GUARD:-./infra/azure/agents/branch-policy-guard-stan.sh}"
 PR_VALIDATOR="${PR_VALIDATOR:-./infra/azure/agents/pr-validation-stan.sh}"
@@ -182,11 +187,10 @@ if [[ "$base_ref" == "master" ]]; then
       "$WORKFLOW_INVENTORY" |
       sed -n 's/^production_workflows=//p'
   )"
+  echo "production_workflows=$expected_workflows"
   if [[ "$AUTO_APPROVE" == "true" ]]; then
-    approved_sha="$head_sha"
     approved_workflows="$expected_workflows"
   else
-    approved_sha="${APPROVED_SHA:-}"
     approved_workflows="$(
       tr ',' '\n' <<<"${APPROVED_WORKFLOWS:-}" |
         sed '/^$/d' |
@@ -194,8 +198,17 @@ if [[ "$base_ref" == "master" ]]; then
         paste -sd, -
     )"
   fi
-  [[ "$approved_sha" == "$head_sha" ]] ||
-    fail "production promotion requires APPROVED_SHA=$head_sha"
+fi
+
+if [[ "$AUTO_APPROVE" == "true" ]]; then
+  approved_sha="$head_sha"
+else
+  approved_sha="${APPROVED_SHA:-}"
+fi
+[[ "$approved_sha" == "$head_sha" ]] ||
+  fail "human approval requires APPROVED_SHA=$head_sha"
+
+if [[ "$base_ref" == "master" ]]; then
   [[ "$approved_workflows" == "$expected_workflows" ]] ||
     fail "production workflow approval mismatch expected=$expected_workflows approved=${approved_workflows:-none}"
 fi

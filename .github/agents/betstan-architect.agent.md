@@ -14,6 +14,7 @@ bounded, dependency-ordered implementation contract before code is changed.
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
@@ -80,5 +81,5 @@ Include:
 - required specialist reviews and tests;
 - concrete blockers with tradeoffs and a recommended choice.
 
-End with a handoff to `betstan-simplifier` or the exact specialist that must
-resolve a blocker.
+End with one architecture handoff to the registered three-model
+`betstan-simplifier` gate, or the exact specialist that must resolve a blocker.

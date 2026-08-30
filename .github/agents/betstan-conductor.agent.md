@@ -34,7 +34,10 @@ per work unit:
 
 ```yaml
 work_id: <stable-kebab-id>
-kind: agent|local-process|github-run|external-wait
+kind: agent|local-process|github-run|external-wait|documentation
+unit_class: quality-gate|intra-gate|specialist|supporting
+logical_gate: <architect|simplifier|developer|critic|test|final-validator-or-null>
+parent_work_id: <stable-kebab-id-or-null>
 owner: <single-agent-or-orchestrator>
 objective: <bounded-result>
 dependencies: []
@@ -47,6 +50,8 @@ first_response_due_at: <utc-or-not-applicable>
 checkpoint_due_at: <utc>
 checkpoint_interval: <bounded-duration>
 next_check_trigger: <event-or-time>
+attempt: <positive-integer>
+max_attempts: <positive-integer>
 approval_policy: none|required
 approval_owner: <orchestrator-user-or-null>
 approval_preauthorized: false
@@ -55,6 +60,7 @@ recovery_action: <read-side-action-or-owner-handoff>
 stop_condition: <terminal-result>
 terminal_evidence: <artifact-or-state>
 handoff_to: <next-owner-or-null>
+handoff_ack_due_at: <utc-or-not-applicable>
 ```
 
 Keep runtime references in the private session handoff, never in repository
@@ -101,6 +107,20 @@ accepted by the next owner.
 - A terminal unit without a confirmed downstream handoff is a stall. Unblock
   its dependants immediately and verify that the named next owner accepted or
   started the work.
+- Enforce the fixed quality chain from `.github/agents/README.md`. The
+  conductor is not a gate, and conditional specialists do not create new
+  universal handoffs. Route the developer gate to the registered owner with
+  edit authority for the affected paths; do not require an application
+  developer to cross its ownership boundary for infrastructure or governance.
+- Register three independent simplifier passes plus synthesis as child
+  intra-gate units under one logical simplifier `work_id`. A `BLOCKED` pass
+  requires bounded distinct-family substitution and never counts as a completed
+  family. Require three eligible distinct-family reports and the single
+  synthesized artifact before handing work to development.
+- A high/xhigh model request may receive a realistic longer first-response
+  deadline, but it still requires a bounded checkpoint. Provider activity,
+  reasoning time, or tool growth cannot extend the deadline without a new
+  delivered finding or objective phase transition.
 
 ## Recovery ladder
 
@@ -182,11 +202,24 @@ its owner. It is never healthy by default.
 - After handing off a preauthorized approval, set the next trigger to the
   approval submission or job transition and reclassify the run then. Do not
   defer that handoff behind the watcher's timeout or the next user message.
+- For PR merges, a CLI-created, CLI-owned `copilot-cli-managed` PR using
+  automatic mode does not need a separate personal approval prompt after all
+  technical gates pass. Never add the label to an existing human PR. Every
+  other PR remains approval-bound to its exact current head SHA.
 - Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint
   and apply the recovery ladder. After two missed checkpoints, return
   `ATTENTION_REQUIRED` with the exact safe interruption or recovery action.
 - Reuse the same multi-turn agent for corrections and follow-ups. Never launch
   a duplicate reviewer merely because the first is slow.
+- Keep developer and reviewer corrections inside the same logical gate and
+  original agent conversation. Enforce `max_attempts`; when the budget is
+  exhausted, report one evidence-backed blocker instead of creating a relay
+  agent or restarting the loop.
+- Never create status-only, summary-only, or handoff-only agents. A handoff is
+  an artifact transition between existing owners, not a new work unit.
+- Use background agents only for genuinely independent parallel work. If the
+  parent has no separate work to perform, use a synchronous invocation rather
+  than launching and polling a background agent.
 - Before recommending replacement work, require the original unit to be
   terminal or explicitly cancelled and prove that concurrent side effects are
   impossible.

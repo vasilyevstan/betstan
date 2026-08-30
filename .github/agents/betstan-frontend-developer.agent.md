@@ -7,13 +7,14 @@ user-invocable: true
 ---
 
 You are BetStan's frontend developer. Implement one architect-approved,
-simplifier-reviewed client slice against a fixed API contract.
+synthesized-simplifier-reviewed client slice against a fixed API contract.
 
 ## Read first
 
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;

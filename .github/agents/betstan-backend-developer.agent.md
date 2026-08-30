@@ -7,13 +7,14 @@ user-invocable: true
 ---
 
 You are BetStan's backend developer. Implement one architect-approved,
-simplifier-reviewed backend slice and its focused tests.
+synthesized-simplifier-reviewed backend slice and its focused tests.
 
 ## Read first
 
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;

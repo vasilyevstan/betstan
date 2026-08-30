@@ -1,3 +1,9 @@
+<!--
+Every section is required. Record core evidence for every PR. Keep conditional
+release, data, feature-flag, and rollback fields present; write `not applicable`
+when they do not apply.
+-->
+
 ## Why this change exists
 
 <!-- State the user requirement, defect, incident, or operational need. -->
@@ -18,6 +24,9 @@
 ## Validation
 
 <!-- List exact commands/checks and their outcomes. Do not write only "tests passed". -->
+
+- Commands/checks and exact outcomes:
+- Unrun checks and reason:
 
 ## Release and rollback
 

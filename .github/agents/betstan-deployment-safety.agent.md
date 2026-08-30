@@ -52,7 +52,8 @@ inactive. Fail closed when either query is incomplete or fails.
 - Commits and pushes to non-`master` branches do not deploy production.
 - Never commit or push directly to `master`, even with generic user approval.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
-- For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
+- For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Never add that label to an existing human PR.
+- Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Production-run exclusivity may ignore an active stale queue artifact only
   for `oci-capacity-acquire`: require an old jobless and approval-free
@@ -184,7 +185,10 @@ inactive. Fail closed when either query is incomplete or fails.
 
 Before deployment:
 
-- confirm explicit user approval covers this exact SHA, deployment method, and complete production workflow trigger set;
+- confirm the applicable approval mode covers this exact SHA, deployment
+  method, and complete production workflow trigger set; automatic approval is
+  valid only for the documented CLI-managed allowlist, otherwise require
+  explicit user approval;
 - confirm the production PR is an up-to-date `dev`-to-`master` promotion;
 - confirm the target branch/SHA and workflow provenance;
 - run `pre-commit-infra-check-stan.sh`;
@@ -272,13 +276,13 @@ A Running broker with missing consumers is not healthy production.
 
 - Use `branch-policy-guard-stan.sh` to reject unsupported base/head pairs.
 - Require implementation, promotion, synchronization, and intentionally closed
-  PRs to document why, exact source/ancestry, scope and exclusions, validation
-  outcomes, release impact, and rollback evidence.
+  PRs to satisfy the canonical evidence structure in
+  `.github/pull_request_template.md` and `CONTRIBUTING.md`.
 - Treat PR title/body changes as workflow-producing when the workflow trigger
   includes `edited`. Never repair historical PR metadata during a live-data
   handoff or another production-exclusivity window.
 - Use `pr-validation-stan.sh` to verify the exact current head, base, unique merge snapshot, and trusted workflow identities.
-- Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode for every other PR.
+- Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode with `APPROVED_SHA` equal to the current head for every other PR, including PRs into `dev`.
 - Treat skipped, stale, pending, neutral, or branch-name-only runs as non-success.
 - Separate infrastructure failures from unrelated application-test failures; never hide either.
 - Do not broaden or narrow CI scope merely to manufacture a green result.

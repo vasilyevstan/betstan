@@ -229,6 +229,29 @@ cd resulting && npm ci && npm run test:ci
   Queries for optional nested safety markers require explicit field existence
   and a non-null value so the production predicate is reviewable in fixtures.
 
+### Agent orchestration and review governance
+
+- The conductor spans the quality chain but never substitutes for a gate.
+  `.github/agents/README.md` owns the exact chain and handoff taxonomy.
+- A process can be running and still be stalled. Tool activity, logs, and
+  watchers do not replace a bounded first response, objective progress,
+  checkpoint, or accepted downstream handoff.
+- Keep corrections in the originating agent context with a bounded attempt
+  count. Replacement, summary-only, or status-only agents create lost context
+  and conflicting ownership.
+- Three independent simplifier passes need distinct model families, identical
+  sealed input, high reasoning, and one conservative synthesis. Fewer than
+  three completed passes blocks; safety and compatibility cannot be removed by
+  majority vote.
+- PR descriptions are durable evidence. Use
+  `.github/pull_request_template.md` for the exact core and conditional fields.
+- Copilot CLI automatic approval removes only the personal prompt. It never
+  removes exact-SHA, trusted-check, review-thread, workflow-inventory,
+  environment, or exclusivity gates. Human/default PRs require approval bound
+  to their current head SHA.
+- `copilot-cli-managed` is a repository convention rather than cryptographic
+  provenance because CLI and human `gh` operations share one GitHub identity.
+
 ## Resolved failures and durable rules
 
 - An orphaned `common` gitlink without `.gitmodules` previously broke checkout cleanup. `common/` is now maintained as a normal tracked package while services consume explicit published versions from npm.

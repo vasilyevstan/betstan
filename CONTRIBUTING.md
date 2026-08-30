@@ -18,15 +18,17 @@ Never push directly to `dev`; integrate focused feature, fix, or operations bran
 ## Pull request evidence
 
 Treat every pull request description as durable review and release evidence,
-not as a short notification. Use `.github/pull_request_template.md` and include:
+not as a short notification. Use `.github/pull_request_template.md`. The
+following core evidence is required on every PR; conditional operational fields
+remain present and say `not applicable` when they do not apply:
 
 - why the change exists and the failure or requirement that triggered it;
 - exact base/head SHAs and, for promotions or ancestry syncs, the resulting
   merge SHA;
 - changed scope, compatibility effects, and explicit exclusions;
 - commands and exact validation outcomes;
-- production, data, feature-flag, and rollback impact, including an explicit
-  statement when there is none;
+- full production, data, feature-flag, and rollback evidence when applicable;
+  keep each field present and write `not applicable` otherwise;
 - the reason for an intentional closure, replacement, or zero-diff ancestry
   change.
 
@@ -37,7 +39,23 @@ Do not edit historical PR metadata during an active data-to-deploy handoff or
 other production-exclusivity window. Make the edit before or after that window
 and wait for the resulting checks to become terminal.
 
-Copilot CLI-created pull requests carry the `copilot-cli-managed` label. They may use `COPILOT_CLI_AUTO_APPROVE=true` only after the merge-safety script verifies the label, exact refs, trusted required checks, resolved review threads, production workflow inventory, and absence of actionable competing production activity. Unlabelled pull requests and work created outside Copilot CLI require explicit human approval. Automatic mode never skips required checks or immutable-SHA gates.
+Copilot CLI-created pull requests carry the `copilot-cli-managed` label. Only
+Copilot CLI may apply it, and only to a PR that the active CLI workflow created
+and owns; never relabel an existing human PR. Because the CLI and a human using
+`gh` share the same GitHub identity, this label is an operational convention,
+not cryptographic attestation.
+
+CLI-managed PRs may use `COPILOT_CLI_AUTO_APPROVE=true` without a separate
+personal prompt only after the merge-safety script verifies the label, exact
+refs, trusted required checks, resolved review threads, production workflow
+inventory, and absence of actionable competing production activity. Every
+other PR requires `APPROVED_SHA` equal to its exact current head, including
+PRs targeting `dev`. Human `master` promotions also require the exact
+`APPROVED_WORKFLOWS` inventory. Automatic mode never skips required checks,
+immutable-SHA gates, or production safety.
+
+Do not merge a PR until `pr-merge-safety-stan.sh` passes in the correct
+automatic or human mode for its exact current head.
 
 Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to application build/deploy/activation, exact-title capacity and registry/finalize phases, and the bounded `oci-live-data-rollout` chain. Broad migration, recovery, rollback, stale-master, rerun, unlabelled, and competing runs remain human-gated.
 
@@ -89,7 +107,11 @@ Before proposing a production promotion:
 
 ```bash
 ./infra/azure/agents/pre-commit-infra-check-stan.sh
+# Inspect and explicitly review the printed head_sha and production_workflows.
 ./infra/azure/agents/pr-merge-safety-stan.sh <pr-number>
+# Re-run with the exact reviewed SHA and production workflow inventory.
+APPROVED_SHA=<head-sha> APPROVED_WORKFLOWS=<comma-separated-workflows> \
+  ./infra/azure/agents/pr-merge-safety-stan.sh <pr-number>
 ```
 
 After an approved promotion:
