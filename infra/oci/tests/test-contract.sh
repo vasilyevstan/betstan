@@ -83,6 +83,15 @@ grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
 grep -Fq 'const LIVE_FIXTURE_KICKOFF_DELAY_SECONDS = 90;' "$acceptance_spec" &&
   [[ "$(grep -Fc 'kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS' "$acceptance_spec")" -eq 2 ]] ||
   fail "OCI live acceptance does not start both live fixtures together"
+for countdown_contract in \
+    "{ marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' }" \
+    "{ marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' }" \
+    '...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),' \
+    'ALL_LIVE_MARKET_TYPES.length,' \
+    ').toEqual([...ALL_LIVE_MARKET_TYPES].sort());'; do
+  grep -Fq "$countdown_contract" "$acceptance_spec" ||
+    fail "OCI live acceptance omits countdown-market coverage: $countdown_contract"
+done
 for selection_contract in \
     'const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([' \
     "'Live quote is stale'" \

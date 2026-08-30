@@ -53,7 +53,7 @@ it("revokes an existing admin token after the persisted role is demoted", async 
   await request(app)
     .get("/api/auth/admin/verify")
     .set("Cookie", cookie)
-    .expect(403);
+    .expect(401);
 });
 
 it("revokes an existing admin token after the user is deleted", async () => {
