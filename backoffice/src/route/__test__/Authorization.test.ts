@@ -88,12 +88,12 @@ it.each([
 });
 
 it("rejects backoffice reads after persisted-role revocation", async () => {
-  setAdminSessionVerifierForTests(async () => 403);
+  setAdminSessionVerifierForTests(async () => 401);
 
   await request(app)
     .get("/api/backoffice")
     .set("Cookie", buildSessionCookie("ADMIN"))
-    .expect(403);
+    .expect(401);
 });
 
 it("fails backoffice reads closed when persisted-role verification is unavailable", async () => {
@@ -171,13 +171,13 @@ it.each(mutations)(
   async ({ path, body, publisher }) => {
     await seedGuardedEvent();
     const snapshot = await snapshotGuardedEvent();
-    setAdminSessionVerifierForTests(async () => 403);
+    setAdminSessionVerifierForTests(async () => 401);
 
     await request(app)
       .post(path)
       .set("Cookie", buildSessionCookie("ADMIN"))
       .send(body)
-      .expect(403);
+      .expect(401);
 
     await expectNoMutationOccurred(publisher, snapshot);
   }
