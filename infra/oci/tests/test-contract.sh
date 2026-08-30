@@ -83,6 +83,15 @@ grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
 grep -Fq 'const LIVE_FIXTURE_KICKOFF_DELAY_SECONDS = 90;' "$acceptance_spec" &&
   [[ "$(grep -Fc 'kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS' "$acceptance_spec")" -eq 2 ]] ||
   fail "OCI live acceptance does not start both live fixtures together"
+for countdown_contract in \
+    "{ marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' }" \
+    "{ marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' }" \
+    '...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),' \
+    'ALL_LIVE_MARKET_TYPES.length,' \
+    ').toEqual([...ALL_LIVE_MARKET_TYPES].sort());'; do
+  grep -Fq "$countdown_contract" "$acceptance_spec" ||
+    fail "OCI live acceptance omits countdown-market coverage: $countdown_contract"
+done
 for selection_contract in \
     'const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([' \
     "'Live quote is stale'" \
@@ -151,6 +160,10 @@ for conductor_contract in \
     'Reconstruct observation from the registry after interruption' \
     'A terminal unit without a confirmed downstream handoff is a stall' \
     'must never answer a detected stall with observation alone' \
+    'Raw tool-call growth alone is not deliverable progress' \
+    'zero completed turns after its first-response deadline' \
+    'stop further investigation and return the bounded verdict' \
+    'Continue dependency-safe work immediately' \
     'Do not extend a checkpoint without new underlying progress evidence' \
     'At the second missed checkpoint, escalate the same registered unit' \
     '`ORCHESTRATION_HEALTHY` is forbidden while a checkpoint is overdue' \
@@ -158,7 +171,8 @@ for conductor_contract in \
     'completed deploy job' \
     'waiting public-validation job is an approval-bound gate' \
     "defer that handoff behind the watcher's timeout" \
-    'A running agent with recent tool activity is active' \
+    'A running agent with recent tool activity is observable' \
+    'Enforce its first-response deadline' \
     'A GitHub environment approval wait is active external work' \
     'inspect both jobs and `pending_deployments` immediately' \
     'have documented preauthorization, immediately return' \

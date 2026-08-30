@@ -9,6 +9,14 @@ const LIVE_MARKETS = [
   'NEXT_PENALTY',
   'HALF_TIME_RESULT',
 ];
+const COUNTDOWN_MARKETS = [
+  { marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' },
+  { marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' },
+];
+const ALL_LIVE_MARKET_TYPES = [
+  ...LIVE_MARKETS,
+  ...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),
+];
 const STRUCTURAL_INCIDENTS = [
   'KICK_OFF',
   'ADDED_TIME_ANNOUNCED',
@@ -280,6 +288,19 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       page.getByRole('article', { name: fixture.name }),
     ).toBeVisible({ timeout: 30000 });
   }
+  for (const fixture of fixtures.slice(0, 2)) {
+    const article = page.getByRole('article', { name: fixture.name });
+    await expect(article.locator('.event-market-card')).toHaveCount(
+      COUNTDOWN_MARKETS.length,
+    );
+    for (const { label } of COUNTDOWN_MARKETS) {
+      const marketCard = article.locator('.event-market-card').filter({
+        hasText: label,
+      });
+      await expect(marketCard).toBeVisible();
+      await expect(marketCard.getByRole('button').first()).toBeEnabled();
+    }
+  }
 
   const futureFixture = fixtures[2];
   const futureArticle = page.getByRole('article', { name: futureFixture.name });
@@ -299,15 +320,24 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   for (const fixture of fixtures.slice(0, 2)) {
     const article = page.getByRole('article', { name: fixture.name });
     await expect(article).toBeVisible({ timeout: 100000 });
-    await expect(article.locator('.event-market-card')).toHaveCount(5);
+    await expect(article.locator('.event-market-card')).toHaveCount(
+      ALL_LIVE_MARKET_TYPES.length,
+    );
     for (const marketName of [
       'Next Yellow Card',
       'Next Red Card',
       'Next Corner',
       'Next Penalty',
       'Half Time Result',
+      ...COUNTDOWN_MARKETS.map(({ label }) => label),
     ]) {
       await expect(article.getByText(marketName, { exact: true })).toBeVisible();
+    }
+    for (const { label } of COUNTDOWN_MARKETS) {
+      const marketCard = article.locator('.event-market-card').filter({
+        hasText: label,
+      });
+      await expect(marketCard.getByRole('button').first()).toBeDisabled();
     }
   }
 
@@ -502,7 +532,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     );
     expect(
       kickoffSnapshot.live.currentMarkets.map((market) => market.marketType).sort(),
-    ).toEqual([...LIVE_MARKETS].sort());
+    ).toEqual([...ALL_LIVE_MARKET_TYPES].sort());
 
     const finalSnapshot = [...eventSnapshots].reverse().find(
       (snapshot) => snapshot.live.phase === 'FULL_TIME',

@@ -33,7 +33,7 @@ router.get(
 
     if (normalizeUserRole(user.role) !== UserRole.ADMIN) {
       req.session = null;
-      return res.status(403).send();
+      return res.status(401).send();
     }
 
     return res.status(204).send();
