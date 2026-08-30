@@ -400,7 +400,9 @@ for literal in \
   'APPLY LIVE BACKFILLS EXACT SHA' \
   'APPLY LIVE SLIP INDEX EXACT SHA' \
   'RESUME APPLIED LIVE DATA EXACT SHA' \
+  'RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME EXACT SHA' \
   'RESUME APPLIED LIVE DATA AND CLEAN FAILED ACTIVATION EXACT SHA' \
+  'RESUME APPLIED LIVE DATA FROM RELEASED RUNTIME AND CLEAN FAILED ACTIVATION EXACT SHA' \
   'production-run-exclusivity-stan.sh' \
   'shared-mongo-operation-lock-stan.sh acquire' \
   'shared-mongo-operation-lock-stan.sh release' \
@@ -421,6 +423,16 @@ for literal in \
   'Bind historical recovery source through its exact artifact' \
   'BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || '\''none'\'' }}' \
   'failed_deploy_run_id:' \
+  'attempts/1/jobs?per_page=100' \
+  '.name == "deploy"' \
+  '.name == "public-validate"' \
+  'Release live data maintenance fence' \
+  'Re-enter maintenance after an incomplete deployment' \
+  'success:failure:success:skipped' \
+  'failure:skipped:failure:success' \
+  'failure:skipped:skipped:success' \
+  'resume_maintenance_mode=released-runtime' \
+  'resume_maintenance_mode=retained-hold' \
   'failed_activation_run_id:' \
   'failed_activation_user_id:' \
   'oci-production-baseline-${{ inputs.failed_deploy_run_id }}-1' \
@@ -558,6 +570,9 @@ require_order(
     [
         "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
         "Resume deployment image mismatch",
+        'case "$RESUME_MAINTENANCE_MODE" in',
+        "released-runtime)",
+        "retained-hold)",
         "live-data-maintenance-stan.sh verify-quiesced",
         "for service in auth backoffice client; do",
         "kubectl rollout status",
@@ -573,7 +588,9 @@ maintenance = data[
     data.index("- name: Delete exact orphaned live-acceptance slips")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then',
+    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
+    '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
+    '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
     "live-data-maintenance-stan.sh enter",
     "live-data-maintenance-stan.sh hold",
 ):
@@ -582,12 +599,30 @@ for literal in (
             f"data workflow does not re-establish failed-deploy maintenance: {literal}"
         )
 
+handoff = data[
+    data.index("- name: Restore runtime or verify final deploy handoff"):
+    data.index("- name: Capture post-phase runtime baseline")
+]
+for literal in (
+    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
+    '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
+    '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
+    "live-data-maintenance-stan.sh restore",
+    "live-data-maintenance-stan.sh verify-held",
+):
+    if literal not in handoff:
+        raise SystemExit(
+            f"data workflow does not restore released runtime after phase failure: {literal}"
+        )
+
 abort = data[
     data.index("- name: Restore runtime or retain hold if final handoff packaging failed"):
     data.index("- name: Release database operation lock unless handed to deploy")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then',
+    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
+    '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
+    '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
     "live-data-maintenance-stan.sh restore",
     "live-data-maintenance-stan.sh verify-held",
 ):
@@ -595,6 +630,16 @@ for literal in (
         raise SystemExit(
             f"data workflow does not retain a failed-deploy hold on abort: {literal}"
         )
+
+resume_mode_env = (
+    "RESUME_MAINTENANCE_MODE: "
+    "${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}"
+)
+if data.count(resume_mode_env) != 3:
+    raise SystemExit(
+        "data workflow must bind the resume maintenance mode to exactly three "
+        "maintenance and cleanup steps"
+    )
 
 for literal in (
     "EXPECTED_OPERATION_LOCK_HOLDER: live-data-${{ inputs.data_run_id }}-1",
