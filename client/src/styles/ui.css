@@ -227,6 +227,50 @@ body {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
+/* Compact label-over-price control used by Product1X2/ProductCS: keeps the selection label and
+   price legible and touch-friendly inside a narrow (col-xl-4 or narrower) event card without a
+   separate header row consuming extra vertical space. `min-width: 0` lets the control actually
+   shrink to its assigned grid-column width instead of forcing the column (and its ancestors)
+   wider than the card to fit the label's un-shrunk intrinsic size. */
+.product-button--labelled {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  min-height: 2.75rem;
+  min-width: 0;
+  padding-block: 0.4rem;
+  white-space: normal;
+}
+
+.product-button__label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+
+/* Three-column 1X2 control layout. Deliberately a plain CSS grid (not Bootstrap's `.row`/`.col-*`)
+   so there is no negative-margin gutter bleed past the card's own padding; `minmax(0, 1fr)`
+   lets each column shrink below its content's natural width instead of overflowing. */
+.product-1x2-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+/* Compact correct-score grid: every generated option stays visible without one full-width row
+   per option, reflowing its column count to the actual (now often much narrower) card width. */
+.product-cs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+
 .auth-card {
   width: min(100%, 30rem);
   margin-inline: auto;
@@ -1158,9 +1202,15 @@ body {
 .event-card__badge,
 .event-market-status,
 .slip-board__status {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  /* `inline-block` (not `inline-flex`) so a longer dynamic label (e.g. "Temporarily suspended")
+     can actually wrap onto another line within its own box when space is tight, instead of an
+     inline-flex container's bare text child refusing to shrink below its unwrapped width and
+     forcing every ancestor up to the card wider than the card itself. */
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  text-align: center;
+  overflow-wrap: anywhere;
   min-height: 1.5rem;
   padding: 0.15rem 0.55rem;
   border: 1px solid transparent;
@@ -1256,13 +1306,28 @@ body {
 .event-card__live-body {
   display: grid;
   gap: 1rem;
+  min-width: 0;
+}
+
+.event-card__live-body > * {
+  min-width: 0;
 }
 
 .event-card__live-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.9rem;
   align-items: flex-start;
+}
+
+/* Cards are now always constrained to the responsive col-xl-4 grid (never full-width), so the
+   title/kickoff block needs to be able to shrink and wrap rather than force the scoreboard/
+   countdown block to overflow the card at any viewport size. */
+.event-card__live-head > :first-child {
+  min-width: 0;
+  flex: 1 1 10rem;
+  overflow-wrap: anywhere;
 }
 
 .event-scoreboard {
@@ -1334,6 +1399,11 @@ body {
 .event-card__section {
   display: grid;
   gap: 0.45rem;
+  min-width: 0;
+}
+
+.event-card__section > * {
+  min-width: 0;
 }
 
 .event-card__section-title {
@@ -1368,7 +1438,7 @@ body {
 }
 
 .event-market-grid--compact {
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
   align-items: start;
 }
 
@@ -1382,6 +1452,10 @@ body {
 
 .event-market-card {
   margin: 0;
+  /* This card is a grid item of `.event-market-grid--compact`'s auto-fill track; without
+     overriding the default `min-width: auto`, its own un-shrinkable content (below) could force
+     the track -- and therefore the card -- wider than the space actually assigned to it. */
+  min-width: 0;
   border-color: color-mix(in srgb, var(--border-subtle) 80%, var(--accent) 20%);
 }
 
@@ -1392,6 +1466,14 @@ body {
 .event-market-card .card-body {
   display: grid;
   gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Every direct child of the card body (the header row, the buttons list) is itself a grid item
+   here and needs the same shrink-to-fit override, for the same reason as `.event-market-card`
+   above -- otherwise un-shrinkable content on any one of them silently widens the whole card. */
+.event-market-card .card-body > * {
+  min-width: 0;
 }
 
 .event-market-meta,
@@ -1405,13 +1487,25 @@ body {
 .event-market-buttons {
   display: grid;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .event-market-button {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.25rem 0.75rem;
+  min-width: 0;
+  white-space: normal;
+}
+
+/* The selection label must be allowed to actually wrap onto another line (long team/market names)
+   rather than being clipped or forcing the button -- and every ancestor above -- wider than the
+   card. Buttons default to `white-space: nowrap`, which is overridden above and here. */
+.event-market-button > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 @media (min-width: 1400px) {

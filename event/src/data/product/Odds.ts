@@ -15,9 +15,15 @@ class Odds {
   name: string;
   value: number;
 
-  constructor(name: string) {
+  /**
+   * `value` is optional and, when provided, must be a finite number -- used by coherently-priced
+   * products (see `preMatchPricing.ts`) that already know the exact price to assign. Any caller
+   * that omits it (or passes something non-finite) keeps the legacy random-arbitrary fallback,
+   * so existing call sites are unaffected.
+   */
+  constructor(name: string, value?: number) {
     this.name = name;
-    this.value = getRandomArbitrary();
+    this.value = typeof value === "number" && Number.isFinite(value) ? value : getRandomArbitrary();
   }
 }
 

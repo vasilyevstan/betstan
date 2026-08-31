@@ -2,6 +2,8 @@ import {
   COUNTDOWN_LIVE_MARKET_TYPE,
   COUNTDOWN_WINDOW_MS,
   formatCountdownDuration,
+  formatLegacyLiveSelectionLabel,
+  formatRowOutcome,
   getMarketAvailabilityLabel,
   getMarketSelectionLabel,
   getScheduledKickoffTime,
@@ -9,7 +11,9 @@ import {
   isFinishedLiveEvent,
   isInCountdownWindow,
   isLiveMarketSelectable,
+  isTerminalMarketStatus,
   LIVE_MARKET_STATUS,
+  SLIP_ROW_STATUS,
   shouldReplaceEventFromAuthoritativeSource,
 } from './liveBettingUtils';
 
@@ -218,6 +222,13 @@ describe('getMarketAvailabilityLabel for countdown markets', () => {
 
     expect(getMarketAvailabilityLabel(event, market, KICKOFF_TIME - 60_000)).toBe('Live markets open in-play only');
   });
+
+  it('reports an actually unknown, non-terminal status (e.g. SETTLEMENT_PENDING) as "Temporarily unavailable", never as the contradictory "Open"', () => {
+    const event = buildScheduledEvent({ live: { bettingStatus: 'OPEN' } });
+    const market = buildMarket({ status: 'SETTLEMENT_PENDING' });
+
+    expect(getMarketAvailabilityLabel(event, market, KICKOFF_TIME - 60_000)).toBe('Temporarily unavailable');
+  });
 });
 
 describe('isCountdownMarketType', () => {
@@ -309,5 +320,173 @@ describe('shouldReplaceEventFromAuthoritativeSource', () => {
     expect(shouldReplaceEventFromAuthoritativeSource(undefined, next)).toBe(true);
     expect(shouldReplaceEventFromAuthoritativeSource(buildEvent({ live: undefined }), next)).toBe(true);
     expect(shouldReplaceEventFromAuthoritativeSource(next, buildEvent({ live: undefined }))).toBe(false);
+  });
+});
+
+describe('isTerminalMarketStatus', () => {
+  it('treats SETTLED and CLOSED as terminal', () => {
+    expect(isTerminalMarketStatus(LIVE_MARKET_STATUS.SETTLED)).toBe(true);
+    expect(isTerminalMarketStatus(LIVE_MARKET_STATUS.CLOSED)).toBe(true);
+  });
+
+  it('is defensively case-insensitive/trimmed', () => {
+    expect(isTerminalMarketStatus('settled')).toBe(true);
+    expect(isTerminalMarketStatus(' Closed ')).toBe(true);
+  });
+
+  it('does not treat OPEN, SUSPENDED, unknown, or missing statuses as terminal', () => {
+    expect(isTerminalMarketStatus(LIVE_MARKET_STATUS.OPEN)).toBe(false);
+    expect(isTerminalMarketStatus(LIVE_MARKET_STATUS.SUSPENDED)).toBe(false);
+    expect(isTerminalMarketStatus('SOME_FUTURE_STATUS')).toBe(false);
+    // An actually unknown, non-terminal status (e.g. a settlement-in-progress state the client
+    // has never seen before) must remain non-terminal -- only the two canonical SETTLED/CLOSED
+    // values (case-insensitively) are terminal, never a heuristic/prefix/substring match.
+    expect(isTerminalMarketStatus('SETTLEMENT_PENDING')).toBe(false);
+    expect(isTerminalMarketStatus('settlement_pending')).toBe(false);
+    expect(isTerminalMarketStatus(undefined)).toBe(false);
+    expect(isTerminalMarketStatus(null)).toBe(false);
+  });
+});
+
+describe('formatLegacyLiveSelectionLabel', () => {
+  it('leaves an already-readable label unchanged for backward compatibility', () => {
+    expect(formatLegacyLiveSelectionLabel('Team A', {})).toBe('Team A');
+    expect(formatLegacyLiveSelectionLabel('Draw', {})).toBe('Draw');
+  });
+
+  it('derives a HOME/AWAY label from a raw stored live-selection identifier using event home/away names', () => {
+    const row = {
+      eventName: 'Raptors - Sharks',
+      marketType: 'NEXT_CORNER',
+      side: 'HOME',
+      selectionId: 'home',
+    };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+  });
+
+  it('derives an AWAY label from a raw identifier', () => {
+    const row = {
+      eventName: 'Raptors - Sharks',
+      marketType: 'NEXT_CORNER',
+      side: 'AWAY',
+      selectionId: 'away',
+    };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row)).toBe('Next Corner: Sharks');
+  });
+
+  it('derives a Draw label from a raw identifier for a market with a draw side', () => {
+    const row = {
+      eventName: 'Raptors - Sharks',
+      marketType: 'HALF_TIME_RESULT',
+      side: 'DRAW',
+      selectionId: 'draw',
+    };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:HALF_TIME_RESULT:1:DRAW', row)).toBe('Half Time Result: Draw');
+  });
+
+  it('normalizes a known market type without a recognizable side into just the market label', () => {
+    const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_PENALTY' };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_PENALTY:1:UNKNOWN', row)).toBe('Next Penalty');
+  });
+
+  it('derives the full label purely from the raw identifier when the row has no structured fields at all', () => {
+    const raw = 'event-42:NEXT_CORNER:1:HOME';
+    expect(formatLegacyLiveSelectionLabel(raw, {})).toBe('Next Corner: Home');
+    expect(formatLegacyLiveSelectionLabel(raw, undefined)).toBe('Next Corner: Home');
+  });
+
+  it('falls back to a side encoded in the raw identifier when the relevant structured side field is absent', () => {
+    const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_CORNER' };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'selected')).toBe('Next Corner: Sharks');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'winning')).toBe('Next Corner: Sharks');
+  });
+
+  it('falls back to a market type encoded in the raw identifier when row.marketType is absent', () => {
+    const row = { eventName: 'Raptors - Sharks', side: 'HOME' };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+  });
+
+  it('for the "selected" perspective (default, used for oddsName), uses the bettor\'s own row.side', () => {
+    const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_CORNER', side: 'HOME', winningSide: 'AWAY' };
+
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'selected')).toBe('Next Corner: Raptors');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+  });
+
+  it('for the "winning" perspective (used for winningSelection), prefers row.winningSide over the bettor\'s own row.side', () => {
+    const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_CORNER', side: 'HOME', winningSide: 'AWAY' };
+
+    // The raw text itself even encodes "HOME" (the bettor's own historical selection identifier),
+    // but the authoritative winner is `row.winningSide` -- never `row.side` -- so the result must
+    // still be the away team, not the home team.
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'winning')).toBe('Next Corner: Sharks');
+  });
+
+  it('leaves malformed/unknown non-live values unchanged (no colon, or no recognizable segment)', () => {
+    expect(formatLegacyLiveSelectionLabel('Over 2.5', {})).toBe('Over 2.5');
+    expect(formatLegacyLiveSelectionLabel('12:30', {})).toBe('12:30');
+    expect(formatLegacyLiveSelectionLabel('some:unrelated:value', {})).toBe('some:unrelated:value');
+    expect(formatLegacyLiveSelectionLabel(undefined, {})).toBeUndefined();
+    expect(formatLegacyLiveSelectionLabel(null, {})).toBeNull();
+  });
+});
+
+describe('formatRowOutcome winning-selection normalization', () => {
+  it('normalizes a raw stored winningSelection identifier for a WIN row', () => {
+    const row = {
+      status: SLIP_ROW_STATUS.WIN,
+      eventName: 'Raptors - Sharks',
+      marketType: 'NEXT_CORNER',
+      side: 'HOME',
+      winningSide: 'HOME',
+      selectionId: 'home',
+      winningSelection: 'event-42:NEXT_CORNER:1:HOME',
+    };
+
+    expect(formatRowOutcome(row)).toBe('Won · Winner: Next Corner: Raptors');
+  });
+
+  it('leaves an already-readable winningSelection unchanged for a LOSS row', () => {
+    const row = {
+      status: SLIP_ROW_STATUS.LOSS,
+      winningSelection: 'Sharks',
+    };
+
+    expect(formatRowOutcome(row)).toBe('Lost · Winner: Sharks');
+  });
+
+  it('regression: reports the actual winning side, not the bettor\'s own selected side, on a LOSS row (selected HOME, winner AWAY)', () => {
+    const row = {
+      status: SLIP_ROW_STATUS.LOSS,
+      eventName: 'Raptors - Sharks',
+      marketType: 'NEXT_CORNER',
+      side: 'HOME',
+      winningSide: 'AWAY',
+      selectionId: 'home',
+      winningSelection: 'event-42:NEXT_CORNER:1:AWAY',
+    };
+
+    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner: Sharks');
+  });
+
+  it('regression: falls back to the side encoded in the raw winningSelection identifier when row.winningSide is absent (never using the bettor\'s own row.side)', () => {
+    const row = {
+      status: SLIP_ROW_STATUS.LOSS,
+      eventName: 'Raptors - Sharks',
+      marketType: 'NEXT_CORNER',
+      side: 'HOME',
+      selectionId: 'home',
+      // winningSide intentionally omitted: only the raw identifier's own embedded side is
+      // available, and it disagrees with the bettor's own `side` (HOME).
+      winningSelection: 'event-42:NEXT_CORNER:1:AWAY',
+    };
+
+    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner: Sharks');
   });
 });

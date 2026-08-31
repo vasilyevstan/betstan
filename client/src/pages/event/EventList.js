@@ -22,6 +22,7 @@ import {
   isInCountdownWindow,
   isLiveEvent,
   isLiveMarketSelectable,
+  isTerminalMarketStatus,
   sortEvents,
 } from '../../liveBettingUtils';
 
@@ -81,7 +82,10 @@ const formatQuoteValidity = (value) => {
     : format(validUntil, 'HH:mm:ss');
 };
 
-const buildCardClass = (uiVariant) => (uiVariant === 'v3' ? 'col-12' : 'col-12 col-md-6 col-xl-4');
+// All live, countdown, retained-finished, and pre-match event cards use the same responsive
+// Bootstrap grid across every ui variant (v1/v2/v3): 1 column on narrow viewports, 2 at md, 3 at
+// xl. There is no full-width/lone-live or per-variant special case.
+const EVENT_CARD_CLASS = 'col-12 col-md-6 col-xl-4';
 const EMPTY_EVENT_IDS = new Set();
 
 const FeedStatus = ({ feedState }) => {
@@ -165,7 +169,10 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
     .filter(Boolean)
     .slice(-5)
     .reverse();
-  const liveMarkets = event.live?.currentMarkets ?? [];
+  // Terminal (SETTLED/CLOSED) markets are done and no longer worth a card; SUSPENDED, stale/
+  // expired, missing-expiry, and unknown statuses stay visible (disabled, with an explanatory
+  // label) exactly as before.
+  const liveMarkets = (event.live?.currentMarkets ?? []).filter((market) => !isTerminalMarketStatus(market?.status));
   const progressValue = getMatchProgressValue(event.live);
 
   return <article className="card event-card event-card--live event-card--active-live h-100" aria-label={event.name}>
@@ -247,7 +254,8 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
     ? 'Kickoff time unavailable'
     : (remainingMs > 0 ? formatCountdownDuration(remainingMs) : 'Kickoff imminent');
   const countdownMarkets = (event.live?.currentMarkets ?? [])
-    .filter((market) => isCountdownMarketType(market?.marketType));
+    .filter((market) => isCountdownMarketType(market?.marketType))
+    .filter((market) => !isTerminalMarketStatus(market?.status));
   const preMatchProducts = event.products ?? [];
 
   return <article className="card event-card event-card--live event-card--countdown h-100" aria-label={event.name}>
@@ -317,6 +325,7 @@ const RetainedFinishedEventCard = ({ event }) => {
     .filter(Boolean)
     .slice(-5)
     .reverse();
+  const kickoffValue = event.live?.kickoffAt ?? event.time;
 
   return <article className="card event-card event-card--live event-card--finished h-100" aria-label={event.name}>
     <div className="card-body event-card__live-body">
@@ -326,7 +335,9 @@ const RetainedFinishedEventCard = ({ event }) => {
             <span className="event-card__badge event-card__badge--finished">FULL-TIME</span>
           </div>
           <h5 className="card-title mb-1">{event.name}</h5>
-          <h6 className="card-subtitle text-secondary mb-0">Final score</h6>
+          <h6 className="card-subtitle text-secondary mb-0">
+            Kickoff <time dateTime={kickoffValue}>{formatEventTime(kickoffValue)}</time>
+          </h6>
         </div>
         <div className="event-scoreboard" aria-label={`Final score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
           <div className="event-scoreboard__teams">
@@ -473,10 +484,8 @@ const HandleEventList = ({
     && !isFinishedLiveEvent(event)
     && !countdownEvents.some((countdownEvent) => countdownEvent.eventId === event.eventId)
   ));
-  const cardClass = buildCardClass(uiVariant);
+  const cardClass = EVENT_CARD_CLASS;
   const upperLiveEvents = [...countdownEvents, ...liveEvents];
-  const upperLiveCardCount = upperLiveEvents.length + (retainedFinishedEvent ? 1 : 0);
-  const upperLiveCardClass = upperLiveCardCount === 1 ? 'col-12' : cardClass;
   // A countdown event is already occupying the upper live area with its own imminent kickoff, so the
   // "next live event" banner (which points at some other, later-scheduled event) must not also show
   // alongside it -- otherwise the truly-next event is both counting down above and mislabeled below.
@@ -503,8 +512,8 @@ const HandleEventList = ({
   const content = <>
     <FeedStatus feedState={feedState} />
     {nextLiveEvent ? <NextLiveEvent event={nextLiveEvent} uiVariant={uiVariant} /> : null}
-    {upperLiveEvents.length > 0 || retainedFinishedEvent ? <EventSection title="Live now" uiVariant={uiVariant}>
-      {countdownEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
+    {upperLiveEvents.length > 0 ? <EventSection title="Live now" uiVariant={uiVariant}>
+      {countdownEvents.map((event) => <div className={cardClass} key={event.eventId}>
         <CountdownEventCard
           event={event}
           now={now}
@@ -513,7 +522,7 @@ const HandleEventList = ({
           uiVariant={uiVariant}
         />
       </div>)}
-      {liveEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
+      {liveEvents.map((event) => <div className={cardClass} key={event.eventId}>
         <LiveEventCard
           event={event}
           onSelectionPlaced={onSelectionPlaced}
@@ -521,9 +530,11 @@ const HandleEventList = ({
           uiVariant={uiVariant}
         />
       </div>)}
-      {retainedFinishedEvent ? <div className={upperLiveCardClass} key={retainedFinishedEvent.eventId}>
+    </EventSection> : null}
+    {retainedFinishedEvent ? <EventSection title="Recently finished" uiVariant={uiVariant}>
+      <div className={cardClass} key={retainedFinishedEvent.eventId}>
         <RetainedFinishedEventCard event={retainedFinishedEvent} />
-      </div> : null}
+      </div>
     </EventSection> : null}
     {preMatchEvents.length > 0 ? <EventSection title="Pre-match" uiVariant={uiVariant}>
       {preMatchEvents.map((event) => <div className={cardClass} key={event.eventId}>

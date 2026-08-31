@@ -69,6 +69,8 @@ const liveEvent = {
       buildLiveMarket({ marketId: 'market-4', marketType: 'NEXT_PENALTY', marketVersion: 1, quoteVersion: 4, quoteValidUntil: null, odds: 5.1 }),
       buildLiveMarket({ marketId: 'market-5', marketType: 'HALF_TIME_RESULT', marketVersion: 1, quoteVersion: 5, odds: 1.4 }),
       buildLiveMarket({ marketId: 'market-6', marketType: 'NEXT_CORNER', marketVersion: 2, quoteVersion: 6, odds: 2.1 }),
+      buildLiveMarket({ marketId: 'market-7', marketType: 'NEXT_CORNER', marketVersion: 3, quoteVersion: 7, status: 'settled', odds: 9.9 }),
+      buildLiveMarket({ marketId: 'market-8', marketType: 'NEXT_CORNER', marketVersion: 4, quoteVersion: 8, status: 'CLOSED', odds: 8.8 }),
     ],
   },
 };
@@ -124,9 +126,11 @@ describe('EventList', () => {
     const articles = screen.getAllByRole('article');
     expect(articles[0]).toHaveAccessibleName('Live Derby');
     expect(articles[1]).toHaveAccessibleName('Pre-match Clash');
-    expect(articles[0].parentElement).toHaveClass('col-12');
-    expect(articles[0].parentElement).not.toHaveClass('col-xl-4');
-    expect(articles[1].parentElement).toHaveClass('col-xl-4');
+    // Every card (live, countdown, retained-finished, or pre-match) always uses the same
+    // responsive Bootstrap grid across every ui variant -- there is no lone-live/full-width
+    // special case anymore.
+    expect(articles[0].parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
+    expect(articles[1].parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
     expect(articles[0].querySelector('.event-market-grid')).toHaveClass('event-market-grid--compact');
     expect(articles[0].querySelectorAll('.event-market-card')).toHaveLength(6);
 
@@ -149,6 +153,10 @@ describe('EventList', () => {
     expect(missingExpirySelection).toBeDisabled();
     expect(screen.getByText('Quote v5')).toBeInTheDocument();
     expect(screen.getByText('Quote v6')).toBeInTheDocument();
+    // Terminal (SETTLED/CLOSED, case-insensitively) markets are excluded from the rendered card
+    // list entirely -- the count reflects only the 6 non-terminal markets out of the 8 supplied.
+    expect(screen.queryByText('Quote v7')).toBeNull();
+    expect(screen.queryByText('Quote v8')).toBeNull();
     expect(screen.getByText('6 markets')).toBeInTheDocument();
 
     fireEvent.click(liveSelection);
@@ -455,7 +463,7 @@ describe('EventList kickoff countdown', () => {
     expect(screen.getByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' })).toBe(kickoffTeamButton);
   });
 
-  it('makes countdown markets unavailable once the server closes them, even though the client clock is still pre-kickoff', () => {
+  it('excludes a countdown market card entirely once the server closes it (terminal status), even though the client clock is still pre-kickoff', () => {
     jest.setSystemTime(KICKOFF_TIME - 5 * 60_000);
     const event = buildCountdownEvent({
       live: {
@@ -474,9 +482,68 @@ describe('EventList kickoff countdown', () => {
 
     render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
 
+    // CLOSED is a terminal market status: the card is dropped entirely rather than shown disabled.
+    expect(screen.queryByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' })).toBeNull();
+    expect(screen.queryByText('Closed')).toBeNull();
+    // The still-open sibling market is unaffected.
+    expect(screen.getByRole('button', { name: 'Select Goal in First Minute: Yes at 6.5' })).toBeEnabled();
+  });
+
+  it('keeps a suspended (non-terminal) countdown market card visible but disabled', () => {
+    jest.setSystemTime(KICKOFF_TIME - 5 * 60_000);
+    const event = buildCountdownEvent({
+      live: {
+        bettingStatus: 'OPEN',
+        currentMarkets: [
+          { ...kickoffTeamMarket, status: 'SUSPENDED' },
+          firstMinuteGoalMarket,
+        ],
+      },
+    });
+    useLiveEvents.mockReturnValue({
+      events: [event],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
+
     const kickoffTeamButton = screen.getByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' });
     expect(kickoffTeamButton).toBeDisabled();
-    expect(screen.getByText('Closed')).toBeInTheDocument();
+    expect(screen.getByText('Temporarily suspended')).toBeInTheDocument();
+  });
+
+  it('keeps a market with an actually unknown, non-terminal status (e.g. SETTLEMENT_PENDING) visible rather than excluding it like a terminal SETTLED/CLOSED market', () => {
+    jest.setSystemTime(KICKOFF_TIME - 5 * 60_000);
+    const event = buildCountdownEvent({
+      live: {
+        bettingStatus: 'OPEN',
+        currentMarkets: [
+          { ...kickoffTeamMarket, status: 'SETTLEMENT_PENDING' },
+          firstMinuteGoalMarket,
+        ],
+      },
+    });
+    useLiveEvents.mockReturnValue({
+      events: [event],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
+
+    // Unlike a terminal SETTLED/CLOSED market, an unrecognized status is not excluded from the
+    // rendered card list -- it stays visible, is treated as not currently selectable (per the
+    // existing selectability rule, which only ever allows the exact OPEN status), and is labelled
+    // with a clear, non-contradictory "Temporarily unavailable" rather than "Open".
+    const kickoffTeamButton = screen.getByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' });
+    expect(kickoffTeamButton).toBeInTheDocument();
+    expect(kickoffTeamButton).toBeDisabled();
+    const kickoffTeamCard = kickoffTeamButton.closest('.event-market-card');
+    expect(kickoffTeamCard).toHaveTextContent('Temporarily unavailable');
+    // The sibling market genuinely is OPEN, so "Open" legitimately appears elsewhere on the page;
+    // it must specifically not appear on *this* unknown-status market's own card.
+    expect(kickoffTeamCard).not.toHaveTextContent('Open');
   });
 
   it('transitions cleanly to the live clock/scoreboard at kickoff based on authoritative server data', () => {
@@ -539,7 +606,7 @@ describe('EventList kickoff countdown', () => {
     expect(screen.getByText('Pre-kickoff markets opening soon…')).toBeInTheDocument();
   });
 
-  it('retains the most recently finished live event with its final score in the live area', () => {
+  it('retains the most recently finished live event, grouped under Recently finished (not Live now), with its final score and scheduled kickoff time', () => {
     jest.setSystemTime(KICKOFF_TIME + 2 * 60 * 60 * 1000);
     const finishedEvent = {
       eventId: 'finished-1',
@@ -569,11 +636,14 @@ describe('EventList kickoff countdown', () => {
 
     render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
 
-    expect(screen.getByRole('heading', { name: 'Live now' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Live now' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Recently finished' })).toBeInTheDocument();
     expect(screen.getByText('FULL-TIME')).toBeInTheDocument();
     const finishedCard = screen.getByRole('article', { name: 'Finished Match' });
     expect(finishedCard).toHaveTextContent('3');
     expect(finishedCard).toHaveTextContent('1');
+    expect(finishedCard.parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
+    expect(finishedCard.querySelector('time')).toHaveAttribute('datetime', KICKOFF_ISO);
   });
 
   it('keeps showing the retained finished card even after the server stops returning that event', async () => {
