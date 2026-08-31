@@ -236,8 +236,9 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 0.15rem;
+  height: 100%;
   min-height: 2.75rem;
   min-width: 0;
   padding-block: 0.4rem;
@@ -245,12 +246,21 @@ body {
 }
 
 .product-button__label {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
   font-size: 0.7rem;
   font-weight: 600;
+  line-height: 1.2;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   opacity: 0.8;
   overflow-wrap: anywhere;
+}
+
+.product-button__value {
+  flex: 0 0 auto;
 }
 
 /* Three-column 1X2 control layout. Deliberately a plain CSS grid (not Bootstrap's `.row`/`.col-*`)
@@ -262,12 +272,33 @@ body {
   gap: 0.5rem;
 }
 
-/* Compact correct-score grid: every generated option stays visible without one full-width row
-   per option, reflowing its column count to the actual (now often much narrower) card width. */
+.product-1x2-grid > div {
+  display: flex;
+  min-width: 0;
+}
+
+.product-1x2-grid .product-button {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.product-block--cs {
+  container-type: inline-size;
+}
+
+/* Generated Correct Score boards contain ten options. Two columns are the safe fallback for a
+   narrow nested card; once the product can fit five touch targets plus full decimal prices and
+   Bootstrap button padding, use two balanced rows. */
 .product-cs-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.4rem;
+}
+
+@container (min-width: 28rem) {
+  .product-cs-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
 }
 
 

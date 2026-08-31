@@ -126,11 +126,11 @@ describe('EventList', () => {
     const articles = screen.getAllByRole('article');
     expect(articles[0]).toHaveAccessibleName('Live Derby');
     expect(articles[1]).toHaveAccessibleName('Pre-match Clash');
-    // Every card (live, countdown, retained-finished, or pre-match) always uses the same
-    // responsive Bootstrap grid across every ui variant -- there is no lone-live/full-width
-    // special case anymore.
-    expect(articles[0].parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
-    expect(articles[1].parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
+    // Each section contains one card here, so both use the bounded sparse-section width.
+    expect(articles[0].parentElement).toHaveClass('col-12', 'col-xl-8');
+    expect(articles[0].parentElement).not.toHaveClass('col-xl-4');
+    expect(articles[1].parentElement).toHaveClass('col-12', 'col-xl-8');
+    expect(articles[1].parentElement).not.toHaveClass('col-xl-4');
     expect(articles[0].querySelector('.event-market-grid')).toHaveClass('event-market-grid--compact');
     expect(articles[0].querySelectorAll('.event-market-card')).toHaveLength(6);
 
@@ -642,7 +642,8 @@ describe('EventList kickoff countdown', () => {
     const finishedCard = screen.getByRole('article', { name: 'Finished Match' });
     expect(finishedCard).toHaveTextContent('3');
     expect(finishedCard).toHaveTextContent('1');
-    expect(finishedCard.parentElement).toHaveClass('col-12', 'col-md-6', 'col-xl-4');
+    expect(finishedCard.parentElement).toHaveClass('col-12', 'col-xl-8');
+    expect(finishedCard.parentElement).not.toHaveClass('col-xl-4');
     expect(finishedCard.querySelector('time')).toHaveAttribute('datetime', KICKOFF_ISO);
   });
 
