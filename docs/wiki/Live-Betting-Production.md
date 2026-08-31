@@ -50,12 +50,14 @@ and restart checks. Final state is `LIVE_KICKOFFS_ENABLED=true`,
 
 The later compact-presentation release at exact master
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` was deployed successfully by run
-`33418318240`. Activation `33419673381` then failed only because the browser
-test still expected the two terminal countdown cards to remain visible after
-kickoff. Cleanup completed: production is in dark mode, new live kickoffs are
-disabled, the exact synthetic active Slip and reusable test account are gone,
-and no activation lease remains. The failed first attempt is immutable; the
-corrected five-visible-card assertion requires a new exact-SHA release chain.
+`33418318240`. Activation `33419673381` then failed at a browser assertion that
+still expected the two terminal countdown cards to remain visible after
+kickoff; subsequent browser, queue, restart, and permanent-commit gates were
+not evaluated. Cleanup completed: production is in dark mode, new live
+kickoffs are disabled, the exact synthetic active Slip is gone, the reusable
+test account was restored to `USER`, and no activation lease remains. The
+failed first attempt is immutable; the corrected five-visible-card assertion
+requires a new exact-SHA release chain.
 
 ## Compatibility and rollback
 

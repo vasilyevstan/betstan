@@ -519,9 +519,10 @@ validated.
   audit, and settlement logic. Production acceptance must distinguish that
   domain inventory from the filtered visible-card contract.
 - Failure cleanup returned production to dark mode, disabled new kickoffs,
-  removed the exact synthetic active Slip and reusable test account, and left
-  no activation lease. Preserve the failed first attempt and promote the
-  corrected assertion through a new exact-SHA release chain.
+  removed the exact synthetic active Slip, restored the reusable test account
+  to `USER`, and left no activation lease. Later browser, queue, restart, and
+  permanent-commit gates were not evaluated. Preserve the failed first attempt
+  and promote the corrected assertion through a new exact-SHA release chain.
 - A UX change that alters terminal-state visibility is incomplete until the
   browser acceptance journey, static workflow contract, reusable UX guidance,
   and production documentation agree with the rendered behavior.

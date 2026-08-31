@@ -520,9 +520,10 @@ conversation summaries are not authority.
 - Keep failed activation `33419673381` immutable. Production rendered the
   intended five active post-kickoff market cards, but the stale seven-card UI
   assertion failed. Cleanup restored dark mode, disabled new kickoffs, demoted
-  and removed the reusable acceptance account, deleted its exact synthetic
-  active Slip, and cleared the lease. A corrected activation requires a new
-  exact-master release chain; do not rerun the failed attempt.
+  the reusable acceptance account to `USER`, deleted its exact synthetic active
+  Slip, and cleared the lease. Later browser, queue, restart, and permanent-
+  commit gates were not evaluated. A corrected activation requires a new exact-
+  master release chain; do not rerun the failed attempt.
 - Production acceptance must test visible market-state semantics separately
   from the complete domain snapshot. Whenever UX changes which terminal states
   are rendered, update the production journey and its static contract test in
