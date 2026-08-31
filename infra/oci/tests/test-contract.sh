@@ -87,11 +87,15 @@ for countdown_contract in \
     "{ marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' }" \
     "{ marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' }" \
     '...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),' \
-    'ALL_LIVE_MARKET_TYPES.length,' \
+    'LIVE_MARKETS.length,' \
+    'await expect(article.getByText(label, { exact: true })).toHaveCount(0);' \
     ').toEqual([...ALL_LIVE_MARKET_TYPES].sort());'; do
   grep -Fq "$countdown_contract" "$acceptance_spec" ||
     fail "OCI live acceptance omits countdown-market coverage: $countdown_contract"
 done
+if grep -Fq 'ALL_LIVE_MARKET_TYPES.length,' "$acceptance_spec"; then
+  fail "OCI live acceptance still expects terminal countdown markets to remain visible after kickoff"
+fi
 for selection_contract in \
     'const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([' \
     "'Live quote is stale'" \

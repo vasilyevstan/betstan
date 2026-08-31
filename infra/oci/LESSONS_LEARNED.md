@@ -504,18 +504,37 @@ conversation summaries are not authority.
 
 ### Acceptance corrections
 
-- The implemented live card has two phases: exactly two enabled countdown
-  products before kickoff, then seven retained cards after kickoff—five
-  in-play markets plus two non-selectable countdown products. `KICKOFF_TEAM`
-  settles at kickoff; `FIRST_MINUTE_GOAL` remains closed until the first-minute
-  transition and then settles. An assertion that expected only five
-  post-kickoff cards was a test defect, not a product failure.
+- In the August 30 release, the live card had two phases: exactly two enabled
+  countdown products before kickoff, then seven retained cards after kickoff—
+  five in-play markets plus two non-selectable countdown products.
+  `KICKOFF_TEAM` settled at kickoff; `FIRST_MINUTE_GOAL` remained closed until
+  the first-minute transition and then settled. At that release, an assertion
+  that expected only five post-kickoff cards was a test defect.
 - A JWT that still claims `ADMIN` after the persisted account is demoted is an
   invalid privileged session. Clear it and return `401`; a current ordinary
   `USER` requesting an administrator route still receives `403`.
 - Keep failed activation `33303355082` immutable. Its cleanup disabled new
   kickoffs, restored the account to `USER`, removed the exact synthetic slip,
   and cleared the lease before the corrected candidate was built.
+
+### Compact presentation regression — 2026-08-31
+
+- The compact presentation introduced on August 31 supersedes the earlier
+  visible-card contract: after kickoff it shows the five active in-play cards
+  and intentionally omits both terminal countdown cards. All seven market
+  objects remain in the authoritative snapshot for transition, audit, and
+  settlement history.
+- Keep failed activation `33419673381` immutable. Production rendered the
+  intended five active post-kickoff market cards, but the stale seven-card UI
+  assertion failed. Cleanup restored dark mode, disabled new kickoffs, demoted
+  the reusable acceptance account to `USER`, deleted its exact synthetic active
+  Slip, and cleared the lease. Later browser, queue, restart, and permanent-
+  commit gates were not evaluated. A corrected activation requires a new exact-
+  master release chain; do not rerun the failed attempt.
+- Production acceptance must test visible market-state semantics separately
+  from the complete domain snapshot. Whenever UX changes which terminal states
+  are rendered, update the production journey and its static contract test in
+  the same change.
 
 ### Workflow orchestration
 

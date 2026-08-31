@@ -9,12 +9,14 @@ versions, and Bet exposes labelled history.
 
 ## User-visible behavior
 
-- Live events appear above upcoming events in a compact full-row card.
+- Live, countdown, recently finished, and pre-match events share the same
+  responsive one/two/three-card grid.
 - Before kickoff, two countdown products are enabled.
-- After kickoff, five in-play products plus both non-selectable countdown
-  products remain visible, for seven market cards. `KICKOFF_TEAM` settles at
-  kickoff; `FIRST_MINUTE_GOAL` is closed until `FIRST_MINUTE_ELAPSED`, then
-  settles.
+- After kickoff, the five active in-play products remain visible.
+  `KICKOFF_TEAM` settles and `FIRST_MINUTE_GOAL` closes at kickoff, so both
+  terminal countdown cards are hidden from that moment. The latter is graded
+  after `FIRST_MINUTE_ELAPSED` with no further visible-card change, while both
+  authoritative market states remain in the live snapshot.
 - Live and pre-match selections never mix in one slip. Both boards may stay
   open and retain independent wagers and submission state.
 - Live incidents include goals, cards, corners, free kicks, penalties,
@@ -25,7 +27,7 @@ versions, and Bet exposes labelled history.
 
 ## Production release
 
-Live betting was permanently activated on 2026-08-30 from exact master
+Live betting was first permanently activated on 2026-08-30 from exact master
 `0bf1d01981e454cd6ca661d8e6d99997462c558c`.
 
 | Stage | Run |
@@ -45,6 +47,17 @@ The activation passed the complete browser journey, live and pre-match
 settlement, protected-account cleanup, queue checks, REST/SSE compatibility,
 and restart checks. Final state is `LIVE_KICKOFFS_ENABLED=true`,
 `activation_state=committed`, with no activation lease.
+
+The later compact-presentation release at exact master
+`e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` was deployed successfully by run
+`33418318240`. Activation `33419673381` then failed at a browser assertion that
+still expected the two terminal countdown cards to remain visible after
+kickoff; subsequent browser, queue, restart, and permanent-commit gates were
+not evaluated. Cleanup completed: production is in dark mode, new live
+kickoffs are disabled, the exact synthetic active Slip is gone, the reusable
+test account was restored to `USER`, and no activation lease remains. The
+failed first attempt is immutable; the corrected five-visible-card assertion
+requires a new exact-SHA release chain.
 
 ## Compatibility and rollback
 
