@@ -27,9 +27,27 @@ const trackClientIssues = (page) => {
 // Dense sections retain the Bootstrap 1/2/3-column breakpoints. Sparse one-card sections expand
 // to a bounded two-thirds stage at xl and the full stage below xl.
 const REPRESENTATIVE_VIEWPORTS = [
-  { label: '1600px', width: 1600, height: 1000, expectedColumns: 3 },
-  { label: '768px', width: 768, height: 1000, expectedColumns: 2 },
-  { label: '390px', width: 390, height: 844, expectedColumns: 1 },
+  {
+    label: '1600px',
+    width: 1600,
+    height: 1000,
+    expectedColumns: 3,
+    expectedCorrectScoreRows: [5, 5],
+  },
+  {
+    label: '768px',
+    width: 768,
+    height: 1000,
+    expectedColumns: 2,
+    expectedCorrectScoreRows: [5, 5],
+  },
+  {
+    label: '390px',
+    width: 390,
+    height: 844,
+    expectedColumns: 1,
+    expectedCorrectScoreRows: [2, 2, 2, 2, 2],
+  },
 ];
 const UI_VARIANTS = ['v1', 'v2', 'v3'];
 const THEMES = ['dark', 'light'];
@@ -37,8 +55,9 @@ const THEMES = ['dark', 'light'];
 // Ten distinct, plausible score/price pairs backing the Correct Score fixture below, shared
 // between the fixture builder and the test assertions so they can never drift apart.
 const CORRECT_SCORE_OPTIONS = [
-  ['1 - 0', '6'], ['0 - 0', '7'], ['1 - 1', '8'], ['2 - 0', '9'], ['2 - 1', '10'],
-  ['0 - 1', '11'], ['1 - 2', '12'], ['2 - 2', '13'], ['0 - 2', '14'], ['3 - 1', '15'],
+  ['1 - 0', '10'], ['0 - 0', '11.08'], ['1 - 1', '7.3'], ['2 - 0', '19.23'],
+  ['2 - 1', '14.04'], ['0 - 1', '8.74'], ['1 - 2', '10.65'], ['2 - 2', '20.49'],
+  ['0 - 2', '16.27'], ['3 - 1', '23.33'],
 ];
 
 // Counts how many of the "Pre-match" section's sibling cards share the same top offset as the
@@ -95,9 +114,18 @@ const getCorrectScoreGeometry = async (article) => {
     const sizes = [];
     for (const button of elements) {
       const bounds = button.getBoundingClientRect();
+      const valueBounds = button.querySelector('.product-button__value')?.getBoundingClientRect();
       const top = Math.round(bounds.top);
       rows.set(top, (rows.get(top) ?? 0) + 1);
-      sizes.push({ height: bounds.height, width: bounds.width });
+      sizes.push({
+        height: bounds.height,
+        valueFits: Boolean(
+          valueBounds
+          && valueBounds.left >= bounds.left
+          && valueBounds.right <= bounds.right
+        ),
+        width: bounds.width,
+      });
     }
     return { rowSizes: [...rows.values()], sizes };
   });
@@ -622,10 +650,11 @@ for (const uiVariant of UI_VARIANTS) {
         }
 
         const correctScoreGeometry = await getCorrectScoreGeometry(article);
-        expect(correctScoreGeometry.rowSizes).toEqual([5, 5]);
+        expect(correctScoreGeometry.rowSizes).toEqual(viewport.expectedCorrectScoreRows);
         expect(correctScoreGeometry.sizes.every(
           ({ height, width }) => height >= 44 && width >= 44
         )).toBe(true);
+        expect(correctScoreGeometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
 
         expect(await hasIntersectingElements(page, '.product-cs-grid > *')).toBe(false);
         expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
@@ -655,6 +684,7 @@ for (const uiVariant of UI_VARIANTS) {
     expect(geometry.sizes.every(
       ({ height, width }) => height >= 44 && width >= 44
     )).toBe(true);
+    expect(geometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
     expect(await hasInternalOverflow(page, '.product-cs-grid')).toBe(false);
     expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
   });
@@ -672,11 +702,11 @@ test('Correct Score controls stay touch-safe at a narrow mobile width', async ({
 
   const article = page.getByRole('article', { name: 'Millhaven - Oakbridge' });
   const geometry = await getCorrectScoreGeometry(article);
-  expect(geometry.rowSizes.every((rowSize) => rowSize === 2 || rowSize === 5)).toBe(true);
-  expect(geometry.rowSizes.reduce((sum, rowSize) => sum + rowSize, 0)).toBe(10);
+  expect(geometry.rowSizes).toEqual([2, 2, 2, 2, 2]);
   expect(geometry.sizes.every(
     ({ height, width }) => height >= 44 && width >= 44
   )).toBe(true);
+  expect(geometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
   expect(await hasInternalOverflow(page, '.product-cs-grid')).toBe(false);
   expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
 });

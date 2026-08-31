@@ -287,14 +287,15 @@ body {
 }
 
 /* Generated Correct Score boards contain ten options. Two columns are the safe fallback for a
-   narrow nested card; once the product itself can fit five touch targets, use two balanced rows. */
+   narrow nested card; once the product can fit five touch targets plus full decimal prices and
+   Bootstrap button padding, use two balanced rows. */
 .product-cs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.4rem;
 }
 
-@container (min-width: 15.5rem) {
+@container (min-width: 28rem) {
   .product-cs-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
