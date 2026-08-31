@@ -72,4 +72,46 @@ describe('MyBets', () => {
     expect(screen.getByText('Void · Manual void')).toBeInTheDocument();
     expect(screen.getByText('Pending result')).toBeInTheDocument();
   });
+
+  it('normalizes a legacy raw live-selection identifier into a human label instead of rendering it verbatim', async () => {
+    const rawIdentifier = 'event-77:NEXT_CORNER:1:HOME';
+    axios.get.mockResolvedValue({
+      data: [
+        {
+          _id: 'bet-legacy-live',
+          slipId: 'legacy-live-slip-1',
+          status: 'WIN',
+          wager: 8,
+          timestamp: '2030-01-03T12:00:00.000Z',
+          betKind: 'LIVE',
+          rows: [
+            {
+              _id: 'row-legacy-live',
+              eventName: 'Raptors - Sharks',
+              eventTime: '2030-01-03T11:30:00.000Z',
+              oddsName: rawIdentifier,
+              oddsValue: 1.8,
+              productName: '',
+              marketType: 'NEXT_CORNER',
+              side: 'HOME',
+              selectionId: 'home',
+              betKind: 'LIVE',
+              status: 'WIN',
+              winningSelection: rawIdentifier,
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<MyBets />);
+
+    await screen.findByText('Raptors - Sharks');
+
+    // The raw stored identifier is never rendered verbatim; it is normalized into a readable
+    // "<market>: <side>" label derived from the row's own structured live fields.
+    expect(screen.queryByText(rawIdentifier, { exact: false })).toBeNull();
+    expect(screen.getAllByText('Next Corner: Raptors', { exact: false }).length).toBeGreaterThan(0);
+    expect(screen.getByText('Won · Winner: Next Corner: Raptors')).toBeInTheDocument();
+  });
 });

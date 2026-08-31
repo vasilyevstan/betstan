@@ -3,6 +3,7 @@ import { format } from 'date-fns';
 import axios from 'axios';
 import {
   formatDeclineReason,
+  formatLegacyLiveSelectionLabel,
   formatLiveMarketType,
   formatRowOutcome,
   getBetKindLabel,
@@ -163,9 +164,14 @@ const HandleMyBetsList = () => {
             ? (row.productName || formatLiveMarketType(row.marketType))
             : row.productName;
           const winningSelection = typeof row.winningSelection === 'string' ? row.winningSelection.trim() : '';
+          // `oddsName` describes the bettor's own pick (uses `row.side`); `winningSelection`
+          // describes whoever actually won, which is a distinct field (`row.winningSide`) --
+          // never the bettor's own side, since on a LOSS row those two are different.
+          const oddsNameLabel = formatLegacyLiveSelectionLabel(row.oddsName, row, 'selected');
+          const winningSelectionLabel = winningSelection ? formatLegacyLiveSelectionLabel(row.winningSelection, row, 'winning') : '';
           const selectionLabel = winningSelection && row.status !== 'NOT_SETTLED'
-            ? `${row.oddsName} (winner: ${winningSelection})`
-            : row.oddsName;
+            ? `${oddsNameLabel} (winner: ${winningSelectionLabel})`
+            : oddsNameLabel;
 
           return <div className="row my-bets-row" key={row._id || row.id}>
             <div className={`col-5 col-md-4${rowColor}`}>

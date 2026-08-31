@@ -471,6 +471,23 @@ export const formatMarketStatus = (status) => (
   status === LIVE_MARKET_STATUS.OPEN ? 'Open' : normalizeText(status).replace(/_/g, ' ').toLowerCase()
 );
 
+/**
+ * Terminal live-market statuses (`SETTLED`/`CLOSED`) mean the market is done and no longer worth
+ * rendering as a card at all -- unlike `SUSPENDED` or a stale/expired quote, which are still
+ * meaningful state for an otherwise-live event and stay visible (disabled, with an explanatory
+ * label). Comparison is defensively case-insensitive/trimmed since the field ultimately comes over
+ * the wire and older/unexpected casing should still be treated as terminal rather than leaking a
+ * dead card into the UI.
+ */
+const TERMINAL_LIVE_MARKET_STATUSES = new Set([
+  LIVE_MARKET_STATUS.SETTLED,
+  LIVE_MARKET_STATUS.CLOSED,
+]);
+
+export const isTerminalMarketStatus = (status) => (
+  TERMINAL_LIVE_MARKET_STATUSES.has(normalizeText(status).toUpperCase())
+);
+
 export const isMarketStale = (market, now = Date.now()) => {
   const expiresAt = normalizeText(market?.quoteValidUntil);
   if (!expiresAt) {
@@ -545,6 +562,126 @@ export const formatSettlementReason = (settlementReason) => (
   ?? normalizeText(settlementReason).replace(/_/g, ' ').toLowerCase()
 );
 
+/** Known live market-type tokens a raw stored identifier's segments might contain. */
+const KNOWN_MARKET_TYPE_TOKENS = new Set(Object.keys(LIVE_MARKET_LABELS));
+/** Known side/selection tokens (`TeamSide`, plus the yes/no countdown values) a raw stored identifier's segments might contain. */
+const KNOWN_SIDE_TOKENS = new Set(['HOME', 'AWAY', 'DRAW', 'NONE', 'YES', 'NO']);
+
+/**
+ * Detects a raw internal live-selection identifier (e.g. `eventId:NEXT_CORNER:version:HOME`)
+ * that leaked into a stored display field (`oddsName`/`winningSelection`) instead of an
+ * already human-readable label. Deliberately conservative: requires a colon-delimited value
+ * with at least 3 segments where at least one segment matches a known market type or side/
+ * selection token, so ordinary readable labels (which never contain colons) are never misread.
+ */
+const looksLikeRawLiveSelectionLabel = (value) => {
+  const text = normalizeText(value);
+  if (!text || !text.includes(':')) {
+    return false;
+  }
+
+  const segments = text.split(':').map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length < 3) {
+    return false;
+  }
+
+  return segments.some((segment) => (
+    KNOWN_MARKET_TYPE_TOKENS.has(segment.toUpperCase()) || KNOWN_SIDE_TOKENS.has(segment.toUpperCase())
+  ));
+};
+
+/** Best-effort `{ home, away }` reconstruction from an event name of the `"Home - Away"` shape built by the server (see `EventTemplate`/`LiveEventReadModel`). */
+const buildPseudoEventFromName = (eventName) => {
+  const text = normalizeText(eventName);
+  const separatorIndex = text.indexOf(' - ');
+  if (separatorIndex === -1) {
+    return undefined;
+  }
+
+  return {
+    home: text.slice(0, separatorIndex).trim(),
+    away: text.slice(separatorIndex + 3).trim(),
+  };
+};
+
+/** Splits a raw stored identifier into its uppercased, non-empty colon-delimited segments, for
+ * the defensive fallback parsers below. */
+const splitRawIdentifierSegments = (value) => (
+  normalizeText(value).split(':').map((segment) => segment.trim().toUpperCase()).filter(Boolean)
+);
+
+/** Defensively extracts a known market-type token embedded anywhere in a raw stored identifier,
+ * used only when the row itself has no `marketType`. */
+const extractMarketTypeFromRawIdentifier = (value) => (
+  splitRawIdentifierSegments(value).find((segment) => KNOWN_MARKET_TYPE_TOKENS.has(segment)) ?? ''
+);
+
+/** Defensively extracts a known side/selection token embedded in a raw stored identifier. The
+ * side is conventionally the trailing segment (e.g. `eventId:NEXT_CORNER:version:HOME`), so the
+ * segments are scanned from the end, but the whole value is scanned to stay tolerant of other
+ * historical shapes. Used only when the relevant structured side field is missing. */
+const extractSideFromRawIdentifier = (value) => {
+  const segments = splitRawIdentifierSegments(value);
+  for (let index = segments.length - 1; index >= 0; index--) {
+    if (KNOWN_SIDE_TOKENS.has(segments[index])) {
+      return segments[index];
+    }
+  }
+  return '';
+};
+
+/**
+ * Defensive display formatter for a stored slip-row selection label (`row.oddsName` or
+ * `row.winningSelection`). Historical/legacy data can contain a raw internal live-selection
+ * identifier instead of a human-readable label; when `value` looks like one of these
+ * (`looksLikeRawLiveSelectionLabel`), this rebuilds a proper label the same way the live market
+ * UI does (`formatLiveMarketType` + `getSideLabel`), using `row.eventName`'s home/away split when
+ * the row itself has no richer event reference. Already-readable labels, and anything that
+ * cannot be confidently reinterpreted, are returned completely unchanged for backward
+ * compatibility with historical records.
+ *
+ * `perspective` controls *which side* the label describes, because a slip row's own selected
+ * side (`row.side`) and the side that actually won (`row.winningSide`) are not the same field
+ * and must never be conflated:
+ *  - `'selected'` (default) is for `row.oddsName` -- the bettor's own pick -- and uses
+ *    `row.side` (falling back to a yes/no `row.selectionId` for countdown markets).
+ *  - `'winning'` is for `row.winningSelection` -- who actually won -- and uses only
+ *    `row.winningSide`, **never** `row.side` (a LOSS row's winner is, by definition, the other
+ *    side from what the bettor picked).
+ * In either case, when the relevant structured field is missing, this falls back to defensively
+ * parsing the raw identifier itself for an embedded market-type/side token before giving up.
+ */
+export const formatLegacyLiveSelectionLabel = (value, row, perspective = 'selected') => {
+  if (!looksLikeRawLiveSelectionLabel(value)) {
+    return value;
+  }
+
+  const marketType = normalizeText(row?.marketType) || extractMarketTypeFromRawIdentifier(value);
+  const selectionId = normalizeText(row?.selectionId).toLowerCase();
+  const pseudoEvent = buildPseudoEventFromName(row?.eventName);
+
+  let side = perspective === 'winning'
+    ? normalizeText(row?.winningSide).toUpperCase()
+    : normalizeText(row?.side).toUpperCase();
+
+  if (!side && perspective === 'selected' && (selectionId === 'yes' || selectionId === 'no')) {
+    side = selectionId.toUpperCase();
+  }
+
+  if (!side) {
+    side = extractSideFromRawIdentifier(value);
+  }
+
+  const selectionLabel = side ? getSideLabel(side, pseudoEvent) : '';
+  const marketLabel = marketType ? formatLiveMarketType(marketType) : '';
+
+  if (marketLabel && selectionLabel) {
+    return `${marketLabel}: ${selectionLabel}`;
+  }
+
+  return selectionLabel || marketLabel || value;
+};
+
 export const formatRowOutcome = (row) => {
   if (row?.status === SLIP_ROW_STATUS.NOT_SETTLED) {
     return 'Pending result';
@@ -555,7 +692,8 @@ export const formatRowOutcome = (row) => {
   }
 
   if ((row?.status === SLIP_ROW_STATUS.WIN || row?.status === SLIP_ROW_STATUS.LOSS) && normalizeText(row?.winningSelection)) {
-    return `${row.status === SLIP_ROW_STATUS.WIN ? 'Won' : 'Lost'} · Winner: ${row.winningSelection}`;
+    const winningSelectionLabel = formatLegacyLiveSelectionLabel(row.winningSelection, row, 'winning');
+    return `${row.status === SLIP_ROW_STATUS.WIN ? 'Won' : 'Lost'} · Winner: ${winningSelectionLabel}`;
   }
 
   if (row?.status === SLIP_ROW_STATUS.WIN) {
@@ -599,6 +737,14 @@ export const getMarketAvailabilityLabel = (event, market, now = Date.now()) => {
 
   if (isMarketStale(market)) {
     return 'Quote expired';
+  }
+
+  // Only the exact OPEN status (the same status `isLiveMarketSelectable` requires) is genuinely
+  // open; anything else at this point is neither SUSPENDED, CLOSED, SETTLED, nor stale -- an
+  // actually unknown/unexpected status -- and must never be mislabeled as "Open" while
+  // `isLiveMarketSelectable` correctly disables it.
+  if (market?.status !== LIVE_MARKET_STATUS.OPEN) {
+    return 'Temporarily unavailable';
   }
 
   return 'Open';

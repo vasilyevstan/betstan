@@ -12,28 +12,27 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
     }
   };
 
-  return <div className="product-block">
-    <div className="row fw-semibold mb-2">{product.name}</div>
-    {(product.odds ?? []).map((option) => {
-      const selectionKey = getPreMatchSelectionKey({ eventId, productId: product.id, oddsId: option.id });
-      const isSelected = selectionKey ? selectedSelectionKeys?.has(selectionKey) : false;
-      const selectedClass = isSelected ? ' product-button--selected' : '';
+  return <div className="product-block product-block--cs">
+    <div className="fw-semibold mb-2">{product.name}</div>
+    <div className="product-cs-grid">
+      {(product.odds ?? []).map((option) => {
+        const selectionKey = getPreMatchSelectionKey({ eventId, productId: product.id, oddsId: option.id });
+        const isSelected = selectionKey ? selectedSelectionKeys?.has(selectionKey) : false;
+        const selectedClass = isSelected ? ' product-button--selected' : '';
 
-      return <div className="row" key={option.id}>
-        <div className="col small">{option.name}</div>
-        <div className="col">
-          <button
-            aria-label={`Select ${product.name} ${option.name} at ${option.value}`}
-            className={`btn w-100 product-button product-button--${uiVariant ?? 'v1'} mb-2${selectedClass}${resulted ? ' disabled' : ''}`}
-            disabled={resulted}
-            type="button"
-            onClick={() => handleClick(product.id, option.id)}
-          >
-            {option.value}
-          </button>
-        </div>
-      </div>;
-    })}
+        return <button
+          key={option.id}
+          aria-label={`Select ${product.name} ${option.name} at ${option.value}`}
+          className={`btn product-button product-button--${uiVariant ?? 'v1'} product-button--labelled${selectedClass}${resulted ? ' disabled' : ''}`}
+          disabled={resulted}
+          type="button"
+          onClick={() => handleClick(product.id, option.id)}
+        >
+          <span className="product-button__label">{option.name}</span>
+          <strong>{option.value}</strong>
+        </button>;
+      })}
+    </div>
   </div>;
 };
 

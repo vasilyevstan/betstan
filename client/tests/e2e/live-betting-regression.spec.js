@@ -24,9 +24,226 @@ const trackClientIssues = (page) => {
   return { apiFailures, pageErrors };
 };
 
+// Bootstrap breakpoints backing the `col-12 col-md-6 col-xl-4` grid every event card uses,
+// regardless of ui variant: below md (768px) -> 1 column, md up to xl (1200px) -> 2 columns,
+// xl and above -> 3 columns. This holds even for v3, whose `.event-stage` is CSS `max-width`
+// capped to ~1020px at a 1600px viewport -- Bootstrap's grid breakpoints key off the *viewport*
+// width, not the container's own width, so the column count is unaffected by that cap.
+const REPRESENTATIVE_VIEWPORTS = [
+  { label: '1600px', width: 1600, height: 1000, expectedColumns: 3 },
+  { label: '768px', width: 768, height: 1000, expectedColumns: 2 },
+  { label: '390px', width: 390, height: 844, expectedColumns: 1 },
+];
+const UI_VARIANTS = ['v1', 'v2', 'v3'];
+
+// Ten distinct, plausible score/price pairs backing the Correct Score fixture below, shared
+// between the fixture builder and the test assertions so they can never drift apart.
+const CORRECT_SCORE_OPTIONS = [
+  ['1 - 0', '6'], ['0 - 0', '7'], ['1 - 1', '8'], ['2 - 0', '9'], ['2 - 1', '10'],
+  ['0 - 1', '11'], ['1 - 2', '12'], ['2 - 2', '13'], ['0 - 2', '14'], ['3 - 1', '15'],
+];
+
+// Counts how many of the "Pre-match" section's sibling cards share the same top offset as the
+// first one, i.e. how many columns the current viewport lays out in the first row.
+const getPreMatchColumnCount = (page) => page.evaluate(() => {
+  const heading = Array.from(document.querySelectorAll('h2'))
+    .find((candidate) => candidate.textContent.trim() === 'Pre-match');
+  const section = heading?.closest('section');
+  const cards = Array.from(section?.querySelectorAll(':scope > .row > [class*="col-"]') ?? []);
+  if (cards.length === 0) {
+    return 0;
+  }
+  const firstTop = cards[0].getBoundingClientRect().top;
+  return cards.filter((card) => Math.abs(card.getBoundingClientRect().top - firstTop) < 2).length;
+});
+
+const hasIntersectingElements = (page, selector) => page.evaluate((cardSelector) => {
+  const boxes = Array.from(document.querySelectorAll(cardSelector)).map((element) => element.getBoundingClientRect());
+  const intersects = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  return boxes.some((box, index) => boxes.some((other, otherIndex) => otherIndex !== index && intersects(box, other)));
+}, selector);
+
+const hasDocumentHorizontalOverflow = (page) => page.evaluate(() => (
+  document.documentElement.scrollWidth > window.innerWidth
+));
+
+// Container-level clipping check: a document-level overflow check alone would miss an element
+// whose *own* content overflows its own box (e.g. a market/product card whose internal grid is
+// wider than the card itself) while the outer page still happens to fit the viewport. Every
+// matched element's own `scrollWidth` must not exceed its `clientWidth` (a 1px tolerance absorbs
+// subpixel rounding).
+const hasInternalOverflow = (page, selector) => page.evaluate((cardSelector) => (
+  Array.from(document.querySelectorAll(cardSelector)).some((element) => element.scrollWidth > element.clientWidth + 1)
+), selector);
+
+const buildSiblingPreMatchEvent = (eventId, home, away, time) => ({
+  eventId,
+  name: `${home} - ${away}`,
+  time,
+  visibility: 'ONLINE',
+  status: 'NO_RESULT',
+  home,
+  away,
+  products: [{
+    id: `${eventId}-1x2`,
+    type: '1X2',
+    name: '1X2',
+    odds: [
+      { id: 'home', name: home, value: 1.9 },
+      { id: 'draw', name: 'Draw', value: 3.1 },
+      { id: 'away', name: away, value: 2.2 },
+    ],
+  }],
+});
+
+/** Fixture shared by the responsive event/market layout matrix: one countdown event carrying an
+ * OPEN, a SUSPENDED, and a terminal SETTLED market (to exercise terminal-exclusion/suspended-
+ * visibility together with layout), plus three plain pre-match siblings (to exercise the 3/2/1
+ * column behavior with enough cards to fill a full row at the widest breakpoint). */
+const buildResponsiveLayoutState = () => {
+  const state = createLiveBettingMockState();
+  const kickoffTime = Date.now() + 5 * 60_000;
+  const kickoffAt = new Date(kickoffTime).toISOString();
+  const quoteValidUntil = new Date(kickoffTime + 60_000).toISOString();
+  const laterTime = new Date(kickoffTime + 6 * 60 * 60 * 1000).toISOString();
+
+  state.events = [
+    {
+      eventId: 'countdown-1',
+      name: 'South Henriton - Pfefferberg',
+      time: kickoffAt,
+      visibility: 'ONLINE',
+      status: 'NO_RESULT',
+      home: 'South Henriton',
+      away: 'Pfefferberg',
+      products: [],
+      live: {
+        kickoffAt,
+        bettingStatus: 'OPEN',
+        currentMarkets: [
+          {
+            marketId: 'kickoff-team',
+            marketType: 'KICKOFF_TEAM',
+            marketVersion: 1,
+            quoteVersion: 1,
+            status: 'OPEN',
+            quoteValidUntil,
+            selections: [
+              { selectionId: 'home', side: 'HOME', odds: 1.85 },
+              { selectionId: 'away', side: 'AWAY', odds: 2.05 },
+            ],
+          },
+          {
+            marketId: 'first-minute-goal',
+            marketType: 'FIRST_MINUTE_GOAL',
+            marketVersion: 1,
+            quoteVersion: 1,
+            status: 'SUSPENDED',
+            quoteValidUntil,
+            selections: [
+              { selectionId: 'yes', side: 'YES', odds: 6.5 },
+              { selectionId: 'no', side: 'NO', odds: 1.1 },
+            ],
+          },
+          {
+            // Terminal (SETTLED) markets are excluded from the rendered card list entirely.
+            marketId: 'half-time-result',
+            marketType: 'HALF_TIME_RESULT',
+            marketVersion: 1,
+            quoteVersion: 1,
+            status: 'SETTLED',
+            quoteValidUntil,
+            selections: [
+              { selectionId: 'home', side: 'HOME', odds: 2.2 },
+            ],
+          },
+        ],
+      },
+    },
+    buildSiblingPreMatchEvent('sibling-1', 'Northgate', 'Eastwick', laterTime),
+    buildSiblingPreMatchEvent('sibling-2', 'Westfall', 'Southmoor', laterTime),
+    buildSiblingPreMatchEvent('sibling-3', 'Ridgeport', 'Lakeview', laterTime),
+  ];
+
+  return state;
+};
+
+/** Fixture for the pre-match Correct Score board: one pre-match event with a Correct Score
+ * product carrying 10 distinct score options, alongside its 1X2 product. */
+const buildCorrectScoreLayoutState = () => {
+  const state = createLiveBettingMockState();
+  const laterTime = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+
+  state.events = [{
+    eventId: 'correct-score-1',
+    name: 'Millhaven - Oakbridge',
+    time: laterTime,
+    visibility: 'ONLINE',
+    status: 'NO_RESULT',
+    home: 'Millhaven',
+    away: 'Oakbridge',
+    products: [
+      {
+        id: 'cs-1x2',
+        type: '1X2',
+        name: '1X2',
+        odds: [
+          { id: 'home', name: 'Millhaven', value: 1.9 },
+          { id: 'draw', name: 'Draw', value: 3.1 },
+          { id: 'away', name: 'Oakbridge', value: 2.2 },
+        ],
+      },
+      {
+        id: 'cs-correct-score',
+        type: 'CS',
+        name: 'Correct Score',
+        odds: CORRECT_SCORE_OPTIONS.map(([name, value], index) => ({
+          id: `cs-${index}`,
+          name,
+          value: Number(value),
+        })),
+      },
+    ],
+  }];
+
+  return state;
+};
+
 test('live betting main page flow is deterministic without a backend', async ({ page }) => {
   const state = createLiveBettingMockState();
   const liveFeed = await installFakeEventSource(page);
+  // A legacy bet whose stored `oddsName`/`winningSelection` is a raw internal live-selection
+  // identifier (rather than an already human-readable label) -- exercises the My Bets defensive
+  // normalization (`formatLegacyLiveSelectionLabel`) end-to-end.
+  const legacyRawIdentifier = 'live-1:NEXT_CORNER:1:HOME';
+  state.bets.push({
+    _id: 'bet-legacy-live-identifier',
+    slipId: 'legacy-live-identifier-1',
+    status: 'WIN',
+    wager: 4,
+    timestamp: '2030-01-01T09:00:00.000Z',
+    betKind: BET_KIND.LIVE,
+    rows: [{
+      _id: 'row-legacy-live-identifier',
+      eventId: 'live-1',
+      eventName: 'Raptors - Sharks',
+      oddsId: 'legacy-oid',
+      oddsValue: 1.8,
+      oddsName: legacyRawIdentifier,
+      productName: '',
+      marketType: 'NEXT_CORNER',
+      marketId: 'market-corner',
+      marketVersion: 1,
+      quoteVersion: 1,
+      selectionId: 'home',
+      side: 'HOME',
+      timestamp: '2030-01-01T09:00:00.000Z',
+      eventTime: '2030-01-01T12:00:00.000Z',
+      betKind: BET_KIND.LIVE,
+      status: 'WIN',
+      winningSelection: legacyRawIdentifier,
+    }],
+  });
   await installAppApiMocks(page, state);
   const diagnostics = trackClientIssues(page);
 
@@ -47,30 +264,38 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(articles.nth(1)).toHaveAttribute('aria-label', state.fixtures.preMatchEventName);
   await expect(liveArticle.getByLabel('Score Raptors 1, Sharks 0')).toBeVisible();
   await expect(liveArticle.getByText("11' Sharks yellow card")).toBeVisible();
-  await expect(liveArticle.getByText('7 markets')).toBeVisible();
-  await expect(liveArticle.locator('.event-market-card')).toHaveCount(7);
+  // The fixture's Kickoff Team and Goal in First Minute markets are SETTLED (terminal): they are
+  // excluded from the rendered card list entirely, leaving the 5 still-active markets.
+  await expect(liveArticle.getByText('5 markets')).toBeVisible();
+  await expect(liveArticle.locator('.event-market-card')).toHaveCount(5);
   await expect(liveArticle.getByText('Next Corner', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Yellow Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Red Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Penalty', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Half Time Result', { exact: true })).toBeVisible();
-  await expect(liveArticle.getByText('Kickoff Team', { exact: true })).toBeVisible();
-  await expect(liveArticle.getByText('Goal in First Minute', { exact: true })).toBeVisible();
+  await expect(liveArticle.getByText('Kickoff Team', { exact: true })).toHaveCount(0);
+  await expect(liveArticle.getByText('Goal in First Minute', { exact: true })).toHaveCount(0);
   await expect(preMatchArticle.getByRole('button', { name: state.fixtures.preMatchSelectionLabel })).toBeVisible();
-  await expect(liveArticle.locator('..')).not.toHaveClass(/col-xl-4/);
+  // Every event card (live or pre-match) uses the same responsive grid -- there is no
+  // full-width/lone-live special case anymore.
+  await expect(liveArticle.locator('..')).toHaveClass(/col-xl-4/);
   await expect(preMatchArticle.locator('..')).toHaveClass(/col-xl-4/);
   const liveBounds = await liveArticle.boundingBox();
   const preMatchBounds = await preMatchArticle.boundingBox();
-  const marketColumns = await liveArticle.locator('.event-market-grid').evaluate((element) => (
-    getComputedStyle(element).gridTemplateColumns.split(' ').filter(Boolean).length
+  const marketCardBoxes = await liveArticle.locator('.event-market-card').evaluateAll((cards) => (
+    cards.map((card) => card.getBoundingClientRect()).map(({ x, y, width, height }) => ({ x, y, width, height }))
   ));
-  const marketRows = await liveArticle.locator('.event-market-grid').evaluate((element) => (
-    new Set(Array.from(element.children).map((card) => card.offsetTop)).size
+  const boxesIntersect = (a, b) => (
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+  );
+  const hasIntersectingMarketCards = marketCardBoxes.some((box, index) => (
+    marketCardBoxes.some((other, otherIndex) => otherIndex !== index && boxesIntersect(box, other))
   ));
-  expect(liveBounds.width).toBeGreaterThan(preMatchBounds.width * 2.5);
-  expect(liveBounds.height).toBeLessThan(800);
-  expect(marketColumns).toBe(7);
-  expect(marketRows).toBe(1);
+  // Both cards now share the same responsive column width, so their rendered widths should be
+  // close (no more full-width-vs-narrow-column mismatch).
+  expect(Math.abs(liveBounds.width - preMatchBounds.width)).toBeLessThan(4);
+  expect(hasIntersectingMarketCards).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   await page.getByRole('button', { name: state.fixtures.preMatchSelectionLabel }).click();
   await expect(preMatchBoard.locator('.slip-row-card__selection')).toHaveText('Draw');
@@ -172,10 +397,16 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   const main = page.locator('main');
   const declinedCard = main.locator('.my-bets-card').filter({ hasText: 'Declined: Quote changed' }).first();
   const preMatchHistoryCard = main.locator('.my-bets-card').filter({ hasText: 'Historic Derby' }).first();
+  const legacyIdentifierCard = main.locator('.my-bets-card').filter({ hasText: 'Won · Winner' }).first();
 
   await expect(declinedCard).toContainText('Live');
   await expect(declinedCard).toContainText('Void · Manual void');
   await expect(preMatchHistoryCard).toContainText('Pre-match');
+  // The raw stored identifier is never rendered verbatim -- it is normalized into a readable
+  // "<market>: <side>" label derived from the row's own structured live fields.
+  await expect(legacyIdentifierCard).toContainText('Next Corner: Raptors');
+  await expect(legacyIdentifierCard).toContainText('Won · Winner: Next Corner: Raptors');
+  await expect(page.getByText(legacyRawIdentifier, { exact: false })).toHaveCount(0);
   await expect.poll(async () => (await liveFeed.getMetrics()).open).toBe(0);
   await expect.poll(async () => (await liveFeed.getMetrics()).closed).toBe(2);
 
@@ -184,81 +415,87 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   expect(diagnostics.apiFailures).toEqual([]);
 });
 
-test('kickoff countdown markets stay compact across responsive widths', async ({ page }) => {
-  const state = createLiveBettingMockState();
-  const liveFeed = await installFakeEventSource(page);
-  const kickoffTime = Date.now() + 5 * 60_000;
-  const kickoffAt = new Date(kickoffTime).toISOString();
-  const quoteValidUntil = new Date(kickoffTime + 60_000).toISOString();
+for (const uiVariant of UI_VARIANTS) {
+  for (const viewport of REPRESENTATIVE_VIEWPORTS) {
+    test(`event/market layout stays responsive (${viewport.expectedColumns}-column), intersection-free, and unclipped (ui=${uiVariant}, ${viewport.label})`, async ({ page }) => {
+      const state = buildResponsiveLayoutState();
+      const liveFeed = await installFakeEventSource(page);
+      await installAppApiMocks(page, state);
 
-  state.events = [{
-    eventId: 'countdown-1',
-    name: 'South Henriton - Pfefferberg',
-    time: kickoffAt,
-    visibility: 'ONLINE',
-    status: 'NO_RESULT',
-    home: 'South Henriton',
-    away: 'Pfefferberg',
-    products: [],
-    live: {
-      kickoffAt,
-      bettingStatus: 'OPEN',
-      currentMarkets: [
-        {
-          marketId: 'kickoff-team',
-          marketType: 'KICKOFF_TEAM',
-          marketVersion: 1,
-          quoteVersion: 1,
-          status: 'OPEN',
-          quoteValidUntil,
-          selections: [
-            { selectionId: 'home', side: 'HOME', odds: 1.85 },
-            { selectionId: 'away', side: 'AWAY', odds: 2.05 },
-          ],
-        },
-        {
-          marketId: 'first-minute-goal',
-          marketType: 'FIRST_MINUTE_GOAL',
-          marketVersion: 1,
-          quoteVersion: 1,
-          status: 'OPEN',
-          quoteValidUntil,
-          selections: [
-            { selectionId: 'yes', side: 'YES', odds: 6.5 },
-            { selectionId: 'no', side: 'NO', odds: 1.1 },
-          ],
-        },
-      ],
-    },
-  }];
-  await installAppApiMocks(page, state);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`/?ui=${uiVariant}`, { waitUntil: 'domcontentloaded' });
+      await liveFeed.waitForSource();
+      await liveFeed.openAll();
 
-  await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.goto('/?ui=v2', { waitUntil: 'domcontentloaded' });
-  await liveFeed.waitForSource();
-  await liveFeed.openAll();
+      const countdownArticle = page.getByRole('article', { name: 'South Henriton - Pfefferberg' });
+      const marketCards = countdownArticle.locator('.event-market-card');
 
-  const countdownArticle = page.getByRole('article', { name: 'South Henriton - Pfefferberg' });
-  const marketCards = countdownArticle.locator('.event-market-card');
-  const getWidestMarketRatio = async () => countdownArticle.evaluate((article) => {
-    const articleWidth = article.getBoundingClientRect().width;
-    return Math.max(
-      ...Array.from(article.querySelectorAll('.event-market-card'))
-        .map((card) => card.getBoundingClientRect().width / articleWidth),
-    );
-  });
+      await expect(page.getByRole('timer')).toBeVisible();
+      // Every event card (countdown, live, retained-finished, or pre-match) always uses the same
+      // responsive grid class across every ui variant -- there is no full-width/lone-live or
+      // per-variant special case.
+      await expect(countdownArticle.locator('..')).toHaveClass(/col-12/);
+      await expect(countdownArticle.locator('..')).toHaveClass(/col-md-6/);
+      await expect(countdownArticle.locator('..')).toHaveClass(/col-xl-4/);
+      // The SETTLED market is terminal and excluded entirely; only the two still-active markets remain.
+      await expect(marketCards).toHaveCount(2);
+      const kickoffTeamButton = page.getByRole('button', { name: 'Select Kickoff Team: South Henriton at 1.85' });
+      const suspendedButton = page.getByRole('button', { name: 'Select Goal in First Minute: Yes at 6.5' });
+      await expect(kickoffTeamButton).toBeEnabled();
+      await expect(suspendedButton).toBeDisabled();
+      await expect(countdownArticle.getByText('Temporarily suspended')).toBeVisible();
+      await expect(countdownArticle.getByText('Half Time Result', { exact: true })).toHaveCount(0);
 
-  await expect(page.getByRole('timer')).toBeVisible();
-  await expect(countdownArticle.locator('..')).not.toHaveClass(/col-xl-4/);
-  await expect(marketCards).toHaveCount(2);
-  await expect.poll(getWidestMarketRatio).toBeLessThan(0.3);
+      await expect.poll(() => getPreMatchColumnCount(page)).toBe(viewport.expectedColumns);
+      expect(await hasIntersectingElements(page, '.event-card')).toBe(false);
+      expect(await hasIntersectingElements(page, '.event-market-card')).toBe(false);
+      expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
+      // Container-level clipping: each card/grid's own content must not overflow its own box,
+      // independent of whether the outer document itself happens to fit the viewport.
+      expect(await hasInternalOverflow(page, '.event-card')).toBe(false);
+      expect(await hasInternalOverflow(page, '.event-market-grid')).toBe(false);
+      expect(await hasInternalOverflow(page, '.product-block--1x2')).toBe(false);
 
-  await page.setViewportSize({ width: 768, height: 1000 });
-  await expect.poll(getWidestMarketRatio).toBeLessThan(0.45);
+      // Keyboard/semantic control behavior is preserved: the still-open countdown market button is
+      // a real, keyboard-focusable/activatable <button>, and the suspended one is excluded from the
+      // tab order entirely (native `disabled` semantics), not merely visually dimmed.
+      await kickoffTeamButton.focus();
+      await expect(kickoffTeamButton).toBeFocused();
+      await expect(suspendedButton).not.toBeFocused();
+    });
+  }
+}
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-});
+for (const uiVariant of UI_VARIANTS) {
+  for (const viewport of REPRESENTATIVE_VIEWPORTS) {
+    test(`pre-match Correct Score board stays fully visible, intersection-free, and unclipped (ui=${uiVariant}, ${viewport.label})`, async ({ page }) => {
+      const state = buildCorrectScoreLayoutState();
+      const liveFeed = await installFakeEventSource(page);
+      await installAppApiMocks(page, state);
+
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`/?ui=${uiVariant}`, { waitUntil: 'domcontentloaded' });
+      await liveFeed.waitForSource();
+      await liveFeed.openAll();
+
+      const article = page.getByRole('article', { name: 'Millhaven - Oakbridge' });
+
+      await expect(article).toBeVisible();
+      for (const [score, price] of CORRECT_SCORE_OPTIONS) {
+        const button = article.getByRole('button', { name: `Select Correct Score ${score} at ${price}` });
+        await expect(button).toBeVisible();
+        await expect(button).toContainText(score);
+        await expect(button).toContainText(price);
+      }
+
+      expect(await hasIntersectingElements(page, '.product-cs-grid > *')).toBe(false);
+      expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
+      expect(await hasInternalOverflow(page, '.event-card')).toBe(false);
+      expect(await hasInternalOverflow(page, '.product-cs-grid')).toBe(false);
+      expect(await hasInternalOverflow(page, '.product-block--1x2')).toBe(false);
+    });
+  }
+}
 
 test('live betting layout stays usable on a mobile v3 viewport', async ({ page }) => {
   const state = createLiveBettingMockState();
@@ -288,4 +525,48 @@ test('live betting layout stays usable on a mobile v3 viewport', async ({ page }
   await expect(getBoard(page, BET_KIND.LIVE)).toBeVisible();
   await expect(getBoard(page, BET_KIND.PRE_MATCH)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('a recently finished event groups under "Recently finished" (not "Live now") with its scheduled kickoff time, across representative widths', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const liveFeed = await installFakeEventSource(page);
+  const kickoffAt = '2030-06-01T15:00:00.000Z';
+
+  state.events = [{
+    eventId: 'finished-1',
+    name: 'Riverton - Fairhaven',
+    time: kickoffAt,
+    visibility: 'ONLINE',
+    status: 'NO_RESULT',
+    home: 'Riverton',
+    away: 'Fairhaven',
+    products: [],
+    live: {
+      phase: 'FULL_TIME',
+      kickoffAt,
+      occurredAt: '2030-06-01T16:48:00.000Z',
+      homeScore: 2,
+      awayScore: 1,
+      bettingStatus: 'SUSPENDED',
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  }];
+  await installAppApiMocks(page, state);
+
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 768, height: 1000 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/?ui=v2', { waitUntil: 'domcontentloaded' });
+    await liveFeed.waitForSource();
+    await liveFeed.openAll();
+
+    await expect(page.getByRole('heading', { name: 'Live now' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Recently finished' })).toBeVisible();
+    const finishedArticle = page.getByRole('article', { name: 'Riverton - Fairhaven' });
+    await expect(finishedArticle).toBeVisible();
+    await expect(finishedArticle.getByText('FULL-TIME')).toBeVisible();
+    await expect(finishedArticle.locator('time')).toHaveAttribute('datetime', kickoffAt);
+    await expect(finishedArticle.locator('..')).toHaveClass(/col-xl-4/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
 });
