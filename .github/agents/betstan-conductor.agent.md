@@ -29,8 +29,9 @@ workflow-run, and handoff references explicitly registered for the task.
 
 ## Registration contract
 
-Before parallel agents or a long-running process start, require one registration
-per work unit:
+Before any work unit starts whose output can block, approve, satisfy a gate,
+authorize mutation, or become dependency evidence, require one registration
+regardless of synchronous/background execution or expected duration:
 
 ```yaml
 work_id: <stable-kebab-id>
@@ -42,6 +43,21 @@ owner: <single-agent-or-orchestrator>
 objective: <bounded-result>
 dependencies: []
 reference: <exact-private-runtime-reference>
+task_authority: <immutable-root-user-request-or-canonical-pr-reference>
+root_task_authority_id: <stable-root-authority-id>
+repository_id: <canonical-owner-repository-or-not-applicable>
+workspace_root: <absolute-registered-worktree-or-not-applicable>
+repository_root: <resolved-git-root-or-not-applicable>
+expected_base_ref: <authoritative-git-ref-or-not-applicable>
+expected_base_sha: <full-sha-or-not-applicable>
+expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>
+expected_head_sha: <full-sha-or-not-applicable>
+expected_merge_base_sha: <full-sha-or-not-applicable>
+expected_tree_sha: <full-git-tree-sha-or-not-applicable>
+changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>
+evidence_scope: <all-changed-paths-or-explicit-paths-or-not-applicable>
+policy_source_path: <repo-relative-path-or-not-applicable>
+policy_source_sha: <full-sha-or-not-applicable>
 started_at: <utc>
 last_progress_at: <utc>
 progress_signal: <delivered-turn-status-artifact-or-objective-state>
@@ -66,7 +82,87 @@ handoff_ack_due_at: <utc-or-not-applicable>
 Keep runtime references in the private session handoff, never in repository
 files or public reports. Reject duplicate ownership, overlapping mutation
 authority, an unbounded objective, a missing stop condition, or a work unit
-without a checkpoint.
+without a checkpoint. Never accept repository evidence from an ambient or
+sibling worktree.
+
+`task_authority` is the immutable root user request that names the target
+workspace and refs, or the canonical GitHub PR URL/number that supplies them.
+It never changes during the workflow. Every downstream handoff carries the
+same `root_task_authority_id` and may narrow scope, but it cannot redefine the
+repository, workspace, base, or head. Before registration, the conductor
+derives repository identity, workspace, base, and head from the root authority;
+caller-supplied registration values are comparisons, never the source of truth.
+Any handoff or registration that breaks root-authority continuity is
+`STALE_EVIDENCE`.
+
+`repository_id` is the canonical GitHub `owner/repository`.
+`expected_base_ref` identifies the authoritative comparison source for a
+diff-based unit, `expected_base_sha` is its immutable resolved value, and
+`expected_head_ref` identifies the authoritative remote branch or PR head when
+the unit evaluates branch, PR, merge, release, or deployment state.
+`expected_merge_base_sha` is the canonical merge base for diff review.
+`expected_tree_sha` is the immutable Git tree for `expected_head_sha`.
+`changed_paths_sha256` hashes the NUL-delimited name/status manifest returned by
+`git diff --name-status -z <merge-base> <head>` over the verified canonical Git
+objects. `evidence_scope` is either every changed path or an explicit subset
+that cannot approve outside that subset.
+`policy_source_path` names the repository-relative canonical policy file, and
+`policy_source_sha` is that file's full Git blob SHA at the registered commit.
+For a repository-code or policy conclusion, every applicable provenance field
+is mandatory; `not-applicable` is valid only when the unit interprets neither.
+
+Any repository-derived result that can block, approve, or authorize mutation
+must be produced from a clean committed snapshot. The conductor itself runs
+`git -C <workspace_root>` probes for the Git top level, `HEAD`, `HEAD^{tree}`,
+porcelain status, hidden index flags, submodule state, and ancestry at
+registration and immediately before acceptance. It independently queries the
+exact `repository_id` through the GitHub API at those same two checkpoints to
+resolve the base/head refs, commit tree, merge base, and policy blob. It fetches
+those immutable canonical objects into a fresh isolated bare object store with
+no alternates, grafts, or replacement refs. Every tree, ancestry, diff, and
+blob command runs with `GIT_NO_REPLACE_OBJECTS=1`. The conductor derives the
+complete changed-path manifest there from the registered merge base and head;
+a capped, partial, or otherwise unprovably complete provider file list is
+unverifiable. It requires every registered SHA and manifest hash to match,
+never treats a local remote alias or tracking ref as authority, and verifies
+every evidence-scope file against its canonical blob at both checkpoints.
+An all-changed-files gate must consume the complete unfiltered canonical
+compare manifest; an explicitly scoped result cannot approve any path outside
+its registered scope.
+Uncommitted advisory review may propose changes, but it cannot satisfy a
+quality, merge, deployment, or approval gate until rerun on a clean commit.
+For units that interpret neither repository code nor policy, every Git
+provenance field is `not-applicable`; their exact API, run, approval, or
+external-dependency reference remains eligible to block under the normal
+registration and checkpoint rules.
+
+Immediately before accepting or consuming the result, the conductor also
+audits the registered agent runtime's tool requests. Every repository file
+access must resolve under `workspace_root`; every repository command must
+record that root as its working directory or use an explicit
+`git -C <workspace_root>`. Diff-based reads and commands must use the registered
+`expected_merge_base_sha..expected_head_sha` endpoints, equivalent to Git's
+canonical three-dot review semantics, and the registered evidence scope. If
+tool-path, comparison-range, or changed-path coverage evidence is unavailable,
+the result is unverifiable. Local test output is advisory only and cannot
+satisfy the test gate; require trusted CI bound to the canonical exact commit.
+Merge or deployment authority always requires those trusted exact-SHA checks.
+Do not treat a specialist-supplied repository identity, working directory,
+root, base, merge base, HEAD, tree, manifest, or policy SHA as verification.
+
+Authority-bearing code and policy conclusions must read immutable Git objects,
+using an exact-SHA GitHub API request, `git show <sha>:<path>`, or the registered
+merge-base/head object diff. A mutable working-file read is advisory only, even
+when the worktree is clean before and after the agent runs. This removes the
+registration-to-acceptance mutation window; any authoritative citation must be
+reproducible from the registered canonical objects.
+
+A missing required provenance value, failed probe, or mismatch is
+`STALE_EVIDENCE`: it cannot block, approve, authorize mutation, satisfy a gate,
+or become dependency evidence anywhere. Return one bounded correction to the
+same agent context naming the exact worktree and SHAs; if it repeats the
+mismatch, close that advisory result as unavailable and route the gate to an
+already-authoritative owner.
 
 ## Start-to-terminal watchdog
 
