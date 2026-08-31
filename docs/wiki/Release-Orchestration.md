@@ -19,6 +19,20 @@ Never rerun a failed run when downstream evidence requires
 `run_attempt == 1`. Preserve it and create a fresh exact candidate or dispatch
 as allowed by the owning workflow.
 
+## Quality chain
+
+The universal quality gates are architect, three-model simplifier synthesis,
+developer, critic, test engineer, and final validator. The conductor spans that
+chain but is not a quality gate. Model passes and same-agent corrections are
+intra-gate work; UX and other specialists are conditional evidence providers;
+GitHub runs, approvals, external waits, and durable documentation are monitored
+supporting units.
+
+Three independent simplifier passes use distinct model families and high
+reasoning. One xhigh synthesis produces the only developer-gate handoff. Fewer
+than three eligible completed passes blocks the gate, and unresolved material
+disagreement is reported rather than averaged away.
+
 ## Conductor rules
 
 - Register every agent, local process, workflow, approval, and handoff with one
@@ -30,6 +44,9 @@ as allowed by the owning workflow.
   `pending_deployments`, not only top-level run status.
 - One missed checkpoint triggers bounded recovery. Two misses require an
   explicit safe action; do not duplicate mutation-capable work.
+- Keep corrections in the same agent context with a bounded attempt count.
+  A completed gate without acknowledgement from its exact next owner is a
+  stall.
 - Revalidate late specialist findings against the current SHA, workflow tree,
   and runtime topology.
 - When production is the explicit priority, freeze unrelated metadata and
@@ -56,3 +73,10 @@ as allowed by the owning workflow.
 Every implementation, promotion, ancestry synchronization, and intentionally
 closed PR documents its rationale, exact SHAs, scope and exclusions,
 validation outcomes, release impact, rollback evidence, and exceptions.
+Core evidence is mandatory; conditional operational fields remain present and
+say `not applicable` when they do not apply.
+
+Only a CLI-created and CLI-owned PR uses `copilot-cli-managed` and the bounded
+no-personal-prompt path. Every other PR requires approval bound to its exact
+current head SHA. Neither path waives technical or production gates; see
+`CONTRIBUTING.md` for the classifier limitation and exact approval procedure.

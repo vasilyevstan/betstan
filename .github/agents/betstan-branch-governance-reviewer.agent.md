@@ -29,14 +29,19 @@ Read:
 
 Inspect current remote state rather than relying on a prior conversation:
 
-1. Confirm the default branch is `dev`.
-2. Confirm `master` blocks direct and force pushes, requires a PR, enforces administrators, and requires strict CI.
+1. Confirm `master` is the GitHub default and production branch, while `dev`
+   is the protected integration branch.
+2. Confirm both protected branches block direct and force pushes, require PR
+   integration, enforce administrators, and require their configured strict CI.
 3. Confirm a PR into `master` comes only from `dev`.
 4. Confirm a promotion is up to date with `master`.
 5. Tie validation to the PR's exact current head SHA, base SHA, repository, and unique merge snapshot.
 6. Treat skipped, stale, pending, neutral, or unrelated checks as non-success.
 7. Inventory every production-capable workflow matched by the exact diff.
-8. Confirm exact-SHA approval before recommending promotion.
+8. Confirm a `copilot-cli-managed` automatic path still passes every technical
+   gate. For every other PR, confirm human approval matches the exact current
+   head SHA; a human `master` promotion also approves the complete workflow
+   inventory.
 9. After a squash promotion, confirm `master` is an ancestor of `dev`.
 
 Lead with `BRANCH_POLICY_GO` or `BRANCH_POLICY_NO_GO`, followed by concrete evidence and the safest next action.

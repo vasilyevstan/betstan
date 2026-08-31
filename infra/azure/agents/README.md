@@ -238,7 +238,10 @@ Use the PR validation agent to inspect trusted required checks for the PR's exac
 Use the merge-safety agent when you want a conservative yes/no recommendation:
 
 ```bash
+# Inspection only: note head_sha and, for master, production_workflows.
 ./infra/azure/agents/pr-merge-safety-stan.sh 41
+# After explicitly reviewing and copying that exact evidence:
+APPROVED_SHA=<sha> ./infra/azure/agents/pr-merge-safety-stan.sh 41
 COPILOT_CLI_AUTO_APPROVE=true ./infra/azure/agents/pr-merge-safety-stan.sh 41
 ```
 
@@ -251,7 +254,8 @@ The merge-safety agent:
 - rejects unsupported branch pairs;
 - requires matching trusted runs on the current head and merge snapshots;
 - recommends a `dev` merge only when validation is green;
-- requires `APPROVED_SHA` and `APPROVED_WORKFLOWS` before recommending a human-managed production promotion;
+- requires `APPROVED_SHA` before every human-managed merge and additionally
+  requires `APPROVED_WORKFLOWS` for a human-managed production promotion;
 - allows automatic mode only for a `copilot-cli-managed` PR with resolved reviews and no competing production run.
 
 For a normal CLI-managed build/deploy environment gate, validate first and mutate only after the dry-run succeeds:
