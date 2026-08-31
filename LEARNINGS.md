@@ -508,12 +508,12 @@ wiki, reusable-agent guidance, PR/release evidence, and todo reconciliation.
 It may report orchestration complete only after that handoff is persisted and
 validated.
 
-## Compact live activation acceptance regression — 2026-08-30
+## Compact live activation acceptance regression — 2026-08-31
 
 - Dark deployment `33418318240` successfully placed exact master
   `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` in production.
 - Activation `33419673381` failed because its browser assertion still expected
-  seven visible cards after kickoff. The accepted compact UI correctly showed
+  seven visible cards after kickoff. The intended compact UI showed
   five active in-play cards and hid the two terminal countdown cards.
 - The authoritative snapshot still carries all seven markets for transition,
   audit, and settlement logic. Production acceptance must distinguish that

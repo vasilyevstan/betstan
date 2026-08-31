@@ -517,6 +517,9 @@ conversation summaries are not authority.
 - Keep failed activation `33303355082` immutable. Its cleanup disabled new
   kickoffs, restored the account to `USER`, removed the exact synthetic slip,
   and cleared the lease before the corrected candidate was built.
+
+### Compact presentation regression — 2026-08-31
+
 - Keep failed activation `33419673381` immutable. Production rendered the
   intended five active post-kickoff market cards, but the stale seven-card UI
   assertion failed. Cleanup restored dark mode, disabled new kickoffs, demoted
