@@ -38,7 +38,7 @@ const Handle1X2 = ({ eventId, onSelectionPlaced, product, resulted, selectedSele
       onClick={() => handleClick(product.id, odd.id)}
     >
       <span className="product-button__label">{odd.name}</span>
-      <strong>{odd.value}</strong>
+      <strong className="product-button__value">{odd.value}</strong>
     </button>;
   };
 
