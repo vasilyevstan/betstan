@@ -504,13 +504,12 @@ conversation summaries are not authority.
 
 ### Acceptance corrections
 
-- The implemented live card has two phases: exactly two enabled countdown
-  products before kickoff, then five active in-play cards after kickoff.
-  `KICKOFF_TEAM` settles at kickoff; `FIRST_MINUTE_GOAL` settles after the
-  first-minute transition. Both remain in the authoritative live snapshot for
-  settlement history, but terminal market cards are intentionally omitted from
-  the betting UI. An assertion that expects seven visible post-kickoff cards is
-  a test defect, not a product failure.
+- In the August 30 release, the live card had two phases: exactly two enabled
+  countdown products before kickoff, then seven retained cards after kickoff—
+  five in-play markets plus two non-selectable countdown products.
+  `KICKOFF_TEAM` settled at kickoff; `FIRST_MINUTE_GOAL` remained closed until
+  the first-minute transition and then settled. At that release, an assertion
+  that expected only five post-kickoff cards was a test defect.
 - A JWT that still claims `ADMIN` after the persisted account is demoted is an
   invalid privileged session. Clear it and return `401`; a current ordinary
   `USER` requesting an administrator route still receives `403`.
@@ -520,6 +519,11 @@ conversation summaries are not authority.
 
 ### Compact presentation regression — 2026-08-31
 
+- The compact presentation introduced on August 31 supersedes the earlier
+  visible-card contract: after kickoff it shows the five active in-play cards
+  and intentionally omits both terminal countdown cards. All seven market
+  objects remain in the authoritative snapshot for transition, audit, and
+  settlement history.
 - Keep failed activation `33419673381` immutable. Production rendered the
   intended five active post-kickoff market cards, but the stale seven-card UI
   assertion failed. Cleanup restored dark mode, disabled new kickoffs, demoted
