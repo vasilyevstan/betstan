@@ -13,8 +13,11 @@ const Handle1X2 = ({ eventId, onSelectionPlaced, product, resulted, selectedSele
   };
 
   const odds = product.odds ?? [];
-  const oddButtonBaseClass = `btn w-100 product-button product-button--${uiVariant ?? 'v1'}`;
+  const oddButtonBaseClass = `btn w-100 product-button product-button--${uiVariant ?? 'v1'} product-button--labelled`;
 
+  // Each control renders the actual selection name (the home team, "Draw", or the away team) as
+  // its visible label, stacked above the price, so the visible text is never a generic positional
+  // placeholder that diverges from the accessible name (label-in-name) built below.
   const renderOdd = (index) => {
     const odd = odds[index];
 
@@ -34,21 +37,17 @@ const Handle1X2 = ({ eventId, onSelectionPlaced, product, resulted, selectedSele
       type="button"
       onClick={() => handleClick(product.id, odd.id)}
     >
-      {odd.value}
+      <span className="product-button__label">{odd.name}</span>
+      <strong>{odd.value}</strong>
     </button>;
   };
 
-  return <div className="text-center product-block">
-    <div className="row fw-semibold mb-2">{product.name}</div>
-    <div className="row small text-secondary mb-1">
-      <div className="col">Home</div>
-      <div className="col">Draw</div>
-      <div className="col">Away</div>
-    </div>
-    <div className="row" key={product.id}>
-      <div className="col-4 pe-1">{renderOdd(0)}</div>
-      <div className="col-4 px-1">{renderOdd(1)}</div>
-      <div className="col-4 ps-1">{renderOdd(2)}</div>
+  return <div className="text-center product-block product-block--1x2">
+    <div className="fw-semibold mb-2">{product.name}</div>
+    <div className="product-1x2-grid" key={product.id}>
+      <div>{renderOdd(0)}</div>
+      <div>{renderOdd(1)}</div>
+      <div>{renderOdd(2)}</div>
     </div>
     <hr></hr>
   </div>;

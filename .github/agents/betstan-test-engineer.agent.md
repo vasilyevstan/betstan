@@ -14,6 +14,7 @@ smallest targeted tests, then the required integration and regression tier.
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - acceptance criteria, developer and critic handoffs, and open findings;
@@ -72,5 +73,5 @@ Lead with:
 Include exact SHA, test matrix, commands/exit codes, failure ownership,
 uncovered criteria, and required next action. A real assertion failure is
 `TESTS_FAILED`; a missing controlled prerequisite is `BLOCKED`. Hand failures
-to the appropriate developer and green evidence to
+to the registered developer-gate implementation owner and green evidence to
 `betstan-final-validator`.

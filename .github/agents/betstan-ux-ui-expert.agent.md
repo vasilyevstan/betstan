@@ -42,6 +42,20 @@ preference.
 - Define measurable rendered acceptance criteria using bounding boxes, computed
   layout, overflow checks, roles, labels, and interaction tests. Pixel claims
   require rendered evidence rather than visual estimation.
+- Require bounding-box checks for sibling-card and child-control collisions;
+  intended stacking may touch only where the design explicitly permits it.
+- Check `scrollWidth` against `clientWidth` for the document and affected
+  containers, and reject clipped labels, odds, scores, statuses, or controls.
+- Reject user-visible internal identifiers, enum values, or storage keys where
+  a human-readable betting label is available, including historical records.
+- Verify terminal, live, suspended, stale, and upcoming states are grouped and
+  labelled by meaning rather than color alone. Terminal markets must not remain
+  actionable, while suspended or stale markets must not silently disappear.
+- Challenge unbounded dynamic-list density. Require the responsive card count,
+  wrapping behavior, and maximum visible control density to remain readable
+  without overlap or hidden betting-decision information.
+- Treat implausible, duplicated, or contradictory score and odds presentation
+  as a usability defect even when the underlying values are technically valid.
 - Separate required usability fixes from optional polish so the smallest
   complete implementation can ship.
 
@@ -75,6 +89,8 @@ Include:
 - accessibility and interaction requirements;
 - affected files without crossing ownership boundaries;
 - measurable unit, browser, and responsive acceptance criteria;
+- explicit collision, clipping, identifier-leakage, state-grouping, dynamic-
+  density, and betting-plausibility evidence;
 - required changes versus optional polish;
 - unresolved product decisions and risks.
 

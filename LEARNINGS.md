@@ -196,6 +196,22 @@ cd resulting && npm ci && npm run test:ci
 - A stalled watcher is not a stalled job, and a running watcher is not job
   progress. Recover read-side observation directly; route mutations to one
   exact owner with a deadline and keep the same unit open until evidence moves.
+- A workflow dispatch URL is event-acceptance evidence, not job
+  materialization. Keep a manually enabled workflow active until the exact run
+  has a real job and expected protected gate, then disable it before approval.
+  Capture the run ID from the URL, and inspect that run before retrying when a
+  local assertion fails after dispatch.
+- Pull-request title and body edits trigger `pull_request.edited` validation.
+  Treat PR metadata changes as workflow-producing work and keep them outside
+  active data-to-deploy handoffs or other production-exclusivity windows.
+- A late specialist report must be revalidated against its recorded SHA,
+  current authoritative branch, and runtime topology. Tool-heavy work that
+  returns after the release state changed cannot reopen a gate with stale
+  assumptions.
+- When the user explicitly prioritizes the production critical path, freeze
+  unrelated documentation and metadata changes until the safe terminal gate.
+  Required safety checks still run; the scope freeze prevents self-created
+  workflow conflicts rather than weakening release evidence.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
@@ -212,6 +228,29 @@ cd resulting && npm ci && npm run test:ci
   omitted counters are `unknown`, not zero, and must prevent image mutation.
   Queries for optional nested safety markers require explicit field existence
   and a non-null value so the production predicate is reviewable in fixtures.
+
+### Agent orchestration and review governance
+
+- The conductor spans the quality chain but never substitutes for a gate.
+  `.github/agents/README.md` owns the exact chain and handoff taxonomy.
+- A process can be running and still be stalled. Tool activity, logs, and
+  watchers do not replace a bounded first response, objective progress,
+  checkpoint, or accepted downstream handoff.
+- Keep corrections in the originating agent context with a bounded attempt
+  count. Replacement, summary-only, or status-only agents create lost context
+  and conflicting ownership.
+- Three independent simplifier passes need distinct model families, identical
+  sealed input, high reasoning, and one conservative synthesis. Fewer than
+  three completed passes blocks; safety and compatibility cannot be removed by
+  majority vote.
+- PR descriptions are durable evidence. Use
+  `.github/pull_request_template.md` for the exact core and conditional fields.
+- Copilot CLI automatic approval removes only the personal prompt. It never
+  removes exact-SHA, trusted-check, review-thread, workflow-inventory,
+  environment, or exclusivity gates. Human/default PRs require approval bound
+  to their current head SHA.
+- `copilot-cli-managed` is a repository convention rather than cryptographic
+  provenance because CLI and human `gh` operations share one GitHub identity.
 
 ## Resolved failures and durable rules
 
@@ -407,3 +446,61 @@ cd resulting && npm ci && npm run test:ci
   A second currency query, malformed `nextLink`, trailing `NO_ROWS` reset, or
   rewritten prior prefix invalidates the evidence rather than defaulting to a
   clean window.
+
+## Live betting terminal release — 2026-08-30
+
+Live betting is permanently active on source
+`0bf1d01981e454cd6ca661d8e6d99997462c558c`. The release preserved the normal
+feature-to-`dev`-to-`master` path and immutable rollback authority.
+
+### Exact release chain
+
+- production build `33307059664`;
+- OCI/GHCR build `33307558371`;
+- public GHCR validation `33308076137`;
+- bounded capacity acquisition `33308191145`;
+- infrastructure finalization `33308306279`;
+- data dry-run `33308673229`;
+- idempotent backfill `33309055711`;
+- final Slip index and deployment handoff `33309897271`;
+- dark deployment and public validation `33310369637`;
+- committed activation `33311534616`.
+
+Failed index dispatch `33309600827` remains immutable. It failed before lock
+acquisition or mutation because detailed edits to PRs #425–#429 triggered
+`pull_request.edited` CI and the production-exclusivity guard correctly found
+run `33309358639`. Jobless activation dispatch `33310925721` has zero jobs and
+zero approvals and is not activation authority. The materialized replacement
+was captured before workflow disable and completed once.
+
+### Acceptance and runtime evidence
+
+- two enabled countdown products were available before kickoff and all seven
+  market cards were retained after kickoff;
+- independent live and pre-match slips, quote/revision handling, live
+  incidents, half-time/stoppage/full-time transitions, immediate live
+  settlement, and pre-match settlement all passed;
+- the reusable protected account was returned to `USER`, its stale privileged
+  session was rejected, and zero active synthetic slips remained;
+- page errors, console errors, API failures, queue residue, retry/dead-letter
+  residue, and pod restart deltas were all zero;
+- final readiness reported shared-Mongo topology valid, the retained PVC
+  `Bound`, four live queue consumers, REST/SSE/legacy API success, and
+  `LIVE_KICKOFFS_ENABLED=true`;
+- the final control state is `committed` with no activation lease.
+
+Protected rollback remains source
+`3ce5ddcc031081f1658e91fa658000aa9a9f9ab4`, OCI build `33249834065`, and
+deployment `33252255145` only while all required immutable artifacts remain
+retained. The earliest current required artifact expires at
+`2026-09-28T11:28:54Z`, but the build run reaches the workflow's 30-day age
+limit earlier at `2026-09-28T11:18:50Z`. Rotate or recertify rollback authority
+before the earlier cutoff or when a newer accepted release supersedes it.
+
+### Process outcome
+
+Activation is not the end of a long task when durable learning was requested.
+The conductor must register a terminal documentation unit covering Markdown,
+wiki, reusable-agent guidance, PR/release evidence, and todo reconciliation.
+It may report orchestration complete only after that handoff is persisted and
+validated.

@@ -130,7 +130,10 @@ for lesson in \
     "Mongo \`fsyncLock\` is process-local" \
     "application rollout does not prove that asynchronous RabbitMQ" \
     "Pre-commit public checks must be read-only" \
-    "Never return a blind \`NO_GO\`"; do
+    "Never return a blind \`NO_GO\`" \
+    "A workflow-dispatch URL is not job materialization" \
+    "\`pull_request.edited\`" \
+    "A late advisory verdict is stale until revalidated"; do
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
@@ -161,6 +164,11 @@ for conductor_contract in \
     'A terminal unit without a confirmed downstream handoff is a stall' \
     'must never answer a detected stall with observation alone' \
     'Raw tool-call growth alone is not deliverable progress' \
+    'critical-path scope freeze' \
+    'Treat a pull request metadata edit as workflow-producing' \
+    'Revalidate every late specialist result' \
+    'A workflow dispatch URL is not job materialization' \
+    'A jobless queued dispatch with zero jobs and zero pending approvals' \
     'zero completed turns after its first-response deadline' \
     'stop further investigation and return the bounded verdict' \
     'Continue dependency-safe work immediately' \
@@ -186,13 +194,15 @@ for conductor_contract in \
     'Never bypass a trusted publisher that rejects changes to its own' \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
+    'terminal learning and documentation unit' \
     'Never use name-based process discovery or termination' \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
     fail "conductor agent omits orchestration contract: $conductor_contract"
 done
-grep -Fq 'Start `betstan-conductor` before parallel agents' "$agent_readme" ||
-  fail "agent workflow does not start with conductor registration"
+grep -Fq 'Start `betstan-conductor` before every unit whose result can block, approve,' \
+    "$agent_readme" ||
+  fail "agent workflow does not require universal authority-bearing registration"
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
 grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
     <<<"$agent_readme_flat" ||
@@ -215,6 +225,14 @@ grep -Fq 'Every event trigger is paired with a maximum wall-clock checkpoint' \
 grep -Fq 'completed unit with no confirmed next-owner handoff is itself a stall' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can stall between completion and handoff"
+grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can disable a manual workflow before job materialization"
+grep -Fq 'Pull-request metadata edits are workflow-producing' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow ignores pull-request edit triggers"
+grep -Fq 'terminal documentation handoff' <<<"$agent_readme_flat" ||
+  fail "agent workflow can complete before required durable learning"
 grep -Fq 'At the second missed checkpoint it escalates the same unit' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can replace or indefinitely defer stalled work"
@@ -897,11 +915,27 @@ grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
   fail "OCI deployment validation omits the image-prefix inventory contract"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"
+pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
 
 grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
 grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
+grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
+  "$deployment_safety_agent"
+grep -Fq 'Treat PR title/body changes as workflow-producing' \
+  "$deployment_safety_agent"
+[[ -f "$pr_template" ]] || fail "pull request evidence template is missing"
+for heading in \
+    '## Why this change exists' \
+    '## Exact source and ancestry' \
+    '## Scope and compatibility' \
+    '## Validation' \
+    '## Release and rollback' \
+    '## Exceptions and remaining work'; do
+  grep -Fq "$heading" "$pr_template" ||
+    fail "pull request template omits required evidence heading: $heading"
+done
 grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
   "$azure_deploy_workflow"
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"

@@ -2,35 +2,80 @@
 
 These repository agents provide a reusable, independent workflow for feature,
 fix, migration, and release-preparation tasks. They complement the existing
-specialist agents; they do not replace specialist authority or user approval.
+specialist agents; they do not replace specialist authority or the approval
+mode defined in `CONTRIBUTING.md`.
 
-## Core workflow
+## Universal quality chain
 
-1. `betstan-conductor` registers active work, follows dependencies, monitors
-   bounded progress, and escalates suspected stalls.
-2. `betstan-architect` maps the solution and routes specialist decisions.
-3. `betstan-simplifier` removes unnecessary scope without changing accepted
-   behavior.
-4. `betstan-ux-ui-expert` specifies responsive, accessible, measurable
-   usability for user-facing slices.
-5. `betstan-backend-developer` and `betstan-frontend-developer` implement
-   disjoint, bounded slices.
-6. `betstan-validation-critic` reviews each immutable slice diff.
-7. `betstan-test-engineer` independently executes targeted and regression tests.
-8. `betstan-final-validator` checks acceptance and evidence completeness.
-9. `betstan-deployment-safety` owns branch, PR, exact-SHA deploy, and rollback
-   decisions. Runtime changes remain with the AKS or OCI operator.
+The fixed quality gates are:
 
-No agent status is permission to merge or deploy. Exact user approval is still
-required for the target SHA and complete production-capable workflow set.
+1. `betstan-architect`
+2. `betstan-simplifier`
+3. **Developer gate**: `betstan-backend-developer` and/or
+   `betstan-frontend-developer` for application code, or the authorized
+   infrastructure/governance implementation owner for its owned paths
+4. `betstan-validation-critic`
+5. `betstan-test-engineer`
+6. `betstan-final-validator`
+
+The conductor spans the workflow but is not a quality gate.
+`betstan-ux-ui-expert` specifies responsive, accessible, measurable usability
+for user-facing slices and remains a conditional specialist. Other specialists
+are registered when their trigger applies. `betstan-deployment-safety` owns
+branch, PR, exact-SHA deploy, and rollback decisions; runtime changes remain
+with the AKS or OCI operator.
+
+No agent status is permission to merge or deploy. Follow the exact-SHA approval
+mode in `CONTRIBUTING.md`: CLI-managed PRs may use the bounded automatic path,
+while every other PR requires approval bound to its current head SHA.
+
+## Work-unit taxonomy
+
+- A **quality gate** is one stage in the universal chain and produces one
+  accepted downstream handoff.
+- The **developer gate** means the registered implementation owner with edit
+  authority for the slice. It is not an exemption for non-application work:
+  backend/frontend agents own application paths, deployment/runtime
+  specialists own their infrastructure paths, and the human/orchestrator owns
+  governance definitions and documentation.
+- **Intra-gate work** stays under the same logical gate and `work_id`. The three
+  simplifier passes, simplifier synthesis, and same-developer correction rounds
+  are not additional quality-chain handoffs.
+- A **conditional specialist** supplies evidence to the owning quality gate;
+  it does not insert itself into the universal chain or issue a competing
+  approval.
+- A **registered supporting unit** is an agent, local process, GitHub run,
+  protected approval, external wait, or terminal documentation task monitored
+  by the conductor.
+
+Only a completed logical quality gate hands work to the exact next gate.
+Corrections return to the same agent conversation unless that owner has failed
+or become unavailable.
+
+## Canonical policy sources
+
+| Concern | Source |
+|---|---|
+| Repository entry point and irreversible rules | `.github/copilot-instructions.md` |
+| Quality chain, handoffs, and statuses | This README |
+| Watchdog and recovery behavior | `betstan-conductor.agent.md` |
+| Simplifier pass and synthesis decisions | `betstan-simplifier.agent.md` |
+| PR evidence structure | `.github/pull_request_template.md` |
+| Branch, approval, and contribution policy | `CONTRIBUTING.md` |
+| Human-readable release flow | `docs/wiki/Release-Orchestration.md` |
+
+Secondary agents and skills cite these sources instead of redefining complete
+policy blocks.
 
 ## Conductor loop
 
-Start `betstan-conductor` before parallel agents, background validation, or a
-long GitHub Actions operation. Register each unit with one owner, a bounded
-objective, dependencies, an exact private runtime reference, a progress signal,
-a checkpoint, a next-check trigger, and a stop condition. Keep those references
-in private session handoffs, not repository files or public reports.
+Start `betstan-conductor` before every unit whose result can block, approve,
+satisfy a gate, authorize mutation, or become dependency evidence, including
+short synchronous work. Register each unit with one owner, a bounded objective,
+dependencies, an exact private runtime reference, repository provenance when
+applicable, a progress signal, a checkpoint, a next-check trigger, and a stop
+condition. Keep those references in private session handoffs, not repository
+files or public reports.
 
 The conductor monitors completion events and bounded checkpoints rather than
 tight-polling. A still-running `gh run watch` is notification transport, not
@@ -45,6 +90,25 @@ and return the verdict already supported by collected evidence. A second miss
 closes advisory read-only work as unavailable and routes its gate to an
 existing authoritative owner; mandatory evidence blocks only its dependants
 while all dependency-safe work continues.
+
+An explicit user request to prioritize production establishes a critical-path
+scope freeze. Continue required safety work, but defer unrelated documentation,
+PR metadata, and advisory expansion until the production gate is terminal.
+Pull-request metadata edits are workflow-producing when validation subscribes
+to `pull_request.edited`; register those runs and never create them inside a
+data-to-deploy handoff or production-exclusivity window.
+
+For manually disabled workflows, a workflow dispatch URL is acceptance, not
+materialization. Capture the exact run ID from the URL, keep the workflow
+enabled until the run has a real job and expected `pending_deployments` gate,
+then disable it before approval. If a command fails after printing a URL,
+inspect that run before dispatching again. A jobless queued record with no jobs
+or approvals is inert evidence, not release authority.
+
+Revalidate a late specialist result against its recorded SHA, current workflow
+tree, and runtime topology before accepting it. A result that arrives after
+those authorities changed cannot block the critical path with stale
+assumptions.
 
 The conductor remains proactive from before a registered job starts through
 its terminal evidence and accepted downstream handoff. Every event trigger is
@@ -61,6 +125,12 @@ of resetting the timer, waiting longer, or launching a duplicate. A healthy
 status is forbidden while a checkpoint, acknowledgement, actionable gate, or
 handoff is overdue; orchestration completes only when every registered unit
 has terminal evidence and an accepted handoff.
+
+A gate that finishes without immediately naming and obtaining acknowledgement
+from its exact next owner is stalled. Correction rounds remain inside the same
+logical gate and agent context. Every gate records a bounded correction budget;
+exhausting it produces one precise blocker instead of another replacement
+agent, summary relay, or silent deadline extension.
 
 Recent tool/log/job progress means active work; an environment approval wait is
 external progress, not a hang, but it is an immediate actionable gate. A
@@ -86,6 +156,52 @@ treats that state as an active production incident and routes the exact runtime
 owner to restore service or complete the verified handoff before starting a
 replacement candidate.
 
+When durable learning was requested, activation is followed by a registered
+terminal documentation handoff. Orchestration is incomplete until the relevant
+Markdown, wiki, reusable agents, PR/release evidence, and todos are updated and
+validated.
+
+## Three-model simplifier gate
+
+The parent/orchestrator launches three sealed, independent
+`betstan-simplifier` passes from distinct model families. Each pass receives the
+same requirements, architecture, scope, and code evidence, requests high
+reasoning, and cannot see the other pass reports.
+
+The conductor registers those attempts and the synthesis under one logical
+simplifier `work_id`; they are intra-gate work, not three reviewer handoffs.
+For each pass, record:
+
+```yaml
+pass_id: <stable-id>
+model_id: <exact-model>
+model_family: <distinct-family>
+requested_reasoning: high
+actual_reasoning: <reported-level-or-not-exposed>
+status: SIMPLIFICATION_PROPOSED|NO_SIMPLIFICATION_FOUND|BLOCKED
+artifact: <private-reference>
+```
+
+If a provider fails, the parent may make a bounded substitution using another
+distinct family. A `BLOCKED` pass is attempt evidence, not a completed family;
+only `SIMPLIFICATION_PROPOSED` and `NO_SIMPLIFICATION_FOUND` are eligible for
+synthesis. Fewer than three eligible completed families returns
+`SIMPLIFICATION_INCOMPLETE`; there is no degraded 2-of-3 handoff.
+
+One model-neutral simplifier invocation synthesizes the three sealed reports.
+It requests xhigh reasoning when supported and records the highest actual
+supported level. `betstan-simplifier.agent.md` is the sole source for
+adjudication, protected criteria, and disputed-result rules.
+
+The synthesis artifact records `synthesis_model_id`,
+`synthesis_model_family`, `requested_reasoning: xhigh`,
+`actual_reasoning`, all three `pass_id` values, the terminal status, and the
+accepted/rejected recommendations.
+
+Only `SIMPLIFICATION_READY` produces the single artifact handed to the
+developer. The three pass reports remain auditable evidence for final
+validation.
+
 ## Ownership
 
 | Area | Editor |
@@ -93,7 +209,7 @@ replacement candidate.
 | `common/**` and backend service source/tests/manifests | `betstan-backend-developer` |
 | `client/src/**`, `client/public/**`, and client tests/config | `betstan-frontend-developer` |
 | `infra/**`, workflows, Dockerfiles, runtime proxy config | Existing deployment/runtime specialists |
-| `.github/agents/**`, skills, governance docs | Human/orchestrator; agents never edit their own definitions |
+| `.github/agents/**`, skills, governance docs | Human/orchestrator acting as the developer-gate implementation owner; agents never edit their own definitions |
 
 Developers are file editors, not git actors. They never stage, commit, switch,
 merge, rebase, push, open a PR, or dispatch a workflow. Concurrent editors are
@@ -166,22 +282,36 @@ risks: []
 approvals: []
 
 orchestration:
+  root_task_authority_id: <stable-root-authority-id>
   work_id: <stable-kebab-id>
+  logical_gate: <architect|simplifier|developer|critic|test|final-validator>
+  unit_class: <quality-gate|intra-gate|specialist|supporting>
+  parent_work_id: <stable-kebab-id-or-null>
   owner: <single-owner>
   dependencies: []
+  attempt: <positive-integer>
+  max_attempts: <positive-integer>
   progress_signal: <delivered-turn-status-artifact-or-objective-state>
   activity_signal: <tool-count-log-heartbeat-or-null>
   first_response_due_at: <utc-or-not-applicable>
   checkpoint_due_at: <utc>
   next_check_trigger: <event-or-time>
   stop_condition: <terminal-result>
+  handoff_ack_due_at: <utc-or-not-applicable>
 ```
 
 Required invariants:
 
-- Every parallel/background unit is registered with one owner, a checkpoint,
-  a maximum checkpoint interval, a recovery action, a stop condition, and
-  required terminal evidence.
+- Every authority-bearing unit is registered regardless of synchronous or
+  background execution, with one owner, a checkpoint, a maximum checkpoint
+  interval, a recovery action, a stop condition, and required terminal
+  evidence.
+- Every handoff preserves the original `root_task_authority_id`; it may narrow
+  scope but cannot redefine repository, workspace, base, or head.
+- Every quality gate has one logical `work_id`, one exact next owner, and a
+  bounded correction count.
+- Three simplifier pass records use distinct model families and one synthesized
+  `SIMPLIFICATION_READY` artifact before development starts.
 - No replacement unit starts while the original can still produce side effects.
 - `out_of_ownership_touched` is empty.
 - A critic receives a non-null immutable `head_sha`.
@@ -206,8 +336,9 @@ Required invariants:
 | Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
 | UX/UI expert | `UX_SPEC_READY`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
-| Backend/frontend developer | `IMPLEMENTED_LOCAL`, `BLOCKED` |
-| Simplifier | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND` |
+| Developer gate | `IMPLEMENTED_LOCAL`, `BLOCKED` |
+| Simplifier pass | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
+| Simplifier synthesis | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |
 | Validation critic | `APPROVE_SLICE`, `CHANGES_REQUIRED` |
 | Test engineer | `TESTS_GREEN`, `TESTS_FAILED`, `BLOCKED` |
 | Final validator | `READY_FOR_RELEASE_REVIEW`, `NO_GO` |
@@ -215,3 +346,7 @@ Required invariants:
 Status lines should be namespaced with the agent name. Final validation is
 evidence for deployment safety, not a release action. Conductor status is
 coordination evidence, not specialist or release approval.
+
+The developer-gate handoff uses `IMPLEMENTED_LOCAL` or `BLOCKED` regardless of
+which authorized implementation owner edited the slice. Specialist decision
+tokens remain separate evidence.

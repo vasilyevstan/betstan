@@ -25,6 +25,8 @@ EXPECTED_SHA="${EXPECTED_SHA:-}"
 EXPECTED_WORKFLOW="${EXPECTED_WORKFLOW:-}"
 EXPECTED_ENVIRONMENT="${EXPECTED_ENVIRONMENT:-}"
 EXPECTED_DISPLAY_TITLE="${EXPECTED_DISPLAY_TITLE:-}"
+# This repository intentionally treats the label as an operational classifier;
+# it is not cryptographic provenance for the shared GitHub user identity.
 CLI_MANAGED_LABEL="${COPILOT_CLI_MANAGED_LABEL:-copilot-cli-managed}"
 AUTO_APPROVE="${COPILOT_CLI_AUTO_APPROVE:-false}"
 PRODUCTION_RUN_EXCLUSIVITY="${PRODUCTION_RUN_EXCLUSIVITY:-./infra/azure/agents/production-run-exclusivity-stan.sh}"

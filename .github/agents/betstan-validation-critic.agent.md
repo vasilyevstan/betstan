@@ -14,11 +14,12 @@ and report only concrete failure paths or missing acceptance evidence.
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
-- the architecture, acceptance criteria, developer handoff, and every open
-  finding from prior rounds;
+- the architecture, synthesized simplifier artifact, acceptance criteria,
+  developer handoff, and every open finding from prior rounds;
 - current git state and the exact immutable `base_sha..head_sha` diff;
 - affected source, models, contracts, tests, and callers/consumers.
 
@@ -97,5 +98,5 @@ Lead with:
 Include exact base/head SHA, ranked findings with severity, confidence,
 `file:line`, failure path, minimal fix, and required regression test. Track each
 prior finding as open or resolved with evidence. Separate non-blocking follow-up
-work. Hand changes back to the originating developer; hand specialist questions
-to the named specialist.
+work. Hand changes back to the originating developer-gate implementation owner;
+hand specialist questions to the named specialist.

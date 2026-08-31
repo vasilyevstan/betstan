@@ -22,6 +22,7 @@ Before changing or assessing deployment behavior, read:
 - `.github/workflows/oci-production-deploy.yml`
 - `.github/workflows/ghcr-package-management.yml`
 - `.github/workflows/oci-ghcr-cache-recovery.yml`
+- `.github/pull_request_template.md`
 - `infra/oci/scripts/live-betting-control-stan.sh`
 - `infra/oci/scripts/revalidate-live-activation-stan.sh`
 - `infra/azure/LESSONS_LEARNED.md`
@@ -51,7 +52,8 @@ inactive. Fail closed when either query is incomplete or fails.
 - Commits and pushes to non-`master` branches do not deploy production.
 - Never commit or push directly to `master`, even with generic user approval.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
-- For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Work without that provenance requires explicit user approval for the exact target SHA and complete production-capable workflow set.
+- For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Never add that label to an existing human PR.
+- Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Production-run exclusivity may ignore an active stale queue artifact only
   for `oci-capacity-acquire`: require an old jobless and approval-free
@@ -142,6 +144,11 @@ inactive. Fail closed when either query is incomplete or fails.
   allowed only for nine matching public-GHCR live references and exact GHCR
   deploy provenance; OCIR or mixed state requires completed recovery authority.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
+- For a manually disabled workflow, keep it enabled until the exact returned
+  run ID has at least one job and the expected protected environment. The
+  dispatch URL proves event acceptance, not job materialization. Disable before
+  approval, and inspect the exact run before any retry when a local command
+  fails after printing its URL.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.
@@ -178,7 +185,10 @@ inactive. Fail closed when either query is incomplete or fails.
 
 Before deployment:
 
-- confirm explicit user approval covers this exact SHA, deployment method, and complete production workflow trigger set;
+- confirm the applicable approval mode covers this exact SHA, deployment
+  method, and complete production workflow trigger set; automatic approval is
+  valid only for the documented CLI-managed allowlist, otherwise require
+  explicit user approval;
 - confirm the production PR is an up-to-date `dev`-to-`master` promotion;
 - confirm the target branch/SHA and workflow provenance;
 - run `pre-commit-infra-check-stan.sh`;
@@ -192,9 +202,12 @@ Before deployment:
   must not race migration, cleanup, or rollback;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
-- for a schema-dependent OCI release, require the exact successful three-phase
-  data chain, baseline digest, active transferred database lock, ingress write
-  fence, and six quiesced legacy writer Deployments before applying images;
+- for every OCI release, require a new exact-SHA final data handoff. Application
+  or schema changes require the exact successful three-phase data chain; only
+  the validated GitHub/infra/Markdown-only descendant resume may reuse an
+  already applied chain. Require the baseline digest, active transferred
+  database lock, ingress write fence, and six quiesced legacy writer
+  Deployments before applying images;
 - treat a successful final data phase as an active maintenance handoff, not a
   completed release, and proceed directly to its bound deployment.
 
@@ -262,8 +275,14 @@ A Running broker with missing consumers is not healthy production.
 ## PR and CI triage
 
 - Use `branch-policy-guard-stan.sh` to reject unsupported base/head pairs.
+- Require implementation, promotion, synchronization, and intentionally closed
+  PRs to satisfy the canonical evidence structure in
+  `.github/pull_request_template.md` and `CONTRIBUTING.md`.
+- Treat PR title/body changes as workflow-producing when the workflow trigger
+  includes `edited`. Never repair historical PR metadata during a live-data
+  handoff or another production-exclusivity window.
 - Use `pr-validation-stan.sh` to verify the exact current head, base, unique merge snapshot, and trusted workflow identities.
-- Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode for every other PR.
+- Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode with `APPROVED_SHA` equal to the current head for every other PR, including PRs into `dev`.
 - Treat skipped, stale, pending, neutral, or branch-name-only runs as non-success.
 - Separate infrastructure failures from unrelated application-test failures; never hide either.
 - Do not broaden or narrow CI scope merely to manufacture a green result.
@@ -277,6 +296,11 @@ A Running broker with missing consumers is not healthy production.
   Inspect jobs, pending deployments, workflow enablement, timestamps, and head
   provenance. Never re-enable or approve a production-capable workflow merely
   to make an old queue record disappear.
+- Query exact artifact names from the successful upstream run instead of
+  guessing them in a mutation preflight.
+- Freshness-check late advisory evidence against its recorded SHA, the current
+  authoritative workflow tree, and the validated shared-Mongo topology before
+  allowing it to reopen a release gate.
 
 ## Rollback
 

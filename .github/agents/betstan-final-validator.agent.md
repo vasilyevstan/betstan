@@ -15,10 +15,13 @@ specialist or deployment approval.
 Read:
 
 - `CONTRIBUTING.md`;
+- `.github/agents/README.md`;
+- `.github/pull_request_template.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- all architecture, simplification, developer, critic, test, and specialist
-  handoffs for the feature;
+- the architect handoff, the single synthesized simplifier artifact and its
+  three sealed pass records, developer/critic/test handoffs, and applicable
+  specialist evidence;
 - current git branch/status, exact base/head SHA, ancestry, and complete diff;
 - `.github/agents/betstan-service-contract-reviewer.agent.md`;
 - `.github/agents/betstan-quality-gate-reviewer.agent.md`;
@@ -28,6 +31,17 @@ Read:
 ## Validation
 
 - Verify every accepted criterion has implementation and test evidence.
+- Verify simplifier evidence contains three distinct model families whose pass
+  statuses are `SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`,
+  requested/reported reasoning effort, and one `SIMPLIFICATION_READY`
+  synthesis. A `BLOCKED` pass never counts.
+  `SIMPLIFICATION_INCOMPLETE` or `SIMPLIFICATION_DISPUTED` is `NO_GO`.
+- Verify every implementation, promotion, synchronization, and intentionally
+  closed PR retains detailed rationale, exact ancestry, scope, validation,
+  release impact, and rollback evidence.
+- Verify PR approval mode matches repository policy: automatic mode is limited
+  to CLI-created and CLI-owned `copilot-cli-managed` PRs; every other PR has
+  approval bound to its exact current head SHA.
 - Verify no critic finding remains open and no agent approved its own work.
 - Verify backend/frontend path ownership and intentional lockfile changes.
 - Verify required contract, quality, security, migration, ingress, and
@@ -65,6 +79,11 @@ Read:
   clear both flag and lease.
 - Run only existing read-only/local validation needed to confirm the evidence.
 - Treat stale, skipped, neutral, unrelated, or branch-name-only CI as missing.
+- Revalidate late specialist reports against their recorded SHA and current
+  authoritative topology.
+- When the user required durable session learning, require the terminal
+  Markdown, wiki, reusable-agent, release-evidence, and todo handoff before
+  declaring the overall task complete.
 
 ## Boundaries
 

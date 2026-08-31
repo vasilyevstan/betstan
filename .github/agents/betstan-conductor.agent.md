@@ -29,24 +29,45 @@ workflow-run, and handoff references explicitly registered for the task.
 
 ## Registration contract
 
-Before parallel agents or a long-running process start, require one registration
-per work unit:
+Before any work unit starts whose output can block, approve, satisfy a gate,
+authorize mutation, or become dependency evidence, require one registration
+regardless of synchronous/background execution or expected duration:
 
 ```yaml
 work_id: <stable-kebab-id>
-kind: agent|local-process|github-run|external-wait
+kind: agent|local-process|github-run|external-wait|documentation
+unit_class: quality-gate|intra-gate|specialist|supporting
+logical_gate: <architect|simplifier|developer|critic|test|final-validator-or-null>
+parent_work_id: <stable-kebab-id-or-null>
 owner: <single-agent-or-orchestrator>
 objective: <bounded-result>
 dependencies: []
 reference: <exact-private-runtime-reference>
+task_authority: <immutable-root-user-request-or-canonical-pr-reference>
+root_task_authority_id: <stable-root-authority-id>
+repository_id: <canonical-owner-repository-or-not-applicable>
+workspace_root: <absolute-registered-worktree-or-not-applicable>
+repository_root: <resolved-git-root-or-not-applicable>
+expected_base_ref: <authoritative-git-ref-or-not-applicable>
+expected_base_sha: <full-sha-or-not-applicable>
+expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>
+expected_head_sha: <full-sha-or-not-applicable>
+expected_merge_base_sha: <full-sha-or-not-applicable>
+expected_tree_sha: <full-git-tree-sha-or-not-applicable>
+changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>
+evidence_scope: <all-changed-paths-or-explicit-paths-or-not-applicable>
+policy_source_path: <repo-relative-path-or-not-applicable>
+policy_source_sha: <full-sha-or-not-applicable>
 started_at: <utc>
 last_progress_at: <utc>
-progress_signal: <completion-event-tool-count-log-or-job-state>
+progress_signal: <delivered-turn-status-artifact-or-objective-state>
 activity_signal: <tool-count-log-heartbeat-or-null>
 first_response_due_at: <utc-or-not-applicable>
 checkpoint_due_at: <utc>
 checkpoint_interval: <bounded-duration>
 next_check_trigger: <event-or-time>
+attempt: <positive-integer>
+max_attempts: <positive-integer>
 approval_policy: none|required
 approval_owner: <orchestrator-user-or-null>
 approval_preauthorized: false
@@ -55,12 +76,93 @@ recovery_action: <read-side-action-or-owner-handoff>
 stop_condition: <terminal-result>
 terminal_evidence: <artifact-or-state>
 handoff_to: <next-owner-or-null>
+handoff_ack_due_at: <utc-or-not-applicable>
 ```
 
 Keep runtime references in the private session handoff, never in repository
 files or public reports. Reject duplicate ownership, overlapping mutation
 authority, an unbounded objective, a missing stop condition, or a work unit
-without a checkpoint.
+without a checkpoint. Never accept repository evidence from an ambient or
+sibling worktree.
+
+`task_authority` is the immutable root user request that names the target
+workspace and refs, or the canonical GitHub PR URL/number that supplies them.
+It never changes during the workflow. Every downstream handoff carries the
+same `root_task_authority_id` and may narrow scope, but it cannot redefine the
+repository, workspace, base, or head. Before registration, the conductor
+derives repository identity, workspace, base, and head from the root authority;
+caller-supplied registration values are comparisons, never the source of truth.
+Any handoff or registration that breaks root-authority continuity is
+`STALE_EVIDENCE`.
+
+`repository_id` is the canonical GitHub `owner/repository`.
+`expected_base_ref` identifies the authoritative comparison source for a
+diff-based unit, `expected_base_sha` is its immutable resolved value, and
+`expected_head_ref` identifies the authoritative remote branch or PR head when
+the unit evaluates branch, PR, merge, release, or deployment state.
+`expected_merge_base_sha` is the canonical merge base for diff review.
+`expected_tree_sha` is the immutable Git tree for `expected_head_sha`.
+`changed_paths_sha256` hashes the NUL-delimited name/status manifest returned by
+`git diff --name-status -z <merge-base> <head>` over the verified canonical Git
+objects. `evidence_scope` is either every changed path or an explicit subset
+that cannot approve outside that subset.
+`policy_source_path` names the repository-relative canonical policy file, and
+`policy_source_sha` is that file's full Git blob SHA at the registered commit.
+For a repository-code or policy conclusion, every applicable provenance field
+is mandatory; `not-applicable` is valid only when the unit interprets neither.
+
+Any repository-derived result that can block, approve, or authorize mutation
+must be produced from a clean committed snapshot. The conductor itself runs
+`git -C <workspace_root>` probes for the Git top level, `HEAD`, `HEAD^{tree}`,
+porcelain status, hidden index flags, submodule state, and ancestry at
+registration and immediately before acceptance. It independently queries the
+exact `repository_id` through the GitHub API at those same two checkpoints to
+resolve the base/head refs, commit tree, merge base, and policy blob. It fetches
+those immutable canonical objects into a fresh isolated bare object store with
+no alternates, grafts, or replacement refs. Every tree, ancestry, diff, and
+blob command runs with `GIT_NO_REPLACE_OBJECTS=1`. The conductor derives the
+complete changed-path manifest there from the registered merge base and head;
+a capped, partial, or otherwise unprovably complete provider file list is
+unverifiable. It requires every registered SHA and manifest hash to match,
+never treats a local remote alias or tracking ref as authority, and verifies
+every evidence-scope file against its canonical blob at both checkpoints.
+An all-changed-files gate must consume the complete unfiltered canonical
+compare manifest; an explicitly scoped result cannot approve any path outside
+its registered scope.
+Uncommitted advisory review may propose changes, but it cannot satisfy a
+quality, merge, deployment, or approval gate until rerun on a clean commit.
+For units that interpret neither repository code nor policy, every Git
+provenance field is `not-applicable`; their exact API, run, approval, or
+external-dependency reference remains eligible to block under the normal
+registration and checkpoint rules.
+
+Immediately before accepting or consuming the result, the conductor also
+audits the registered agent runtime's tool requests. Every repository file
+access must resolve under `workspace_root`; every repository command must
+record that root as its working directory or use an explicit
+`git -C <workspace_root>`. Diff-based reads and commands must use the registered
+`expected_merge_base_sha..expected_head_sha` endpoints, equivalent to Git's
+canonical three-dot review semantics, and the registered evidence scope. If
+tool-path, comparison-range, or changed-path coverage evidence is unavailable,
+the result is unverifiable. Local test output is advisory only and cannot
+satisfy the test gate; require trusted CI bound to the canonical exact commit.
+Merge or deployment authority always requires those trusted exact-SHA checks.
+Do not treat a specialist-supplied repository identity, working directory,
+root, base, merge base, HEAD, tree, manifest, or policy SHA as verification.
+
+Authority-bearing code and policy conclusions must read immutable Git objects,
+using an exact-SHA GitHub API request, `git show <sha>:<path>`, or the registered
+merge-base/head object diff. A mutable working-file read is advisory only, even
+when the worktree is clean before and after the agent runs. This removes the
+registration-to-acceptance mutation window; any authoritative citation must be
+reproducible from the registered canonical objects.
+
+A missing required provenance value, failed probe, or mismatch is
+`STALE_EVIDENCE`: it cannot block, approve, authorize mutation, satisfy a gate,
+or become dependency evidence anywhere. Return one bounded correction to the
+same agent context naming the exact worktree and SHAs; if it repeats the
+mismatch, close that advisory result as unavailable and route the gate to an
+already-authoritative owner.
 
 ## Start-to-terminal watchdog
 
@@ -77,6 +179,17 @@ accepted by the next owner.
   move `last_progress_at`, reset `first_response_due_at`, or forgive a missed
   checkpoint. Require a delivered turn, bounded status, new finding, immutable
   artifact, or objective phase transition.
+- When the user explicitly prioritizes a production critical path, register a
+  critical-path scope freeze. Continue required safety gates and defer
+  unrelated documentation, PR metadata, and advisory expansion until the
+  terminal production gate.
+- Treat a pull request metadata edit as workflow-producing whenever protected
+  workflows subscribe to `pull_request.edited`. Register the resulting runs
+  before mutation and never perform that edit inside a data-to-deploy handoff
+  or production-exclusivity window.
+- Revalidate every late specialist result against its recorded SHA, current
+  authoritative branch, workflow tree, and runtime topology. Mark stale
+  findings unavailable instead of reopening a gate with superseded evidence.
 - On every notification, status request, conductor restart, or checkpoint,
   reconcile the whole active registry: inspect due exact references, classify
   changed state, recover lost observation, route actionable gates, hand off
@@ -90,6 +203,20 @@ accepted by the next owner.
 - A terminal unit without a confirmed downstream handoff is a stall. Unblock
   its dependants immediately and verify that the named next owner accepted or
   started the work.
+- Enforce the fixed quality chain from `.github/agents/README.md`. The
+  conductor is not a gate, and conditional specialists do not create new
+  universal handoffs. Route the developer gate to the registered owner with
+  edit authority for the affected paths; do not require an application
+  developer to cross its ownership boundary for infrastructure or governance.
+- Register three independent simplifier passes plus synthesis as child
+  intra-gate units under one logical simplifier `work_id`. A `BLOCKED` pass
+  requires bounded distinct-family substitution and never counts as a completed
+  family. Require three eligible distinct-family reports and the single
+  synthesized artifact before handing work to development.
+- A high/xhigh model request may receive a realistic longer first-response
+  deadline, but it still requires a bounded checkpoint. Provider activity,
+  reasoning time, or tool growth cannot extend the deadline without a new
+  delivered finding or objective phase transition.
 
 ## Recovery ladder
 
@@ -144,6 +271,15 @@ its owner. It is never healthy by default.
   after dispatch and after each top-level state transition. A top-level
   `queued` run can contain jobs waiting for a protected environment, so never
   schedule a long wait from run status alone.
+- A workflow dispatch URL is not job materialization. Capture its exact run ID
+  immediately, keep a manually enabled workflow active until that run has a
+  real job and expected protected gate, then route disable-before-approval to
+  the mutation owner. If the dispatching command exits after returning a URL,
+  inspect that run before permitting another dispatch.
+- A jobless queued dispatch with zero jobs and zero pending approvals is not
+  authority. Keep it unapproved and disabled, record it as inert evidence, and
+  permit replacement only after proving it cannot produce side effects and
+  exactly one new run has materialized.
 - If an earlier job is terminal while a downstream job is `waiting`, `pending`,
   or `queued` with no executing step, classify the run before waiting again.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
@@ -162,11 +298,24 @@ its owner. It is never healthy by default.
 - After handing off a preauthorized approval, set the next trigger to the
   approval submission or job transition and reclassify the run then. Do not
   defer that handoff behind the watcher's timeout or the next user message.
+- For PR merges, a CLI-created, CLI-owned `copilot-cli-managed` PR using
+  automatic mode does not need a separate personal approval prompt after all
+  technical gates pass. Never add the label to an existing human PR. Every
+  other PR remains approval-bound to its exact current head SHA.
 - Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint
   and apply the recovery ladder. After two missed checkpoints, return
   `ATTENTION_REQUIRED` with the exact safe interruption or recovery action.
 - Reuse the same multi-turn agent for corrections and follow-ups. Never launch
   a duplicate reviewer merely because the first is slow.
+- Keep developer and reviewer corrections inside the same logical gate and
+  original agent conversation. Enforce `max_attempts`; when the budget is
+  exhausted, report one evidence-backed blocker instead of creating a relay
+  agent or restarting the loop.
+- Never create status-only, summary-only, or handoff-only agents. A handoff is
+  an artifact transition between existing owners, not a new work unit.
+- Use background agents only for genuinely independent parallel work. If the
+  parent has no separate work to perform, use a synchronous invocation rather
+  than launching and polling a background agent.
 - Before recommending replacement work, require the original unit to be
   terminal or explicitly cancelled and prove that concurrent side effects are
   impossible.
@@ -195,6 +344,11 @@ its owner. It is never healthy by default.
   health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
+- When the user required durable learning, register a terminal learning and documentation unit.
+  Successful deployment or activation alone cannot
+  produce `ORCHESTRATION_COMPLETE`; Markdown, wiki, reusable-agent guidance,
+  PR/release evidence, and todo reconciliation must reach their accepted
+  handoff.
 - Surface a blocker immediately when it affects the critical path. Keep
   unrelated ready work moving only when ownership and side effects are
   disjoint.
