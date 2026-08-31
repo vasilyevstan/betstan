@@ -535,6 +535,25 @@ conversation summaries are not authority.
   from the complete domain snapshot. Whenever UX changes which terminal states
   are rendered, update the production journey and its static contract test in
   the same change.
+- Sparse event sections need their own width invariant. Preserve the dense
+  three/two/one-card grid, but let one desktop card use a bounded two-thirds row
+  and two cards fill a balanced row. Stretch labelled odds buttons to the
+  tallest sibling, anchor prices to one baseline, and let ten-option Correct
+  Score boards switch between balanced five- and two-column layouts based on
+  their own container width.
+- `$setOnInsert` protects scheduler convergence but also means a corrected
+  generator cannot rewrite the current event pool. Repair implausible
+  non-terminal boards through the existing event compatibility backfill with
+  deterministic event-ID pricing and dry-run/apply/verify evidence; do not
+  delete slots, forge visibility decisions, or hide stale options only in the
+  public read model.
+- Existing pre-match rows are snapshots and remain settleable after the Event
+  document changes. Preserve an odds ID only for the same Correct Score label;
+  deterministically rotate identities for replacement labels so a stale draft
+  cannot appear selected on a different outcome.
+- Reprice 1X2 by unique normalized home/draw/away labels, never by legacy array
+  position. Bind each backfill write to the complete scanned source state so a
+  concurrent terminal transition or product reorder fails closed.
 
 ### Workflow orchestration
 

@@ -9,8 +9,12 @@ versions, and Bet exposes labelled history.
 
 ## User-visible behavior
 
-- Live, countdown, recently finished, and pre-match events share the same
-  responsive one/two/three-card grid.
+- Dense live, countdown, recently finished, and pre-match sections share the
+  same responsive one/two/three-card grid. A sparse desktop section expands one
+  card to a bounded two-thirds row and two cards to a balanced half-width row.
+- Long team names wrap without moving the odds baseline. The ten-option Correct
+  Score board uses five columns when its card can preserve touch targets and
+  falls back to two balanced columns in a narrow nested card.
 - Before kickoff, two countdown products are enabled.
 - After kickoff, the five active in-play products remain visible.
   `KICKOFF_TEAM` settles and `FIRST_MINUTE_GOAL` closes at kickoff, so both
@@ -67,6 +71,19 @@ A missing event phase defaults only for a truly scheduled pre-match record.
 Resulted or positive-sequence/cursor records retain their existing authority
 instead of being relabelled. Additive schemas remain readable by the recorded
 fallback application.
+
+Scheduler events are inserted with `$setOnInsert`, so pricing improvements
+apply automatically to new slots but do not rewrite the already persisted
+24-hour pool. The corrected release candidate extends the existing event
+compatibility backfill to deterministically repair implausible or duplicate
+Correct Score boards on non-terminal events and reprice 1X2 from the same
+distribution. The operation remains event-database-only and follows the
+existing dry-run, apply, and zero-match verification phases.
+
+Existing draft and submitted rows keep their snapshotted event, product,
+selection, label, and price. A Correct Score selection ID is retained only when
+the repaired board keeps the same label; replacement outcomes receive stable
+new IDs so an old draft cannot be visually reinterpreted as a different score.
 
 Protected rollback authority:
 
