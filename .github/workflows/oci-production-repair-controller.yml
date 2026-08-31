@@ -1,0 +1,234 @@
+name: oci-production-repair-controller
+run-name: oci-production-repair-controller ${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - oci-production-monitor-publish
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: oci-production-repair-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production-monitor-controller
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COPILOT_AGENT_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id }}
+      PUBLISHER_SHA: ${{ github.event.workflow_run.head_sha }}
+      AUTO_MERGE: ${{ vars.OCI_PRODUCTION_MONITOR_AUTO_MERGE_ENABLED || 'false' }}
+      AUTO_PROMOTION: ${{ vars.OCI_PRODUCTION_MONITOR_AUTO_PROMOTION_ENABLED || 'false' }}
+      AUTO_DEPLOY: ${{ vars.OCI_PRODUCTION_MONITOR_AUTO_DEPLOY_ENABLED || 'false' }}
+
+    steps:
+      - name: Check out the trusted controller source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify publisher provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "vasilyevstan/betstan" ]]
+          [[ "$PUBLISHER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PUBLISHER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$PUBLISHER_SHA" HEAD
+          run="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLISHER_RUN_ID"
+          )"
+          [[ "$(jq -r '.path' <<<"$run")" == \
+            ".github/workflows/oci-production-monitor-publish.yml" ]]
+          [[ "$(jq -r '.run_attempt' <<<"$run")" == "1" ]]
+          [[ "$(jq -r '.status' <<<"$run")" == "completed" ]]
+          [[ "$(jq -r '.conclusion' <<<"$run")" == "success" ]]
+          controller_dir="$RUNNER_TEMP/production-repair-controller"
+          echo "CONTROLLER_DIR=$controller_dir" >> "$GITHUB_ENV"
+          mkdir -p "$controller_dir"
+          chmod 700 "$controller_dir"
+
+      - name: Reconcile and dispatch bounded self-heals
+        if: vars.OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/self_heal_controller.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --output "$CONTROLLER_DIR/self-heal.json"
+
+      - name: Resolve repairs after incident recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_controller.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode resolve \
+            --output "$CONTROLLER_DIR/resolution.json"
+
+      - name: Acquire and dispatch eligible code repairs
+        if: vars.OCI_PRODUCTION_MONITOR_COPILOT_ENABLED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_controller.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode dispatch \
+            --output "$CONTROLLER_DIR/dispatch.json"
+
+      - name: Find active repair lifecycle work
+        if: env.AUTO_MERGE == 'true' || env.AUTO_PROMOTION == 'true'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_lifecycle.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$CONTROLLER_DIR/lifecycle.json"
+
+      - name: Reconcile repair pull requests
+        if: env.AUTO_MERGE == 'true'
+        run: |
+          set -euo pipefail
+          jq -r '.review_pull_requests[]' "$CONTROLLER_DIR/lifecycle.json" |
+          while IFS= read -r pr; do
+            result="$CONTROLLER_DIR/policy-$pr.json"
+            python3 infra/oci/monitor/repair_policy.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --policy "$POLICY" \
+              --pull-request "$pr" \
+              --approve-actions "${{ vars.OCI_PRODUCTION_MONITOR_ACTIONS_APPROVAL_ENABLED || 'false' }}" \
+              --output "$result"
+            python3 infra/oci/monitor/repair_merge.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --policy "$POLICY" \
+              --policy-result "$result" \
+              --mode prepare \
+              --output "$CONTROLLER_DIR/ready-$pr.json"
+            if ./infra/azure/agents/pr-merge-safety-stan.sh "$pr"; then
+              python3 infra/oci/monitor/repair_merge.py \
+                --repository "$GITHUB_REPOSITORY" \
+                --policy "$POLICY" \
+                --policy-result "$result" \
+                --mode merge \
+                --output "$CONTROLLER_DIR/merge-$pr.json"
+            fi
+          done
+
+      - name: Reconcile isolated repair promotion
+        if: env.AUTO_PROMOTION == 'true'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_promotion.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode create \
+            --output "$CONTROLLER_DIR/promotion.json"
+          promotion_pr="$(
+            jq -r '.promotion.promotion_pr // empty' \
+              "$CONTROLLER_DIR/promotion.json"
+          )"
+          if [[ "$promotion_pr" =~ ^[1-9][0-9]*$ ]] &&
+             python3 infra/oci/monitor/repair_promotion.py \
+               --repository "$GITHUB_REPOSITORY" \
+               --policy "$POLICY" \
+               --mode prepare \
+               --promotion-pr "$promotion_pr" \
+               --output "$CONTROLLER_DIR/promotion-ready.json" &&
+             ./infra/azure/agents/pr-merge-safety-stan.sh "$promotion_pr"; then
+            python3 infra/oci/monitor/repair_promotion.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --policy "$POLICY" \
+              --mode merge \
+              --promotion-pr "$promotion_pr" \
+              --output "$CONTROLLER_DIR/promotion-merge.json"
+          fi
+
+      - name: Reconcile repair builds and deployments
+        if: env.AUTO_DEPLOY == 'true'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_deploy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode lifecycle \
+            --output "$CONTROLLER_DIR/deployment-lifecycle.json"
+
+      - name: Write dispatch summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$CONTROLLER_DIR" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          print("## OCI production repair dispatch")
+          print()
+          self_heal_path = root / "self-heal.json"
+          if self_heal_path.is_file():
+              document = json.loads(self_heal_path.read_text(encoding="utf-8"))
+              print(f"- Dispatched self-heals: `{len(document['dispatched'])}`")
+              print(f"- Reconciled self-heals: `{len(document['reconciled'])}`")
+          dispatch_path = root / "dispatch.json"
+          if dispatch_path.is_file():
+              document = json.loads(dispatch_path.read_text(encoding="utf-8"))
+              print(f"- Dispatched code repairs: `{len(document['dispatched'])}`")
+              for repair in document["dispatched"]:
+                  print(
+                      f"- #{repair['issue_number']} `{repair['service']}` "
+                      f"`{repair['code']}` generation `{repair['repair_generation']}`"
+                  )
+          resolution_path = root / "resolution.json"
+          if resolution_path.is_file():
+              document = json.loads(resolution_path.read_text(encoding="utf-8"))
+              print(f"- Resolved repairs: `{len(document['resolved'])}`")
+              print(f"- Failed validation leases: `{len(document['failed'])}`")
+          lifecycle_path = root / "lifecycle.json"
+          if lifecycle_path.is_file():
+              document = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+              print(
+                  "- Repair PRs awaiting merge reconciliation: "
+                  f"`{len(document['review_pull_requests'])}`"
+              )
+          promotion_path = root / "promotion.json"
+          if promotion_path.is_file():
+              document = json.loads(promotion_path.read_text(encoding="utf-8"))
+              print(f"- Promotion action: `{document['action']}`")
+          deployment_path = root / "deployment-lifecycle.json"
+          if deployment_path.is_file():
+              document = json.loads(deployment_path.read_text(encoding="utf-8"))
+              print(f"- Deployment lifecycle actions: `{len(document['actions'])}`")
+          PY
+
+      - name: Upload repair dispatch record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-repair-dispatch-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/production-repair-controller/*.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

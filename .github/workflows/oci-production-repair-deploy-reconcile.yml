@@ -1,0 +1,77 @@
+name: oci-production-repair-deploy-reconcile
+run-name: oci-repair-deploy-reconcile run-${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - oci-production-repair-deploy
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+
+concurrency:
+  group: oci-production-repair-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.event.workflow_run.run_attempt == 1 &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      contains(
+        fromJSON('["success","failure","cancelled","timed_out","action_required","startup_failure","stale","neutral","skipped"]'),
+        github.event.workflow_run.conclusion
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production-monitor-controller
+    env:
+      COPILOT_AGENT_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      DEPLOY_RUN_ID: ${{ github.event.workflow_run.id }}
+
+    steps:
+      - name: Check out trusted reconciliation code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Reconcile exact repair deployment result
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/repair-deploy-reconciliation
+          python3 infra/oci/monitor/repair_deploy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode reconcile \
+            --deploy-run-id "$DEPLOY_RUN_ID" \
+            --output artifacts/repair-deploy-reconciliation/result.json
+
+      - name: Write reconciliation summary
+        run: |
+          set -euo pipefail
+          jq -r '
+            "## OCI repair deployment reconciliation\n\n" +
+            "- Deployment run: `\(.deploy_run_id)`\n" +
+            "- Source SHA: `\(.source_sha)`\n" +
+            "- Conclusion: `\(.conclusion)`\n" +
+            "- Repairs: `\(.repairs | length)`"
+          ' artifacts/repair-deploy-reconciliation/result.json \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reconciliation record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-deploy-reconciliation-${{ github.run_id }}-1
+          path: artifacts/repair-deploy-reconciliation/result.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

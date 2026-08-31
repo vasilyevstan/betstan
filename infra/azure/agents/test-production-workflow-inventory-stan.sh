@@ -271,6 +271,15 @@ YAML
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-activate.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-live-betting-disable.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-production-rollback.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-repair-deploy.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-self-heal.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-monitor.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-monitor-publish.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-monitor-repair-policy.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-repair-controller.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-repair-deploy-controller.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-repair-deploy-reconcile.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/oci-production-repair-promotion.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/ghcr-package-management.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" "$tmp_dir/"
 }
@@ -680,7 +689,7 @@ PY
 }
 
 azure_set="production-build,production-deploy,production-rollback"
-full_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+full_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-repair-deploy,oci-production-rollback,oci-production-self-heal,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 reset_fixtures
@@ -689,6 +698,84 @@ assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/Upload immutable repair deployment plan before mutation/Upload repair deployment plan after mutation/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without pre-mutation plan" \
+  "oci-production-repair-deploy is missing pre-mutation compensation evidence"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/MODE: compensate/MODE: restore/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without exact compensation mode" \
+  "oci-production-repair-deploy is missing exact prior-generation compensation mode"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/Run independent public repair validation/Skip independent public repair validation/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without public validation" \
+  "oci-production-repair-deploy is missing credentialless public validation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/--exclude-run-id "\$GITHUB_RUN_ID"/--exclude-run-id "0"/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without current-run exclusion" \
+  "oci-production-repair-deploy is missing current-run-only observation exception"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/Verify durable release commitment/Skip durable release commitment/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without durable release verification" \
+  "oci-production-repair-deploy is missing durable release commit verification"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "s/needs.commit-release.outputs.release_published != 'true'/needs.commit-release.outputs.release_published == 'true'/" \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without pre-commit compensation routing" \
+  "oci-production-repair-deploy is missing pre-commit failure compensation routing"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/production_state.py finish-operation/production_state.py skip-finish/' \
+  "$tmp_dir/oci-production-repair-deploy.yml"
+rm "$tmp_dir/oci-production-repair-deploy.yml.bak"
+assert_fail "repair deployment without operation finalization" \
+  "oci-production-repair-deploy is missing explicit operation finalization"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/name: production-monitor-controller/name: oci-production/' \
+  "$tmp_dir/oci-production-repair-controller.yml"
+rm "$tmp_dir/oci-production-repair-controller.yml.bak"
+assert_fail "repair controller with production environment" \
+  "oci-production-repair-controller job dispatch must use production-monitor-controller"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/COPILOT_AGENT_TOKEN: \${{ secrets.COPILOT_AGENT_TOKEN }}/OCI_CLI_KEY_CONTENT: \${{ secrets.OCI_CLI_KEY_CONTENT }}/' \
+  "$tmp_dir/oci-production-repair-controller.yml"
+rm "$tmp_dir/oci-production-repair-controller.yml.bak"
+assert_fail "repair controller with production credential" \
+  "oci-production-repair-controller must remain a GitHub-only control without production credentials"
 
 reset_fixtures
 write_complete_oci_set
@@ -734,6 +821,55 @@ sed -i.bak \
 rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
 assert_fail "cache recovery without pre-mutation plan upload" \
   "oci-ghcr-cache-recovery is missing pre-mutation plan persistence"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/production_state.py begin-operation/production_state.py skip-begin/' \
+  "$tmp_dir/oci-ghcr-cache-recovery.yml"
+rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
+assert_fail "cache recovery without operation ownership" \
+  "oci-ghcr-cache-recovery is missing production operation acquisition"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/production_state.py finish-operation/production_state.py skip-finish/' \
+  "$tmp_dir/oci-ghcr-cache-recovery.yml"
+rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
+assert_fail "cache recovery without operation finalization" \
+  "oci-ghcr-cache-recovery is missing explicit operation finalization"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's/(failure() || cancelled())/failure()/' \
+  "$tmp_dir/oci-ghcr-cache-recovery.yml"
+rm "$tmp_dir/oci-ghcr-cache-recovery.yml.bak"
+assert_fail "cache recovery without cancellation finalization" \
+  "oci-ghcr-cache-recovery must finalize an acquired operation after failure or cancellation"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/oci-ghcr-cache-recovery.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+start = content.index("- name: Upload first-attempt recovery provenance")
+end = content.index("- name: Upload terminal cache recovery operation state")
+section = content[start:end]
+needle = "            artifacts/ghcr-cache-recovery/transition-provenance.env\n"
+section = section.replace(
+    needle,
+    needle + "            artifacts/ghcr-cache-recovery/production-operation.json\n",
+    1,
+)
+path.write_text(content[:start] + section + content[end:], encoding="utf-8")
+PY
+assert_fail "cache recovery with mutable operation in authoritative artifact" \
+  "oci-ghcr-cache-recovery authoritative recovery artifact must not include mutable operation state"
 
 reset_fixtures
 write_complete_oci_set

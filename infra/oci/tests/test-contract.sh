@@ -476,7 +476,7 @@ OCI_CERT_EMAIL=fixture@example.invalid \
 ruby -ryaml - "$WORK_DIR/rendered.yaml" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
 by_kind = documents.group_by { |document| document["kind"] }
-abort "nine application deployments plus RabbitMQ required" unless by_kind.fetch("Deployment").length == 10
+abort "application, RabbitMQ, and monitor deployments required" unless by_kind.fetch("Deployment").length == 12
 abort "single Mongo StatefulSet required" unless by_kind.fetch("StatefulSet").map {
   |item| item.dig("metadata", "name")
 } == ["gaming-auth-mongo-depl"]
@@ -525,7 +525,7 @@ abort "Mongo does not use the explicit 50Gi claim" unless mongo.dig(
   "spec", "template", "spec", "volumes", 0, "persistentVolumeClaim", "claimName"
 ) == "gaming-auth-mongo-data"
 abort "legacy Mongo rendered" if File.read(ARGV.fetch(0)).include?("legacy-mongo")
-abort "expected canonical and redirect OCI ingresses" unless by_kind.fetch("Ingress").length == 2
+abort "expected canonical, redirect, and monitor OCI ingresses" unless by_kind.fetch("Ingress").length == 3
 abort "expected canonical and diagnostic certificates" unless by_kind.fetch("Certificate").length == 2
 event = by_kind.fetch("Deployment").find {
   |deployment| deployment.dig("metadata", "name") == "gaming-event-depl"
@@ -536,7 +536,7 @@ event_env = event.dig("spec", "template", "spec", "containers", 0, "env").to_h {
 abort "event SSE connection cap differs" unless event_env["EVENT_PUBLIC_SSE_MAX_CONNECTIONS"] == "250"
 ingress_hosts = by_kind.fetch("Ingress").flat_map {
   |ingress| ingress.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
-}.sort
+}.sort.uniq
 abort "OCI ingress host set differs" unless ingress_hosts ==
   %w[203.0.113.10.nip.io betstan.xyz www.betstan.xyz]
 canonical_certificate = by_kind.fetch("Certificate").find {
@@ -551,6 +551,57 @@ redirect = by_kind.fetch("Ingress").find {
 canonical_ingress = by_kind.fetch("Ingress").find {
   |ingress| ingress.dig("metadata", "name") == "gaming-oci-ingress"
 }
+monitor_ingress = by_kind.fetch("Ingress").find {
+  |ingress| ingress.dig("metadata", "name") == "gaming-oci-monitor-ingress"
+}
+abort "monitor ingress is missing" unless monitor_ingress
+monitor_paths = monitor_ingress.dig("spec", "rules", 0, "http", "paths")
+abort "monitor ingress paths differ" unless monitor_paths.map { |path| path["path"] }.sort == %w[
+  /__betstan/monitor/v1/observation
+  /__betstan/repair/v1/finalize
+  /__betstan/repair/v1/restart
+]
+abort "monitor ingress paths must be exact" unless monitor_paths.all? {
+  |path| path["pathType"] == "Exact"
+}
+exporter_role = by_kind.fetch("Role").find {
+  |role| role.dig("metadata", "name") == "betstan-monitor-exporter"
+}
+abort "monitor exporter Role is missing" unless exporter_role
+exporter_rules = exporter_role.fetch("rules")
+abort "monitor exporter may not access Secrets" if exporter_rules.any? {
+  |rule| Array(rule["resources"]).include?("secrets")
+}
+abort "monitor exporter may not use pods/exec" if exporter_rules.any? {
+  |rule| Array(rule["resources"]).include?("pods/exec")
+}
+abort "monitor exporter may not mutate resources" if exporter_rules.any? {
+  |rule| !(Array(rule["verbs"]) - %w[get list watch]).empty?
+}
+repair_role = by_kind.fetch("Role").find {
+  |role| role.dig("metadata", "name") == "betstan-monitor-repair"
+}
+state_rules = repair_role.fetch("rules").select {
+  |rule| Array(rule["resources"]) == ["configmaps"]
+}
+operation_rule = state_rules.find {
+  |rule| Array(rule["resourceNames"]) == ["betstan-production-operation-v1"]
+}
+release_rule = state_rules.find {
+  |rule| Array(rule["resourceNames"]) == ["betstan-active-release-v1"]
+}
+abort "repair Role operation access differs" unless operation_rule &&
+  operation_rule["verbs"].sort == %w[get update]
+abort "repair Role active-release access differs" unless release_rule &&
+  release_rule["verbs"] == ["get"]
+abort "repair Role contains unexpected ConfigMap access" unless state_rules.length == 2
+deployment_rule = repair_role.fetch("rules").find {
+  |rule| Array(rule["resources"]) == ["deployments"]
+}
+abort "repair Role deployment allowlist differs" unless deployment_rule &&
+  deployment_rule["resourceNames"].sort ==
+    %w[gaming-backoffice-depl gaming-client-depl] &&
+  deployment_rule["verbs"].sort == %w[get patch]
 canonical_annotations = canonical_ingress.dig("metadata", "annotations")
 abort "OCI ingress must disable SSE proxy buffering" unless canonical_annotations[
   "nginx.ingress.kubernetes.io/proxy-buffering"
@@ -561,6 +612,13 @@ abort "OCI ingress SSE read timeout differs" unless canonical_annotations[
 abort "OCI ingress SSE send timeout differs" unless canonical_annotations[
   "nginx.ingress.kubernetes.io/proxy-send-timeout"
 ] == "75"
+monitor_annotations = monitor_ingress.dig("metadata", "annotations")
+abort "monitor ingress read timeout differs" unless monitor_annotations[
+  "nginx.ingress.kubernetes.io/proxy-read-timeout"
+] == "180"
+abort "monitor ingress send timeout differs" unless monitor_annotations[
+  "nginx.ingress.kubernetes.io/proxy-send-timeout"
+] == "180"
 abort "www ingress must leave HTTP for the canonical redirect" unless redirect.dig(
   "metadata", "annotations", "nginx.ingress.kubernetes.io/ssl-redirect"
 ) == "false"
@@ -572,9 +630,9 @@ RUBY
 grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not apply both TLS Certificate resources"
-grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
+grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect|monitor-ingress)$'" \
   "$OCI_DIR/scripts/deploy.sh" ||
-  fail "OCI deployment does not apply canonical/diagnostic and www redirect ingresses"
+  fail "OCI deployment does not apply canonical, redirect, and monitor ingresses"
 grep -Fq 'services=(auth bet event moderation resulting slip backoffice client gamemaster)' \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment must roll out API dependencies before Client and Gamemaster"
@@ -1083,12 +1141,16 @@ for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow" "$migrate_
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
 done
-for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow"; do
+for workflow in "$infra_workflow" "$data_workflow"; do
   [[ "$(grep -Fc \
     'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
     "$workflow")" == "1" ]] ||
     fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
 done
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$deploy_workflow")" == "2" ]] ||
+  fail "deployment SSH key must be scoped to mutation and state-finalization access steps"
 [[ "$(grep -Fc \
   'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
   "$migrate_workflow")" == "2" ]] ||

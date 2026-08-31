@@ -37,6 +37,8 @@
     {"kind": "Deployment", "name": "gaming-resulting-depl", "desired": 1, "ready": 1},
     {"kind": "Deployment", "name": "gaming-slip-depl", "desired": 1, "ready": 1},
     {"kind": "Deployment", "name": "gaming-rabbitmq-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "betstan-monitor-exporter", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "betstan-monitor-repair", "desired": 1, "ready": 1},
     {"kind": "StatefulSet", "name": "gaming-auth-mongo-depl", "desired": 1, "ready": 1}
   ],
   "platform_workloads": [
@@ -119,7 +121,9 @@
     {"name": "gaming-slip-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-rabbitmq-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-auth-mongo-srv", "type": "ClusterIP", "ready_endpoints": true},
-    {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true}
+    {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "betstan-monitor-exporter-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "betstan-monitor-repair-srv", "type": "ClusterIP", "ready_endpoints": true}
   ],
   "rabbitmq": {
     "queue_count": 22,

@@ -15,6 +15,7 @@ OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
 OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 OCI_CERT_EMAIL="${OCI_CERT_EMAIL:-}"
 OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}"
+OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED="${OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED:-false}"
 WORK_DIR="${WORK_DIR:-$(dirname "$OUTPUT_FILE")/.oci-render-work}"
 
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "image provenance TSV is required"
@@ -26,6 +27,8 @@ WORK_DIR="${WORK_DIR:-$(dirname "$OUTPUT_FILE")/.oci-render-work}"
 [[ "$OCI_REDIRECT_HOST" == "www.${OCI_CANONICAL_HOST}" ]] ||
   oci_die "OCI_REDIRECT_HOST must be the canonical www host"
 [[ "$OCI_CERT_EMAIL" == *@*.* ]] || oci_die "OCI_CERT_EMAIL is required for ACME"
+[[ "$OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED" =~ ^(true|false)$ ]] ||
+  oci_die "OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED must be true or false"
 oci_require_command kubectl
 oci_require_command ruby
 application_registry_require_ghcr
@@ -65,9 +68,11 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 ruby -ryaml - "$raw_manifest" "$IMAGE_PROVENANCE_FILE" "$OUTPUT_FILE" \
   "$OCI_K8S_NAMESPACE" "$canonical_host" "$redirect_host" "$diagnostic_host" \
   "$OCI_CERT_EMAIL" "$(application_registry_repository)" \
-  "$OCI_MONGO_VOLUME_OCID" "$OCI_K3S_NODE_NAME" <<'RUBY'
+  "$OCI_MONGO_VOLUME_OCID" "$OCI_K3S_NODE_NAME" \
+  "$OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED" <<'RUBY'
 raw_file, images_file, output_file, namespace, canonical_host, redirect_host,
-  diagnostic_host, cert_email, application_repository, volume_ocid, node_name = ARGV
+  diagnostic_host, cert_email, application_repository, volume_ocid, node_name,
+  self_heal_enabled = ARGV
 images = {}
 File.readlines(images_file, chomp: true).reject(&:empty?).each do |line|
   service, repository, image_ref, digest, platform_digest = line.split("\t", 5)
@@ -84,7 +89,7 @@ abort "image provenance must contain exactly nine services" unless images.keys.s
 
 documents = YAML.load_stream(File.read(raw_file)).compact
 namespaced_kinds = documents.map { |document| document["kind"] }.uniq -
-  %w[Namespace PersistentVolume ClusterIssuer]
+  %w[Namespace PersistentVolume ClusterIssuer ClusterRole ClusterRoleBinding]
 
 replace = lambda do |value|
   case value
@@ -98,8 +103,10 @@ replace = lambda do |value|
       .gsub("__OCI_REDIRECT_HOST__", redirect_host)
       .gsub("__OCI_DIAGNOSTIC_HOST__", diagnostic_host)
       .gsub("__OCI_CERT_EMAIL__", cert_email)
+      .gsub("__OCI_K8S_NAMESPACE__", namespace)
       .gsub("__OCI_MONGO_VOLUME_OCID__", volume_ocid)
       .gsub("__OCI_K3S_NODE_NAME__", node_name)
+      .gsub("__OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED__", self_heal_enabled)
   else
     value
   end
@@ -154,13 +161,13 @@ abort "expected exactly one Mongo PV" unless documents.count { |document|
   document["kind"] == "PersistentVolume" &&
     document.dig("spec", "capacity", "storage") == "50Gi"
 } == 1
-abort "expected ten deployments" unless count.call("Deployment") == 10
-abort "expected canonical and redirect ingresses" unless count.call("Ingress") == 2
+abort "expected twelve deployments" unless count.call("Deployment") == 12
+abort "expected canonical, redirect, and monitor ingresses" unless count.call("Ingress") == 3
 abort "expected canonical and diagnostic certificates" unless count.call("Certificate") == 2
 ingress_hosts = documents.select { |document| document["kind"] == "Ingress" }.flat_map {
   |document| document.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
 }
-abort "rendered ingress hosts differ from the approved set" unless ingress_hosts.sort ==
+abort "rendered ingress hosts differ from the approved set" unless ingress_hosts.sort.uniq ==
   [canonical_host, diagnostic_host, redirect_host].sort
 certificates = documents.select { |document| document["kind"] == "Certificate" }
 certificate_hosts = certificates.flat_map { |certificate| certificate.dig("spec", "dnsNames") }.sort

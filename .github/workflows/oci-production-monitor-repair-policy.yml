@@ -1,0 +1,174 @@
+name: monitor-repair-policy
+run-name: monitor-repair-policy PR ${{ inputs.pr_number || github.event.pull_request.number || github.event.workflow_run.id }}
+
+on:
+  pull_request_target:
+    branches:
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_run:
+    workflows:
+      - production-build
+      - oci-validate
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Exact open monitor repair pull request number
+        required: true
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: oci-production-repair-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: >-
+      vars.OCI_PRODUCTION_MONITOR_PR_POLICY_ENABLED == 'true' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.run_attempt == 1 &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production-monitor-controller
+    env:
+      COPILOT_AGENT_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      APPROVE_ACTIONS: ${{ vars.OCI_PRODUCTION_MONITOR_ACTIONS_APPROVAL_ENABLED || 'false' }}
+      AUTO_MERGE: ${{ vars.OCI_PRODUCTION_MONITOR_AUTO_MERGE_ENABLED || 'false' }}
+      AUTO_PROMOTION: ${{ vars.OCI_PRODUCTION_MONITOR_AUTO_PROMOTION_ENABLED || 'false' }}
+
+    steps:
+      - name: Check out trusted repair policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Resolve exact pull request
+        id: pull
+        shell: bash
+        env:
+          INPUT_PR: ${{ inputs.pr_number }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          RUN_PRS: ${{ toJson(github.event.workflow_run.pull_requests) }}
+        run: |
+          set -euo pipefail
+          pr="${INPUT_PR:-${EVENT_PR:-}}"
+          if [[ -z "$pr" && -n "${RUN_PRS:-}" && "$RUN_PRS" != "null" ]]; then
+            pr="$(
+              jq -er '
+                if length == 1 and .[0].number > 0
+                then .[0].number
+                else error("workflow run must relate to exactly one pull request")
+                end
+              ' <<<"$RUN_PRS"
+            )"
+          fi
+          [[ "$pr" =~ ^[1-9][0-9]*$ ]]
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+          output_dir="$RUNNER_TEMP/monitor-repair-policy"
+          echo "OUTPUT_DIR=$output_dir" >> "$GITHUB_ENV"
+          mkdir -p "$output_dir"
+          chmod 700 "$output_dir"
+
+      - name: Validate repair provenance and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$APPROVE_ACTIONS" == "true" || "$APPROVE_ACTIONS" == "false" ]]
+          python3 infra/oci/monitor/repair_policy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --pull-request "${{ steps.pull.outputs.number }}" \
+            --approve-actions "$APPROVE_ACTIONS" \
+            --output "$OUTPUT_DIR/result.json"
+
+      - name: Prepare exact repair for merge safety
+        id: ready
+        if: env.AUTO_MERGE == 'true' && github.event_name == 'workflow_run'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_merge.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --policy-result "$OUTPUT_DIR/result.json" \
+            --mode prepare \
+            --output "$OUTPUT_DIR/ready.json"
+
+      - name: Check exact repair merge gates
+        id: merge_safety
+        if: >-
+          env.AUTO_MERGE == 'true' &&
+          github.event_name == 'workflow_run' &&
+          steps.ready.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+        run: |
+          set -euo pipefail
+          ./infra/azure/agents/pr-merge-safety-stan.sh \
+            "${{ steps.pull.outputs.number }}"
+
+      - name: Merge exact repair into dev
+        if: >-
+          env.AUTO_MERGE == 'true' &&
+          github.event_name == 'workflow_run' &&
+          steps.merge_safety.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_merge.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --policy-result "$OUTPUT_DIR/result.json" \
+            --mode merge \
+            --output "$OUTPUT_DIR/merge.json"
+
+      - name: Create isolated repair promotion
+        if: >-
+          env.AUTO_PROMOTION == 'true' &&
+          steps.merge_safety.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_promotion.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode create \
+            --output "$OUTPUT_DIR/promotion.json"
+
+      - name: Write repair policy summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$OUTPUT_DIR/result.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          print("## Monitor repair policy")
+          print()
+          print(f"- Pull request: `#{document['pull_request']}`")
+          print(f"- Repair generation: `{document['repair_generation']}`")
+          print(f"- Changed files: `{len(document['files'])}`")
+          print(f"- Approved workflow runs: `{len(document['approved_runs'])}`")
+          merge_path = __import__("pathlib").Path(sys.argv[1]).with_name("merge.json")
+          if merge_path.is_file():
+              merged = json.loads(merge_path.read_text(encoding="utf-8"))
+              print(f"- Merged to `dev`: `{merged['merge_sha']}`")
+          promotion_path = merge_path.with_name("promotion.json")
+          if promotion_path.is_file():
+              promotion = json.loads(promotion_path.read_text(encoding="utf-8"))
+              print(f"- Promotion action: `{promotion['action']}`")
+          PY

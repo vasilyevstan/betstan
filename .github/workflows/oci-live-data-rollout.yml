@@ -103,6 +103,8 @@ jobs:
       SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}
       SHARED_MONGO_LOCK_LEASE_SECONDS: "14400"
       SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"
+      PRODUCTION_OPERATION_ID: live-data-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-live-data-rollout.yml
 
     steps:
       - name: Initialize isolated OCI data paths
@@ -1013,6 +1015,23 @@ jobs:
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire
 
+      - name: Begin live data production operation
+        id: production_operation_begin
+        if: inputs.phase != 'dry-run'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase mutating-data \
+            --lease-seconds 14400 \
+            --output artifacts/oci-live-data-rollout/evidence/production-operation.json
+
       - name: Enter or re-establish live data maintenance
         id: maintenance_enter
         if: inputs.phase != 'dry-run'
@@ -1037,10 +1056,12 @@ jobs:
         env:
           OUTPUT_FILE: artifacts/oci-live-data-rollout/evidence/failed-live-acceptance-cleanup.json
         run: |
+          cleanup_run_id="$FAILED_ACTIVATION_RUN_ID"
+          cleanup_user_id="$FAILED_ACTIVATION_USER_ID"
           NAMESPACE="$OCI_K8S_NAMESPACE" \
-          FAILED_ACTIVATION_RUN_ID="$FAILED_ACTIVATION_RUN_ID" \
-          FAILED_ACTIVATION_USER_ID="$FAILED_ACTIVATION_USER_ID" \
-          CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$FAILED_ACTIVATION_RUN_ID:$FAILED_ACTIVATION_USER_ID" \
+          FAILED_ACTIVATION_RUN_ID="$cleanup_run_id" \
+          FAILED_ACTIVATION_USER_ID="$cleanup_user_id" \
+          CONFIRMATION="DELETE_FAILED_LIVE_DRAFT:$cleanup_run_id:$cleanup_user_id" \
           EXPECTED_AUTH_USER_COUNT=0 \
           ALLOWED_BET_KINDS=LIVE,PRE_MATCH \
           MAX_ACTIVE_SLIPS=2 \
@@ -1130,6 +1151,25 @@ jobs:
               ./infra/oci/scripts/baseline-capture-stan.sh
           fi
 
+      - name: Advance live data operation to validation
+        if: >-
+          steps.production_operation_begin.outcome == 'success' &&
+          steps.data.outcome == 'success' &&
+          steps.maintenance.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 1800 \
+            --output artifacts/oci-live-data-rollout/evidence/production-operation.json
+
       - name: Upload exact sanitized data evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1192,6 +1232,53 @@ jobs:
           OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
           SOURCE_SHA="$SOURCE_SHA" \
             ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify-released
+
+      - name: Finish successful live data operation
+        id: production_operation_finish
+        if: >-
+          !failure() &&
+          !cancelled() &&
+          steps.production_operation_begin.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result succeeded \
+            --output artifacts/oci-live-data-rollout/evidence/production-operation.json
+
+      - name: Finish failed live data operation
+        if: >-
+          always() &&
+          steps.production_operation_begin.outcome == 'success' &&
+          steps.production_operation_finish.outcome != 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result failed \
+            --output artifacts/oci-live-data-rollout/evidence/production-operation.json
+
+      - name: Upload final live data production state
+        if: always() && steps.production_operation_begin.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-data-production-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-live-data-rollout/evidence/production-operation.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
 
       - name: Revoke exact runner rule
         if: always() && env.OCI_RUNTIME_MODE == 'oke'

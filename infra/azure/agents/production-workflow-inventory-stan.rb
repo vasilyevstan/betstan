@@ -21,8 +21,59 @@ OCI_WORKFLOWS = %w[
   oci-ghcr-cache-recovery
   oci-production-build
   oci-production-deploy
+  oci-production-repair-deploy
   oci-production-rollback
+  oci-production-self-heal
 ].freeze
+NON_PRODUCTION_MONITOR_CONTROLS = %w[
+  monitor-repair-policy
+  oci-production-monitor
+  oci-production-monitor-publish
+  oci-production-repair-controller
+  oci-production-repair-deploy-controller
+  oci-production-repair-deploy-reconcile
+  oci-production-repair-promotion
+].freeze
+NON_PRODUCTION_MONITOR_PERMISSIONS = {
+  "monitor-repair-policy" => {
+    "actions" => "read",
+    "contents" => "read"
+  },
+  "oci-production-monitor-publish" => {
+    "actions" => "read",
+    "contents" => "read",
+    "issues" => "write"
+  },
+  "oci-production-repair-controller" => {
+    "actions" => "write",
+    "contents" => "read",
+    "issues" => "write"
+  },
+  "oci-production-repair-deploy-controller" => {
+    "actions" => "write",
+    "contents" => "read",
+    "issues" => "read",
+    "pull-requests" => "read"
+  },
+  "oci-production-repair-deploy-reconcile" => {
+    "actions" => "read",
+    "contents" => "read",
+    "issues" => "read"
+  },
+  "oci-production-repair-promotion" => {
+    "actions" => "read",
+    "contents" => "read",
+    "pull-requests" => "read"
+  }
+}.freeze
+NON_PRODUCTION_MONITOR_ENVIRONMENTS = {
+  "monitor-repair-policy" => "production-monitor-controller",
+  "oci-production-monitor-publish" => nil,
+  "oci-production-repair-controller" => "production-monitor-controller",
+  "oci-production-repair-deploy-controller" => nil,
+  "oci-production-repair-deploy-reconcile" => "production-monitor-controller",
+  "oci-production-repair-promotion" => "production-monitor-controller"
+}.freeze
 REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
   "production-rollback" => "production-emergency",
@@ -37,7 +88,9 @@ PROTECTED_ENVIRONMENTS = {
   "oci-ghcr-cache-recovery" => "oci-production",
   "oci-production-build" => "oci-build",
   "oci-production-deploy" => "oci-production",
-  "oci-production-rollback" => "oci-production"
+  "oci-production-repair-deploy" => "oci-production",
+  "oci-production-rollback" => "oci-production",
+  "oci-production-self-heal" => "oci-production"
 }.freeze
 ROLLBACK_ACTION_PINS = {
   "production-rollback" => {
@@ -70,6 +123,15 @@ ROLLBACK_ACTION_PINS = {
     "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
     "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
+  },
+  "oci-production-self-heal" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  },
+  "oci-production-repair-deploy" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02"
   }
 }.freeze
 FULL_SHA = /\A[0-9a-f]{40}\z/
@@ -608,6 +670,14 @@ def validate_ghcr_cache_recovery_workflow!(name, document, content)
     "public-validate" => "credential-retirement health gate",
     "retire-ocir" => "deferred OCIR retirement",
     "TRANSITION_PHASE: retire" => "two-phase transition",
+    "production_state.py begin-operation" => "production operation acquisition",
+    '--superseded-run-id "$RESUME_RECOVERY_RUN_ID"' =>
+      "exact terminal recovery ownership transfer",
+    "--phase rebinding" => "cache rebind operation phase",
+    "--phase validating" => "independent validation operation phase",
+    "--phase retiring" => "credential retirement operation phase",
+    "production_state.py finish-operation" => "explicit operation finalization",
+    "Upload terminal cache recovery operation state" => "terminal operation evidence",
     "group: oci-control-plane" => "control-plane serialization",
     "cancel-in-progress: false" => "non-cancelling recovery serialization"
   }.each do |literal, label|
@@ -617,6 +687,36 @@ def validate_ghcr_cache_recovery_workflow!(name, document, content)
     content,
     /\^\[0-9a-f\]\{40\}\$/,
     "#{name} must validate the historical source SHA"
+  )
+  require_content(
+    content,
+    /name:\s*Finish failed cache recovery production operation.*?if:\s*>-\s*always\(\)\s*&&\s*steps\.operation_begin\.outcome\s*==\s*'success'\s*&&\s*\(failure\(\)\s*\|\|\s*cancelled\(\)\)/m,
+    "#{name} must finalize an acquired operation after failure or cancellation"
+  )
+  immutable_plan = content.index("- name: Upload immutable pre-rebind plan before rollout")
+  operation_begin = content.index("- name: Begin cache recovery production operation")
+  rebind = content.index("- name: Sequentially rebind verified GHCR digests")
+  unless immutable_plan && operation_begin && rebind &&
+      immutable_plan < operation_begin && operation_begin < rebind
+    fail_inventory(
+      "#{name} must persist compensation inputs and acquire its operation before rebind"
+    )
+  end
+  authoritative_upload = content.index(
+    "- name: Upload first-attempt recovery provenance"
+  )
+  terminal_upload = content.index(
+    "- name: Upload terminal cache recovery operation state"
+  )
+  unless authoritative_upload && terminal_upload && authoritative_upload < terminal_upload
+    fail_inventory(
+      "#{name} must separate immutable recovery provenance from terminal operation state"
+    )
+  end
+  reject_content(
+    content[authoritative_upload...terminal_upload],
+    /production-operation\.json/,
+    "#{name} authoritative recovery artifact must not include mutable operation state"
   )
 end
 
@@ -921,7 +1021,12 @@ def validate_live_data_rollout_workflow!(file, document, content)
     "live-data-maintenance-stan.sh enter" => "legacy writer quiescence",
     "live-data-maintenance-stan.sh verify-held" => "deploy maintenance handoff",
     "live-betting-data-rollout-stan.sh" => "reviewed data operator",
-    "verify-live-betting-data-evidence-stan.sh" => "tamper-evident phase validation"
+    "verify-live-betting-data-evidence-stan.sh" => "tamper-evident phase validation",
+    "production_state.py begin-operation" => "durable production operation acquisition",
+    "--phase mutating-data" => "live-data maintenance classification",
+    "production_state.py advance-operation" => "validation phase transition",
+    "production_state.py finish-operation" => "explicit operation finalization",
+    "oci-live-data-production-state-" => "attempt-bound final operation evidence"
   }.each do |literal, label|
     require_content(
       content,
@@ -1007,7 +1112,11 @@ def validate_live_betting_activation_workflow!(file, document, content)
     '.id == $user_id and .email == $username and .role == "USER"' =>
       "retained low-privilege identity verification",
     "playwright-live-acceptance.config.js" => "production browser acceptance",
-    "service-ops-stan.sh" => "sanitized runtime log inspection"
+    "service-ops-stan.sh" => "sanitized runtime log inspection",
+    "production_state.py begin-operation" => "durable production operation acquisition",
+    "--phase activating" => "activation maintenance classification",
+    "production_state.py advance-operation" => "validation phase transition",
+    "production_state.py finish-operation" => "explicit operation finalization"
   }.each do |literal, label|
     require_content(
       content,
@@ -1114,7 +1223,12 @@ def validate_live_betting_disable_workflow!(file, document, content)
     "live betting did not drain within 20 minutes" => "bounded drain timeout",
     "steps.disable.outcome != 'success'" => "workflow-level dark reassertion",
     "service-ops-stan.sh" => "sanitized runtime diagnostics",
-    "oci-live-betting-disable-" => "attempt-bound disable evidence"
+    "oci-live-betting-disable-" => "attempt-bound disable evidence",
+    "production_state.py begin-operation" => "durable production operation acquisition",
+    "--phase disabling" => "disable maintenance classification",
+    "production_state.py advance-operation" => "validation phase transition",
+    "production_state.py finish-operation" => "explicit operation finalization",
+    "oci-live-betting-disable-state-" => "attempt-bound final operation evidence"
   }.each do |literal, label|
     require_content(
       content,
@@ -1177,6 +1291,205 @@ def validate_oci_production_deploy_binding!(name, document, content)
   unless renew_count == 2
     fail_inventory("#{name} must renew each verified deploy-lock path exactly once")
   end
+end
+
+def validate_oci_self_heal_workflow!(name, document, content)
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[
+      issue_number
+      incident_fingerprint
+      repair_generation
+      repair_id
+      service
+      target_sha
+    ]
+  )
+  validate_exact_permissions!(
+    name,
+    document,
+    {
+      "actions" => "read",
+      "contents" => "read",
+      "id-token" => "write",
+      "issues" => "read"
+    }
+  )
+  validate_expected_action_pins!(name, content)
+  {
+    "vars.OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED == 'true'" =>
+      "false-by-default self-heal guard",
+    "group: oci-control-plane" => "OCI control-plane serialization",
+    "self_heal_request.py" => "exact incident and repair authorization",
+    "betstan-production-repair" => "dedicated OIDC audience",
+    "/__betstan/repair/v1/restart" => "narrow restart endpoint",
+    "/__betstan/repair/v1/finalize" => "explicit operation finalization",
+    "smoke-liveness-stan.sh" => "independent public validation",
+    "steps.restart.outcome == 'success'" => "bounded finalization guard"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+  reject_content(
+    content,
+    /OCI_CI_PRIVATE_KEY|OCI_K3S_SSH_PRIVATE_KEY|configure-k3s-access|kubectl\s/,
+    "#{name} must not receive broad OCI or Kubernetes mutation credentials"
+  )
+end
+
+def validate_oci_repair_deploy_workflow!(name, document, content)
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[source_sha build_run_id repair_id]
+  )
+  validate_exact_permissions!(
+    name,
+    document,
+    {
+      "actions" => "read",
+      "contents" => "read",
+      "issues" => "read",
+      "pull-requests" => "read"
+    }
+  )
+  validate_expected_action_pins!(name, content)
+  {
+    "vars.OCI_PRODUCTION_MONITOR_AUTO_DEPLOY_ENABLED == 'true'" =>
+      "false-by-default repair deploy guard",
+    "group: oci-control-plane" => "OCI control-plane serialization",
+    "github.run_attempt == 1" => "first-attempt enforcement",
+    "repair_deploy.py" => "exact repair cohort and build authorization",
+    'active_release_evidence.py' => "trusted active-release baseline resolution",
+    '--exclude-run-id "$GITHUB_RUN_ID"' => "current-run-only observation exception",
+    "Upload immutable repair deployment plan before mutation" =>
+      "pre-mutation compensation evidence",
+    "oci-repair-deploy-plan-" => "attempt-bound immutable deployment plan",
+    "production_state.py begin-operation" => "production operation acquisition",
+    "--phase deploying" => "deploying operation phase",
+    "deploy-repair-images.sh" => "application-only image rollout operator",
+    "MODE: deploy" => "explicit application deployment mode",
+    "--phase validating" => "independent validation operation phase",
+    "deploy-validation-loop-stan.sh" => "protected cluster validation",
+    "Run independent public repair validation" => "credentialless public validation",
+    "MODE: compensate" => "exact prior-generation compensation mode",
+    "Validate compensated cluster state" => "protected compensation validation",
+    "Validate compensated public service" => "public compensation validation",
+    "production_state.py publish-release" => "post-validation active release publication",
+    "Verify durable release commitment" => "durable release commit verification",
+    "needs.commit-release.outputs.release_published != 'true'" =>
+      "pre-commit failure compensation routing",
+    "production_state.py finish-operation" => "explicit operation finalization"
+  }.each do |literal, label|
+    require_content(
+      content,
+      /#{Regexp.escape(literal)}/,
+      "#{name} is missing #{label}"
+    )
+  end
+  reject_content(
+    content,
+    /kubectl\s+apply|deploy\.sh|terraform\s+apply|shared-mongo-operation-lock-stan\.sh/,
+    "#{name} must remain an application-image-only repair runbook"
+  )
+
+  immutable_plan = content.index(
+    "- name: Upload immutable repair deployment plan before mutation"
+  )
+  operation_begin = content.index("- name: Begin repair production operation")
+  deploy = content.index("- name: Deploy coherent repair image generation")
+  compensation = content.index("- name: Restore captured prior image generation")
+  publish = content.index("- name: Publish successful repair release")
+  finish = content.index("- name: Finish repair production operation")
+  unless immutable_plan &&
+      operation_begin &&
+      deploy &&
+      compensation &&
+      publish &&
+      finish &&
+      immutable_plan < operation_begin &&
+      operation_begin < deploy &&
+      deploy < publish &&
+      publish < compensation &&
+      compensation < finish
+    fail_inventory(
+      "#{name} must persist compensation inputs before mutation, commit only after validation, and retain a later compensation path"
+    )
+  end
+end
+
+def validate_read_only_monitor!(document, content)
+  name = "oci-production-monitor"
+  triggers = workflow_triggers(document)
+  unless triggers.keys.sort == ["schedule", "workflow_dispatch"]
+    fail_inventory("#{name} must use schedule and workflow_dispatch only")
+  end
+
+  def validate_non_production_monitor_control!(name, document, content)
+    validate_exact_permissions!(
+      name,
+      document,
+      NON_PRODUCTION_MONITOR_PERMISSIONS.fetch(name)
+    )
+
+    expected_environment = NON_PRODUCTION_MONITOR_ENVIRONMENTS.fetch(name)
+    jobs = document["jobs"]
+    fail_inventory("#{name} must define jobs") unless jobs.is_a?(Hash) && !jobs.empty?
+    jobs.each do |job_name, job|
+      environment = job.is_a?(Hash) ? job["environment"] : nil
+      environment_name =
+        environment.is_a?(Hash) ? environment["name"] : environment
+      next if environment_name == expected_environment
+
+      expected = expected_environment || "no protected environment"
+      fail_inventory("#{name} job #{job_name} must use #{expected}")
+    end
+
+    reject_content(
+      content,
+      %r{
+        secrets\s*\.\s*(?:
+          OCI[A-Z0-9_]*|OCIR[A-Z0-9_]*|AZURE[A-Z0-9_]*|ARM[A-Z0-9_]*|
+          ACR[A-Z0-9_]*|RESOURCE_GROUP|CLUSTER_NAME
+        )\b|
+        id-token:\s*write|
+        configure-k3s-access|
+        production_state\.py|
+        deploy-repair-images\.sh|
+        kubectl\s|
+        terraform\s+apply
+      }ix,
+      "#{name} must remain a GitHub-only control without production credentials"
+    )
+  end
+  schedules = triggers["schedule"]
+  unless schedules.is_a?(Array) &&
+      schedules.length == 1 &&
+      schedules[0].is_a?(Hash) &&
+      schedules[0]["cron"] == "2,17,32,47 * * * *"
+    fail_inventory("#{name} must use the reviewed four-times-hourly schedule")
+  end
+  validate_exact_permissions!(
+    name,
+    document,
+    {"actions" => "read", "contents" => "read", "id-token" => "write"}
+  )
+  require_content(
+    content,
+    /vars\.OCI_PRODUCTION_MONITOR_ENABLED\s*==\s*['"]true['"]/,
+    "#{name} must retain its false-by-default activation guard"
+  )
+  reject_content(
+    content,
+    /issues:\s*write|pull-requests:\s*write|actions:\s*write|environment:\s*/,
+    "#{name} must remain read-only and outside protected production environments"
+  )
 end
 
 def validate_oci_workflow!(name, file, document, content)
@@ -1258,6 +1571,10 @@ def validate_oci_workflow!(name, file, document, content)
     validate_live_betting_disable_workflow!(file, document, content)
   elsif name == "oci-production-deploy"
     validate_oci_production_deploy_binding!(name, document, content)
+  elsif name == "oci-production-repair-deploy"
+    validate_oci_repair_deploy_workflow!(name, document, content)
+  elsif name == "oci-production-self-heal"
+    validate_oci_self_heal_workflow!(name, document, content)
   elsif name == "oci-ghcr-cache-recovery"
     validate_ghcr_cache_recovery_workflow!(name, document, content)
   else
@@ -1317,7 +1634,7 @@ names = workflow_files.each_with_object([]) do |file, result|
       ["production-build", "oci-production-build"].include?(workflow)
     end
 
-  production_capable = content.match?(
+  production_capable = !NON_PRODUCTION_MONITOR_CONTROLS.include?(name) && content.match?(
     %r{
       production-(?:automatic|emergency)|
       infra/k8s-prod|
@@ -1356,6 +1673,16 @@ validate_azure_rollback_workflow!(file, document, content)
 OCI_WORKFLOWS.each do |name|
   file, document, content = documents.fetch(name)
   validate_oci_workflow!(name, file, document, content)
+end
+
+file, document, content = documents.fetch("oci-production-monitor")
+validate_read_only_monitor!(document, content)
+
+NON_PRODUCTION_MONITOR_PERMISSIONS.each_key do |name|
+  next unless documents.key?(name)
+
+  _file, document, content = documents.fetch(name)
+  validate_non_production_monitor_control!(name, document, content)
 end
 
 puts names

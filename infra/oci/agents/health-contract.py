@@ -14,6 +14,8 @@ EXPECTED_DEPLOYMENTS = {
     "gaming-resulting-depl",
     "gaming-slip-depl",
     "gaming-rabbitmq-depl",
+    "betstan-monitor-exporter",
+    "betstan-monitor-repair",
 }
 EXPECTED_SERVICES = {
     "gaming-auth-srv",
@@ -28,6 +30,8 @@ EXPECTED_SERVICES = {
     "gaming-rabbitmq-srv",
     "gaming-auth-mongo-srv",
     "gaming-shared-mongo-srv",
+    "betstan-monitor-exporter-srv",
+    "betstan-monitor-repair-srv",
 }
 EXPECTED_DATABASES = {
     "gaming_auth",

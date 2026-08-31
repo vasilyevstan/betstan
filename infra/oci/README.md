@@ -164,6 +164,129 @@ and `VOLUME_DELETE` in the deployment compartment for boot-volume
 reconciliation. OCI authorizes boot-volume operations with `VOLUME_*`
 permissions; `boot-volumes` is not an individual IAM resource type.
 
+## Production monitor and repair controller
+
+The production monitor is a set of isolated GitHub workflows and two
+least-privilege in-cluster services, not one privileged long-running agent:
+
+- `oci-production-monitor` runs at minutes 2, 17, 32, and 47. It performs
+  public checks, obtains a GitHub OIDC token, reads a sanitized deep snapshot,
+  classifies production activity, and uploads a bounded observation artifact.
+  It has no issue-write, code-write, OCI, kubeconfig, or production permission.
+- `oci-production-monitor-publish` validates the completed detector run and
+  artifact before maintaining machine-owned incident issues. Two consecutive
+  failing observations confirm an incident; three consecutive healthy
+  observations close it. Missing, stale, or malformed evidence is never
+  counted as healthy.
+- `oci-production-repair-controller` owns repair records and may assign a
+  confirmed incident to Copilot from `dev`. Copilot receives repository
+  access only and never receives OCI, Kubernetes, Mongo, RabbitMQ, deployment,
+  or environment-approval credentials. Each completed monitor publication also
+  reconciles delayed task IDs with a bounded lookup budget, expires unresolved
+  task identities, claims, and validation leases, handles closed repair or
+  promotion PRs, and recovers missed build or deployment completion events.
+- `oci-production-monitor-repair-policy` validates the exact task, PR, signed
+  commits, changed paths, and head and merge-snapshot statuses. Only this exact
+  machine-managed PR may be prepared or have its Actions runs approved.
+- `oci-production-repair-promotion` proves that the complete `master..dev`
+  range belongs to one disjoint validated repair cohort. Any unrelated commit
+  or overlapping ownership blocks automatic promotion.
+- `oci-production-self-heal` permits one restart attempt per incident, with a
+  60-minute cooldown, and only for `client` or `backoffice`.
+- `oci-production-repair-deploy` deploys only the nine application image
+  fields from an exact successful build. It captures and uploads the previous
+  generation before mutation, validates independently, and restores that exact
+  generation if validation fails. It cannot apply manifests or change Mongo,
+  RabbitMQ, storage, Services, Ingress, or Secrets.
+- `oci-ghcr-cache-recovery` also owns a durable operation across image
+  rebinding, independent public validation, and deferred OCIR retirement, so
+  the monitor suppresses only reviewed rollout transients and exposes failed
+  or abandoned recovery state. An expired lease never grants maintenance, and
+  an active operation without its exact active GitHub run is reported
+  immediately as a critical operation mismatch.
+
+The exporter and repair operator are installed by the normal OCI manifest
+render and deploy path. The exporter ServiceAccount can read only the
+Kubernetes resources needed for health. The separate repair ServiceAccount can
+patch only the exact `gaming-client-depl` and `gaming-backoffice-depl`
+Deployments, update only the production-operation ConfigMap, and read but not
+update the active-release ConfigMap. GitHub reaches their exact diagnostic ingress paths with OIDC
+tokens bound to this repository, the trusted workflow, `master`, source SHA,
+workflow SHA, event, audience, and replay state.
+
+### Required GitHub configuration
+
+Set `OCI_DIAGNOSTIC_URL` as a repository variable to the exact
+`https://<load-balancer-ip>.nip.io` origin recorded by infrastructure
+provenance. The detector and publisher need no repository secret.
+
+Create a protected `production-monitor-controller` environment only before
+enabling Copilot dispatch. Store `COPILOT_AGENT_TOKEN` there as a dedicated
+fine-grained user-to-server token with only the repository Issues, pull
+request, commit-status, Actions approval/dispatch, and Copilot task operations
+used by the controller. Do not reuse an OCI token, a general personal token,
+or any credential from `oci-production`.
+
+Provision the in-cluster `betstan-monitor-datastores` Secret out of band with
+the keys `rabbitmq-username` and `rabbitmq-password` for a dedicated RabbitMQ
+monitoring identity. Do not use application credentials or commit the Secret.
+Until the current unauthenticated Mongo topology is replaced with a genuine
+read-only monitoring identity and the sampler is mounted, Mongo sampling
+intentionally reports `unavailable`. Keep incident publication disabled while
+this prerequisite is unresolved; collection may run in shadow mode so the
+remaining evidence can be inspected without creating incidents.
+
+All repository switches are fail-closed and default to false:
+
+| Variable | Effect when exactly `true` |
+|---|---|
+| `OCI_PRODUCTION_MONITOR_ENABLED` | Run scheduled and manual observations. |
+| `OCI_PRODUCTION_MONITOR_PUBLISH_ENABLED` | Create, update, and close monitor incident issues. |
+| `OCI_PRODUCTION_MONITOR_COPILOT_ENABLED` | Assign eligible confirmed incidents to Copilot. |
+| `OCI_PRODUCTION_MONITOR_PR_POLICY_ENABLED` | Publish the exact repair PR policy status. |
+| `OCI_PRODUCTION_MONITOR_ACTIONS_APPROVAL_ENABLED` | Approve only an exact policy-valid Copilot repair run. |
+| `OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED` | Admit one allowlisted restart and enable the in-cluster repair endpoint on the next normal deploy. |
+| `OCI_PRODUCTION_MONITOR_AUTO_MERGE_ENABLED` | Prepare and merge a validated repair PR into `dev`. |
+| `OCI_PRODUCTION_MONITOR_AUTO_PROMOTION_ENABLED` | Create and merge an isolated repair cohort from `dev` to `master`. |
+| `OCI_PRODUCTION_MONITOR_AUTO_DEPLOY_ENABLED` | Dispatch and periodically reconcile the protected application-only repair deployment. |
+
+`OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED` is both a workflow gate and a
+rendered runtime setting. Changing it requires a normal reviewed OCI
+deployment before the in-cluster endpoint changes state. The remaining
+switches affect only future workflow admission.
+
+### Staged activation
+
+1. Merge the implementation with every switch false, run a normal OCI deploy,
+   and verify the exporter, operation records, active-release record, OIDC
+   rejection tests, and diagnostic TLS path.
+2. Set only `OCI_PRODUCTION_MONITOR_ENABLED=true`. Inspect several scheduled
+   observation artifacts across healthy and production-maintenance periods.
+3. Provision the dedicated datastore monitoring identities. Do not enable
+   publication while a required deep signal remains intentionally
+   unavailable.
+4. Set `OCI_PRODUCTION_MONITOR_PUBLISH_ENABLED=true` and verify
+   two-observation confirmation, issue deduplication, recurrence, and
+   three-observation recovery.
+5. Configure `production-monitor-controller`, then enable Copilot dispatch,
+   repair policy, and selective Actions approval.
+6. Enable self-heal only after redeploying the manifest with its switch true
+   and proving the one-attempt allowlist and cooldown.
+7. Enable automatic merge, then promotion, then deployment one stage at a
+   time. Validate exact branch isolation, successful compensation evidence,
+   and incident recovery before enabling the next stage.
+
+High-risk anomalies remain `unsupported-runbook` until a separate reviewed
+deterministic workflow supplies immutable preconditions, bounded authority,
+compensation, and independent validation. The model never invents a production
+command.
+
+For an emergency stop, set all nine variables to `false`. This prevents new
+automated admissions but does not prove that an already-running mutation is
+safe to cancel. Inspect its jobs, pending environment deployments, and
+`betstan-production-operation-v1`; allow its validation or compensation path
+to reach a terminal state unless the exact runbook directs otherwise.
+
 ## Offline validation
 
 ```bash

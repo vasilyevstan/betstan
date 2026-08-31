@@ -1,0 +1,355 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: betstan-monitor-exporter
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: betstan-monitor-exporter
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, pods, services, persistentvolumeclaims]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: betstan-monitor-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: betstan-monitor-exporter
+subjects:
+  - kind: ServiceAccount
+    name: betstan-monitor-exporter
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: betstan-monitor-exporter
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: betstan-monitor-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: betstan-monitor-exporter
+subjects:
+  - kind: ServiceAccount
+    name: betstan-monitor-exporter
+    namespace: __OCI_K8S_NAMESPACE__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betstan-monitor-exporter
+  labels:
+    app: betstan-monitor-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: betstan-monitor-exporter
+  template:
+    metadata:
+      labels:
+        app: betstan-monitor-exporter
+    spec:
+      serviceAccountName: betstan-monitor-exporter
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: docker.io/library/node:20.19.4-alpine3.22@sha256:df02558528d3d3d0d621f112e232611aecfee7cbc654f6b375765f72bb262799
+          command: [node, /app/index.js]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: OCI_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GITHUB_REPOSITORY
+              value: vasilyevstan/betstan
+            - name: MONITOR_WORKFLOW_PATH
+              value: .github/workflows/oci-production-monitor.yml
+            - name: MONITOR_OIDC_AUDIENCE
+              value: betstan-production-monitor
+            - name: RABBITMQ_MONITOR_URL
+              value: http://gaming-rabbitmq-srv:15672/api/queues/%2F
+            - name: RABBITMQ_MONITOR_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: betstan-monitor-datastores
+                  key: rabbitmq-username
+                  optional: true
+            - name: RABBITMQ_MONITOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: betstan-monitor-datastores
+                  key: rabbitmq-password
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 20m
+              memory: 48Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: monitor-runtime
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: monitor-runtime
+          configMap:
+            name: betstan-monitor-runtime
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betstan-monitor-exporter-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: betstan-monitor-exporter
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: http
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: betstan-monitor-repair
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: betstan-monitor-repair
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames:
+      - betstan-production-operation-v1
+    verbs: [get, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames:
+      - betstan-active-release-v1
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames:
+      - gaming-client-depl
+      - gaming-backoffice-depl
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: betstan-monitor-repair
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: betstan-monitor-repair
+subjects:
+  - kind: ServiceAccount
+    name: betstan-monitor-repair
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: betstan-monitor-repair
+  labels:
+    app: betstan-monitor-repair
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: betstan-monitor-repair
+  template:
+    metadata:
+      labels:
+        app: betstan-monitor-repair
+    spec:
+      serviceAccountName: betstan-monitor-repair
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: repair-operator
+          image: docker.io/library/node:20.19.4-alpine3.22@sha256:df02558528d3d3d0d621f112e232611aecfee7cbc654f6b375765f72bb262799
+          command: [node, /app/repair.js]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: OCI_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GITHUB_REPOSITORY
+              value: vasilyevstan/betstan
+            - name: REPAIR_WORKFLOW_PATH
+              value: .github/workflows/oci-production-self-heal.yml
+            - name: REPAIR_OIDC_AUDIENCE
+              value: betstan-production-repair
+            - name: REPAIR_OIDC_SUBJECT
+              value: repo:vasilyevstan/betstan:environment:oci-production
+            - name: SELF_HEAL_ENABLED
+              value: "__OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED__"
+            - name: SELF_HEAL_SERVICES
+              value: client,backoffice
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: monitor-runtime
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: monitor-runtime
+          configMap:
+            name: betstan-monitor-runtime
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: betstan-monitor-repair-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: betstan-monitor-repair
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gaming-oci-monitor-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 16k
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "180"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "180"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - __OCI_DIAGNOSTIC_HOST__
+      secretName: betstan-oci-tls
+  rules:
+    - host: __OCI_DIAGNOSTIC_HOST__
+      http:
+        paths:
+          - path: /__betstan/monitor/v1/observation
+            pathType: Exact
+            backend:
+              service:
+                name: betstan-monitor-exporter-srv
+                port:
+                  number: 3000
+          - path: /__betstan/repair/v1/restart
+            pathType: Exact
+            backend:
+              service:
+                name: betstan-monitor-repair-srv
+                port:
+                  number: 3000
+          - path: /__betstan/repair/v1/finalize
+            pathType: Exact
+            backend:
+              service:
+                name: betstan-monitor-repair-srv
+                port:
+                  number: 3000

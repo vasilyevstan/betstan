@@ -1,0 +1,145 @@
+name: oci-production-monitor-publish
+run-name: oci-production-monitor-publish ${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - oci-production-monitor
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+concurrency:
+  group: oci-production-monitor-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.event == 'schedule' ||
+       github.event.workflow_run.event == 'workflow_dispatch') &&
+      vars.OCI_PRODUCTION_MONITOR_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+      TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Check out the trusted publisher source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify triggering monitor provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "vasilyevstan/betstan" ]]
+          [[ "$TRIGGER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TRIGGER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$TRIGGER_SHA" HEAD
+          publisher_dir="$RUNNER_TEMP/production-monitor-publisher"
+          echo "PUBLISHER_DIR=$publisher_dir" >> "$GITHUB_ENV"
+          mkdir -p \
+            "$publisher_dir/current" \
+            "$publisher_dir/history" \
+            "$publisher_dir/output"
+          chmod 700 \
+            "$publisher_dir" \
+            "$publisher_dir/current" \
+            "$publisher_dir/history" \
+            "$publisher_dir/output"
+
+      - name: Download and validate current observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/github_observer.py download-observation \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$TRIGGER_RUN_ID" \
+            --workflow-path ".github/workflows/oci-production-monitor.yml" \
+            --policy "$POLICY" \
+            --destination "$PUBLISHER_DIR/current" \
+            --expected-sha "$TRIGGER_SHA"
+
+      - name: Download immediately previous trusted observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/github_observer.py fetch-baselines \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-path ".github/workflows/oci-production-monitor.yml" \
+            --policy "$POLICY" \
+            --destination "$PUBLISHER_DIR/history" \
+            --limit 1 \
+            --exclude-run-id "$TRIGGER_RUN_ID"
+          previous_file="$(find "$PUBLISHER_DIR/history" -maxdepth 1 -type f -name '*.json' -print -quit)"
+          if [[ -n "$previous_file" ]]; then
+            mkdir "$PUBLISHER_DIR/previous"
+            cp "$previous_file" "$PUBLISHER_DIR/previous/observation.json"
+            (
+              cd "$PUBLISHER_DIR/previous"
+              shasum -a 256 observation.json |
+                awk '{print $1 "  observation.json"}' > SHA256SUMS
+            )
+            echo "PREVIOUS_ARGUMENT=--previous-directory=$PUBLISHER_DIR/previous" \
+              >> "$GITHUB_ENV"
+          else
+            echo "PREVIOUS_ARGUMENT=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Reconcile machine-managed incidents
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=(
+            --repository "$GITHUB_REPOSITORY"
+            --policy "$POLICY"
+            --observation-directory "$PUBLISHER_DIR/current"
+            --output "$PUBLISHER_DIR/output/publication.json"
+          )
+          if [[ -n "$PREVIOUS_ARGUMENT" ]]; then
+            arguments+=("$PREVIOUS_ARGUMENT")
+          fi
+          python3 infra/oci/monitor/publisher.py "${arguments[@]}"
+
+      - name: Write publication summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$PUBLISHER_DIR/output/publication.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          print("## OCI production incident publication")
+          print()
+          print(f"- Confirmed or active incidents: `{len(document['confirmed'])}`")
+          for incident in document["confirmed"]:
+              print(
+                  f"- #{incident['issue_number']} `{incident['severity']}` "
+                  f"`{incident['service']}` `{incident['code']}`"
+              )
+          PY
+
+      - name: Upload publication result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-publication-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/production-monitor-publisher/output
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

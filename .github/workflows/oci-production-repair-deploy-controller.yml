@@ -1,0 +1,95 @@
+name: oci-production-repair-deploy-controller
+run-name: oci-repair-deploy-controller build-${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - oci-production-build
+    types:
+      - completed
+    branches:
+      - master
+
+permissions:
+  actions: write
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: oci-production-repair-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  authorize-and-dispatch:
+    if: >-
+      vars.OCI_PRODUCTION_MONITOR_AUTO_DEPLOY_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_run' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+      POLICY: infra/oci/monitor/policy-v1.json
+
+    steps:
+      - name: Check out exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authorize repair deployment
+        id: authorization
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/repair-deploy-controller
+          python3 infra/oci/monitor/repair_deploy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode authorize \
+            --build-run-id "$BUILD_RUN_ID" \
+            --source-sha "$SOURCE_SHA" \
+            --allow-no-match \
+            --output artifacts/repair-deploy-controller/authorization.json
+          authorized="$(
+            jq -r '.authorized | if . == true then "true" else "false" end' \
+              artifacts/repair-deploy-controller/authorization.json
+          )"
+          echo "authorized=$authorized" >> "$GITHUB_OUTPUT"
+          if [[ "$authorized" == "true" ]]; then
+            echo "repair_id=$(
+              jq -r '.repair_id' \
+                artifacts/repair-deploy-controller/authorization.json
+            )" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch protected repair deployment
+        if: steps.authorization.outputs.authorized == 'true'
+        env:
+          REPAIR_ID: ${{ steps.authorization.outputs.repair_id }}
+        run: |
+          set -euo pipefail
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/oci-production-repair-deploy.yml/dispatches" \
+            --method POST \
+            -f ref=master \
+            -f "inputs[source_sha]=$SOURCE_SHA" \
+            -f "inputs[build_run_id]=$BUILD_RUN_ID" \
+            -f "inputs[repair_id]=$REPAIR_ID"
+
+      - name: Upload deployment authorization
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-deploy-controller-${{ github.run_id }}-1
+          path: artifacts/repair-deploy-controller/authorization.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

@@ -21,6 +21,7 @@ OCI_PUBLIC_URL="${OCI_PUBLIC_URL:-}"
 OCI_REDIRECT_URL="${OCI_REDIRECT_URL:-}"
 OCI_DIAGNOSTIC_URL="${OCI_DIAGNOSTIC_URL:-}"
 OCI_EXPECTED_SOURCE_SHA="${OCI_EXPECTED_SOURCE_SHA:-}"
+OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA="${OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA:-$OCI_EXPECTED_SOURCE_SHA}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 live_acceptance_password="${LIVE_ACCEPTANCE_PASSWORD:-}"
 unset LIVE_ACCEPTANCE_PASSWORD
@@ -39,6 +40,8 @@ oci_require_vars \
   oci_die "LIVE_ACCEPTANCE_PASSWORD is required for browser checks"
 [[ "$OCI_EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "OCI_EXPECTED_SOURCE_SHA must be a full lowercase commit SHA"
+[[ "$OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  oci_die "OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$INFRA_PROVENANCE_FILE" && -f "$IMAGE_PROVENANCE_FILE" ]] ||
   oci_die "health check requires verified infrastructure and image provenance files"
 oci_require_value OCI_MEMORY_MAX_PERCENT 70
@@ -57,7 +60,7 @@ oci_require_vars \
   canonical_host redirect_host diagnostic_host lb_ocid
 [[ "$runtime_mode" == "$(oci_runtime_mode)" ]] ||
   oci_die "health runtime differs from infrastructure provenance"
-[[ "$source_sha" == "$OCI_EXPECTED_SOURCE_SHA" ]] ||
+[[ "$source_sha" == "$OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA" ]] ||
   oci_die "health source SHA differs from infrastructure provenance"
 [[ "$public_host" == "$canonical_host" &&
    "${OCI_PUBLIC_URL%/}" == "https://${canonical_host}" &&
@@ -307,6 +310,8 @@ with open(sys.argv[2], encoding="utf-8") as handle:
 result = []
 for pod in pods.get("items", []):
     statuses = pod.get("status", {}).get("containerStatuses") or []
+    if not statuses or any(status.get("name") not in expected for status in statuses):
+        continue
     reasons = []
     digest_match = True
     for status in statuses:

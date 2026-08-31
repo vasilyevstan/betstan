@@ -108,6 +108,8 @@ jobs:
       OCI_CPU_MAX_PERCENT: "90"
       OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
       OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+      PRODUCTION_OPERATION_ID: rollback-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-rollback.yml
 
     steps:
       - name: Initialize isolated OCI paths
@@ -246,6 +248,11 @@ jobs:
             artifacts/oci-rollback \
             artifacts/pre-recovery-build
           chmod 700 "$HOME" "$HOME/.kube"
+          target_release_sha="$TARGET_SHA"
+          if [ "$PARTIAL_ROLLBACK_RUN_ID" != "0" ]; then
+            target_release_sha="$pre_recovery_source_sha"
+          fi
+          printf 'TARGET_RELEASE_SHA=%s\n' "$target_release_sha" >> "$GITHUB_ENV"
 
       - name: Record explicit legacy admin-auth rollback capability
         if: inputs.allow_legacy_admin_auth && inputs.partial_rollback_run_id == '0'
@@ -344,22 +351,27 @@ jobs:
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
-            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
-            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
             runtime_fingerprint="$cluster_fingerprint"
           else
             echo "::add-mask::$instance_ocid"
-            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
             runtime_fingerprint="$instance_fingerprint"
           fi
-          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
-          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
-          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
-          printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint" >> "$GITHUB_OUTPUT"
-          printf 'infrastructure_provenance_sha256=%s\n' "$(
-            sha256sum artifacts/infrastructure/provenance.env |
-              awk '{print $1}'
-          )" >> "$GITHUB_OUTPUT"
+          {
+            if [ "$runtime_mode" = "oke" ]; then
+              printf 'cluster_ocid=%s\n' "$cluster_ocid"
+              printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid"
+            else
+              printf 'instance_ocid=%s\n' "$instance_ocid"
+            fi
+            printf 'public_url=https://%s\n' "$public_host"
+            printf 'redirect_url=https://%s\n' "$redirect_host"
+            printf 'diagnostic_url=https://%s\n' "$diagnostic_host"
+            printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
+            printf 'infrastructure_provenance_sha256=%s\n' "$(
+              sha256sum artifacts/infrastructure/provenance.env |
+                awk '{print $1}'
+            )"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         run: ./infra/oci/scripts/install-cli.sh
@@ -445,7 +457,25 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Begin production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$GITHUB_SHA" \
+            --target-sha "$TARGET_RELEASE_SHA" \
+            --phase rolling-back \
+            --lease-seconds 7200 \
+            --output artifacts/oci-rollback/production-operation.json
+
       - name: Roll back exact immutable OCI images
+        id: rollback
         if: inputs.partial_rollback_run_id == '0'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -461,6 +491,7 @@ jobs:
         run: ./infra/oci/scripts/rollback-application-stan.sh
 
       - name: Restore exact pre-run state from failed partial rollback
+        id: recover
         if: inputs.partial_rollback_run_id != '0'
         env:
           PARTIAL_ROLLBACK_SOURCE_DIR: artifacts/partial-rollback-source
@@ -475,6 +506,82 @@ jobs:
           OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
           OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
         run: ./infra/oci/scripts/recover-partial-rollback-stan.sh
+
+      - name: Advance production operation to validation
+        id: operation_validate
+        if: >-
+          (inputs.partial_rollback_run_id == '0' && steps.rollback.outcome == 'success') ||
+          (inputs.partial_rollback_run_id != '0' && steps.recover.outcome == 'success')
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$GITHUB_SHA" \
+            --target-sha "$TARGET_RELEASE_SHA" \
+            --phase validating \
+            --lease-seconds 900 \
+            --output artifacts/oci-rollback/production-operation.json
+
+      - name: Publish rollback active release
+        id: publish_release
+        if: steps.operation_validate.outcome == 'success'
+        run: |
+          set -euo pipefail
+          images=artifacts/oci-rollback/images.tsv
+          if [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ]; then
+            images=artifacts/oci-rollback/baseline/images.tsv
+          fi
+          python3 infra/oci/monitor/production_state.py publish-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --source-sha "$TARGET_RELEASE_SHA" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID" \
+            --images "$images" \
+            --infrastructure-fingerprint-sha256 "${{ steps.infra.outputs.runtime_fingerprint }}" \
+            --output artifacts/oci-rollback/active-release.json
+
+      - name: Finish successful production operation
+        id: operation_finish
+        if: steps.publish_release.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$GITHUB_SHA" \
+            --target-sha "$TARGET_RELEASE_SHA" \
+            --result succeeded \
+            --output artifacts/oci-rollback/production-operation.json
+
+      - name: Finish failed production operation
+        if: >-
+          always() &&
+          steps.operation_begin.outcome == 'success' &&
+          steps.operation_finish.outcome != 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$GITHUB_SHA" \
+            --target-sha "$TARGET_RELEASE_SHA" \
+            --result failed \
+            --output artifacts/oci-rollback/production-operation.json
 
       - name: Upload rollback diagnostics and provenance
         if: always()

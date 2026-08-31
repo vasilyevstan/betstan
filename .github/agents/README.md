@@ -24,6 +24,15 @@ specialist agents; they do not replace specialist authority or user approval.
 No agent status is permission to merge or deploy. Exact user approval is still
 required for the target SHA and complete production-capable workflow set.
 
+The only standing exception is the repository-reviewed OCI production monitor
+path after an owner explicitly enables its independent fail-closed switches
+and protected environment. The Copilot repair agent still has no merge,
+workflow-approval, deployment, or production credential. Deterministic
+controllers may advance only the exact machine-recorded task, PR, promotion
+cohort, build, and application-only deployment after every immutable policy
+gate passes. Any unrelated commit, unsupported change class, ambiguous state,
+or missing evidence restores the normal user-approval requirement.
+
 ## Conductor loop
 
 Start `betstan-conductor` before parallel agents, background validation, or a
@@ -114,6 +123,8 @@ allowed only with disjoint ownership and a stable shared contract.
 - Deployment/rollback: `betstan-deployment-safety`
 - Live runtime: `betstan-aks-operator`, `betstan-oci-operator`, and
   `betstan-oci-health-reviewer`
+- Confirmed OCI monitor repair: `betstan-production-monitor-repair`, constrained
+  by `infra/oci/monitor/policy-v1.json` and the machine-owned repair record
 
 General agents cite and defer to specialist decisions rather than issuing
 competing approvals.

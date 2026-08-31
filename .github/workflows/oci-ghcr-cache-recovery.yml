@@ -71,6 +71,9 @@ jobs:
       APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
       APPLICATION_REGISTRY_TAG_PREFIX: arm64
       APPLICATION_REGISTRY_TAG_SCHEMA: v1
+      PRODUCTION_OPERATION_ID: ghcr-cache-recovery-${{ github.run_id }}-1
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-ghcr-cache-recovery.yml
+      OPERATION_CONTROL_SHA: ${{ github.sha }}
 
     steps:
       - name: Initialize isolated OCI paths
@@ -385,7 +388,26 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Begin cache recovery production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$OPERATION_CONTROL_SHA" \
+            --target-sha "$SOURCE_SHA" \
+            --superseded-run-id "$RESUME_RECOVERY_RUN_ID" \
+            --phase rebinding \
+            --lease-seconds 14400 \
+            --output artifacts/ghcr-cache-recovery/production-operation.json
+
       - name: Sequentially rebind verified GHCR digests
+        id: rebind
         env:
           RECOVERY_DIR: artifacts/ghcr-cache-recovery
           OUTPUT_DIR: artifacts/ghcr-cache-recovery
@@ -399,7 +421,25 @@ jobs:
           ./infra/oci/scripts/transition-k3s-cached-images.sh
           rm -rf -- artifacts/ghcr-cache-recovery-inputs
 
+      - name: Advance cache recovery operation to validation
+        id: operation_validate
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$OPERATION_CONTROL_SHA" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 14400 \
+            --output artifacts/ghcr-cache-recovery/production-operation.json
+
       - name: Require post-transition API, queue, and rollback readiness
+        id: readiness
         env:
           TARGET_SHA: ${{ inputs.baseline_source_sha }}
           OCI_PUBLIC_URL: ${{ steps.endpoints.outputs.public_url }}
@@ -425,6 +465,35 @@ jobs:
           path: artifacts/ghcr-cache-recovery-readiness
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Finish failed cache recovery production operation
+        id: operation_fail
+        if: >-
+          always() &&
+          steps.operation_begin.outcome == 'success' &&
+          (failure() || cancelled())
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$OPERATION_CONTROL_SHA" \
+            --target-sha "$SOURCE_SHA" \
+            --result failed \
+            --output artifacts/ghcr-cache-recovery/production-operation.json
+
+      - name: Upload cache recovery operation state
+        if: always() && steps.operation_begin.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-operation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery/production-operation.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Close retained protected k3s access
         if: always()
@@ -499,9 +568,12 @@ jobs:
   retire-ocir:
     needs: [recover, public-validate]
     if: >-
+      always() &&
       github.run_attempt == 1 &&
       needs.recover.result == 'success' &&
-      needs.public-validate.result == 'success'
+      (needs.public-validate.result == 'success' ||
+       needs.public-validate.result == 'failure' ||
+       needs.public-validate.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment:
@@ -524,6 +596,9 @@ jobs:
       APPLICATION_REGISTRY_REPOSITORY: vasilyevstan/betstan-images
       APPLICATION_REGISTRY_TAG_PREFIX: arm64
       APPLICATION_REGISTRY_TAG_SCHEMA: v1
+      PRODUCTION_OPERATION_ID: ghcr-cache-recovery-${{ github.run_id }}-1
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-ghcr-cache-recovery.yml
+      OPERATION_CONTROL_SHA: ${{ github.sha }}
 
     steps:
       - name: Initialize isolated OCI paths
@@ -588,7 +663,26 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Advance cache recovery operation to OCIR retirement
+        if: needs.public-validate.result == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$OPERATION_CONTROL_SHA" \
+            --target-sha "$SOURCE_SHA" \
+            --phase retiring \
+            --lease-seconds 3600 \
+            --output artifacts/ghcr-cache-recovery/production-operation.json
+
       - name: Retire OCIR credentials and empty repository after public validation
+        id: retire
+        if: needs.public-validate.result == 'success'
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -604,6 +698,31 @@ jobs:
           RETIRE_OCIR_REPOSITORY: "1"
         run: ./infra/oci/scripts/transition-k3s-cached-images.sh
 
+      - name: Finish cache recovery production operation
+        id: operation_finish
+        if: always()
+        env:
+          PUBLIC_VALIDATION_RESULT: ${{ needs.public-validate.result }}
+          RETIRE_OUTCOME: ${{ steps.retire.outcome }}
+        run: |
+          set -euo pipefail
+          result=failed
+          if [[ "$PUBLIC_VALIDATION_RESULT" == "success" &&
+                "$RETIRE_OUTCOME" == "success" ]]; then
+            result=succeeded
+          fi
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --control-sha "$OPERATION_CONTROL_SHA" \
+            --target-sha "$SOURCE_SHA" \
+            --result "$result" \
+            --output artifacts/ghcr-cache-recovery/production-operation.json
+
       - name: Close retained protected k3s access
         if: always()
         env:
@@ -617,6 +736,7 @@ jobs:
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Upload first-attempt recovery provenance
+        if: steps.retire.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ghcr-cache-recovery-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -638,5 +758,14 @@ jobs:
             artifacts/ghcr-cache-recovery/transition-plan-evidence.env
             artifacts/ghcr-cache-recovery/transition-plan.tsv
             artifacts/ghcr-cache-recovery/transition-provenance.env
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload terminal cache recovery operation state
+        if: always() && steps.operation_finish.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ghcr-cache-recovery-operation-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ghcr-cache-recovery/production-operation.json
           if-no-files-found: error
           retention-days: 30

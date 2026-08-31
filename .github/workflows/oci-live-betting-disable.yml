@@ -55,6 +55,8 @@ jobs:
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       OUTPUT_DIR: artifacts/oci-live-betting-disable
       GH_TOKEN: ${{ github.token }}
+      PRODUCTION_OPERATION_ID: live-disable-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-live-betting-disable.yml
     steps:
       - name: Initialize isolated OCI paths
         run: |
@@ -308,6 +310,22 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Begin live disable production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase disabling \
+            --lease-seconds 3600 \
+            --output "$OUTPUT_DIR/production-operation.json"
+
       - name: Disable new live kickoffs
         id: disable
         env:
@@ -320,6 +338,22 @@ jobs:
           mkdir -p "$OUTPUT_DIR"
           ./infra/oci/scripts/live-betting-control-stan.sh |
             tee "$OUTPUT_DIR/control.txt"
+
+      - name: Advance live disable operation to validation
+        if: steps.disable.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 3600 \
+            --output "$OUTPUT_DIR/production-operation.json"
 
       - name: Wait for live work to drain
         id: drain
@@ -389,6 +423,53 @@ jobs:
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/oci-live-betting-disable/final-dark-reassertion
         run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Finish successful live disable operation
+        id: operation_finish
+        if: >-
+          steps.disable.outcome == 'success' &&
+          steps.drain.outcome == 'success' &&
+          steps.evidence_upload.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result succeeded \
+            --output "$OUTPUT_DIR/production-operation.json"
+
+      - name: Finish failed live disable operation
+        if: >-
+          always() &&
+          steps.operation_begin.outcome == 'success' &&
+          steps.operation_finish.outcome != 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result failed \
+            --output "$OUTPUT_DIR/production-operation.json"
+
+      - name: Upload final live disable production state
+        if: always() && steps.operation_begin.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-live-betting-disable-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-live-betting-disable/production-operation.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
 
       - name: Revoke exact runner rule
         if: always() && env.OCI_RUNTIME_MODE == 'oke'

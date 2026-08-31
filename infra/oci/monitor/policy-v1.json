@@ -1,0 +1,296 @@
+{
+  "schema": "betstan.production-monitor.policy.v1",
+  "environment": "oci-production",
+  "observation": {
+    "confirm_failures": 2,
+    "resolve_healthy": 3,
+    "maximum_gap_seconds": 1800,
+    "maximum_artifact_bytes": 262144,
+    "maximum_evidence_items": 20,
+    "baseline_window": 16,
+    "baseline_minimum_samples": 4
+  },
+  "repair": {
+    "base_branch": "dev",
+    "claim_ttl_seconds": 3600,
+    "maximum_attempts": 2,
+    "self_heal_cooldown_seconds": 3600,
+    "managed_label": "production-monitor-managed",
+    "incident_label": "production-monitor-incident",
+    "repair_label": "production-monitor-repair"
+  },
+  "services": {
+    "auth": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["auth/**", "common/**"],
+      "restart_safe": false
+    },
+    "backoffice": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["backoffice/**", "common/**"],
+      "restart_safe": true
+    },
+    "bet": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["bet/**", "common/**"],
+      "restart_safe": false
+    },
+    "client": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["client/**"],
+      "restart_safe": true
+    },
+    "event": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["event/**", "common/**"],
+      "restart_safe": false
+    },
+    "gamemaster": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["gamemaster/**", "common/**"],
+      "restart_safe": false
+    },
+    "moderation": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["moderation/**", "common/**"],
+      "restart_safe": false
+    },
+    "resulting": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["resulting/**", "common/**"],
+      "restart_safe": false
+    },
+    "slip": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": ["slip/**", "common/**"],
+      "restart_safe": false
+    },
+    "platform": {
+      "agent": "betstan-production-monitor-repair",
+      "paths": [],
+      "restart_safe": false
+    }
+  },
+  "anomalies": {
+    "active-release-missing": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "active-release-mismatch": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "production-operation-stale": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "production-operation-mismatch": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "public-home-failed": {
+      "severity": "high",
+      "service": "client",
+      "automation": "code-repair"
+    },
+    "public-api-failed": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "code-repair"
+    },
+    "public-auth-boundary-failed": {
+      "severity": "critical",
+      "service": "backoffice",
+      "automation": "code-repair"
+    },
+    "public-redirect-failed": {
+      "severity": "medium",
+      "service": "client",
+      "automation": "unsupported-runbook"
+    },
+    "public-tls-failed": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "exporter-unavailable": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "workload-not-ready": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "self-heal"
+    },
+    "pod-crash-loop": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "self-heal"
+    },
+    "pod-restart-delta": {
+      "severity": "medium",
+      "service": "platform",
+      "automation": "self-heal"
+    },
+    "image-digest-drift": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "service-endpoint-empty": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "self-heal"
+    },
+    "node-pressure": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "resource-outlier": {
+      "severity": "medium",
+      "service": "platform",
+      "automation": "code-repair"
+    },
+    "mongo-unavailable": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "rabbitmq-unavailable": {
+      "severity": "critical",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "rabbitmq-backlog": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "code-repair"
+    },
+    "certificate-expiring": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    },
+    "monitor-unknown": {
+      "severity": "high",
+      "service": "platform",
+      "automation": "unsupported-runbook"
+    }
+  },
+  "maintenance": {
+    ".github/workflows/oci-production-deploy.yml": {
+      "deploying": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "validating": []
+    },
+    ".github/workflows/oci-production-repair-deploy.yml": {
+      "deploying": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "compensating": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "validating": []
+    },
+    ".github/workflows/oci-production-rollback.yml": {
+      "rolling-back": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "validating": []
+    },
+    ".github/workflows/oci-live-data-rollout.yml": {
+      "mutating-data": ["public-api-failed"],
+      "validating": []
+    },
+    ".github/workflows/oci-live-betting-activate.yml": {
+      "activating": ["public-api-failed"],
+      "validating": []
+    },
+    ".github/workflows/oci-live-betting-disable.yml": {
+      "disabling": ["public-api-failed"],
+      "validating": []
+    },
+    ".github/workflows/oci-ghcr-cache-recovery.yml": {
+      "rebinding": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "validating": [],
+      "retiring": []
+    },
+    ".github/workflows/oci-production-self-heal.yml": {
+      "restarting": [
+        "workload-not-ready",
+        "service-endpoint-empty",
+        "public-api-failed",
+        "public-home-failed"
+      ],
+      "validating": []
+    }
+  },
+  "forbidden_repair_paths": [
+    ".github/**",
+    "infra/**",
+    "**/package.json",
+    "**/*.pem",
+    "**/*.key",
+    "**/*secret*",
+    "**/package-lock.json",
+    "**/yarn.lock",
+    "**/pnpm-lock.yaml",
+    "**/dist/**",
+    "**/build/**",
+    "**/generated/**"
+  ],
+  "runbooks": {
+    "code-repair": {
+      "enabled": true,
+      "workflow": ".github/workflows/oci-production-repair-deploy.yml"
+    },
+    "self-heal": {
+      "enabled": true,
+      "workflow": ".github/workflows/oci-production-self-heal.yml"
+    },
+    "data": {
+      "enabled": false,
+      "workflow": null
+    },
+    "ingress": {
+      "enabled": false,
+      "workflow": null
+    },
+    "secrets": {
+      "enabled": false,
+      "workflow": null
+    },
+    "infrastructure": {
+      "enabled": false,
+      "workflow": null
+    },
+    "live-betting": {
+      "enabled": false,
+      "workflow": null
+    }
+  }
+}

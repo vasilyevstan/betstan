@@ -57,6 +57,8 @@ jobs:
       OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
       LIVE_ACTIVATION_LEASE_SECONDS: "1800"
       LIVE_ACCEPTANCE_USERNAME: betstan-e2e-protected-v2
+      PRODUCTION_OPERATION_ID: live-activate-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-live-betting-activate.yml
 
     steps:
       - name: Initialize isolated OCI paths
@@ -226,6 +228,7 @@ jobs:
           [ "$(awk -F= '$1 == "submitted_live_slips" {print $2}' "$dark_summary")" = "0" ]
           printf 'DARK_READINESS_FILE=%s\n' "$dark_summary" >> "$GITHUB_ENV"
 
+          # shellcheck disable=SC2129
           printf 'public_url=https://%s\n' "$canonical_host" >> "$GITHUB_OUTPUT"
           printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
           printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
@@ -367,6 +370,22 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: ./infra/oci/scripts/revalidate-live-activation-stan.sh
 
+      - name: Begin live activation production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase activating \
+            --lease-seconds 3600 \
+            --output artifacts/live-control/production-operation.json
+
       - name: Activate new live kickoffs
         id: activate
         env:
@@ -378,6 +397,22 @@ jobs:
           LEASE_DURATION_SECONDS: ${{ env.LIVE_ACTIVATION_LEASE_SECONDS }}
           OUTPUT_DIR: artifacts/live-control/activate
         run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Advance live activation operation to validation
+        if: steps.activate.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 3600 \
+            --output artifacts/live-control/production-operation.json
 
       - name: Verify activated runtime
         env:
@@ -748,6 +783,40 @@ jobs:
           NAMESPACE: ${{ env.OCI_K8S_NAMESPACE }}
           OUTPUT_DIR: artifacts/live-control/final-failure-disable
         run: ./infra/oci/scripts/live-betting-control-stan.sh
+
+      - name: Finish successful live activation operation
+        id: operation_finish
+        if: steps.commit.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result succeeded \
+            --output artifacts/live-control/production-operation.json
+
+      - name: Finish failed live activation operation
+        if: >-
+          always() &&
+          steps.operation_begin.outcome == 'success' &&
+          steps.operation_finish.outcome != 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result failed \
+            --output artifacts/live-control/production-operation.json
 
       - name: Revoke exact OKE runner rule
         id: revoke_runner

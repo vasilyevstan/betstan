@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 source "$SCRIPT_DIR/application-registry.sh"
 
 SOURCE_SHA="${SOURCE_SHA:-${1:-}}"
+INFRASTRUCTURE_SOURCE_SHA="${INFRASTRUCTURE_SOURCE_SHA:-$SOURCE_SHA}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-${2:-}}"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-${3:-}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-deploy}"
@@ -17,6 +18,8 @@ OCI_CANONICAL_HOST="${OCI_CANONICAL_HOST:-betstan.xyz}"
 OCI_REDIRECT_HOST="${OCI_REDIRECT_HOST:-www.betstan.xyz}"
 
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || oci_die "SOURCE_SHA must be a full lowercase commit SHA"
+[[ "$INFRASTRUCTURE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  oci_die "INFRASTRUCTURE_SOURCE_SHA must be a full lowercase commit SHA"
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] || oci_die "verified image provenance TSV is required"
 [[ -f "$INFRA_PROVENANCE_FILE" ]] || oci_die "verified infrastructure provenance is required"
 oci_require_command kubectl
@@ -36,7 +39,8 @@ unset application_registry_public_anonymous ocir_application_repository_absent
 unset node_shape node_ocpus node_memory_gb mongo_volume_gb lb_min_mbps lb_max_mbps expected_monthly_cost
 # shellcheck disable=SC1090
 source "$INFRA_PROVENANCE_FILE"
-[[ "${source_sha:-}" == "$SOURCE_SHA" ]] || oci_die "infrastructure provenance source SHA mismatch"
+[[ "${source_sha:-}" == "$INFRASTRUCTURE_SOURCE_SHA" ]] ||
+  oci_die "infrastructure provenance source SHA mismatch"
 oci_require_vars \
   runtime_mode infrastructure_finalized compartment_ocid ingress_ipv4 \
   public_host canonical_host redirect_host diagnostic_host \
@@ -98,7 +102,7 @@ else
   instance="$(oci compute instance get --instance-id "$instance_ocid")"
   jq -e \
     --arg compartment "$compartment_ocid" \
-    --arg sha "$SOURCE_SHA" '
+    --arg sha "$INFRASTRUCTURE_SOURCE_SHA" '
       .data."compartment-id" == $compartment and
       .data."lifecycle-state" == "RUNNING" and
       .data.shape == "VM.Standard.A1.Flex" and
@@ -210,6 +214,12 @@ RUBY
 mongo_upgrade_state_file="$OUTPUT_DIR/mongo-upgrade.env"
 
 apply_documents "Namespace:^${OCI_K8S_NAMESPACE}$"
+apply_documents 'ClusterRole:^betstan-monitor-exporter$'
+apply_documents 'ClusterRoleBinding:^betstan-monitor-exporter$'
+apply_documents 'ServiceAccount:^betstan-monitor-(exporter|repair)$'
+apply_documents 'Role:^betstan-monitor-(exporter|repair)$'
+apply_documents 'RoleBinding:^betstan-monitor-(exporter|repair)$'
+apply_documents 'ConfigMap:^betstan-monitor-runtime-'
 
 OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
   "$SCRIPT_DIR/verify-public-registry-credentials.sh"
@@ -275,6 +285,12 @@ apply_documents 'Service:^gaming-rabbitmq-srv$'
 apply_documents 'Deployment:^gaming-rabbitmq-depl$'
 kubectl rollout status deployment/gaming-rabbitmq-depl \
   -n "$OCI_K8S_NAMESPACE" --timeout=10m
+apply_documents 'Service:^betstan-monitor-(exporter|repair)-srv$'
+apply_documents 'Deployment:^betstan-monitor-(exporter|repair)$'
+kubectl rollout status deployment/betstan-monitor-exporter \
+  -n "$OCI_K8S_NAMESPACE" --timeout=10m
+kubectl rollout status deployment/betstan-monitor-repair \
+  -n "$OCI_K8S_NAMESPACE" --timeout=10m
 
 # Roll out API dependencies before Client; Gamemaster remains the final producer.
 services=(auth bet event moderation resulting slip backoffice client gamemaster)
@@ -325,7 +341,7 @@ done
 awk '{print $1}' <<<"$queue_rows" | sort > "$OUTPUT_DIR/rabbitmq-baseline.txt"
 
 apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'
-apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'
+apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect|monitor-ingress)$'
 
 if [[ "$runtime_mode" == "oke" ]]; then
   live_ingress_ip="$(

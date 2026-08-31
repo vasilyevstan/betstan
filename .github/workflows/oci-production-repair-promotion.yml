@@ -1,0 +1,142 @@
+name: oci-production-repair-promotion
+run-name: oci-repair-promotion ${{ inputs.pr_number || github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - production-build
+      - oci-validate
+      - branch-policy
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Exact open monitor-managed dev-to-master promotion PR
+        required: true
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: oci-production-repair-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      vars.OCI_PRODUCTION_MONITOR_AUTO_PROMOTION_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.run_attempt == 1 &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production-monitor-controller
+    env:
+      COPILOT_AGENT_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+      GH_TOKEN: ${{ secrets.COPILOT_AGENT_TOKEN }}
+      POLICY: infra/oci/monitor/policy-v1.json
+
+    steps:
+      - name: Check out trusted promotion controller
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Resolve exact monitor promotion
+        id: promotion
+        env:
+          INPUT_PR: ${{ inputs.pr_number }}
+          RUN_PRS: ${{ toJson(github.event.workflow_run.pull_requests) }}
+        run: |
+          set -euo pipefail
+          pr="${INPUT_PR:-}"
+          if [[ -z "$pr" && -n "${RUN_PRS:-}" && "$RUN_PRS" != "null" ]]; then
+            pr="$(
+              jq -r '
+                if length == 1 and .[0].number > 0
+                then .[0].number
+                else ""
+                end
+              ' <<<"$RUN_PRS"
+            )"
+          fi
+          if [[ ! "$pr" =~ ^[1-9][0-9]*$ ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pull="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr")"
+          if ! jq -e '
+            .state == "open" and
+            .base.ref == "master" and
+            .head.ref == "dev" and
+            .head.repo.full_name == env.GITHUB_REPOSITORY and
+            (.body | type == "string") and
+            (.body | contains("betstan-production-repair-promotion-v1"))
+          ' >/dev/null <<<"$pull"; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          output_dir="$RUNNER_TEMP/production-repair-promotion"
+          mkdir -p "$output_dir"
+          chmod 700 "$output_dir"
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+          echo "OUTPUT_DIR=$output_dir" >> "$GITHUB_ENV"
+
+      - name: Prepare exact promotion for merge safety
+        id: ready
+        if: steps.promotion.outputs.eligible == 'true'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_promotion.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode prepare \
+            --promotion-pr "${{ steps.promotion.outputs.number }}" \
+            --output "$OUTPUT_DIR/ready.json"
+
+      - name: Check exact promotion merge gates
+        id: merge_safety
+        if: >-
+          steps.promotion.outputs.eligible == 'true' &&
+          steps.ready.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ./infra/azure/agents/pr-merge-safety-stan.sh \
+            "${{ steps.promotion.outputs.number }}"
+
+      - name: Merge exact promotion to master
+        if: >-
+          steps.promotion.outputs.eligible == 'true' &&
+          steps.merge_safety.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/repair_promotion.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode merge \
+            --promotion-pr "${{ steps.promotion.outputs.number }}" \
+            --output "$OUTPUT_DIR/result.json"
+
+      - name: Write promotion summary
+        if: always() && steps.promotion.outputs.eligible == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## OCI production repair promotion"
+            echo
+            echo "- Pull request: \`#${{ steps.promotion.outputs.number }}\`"
+            echo "- Merge gates: \`${{ steps.merge_safety.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "${OUTPUT_DIR:-}/result.json" ]]; then
+            jq -r '"- Action: `\(.action)`\n- Source SHA: `\(.source_sha)`"' \
+              "$OUTPUT_DIR/result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi

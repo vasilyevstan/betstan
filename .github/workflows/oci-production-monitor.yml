@@ -1,0 +1,148 @@
+name: oci-production-monitor
+run-name: oci-production-monitor ${{ github.run_id }}
+
+on:
+  schedule:
+    - cron: "2,17,32,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: oci-production-monitor
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    if: >-
+      github.run_attempt == 1 &&
+      github.ref == 'refs/heads/master' &&
+      vars.OCI_PRODUCTION_MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      PUBLIC_URL: https://betstan.xyz
+      REDIRECT_URL: https://www.betstan.xyz
+      DIAGNOSTIC_URL: ${{ vars.OCI_DIAGNOSTIC_URL }}
+      OIDC_AUDIENCE: betstan-production-monitor
+
+    steps:
+      - name: Check out the trusted monitor source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify default-branch provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "vasilyevstan/betstan" ]]
+          [[ "$GITHUB_REF" == "refs/heads/master" ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current_master="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          [[ "$current_master" == "$GITHUB_SHA" ]]
+          [[ "$DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io/?$ ]]
+          monitor_dir="$RUNNER_TEMP/production-monitor"
+          echo "MONITOR_DIR=$monitor_dir" >> "$GITHUB_ENV"
+          mkdir -p "$monitor_dir/artifact" "$monitor_dir/baselines"
+          chmod 700 "$monitor_dir" "$monitor_dir/artifact" "$monitor_dir/baselines"
+
+      - name: Collect bounded public health
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/detector.py collect-public \
+            --public-url "$PUBLIC_URL" \
+            --redirect-url "$REDIRECT_URL" \
+            --diagnostic-url "$DIAGNOSTIC_URL" \
+            --output "$MONITOR_DIR/public.json"
+
+      - name: Collect authenticated deep health
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! python3 infra/oci/monitor/deep_client.py \
+            --endpoint "$DIAGNOSTIC_URL" \
+            --audience "$OIDC_AUDIENCE" \
+            --source-sha "$GITHUB_SHA" \
+            --output "$MONITOR_DIR/deep.json"; then
+            rm -f "$MONITOR_DIR/deep.json"
+          fi
+
+      - name: Classify production activity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/github_observer.py collect-activity \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --deep "$MONITOR_DIR/deep.json" \
+            --output "$MONITOR_DIR/activity.json"
+
+      - name: Load trusted observation history
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/github_observer.py fetch-baselines \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-path ".github/workflows/oci-production-monitor.yml" \
+            --policy "$POLICY" \
+            --destination "$MONITOR_DIR/baselines" \
+            --limit 16 \
+            --exclude-run-id "$GITHUB_RUN_ID"
+
+      - name: Build sanitized observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/detector.py build \
+            --policy "$POLICY" \
+            --public "$MONITOR_DIR/public.json" \
+            --deep "$MONITOR_DIR/deep.json" \
+            --activity "$MONITOR_DIR/activity.json" \
+            --baselines "$MONITOR_DIR/baselines" \
+            --monitor-run-id "$GITHUB_RUN_ID" \
+            --monitor-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-sha "$GITHUB_SHA" \
+            --output "$MONITOR_DIR/artifact/observation.json"
+
+      - name: Write observation summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$MONITOR_DIR/artifact/observation.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          print("## OCI production observation")
+          print()
+          print(f"- Status: `{document['status']}`")
+          print(f"- Baseline: `{document['baseline_status']}`")
+          print(f"- Activity: `{document['activity']['classification']}`")
+          print(f"- Findings: `{len(document['anomalies'])}`")
+          for finding in document["anomalies"][:20]:
+              print(
+                  f"- `{finding['severity']}` `{finding['service']}` "
+                  f"`{finding['code']}` ({finding['classification']})"
+              )
+          PY
+
+      - name: Upload trusted observation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-observation-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/production-monitor/artifact
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

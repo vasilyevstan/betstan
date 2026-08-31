@@ -1,0 +1,1040 @@
+name: oci-production-repair-deploy
+run-name: oci-repair-deploy ${{ inputs.source_sha }} build-${{ inputs.build_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact current master SHA from the monitor repair promotion
+        required: true
+        type: string
+      build_run_id:
+        description: Successful first-attempt OCI image build for source_sha
+        required: true
+        type: string
+      repair_id:
+        description: Exact deterministic repair cohort identifier
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    if: >-
+      vars.OCI_PRODUCTION_MONITOR_AUTO_DEPLOY_ENABLED == 'true' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: oci-production
+    outputs:
+      authorized: ${{ steps.authorization.outputs.authorized }}
+      repair_id: ${{ steps.authorization.outputs.repair_id }}
+      source_sha: ${{ steps.authorization.outputs.source_sha }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      REPAIR_ID: ${{ inputs.repair_id }}
+      POLICY: infra/oci/monitor/policy-v1.json
+
+    steps:
+      - name: Check out exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authorize exact repair cohort and build
+        id: authorization
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/repair-authorization
+          python3 infra/oci/monitor/repair_deploy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode authorize \
+            --build-run-id "$BUILD_RUN_ID" \
+            --source-sha "$SOURCE_SHA" \
+            --allow-no-match \
+            --output artifacts/repair-authorization/authorization.json
+          authorized="$(
+            jq -r '.authorized | if . == true then "true" else "false" end' \
+              artifacts/repair-authorization/authorization.json
+          )"
+          [ "$authorized" = "true" ]
+          [ "$(jq -r '.repair_id' artifacts/repair-authorization/authorization.json)" = "$REPAIR_ID" ]
+          echo "authorized=$authorized" >> "$GITHUB_OUTPUT"
+          if [[ "$authorized" == "true" ]]; then
+            echo "repair_id=$(jq -r '.repair_id' artifacts/repair-authorization/authorization.json)" \
+              >> "$GITHUB_OUTPUT"
+            echo "source_sha=$(jq -r '.source_sha' artifacts/repair-authorization/authorization.json)" \
+              >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload repair deployment authorization
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-authorization-${{ github.run_id }}-1
+          path: artifacts/repair-authorization/authorization.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  deploy:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: oci-production
+    outputs:
+      operation_started: ${{ steps.operation_begin.outputs.started }}
+      public_url: ${{ steps.provenance.outputs.public_url }}
+      redirect_url: ${{ steps.provenance.outputs.redirect_url }}
+      diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}
+      infrastructure_run_id: ${{ steps.baseline.outputs.infrastructure_run_id }}
+      infrastructure_source_sha: ${{ steps.provenance.outputs.infrastructure_source_sha }}
+      baseline_source_sha: ${{ steps.baseline.outputs.baseline_source_sha }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      REPAIR_ID: ${{ needs.authorize.outputs.repair_id }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_CPU_MAX_PERCENT: "90"
+      OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
+      OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+      PRODUCTION_OPERATION_ID: repair-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-repair-deploy.yml
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          set -euo pipefail
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          {
+            echo "HOME=$RUNNER_TEMP/oci-repair-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-repair-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-repair-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-repair-home/.kube" \
+            artifacts/authorization \
+            artifacts/baseline \
+            artifacts/build \
+            artifacts/infrastructure \
+            artifacts/repair-deploy \
+            artifacts/repair-validation
+          chmod 700 "$RUNNER_TEMP/oci-repair-home" "$RUNNER_TEMP/oci-repair-home/.kube"
+
+      - name: Check out exact promoted source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate repair authorization
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          python3 infra/oci/monitor/repair_deploy.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --mode authorize \
+            --build-run-id "$BUILD_RUN_ID" \
+            --source-sha "$SOURCE_SHA" \
+            --output artifacts/authorization/authorization.json
+          [ "$(jq -r '.repair_id' artifacts/authorization/authorization.json)" = "$REPAIR_ID" ]
+
+      - name: Resolve trusted active release baseline
+        id: baseline
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/active_release_evidence.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --policy "$POLICY" \
+            --exclude-run-id "$GITHUB_RUN_ID" \
+            --destination artifacts/baseline
+          baseline_source_sha="$(jq -r '.source_sha' artifacts/baseline/evidence.json)"
+          infrastructure_run_id="$(
+            jq -r '.infrastructure_run_id' artifacts/baseline/evidence.json
+          )"
+          [[ "$baseline_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$infrastructure_run_id" =~ ^[1-9][0-9]*$ ]]
+          [ "$baseline_source_sha" != "$SOURCE_SHA" ]
+          git merge-base --is-ancestor "$baseline_source_sha" "$SOURCE_SHA"
+          echo "baseline_source_sha=$baseline_source_sha" >> "$GITHUB_OUTPUT"
+          echo "infrastructure_run_id=$infrastructure_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact OCI image provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-image-provenance-${{ needs.authorize.outputs.source_sha }}-${{ inputs.build_run_id }}-1
+          path: artifacts/build
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Download active OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ steps.baseline.outputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.baseline.outputs.infrastructure_run_id }}
+
+      - name: Verify immutable images and active infrastructure
+        id: provenance
+        run: |
+          set -euo pipefail
+          PROVENANCE_DIR=artifacts/build \
+          SOURCE_SHA="$SOURCE_SHA" \
+          EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+          EXPECTED_BUILD_RUN_ATTEMPT=1 \
+          OUTPUT_FILE=artifacts/repair-deploy/images.tsv \
+          VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+            ./infra/oci/scripts/verify-images.sh
+          source artifacts/infrastructure/provenance.env
+          [ "$infrastructure_run_id" = "${{ steps.baseline.outputs.infrastructure_run_id }}" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$compartment_ocid" = "$OCI_COMPARTMENT_OCID" ]
+          [ "$infrastructure_finalized" = "true" ]
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [ "$instance_fingerprint" = "$(
+            jq -r '.infrastructure_fingerprint_sha256' \
+              artifacts/baseline/active-release.json
+          )" ]
+          [ "$public_host" = "betstan.xyz" ]
+          [ "$canonical_host" = "betstan.xyz" ]
+          [ "$redirect_host" = "www.betstan.xyz" ]
+          [ "$diagnostic_host" = "${ingress_ipv4}.nip.io" ]
+          echo "::add-mask::$instance_ocid"
+          {
+            echo "instance_ocid=$instance_ocid"
+            echo "infrastructure_source_sha=$source_sha"
+            echo "runtime_fingerprint=$instance_fingerprint"
+            echo "public_url=https://$public_host"
+            echo "redirect_url=https://$redirect_host"
+            echo "diagnostic_url=https://$diagnostic_host"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable repair deployment plan before mutation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-deploy-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/authorization/authorization.json
+            artifacts/baseline
+            artifacts/repair-deploy/images.tsv
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Verify active k3s identity
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_INSTANCE_OCID: ${{ steps.provenance.outputs.instance_ocid }}
+        run: |
+          set -euo pipefail
+          oci compute instance get \
+            --instance-id "$OCI_INSTANCE_OCID" \
+            --query 'data.{shape:shape,state:"lifecycle-state"}' >/dev/null
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/repair-deploy/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-deploy-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Cross-check live active release
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py read-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --output artifacts/repair-deploy/live-active-release.json
+          cmp artifacts/baseline/active-release.json \
+            artifacts/repair-deploy/live-active-release.json
+
+      - name: Begin repair production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy "$POLICY" \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --repair-id "$REPAIR_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase deploying \
+            --lease-seconds 7200 \
+            --output artifacts/repair-deploy/production-operation.json
+          echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy coherent repair image generation
+        id: apply
+        env:
+          MODE: deploy
+          TARGET_IMAGES_FILE: artifacts/repair-deploy/images.tsv
+          BASELINE_IMAGES_FILE: artifacts/baseline/images.tsv
+          OUTPUT_DIR: artifacts/repair-deploy/apply
+        run: ./infra/oci/scripts/deploy-repair-images.sh
+
+      - name: Advance repair operation to validation
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy "$POLICY" \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 7200 \
+            --output artifacts/repair-deploy/production-operation.json
+
+      - name: Run protected repair validation
+        env:
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          IMAGE_PROVENANCE_FILE: artifacts/repair-deploy/images.tsv
+          OCI_EXPECTED_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA: ${{ steps.provenance.outputs.infrastructure_source_sha }}
+          OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
+          OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
+          OCI_E2E_ALREADY_PASSED: "1"
+          OCI_EXPECT_HTTP_MUTATION_FENCE: "0"
+          LIVE_BETTING_READINESS_MODE: dark
+          LIVE_READINESS_REQUEST_TIMEOUT: "15"
+          LIVE_READINESS_SSE_TIMEOUT: "20"
+          OUTPUT_DIR: artifacts/repair-validation
+        run: ./infra/oci/agents/deploy-validation-loop-stan.sh
+
+      - name: Upload repair deployment evidence
+        if: always() && steps.baseline.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-repair-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/authorization/authorization.json
+            artifacts/baseline
+            artifacts/repair-deploy
+            artifacts/repair-validation
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/repair-deploy/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-deploy-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-repair-home" "$RUNNER_TEMP/betstan-repair-deploy-access"
+
+  public-validate:
+    needs:
+      - authorize
+      - deploy
+    if: needs.deploy.result == 'success' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    steps:
+      - name: Check out exact deployed source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run independent public repair validation
+        env:
+          OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
+          OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
+          MAX_LOOPS: "3"
+          SLEEP_SECONDS: "20"
+          OUTPUT_DIR: artifacts/oci-repair-public-validation
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "${{ needs.authorize.outputs.source_sha }}" ]
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+          cd ..
+          ./infra/oci/agents/validation-loop-stan.sh
+
+      - name: Upload public repair diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-public-diagnostics-${{ github.run_id }}-1
+          path: artifacts/oci-repair-public-validation
+          if-no-files-found: ignore
+          retention-days: 14
+
+  commit-release:
+    needs:
+      - authorize
+      - deploy
+      - public-validate
+    if: >-
+      always() &&
+      needs.deploy.outputs.operation_started == 'true' &&
+      needs.deploy.result == 'success' &&
+      needs.public-validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    outputs:
+      release_published: ${{ steps.release_commit.outputs.published }}
+    env:
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      INFRASTRUCTURE_RUN_ID: ${{ needs.deploy.outputs.infrastructure_run_id }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-repair-deploy.yml
+
+    steps:
+      - name: Initialize release commit paths
+        run: |
+          set -euo pipefail
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          {
+            echo "HOME=$RUNNER_TEMP/oci-repair-commit-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-repair-commit-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-repair-commit-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-repair-commit-home/.kube" \
+            artifacts/deployment \
+            artifacts/infrastructure \
+            artifacts/release-commit
+          chmod 700 \
+            "$RUNNER_TEMP/oci-repair-commit-home" \
+            "$RUNNER_TEMP/oci-repair-commit-home/.kube"
+
+      - name: Check out exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download immutable repair deployment plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-repair-deploy-plan-${{ github.run_id }}-1
+          path: artifacts/deployment
+
+      - name: Download active OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ needs.deploy.outputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.deploy.outputs.infrastructure_run_id }}
+
+      - name: Verify release commit evidence
+        id: provenance
+        run: |
+          set -euo pipefail
+          source artifacts/infrastructure/provenance.env
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$infrastructure_finalized" = "true" ]
+          [ "$instance_fingerprint" = "$(
+            jq -r '.infrastructure_fingerprint_sha256' \
+              artifacts/deployment/baseline/active-release.json
+          )" ]
+          echo "::add-mask::$instance_ocid"
+          echo "runtime_fingerprint=$instance_fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        id: access
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/release-commit/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-commit-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Verify active release was not advanced early
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py read-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --output artifacts/release-commit/live-active-release.json
+          cmp artifacts/deployment/baseline/active-release.json \
+            artifacts/release-commit/live-active-release.json
+
+      - name: Publish successful repair release
+        id: publish_release
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py publish-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --source-sha "$SOURCE_SHA" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID" \
+            --images artifacts/deployment/repair-deploy/images.tsv \
+            --infrastructure-fingerprint-sha256 "${{ steps.provenance.outputs.runtime_fingerprint }}" \
+            --output artifacts/release-commit/active-release.json
+
+      - name: Verify durable release commitment
+        id: release_commit
+        if: always() && steps.access.outcome == 'success'
+        run: |
+          set -euo pipefail
+          echo "published=false" >> "$GITHUB_OUTPUT"
+          python3 infra/oci/monitor/production_state.py read-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --output artifacts/release-commit/verified-active-release.json
+          jq -e \
+            --arg source "$SOURCE_SHA" \
+            --arg workflow "$PRODUCTION_WORKFLOW_PATH" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '
+              .source_sha == $source and
+              .workflow_path == $workflow and
+              .run_id == $run_id and
+              .run_attempt == $run_attempt and
+              .state == "active"
+            ' artifacts/release-commit/verified-active-release.json >/dev/null
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload repair release commitment
+        if: always() && steps.release_commit.outputs.published == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-release-commit-${{ github.run_id }}-1
+          path: artifacts/release-commit/*active-release.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/release-commit/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-commit-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-repair-commit-home" "$RUNNER_TEMP/betstan-repair-commit-access"
+
+  compensate:
+    needs:
+      - authorize
+      - deploy
+      - public-validate
+      - commit-release
+    if: >-
+      always() &&
+      needs.deploy.outputs.operation_started == 'true' &&
+      needs.commit-release.outputs.release_published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: oci-production
+    outputs:
+      public_url: ${{ needs.deploy.outputs.public_url }}
+      redirect_url: ${{ needs.deploy.outputs.redirect_url }}
+      diagnostic_url: ${{ needs.deploy.outputs.diagnostic_url }}
+    env:
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      BASELINE_SOURCE_SHA: ${{ needs.deploy.outputs.baseline_source_sha }}
+      INFRASTRUCTURE_RUN_ID: ${{ needs.deploy.outputs.infrastructure_run_id }}
+      INFRASTRUCTURE_SOURCE_SHA: ${{ needs.deploy.outputs.infrastructure_source_sha }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_MEMORY_MAX_PERCENT: ${{ vars.OCI_MEMORY_MAX_PERCENT }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+      OCI_CPU_MAX_PERCENT: "90"
+      OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
+      OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+      PRODUCTION_OPERATION_ID: repair-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-repair-deploy.yml
+
+    steps:
+      - name: Initialize compensation paths
+        run: |
+          set -euo pipefail
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          {
+            echo "HOME=$RUNNER_TEMP/oci-repair-compensation-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-repair-compensation-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-repair-compensation-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-repair-compensation-home/.kube" \
+            artifacts/deployment \
+            artifacts/infrastructure \
+            artifacts/compensation
+          chmod 700 \
+            "$RUNNER_TEMP/oci-repair-compensation-home" \
+            "$RUNNER_TEMP/oci-repair-compensation-home/.kube"
+
+      - name: Check out trusted compensation code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download immutable repair deployment plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-repair-deploy-plan-${{ github.run_id }}-1
+          path: artifacts/deployment
+
+      - name: Download active OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ needs.deploy.outputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.deploy.outputs.infrastructure_run_id }}
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/compensation/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-compensation-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Verify unchanged active release baseline
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py read-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --output artifacts/compensation/live-active-release.json
+          cmp artifacts/deployment/baseline/active-release.json \
+            artifacts/compensation/live-active-release.json
+
+      - name: Advance repair operation to compensation
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy "$POLICY" \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase compensating \
+            --lease-seconds 7200 \
+            --output artifacts/compensation/production-operation.json
+
+      - name: Restore captured prior image generation
+        env:
+          MODE: compensate
+          TARGET_IMAGES_FILE: artifacts/deployment/baseline/images.tsv
+          BASELINE_IMAGES_FILE: artifacts/deployment/repair-deploy/images.tsv
+          OUTPUT_DIR: artifacts/compensation/apply
+        run: ./infra/oci/scripts/deploy-repair-images.sh
+
+      - name: Advance compensated operation to validation
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy "$POLICY" \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 7200 \
+            --output artifacts/compensation/production-operation.json
+
+      - name: Validate compensated cluster state
+        env:
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          IMAGE_PROVENANCE_FILE: artifacts/deployment/baseline/images.tsv
+          OCI_EXPECTED_SOURCE_SHA: ${{ needs.deploy.outputs.baseline_source_sha }}
+          OCI_EXPECTED_INFRASTRUCTURE_SOURCE_SHA: ${{ needs.deploy.outputs.infrastructure_source_sha }}
+          OCI_PUBLIC_URL: ${{ needs.deploy.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.deploy.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.deploy.outputs.diagnostic_url }}
+          OCI_PUBLIC_CHECKS_ALREADY_PASSED: "1"
+          OCI_E2E_ALREADY_PASSED: "1"
+          OCI_EXPECT_HTTP_MUTATION_FENCE: "0"
+          LIVE_BETTING_READINESS_MODE: dark
+          LIVE_READINESS_REQUEST_TIMEOUT: "15"
+          LIVE_READINESS_SSE_TIMEOUT: "20"
+          OUTPUT_DIR: artifacts/compensation/validation
+        run: ./infra/oci/agents/deploy-validation-loop-stan.sh
+
+      - name: Upload compensation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-compensation-${{ github.run_id }}-1
+          path: artifacts/compensation
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/compensation/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-compensation-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-repair-compensation-home" "$RUNNER_TEMP/betstan-repair-compensation-access"
+
+  compensation-public-validate:
+    needs:
+      - authorize
+      - compensate
+    if: needs.compensate.result == 'success' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    steps:
+      - name: Check out trusted public validation code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate compensated public service
+        env:
+          OCI_PUBLIC_URL: ${{ needs.compensate.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ needs.compensate.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ needs.compensate.outputs.diagnostic_url }}
+          LIVE_ACCEPTANCE_PASSWORD: ${{ secrets.LIVE_ACCEPTANCE_PASSWORD }}
+          OCI_CLUSTER_CHECKS_ALREADY_PASSED: "1"
+          MAX_LOOPS: "3"
+          SLEEP_SECONDS: "20"
+          OUTPUT_DIR: artifacts/oci-repair-compensation-public
+        run: |
+          set -euo pipefail
+          cd client
+          npm ci
+          npx playwright install --with-deps chromium
+          cd ..
+          ./infra/oci/agents/validation-loop-stan.sh
+
+  finalize:
+    needs:
+      - authorize
+      - deploy
+      - public-validate
+      - commit-release
+      - compensate
+      - compensation-public-validate
+    if: always() && needs.deploy.outputs.operation_started == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+      INFRASTRUCTURE_RUN_ID: ${{ needs.deploy.outputs.infrastructure_run_id }}
+      POLICY: infra/oci/monitor/policy-v1.json
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      PRODUCTION_OPERATION_ID: repair-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-repair-deploy.yml
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      PUBLIC_RESULT: ${{ needs.public-validate.result }}
+      RELEASE_PUBLISHED: ${{ needs.commit-release.outputs.release_published }}
+      COMPENSATE_RESULT: ${{ needs.compensate.result }}
+      COMPENSATION_PUBLIC_RESULT: ${{ needs.compensation-public-validate.result }}
+
+    steps:
+      - name: Initialize finalization paths
+        run: |
+          set -euo pipefail
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          {
+            echo "HOME=$RUNNER_TEMP/oci-repair-finalize-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-repair-finalize-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-repair-finalize-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-repair-finalize-home/.kube" \
+            artifacts/deployment \
+            artifacts/infrastructure \
+            artifacts/production-state
+          chmod 700 \
+            "$RUNNER_TEMP/oci-repair-finalize-home" \
+            "$RUNNER_TEMP/oci-repair-finalize-home/.kube"
+
+      - name: Check out exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download immutable repair deployment plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-repair-deploy-plan-${{ github.run_id }}-1
+          path: artifacts/deployment
+
+      - name: Download active OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ needs.deploy.outputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.deploy.outputs.infrastructure_run_id }}
+
+      - name: Verify finalization evidence
+        id: provenance
+        run: |
+          set -euo pipefail
+          source artifacts/infrastructure/provenance.env
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$infrastructure_finalized" = "true" ]
+          [ "$instance_fingerprint" = "$(
+            jq -r '.infrastructure_fingerprint_sha256' \
+              artifacts/deployment/baseline/active-release.json
+          )" ]
+          echo "::add-mask::$instance_ocid"
+          echo "runtime_fingerprint=$instance_fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/production-state/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-finalize-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Verify final serving release
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py read-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --output artifacts/production-state/live-active-release.json
+          if [ "$RELEASE_PUBLISHED" = "true" ]; then
+            jq -e \
+              --arg source "$SOURCE_SHA" \
+              --arg workflow "$PRODUCTION_WORKFLOW_PATH" \
+              --argjson run_id "$GITHUB_RUN_ID" \
+              --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+              '
+                .source_sha == $source and
+                .workflow_path == $workflow and
+                .run_id == $run_id and
+                .run_attempt == $run_attempt and
+                .state == "active"
+              ' artifacts/production-state/live-active-release.json >/dev/null
+          else
+            cmp artifacts/deployment/baseline/active-release.json \
+              artifacts/production-state/live-active-release.json
+          fi
+
+      - name: Finish repair production operation
+        run: |
+          set -euo pipefail
+          result=failed
+          if [ "$RELEASE_PUBLISHED" = "true" ]; then
+            result=succeeded
+          elif [ "$COMPENSATE_RESULT" != "success" ] ||
+               [ "$COMPENSATION_PUBLIC_RESULT" != "success" ]; then
+            echo "::error::Repair deployment failed and compensation is not healthy"
+          fi
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy "$POLICY" \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result "$result" \
+            --output artifacts/production-state/production-operation.json
+          if [ "$result" = "failed" ]; then
+            exit 1
+          fi
+
+      - name: Upload repair production state
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-repair-production-state-${{ github.run_id }}-1
+          path: artifacts/production-state/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/production-state/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-repair-finalize-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-repair-finalize-home" "$RUNNER_TEMP/betstan-repair-finalize-access"

@@ -45,6 +45,8 @@ paths = {
     ".github/workflows/oci-production-build.yml",
     ".github/workflows/oci-production-deploy.yml",
     ".github/workflows/oci-production-rollback.yml",
+    ".github/workflows/oci-production-repair-deploy.yml",
+    ".github/workflows/oci-production-self-heal.yml",
     ".github/workflows/oci-ghcr-cache-recovery.yml",
     ".github/workflows/ghcr-package-management.yml",
     ".github/workflows/oci-infrastructure.yml",

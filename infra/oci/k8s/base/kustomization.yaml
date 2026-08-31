@@ -15,6 +15,14 @@ resources:
   - ../mongo-storage.yaml
   - ../cert-issuer.yaml
   - ../ingress.yaml
+  - ../monitor.yaml
+configMapGenerator:
+  - name: betstan-monitor-runtime
+    files:
+      - auth.js=../../monitor/exporter/dist/auth.js
+      - index.js=../../monitor/exporter/dist/index.js
+      - kubernetes.js=../../monitor/exporter/dist/kubernetes.js
+      - repair.js=../../monitor/exporter/dist/repair.js
 images:
   - name: mongo
     newName: docker.io/library/mongo

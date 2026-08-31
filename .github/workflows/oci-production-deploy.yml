@@ -52,6 +52,7 @@ jobs:
       public_url: ${{ steps.provenance.outputs.public_url }}
       redirect_url: ${{ steps.provenance.outputs.redirect_url }}
       diagnostic_url: ${{ steps.provenance.outputs.diagnostic_url }}
+      operation_started: ${{ steps.operation_begin.outputs.started }}
     environment:
       name: oci-production
     env:
@@ -98,6 +99,9 @@ jobs:
       SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: "10800"
       OCI_HEALTH_MAX_ATTEMPTS: ${{ vars.OCI_HEALTH_MAX_ATTEMPTS }}
       OCI_HEALTH_SLEEP_SECONDS: ${{ vars.OCI_HEALTH_SLEEP_SECONDS }}
+      OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED: ${{ vars.OCI_PRODUCTION_MONITOR_SELF_HEAL_ENABLED || 'false' }}
+      PRODUCTION_OPERATION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-deploy.yml
 
     steps:
       - name: Initialize isolated OCI paths
@@ -333,16 +337,24 @@ jobs:
           if [ "$runtime_mode" = "oke" ]; then
             echo "::add-mask::$cluster_ocid"
             echo "::add-mask::$endpoint_nsg_ocid"
-            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
-            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$cluster_fingerprint"
           else
             echo "::add-mask::$instance_ocid"
             echo "::add-mask::$bastion_ocid"
-            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$instance_fingerprint"
           fi
-          printf 'public_url=https://%s\n' "$public_host" >> "$GITHUB_OUTPUT"
-          printf 'redirect_url=https://%s\n' "$redirect_host" >> "$GITHUB_OUTPUT"
-          printf 'diagnostic_url=https://%s\n' "$diagnostic_host" >> "$GITHUB_OUTPUT"
+          {
+            if [ "$runtime_mode" = "oke" ]; then
+              printf 'cluster_ocid=%s\n' "$cluster_ocid"
+              printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid"
+            else
+              printf 'instance_ocid=%s\n' "$instance_ocid"
+            fi
+            printf 'public_url=https://%s\n' "$public_host"
+            printf 'redirect_url=https://%s\n' "$redirect_host"
+            printf 'diagnostic_url=https://%s\n' "$diagnostic_host"
+            printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install pinned OCI CLI
         id: oci_cli
@@ -429,6 +441,23 @@ jobs:
           export RUNNER_PUBLIC_IPV4
           ./infra/oci/scripts/configure-k3s-access.sh open
 
+      - name: Begin production operation
+        id: operation_begin
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py begin-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase deploying \
+            --lease-seconds 7200 \
+            --output artifacts/oci-deploy/production-operation.json
+          echo "started=true" >> "$GITHUB_OUTPUT"
+
       - name: Verify transferred database lock and maintenance fence
         id: handoff
         env:
@@ -510,6 +539,22 @@ jobs:
             )"
           } >> artifacts/oci-deploy/provenance.txt
           cp artifacts/data/schema.env artifacts/oci-deploy/live-schema.env
+
+      - name: Advance production operation to validation
+        id: operation_validate
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py advance-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --phase validating \
+            --lease-seconds 7200 \
+            --output artifacts/oci-deploy/production-operation.json
 
       - name: Run protected OCI cluster validation loop
         id: health
@@ -648,6 +693,7 @@ jobs:
             artifacts/oci-deploy/images.tsv
             artifacts/oci-deploy/rabbitmq-baseline.txt
             artifacts/oci-deploy/live-schema.env
+            artifacts/oci-deploy/production-operation.json
           if-no-files-found: error
           retention-days: 30
 
@@ -742,3 +788,218 @@ jobs:
           path: artifacts/oci-public-validation
           if-no-files-found: ignore
           retention-days: 14
+
+  finalize-production-state:
+    needs:
+      - deploy
+      - public-validate
+    if: >-
+      always() &&
+      github.run_attempt == 1 &&
+      needs.deploy.outputs.operation_started == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: oci-production
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_K8S_NAMESPACE: ${{ vars.OCI_K8S_NAMESPACE }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      PRODUCTION_OPERATION_ID: deploy-${{ github.run_id }}-${{ github.run_attempt }}
+      PRODUCTION_WORKFLOW_PATH: .github/workflows/oci-production-deploy.yml
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      PUBLIC_VALIDATE_RESULT: ${{ needs.public-validate.result }}
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-state-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-state-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-state-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/oci-state-home/.kube" artifacts/infrastructure artifacts/production-state
+          chmod 700 "$RUNNER_TEMP/oci-state-home" "$RUNNER_TEMP/oci-state-home/.kube"
+
+      - name: Checkout exact deployed commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download exact OCI infrastructure provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
+          path: artifacts/infrastructure
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.infrastructure_run_id }}
+
+      - name: Download exact deployment provenance
+        if: env.DEPLOY_RESULT == 'success' && env.PUBLIC_VALIDATE_RESULT == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: oci-deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/deployment
+
+      - name: Verify finalization inputs
+        id: provenance
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          source artifacts/infrastructure/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$infrastructure_run_id" = "$INFRASTRUCTURE_RUN_ID" ]
+          [ "$infrastructure_run_attempt" = "1" ]
+          [ "$namespace" = "$OCI_K8S_NAMESPACE" ]
+          [ "$runtime_mode" = "$OCI_RUNTIME_MODE" ]
+          [ "$infrastructure_finalized" = "true" ]
+          if [ "$runtime_mode" = "oke" ]; then
+            echo "::add-mask::$cluster_ocid"
+            echo "::add-mask::$endpoint_nsg_ocid"
+            printf 'cluster_ocid=%s\n' "$cluster_ocid" >> "$GITHUB_OUTPUT"
+            printf 'endpoint_nsg_ocid=%s\n' "$endpoint_nsg_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$cluster_fingerprint"
+          else
+            echo "::add-mask::$instance_ocid"
+            printf 'instance_ocid=%s\n' "$instance_ocid" >> "$GITHUB_OUTPUT"
+            runtime_fingerprint="$instance_fingerprint"
+          fi
+          [[ "$runtime_fingerprint" =~ ^[0-9a-f]{64}$ ]]
+          printf 'runtime_fingerprint=%s\n' "$runtime_fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned OCI CLI
+        id: oci_cli
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Reconcile expired and authorize current runner IPv4
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_ENDPOINT_NSG_OCID: ${{ steps.provenance.outputs.endpoint_nsg_ocid }}
+          RULE_STATE_FILE: artifacts/production-state/runner-rule.env
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          RUNNER_PUBLIC_IPV4="$(curl --fail --silent --show-error --max-time 15 https://api.ipify.org)"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+
+      - name: Configure kubectl from exact cluster OCID
+        if: env.OCI_RUNTIME_MODE == 'oke'
+        uses: oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58 # v1.5.0
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+        with:
+          cluster: ${{ steps.provenance.outputs.cluster_ocid }}
+
+      - name: Open ephemeral OCI Bastion access to k3s
+        if: env.OCI_RUNTIME_MODE == 'k3s'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          INFRA_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/production-state/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-production-state-access
+        run: |
+          set -euo pipefail
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          ./infra/oci/scripts/configure-k3s-access.sh open
+
+      - name: Publish validated active release
+        if: env.DEPLOY_RESULT == 'success' && env.PUBLIC_VALIDATE_RESULT == 'success'
+        run: |
+          set -euo pipefail
+          python3 infra/oci/monitor/production_state.py publish-release \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --source-sha "$SOURCE_SHA" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID" \
+            --images artifacts/deployment/images.tsv \
+            --infrastructure-fingerprint-sha256 "${{ steps.provenance.outputs.runtime_fingerprint }}" \
+            --output artifacts/production-state/active-release.json
+
+      - name: Finish production operation
+        run: |
+          set -euo pipefail
+          result=failed
+          if [ "$DEPLOY_RESULT" = "success" ] &&
+             [ "$PUBLIC_VALIDATE_RESULT" = "success" ]; then
+            result=succeeded
+          fi
+          python3 infra/oci/monitor/production_state.py finish-operation \
+            --namespace "$OCI_K8S_NAMESPACE" \
+            --policy infra/oci/monitor/policy-v1.json \
+            --operation-id "$PRODUCTION_OPERATION_ID" \
+            --workflow-path "$PRODUCTION_WORKFLOW_PATH" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --target-sha "$SOURCE_SHA" \
+            --result "$result" \
+            --output artifacts/production-state/production-operation.json
+
+      - name: Upload sanitized production state
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oci-production-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/production-state/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Revoke exact runner rule
+        if: always() && env.OCI_RUNTIME_MODE == 'oke'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          RULE_STATE_FILE: artifacts/production-state/runner-rule.env
+        run: |
+          if [ -f "$RULE_STATE_FILE" ]; then
+            ./infra/oci/scripts/revoke-github-runner.sh "$RULE_STATE_FILE"
+          fi
+
+      - name: Close ephemeral OCI Bastion access
+        if: always() && env.OCI_RUNTIME_MODE == 'k3s' && steps.oci_cli.outcome == 'success'
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/production-state/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-production-state-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/oci-state-home" "$RUNNER_TEMP/betstan-production-state-access"

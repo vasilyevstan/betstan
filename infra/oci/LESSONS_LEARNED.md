@@ -492,6 +492,54 @@ conversation summaries are not authority.
   retained events, bind it to a strict private legacy attestation rather than
   weakening live checks to broad display-name searches.
 
+## Production monitoring and autonomous repair
+
+- A monitor must observe through a different trust boundary from the component
+  that publishes incidents or mutates state. Keep collection read-only,
+  validate and sanitize its artifact in a second workflow, keep Copilot
+  credentials in a third environment, and leave production credentials only
+  in reviewed production workflows.
+- Do not pause health checks because a repair PR, build, approval wait, or
+  deployment exists. Correlate coding work with a GitHub repair record, and
+  classify maintenance only from an exact live Kubernetes operation record
+  whose workflow, run, attempt, phase, lease, target, and expected transient
+  codes all agree with GitHub.
+- Kubernetes state alone and GitHub state alone are each insufficient. An
+  active release is trusted only when its ConfigMap record, recent monitor
+  observation, originating first-attempt workflow, immutable artifact, and
+  exact nine image digests agree. Reject stale or future observations and any
+  later competing production mutation.
+- Unknown monitoring evidence must not become healthy evidence. Missing
+  datastore credentials, stale samples, malformed payloads, unavailable APIs,
+  and incomplete history remain visible and block recovery hysteresis.
+- Capture compensation inputs before the first mutation and publish them from
+  a separate pre-mutation phase. An artifact uploaded only after rollout starts
+  can disappear with a cancelled runner and is not a recoverable rollback
+  contract.
+- Automatic service-code repair should change only immutable application image
+  fields and preserve the current infrastructure generation. Require every
+  live image to match the captured baseline before mutation, update the whole
+  nine-service generation coherently, and accept only the attempted or prior
+  exact digest during compensation.
+- Draft readiness is a state transition, not a merge detail. Validate identity,
+  mark the exact draft ready, revalidate the changed snapshot, run merge
+  safety, then revalidate again before merging with the exact head SHA.
+- Parallel coding is safe only with explicit disjoint ownership. Promotion
+  must prove that the complete `master..dev` commit and file set equals the
+  selected repair cohort; an unrelated commit blocks the cohort rather than
+  being silently shipped with it.
+- A kill switch controls future admission, not an operation already mutating
+  production. Before cancellation, inspect jobs, pending deployments, the
+  durable operation phase, and the compensation contract.
+- A resumable recovery may replace an unexpired operation owner only when the
+  new first-attempt workflow proves the exact prior run is terminal and names
+  that run explicitly. Never infer ownership transfer from a shared target SHA
+  or an expired-looking local timestamp alone.
+- A model may propose repository edits, but it must never receive or exercise
+  production credentials. High-risk categories remain unsupported until a
+  reviewed deterministic runbook defines exact preconditions, one bounded
+  attempt budget, compensation or safe hold, and independent validation.
+
 ## Decision quality
 
 - Never return a blind `NO_GO`. Collect bounded sanitized diagnostics,

@@ -19,6 +19,7 @@ suites=(
   "$TESTS_DIR/test-registry-prune-contract.sh"
   "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
+  "$TESTS_DIR/test-production-monitor-contract.sh"
   "$ROOT_DIR/infra/oci/agents/test-health-contract-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-production-reentrant-stan.sh"
   "$ROOT_DIR/infra/azure/agents/test-retire-migration-identities-stan.sh"
