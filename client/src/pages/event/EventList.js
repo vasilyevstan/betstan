@@ -82,10 +82,18 @@ const formatQuoteValidity = (value) => {
     : format(validUntil, 'HH:mm:ss');
 };
 
-// All live, countdown, retained-finished, and pre-match event cards use the same responsive
-// Bootstrap grid across every ui variant (v1/v2/v3): 1 column on narrow viewports, 2 at md, 3 at
-// xl. There is no full-width/lone-live or per-variant special case.
-const EVENT_CARD_CLASS = 'col-12 col-md-6 col-xl-4';
+// Dense sections retain the 1/2/3-column responsive grid. Sparse sections deliberately use more
+// of the available stage so one card is not stranded in a narrow third-width island and two cards
+// still fill a complete row.
+const getEventCardClass = (eventCount) => {
+  if (eventCount === 1) {
+    return 'col-12 col-xl-8';
+  }
+  if (eventCount === 2) {
+    return 'col-12 col-md-6';
+  }
+  return 'col-12 col-md-6 col-xl-4';
+};
 const EMPTY_EVENT_IDS = new Set();
 
 const FeedStatus = ({ feedState }) => {
@@ -484,8 +492,10 @@ const HandleEventList = ({
     && !isFinishedLiveEvent(event)
     && !countdownEvents.some((countdownEvent) => countdownEvent.eventId === event.eventId)
   ));
-  const cardClass = EVENT_CARD_CLASS;
   const upperLiveEvents = [...countdownEvents, ...liveEvents];
+  const upperLiveCardClass = getEventCardClass(upperLiveEvents.length);
+  const preMatchCardClass = getEventCardClass(preMatchEvents.length);
+  const singleEventCardClass = getEventCardClass(1);
   // A countdown event is already occupying the upper live area with its own imminent kickoff, so the
   // "next live event" banner (which points at some other, later-scheduled event) must not also show
   // alongside it -- otherwise the truly-next event is both counting down above and mislabeled below.
@@ -513,7 +523,7 @@ const HandleEventList = ({
     <FeedStatus feedState={feedState} />
     {nextLiveEvent ? <NextLiveEvent event={nextLiveEvent} uiVariant={uiVariant} /> : null}
     {upperLiveEvents.length > 0 ? <EventSection title="Live now" uiVariant={uiVariant}>
-      {countdownEvents.map((event) => <div className={cardClass} key={event.eventId}>
+      {countdownEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
         <CountdownEventCard
           event={event}
           now={now}
@@ -522,7 +532,7 @@ const HandleEventList = ({
           uiVariant={uiVariant}
         />
       </div>)}
-      {liveEvents.map((event) => <div className={cardClass} key={event.eventId}>
+      {liveEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
         <LiveEventCard
           event={event}
           onSelectionPlaced={onSelectionPlaced}
@@ -532,12 +542,12 @@ const HandleEventList = ({
       </div>)}
     </EventSection> : null}
     {retainedFinishedEvent ? <EventSection title="Recently finished" uiVariant={uiVariant}>
-      <div className={cardClass} key={retainedFinishedEvent.eventId}>
+      <div className={singleEventCardClass} key={retainedFinishedEvent.eventId}>
         <RetainedFinishedEventCard event={retainedFinishedEvent} />
       </div>
     </EventSection> : null}
     {preMatchEvents.length > 0 ? <EventSection title="Pre-match" uiVariant={uiVariant}>
-      {preMatchEvents.map((event) => <div className={cardClass} key={event.eventId}>
+      {preMatchEvents.map((event) => <div className={preMatchCardClass} key={event.eventId}>
         <PreMatchEventCard
           event={event}
           onSelectionPlaced={onSelectionPlaced}

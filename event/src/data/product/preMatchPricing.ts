@@ -1,4 +1,5 @@
 import { faker } from "@faker-js/faker";
+import { createHash } from "crypto";
 
 /**
  * Pure, dependency-free pre-match pricing model. Given a realistic home/away expected-goal
@@ -45,10 +46,10 @@ export interface PreMatchPricing {
 
 /** Bounds the score grid to a plausible low-score support: no generated correct score can ever
  * be an implausible value like `7 - 10` because the grid itself never contains such a cell. */
-const MAX_GOALS_PER_SIDE = 6;
+export const MAX_GOALS_PER_SIDE = 6;
 
 /** How many distinct highest-probability exact scores make up the Correct Score board. */
-const CORRECT_SCORE_OPTION_COUNT = 10;
+export const CORRECT_SCORE_OPTION_COUNT = 10;
 
 /** Typical realistic single-team expected-goals range for a football match. */
 const MIN_EXPECTED_GOALS = 0.6;
@@ -76,6 +77,24 @@ const poissonPmf = (count: number, lambda: number): number => {
 export const sampleExpectedGoals = (): ExpectedGoals => ({
   home: faker.number.float({ min: MIN_EXPECTED_GOALS, max: MAX_EXPECTED_GOALS, precision: 0.01 }),
   away: faker.number.float({ min: MIN_EXPECTED_GOALS, max: MAX_EXPECTED_GOALS, precision: 0.01 }),
+});
+
+const seededExpectedGoals = (seed: string): number => {
+  const unitValue = createHash("sha256")
+    .update(seed)
+    .digest()
+    .readUInt32BE(0) / 0xffffffff;
+  return Math.round(
+    (MIN_EXPECTED_GOALS + unitValue * (MAX_EXPECTED_GOALS - MIN_EXPECTED_GOALS))
+      * 100
+  ) / 100;
+};
+
+/** Produces a stable realistic expected-goal pair for compatibility repairs. Unlike generated
+ * events, a dry-run/apply/verify backfill must derive the same board on every invocation. */
+export const expectedGoalsFromSeed = (seed: string): ExpectedGoals => ({
+  home: seededExpectedGoals(`${seed}:home`),
+  away: seededExpectedGoals(`${seed}:away`),
 });
 
 /** Builds the bounded, normalized joint score-probability grid for a given expected-goal pair.

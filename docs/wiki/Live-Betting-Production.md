@@ -9,12 +9,18 @@ versions, and Bet exposes labelled history.
 
 ## User-visible behavior
 
-- Live events appear above upcoming events in a compact full-row card.
+- Dense live, countdown, recently finished, and pre-match sections share the
+  same responsive one/two/three-card grid. A sparse desktop section expands one
+  card to a bounded two-thirds row and two cards to a balanced half-width row.
+- Long team names wrap without moving the odds baseline. The ten-option Correct
+  Score board uses five columns when its card can preserve touch targets and
+  falls back to two balanced columns in a narrow nested card.
 - Before kickoff, two countdown products are enabled.
-- After kickoff, five in-play products plus both non-selectable countdown
-  products remain visible, for seven market cards. `KICKOFF_TEAM` settles at
-  kickoff; `FIRST_MINUTE_GOAL` is closed until `FIRST_MINUTE_ELAPSED`, then
-  settles.
+- After kickoff, the five active in-play products remain visible.
+  `KICKOFF_TEAM` settles and `FIRST_MINUTE_GOAL` closes at kickoff, so both
+  terminal countdown cards are hidden from that moment. The latter is graded
+  after `FIRST_MINUTE_ELAPSED` with no further visible-card change, while both
+  authoritative market states remain in the live snapshot.
 - Live and pre-match selections never mix in one slip. Both boards may stay
   open and retain independent wagers and submission state.
 - Live incidents include goals, cards, corners, free kicks, penalties,
@@ -25,7 +31,7 @@ versions, and Bet exposes labelled history.
 
 ## Production release
 
-Live betting was permanently activated on 2026-08-30 from exact master
+Live betting was first permanently activated on 2026-08-30 from exact master
 `0bf1d01981e454cd6ca661d8e6d99997462c558c`.
 
 | Stage | Run |
@@ -46,6 +52,17 @@ settlement, protected-account cleanup, queue checks, REST/SSE compatibility,
 and restart checks. Final state is `LIVE_KICKOFFS_ENABLED=true`,
 `activation_state=committed`, with no activation lease.
 
+The later compact-presentation release at exact master
+`e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` was deployed successfully by run
+`33418318240`. Activation `33419673381` then failed at a browser assertion that
+still expected the two terminal countdown cards to remain visible after
+kickoff; subsequent browser, queue, restart, and permanent-commit gates were
+not evaluated. Cleanup completed: production is in dark mode, new live
+kickoffs are disabled, the exact synthetic active Slip is gone, the reusable
+test account was restored to `USER`, and no activation lease remains. The
+failed first attempt is immutable; the corrected five-visible-card assertion
+requires a new exact-SHA release chain.
+
 ## Compatibility and rollback
 
 Ordinary legacy rows without live market evidence normalize to `PRE_MATCH`;
@@ -54,6 +71,19 @@ A missing event phase defaults only for a truly scheduled pre-match record.
 Resulted or positive-sequence/cursor records retain their existing authority
 instead of being relabelled. Additive schemas remain readable by the recorded
 fallback application.
+
+Scheduler events are inserted with `$setOnInsert`, so pricing improvements
+apply automatically to new slots but do not rewrite the already persisted
+24-hour pool. The corrected release candidate extends the existing event
+compatibility backfill to deterministically repair implausible or duplicate
+Correct Score boards on non-terminal events and reprice 1X2 from the same
+distribution. The operation remains event-database-only and follows the
+existing dry-run, apply, and zero-match verification phases.
+
+Existing draft and submitted rows keep their snapshotted event, product,
+selection, label, and price. A Correct Score selection ID is retained only when
+the repaired board keeps the same label; replacement outcomes receive stable
+new IDs so an old draft cannot be visually reinterpreted as a different score.
 
 Protected rollback authority:
 

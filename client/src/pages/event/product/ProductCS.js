@@ -29,7 +29,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
           onClick={() => handleClick(product.id, option.id)}
         >
           <span className="product-button__label">{option.name}</span>
-          <strong>{option.value}</strong>
+          <strong className="product-button__value">{option.value}</strong>
         </button>;
       })}
     </div>

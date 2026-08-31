@@ -40,10 +40,18 @@
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
-- A single live, countdown, or retained-finished event should use the full
-  desktop event-row width instead of one pre-match card column. Keep every
-  score, incident, market, and selection visible, and compact by reflowing
-  market cards responsively rather than hiding betting information.
+- Dense live, countdown, retained-finished, and pre-match sections use the same
+  responsive one/two/three-card grid. Sparse sections must consume the stage
+  intentionally: one desktop card uses a bounded two-thirds row and two cards
+  complete a half-width row. Keep scores, incidents, active markets,
+  selections, and non-terminal availability states visible; omit only
+  semantically terminal market cards, whose state remains in the authoritative
+  live snapshot and settlement history.
+- Betting controls in one market share geometry. Wrapped labels may increase
+  the row height, but buttons stretch together and odds remain on one baseline.
+  Fixed ten-option Correct Score boards use a container-aware five- or
+  two-column layout so every row is balanced and every control remains at least
+  touch-target width.
 - Read-only review roles must be read-only in their declared capabilities,
   not only in prose. UX reviewers consume rendered evidence from the test
   owner; they do not need unrestricted command execution to assess it.
@@ -475,8 +483,10 @@ was captured before workflow disable and completed once.
 
 ### Acceptance and runtime evidence
 
-- two enabled countdown products were available before kickoff and all seven
-  market cards were retained after kickoff;
+- in this historical release, two enabled countdown products were available
+  before kickoff and all seven market cards were retained after kickoff; the
+  later compact presentation intentionally hides terminal countdown cards and
+  shows only the five active in-play cards;
 - independent live and pre-match slips, quote/revision handling, live
   incidents, half-time/stoppage/full-time transitions, immediate live
   settlement, and pre-match settlement all passed;
@@ -504,3 +514,47 @@ The conductor must register a terminal documentation unit covering Markdown,
 wiki, reusable-agent guidance, PR/release evidence, and todo reconciliation.
 It may report orchestration complete only after that handoff is persisted and
 validated.
+
+## Compact live activation acceptance regression — 2026-08-31
+
+- Dark deployment `33418318240` successfully placed exact master
+  `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` in production.
+- Activation `33419673381` failed because its browser assertion still expected
+  seven visible cards after kickoff. The intended compact UI showed
+  five active in-play cards and hid the two terminal countdown cards.
+- The authoritative snapshot still carries all seven markets for transition,
+  audit, and settlement logic. Production acceptance must distinguish that
+  domain inventory from the filtered visible-card contract.
+- Failure cleanup returned production to dark mode, disabled new kickoffs,
+  removed the exact synthetic active Slip, restored the reusable test account
+  to `USER`, and left no activation lease. Later browser, queue, restart, and
+  permanent-commit gates were not evaluated. Preserve the failed first attempt
+  and promote the corrected assertion through a new exact-SHA release chain.
+- A UX change that alters terminal-state visibility is incomplete until the
+  browser acceptance journey, static workflow contract, reusable UX guidance,
+  and production documentation agree with the rendered behavior.
+- Scheduler `$setOnInsert` convergence deliberately preserves existing event
+  products, so a pricing-generator correction does not repair the current
+  24-hour pool. When persisted boards remain user-visible, extend the existing
+  event compatibility backfill instead of adding read-path filtering, deleting
+  slots, or changing explicit visibility provenance.
+- Pre-match clicks, Slip/Bet rows, moderation, and resulting use immutable row
+  snapshots after selection. A bounded event-product repricing can therefore
+  leave existing drafts and bets untouched. Preserve a Correct Score odds ID
+  only when its label still represents the same selection; removed labels get
+  deterministic new identities so the UI cannot highlight an old `8 - 10`
+  selection as a new plausible score.
+- If a legacy board contains duplicate labels under different IDs, retain one
+  deterministic canonical ID. A draft using a displaced duplicate remains
+  visible, placeable, and settleable from its own snapshot but is deliberately
+  not highlighted on the repaired board; this avoids silently substituting a
+  different stored ID.
+- Data repairs used by release acceptance must be deterministic and
+  self-terminating: derive prices from the stable event ID, repair both 1X2 and
+  Correct Score from one distribution, preserve product and embedded Mongo
+  identities, map 1X2 prices by validated home/draw/away labels rather than
+  array position, and require dry-run/apply/verify to converge to zero matches.
+- A migration predicate is not a write guard. Bind each numeric array-path
+  update to the exact scanned event, terminal markers, live state, and product
+  arrays so a concurrent result or reorder becomes a safe mismatch instead of
+  overwriting newer authority.

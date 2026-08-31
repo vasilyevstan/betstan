@@ -26,12 +26,23 @@ Review rendered evidence supplied by the implementation and test owners. Never
 infer usability from screenshots alone or propose an API shape from a visual
 preference.
 
+For screenshot-backed work, the orchestrator must select a current
+high-capability multimodal model with high reasoning and record the exact
+model, reasoning setting, route, viewport, UI variant, theme, and data state in
+the review evidence. Do not hardcode a model name that can silently become
+obsolete.
+
 ## Review contract
 
 - Establish the information hierarchy before changing spacing or decoration.
 - Preserve complete names, scores, times, odds, statuses, and error messages
   wherever they drive a betting decision.
-- Verify desktop, tablet, and mobile behavior across all three UI variants and both themes.
+- Audit `/`, `/bets`, `/login`, `/signup`, and `/backoffice`; distinguish an
+  intentionally readable-width form from an accidental narrow content island
+  created by sparse data or an empty shell column.
+- Verify desktop, tablet, and mobile behavior across all three UI variants and both themes,
+  including sparse, dense, empty, long-name, simultaneous-live, and
+  retained-finished states.
 - Preserve DOM, reading, and keyboard order when visual layout reflows.
 - Require semantic controls, visible focus, non-color-only status, sufficient
   contrast, usable touch targets, and no horizontal overflow.
@@ -51,9 +62,21 @@ preference.
 - Verify terminal, live, suspended, stale, and upcoming states are grouped and
   labelled by meaning rather than color alone. Terminal markets must not remain
   actionable, while suspended or stale markets must not silently disappear.
+- Cross-check production acceptance assertions against the current rendering
+  contract for every market state. Distinguish authoritative snapshot inventory
+  from visible cards: explicitly hidden terminal markets still belong to
+  settlement history, while non-terminal suspended or stale markets remain
+  visible with their status.
 - Challenge unbounded dynamic-list density. Require the responsive card count,
   wrapping behavior, and maximum visible control density to remain readable
   without overlap or hidden betting-decision information.
+- Prove dense event sections preserve three desktop cards, two tablet cards,
+  and one mobile card. Prove sparse one- and two-card sections use the available
+  stage intentionally instead of leaving a third-width content island.
+- Require equal geometry for controls in the same market: wrapped labels may
+  increase a row's height, but button bounds and odds baselines must align.
+  Fixed-size generated boards such as ten-option Correct Score must use
+  balanced rows rather than an orphaned final control.
 - Treat implausible, duplicated, or contradictory score and odds presentation
   as a usability defect even when the underlying values are technically valid.
 - Separate required usability fixes from optional polish so the smallest
@@ -91,6 +114,8 @@ Include:
 - measurable unit, browser, and responsive acceptance criteria;
 - explicit collision, clipping, identifier-leakage, state-grouping, dynamic-
   density, and betting-plausibility evidence;
+- rendered width-utilization, equal-control-geometry, and balanced-grid
+  measurements rather than screenshot opinion alone;
 - required changes versus optional polish;
 - unresolved product decisions and risks.
 
