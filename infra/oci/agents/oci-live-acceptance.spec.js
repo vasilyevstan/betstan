@@ -321,7 +321,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     const article = page.getByRole('article', { name: fixture.name });
     await expect(article).toBeVisible({ timeout: 100000 });
     await expect(article.locator('.event-market-card')).toHaveCount(
-      ALL_LIVE_MARKET_TYPES.length,
+      LIVE_MARKETS.length,
     );
     for (const marketName of [
       'Next Yellow Card',
@@ -329,15 +329,11 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       'Next Corner',
       'Next Penalty',
       'Half Time Result',
-      ...COUNTDOWN_MARKETS.map(({ label }) => label),
     ]) {
       await expect(article.getByText(marketName, { exact: true })).toBeVisible();
     }
     for (const { label } of COUNTDOWN_MARKETS) {
-      const marketCard = article.locator('.event-market-card').filter({
-        hasText: label,
-      });
-      await expect(marketCard.getByRole('button').first()).toBeDisabled();
+      await expect(article.getByText(label, { exact: true })).toHaveCount(0);
     }
   }
 

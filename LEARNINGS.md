@@ -40,10 +40,11 @@
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
-- A single live, countdown, or retained-finished event should use the full
-  desktop event-row width instead of one pre-match card column. Keep every
-  score, incident, market, and selection visible, and compact by reflowing
-  market cards responsively rather than hiding betting information.
+- Live, countdown, retained-finished, and pre-match events use the same
+  responsive one/two/three-card grid. Keep scores, incidents, active markets,
+  selections, and non-terminal availability states visible; omit only
+  semantically terminal market cards, whose state remains in the authoritative
+  live snapshot and settlement history.
 - Read-only review roles must be read-only in their declared capabilities,
   not only in prose. UX reviewers consume rendered evidence from the test
   owner; they do not need unrestricted command execution to assess it.
@@ -475,8 +476,10 @@ was captured before workflow disable and completed once.
 
 ### Acceptance and runtime evidence
 
-- two enabled countdown products were available before kickoff and all seven
-  market cards were retained after kickoff;
+- in this historical release, two enabled countdown products were available
+  before kickoff and all seven market cards were retained after kickoff; the
+  later compact presentation intentionally hides terminal countdown cards and
+  shows only the five active in-play cards;
 - independent live and pre-match slips, quote/revision handling, live
   incidents, half-time/stoppage/full-time transitions, immediate live
   settlement, and pre-match settlement all passed;
@@ -504,3 +507,21 @@ The conductor must register a terminal documentation unit covering Markdown,
 wiki, reusable-agent guidance, PR/release evidence, and todo reconciliation.
 It may report orchestration complete only after that handoff is persisted and
 validated.
+
+## Compact live activation acceptance regression — 2026-08-30
+
+- Dark deployment `33418318240` successfully placed exact master
+  `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` in production.
+- Activation `33419673381` failed because its browser assertion still expected
+  seven visible cards after kickoff. The accepted compact UI correctly showed
+  five active in-play cards and hid the two terminal countdown cards.
+- The authoritative snapshot still carries all seven markets for transition,
+  audit, and settlement logic. Production acceptance must distinguish that
+  domain inventory from the filtered visible-card contract.
+- Failure cleanup returned production to dark mode, disabled new kickoffs,
+  removed the exact synthetic active Slip and reusable test account, and left
+  no activation lease. Preserve the failed first attempt and promote the
+  corrected assertion through a new exact-SHA release chain.
+- A UX change that alters terminal-state visibility is incomplete until the
+  browser acceptance journey, static workflow contract, reusable UX guidance,
+  and production documentation agree with the rendered behavior.

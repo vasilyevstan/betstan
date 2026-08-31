@@ -505,17 +505,28 @@ conversation summaries are not authority.
 ### Acceptance corrections
 
 - The implemented live card has two phases: exactly two enabled countdown
-  products before kickoff, then seven retained cards after kickoff—five
-  in-play markets plus two non-selectable countdown products. `KICKOFF_TEAM`
-  settles at kickoff; `FIRST_MINUTE_GOAL` remains closed until the first-minute
-  transition and then settles. An assertion that expected only five
-  post-kickoff cards was a test defect, not a product failure.
+  products before kickoff, then five active in-play cards after kickoff.
+  `KICKOFF_TEAM` settles at kickoff; `FIRST_MINUTE_GOAL` settles after the
+  first-minute transition. Both remain in the authoritative live snapshot for
+  settlement history, but terminal market cards are intentionally omitted from
+  the betting UI. An assertion that expects seven visible post-kickoff cards is
+  a test defect, not a product failure.
 - A JWT that still claims `ADMIN` after the persisted account is demoted is an
   invalid privileged session. Clear it and return `401`; a current ordinary
   `USER` requesting an administrator route still receives `403`.
 - Keep failed activation `33303355082` immutable. Its cleanup disabled new
   kickoffs, restored the account to `USER`, removed the exact synthetic slip,
   and cleared the lease before the corrected candidate was built.
+- Keep failed activation `33419673381` immutable. Production rendered the
+  intended five active post-kickoff market cards, but the stale seven-card UI
+  assertion failed. Cleanup restored dark mode, disabled new kickoffs, demoted
+  and removed the reusable acceptance account, deleted its exact synthetic
+  active Slip, and cleared the lease. A corrected activation requires a new
+  exact-master release chain; do not rerun the failed attempt.
+- Production acceptance must test visible market-state semantics separately
+  from the complete domain snapshot. Whenever UX changes which terminal states
+  are rendered, update the production journey and its static contract test in
+  the same change.
 
 ### Workflow orchestration
 

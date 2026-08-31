@@ -51,6 +51,11 @@ preference.
 - Verify terminal, live, suspended, stale, and upcoming states are grouped and
   labelled by meaning rather than color alone. Terminal markets must not remain
   actionable, while suspended or stale markets must not silently disappear.
+- Cross-check production acceptance assertions against the current rendering
+  contract for every market state. Distinguish authoritative snapshot inventory
+  from visible cards: explicitly hidden terminal markets still belong to
+  settlement history, while non-terminal suspended or stale markets remain
+  visible with their status.
 - Challenge unbounded dynamic-list density. Require the responsive card count,
   wrapping behavior, and maximum visible control density to remain readable
   without overlap or hidden betting-decision information.
