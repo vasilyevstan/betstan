@@ -1,7 +1,10 @@
 import {
   buildPreMatchPricing,
   buildScoreGrid,
+  CORRECT_SCORE_OPTION_COUNT,
   deriveOneCrossTwoProbabilities,
+  expectedGoalsFromSeed,
+  MAX_GOALS_PER_SIDE,
   oddsFromProbability,
   sampleExpectedGoals,
   selectTopCorrectScores,
@@ -22,6 +25,42 @@ describe("sampleExpectedGoals", () => {
   });
 });
 
+describe("expectedGoalsFromSeed", () => {
+  it("derives a stable, bounded pair without consuming random state", () => {
+    const randomSpy = jest.spyOn(Math, "random");
+
+    const first = expectedGoalsFromSeed("event-a");
+    const second = expectedGoalsFromSeed("event-a");
+    const other = expectedGoalsFromSeed("event-b");
+
+    expect(first).toEqual(second);
+    expect(other).not.toEqual(first);
+    expect(randomSpy).not.toHaveBeenCalled();
+    for (const value of [first.home, first.away, other.home, other.away]) {
+      expect(Number.isFinite(value)).toBe(true);
+      expect(value).toBeGreaterThanOrEqual(0.6);
+      expect(value).toBeLessThanOrEqual(2.6);
+    }
+    randomSpy.mockRestore();
+  });
+
+  it("builds a deterministic plausible board from the same seeded pair", () => {
+    const pricing = buildPreMatchPricing(expectedGoalsFromSeed("legacy-event"));
+    const labels = pricing.correctScoreOdds.map(
+      (score) => `${score.homeGoals} - ${score.awayGoals}`
+    );
+
+    expect(pricing.correctScoreOdds).toHaveLength(CORRECT_SCORE_OPTION_COUNT);
+    expect(new Set(labels).size).toBe(CORRECT_SCORE_OPTION_COUNT);
+    pricing.correctScoreOdds.forEach((score) => {
+      expect(score.homeGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
+      expect(score.awayGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
+      expect(score.odds).toBeGreaterThanOrEqual(1.01);
+      expect(Number.isFinite(score.odds)).toBe(true);
+    });
+  });
+});
+
 describe("buildScoreGrid", () => {
   it("normalizes the bounded grid so probabilities sum to (approximately) 1", () => {
     const grid = buildScoreGrid({ home: 1.4, away: 1.1 });
@@ -36,8 +75,8 @@ describe("buildScoreGrid", () => {
     grid.forEach((cell) => {
       expect(cell.homeGoals).toBeGreaterThanOrEqual(0);
       expect(cell.awayGoals).toBeGreaterThanOrEqual(0);
-      expect(cell.homeGoals).toBeLessThanOrEqual(6);
-      expect(cell.awayGoals).toBeLessThanOrEqual(6);
+      expect(cell.homeGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
+      expect(cell.awayGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
     });
   });
 
@@ -71,12 +110,12 @@ describe("deriveOneCrossTwoProbabilities", () => {
 describe("selectTopCorrectScores", () => {
   it("selects the requested number of distinct, highest-probability scores", () => {
     const grid = buildScoreGrid({ home: 1.4, away: 1.1 });
-    const topScores = selectTopCorrectScores(grid, 10);
+    const topScores = selectTopCorrectScores(grid, CORRECT_SCORE_OPTION_COUNT);
 
-    expect(topScores).toHaveLength(10);
+    expect(topScores).toHaveLength(CORRECT_SCORE_OPTION_COUNT);
 
     const keys = topScores.map((score) => `${score.homeGoals}-${score.awayGoals}`);
-    expect(new Set(keys).size).toBe(10);
+    expect(new Set(keys).size).toBe(CORRECT_SCORE_OPTION_COUNT);
 
     for (let i = 1; i < topScores.length; i++) {
       expect(topScores[i - 1].probability).toBeGreaterThanOrEqual(topScores[i].probability);
@@ -85,9 +124,12 @@ describe("selectTopCorrectScores", () => {
 
   it("never selects an implausible score such as 7 - 10", () => {
     const grid = buildScoreGrid({ home: 1.4, away: 1.1 });
-    const topScores = selectTopCorrectScores(grid, 10);
+    const topScores = selectTopCorrectScores(grid, CORRECT_SCORE_OPTION_COUNT);
 
-    const hasImplausibleScore = topScores.some((score) => score.homeGoals >= 7 || score.awayGoals >= 7);
+    const hasImplausibleScore = topScores.some(
+      (score) => score.homeGoals > MAX_GOALS_PER_SIDE
+        || score.awayGoals > MAX_GOALS_PER_SIDE
+    );
     expect(hasImplausibleScore).toBe(false);
   });
 });
@@ -119,11 +161,11 @@ describe("buildPreMatchPricing", () => {
     expect(Number.isFinite(pricing.oneCrossTwoOdds.draw)).toBe(true);
     expect(Number.isFinite(pricing.oneCrossTwoOdds.away)).toBe(true);
 
-    expect(pricing.correctScoreOdds).toHaveLength(10);
+    expect(pricing.correctScoreOdds).toHaveLength(CORRECT_SCORE_OPTION_COUNT);
     pricing.correctScoreOdds.forEach((score) => {
       expect(Number.isFinite(score.odds)).toBe(true);
-      expect(score.homeGoals).toBeLessThan(7);
-      expect(score.awayGoals).toBeLessThan(7);
+      expect(score.homeGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
+      expect(score.awayGoals).toBeLessThanOrEqual(MAX_GOALS_PER_SIDE);
     });
 
     const scoreKeys = pricing.correctScoreOdds.map((score) => `${score.homeGoals}-${score.awayGoals}`);
