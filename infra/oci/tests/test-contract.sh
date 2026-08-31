@@ -200,8 +200,9 @@ for conductor_contract in \
   grep -Fq "$conductor_contract" "$conductor_agent" ||
     fail "conductor agent omits orchestration contract: $conductor_contract"
 done
-grep -Fq 'Start `betstan-conductor` before parallel agents' "$agent_readme" ||
-  fail "agent workflow does not start with conductor registration"
+grep -Fq 'Start `betstan-conductor` before every unit whose result can block, approve,' \
+    "$agent_readme" ||
+  fail "agent workflow does not require universal authority-bearing registration"
 agent_readme_flat="$(tr '\n' ' ' <"$agent_readme")"
 grep -Fq 'Two missed checkpoints require an explicit safe recovery' \
     <<<"$agent_readme_flat" ||

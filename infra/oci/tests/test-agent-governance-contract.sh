@@ -129,6 +129,12 @@ for marker in \
   'bounded correction budget'; do
   require_literal "$README" "$marker"
 done
+require_flat_literal "$README" \
+  'Start `betstan-conductor` before every unit whose result can block, approve, satisfy a gate, authorize mutation, or become dependency evidence'
+require_flat_literal "$README" \
+  'Every authority-bearing unit is registered regardless of synchronous or background execution'
+require_flat_literal "$README" \
+  'Every handoff preserves the original `root_task_authority_id`'
 
 simplifier_flat="$(tr '\n' ' ' <"$SIMPLIFIER" | tr -s '[:space:]' ' ')"
 for marker in \
@@ -149,6 +155,21 @@ done
 for marker in \
   'unit_class: quality-gate|intra-gate|specialist|supporting' \
   'logical_gate:' \
+  'task_authority: <immutable-root-user-request-or-canonical-pr-reference>' \
+  'root_task_authority_id: <stable-root-authority-id>' \
+  'repository_id: <canonical-owner-repository-or-not-applicable>' \
+  'workspace_root: <absolute-registered-worktree-or-not-applicable>' \
+  'repository_root: <resolved-git-root-or-not-applicable>' \
+  'expected_base_ref: <authoritative-git-ref-or-not-applicable>' \
+  'expected_base_sha: <full-sha-or-not-applicable>' \
+  'expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>' \
+  'expected_head_sha: <full-sha-or-not-applicable>' \
+  'expected_merge_base_sha: <full-sha-or-not-applicable>' \
+  'expected_tree_sha: <full-git-tree-sha-or-not-applicable>' \
+  'changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>' \
+  'evidence_scope: <all-changed-paths-or-explicit-paths-or-not-applicable>' \
+  'policy_source_path: <repo-relative-path-or-not-applicable>' \
+  'policy_source_sha: <full-sha-or-not-applicable>' \
   'max_attempts:' \
   'handoff_ack_due_at:' \
   'Never create status-only, summary-only, or handoff-only agents' \
@@ -156,6 +177,105 @@ for marker in \
   'three independent simplifier passes plus synthesis'; do
   require_literal "$CONDUCTOR" "$marker"
 done
+require_flat_literal "$CONDUCTOR" \
+  'Never accept repository evidence from an ambient or sibling worktree'
+require_flat_literal "$CONDUCTOR" \
+  'Before any work unit starts whose output can block, approve, satisfy a gate, authorize mutation, or become dependency evidence, require one registration regardless of synchronous/background execution or expected duration'
+require_literal "$CONDUCTOR" '`STALE_EVIDENCE`'
+require_flat_literal "$CONDUCTOR" \
+  '`task_authority` is the immutable root user request that names the target workspace and refs'
+require_flat_literal "$CONDUCTOR" \
+  'It never changes during the workflow'
+require_flat_literal "$CONDUCTOR" \
+  'Every downstream handoff carries the same `root_task_authority_id`'
+require_flat_literal "$CONDUCTOR" \
+  'it cannot redefine the repository, workspace, base, or head'
+require_flat_literal "$CONDUCTOR" \
+  'Before registration, the conductor derives repository identity, workspace, base, and head from the root authority'
+require_flat_literal "$CONDUCTOR" \
+  'caller-supplied registration values are comparisons, never the source of truth'
+require_flat_literal "$CONDUCTOR" \
+  'Any handoff or registration that breaks root-authority continuity is `STALE_EVIDENCE`'
+require_flat_literal "$CONDUCTOR" \
+  '`repository_id` is the canonical GitHub `owner/repository`'
+require_flat_literal "$CONDUCTOR" \
+  '`expected_base_ref` identifies the authoritative comparison source for a diff-based unit'
+require_flat_literal "$CONDUCTOR" \
+  '`expected_base_sha` is its immutable resolved value'
+require_flat_literal "$CONDUCTOR" \
+  '`expected_head_ref` identifies the authoritative remote branch or PR head'
+require_flat_literal "$CONDUCTOR" \
+  '`expected_merge_base_sha` is the canonical merge base for diff review'
+require_flat_literal "$CONDUCTOR" \
+  '`expected_tree_sha` is the immutable Git tree for `expected_head_sha`'
+require_flat_literal "$CONDUCTOR" \
+  '`changed_paths_sha256` hashes the NUL-delimited name/status manifest returned by `git diff --name-status -z <merge-base> <head>`'
+require_flat_literal "$CONDUCTOR" \
+  '`evidence_scope` is either every changed path or an explicit subset that cannot approve outside that subset'
+require_flat_literal "$CONDUCTOR" \
+  '`policy_source_path` names the repository-relative canonical policy file'
+require_flat_literal "$CONDUCTOR" \
+  '`policy_source_sha` is that file'
+require_flat_literal "$CONDUCTOR" \
+  'Any repository-derived result that can block, approve, or authorize mutation must be produced from a clean committed snapshot'
+require_flat_literal "$CONDUCTOR" \
+  'The conductor itself runs `git -C <workspace_root>` probes for the Git top level, `HEAD`, `HEAD^{tree}`, porcelain status, hidden index flags, submodule state, and ancestry at registration and immediately before acceptance'
+require_flat_literal "$CONDUCTOR" \
+  'independently queries the exact `repository_id` through the GitHub API at those same two checkpoints'
+require_flat_literal "$CONDUCTOR" \
+  'exact `repository_id` through the GitHub API at those same two checkpoints to resolve the base/head refs, commit tree, merge base, and policy blob'
+require_flat_literal "$CONDUCTOR" \
+  'fresh isolated bare object store with no alternates, grafts, or replacement refs'
+require_flat_literal "$CONDUCTOR" \
+  'Every tree, ancestry, diff, and blob command runs with `GIT_NO_REPLACE_OBJECTS=1`'
+require_flat_literal "$CONDUCTOR" \
+  'derives the complete changed-path manifest there from the registered merge base and head'
+require_flat_literal "$CONDUCTOR" \
+  'a capped, partial, or otherwise unprovably complete provider file list is unverifiable'
+require_flat_literal "$CONDUCTOR" \
+  'never treats a local remote alias or tracking ref as authority'
+require_flat_literal "$CONDUCTOR" \
+  'verifies every evidence-scope file against its canonical blob'
+require_flat_literal "$CONDUCTOR" \
+  'An all-changed-files gate must consume the complete unfiltered canonical compare manifest'
+require_flat_literal "$CONDUCTOR" \
+  'Uncommitted advisory review may propose changes, but it cannot satisfy a quality, merge, deployment, or approval gate until rerun on a clean commit'
+require_flat_literal "$CONDUCTOR" \
+  'For units that interpret neither repository code nor policy, every Git provenance field is `not-applicable`'
+require_flat_literal "$CONDUCTOR" \
+  'Immediately before accepting or consuming the result, the conductor also audits the registered agent runtime'
+require_flat_literal "$CONDUCTOR" \
+  'Every repository file access must resolve under `workspace_root`'
+require_flat_literal "$CONDUCTOR" \
+  'every repository command must record that root as its working directory or use an explicit `git -C <workspace_root>`'
+require_flat_literal "$CONDUCTOR" \
+  'Diff-based reads and commands must use the registered `expected_merge_base_sha..expected_head_sha` endpoints'
+require_flat_literal "$CONDUCTOR" \
+  'equivalent to Git'
+require_flat_literal "$CONDUCTOR" \
+  'If tool-path, comparison-range, or changed-path coverage evidence is unavailable, the result is unverifiable'
+require_flat_literal "$CONDUCTOR" \
+  'Local test output is advisory only and cannot satisfy the test gate'
+require_flat_literal "$CONDUCTOR" \
+  'require trusted CI bound to the canonical exact commit'
+require_flat_literal "$CONDUCTOR" \
+  'Merge or deployment authority always requires those trusted exact-SHA checks'
+require_flat_literal "$CONDUCTOR" \
+  'Authority-bearing code and policy conclusions must read immutable Git objects'
+require_flat_literal "$CONDUCTOR" \
+  'using an exact-SHA GitHub API request, `git show <sha>:<path>`, or the registered merge-base/head object diff'
+require_flat_literal "$CONDUCTOR" \
+  'A mutable working-file read is advisory only'
+require_flat_literal "$CONDUCTOR" \
+  'any authoritative citation must be reproducible from the registered canonical objects'
+require_flat_literal "$CONDUCTOR" \
+  'A missing required provenance value, failed probe, or mismatch is `STALE_EVIDENCE`'
+require_flat_literal "$CONDUCTOR" \
+  'it cannot block, approve, authorize mutation, satisfy a gate, or become dependency evidence anywhere'
+require_flat_literal "$CONDUCTOR" \
+  'Return one bounded correction to the same agent context naming the exact worktree and SHAs'
+require_flat_literal "$CONDUCTOR" \
+  'if it repeats the mismatch, close that advisory result as unavailable'
 require_flat_literal "$CONDUCTOR" \
   'Every other PR remains approval-bound to its exact current head SHA'
 

@@ -69,11 +69,13 @@ policy blocks.
 
 ## Conductor loop
 
-Start `betstan-conductor` before parallel agents, background validation, or a
-long GitHub Actions operation. Register each unit with one owner, a bounded
-objective, dependencies, an exact private runtime reference, a progress signal,
-a checkpoint, a next-check trigger, and a stop condition. Keep those references
-in private session handoffs, not repository files or public reports.
+Start `betstan-conductor` before every unit whose result can block, approve,
+satisfy a gate, authorize mutation, or become dependency evidence, including
+short synchronous work. Register each unit with one owner, a bounded objective,
+dependencies, an exact private runtime reference, repository provenance when
+applicable, a progress signal, a checkpoint, a next-check trigger, and a stop
+condition. Keep those references in private session handoffs, not repository
+files or public reports.
 
 The conductor monitors completion events and bounded checkpoints rather than
 tight-polling. A still-running `gh run watch` is notification transport, not
@@ -280,6 +282,7 @@ risks: []
 approvals: []
 
 orchestration:
+  root_task_authority_id: <stable-root-authority-id>
   work_id: <stable-kebab-id>
   logical_gate: <architect|simplifier|developer|critic|test|final-validator>
   unit_class: <quality-gate|intra-gate|specialist|supporting>
@@ -299,9 +302,12 @@ orchestration:
 
 Required invariants:
 
-- Every parallel/background unit is registered with one owner, a checkpoint,
-  a maximum checkpoint interval, a recovery action, a stop condition, and
-  required terminal evidence.
+- Every authority-bearing unit is registered regardless of synchronous or
+  background execution, with one owner, a checkpoint, a maximum checkpoint
+  interval, a recovery action, a stop condition, and required terminal
+  evidence.
+- Every handoff preserves the original `root_task_authority_id`; it may narrow
+  scope but cannot redefine repository, workspace, base, or head.
 - Every quality gate has one logical `work_id`, one exact next owner, and a
   bounded correction count.
 - Three simplifier pass records use distinct model families and one synthesized
