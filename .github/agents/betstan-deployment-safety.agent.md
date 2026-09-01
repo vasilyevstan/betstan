@@ -60,13 +60,40 @@ inactive. Fail closed when either query is incomplete or fails.
   first-attempt manual dispatch for a non-current SHA plus a later successful
   first-attempt run for the exact workflow and SHA. Never apply this exception
   to deployment, activation, rollback, infrastructure, or data workflows.
-- Use `copilot-cli-run-approval-stan.sh` for protected build/deploy
-  environments in automatic mode. Exact-title capacity acquisition,
-  infrastructure `finalize`, and the bounded live-data phases may also run
-  automatically on current CLI-managed `master`. Legacy OCIR registry
-  validation/pruning is retired and must never be approved. Never
-  auto-approve infrastructure `prepare`, broad migration, recovery, rollback,
-  stale-master, rerun, unlabelled, or competing workflow activity.
+- Classify protected approval by origin, not workflow type. Every direct
+  Copilot CLI operation must use `copilot-cli-dispatch-stan.sh` and its exact
+  private one-run authority record; this includes infrastructure `prepare`,
+  GHCR management and cache repair, broad migration, recovery, and rollback.
+  Automatic build/recovery runs must trace to the exact labelled promotion or
+  consumed upstream record. Human dispatches, schedules, stale master, reruns,
+  missing or mismatched records, and competing activity are never
+  auto-approved.
+- Run dispatcher and approver code only from a clean checkout at exact current
+  `master`. Require the shared policy's exact workflow ID/path/blob, event,
+  title, environment, transport input hash, control/subject/target SHA roles,
+  pending job, first attempt, and production exclusivity immediately before
+  approval. Require the private `dispatching` intent and durable capture to
+  exist before direct dispatch mutation; use `--resume-captured` or
+  `--resume-run` for their exact recovery. Promotion-derived builds require
+  durable automatic records. An ambiguous approval POST leaves an `inflight`
+  record and must use `--reconcile`, never direct replay. Require a new exact
+  approved GitHub review for the same downstream run and operation relative to
+  the recorded pre-POST reviewer/comment/environment baseline before consuming
+  it; gate disappearance or terminal status alone stays unresolved. Accept
+  `retired` only for an exact terminal run with zero jobs and zero pending
+  deployments.
+- Treat any unresolved intent or `claimed`/`inflight` record as a global
+  protected-dispatch fence for the same repository and control SHA.
+  `issued`/`consumed` authority is one-use for the same operation and exact
+  transport input hash; changed inputs remain subject to every normal check.
+- Require `disabled_manually` at approval for capacity, infrastructure,
+  activation, live-data, migration-recovery, and production-deploy workflows;
+  require `active` for every other protected workflow. Revalidate current
+  master, workflow blob/state, and promotion authority after the local
+  approval claim. Drift must release that exact claim and prohibit the POST.
+- Fail production exclusivity closed unless every active-run response has a
+  nonnegative integer count, an array of runs, exact count/list agreement, and
+  no pagination overflow.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
@@ -80,11 +107,13 @@ inactive. Fail closed when either query is incomplete or fails.
 - Inventory every production-capable workflow before reasoning about triggers.
   OCI is the operational service primary and is active; that statement is not
   evidence that Azure data cutover or retirement is complete. The governed set includes `production-build`,
-  `production-deploy`, `oci-production-build`, `oci-production-deploy`,
-  `oci-infrastructure`, `oci-capacity-acquire`, `oci-live-data-rollout`,
-  `oci-live-betting-activate`, `oci-live-betting-disable`, `oci-migrate`, and the
-  stop-only `oci-migration-recovery`; use the checked-in inventory as
-  authority when it changes.
+  `production-deploy`, `production-rollback`, `oci-production-build`,
+  `oci-production-deploy`, `oci-production-rollback`, `oci-infrastructure`,
+  `oci-capacity-acquire`, `ghcr-package-management`,
+  `oci-ghcr-cache-recovery`, `oci-live-data-rollout`,
+  `oci-live-betting-activate`, `oci-live-betting-disable`, `oci-migrate`, and
+  the stop-only `oci-migration-recovery`; use the checked-in policy and
+  inventory as authority when they change.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - OCI application images are public GHCR only:
@@ -98,9 +127,10 @@ inactive. Fail closed when either query is incomplete or fails.
   package metadata/retention if repository package-admin access is absent; it
   must never publish images or reach the runtime.
 - `ghcr-package-management` bootstrap/validate/prune/repair-build and
-  `oci-ghcr-cache-recovery` are production-capable, human-approved workflows.
-  They remain in production-run exclusivity but are never Copilot
-  auto-approvable. The sentinel may establish package linkage but does not
+  `oci-ghcr-cache-recovery` are production-capable protected workflows. They
+  may auto-approve only when the exact run was issued by the CLI dispatcher;
+  direct human runs remain personally gated. The sentinel may establish
+  package linkage but does not
   prove public visibility. Build repair must bind an exact failed
   first-attempt build to its successful first-attempt upstream, then rebuild
   and compare every existing exact tag's ARM64 platform digest while

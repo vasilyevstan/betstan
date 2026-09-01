@@ -8,6 +8,8 @@ BUILD_WORKFLOW="$ROOT_DIR/.github/workflows/production-build.yml"
 OCI_DEPLOY_SCRIPT="$ROOT_DIR/infra/oci/scripts/deploy.sh"
 PRE_COMMIT_CHECK="$ROOT_DIR/infra/azure/agents/pre-commit-infra-check-stan.sh"
 PR_MERGE_SAFETY_TEST="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
+PROTECTED_OPERATION_POLICY_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-protected-operation-policy-stan.sh"
+CLI_DISPATCH_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-dispatch-stan.sh"
 RUN_APPROVAL_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-run-approval-stan.sh"
 RUN_EXCLUSIVITY_TEST="$ROOT_DIR/infra/azure/agents/test-production-run-exclusivity-stan.sh"
 LIVE_DATA_ROLLOUT_TEST="$ROOT_DIR/infra/oci/tests/test-live-betting-data-rollout-stan.sh"
@@ -29,10 +31,13 @@ if grep -qF "direct work on master is forbidden" "$test_output"; then
 fi
 
 "$PR_MERGE_SAFETY_TEST"
+"$PROTECTED_OPERATION_POLICY_TEST"
+"$CLI_DISPATCH_TEST"
 "$RUN_APPROVAL_TEST"
 "$RUN_EXCLUSIVITY_TEST"
 "$LIVE_DATA_ROLLOUT_TEST"
 "$GHCR_CONTRACT_TEST"
+python3 -B -m py_compile "$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 
 python3 - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import pathlib

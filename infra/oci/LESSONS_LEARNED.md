@@ -567,6 +567,15 @@ conversation summaries are not authority.
   until that run has at least one job and the expected protected environment,
   then disable before approval. Disabling immediately can leave a permanent
   jobless queued record.
+- Unresolved dispatch authority is a same-release global fence. Any intent or
+  `claimed`/`inflight` record blocks all protected requests for the repository
+  and control SHA, even if a caller changes inputs. Exact `issued`/`consumed`
+  requests are one-use; only a genuinely changed request may start after full
+  safety validation.
+- Revalidate master, workflow blob/state, and promotion authority both after a
+  pristine dispatch intent and after an approval claim. Pre-dispatch drift
+  cancels only the untouched intent; pre-approval drift releases the exact
+  claim and sends no GitHub mutation.
 - If a local command exits after printing a run URL, query that exact run
   before dispatching again. Display titles can remain generic before inputs
   materialize, so title matching alone can falsely report that no run exists.
@@ -602,3 +611,41 @@ artifacts remain retained. The earliest current required artifact expires at
 30-day age limit earlier at `2026-09-28T11:18:50Z`. Rotate or recertify the
 fallback before the earlier cutoff or when a newer release becomes the
 accepted rollback target.
+
+## Corrected compact release and CLI gate authority — 2026-08-31
+
+Exact master `f4a0b333963b3a458c9b2b48c2aae1f6267f754d` completed build
+`33436391225`, OCI build `33437490565`, GHCR validation `33438579478`,
+capacity `33438984944`, infrastructure `33439362885`, data runs
+`33440517994`/`33441373219`/`33442790087`, dark deployment `33443908124`,
+and permanent activation `33444998653`. The compatibility backfill changed
+seven legacy Event boards and converged to zero; no Slip or Bet snapshot was
+rewritten. Terminal validation passed image, topology, queue, ingress,
+REST/SSE, pricing, and responsive-browser checks. Live kickoffs are committed
+with no lease.
+
+The failed activation `33419673381` remains immutable. Its cleanup evidence is
+retained, while the later exact-SHA chain proves the corrected five-visible-
+card contract and plausible persisted pricing.
+
+All protected OCI operations may auto-approve when, and only when, the active
+Copilot CLI created the exact dispatch through the checked-in policy
+dispatcher. The private record binds the returned run ID, current master
+control code, workflow identity/blob, transport input hash, title, environment,
+subject, and historical target. Direct human and scheduled runs have no record
+and remain personally gated. Automatic OCI build repair and migration
+recovery must trace to the exact consumed upstream record.
+
+Treat authority state as production evidence. A `dispatching` intent exists
+before GitHub mutation and owns the durable run-URL capture; recover it with
+`--resume-captured`, not another dispatch. `claimed` means the bound run still
+needs exact materialization, `issued` means it may approve, `inflight` means an
+approval result is ambiguous and requires explicit `--reconcile` against the
+same downstream run/operation plus the pre-POST exact
+reviewer/comment/environment review-history baseline, and
+`consumed` retains non-replayable receipts for later gates or explicitly
+allowed descendants. `retired` is reserved for an exact terminal run with zero
+jobs and zero pending deployments. Promotion-derived builds use the same
+durable approval receipts. This removes personal prompts for CLI-owned work
+without weakening first-attempt, current-master, provenance, expiry,
+exclusivity, rollback, or post-operation gates.

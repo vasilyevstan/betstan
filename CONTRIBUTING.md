@@ -57,15 +57,65 @@ immutable-SHA gates, or production safety.
 Do not merge a PR until `pr-merge-safety-stan.sh` passes in the correct
 automatic or human mode for its exact current head.
 
-Protected environment approval for CLI-managed work uses `copilot-cli-run-approval-stan.sh`. It additionally requires current `master`, a single associated labelled `dev` promotion, first-attempt workflow provenance, the exact expected environment, and no competing production workflow. Automatic approval is limited to application build/deploy/activation, exact-title capacity and registry/finalize phases, and the bounded `oci-live-data-rollout` chain. Broad migration, recovery, rollback, stale-master, rerun, unlabelled, and competing runs remain human-gated.
+Protected environment approval is classified by origin, not workflow type.
+Every protected operation dispatched by the active Copilot CLI must use
+`copilot-cli-dispatch-stan.sh` with an operation-specific JSON request stored
+outside the repository. Before calling GitHub, the dispatcher persists a
+private `dispatching` intent and mode-`0600` output capture. It then binds the
+exact returned run ID, workflow ID/path/blob, transport input hash, current
+control SHA, subject or historical target SHA, title, event, and environment
+to a private one-run authority record. `copilot-cli-run-approval-stan.sh` may
+approve that exact first attempt without a personal prompt. Automatic build
+chains receive the same durable approval record after deriving authority from
+the labelled promotion and exact upstream run; recovery chains must derive
+from an exact consumed upstream record. A human dispatch, direct
+`gh workflow run`, scheduled run, stale master, rerun, mismatched record, or
+competing production run remains personally gated.
 
-Public GHCR package bootstrap/validation/prune, partial-build repair, and
-cached-image recovery are also production-capable and remain in the
-exclusivity inventory, but are always human-gated. A package sentinel does not
-replace the one-time Package settings visibility change or the required
-anonymous-pull proof. Build repair must cite the exact failed first-attempt
-build and its successful first-attempt `production-build`; it rebuilds and
-digest-compares existing tags instead of trusting or overwriting them.
+This authority applies equally to deploy, activation, capacity,
+infrastructure, GHCR package management and cache repair, live-data work,
+broad migration, recovery, and rollback. It never bypasses workflow
+confirmations, package visibility checks, provenance, rollback readiness,
+runtime locks, or post-operation validation. A package sentinel still does
+not replace the one-time Package settings visibility change or anonymous-pull
+proof. Build repair must cite the exact failed first-attempt build and its
+successful first-attempt `production-build`; it rebuilds and digest-compares
+existing tags instead of trusting or overwriting them.
+
+The repository and `gh` use one GitHub identity, so the private one-run record
+is an operational ownership boundary rather than cryptographic identity.
+Never create, copy, or retrofit a record for a human-created run. An ambiguous
+dispatch with no captured run URL remains blocked for explicit operator
+reconciliation; never infer a run from timing or title. After a dispatcher
+crash, use `--resume-captured` when the durable capture contains the URL, or
+`--resume-run <run-id>` after a bound run has not materialized. A terminal
+first-attempt run may become `retired` only when it has zero jobs and zero
+pending deployments. An ambiguous approval response leaves the record
+`inflight`; use the approver's explicit `--reconcile` path and never replay the
+POST directly. Reconciliation may consume the gate only when GitHub review
+history contains a new exact approved review for the recorded reviewer,
+comment, environment, downstream run, and operation. Otherwise it restores
+retry authority only while the same active gate remains, or stays unresolved
+and fail-closed.
+
+Any unresolved `dispatching` or `bound` intent, or `claimed` or `inflight`
+record, blocks every protected dispatch for the same repository and control
+SHA even when the requested operation or inputs differ. An `issued` or
+`consumed` record blocks the same operation and exact transport input hash;
+changed inputs are a new request and still require all normal policy,
+lineage, exclusivity, and recovery checks. `retired` is the only inert
+replacement exception. After persisting a pristine dispatch intent, recheck
+master, workflow blob, and active state before dispatch and cancel only that
+untouched intent if authority drifted.
+
+The shared policy also declares the required workflow state at approval.
+`oci-capacity-acquire.yml`, `oci-infrastructure.yml`,
+`oci-live-betting-activate.yml`, `oci-live-data-rollout.yml`,
+`oci-migration-recovery.yml`, and `oci-production-deploy.yml` must be
+`disabled_manually`; every other protected workflow must be `active`.
+Revalidate control, workflow state/blob, and promotion authority after the
+local `inflight` claim. If they changed, release the exact claim back to its
+previous `issued` or `consumed` state and do not call GitHub.
 
 Every OCI release requires a new exact-SHA final
 `oci-live-data-rollout` handoff before deployment. Application or schema
@@ -88,10 +138,11 @@ For a manually disabled production workflow, a successful dispatch command or
 returned run URL proves only that GitHub accepted the event. Keep the workflow
 enabled until the captured exact run has a real job and, when protected, the
 expected `pending_deployments` gate. Then disable it before approval. Capture
-the run ID from the returned URL instead of depending on an early display
-title. If a local command fails after returning a URL, inspect that exact run
-before any retry. A jobless queued record with zero jobs and zero pending
-deployments is not release authority and must never be approved or rerun.
+the run ID through the policy dispatcher's durable capture instead of
+depending on an early display title. Recover a captured URL or delayed bound
+run through the exact resume path; never redispatch it. A terminal record with
+zero jobs and zero pending deployments is not release authority and may only
+be persisted as `retired`; it must never be approved or rerun.
 
 Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, staged, and untracked work.
 
