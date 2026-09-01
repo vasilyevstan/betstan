@@ -541,11 +541,8 @@ conversation summaries are not authority.
   tallest sibling, anchor prices to one baseline, and let ten-option Correct
   Score boards switch between balanced five- and two-column layouts based on
   their own container width.
-- Generalize these checks through the product-wide UX consistency contract.
-  Name the stable route/component/token reference, compare relevant states,
-  variants, themes, and responsive modes, and classify each divergence as a
-  required fix, documented semantic exception, or optional polish. Do not
-  treat the latest screenshot as the design system.
+- Classify live-betting UX observations through the product-wide
+  named-reference and exception taxonomy in `docs/wiki/UI-UX-Consistency.md`.
 - `$setOnInsert` protects scheduler convergence but also means a corrected
   generator cannot rewrite the current event pool. Repair implausible
   non-terminal boards through the existing event compatibility backfill with

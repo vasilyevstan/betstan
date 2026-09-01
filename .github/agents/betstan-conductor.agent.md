@@ -275,10 +275,10 @@ its owner. It is never healthy by default.
 - At a checkpoint, inspect each exact reference once. Record elapsed time,
   current phase, the latest real progress signal, the next expected event, and
   who owns the next action.
-- Before classifying an executing GitHub job as `SUSPECTED_STALL`, compare its
-  current step and elapsed time with recent successful same-workflow,
-  same-job runs. Historical duration informs the checkpoint; it never excuses
-  a missed progress signal, an actionable approval, or a completed handoff.
+- At every checkpoint, apply the recovery ladder's same-workflow/same-job
+  duration comparison before classifying `SUSPECTED_STALL`; historical
+  duration never excuses a missing progress signal, actionable approval, or
+  completed handoff.
 - A user request for status or a suspicion that work is stuck is an immediate
   checkpoint for every active critical-path unit. Answer from the underlying
   agent, process, or GitHub job state, never only from a still-running watcher.
