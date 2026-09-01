@@ -15,6 +15,10 @@ import NewEventListener from "../../messaging/listener/NewEventListener";
 import EventVisibilityListener from "../../messaging/listener/EventVisibilityListener";
 import { Event } from "../../model/Event";
 
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 // Regression coverage for independently reported ordering/reconciliation
 // bugs in the live-event retention/handoff mechanism:
 //   1. The T-10 PRE_MATCH retirement side effect must only run for an
@@ -489,6 +493,70 @@ it("keeps a completed OFFLINE decision authoritative after it supersedes an earl
   expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
 });
 
+it("keeps a concurrent admin OFFLINE decision authoritative during full-time race recovery", async () => {
+  const eventId = "race-recovery-admin-offline-interleaving";
+  await Event.create({
+    eventId,
+    name: "Race Recovery Admin Offline",
+    time: new Date("2030-01-01T12:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.OFFLINE,
+    visibilityInitialized: true,
+    eventMetadataInitialized: true,
+    liveRaceResultedAt: new Date("2030-01-01T13:40:00.000Z"),
+    products: [],
+  });
+
+  const visibilityListener = new EventVisibilityListener(
+    messengerWrapper.connection
+  );
+  await visibilityListener.init();
+
+  const originalUpdateOne = Event.updateOne.bind(Event);
+  let injectedOfflineDecision = false;
+  (
+    jest.spyOn(Event, "updateOne") as unknown as jest.Mock
+  ).mockImplementation((...args: any[]) =>
+    (async () => {
+      const [filter, update, options] = args;
+      if (
+        !injectedOfflineDecision
+        && Array.isArray(update)
+        && (filter as { eventId?: string }).eventId === eventId
+      ) {
+        injectedOfflineDecision = true;
+        await visibilityListener.onMessage(
+          {
+            timestamp: new Date().toISOString(),
+            data: { eventId, visibility: EventVisibility.OFFLINE },
+          },
+          buildMessage()
+        );
+      }
+
+      return originalUpdateOne(filter, update, options).exec();
+    })()
+  );
+
+  const repairedSnapshot = await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  expect(repairedSnapshot?.status).toEqual(EventStatus.RESULTED);
+  expect(repairedSnapshot?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(repairedSnapshot?.live?.phase).toEqual(EventPhase.FULL_TIME);
+
+  const storedEvent = await Event.findOne({ eventId }).lean();
+  expect(storedEvent?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent?.visibilityDecision).toEqual(EventVisibility.OFFLINE);
+  expect(storedEvent?.pendingVisibility).toBeUndefined();
+  expect(storedEvent?.live?.phase).toEqual(EventPhase.FULL_TIME);
+  expect(storedEvent?.liveRaceResultedAt ?? null).toBeNull();
+
+  const listed = await listPublicEvents(new Date("2030-01-01T13:46:00.000Z"));
+  expect(listed.map((entry) => entry.eventId)).not.toContain(eventId);
+});
+
 it("keeps a pending ONLINE result hidden until FULL_TIME, then restores the retained card without reopening the result", async () => {
   const eventId = "race-then-pending-online-decision";
   await Event.create({
@@ -519,6 +587,74 @@ it("keeps a pending ONLINE result hidden until FULL_TIME, then restores the reta
   expect(afterFullTime?.visibility).toEqual(EventVisibility.ONLINE);
   expect(afterFullTime?.status).toEqual(EventStatus.RESULTED);
   expect(afterFullTime?.liveRaceResultedAt ?? null).toBeNull();
+});
+
+it("keeps a full-time pending-ONLINE placeholder hidden until NewEvent resolves authority", async () => {
+  const eventId = "visibility-online-result-fulltime-before-newevent";
+
+  const visibilityListener = new EventVisibilityListener(
+    messengerWrapper.connection
+  );
+  await visibilityListener.init();
+  await visibilityListener.onMessage(
+    {
+      timestamp: new Date().toISOString(),
+      data: { eventId, visibility: EventVisibility.ONLINE },
+    },
+    buildMessage()
+  );
+
+  const resultListener = new EventResultListener(messengerWrapper.connection);
+  await resultListener.init();
+  await resultListener.onMessage(
+    {
+      timestamp: new Date().toISOString(),
+      data: { eventId, homeScore: 1, awayScore: 0, home: "Team C", away: "Team D" },
+    } as IEventResultEvent,
+    buildMessage()
+  );
+
+  await applyLiveEventUpdate(
+    buildFullTimeLiveUpdate(eventId, "2030-01-01T12:00:00.000Z")
+  );
+
+  const beforeOnboarding = await Event.findOne({ eventId }).lean();
+  expect(beforeOnboarding?.status).toEqual(EventStatus.RESULTED);
+  expect(beforeOnboarding?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(beforeOnboarding?.pendingVisibility).toEqual(EventVisibility.ONLINE);
+  expect(beforeOnboarding?.live?.phase).toEqual(EventPhase.FULL_TIME);
+  expect(beforeOnboarding?.liveRaceResultedAt ?? null).toBeNull();
+
+  const hiddenList = await listPublicEvents(new Date("2030-01-01T13:46:00.000Z"));
+  expect(hiddenList.map((entry) => entry.eventId)).not.toContain(eventId);
+
+  const newEventListener = new NewEventListener(messengerWrapper.connection);
+  await newEventListener.init();
+  await newEventListener.onMessage(
+    {
+      sender: "other_service",
+      timestamp: new Date().toISOString(),
+      data: {
+        id: eventId,
+        name: "Team C - Team D",
+        time: "2030-01-01T12:00:00.000Z",
+        home: "Team C",
+        away: "Team D",
+      },
+    } as INewEventEvent,
+    buildMessage()
+  );
+
+  const afterOnboarding = await Event.findOne({ eventId }).lean();
+  expect(afterOnboarding?.status).toEqual(EventStatus.RESULTED);
+  expect(afterOnboarding?.visibility).toEqual(EventVisibility.ONLINE);
+  expect(afterOnboarding?.pendingVisibility).toBeUndefined();
+  expect(afterOnboarding?.eventMetadataInitialized).toBe(true);
+  expect(afterOnboarding?.visibilityInitialized).toBe(true);
+  expect(afterOnboarding?.live?.phase).toEqual(EventPhase.FULL_TIME);
+
+  const visibleList = await listPublicEvents(new Date("2030-01-01T13:46:00.000Z"));
+  expect(visibleList.map((entry) => entry.eventId)).toContain(eventId);
 });
 
 it("re-hides a delayed non-terminal update after NewEvent restored visibility, then exposes only FULL_TIME", async () => {

@@ -25,50 +25,58 @@ describe('Product1X2', () => {
     axios.post.mockResolvedValue({});
   });
 
-  it('renders the actual selection name (not a generic Home/Away placeholder) as the visible label, satisfying label-in-name', () => {
+  it('renders a safely mapped board as semantic 1/X/2 controls with full accessible identity', () => {
     render(
       <Product1X2
+        away="Owls"
         eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
         product={product}
         selectedSelectionKeys={new Set()}
         uiVariant="v2"
       />,
     );
 
-    // The visible label must be the real selection name...
-    expect(screen.getByText('Falcons')).toBeInTheDocument();
-    expect(screen.getByText('Draw')).toBeInTheDocument();
-    expect(screen.getByText('Owls')).toBeInTheDocument();
-    // ...and never a generic positional placeholder standing in for it.
-    expect(screen.queryByText('Home')).toBeNull();
-    expect(screen.queryByText('Away')).toBeNull();
+    const homeButton = screen.getByRole('button', {
+      name: 'Select 1X2 1: Falcons in Falcons - Owls at 1.6',
+    });
+    const drawButton = screen.getByRole('button', {
+      name: 'Select 1X2 X: Draw in Falcons - Owls at 3.2',
+    });
+    const awayButton = screen.getByRole('button', {
+      name: 'Select 1X2 2: Owls in Falcons - Owls at 4.5',
+    });
 
-    // Label-in-name: the visible text must be a substring of the accessible name.
-    const homeButton = screen.getByRole('button', { name: 'Select 1X2 Falcons at 1.6' });
-    const drawButton = screen.getByRole('button', { name: 'Select 1X2 Draw at 3.2' });
-    const awayButton = screen.getByRole('button', { name: 'Select 1X2 Owls at 4.5' });
-
+    expect(homeButton.querySelector('.product-button__label')).toHaveTextContent('1');
+    expect(drawButton.querySelector('.product-button__label')).toHaveTextContent('X');
+    expect(awayButton.querySelector('.product-button__label')).toHaveTextContent('2');
     expect(homeButton).toHaveAccessibleName(expect.stringContaining('Falcons'));
-    expect(drawButton).toHaveAccessibleName(expect.stringContaining('Draw'));
     expect(awayButton).toHaveAccessibleName(expect.stringContaining('Owls'));
-    expect(homeButton.querySelector('.product-button__label')).toHaveTextContent('Falcons');
-    expect(drawButton.querySelector('.product-button__label')).toHaveTextContent('Draw');
-    expect(awayButton.querySelector('.product-button__label')).toHaveTextContent('Owls');
   });
 
-  it('retains price, disabled state, and click behavior alongside the corrected label', async () => {
+  it('preserves the exact odds ID and price when semantic presentation reorders the board', async () => {
     const onSelectionPlaced = jest.fn();
+    const reorderedProduct = {
+      ...product,
+      odds: [product.odds[2], product.odds[0], product.odds[1]],
+    };
     render(
       <Product1X2
+        away="Owls"
         eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
         onSelectionPlaced={onSelectionPlaced}
-        product={product}
+        product={reorderedProduct}
         selectedSelectionKeys={new Set()}
         uiVariant="v2"
       />,
     );
 
-    const homeButton = screen.getByRole('button', { name: 'Select 1X2 Falcons at 1.6' });
+    const homeButton = screen.getByRole('button', {
+      name: 'Select 1X2 1: Falcons in Falcons - Owls at 1.6',
+    });
     expect(homeButton).toHaveTextContent('1.6');
     expect(homeButton).toBeEnabled();
 
@@ -80,10 +88,67 @@ describe('Product1X2', () => {
     });
   });
 
+  it('falls back to original labels and order when event identity is ambiguous', () => {
+    const malformedProduct = {
+      ...product,
+      odds: [
+        { id: 'draw-home', name: 'Draw', value: 1.6 },
+        { id: 'draw', name: 'Draw', value: 3.2 },
+        { id: 'away', name: 'Owls', value: 4.5 },
+      ],
+    };
+
+    render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Draw - Owls"
+        home="Draw"
+        product={malformedProduct}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    expect(screen.getAllByText('Draw')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Select 1X2 Owls at 4.5' }))
+      .toBeInTheDocument();
+    expect(screen.queryByText('1')).toBeNull();
+  });
+
+  it('keeps an incomplete legacy board balanced with a disabled placeholder', () => {
+    const incompleteProduct = {
+      ...product,
+      odds: product.odds.slice(0, 2),
+    };
+    const { container } = render(
+      <Product1X2
+        away="Owls"
+        eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
+        product={incompleteProduct}
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    expect(container.querySelectorAll('.product-1x2-grid > div')).toHaveLength(3);
+    expect(screen.getByRole('button', { name: 'Select 1X2 Falcons at 1.6' }))
+      .toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Select 1X2 Draw at 3.2' }))
+      .toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Unavailable 1X2 selection' }))
+      .toBeDisabled();
+  });
+
   it('disables every control when the event is resulted', () => {
     render(
       <Product1X2
+        away="Owls"
         eventId="event-1"
+        eventName="Falcons - Owls"
+        home="Falcons"
         product={product}
         resulted
         selectedSelectionKeys={new Set()}
@@ -91,8 +156,8 @@ describe('Product1X2', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'Select 1X2 Falcons at 1.6' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Select 1X2 Draw at 3.2' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Select 1X2 Owls at 4.5' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Select 1X2 1:/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Select 1X2 X:/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Select 1X2 2:/ })).toBeDisabled();
   });
 });

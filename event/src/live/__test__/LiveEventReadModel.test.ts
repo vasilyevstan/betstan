@@ -111,7 +111,33 @@ const buildRawEventDocument = () => {
   };
 };
 
-const buildLiveUpdate = (sequence: number): ILiveEventUpdateEvent => ({
+type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
+type LiveEventUpdateData = ILiveEventUpdateEvent["data"] & {
+  incidents?: LiveUpdateIncident[];
+  incidentsComplete?: boolean;
+};
+
+const buildIncident = (
+  sequence: number,
+  overrides: Partial<LiveUpdateIncident> = {}
+): LiveUpdateIncident => ({
+  id: `incident-${sequence}`,
+  type: LiveIncidentType.GOAL,
+  side: TeamSide.HOME,
+  occurredAt: new Date(Date.UTC(2030, 0, 1, 12, sequence, 0)).toISOString(),
+  minute: sequence,
+  ...overrides,
+});
+
+const buildIncidentsThrough = (
+  sequence: number
+): NonNullable<LiveEventUpdateData["incidents"]> =>
+  Array.from({ length: sequence }, (_, index) => buildIncident(index + 1));
+
+const buildLiveUpdate = (
+  sequence: number,
+  overrides: Partial<LiveEventUpdateData> = {}
+): ILiveEventUpdateEvent => ({
   timestamp: new Date().toISOString(),
   data: {
     eventId: "event-id",
@@ -125,22 +151,18 @@ const buildLiveUpdate = (sequence: number): ILiveEventUpdateEvent => ({
     awayScore: 0,
     bettingStatus: BettingStatus.OPEN,
     incidents: [
-      {
-        id: "incident-1",
+      buildIncident(1, {
         relatedIncidentId: "incident-0",
-        type: LiveIncidentType.GOAL,
-        side: TeamSide.HOME,
+        addedTime: 1,
         occurredAt: "2030-01-01T12:03:00.000Z",
         minute: 3,
-        addedTime: 1,
-      },
-      {
-        id: "incident-2",
+      }),
+      buildIncident(2, {
         type: LiveIncidentType.YELLOW_CARD,
         side: TeamSide.AWAY,
         occurredAt: "2030-01-01T12:08:00.000Z",
         minute: 8,
-      },
+      }),
     ],
     markets: [
       {
@@ -163,6 +185,7 @@ const buildLiveUpdate = (sequence: number): ILiveEventUpdateEvent => ({
     eventName: "Team A - Team B",
     home: "Team A",
     away: "Team B",
+    ...overrides,
   },
 } as unknown as ILiveEventUpdateEvent);
 
@@ -248,6 +271,152 @@ it("creates immutable public snapshots without mutating source documents", () =>
   expect(
     Object.isFrozen(snapshot.live!.currentMarkets[0].selections[0])
   ).toEqual(true);
+});
+
+it("sorts numeric correct-score tuples while preserving malformed legacy board order", () => {
+  const rawEventDocument = buildRawEventDocument();
+  rawEventDocument.products = [
+    {
+      id: "correct-score-valid",
+      type: "CS",
+      name: "Correct Score",
+      internalProductFlag: true,
+      odds: [
+        { id: "cs-2-1", name: "2 - 1", value: 9.2, internalProbability: 0.12 },
+        { id: "cs-0-0", name: "0 - 0", value: 6.4, internalProbability: 0.15 },
+        { id: "cs-1-0", name: "1 - 0", value: 7.1, internalProbability: 0.14 },
+      ],
+    },
+    {
+      id: "correct-score-malformed",
+      type: "CS",
+      name: "Correct Score",
+      internalProductFlag: true,
+      odds: [
+        { id: "keep-1", name: "1 - 0", value: 7.1, internalProbability: 0.14 },
+        { id: "keep-2", name: "legacy", value: 99, internalProbability: 0.01 },
+        { id: "keep-3", name: "0 - 0", value: 6.4, internalProbability: 0.15 },
+      ],
+    },
+  ];
+
+  const snapshot = createPublicEventSnapshot(
+    rawEventDocument as Record<string, unknown>
+  );
+
+  expect(snapshot.products[0].odds).toEqual([
+    { id: "cs-0-0", name: "0 - 0", value: 6.4 },
+    { id: "cs-1-0", name: "1 - 0", value: 7.1 },
+    { id: "cs-2-1", name: "2 - 1", value: 9.2 },
+  ]);
+  expect(snapshot.products[1].odds).toEqual([
+    { id: "keep-1", name: "1 - 0", value: 7.1 },
+    { id: "keep-2", name: "legacy", value: 99 },
+    { id: "keep-3", name: "0 - 0", value: 6.4 },
+  ]);
+});
+
+it("preserves full-time completeness across live-update construction, public cloning, and stored snapshot normalization", async () => {
+  const completeSnapshot = createPublicEventSnapshotFromLiveUpdate(
+    buildLiveUpdate(80, {
+      eventId: "full-time-complete",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 4,
+      awayScore: 2,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: buildIncidentsThrough(80),
+      incidentsComplete: true,
+      markets: [],
+    })
+  );
+
+  expect(completeSnapshot.live?.incidentHistory).toHaveLength(80);
+  expect(completeSnapshot.live?.incidentHistoryComplete).toBe(true);
+  expect(
+    sanitizePublicEventSnapshot(completeSnapshot as unknown as Record<string, unknown>)
+  ).toEqual(completeSnapshot);
+
+  await Event.create({
+    eventId: "stored-full-time-truncated",
+    name: "Stored Full Time Truncated",
+    time: new Date("2030-01-01T12:00:00.000Z"),
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 180,
+      occurredAt: "2030-01-01T13:45:00.000Z",
+      kickoffAt: "2030-01-01T12:00:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 4,
+      awayScore: 2,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: buildIncidentsThrough(130),
+      incidentHistoryComplete: true,
+      currentMarkets: [],
+    },
+  });
+
+  const storedSnapshot = await getStoredPublicEventSnapshot(
+    "stored-full-time-truncated"
+  );
+  expect(storedSnapshot?.live?.incidentHistory).toHaveLength(128);
+  expect(storedSnapshot?.live?.incidentHistoryComplete).toBeUndefined();
+});
+
+it("keeps nonterminal, unattested, malformed, and legacy full-time updates incomplete", () => {
+  const nonTerminalSnapshot = createPublicEventSnapshotFromLiveUpdate(
+    buildLiveUpdate(40, {
+      eventId: "nonterminal-attested",
+      incidents: buildIncidentsThrough(40),
+      incidentsComplete: true,
+    })
+  );
+  const unattestedSnapshot = createPublicEventSnapshotFromLiveUpdate(
+    buildLiveUpdate(41, {
+      eventId: "full-time-unattested",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: buildIncidentsThrough(41),
+      markets: [],
+    })
+  );
+  const malformedSnapshot = createPublicEventSnapshotFromLiveUpdate(
+    buildLiveUpdate(42, {
+      eventId: "full-time-malformed",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: [
+        ...buildIncidentsThrough(2),
+        { id: "broken-incident" } as unknown as LiveUpdateIncident,
+      ],
+      incidentsComplete: true,
+      markets: [],
+    })
+  );
+  const legacySnapshot = createPublicEventSnapshotFromLiveUpdate(
+    buildLiveUpdate(43, {
+      eventId: "full-time-legacy-single",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: undefined,
+      incident: buildIncident(43, {
+        type: LiveIncidentType.YELLOW_CARD,
+        side: TeamSide.AWAY,
+      }),
+      markets: [],
+    })
+  );
+
+  expect(nonTerminalSnapshot.live?.incidentHistoryComplete).toBeUndefined();
+  expect(unattestedSnapshot.live?.incidentHistoryComplete).toBeUndefined();
+  expect(malformedSnapshot.live?.incidentHistoryComplete).toBeUndefined();
+  expect(legacySnapshot.live?.incidentHistoryComplete).toBeUndefined();
 });
 
 it("builds higher-sequence live snapshots without mutating the seed snapshot or leaking extra fields", () => {

@@ -42,7 +42,28 @@ Read:
 - Verify PR approval mode matches repository policy: automatic mode is limited
   to CLI-created and CLI-owned `copilot-cli-managed` PRs; every other PR has
   approval bound to its exact current head SHA.
+- Verify protected-run approval mode matches origin policy. A direct automatic
+  approval requires a pre-dispatch private intent/capture and the exact
+  dispatcher-issued record; automatic build or recovery requires exact
+  promotion/upstream lineage plus durable authority state. Human and scheduled
+  runs have no record. Confirm first attempt, current control SHA, workflow
+  ID/path/blob, transport input hash, exact title/environment, distinct subject
+  or historical target, non-replayed gate receipt, explicit inflight
+  reconciliation for the same downstream run/operation against an increased
+  exact GitHub approved-review baseline, fail-closed unresolved ambiguity,
+  global same-release dispatch fencing, exact-request one-use authority,
+  pristine-intent cancellation on pre-dispatch drift, policy-required
+  workflow state, post-claim authority revalidation and safe claim release,
+  zero-job/zero-pending retirement, bounded expiry, and complete fail-closed
+  exclusivity responses.
 - Verify no critic finding remains open and no agent approved its own work.
+- For every user-facing visual or interaction change, require one exact-head
+  `betstan-ux-ui-expert: UX_REVIEW_PASSED` result. Verify its named stable
+  references, cross-route/state/variant/theme consistency matrix, resolved
+  blocking and required fixes, documented intentional product exceptions, and
+  bounded uncertainty. Do not require a new automated visual-regression matrix
+  when the UX specialist and test evidence identify no unresolved factual
+  geometry or interaction claim.
 - Verify backend/frontend path ownership and intentional lockfile changes.
 - Verify required contract, quality, security, migration, ingress, and
   deployment specialists were invoked when their triggers apply.

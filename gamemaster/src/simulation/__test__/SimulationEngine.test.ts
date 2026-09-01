@@ -195,6 +195,9 @@ describe("simulation timeline", () => {
 
   it("satisfies calibration, cap, phase, and rare-event corpus expectations", () => {
     const totals = { goals: 0, yellows: 0, reds: 0, corners: 0, penalties: 0, freeKicks: 0 };
+    let firstHalfNormalIncidents = 0;
+    let secondHalfNormalIncidents = 0;
+    let stoppageNormalIncidents = 0;
     let firstStoppageIncident = false;
     let secondStoppageIncident = false;
     let missingRed = false;
@@ -218,6 +221,24 @@ describe("simulation timeline", () => {
       totals.corners += types.filter((type) => type === LiveIncidentType.CORNER).length;
       totals.penalties += types.filter((type) => type === LiveIncidentType.PENALTY_AWARDED).length;
       totals.freeKicks += types.filter((type) => type === LiveIncidentType.FREE_KICK).length;
+      firstHalfNormalIncidents += result.transitions.filter(
+        (transition) =>
+          transition.phase === EventPhase.FIRST_HALF
+          && !structural.has(transition.incident.type)
+      ).length;
+      secondHalfNormalIncidents += result.transitions.filter(
+        (transition) =>
+          transition.phase === EventPhase.SECOND_HALF
+          && !structural.has(transition.incident.type)
+      ).length;
+      stoppageNormalIncidents += result.transitions.filter(
+        (transition) =>
+          (
+            transition.phase === EventPhase.FIRST_HALF_STOPPAGE
+            || transition.phase === EventPhase.SECOND_HALF_STOPPAGE
+          )
+          && !structural.has(transition.incident.type)
+      ).length;
       firstStoppageIncident = firstStoppageIncident || result.transitions.some((transition) =>
         transition.phase === EventPhase.FIRST_HALF_STOPPAGE
         && !structural.has(transition.incident.type)
@@ -248,6 +269,11 @@ describe("simulation timeline", () => {
     expect(means.penalties).toBeLessThan(0.45);
     expect(means.freeKicks).toBeGreaterThan(6.3);
     expect(means.freeKicks).toBeLessThan(9.7);
+    expect(firstHalfNormalIncidents).toBeGreaterThan(0);
+    expect(secondHalfNormalIncidents).toBeGreaterThan(0);
+    expect(stoppageNormalIncidents).toBeLessThan(
+      firstHalfNormalIncidents + secondHalfNormalIncidents
+    );
     expect(firstStoppageIncident).toBe(true);
     expect(secondStoppageIncident).toBe(true);
     expect(missingRed).toBe(true);

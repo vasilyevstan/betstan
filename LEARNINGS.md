@@ -40,18 +40,30 @@
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
-- Dense live, countdown, retained-finished, and pre-match sections use the same
-  responsive one/two/three-card grid. Sparse sections must consume the stage
-  intentionally: one desktop card uses a bounded two-thirds row and two cards
-  complete a half-width row. Keep scores, incidents, active markets,
-  selections, and non-terminal availability states visible; omit only
+- Dense pre-match sections and a sparse two/three-card pre-match row use the
+  same responsive one/two/three-card grid; a sparse pre-match row must
+  consume the stage intentionally: one desktop card uses a bounded two-thirds
+  row and two cards complete a half-width row. Keep scores, incidents, active
+  markets, selections, and non-terminal availability states visible; omit only
   semantically terminal market cards, whose state remains in the authoritative
   live snapshot and settlement history.
+- Superseded narrow-live-card rule: when exactly one countdown, active-live,
+  or retained-finished event occupies the separate upper section, it does not
+  follow the pre-match two-thirds/half-width sparse rule above. It uses the
+  full event-stage width and arranges its semantic regions side by side,
+  because a single information-dense live/countdown card should use full-stage
+  width and parallel regions when that reduces its vertical footprint below a
+  comparable pre-match row. Its collapsed height must stay within a bounded
+  budget relative to that pre-match row; only a user-expanded historical
+  timeline disclosure may exceed the budget.
 - Betting controls in one market share geometry. Wrapped labels may increase
   the row height, but buttons stretch together and odds remain on one baseline.
   Fixed ten-option Correct Score boards use a container-aware five- or
   two-column layout so every row is balanced and every control remains at least
-  touch-target width.
+  touch-target width. Recheck the board inside every changed parent layout and
+  around container-query transitions: touch width alone misses prices that
+  escape their controls. A shared section badge/title must span the whole
+  product deck rather than auto-place above one sibling market.
 - Read-only review roles must be read-only in their declared capabilities,
   not only in prose. UX reviewers consume rendered evidence from the test
   owner; they do not need unrestricted command execution to assess it.
@@ -69,6 +81,93 @@
 - Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
 - Every open quote expires at the next persisted simulation transition. Slip records one immutable server-generated submission time during its atomic draft-to-submitted transition, and Moderation requires an exact mirrored expiry plus `submittedAt` strictly before both `quoteValidUntil` and the first later transition that ended that quote's authority. Persist that authority end from the update payload's domain `occurredAt`, choose the earliest later sequence under out-of-order delivery, and use the current terminal mirror timestamp only as a backward-compatible fallback when old history lacks the additive field.
 - Missing, malformed, or boundary-equal live expiry evidence fails closed at Event, client, and Moderation boundaries. A delayed market mirror may park a provably pre-cutoff submission, but it must not authorize an outcome-known bet.
+
+### Product-wide UI/UX consistency
+
+- Every user-facing visual or interaction change uses one two-phase
+  `betstan-ux-ui-expert` work unit: establish a named consistency baseline
+  before implementation, then review the immutable exact-head result in the
+  same context.
+- Build the baseline from accepted product semantics and stable shared shells,
+  components, variables, tokens, and repeated patterns across routes. A single
+  screenshot or the newest page is evidence, not a design system.
+- Compare hierarchy, typography, spacing, content width, surfaces, control
+  geometry, semantic status cues, copy, loading/empty/error/disabled/live/
+  terminal states, responsive modes, v1/v2/v3, light/dark, keyboard/focus
+  order, and live-update movement where applicable.
+- Every material divergence is a required consistency fix, an intentional
+  product exception with a semantic rationale, or optional polish. Do not make
+  subjective preference a blocker, and do not silently normalize an
+  unexplained exception into a new pattern.
+- Source, stable references, and supplied screenshots can establish a design
+  inconsistency through bounded expert judgment. Exact collision, clipping,
+  overflow, touch-target, pixel-geometry, or dynamic-interaction claims still
+  require the smallest suitable rendered evidence; a user-facing change alone
+  does not require a new visual-regression matrix.
+
+### Live timeline completeness and market alignment
+
+- Active-tail versus full timeline semantics: an active-live view may keep
+  showing only its latest incidents, but a finished/retained view must never
+  present a `.slice(-5).reverse()` latest-events tail as a complete match
+  summary. Preserve the authoritative oldest-to-newest source order and show a
+  compact chronological key-moments list plus a native, expandable
+  chronological full timeline.
+- Explicit completeness attestation: label a timeline `Full timeline (N)` only
+  when the producer attested a validated cumulative payload
+  (`incidentsComplete`/`incidentHistoryComplete`) built from its authoritative
+  transition history and every raw incident validated within the phase-aware
+  limit. The attestation is optional and additive so old producers stay
+  compatible with new consumers and new producers stay safe for old consumers.
+- Partial legacy copy: a stored row, single-incident compatibility update,
+  malformed/truncated input, or non-terminal phase must keep the completeness
+  flag absent/false and be labelled `Available timeline (N)` with an explicit
+  note that earlier incidents may be unavailable. A previously finished row
+  cannot be reconstructed after the fact; honesty about partial history beats
+  a false completeness claim.
+- Penalty linkage: suppress a derived scoring incident (for example a goal
+  linked to a scored penalty) only via an exact relation-ID match against a
+  displayed incident, never a team/minute heuristic that can hide or duplicate
+  an unrelated incident.
+- Stable identity-preserving presentation order: a presentation sort (for
+  example a numeric scoreline order) is all-or-nothing against a fully valid
+  board and must preserve each option's original ID/name/value tuple; a
+  malformed board keeps its original order instead of a partial re-sort.
+  Selection identity stays ID-based, so a presentation reorder never
+  reinterprets an open or historical bet.
+- Full-stage compact live regions: a single upper-section countdown,
+  active-live, or retained-finished event uses full event-stage width and
+  parallel semantic regions instead of vertical stacking, staying within a
+  bounded height budget relative to the comparable pre-match row; an
+  intentionally expanded historical disclosure is the one allowed exception.
+- Sparse-grid and alignment lessons: a compact market grid collapses phantom
+  empty tracks with `auto-fit` (not `auto-fill`); market cards sharing a row
+  stretch to equal height and top alignment; a status badge wraps only between
+  words; and sibling pre-match cards keep aligned market headings, control
+  bounds, and odds baselines regardless of team-name length.
+- Visible admin navigation: role-gated global navigation (for example
+  Backoffice) needs visible discoverable text, not only an icon, for the
+  correct role in every UI variant, while staying absent for every non-admin
+  and anonymous state.
+- Terminal ordering and auth safeguards: a result/`FULL_TIME` write decision
+  must be atomic against the current live phase and explicit/legacy offline
+  intent so no interleaving can leave a fully onboarded, non-retired terminal
+  event `OFFLINE`. Apply that predicate to every terminal writer and delayed
+  recovery path at write time; a stale pre-read must not overwrite a
+  concurrent administrator `OFFLINE` decision. The inverse is equally
+  important: a placeholder stays fail-dark until event metadata and visibility
+  authority are initialized, even with pending `ONLINE` intent. An
+  equal-sequence authoritative merge keeps the stronger terminal history while
+  adopting repaired status/visibility; and an acceptance-scoped retained
+  `OFFLINE` snapshot must not render, clear, or leak while current-user
+  authorization is unresolved.
+- Exact-SHA production evidence: when this class of change reaches
+  production, extend the existing post-deploy acceptance journey to verify
+  full bounded timeline completeness/labelling, penalty-linked deduplication,
+  live-card relative height and pre-kickoff market alignment, stable Correct
+  Score order, and visible administrator navigation, and record the exact
+  master SHA and run evidence in `docs/wiki/Live-Betting-Production.md`
+  alongside the existing release chain.
 
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
@@ -204,6 +303,11 @@ cd resulting && npm ci && npm run test:ci
 - A stalled watcher is not a stalled job, and a running watcher is not job
   progress. Recover read-side observation directly; route mutations to one
   exact owner with a deadline and keep the same unit open until evidence moves.
+- Before declaring an executing GitHub job stalled, compare its current step
+  and elapsed time with recent successful runs of the same workflow and job on
+  a comparable runner. Local execution time is not a CI baseline, and
+  historical duration never excuses an actionable approval or missing
+  progress signal.
 - A workflow dispatch URL is event-acceptance evidence, not job
   materialization. Keep a manually enabled workflow active until the exact run
   has a real job and expected protected gate, then disable it before approval.
@@ -212,6 +316,9 @@ cd resulting && npm ci && npm run test:ci
 - Pull-request title and body edits trigger `pull_request.edited` validation.
   Treat PR metadata changes as workflow-producing work and keep them outside
   active data-to-deploy handoffs or other production-exclusivity windows.
+  Derive the exact head SHA from Git or GitHub when preparing evidence and
+  prefer one complete edit over repeated manual SHA corrections that start
+  duplicate runs.
 - A late specialist report must be revalidated against its recorded SHA,
   current authoritative branch, and runtime topology. Tool-heavy work that
   returns after the release state changed cannot reopen a gate with stale
@@ -265,6 +372,14 @@ cd resulting && npm ci && npm run test:ci
 - An orphaned `common` gitlink without `.gitmodules` previously broke checkout cleanup. `common/` is now maintained as a normal tracked package while services consume explicit published versions from npm.
 - Per-service workflows use `actions/checkout@v4`; do not reintroduce `checkout@v2`.
 - Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
+- First-attempt-only script fixtures must explicitly set or clear
+  `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`. Ambient metadata from a GitHub
+  Actions rerun can otherwise reject a fixture before the assertion it was
+  intended to exercise.
+- Portable command fallbacks must try the current platform's successful form
+  first and capture output only from the selected probe. A nominally failed
+  GNU/BSD variant can emit partial or misleading stdout, or even succeed with
+  unrelated semantics.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
 - Coverage instrumentation can report `branches=0` with a non-zero branch total. Keep line coverage mandatory and apply the branch threshold only when a meaningful branch percentage exists.
 
@@ -558,3 +673,102 @@ validated.
   update to the exact scanned event, terminal markers, live state, and product
   arrays so a concurrent result or reorder becomes a safe mismatch instead of
   overwriting newer authority.
+
+## Corrected compact live release — 2026-08-31
+
+- Exact master `f4a0b333963b3a458c9b2b48c2aae1f6267f754d` completed a new
+  first-attempt release chain: production build `33436391225`, OCI build
+  `33437490565`, GHCR validation `33438579478`, capacity `33438984944`,
+  infrastructure `33439362885`, data dry-run `33440517994`, backfill
+  `33441373219`, Slip-index handoff `33442790087`, dark deployment
+  `33443908124`, and activation `33444998653`.
+- The Event backfill changed seven eligible legacy boards and verification
+  found zero remaining matches. Existing Slip and Bet snapshots were not
+  rewritten.
+- Permanent activation passed the complete ten-minute browser journey and
+  finished two matches `1-2` and `2-1`. Live and pre-match slips remained
+  separate; quote refresh, stale-quote handling, moderation, settlement,
+  history, SSE, cleanup, queues, and restarts passed. Final state is committed
+  with live kickoffs enabled and no lease.
+- Terminal production validation bound all nine deployments to immutable
+  digests, verified eight logical databases on the retained 50 GiB Mongo PVC,
+  zero RabbitMQ backlog, public REST/SSE health, 90 plausible Correct Score
+  options, 44 deployed-client regressions, and 24 real-data responsive checks
+  through the 320px boundary.
+- A failed first attempt is evidence, not a retry candidate. The corrected
+  acceptance assertion and persisted-board repair required a new exact master
+  SHA and complete release chain.
+
+## CLI-originated protected authority — 2026-08-31
+
+- Protected approval is classified by origin, not workflow class. A direct
+  Copilot CLI operation must be created by the bounded dispatcher and bound to
+  its exact returned run ID. Human `gh workflow run` and scheduled runs receive
+  no record and remain personally gated.
+- Keep one shared policy for all 15 protected workflows. Bind exact workflow
+  ID/path/blob, event, environment, title, first attempt, current control SHA,
+  separate subject or historical target, and every workflow input. Keep
+  booleans typed in the private request and record, normalize them to lowercase
+  strings for `gh workflow run --json`, and hash the exact transport bytes.
+- A dispatch URL proves event acceptance, not materialization. Persist a
+  `dispatching` intent and mode-`0600` output capture before the external
+  mutation, bind the exact captured URL to a `claimed` record, and issue it
+  only when that exact run appears. Use `--resume-captured` after a pre-bind
+  crash and `--resume-run` after delayed materialization. Never infer identity
+  from title or timing, and never redispatch a URL-less unresolved intent.
+- Treat an unresolved same-release authority state as global, not
+  request-local. Any `dispatching`/`bound` intent or `claimed`/`inflight`
+  record blocks every protected request for the repository and control SHA.
+  `issued` and `consumed` are one-use for the same operation and exact
+  transport input hash; changed inputs form a new request but do not bypass
+  policy, lineage, recovery, or exclusivity. `retired` is the only inert
+  replacement exception.
+- Persisting an intent is not the last dispatch check. Revalidate current
+  master, workflow blob, and active state after creating it, and cancel only a
+  pristine untouched intent if authority drifted before the GitHub call.
+- Approval needs a two-phase local state change. Claim the exact
+  run/environment/waiting-job-set fingerprint as `inflight` before the GitHub
+  POST, then append a consumed receipt only after acceptance. An ambiguous
+  response stays inflight and cannot be replayed automatically. Reconciliation
+  first binds to the exact downstream run and operation, then compares GitHub
+  review history with the reviewer/comment/environment baseline captured
+  before the POST. A new exact approved review permits a consumed receipt; no
+  new review plus the same active gate permits retry. Every other shape remains
+  unresolved and inflight. Gate disappearance, terminal status, and
+  temporarily missing pending evidence are not approval.
+- Workflow lifecycle is policy data. Capacity, infrastructure, activation,
+  live-data, migration-recovery, and production-deploy workflows must be
+  `disabled_manually` at approval; all other protected workflows must be
+  `active`. Revalidate that state, the workflow blob, current master, and
+  promotion authority after the local claim. On drift, release the exact claim
+  to its previous state and never send the POST.
+- One dispatch can legitimately encounter multiple sequential protected jobs.
+  Preserve the consumed record and allow a new waiting-job-set fingerprint on
+  the same exact run even when it reuses the same environment ID, or a policy-
+  declared automatic descendant. Never reuse the same gate fingerprint.
+- Promotion-derived build approvals need the same durable automatic records
+  and receipt lifecycle as directly dispatched runs. A captured terminal run
+  is safe to mark `retired` only with zero jobs and zero pending deployments;
+  that proof, not age or a generic conclusion, permits a replacement dispatch.
+- Expired `claimed` and `inflight` records stay inspectable so exact recovery
+  remains possible. Issuing an active claimed run or restoring retry authority
+  for the same active gate renews the bounded window; reconciled consumption,
+  issued records, and consumed records otherwise remain expiry-bound.
+- Current `controlSha` is always current master safety code. `subjectSha` may
+  identify the deployed release and `targetSha` may identify a historical
+  ancestor for rollback or recovery; an old target never authorizes stale
+  control code.
+- Active-run exclusivity data is usable only when the response is a complete
+  object with a nonnegative integer `total_count`, a `workflow_runs` array,
+  exact count/list agreement, and no more than the requested 100 results.
+  Missing or malformed completeness evidence fails closed.
+- The shared GitHub user cannot cryptographically distinguish a human `gh`
+  command from Copilot CLI. Owner-only outside-repository records are an
+  operational ownership boundary, so never create, copy, or retrofit one for
+  a human-originated run.
+- The conductor must treat an issued record plus a pending exact environment
+  as an immediate automatic-approval handoff. A surviving intent with a
+  captured URL invokes `--resume-captured`, a delayed claimed record invokes
+  exact-run resume, an inert terminal claim invokes retirement, and an
+  inflight record invokes explicit reconciliation. None should wait for a
+  routine polling interval or cause a replacement dispatch.

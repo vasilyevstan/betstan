@@ -208,6 +208,12 @@ accepted by the next owner.
   universal handoffs. Route the developer gate to the registered owner with
   edit authority for the affected paths; do not require an application
   developer to cross its ownership boundary for infrastructure or governance.
+- Register `betstan-ux-ui-expert` as one two-phase specialist work unit for
+  every user-facing visual or interaction change. Its first phase establishes
+  the named consistency baseline before implementation; its second phase
+  reviews the immutable exact-head result. Reuse the same `work_id`, owner, and
+  agent context so mandatory UX evidence does not become duplicate agents or
+  extra universal quality gates.
 - Register three independent simplifier passes plus synthesis as child
   intra-gate units under one logical simplifier `work_id`. A `BLOCKED` pass
   requires bounded distinct-family substitution and never counts as a completed
@@ -226,7 +232,12 @@ The conductor must never answer a detected stall with observation alone:
    reference and restore read-side monitoring if only the watcher,
    notification, or prior conductor turn was lost.
 2. Classify the cause as executing, queued/provider-bound, approval-bound,
-   dependency-bound, failed, dead, or unobservable. Do not extend a checkpoint without new underlying progress evidence.
+   dependency-bound, failed, dead, or unobservable. For an executing GitHub
+   job, compare its elapsed time and current step with the recent successful
+   duration for the same workflow and job on a comparable runner before
+   declaring a stall. Do not use a much faster local command as that baseline,
+   and do not treat duration alone as progress.
+   Do not extend a checkpoint without new underlying progress evidence.
 3. When an agent has zero completed turns after its first-response deadline,
    route one bounded instruction to the same agent owner:
    `stop further investigation and return the bounded verdict` from evidence
@@ -264,6 +275,10 @@ its owner. It is never healthy by default.
 - At a checkpoint, inspect each exact reference once. Record elapsed time,
   current phase, the latest real progress signal, the next expected event, and
   who owns the next action.
+- At every checkpoint, apply the recovery ladder's same-workflow/same-job
+  duration comparison before classifying `SUSPECTED_STALL`; historical
+  duration never excuses a missing progress signal, actionable approval, or
+  completed handoff.
 - A user request for status or a suspicion that work is stuck is an immediate
   checkpoint for every active critical-path unit. Answer from the underlying
   agent, process, or GitHub job state, never only from a still-running watcher.
@@ -276,10 +291,29 @@ its owner. It is never healthy by default.
   real job and expected protected gate, then route disable-before-approval to
   the mutation owner. If the dispatching command exits after returning a URL,
   inspect that run before permitting another dispatch.
+- Track CLI authority as part of the run identity: operation, request key or
+  authority run ID, `dispatching|claimed|issued|inflight|consumed|retired`
+  state, control/subject/target SHA, and expiry. A surviving intent whose
+  durable capture contains one exact URL triggers `--resume-captured`; a
+  delayed `claimed` record triggers exact `--resume-run`; neither permits a
+  replacement dispatch. Treat any unresolved intent or `claimed`/`inflight`
+  record as a global fence on every protected request for the same repository
+  and control SHA; changing operation or inputs is not recovery. An exact
+  `issued`/`consumed` operation and transport-input request is one-use. A
+  terminal claimed run may be retired only after exact zero-job and
+  zero-pending evidence. An `inflight` record triggers
+  explicit `--reconcile`, never a direct replay. Reconciliation consumes only
+  for the recorded downstream run and operation, with a new exact GitHub
+  approved review relative to the reviewer/comment/environment baseline;
+  without that evidence, a disappeared or terminal gate remains unresolved and
+  must be reported immediately. A lock whose owner PID is gone may be cleared
+  only through the helper's exact stale-lock check; never delete a live or
+  unverified lock.
 - A jobless queued dispatch with zero jobs and zero pending approvals is not
-  authority. Keep it unapproved and disabled, record it as inert evidence, and
-  permit replacement only after proving it cannot produce side effects and
-  exactly one new run has materialized.
+  usable authority. Keep it unapproved and disabled. Retire its exact record
+  as inert evidence, and permit replacement only after the run becomes
+  terminal and that retirement is persisted; age, a queue label, or missing
+  pending evidence alone is insufficient.
 - If an earlier job is terminal while a downstream job is `waiting`, `pending`,
   or `queued` with no executing step, classify the run before waiting again.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
@@ -292,7 +326,17 @@ its owner. It is never healthy by default.
   it is an actionable gate. If the exact workflow, environment, SHA, and
   operation have documented preauthorization, immediately return
   `ATTENTION_REQUIRED` with the run ID, environment ID/name, approving owner,
-  and exact bounded approval handoff to the orchestrator. Otherwise report
+  and exact bounded automatic approval handoff to the orchestrator, but only
+  after the issued or consumed CLI authority record also validates. Automatic
+  promotion-derived builds must have their durable record materialized before
+  mutation. Require the policy-declared approval workflow state: the normally
+  dormant capacity, infrastructure, activation, live-data,
+  migration-recovery, and production-deploy workflows are
+  `disabled_manually`; every other protected workflow is `active`. The
+  mutation owner must revalidate master, workflow blob/state, and promotion
+  authority after claiming approval, release the claim on drift, and send no
+  POST. A valid record must be routed in the same checkpoint, not after another
+  watch interval. Otherwise report
   `BLOCKED` and identify the required human approval owner. Never leave either
   case until the next ordinary progress checkpoint.
 - After handing off a preauthorized approval, set the next trigger to the

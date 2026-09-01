@@ -6,6 +6,7 @@ import {
   EventStatus,
   EventVisibility,
   IEventResultEvent,
+  ILiveEventUpdateEvent,
   IEventVibibilityEvent,
   INewEventEvent,
   messengerWrapper,
@@ -13,7 +14,12 @@ import {
 import EventResultListener from "../EventResultListener";
 import NewEventListener from "../NewEventListener";
 import EventVisibilityListener from "../EventVisibilityListener";
+import { applyLiveEventUpdate } from "../../../live/LiveEventReadModel";
 import { Event } from "../../../model/Event";
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 const buildMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -57,6 +63,31 @@ const buildResultEvent = (eventId: string): IEventResultEvent => ({
   timestamp: new Date().toISOString(),
   data: { eventId, homeScore: 2, awayScore: 0, home: "A", away: "B" },
 });
+
+const buildFullTimeLiveUpdate = (
+  eventId: string,
+  sequence = 13
+): ILiveEventUpdateEvent =>
+  ({
+    timestamp: new Date().toISOString(),
+    data: {
+      eventId,
+      sequence,
+      occurredAt: "2030-01-01T13:45:00.000Z",
+      kickoffAt: "2030-01-01T12:00:00.000Z",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 2,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: [],
+      incidentsComplete: true,
+      markets: [],
+      settlements: [],
+      home: "A",
+      away: "B",
+    },
+  } as unknown as ILiveEventUpdateEvent);
 
 it("marks event as resulted and offline when EventResult arrives", async () => {
   const eventId = new mongoose.Types.ObjectId().toHexString();
@@ -261,6 +292,185 @@ it("retains a live-simulated event ONLINE with its full-time snapshot when Event
   expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
   expect(updatedEvent!.visibility).toEqual(EventVisibility.ONLINE);
   expect(updatedEvent!.live?.phase).toEqual(EventPhase.FULL_TIME);
+});
+
+it("keeps full-time placeholder events fail-dark until metadata and visibility authority resolve", async () => {
+  const unresolvedEventIds = [
+    new mongoose.Types.ObjectId().toHexString(),
+    new mongoose.Types.ObjectId().toHexString(),
+  ];
+  const fullTimeState = {
+    sequence: 12,
+    occurredAt: new Date().toISOString(),
+    kickoffAt: new Date().toISOString(),
+    minute: 90,
+    phase: EventPhase.FULL_TIME,
+    homeScore: 2,
+    awayScore: 0,
+    bettingStatus: BettingStatus.CLOSED,
+    incidentHistory: [],
+    currentMarkets: [],
+  };
+
+  await Event.create([
+    {
+      eventId: unresolvedEventIds[0],
+      name: unresolvedEventIds[0],
+      time: new Date(),
+      source: "EXTERNAL",
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.OFFLINE,
+      visibilityInitialized: false,
+      eventMetadataInitialized: false,
+      products: [],
+      live: fullTimeState,
+    },
+    {
+      eventId: unresolvedEventIds[1],
+      name: unresolvedEventIds[1],
+      time: new Date(),
+      source: "EXTERNAL",
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.OFFLINE,
+      pendingVisibility: EventVisibility.ONLINE,
+      visibilityDecision: EventVisibility.ONLINE,
+      products: [],
+      live: fullTimeState,
+    },
+  ]);
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  for (const eventId of unresolvedEventIds) {
+    await listener.onMessage(buildResultEvent(eventId), buildMessage());
+  }
+
+  const updatedEvents = await Event.find({
+    eventId: { $in: unresolvedEventIds },
+  }).lean();
+  expect(updatedEvents).toHaveLength(2);
+  for (const updatedEvent of updatedEvents) {
+    expect(updatedEvent.status).toEqual(EventStatus.RESULTED);
+    expect(updatedEvent.visibility).toEqual(EventVisibility.OFFLINE);
+    expect(updatedEvent.live?.phase).toEqual(EventPhase.FULL_TIME);
+    expect(updatedEvent.liveRaceResultedAt ?? null).toBeNull();
+  }
+});
+
+it("keeps explicit offline and retired full-time events offline when EventResult arrives", async () => {
+  const explicitOfflineId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId: explicitOfflineId,
+    name: "Hidden Result",
+    time: new Date(),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.OFFLINE,
+    visibilityInitialized: true,
+    visibilityDecision: EventVisibility.OFFLINE,
+    liveRaceResultedAt: new Date("2030-01-01T11:55:00.000Z"),
+    products: [],
+    live: {
+      sequence: 12,
+      occurredAt: new Date().toISOString(),
+      kickoffAt: new Date().toISOString(),
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 2,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  const retiredId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId: retiredId,
+    name: "Retired Result",
+    time: new Date(),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.OFFLINE,
+    liveRaceResultedAt: new Date("2030-01-01T11:55:00.000Z"),
+    liveRetiredAt: new Date("2030-01-01T14:00:00.000Z"),
+    products: [],
+    live: {
+      sequence: 12,
+      occurredAt: new Date().toISOString(),
+      kickoffAt: new Date().toISOString(),
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 1,
+      awayScore: 1,
+      bettingStatus: BettingStatus.CLOSED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  await listener.onMessage(buildResultEvent(explicitOfflineId), buildMessage());
+  await listener.onMessage(buildResultEvent(retiredId), buildMessage());
+
+  const explicitOfflineEvent = await Event.findOne({ eventId: explicitOfflineId });
+  const retiredEvent = await Event.findOne({ eventId: retiredId });
+
+  expect(explicitOfflineEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(explicitOfflineEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(explicitOfflineEvent!.liveRaceResultedAt ?? null).toBeNull();
+  expect(retiredEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(retiredEvent!.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(retiredEvent!.liveRaceResultedAt ?? null).toBeNull();
+});
+
+it("keeps a concurrently full-time ordinary event online when FULL_TIME commits after the result read but before the visibility write", async () => {
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  await Event.create({
+    eventId,
+    name: "Concurrent Full Time",
+    time: new Date("2030-01-01T12:00:00.000Z"),
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    products: [],
+    live: {
+      sequence: 12,
+      occurredAt: "2030-01-01T12:45:00.000Z",
+      kickoffAt: "2030-01-01T12:00:00.000Z",
+      minute: 45,
+      phase: EventPhase.HALF_TIME,
+      homeScore: 1,
+      awayScore: 0,
+      bettingStatus: BettingStatus.SUSPENDED,
+      incidentHistory: [],
+      currentMarkets: [],
+    },
+  });
+
+  const originalUpdateOne = Event.updateOne.bind(Event);
+  let injectedFullTime = false;
+  (
+    jest.spyOn(Event, "updateOne") as unknown as jest.Mock
+  ).mockImplementation((...args: any[]) =>
+    (async () => {
+      const [, update] = args;
+      if (!injectedFullTime && Array.isArray(update)) {
+        injectedFullTime = true;
+        await applyLiveEventUpdate(buildFullTimeLiveUpdate(eventId));
+      }
+
+      return originalUpdateOne(...args).exec();
+    })()
+  );
+
+  const listener = new EventResultListener(messengerWrapper.connection);
+  await listener.init();
+  await listener.onMessage(buildResultEvent(eventId), buildMessage());
+
+  const updatedEvent = await Event.findOne({ eventId });
+  expect(updatedEvent!.status).toEqual(EventStatus.RESULTED);
+  expect(updatedEvent!.visibility).toEqual(EventVisibility.ONLINE);
+  expect(updatedEvent!.live?.phase).toEqual(EventPhase.FULL_TIME);
+  expect(updatedEvent!.liveRaceResultedAt ?? null).toBeNull();
 });
 
 it("hides a resulted event whose latest live projection is still non-terminal", async () => {

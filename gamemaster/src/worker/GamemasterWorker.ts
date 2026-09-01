@@ -47,6 +47,7 @@ type LiveUpdateSettlement =
   ILiveEventUpdateEvent["data"]["settlements"][number];
 type LiveUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
+  incidentsComplete?: boolean;
 };
 
 function asPublishedIncidentType(
@@ -845,6 +846,7 @@ export class GamemasterWorker {
       bettingStatus: transition.bettingStatus as BettingStatus,
       incident,
       incidents: this.buildCumulativeIncidents(event, transition.sequence, incident),
+      incidentsComplete: true,
       markets: transition.markets.map((market) => ({
         marketId: market.marketId,
         marketType: asPublishedMarketType(market.marketType),
@@ -946,6 +948,7 @@ export class GamemasterWorker {
       awayScore: 0,
       bettingStatus: BettingStatus.OPEN,
       incidents: [],
+      incidentsComplete: true,
       markets: markets.map((market) => ({
         marketId: market.marketId,
         marketType: market.marketType as unknown as ILiveEventUpdateEvent["data"]["markets"][number]["marketType"],
@@ -1099,6 +1102,7 @@ export class GamemasterWorker {
       bettingStatus: BettingStatus.CLOSED,
       incident,
       incidents: this.buildManualCumulativeIncidents(event, incident),
+      incidentsComplete: true,
       markets,
       settlements,
       eventName: event.name,

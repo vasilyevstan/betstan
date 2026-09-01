@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   applyLiveSnapshotUpdate,
+  isFinishedLiveEvent,
   mergeAuthoritativeEventList,
 } from '../../liveBettingUtils';
 
@@ -152,6 +153,9 @@ const useLiveEvents = (visibleOfflineEventIds, onScopedAccessFailure) => {
 
       try {
         const snapshot = JSON.parse(message.data);
+        if (isFinishedLiveEvent(snapshot)) {
+          scheduleReconcile();
+        }
         setEvents((currentEvents) => {
           const update = applyLiveSnapshotUpdate(currentEvents, snapshot);
           if (update.hasGap) {

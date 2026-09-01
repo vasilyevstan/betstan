@@ -149,6 +149,10 @@ const liveStateSchema = new Schema(
       required: true,
       default: [],
     },
+    incidentHistoryComplete: {
+      type: Boolean,
+      required: false,
+    },
     currentMarkets: {
       type: [liveMarketSchema],
       required: true,

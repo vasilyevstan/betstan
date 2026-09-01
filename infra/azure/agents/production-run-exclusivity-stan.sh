@@ -4,6 +4,8 @@ set -euo pipefail
 # Purpose: block concurrent production-capable activity while ignoring only
 #          queue records proven inert by bounded GitHub evidence.
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 REPO="${REPO:-vasilyevstan/betstan}"
 EXCLUDE_RUN_ID="${EXCLUDE_RUN_ID:-}"
 STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
@@ -24,37 +26,31 @@ NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 
 tmp_runs="$(mktemp)"
 tmp_candidates="$(mktemp)"
+tmp_workflows="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_runs" "$tmp_candidates"
+  rm -f "$tmp_runs" "$tmp_candidates" "$tmp_workflows"
 }
 trap cleanup EXIT
+
+"$POLICY_SCRIPT" workflows |
+  sed 's#^#.github/workflows/#' >"$tmp_workflows"
 
 for status in queued in_progress waiting requested pending; do
   gh api "repos/$REPO/actions/runs?status=$status&per_page=100" >>"$tmp_runs"
   printf '\n' >>"$tmp_runs"
 done
 
-python3 - "$tmp_runs" >"$tmp_candidates" <<'PY'
+python3 - "$tmp_runs" "$tmp_workflows" >"$tmp_candidates" <<'PY'
 import json
 import sys
 
 paths = {
-    ".github/workflows/production-build.yml",
-    ".github/workflows/production-deploy.yml",
-    ".github/workflows/production-rollback.yml",
-    ".github/workflows/oci-production-build.yml",
-    ".github/workflows/oci-production-deploy.yml",
-    ".github/workflows/oci-production-rollback.yml",
-    ".github/workflows/oci-ghcr-cache-recovery.yml",
-    ".github/workflows/ghcr-package-management.yml",
-    ".github/workflows/oci-infrastructure.yml",
-    ".github/workflows/oci-capacity-acquire.yml",
-    ".github/workflows/oci-live-data-rollout.yml",
-    ".github/workflows/oci-live-betting-activate.yml",
-    ".github/workflows/oci-live-betting-disable.yml",
-    ".github/workflows/oci-migrate.yml",
-    ".github/workflows/oci-migration-recovery.yml",
+    line.strip()
+    for line in open(sys.argv[2], encoding="utf-8")
+    if line.strip()
 }
+if len(paths) != 15:
+    raise SystemExit("protected-operation policy must enumerate exactly 15 workflows")
 decoder = json.JSONDecoder()
 payload = open(sys.argv[1], encoding="utf-8").read()
 index = 0
@@ -65,9 +61,17 @@ while index < len(payload):
     if index >= len(payload):
         break
     response, index = decoder.raw_decode(payload, index)
-    if response.get("total_count", 0) > 100:
+    if not isinstance(response, dict):
+        raise SystemExit("active run inventory response is malformed")
+    total_count = response.get("total_count")
+    runs = response.get("workflow_runs")
+    if not isinstance(total_count, int) or total_count < 0:
+        raise SystemExit("active run inventory count is malformed")
+    if total_count > 100:
         raise SystemExit("more than 100 active runs requires manual review")
-    for run in response.get("workflow_runs", []):
+    if not isinstance(runs, list) or len(runs) != total_count:
+        raise SystemExit("active run inventory is incomplete")
+    for run in runs:
         run_id = run.get("id")
         if (
             run_id in seen

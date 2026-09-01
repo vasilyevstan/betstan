@@ -81,9 +81,10 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                        ))}
                    </div>
                    <ul className="navbar-nav align-items-lg-center gap-lg-1">
-                       {links.map(({ label, href, icon, kind }) => (
-                           <li key={href} className="nav-item">
-                               <Link className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : 'nav-icon-link'} to={linkTo(href)} title={label}>
+                       {links.map(({ label, href, icon, kind }) => {
+                           const isLabelledIconLink = !isV2 && label === 'Backoffice';
+                           return <li key={href} className="nav-item">
+                               <Link className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : `nav-icon-link${isLabelledIconLink ? ' nav-icon-link--labelled' : ''}`} to={linkTo(href)} title={label}>
                                    {isV2 ? (
                                        <>
                                            <span className="nav-picture-button__icon-wrap">
@@ -94,12 +95,12 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                                    ) : (
                                        <>
                                            <img className="nav-icon" src={icon} alt="" />
-                                           <span className="visually-hidden">{label}</span>
+                                           <span className={isLabelledIconLink ? 'nav-icon-link__label' : 'visually-hidden'}>{label}</span>
                                        </>
                                    )}
                                </Link>
-                           </li>
-                       ))}
+                           </li>;
+                       })}
                    </ul>
                </div>
            </div>

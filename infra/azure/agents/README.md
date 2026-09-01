@@ -15,7 +15,10 @@
 - `production-workflow-inventory-stan.sh` — derives and validates the exact governed Azure-plus-OCI production workflow set matched by a promotion diff.
 - `pr-validation-stan.sh` — inspects trusted required checks for a PR's exact head SHA.
 - `pr-merge-safety-stan.sh` — combines branch policy, exact-SHA validation, mergeability, and production approval gates.
-- `copilot-cli-run-approval-stan.sh` — fail-closed protected-environment approval for normal CLI-managed build/deploy runs.
+- `copilot-cli-protected-operation-policy-stan.sh` — one policy for every protected workflow, operation, input set, title, environment, SHA role, and automatic lineage.
+- `copilot_cli_authority_stan.py` — canonical transport-input hashing plus private dispatch intents, one-run authority state, approval receipts, reconciliation, and inert retirement.
+- `copilot-cli-dispatch-stan.sh` — validates an operation request, persists a pre-dispatch intent and durable output capture, dispatches exactly once, binds the returned run ID, and issues its private authority record.
+- `copilot-cli-run-approval-stan.sh` — fail-closed protected-environment approval for exact CLI-owned or promotion-derived runs.
 - `production-run-exclusivity-stan.sh` — blocks actionable concurrent production runs while identifying inert disabled queue records.
 - `post-merge-verification-stan.sh` — verifies merged commit workflow success plus production health across both public hosts.
 - `rollback-readiness-stan.sh` — emits explicit rollback go/no-go based on current health, queue pressure, and rollout history.
@@ -258,22 +261,138 @@ The merge-safety agent:
   requires `APPROVED_WORKFLOWS` for a human-managed production promotion;
 - allows automatic mode only for a `copilot-cli-managed` PR with resolved reviews and no competing production run.
 
-For a normal CLI-managed build/deploy environment gate, validate first and mutate only after the dry-run succeeds:
+Run dispatch and approval from a clean checkout at exact current `master`.
+Create every request outside the repository with mode `0600`; include every
+workflow input, including optional values, so the canonical bytes sent to
+GitHub are the bytes whose SHA-256 is recorded. Boolean request values remain
+typed JSON booleans in the private request and authority record; the dispatcher
+converts them to lowercase `"true"`/`"false"` strings in the exact JSON payload
+required by `gh workflow run --json`, and hashes that transmitted payload.
 
 ```bash
-EXPECTED_SHA=<current-master-sha> \
-EXPECTED_WORKFLOW=production-build.yml \
-EXPECTED_ENVIRONMENT=production-emergency \
-./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id>
+request=/private/path/oci-deploy-request.json
+chmod 600 "$request"
+
+./infra/azure/agents/copilot-cli-dispatch-stan.sh "$request"
+./infra/azure/agents/copilot-cli-dispatch-stan.sh "$request" --dispatch
 
 COPILOT_CLI_AUTO_APPROVE=true \
-EXPECTED_SHA=<current-master-sha> \
-EXPECTED_WORKFLOW=production-build.yml \
-EXPECTED_ENVIRONMENT=production-emergency \
+EXPECTED_OPERATION=oci-production-deploy \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
-The approver rejects stale master SHAs, reruns, unlabelled promotions, unexpected workflows/environments or phase titles, and actionable competing production activity. Disabled records are ignored only when they are old and have no jobs or pending environments. Automatic mode supports the normal application build/deploy/activation path, exact-title OCI capacity and registry/finalize runs, and the bounded `dry-run` → `apply-backfills` → `apply-slip-index` workflow. Broad migration, recovery, and rollback remain human-gated.
+The request schema is:
+
+```json
+{
+  "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+  "repository": "vasilyevstan/betstan",
+  "operation": "production-deploy",
+  "controlSha": "<current-master-sha>",
+  "subjectSha": "<current-master-sha>",
+  "targetSha": null,
+  "inputs": {
+    "approved_sha": "<current-master-sha>",
+    "build_run_id": "<first-attempt-build-run-id>"
+  }
+}
+```
+
+List exact operation names with
+`copilot-cli-protected-operation-policy-stan.sh operations`. If GitHub returns
+a run URL but exact run metadata has not materialized, never dispatch again;
+rerun the dispatcher with the same request and `--resume-run <run-id>`. If the
+dispatcher process dies after GitHub writes the URL but before the run is
+bound, recover the durable capture instead:
+
+```bash
+./infra/azure/agents/copilot-cli-dispatch-stan.sh \
+  "$request" \
+  --resume-captured
+```
+
+The dispatcher creates its private `dispatching` intent and mode-`0600`
+capture before the external mutation. A URL-less result remains ambiguous and
+blocks replacement dispatch; do not infer identity from timestamps, titles,
+or nearby runs. A captured terminal run is automatically marked `retired`
+only after GitHub proves it has zero jobs and zero pending deployments, at
+which point a replacement request may proceed.
+Any unresolved intent or `claimed`/`inflight` record blocks every protected
+dispatch for the same repository and control SHA, including requests with a
+different operation or inputs. An `issued` or `consumed` record blocks the
+same operation and exact transport input hash; a changed request is distinct
+but still passes the full policy, lineage, recovery, and exclusivity checks.
+After creating a pristine intent, the dispatcher revalidates current master,
+workflow blob, and active state. Authority drift cancels only that untouched
+intent and no GitHub dispatch occurs.
+
+The shared policy declares the required workflow state at approval.
+`oci-capacity-acquire.yml`, `oci-infrastructure.yml`,
+`oci-live-betting-activate.yml`, `oci-live-data-rollout.yml`,
+`oci-migration-recovery.yml`, and `oci-production-deploy.yml` must be
+`disabled_manually`; every other protected workflow must be `active`. For a
+normally disabled workflow, enable it before dispatch, keep it enabled until
+the returned run has a real job and expected pending environment, then disable
+it before approval.
+
+Automatic `production-build` approval requires the exact labelled promotion
+and creates a private automatic authority record before its first approval:
+
+```bash
+COPILOT_CLI_AUTO_APPROVE=true \
+EXPECTED_OPERATION=production-build \
+EXPECTED_CONTROL_SHA=<current-master-sha> \
+./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
+```
+
+`oci-production-build` also requires `EXPECTED_UPSTREAM_RUN_ID` and receives
+its own automatic authority record after the exact successful upstream build
+is proven. Automatic migration recovery requires the exact failed
+`oci-migrate` run ID and its consumed CLI authority receipt. Scheduled
+recovery and capacity runs have no record and cannot enter automatic approval.
+
+The approver rechecks current master, promotion authority, workflow ID/path
+and Git blob, first attempt, exact title/event/environment, pending job,
+current-user approval capability, record input hash, historical ancestry, and
+production exclusivity. One record can acknowledge multiple sequential gates
+on the same exact run and explicitly allowed downstream recovery. Each exact
+run/environment/waiting-job-set fingerprint is receipted once, so a later job
+may reuse the same environment without replaying an earlier gate. An ambiguous
+GitHub POST leaves an `inflight` claim and must not be replayed automatically.
+Immediately after persisting the local `inflight` claim, the approver
+revalidates current master, workflow blob/state, and promotion authority. If
+authority changed, it releases the exact claim to its previous
+`issued`/`consumed` state and makes no GitHub POST. Production exclusivity also
+fails closed unless each active-run API response is a complete object with a
+nonnegative integer `total_count`, a `workflow_runs` array, exact count/list
+agreement, and no more than the requested 100 results.
+Reconcile it by observing the exact run again:
+
+```bash
+COPILOT_CLI_AUTO_APPROVE=true \
+EXPECTED_OPERATION=oci-production-deploy \
+./infra/azure/agents/copilot-cli-run-approval-stan.sh \
+  <run-id> \
+  --reconcile
+```
+
+The inflight claim records the exact reviewer, approval comment, environment,
+downstream run, operation, and matching GitHub review-history count observed
+before the POST. Reconciliation first requires that exact run and operation,
+then writes a consumed receipt only when the exact approved-review count
+increased. If no review appeared and the same active pending gate still
+exists, it restores the prior issued/consumed state and reports `RETRY_READY`;
+submit a new approval only through a later normal `--approve` invocation. If
+neither condition is proven, authority stays inflight and unresolved. A
+missing pending response or terminal run is never treated as approval by
+itself. Authority states are `dispatching` intent, then `claimed`, `issued`,
+`inflight`, `consumed`, or terminal `retired`. Expired claimed and inflight
+records remain inspectable for exact recovery, while issued and consumed
+authority remains bounded by expiry.
+
+If an approval process dies while holding a local lock, use the helper's
+`clear-stale-lock` command only after it proves the recorded owner PID is gone;
+never delete a live or unverified lock directly.
 
 ## Post-merge production verification
 
@@ -503,6 +622,17 @@ CONFIRM_UNLOCK=remove-stale-migration-lock \
   a failed command that emits partial stdout can corrupt fallback output.
 - Use Ruby YAML parsing for offline manifest syntax. `kubectl apply
   --dry-run=client` may still contact the configured API server for discovery.
+
+### CI fixture and progress discipline
+
+- Tests for first-attempt-only scripts must set or clear `GITHUB_RUN_ID` and
+  `GITHUB_RUN_ATTEMPT` explicitly. Ambient metadata from a GitHub Actions rerun
+  must not cause the fixture to fail before the assertion under test.
+- Before treating an executing GitHub job as stalled, inspect its current step
+  and compare elapsed time with recent successful runs of the same workflow and
+  job on a comparable runner. A much faster local command is not a CI duration
+  baseline. Historical duration does not excuse a pending approval, failed
+  step, or missing progress transition.
 
 ## Stage lifecycle and cost controls
 

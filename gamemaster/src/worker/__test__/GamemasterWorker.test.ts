@@ -704,6 +704,7 @@ it("persists a simulation before kickoff publication and replays it after restar
   expect(
     kickoffPayload.data.incidents.map((incident: { id: string }) => incident.id)
   ).toEqual([simulation.transitions[0].incident.id]);
+  expect(kickoffPayload.data.incidentsComplete).toBe(true);
   expect(kickoffPayload.data.incident.id).toBe(simulation.transitions[0].incident.id);
   const kickoffOpenMarkets = kickoffPayload.data.markets.filter(
     (market: { status: LiveMarketStatus }) =>
@@ -747,6 +748,7 @@ it("persists a simulation before kickoff publication and replays it after restar
   expect(
     finalSnapshot.data.incidents.map((incident: { id: string }) => incident.id)
   ).toEqual(simulation.transitions.map((transition) => transition.incident.id));
+  expect(finalSnapshot.data.incidentsComplete).toBe(true);
   expect(
     ResultSetPublisher.prototype.publishWithConfirm
   ).toHaveBeenCalledTimes(1);
@@ -794,6 +796,8 @@ it("treats an event as a live-betting candidate exactly 10 minutes before kickof
   ).mock.calls[0][0];
   expect(snapshot.data.sequence).toBe(0);
   expect(snapshot.data.phase).toBe(EventPhase.PRE_MATCH);
+  expect(snapshot.data.incidents).toEqual([]);
+  expect(snapshot.data.incidentsComplete).toBe(true);
   expect(snapshot.data.markets.map((market: any) => market.marketType).sort()).toEqual(
     [LiveMarketType.FIRST_MINUTE_GOAL, LiveMarketType.KICKOFF_TEAM].sort()
   );
@@ -1560,6 +1564,7 @@ it("publishes a single cutover snapshot for overdue events still inside the roll
       .slice(0, 3)
       .map((transition) => transition.incident.id)
   );
+  expect(cutoverPayload.data.incidentsComplete).toBe(true);
   expect(
     ResultSetPublisher.prototype.publishWithConfirm
   ).not.toHaveBeenCalled();
@@ -1734,6 +1739,7 @@ it("covers helper fallbacks for getters, dates, incidents, and manual payloads",
   expect(payloadFromStoredTransitions.data.markets).toHaveLength(4);
   expect(payloadFromStoredTransitions.data.settlements).toHaveLength(4);
   expect(payloadFromStoredTransitions.data.incidents).toHaveLength(2);
+  expect(payloadFromStoredTransitions.data.incidentsComplete).toBe(true);
 
   const payloadWithoutMarkets = (worker as any).buildManualLiveUpdatePayload({
     eventId: "empty-event",
@@ -1749,6 +1755,7 @@ it("covers helper fallbacks for getters, dates, incidents, and manual payloads",
   });
   expect(payloadWithoutMarkets.data.markets).toEqual([]);
   expect(payloadWithoutMarkets.data.settlements).toEqual([]);
+  expect(payloadWithoutMarkets.data.incidentsComplete).toBe(true);
   expect(payloadWithoutMarkets.data.occurredAt).toBe(clock.now().toISOString());
 });
 

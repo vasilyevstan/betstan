@@ -365,7 +365,7 @@ const createLiveBettingMockState = () => {
   state.fixtures = {
     liveEventName: sequence1.name,
     preMatchEventName: preMatchEvent.name,
-    preMatchSelectionLabel: 'Select 1X2 Draw at 3.2',
+    preMatchSelectionLabel: 'Select 1X2 X: Draw in Falcons - Owls at 3.2',
     liveInitialSelectionLabel: 'Select Next Corner: Raptors at 1.8',
     liveUpdatedHomeSelectionLabel: 'Select Next Corner: Raptors at 1.92',
     liveUpdatedAwaySelectionLabel: 'Select Next Corner: Sharks at 2.25',

@@ -17,6 +17,8 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
+- `docs/wiki/UI-UX-Consistency.md` and the applicable UX consistency
+  specification when backend output is user-visible;
 - `docs/copilot-security-guardrails.md`;
 - the incoming architecture and handoff;
 - current git branch, status, recent history, and exact diff;
@@ -49,6 +51,10 @@ instead of crossing the boundary.
 ## Engineering rules
 
 - Implement only the handed-off slice; do not redesign accepted contracts.
+- When backend output changes a user-visible label, format, status, ordering,
+  or state meaning, implement the architect- and contract-approved shape
+  against the UX specialist's named references. Record intentional product
+  exceptions, but never invent an API contract from a visual preference.
 - Preserve old payloads and historical Mongo documents when compatibility is
   required.
 - Make message handlers idempotent and explicit about cross-queue ordering.
@@ -103,6 +109,20 @@ instead of crossing the boundary.
 - Use `npm ci`, not `npm install`, unless an intentional dependency change owns
   the lockfile update.
 
+- When output changes public presentation ordering or exposes a
+  completeness/attestation flag, preserve each item's original ID/name/value
+  identity across the sort and set completeness only from validated, fully
+  retained authoritative data; never claim completeness for legacy, partial,
+  or unvalidated input.
+- Keep terminal Event placeholders fail-dark until both event metadata and
+  visibility authority are initialized. A pending `ONLINE` decision is not
+  permission to publish an unresolved placeholder, including when
+  `EVENT_RESULT` and `FULL_TIME` arrive first.
+- Every terminal visibility writer and recovery path must re-evaluate current
+  offline intent, retirement, phase, and unresolved authority atomically at
+  write time. A stale pre-read must never authorize `ONLINE` or overwrite a
+  concurrent administrator `OFFLINE` decision.
+
 When creating `common/`, it must be a normal tracked package, never a gitlink.
 Refuse mode `160000` or an accidental `.gitmodules` entry.
 
@@ -125,6 +145,11 @@ Lead with:
 For `BLOCKED`, use one reason: `out_of_scope_path`, `contract_unstable`,
 `missing_dependency`, `test_environment`, or `approval_required`.
 
-Include exact files changed, contract/database effects, tests and exit codes,
-known risks, and unresolved findings. Hand off to
-`betstan-validation-critic`; do not approve your own work.
+Include exact files changed, contract/database effects, any public-ordering
+or exact-ID-preservation impact, any final-history completeness/attestation
+semantics, tests and exit codes, known risks, and unresolved findings. For
+user-visible read-model, formatter, ordering, or contract work, return the
+immutable exact-head result to the same registered `betstan-ux-ui-expert` work
+unit and include its `UX_REVIEW_PASSED` result when handing off to
+`betstan-validation-critic`.
+Do not approve your own work.
