@@ -276,10 +276,10 @@ grep -qF "non-symlink directory" "$error_file"
 run_dispatcher "$request_file" --dispatch >"$output_file"
 grep -qF "authority_state=issued" "$output_file"
 [[ "$(cat "$dispatch_count_file")" = "1" ]]
-[[ "$(stat -f '%Lp' "$authority_dir" 2>/dev/null || stat -c '%a' "$authority_dir")" = "700" ]]
+[[ "$(stat -c '%a' "$authority_dir" 2>/dev/null || stat -f '%Lp' "$authority_dir")" = "700" ]]
 record="$authority_dir/7001.json"
 [[ -f "$record" ]]
-[[ "$(stat -f '%Lp' "$record" 2>/dev/null || stat -c '%a' "$record")" = "600" ]]
+[[ "$(stat -c '%a' "$record" 2>/dev/null || stat -f '%Lp' "$record")" = "600" ]]
 jq -e '
   .state == "issued" and
   .operation == "production-deploy" and
