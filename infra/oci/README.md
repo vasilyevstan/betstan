@@ -147,7 +147,9 @@ cluster and migration ConfigMaps, scale the known Azure ingress/application
 deployments to zero, stop `betstan-aks`, and cancel only a conclusively stale
 exact migration run. It cannot start, create, resize, delete, or access OCI.
 The schedule remains inert unless
-`OCI_MIGRATION_RECOVERY_ENABLED=true`; manual dispatch remains reviewer-gated.
+`OCI_MIGRATION_RECOVERY_ENABLED=true`; a manual dispatch auto-approves only
+with its exact Copilot CLI authority record, otherwise it remains personally
+gated.
 An armed schedule also requires
 `OCI_MIGRATION_RECOVERY_ARM_UNTIL_EPOCH` to be in the future and no more than
 24 hours away.
@@ -201,8 +203,10 @@ concurrent retirement fixture isolation without masking failed suites.
    generation with unchanged image inputs. Publication stages each image by
    digest before assigning its exact tag. If a first-attempt build terminates
    after publishing only part of a generation, do not rerun it: dispatch the
-   human-gated `repair-build` package phase with that failed run and its exact
-   successful `production-build` upstream. The resulting new first-attempt
+   policy-bound `repair-build` package phase with that failed run and its exact
+   successful `production-build` upstream. A Copilot CLI dispatch uses its
+   private exact-run authority record; a direct human dispatch remains
+   personally gated. The resulting new first-attempt
    build rebuilds every existing tag, adopts it only when the rebuilt ARM64
    platform digest is identical, preserves the verified existing manifest
    identity, and publishes the missing tags. Full and repair builds derive
@@ -211,8 +215,8 @@ concurrent retirement fixture isolation without masking failed suites.
    is a reproducible-build check rather than an assumption.
 
    Before any restart or deployment after OCIR deletion, prioritize the
-   reviewer-gated
-   `oci-ghcr-cache-recovery` workflow if the live k3s baseline is still OCIR.
+   protected `oci-ghcr-cache-recovery` workflow if the live k3s baseline is
+   still OCIR. It follows the same CLI-origin record or human-approval rule.
    Select the successful infrastructure **finalize** run for the same
    historical baseline SHA; recovery binds its runtime fingerprint and public
    endpoints to the historical deployment while executing the current master
@@ -307,9 +311,10 @@ concurrent retirement fixture isolation without masking failed suites.
 6. Before every OCI application deploy, produce a successful final
    `apply-slip-index` data handoff for the same exact current master SHA,
    first-attempt OCI build, and finalized infrastructure run. Application or
-   schema changes use the reviewer-gated phases in order: `dry-run`,
+   schema changes use protected policy-bound phases in order: `dry-run`,
    `apply-backfills`, then `apply-slip-index`, passing each successful run ID
-   to the next phase. Only the workflow's explicitly validated
+   to the next phase. CLI-created runs use their exact private authority
+   records; direct human runs remain personally gated. Only the workflow's explicitly validated
    GitHub/infra/docs-only descendant resume may reuse an already applied data
    chain; deployment still requires the resulting new exact-SHA final handoff.
    The workflow runs only compiled CLIs from the approved immutable image
@@ -411,19 +416,38 @@ For workflows that are normally disabled:
 
 1. Prove the exact current master SHA, inputs, upstream attempt-1 evidence, and
    absence of competing production work.
-2. Enable the workflow and dispatch exactly once.
-3. Capture the run ID from the returned URL. A returned URL is not proof that
-   GitHub created a job.
+2. Enable the workflow and use the policy dispatcher, which persists its
+   private intent and output capture before dispatching exactly once.
+3. Bind the exact run ID from the returned URL. A returned URL is not proof
+   that GitHub created a job.
 4. Keep the workflow enabled until the exact run has a real job and, for a
    protected operation, the expected `pending_deployments` environment.
 5. Disable the workflow before approving that exact run.
-6. Revalidate SHA, attempt, job, environment, and workflow state before
-   approval.
+6. Revalidate SHA, attempt, job, environment, workflow blob/state, and
+   promotion authority after the local approval claim and before the GitHub
+   POST.
 
-If a command fails after returning a URL, inspect that exact run before any
-retry. A queued record with zero jobs and zero pending approvals is not
-provenance. Keep it unapproved and record it as inert; never relabel it as a
-successful attempt.
+The shared policy requires `disabled_manually` at approval for
+`oci-capacity-acquire.yml`, `oci-infrastructure.yml`,
+`oci-live-betting-activate.yml`, `oci-live-data-rollout.yml`,
+`oci-migration-recovery.yml`, and `oci-production-deploy.yml`; all other
+protected workflows must remain `active`. If authority changes after the
+claim, release that exact claim and do not approve.
+
+If the dispatcher dies after capturing a URL, use `--resume-captured`; if the
+bound run is delayed, use `--resume-run`. Never redispatch either case. A
+URL-less capture remains ambiguous and fail-closed. A run may be recorded as
+`retired` and replaced only after it is terminal with zero jobs and zero
+pending approvals; never relabel it as a successful attempt. Reconcile an
+ambiguous approval POST through the approver's explicit `--reconcile` path,
+never by replaying the POST. Only a new exact approved review in GitHub
+history can produce a consumed receipt; a vanished or terminal gate without
+that evidence remains unresolved.
+
+Any unresolved intent or `claimed`/`inflight` record blocks every protected
+dispatch for the same repository and control SHA. An `issued` or `consumed`
+record blocks only the same operation and exact transport input hash; changed
+inputs are a new request and still require every normal safety check.
 
 PR title/body edits are also workflow-producing because the protected
 validation workflows subscribe to `pull_request.edited`. Do not make those

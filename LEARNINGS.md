@@ -558,3 +558,102 @@ validated.
   update to the exact scanned event, terminal markers, live state, and product
   arrays so a concurrent result or reorder becomes a safe mismatch instead of
   overwriting newer authority.
+
+## Corrected compact live release — 2026-08-31
+
+- Exact master `f4a0b333963b3a458c9b2b48c2aae1f6267f754d` completed a new
+  first-attempt release chain: production build `33436391225`, OCI build
+  `33437490565`, GHCR validation `33438579478`, capacity `33438984944`,
+  infrastructure `33439362885`, data dry-run `33440517994`, backfill
+  `33441373219`, Slip-index handoff `33442790087`, dark deployment
+  `33443908124`, and activation `33444998653`.
+- The Event backfill changed seven eligible legacy boards and verification
+  found zero remaining matches. Existing Slip and Bet snapshots were not
+  rewritten.
+- Permanent activation passed the complete ten-minute browser journey and
+  finished two matches `1-2` and `2-1`. Live and pre-match slips remained
+  separate; quote refresh, stale-quote handling, moderation, settlement,
+  history, SSE, cleanup, queues, and restarts passed. Final state is committed
+  with live kickoffs enabled and no lease.
+- Terminal production validation bound all nine deployments to immutable
+  digests, verified eight logical databases on the retained 50 GiB Mongo PVC,
+  zero RabbitMQ backlog, public REST/SSE health, 90 plausible Correct Score
+  options, 44 deployed-client regressions, and 24 real-data responsive checks
+  through the 320px boundary.
+- A failed first attempt is evidence, not a retry candidate. The corrected
+  acceptance assertion and persisted-board repair required a new exact master
+  SHA and complete release chain.
+
+## CLI-originated protected authority — 2026-08-31
+
+- Protected approval is classified by origin, not workflow class. A direct
+  Copilot CLI operation must be created by the bounded dispatcher and bound to
+  its exact returned run ID. Human `gh workflow run` and scheduled runs receive
+  no record and remain personally gated.
+- Keep one shared policy for all 15 protected workflows. Bind exact workflow
+  ID/path/blob, event, environment, title, first attempt, current control SHA,
+  separate subject or historical target, and every workflow input. Keep
+  booleans typed in the private request and record, normalize them to lowercase
+  strings for `gh workflow run --json`, and hash the exact transport bytes.
+- A dispatch URL proves event acceptance, not materialization. Persist a
+  `dispatching` intent and mode-`0600` output capture before the external
+  mutation, bind the exact captured URL to a `claimed` record, and issue it
+  only when that exact run appears. Use `--resume-captured` after a pre-bind
+  crash and `--resume-run` after delayed materialization. Never infer identity
+  from title or timing, and never redispatch a URL-less unresolved intent.
+- Treat an unresolved same-release authority state as global, not
+  request-local. Any `dispatching`/`bound` intent or `claimed`/`inflight`
+  record blocks every protected request for the repository and control SHA.
+  `issued` and `consumed` are one-use for the same operation and exact
+  transport input hash; changed inputs form a new request but do not bypass
+  policy, lineage, recovery, or exclusivity. `retired` is the only inert
+  replacement exception.
+- Persisting an intent is not the last dispatch check. Revalidate current
+  master, workflow blob, and active state after creating it, and cancel only a
+  pristine untouched intent if authority drifted before the GitHub call.
+- Approval needs a two-phase local state change. Claim the exact
+  run/environment/waiting-job-set fingerprint as `inflight` before the GitHub
+  POST, then append a consumed receipt only after acceptance. An ambiguous
+  response stays inflight and cannot be replayed automatically. Reconciliation
+  first binds to the exact downstream run and operation, then compares GitHub
+  review history with the reviewer/comment/environment baseline captured
+  before the POST. A new exact approved review permits a consumed receipt; no
+  new review plus the same active gate permits retry. Every other shape remains
+  unresolved and inflight. Gate disappearance, terminal status, and
+  temporarily missing pending evidence are not approval.
+- Workflow lifecycle is policy data. Capacity, infrastructure, activation,
+  live-data, migration-recovery, and production-deploy workflows must be
+  `disabled_manually` at approval; all other protected workflows must be
+  `active`. Revalidate that state, the workflow blob, current master, and
+  promotion authority after the local claim. On drift, release the exact claim
+  to its previous state and never send the POST.
+- One dispatch can legitimately encounter multiple sequential protected jobs.
+  Preserve the consumed record and allow a new waiting-job-set fingerprint on
+  the same exact run even when it reuses the same environment ID, or a policy-
+  declared automatic descendant. Never reuse the same gate fingerprint.
+- Promotion-derived build approvals need the same durable automatic records
+  and receipt lifecycle as directly dispatched runs. A captured terminal run
+  is safe to mark `retired` only with zero jobs and zero pending deployments;
+  that proof, not age or a generic conclusion, permits a replacement dispatch.
+- Expired `claimed` and `inflight` records stay inspectable so exact recovery
+  remains possible. Issuing an active claimed run or restoring retry authority
+  for the same active gate renews the bounded window; reconciled consumption,
+  issued records, and consumed records otherwise remain expiry-bound.
+- Current `controlSha` is always current master safety code. `subjectSha` may
+  identify the deployed release and `targetSha` may identify a historical
+  ancestor for rollback or recovery; an old target never authorizes stale
+  control code.
+- Active-run exclusivity data is usable only when the response is a complete
+  object with a nonnegative integer `total_count`, a `workflow_runs` array,
+  exact count/list agreement, and no more than the requested 100 results.
+  Missing or malformed completeness evidence fails closed.
+- The shared GitHub user cannot cryptographically distinguish a human `gh`
+  command from Copilot CLI. Owner-only outside-repository records are an
+  operational ownership boundary, so never create, copy, or retrofit one for
+  a human-originated run.
+- The conductor must treat an issued record plus a pending exact environment
+  as an immediate automatic-approval handoff. A surviving intent with a
+  captured URL invokes `--resume-captured`, a delayed claimed record invokes
+  exact-run resume, an inert terminal claim invokes retirement, and an
+  inflight record invokes explicit reconciliation. None should wait for a
+  routine polling interval or cause a replacement dispatch.

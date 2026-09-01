@@ -19,6 +19,18 @@ gh() {
       printf '%s\n' '{"total_count":101,"workflow_runs":[]}'
       return
     fi
+    if [[ "$mode" == "missing-runs" && "$2" == *"status=in_progress"* ]]; then
+      printf '%s\n' '{"total_count":0}'
+      return
+    fi
+    if [[ "$mode" == "count-mismatch" && "$2" == *"status=in_progress"* ]]; then
+      printf '%s\n' '{"total_count":1,"workflow_runs":[]}'
+      return
+    fi
+    if [[ "$mode" == "non-array-runs" && "$2" == *"status=in_progress"* ]]; then
+      printf '%s\n' '{"total_count":0,"workflow_runs":{}}'
+      return
+    fi
 
     local branch=master
     if [[ "$mode" == "pr-validation" ]]; then
@@ -172,7 +184,8 @@ REPO=example/repo NOW_EPOCH=2000 STUB_MODE=superseded-capacity \
 
 for mode in active data-active activation-active disable-active ghcr-package-active \
   cache-recovery-active recent-disabled \
-  pending-disabled jobs-disabled overflow unsuperseded-capacity \
+  pending-disabled jobs-disabled overflow missing-runs count-mismatch \
+  non-array-runs unsuperseded-capacity \
   current-superseded-capacity recent-superseded-capacity \
   pending-superseded-capacity jobs-superseded-capacity \
   wrong-attempt-superseded-capacity rerun-superseded-capacity \

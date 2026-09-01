@@ -276,10 +276,29 @@ its owner. It is never healthy by default.
   real job and expected protected gate, then route disable-before-approval to
   the mutation owner. If the dispatching command exits after returning a URL,
   inspect that run before permitting another dispatch.
+- Track CLI authority as part of the run identity: operation, request key or
+  authority run ID, `dispatching|claimed|issued|inflight|consumed|retired`
+  state, control/subject/target SHA, and expiry. A surviving intent whose
+  durable capture contains one exact URL triggers `--resume-captured`; a
+  delayed `claimed` record triggers exact `--resume-run`; neither permits a
+  replacement dispatch. Treat any unresolved intent or `claimed`/`inflight`
+  record as a global fence on every protected request for the same repository
+  and control SHA; changing operation or inputs is not recovery. An exact
+  `issued`/`consumed` operation and transport-input request is one-use. A
+  terminal claimed run may be retired only after exact zero-job and
+  zero-pending evidence. An `inflight` record triggers
+  explicit `--reconcile`, never a direct replay. Reconciliation consumes only
+  for the recorded downstream run and operation, with a new exact GitHub
+  approved review relative to the reviewer/comment/environment baseline;
+  without that evidence, a disappeared or terminal gate remains unresolved and
+  must be reported immediately. A lock whose owner PID is gone may be cleared
+  only through the helper's exact stale-lock check; never delete a live or
+  unverified lock.
 - A jobless queued dispatch with zero jobs and zero pending approvals is not
-  authority. Keep it unapproved and disabled, record it as inert evidence, and
-  permit replacement only after proving it cannot produce side effects and
-  exactly one new run has materialized.
+  usable authority. Keep it unapproved and disabled. Retire its exact record
+  as inert evidence, and permit replacement only after the run becomes
+  terminal and that retirement is persisted; age, a queue label, or missing
+  pending evidence alone is insufficient.
 - If an earlier job is terminal while a downstream job is `waiting`, `pending`,
   or `queued` with no executing step, classify the run before waiting again.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
@@ -292,7 +311,17 @@ its owner. It is never healthy by default.
   it is an actionable gate. If the exact workflow, environment, SHA, and
   operation have documented preauthorization, immediately return
   `ATTENTION_REQUIRED` with the run ID, environment ID/name, approving owner,
-  and exact bounded approval handoff to the orchestrator. Otherwise report
+  and exact bounded automatic approval handoff to the orchestrator, but only
+  after the issued or consumed CLI authority record also validates. Automatic
+  promotion-derived builds must have their durable record materialized before
+  mutation. Require the policy-declared approval workflow state: the normally
+  dormant capacity, infrastructure, activation, live-data,
+  migration-recovery, and production-deploy workflows are
+  `disabled_manually`; every other protected workflow is `active`. The
+  mutation owner must revalidate master, workflow blob/state, and promotion
+  authority after claiming approval, release the claim on drift, and send no
+  POST. A valid record must be routed in the same checkpoint, not after another
+  watch interval. Otherwise report
   `BLOCKED` and identify the required human approval owner. Never leave either
   case until the next ordinary progress checkpoint.
 - After handing off a preauthorized approval, set the next trigger to the
