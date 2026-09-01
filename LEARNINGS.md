@@ -60,7 +60,10 @@
   the row height, but buttons stretch together and odds remain on one baseline.
   Fixed ten-option Correct Score boards use a container-aware five- or
   two-column layout so every row is balanced and every control remains at least
-  touch-target width.
+  touch-target width. Recheck the board inside every changed parent layout and
+  around container-query transitions: touch width alone misses prices that
+  escape their controls. A shared section badge/title must span the whole
+  product deck rather than auto-place above one sibling market.
 - Read-only review roles must be read-only in their declared capabilities,
   not only in prose. UX reviewers consume rendered evidence from the test
   owner; they do not need unrestricted command execution to assess it.
@@ -149,12 +152,15 @@
 - Terminal ordering and auth safeguards: a result/`FULL_TIME` write decision
   must be atomic against the current live phase and explicit/legacy offline
   intent so no interleaving can leave a fully onboarded, non-retired terminal
-  event `OFFLINE`. The inverse is equally important: a placeholder stays
-  fail-dark until event metadata and visibility authority are initialized,
-  even with pending `ONLINE` intent. An equal-sequence authoritative merge
-  keeps the stronger terminal history while adopting repaired
-  status/visibility; and an acceptance-scoped retained `OFFLINE` snapshot must
-  not render, clear, or leak while current-user authorization is unresolved.
+  event `OFFLINE`. Apply that predicate to every terminal writer and delayed
+  recovery path at write time; a stale pre-read must not overwrite a
+  concurrent administrator `OFFLINE` decision. The inverse is equally
+  important: a placeholder stays fail-dark until event metadata and visibility
+  authority are initialized, even with pending `ONLINE` intent. An
+  equal-sequence authoritative merge keeps the stronger terminal history while
+  adopting repaired status/visibility; and an acceptance-scoped retained
+  `OFFLINE` snapshot must not render, clear, or leak while current-user
+  authorization is unresolved.
 - Exact-SHA production evidence: when this class of change reaches
   production, extend the existing post-deploy acceptance journey to verify
   full bounded timeline completeness/labelling, penalty-linked deduplication,

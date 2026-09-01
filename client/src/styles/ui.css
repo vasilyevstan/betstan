@@ -330,7 +330,6 @@ body {
   }
 }
 
-
 .auth-card {
   width: min(100%, 30rem);
   margin-inline: auto;
@@ -1486,6 +1485,14 @@ body {
   min-width: 0;
 }
 
+.event-card__section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .event-card__section-title {
   font-size: 0.78rem;
   font-weight: 700;
@@ -1674,19 +1681,7 @@ body {
   .event-card__countdown-products {
     grid-column: 2;
     grid-row: 1;
-    grid-template-columns: minmax(9.25rem, 0.65fr) minmax(0, 1.35fr);
     align-items: start;
-  }
-
-  .event-card__countdown-products > .product-block {
-    margin-bottom: 0;
-  }
-
-  .event-card__countdown-products > .product-block--1x2 {
-    padding-right: 0.75rem;
-    padding-bottom: 0;
-    border-right: 1px solid var(--border-subtle);
-    border-bottom: 0;
   }
 
   .event-card__countdown-products .product-cs-grid {
@@ -1717,22 +1712,6 @@ body {
   .event-card__countdown-products {
     grid-column: auto;
     grid-row: auto;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .event-card__countdown-products > .product-block {
-    margin-bottom: 0.7rem;
-  }
-
-  .event-card__countdown-products > .product-block:last-child {
-    margin-bottom: 0;
-  }
-
-  .event-card__countdown-products > .product-block--1x2 {
-    padding-right: 0;
-    padding-bottom: 0.7rem;
-    border-right: 0;
-    border-bottom: 1px solid var(--border-subtle);
   }
 }
 

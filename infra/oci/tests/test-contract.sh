@@ -362,7 +362,9 @@ for ux_reinforced_check in \
     'Single-live-card width and relative-height budget' \
     'Phantom auto-fill tracks' \
     'Equal-height market groups' \
-    'Readable status words'; do
+    'Readable status words' \
+    'Nested-board content fit in every card context' \
+    'Section heading spans its product group'; do
   grep -Fq "$ux_reinforced_check" "$ux_agent" ||
     fail "UX/UI expert omits reinforced consistency check: $ux_reinforced_check"
 done
@@ -390,6 +392,8 @@ grep -Fq 'When output changes public presentation ordering or exposes a' \
   fail "backend developer omits public-ordering/completeness handoff evidence"
 grep -Fq 'Keep terminal Event placeholders fail-dark' "$ux_backend_agent" ||
   fail "backend developer omits unresolved terminal placeholder safety"
+grep -Fq 'Every terminal visibility writer and recovery path' "$ux_backend_agent" ||
+  fail "backend developer omits atomic terminal recovery safety"
 grep -Fq 'including one with pending `ONLINE` intent, remains `OFFLINE`' \
     <<<"$test_agent_flat" ||
   fail "test engineer omits fail-dark terminal placeholder coverage"

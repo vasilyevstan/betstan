@@ -236,7 +236,8 @@ describe('EventList', () => {
         nextEvent.time,
       );
       expect(nextLiveCard).toHaveTextContent(
-        'Pre-match markets are open now. Live markets appear at kickoff.',
+        'Pre-match markets are open now. Pre-kickoff live markets open in the final countdown; '
+          + 'in-play markets follow at kickoff.',
       );
     },
   );

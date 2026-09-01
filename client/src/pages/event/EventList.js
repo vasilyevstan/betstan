@@ -293,10 +293,12 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
 
       {preMatchProducts.length > 0 ? (
         <div className="event-card__section event-card__countdown-products">
-          <div className="event-card__badges mb-2">
-            <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
+          <div className="event-card__section-header">
+            <div className="event-card__badges">
+              <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
+            </div>
+            <div className="event-card__section-title">Pre-match markets</div>
           </div>
-          <div className="event-card__section-title">Pre-match markets</div>
           {/* Same ProductsList/click path as PreMatchEventCard: pre-match boards accept selections
               up to kickoff (enforced server-side by EventOddsClicked), independent of the new
               live-slip countdown markets below. */}
@@ -440,7 +442,10 @@ const NextLiveEvent = ({ event, uiVariant }) => <aside
     <div className="event-next-live__schedule">
       <span className="text-secondary">Scheduled kickoff</span>
       <time dateTime={event.time}>{formatEventTime(event.time)}</time>
-      <small className="text-secondary">Pre-match markets are open now. Live markets appear at kickoff.</small>
+      <small className="text-secondary">
+        Pre-match markets are open now. Pre-kickoff live markets open in the final countdown;
+        in-play markets follow at kickoff.
+      </small>
     </div>
   </div>
 </aside>;

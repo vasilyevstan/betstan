@@ -15,6 +15,10 @@ import {
 } from "../compat/LiveContract";
 import { ProductType } from "../data/product/ProductType";
 import { Event } from "../model/Event";
+import {
+  buildHasOfflineIntentExpression,
+  buildHasUnresolvedVisibilityAuthorityExpression,
+} from "../model/visibilityAuthorityExpressions";
 import { getPublicEventConfig } from "./config";
 
 export interface PublicEventProductOdd {
@@ -609,13 +613,64 @@ const buildIncomingMarkets = (
     .filter((market): market is PublicLiveMarket => market !== undefined)
     .slice(0, maxMarkets);
 
-const buildLiveUpdateFilter = (eventId: string, sequence: number) => ({
+const buildLiveUpdateFilter = (eventId: string, sequence: number): UnknownRecord => ({
   eventId,
   $or: [
     { "live.sequence": { $exists: false } },
     { "live.sequence": { $lt: sequence } },
   ],
 });
+
+const buildTerminalRaceRecoveryPipeline = (): UnknownRecord[] => [
+  {
+    $set: {
+      visibility: {
+        $let: {
+          vars: {
+            isFullTime: { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+            isRetired: {
+              $ne: [{ $ifNull: ["$liveRetiredAt", null] }, null],
+            },
+            hasOfflineIntent: buildHasOfflineIntentExpression(),
+            hasUnresolvedVisibilityAuthority:
+              buildHasUnresolvedVisibilityAuthorityExpression(),
+          },
+          in: {
+            $cond: [
+              { $eq: ["$$isFullTime", false] },
+              "$visibility",
+              {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$$isRetired", false] },
+                      { $eq: ["$$hasOfflineIntent", false] },
+                      {
+                        $eq: [
+                          "$$hasUnresolvedVisibilityAuthority",
+                          false,
+                        ],
+                      },
+                    ],
+                  },
+                  EventVisibility.ONLINE,
+                  EventVisibility.OFFLINE,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      liveRaceResultedAt: {
+        $cond: [
+          { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+          null,
+          "$liveRaceResultedAt",
+        ],
+      },
+    },
+  },
+];
 
 const buildLiveUpdateOperations = (
   event: ILiveEventUpdateEvent
@@ -959,7 +1014,7 @@ export const applyLiveEventUpdate = async (
     return null;
   }
 
-  const currentRecord = currentEvent as unknown as UnknownRecord;
+  let currentRecord = currentEvent as unknown as UnknownRecord;
 
   // "Accepted" means this exact call's sequence is the one now stored --
   // i.e. the sequence gate above did not reject it as stale/duplicate.
@@ -972,39 +1027,28 @@ export const applyLiveEventUpdate = async (
   const accepted = liveRecord?.sequence === event.data.sequence;
 
   if (accepted) {
-    const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
     const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
-    // A completed visibility decision is retained separately from the
-    // mutable runtime visibility. `pendingVisibility` covers the same intent
-    // while metadata onboarding is still in flight.
-    const hasCurrentOfflineIntent =
-      currentRecord.visibilityDecision === EventVisibility.OFFLINE
-      || currentRecord.pendingVisibility === EventVisibility.OFFLINE;
 
-    if (
-      currentRecord.status === EventStatus.RESULTED &&
-      isRaceResulted &&
-      !wasIntentionallyRetired
-    ) {
+    if (currentRecord.status === EventStatus.RESULTED && isRaceResulted) {
       // EVENT_RESULT is terminal domain authority even when it wins the
       // queue race. Earlier live snapshots may still fill bounded history,
       // but they cannot reopen or publicly resurrect the event. Only the
       // matching FULL_TIME projection completes the retained-card view.
       if (event.data.phase === EventPhase.FULL_TIME) {
-        const finalProjectionUpdate: UnknownRecord = {
-          liveRaceResultedAt: null,
-        };
-        if (!hasCurrentOfflineIntent) {
-          finalProjectionUpdate.visibility = EventVisibility.ONLINE;
-        }
-
         await Event.updateOne(
-          { eventId: event.data.eventId },
-          { $set: finalProjectionUpdate }
+          {
+            eventId: event.data.eventId,
+            status: EventStatus.RESULTED,
+            liveRaceResultedAt: { $ne: null },
+          },
+          buildTerminalRaceRecoveryPipeline()
         );
-        currentRecord.liveRaceResultedAt = null;
-        if (finalProjectionUpdate.visibility) {
-          currentRecord.visibility = finalProjectionUpdate.visibility;
+
+        const refreshedEvent = await Event.findOne({
+          eventId: event.data.eventId,
+        }).lean();
+        if (refreshedEvent) {
+          currentRecord = refreshedEvent as unknown as UnknownRecord;
         }
       } else if (currentRecord.visibility !== EventVisibility.OFFLINE) {
         await Event.updateOne(

@@ -246,6 +246,36 @@ const getCorrectScoreGeometry = async (article) => {
   });
 };
 
+const getCountdownProductsGeometry = async (article) => (
+  article.locator('.event-card__countdown-products').evaluate((container) => {
+    const containerBounds = container.getBoundingClientRect();
+    const header = container.querySelector(':scope > .event-card__section-header');
+    const headerBounds = header?.getBoundingClientRect();
+    const badgesBounds = header?.querySelector('.event-card__badges')?.getBoundingClientRect();
+    const titleBounds = header?.querySelector('.event-card__section-title')?.getBoundingClientRect();
+    const productBounds = Array.from(container.querySelectorAll(':scope > .product-block'))
+      .map((product) => product.getBoundingClientRect());
+    const productLeft = Math.min(...productBounds.map((bounds) => bounds.left));
+    const productRight = Math.max(...productBounds.map((bounds) => bounds.right));
+
+    return {
+      headerSpansProductDeck: Boolean(
+        headerBounds
+        && Math.abs(headerBounds.left - containerBounds.left) < 1
+        && Math.abs(headerBounds.right - containerBounds.right) < 1
+        && headerBounds.left <= productLeft + 1
+        && headerBounds.right >= productRight - 1
+      ),
+      headerItemsShareRow: Boolean(
+        badgesBounds
+        && titleBounds
+        && badgesBounds.top < titleBounds.bottom
+        && titleBounds.top < badgesBounds.bottom
+      ),
+    };
+  })
+);
+
 const hasIntersectingElements = (page, selector) => page.evaluate((cardSelector) => {
   const boxes = Array.from(document.querySelectorAll(cardSelector)).map((element) => element.getBoundingClientRect());
   const intersects = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
@@ -656,6 +686,19 @@ for (const uiVariant of UI_VARIANTS) {
           name: 'Select 1X2 1: South Henriton in South Henriton - Pfefferberg at 1.9',
         })).toBeVisible();
 
+        const countdownCorrectScoreGeometry = await getCorrectScoreGeometry(countdownArticle);
+        expect(countdownCorrectScoreGeometry.rowSizes).toEqual(
+          viewport.width >= 768 ? [5, 5] : [2, 2, 2, 2, 2],
+        );
+        expect(countdownCorrectScoreGeometry.sizes.every(
+          ({ height, width }) => height >= 44 && width >= 44,
+        )).toBe(true);
+        expect(countdownCorrectScoreGeometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
+
+        const countdownProductsGeometry = await getCountdownProductsGeometry(countdownArticle);
+        expect(countdownProductsGeometry.headerSpansProductDeck).toBe(true);
+        expect(countdownProductsGeometry.headerItemsShareRow).toBe(true);
+
         const baselines = await getPreMatchRowBaselines(page);
         expect(baselines).not.toBeNull();
         for (const values of Object.values(baselines)) {
@@ -687,6 +730,14 @@ for (const uiVariant of UI_VARIANTS) {
         expect(await hasInternalOverflow(page, '.event-card')).toBe(false);
         expect(await hasInternalOverflow(page, '.event-market-grid')).toBe(false);
         expect(await hasInternalOverflow(page, '.product-block--1x2')).toBe(false);
+        expect(await hasInternalOverflow(
+          page,
+          '.event-card--countdown .product-cs-grid',
+        )).toBe(false);
+        expect(await hasIntersectingElements(
+          page,
+          '.event-card--countdown .product-cs-grid > *',
+        )).toBe(false);
 
         // Native button semantics remain intact after the layout-only correction.
         await kickoffTeamButton.focus();
@@ -696,6 +747,55 @@ for (const uiVariant of UI_VARIANTS) {
     }
   }
 }
+
+test('countdown product controls stay balanced through live-card layout transitions', async ({ page }) => {
+  const state = buildResponsiveLayoutState();
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+
+  await page.setViewportSize({ width: 720, height: 1000 });
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+
+  const countdownArticle = page.getByRole('article', { name: 'South Henriton - Pfefferberg' });
+  for (const width of [720, 736, 968, 984, 1000]) {
+    await page.setViewportSize({ width, height: 1000 });
+
+    const correctScoreGeometry = await getCorrectScoreGeometry(countdownArticle);
+    expect(new Set(correctScoreGeometry.rowSizes).size, `${width}px balanced rows`).toBe(1);
+    expect([2, 5], `${width}px supported row width`).toContain(
+      correctScoreGeometry.rowSizes[0],
+    );
+    expect(correctScoreGeometry.sizes.every(
+      ({ height, width: controlWidth }) => height >= 44 && controlWidth >= 44,
+    ), `${width}px touch targets`).toBe(true);
+    expect(
+      correctScoreGeometry.sizes.every(({ valueFits }) => valueFits),
+      `${width}px price bounds`,
+    ).toBe(true);
+
+    const productGeometry = await getCountdownProductsGeometry(countdownArticle);
+    expect(productGeometry.headerSpansProductDeck, `${width}px shared heading`).toBe(true);
+    expect(productGeometry.headerItemsShareRow, `${width}px compact heading row`).toBe(true);
+    expect(await hasInternalOverflow(
+      page,
+      '.event-card--countdown .product-cs-grid',
+    ), `${width}px internal overflow`).toBe(false);
+    expect(await hasIntersectingElements(
+      page,
+      '.event-card--countdown .product-cs-grid > *',
+    ), `${width}px control collisions`).toBe(false);
+
+    if (width >= 768) {
+      const compactGeometry = await getCompactLiveGeometry(page);
+      expect(
+        compactGeometry.liveHeight,
+        `${width}px comparative height`,
+      ).toBeLessThanOrEqual(compactGeometry.preMatchRowHeight + 8);
+    }
+  }
+});
 
 test('two-card live and pre-match sections fill balanced rows and stack on mobile', async ({ page }) => {
   const state = buildResponsiveLayoutState();

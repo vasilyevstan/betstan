@@ -9,51 +9,15 @@ import {
 } from "@betstan/common";
 
 import { Event } from "../../model/Event";
+import {
+  buildHasOfflineIntentExpression,
+  buildHasUnresolvedVisibilityAuthorityExpression,
+} from "../../model/visibilityAuthorityExpressions";
 
 const buildResultedAt = (timestamp: string | undefined): Date => {
   const resultedAt = timestamp ? new Date(timestamp) : new Date();
   return Number.isNaN(resultedAt.getTime()) ? new Date() : resultedAt;
 };
-
-const buildHasOfflineIntentExpression = () => ({
-  $or: [
-    { $eq: ["$visibilityDecision", EventVisibility.OFFLINE] },
-    { $eq: ["$pendingVisibility", EventVisibility.OFFLINE] },
-    {
-      $and: [
-        {
-          $eq: [{ $ifNull: ["$visibilityDecision", null] }, null],
-        },
-        {
-          $eq: [{ $ifNull: ["$pendingVisibility", null] }, null],
-        },
-        { $eq: ["$visibilityInitialized", true] },
-        { $eq: ["$visibility", EventVisibility.OFFLINE] },
-      ],
-    },
-  ],
-});
-
-const buildHasUnresolvedVisibilityAuthorityExpression = () => ({
-  $or: [
-    { $eq: ["$visibilityInitialized", false] },
-    { $eq: ["$eventMetadataInitialized", false] },
-    {
-      $and: [
-        {
-          $eq: [{ $ifNull: ["$eventMetadataInitialized", null] }, null],
-        },
-        { $eq: ["$source", "EXTERNAL"] },
-        {
-          $ne: [{ $ifNull: ["$live.sequence", null] }, null],
-        },
-        {
-          $eq: [{ $size: { $ifNull: ["$products", []] } }, 0],
-        },
-      ],
-    },
-  ],
-});
 
 const buildResultUpdatePipeline = (resultedAt: Date) => [
   {

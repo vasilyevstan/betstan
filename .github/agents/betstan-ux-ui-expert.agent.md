@@ -171,6 +171,15 @@ contract above.
   nested scrolling.
 - **Readable status words**: a status badge wraps only between words; a
   status label broken inside a word is a required consistency fix.
+- **Nested-board content fit in every card context**: measure generated-board
+  controls inside each affected parent layout, including prominent countdown
+  cards, not only the standalone pre-match card. Touch-target width alone is
+  insufficient when a label or price bounding box escapes its assigned
+  control or collides with a sibling.
+- **Section heading spans its product group**: a badge and section heading
+  must form one coherent header for the complete sibling product deck.
+  Auto-placement that leaves the heading visually attached to only one market
+  is a required hierarchy fix.
 
 ## Boundaries
 

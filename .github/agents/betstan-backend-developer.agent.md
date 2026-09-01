@@ -118,6 +118,10 @@ instead of crossing the boundary.
   visibility authority are initialized. A pending `ONLINE` decision is not
   permission to publish an unresolved placeholder, including when
   `EVENT_RESULT` and `FULL_TIME` arrive first.
+- Every terminal visibility writer and recovery path must re-evaluate current
+  offline intent, retirement, phase, and unresolved authority atomically at
+  write time. A stale pre-read must never authorize `ONLINE` or overwrite a
+  concurrent administrator `OFFLINE` decision.
 
 When creating `common/`, it must be a normal tracked package, never a gitlink.
 Refuse mode `160000` or an accidental `.gitmodules` entry.

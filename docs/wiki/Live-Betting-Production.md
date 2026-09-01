@@ -72,10 +72,13 @@ named-reference, cross-state, exception, and exact-head UX review contract.
 - A result/`FULL_TIME` write decision is atomic against the current live phase
   and explicit/legacy offline intent, so no interleaving can leave a fully
   onboarded, non-retired terminal event `OFFLINE`; the terminal status always
-  becomes `RESULTED`. A placeholder remains fail-dark until event metadata and
-  visibility authority are initialized, even when pending intent is `ONLINE`.
-  An equal-sequence authoritative merge adopts the current status/visibility
-  while keeping whichever terminal snapshot has the stronger incident history
+  becomes `RESULTED`. Every terminal visibility writer and delayed recovery
+  path re-evaluates that authority at write time, so a stale pre-read cannot
+  overwrite a concurrent administrator `OFFLINE` decision.
+  A placeholder remains fail-dark until event metadata and visibility authority are
+  initialized, even when pending intent is `ONLINE`. An equal-sequence
+  authoritative merge adopts the current status/visibility while keeping
+  whichever terminal snapshot has the stronger incident history
   (verified-complete first, otherwise longer).
 - An acceptance-scoped retained `OFFLINE` snapshot must not render, clear, or
   leak while current-user authorization is unresolved, and afterward is

@@ -162,6 +162,12 @@ The compact live-betting work established reusable examples:
   height and top alignment without fixed pixel heights or nested scrolling;
 - readable status words: a status badge wraps only between words, never
   inside one;
+- nested-board content fit: repeat generated-board geometry checks inside
+  every affected parent layout and around container-query transitions;
+  touch-target width does not prove usability when a label or price escapes
+  its control or overlaps a sibling;
+- section hierarchy: one shared badge/title header spans the complete product
+  group instead of auto-placing the title above only one sibling market;
 - a single upper-section countdown/live/finished card uses full event-stage
   width and stays within a bounded height budget relative to the comparable
   pre-match row; an intentionally expanded historical disclosure is the one

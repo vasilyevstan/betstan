@@ -86,6 +86,9 @@ Read:
 - Terminal result/`FULL_TIME` interleavings: every ordering must end
   `RESULTED`; a fully onboarded, non-retired, non-explicitly-offline terminal
   event must never remain `OFFLINE` because of write-order or stale reads.
+  Challenge every writer and recovery path separately: a recovery based on a
+  stale pre-read must not overwrite a concurrent administrator `OFFLINE`
+  decision.
 - Fail-dark terminal placeholders: `FULL_TIME` or `EVENT_RESULT` must not
   publish an Event placeholder before metadata and visibility authority are
   initialized, even when a pending visibility decision says `ONLINE`.
