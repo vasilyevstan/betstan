@@ -70,6 +70,29 @@
 - Every open quote expires at the next persisted simulation transition. Slip records one immutable server-generated submission time during its atomic draft-to-submitted transition, and Moderation requires an exact mirrored expiry plus `submittedAt` strictly before both `quoteValidUntil` and the first later transition that ended that quote's authority. Persist that authority end from the update payload's domain `occurredAt`, choose the earliest later sequence under out-of-order delivery, and use the current terminal mirror timestamp only as a backward-compatible fallback when old history lacks the additive field.
 - Missing, malformed, or boundary-equal live expiry evidence fails closed at Event, client, and Moderation boundaries. A delayed market mirror may park a provably pre-cutoff submission, but it must not authorize an outcome-known bet.
 
+### Product-wide UI/UX consistency
+
+- Every user-facing visual or interaction change uses one two-phase
+  `betstan-ux-ui-expert` work unit: establish a named consistency baseline
+  before implementation, then review the immutable exact-head result in the
+  same context.
+- Build the baseline from accepted product semantics and stable shared shells,
+  components, variables, tokens, and repeated patterns across routes. A single
+  screenshot or the newest page is evidence, not a design system.
+- Compare hierarchy, typography, spacing, content width, surfaces, control
+  geometry, semantic status cues, copy, loading/empty/error/disabled/live/
+  terminal states, responsive modes, v1/v2/v3, light/dark, keyboard/focus
+  order, and live-update movement where applicable.
+- Every material divergence is a required consistency fix, an intentional
+  product exception with a semantic rationale, or optional polish. Do not make
+  subjective preference a blocker, and do not silently normalize an
+  unexplained exception into a new pattern.
+- Source, stable references, and supplied screenshots can establish a design
+  inconsistency through bounded expert judgment. Exact collision, clipping,
+  overflow, touch-target, pixel-geometry, or dynamic-interaction claims still
+  require the smallest suitable rendered evidence; a user-facing change alone
+  does not require a new visual-regression matrix.
+
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
 - Signup never accepts an administrator role. Persisted demotion or deletion revokes privileged mutations immediately, and `/currentuser` invalidates expired, deleted, or role-mismatched sessions, including bounded legacy tokens without `exp`.
@@ -204,6 +227,11 @@ cd resulting && npm ci && npm run test:ci
 - A stalled watcher is not a stalled job, and a running watcher is not job
   progress. Recover read-side observation directly; route mutations to one
   exact owner with a deadline and keep the same unit open until evidence moves.
+- Before declaring an executing GitHub job stalled, compare its current step
+  and elapsed time with recent successful runs of the same workflow and job on
+  a comparable runner. Local execution time is not a CI baseline, and
+  historical duration never excuses an actionable approval or missing
+  progress signal.
 - A workflow dispatch URL is event-acceptance evidence, not job
   materialization. Keep a manually enabled workflow active until the exact run
   has a real job and expected protected gate, then disable it before approval.
@@ -212,6 +240,9 @@ cd resulting && npm ci && npm run test:ci
 - Pull-request title and body edits trigger `pull_request.edited` validation.
   Treat PR metadata changes as workflow-producing work and keep them outside
   active data-to-deploy handoffs or other production-exclusivity windows.
+  Derive the exact head SHA from Git or GitHub when preparing evidence and
+  prefer one complete edit over repeated manual SHA corrections that start
+  duplicate runs.
 - A late specialist report must be revalidated against its recorded SHA,
   current authoritative branch, and runtime topology. Tool-heavy work that
   returns after the release state changed cannot reopen a gate with stale
@@ -265,6 +296,14 @@ cd resulting && npm ci && npm run test:ci
 - An orphaned `common` gitlink without `.gitmodules` previously broke checkout cleanup. `common/` is now maintained as a normal tracked package while services consume explicit published versions from npm.
 - Per-service workflows use `actions/checkout@v4`; do not reintroduce `checkout@v2`.
 - Post-deploy browser tests require both `npm ci` in `client` and `npx playwright install --with-deps chromium`.
+- First-attempt-only script fixtures must explicitly set or clear
+  `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`. Ambient metadata from a GitHub
+  Actions rerun can otherwise reject a fixture before the assertion it was
+  intended to exercise.
+- Portable command fallbacks must try the current platform's successful form
+  first and capture output only from the selected probe. A nominally failed
+  GNU/BSD variant can emit partial or misleading stdout, or even succeed with
+  unrelated semantics.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
 - Coverage instrumentation can report `branches=0` with a non-zero branch total. Keep line coverage mandatory and apply the branch threshold only when a meaningful branch percentage exists.
 

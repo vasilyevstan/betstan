@@ -208,6 +208,12 @@ accepted by the next owner.
   universal handoffs. Route the developer gate to the registered owner with
   edit authority for the affected paths; do not require an application
   developer to cross its ownership boundary for infrastructure or governance.
+- Register `betstan-ux-ui-expert` as one two-phase specialist work unit for
+  every user-facing visual or interaction change. Its first phase establishes
+  the named consistency baseline before implementation; its second phase
+  reviews the immutable exact-head result. Reuse the same `work_id`, owner, and
+  agent context so mandatory UX evidence does not become duplicate agents or
+  extra universal quality gates.
 - Register three independent simplifier passes plus synthesis as child
   intra-gate units under one logical simplifier `work_id`. A `BLOCKED` pass
   requires bounded distinct-family substitution and never counts as a completed
@@ -226,7 +232,12 @@ The conductor must never answer a detected stall with observation alone:
    reference and restore read-side monitoring if only the watcher,
    notification, or prior conductor turn was lost.
 2. Classify the cause as executing, queued/provider-bound, approval-bound,
-   dependency-bound, failed, dead, or unobservable. Do not extend a checkpoint without new underlying progress evidence.
+   dependency-bound, failed, dead, or unobservable. For an executing GitHub
+   job, compare its elapsed time and current step with the recent successful
+   duration for the same workflow and job on a comparable runner before
+   declaring a stall. Do not use a much faster local command as that baseline,
+   and do not treat duration alone as progress.
+   Do not extend a checkpoint without new underlying progress evidence.
 3. When an agent has zero completed turns after its first-response deadline,
    route one bounded instruction to the same agent owner:
    `stop further investigation and return the bounded verdict` from evidence
@@ -264,6 +275,10 @@ its owner. It is never healthy by default.
 - At a checkpoint, inspect each exact reference once. Record elapsed time,
   current phase, the latest real progress signal, the next expected event, and
   who owns the next action.
+- At every checkpoint, apply the recovery ladder's same-workflow/same-job
+  duration comparison before classifying `SUSPECTED_STALL`; historical
+  duration never excuses a missing progress signal, actionable approval, or
+  completed handoff.
 - A user request for status or a suspicion that work is stuck is an immediate
   checkpoint for every active critical-path unit. Answer from the underlying
   agent, process, or GitHub job state, never only from a still-running watcher.

@@ -541,6 +541,8 @@ conversation summaries are not authority.
   tallest sibling, anchor prices to one baseline, and let ten-option Correct
   Score boards switch between balanced five- and two-column layouts based on
   their own container width.
+- Classify live-betting UX observations through the product-wide
+  named-reference and exception taxonomy in `docs/wiki/UI-UX-Consistency.md`.
 - `$setOnInsert` protects scheduler convergence but also means a corrected
   generator cannot rewrite the current event pool. Repair implausible
   non-terminal boards through the existing event compatibility backfill with
@@ -562,6 +564,19 @@ conversation summaries are not authority.
   therefore start production-capable CI. Do that work outside a live data,
   deploy, activation, or exclusivity window and wait for those runs to become
   terminal.
+- Derive the exact PR head SHA programmatically and prepare one complete body
+  update. Repeated manual SHA or evidence corrections create fresh protected
+  runs and can manufacture avoidable exclusivity conflicts.
+- Before classifying an executing GitHub job as stalled, inspect its current
+  step and compare elapsed time with recent successful runs of the same
+  workflow and job on a comparable runner. A ten-minute deployment-safety job
+  is not stalled merely because its local contract command completed much
+  faster; elapsed history never hides a pending approval, failed step, or
+  missing progress transition.
+- Fixtures for first-attempt-only release scripts must explicitly set or clear
+  `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`. A rerun of the outer validation
+  workflow must not make the fixture reject itself before its intended
+  assertion.
 - A workflow-dispatch URL is not job materialization. For a manually disabled
   workflow, capture the exact run ID from the URL, keep the workflow enabled
   until that run has at least one job and the expected protected environment,

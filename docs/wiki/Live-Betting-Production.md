@@ -7,6 +7,10 @@ and SSE snapshots. Slip keeps independent live and pre-match boards.
 Moderation revalidates phase and quote authority, Resulting settles market
 versions, and Bet exposes labelled history.
 
+The rules below are the live-betting specialization of
+[[UI UX Consistency]]. Every visual or interaction change uses that page's
+named-reference, cross-state, exception, and exact-head UX review contract.
+
 ## User-visible behavior
 
 - Dense live, countdown, recently finished, and pre-match sections share the

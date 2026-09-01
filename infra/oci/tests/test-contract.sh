@@ -199,6 +199,8 @@ for conductor_contract in \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
     'terminal learning and documentation unit' \
+    'one two-phase specialist work unit for' \
+    'duration for the same workflow and job on a comparable runner' \
     'Never use name-based process discovery or termination' \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
@@ -256,7 +258,18 @@ grep -Fq 'treats that state as an active production incident' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can leave a failed release maintenance hold unattended"
 ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
+ux_wiki="$ROOT_DIR/docs/wiki/UI-UX-Consistency.md"
+ux_home="$ROOT_DIR/docs/wiki/Home.md"
+ux_release_wiki="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
+ux_backend_agent="$ROOT_DIR/.github/agents/betstan-backend-developer.agent.md"
+ux_frontend_agent="$ROOT_DIR/.github/agents/betstan-frontend-developer.agent.md"
+ux_critic_agent="$ROOT_DIR/.github/agents/betstan-validation-critic.agent.md"
+ux_test_agent="$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md"
+ux_final_agent="$ROOT_DIR/.github/agents/betstan-final-validator.agent.md"
 [[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
+[[ -f "$ux_wiki" ]] || fail "canonical UI/UX consistency wiki page is missing"
+[[ -f "$ux_backend_agent" ]] || fail "backend developer agent is missing"
+[[ -f "$ux_frontend_agent" ]] || fail "frontend developer agent is missing"
 grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
   fail "UX/UI expert frontmatter has the wrong name"
 grep -Fq 'tools: [read, search]' "$ux_agent" ||
@@ -270,14 +283,88 @@ for ux_contract in \
     'all three UI variants and both themes' \
     'Preserve DOM, reading, and keyboard order' \
     'live updates do not steal focus' \
+    'Establish a named design-consistency baseline' \
+    'Produce one cross-route, state, variant, theme, and responsive-mode' \
+    'consistency matrix. Compare hierarchy and typography' \
+    'intentional product exception' \
+    'required consistency fix' \
+    'Do not require a new automated visual-regression matrix' \
     'Define measurable rendered acceptance criteria' \
-    'Hand implementation to `betstan-frontend-developer`'; do
+    'When layout or geometry is affected or remains unresolved' \
+    'When overflow or clipping is in scope or remains unresolved' \
+    'For event-grid changes' \
+    'For market-control changes' \
+    'UX_REVIEW_PASSED' \
+    'Hand implementation to the registered developer-gate owner for the affected paths' \
+    '`betstan-backend-developer` for user-visible producer, formatter, ordering, or contract work' \
+    'return the UX status to the registered developer-gate implementation owner'; do
   grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
     fail "UX/UI expert omits usability contract: $ux_contract"
 done
-grep -Fq '`betstan-ux-ui-expert` specifies responsive, accessible, measurable' \
+for unconditional_rendered_gate in \
+    '- Require bounding-box checks for sibling-card and child-control collisions' \
+    '- Check `scrollWidth` against `clientWidth` for the document and affected'; do
+  if grep -Fq -- "$unconditional_rendered_gate" "$ux_agent"; then
+    fail "UX/UI expert makes rendered evidence unconditional: $unconditional_rendered_gate"
+  fi
+done
+grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction change' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow does not route user-facing slices through UX review"
+  fail "agent workflow does not require UX review for every user-facing change"
+grep -Fq 'Register one two-phase specialist work unit' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow duplicates or omits the two-phase UX specialist handoff"
+grep -Fq 'Every user-facing change has one exact-head `UX_REVIEW_PASSED` result' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not require exact-head UX consistency evidence"
+grep -Fq 'Every change that alters what a user sees or how a user interacts requires' \
+    "$ux_wiki" ||
+  fail "UI/UX consistency wiki omits the mandatory trigger"
+grep -Fq 'A user-facing change does not automatically require a new screenshot baseline' \
+    "$ux_wiki" ||
+  fail "UI/UX consistency wiki turns visual tests into a blanket gate"
+grep -Fq '[[UI UX Consistency]]' "$ux_home" ||
+  fail "wiki Home does not link the UI/UX consistency contract"
+grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
+    "$ux_release_wiki" ||
+  fail "release orchestration omits the mandatory UX handoff"
+backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
+grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
+    <<<"$backend_agent_flat" ||
+  fail "backend developer does not carry applicable UX evidence into the critic handoff"
+frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
+grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
+    <<<"$frontend_agent_flat" ||
+  fail "frontend developer does not carry UX evidence into the critic handoff"
+grep -Fq 'Missing or stale UX evidence is an acceptance' \
+    "$ux_critic_agent" ||
+  fail "validation critic does not identify missing UX evidence"
+grep -Fq 'gap. Do not replace the UX specialist with subjective style review' \
+    "$ux_critic_agent" ||
+  fail "validation critic does not fail missing UX evidence"
+grep -Fq 'Do not add or require a screenshot/image-diff matrix' "$ux_test_agent" ||
+  fail "test engineer turns user-facing work into a blanket visual-test gate"
+test_agent_flat="$(tr '\n' ' ' <"$ux_test_agent")"
+grep -Fq 'set or clear `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` explicitly' \
+    <<<"$test_agent_flat" ||
+  fail "test engineer does not isolate first-attempt fixtures from ambient CI metadata"
+grep -Fq '`betstan-ux-ui-expert: UX_REVIEW_PASSED` result' "$ux_final_agent" ||
+  fail "final validator does not require exact-head UX evidence"
+grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
+  fail "durable learning omits the product-wide UI/UX consistency contract"
+grep -Fq 'GITHUB_RUN_ATTEMPT' "$ROOT_DIR/infra/azure/agents/README.md" ||
+  fail "Azure guidance omits first-attempt fixture isolation"
+grep -Fq 'recent successful runs of the same' \
+    "$ROOT_DIR/infra/oci/LESSONS_LEARNED.md" ||
+  fail "OCI lessons omit recent successful duration evidence"
+grep -Fq 'workflow and job on a comparable runner' \
+    "$ROOT_DIR/infra/oci/LESSONS_LEARNED.md" ||
+  fail "OCI lessons omit historical-duration-aware stall classification"
+ghcr_fixture_head="$(sed -n '1,80p' "$OCI_DIR/tests/test-ghcr-contract.sh")"
+grep -Fq '"GITHUB_RUN_ID=777"' <<<"$ghcr_fixture_head" ||
+  fail "GHCR contract fixture does not isolate the run ID"
+grep -Fq '"GITHUB_RUN_ATTEMPT=1"' <<<"$ghcr_fixture_head" ||
+  fail "GHCR contract fixture inherits ambient workflow rerun metadata"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"
@@ -934,12 +1021,19 @@ for heading in \
     '## Why this change exists' \
     '## Exact source and ancestry' \
     '## Scope and compatibility' \
+    '## User-facing consistency' \
     '## Validation' \
     '## Release and rollback' \
     '## Exceptions and remaining work'; do
   grep -Fq "$heading" "$pr_template" ||
     fail "pull request template omits required evidence heading: $heading"
 done
+grep -Fq 'UX specialist baseline status and final exact-head status/SHA' \
+  "$pr_template" ||
+  fail "pull request template omits exact-head UX evidence"
+grep -Fq 'Every pull request that changes what a user sees or how a user interacts must' \
+  "$ROOT_DIR/CONTRIBUTING.md" ||
+  fail "contributor policy omits mandatory UX review"
 grep -Fq './infra/azure/agents/shared-mongo-topology-guard-stan.sh' \
   "$azure_deploy_workflow"
 grep -Fq 'export REQUIRED_MONGO_TOPOLOGY_MODE=shared' "$oci_live_readiness"

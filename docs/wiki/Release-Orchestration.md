@@ -24,9 +24,12 @@ as allowed by the owning workflow.
 The universal quality gates are architect, three-model simplifier synthesis,
 developer, critic, test engineer, and final validator. The conductor spans that
 chain but is not a quality gate. Model passes and same-agent corrections are
-intra-gate work; UX and other specialists are conditional evidence providers;
-GitHub runs, approvals, external waits, and durable documentation are monitored
-supporting units.
+intra-gate work. UX and other specialists are conditional evidence providers,
+but `betstan-ux-ui-expert` is mandatory for every user-facing visual or
+interaction change. Register one two-phase UX work unit: establish the named
+consistency baseline before implementation, then review the immutable exact
+head in the same agent context. GitHub runs, approvals, external waits, and
+durable documentation are monitored supporting units.
 
 Three independent simplifier passes use distinct model families and high
 reasoning. One xhigh synthesis produces the only developer-gate handoff. Fewer
@@ -42,6 +45,9 @@ disagreement is reported rather than averaged away.
   progress. Agents have a separate first-response deadline.
 - A status request is an immediate checkpoint. Inspect exact jobs and
   `pending_deployments`, not only top-level run status.
+- Before declaring an executing GitHub job stalled, compare its current step
+  and elapsed time with recent successful runs of the same workflow and job on
+  a comparable runner. A much faster local run is not a CI baseline.
 - One missed checkpoint triggers bounded recovery. Two misses require an
   explicit safe action; do not duplicate mutation-capable work.
 - Keep corrections in the same agent context with a bounded attempt count.
@@ -58,7 +64,8 @@ disagreement is reported rather than averaged away.
 
 - PR title/body edits trigger protected CI through `pull_request.edited`.
   Never perform them during production exclusivity or the data-to-deploy
-  handoff.
+  handoff. Derive the exact head SHA programmatically and prefer one complete
+  metadata edit over repeated corrections that start duplicate runs.
 - A workflow dispatch URL means the event was accepted; it does not mean a job
   exists. Keep a manually enabled workflow active until the exact run has a job
   and expected protected gate, then disable before approval.

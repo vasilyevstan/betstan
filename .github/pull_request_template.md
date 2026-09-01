@@ -21,6 +21,16 @@ when they do not apply.
 - Explicitly out of scope:
 - Backward-compatibility statement:
 
+## User-facing consistency
+
+<!-- Write `not applicable` throughout for changes with no visual or interaction effect. -->
+
+- Affected routes/components, states, variants, themes, and viewport classes:
+- Named reference screens/components/tokens:
+- Intentional product exceptions and rationale:
+- UX specialist baseline status and final exact-head status/SHA:
+- Evidence used and unresolved uncertainty:
+
 ## Validation
 
 <!-- List exact commands/checks and their outcomes. Do not write only "tests passed". -->

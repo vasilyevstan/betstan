@@ -623,6 +623,17 @@ CONFIRM_UNLOCK=remove-stale-migration-lock \
 - Use Ruby YAML parsing for offline manifest syntax. `kubectl apply
   --dry-run=client` may still contact the configured API server for discovery.
 
+### CI fixture and progress discipline
+
+- Tests for first-attempt-only scripts must set or clear `GITHUB_RUN_ID` and
+  `GITHUB_RUN_ATTEMPT` explicitly. Ambient metadata from a GitHub Actions rerun
+  must not cause the fixture to fail before the assertion under test.
+- Before treating an executing GitHub job as stalled, inspect its current step
+  and compare elapsed time with recent successful runs of the same workflow and
+  job on a comparable runner. A much faster local command is not a CI duration
+  baseline. Historical duration does not excuse a pending approval, failed
+  step, or missing progress transition.
+
 ## Stage lifecycle and cost controls
 
 Use these operations to park and restore stage safely:
