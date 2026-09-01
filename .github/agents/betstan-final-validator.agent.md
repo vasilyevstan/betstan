@@ -57,6 +57,13 @@ Read:
   zero-job/zero-pending retirement, bounded expiry, and complete fail-closed
   exclusivity responses.
 - Verify no critic finding remains open and no agent approved its own work.
+- For every user-facing visual or interaction change, require one exact-head
+  `betstan-ux-ui-expert: UX_REVIEW_PASSED` result. Verify its named stable
+  references, cross-route/state/variant/theme consistency matrix, resolved
+  blocking and required fixes, documented intentional product exceptions, and
+  bounded uncertainty. Do not require a new automated visual-regression matrix
+  when the UX specialist and test evidence identify no unresolved factual
+  geometry or interaction claim.
 - Verify backend/frontend path ownership and intentional lockfile changes.
 - Verify required contract, quality, security, migration, ingress, and
   deployment specialists were invoked when their triggers apply.

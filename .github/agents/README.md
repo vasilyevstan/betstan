@@ -19,11 +19,14 @@ The fixed quality gates are:
 6. `betstan-final-validator`
 
 The conductor spans the workflow but is not a quality gate.
-`betstan-ux-ui-expert` specifies responsive, accessible, measurable usability
-for user-facing slices and remains a conditional specialist. Other specialists
-are registered when their trigger applies. `betstan-deployment-safety` owns
-branch, PR, exact-SHA deploy, and rollback decisions; runtime changes remain
-with the AKS or OCI operator.
+`betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction
+change and remains a conditional specialist rather than a universal quality
+gate. Register one two-phase specialist work unit: establish the named
+product-wide consistency baseline before implementation, then audit the
+immutable exact-head result in the same agent context. Other specialists are
+registered when their trigger applies. `betstan-deployment-safety` owns branch,
+PR, exact-SHA deploy, and rollback decisions; runtime changes remain with the
+AKS or OCI operator.
 
 No agent status is permission to merge or deploy. Follow the exact-SHA approval
 mode in `CONTRIBUTING.md`: CLI-managed PRs may use the bounded automatic path,
@@ -62,6 +65,7 @@ or become unavailable.
 | Simplifier pass and synthesis decisions | `betstan-simplifier.agent.md` |
 | PR evidence structure | `.github/pull_request_template.md` |
 | Branch, approval, and contribution policy | `CONTRIBUTING.md` |
+| UI/UX consistency method | `docs/wiki/UI-UX-Consistency.md` |
 | Human-readable release flow | `docs/wiki/Release-Orchestration.md` |
 
 Secondary agents and skills cite these sources instead of redefining complete
@@ -82,6 +86,12 @@ tight-polling. A still-running `gh run watch` is notification transport, not
 evidence of progress, and may not outlive the registered checkpoint without an
 independent jobs and `pending_deployments` inspection. A user asking for status
 or whether work is stuck triggers that checkpoint immediately.
+
+Before classifying an executing GitHub job as stalled, compare its current step
+and elapsed time with recent successful runs of the same workflow and job on a
+comparable runner. A local runtime is not a CI duration baseline. Historical
+duration can prevent a false stall classification, but it cannot excuse a
+missed progress signal, pending approval, failed step, or unaccepted handoff.
 
 For agents, tool-call growth is activity rather than deliverable progress.
 Every agent has a separate first-response deadline. Zero completed turns at
@@ -218,8 +228,9 @@ allowed only with disjoint ownership and a stable shared contract.
 ## Specialist routing
 
 - Active-work coordination: `betstan-conductor`
-- User-facing hierarchy, accessibility, and responsive density:
-  `betstan-ux-ui-expert`
+- Every user-facing visual or interaction change, including hierarchy,
+  cross-page consistency, accessibility, responsive density, state
+  presentation, and interaction behavior: `betstan-ux-ui-expert`
 - Shared contracts and mixed versions: `betstan-service-contract-reviewer`
 - CI, coverage, and false-green gates: `betstan-quality-gate-reviewer`
 - Branch policy and ancestry: `betstan-branch-governance-reviewer`
@@ -316,6 +327,9 @@ Required invariants:
 - `out_of_ownership_touched` is empty.
 - A critic receives a non-null immutable `head_sha`.
 - Every prior blocking finding is resolved with evidence before approval.
+- Every user-facing change has one exact-head `UX_REVIEW_PASSED` result whose
+  consistency matrix names its stable references, required fixes, and accepted
+  intentional exceptions.
 - `from_agent` never appears in `approvals`.
 - Feature flags remain dark until the approved activation gate.
 - Draft writes/deletes require owner, kind, status, and board-identity CAS;
@@ -335,7 +349,7 @@ Required invariants:
 |---|---|
 | Conductor | `ORCHESTRATION_HEALTHY`, `ATTENTION_REQUIRED`, `BLOCKED`, `ORCHESTRATION_COMPLETE` |
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
-| UX/UI expert | `UX_SPEC_READY`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
+| UX/UI expert | `UX_SPEC_READY`, `UX_REVIEW_PASSED`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
 | Developer gate | `IMPLEMENTED_LOCAL`, `BLOCKED` |
 | Simplifier pass | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
 | Simplifier synthesis | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |

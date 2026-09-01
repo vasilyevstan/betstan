@@ -199,6 +199,8 @@ for conductor_contract in \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
     'terminal learning and documentation unit' \
+    'one two-phase specialist work unit for' \
+    'duration for the same workflow and job on a comparable runner' \
     'Never use name-based process discovery or termination' \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
@@ -270,14 +272,27 @@ for ux_contract in \
     'all three UI variants and both themes' \
     'Preserve DOM, reading, and keyboard order' \
     'live updates do not steal focus' \
+    'Establish a named design-consistency baseline' \
+    'Produce one cross-route, state, variant, theme, and responsive-mode' \
+    'consistency matrix. Compare hierarchy and typography' \
+    'intentional product exception' \
+    'required consistency fix' \
+    'Do not require a new automated visual-regression matrix' \
     'Define measurable rendered acceptance criteria' \
+    'UX_REVIEW_PASSED' \
     'Hand implementation to `betstan-frontend-developer`'; do
   grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
     fail "UX/UI expert omits usability contract: $ux_contract"
 done
-grep -Fq '`betstan-ux-ui-expert` specifies responsive, accessible, measurable' \
+grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction change' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow does not route user-facing slices through UX review"
+  fail "agent workflow does not require UX review for every user-facing change"
+grep -Fq 'Register one two-phase specialist work unit' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow duplicates or omits the two-phase UX specialist handoff"
+grep -Fq 'Every user-facing change has one exact-head `UX_REVIEW_PASSED` result' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow does not require exact-head UX consistency evidence"
 grep -Fq "A run waiting for environment approval is active, not hung" \
     "$ROOT_DIR/.github/agents/betstan-migration-recovery.agent.md" ||
     fail "migration recovery agent can misclassify approval waits"

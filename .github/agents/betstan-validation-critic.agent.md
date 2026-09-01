@@ -19,7 +19,8 @@ Read:
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
 - the architecture, synthesized simplifier artifact, acceptance criteria,
-  developer handoff, and every open finding from prior rounds;
+  developer handoff, applicable UX specification and immutable-result review,
+  and every open finding from prior rounds;
 - current git state and the exact immutable `base_sha..head_sha` diff;
 - affected source, models, contracts, tests, and callers/consumers.
 
@@ -66,6 +67,12 @@ Read:
 - Deployment failure cleanup that can acquire a lock, fence writes, or
   quiesce workloads before the same run has validated the exact handoff.
 - Missing negative, boundary, integration, and regression tests.
+- For every user-facing visual or interaction change, require one exact-head
+  `UX_REVIEW_PASSED` result with named references, a cross-route/state/variant/
+  theme consistency matrix, resolved required fixes, and rationale for every
+  intentional product exception. Missing or stale UX evidence is an acceptance
+  gap. Do not replace the UX specialist with subjective style review or demand
+  a new visual-test matrix when no unresolved factual claim requires one.
 - Unrelated scope or path-ownership violations.
 
 Defer specialist decisions:

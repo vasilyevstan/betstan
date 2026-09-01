@@ -32,12 +32,31 @@ remain present and say `not applicable` when they do not apply:
 - the reason for an intentional closure, replacement, or zero-diff ancestry
   change.
 
+Every pull request that changes what a user sees or how a user interacts must
+also include an exact-head `betstan-ux-ui-expert` result. Use one registered
+two-phase specialist work unit: establish the named reference pattern before
+implementation, then review the immutable result. Record the affected routes,
+components, states, UI variants, themes, and viewport classes; the stable
+reference screens/components/tokens; every intentional exception and its
+product rationale; the final UX status and head SHA; and any evidence gap.
+Non-user-facing changes write `not applicable`.
+
+The UX specialist may establish a consistency finding from source, stable
+references, or supplied screenshots. A new screenshot suite is not mandatory
+solely because a change is visual, but precise clipping, collision, overflow,
+touch-target, pixel-geometry, or dynamic-interaction claims require the
+smallest appropriate rendered evidence. See
+`docs/wiki/UI-UX-Consistency.md`.
+
 Keep this detail on implementation, promotion, synchronization, and closed
 attempt PRs. `production-build`, `oci-validate`, and branch policy run on
 `pull_request.edited`, so title/body restoration is workflow-producing work.
 Do not edit historical PR metadata during an active data-to-deploy handoff or
 other production-exclusivity window. Make the edit before or after that window
-and wait for the resulting checks to become terminal.
+and wait for the resulting checks to become terminal. Derive the exact head SHA
+from Git or GitHub immediately before preparing the final description, and
+prefer one complete metadata edit over repeated corrections that start
+duplicate validation runs.
 
 Copilot CLI-created pull requests carry the `copilot-cli-managed` label. Only
 Copilot CLI may apply it, and only to a PR that the active CLI workflow created

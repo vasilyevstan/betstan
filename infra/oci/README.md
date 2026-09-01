@@ -350,7 +350,13 @@ concurrent retirement fixture isolation without masking failed suites.
 8. `agents/deploy-validation-loop-stan.sh` must pass canonical apex, permanent
    `www` redirect, diagnostic TLS, API, browser, cluster, zero-cost, validated
    shared-Mongo marker/lock, and exact `Bound` shared-PVC checks before the
-   deployment is healthy.
+   deployment is healthy. When the release changes a user-facing visual or
+   interaction contract, its release evidence also includes an exact-head
+   `betstan-ux-ui-expert: UX_REVIEW_PASSED` result naming the stable references,
+   required fixes, and accepted semantic exceptions. UX is review evidence,
+   not deployment authority. Require targeted rendered proof for factual
+   geometry or interaction claims, but do not add a new visual-test matrix
+   solely because the release contains UI changes.
 9. Dispatch `oci-migrate` only with the exact current master SHA, successful
    first-attempt build/infrastructure/deploy run IDs,
    `replace_oci_data=true`, and the destructive confirmation. The workflow

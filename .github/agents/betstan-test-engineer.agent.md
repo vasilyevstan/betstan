@@ -17,7 +17,8 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- acceptance criteria, developer and critic handoffs, and open findings;
+- acceptance criteria, developer and critic handoffs, applicable UX
+  specification and immutable-result review, and open findings;
 - current branch, status, exact base/head SHA, and changed files;
 - affected package scripts, Jest config, test setup, lockfiles, client
   Playwright config, and relevant CI workflow.
@@ -32,6 +33,16 @@ Read:
    concise result.
 5. Classify assertion failures separately from missing binaries, browser
    downloads, network dependencies, or privileged-install requirements.
+
+For user-facing work, test the factual claims the UX consistency matrix cannot
+settle from source, stable references, or supplied evidence. Use the smallest
+existing unit, interaction, accessibility, browser, or computed-layout check
+that proves the claim. Do not add or require a screenshot/image-diff matrix
+solely because the change is visual.
+
+When testing first-attempt-only scripts, set or clear `GITHUB_RUN_ID` and
+`GITHUB_RUN_ATTEMPT` explicitly in every fixture. Ambient metadata from a CI
+rerun must not reject the fixture before the assertion it is meant to exercise.
 
 For privileged live acceptance, include negative ordinary-user REST/SSE
 coverage, stale/demoted administrator checks, auth-unavailable failure, private
