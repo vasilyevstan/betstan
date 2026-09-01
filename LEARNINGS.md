@@ -40,13 +40,22 @@
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
-- Dense live, countdown, retained-finished, and pre-match sections use the same
-  responsive one/two/three-card grid. Sparse sections must consume the stage
-  intentionally: one desktop card uses a bounded two-thirds row and two cards
-  complete a half-width row. Keep scores, incidents, active markets,
-  selections, and non-terminal availability states visible; omit only
+- Dense pre-match sections and a sparse two/three-card pre-match row use the
+  same responsive one/two/three-card grid; a sparse pre-match row must
+  consume the stage intentionally: one desktop card uses a bounded two-thirds
+  row and two cards complete a half-width row. Keep scores, incidents, active
+  markets, selections, and non-terminal availability states visible; omit only
   semantically terminal market cards, whose state remains in the authoritative
   live snapshot and settlement history.
+- Superseded narrow-live-card rule: when exactly one countdown, active-live,
+  or retained-finished event occupies the separate upper section, it does not
+  follow the pre-match two-thirds/half-width sparse rule above. It uses the
+  full event-stage width and arranges its semantic regions side by side,
+  because a single information-dense live/countdown card should use full-stage
+  width and parallel regions when that reduces its vertical footprint below a
+  comparable pre-match row. Its collapsed height must stay within a bounded
+  budget relative to that pre-match row; only a user-expanded historical
+  timeline disclosure may exceed the budget.
 - Betting controls in one market share geometry. Wrapped labels may increase
   the row height, but buttons stretch together and odds remain on one baseline.
   Fixed ten-option Correct Score boards use a container-aware five- or
@@ -92,6 +101,67 @@
   overflow, touch-target, pixel-geometry, or dynamic-interaction claims still
   require the smallest suitable rendered evidence; a user-facing change alone
   does not require a new visual-regression matrix.
+
+### Live timeline completeness and market alignment
+
+- Active-tail versus full timeline semantics: an active-live view may keep
+  showing only its latest incidents, but a finished/retained view must never
+  present a `.slice(-5).reverse()` latest-events tail as a complete match
+  summary. Preserve the authoritative oldest-to-newest source order and show a
+  compact chronological key-moments list plus a native, expandable
+  chronological full timeline.
+- Explicit completeness attestation: label a timeline `Full timeline (N)` only
+  when the producer attested a validated cumulative payload
+  (`incidentsComplete`/`incidentHistoryComplete`) built from its authoritative
+  transition history and every raw incident validated within the phase-aware
+  limit. The attestation is optional and additive so old producers stay
+  compatible with new consumers and new producers stay safe for old consumers.
+- Partial legacy copy: a stored row, single-incident compatibility update,
+  malformed/truncated input, or non-terminal phase must keep the completeness
+  flag absent/false and be labelled `Available timeline (N)` with an explicit
+  note that earlier incidents may be unavailable. A previously finished row
+  cannot be reconstructed after the fact; honesty about partial history beats
+  a false completeness claim.
+- Penalty linkage: suppress a derived scoring incident (for example a goal
+  linked to a scored penalty) only via an exact relation-ID match against a
+  displayed incident, never a team/minute heuristic that can hide or duplicate
+  an unrelated incident.
+- Stable identity-preserving presentation order: a presentation sort (for
+  example a numeric scoreline order) is all-or-nothing against a fully valid
+  board and must preserve each option's original ID/name/value tuple; a
+  malformed board keeps its original order instead of a partial re-sort.
+  Selection identity stays ID-based, so a presentation reorder never
+  reinterprets an open or historical bet.
+- Full-stage compact live regions: a single upper-section countdown,
+  active-live, or retained-finished event uses full event-stage width and
+  parallel semantic regions instead of vertical stacking, staying within a
+  bounded height budget relative to the comparable pre-match row; an
+  intentionally expanded historical disclosure is the one allowed exception.
+- Sparse-grid and alignment lessons: a compact market grid collapses phantom
+  empty tracks with `auto-fit` (not `auto-fill`); market cards sharing a row
+  stretch to equal height and top alignment; a status badge wraps only between
+  words; and sibling pre-match cards keep aligned market headings, control
+  bounds, and odds baselines regardless of team-name length.
+- Visible admin navigation: role-gated global navigation (for example
+  Backoffice) needs visible discoverable text, not only an icon, for the
+  correct role in every UI variant, while staying absent for every non-admin
+  and anonymous state.
+- Terminal ordering and auth safeguards: a result/`FULL_TIME` write decision
+  must be atomic against the current live phase and explicit/legacy offline
+  intent so no interleaving can leave a fully onboarded, non-retired terminal
+  event `OFFLINE`. The inverse is equally important: a placeholder stays
+  fail-dark until event metadata and visibility authority are initialized,
+  even with pending `ONLINE` intent. An equal-sequence authoritative merge
+  keeps the stronger terminal history while adopting repaired
+  status/visibility; and an acceptance-scoped retained `OFFLINE` snapshot must
+  not render, clear, or leak while current-user authorization is unresolved.
+- Exact-SHA production evidence: when this class of change reaches
+  production, extend the existing post-deploy acceptance journey to verify
+  full bounded timeline completeness/labelling, penalty-linked deduplication,
+  live-card relative height and pre-kickoff market alignment, stable Correct
+  Score order, and visible administrator navigation, and record the exact
+  master SHA and run evidence in `docs/wiki/Live-Betting-Production.md`
+  alongside the existing release chain.
 
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.

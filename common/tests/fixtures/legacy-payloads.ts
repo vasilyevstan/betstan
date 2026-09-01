@@ -207,6 +207,7 @@ const cumulativeLiveUpdate: ILiveEventUpdateEvent = {
     sequence: 2,
     occurredAt: "2026-08-20T17:01:00.000Z",
     minute: 61,
+    incidentsComplete: true,
     incidents: [
       {
         id: "incident-id",

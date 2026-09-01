@@ -32,6 +32,54 @@ named-reference, cross-state, exception, and exact-head UX review contract.
   incident type appears in every match.
 - Goals are the only score source. Remaining next-event markets settle
   explicitly to `NONE` at full-time.
+- A finished card shows a compact chronological `Key moments` list plus a
+  native, expandable chronological full timeline; it never presents a
+  reversed latest-five tail as the match summary. A verified full history is
+  labelled `Full timeline (N)`; absent/legacy/malformed history is labelled
+  `Available timeline (N)` and states that earlier incidents may be
+  unavailable. A scored penalty and its linked goal render once via an exact
+  relation-ID match, never a team/minute heuristic.
+- 1X2 shows compact `1`/`X`/`2` tokens while full team identity remains in the
+  card header and accessible name; malformed/legacy boards keep their
+  original names and order instead of a false `1/X/2` mapping. Correct Score
+  uses one stable ascending `(homeGoals, awayGoals)` order; the presentation
+  sort never changes an option's ID/name/value tuple or selection identity.
+  Both market headings share one centered treatment.
+- When exactly one countdown, active-live, or retained-finished event occupies
+  the upper section, it uses the full event-stage width with its semantic
+  regions arranged side by side, and stays within a bounded height budget
+  relative to the comparable pre-match row; only an expanded historical
+  timeline may exceed that budget.
+- Compact pre-kickoff market grids collapse phantom empty tracks with
+  `auto-fit`, stretch cards sharing a row to equal height, and wrap status
+  words only between words.
+- Backoffice navigation shows visible discoverable text for administrators in
+  every UI variant and stays hidden for ordinary users, legacy roleless users,
+  and anonymous visitors.
+
+## Timeline completeness and terminal safeguards
+
+- `incidentHistoryComplete`/`incidentsComplete` is an optional, additive
+  producer attestation: Gamemaster sets it only on payloads built from its
+  authoritative cumulative transition history (including the complete empty
+  pre-kickoff list and manual full-time result); Event sets the public flag
+  only when the update carries that attestation, includes the cumulative
+  incidents array, every raw incident validates, and the normalized list fits
+  the full-time floor. The flag stays absent/false for legacy rows,
+  single-incident compatibility updates, malformed/truncated input, and
+  non-terminal phases; a previously finished row cannot be reconstructed after
+  the fact, so honest partial labelling replaces a false completeness claim.
+- A result/`FULL_TIME` write decision is atomic against the current live phase
+  and explicit/legacy offline intent, so no interleaving can leave a fully
+  onboarded, non-retired terminal event `OFFLINE`; the terminal status always
+  becomes `RESULTED`. A placeholder remains fail-dark until event metadata and
+  visibility authority are initialized, even when pending intent is `ONLINE`.
+  An equal-sequence authoritative merge adopts the current status/visibility
+  while keeping whichever terminal snapshot has the stronger incident history
+  (verified-complete first, otherwise longer).
+- An acceptance-scoped retained `OFFLINE` snapshot must not render, clear, or
+  leak while current-user authorization is unresolved, and afterward is
+  retained only when its event ID is in the administrator's acceptance scope.
 
 ## Production release
 
@@ -95,6 +143,13 @@ current 1X2 and Correct Score boards. Forty-four deployed-client regressions
 and 24 read-only real-production responsive checks passed across v1/v2/v3,
 light/dark, and 1600/768/390/320px widths without clipping, overflow,
 misalignment, short touch targets, page errors, or API failures.
+
+The next release that lands the live-timeline/market-alignment slice must
+extend this acceptance journey with: full bounded timeline
+completeness/labelling, penalty-linked deduplication, live-card relative
+height and pre-kickoff market alignment, stable Correct Score order, and
+visible administrator navigation across UI variants. Record its exact master
+SHA and run evidence in a new dated entry above once that release completes.
 
 ## Compatibility and rollback
 

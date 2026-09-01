@@ -1,4 +1,5 @@
 import {
+  buildFinishedMatchTimeline,
   COUNTDOWN_LIVE_MARKET_TYPE,
   COUNTDOWN_WINDOW_MS,
   formatCountdownDuration,
@@ -13,6 +14,7 @@ import {
   isLiveMarketSelectable,
   isTerminalMarketStatus,
   LIVE_MARKET_STATUS,
+  mergeAuthoritativeEventList,
   SLIP_ROW_STATUS,
   shouldReplaceEventFromAuthoritativeSource,
 } from './liveBettingUtils';
@@ -320,6 +322,137 @@ describe('shouldReplaceEventFromAuthoritativeSource', () => {
     expect(shouldReplaceEventFromAuthoritativeSource(undefined, next)).toBe(true);
     expect(shouldReplaceEventFromAuthoritativeSource(buildEvent({ live: undefined }), next)).toBe(true);
     expect(shouldReplaceEventFromAuthoritativeSource(next, buildEvent({ live: undefined }))).toBe(false);
+  });
+});
+
+describe('mergeAuthoritativeEventList terminal history', () => {
+  const buildFinishedEvent = ({
+    complete = false,
+    history = [],
+    sequence = 5,
+    status = 'RESULTED',
+    visibility = 'ONLINE',
+  } = {}) => ({
+    eventId: 'finished-event',
+    name: 'Falcons - Owls',
+    status,
+    visibility,
+    live: {
+      sequence,
+      phase: 'FULL_TIME',
+      incidentHistory: history,
+      incidentHistoryComplete: complete,
+    },
+  });
+
+  it('accepts authoritative metadata without shrinking verified same-sequence history', () => {
+    const currentHistory = [
+      { id: 'kickoff', type: 'KICK_OFF' },
+      { id: 'goal', type: 'GOAL', minute: 12 },
+      { id: 'full-time', type: 'FULL_TIME' },
+    ];
+    const current = buildFinishedEvent({ complete: true, history: currentHistory });
+    const next = buildFinishedEvent({
+      complete: false,
+      history: [{ id: 'full-time', type: 'FULL_TIME' }],
+      visibility: 'OFFLINE',
+    });
+
+    const [merged] = mergeAuthoritativeEventList([current], [next]);
+
+    expect(merged.visibility).toBe('OFFLINE');
+    expect(merged.live.incidentHistory).toEqual(currentHistory);
+    expect(merged.live.incidentHistoryComplete).toBe(true);
+    expect(merged).not.toBe(next);
+    expect(current.live.incidentHistory).toEqual(currentHistory);
+  });
+
+  it('prefers a newly verified complete history over a longer unverified history', () => {
+    const current = buildFinishedEvent({
+      history: [
+        { id: 'legacy-1', type: 'GOAL' },
+        { id: 'legacy-2', type: 'GOAL' },
+        { id: 'legacy-3', type: 'GOAL' },
+      ],
+    });
+    const verifiedHistory = [
+      { id: 'kickoff', type: 'KICK_OFF' },
+      { id: 'full-time', type: 'FULL_TIME' },
+    ];
+    const next = buildFinishedEvent({ complete: true, history: verifiedHistory });
+
+    expect(mergeAuthoritativeEventList([current], [next])[0].live).toMatchObject({
+      incidentHistory: verifiedHistory,
+      incidentHistoryComplete: true,
+    });
+  });
+
+  it('replaces history normally when the authoritative sequence is strictly newer', () => {
+    const current = buildFinishedEvent({
+      complete: true,
+      history: [{ id: 'old', type: 'GOAL' }],
+      sequence: 5,
+    });
+    const next = buildFinishedEvent({
+      history: [],
+      sequence: 6,
+    });
+
+    expect(mergeAuthoritativeEventList([current], [next])[0]).toBe(next);
+  });
+});
+
+describe('buildFinishedMatchTimeline', () => {
+  const event = {
+    home: 'Falcons',
+    away: 'Owls',
+  };
+
+  it('keeps source chronology, includes structural moments, and removes only an exactly linked penalty goal', () => {
+    const history = [
+      { id: 'kickoff', type: 'KICK_OFF', minute: 0 },
+      { id: 'first-minute', type: 'FIRST_MINUTE_ELAPSED', minute: 1 },
+      { id: 'goal-1', type: 'GOAL', side: 'HOME', minute: 12 },
+      { id: 'half-time', type: 'HALF_TIME', minute: 45 },
+      { id: 'penalty-scored', type: 'PENALTY_SCORED', side: 'AWAY', minute: 61 },
+      {
+        id: 'derived-penalty-goal',
+        relatedIncidentId: 'penalty-scored',
+        type: 'GOAL',
+        side: 'AWAY',
+        minute: 61,
+      },
+      {
+        id: 'unrelated-same-minute-goal',
+        relatedIncidentId: 'some-other-incident',
+        type: 'GOAL',
+        side: 'HOME',
+        minute: 61,
+      },
+      { id: 'red-card', type: 'RED_CARD', side: 'AWAY', minute: 75 },
+      { id: 'added-time', type: 'ADDED_TIME_ANNOUNCED', minute: 90, addedTime: 4 },
+      { id: 'unknown', type: 'FUTURE_TECHNICAL_MARKER', minute: 90 },
+      { id: 'full-time', type: 'FULL_TIME', minute: 90, addedTime: 4 },
+    ];
+
+    const result = buildFinishedMatchTimeline(history, event);
+
+    expect(result.timeline.map((entry) => entry.label)).toEqual([
+      'Kick-off',
+      "12' Falcons goal",
+      'Half-time',
+      "61' Owls penalty scored",
+      "61' Falcons goal",
+      "75' Owls red card",
+      'Added time +4',
+      'Full-time',
+    ]);
+    expect(result.keyMoments.map((entry) => entry.id)).toEqual([
+      'goal-1',
+      'penalty-scored',
+      'unrelated-same-minute-goal',
+      'red-card',
+    ]);
   });
 });
 

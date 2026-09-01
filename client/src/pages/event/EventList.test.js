@@ -126,8 +126,9 @@ describe('EventList', () => {
     const articles = screen.getAllByRole('article');
     expect(articles[0]).toHaveAccessibleName('Live Derby');
     expect(articles[1]).toHaveAccessibleName('Pre-match Clash');
-    // Each section contains one card here, so both use the bounded sparse-section width.
-    expect(articles[0].parentElement).toHaveClass('col-12', 'col-xl-8');
+    // The single live surface uses the full stage; a sparse pre-match card keeps its bounded width.
+    expect(articles[0].parentElement).toHaveClass('col-12');
+    expect(articles[0].parentElement).not.toHaveClass('col-xl-8');
     expect(articles[0].parentElement).not.toHaveClass('col-xl-4');
     expect(articles[1].parentElement).toHaveClass('col-12', 'col-xl-8');
     expect(articles[1].parentElement).not.toHaveClass('col-xl-4');
@@ -431,7 +432,9 @@ describe('EventList kickoff countdown', () => {
     expect(screen.getByText('Pre-match markets')).toBeInTheDocument();
     expect(screen.getByText('Pre-kickoff markets')).toBeInTheDocument();
 
-    const preMatchButton = screen.getByRole('button', { name: 'Select 1X2 Team A at 1.5' });
+    const preMatchButton = screen.getByRole('button', {
+      name: 'Select 1X2 1: Team A in Countdown Derby at 1.5',
+    });
     const kickoffTeamButton = screen.getByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' });
     const firstMinuteGoalButton = screen.getByRole('button', { name: 'Select Goal in First Minute: Yes at 6.5' });
     expect(preMatchButton).toBeEnabled();
@@ -459,7 +462,9 @@ describe('EventList kickoff countdown', () => {
 
     // Neither click unmounted/remounted the card: the same button elements are still present and
     // enabled afterward, proving no state loss from routing to two independent boards.
-    expect(screen.getByRole('button', { name: 'Select 1X2 Team A at 1.5' })).toBe(preMatchButton);
+    expect(screen.getByRole('button', {
+      name: 'Select 1X2 1: Team A in Countdown Derby at 1.5',
+    })).toBe(preMatchButton);
     expect(screen.getByRole('button', { name: 'Select Kickoff Team: Team A at 2.1' })).toBe(kickoffTeamButton);
   });
 
@@ -624,7 +629,13 @@ describe('EventList kickoff countdown', () => {
         homeScore: 3,
         awayScore: 1,
         bettingStatus: 'SUSPENDED',
-        incidentHistory: [],
+        incidentHistoryComplete: true,
+        incidentHistory: [
+          { id: 'kickoff', type: 'KICK_OFF', minute: 0 },
+          { id: 'goal', type: 'GOAL', side: 'HOME', minute: 12 },
+          { id: 'yellow', type: 'YELLOW_CARD', side: 'AWAY', minute: 30 },
+          { id: 'full-time', type: 'FULL_TIME', minute: 90 },
+        ],
         currentMarkets: [],
       },
     };
@@ -642,9 +653,23 @@ describe('EventList kickoff countdown', () => {
     const finishedCard = screen.getByRole('article', { name: 'Finished Match' });
     expect(finishedCard).toHaveTextContent('3');
     expect(finishedCard).toHaveTextContent('1');
-    expect(finishedCard.parentElement).toHaveClass('col-12', 'col-xl-8');
+    expect(finishedCard.parentElement).toHaveClass('col-12');
+    expect(finishedCard.parentElement).not.toHaveClass('col-xl-8');
     expect(finishedCard.parentElement).not.toHaveClass('col-xl-4');
     expect(finishedCard.querySelector('time')).toHaveAttribute('datetime', KICKOFF_ISO);
+    expect(finishedCard).toHaveTextContent('Key moments');
+    expect(finishedCard.querySelector('.event-incidents')).toHaveTextContent("12' Team A goal");
+    const timeline = finishedCard.querySelector('details');
+    expect(timeline).not.toHaveAttribute('open');
+    expect(screen.getByText('Full timeline (4)')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Full timeline (4)'));
+    expect(timeline).toHaveAttribute('open');
+    expect(Array.from(timeline.querySelectorAll('li')).map((item) => item.textContent)).toEqual([
+      'Kick-off',
+      "12' Team A goal",
+      "30' Team B yellow card",
+      'Full-time',
+    ]);
   });
 
   it('keeps showing the retained finished card even after the server stops returning that event', async () => {
@@ -917,6 +942,63 @@ describe('EventList kickoff countdown', () => {
 
     expect(screen.queryByRole('article', { name: 'Finished Offline Match' })).toBeNull();
     expect(window.sessionStorage.getItem(RETAINED_FINISHED_EVENT_STORAGE_KEY)).toBeNull();
+  });
+
+  it('does not render or erase a retained OFFLINE event before scoped authorization resolves', async () => {
+    jest.setSystemTime(KICKOFF_TIME + 2 * 60 * 60 * 1000);
+    const offlineFinishedEvent = {
+      eventId: 'finished-auth-pending',
+      name: 'Pending Authorization Match',
+      time: KICKOFF_ISO,
+      visibility: 'OFFLINE',
+      status: 'RESULTED',
+      home: 'Team A',
+      away: 'Team B',
+      products: [],
+      live: {
+        phase: 'FULL_TIME',
+        kickoffAt: KICKOFF_ISO,
+        occurredAt: '2030-06-01T16:48:00.000Z',
+        homeScore: 2,
+        awayScore: 0,
+        bettingStatus: 'CLOSED',
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    };
+    window.sessionStorage.setItem(
+      RETAINED_FINISHED_EVENT_STORAGE_KEY,
+      JSON.stringify(offlineFinishedEvent),
+    );
+    useLiveEvents.mockReturnValue({
+      events: [],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    const { rerender } = render(<EventList
+      isScopedAccessResolved={false}
+      selectedSelectionKeys={new Set()}
+      uiVariant="v2"
+      visibleOfflineEventIds={new Set()}
+    />);
+
+    expect(screen.queryByRole('article', { name: offlineFinishedEvent.name })).toBeNull();
+    expect(JSON.parse(
+      window.sessionStorage.getItem(RETAINED_FINISHED_EVENT_STORAGE_KEY),
+    )).toMatchObject({ eventId: offlineFinishedEvent.eventId });
+
+    await act(async () => {
+      rerender(<EventList
+        isScopedAccessResolved
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+        visibleOfflineEventIds={new Set([offlineFinishedEvent.eventId])}
+      />);
+    });
+
+    expect(screen.getByRole('article', { name: offlineFinishedEvent.name }))
+      .toBeInTheDocument();
   });
 
   it('suppresses the "Next live event" banner while a countdown event occupies the upper live area', () => {

@@ -252,6 +252,7 @@ test("live update payload keeps legacy incident and additive incidents history",
         occurredAt: "2026-08-20T17:03:00.000Z",
         minute: 63,
       },
+      incidentsComplete: true,
       incidents: [
         {
           id: "incident-1",
@@ -281,5 +282,6 @@ test("live update payload keeps legacy incident and additive incidents history",
 
   assert.deepEqual(JSON.parse(JSON.stringify(event)), event);
   assert.equal(event.data.incident.id, "incident-3");
+  assert.equal(event.data.incidentsComplete, true);
   assert.equal(event.data.incidents.length, 3);
 });

@@ -135,7 +135,37 @@ The compact live-betting work established reusable examples:
   semantics require it, while suspended or stale non-terminal markets remain
   visible and labelled;
 - technically valid but duplicated, contradictory, or implausible score/odds
-  presentation is a usability defect.
+  presentation is a usability defect;
+- cross-card baseline drift: a sibling card's market heading, control bounds,
+  or odds baseline must not shift when another card's content length (for
+  example a long team name) changes;
+- event identity versus selection semantics: a compact semantic selection
+  token (for example `1`/`X`/`2`) expresses the betting outcome while full
+  event/team identity stays in the card header and accessible name; duplicating
+  identity inside the control that causes wrapping is a defect, not
+  compaction;
+- markets sharing one route/card family use one shared centered heading
+  treatment;
+- stable board order: a fixed-size selectable board uses a stable domain
+  order rather than a volatile value such as current odds, and any
+  presentation sort preserves each option's original ID/name/value tuple
+  instead of reconnecting a value to a selection by array position;
+- coupled markets sharing one pricing model (for example 1X2 and Correct
+  Score) are cross-checked for numeric plausibility against each other;
+- role-gated navigation: a role-gated global entry (for example Backoffice)
+  needs visible discoverable text, not only an icon, for the correct role in
+  every affected UI variant, and stays absent for every non-privileged state;
+- phantom sparse-grid tracks: a compact market grid collapses empty tracks
+  with `auto-fit` rather than reserving them with `auto-fill`, so occupied
+  tracks equal visible market cards;
+- equal-height market groups: market cards sharing one row stretch to equal
+  height and top alignment without fixed pixel heights or nested scrolling;
+- readable status words: a status badge wraps only between words, never
+  inside one;
+- a single upper-section countdown/live/finished card uses full event-stage
+  width and stays within a bounded height budget relative to the comparable
+  pre-match row; an intentionally expanded historical disclosure is the one
+  allowed exception.
 
 Product-specific live rules remain in [[Live Betting Production]].
 

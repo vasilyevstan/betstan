@@ -2,11 +2,24 @@ import React from 'react';
 import Product1X2 from './Product1X2';
 import ProductCS from './ProductCS';
 
-const HandleProducts = ({ eventId, onSelectionPlaced, products, resulted, selectedSelectionKeys, uiVariant }) => (
+const HandleProducts = ({
+  away,
+  eventId,
+  eventName,
+  home,
+  onSelectionPlaced,
+  products,
+  resulted,
+  selectedSelectionKeys,
+  uiVariant,
+}) => (
   (products ?? []).map((product) => {
     if (product.type === '1X2') {
       return <Product1X2
+        away={away}
         eventId={eventId}
+        eventName={eventName}
+        home={home}
         key={product.id}
         onSelectionPlaced={onSelectionPlaced}
         product={product}

@@ -68,6 +68,11 @@ export interface ILiveEventUpdateEvent extends IEvent {
     incident?: ILiveIncident;
     /** Complete incident history through `sequence`, ordered oldest -> newest. */
     incidents?: ILiveIncident[];
+    /**
+     * Producer attestation that `incidents` is the authoritative cumulative
+     * incident list through this sequence, with no older items omitted.
+     */
+    incidentsComplete?: boolean;
     markets: ILiveMarketSnapshot[];
     settlements: ILiveMarketSettlement[];
     eventName?: string;

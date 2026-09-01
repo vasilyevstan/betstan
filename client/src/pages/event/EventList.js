@@ -5,6 +5,7 @@ import ProductsList from './product/ProductsList';
 import useLiveEvents from './useLiveEvents';
 import useNow from '../../hook/useNow';
 import {
+  buildFinishedMatchTimeline,
   buildLiveMarketButtonLabel,
   formatCountdownDuration,
   formatIncident,
@@ -85,9 +86,9 @@ const formatQuoteValidity = (value) => {
 // Dense sections retain the 1/2/3-column responsive grid. Sparse sections deliberately use more
 // of the available stage so one card is not stranded in a narrow third-width island and two cards
 // still fill a complete row.
-const getEventCardClass = (eventCount) => {
+const getEventCardClass = (eventCount, expandSingle = false) => {
   if (eventCount === 1) {
-    return 'col-12 col-xl-8';
+    return expandSingle ? 'col-12' : 'col-12 col-xl-8';
   }
   if (eventCount === 2) {
     return 'col-12 col-md-6';
@@ -132,8 +133,8 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
 
   return <div className={`card event-market-card${isSelectable ? '' : ' event-market-card--inactive'} event-market-card--${uiVariant}`}>
     <div className="card-body">
-      <div className="d-flex justify-content-between align-items-start gap-2 mb-2">
-        <div>
+      <div className="event-market-card__header">
+        <div className="event-market-card__title">
           <div className="fw-semibold">{formatLiveMarketType(market.marketType)}</div>
           <div className="event-market-meta">
             <span>Quote v{market.quoteVersion}</span>
@@ -184,54 +185,56 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
   const progressValue = getMatchProgressValue(event.live);
 
   return <article className="card event-card event-card--live event-card--active-live h-100" aria-label={event.name}>
-    <div className="card-body event-card__live-body">
-      <div className="event-card__live-head">
-        <div>
-          <div className="event-card__badges">
-            <span className="event-card__badge event-card__badge--live">LIVE</span>
-            <span className="event-card__badge event-card__badge--phase">{getPhaseLabel(event.live?.phase)}</span>
+    <div className="card-body event-card__live-body event-card__live-body--active">
+      <div className="event-card__live-overview">
+        <div className="event-card__live-head">
+          <div>
+            <div className="event-card__badges">
+              <span className="event-card__badge event-card__badge--live">LIVE</span>
+              <span className="event-card__badge event-card__badge--phase">{getPhaseLabel(event.live?.phase)}</span>
+            </div>
+            <h5 className="card-title mb-1">{event.name}</h5>
+            <h6 className="card-subtitle text-secondary mb-0">Kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
           </div>
-          <h5 className="card-title mb-1">{event.name}</h5>
-          <h6 className="card-subtitle text-secondary mb-0">Kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
+          <div className="event-scoreboard" aria-label={`Score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
+            <div className="event-scoreboard__teams">
+              <span>{event.home ?? 'Home'}</span>
+              <span>{event.away ?? 'Away'}</span>
+            </div>
+            <div className="event-scoreboard__score">
+              <span>{event.live?.homeScore ?? 0}</span>
+              <span>:</span>
+              <span>{event.live?.awayScore ?? 0}</span>
+            </div>
+          </div>
         </div>
-        <div className="event-scoreboard" aria-label={`Score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
-          <div className="event-scoreboard__teams">
-            <span>{event.home ?? 'Home'}</span>
-            <span>{event.away ?? 'Away'}</span>
+
+        <div className="event-progress" role="progressbar" aria-label="Match progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progressValue}>
+          <div className="event-progress__labels">
+            <span>{formatMinute(event.live?.minute, event.live?.addedTime)}</span>
+            <span>{getPhaseLabel(event.live?.phase)}</span>
           </div>
-          <div className="event-scoreboard__score">
-            <span>{event.live?.homeScore ?? 0}</span>
-            <span>:</span>
-            <span>{event.live?.awayScore ?? 0}</span>
+          <div className="event-progress__track">
+            <div className="event-progress__fill" style={{ width: `${progressValue}%` }}></div>
+            <div className="event-progress__ticks" aria-hidden="true">
+              {Array.from({ length: 11 }).map((_, index) => <span key={index}></span>)}
+            </div>
           </div>
+        </div>
+
+        <div className="event-card__section">
+          <div className="event-card__section-title">Latest incidents</div>
+          {incidents.length === 0 ? (
+            <div className="event-card__empty text-secondary">Waiting for live incidents…</div>
+          ) : (
+            <ul className="event-incidents list-unstyled mb-0">
+              {incidents.map((incident, index) => <li key={`${incident}-${index}`} className="event-incidents__item">{incident}</li>)}
+            </ul>
+          )}
         </div>
       </div>
 
-      <div className="event-progress" role="progressbar" aria-label="Match progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progressValue}>
-        <div className="event-progress__labels">
-          <span>{formatMinute(event.live?.minute, event.live?.addedTime)}</span>
-          <span>{getPhaseLabel(event.live?.phase)}</span>
-        </div>
-        <div className="event-progress__track">
-          <div className="event-progress__fill" style={{ width: `${progressValue}%` }}></div>
-          <div className="event-progress__ticks" aria-hidden="true">
-            {Array.from({ length: 11 }).map((_, index) => <span key={index}></span>)}
-          </div>
-        </div>
-      </div>
-
-      <div className="event-card__section">
-        <div className="event-card__section-title">Latest incidents</div>
-        {incidents.length === 0 ? (
-          <div className="event-card__empty text-secondary">Waiting for live incidents…</div>
-        ) : (
-          <ul className="event-incidents list-unstyled mb-0">
-            {incidents.map((incident, index) => <li key={`${incident}-${index}`} className="event-incidents__item">{incident}</li>)}
-          </ul>
-        )}
-      </div>
-
-      <div className="event-card__section">
+      <div className="event-card__section event-card__live-markets">
         <div className="d-flex justify-content-between align-items-center gap-2 mb-2">
           <div className="event-card__section-title">Current markets</div>
           <small className="text-secondary">{liveMarkets.length} markets</small>
@@ -267,27 +270,29 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
   const preMatchProducts = event.products ?? [];
 
   return <article className="card event-card event-card--live event-card--countdown h-100" aria-label={event.name}>
-    <div className="card-body event-card__live-body">
-      <div className="event-card__live-head">
-        <div>
-          <div className="event-card__badges">
-            <span className="event-card__badge event-card__badge--countdown">KICKOFF SOON</span>
+    <div className="card-body event-card__live-body event-card__live-body--countdown">
+      <div className="event-card__live-overview">
+        <div className="event-card__live-head">
+          <div>
+            <div className="event-card__badges">
+              <span className="event-card__badge event-card__badge--countdown">KICKOFF SOON</span>
+            </div>
+            <h5 className="card-title mb-1">{event.name}</h5>
+            <h6 className="card-subtitle text-secondary mb-0">Scheduled kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
           </div>
-          <h5 className="card-title mb-1">{event.name}</h5>
-          <h6 className="card-subtitle text-secondary mb-0">Scheduled kickoff {formatEventTime(event.live?.kickoffAt ?? event.time)}</h6>
-        </div>
-        <div
-          aria-label={`Kickoff countdown: ${countdownLabel}`}
-          className="event-countdown"
-          role="timer"
-        >
-          <span className="event-countdown__eyebrow">Kickoff in</span>
-          <span aria-hidden="true" className="event-countdown__value">{countdownLabel}</span>
+          <div
+            aria-label={`Kickoff countdown: ${countdownLabel}`}
+            className="event-countdown"
+            role="timer"
+          >
+            <span className="event-countdown__eyebrow">Kickoff in</span>
+            <span aria-hidden="true" className="event-countdown__value">{countdownLabel}</span>
+          </div>
         </div>
       </div>
 
       {preMatchProducts.length > 0 ? (
-        <div className="event-card__section">
+        <div className="event-card__section event-card__countdown-products">
           <div className="event-card__badges mb-2">
             <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
           </div>
@@ -296,7 +301,10 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
               up to kickoff (enforced server-side by EventOddsClicked), independent of the new
               live-slip countdown markets below. */}
           <ProductsList
+            away={event.away}
             eventId={event.eventId}
+            eventName={event.name}
+            home={event.home}
             onSelectionPlaced={onSelectionPlaced}
             products={preMatchProducts}
             resulted={event.status === 'RESULTED'}
@@ -306,7 +314,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
         </div>
       ) : null}
 
-      <div className="event-card__section">
+      <div className="event-card__section event-card__countdown-markets">
         <div className="event-card__section-title">Pre-kickoff markets</div>
         {countdownMarkets.length === 0 ? (
           <div className="event-card__empty text-secondary">Pre-kickoff markets opening soon…</div>
@@ -328,65 +336,92 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
 };
 
 const RetainedFinishedEventCard = ({ event }) => {
-  const incidents = (event.live?.incidentHistory ?? [])
-    .map((incident) => formatIncident(incident, event))
-    .filter(Boolean)
-    .slice(-5)
-    .reverse();
+  const { keyMoments, timeline } = buildFinishedMatchTimeline(
+    event.live?.incidentHistory,
+    event,
+  );
+  const isComplete = event.live?.incidentHistoryComplete === true;
   const kickoffValue = event.live?.kickoffAt ?? event.time;
 
   return <article className="card event-card event-card--live event-card--finished h-100" aria-label={event.name}>
-    <div className="card-body event-card__live-body">
-      <div className="event-card__live-head">
-        <div>
-          <div className="event-card__badges">
-            <span className="event-card__badge event-card__badge--finished">FULL-TIME</span>
+    <div className="card-body event-card__live-body event-card__live-body--finished">
+      <div className="event-card__live-overview">
+        <div className="event-card__live-head">
+          <div>
+            <div className="event-card__badges">
+              <span className="event-card__badge event-card__badge--finished">FULL-TIME</span>
+            </div>
+            <h5 className="card-title mb-1">{event.name}</h5>
+            <h6 className="card-subtitle text-secondary mb-0">
+              Kickoff <time dateTime={kickoffValue}>{formatEventTime(kickoffValue)}</time>
+            </h6>
           </div>
-          <h5 className="card-title mb-1">{event.name}</h5>
-          <h6 className="card-subtitle text-secondary mb-0">
-            Kickoff <time dateTime={kickoffValue}>{formatEventTime(kickoffValue)}</time>
-          </h6>
-        </div>
-        <div className="event-scoreboard" aria-label={`Final score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
-          <div className="event-scoreboard__teams">
-            <span>{event.home ?? 'Home'}</span>
-            <span>{event.away ?? 'Away'}</span>
-          </div>
-          <div className="event-scoreboard__score">
-            <span>{event.live?.homeScore ?? 0}</span>
-            <span>:</span>
-            <span>{event.live?.awayScore ?? 0}</span>
+          <div className="event-scoreboard" aria-label={`Final score ${event.home ?? 'Home'} ${event.live?.homeScore ?? 0}, ${event.away ?? 'Away'} ${event.live?.awayScore ?? 0}`}>
+            <div className="event-scoreboard__teams">
+              <span>{event.home ?? 'Home'}</span>
+              <span>{event.away ?? 'Away'}</span>
+            </div>
+            <div className="event-scoreboard__score">
+              <span>{event.live?.homeScore ?? 0}</span>
+              <span>:</span>
+              <span>{event.live?.awayScore ?? 0}</span>
+            </div>
           </div>
         </div>
       </div>
 
-      {incidents.length > 0 ? (
-        <div className="event-card__section">
-          <div className="event-card__section-title">Match summary</div>
+      <div className="event-card__section event-card__finished-timeline">
+        <div className="event-card__section-title">Key moments</div>
+        {keyMoments.length > 0 ? (
           <ul className="event-incidents list-unstyled mb-0">
-            {incidents.map((incident, index) => <li key={`${incident}-${index}`} className="event-incidents__item">{incident}</li>)}
+            {keyMoments.map((entry) => (
+              <li key={entry.id} className="event-incidents__item">{entry.label}</li>
+            ))}
           </ul>
-        </div>
-      ) : null}
+        ) : (
+          <div className="event-card__empty text-secondary">No key moments recorded.</div>
+        )}
+
+        <details className="event-timeline">
+          <summary>{isComplete ? 'Full' : 'Available'} timeline ({timeline.length})</summary>
+          {!isComplete ? (
+            <p className="event-timeline__notice">Earlier incidents may be unavailable for this match.</p>
+          ) : null}
+          {timeline.length > 0 ? (
+            <ol className="event-timeline__list">
+              {timeline.map((entry) => <li key={entry.id}>{entry.label}</li>)}
+            </ol>
+          ) : (
+            <p className="event-timeline__notice">No incident history is available.</p>
+          )}
+        </details>
+      </div>
     </div>
   </article>;
 };
 
 const PreMatchEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVariant }) => <article className="card event-card h-100" aria-label={event.name}>
-  <div className="card-body">
-    <div className="event-card__badges mb-2">
-      <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
+  <div className="card-body event-card__prematch-body">
+    <div className="event-card__prematch-header">
+      <div className="event-card__badges mb-2">
+        <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
+      </div>
+      <h5 className="card-title mb-1">{event.name}</h5>
+      <h6 className="card-subtitle mb-3 text-secondary">{formatEventTime(event.time)}</h6>
     </div>
-    <h5 className="card-title mb-1">{event.name}</h5>
-    <h6 className="card-subtitle mb-3 text-secondary">{formatEventTime(event.time)}</h6>
-    <ProductsList
-      eventId={event.eventId}
-      onSelectionPlaced={onSelectionPlaced}
-      products={event.products ?? []}
-      resulted={event.status === 'RESULTED'}
-      selectedSelectionKeys={selectedSelectionKeys}
-      uiVariant={uiVariant}
-    />
+    <div className="event-card__product-deck">
+      <ProductsList
+        away={event.away}
+        eventId={event.eventId}
+        eventName={event.name}
+        home={event.home}
+        onSelectionPlaced={onSelectionPlaced}
+        products={event.products ?? []}
+        resulted={event.status === 'RESULTED'}
+        selectedSelectionKeys={selectedSelectionKeys}
+        uiVariant={uiVariant}
+      />
+    </div>
   </div>
 </article>;
 
@@ -423,6 +458,7 @@ const HandleEventList = ({
   uiVariant,
   visibleOfflineEventIds = EMPTY_EVENT_IDS,
   onScopedAccessFailure,
+  isScopedAccessResolved = true,
 }) => {
   const { events, feedState, isLoading } = useLiveEvents(
     visibleOfflineEventIds,
@@ -440,12 +476,28 @@ const HandleEventList = ({
   // remounts this component doesn't lose a card the client already legitimately received this
   // session (see `persistRetainedFinishedEvent` above).
   const [retainedFinishedEvent, setRetainedFinishedEvent] = useState(readPersistedRetainedFinishedEvent);
+  const visibleRetainedFinishedEvent = retainedFinishedEvent && (
+    retainedFinishedEvent.visibility !== 'OFFLINE'
+    || (
+      isScopedAccessResolved
+      && isEventVisibleToViewer(retainedFinishedEvent, visibleOfflineEventIds)
+    )
+  )
+    ? retainedFinishedEvent
+    : null;
 
   useEffect(() => {
+    if (retainedFinishedEvent?.visibility === 'OFFLINE' && !isScopedAccessResolved) {
+      return;
+    }
     persistRetainedFinishedEvent(retainedFinishedEvent);
-  }, [retainedFinishedEvent]);
+  }, [isScopedAccessResolved, retainedFinishedEvent]);
 
   useEffect(() => {
+    if (retainedFinishedEvent?.visibility === 'OFFLINE' && !isScopedAccessResolved) {
+      return;
+    }
+
     // A retained event scoped to an acceptance view must not survive that authorization being
     // revoked (e.g. its id leaving `visibleOfflineEventIds`), even though it isn't otherwise present
     // in `eventItems` (which is already filtered to only authorized events) to trigger replacement.
@@ -481,7 +533,13 @@ const HandleEventList = ({
     if (latestFinishedEvent) {
       setRetainedFinishedEvent(latestFinishedEvent);
     }
-  }, [eventItems, now, retainedFinishedEvent, visibleOfflineEventIds]);
+  }, [
+    eventItems,
+    isScopedAccessResolved,
+    now,
+    retainedFinishedEvent,
+    visibleOfflineEventIds,
+  ]);
 
   const liveEvents = eventItems.filter(isLiveEvent);
   const countdownEvents = eventItems.filter((event) => (
@@ -493,9 +551,9 @@ const HandleEventList = ({
     && !countdownEvents.some((countdownEvent) => countdownEvent.eventId === event.eventId)
   ));
   const upperLiveEvents = [...countdownEvents, ...liveEvents];
-  const upperLiveCardClass = getEventCardClass(upperLiveEvents.length);
+  const upperLiveCardClass = getEventCardClass(upperLiveEvents.length, true);
   const preMatchCardClass = getEventCardClass(preMatchEvents.length);
-  const singleEventCardClass = getEventCardClass(1);
+  const singleEventCardClass = getEventCardClass(1, true);
   // A countdown event is already occupying the upper live area with its own imminent kickoff, so the
   // "next live event" banner (which points at some other, later-scheduled event) must not also show
   // alongside it -- otherwise the truly-next event is both counting down above and mislabeled below.
@@ -512,7 +570,7 @@ const HandleEventList = ({
     </section>;
   }
 
-  if (eventItems.length === 0 && !retainedFinishedEvent) {
+  if (eventItems.length === 0 && !visibleRetainedFinishedEvent) {
     return <section className={`event-stage event-stage--${uiVariant}`}>
       <FeedStatus feedState={feedState} />
       <div className="card event-stage__empty card-body">No events are available in the current live window.</div>
@@ -541,9 +599,9 @@ const HandleEventList = ({
         />
       </div>)}
     </EventSection> : null}
-    {retainedFinishedEvent ? <EventSection title="Recently finished" uiVariant={uiVariant}>
-      <div className={singleEventCardClass} key={retainedFinishedEvent.eventId}>
-        <RetainedFinishedEventCard event={retainedFinishedEvent} />
+    {visibleRetainedFinishedEvent ? <EventSection title="Recently finished" uiVariant={uiVariant}>
+      <div className={singleEventCardClass} key={visibleRetainedFinishedEvent.eventId}>
+        <RetainedFinishedEventCard event={visibleRetainedFinishedEvent} />
       </div>
     </EventSection> : null}
     {preMatchEvents.length > 0 ? <EventSection title="Pre-match" uiVariant={uiVariant}>
