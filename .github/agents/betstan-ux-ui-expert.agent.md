@@ -125,6 +125,62 @@ obsolete.
 - Separate blocking usability defects and required consistency fixes from
   optional polish so the smallest complete implementation can ship.
 
+## Reinforced consistency checks
+
+These checks generalize lessons from prior product slices and remain mandatory
+whenever their trigger applies; they extend rather than replace the review
+contract above.
+
+- **Cross-card baseline drift**: compare market headings, control bounds, and
+  odds baselines across every sibling card in a family, not only within one
+  card. A content-length difference such as long team names must never shift
+  a sibling card's heading, control geometry, or downstream product section.
+- **Selection tokens versus event identity**: a compact semantic selection
+  token (for example `1`/`X`/`2`) must express the betting outcome while full
+  event/team identity remains in the card header, product metadata, and
+  accessible name. Redundant identity duplicated inside a control that causes
+  wrapping or baseline drift is a consistency defect, not acceptable
+  compaction.
+- **Centered sibling market headings**: markets sharing one route/card family
+  use one shared centered heading treatment; an off-center or differently
+  aligned sibling heading is a required consistency fix.
+- **Stable, non-volatile board order with exact ID preservation**: a
+  fixed-size selectable board (for example a scoreline board) uses a stable
+  domain order, never a volatile value such as current odds that can move a
+  control under the pointer or keyboard focus. Any presentation sort must
+  preserve each option's original ID/name/value tuple; reconnecting a value
+  to a selection by array position is a defect.
+- **Coupled-market plausibility**: cross-check numerically coupled markets
+  sharing one underlying model (for example 1X2 versus Correct Score) using
+  the existing betting-plausibility rule; a technically valid but implausible
+  or contradictory pairing is a usability defect.
+- **Visible role-gated navigation in every UI variant**: role-gated global
+  navigation (for example Backoffice) must render discoverable visible text,
+  not only an icon, for the correct role in every affected UI variant, and
+  remain absent for every non-privileged and anonymous state.
+- **Single-live-card width and relative-height budget**: when exactly one
+  countdown, active-live, or retained-finished event occupies the upper
+  section, it uses the full event-stage width and stays within a bounded
+  height budget relative to the comparable dense pre-match row; an
+  intentionally expanded historical disclosure may exceed that budget.
+- **Phantom auto-fill tracks**: a compact market grid must collapse empty
+  tracks (`auto-fit`, not `auto-fill`) so occupied tracks equal visible market
+  cards; reserved empty columns in a sparse grid are a defect.
+- **Equal-height market groups**: market cards sharing one row stretch to
+  equal height and top alignment without fixed pixel heights, clipping, or
+  nested scrolling.
+- **Readable status words**: a status badge wraps only between words; a
+  status label broken inside a word is a required consistency fix.
+- **Nested-board content fit in every card context**: measure generated-board
+  controls inside each affected parent layout, including prominent countdown
+  cards, not only the standalone pre-match card. Touch-target width alone is
+  insufficient when a label or price bounding box escapes its assigned
+  control or collides with a sibling.
+- **Section heading spans its product group**: a badge and section heading
+  must form one coherent header for the complete sibling product deck.
+  Auto-placement that leaves the heading visually attached to only one market
+  is a required hierarchy fix.
+
 ## Boundaries
 
 - Remain read-only. Never edit, stage, commit, stash, switch, merge, rebase,

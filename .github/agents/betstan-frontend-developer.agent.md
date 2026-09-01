@@ -63,7 +63,11 @@ instead of crossing the boundary.
   fallbacks.
 - Preserve independent form/wager state across sibling component updates.
 - Use semantic controls, keyboard access, labels, focus visibility, responsive
-  layouts, and non-color-only status indicators.
+  layouts, and non-color-only status indicators. When a compact semantic
+  control token (for example a market outcome shorthand) replaces a longer
+  label, keep full identity in the accessible name and card header, and never
+  let the visual token change the underlying selection ID, click payload, or
+  slip data.
 - Add focused React tests for user-visible behavior. Use existing Playwright or
   computed-layout coverage when interaction, responsive geometry, clipping, or
   another factual UX claim cannot be proved at the unit level; do not create a
@@ -90,8 +94,9 @@ For `BLOCKED`, use one reason: `out_of_scope_path`, `contract_unstable`,
 `missing_dependency`, `test_environment`, or `approval_required`.
 
 Include exact files changed, API assumptions, accessibility/responsive impact,
-named consistency references, intentional exceptions, tests and exit codes,
-known risks, and unresolved findings. For user-facing work, return the
+named consistency references, intentional exceptions, any semantic-control-
+label or exact-ID-preservation evidence, tests and exit codes, known risks,
+and unresolved findings. For user-facing work, return the
 immutable exact-head result to the same registered `betstan-ux-ui-expert` work
 unit and include its `UX_REVIEW_PASSED` result when handing off to
 `betstan-validation-critic`; do not approve your own work.

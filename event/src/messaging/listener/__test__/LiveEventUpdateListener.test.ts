@@ -17,6 +17,7 @@ import LiveEventProjectionListener from "../LiveEventProjectionListener";
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
 type LiveUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
+  incidentsComplete?: boolean;
 };
 
 const buildMessage = (): ConsumeMessage => ({
@@ -309,4 +310,121 @@ it("keeps only the bounded public incident history", async () => {
   expect(live.incidentHistory).toHaveLength(25);
   expect(live.incidentHistory[0].id).toEqual("incident-3");
   expect(live.incidentHistory[24].id).toEqual("incident-27");
+});
+
+it("retains full-time cumulative histories up to the terminal floor and marks only validated attestations complete", async () => {
+  const listener = new LiveEventProjectionListener(messengerWrapper.connection);
+  await listener.init();
+
+  await listener.onMessage(
+    buildLiveUpdate(80, {
+      eventId: "full-time-complete",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 4,
+      awayScore: 2,
+      bettingStatus: BettingStatus.CLOSED,
+      incident: buildIncident(80),
+      incidents: buildIncidentsThrough(80),
+      incidentsComplete: true,
+      markets: [],
+    }),
+    buildMessage()
+  );
+
+  const completeEvent = await Event.findOne({
+    eventId: "full-time-complete",
+  }).lean();
+  const completeLive = completeEvent?.live as any;
+  expect(completeLive.incidentHistory).toHaveLength(80);
+  expect(completeLive.incidentHistoryComplete).toBe(true);
+
+  await listener.onMessage(
+    buildLiveUpdate(130, {
+      eventId: "full-time-truncated",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 5,
+      awayScore: 3,
+      bettingStatus: BettingStatus.CLOSED,
+      incident: buildIncident(130),
+      incidents: buildIncidentsThrough(130),
+      incidentsComplete: true,
+      markets: [],
+    }),
+    buildMessage()
+  );
+
+  const truncatedEvent = await Event.findOne({
+    eventId: "full-time-truncated",
+  }).lean();
+  const truncatedLive = truncatedEvent?.live as any;
+  expect(truncatedLive.incidentHistory).toHaveLength(128);
+  expect(truncatedLive.incidentHistory[0].id).toEqual("incident-3");
+  expect(truncatedLive.incidentHistory[127].id).toEqual("incident-130");
+  expect(truncatedLive.incidentHistoryComplete).toBeUndefined();
+
+  await listener.onMessage(
+    buildLiveUpdate(41, {
+      eventId: "full-time-malformed",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      homeScore: 1,
+      awayScore: 0,
+      bettingStatus: BettingStatus.CLOSED,
+      incident: buildIncident(41),
+      incidents: [
+        ...buildIncidentsThrough(2),
+        { id: "broken-incident" } as unknown as LiveUpdateIncident,
+      ],
+      incidentsComplete: true,
+      markets: [],
+    }),
+    buildMessage()
+  );
+
+  const malformedEvent = await Event.findOne({
+    eventId: "full-time-malformed",
+  }).lean();
+  expect((malformedEvent?.live as any).incidentHistoryComplete).toBeUndefined();
+});
+
+it("keeps unattested and legacy full-time histories incomplete", async () => {
+  const listener = new LiveEventProjectionListener(messengerWrapper.connection);
+  await listener.init();
+
+  await listener.onMessage(
+    buildLiveUpdate(40, {
+      eventId: "full-time-unattested",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      incidents: buildIncidentsThrough(40),
+      markets: [],
+    }),
+    buildMessage()
+  );
+
+  await listener.onMessage(
+    buildLiveUpdate(41, {
+      eventId: "full-time-legacy-single",
+      minute: 90,
+      phase: EventPhase.FULL_TIME,
+      bettingStatus: BettingStatus.CLOSED,
+      markets: [],
+    }),
+    buildMessage()
+  );
+
+  const unattested = await Event.findOne({
+    eventId: "full-time-unattested",
+  }).lean();
+  const legacy = await Event.findOne({
+    eventId: "full-time-legacy-single",
+  }).lean();
+
+  expect((unattested?.live as any).incidentHistory).toHaveLength(40);
+  expect((unattested?.live as any).incidentHistoryComplete).toBeUndefined();
+  expect((legacy?.live as any).incidentHistory).toHaveLength(1);
+  expect((legacy?.live as any).incidentHistoryComplete).toBeUndefined();
 });

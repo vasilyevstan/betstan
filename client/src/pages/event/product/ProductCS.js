@@ -13,7 +13,7 @@ const HandleCS = ({ eventId, onSelectionPlaced, product, resulted, selectedSelec
   };
 
   return <div className="product-block product-block--cs">
-    <div className="fw-semibold mb-2">{product.name}</div>
+    <div className="fw-semibold mb-2 product-block__title">{product.name}</div>
     <div className="product-cs-grid">
       {(product.odds ?? []).map((option) => {
         const selectionKey = getPreMatchSelectionKey({ eventId, productId: product.id, oddsId: option.id });

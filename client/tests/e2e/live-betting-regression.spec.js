@@ -24,8 +24,8 @@ const trackClientIssues = (page) => {
   return { apiFailures, pageErrors };
 };
 
-// Dense sections retain the Bootstrap 1/2/3-column breakpoints. Sparse one-card sections expand
-// to a bounded two-thirds stage at xl and the full stage below xl.
+// Dense sections retain the Bootstrap 1/2/3-column breakpoints. A single live/countdown/finished
+// surface uses the full event stage so its regions can compact horizontally.
 const REPRESENTATIVE_VIEWPORTS = [
   {
     label: '1600px',
@@ -55,9 +55,32 @@ const THEMES = ['dark', 'light'];
 // Ten distinct, plausible score/price pairs backing the Correct Score fixture below, shared
 // between the fixture builder and the test assertions so they can never drift apart.
 const CORRECT_SCORE_OPTIONS = [
-  ['1 - 0', '10'], ['0 - 0', '11.08'], ['1 - 1', '7.3'], ['2 - 0', '19.23'],
-  ['2 - 1', '14.04'], ['0 - 1', '8.74'], ['1 - 2', '10.65'], ['2 - 2', '20.49'],
-  ['0 - 2', '16.27'], ['3 - 1', '23.33'],
+  ['0 - 0', '11.08'], ['0 - 1', '8.74'], ['0 - 2', '16.27'], ['1 - 0', '10'],
+  ['1 - 1', '7.3'], ['1 - 2', '10.65'], ['2 - 0', '19.23'], ['2 - 1', '14.04'],
+  ['2 - 2', '20.49'], ['3 - 1', '23.33'],
+];
+
+const buildPreMatchProducts = (eventId, home, away) => [
+  {
+    id: `${eventId}-1x2`,
+    type: '1X2',
+    name: '1X2',
+    odds: [
+      { id: `${eventId}-home`, name: home, value: 1.9 },
+      { id: `${eventId}-draw`, name: 'Draw', value: 3.1 },
+      { id: `${eventId}-away`, name: away, value: 2.2 },
+    ],
+  },
+  {
+    id: `${eventId}-correct-score`,
+    type: 'CS',
+    name: 'Correct Score',
+    odds: CORRECT_SCORE_OPTIONS.map(([name, value], index) => ({
+      id: `${eventId}-cs-${index}`,
+      name,
+      value: Number(value),
+    })),
+  },
 ];
 
 // Counts how many of the "Pre-match" section's sibling cards share the same top offset as the
@@ -101,11 +124,103 @@ const getLabelledButtonAlignment = (page, eventName) => page.evaluate((name) => 
     buttonBottoms: buttons.map((button) => button.getBoundingClientRect().bottom),
     buttonHeights: buttons.map((button) => button.getBoundingClientRect().height),
     buttonTops: buttons.map((button) => button.getBoundingClientRect().top),
+    buttonWidths: buttons.map((button) => button.getBoundingClientRect().width),
     valueBottoms: buttons.map((button) => (
       button.querySelector('.product-button__value')?.getBoundingClientRect().bottom
     )),
   };
 }, eventName);
+
+const getPreMatchRowBaselines = (page) => page.evaluate(() => {
+  const heading = Array.from(document.querySelectorAll('h2'))
+    .find((candidate) => candidate.textContent.trim() === 'Pre-match');
+  const cards = Array.from(
+    heading?.closest('section')?.querySelectorAll(':scope > .row > [class*="col-"] article') ?? [],
+  );
+  if (cards.length === 0) {
+    return null;
+  }
+  const firstTop = cards[0].getBoundingClientRect().top;
+  const firstRow = cards.filter(
+    (card) => Math.abs(card.getBoundingClientRect().top - firstTop) < 2,
+  );
+  const topFor = (card, selector) => card.querySelector(selector)?.getBoundingClientRect().top;
+
+  return {
+    correctScoreTitleTops: firstRow.map((card) => topFor(card, '.product-block--cs .product-block__title')),
+    oddsValueTops: firstRow.map((card) => topFor(card, '.product-block--1x2 .product-button__value')),
+    oneXTwoTitleTops: firstRow.map((card) => topFor(card, '.product-block--1x2 .product-block__title')),
+  };
+});
+
+const getCompactLiveGeometry = (page) => page.evaluate(() => {
+  const liveHeading = Array.from(document.querySelectorAll('h2'))
+    .find((candidate) => candidate.textContent.trim() === 'Live now');
+  const preMatchHeading = Array.from(document.querySelectorAll('h2'))
+    .find((candidate) => candidate.textContent.trim() === 'Pre-match');
+  const liveCard = liveHeading?.closest('section')?.querySelector('article');
+  const liveBody = liveCard?.querySelector('.event-card__live-body');
+  const preMatchCards = Array.from(
+    preMatchHeading?.closest('section')?.querySelectorAll(':scope > .row > [class*="col-"] article') ?? [],
+  );
+  if (!liveCard || !liveBody || preMatchCards.length === 0) {
+    return null;
+  }
+
+  const firstPreMatchTop = preMatchCards[0].getBoundingClientRect().top;
+  const firstPreMatchRow = preMatchCards.filter(
+    (card) => Math.abs(card.getBoundingClientRect().top - firstPreMatchTop) < 2,
+  );
+  const regions = Array.from(liveBody.children).map((region) => {
+    const bounds = region.getBoundingClientRect();
+    return {
+      bottom: bounds.bottom,
+      left: bounds.left,
+      right: bounds.right,
+      top: bounds.top,
+    };
+  });
+  const marketCards = Array.from(liveCard.querySelectorAll('.event-market-card'));
+  const marketBounds = marketCards.map((card) => card.getBoundingClientRect());
+  const firstMarketTop = marketBounds[0]?.top;
+  const firstMarketRow = marketBounds.filter((bounds) => Math.abs(bounds.top - firstMarketTop) < 2);
+  const statuses = Array.from(liveCard.querySelectorAll('.event-market-status')).map((status) => {
+    const style = getComputedStyle(status);
+    return {
+      overflowWrap: style.overflowWrap,
+      overflows: status.scrollWidth > status.clientWidth + 1,
+      wordBreak: style.wordBreak,
+    };
+  });
+
+  return {
+    hasParallelRegions: regions.some((region, index) => regions
+      .slice(index + 1)
+      .some((other) => (
+        Math.abs(region.left - other.left) > 2
+        && Math.max(region.top, other.top) < Math.min(region.bottom, other.bottom)
+      ))),
+    liveHeight: liveCard.getBoundingClientRect().height,
+    marketFirstRowCount: firstMarketRow.length,
+    marketFirstRowHeightSpread: firstMarketRow.length > 0
+      ? Math.max(...firstMarketRow.map((bounds) => bounds.height))
+        - Math.min(...firstMarketRow.map((bounds) => bounds.height))
+      : 0,
+    preMatchRowHeight: Math.max(
+      ...firstPreMatchRow.map((card) => card.getBoundingClientRect().height),
+    ),
+    regions,
+    visualRegionOrderMatchesDom: regions
+      .map((region, index) => ({ ...region, index }))
+      .sort((first, second) => (
+        Math.abs(first.top - second.top) >= 2
+          ? first.top - second.top
+          : first.left - second.left
+      ))
+      .every((region, visualIndex) => region.index === visualIndex),
+    statuses,
+  };
+});
 
 const getCorrectScoreGeometry = async (article) => {
   const buttons = article.locator('.product-cs-grid > *');
@@ -130,6 +245,36 @@ const getCorrectScoreGeometry = async (article) => {
     return { rowSizes: [...rows.values()], sizes };
   });
 };
+
+const getCountdownProductsGeometry = async (article) => (
+  article.locator('.event-card__countdown-products').evaluate((container) => {
+    const containerBounds = container.getBoundingClientRect();
+    const header = container.querySelector(':scope > .event-card__section-header');
+    const headerBounds = header?.getBoundingClientRect();
+    const badgesBounds = header?.querySelector('.event-card__badges')?.getBoundingClientRect();
+    const titleBounds = header?.querySelector('.event-card__section-title')?.getBoundingClientRect();
+    const productBounds = Array.from(container.querySelectorAll(':scope > .product-block'))
+      .map((product) => product.getBoundingClientRect());
+    const productLeft = Math.min(...productBounds.map((bounds) => bounds.left));
+    const productRight = Math.max(...productBounds.map((bounds) => bounds.right));
+
+    return {
+      headerSpansProductDeck: Boolean(
+        headerBounds
+        && Math.abs(headerBounds.left - containerBounds.left) < 1
+        && Math.abs(headerBounds.right - containerBounds.right) < 1
+        && headerBounds.left <= productLeft + 1
+        && headerBounds.right >= productRight - 1
+      ),
+      headerItemsShareRow: Boolean(
+        badgesBounds
+        && titleBounds
+        && badgesBounds.top < titleBounds.bottom
+        && titleBounds.top < badgesBounds.bottom
+      ),
+    };
+  })
+);
 
 const hasIntersectingElements = (page, selector) => page.evaluate((cardSelector) => {
   const boxes = Array.from(document.querySelectorAll(cardSelector)).map((element) => element.getBoundingClientRect());
@@ -158,16 +303,7 @@ const buildSiblingPreMatchEvent = (eventId, home, away, time) => ({
   status: 'NO_RESULT',
   home,
   away,
-  products: [{
-    id: `${eventId}-1x2`,
-    type: '1X2',
-    name: '1X2',
-    odds: [
-      { id: 'home', name: home, value: 1.9 },
-      { id: 'draw', name: 'Draw', value: 3.1 },
-      { id: 'away', name: away, value: 2.2 },
-    ],
-  }],
+  products: buildPreMatchProducts(eventId, home, away),
 });
 
 /** Fixture shared by the responsive event/market layout matrix: one countdown event carrying an
@@ -190,7 +326,11 @@ const buildResponsiveLayoutState = () => {
       status: 'NO_RESULT',
       home: 'South Henriton',
       away: 'Pfefferberg',
-      products: [],
+      products: buildPreMatchProducts(
+        'countdown-1',
+        'South Henriton',
+        'Pfefferberg',
+      ),
       live: {
         kickoffAt,
         bettingStatus: 'OPEN',
@@ -250,28 +390,7 @@ const buildCorrectScoreEvent = (eventId, home, away, time) => ({
   status: 'NO_RESULT',
   home,
   away,
-  products: [
-    {
-      id: `${eventId}-1x2`,
-      type: '1X2',
-      name: '1X2',
-      odds: [
-        { id: `${eventId}-home`, name: home, value: 1.9 },
-        { id: `${eventId}-draw`, name: 'Draw', value: 3.1 },
-        { id: `${eventId}-away`, name: away, value: 2.2 },
-      ],
-    },
-    {
-      id: `${eventId}-correct-score`,
-      type: 'CS',
-      name: 'Correct Score',
-      odds: CORRECT_SCORE_OPTIONS.map(([name, value], index) => ({
-        id: `${eventId}-cs-${index}`,
-        name,
-        value: Number(value),
-      })),
-    },
-  ],
+  products: buildPreMatchProducts(eventId, home, away),
 });
 
 /** Fixture for one sparse or three dense pre-match Correct Score boards. */
@@ -355,8 +474,8 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(liveArticle.getByText('Kickoff Team', { exact: true })).toHaveCount(0);
   await expect(liveArticle.getByText('Goal in First Minute', { exact: true })).toHaveCount(0);
   await expect(preMatchArticle.getByRole('button', { name: state.fixtures.preMatchSelectionLabel })).toBeVisible();
-  // Each section contains one card, so both use the bounded sparse-section width.
-  await expect(liveArticle.locator('..')).toHaveClass(/col-xl-8/);
+  // A single live card uses the full event stage; the sparse pre-match card remains bounded.
+  await expect(liveArticle.locator('..')).not.toHaveClass(/col-xl-8/);
   await expect(preMatchArticle.locator('..')).toHaveClass(/col-xl-8/);
   const liveBounds = await liveArticle.boundingBox();
   const preMatchBounds = await preMatchArticle.boundingBox();
@@ -369,9 +488,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   const hasIntersectingMarketCards = marketCardBoxes.some((box, index) => (
     marketCardBoxes.some((other, otherIndex) => otherIndex !== index && boxesIntersect(box, other))
   ));
-  // Both cards now share the same responsive column width, so their rendered widths should be
-  // close (no more full-width-vs-narrow-column mismatch).
-  expect(Math.abs(liveBounds.width - preMatchBounds.width)).toBeLessThan(4);
+  expect(liveBounds.width).toBeGreaterThan(preMatchBounds.width * 1.4);
   expect(hasIntersectingMarketCards).toBe(false);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
@@ -494,6 +611,25 @@ test('live betting main page flow is deterministic without a backend', async ({ 
 });
 
 for (const uiVariant of UI_VARIANTS) {
+  test(`administrators can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
+    const state = createLiveBettingMockState();
+    state.currentUser.role = 'ADMIN';
+    const liveFeed = await installFakeEventSource(page);
+    await installAppApiMocks(page, state);
+
+    await page.goto(`/?ui=${uiVariant}&theme=dark`, { waitUntil: 'domcontentloaded' });
+    await liveFeed.waitForSource();
+    await liveFeed.openAll();
+
+    const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
+    await expect(backofficeLink).toBeVisible();
+    await expect(backofficeLink).toContainText('Backoffice');
+    await backofficeLink.click();
+    await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
+  });
+}
+
+for (const uiVariant of UI_VARIANTS) {
   for (const theme of THEMES) {
     for (const viewport of REPRESENTATIVE_VIEWPORTS) {
       test(`event/market layout stays responsive (${viewport.expectedColumns}-column), aligned, and unclipped (ui=${uiVariant}, theme=${theme}, ${viewport.label})`, async ({ page }) => {
@@ -511,7 +647,7 @@ for (const uiVariant of UI_VARIANTS) {
 
         await expect(page.getByRole('timer')).toBeVisible();
         await expect(countdownArticle.locator('..')).toHaveClass(/col-12/);
-        await expect(countdownArticle.locator('..')).toHaveClass(/col-xl-8/);
+        await expect(countdownArticle.locator('..')).not.toHaveClass(/col-xl-8/);
         await expect(countdownArticle.locator('..')).not.toHaveClass(/col-xl-4/);
         // The SETTLED market is terminal and excluded entirely; only the two still-active markets remain.
         await expect(marketCards).toHaveCount(2);
@@ -526,13 +662,8 @@ for (const uiVariant of UI_VARIANTS) {
 
         const liveSectionMetrics = await getSectionCardMetrics(page, 'Live now');
         expect(liveSectionMetrics).not.toBeNull();
-        if (viewport.width >= 1200) {
-          expect(liveSectionMetrics.widthRatio).toBeGreaterThan(0.62);
-          expect(liveSectionMetrics.widthRatio).toBeLessThan(0.7);
-          expect(Math.abs(liveSectionMetrics.leftGap - liveSectionMetrics.rightGap)).toBeLessThan(2);
-        } else {
-          expect(liveSectionMetrics.widthRatio).toBeGreaterThan(0.92);
-        }
+        expect(liveSectionMetrics.widthRatio).toBeGreaterThan(0.95);
+        expect(Math.abs(liveSectionMetrics.leftGap - liveSectionMetrics.rightGap)).toBeLessThan(2);
 
         const labelledButtonAlignment = await getLabelledButtonAlignment(
           page,
@@ -547,12 +678,66 @@ for (const uiVariant of UI_VARIANTS) {
         expect(Math.max(...labelledButtonAlignment.valueBottoms) - Math.min(...labelledButtonAlignment.valueBottoms))
           .toBeLessThan(1);
 
+        const semanticLabels = await countdownArticle
+          .locator('.product-block--1x2 .product-button__label')
+          .allTextContents();
+        expect(semanticLabels).toEqual(['1', 'X', '2']);
+        await expect(countdownArticle.getByRole('button', {
+          name: 'Select 1X2 1: South Henriton in South Henriton - Pfefferberg at 1.9',
+        })).toBeVisible();
+
+        const countdownCorrectScoreGeometry = await getCorrectScoreGeometry(countdownArticle);
+        expect(countdownCorrectScoreGeometry.rowSizes).toEqual(
+          viewport.width >= 768 ? [5, 5] : [2, 2, 2, 2, 2],
+        );
+        expect(countdownCorrectScoreGeometry.sizes.every(
+          ({ height, width }) => height >= 44 && width >= 44,
+        )).toBe(true);
+        expect(countdownCorrectScoreGeometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
+
+        const countdownProductsGeometry = await getCountdownProductsGeometry(countdownArticle);
+        expect(countdownProductsGeometry.headerSpansProductDeck).toBe(true);
+        expect(countdownProductsGeometry.headerItemsShareRow).toBe(true);
+
+        const baselines = await getPreMatchRowBaselines(page);
+        expect(baselines).not.toBeNull();
+        for (const values of Object.values(baselines)) {
+          expect(values.every(Number.isFinite)).toBe(true);
+          expect(Math.max(...values) - Math.min(...values)).toBeLessThan(2);
+        }
+
+        const compactGeometry = await getCompactLiveGeometry(page);
+        expect(compactGeometry).not.toBeNull();
+        if (viewport.width >= 768) {
+          expect(compactGeometry.liveHeight)
+            .toBeLessThanOrEqual(compactGeometry.preMatchRowHeight + 8);
+          expect(compactGeometry.regions.length).toBe(3);
+          expect(compactGeometry.hasParallelRegions).toBe(true);
+          expect(compactGeometry.visualRegionOrderMatchesDom).toBe(true);
+        }
+        if (viewport.width >= 1200) {
+          expect(compactGeometry.marketFirstRowCount).toBe(2);
+          expect(compactGeometry.marketFirstRowHeightSpread).toBeLessThan(2);
+        }
+        expect(compactGeometry.statuses.every(({ overflows }) => !overflows)).toBe(true);
+        expect(compactGeometry.statuses.every(
+          ({ overflowWrap, wordBreak }) => overflowWrap === 'normal' && wordBreak === 'normal',
+        )).toBe(true);
+
         expect(await hasIntersectingElements(page, '.event-card')).toBe(false);
         expect(await hasIntersectingElements(page, '.event-market-card')).toBe(false);
         expect(await hasDocumentHorizontalOverflow(page)).toBe(false);
         expect(await hasInternalOverflow(page, '.event-card')).toBe(false);
         expect(await hasInternalOverflow(page, '.event-market-grid')).toBe(false);
         expect(await hasInternalOverflow(page, '.product-block--1x2')).toBe(false);
+        expect(await hasInternalOverflow(
+          page,
+          '.event-card--countdown .product-cs-grid',
+        )).toBe(false);
+        expect(await hasIntersectingElements(
+          page,
+          '.event-card--countdown .product-cs-grid > *',
+        )).toBe(false);
 
         // Native button semantics remain intact after the layout-only correction.
         await kickoffTeamButton.focus();
@@ -562,6 +747,55 @@ for (const uiVariant of UI_VARIANTS) {
     }
   }
 }
+
+test('countdown product controls stay balanced through live-card layout transitions', async ({ page }) => {
+  const state = buildResponsiveLayoutState();
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+
+  await page.setViewportSize({ width: 720, height: 1000 });
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+
+  const countdownArticle = page.getByRole('article', { name: 'South Henriton - Pfefferberg' });
+  for (const width of [720, 736, 968, 984, 1000]) {
+    await page.setViewportSize({ width, height: 1000 });
+
+    const correctScoreGeometry = await getCorrectScoreGeometry(countdownArticle);
+    expect(new Set(correctScoreGeometry.rowSizes).size, `${width}px balanced rows`).toBe(1);
+    expect([2, 5], `${width}px supported row width`).toContain(
+      correctScoreGeometry.rowSizes[0],
+    );
+    expect(correctScoreGeometry.sizes.every(
+      ({ height, width: controlWidth }) => height >= 44 && controlWidth >= 44,
+    ), `${width}px touch targets`).toBe(true);
+    expect(
+      correctScoreGeometry.sizes.every(({ valueFits }) => valueFits),
+      `${width}px price bounds`,
+    ).toBe(true);
+
+    const productGeometry = await getCountdownProductsGeometry(countdownArticle);
+    expect(productGeometry.headerSpansProductDeck, `${width}px shared heading`).toBe(true);
+    expect(productGeometry.headerItemsShareRow, `${width}px compact heading row`).toBe(true);
+    expect(await hasInternalOverflow(
+      page,
+      '.event-card--countdown .product-cs-grid',
+    ), `${width}px internal overflow`).toBe(false);
+    expect(await hasIntersectingElements(
+      page,
+      '.event-card--countdown .product-cs-grid > *',
+    ), `${width}px control collisions`).toBe(false);
+
+    if (width >= 768) {
+      const compactGeometry = await getCompactLiveGeometry(page);
+      expect(
+        compactGeometry.liveHeight,
+        `${width}px comparative height`,
+      ).toBeLessThanOrEqual(compactGeometry.preMatchRowHeight + 8);
+    }
+  }
+});
 
 test('two-card live and pre-match sections fill balanced rows and stack on mobile', async ({ page }) => {
   const state = buildResponsiveLayoutState();
@@ -594,6 +828,7 @@ test('two-card live and pre-match sections fill balanced rows and stack on mobil
         const bounds = card.getBoundingClientRect();
         return {
           className: card.className,
+          height: bounds.height,
           top: bounds.top,
           widthRatio: bounds.width / row.getBoundingClientRect().width,
         };
@@ -603,6 +838,7 @@ test('two-card live and pre-match sections fill balanced rows and stack on mobil
     expect(cardMetrics.every(({ className }) => className.includes('col-md-6'))).toBe(true);
     expect(cardMetrics.every(({ widthRatio }) => widthRatio > 0.48 && widthRatio < 0.52)).toBe(true);
     expect(Math.abs(cardMetrics[0].top - cardMetrics[1].top)).toBeLessThan(2);
+    expect(Math.abs(cardMetrics[0].height - cardMetrics[1].height)).toBeLessThan(2);
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -623,6 +859,65 @@ test('two-card live and pre-match sections fill balanced rows and stack on mobil
     expect(cardMetrics).toHaveLength(2);
     expect(cardMetrics.every(({ widthRatio }) => widthRatio > 0.92)).toBe(true);
     expect(Math.abs(cardMetrics[0].top - cardMetrics[1].top)).toBeGreaterThan(2);
+  }
+});
+
+test('malformed legacy 1X2 data keeps a balanced, identity-safe fallback board', async ({ page }) => {
+  const state = buildResponsiveLayoutState();
+  const event = state.events[1];
+  const product = event.products.find(({ type }) => type === '1X2');
+  product.odds[1].id = product.odds[0].id;
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+
+  const article = page.getByRole('article', { name: event.name });
+  await expect(article.getByRole('button', {
+    name: `Select 1X2 ${event.home} at 1.9`,
+  })).toBeVisible();
+  await expect(article.getByRole('button', {
+    name: 'Select 1X2 Draw at 3.1',
+  })).toBeVisible();
+  await expect(article.getByRole('button', {
+    name: `Select 1X2 ${event.away} at 2.2`,
+  })).toBeVisible();
+  await expect(article.locator('.product-1x2-grid > div')).toHaveCount(3);
+
+  const alignment = await getLabelledButtonAlignment(page, event.name);
+  expect(Math.max(...alignment.buttonWidths) - Math.min(...alignment.buttonWidths))
+    .toBeLessThan(2);
+  expect(Math.max(...alignment.valueBottoms) - Math.min(...alignment.valueBottoms))
+    .toBeLessThan(2);
+  expect(alignment.buttonHeights.every((height) => height >= 44)).toBe(true);
+});
+
+test('collapsed countdown stays within two-card pre-match row budgets', async ({ page }) => {
+  const state = buildResponsiveLayoutState();
+  const countdown = state.events[0];
+  const preMatchEvents = state.events.slice(1);
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+
+  state.events = [countdown, ...preMatchEvents.slice(0, 2)];
+  for (const viewport of [
+    { width: 1600, height: 1000 },
+    { width: 768, height: 1000 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+    await liveFeed.waitForSource();
+    await liveFeed.openAll();
+
+    const geometry = await getCompactLiveGeometry(page);
+    expect(geometry).not.toBeNull();
+    expect(
+      geometry.liveHeight,
+      `two-card pre-match row at ${viewport.width}px`,
+    ).toBeLessThanOrEqual(geometry.preMatchRowHeight + 8);
   }
 });
 
@@ -648,6 +943,11 @@ for (const uiVariant of UI_VARIANTS) {
           await expect(button).toContainText(score);
           await expect(button).toContainText(price);
         }
+        expect(await article.locator('.product-cs-grid .product-button__label').allTextContents())
+          .toEqual(CORRECT_SCORE_OPTIONS.map(([score]) => score));
+        expect(await article.locator('.product-block__title').evaluateAll((titles) => (
+          titles.map((title) => getComputedStyle(title).textAlign)
+        ))).toEqual(['center', 'center']);
 
         const correctScoreGeometry = await getCorrectScoreGeometry(article);
         expect(correctScoreGeometry.rowSizes).toEqual(viewport.expectedCorrectScoreRows);
@@ -762,7 +1062,24 @@ test('a recently finished event groups under "Recently finished" (not "Live now"
       homeScore: 2,
       awayScore: 1,
       bettingStatus: 'SUSPENDED',
-      incidentHistory: [],
+      incidentHistoryComplete: true,
+      incidentHistory: [
+        { id: 'kickoff', type: 'KICK_OFF', minute: 0 },
+        { id: 'first-minute', type: 'FIRST_MINUTE_ELAPSED', minute: 1 },
+        { id: 'early-goal', type: 'GOAL', side: 'HOME', minute: 17 },
+        { id: 'half-time', type: 'HALF_TIME', minute: 45 },
+        { id: 'penalty-scored', type: 'PENALTY_SCORED', side: 'AWAY', minute: 63 },
+        {
+          id: 'penalty-goal',
+          relatedIncidentId: 'penalty-scored',
+          type: 'GOAL',
+          side: 'AWAY',
+          minute: 63,
+        },
+        { id: 'winner', type: 'GOAL', side: 'HOME', minute: 84 },
+        { id: 'added-time', type: 'ADDED_TIME_ANNOUNCED', minute: 90, addedTime: 4 },
+        { id: 'full-time', type: 'FULL_TIME', minute: 90, addedTime: 4 },
+      ],
       currentMarkets: [],
     },
   }];
@@ -778,9 +1095,27 @@ test('a recently finished event groups under "Recently finished" (not "Live now"
     await expect(page.getByRole('heading', { name: 'Recently finished' })).toBeVisible();
     const finishedArticle = page.getByRole('article', { name: 'Riverton - Fairhaven' });
     await expect(finishedArticle).toBeVisible();
-    await expect(finishedArticle.getByText('FULL-TIME')).toBeVisible();
+    await expect(finishedArticle.getByText('FULL-TIME', { exact: true })).toBeVisible();
     await expect(finishedArticle.locator('time')).toHaveAttribute('datetime', kickoffAt);
-    await expect(finishedArticle.locator('..')).toHaveClass(/col-xl-8/);
+    await expect(finishedArticle.locator('..')).not.toHaveClass(/col-xl-8/);
+    const keyMoments = finishedArticle.locator('.event-card__finished-timeline > .event-incidents');
+    await expect(keyMoments.getByText("17' Riverton goal")).toBeVisible();
+    await expect(keyMoments.getByText("63' Fairhaven penalty scored")).toBeVisible();
+    await expect(keyMoments.getByText("84' Riverton goal")).toBeVisible();
+    await expect(finishedArticle.getByText('Full timeline (7)')).toBeVisible();
+    const details = finishedArticle.locator('details');
+    await expect(details).not.toHaveAttribute('open', '');
+    await details.locator('summary').click();
+    await expect(details).toHaveAttribute('open', '');
+    expect(await details.locator('li').allTextContents()).toEqual([
+      'Kick-off',
+      "17' Riverton goal",
+      'Half-time',
+      "63' Fairhaven penalty scored",
+      "84' Riverton goal",
+      'Added time +4',
+      'Full-time',
+    ]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
 });

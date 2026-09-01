@@ -352,6 +352,70 @@ grep -Fq '`betstan-ux-ui-expert: UX_REVIEW_PASSED` result' "$ux_final_agent" ||
   fail "final validator does not require exact-head UX evidence"
 grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the product-wide UI/UX consistency contract"
+for ux_reinforced_check in \
+    'Cross-card baseline drift' \
+    'Selection tokens versus event identity' \
+    'Centered sibling market headings' \
+    'Stable, non-volatile board order with exact ID preservation' \
+    'Coupled-market plausibility' \
+    'Visible role-gated navigation in every UI variant' \
+    'Single-live-card width and relative-height budget' \
+    'Phantom auto-fill tracks' \
+    'Equal-height market groups' \
+    'Readable status words' \
+    'Nested-board content fit in every card context' \
+    'Section heading spans its product group'; do
+  grep -Fq "$ux_reinforced_check" "$ux_agent" ||
+    fail "UX/UI expert omits reinforced consistency check: $ux_reinforced_check"
+done
+grep -Fq 'For live-history and presentation-order changes, prove producer-attested' \
+    "$ux_test_agent" ||
+  fail "test engineer omits live-history/presentation-order coverage requirements"
+grep -Fq 'For semantic-control and layout changes, prove accessible names remain' \
+    "$ux_test_agent" ||
+  fail "test engineer omits semantic-control/computed-geometry coverage requirements"
+for critic_reinforced_check in \
+    'False `Full timeline` completeness claims' \
+    'Exact linked-incident deduplication' \
+    'Equal-sequence monotonic history merges' \
+    'Terminal result/`FULL_TIME` interleavings' \
+    'Fail-dark terminal placeholders' \
+    'Unresolved-auth retained `OFFLINE` data' \
+    'Presentation ordering that changes selection identity' \
+    'Hidden or icon-only role-gated navigation' \
+    'Cross-card computed-geometry regressions'; do
+  grep -Fq "$critic_reinforced_check" "$ux_critic_agent" ||
+    fail "validation critic omits reinforced finding: $critic_reinforced_check"
+done
+grep -Fq 'When output changes public presentation ordering or exposes a' \
+    "$ux_backend_agent" ||
+  fail "backend developer omits public-ordering/completeness handoff evidence"
+grep -Fq 'Keep terminal Event placeholders fail-dark' "$ux_backend_agent" ||
+  fail "backend developer omits unresolved terminal placeholder safety"
+grep -Fq 'Every terminal visibility writer and recovery path' "$ux_backend_agent" ||
+  fail "backend developer omits atomic terminal recovery safety"
+grep -Fq 'including one with pending `ONLINE` intent, remains `OFFLINE`' \
+    <<<"$test_agent_flat" ||
+  fail "test engineer omits fail-dark terminal placeholder coverage"
+grep -Fq 'exact-ID-preservation evidence' \
+    "$ux_frontend_agent" ||
+  fail "frontend developer omits semantic-control-label/exact-ID handoff evidence"
+grep -Fq '### Live timeline completeness and market alignment' "$ROOT_DIR/LEARNINGS.md" ||
+  fail "durable learning omits the live timeline completeness and market alignment contract"
+grep -Fq 'Superseded narrow-live-card rule' "$ROOT_DIR/LEARNINGS.md" ||
+  fail "durable learning does not supersede the earlier narrow-live-card rule"
+grep -Fq 'cross-card baseline drift: a sibling' "$ux_wiki" ||
+  fail "UI/UX consistency wiki omits the cross-card baseline drift example"
+grep -Fq 'phantom sparse-grid tracks' "$ux_wiki" ||
+  fail "UI/UX consistency wiki omits the phantom sparse-grid tracks example"
+ux_live_prod_wiki="$ROOT_DIR/docs/wiki/Live-Betting-Production.md"
+[[ -f "$ux_live_prod_wiki" ]] || fail "live-betting production wiki is missing"
+grep -Fq '## Timeline completeness and terminal safeguards' "$ux_live_prod_wiki" ||
+  fail "live-betting production wiki omits the timeline completeness safeguards section"
+grep -Fq 'is an optional, additive' "$ux_live_prod_wiki" ||
+  fail "live-betting production wiki omits the producer attestation contract"
+grep -Fq 'placeholder remains fail-dark' "$ux_live_prod_wiki" ||
+  fail "live-betting production wiki omits unresolved terminal placeholder safety"
 grep -Fq 'GITHUB_RUN_ATTEMPT' "$ROOT_DIR/infra/azure/agents/README.md" ||
   fail "Azure guidance omits first-attempt fixture isolation"
 grep -Fq 'recent successful runs of the same' \

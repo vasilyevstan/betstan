@@ -9,7 +9,16 @@ import {
   LiveMarketType,
   TeamSide,
 } from "@betstan/common";
+import {
+  LiveIncidentType as CompatibleLiveIncidentType,
+  TeamSide as CompatibleTeamSide,
+} from "../compat/LiveContract";
+import { ProductType } from "../data/product/ProductType";
 import { Event } from "../model/Event";
+import {
+  buildHasOfflineIntentExpression,
+  buildHasUnresolvedVisibilityAuthorityExpression,
+} from "../model/visibilityAuthorityExpressions";
 import { getPublicEventConfig } from "./config";
 
 export interface PublicEventProductOdd {
@@ -60,6 +69,7 @@ export interface PublicLiveSnapshot {
   awayScore: number;
   bettingStatus: BettingStatus;
   incidentHistory: PublicLiveIncident[];
+  incidentHistoryComplete?: boolean;
   currentMarkets: PublicLiveMarket[];
 }
 
@@ -81,10 +91,19 @@ type UnknownRecord = Record<string, unknown>;
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
 type LiveEventUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
+  incidentsComplete?: boolean;
 };
 
 const FALLBACK_EVENT_STATUS = EventStatus.NO_RESULT;
 const FALLBACK_EVENT_VISIBILITY = EventVisibility.ONLINE;
+const FULL_TIME_INCIDENT_HISTORY_FLOOR = 128;
+const NUMERIC_SCORELINE_PATTERN = /^(\d+)\s*-\s*(\d+)$/;
+const VALID_INCIDENT_TYPES = new Set<string>(
+  Object.values(CompatibleLiveIncidentType)
+);
+const VALID_INCIDENT_SIDES = new Set<string>(
+  Object.values(CompatibleTeamSide)
+);
 
 const asString = (value: unknown): string | undefined => {
   if (typeof value === "string") {
@@ -134,19 +153,67 @@ const deepFreeze = <T>(value: T): T => {
   return value;
 };
 
-const cloneProductOdds = (odds: PublicEventProductOdd[]): PublicEventProductOdd[] =>
-  odds.map((odd) => ({
-    id: odd.id,
-    name: odd.name,
-    value: odd.value,
-  }));
+const parseNumericScoreline = (
+  name: string
+): { homeGoals: number; awayGoals: number } | undefined => {
+  const match = name.match(NUMERIC_SCORELINE_PATTERN);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    homeGoals: Number(match[1]),
+    awayGoals: Number(match[2]),
+  };
+};
+
+const sortPublicProductOdds = (
+  productType: string,
+  odds: PublicEventProductOdd[]
+): PublicEventProductOdd[] => {
+  if (productType !== ProductType.CORRECT_SCORE) {
+    return odds;
+  }
+
+  const parsedScorelines = odds.map((odd) => parseNumericScoreline(odd.name));
+  if (parsedScorelines.some((parsed) => parsed === undefined)) {
+    return odds;
+  }
+
+  return odds
+    .map((odd, index) => ({
+      odd,
+      scoreline: parsedScorelines[index]!,
+    }))
+    .sort((left, right) => {
+      const homeComparison =
+        left.scoreline.homeGoals - right.scoreline.homeGoals;
+      return homeComparison !== 0
+        ? homeComparison
+        : left.scoreline.awayGoals - right.scoreline.awayGoals;
+    })
+    .map(({ odd }) => odd);
+};
+
+const cloneProductOdds = (
+  productType: string,
+  odds: PublicEventProductOdd[]
+): PublicEventProductOdd[] =>
+  sortPublicProductOdds(
+    productType,
+    odds.map((odd) => ({
+      id: odd.id,
+      name: odd.name,
+      value: odd.value,
+    }))
+  );
 
 const cloneProducts = (products: PublicEventProduct[]): PublicEventProduct[] =>
   products.map((product) => ({
     id: product.id,
     type: product.type,
     name: product.name,
-    odds: cloneProductOdds(product.odds),
+    odds: cloneProductOdds(product.type, product.odds),
   }));
 
 const cloneIncidentHistory = (
@@ -197,25 +264,29 @@ const normalizeProducts = (products: unknown): PublicEventProduct[] => {
     .map((product) => {
       const productRecord =
         product && typeof product === "object" ? (product as UnknownRecord) : {};
+      const type = asString(productRecord.type) ?? "";
 
       return {
         id: asString(productRecord.id) ?? "",
-        type: asString(productRecord.type) ?? "",
+        type,
         name: asString(productRecord.name) ?? "",
-        odds: Array.isArray(productRecord.odds)
-          ? productRecord.odds.map((odd) => {
-              const oddRecord =
-                odd && typeof odd === "object" ? (odd as UnknownRecord) : {};
-              return {
-                id: asString(oddRecord.id) ?? "",
-                name: asString(oddRecord.name) ?? "",
-                value:
-                  typeof oddRecord.value === "number"
-                    ? oddRecord.value
-                    : Number(oddRecord.value),
-              };
-            })
-          : [],
+        odds: sortPublicProductOdds(
+          type,
+          Array.isArray(productRecord.odds)
+            ? productRecord.odds.map((odd) => {
+                const oddRecord =
+                  odd && typeof odd === "object" ? (odd as UnknownRecord) : {};
+                return {
+                  id: asString(oddRecord.id) ?? "",
+                  name: asString(oddRecord.name) ?? "",
+                  value:
+                    typeof oddRecord.value === "number"
+                      ? oddRecord.value
+                      : Number(oddRecord.value),
+                };
+              })
+            : []
+        ),
       };
     })
     .filter((product) => product.id && product.name);
@@ -245,6 +316,61 @@ const normalizeLiveIncident = (
         ? incidentRecord.addedTime
         : undefined,
   };
+};
+
+interface NormalizedIncidentResult {
+  incident?: PublicLiveIncident;
+  valid: boolean;
+}
+
+interface IncidentProjection {
+  incidentHistory: PublicLiveIncident[];
+  incidentHistoryComplete?: boolean;
+}
+
+const isOptionalStringLike = (value: unknown): boolean =>
+  value === undefined || value === null || asString(value) !== undefined;
+
+const isOptionalNumber = (value: unknown): boolean =>
+  value === undefined || value === null || typeof value === "number";
+
+const isOptionalDateLike = (value: unknown): boolean =>
+  value === undefined
+  || value === null
+  || typeof value === "string"
+  || value instanceof Date;
+
+const isOptionalIncidentSide = (value: unknown): boolean =>
+  value === undefined
+  || value === null
+  || (
+    typeof value === "string"
+    && VALID_INCIDENT_SIDES.has(value)
+  );
+
+const normalizeLiveIncidentResult = (
+  incident: unknown
+): NormalizedIncidentResult => {
+  if (!incident || typeof incident !== "object") {
+    return { valid: false };
+  }
+
+  const incidentRecord = incident as UnknownRecord;
+  const normalizedIncident = normalizeLiveIncident(incident);
+  const valid =
+    normalizedIncident !== undefined
+    && typeof incidentRecord.type === "string"
+    && VALID_INCIDENT_TYPES.has(incidentRecord.type)
+    && isOptionalIncidentSide(incidentRecord.side)
+    && isOptionalDateLike(incidentRecord.occurredAt)
+    && isOptionalNumber(incidentRecord.minute)
+    && isOptionalNumber(incidentRecord.addedTime)
+    && isOptionalStringLike(incidentRecord.id)
+    && isOptionalStringLike(incidentRecord.relatedIncidentId);
+
+  return normalizedIncident
+    ? { incident: normalizedIncident, valid }
+    : { valid: false };
 };
 
 const normalizeLiveSelection = (
@@ -321,7 +447,16 @@ const normalizeStoredLiveSnapshot = (
     return undefined;
   }
 
-  return {
+  const incidentProjection = projectIncidentHistory({
+    phase: liveRecord.phase as EventPhase | undefined,
+    maxIncidents,
+    incidents: Array.isArray(liveRecord.incidentHistory)
+      ? liveRecord.incidentHistory
+      : undefined,
+    incidentsComplete: liveRecord.incidentHistoryComplete === true,
+  });
+
+  const snapshot: PublicLiveSnapshot = {
     sequence: liveRecord.sequence,
     minute: typeof liveRecord.minute === "number" ? liveRecord.minute : 0,
     addedTime:
@@ -332,14 +467,7 @@ const normalizeStoredLiveSnapshot = (
     awayScore:
       typeof liveRecord.awayScore === "number" ? liveRecord.awayScore : 0,
     bettingStatus: liveRecord.bettingStatus as BettingStatus,
-    incidentHistory: Array.isArray(liveRecord.incidentHistory)
-      ? liveRecord.incidentHistory
-          .map(normalizeLiveIncident)
-          .filter(
-            (incident): incident is PublicLiveIncident => incident !== undefined
-          )
-          .slice(-maxIncidents)
-      : [],
+    incidentHistory: incidentProjection.incidentHistory,
     currentMarkets: Array.isArray(liveRecord.currentMarkets)
       ? liveRecord.currentMarkets
           .map(normalizeLiveMarket)
@@ -347,6 +475,12 @@ const normalizeStoredLiveSnapshot = (
           .slice(0, maxMarkets)
       : [],
   };
+
+  if (incidentProjection.incidentHistoryComplete) {
+    snapshot.incidentHistoryComplete = true;
+  }
+
+  return snapshot;
 };
 
 const buildEventName = (data: LiveEventUpdateData): string | undefined => {
@@ -368,7 +502,7 @@ const buildIncomingIncident = (
     return undefined;
   }
 
-  return normalizeLiveIncident(incident);
+  return normalizeLiveIncidentResult(incident).incident;
 };
 
 const buildIncidentIdentity = (incident: PublicLiveIncident): string =>
@@ -383,8 +517,7 @@ const buildIncidentIdentity = (incident: PublicLiveIncident): string =>
   ].join("|");
 
 const dedupeIncidentHistory = (
-  incidents: PublicLiveIncident[],
-  maxIncidents: number
+  incidents: PublicLiveIncident[]
 ): PublicLiveIncident[] => {
   const seen = new Set<string>();
   const deduped: PublicLiveIncident[] = [];
@@ -399,29 +532,76 @@ const dedupeIncidentHistory = (
     deduped.push(incident);
   }
 
-  return deduped.slice(-maxIncidents);
+  return deduped;
 };
 
-const buildIncomingIncidentHistory = (
-  data: LiveEventUpdateData,
+const buildIncidentHistoryLimit = (
+  phase: EventPhase | undefined,
   maxIncidents: number,
-  seedHistory: PublicLiveIncident[] = []
-): PublicLiveIncident[] => {
-  if (Array.isArray(data.incidents)) {
-    return dedupeIncidentHistory(
-      data.incidents
-        .map(normalizeLiveIncident)
-        .filter(
-          (incident): incident is PublicLiveIncident => incident !== undefined
-        ),
-      maxIncidents
+  hasCumulativeHistory: boolean
+): number =>
+  hasCumulativeHistory && phase === EventPhase.FULL_TIME
+    ? Math.max(maxIncidents, FULL_TIME_INCIDENT_HISTORY_FLOOR)
+    : maxIncidents;
+
+const projectIncidentHistory = ({
+  phase,
+  maxIncidents,
+  incidents,
+  incident,
+  seedHistory = [],
+  incidentsComplete,
+}: {
+  phase: EventPhase | undefined;
+  maxIncidents: number;
+  incidents?: unknown;
+  incident?: ILiveEventUpdateEvent["data"]["incident"];
+  seedHistory?: PublicLiveIncident[];
+  incidentsComplete?: boolean;
+}): IncidentProjection => {
+  const hasCumulativeHistory = Array.isArray(incidents);
+  const limit = buildIncidentHistoryLimit(
+    phase,
+    maxIncidents,
+    hasCumulativeHistory
+  );
+
+  if (hasCumulativeHistory) {
+    let allIncidentsValid = true;
+    const normalizedIncidents = incidents.reduce<PublicLiveIncident[]>(
+      (collection, rawIncident) => {
+        const normalizedIncident = normalizeLiveIncidentResult(rawIncident);
+        allIncidentsValid = allIncidentsValid && normalizedIncident.valid;
+        if (normalizedIncident.incident) {
+          collection.push(normalizedIncident.incident);
+        }
+
+        return collection;
+      },
+      []
     );
+    const dedupedIncidents = dedupeIncidentHistory(normalizedIncidents);
+    const incidentHistory = dedupedIncidents.slice(-limit);
+
+    return {
+      incidentHistory,
+      ...(phase === EventPhase.FULL_TIME
+        && incidentsComplete === true
+        && allIncidentsValid
+        && dedupedIncidents.length <= limit
+        ? { incidentHistoryComplete: true }
+        : {}),
+    };
   }
 
-  const incident = buildIncomingIncident(data.incident);
-  return incident
-    ? dedupeIncidentHistory([...seedHistory, incident], maxIncidents)
-    : dedupeIncidentHistory(seedHistory, maxIncidents);
+  const currentIncident = buildIncomingIncident(incident);
+  const dedupedHistory = dedupeIncidentHistory(
+    currentIncident ? [...seedHistory, currentIncident] : seedHistory
+  );
+
+  return {
+    incidentHistory: dedupedHistory.slice(-limit),
+  };
 };
 
 const buildIncomingMarkets = (
@@ -433,13 +613,64 @@ const buildIncomingMarkets = (
     .filter((market): market is PublicLiveMarket => market !== undefined)
     .slice(0, maxMarkets);
 
-const buildLiveUpdateFilter = (eventId: string, sequence: number) => ({
+const buildLiveUpdateFilter = (eventId: string, sequence: number): UnknownRecord => ({
   eventId,
   $or: [
     { "live.sequence": { $exists: false } },
     { "live.sequence": { $lt: sequence } },
   ],
 });
+
+const buildTerminalRaceRecoveryPipeline = (): UnknownRecord[] => [
+  {
+    $set: {
+      visibility: {
+        $let: {
+          vars: {
+            isFullTime: { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+            isRetired: {
+              $ne: [{ $ifNull: ["$liveRetiredAt", null] }, null],
+            },
+            hasOfflineIntent: buildHasOfflineIntentExpression(),
+            hasUnresolvedVisibilityAuthority:
+              buildHasUnresolvedVisibilityAuthorityExpression(),
+          },
+          in: {
+            $cond: [
+              { $eq: ["$$isFullTime", false] },
+              "$visibility",
+              {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$$isRetired", false] },
+                      { $eq: ["$$hasOfflineIntent", false] },
+                      {
+                        $eq: [
+                          "$$hasUnresolvedVisibilityAuthority",
+                          false,
+                        ],
+                      },
+                    ],
+                  },
+                  EventVisibility.ONLINE,
+                  EventVisibility.OFFLINE,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      liveRaceResultedAt: {
+        $cond: [
+          { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+          null,
+          "$liveRaceResultedAt",
+        ],
+      },
+    },
+  },
+];
 
 const buildLiveUpdateOperations = (
   event: ILiveEventUpdateEvent
@@ -451,10 +682,13 @@ const buildLiveUpdateOperations = (
   const kickoffDate = new Date(kickoffAt);
   const eventName = buildEventName(data);
   const normalizedMarkets = buildIncomingMarkets(data.markets, maxMarkets);
-  const normalizedIncidentHistory = buildIncomingIncidentHistory(
-    data,
-    maxIncidents
-  );
+  const incidentProjection = projectIncidentHistory({
+    phase: data.phase,
+    maxIncidents,
+    incidents: data.incidents,
+    incident: data.incident,
+    incidentsComplete: data.incidentsComplete,
+  });
   const normalizedIncident =
     Array.isArray(data.incidents) ? undefined : buildIncomingIncident(data.incident);
 
@@ -490,9 +724,14 @@ const buildLiveUpdateOperations = (
   if (data.addedTime === undefined) {
     unsetOperations["live.addedTime"] = 1;
   }
+  unsetOperations["live.incidentHistoryComplete"] = 1;
 
   if (Array.isArray(data.incidents)) {
-    setOperations["live.incidentHistory"] = normalizedIncidentHistory;
+    setOperations["live.incidentHistory"] = incidentProjection.incidentHistory;
+    if (incidentProjection.incidentHistoryComplete) {
+      setOperations["live.incidentHistoryComplete"] = true;
+      delete unsetOperations["live.incidentHistoryComplete"];
+    }
   }
 
   const setOnInsertOperations: UnknownRecord = {
@@ -623,11 +862,14 @@ export const createPublicEventSnapshotFromLiveUpdate = (
     seedSnapshot?.time ??
     new Date().toISOString();
   const eventName = buildEventName(data) ?? seedSnapshot?.name ?? data.eventId;
-  const incidentHistory = buildIncomingIncidentHistory(
-    data,
+  const incidentProjection = projectIncidentHistory({
+    phase: data.phase,
     maxIncidents,
-    [...(seedSnapshot?.live?.incidentHistory ?? [])]
-  );
+    incidents: data.incidents,
+    incident: data.incident,
+    seedHistory: cloneIncidentHistory(seedSnapshot?.live?.incidentHistory ?? []),
+    incidentsComplete: data.incidentsComplete,
+  });
 
   const liveSnapshot: PublicLiveSnapshot = {
     sequence: data.sequence,
@@ -636,12 +878,15 @@ export const createPublicEventSnapshotFromLiveUpdate = (
     homeScore: data.homeScore,
     awayScore: data.awayScore,
     bettingStatus: data.bettingStatus,
-    incidentHistory: incidentHistory.slice(-maxIncidents),
+    incidentHistory: incidentProjection.incidentHistory,
     currentMarkets: buildIncomingMarkets(data.markets, maxMarkets),
   };
 
   if (data.addedTime !== undefined) {
     liveSnapshot.addedTime = data.addedTime;
+  }
+  if (incidentProjection.incidentHistoryComplete) {
+    liveSnapshot.incidentHistoryComplete = true;
   }
 
   const snapshot: PublicEventSnapshot = {
@@ -769,7 +1014,7 @@ export const applyLiveEventUpdate = async (
     return null;
   }
 
-  const currentRecord = currentEvent as unknown as UnknownRecord;
+  let currentRecord = currentEvent as unknown as UnknownRecord;
 
   // "Accepted" means this exact call's sequence is the one now stored --
   // i.e. the sequence gate above did not reject it as stale/duplicate.
@@ -782,39 +1027,28 @@ export const applyLiveEventUpdate = async (
   const accepted = liveRecord?.sequence === event.data.sequence;
 
   if (accepted) {
-    const wasIntentionallyRetired = Boolean(currentRecord.liveRetiredAt);
     const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
-    // A completed visibility decision is retained separately from the
-    // mutable runtime visibility. `pendingVisibility` covers the same intent
-    // while metadata onboarding is still in flight.
-    const hasCurrentOfflineIntent =
-      currentRecord.visibilityDecision === EventVisibility.OFFLINE
-      || currentRecord.pendingVisibility === EventVisibility.OFFLINE;
 
-    if (
-      currentRecord.status === EventStatus.RESULTED &&
-      isRaceResulted &&
-      !wasIntentionallyRetired
-    ) {
+    if (currentRecord.status === EventStatus.RESULTED && isRaceResulted) {
       // EVENT_RESULT is terminal domain authority even when it wins the
       // queue race. Earlier live snapshots may still fill bounded history,
       // but they cannot reopen or publicly resurrect the event. Only the
       // matching FULL_TIME projection completes the retained-card view.
       if (event.data.phase === EventPhase.FULL_TIME) {
-        const finalProjectionUpdate: UnknownRecord = {
-          liveRaceResultedAt: null,
-        };
-        if (!hasCurrentOfflineIntent) {
-          finalProjectionUpdate.visibility = EventVisibility.ONLINE;
-        }
-
         await Event.updateOne(
-          { eventId: event.data.eventId },
-          { $set: finalProjectionUpdate }
+          {
+            eventId: event.data.eventId,
+            status: EventStatus.RESULTED,
+            liveRaceResultedAt: { $ne: null },
+          },
+          buildTerminalRaceRecoveryPipeline()
         );
-        currentRecord.liveRaceResultedAt = null;
-        if (finalProjectionUpdate.visibility) {
-          currentRecord.visibility = finalProjectionUpdate.visibility;
+
+        const refreshedEvent = await Event.findOne({
+          eventId: event.data.eventId,
+        }).lean();
+        if (refreshedEvent) {
+          currentRecord = refreshedEvent as unknown as UnknownRecord;
         }
       } else if (currentRecord.visibility !== EventVisibility.OFFLINE) {
         await Event.updateOne(

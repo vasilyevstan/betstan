@@ -28,6 +28,7 @@ const App = () => {
   const theme = useMemo(() => getTheme(location.search), [location.search]);
 
   const [currentUser, setCurrentUser] = useState();
+  const [isCurrentUserResolved, setIsCurrentUserResolved] = useState(false);
   const [selectedSelectionKeys, setSelectedSelectionKeys] = useState(new Set());
   const [slipRefreshSignal, setSlipRefreshSignal] = useState(0);
   const [statsRefreshToken, setStatsRefreshToken] = useState(0);
@@ -45,11 +46,14 @@ const App = () => {
   }, [currentUser, location.search]);
 
   const fetchData = useCallback(async () => {
+    setIsCurrentUserResolved(false);
     try {
       const response = await axios.get('/api/auth/currentuser');
       setCurrentUser(response.data.currentUser);
     } catch (error) {
       setCurrentUser();
+    } finally {
+      setIsCurrentUserResolved(true);
     }
   }, []);
 
@@ -99,6 +103,7 @@ const App = () => {
                   uiVariant={uiVariant}
                   visibleOfflineEventIds={visibleOfflineEventIds}
                   onScopedAccessFailure={fetchData}
+                  isScopedAccessResolved={isCurrentUserResolved}
                 />}
               />
               <Route path="/signup" element={<NewUser callback={handleAuthChange} />} />
@@ -114,6 +119,7 @@ const App = () => {
                       uiVariant={uiVariant}
                       visibleOfflineEventIds={visibleOfflineEventIds}
                       onScopedAccessFailure={fetchData}
+                      isScopedAccessResolved={isCurrentUserResolved}
                     />}
               />
               <Route path="/bets" element={<MyBets />} />
@@ -125,6 +131,7 @@ const App = () => {
                   uiVariant={uiVariant}
                   visibleOfflineEventIds={visibleOfflineEventIds}
                   onScopedAccessFailure={fetchData}
+                  isScopedAccessResolved={isCurrentUserResolved}
                 />}
               />
             </Routes>

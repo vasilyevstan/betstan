@@ -101,6 +101,20 @@ const INCIDENT_LABELS = Object.freeze({
   ADDED_TIME_ANNOUNCED: 'Added time',
 });
 
+const FINISHED_STRUCTURAL_INCIDENT_LABELS = Object.freeze({
+  KICK_OFF: 'Kick-off',
+  HALF_TIME: 'Half-time',
+  SECOND_HALF_KICK_OFF: 'Second half kick-off',
+  FULL_TIME: 'Full-time',
+});
+
+const FINISHED_KEY_MOMENT_TYPES = new Set([
+  'GOAL',
+  'PENALTY_SCORED',
+  'PENALTY_MISSED',
+  'RED_CARD',
+]);
+
 const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
 
 const compareTime = (left, right) => {
@@ -265,6 +279,49 @@ export const shouldReplaceEventFromAuthoritativeSource = (currentEvent, nextEven
   return true;
 };
 
+const getIncidentHistory = (event) => (
+  Array.isArray(event?.live?.incidentHistory) ? event.live.incidentHistory : []
+);
+
+const getPreferredTerminalHistorySource = (currentEvent, nextEvent) => {
+  const currentComplete = currentEvent?.live?.incidentHistoryComplete === true;
+  const nextComplete = nextEvent?.live?.incidentHistoryComplete === true;
+
+  if (currentComplete !== nextComplete) {
+    return nextComplete ? nextEvent : currentEvent;
+  }
+
+  return getIncidentHistory(currentEvent).length > getIncidentHistory(nextEvent).length
+    ? currentEvent
+    : nextEvent;
+};
+
+const mergeEqualSequenceTerminalHistory = (currentEvent, nextEvent) => {
+  if (
+    !currentEvent
+    || !nextEvent
+    || getLiveSequence(currentEvent) !== getLiveSequence(nextEvent)
+    || !isFinishedLiveEvent(currentEvent)
+    || !isFinishedLiveEvent(nextEvent)
+  ) {
+    return nextEvent;
+  }
+
+  const historySource = getPreferredTerminalHistorySource(currentEvent, nextEvent);
+  if (historySource === nextEvent) {
+    return nextEvent;
+  }
+
+  return {
+    ...nextEvent,
+    live: {
+      ...nextEvent.live,
+      incidentHistory: getIncidentHistory(historySource),
+      incidentHistoryComplete: historySource.live?.incidentHistoryComplete === true,
+    },
+  };
+};
+
 export const applyLiveSnapshotUpdate = (currentEvents, nextEvent) => {
   const existingEvents = Array.isArray(currentEvents) ? currentEvents : [];
   const eventId = normalizeText(nextEvent?.eventId);
@@ -319,9 +376,11 @@ export const mergeAuthoritativeEventList = (currentEvents, nextEvents) => {
     .filter((event) => normalizeText(event?.eventId))
     .map((event) => {
       const currentEvent = currentById.get(event.eventId);
-      return shouldReplaceEventFromAuthoritativeSource(currentEvent, event)
-        ? event
-        : currentEvent;
+      if (!shouldReplaceEventFromAuthoritativeSource(currentEvent, event)) {
+        return currentEvent;
+      }
+
+      return mergeEqualSequenceTerminalHistory(currentEvent, event);
     })
     .filter(Boolean);
 
@@ -457,6 +516,54 @@ export const formatIncident = (incident, event) => {
   const label = INCIDENT_LABELS[type];
 
   return sideLabel ? `${minute} ${sideLabel} ${label.toLowerCase()}` : `${minute} ${label}`;
+};
+
+const formatFinishedIncident = (incident, event) => {
+  const structuralLabel = FINISHED_STRUCTURAL_INCIDENT_LABELS[incident?.type];
+  if (structuralLabel) {
+    return structuralLabel;
+  }
+
+  if (incident?.type === 'FIRST_MINUTE_ELAPSED') {
+    return null;
+  }
+
+  return formatIncident(incident, event);
+};
+
+export const buildFinishedMatchTimeline = (incidentHistory, event) => {
+  const sourceIncidents = Array.isArray(incidentHistory) ? incidentHistory : [];
+  const displayedPenaltyOutcomeIds = new Set(sourceIncidents
+    .filter((incident) => (
+      incident?.type === 'PENALTY_SCORED'
+      && normalizeText(incident?.id)
+      && formatFinishedIncident(incident, event)
+    ))
+    .map((incident) => normalizeText(incident.id)));
+
+  const timeline = sourceIncidents
+    .filter((incident) => !(
+      incident?.type === 'GOAL'
+      && displayedPenaltyOutcomeIds.has(normalizeText(incident?.relatedIncidentId))
+    ))
+    .map((incident, index) => {
+      const label = formatFinishedIncident(incident, event);
+      if (!label) {
+        return null;
+      }
+
+      return {
+        id: normalizeText(incident?.id) || `${incident?.type ?? 'incident'}-${index}`,
+        label,
+        type: incident.type,
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    keyMoments: timeline.filter((entry) => FINISHED_KEY_MOMENT_TYPES.has(entry.type)),
+    timeline,
+  };
 };
 
 export const formatDeclineReason = (reason) => (

@@ -9,6 +9,79 @@ import {
 } from "@betstan/common";
 
 import { Event } from "../../model/Event";
+import {
+  buildHasOfflineIntentExpression,
+  buildHasUnresolvedVisibilityAuthorityExpression,
+} from "../../model/visibilityAuthorityExpressions";
+
+const buildResultedAt = (timestamp: string | undefined): Date => {
+  const resultedAt = timestamp ? new Date(timestamp) : new Date();
+  return Number.isNaN(resultedAt.getTime()) ? new Date() : resultedAt;
+};
+
+const buildResultUpdatePipeline = (resultedAt: Date) => [
+  {
+    $set: {
+      status: EventStatus.RESULTED,
+      visibility: {
+        $let: {
+          vars: {
+            isFullTime: { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+            isRetired: {
+              $ne: [{ $ifNull: ["$liveRetiredAt", null] }, null],
+            },
+            hasOfflineIntent: buildHasOfflineIntentExpression(),
+            hasUnresolvedVisibilityAuthority:
+              buildHasUnresolvedVisibilityAuthorityExpression(),
+          },
+          in: {
+            $cond: [
+              {
+                $and: [
+                  "$$isFullTime",
+                  { $eq: ["$$isRetired", false] },
+                  { $eq: ["$$hasOfflineIntent", false] },
+                  {
+                    $eq: [
+                      "$$hasUnresolvedVisibilityAuthority",
+                      false,
+                    ],
+                  },
+                ],
+              },
+              EventVisibility.ONLINE,
+              EventVisibility.OFFLINE,
+            ],
+          },
+        },
+      },
+      liveRaceResultedAt: {
+        $let: {
+          vars: {
+            isFullTime: { $eq: ["$live.phase", EventPhase.FULL_TIME] },
+            isRetired: {
+              $ne: [{ $ifNull: ["$liveRetiredAt", null] }, null],
+            },
+            hasOfflineIntent: buildHasOfflineIntentExpression(),
+          },
+          in: {
+            $cond: [
+              {
+                $or: [
+                  "$$isFullTime",
+                  "$$isRetired",
+                  "$$hasOfflineIntent",
+                ],
+              },
+              null,
+              resultedAt,
+            ],
+          },
+        },
+      },
+    },
+  },
+];
 
 class EventResultListener extends AListener<IEventResultEvent> {
   serviceName: string = "event_result";
@@ -17,7 +90,9 @@ class EventResultListener extends AListener<IEventResultEvent> {
   async onMessage(event: IEventResultEvent, msg: ConsumeMessage) {
     const { data } = event;
 
-    const storedEvent = await Event.findOne({ eventId: data.eventId });
+    const storedEvent = await Event.findOne({ eventId: data.eventId })
+      .select({ _id: 1 })
+      .lean();
 
     if (!storedEvent) {
       console.log("event not found", event);
@@ -25,40 +100,10 @@ class EventResultListener extends AListener<IEventResultEvent> {
       return;
     }
 
-    storedEvent.status = EventStatus.RESULTED;
-    // A completed live event stays visible only once its matching FULL_TIME
-    // projection is present. If EVENT_RESULT wins the queue race while the
-    // projection is absent or still non-terminal, hide it and retain
-    // provenance so delayed snapshots cannot present a resulted match as
-    // active. `applyLiveEventUpdate` restores the retained card when
-    // FULL_TIME eventually arrives.
-    if (storedEvent.live?.phase !== EventPhase.FULL_TIME) {
-      // Capture explicit intent before forcing the runtime projection dark.
-      // A pending ONLINE decision is the normal fail-dark onboarding path,
-      // while an explicit/pending OFFLINE decision must remain authoritative.
-      // The final predicate preserves legacy initialized OFFLINE documents
-      // created before visibility-decision provenance existed.
-      const pendingVisibility = storedEvent.pendingVisibility;
-      const visibilityDecision = storedEvent.visibilityDecision;
-      const hasExplicitOfflineIntent =
-        visibilityDecision === EventVisibility.OFFLINE
-        || pendingVisibility === EventVisibility.OFFLINE
-        || (
-          visibilityDecision == null
-          && pendingVisibility == null
-          && storedEvent.visibilityInitialized === true
-          && storedEvent.visibility === EventVisibility.OFFLINE
-        );
-
-      storedEvent.visibility = EventVisibility.OFFLINE;
-
-      if (!hasExplicitOfflineIntent) {
-        storedEvent.liveRaceResultedAt = new Date(
-          event.timestamp ?? Date.now()
-        );
-      }
-    }
-    await storedEvent.save();
+    await Event.updateOne(
+      { eventId: data.eventId },
+      buildResultUpdatePipeline(buildResultedAt(event.timestamp))
+    );
     this.channel.ack(msg);
   }
 }

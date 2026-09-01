@@ -174,6 +174,42 @@ describe('useLiveEvents', () => {
     expect(axios.get).toHaveBeenCalledTimes(5);
   });
 
+  it('schedules one prompt authoritative reconcile for repeated FULL_TIME snapshots', async () => {
+    const finishedEvent = {
+      ...buildLiveEvent(2),
+      status: 'RESULTED',
+      live: {
+        ...buildLiveEvent(2).live,
+        phase: 'FULL_TIME',
+        bettingStatus: 'CLOSED',
+      },
+    };
+    axios.get
+      .mockResolvedValueOnce({ data: [buildLiveEvent(1)] })
+      .mockResolvedValueOnce({ data: [finishedEvent] });
+
+    const { unmount } = render(<Harness />);
+    await waitFor(() => expect(screen.getByTestId('sequence')).toHaveTextContent('1'));
+
+    act(() => {
+      createdSources[0].emitOpen();
+      createdSources[0].emitSnapshot(finishedEvent);
+      createdSources[0].emitSnapshot(finishedEvent);
+    });
+
+    expect(axios.get).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      jest.advanceTimersByTime(RECONCILE_DEBOUNCE_MS);
+    });
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      jest.advanceTimersByTime(RECONCILE_DEBOUNCE_MS);
+    });
+    expect(axios.get).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
   it('scopes both REST and SSE requests to authorized acceptance event IDs', async () => {
     const eventIds = `${'a'.repeat(24)},${'b'.repeat(24)}`;
     axios.get.mockResolvedValue({ data: [] });

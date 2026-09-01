@@ -57,6 +57,31 @@ authority-ending `occurredAt`, plus legacy history without the additive end
 field. For SSE, verify intentional backpressure disconnect and monotonic
 REST/reconnect recovery together.
 
+For live-history and presentation-order changes, prove producer-attested
+full-versus-partial completeness: an attested cumulative payload, legacy
+single-incident input, malformed raw incidents, and non-terminal phases must
+each retain the correct completeness state, never a false complete claim.
+Require exact linked-incident deduplication by relation ID, equal-sequence
+monotonic merges that preserve the stronger (verified-complete or longer)
+terminal history, and every terminal result/`FULL_TIME` interleaving ending
+`RESULTED` and non-offline once metadata and visibility authority are
+resolved. Cover the inverse fail-dark case: an unresolved placeholder,
+including one with pending `ONLINE` intent, remains `OFFLINE`. Verify an
+acceptance-scoped retained `OFFLINE` snapshot neither renders nor clears
+before auth resolution. For delayed terminal recovery, inject an administrator
+`OFFLINE` decision after any projection pre-read but before the recovery write
+and prove the atomic write preserves that current decision.
+
+For semantic-control and layout changes, prove accessible names remain
+distinct from compact visual tokens, cross-card computed geometry (bounding
+boxes, baselines, equal-height groups) holds across sibling cards, and
+role-gated navigation is visible for the correct role and absent otherwise in
+every affected UI variant. Re-run generated-board geometry in every changed
+parent context and around each container-layout transition: assert label and
+price bounds stay inside their controls, sibling controls do not intersect,
+and a shared section heading spans the whole product group rather than
+auto-placing above only one market.
+
 Keep browser API fixtures faithful to concurrency contracts: include and
 rotate board revisions/fingerprints, reject mismatched placement
 confirmations, and require stale-quote reselection before resubmission.
