@@ -261,12 +261,15 @@ ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
 ux_wiki="$ROOT_DIR/docs/wiki/UI-UX-Consistency.md"
 ux_home="$ROOT_DIR/docs/wiki/Home.md"
 ux_release_wiki="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
+ux_backend_agent="$ROOT_DIR/.github/agents/betstan-backend-developer.agent.md"
 ux_frontend_agent="$ROOT_DIR/.github/agents/betstan-frontend-developer.agent.md"
 ux_critic_agent="$ROOT_DIR/.github/agents/betstan-validation-critic.agent.md"
 ux_test_agent="$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md"
 ux_final_agent="$ROOT_DIR/.github/agents/betstan-final-validator.agent.md"
 [[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
 [[ -f "$ux_wiki" ]] || fail "canonical UI/UX consistency wiki page is missing"
+[[ -f "$ux_backend_agent" ]] || fail "backend developer agent is missing"
+[[ -f "$ux_frontend_agent" ]] || fail "frontend developer agent is missing"
 grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
   fail "UX/UI expert frontmatter has the wrong name"
 grep -Fq 'tools: [read, search]' "$ux_agent" ||
@@ -292,7 +295,8 @@ for ux_contract in \
     'For event-grid changes' \
     'For market-control changes' \
     'UX_REVIEW_PASSED' \
-    'Hand implementation to `betstan-frontend-developer`' \
+    'Hand implementation to the registered developer-gate owner for the affected paths' \
+    '`betstan-backend-developer` for user-visible producer, formatter, ordering, or contract work' \
     'return the UX status to the registered developer-gate implementation owner'; do
   grep -Fq "$ux_contract" <<<"$ux_agent_flat" ||
     fail "UX/UI expert omits usability contract: $ux_contract"
@@ -324,6 +328,10 @@ grep -Fq '[[UI UX Consistency]]' "$ux_home" ||
 grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
     "$ux_release_wiki" ||
   fail "release orchestration omits the mandatory UX handoff"
+backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
+grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
+    <<<"$backend_agent_flat" ||
+  fail "backend developer does not carry applicable UX evidence into the critic handoff"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
 grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
     <<<"$frontend_agent_flat" ||

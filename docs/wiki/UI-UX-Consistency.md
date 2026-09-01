@@ -26,10 +26,10 @@ infrastructure, or documentation-only work.
 Register one specialist `work_id`, owner, and agent context for the complete
 slice.
 
-1. **Baseline specification:** before frontend implementation, name the stable
-   reference grammar, required information hierarchy, states, responsive
-   behavior, accessibility constraints, intentional semantic differences, and
-   acceptance evidence.
+1. **Baseline specification:** before implementation by the registered path
+   owner, name the stable reference grammar, required information hierarchy,
+   states, responsive behavior, accessibility constraints, intentional
+   semantic differences, and acceptance evidence.
 2. **Immutable-result audit:** after implementation, review the exact committed
    head against the same baseline and issue `UX_REVIEW_PASSED`,
    `UX_CHANGES_REQUIRED`, or `UX_CLARIFICATION_NEEDED`.

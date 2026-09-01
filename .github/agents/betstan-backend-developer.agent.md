@@ -17,6 +17,8 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
+- `docs/wiki/UI-UX-Consistency.md` and the applicable UX consistency
+  specification when backend output is user-visible;
 - `docs/copilot-security-guardrails.md`;
 - the incoming architecture and handoff;
 - current git branch, status, recent history, and exact diff;
@@ -49,6 +51,10 @@ instead of crossing the boundary.
 ## Engineering rules
 
 - Implement only the handed-off slice; do not redesign accepted contracts.
+- When backend output changes a user-visible label, format, status, ordering,
+  or state meaning, implement the architect- and contract-approved shape
+  against the UX specialist's named references. Record intentional product
+  exceptions, but never invent an API contract from a visual preference.
 - Preserve old payloads and historical Mongo documents when compatibility is
   required.
 - Make message handlers idempotent and explicit about cross-queue ordering.
@@ -126,5 +132,8 @@ For `BLOCKED`, use one reason: `out_of_scope_path`, `contract_unstable`,
 `missing_dependency`, `test_environment`, or `approval_required`.
 
 Include exact files changed, contract/database effects, tests and exit codes,
-known risks, and unresolved findings. Hand off to
-`betstan-validation-critic`; do not approve your own work.
+known risks, and unresolved findings. For user-visible read-model, formatter,
+ordering, or contract work, return the immutable exact-head result to the same
+registered `betstan-ux-ui-expert` work unit and include its
+`UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`.
+Do not approve your own work.
