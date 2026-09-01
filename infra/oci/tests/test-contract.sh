@@ -328,9 +328,11 @@ frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
 grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
     <<<"$frontend_agent_flat" ||
   fail "frontend developer does not carry UX evidence into the critic handoff"
-critic_agent_flat="$(tr '\n' ' ' <"$ux_critic_agent")"
-grep -Fq 'Missing or stale UX evidence is an acceptance gap' \
-    <<<"$critic_agent_flat" ||
+grep -Fq 'Missing or stale UX evidence is an acceptance' \
+    "$ux_critic_agent" ||
+  fail "validation critic does not identify missing UX evidence"
+grep -Fq 'gap. Do not replace the UX specialist with subjective style review' \
+    "$ux_critic_agent" ||
   fail "validation critic does not fail missing UX evidence"
 grep -Fq 'Do not add or require a screenshot/image-diff matrix' "$ux_test_agent" ||
   fail "test engineer turns user-facing work into a blanket visual-test gate"
@@ -344,9 +346,11 @@ grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the product-wide UI/UX consistency contract"
 grep -Fq 'GITHUB_RUN_ATTEMPT' "$ROOT_DIR/infra/azure/agents/README.md" ||
   fail "Azure guidance omits first-attempt fixture isolation"
-oci_lessons_flat="$(tr '\n' ' ' <"$ROOT_DIR/infra/oci/LESSONS_LEARNED.md")"
-grep -Fq 'same workflow and job on a comparable runner' \
-    <<<"$oci_lessons_flat" ||
+grep -Fq 'recent successful runs of the same' \
+    "$ROOT_DIR/infra/oci/LESSONS_LEARNED.md" ||
+  fail "OCI lessons omit recent successful duration evidence"
+grep -Fq 'workflow and job on a comparable runner' \
+    "$ROOT_DIR/infra/oci/LESSONS_LEARNED.md" ||
   fail "OCI lessons omit historical-duration-aware stall classification"
 ghcr_fixture_head="$(sed -n '1,80p' "$OCI_DIR/tests/test-ghcr-contract.sh")"
 grep -Fq '"GITHUB_RUN_ID=777"' <<<"$ghcr_fixture_head" ||
