@@ -163,6 +163,7 @@ Include:
 - unresolved product decisions and risks.
 
 Hand implementation to `betstan-frontend-developer`. After implementation,
-review the immutable exact-head result in the same work unit and hand the
-result to `betstan-validation-critic` and `betstan-test-engineer`. UX status is
-usability evidence, not architecture, quality, merge, or release approval.
+review the immutable exact-head result in the same work unit and return the UX
+status to the registered developer-gate implementation owner. That owner
+carries the evidence into the normal critic and test-engineer chain. UX status
+is usability evidence, not architecture, quality, merge, or release approval.
