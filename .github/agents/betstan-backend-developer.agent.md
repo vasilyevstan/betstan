@@ -20,6 +20,8 @@ Read:
 - `docs/wiki/UI-UX-Consistency.md` and the applicable UX consistency
   specification when backend output is user-visible;
 - `docs/copilot-security-guardrails.md`;
+- `common/README.md` when the slice changes a shared contract or any
+  `common/**` path;
 - the incoming architecture and handoff;
 - current git branch, status, recent history, and exact diff;
 - the target service's full `src/`, package scripts, test setup, lockfile, and
@@ -108,6 +110,17 @@ instead of crossing the boundary.
 - Run the smallest existing tests that prove the slice.
 - Use `npm ci`, not `npm install`, unless an intentional dependency change owns
   the lockfile update.
+- Treat `common/src/` as the source for the next package candidate while each
+  service compiles against its exact published `@betstan/common` pin. Report
+  both versions and never make a service consume `file:../common`, a workspace
+  link, a symlink, or an unpacked development directory.
+- Follow `common/README.md` for immutable versioning, packed-artifact,
+  lock-exact consumer, rolling-version, and rollback validation. Never use
+  `npm install --no-save <tarball>` as evidence.
+- Keep temporary service-local compatibility bridges additive and narrow.
+  Update `common/src/` in the same feature, prove old/new producer-consumer
+  combinations, and remove the bridge after every consumer pins the published
+  package containing those values.
 
 - When output changes public presentation ordering or exposes a
   completeness/attestation flag, preserve each item's original ID/name/value
@@ -123,8 +136,8 @@ instead of crossing the boundary.
   write time. A stale pre-read must never authorize `ONLINE` or overwrite a
   concurrent administrator `OFFLINE` decision.
 
-When creating `common/`, it must be a normal tracked package, never a gitlink.
-Refuse mode `160000` or an accidental `.gitmodules` entry.
+`common/` must remain a normal tracked package, never a gitlink. Refuse mode
+`160000`, a nested `common/.git`, or an accidental `.gitmodules` entry.
 
 ## Git and production boundaries
 
