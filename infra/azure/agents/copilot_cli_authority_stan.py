@@ -1281,7 +1281,6 @@ def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
     for field, expected in (
         ("base_commit", ancestor_sha),
         ("merge_base_commit", ancestor_sha),
-        ("head_commit", current_master),
     ):
         commit = compare.get(field)
         if not isinstance(commit, dict) or commit.get("sha") != expected:
@@ -1299,10 +1298,11 @@ def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
             fail("GitHub compare commit SHA is malformed")
         commit_shas.append(sha)
     if (
-        len(set(commit_shas)) != len(commit_shas)
-        or current_master not in commit_shas
+        not commit_shas
+        or len(set(commit_shas)) != len(commit_shas)
+        or commit_shas[-1] != current_master
     ):
-        fail("GitHub compare commit list does not reach current master")
+        fail("GitHub compare commit list does not end at current master")
 
 
 def validate_unmaterialized_run_evidence(

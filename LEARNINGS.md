@@ -806,6 +806,9 @@ validated.
   approval, another active run, or the repository-global claimed/inflight
   authority fence. `EXCLUDE_RUN_ID` and generic disabled handling cannot
   supply prospective-bootstrap evidence.
+- GitHub compare responses do not expose `head_commit`. Bind a complete
+  ordered compare list to its requested head by requiring its final unique
+  full-SHA commit to equal that head; containment alone is insufficient.
 - A critical path blocked by a repository-introduced rule, policy, or guard is
   not automatically an external safety wait. The conductor must prove the
   exact self-imposed cause and the intended invariant; if real production

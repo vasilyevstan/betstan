@@ -8,6 +8,7 @@ WORKFLOW_ID=456
 MASTER_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 OLD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 PROSPECTIVE_SHA=dddddddddddddddddddddddddddddddddddddddd
+WRONG_FINAL_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 PROMOTION_PR=224
 REPOSITORY=example/repo
 
@@ -532,15 +533,19 @@ gh() {
   if [[ "$endpoint" == "repos/$REPOSITORY/compare/$MASTER_SHA...$PROSPECTIVE_SHA" ]]; then
     case "$mode" in
       prospective-nonancestor-data)
-        printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-          "$MASTER_SHA" "$OLD_SHA" "$PROSPECTIVE_SHA" "$PROSPECTIVE_SHA"
+        printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$OLD_SHA" "$PROSPECTIVE_SHA"
         ;;
       prospective-malformed-compare-data)
         printf '%s\n' '{"status":"ahead","ahead_by":"1"}'
         ;;
+      prospective-wrong-final-compare-data)
+        printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$MASTER_SHA" "$WRONG_FINAL_SHA"
+        ;;
       *)
-        printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-          "$MASTER_SHA" "$MASTER_SHA" "$PROSPECTIVE_SHA" "$PROSPECTIVE_SHA"
+        printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$MASTER_SHA" "$PROSPECTIVE_SHA"
         ;;
     esac
     return
@@ -603,23 +608,27 @@ gh() {
     "repos/$REPOSITORY/compare/"*)
       case "$mode" in
         nonancestor-*|nonancestor-superseded-data)
-          printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"cccccccccccccccccccccccccccccccccccccccc"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-            "$OLD_SHA" "$MASTER_SHA" "$MASTER_SHA"
+          printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"cccccccccccccccccccccccccccccccccccccccc"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$MASTER_SHA"
           ;;
         missing-compare-unmaterialized-data)
           printf '%s\n' '{}'
           ;;
         malformed-compare-unmaterialized-data)
-          printf '{"status":"ahead","ahead_by":"1","behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA" "$MASTER_SHA"
+          printf '{"status":"ahead","ahead_by":"1","behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA"
           ;;
         incomplete-compare-unmaterialized-data)
-          printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA" "$MASTER_SHA"
+          printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA"
+          ;;
+        wrong-final-compare-unmaterialized-data)
+          printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$WRONG_FINAL_SHA"
           ;;
         *)
-          printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
-            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA" "$MASTER_SHA"
+          printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA"
           ;;
       esac
       ;;
@@ -642,6 +651,7 @@ export -f \
   emit_successful_runs emit_other_active_inventory emit_prospective_promotion
 export \
   ROOT_DIR EXCLUSIVITY RUN_ID WORKFLOW_ID MASTER_SHA OLD_SHA PROSPECTIVE_SHA \
+  WRONG_FINAL_SHA \
   PROMOTION_PR REPOSITORY
 
 run_case() {
@@ -728,6 +738,7 @@ for mode in \
   prospective-wrong-number-data \
   prospective-nonancestor-data \
   prospective-malformed-compare-data \
+  prospective-wrong-final-compare-data \
   prospective-rendered-title-data \
   prospective-other-active-data; do
   expect_prospective_rejected "$mode"
@@ -780,6 +791,7 @@ for mode in \
   missing-compare-unmaterialized-data \
   malformed-compare-unmaterialized-data \
   incomplete-compare-unmaterialized-data \
+  wrong-final-compare-unmaterialized-data \
   malformed-historical-unmaterialized-data \
   missing-guards-unmaterialized-data \
   mutation-before-guard-unmaterialized-data \

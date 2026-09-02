@@ -1185,6 +1185,9 @@ for prospective_learning in \
   grep -Fq "$prospective_learning" "$ROOT_DIR/LEARNINGS.md" ||
     fail "learnings omit prospective-master bootstrap: $prospective_learning"
 done
+grep -Fq 'GitHub compare responses do not expose `head_commit`' \
+  "$ROOT_DIR/LEARNINGS.md" ||
+  fail "learnings omit GitHub compare head binding"
 grep -Fq 'classify-unmaterialized-run' "$run_exclusivity_script" ||
   fail "production exclusivity does not invoke unmaterialized classification"
 grep -Fq 'retire-unmaterialized-claim' "$authority_helper" ||
@@ -1204,6 +1207,9 @@ grep -Fq 'EXCLUDE_RUN_ID="$RUN_ID" PROSPECTIVE_PROMOTION_PR=""' \
   fail "normal approver does not retain only its exact self-run exclusion"
 if grep -Fq 'PROSPECTIVE_MASTER_SHA' "$run_exclusivity_script"; then
   fail "production exclusivity trusts a raw prospective SHA environment value"
+fi
+if grep -Fq 'head_commit' "$run_exclusivity_script" "$authority_helper"; then
+  fail "compare validation relies on a nonexistent head_commit field"
 fi
 [[ -f "$pr_template" ]] || fail "pull request evidence template is missing"
 for heading in \

@@ -139,7 +139,6 @@ if (
 for field, expected in (
     ("base_commit", actual_master),
     ("merge_base_commit", actual_master),
-    ("head_commit", prospective_sha),
 ):
     commit = compare.get(field)
     if not isinstance(commit, dict) or commit.get("sha") != expected:
@@ -155,8 +154,12 @@ for commit in commits:
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise SystemExit("prospective promotion compare commit SHA is malformed")
     commit_shas.append(sha)
-if len(set(commit_shas)) != len(commit_shas) or prospective_sha not in commit_shas:
-    raise SystemExit("prospective promotion compare does not reach its head")
+if (
+    not commit_shas
+    or len(set(commit_shas)) != len(commit_shas)
+    or commit_shas[-1] != prospective_sha
+):
+    raise SystemExit("prospective promotion compare commit list does not end at its head")
 PY
   rechecked_master="$(read_current_master)" || return 1
   [[ "$rechecked_master" == "$actual_master" ]] || {
