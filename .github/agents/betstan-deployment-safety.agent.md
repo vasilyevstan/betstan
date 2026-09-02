@@ -73,6 +73,18 @@ inactive. Fail closed when either query is incomplete or fails.
   classifier input. Never extend either classifier to deployment, disable,
   rollback,
   infrastructure, package, cache-recovery, migration, or build work.
+- Only `pr-merge-safety-stan.sh` may request the prospective-master bootstrap,
+  and it passes the promotion PR number rather than a prospective SHA.
+  Exclusivity re-reads GitHub and accepts that context only for an OPEN,
+  `copilot-cli-managed`, same-repository `dev` -> `master` PR whose base SHA
+  equals actual current master and whose exact head strictly descends from it.
+  It may use that head only to classify an otherwise current-master,
+  allowlisted queued unmaterialized ghost; every other active run and every
+  normal dispatch or approval remains bound to actual master and blocking.
+  It never uses `EXCLUDE_RUN_ID` or generic disabled classification as
+  prospective-bootstrap evidence.
+  The repository-global claimed/inflight authority fence remains unresolved
+  until its explicit evidence-bound retirement.
 - Classify protected approval by origin, not workflow type. Every direct
   Copilot CLI operation must use `copilot-cli-dispatch-stan.sh` and its exact
   private one-run authority record; this includes infrastructure `prepare`,

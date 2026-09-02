@@ -7,6 +7,8 @@ RUN_ID=123
 WORKFLOW_ID=456
 MASTER_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 OLD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+PROSPECTIVE_SHA=dddddddddddddddddddddddddddddddddddddddd
+PROMOTION_PR=224
 REPOSITORY=example/repo
 
 run_path() {
@@ -43,7 +45,7 @@ run_status() {
     in-progress-unmaterialized-data)
       printf '%s\n' in_progress
       ;;
-    *superseded*|*unmaterialized*)
+    prospective-*|*superseded*|*unmaterialized*)
       printf '%s\n' queued
       ;;
     *)
@@ -57,7 +59,7 @@ run_event() {
     wrong-event-unmaterialized-data)
       printf '%s\n' push
       ;;
-    *superseded*|*unmaterialized*)
+    prospective-*|*superseded*|*unmaterialized*)
       printf '%s\n' workflow_dispatch
       ;;
     *)
@@ -76,7 +78,7 @@ run_attempt() {
 
 run_head() {
   case "${STUB_MODE:-none}" in
-    current-unmaterialized-*|current-superseded-*)
+    current-unmaterialized-*|current-superseded-*|prospective-*)
       printf '%s\n' "$MASTER_SHA"
       ;;
     *)
@@ -89,7 +91,7 @@ run_title() {
   local path
   path="$(run_path)"
   case "${STUB_MODE:-none}" in
-    rendered-title-unmaterialized-data)
+    rendered-title-unmaterialized-data|prospective-rendered-title-data)
       printf 'oci-live-data apply-backfills %s\n' "$OLD_SHA"
       ;;
     rendered-title-unmaterialized-activation)
@@ -310,6 +312,57 @@ emit_inventory() {
     "$attempt" "$status" "$updated"
 }
 
+emit_other_active_inventory() {
+  printf '{"total_count":1,"workflow_runs":[{"id":124,"workflow_id":457,"path":".github/workflows/production-build.yml","head_branch":"master","head_sha":"%s","event":"push","run_attempt":1,"status":"in_progress","updated_at":"1970-01-01T00:00:00Z"}]}\n' \
+    "$MASTER_SHA"
+}
+
+emit_prospective_promotion() {
+  local requested_number="$1"
+  local mode="${STUB_MODE:-none}"
+  local number="$PROMOTION_PR"
+  local state=OPEN
+  local base_ref=master
+  local base_sha="$MASTER_SHA"
+  local head_ref=dev
+  local head_repository="$REPOSITORY"
+  local labels='[{"name":"copilot-cli-managed"}]'
+
+  [[ "$requested_number" == "$PROMOTION_PR" ]] || {
+    echo "prospective promotion did not request the expected PR" >&2
+    return 1
+  }
+  case "$mode" in
+    prospective-missing-data)
+      return 1
+      ;;
+    prospective-unlabelled-data)
+      labels='[]'
+      ;;
+    prospective-wrong-repository-data)
+      head_repository=another/repository
+      ;;
+    prospective-wrong-base-data)
+      base_ref=dev
+      ;;
+    prospective-wrong-head-data)
+      head_ref=feature/recovery
+      ;;
+    prospective-stale-data)
+      base_sha="$OLD_SHA"
+      ;;
+    prospective-closed-data)
+      state=CLOSED
+      ;;
+    prospective-wrong-number-data)
+      number=$((PROMOTION_PR + 1))
+      ;;
+  esac
+  printf '{"number":%s,"state":"%s","headRefName":"%s","headRefOid":"%s","headRepository":{"nameWithOwner":"%s"},"baseRefName":"%s","baseRefOid":"%s","labels":%s}\n' \
+    "$number" "$state" "$head_ref" "$PROSPECTIVE_SHA" "$head_repository" \
+    "$base_ref" "$base_sha" "$labels"
+}
+
 emit_full_run() {
   local path status event attempt head title created updated response_run_id
   path="$(run_path)"
@@ -396,6 +449,10 @@ emit_successful_runs() {
 }
 
 gh() {
+  if [[ "$1 $2" == "pr view" ]]; then
+    emit_prospective_promotion "$3"
+    return
+  fi
   if [[ "$1" != api ]]; then
     echo "unexpected gh invocation: $*" >&2
     return 1
@@ -404,6 +461,13 @@ gh() {
   local mode="${STUB_MODE:-none}"
 
   if [[ "$endpoint" == *"/actions/runs?status="* ]]; then
+    if [[
+      "$mode" == prospective-other-active-data &&
+        "$endpoint" == *"status=in_progress"*
+    ]]; then
+      emit_other_active_inventory
+      return
+    fi
     case "$mode" in
       none)
         printf '%s\n' '{"total_count":0,"workflow_runs":[]}'
@@ -442,6 +506,41 @@ gh() {
         else
           printf '%s\n' '{"total_count":0,"workflow_runs":[]}'
         fi
+        ;;
+    esac
+    return
+  fi
+
+  if [[ "$mode" == prospective-other-active-data ]]; then
+    case "$endpoint" in
+      "repos/$REPOSITORY/actions/workflows/457")
+        printf '%s\n' \
+          '{"id":457,"state":"active","path":".github/workflows/production-build.yml"}'
+        return
+        ;;
+      "repos/$REPOSITORY/actions/runs/124/jobs?per_page=1")
+        printf '%s\n' '{"total_count":1,"jobs":[{"id":1}]}'
+        return
+        ;;
+      "repos/$REPOSITORY/actions/runs/124/pending_deployments")
+        printf '%s\n' '[]'
+        return
+        ;;
+    esac
+  fi
+
+  if [[ "$endpoint" == "repos/$REPOSITORY/compare/$MASTER_SHA...$PROSPECTIVE_SHA" ]]; then
+    case "$mode" in
+      prospective-nonancestor-data)
+        printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$OLD_SHA" "$PROSPECTIVE_SHA" "$PROSPECTIVE_SHA"
+        ;;
+      prospective-malformed-compare-data)
+        printf '%s\n' '{"status":"ahead","ahead_by":"1"}'
+        ;;
+      *)
+        printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"head_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$MASTER_SHA" "$PROSPECTIVE_SHA" "$PROSPECTIVE_SHA"
         ;;
     esac
     return
@@ -540,17 +639,33 @@ gh() {
 export -f \
   gh run_path run_status run_event run_attempt run_head run_title workflow_state \
   historical_source emit_historical_workflow emit_inventory emit_full_run \
-  emit_successful_runs
-export ROOT_DIR EXCLUSIVITY RUN_ID WORKFLOW_ID MASTER_SHA OLD_SHA REPOSITORY
+  emit_successful_runs emit_other_active_inventory emit_prospective_promotion
+export \
+  ROOT_DIR EXCLUSIVITY RUN_ID WORKFLOW_ID MASTER_SHA OLD_SHA PROSPECTIVE_SHA \
+  PROMOTION_PR REPOSITORY
 
 run_case() {
-  REPO="$REPOSITORY" NOW_EPOCH=2000 STUB_MODE="$1" "$EXCLUSIVITY"
+  REPO="$REPOSITORY" NOW_EPOCH=2000 STUB_MODE="$1" \
+    PROSPECTIVE_PROMOTION_PR="" "$EXCLUSIVITY"
+}
+
+run_prospective_case() {
+  REPO="$REPOSITORY" NOW_EPOCH=2000 STUB_MODE="$1" \
+    PROSPECTIVE_PROMOTION_PR="$PROMOTION_PR" "$EXCLUSIVITY"
 }
 
 expect_rejected() {
   local mode="$1"
   if run_case "$mode" >/dev/null 2>&1; then
     echo "production exclusivity accepted unsafe mode=$mode" >&2
+    exit 1
+  fi
+}
+
+expect_prospective_rejected() {
+  local mode="$1"
+  if run_prospective_case "$mode" >/dev/null 2>&1; then
+    echo "prospective promotion accepted unsafe mode=$mode" >&2
     exit 1
   fi
 }
@@ -580,6 +695,61 @@ for mode in \
     exit 1
   }
 done
+
+prospective_output="$(
+  run_prospective_case prospective-unmaterialized-data
+)"
+for expected in \
+  'reason=unmaterialized' \
+  'prospective_unmaterialized=yes' \
+  "prospective_promotion_pr=$PROMOTION_PR" \
+  "actual_master_sha=$MASTER_SHA" \
+  "prospective_master_sha=$PROSPECTIVE_SHA"; do
+  grep -qF "$expected" <<<"$prospective_output" || {
+    echo "prospective bootstrap omitted auditable evidence: $expected" >&2
+    exit 1
+  }
+done
+
+ordinary_output="$(run_prospective_case unmaterialized-data)"
+if grep -qF 'prospective_unmaterialized=yes' <<<"$ordinary_output"; then
+  echo "prospective context altered an already historical ghost" >&2
+  exit 1
+fi
+
+for mode in \
+  prospective-missing-data \
+  prospective-unlabelled-data \
+  prospective-wrong-repository-data \
+  prospective-wrong-base-data \
+  prospective-wrong-head-data \
+  prospective-stale-data \
+  prospective-closed-data \
+  prospective-wrong-number-data \
+  prospective-nonancestor-data \
+  prospective-malformed-compare-data \
+  prospective-rendered-title-data \
+  prospective-other-active-data; do
+  expect_prospective_rejected "$mode"
+done
+
+if REPO="$REPOSITORY" NOW_EPOCH=2000 \
+  STUB_MODE=current-unmaterialized-data \
+  PROSPECTIVE_PROMOTION_PR="" \
+  PROSPECTIVE_MASTER_SHA="$PROSPECTIVE_SHA" \
+  "$EXCLUSIVITY" >/dev/null 2>&1; then
+  echo "raw prospective SHA unexpectedly bypassed a current-master ghost" >&2
+  exit 1
+fi
+
+if REPO="$REPOSITORY" NOW_EPOCH=2000 \
+  STUB_MODE=prospective-unmaterialized-data \
+  PROSPECTIVE_PROMOTION_PR="$PROMOTION_PR" \
+  EXCLUDE_RUN_ID="$RUN_ID" \
+  "$EXCLUSIVITY" >/dev/null 2>&1; then
+  echo "prospective bootstrap unexpectedly accepted EXCLUDE_RUN_ID" >&2
+  exit 1
+fi
 
 for mode in \
   active data-active activation-active disable-active ghcr-package-active \

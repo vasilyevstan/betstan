@@ -299,6 +299,16 @@ another agent or a duplicate policy page.
    original job is terminal or non-resumable, use its documented fresh
    exact-SHA recovery chain instead of pretending it resumed.
 
+For the narrow current-master unmaterialized promotion deadlock,
+`pr-merge-safety-stan.sh` may pass only the exact PR number to the checked-in
+exclusivity guard. The guard independently proves the OPEN CLI-managed
+same-repository `dev` -> `master` PR, actual-master base, and strict
+prospective-head ancestry before using that head for this one ghost
+classification. A raw prospective SHA is never authority; normal dispatch,
+approval, authority-fence, and every other active-run decision remain bound
+to actual master. `EXCLUDE_RUN_ID` and generic disabled handling are never
+prospective-bootstrap evidence.
+
 Never bypass or edit live authority state ad hoc. Use only the checked-in
 authority transitions and evidence requirements.
 Never weaken a gate merely to make progress. Never change a policy when the

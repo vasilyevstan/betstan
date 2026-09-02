@@ -11,6 +11,7 @@ REPO="${REPO:-vasilyevstan/betstan}"
 EXCLUDE_RUN_ID="${EXCLUDE_RUN_ID:-}"
 STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
+PROSPECTIVE_PROMOTION_PR="${PROSPECTIVE_PROMOTION_PR:-}"
 
 [[ -z "$EXCLUDE_RUN_ID" || "$EXCLUDE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
   echo "EXCLUDE_RUN_ID must be empty or a positive integer" >&2
@@ -24,9 +25,145 @@ NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
   echo "NOW_EPOCH must be a positive integer" >&2
   exit 1
 }
+[[ -z "$PROSPECTIVE_PROMOTION_PR" ||
+  "$PROSPECTIVE_PROMOTION_PR" =~ ^[1-9][0-9]*$ ]] || {
+  echo "PROSPECTIVE_PROMOTION_PR must be empty or a positive integer" >&2
+  exit 1
+}
+[[ -z "$PROSPECTIVE_PROMOTION_PR" || -z "$EXCLUDE_RUN_ID" ]] || {
+  echo "prospective promotion bootstrap cannot use EXCLUDE_RUN_ID" >&2
+  exit 1
+}
 [[ -x "$AUTHORITY_HELPER" ]] || {
   echo "unmaterialized evidence validator is unavailable" >&2
   exit 1
+}
+
+read_current_master() {
+  gh api "repos/$REPO/git/ref/heads/master" |
+    python3 -c '
+import json
+import re
+import sys
+
+payload = json.load(sys.stdin)
+sha = (payload.get("object") or {}).get("sha")
+if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+    raise SystemExit("current master SHA is unavailable or malformed")
+print(sha)
+'
+}
+
+verify_prospective_promotion() {
+  local compare_file="$1"
+  local actual_master promotion_json prospective_sha rechecked_master
+
+  actual_master="$(read_current_master)" || return 1
+  promotion_json="$(
+    gh pr view "$PROSPECTIVE_PROMOTION_PR" --repo "$REPO" \
+      --json number,state,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,labels
+  )" || return 1
+  prospective_sha="$(
+    python3 - "$promotion_json" "$REPO" "$PROSPECTIVE_PROMOTION_PR" \
+      "$actual_master" <<'PY'
+import json
+import re
+import sys
+
+payload, repository, requested_number, actual_master = sys.argv[1:]
+try:
+    pull = json.loads(payload)
+except json.JSONDecodeError as error:
+    raise SystemExit(f"prospective promotion metadata is malformed: {error}")
+if not isinstance(pull, dict):
+    raise SystemExit("prospective promotion metadata is malformed")
+if type(pull.get("number")) is not int or pull["number"] != int(requested_number):
+    raise SystemExit("prospective promotion number does not match")
+if pull.get("state") != "OPEN":
+    raise SystemExit("prospective promotion is not open")
+if pull.get("baseRefName") != "master" or pull.get("baseRefOid") != actual_master:
+    raise SystemExit("prospective promotion base is not exact current master")
+if pull.get("headRefName") != "dev":
+    raise SystemExit("prospective promotion head is not dev")
+head_repository = pull.get("headRepository")
+if (
+    not isinstance(head_repository, dict)
+    or head_repository.get("nameWithOwner") != repository
+):
+    raise SystemExit("prospective promotion head repository does not match")
+labels = pull.get("labels")
+if (
+    not isinstance(labels, list)
+    or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
+        for label in labels
+    )
+    or not any(label["name"] == "copilot-cli-managed" for label in labels)
+):
+    raise SystemExit("prospective promotion is not CLI-managed")
+head_sha = pull.get("headRefOid")
+if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+    raise SystemExit("prospective promotion head SHA is malformed")
+print(head_sha)
+PY
+  )" || return 1
+  gh api "repos/$REPO/compare/${actual_master}...${prospective_sha}" \
+    >"$compare_file" || return 1
+  python3 - "$compare_file" "$actual_master" "$prospective_sha" <<'PY' || return 1
+import json
+import re
+import sys
+
+path, actual_master, prospective_sha = sys.argv[1:]
+try:
+    compare = json.load(open(path, encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"prospective promotion compare is malformed: {error}")
+if not isinstance(compare, dict):
+    raise SystemExit("prospective promotion compare is malformed")
+def integer(value):
+    return type(value) is int
+ahead_by = compare.get("ahead_by")
+behind_by = compare.get("behind_by")
+total_commits = compare.get("total_commits")
+if (
+    compare.get("status") != "ahead"
+    or not integer(ahead_by)
+    or ahead_by < 1
+    or not integer(behind_by)
+    or behind_by != 0
+    or not integer(total_commits)
+    or total_commits != ahead_by
+):
+    raise SystemExit("prospective promotion compare does not prove strict ancestry")
+for field, expected in (
+    ("base_commit", actual_master),
+    ("merge_base_commit", actual_master),
+    ("head_commit", prospective_sha),
+):
+    commit = compare.get(field)
+    if not isinstance(commit, dict) or commit.get("sha") != expected:
+        raise SystemExit(f"prospective promotion compare {field} is not exact")
+commits = compare.get("commits")
+if not isinstance(commits, list) or len(commits) != total_commits:
+    raise SystemExit("prospective promotion compare commit list is incomplete")
+commit_shas = []
+for commit in commits:
+    if not isinstance(commit, dict):
+        raise SystemExit("prospective promotion compare commit is malformed")
+    sha = commit.get("sha")
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise SystemExit("prospective promotion compare commit SHA is malformed")
+    commit_shas.append(sha)
+if len(set(commit_shas)) != len(commit_shas) or prospective_sha not in commit_shas:
+    raise SystemExit("prospective promotion compare does not reach its head")
+PY
+  rechecked_master="$(read_current_master)" || return 1
+  [[ "$rechecked_master" == "$actual_master" ]] || {
+    echo "current master changed while verifying prospective promotion" >&2
+    return 1
+  }
+  printf '%s\t%s\n' "$actual_master" "$prospective_sha"
 }
 
 tmp_runs="$(mktemp)"
@@ -40,11 +177,12 @@ tmp_workflow="$(mktemp)"
 tmp_jobs="$(mktemp)"
 tmp_pending="$(mktemp)"
 tmp_artifacts="$(mktemp)"
+tmp_prospective_ancestry="$(mktemp)"
 cleanup() {
   rm -f \
     "$tmp_runs" "$tmp_candidates" "$tmp_workflows" "$tmp_successful_runs" \
     "$tmp_ancestry" "$tmp_historical_workflow" "$tmp_run" "$tmp_workflow" \
-    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts"
+    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts" "$tmp_prospective_ancestry"
 }
 trap cleanup EXIT
 
@@ -133,11 +271,13 @@ do
   printf '%s\n' "$pending_json" >"$tmp_pending"
   master_sha=""
   unmaterialized="no"
+  prospective_annotation=""
   printf '%s\n' '{"total_count":0,"workflow_runs":[]}' >"$tmp_successful_runs"
   printf '%s\n' '{}' >"$tmp_ancestry"
   printf '%s\n' '{}' >"$tmp_historical_workflow"
   printf '%s\n' '{}' >"$tmp_run"
   printf '%s\n' '{}' >"$tmp_artifacts"
+  printf '%s\n' '{}' >"$tmp_prospective_ancestry"
   if [[
     (
       "$path" == ".github/workflows/oci-capacity-acquire.yml" ||
@@ -146,20 +286,10 @@ do
     ) &&
       "$status" == "queued"
   ]]; then
-    master_sha="$(
-      gh api "repos/$REPO/git/ref/heads/master" |
-        python3 -c '
-import json
-import sys
-
-payload = json.load(sys.stdin)
-print((payload.get("object") or {}).get("sha", ""))
-'
-    )"
-    [[ "$master_sha" =~ ^[0-9a-f]{40}$ ]] || {
+    if ! master_sha="$(read_current_master)"; then
       echo "Current master SHA is unavailable or malformed" >&2
       exit 1
-    }
+    fi
     [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
       echo "Run $run_id has a malformed head SHA" >&2
       exit 1
@@ -190,6 +320,50 @@ print((payload.get("object") or {}).get("sha", ""))
       --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
       --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
       unmaterialized="yes"
+    fi
+    if [[
+      -n "$PROSPECTIVE_PROMOTION_PR" &&
+        "$head_sha" == "$master_sha" &&
+        "$event" == "workflow_dispatch" &&
+        "$run_attempt" == "1"
+    ]]; then
+      if ! prospective_context="$(
+        verify_prospective_promotion "$tmp_prospective_ancestry"
+      )"; then
+        echo "prospective promotion bootstrap is invalid" >&2
+        exit 1
+      fi
+      IFS=$'\t' read -r prospective_actual_master prospective_master_sha \
+        <<<"$prospective_context"
+      [[
+        "$prospective_actual_master" == "$master_sha" &&
+          "$prospective_master_sha" =~ ^[0-9a-f]{40}$
+      ]] || {
+        echo "prospective promotion bootstrap context is malformed" >&2
+        exit 1
+      }
+      if "$AUTHORITY_HELPER" classify-unmaterialized-run \
+        --run-json "$tmp_run" \
+        --workflow-json "$tmp_workflow" \
+        --jobs-json "$tmp_jobs" \
+        --pending-json "$tmp_pending" \
+        --artifacts-json "$tmp_artifacts" \
+        --compare-json "$tmp_prospective_ancestry" \
+        --historical-workflow-json "$tmp_historical_workflow" \
+        --repository "$REPO" \
+        --current-master "$prospective_master_sha" \
+        --expected-run-id "$run_id" \
+        --expected-workflow-id "$workflow_id" \
+        --expected-path "$path" \
+        --expected-head-sha "$head_sha" \
+        --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
+        --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
+        unmaterialized="yes"
+        prospective_annotation=" prospective_unmaterialized=yes"
+        prospective_annotation+=" prospective_promotion_pr=$PROSPECTIVE_PROMOTION_PR"
+        prospective_annotation+=" actual_master_sha=$master_sha"
+        prospective_annotation+=" prospective_master_sha=$prospective_master_sha"
+      fi
     fi
   fi
   classification="$(
@@ -403,7 +577,7 @@ print(
 PY
   )"
   if [[ "$classification" == inert=yes* ]]; then
-    echo "ignored_inert_run=$run_id path=$path status=$status $classification"
+    echo "ignored_inert_run=$run_id path=$path status=$status $classification$prospective_annotation"
     continue
   fi
 

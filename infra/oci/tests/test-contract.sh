@@ -1090,6 +1090,9 @@ deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agen
 common_readme="$ROOT_DIR/common/README.md"
 run_exclusivity_script="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
 authority_helper="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+pr_merge_safety="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
+cli_dispatcher="$ROOT_DIR/infra/azure/agents/copilot-cli-dispatch-stan.sh"
+run_approver="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
 pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
@@ -1130,6 +1133,15 @@ for recovery_contract in \
   grep -Fq "$recovery_contract" "$deployment_safety_agent" ||
     fail "deployment safety omits unmaterialized recovery contract: $recovery_contract"
 done
+for prospective_contract in \
+    'Only `pr-merge-safety-stan.sh` may request the prospective-master bootstrap' \
+    'same-repository `dev` -> `master` PR whose base SHA' \
+    'normal dispatch or approval remains bound to actual master and blocking' \
+    'It never uses `EXCLUDE_RUN_ID` or generic disabled classification' \
+    'claimed/inflight authority fence remains unresolved'; do
+  grep -Fq "$prospective_contract" "$deployment_safety_agent" ||
+    fail "deployment safety omits prospective-master bootstrap contract: $prospective_contract"
+done
 for recovery_contract in \
     'reason=unmaterialized' \
     'regardless of control SHA' \
@@ -1137,6 +1149,15 @@ for recovery_contract in \
     'rebuild the exact-SHA chain'; do
   grep -Fq "$recovery_contract" "$conductor_agent" ||
     fail "conductor omits unmaterialized recovery contract: $recovery_contract"
+done
+for prospective_contract in \
+    'For the narrow current-master unmaterialized promotion deadlock' \
+    'may pass only the exact PR number to the checked-in' \
+    'A raw prospective SHA is never authority' \
+    'approval, authority-fence, and every other active-run decision remain bound' \
+    '`EXCLUDE_RUN_ID` and generic disabled handling are never'; do
+  grep -Fq "$prospective_contract" "$conductor_agent" ||
+    fail "conductor omits prospective-master bootstrap contract: $prospective_contract"
 done
 for recovery_contract in \
     'Promotion cannot silently clear the fence' \
@@ -1155,10 +1176,34 @@ for self_blocker_learning in \
   grep -Fq "$self_blocker_learning" "$ROOT_DIR/LEARNINGS.md" ||
     fail "learnings omit governed self-blocker recovery: $self_blocker_learning"
 done
+for prospective_learning in \
+    'A current-master ghost can block the guard promotion' \
+    'exclusivity must independently prove an OPEN CLI-managed' \
+    'allowlisted queued unmaterialized ghost, never for normal dispatch' \
+    'approval, another active run, or the repository-global claimed/inflight' \
+    '`EXCLUDE_RUN_ID` and generic disabled handling cannot'; do
+  grep -Fq "$prospective_learning" "$ROOT_DIR/LEARNINGS.md" ||
+    fail "learnings omit prospective-master bootstrap: $prospective_learning"
+done
 grep -Fq 'classify-unmaterialized-run' "$run_exclusivity_script" ||
   fail "production exclusivity does not invoke unmaterialized classification"
 grep -Fq 'retire-unmaterialized-claim' "$authority_helper" ||
   fail "authority helper does not expose unmaterialized retirement"
+grep -Fq 'verify_prospective_promotion' "$run_exclusivity_script" ||
+  fail "production exclusivity does not verify prospective promotion evidence"
+grep -Fq 'PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' "$pr_merge_safety" ||
+  fail "merge safety does not pass the exact prospective promotion PR"
+grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' \
+  "$pr_merge_safety" ||
+  fail "merge safety does not clear exclusion state before prospective bootstrap"
+grep -Fq 'PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"' \
+  "$cli_dispatcher" ||
+  fail "normal dispatcher can inherit prospective promotion context"
+grep -Fq 'PROSPECTIVE_PROMOTION_PR=""' "$run_approver" ||
+  fail "normal approver can inherit prospective promotion context"
+if grep -Fq 'PROSPECTIVE_MASTER_SHA' "$run_exclusivity_script"; then
+  fail "production exclusivity trusts a raw prospective SHA environment value"
+fi
 [[ -f "$pr_template" ]] || fail "pull request evidence template is missing"
 for heading in \
     '## Why this change exists' \

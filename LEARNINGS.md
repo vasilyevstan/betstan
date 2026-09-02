@@ -797,6 +797,15 @@ validated.
   Then rebuild the complete exact-SHA chain; retirement never authorizes an
   automatic redispatch or approval. A cancellation `409` is journal
   corroboration only, never classifier or retirement evidence.
+- A current-master ghost can block the guard promotion that would make it
+  safely historical. The merge-safety path may pass only its exact promotion
+  PR number; exclusivity must independently prove an OPEN CLI-managed
+  same-repository `dev` -> `master` PR, exact current-master base, and strict
+  prospective-head ancestry. Use that prospective SHA only for the
+  allowlisted queued unmaterialized ghost, never for normal dispatch,
+  approval, another active run, or the repository-global claimed/inflight
+  authority fence. `EXCLUDE_RUN_ID` and generic disabled handling cannot
+  supply prospective-bootstrap evidence.
 - A critical path blocked by a repository-introduced rule, policy, or guard is
   not automatically an external safety wait. The conductor must prove the
   exact self-imposed cause and the intended invariant; if real production

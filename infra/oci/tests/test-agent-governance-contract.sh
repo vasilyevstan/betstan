@@ -309,6 +309,12 @@ require_flat_literal "$CONDUCTOR" \
   'Never bypass or edit live authority state ad hoc'
 require_flat_literal "$CONDUCTOR" \
   'Never weaken a gate merely to make progress'
+require_flat_literal "$CONDUCTOR" \
+  'For the narrow current-master unmaterialized promotion deadlock'
+require_flat_literal "$CONDUCTOR" \
+  'The guard independently proves the OPEN CLI-managed same-repository `dev` -> `master` PR'
+require_flat_literal "$CONDUCTOR" \
+  'A raw prospective SHA is never authority'
 
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'
