@@ -814,6 +814,15 @@ if run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
 fi
 grep -qF "display title" "$error_file"
 
+load_record_stub oci-live-data-apply-backfills
+STUB_TITLE="oci-live-data-rollout"
+export STUB_TITLE
+if run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "generic-title stale data ghost unexpectedly received CLI approval" >&2
+  exit 1
+fi
+grep -qF "display title" "$error_file"
+
 load_record_stub oci-live-data-dry-run
 STUB_API_BLOB="3333333333333333333333333333333333333333"
 export STUB_API_BLOB

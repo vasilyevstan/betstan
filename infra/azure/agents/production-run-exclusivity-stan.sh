@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 REPO="${REPO:-vasilyevstan/betstan}"
 EXCLUDE_RUN_ID="${EXCLUDE_RUN_ID:-}"
 STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
@@ -23,6 +24,10 @@ NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
   echo "NOW_EPOCH must be a positive integer" >&2
   exit 1
 }
+[[ -x "$AUTHORITY_HELPER" ]] || {
+  echo "unmaterialized evidence validator is unavailable" >&2
+  exit 1
+}
 
 tmp_runs="$(mktemp)"
 tmp_candidates="$(mktemp)"
@@ -30,10 +35,16 @@ tmp_workflows="$(mktemp)"
 tmp_successful_runs="$(mktemp)"
 tmp_ancestry="$(mktemp)"
 tmp_historical_workflow="$(mktemp)"
+tmp_run="$(mktemp)"
+tmp_workflow="$(mktemp)"
+tmp_jobs="$(mktemp)"
+tmp_pending="$(mktemp)"
+tmp_artifacts="$(mktemp)"
 cleanup() {
   rm -f \
     "$tmp_runs" "$tmp_candidates" "$tmp_workflows" "$tmp_successful_runs" \
-    "$tmp_ancestry" "$tmp_historical_workflow"
+    "$tmp_ancestry" "$tmp_historical_workflow" "$tmp_run" "$tmp_workflow" \
+    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts"
 }
 trap cleanup EXIT
 
@@ -70,7 +81,7 @@ while index < len(payload):
         raise SystemExit("active run inventory response is malformed")
     total_count = response.get("total_count")
     runs = response.get("workflow_runs")
-    if not isinstance(total_count, int) or total_count < 0:
+    if type(total_count) is not int or total_count < 0:
         raise SystemExit("active run inventory count is malformed")
     if total_count > 100:
         raise SystemExit("more than 100 active runs requires manual review")
@@ -96,10 +107,10 @@ while index < len(payload):
             run.get("run_attempt"),
         )
         if (
-            not isinstance(run_id, int)
-            or not isinstance(run.get("workflow_id"), int)
+            type(run_id) is not int
+            or type(run.get("workflow_id")) is not int
             or any(not isinstance(value, str) or not value for value in values[2:7])
-            or not isinstance(values[7], int)
+            or type(values[7]) is not int
             or values[7] < 1
         ):
             raise SystemExit("active run metadata is malformed")
@@ -117,10 +128,16 @@ do
   workflow_json="$(gh api "repos/$REPO/actions/workflows/$workflow_id")"
   jobs_json="$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=1")"
   pending_json="$(gh api "repos/$REPO/actions/runs/$run_id/pending_deployments")"
+  printf '%s\n' "$workflow_json" >"$tmp_workflow"
+  printf '%s\n' "$jobs_json" >"$tmp_jobs"
+  printf '%s\n' "$pending_json" >"$tmp_pending"
   master_sha=""
+  unmaterialized="no"
   printf '%s\n' '{"total_count":0,"workflow_runs":[]}' >"$tmp_successful_runs"
   printf '%s\n' '{}' >"$tmp_ancestry"
   printf '%s\n' '{}' >"$tmp_historical_workflow"
+  printf '%s\n' '{}' >"$tmp_run"
+  printf '%s\n' '{}' >"$tmp_artifacts"
   if [[
     (
       "$path" == ".github/workflows/oci-capacity-acquire.yml" ||
@@ -151,12 +168,28 @@ print((payload.get("object") or {}).get("sha", ""))
       "repos/$REPO/actions/workflows/$workflow_id/runs?head_sha=$head_sha&event=workflow_dispatch&status=success&per_page=100" \
       >"$tmp_successful_runs"
     gh api "repos/$REPO/compare/$head_sha...$master_sha" >"$tmp_ancestry"
-    if [[
-      "$path" == ".github/workflows/oci-live-data-rollout.yml" ||
-        "$path" == ".github/workflows/oci-live-betting-activate.yml"
-    ]]; then
-      gh api "repos/$REPO/contents/$path?ref=$head_sha" \
-        >"$tmp_historical_workflow"
+    gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+    gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
+      >"$tmp_artifacts"
+    gh api "repos/$REPO/contents/$path?ref=$head_sha" \
+      >"$tmp_historical_workflow"
+    if "$AUTHORITY_HELPER" classify-unmaterialized-run \
+      --run-json "$tmp_run" \
+      --workflow-json "$tmp_workflow" \
+      --jobs-json "$tmp_jobs" \
+      --pending-json "$tmp_pending" \
+      --artifacts-json "$tmp_artifacts" \
+      --compare-json "$tmp_ancestry" \
+      --historical-workflow-json "$tmp_historical_workflow" \
+      --repository "$REPO" \
+      --current-master "$master_sha" \
+      --expected-run-id "$run_id" \
+      --expected-workflow-id "$workflow_id" \
+      --expected-path "$path" \
+      --expected-head-sha "$head_sha" \
+      --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
+      --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
+      unmaterialized="yes"
     fi
   fi
   classification="$(
@@ -164,7 +197,7 @@ print((payload.get("object") or {}).get("sha", ""))
       "$tmp_successful_runs" "$tmp_ancestry" "$tmp_historical_workflow" \
       "$run_id" "$workflow_id" "$path" "$status" "$updated_at" "$head_sha" \
       "$event" "$run_attempt" "$master_sha" "$NOW_EPOCH" \
-      "$STALE_DISABLED_MIN_AGE_SECONDS" <<'PY'
+      "$STALE_DISABLED_MIN_AGE_SECONDS" "$unmaterialized" <<'PY'
 import base64
 import datetime
 import json
@@ -190,6 +223,7 @@ run_attempt = int(sys.argv[14])
 master_sha = sys.argv[15]
 now = datetime.datetime.fromtimestamp(int(sys.argv[16]), datetime.timezone.utc)
 minimum_age = int(sys.argv[17])
+unmaterialized = sys.argv[18]
 state = workflow.get("state")
 job_count = jobs.get("total_count")
 job_entries = jobs.get("jobs")
@@ -198,11 +232,11 @@ successful_entries = successful_runs.get("workflow_runs")
 if (
     not isinstance(state, str)
     or workflow.get("path") != path
-    or not isinstance(job_count, int)
+    or type(job_count) is not int
     or job_count < 0
     or not isinstance(job_entries, list)
     or not isinstance(pending, list)
-    or not isinstance(successful_count, int)
+    or type(successful_count) is not int
     or successful_count < 0
     or not isinstance(successful_entries, list)
     or len(successful_entries) != successful_count
@@ -218,6 +252,12 @@ jobless_and_old = (
 disabled_inert = (
     state.startswith("disabled_")
     and jobless_and_old
+    # A queued jobless record can only be ignored through the exact
+    # unmaterialized or supersession classifiers. The generic disabled path
+    # must never bypass their current-master and workflow allowlists, including
+    # a manual run whose provider status changes before it materializes.
+    and status != "queued"
+    and event != "workflow_dispatch"
 )
 
 supersession_kind = {
@@ -339,8 +379,18 @@ elif supersession_kind == "live-data":
     if required_titles.issubset(successors_by_title):
         superseded_by = sorted(successors_by_title.values())
 
-inert = disabled_inert or bool(superseded_by)
-reason = "disabled" if disabled_inert else "superseded" if superseded_by else "none"
+if unmaterialized not in {"yes", "no"}:
+    raise SystemExit("unmaterialized classifier result is malformed")
+inert = disabled_inert or bool(superseded_by) or unmaterialized == "yes"
+reason = (
+    "disabled"
+    if disabled_inert
+    else "superseded"
+    if superseded_by
+    else "unmaterialized"
+    if unmaterialized == "yes"
+    else "none"
+)
 print(
     f"inert={'yes' if inert else 'no'} state={state} jobs={job_count} "
     f"pending={len(pending)} age_seconds={age_seconds} reason={reason}"

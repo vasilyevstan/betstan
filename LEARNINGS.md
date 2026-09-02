@@ -746,13 +746,13 @@ validated.
   only when that exact run appears. Use `--resume-captured` after a pre-bind
   crash and `--resume-run` after delayed materialization. Never infer identity
   from title or timing, and never redispatch a URL-less unresolved intent.
-- Treat an unresolved same-release authority state as global, not
-  request-local. Any `dispatching`/`bound` intent or `claimed`/`inflight`
-  record blocks every protected request for the repository and control SHA.
-  `issued` and `consumed` are one-use for the same operation and exact
-  transport input hash; changed inputs form a new request but do not bypass
-  policy, lineage, recovery, or exclusivity. `retired` is the only inert
-  replacement exception.
+- Treat unresolved authority as repository-global, not request-local. Any
+  `dispatching`/`bound` intent or `claimed`/`inflight` record blocks every
+  protected request for that repository even after control SHA advances.
+  Promotion cannot silently clear the fence. `issued` and `consumed` remain
+  one-use for the same operation and exact transport input hash; changed
+  inputs form a new request but do not bypass policy, lineage, recovery, or
+  exclusivity. `retired` is the only inert replacement exception.
 - Persisting an intent is not the last dispatch check. Revalidate current
   master, workflow blob, and active state after creating it, and cancel only a
   pristine untouched intent if authority drifted before the GitHub call.
@@ -780,6 +780,33 @@ validated.
   and receipt lifecycle as directly dispatched runs. A captured terminal run
   is safe to mark `retired` only with zero jobs and zero pending deployments;
   that proof, not age or a generic conclusion, permits a replacement dispatch.
+- A claimed accepted-but-unmaterialized run is not a terminal claim. Keep its
+  affected workflow disabled while its generic-title ghost SHA is current,
+  and never grant it human or CLI environment approval. Promote the
+  current-master safety guard first; never reset master to the poisoned SHA.
+  After that SHA is a strict ancestor, only
+  `retire-unmaterialized-claim` may migrate the exact v1 claim to a retired
+  record, with optimistic version locking and a digest of complete run,
+  jobs, pending-deployment, artifact, compare, and historical-workflow
+  evidence. The path is restricted to data rollout, live activation, and
+  capacity acquisition; it requires queued/null first-attempt manual identity,
+  equal untouched timestamps, zero exact count/list jobs and artifacts,
+  zero pending deployments, a generic workflow-name title that cannot match
+  a legitimate rendered title, and a one-job historical protected workflow
+  whose `oci-control-plane` non-cancelling guards precede every mutation.
+  Then rebuild the complete exact-SHA chain; retirement never authorizes an
+  automatic redispatch or approval. A cancellation `409` is journal
+  corroboration only, never classifier or retirement evidence.
+- A critical path blocked by a repository-introduced rule, policy, or guard is
+  not automatically an external safety wait. The conductor must prove the
+  exact self-imposed cause and the intended invariant; if real production
+  risk, provenance, approval, health, rollback, or authority evidence remains
+  unresolved, keep the block. Otherwise it owns one focused correction through
+  branch -> `dev` -> `master`, with a reproducing test. It requires an
+  independent deployment-safety challenge, rollback preservation, and
+  post-promotion exact-SHA revalidation before automatic resumption of the
+  exact original job.
+  Never weaken a gate to make progress or edit live authority state ad hoc.
 - Expired `claimed` and `inflight` records stay inspectable so exact recovery
   remains possible. Issuing an active claimed run or restoring retry authority
   for the same active gate renews the bounded window; reconciled consumption,

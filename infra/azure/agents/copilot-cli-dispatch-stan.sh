@@ -325,7 +325,7 @@ materialize_record() {
     fi
   done
 
-  fail "dispatch was accepted as run $run_id, but exact materialization was not proven; do not redispatch, resume this run"
+  fail "dispatch was accepted as run $run_id, but it remains in an accepted-but-unmaterialized provider state; exact materialization was not proven, do not redispatch, resume this run"
 }
 
 if [[ -n "$ACTION" ]]; then

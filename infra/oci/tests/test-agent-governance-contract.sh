@@ -290,6 +290,25 @@ require_flat_literal "$CONDUCTOR" \
   'if it repeats the mismatch, close that advisory result as unavailable'
 require_flat_literal "$CONDUCTOR" \
   'Every other PR remains approval-bound to its exact current head SHA'
+require_literal "$CONDUCTOR" 'tools: [read, search, execute, edit, web]'
+require_flat_literal "$CONDUCTOR" \
+  'When a critical path is blocked by a checked-in rule, policy, or guard that this repository introduced, the conductor must not classify that as an external wait, passively wait, or repeatedly hand it off'
+require_flat_literal "$CONDUCTOR" \
+  'It owns one bounded governed correction under the original registered work ID; do not create another agent or a duplicate policy page'
+require_flat_literal "$CONDUCTOR" \
+  'A self-imposed correction is ineligible when the evidence shows a real unresolved production risk'
+require_flat_literal "$CONDUCTOR" \
+  'normal focused branch -> `dev` -> `master` path'
+require_flat_literal "$CONDUCTOR" \
+  'independent safety challenge through the existing deployment-safety quality gate, not a new agent'
+require_flat_literal "$CONDUCTOR" \
+  'Preserve rollback evidence and revalidate the exact promoted SHA'
+require_flat_literal "$CONDUCTOR" \
+  'resume the original registered job automatically from its exact persisted state'
+require_flat_literal "$CONDUCTOR" \
+  'Never bypass or edit live authority state ad hoc'
+require_flat_literal "$CONDUCTOR" \
+  'Never weaken a gate merely to make progress'
 
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'
