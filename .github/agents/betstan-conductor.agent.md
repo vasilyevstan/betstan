@@ -310,10 +310,14 @@ its owner. It is never healthy by default.
   only through the helper's exact stale-lock check; never delete a live or
   unverified lock.
 - A jobless queued dispatch with zero jobs and zero pending approvals is not
-  usable authority. Keep it unapproved and disabled. Retire its exact record
-  as inert evidence, and permit replacement only after the run becomes
-  terminal and that retirement is persisted; age, a queue label, or missing
-  pending evidence alone is insufficient.
+  usable approval authority. Keep it unapproved. For global production
+  exclusivity, immediately run the checked-in supersession classifier before
+  starting another watch interval: only its workflow-specific proof of an old
+  non-current ancestor, zero jobs and approvals, exact successful successor
+  work, and any required historical stale-master mutation fence may classify a
+  provider ghost as inert. Otherwise keep the workflow disabled and require a
+  terminal transition. Never let age, a queue label, or missing pending
+  evidence alone create approval or replacement authority.
 - If an earlier job is terminal while a downstream job is `waiting`, `pending`,
   or `queued` with no executing step, classify the run before waiting again.
   Query `pending_deployments` in the same checkpoint. A completed deploy job
