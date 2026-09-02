@@ -349,6 +349,13 @@ elif mode == "malformed":
     compare = {"status": "ahead"}
 elif mode == "wrong-final":
     compare["commits"] = [{"sha": "e" * 40}]
+elif mode == "head-present-not-final":
+    compare["ahead_by"] = 2
+    compare["total_commits"] = 2
+    compare["commits"] = [
+        {"sha": master_sha},
+        {"sha": "e" * 40},
+    ]
 historical = {
     "type": "file",
     "path": ".github/workflows/oci-live-data-rollout.yml",
@@ -768,7 +775,7 @@ retire_test_run_id=7310
 for rejection in \
   nonancestor rendered-title wrong-identity wrong-run-id wrong-path wrong-event \
   wrong-head wrong-branch wrong-attempt wrong-repository jobs pending artifacts \
-  malformed wrong-final; do
+  malformed wrong-final head-present-not-final; do
   prepare_unmaterialized_claim "$retire_test_run_id" "$rejection"
   if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then
     echo "unsafe unmaterialized retirement unexpectedly passed: $rejection" >&2

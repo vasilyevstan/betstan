@@ -543,6 +543,10 @@ gh() {
         printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
           "$MASTER_SHA" "$MASTER_SHA" "$WRONG_FINAL_SHA"
         ;;
+      prospective-head-present-not-final-data)
+        printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"},{"sha":"%s"}]}\n' \
+          "$MASTER_SHA" "$MASTER_SHA" "$PROSPECTIVE_SHA" "$WRONG_FINAL_SHA"
+        ;;
       *)
         printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
           "$MASTER_SHA" "$MASTER_SHA" "$PROSPECTIVE_SHA"
@@ -739,6 +743,7 @@ for mode in \
   prospective-nonancestor-data \
   prospective-malformed-compare-data \
   prospective-wrong-final-compare-data \
+  prospective-head-present-not-final-data \
   prospective-rendered-title-data \
   prospective-other-active-data; do
   expect_prospective_rejected "$mode"
