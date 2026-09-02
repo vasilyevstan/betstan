@@ -198,12 +198,15 @@ gh() {
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
-      if [[
-        "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" &&
-          -n "${PROSPECTIVE_PROMOTION_PR:-}"
-      ]]; then
-        echo "normal dispatcher leaked prospective promotion context" >&2
-        return 1
+      if [[ "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" ]]; then
+        if [[ -n "${PROSPECTIVE_PROMOTION_PR:-}" ]]; then
+          echo "normal dispatcher leaked prospective promotion context" >&2
+          return 1
+        fi
+        if [[ -n "${EXCLUDE_RUN_ID:-}" ]]; then
+          echo "normal dispatcher leaked an exclusion bypass" >&2
+          return 1
+        fi
       fi
       printf '{"total_count":0,"workflow_runs":[]}\n'
       ;;
@@ -530,7 +533,8 @@ fi
 grep -qF "non-symlink directory" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
 
-PROSPECTIVE_PROMOTION_PR=224 STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
+EXCLUDE_RUN_ID=9999 PROSPECTIVE_PROMOTION_PR=224 \
+  STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
   run_dispatcher "$request_file" --dispatch >"$output_file"
 grep -qF "authority_state=issued" "$output_file"
 [[ "$(cat "$dispatch_count_file")" = "1" ]]

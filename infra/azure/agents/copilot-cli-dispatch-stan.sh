@@ -391,7 +391,8 @@ if [[ -n "$blocking_record" ]]; then
 fi
 
 revalidate_dispatch_target
-REPO="$repository" PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"
+REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+  "$RUN_EXCLUSIVITY_SCRIPT"
 revalidate_dispatch_target
 
 intent_summary="$(

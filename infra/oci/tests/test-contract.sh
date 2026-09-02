@@ -1196,11 +1196,12 @@ grep -Fq 'PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' "$pr_merge_safety" ||
 grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' \
   "$pr_merge_safety" ||
   fail "merge safety does not clear exclusion state before prospective bootstrap"
-grep -Fq 'PROSPECTIVE_PROMOTION_PR="" "$RUN_EXCLUSIVITY_SCRIPT"' \
+grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR=""' \
   "$cli_dispatcher" ||
-  fail "normal dispatcher can inherit prospective promotion context"
-grep -Fq 'PROSPECTIVE_PROMOTION_PR=""' "$run_approver" ||
-  fail "normal approver can inherit prospective promotion context"
+  fail "normal dispatcher can inherit exclusion or prospective context"
+grep -Fq 'EXCLUDE_RUN_ID="$RUN_ID" PROSPECTIVE_PROMOTION_PR=""' \
+  "$run_approver" ||
+  fail "normal approver does not retain only its exact self-run exclusion"
 if grep -Fq 'PROSPECTIVE_MASTER_SHA' "$run_exclusivity_script"; then
   fail "production exclusivity trusts a raw prospective SHA environment value"
 fi
