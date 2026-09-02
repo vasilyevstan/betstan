@@ -56,10 +56,17 @@ inactive. Fail closed when either query is incomplete or fails.
 - Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Production-run exclusivity may ignore an active stale queue artifact only
-  for `oci-capacity-acquire`: require an old jobless and approval-free
-  first-attempt manual dispatch for a non-current SHA plus a later successful
-  first-attempt run for the exact workflow and SHA. Never apply this exception
-  to deployment, activation, rollback, infrastructure, or data workflows.
+  through the checked-in bounded supersession classifier. Every accepted
+  artifact must be an old jobless and approval-free first-attempt manual
+  dispatch for a non-current ancestor SHA. Capacity requires a later successful
+  first-attempt run for the exact workflow and SHA. Live data requires a later
+  successful first-attempt dry-run, backfill, and slip-index chain for that
+  exact workflow and SHA. Activation requires a later successful first-attempt
+  activation for the exact workflow and SHA. Live-data and activation evidence
+  is valid only when the historical workflow revision used the protected
+  environment, shared control-plane concurrency, and an exact-current-master
+  check before its first mutation. Never extend supersession to deployment,
+  disable, rollback, infrastructure, package, cache-recovery, or build work.
 - Classify protected approval by origin, not workflow type. Every direct
   Copilot CLI operation must use `copilot-cli-dispatch-stan.sh` and its exact
   private one-run authority record; this includes infrastructure `prepare`,
