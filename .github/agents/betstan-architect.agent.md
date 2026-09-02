@@ -22,8 +22,9 @@ Read:
 - current git branch, status, recent history, and exact base/head ancestry;
 - affected services' package manifests, entry points, routes, models, messaging,
   tests, and deployment boundaries;
-- installed `@betstan/common` declarations and exact package version when shared
-  source is unavailable.
+- `common/README.md`, tracked shared source, and every affected service's
+  installed `@betstan/common` declarations and exact package version. Treat
+  source-candidate and deployed-package versions as separate authorities.
 
 Never rely on a prior conversation, stale plan, or branch name as current truth.
 
@@ -34,6 +35,10 @@ Never rely on a prior conversation, stale plan, or branch name as current truth.
 - Separate product decisions from implementation choices.
 - Identify mixed-version, historical-data, concurrency, ordering, restart, and
   failure-recovery constraints.
+- For a shared-contract change, order source, package publication, exact
+  consumer repinning, mixed-version validation, deployment, and rollback as
+  separate dependencies. Source present in `common/` does not make an
+  unpublished contract available to service images.
 - For time-sensitive commands, identify the authoritative transition cutoff
   and immutable ingress timestamp; never make a delayed consumer's wall clock
   the acceptance boundary.

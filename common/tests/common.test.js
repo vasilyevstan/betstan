@@ -1,8 +1,51 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const common = require("../build");
 const legacyCommon = require("legacy-common");
+
+test("repository owns common source while services consume one exact package", () => {
+  const packageRoot = path.resolve(__dirname, "..");
+  const repositoryRoot = path.resolve(packageRoot, "..");
+  const serviceNames = [
+    "auth",
+    "backoffice",
+    "bet",
+    "event",
+    "gamemaster",
+    "moderation",
+    "resulting",
+    "slip",
+  ];
+
+  assert.equal(fs.lstatSync(packageRoot).isDirectory(), true);
+  assert.equal(fs.existsSync(path.join(packageRoot, ".git")), false);
+
+  const packageManifest = JSON.parse(
+    fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"),
+  );
+  assert.equal(packageManifest.name, "@betstan/common");
+
+  const pins = serviceNames.map((serviceName) => {
+    const serviceRoot = path.join(repositoryRoot, serviceName);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(serviceRoot, "package.json"), "utf8"),
+    );
+    const lock = JSON.parse(
+      fs.readFileSync(path.join(serviceRoot, "package-lock.json"), "utf8"),
+    );
+    const pin = manifest.dependencies?.["@betstan/common"];
+
+    assert.match(pin, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+    assert.equal(lock.packages?.[""]?.dependencies?.["@betstan/common"], pin);
+    assert.equal(lock.packages?.["node_modules/@betstan/common"]?.version, pin);
+    return pin;
+  });
+
+  assert.equal(new Set(pins).size, 1);
+});
 
 class FakeChannel {
   constructor(confirmError) {

@@ -8,6 +8,32 @@
 
 ## Architecture patterns
 
+### Shared package source and publication
+
+- `common/src/` is the canonical source for the next `@betstan/common`
+  candidate, while each deployable service compiles against its exact
+  published manifest/lockfile pin. Always inspect and report both versions;
+  repository source being newer does not make it available in a service image.
+- npm versions are immutable. After publishing a version, bump the Common
+  source version before its next content change so a locally packed artifact
+  cannot silently share a name with different registry content.
+- Keep all eight backend consumers on one exact version. Never use a caret,
+  dist-tag, `file:`, workspace, symlink, gitlink, or submodule as a deployment
+  dependency.
+- Validate Common with legacy runtime/export checks, immediate-predecessor
+  assignability, legacy AMQP types, and `npm pack`. For unpublished consumer
+  testing, start from lock-exact `npm ci` and replace only the isolated
+  `node_modules/@betstan/common` directory with the unpacked tarball.
+  `npm install --no-save <tarball>` is not valid evidence because it can
+  re-resolve unrelated TypeScript, Mongoose, or transitive dependencies.
+- Record source SHA, packed file list, npm integrity/shasum, independent
+  tarball SHA-256, publish authorization, dist-tag, and downloaded registry
+  hash. Publish first; repin and clean-install all consumers second.
+- Service-local compatibility bridges are temporary rolling-release adapters,
+  not another contract owner. Add the wire value to `common/src/` in the same
+  feature, keep it additive, and remove the bridge after consumers adopt the
+  published package containing it.
+
 ### Messaging (AMQP / RabbitMQ)
 - Every service communicates through RabbitMQ exchanges.
 - Base classes live in `@betstan/common`: `AListener<T>` (consumers) and `APublisher<T>` (producers).

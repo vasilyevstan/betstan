@@ -1070,9 +1070,25 @@ grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
   fail "OCI deployment validation omits the image-prefix inventory contract"
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"
+common_readme="$ROOT_DIR/common/README.md"
 pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
+
+[[ "$(git -C "$ROOT_DIR" ls-tree HEAD common | awk '{print $1}')" = "040000" ]] ||
+  fail "common source is not a normal tracked directory"
+if [[ -f "$ROOT_DIR/.gitmodules" ]] &&
+   grep -Eq '^[[:space:]]*path[[:space:]]*=[[:space:]]*common/?[[:space:]]*$' \
+     "$ROOT_DIR/.gitmodules"; then
+  fail "common source is configured as a submodule"
+fi
+[[ -f "$common_readme" ]] || fail "common package ownership guide is missing"
+grep -Fq 'canonical source for BetStan' "$common_readme" ||
+  fail "common guide omits source authority"
+grep -Fq 'npm versions are immutable' "$common_readme" ||
+  fail "common guide omits immutable package versioning"
+grep -Fq 'Do not use `npm install --no-save <tarball>`' "$common_readme" ||
+  fail "common guide omits lock-exact tarball validation"
 
 grep -Fq 'read every cited path from that same tree' "$deployment_safety_agent"
 grep -Fq 'never infer topology safety from a count' "$deployment_safety_agent"
