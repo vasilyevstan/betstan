@@ -56,17 +56,35 @@ inactive. Fail closed when either query is incomplete or fails.
 - Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
 - Production-run exclusivity may ignore an active stale queue artifact only
-  through the checked-in bounded supersession classifier. Every accepted
-  artifact must be an old jobless and approval-free first-attempt manual
-  dispatch for a non-current ancestor SHA. Capacity requires a later successful
-  first-attempt run for the exact workflow and SHA. Live data requires a later
-  successful first-attempt dry-run, backfill, and slip-index chain for that
-  exact workflow and SHA. Activation requires a later successful first-attempt
-  activation for the exact workflow and SHA. Live-data and activation evidence
-  is valid only when the historical workflow revision used the protected
-  environment, shared control-plane concurrency, and an exact-current-master
-  check before its first mutation. Never extend supersession to deployment,
-  disable, rollback, infrastructure, package, cache-recovery, or build work.
+  through the checked-in bounded supersession or unmaterialized classifier.
+  Supersession requires an old jobless and approval-free first-attempt manual
+  dispatch for a non-current ancestor SHA plus the exact workflow-specific
+  successful successor chain. The separate `reason=unmaterialized` path is
+  limited exactly to `oci-live-data-rollout.yml`,
+  `oci-live-betting-activate.yml`, and `oci-capacity-acquire.yml`: it requires
+  a queued/null first attempt whose created, started, and updated timestamps
+  are identical, stale, jobless, pending-deployment-free, artifact-free, and
+  generic-title-only; complete GitHub compare proof that its SHA is a strict
+  ancestor; and the historical one-job workflow blob's expected environment,
+  `oci-control-plane` non-cancelling concurrency, and exact-current-master
+  guards before every known mutation token. The generic title must equal the
+  workflow `name:` and must not match any legitimate rendered `run-name`.
+  A cancellation `409` is corroborative journal evidence only, never a
+  classifier input. Never extend either classifier to deployment, disable,
+  rollback,
+  infrastructure, package, cache-recovery, migration, or build work.
+- Only `pr-merge-safety-stan.sh` may request the prospective-master bootstrap,
+  and it passes the promotion PR number rather than a prospective SHA.
+  Exclusivity re-reads GitHub and accepts that context only for an OPEN,
+  `copilot-cli-managed`, same-repository `dev` -> `master` PR whose base SHA
+  equals actual current master and whose exact head strictly descends from it.
+  It may use that head only to classify an otherwise current-master,
+  allowlisted queued unmaterialized ghost; every other active run and every
+  normal dispatch or approval remains bound to actual master and blocking.
+  It never uses `EXCLUDE_RUN_ID` or generic disabled classification as
+  prospective-bootstrap evidence.
+  The repository-global claimed/inflight authority fence remains unresolved
+  until its explicit evidence-bound retirement.
 - Classify protected approval by origin, not workflow type. Every direct
   Copilot CLI operation must use `copilot-cli-dispatch-stan.sh` and its exact
   private one-run authority record; this includes infrastructure `prepare`,
@@ -88,11 +106,16 @@ inactive. Fail closed when either query is incomplete or fails.
   the recorded pre-POST reviewer/comment/environment baseline before consuming
   it; gate disappearance or terminal status alone stays unresolved. Accept
   `retired` only for an exact terminal run with zero jobs and zero pending
-  deployments.
+  deployments. A claimed never-transitioned generic-title ghost is different:
+  keep it fenced and unapproved until master advances; only the explicit
+  evidence-bound `retire-unmaterialized-claim` transition may retire it after
+  strict-ancestor, historical-blob, zero-job/pending/artifact, and
+  stale-before-mutation proof.
 - Treat any unresolved intent or `claimed`/`inflight` record as a global
-  protected-dispatch fence for the same repository and control SHA.
-  `issued`/`consumed` authority is one-use for the same operation and exact
-  transport input hash; changed inputs remain subject to every normal check.
+  protected-dispatch fence for the same repository regardless of control SHA;
+  promotion must not silently clear it. `issued`/`consumed` authority keeps
+  its normal one-use scope for the same operation and exact transport input
+  hash; only an explicit valid retirement releases a stale unresolved fence.
 - Require `disabled_manually` at approval for capacity, infrastructure,
   activation, live-data, migration-recovery, and production-deploy workflows;
   require `active` for every other protected workflow. Revalidate current
@@ -186,6 +209,12 @@ inactive. Fail closed when either query is incomplete or fails.
   dispatch URL proves event acceptance, not job materialization. Disable before
   approval, and inspect the exact run before any retry when a local command
   fails after printing its URL.
+- If a generic-title jobless dispatch is still at current master, keep the
+  affected workflow disabled and never submit either a human or CLI environment
+  approval for it. Promote the safety guard first through the normal path;
+  never reset master to the poisoned SHA. Once that SHA is a strict ancestor,
+  explicitly retire only a fully proven unmaterialized claim and rebuild the
+  complete exact-SHA release chain from the promoted master.
 - Retired central and per-service workflow identities must stay disabled so historical definitions cannot be rerun.
 - Do not change the trusted `production-build.yml` as part of a database
   topology change unless its workflow-blob bootstrap is separately approved.

@@ -290,6 +290,13 @@ PY
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
+      if [[
+        "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" &&
+          -n "${PROSPECTIVE_PROMOTION_PR:-}"
+      ]]; then
+        echo "normal approver leaked prospective promotion context" >&2
+        return 1
+      fi
       printf '{"total_count":0,"workflow_runs":[]}\n'
       ;;
     user)
@@ -581,6 +588,12 @@ done < <(
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
 
+load_record_stub production-deploy
+PROSPECTIVE_PROMOTION_PR=224 STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
+  run_approver "$STUB_RUN_ID" >"$output_file"
+grep -qF "status=ELIGIBLE" "$output_file"
+unset STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY
+
 load_record_stub oci-production-deploy
 if STUB_WORKFLOW_STATE=active \
   run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
@@ -810,6 +823,15 @@ STUB_TITLE="wrong title"
 export STUB_TITLE
 if run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
   echo "wrong run title unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "display title" "$error_file"
+
+load_record_stub oci-live-data-apply-backfills
+STUB_TITLE="oci-live-data-rollout"
+export STUB_TITLE
+if run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "generic-title stale data ghost unexpectedly received CLI approval" >&2
   exit 1
 fi
 grep -qF "display title" "$error_file"

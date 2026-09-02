@@ -32,6 +32,18 @@ chmod +x "$tmp_dir/workflow-inventory"
 
 cat >"$tmp_dir/production-exclusivity" <<'SH'
 #!/usr/bin/env bash
+[[ "${PROSPECTIVE_PROMOTION_PR:-}" == "224" ]] || {
+  echo "master promotion did not pass its exact PR context" >&2
+  exit 1
+}
+[[ -z "${PROSPECTIVE_MASTER_SHA:-}" && -z "${PROSPECTIVE_SHA:-}" ]] || {
+  echo "master promotion passed an untrusted prospective SHA" >&2
+  exit 1
+}
+[[ -z "${EXCLUDE_RUN_ID:-}" ]] || {
+  echo "master promotion attempted an exclusion bypass" >&2
+  exit 1
+}
 [[ "${STUB_ACTIVE:-false}" != "true" ]]
 SH
 chmod +x "$tmp_dir/production-exclusivity"
@@ -80,6 +92,12 @@ common_env=(
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   "$MERGE_SAFETY" 224 >/dev/null
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  "$MERGE_SAFETY" 225 >/dev/null 2>&1; then
+  echo "master promotion did not preserve its exact PR context" >&2
+  exit 1
+fi
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
   STUB_BASE_REF=dev STUB_HEAD_REF=docs/governance \

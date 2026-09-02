@@ -155,8 +155,8 @@ agent_readme="$ROOT_DIR/.github/agents/README.md"
 [[ -f "$conductor_agent" ]] || fail "required conductor agent is missing"
 grep -Fq 'name: betstan-conductor' "$conductor_agent" ||
   fail "conductor agent frontmatter has the wrong name"
-grep -Fq 'tools: [read, search, execute, web]' "$conductor_agent" ||
-  fail "conductor agent does not remain read-only"
+grep -Fq 'tools: [read, search, execute, edit, web]' "$conductor_agent" ||
+  fail "conductor agent lacks governed self-blocker correction authority"
 for conductor_contract in \
     'Do not tight-poll' \
     'blocking watcher such as `gh run watch` as notification transport' \
@@ -205,6 +205,23 @@ for conductor_contract in \
     'Conductor status is coordination evidence only'; do
   grep -Fq "$conductor_contract" "$conductor_agent" ||
     fail "conductor agent omits orchestration contract: $conductor_contract"
+done
+for self_blocker_contract in \
+    '## Governed self-imposed-blocker recovery' \
+    'external wait, passively wait, or repeatedly hand it off' \
+    'governed correction under the original registered work ID' \
+    'another agent or a duplicate policy page' \
+    'focused safe fixture or dry-run' \
+    'unresolved production risk: active or competing work' \
+    'normal focused branch -> `dev` -> `master` path' \
+    '`mutation_capable: true` only' \
+    'challenge through the existing deployment-safety quality gate, not a new' \
+    'Preserve rollback evidence and revalidate the' \
+    'resume the original registered' \
+    'Never bypass or edit live authority state ad hoc' \
+    'Never weaken a gate merely to make progress'; do
+  grep -Fq "$self_blocker_contract" "$conductor_agent" ||
+    fail "conductor omits governed self-blocker contract: $self_blocker_contract"
 done
 grep -Fq 'Start `betstan-conductor` before every unit whose result can block, approve,' \
     "$agent_readme" ||
@@ -1071,6 +1088,11 @@ grep -Fq 'OCI_IMAGE_PREFIX: ${{ vars.OCI_IMAGE_PREFIX }}' "$deploy_workflow" ||
 cli_installer="$OCI_DIR/scripts/install-cli.sh"
 deployment_safety_agent="$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md"
 common_readme="$ROOT_DIR/common/README.md"
+run_exclusivity_script="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
+authority_helper="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+pr_merge_safety="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
+cli_dispatcher="$ROOT_DIR/infra/azure/agents/copilot-cli-dispatch-stan.sh"
+run_approver="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
 pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
@@ -1096,12 +1118,93 @@ grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
   "$deployment_safety_agent"
 grep -Fq 'Treat PR title/body changes as workflow-producing' \
   "$deployment_safety_agent"
-grep -Fq 'through the checked-in bounded supersession classifier' \
+grep -Fq 'through the checked-in bounded supersession or unmaterialized classifier' \
   "$deployment_safety_agent" ||
-  fail "deployment safety omits bounded provider-ghost supersession"
+  fail "deployment safety omits bounded provider-ghost classification"
 grep -Fq 'immediately run the checked-in supersession classifier' \
   "$conductor_agent" ||
   fail "conductor does not recover superseded provider-ghost stalls"
+for recovery_contract in \
+    'reason=unmaterialized' \
+    'same repository regardless of control SHA' \
+    'never reset master to the poisoned SHA' \
+    'A cancellation `409` is corroborative journal evidence only' \
+    'retire-unmaterialized-claim'; do
+  grep -Fq "$recovery_contract" "$deployment_safety_agent" ||
+    fail "deployment safety omits unmaterialized recovery contract: $recovery_contract"
+done
+for prospective_contract in \
+    'Only `pr-merge-safety-stan.sh` may request the prospective-master bootstrap' \
+    'same-repository `dev` -> `master` PR whose base SHA' \
+    'normal dispatch or approval remains bound to actual master and blocking' \
+    'It never uses `EXCLUDE_RUN_ID` or generic disabled classification' \
+    'claimed/inflight authority fence remains unresolved'; do
+  grep -Fq "$prospective_contract" "$deployment_safety_agent" ||
+    fail "deployment safety omits prospective-master bootstrap contract: $prospective_contract"
+done
+for recovery_contract in \
+    'reason=unmaterialized' \
+    'regardless of control SHA' \
+    'runs must never receive human or CLI environment approval' \
+    'rebuild the exact-SHA chain'; do
+  grep -Fq "$recovery_contract" "$conductor_agent" ||
+    fail "conductor omits unmaterialized recovery contract: $recovery_contract"
+done
+for prospective_contract in \
+    'For the narrow current-master unmaterialized promotion deadlock' \
+    'may pass only the exact PR number to the checked-in' \
+    'A raw prospective SHA is never authority' \
+    'approval, authority-fence, and every other active-run decision remain bound' \
+    '`EXCLUDE_RUN_ID` and generic disabled handling are never'; do
+  grep -Fq "$prospective_contract" "$conductor_agent" ||
+    fail "conductor omits prospective-master bootstrap contract: $prospective_contract"
+done
+for recovery_contract in \
+    'Promotion cannot silently clear the fence' \
+    'retire-unmaterialized-claim' \
+    'never reset master to the poisoned SHA' \
+    'zero exact count/list jobs and artifacts'; do
+  grep -Fq "$recovery_contract" "$ROOT_DIR/LEARNINGS.md" ||
+    fail "learnings omit unmaterialized recovery contract: $recovery_contract"
+done
+for self_blocker_learning in \
+    'not automatically an external safety wait' \
+    'branch -> `dev` -> `master`' \
+    'independent deployment-safety challenge' \
+    'post-promotion exact-SHA revalidation before automatic resumption' \
+    'Never weaken a gate to make progress or edit live authority state ad hoc'; do
+  grep -Fq "$self_blocker_learning" "$ROOT_DIR/LEARNINGS.md" ||
+    fail "learnings omit governed self-blocker recovery: $self_blocker_learning"
+done
+for prospective_learning in \
+    'A current-master ghost can block the guard promotion' \
+    'exclusivity must independently prove an OPEN CLI-managed' \
+    'allowlisted queued unmaterialized ghost, never for normal dispatch' \
+    'approval, another active run, or the repository-global claimed/inflight' \
+    '`EXCLUDE_RUN_ID` and generic disabled handling cannot'; do
+  grep -Fq "$prospective_learning" "$ROOT_DIR/LEARNINGS.md" ||
+    fail "learnings omit prospective-master bootstrap: $prospective_learning"
+done
+grep -Fq 'classify-unmaterialized-run' "$run_exclusivity_script" ||
+  fail "production exclusivity does not invoke unmaterialized classification"
+grep -Fq 'retire-unmaterialized-claim' "$authority_helper" ||
+  fail "authority helper does not expose unmaterialized retirement"
+grep -Fq 'verify_prospective_promotion' "$run_exclusivity_script" ||
+  fail "production exclusivity does not verify prospective promotion evidence"
+grep -Fq 'PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' "$pr_merge_safety" ||
+  fail "merge safety does not pass the exact prospective promotion PR"
+grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' \
+  "$pr_merge_safety" ||
+  fail "merge safety does not clear exclusion state before prospective bootstrap"
+grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR=""' \
+  "$cli_dispatcher" ||
+  fail "normal dispatcher can inherit exclusion or prospective context"
+grep -Fq 'EXCLUDE_RUN_ID="$RUN_ID" PROSPECTIVE_PROMOTION_PR=""' \
+  "$run_approver" ||
+  fail "normal approver does not retain only its exact self-run exclusion"
+if grep -Fq 'PROSPECTIVE_MASTER_SHA' "$run_exclusivity_script"; then
+  fail "production exclusivity trusts a raw prospective SHA environment value"
+fi
 [[ -f "$pr_template" ]] || fail "pull request evidence template is missing"
 for heading in \
     '## Why this change exists' \
