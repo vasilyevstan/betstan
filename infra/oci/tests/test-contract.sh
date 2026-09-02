@@ -1080,6 +1080,12 @@ grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
   "$deployment_safety_agent"
 grep -Fq 'Treat PR title/body changes as workflow-producing' \
   "$deployment_safety_agent"
+grep -Fq 'through the checked-in bounded supersession classifier' \
+  "$deployment_safety_agent" ||
+  fail "deployment safety omits bounded provider-ghost supersession"
+grep -Fq 'immediately run the checked-in supersession classifier' \
+  "$conductor_agent" ||
+  fail "conductor does not recover superseded provider-ghost stalls"
 [[ -f "$pr_template" ]] || fail "pull request evidence template is missing"
 for heading in \
     '## Why this change exists' \
