@@ -44,11 +44,118 @@ done
 
 for f in "${target_files[@]}"; do
   # Hard-coded password/token/secret values (not env-var references)
-  if grep -nEi '(password|token|secret|api_key|private_key|jwt_key)\s*[=:]\s*[^"$\{!#][^"\n]{3,}' "$f" 2>/dev/null | \
-      grep -vE '(\$\{|\$\(|secrets\.|#|placeholder|CHANGE_ME|<[^>]+>)' | grep -q .; then
+  secret_matches="$(
+    python3 - "$f" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+assignment = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])"
+    r"(?P<quote>[\x27\x22]?)"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*)(?P=quote)"
+    r"\s*(?P<operator>[=:])\s*"
+)
+oidc_yaml = re.compile(
+    r"^\s*id-token\s*:\s*(?:read|write|none)\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+oidc_serialized = re.compile(
+    r'(^|[,"\s])id-token\s*=\s*(?:read|write|none)(?=$|[,"\s])',
+    re.IGNORECASE,
+)
+safe_values = (
+    re.compile(r"^\$\{\{[^{}\r\n]+\}\}$"),
+    re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-+?=])?\}$"),
+    re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$"),
+    re.compile(r"^\$\([^\r\n]+\)$"),
+    re.compile(r"^secrets\.[A-Za-z0-9_]+$", re.IGNORECASE),
+    re.compile(r"^(?:placeholder|CHANGE_ME)$", re.IGNORECASE),
+    re.compile(r"^<[^>\r\n]+>$"),
+)
+
+
+def is_sensitive_key(key: str) -> bool:
+    compact = re.sub(r"[-_]", "", key).lower()
+    if compact.endswith(("password", "secret", "apikey", "privatekey", "jwtkey")):
+        return True
+    if compact.endswith("token"):
+        return not compact.endswith("locktoken")
+    return False
+
+
+def scalar_at(text: str, offset: int) -> tuple[str, str, bool]:
+    remainder = text[offset:].lstrip()
+    if not remainder:
+        return "", "", True
+    if remainder[0] in {'"', "'"}:
+        quote = remainder[0]
+        end = remainder.find(quote, 1)
+        if end < 0:
+            return remainder[1:], "", False
+        return remainder[1:end], remainder[end + 1 :], True
+    if remainder.startswith("${{"):
+        end = remainder.find("}}", 3)
+        if end < 0:
+            return remainder, "", False
+        return remainder[: end + 2], remainder[end + 2 :], True
+    if remainder.startswith("${"):
+        end = remainder.find("}", 2)
+        if end < 0:
+            return remainder, "", False
+        return remainder[: end + 1], remainder[end + 1 :], True
+    if remainder.startswith("$("):
+        end = remainder.find(")", 2)
+        if end < 0:
+            return remainder, "", False
+        return remainder[: end + 1], remainder[end + 1 :], True
+    variable = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*", remainder)
+    if variable:
+        return variable.group(0), remainder[variable.end() :], True
+    match = re.match(r"[^,;#\s]+", remainder)
+    if not match:
+        return "", remainder, True
+    return match.group(0), remainder[match.end() :], True
+
+
+def has_safe_tail(remainder: str, operator: str) -> bool:
+    if not remainder or re.fullmatch(r"\s*", remainder):
+        return True
+    if re.match(r"^\s+#", remainder):
+        return True
+    if re.fullmatch(r"[\s,\]\}\)\x27\x22\x5c\|&;]*", remainder):
+        return True
+    if operator == "=" and re.match(r"^\s*(?:;|&&|\|\|?)(?:\s|$)", remainder):
+        return True
+    return False
+
+
+with open(path, encoding="utf-8", errors="replace") as source:
+    for line_number, original in enumerate(source, start=1):
+        if original.lstrip().startswith("#") or oidc_yaml.fullmatch(original.rstrip("\n")):
+            continue
+        line = oidc_serialized.sub(
+            lambda match: f"{match.group(1)}oidc-permission=safe",
+            original,
+        )
+        for match in assignment.finditer(line):
+            if not is_sensitive_key(match.group("key")):
+                continue
+            value, remainder, complete = scalar_at(line, match.end())
+            if len(value) < 4:
+                continue
+            if (
+                complete
+                and has_safe_tail(remainder, match.group("operator"))
+                and any(pattern.fullmatch(value) for pattern in safe_values)
+            ):
+                continue
+            print(f"{line_number}:{match.group('key').lower()}=<redacted>")
+PY
+  )"
+  if [[ -n "$secret_matches" ]]; then
     fail "$f: possible hard-coded secret value"
-    grep -nEi '(password|token|secret|api_key|private_key|jwt_key)\s*[=:]\s*[^"$\{!#][^"\n]{3,}' "$f" 2>/dev/null | \
-      grep -vE '(\$\{|\$\(|secrets\.|#|placeholder|CHANGE_ME|<[^>]+>)' | head -5 >&2 || true
+    head -5 <<<"$secret_matches" >&2
   fi
 
   # Bearer tokens or base64-looking auth strings

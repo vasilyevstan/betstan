@@ -28,6 +28,9 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
   subscribe to `pull_request.edited`; schedule them outside production
   exclusivity and data-to-deploy handoff windows.
 - Manual central production workflow dispatches are approval-gated through `production-emergency` and require an exact full master SHA. Legacy per-service deploy workflows are not manually dispatchable.
+- Common package publication is separately approval-gated through
+  `common-package-release`; only `common-package-publish.yml` may publish, and
+  only from an exact current `master` SHA.
 - After a squash promotion, immediately merge `master` back into `dev` and verify `master` is an ancestor of `dev`.
 
 ## Read-only baseline
@@ -48,6 +51,23 @@ When changing a trusted required-check workflow, follow the exact bootstrap in
 mechanism without changing the protected workflow; then authorize only the
 intended workflow blob, promote it normally, remove the authorization, and
 verify fresh statuses before changing protection or disabling an old identity.
+The first completed exact quality run created after authorization consumes its
+durable receipt. Workflow-producing pull-request events publish pending until
+their own run completes. They first publish an unbound exact-snapshot barrier,
+then bind the exact newly registered run, which must strictly postdate the
+event. The marker also binds a bounded title/body fingerprint, so another run
+from the same head/base snapshot or stale PR content cannot satisfy it. Accept
+markers only from the GitHub Actions bot with a validated repository
+`branch-policy` run target carrying the exact PR/head/base relation. Keep
+`branch-policy.yml` as the sole status-writing workflow and require every
+workflow job to declare effective token permissions. A completion that differs
+from the marker-bound run remains pending. An exact delayed completion or
+manual trusted refresh may bind an unbound marker. Recheck the current PR
+snapshot before and after publishing statuses and invalidate stale
+same-snapshot results with pending.
+Non-producing metadata updates do not replace that marker. Any subsequent edit,
+synchronization, base advance, or refresh needs a new short-lived
+authorization and receipt anchor.
 
 Return `NO_GO` for a direct `master` push, a non-`dev` PR into `master`, a stale promotion, missing or stale checks, incomplete production approval, or unsynchronized branches after promotion.
 

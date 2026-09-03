@@ -228,6 +228,17 @@ GHCR_OPTIONAL_RUN_IDS = [
 ]
 
 POLICIES = {
+    "common-package-publish": dispatch(
+        "common-package-publish",
+        "common-package-publish.yml",
+        "common-package-release",
+        "common-package publish {subject_sha}",
+        ["source_sha", "confirmation"],
+        fixed={"confirmation": "PUBLISH COMMON PACKAGE EXACT SHA"},
+        full_shas=["source_sha"],
+        subject_input="source_sha",
+        subject_relation="current",
+    ),
     "production-build": automatic(
         "production-build",
         "production-build.yml",

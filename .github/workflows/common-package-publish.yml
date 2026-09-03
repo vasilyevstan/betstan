@@ -1,0 +1,488 @@
+name: common-package-publish
+run-name: common-package publish ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact current master commit containing the reviewed package source
+        required: true
+        type: string
+      confirmation:
+        description: Type the exact Common package publication confirmation
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: common-package-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish-common-package
+    if: github.run_attempt == 1 && github.repository == 'vasilyevstan/betstan'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: common-package-release
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up npm publication runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate exact publication authority
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]
+          [ "$GITHUB_REPOSITORY" = "vasilyevstan/betstan" ]
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$CONFIRMATION" = "PUBLISH COMMON PACKAGE EXACT SHA" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Verify authenticated unused package version
+        id: preflight
+        working-directory: common
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm ping --registry=https://registry.npmjs.org
+          npm whoami --registry=https://registry.npmjs.org >/dev/null
+
+          read -r package_name package_version lock_name lock_version < <(
+            node - <<'NODE'
+          const manifest = require("./package.json");
+          const lock = require("./package-lock.json");
+          const root = lock.packages?.[""];
+          console.log(
+            manifest.name,
+            manifest.version,
+            root?.name || "",
+            root?.version || "",
+          );
+          NODE
+          )
+          [ "$package_name" = "@betstan/common" ]
+          [ "$lock_name" = "$package_name" ]
+          [ "$lock_version" = "$package_version" ]
+
+          preflight_dir="$RUNNER_TEMP/common-package-preflight-$GITHUB_RUN_ID"
+          mkdir -p "$preflight_dir"
+          if npm view "$package_name@$package_version" version --json \
+            >"$preflight_dir/existing-version.json" \
+            2>"$preflight_dir/existing-version.err"; then
+            echo "$package_name@$package_version already exists" >&2
+            exit 1
+          fi
+          grep -Eq 'E404|404 Not Found' "$preflight_dir/existing-version.err"
+
+          latest_before="$(
+            npm view "$package_name" dist-tags.latest \
+              --registry=https://registry.npmjs.org
+          )"
+          test -n "$latest_before"
+          {
+            echo "package_name=$package_name"
+            echo "package_version=$package_version"
+            echo "latest_before=$latest_before"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Build, test, and pack one candidate
+        id: candidate
+        working-directory: common
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run test:ci
+
+          artifact_dir="$RUNNER_TEMP/common-package-$GITHUB_RUN_ID"
+          mkdir -p "$artifact_dir"
+          npm pack --json --pack-destination "$artifact_dir" \
+            >"$artifact_dir/pack.json"
+
+          node - \
+            "$artifact_dir/pack.json" \
+            "$artifact_dir" \
+            "$GITHUB_OUTPUT" <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const [packJsonPath, artifactDirectory, outputPath] =
+            process.argv.slice(2);
+          const result = JSON.parse(fs.readFileSync(packJsonPath, "utf8"));
+          if (!Array.isArray(result) || result.length !== 1) {
+            throw new Error("npm pack did not create exactly one artifact");
+          }
+          const packed = result[0];
+          if (
+            packed.name !== "@betstan/common" ||
+            typeof packed.version !== "string" ||
+            typeof packed.filename !== "string" ||
+            typeof packed.integrity !== "string" ||
+            typeof packed.shasum !== "string"
+          ) {
+            throw new Error("npm pack metadata is incomplete");
+          }
+          const tarball = path.resolve(artifactDirectory, packed.filename);
+          if (
+            path.dirname(tarball) !== path.resolve(artifactDirectory) ||
+            !fs.statSync(tarball).isFile()
+          ) {
+            throw new Error("npm pack artifact path is unsafe");
+          }
+
+          const files = packed.files?.map((entry) => entry.path).sort();
+          if (!Array.isArray(files)) {
+            throw new Error("npm pack file manifest is missing");
+          }
+          const required = ["README.md", "build/index.d.ts", "build/index.js", "package.json"];
+          for (const requiredPath of required) {
+            if (!files.includes(requiredPath)) {
+              throw new Error(`npm pack is missing ${requiredPath}`);
+            }
+          }
+          for (const file of files) {
+            if (
+              file !== "README.md" &&
+              file !== "package.json" &&
+              !file.startsWith("build/")
+            ) {
+              throw new Error(`npm pack contains unexpected path ${file}`);
+            }
+          }
+
+          const sha256 = crypto
+            .createHash("sha256")
+            .update(fs.readFileSync(tarball))
+            .digest("hex");
+          const manifestPath = path.join(artifactDirectory, "manifest.json");
+          fs.writeFileSync(
+            manifestPath,
+            `${JSON.stringify(
+              {
+                name: packed.name,
+                version: packed.version,
+                filename: packed.filename,
+                sha256,
+                shasum: packed.shasum,
+                integrity: packed.integrity,
+                files,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          fs.appendFileSync(
+            outputPath,
+            [
+              `tarball=${tarball}`,
+              `pack_json=${packJsonPath}`,
+              `manifest=${manifestPath}`,
+              `sha256=${sha256}`,
+              `integrity=${packed.integrity}`,
+              `version=${packed.version}`,
+              "",
+            ].join("\n"),
+          );
+          NODE
+
+          [ "${{ steps.preflight.outputs.package_version }}" = \
+            "$(node -p 'require("./package.json").version')" ]
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Validate exact candidate in every backend
+        env:
+          REVIEWED_TARBALL: ${{ steps.candidate.outputs.tarball }}
+          REVIEWED_SHA256: ${{ steps.candidate.outputs.sha256 }}
+          PACKAGE_VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          consumer_tarball="$RUNNER_TEMP/common-consumer-candidate-$GITHUB_RUN_ID.tgz"
+          cp "$REVIEWED_TARBALL" "$consumer_tarball"
+          [ "$(sha256sum "$consumer_tarball" | awk '{print $1}')" = \
+            "$REVIEWED_SHA256" ]
+          unset REVIEWED_TARBALL
+
+          services=(
+            auth backoffice bet event gamemaster moderation resulting slip
+          )
+          if [ -f telemetry/package.json ]; then
+            services+=(telemetry)
+          fi
+          expected_current_version="$(
+            node -p \
+              'require("./auth/package.json").dependencies["@betstan/common"]'
+          )"
+          [[ "$expected_current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+
+          node - "${services[@]}" <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const expected = process.argv.slice(2).sort();
+          const actual = fs
+            .readdirSync(".", { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && entry.name !== "common")
+            .filter((entry) => fs.existsSync(path.join(entry.name, "package.json")))
+            .filter((entry) => {
+              const manifest = require(path.resolve(entry.name, "package.json"));
+              return Boolean(manifest.dependencies?.["@betstan/common"]);
+            })
+            .map((entry) => entry.name)
+            .sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new Error(
+              `Common consumer inventory mismatch expected=${expected} actual=${actual}`,
+            );
+          }
+          NODE
+
+          for service in "${services[@]}"; do
+            node - "$service/package.json" "$service/package-lock.json" \
+              "$expected_current_version" <<'NODE'
+          const fs = require("node:fs");
+          const [manifestPath, lockPath, expectedVersion] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+          if (manifest.dependencies?.["@betstan/common"] !== expectedVersion) {
+            throw new Error(`${manifestPath} is not exactly pinned`);
+          }
+          if (
+            lock.packages?.["node_modules/@betstan/common"]?.version !==
+            expectedVersion
+          ) {
+            throw new Error(`${lockPath} does not resolve the exact pin`);
+          }
+          NODE
+
+            npm ci --prefix "$service"
+            common_dir="$service/node_modules/@betstan/common"
+            rm -rf -- "$common_dir"
+            extract_dir="$(mktemp -d "$RUNNER_TEMP/common-consumer.XXXXXX")"
+            tar -xzf "$consumer_tarball" -C "$extract_dir"
+            mkdir -p "$(dirname "$common_dir")"
+            cp -R "$extract_dir/package" "$common_dir"
+            rm -rf -- "$extract_dir"
+            (
+              cd "$service"
+              [ "$(node -p \
+                'require("@betstan/common/package.json").version')" = \
+                "$PACKAGE_VERSION" ]
+              ./node_modules/.bin/tsc --noEmit
+              npm run test:ci -- --runInBand
+            )
+          done
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Upload reviewed candidate before publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: common-package-candidate-${{ steps.candidate.outputs.version }}-${{ github.run_id }}-1
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ steps.candidate.outputs.tarball }}
+            ${{ steps.candidate.outputs.pack_json }}
+            ${{ steps.candidate.outputs.manifest }}
+
+      - name: Revalidate and publish the reviewed tarball under next
+        id: publish
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          TARBALL: ${{ steps.candidate.outputs.tarball }}
+          CANDIDATE_SHA256: ${{ steps.candidate.outputs.sha256 }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]
+          [ "$GITHUB_REPOSITORY" = "vasilyevstan/betstan" ]
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$CONFIRMATION" = "PUBLISH COMMON PACKAGE EXACT SHA" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          [ "$GITHUB_SHA" = "$SOURCE_SHA" ]
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ -f "$TARBALL" ]
+          [ "$(sha256sum "$TARBALL" | awk '{print $1}')" = \
+            "$CANDIDATE_SHA256" ]
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+          npm publish "$TARBALL" \
+            --tag next \
+            --access public \
+            --provenance \
+            --ignore-scripts
+
+      - name: Verify registry byte identity and tags
+        id: registry
+        if: always() && steps.candidate.outcome == 'success' && steps.publish.outcome != 'skipped'
+        continue-on-error: true
+        working-directory: common
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_NAME: ${{ steps.preflight.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.preflight.outputs.package_version }}
+          LATEST_BEFORE: ${{ steps.preflight.outputs.latest_before }}
+          CANDIDATE_TARBALL: ${{ steps.candidate.outputs.tarball }}
+          CANDIDATE_SHA256: ${{ steps.candidate.outputs.sha256 }}
+          CANDIDATE_INTEGRITY: ${{ steps.candidate.outputs.integrity }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+        run: |
+          set -euo pipefail
+          registry_dir="$RUNNER_TEMP/common-package-registry-$GITHUB_RUN_ID"
+          mkdir -p "$registry_dir"
+          metadata="$registry_dir/metadata.json"
+          registry_tarball="$registry_dir/registry.tgz"
+          evidence="$registry_dir/release-provenance.txt"
+          {
+            echo "registry_tarball=$registry_tarball"
+            echo "metadata=$metadata"
+            echo "evidence=$evidence"
+          } >>"$GITHUB_OUTPUT"
+
+          verification_status=failed
+          registry_sha256=unavailable
+          registry_integrity=unavailable
+          next_version=unavailable
+          latest_after=unavailable
+          record_verification() {
+            local status="$?"
+            {
+              echo "schema=betstan-common-package-release-v1"
+              echo "source_sha=$(git rev-parse HEAD)"
+              echo "source_tree=$(git rev-parse 'HEAD^{tree}')"
+              echo "workflow=.github/workflows/common-package-publish.yml"
+              echo "workflow_run_id=$GITHUB_RUN_ID"
+              echo "workflow_run_attempt=$GITHUB_RUN_ATTEMPT"
+              echo "publish_outcome=$PUBLISH_OUTCOME"
+              echo "verification_status=$verification_status"
+              echo "package=$PACKAGE_NAME"
+              echo "version=$PACKAGE_VERSION"
+              echo "dist_tag=next"
+              echo "tarball_sha256=$registry_sha256"
+              echo "integrity=$registry_integrity"
+              echo "next_after=$next_version"
+              echo "latest_before=$LATEST_BEFORE"
+              echo "latest_after=$latest_after"
+            } >"$evidence"
+            trap - EXIT
+            exit "$status"
+          }
+          trap record_verification EXIT
+
+          found=false
+          for _attempt in $(seq 1 12); do
+            if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" --json \
+              --registry=https://registry.npmjs.org >"$metadata"; then
+              if node - "$metadata" <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const attestations = metadata.dist?.attestations;
+          if (
+            metadata.version &&
+            metadata.dist?.tarball &&
+            metadata.dist?.integrity &&
+            attestations &&
+            typeof attestations.url === "string"
+          ) {
+            process.exit(0);
+          }
+          process.exit(1);
+          NODE
+              then
+                found=true
+                break
+              fi
+            fi
+            sleep 5
+          done
+          [ "$found" = "true" ]
+
+          read -r registry_version registry_url registry_integrity < <(
+            node - "$metadata" <<'NODE'
+          const metadata = require(process.argv[2]);
+          const attestations = metadata.dist?.attestations;
+          if (
+            !attestations ||
+            typeof attestations.url !== "string" ||
+            !attestations.url.startsWith("https://registry.npmjs.org/")
+          ) {
+            throw new Error("registry provenance attestation is missing");
+          }
+          console.log(
+            metadata.version || "",
+            metadata.dist?.tarball || "",
+            metadata.dist?.integrity || "",
+          );
+          NODE
+          )
+          [ "$registry_version" = "$PACKAGE_VERSION" ]
+          [ "$registry_integrity" = "$CANDIDATE_INTEGRITY" ]
+          [[ "$registry_url" == https://registry.npmjs.org/* ]]
+
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --proto-redir '=https' \
+            "$registry_url" \
+            --output "$registry_tarball"
+          registry_sha256="$(sha256sum "$registry_tarball" | awk '{print $1}')"
+          [ "$registry_sha256" = "$CANDIDATE_SHA256" ]
+          cmp --silent "$CANDIDATE_TARBALL" "$registry_tarball"
+
+          next_version="$(
+            npm view "$PACKAGE_NAME" dist-tags.next \
+              --registry=https://registry.npmjs.org
+          )"
+          latest_after="$(
+            npm view "$PACKAGE_NAME" dist-tags.latest \
+              --registry=https://registry.npmjs.org
+          )"
+          [ "$next_version" = "$PACKAGE_VERSION" ]
+          [ "$latest_after" = "$LATEST_BEFORE" ]
+          verification_status=passed
+
+      - name: Upload immutable publication evidence
+        if: always() && steps.candidate.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: common-package-release-${{ steps.candidate.outputs.version }}-${{ github.run_id }}-1
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ runner.temp }}/common-package-${{ github.run_id }}
+            ${{ runner.temp }}/common-package-registry-${{ github.run_id }}
+
+      - name: Enforce registry verification result
+        if: always() && steps.registry.outcome == 'failure'
+        env:
+          REGISTRY_OUTCOME: ${{ steps.registry.outcome }}
+        run: |
+          echo "Common package registry verification failed" >&2
+          [ "$REGISTRY_OUTCOME" = "success" ]

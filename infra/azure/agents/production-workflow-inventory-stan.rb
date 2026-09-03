@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require "shellwords"
 
 directory = ARGV.fetch(0)
 
@@ -23,8 +24,12 @@ OCI_WORKFLOWS = %w[
   oci-production-deploy
   oci-production-rollback
 ].freeze
-REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS).sort.freeze
+PACKAGE_WORKFLOWS = %w[
+  common-package-publish
+].freeze
+REQUIRED_SET = (AZURE_WORKFLOWS + OCI_WORKFLOWS + PACKAGE_WORKFLOWS).sort.freeze
 PROTECTED_ENVIRONMENTS = {
+  "common-package-publish" => "common-package-release",
   "production-rollback" => "production-emergency",
   "oci-capacity-acquire" => "oci-capacity-acquire",
   "oci-infrastructure" => "oci-infrastructure",
@@ -40,6 +45,11 @@ PROTECTED_ENVIRONMENTS = {
   "oci-production-rollback" => "oci-production"
 }.freeze
 ROLLBACK_ACTION_PINS = {
+  "common-package-publish" => {
+    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02"
+  },
   "production-rollback" => {
     "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
     "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -102,6 +112,114 @@ end
 
 def reject_content(content, pattern, message)
   fail_inventory(message) if content.match?(pattern)
+end
+
+def workflow_run_scripts(document)
+  jobs = document["jobs"]
+  return [] unless jobs.is_a?(Hash)
+
+  jobs.values.flat_map do |job|
+    next [] unless job.is_a?(Hash) && job["steps"].is_a?(Array)
+
+    job["steps"].map do |step|
+      step["run"] if step.is_a?(Hash) && step["run"].is_a?(String)
+    end.compact
+  end
+end
+
+def workflow_scalar_values(value)
+  case value
+  when Hash
+    value.values.flat_map { |child| workflow_scalar_values(child) }
+  when Array
+    value.flat_map { |child| workflow_scalar_values(child) }
+  when String
+    [value]
+  else
+    []
+  end
+end
+
+def shell_logical_commands(script)
+  commands = []
+  current = []
+
+  script.each_line do |raw_line|
+    line = raw_line.rstrip
+    stripped = line.strip
+    next if stripped.empty? || stripped.start_with?("#")
+
+    continued = line.match?(/\\\s*\z/)
+    current << line.sub(/\\\s*\z/, "").strip
+    next if continued
+
+    commands << current.join(" ").gsub(/\s+/, " ").strip
+    current = []
+  end
+
+  commands << current.join(" ").gsub(/\s+/, " ").strip unless current.empty?
+  commands
+end
+
+def canonical_npm_mutation_subcommand(token)
+  normalized = token.downcase
+  if normalized.length >= 2 && "publish".start_with?(normalized)
+    "publish"
+  elsif normalized.length >= 3 && "unpublish".start_with?(normalized)
+    "unpublish"
+  elsif %w[dist-tag dist-tags].include?(normalized)
+    "dist-tag"
+  end
+end
+
+def npm_package_mutation_invocations(document)
+  workflow_run_scripts(document).flat_map do |script|
+    shell_logical_commands(script).flat_map do |command|
+      tokens =
+        begin
+          Shellwords.shellsplit(command)
+        rescue ArgumentError
+          next command.match?(
+            /\bnpm\b.*\b(?:pu(?:b(?:l(?:i(?:s(?:h)?)?)?)?)?|unp(?:u(?:b(?:l(?:i(?:s(?:h)?)?)?)?)?)?|dist-tags?)\b/i
+          ) ?
+            [["<unparseable-npm-mutation>"]] : []
+        end
+
+      tokens.each_index.map do |index|
+        executable = tokens[index]
+        next unless File.basename(executable).match?(/\Anpm(?:\.cmd)?\z/i)
+
+        invocation = tokens[index..].map do |token|
+          token.sub(/\A[;&|]+/, "").sub(/[;&|]+\z/, "")
+        end.reject(&:empty?)
+        canonical_invocation = invocation.dup
+        mutation_index = nil
+        mutation_subcommand = nil
+        invocation.drop(1).each_with_index do |token, offset|
+          canonical = canonical_npm_mutation_subcommand(token)
+          next unless canonical
+
+          mutation_index = offset + 1
+          mutation_subcommand = canonical
+          break
+        end
+        next unless mutation_index
+
+        mutates_package =
+          %w[publish unpublish].include?(mutation_subcommand) ||
+          (
+            mutation_subcommand == "dist-tag" &&
+            invocation.drop(mutation_index + 1).any? do |token|
+              %w[add rm].include?(token.downcase)
+            end
+          )
+        if mutates_package
+          canonical_invocation[mutation_index] = mutation_subcommand
+          canonical_invocation
+        end
+      end.compact
+    end
+  end
 end
 
 def validate_dispatch_only_workflow!(name, document)
@@ -221,6 +339,300 @@ def validate_non_migration_secrets!(name, content)
       fail_inventory("#{name} must not receive Azure credentials")
     end
   end
+end
+
+def validate_common_package_publish_workflow!(file, document, content)
+  name = "common-package-publish"
+  unless File.basename(file) == "#{name}.yml"
+    fail_inventory("#{name} must use .github/workflows/#{name}.yml")
+  end
+
+  validate_dispatch_only_workflow!(name, document)
+  validate_required_workflow_dispatch_inputs!(
+    name,
+    document,
+    %w[source_sha confirmation]
+  )
+  validate_exact_permissions!(
+    name,
+    document,
+    { "contents" => "read", "id-token" => "write" }
+  )
+  validate_environment!(name, document)
+  validate_expected_action_pins!(name, content)
+
+  jobs = document["jobs"]
+  unless jobs.is_a?(Hash) && jobs.keys == ["publish"]
+    fail_inventory("#{name} must use one protected publish job")
+  end
+  concurrency = document["concurrency"]
+  unless concurrency == {
+      "group" => "common-package-publish",
+      "cancel-in-progress" => false
+    }
+    fail_inventory("#{name} must serialize publication without cancellation")
+  end
+
+  require_content(
+    content,
+    %r{run-name:\s*common-package publish\s+\$\{\{\s*inputs\.source_sha\s*\}\}},
+    "#{name} run name must identify the exact source SHA"
+  )
+  require_content(
+    content,
+    /github\.run_attempt\s*==\s*1/,
+    "#{name} must reject rerun attempts"
+  )
+  require_content(
+    content,
+    /github\.repository\s*==\s*['"]vasilyevstan\/betstan['"]/,
+    "#{name} must bind publication to the canonical repository"
+  )
+  require_content(
+    content,
+    /\[\s*"\$GITHUB_REF_NAME"\s*=\s*"master"\s*\]/,
+    "#{name} must reject non-master dispatches"
+  )
+  require_content(
+    content,
+    /\[\[\s*"\$SOURCE_SHA"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]/,
+    "#{name} must require a complete lowercase source SHA"
+  )
+  require_content(
+    content,
+    %r{ref:\s*\$\{\{\s*inputs\.source_sha\s*\}\}},
+    "#{name} must check out inputs.source_sha"
+  )
+  require_content(
+    content,
+    /git fetch --no-tags origin master:refs\/remotes\/origin\/master/,
+    "#{name} must resolve the exact current master"
+  )
+  require_content(
+    content,
+    /\[\s*"\$SOURCE_SHA"\s*=\s*"\$\(git rev-parse origin\/master\)"\s*\]/,
+    "#{name} must bind source_sha to current master"
+  )
+  require_content(
+    content,
+    /\[\s*"\$CONFIRMATION"\s*=\s*"PUBLISH COMMON PACKAGE EXACT SHA"\s*\]/,
+    "#{name} must require the exact publication confirmation"
+  )
+
+  secret_names = content
+    .scan(/\bsecrets\s*\.\s*([A-Z0-9_]+)/i)
+    .flatten
+    .map(&:upcase)
+    .uniq
+  unless secret_names == ["NPM_TOKEN"]
+    fail_inventory("#{name} must receive only the NPM_TOKEN secret")
+  end
+  reject_content(
+    content,
+    /\bsecrets\s*\[/,
+    "#{name} must not use dynamic secret contexts"
+  )
+  reject_content(
+    content,
+    /\b(?:npm\s+(?:unp(?:u(?:b(?:l(?:i(?:s(?:h)?)?)?)?)?)?|dist-tags?\s+(?:add|rm)|install))\b/,
+    "#{name} must not mutate package history or re-resolve dependencies"
+  )
+
+  require_content(
+    content,
+    /\bnpm whoami\b/,
+    "#{name} must authenticate before relying on registry state"
+  )
+  require_content(
+    content,
+    /npm view "\$package_name@\$package_version" version --json/,
+    "#{name} must reject an already-published immutable version"
+  )
+  build_index = content.index("- name: Build, test, and pack one candidate")
+  consumer_index = content.index("- name: Validate exact candidate in every backend")
+  revalidation_index = content.index(
+    "- name: Revalidate and publish the reviewed tarball under next"
+  )
+  publish_index = content.index('npm publish "$TARBALL"')
+  unless build_index && consumer_index && revalidation_index && publish_index &&
+      build_index < consumer_index &&
+      consumer_index < revalidation_index &&
+      revalidation_index < publish_index
+    fail_inventory(
+      "#{name} must test Common and every consumer before final publication revalidation"
+    )
+  end
+  build_section = content[build_index...consumer_index]
+  require_content(
+    build_section,
+    /^\s*npm ci\s*$/,
+    "#{name} must install the Common lockfile exactly"
+  )
+  require_content(
+    build_section,
+    /^\s*npm run test:ci\s*$/,
+    "#{name} must run the Common compatibility suite"
+  )
+  unless content.scan(/\bnpm pack --json\b/).length == 1
+    fail_inventory("#{name} must create exactly one lifecycle-enabled tarball")
+  end
+  require_content(
+    content,
+    /npm publish "\$TARBALL"/,
+    "#{name} must publish the reviewed tarball path"
+  )
+  %w[--tag\ next --access\ public --provenance --ignore-scripts].each do |flag|
+    require_content(
+      content,
+      /#{Regexp.escape(flag)}/,
+      "#{name} must publish with #{flag.tr("\\", "")}"
+    )
+  end
+  mutation_invocations = npm_package_mutation_invocations(document)
+  expected_publish_invocation = %w[
+    npm publish $TARBALL --tag next --access public --provenance --ignore-scripts
+  ]
+  unless mutation_invocations == [expected_publish_invocation]
+    fail_inventory(
+      "#{name} must execute exactly one reviewed npm publish command with bound flags"
+    )
+  end
+  require_content(
+    content,
+    /CANDIDATE_SHA256/,
+    "#{name} must bind the candidate SHA-256"
+  )
+  revalidation_section = content[revalidation_index...publish_index]
+  unless revalidation_section.match?(
+      /\[\s*"\$GITHUB_SHA"\s*=\s*"\$SOURCE_SHA"\s*\]/
+    ) &&
+      revalidation_section.match?(
+        /git fetch --no-tags origin master:refs\/remotes\/origin\/master/
+      ) &&
+      revalidation_section.match?(
+        /\[\s*"\$SOURCE_SHA"\s*=\s*"\$\(git rev-parse origin\/master\)"\s*\]/
+      ) &&
+      revalidation_section.match?(
+        /sha256sum "\$TARBALL".*"\$CANDIDATE_SHA256"/m
+      )
+    fail_inventory(
+      "#{name} must refetch master and recheck the exact tarball immediately before publication"
+    )
+  end
+  require_content(
+    content,
+    /unset REVIEWED_TARBALL/,
+    "#{name} must isolate the reviewed tarball from consumer processes"
+  )
+  require_content(
+    content,
+    /tar -xzf "\$consumer_tarball"/,
+    "#{name} consumers must use only the disposable tarball copy"
+  )
+  require_content(
+    content,
+    /cmp --silent "\$CANDIDATE_TARBALL" "\$registry_tarball"/,
+    "#{name} must compare registry bytes with the reviewed tarball"
+  )
+  require_content(
+    content,
+    /dist-tags\.next/,
+    "#{name} must verify the next dist-tag"
+  )
+  require_content(
+    content,
+    /\[\s*"\$next_version"\s*=\s*"\$PACKAGE_VERSION"\s*\]/,
+    "#{name} must prove the next dist-tag names the published version"
+  )
+  require_content(
+    content,
+    /\[\s*"\$latest_after"\s*=\s*"\$LATEST_BEFORE"\s*\]/,
+    "#{name} must prove the latest dist-tag is unchanged"
+  )
+  require_content(
+    content,
+    /dist\?\.attestations/,
+    "#{name} must verify registry provenance metadata"
+  )
+
+  consumer_section = content[consumer_index...revalidation_index]
+  services_match = consumer_section.match(/services=\(\s*([a-z0-9\s-]+?)\s*\)/m)
+  expected_services = %w[
+    auth
+    backoffice
+    bet
+    event
+    gamemaster
+    moderation
+    resulting
+    slip
+  ]
+  unless services_match &&
+      services_match[1].split == expected_services
+    fail_inventory(
+      "#{name} must validate the candidate against every current backend"
+    )
+  end
+  require_content(
+    consumer_section,
+    /if \[ -f telemetry\/package\.json \]; then\s+services\+=\(telemetry\)/m,
+    "#{name} must include Telemetry when it becomes a Common consumer"
+  )
+  require_content(
+    consumer_section,
+    %r{node_modules/@betstan/common},
+    "#{name} must replace only the ignored installed Common package"
+  )
+  require_content(
+    consumer_section,
+    /Common consumer inventory mismatch/,
+    "#{name} must reject an incomplete Common consumer inventory"
+  )
+  require_content(
+    consumer_section,
+    /readdirSync\("\.", \{ withFileTypes: true \}\)/,
+    "#{name} must discover every top-level Common consumer"
+  )
+  require_content(
+    consumer_section,
+    %r{\./node_modules/\.bin/tsc --noEmit},
+    "#{name} must typecheck every backend against the candidate"
+  )
+  require_content(
+    consumer_section,
+    /npm run test:ci -- --runInBand/,
+    "#{name} must run every backend suite against the candidate"
+  )
+  require_content(
+    content,
+    /actions\/upload-artifact@/,
+    "#{name} must retain immutable publication evidence"
+  )
+  require_content(
+    content,
+    /continue-on-error:\s*true/,
+    "#{name} must continue to sanitized evidence capture after publication"
+  )
+  require_content(
+    content,
+    /if:\s*always\(\) && steps\.candidate\.outcome == 'success' && steps\.publish\.outcome != 'skipped'/,
+    "#{name} must inspect every attempted publication outcome"
+  )
+  require_content(
+    content,
+    /trap record_verification EXIT/,
+    "#{name} must record post-publication verification failures"
+  )
+  require_content(
+    content,
+    /if:\s*always\(\) && steps\.candidate\.outcome == 'success'\s*\n\s*uses:\s*actions\/upload-artifact@/,
+    "#{name} must upload safely available evidence after verification failure"
+  )
+  require_content(
+    content,
+    /if:\s*always\(\) && steps\.registry\.outcome == 'failure'/,
+    "#{name} must fail after retaining incomplete registry evidence"
+  )
 end
 
 def validate_azure_rollback_workflow!(file, document, content)
@@ -1317,7 +1729,21 @@ names = workflow_files.each_with_object([]) do |file, result|
       ["production-build", "oci-production-build"].include?(workflow)
     end
 
-  production_capable = content.match?(
+  npm_package_command = !npm_package_mutation_invocations(document).empty?
+  npm_publication_credential = workflow_scalar_values(document).any? do |value|
+    value.match?(
+      /\bsecrets\s*(?:\.\s*NPM_TOKEN\b|\[\s*['"]NPM_TOKEN['"]\s*\])/i
+    )
+  end
+  package_mutation = npm_package_command || npm_publication_credential
+  if package_mutation && !PACKAGE_WORKFLOWS.include?(name)
+    fail_inventory(
+      "#{name} (#{File.basename(file)}) must not use npm publication commands " \
+      "or NPM_TOKEN; only common-package-publish.yml may publish packages"
+    )
+  end
+
+  production_capable = package_mutation || content.match?(
     %r{
       production-(?:automatic|emergency)|
       infra/k8s-prod|
@@ -1333,7 +1759,7 @@ names = workflow_files.each_with_object([]) do |file, result|
         RESOURCE_GROUP|CLUSTER_NAME|
         OCI[A-Z0-9_]*|OCIR[A-Z0-9_]*)\b|\[)
     }ix
-  ) || OCI_WORKFLOWS.include?(name)
+  ) || OCI_WORKFLOWS.include?(name) || PACKAGE_WORKFLOWS.include?(name)
   manual_production = triggers.key?("workflow_dispatch")
   scheduled_production = triggers.key?("schedule")
 
@@ -1352,6 +1778,11 @@ end
 
 file, document, content = documents.fetch("production-rollback")
 validate_azure_rollback_workflow!(file, document, content)
+
+PACKAGE_WORKFLOWS.each do |name|
+  file, document, content = documents.fetch(name)
+  validate_common_package_publish_workflow!(file, document, content)
+end
 
 OCI_WORKFLOWS.each do |name|
   file, document, content = documents.fetch(name)

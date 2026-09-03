@@ -338,8 +338,8 @@ paths = {
     for line in open(sys.argv[2], encoding="utf-8")
     if line.strip()
 }
-if len(paths) != 15:
-    raise SystemExit("protected-operation policy must enumerate exactly 15 workflows")
+if len(paths) != 16:
+    raise SystemExit("protected-operation policy must enumerate exactly 16 workflows")
 decoder = json.JSONDecoder()
 payload = open(sys.argv[1], encoding="utf-8").read()
 index = 0

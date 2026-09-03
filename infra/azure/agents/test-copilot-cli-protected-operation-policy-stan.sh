@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "31" ]] || {
-  echo "expected 31 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "32" ]] || {
+  echo "expected 32 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -151,6 +151,24 @@ required_derived.each do |operation, expected|
   policy = policies.find { |entry| entry["operation"] == operation }
   fail("missing #{operation}") unless policy
   fail("#{operation} lost derived authority") unless policy["derivedOperations"] == expected
+end
+
+common_publish = policies.find do |entry|
+  entry["operation"] == "common-package-publish"
+end
+fail("missing common-package-publish") unless common_publish
+unless common_publish["workflow"] == "common-package-publish.yml" &&
+    common_publish["environment"] == "common-package-release" &&
+    common_publish["event"] == "workflow_dispatch" &&
+    common_publish["authority"] == "dispatch-record" &&
+    common_publish["inputNames"] == %w[source_sha confirmation] &&
+    common_publish["fixedInputs"] == {
+      "confirmation" => "PUBLISH COMMON PACKAGE EXACT SHA"
+    } &&
+    common_publish["fullShaInputs"] == ["source_sha"] &&
+    common_publish["subjectInput"] == "source_sha" &&
+    common_publish["subjectRelation"] == "current"
+  fail("common-package-publish policy lost exact publication authority")
 end
 
 puts "protected_operation_policy=PASS operations=#{policies.length} workflows=#{by_workflow.length}"

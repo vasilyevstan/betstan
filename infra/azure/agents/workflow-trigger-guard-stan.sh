@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "$ROOT_DIR"
+WORKFLOW_PERMISSION_DIR="${WORKFLOW_PERMISSION_DIR:-.github/workflows}"
 
 fail() {
   echo "ERROR: $1" >&2
@@ -230,11 +231,60 @@ require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted qu
 require_literal "$branch_workflow" "pr_number:" "trusted bootstrap refresh input"
 require_literal "$branch_workflow" "statuses: write" "status publication permission"
 require_literal "$branch_workflow" "publish-pr-policy.js" "trusted policy publisher"
+permission_inventory="$(
+  ruby - "$WORKFLOW_PERMISSION_DIR" <<'RUBY'
+require "yaml"
+
+directory = ARGV.fetch(0)
+writers = []
+implicit = []
+Dir[File.join(directory, "*.{yml,yaml}")].sort.each do |path|
+  workflow = YAML.safe_load(File.read(path), aliases: false)
+  next unless workflow.is_a?(Hash)
+
+  workflow_permissions = workflow["permissions"]
+  permission_sets = [workflow_permissions]
+  jobs = workflow["jobs"]
+  if jobs.is_a?(Hash)
+    jobs.each do |name, job|
+      next unless job.is_a?(Hash)
+
+      if workflow_permissions.nil? && !job.key?("permissions")
+        implicit << "#{File.basename(path)}:#{name}"
+      end
+      permission_sets << job["permissions"] if job.key?("permissions")
+    end
+  elsif workflow_permissions.nil?
+    implicit << "#{File.basename(path)}:workflow"
+  end
+  writes_statuses = permission_sets.any? do |permissions|
+    permissions == "write-all" ||
+      permissions.is_a?(Hash) && permissions["statuses"] == "write"
+  end
+  writers << File.basename(path) if writes_statuses
+end
+
+puts "writers=#{writers.join(",")}"
+puts "implicit=#{implicit.join(",")}"
+RUBY
+)"
+status_writers="$(sed -n 's/^writers=//p' <<<"$permission_inventory")"
+implicit_permissions="$(sed -n 's/^implicit=//p' <<<"$permission_inventory")"
+[[ "$status_writers" = "$(basename "$branch_workflow")" ]] ||
+  fail "branch-policy.yml must be the sole explicit statuses:write workflow; found: ${status_writers:-none}"
+[[ -z "$implicit_permissions" ]] ||
+  fail "every workflow job must declare effective permissions; missing: $implicit_permissions"
 require_literal "$policy_script" 'const BRANCH_CONTEXT_PREFIX = "branch-policy"' "stable branch context"
 require_literal "$policy_script" 'const QUALITY_CONTEXT_PREFIX = "pr-quality-gates"' "stable quality context"
 require_literal "$policy_script" "pull.mergeSha" "unique PR merge snapshot status"
 require_literal "$policy_script" "? [pull.headSha, pull.mergeSha]" "promotion head and merge statuses"
-require_literal "$policy_script" "assertExpectedPull(finalPull, pull)" "final stale-event check"
+require_literal "$policy_script" "invalidatePublishedSnapshot" "stale-status invalidation"
+snapshot_check_count="$(
+  grep -Fc "await assertCurrentPullSnapshot(github, owner, repo, pull)" \
+    "$policy_script"
+)"
+[[ "$snapshot_check_count" -ge 2 ]] ||
+  fail "$policy_script must check the current pull before and after status publication"
 require_literal "$policy_script" "relation.base?.sha === pull.baseSha" "exact base snapshot relation"
 
 for live_workflow in "$oci_live_activate_workflow" "$oci_live_disable_workflow"; do
@@ -324,7 +374,7 @@ workflow_set="$(
   ./infra/azure/agents/production-workflow-inventory-stan.sh |
     sed -n 's/^production_workflows=//p'
 )"
-oci_workflow_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+oci_workflow_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 [[ "$workflow_set" == "$oci_workflow_set" ]] ||
   fail "unexpected production workflow set: ${workflow_set:-none}"
 
