@@ -62,11 +62,50 @@ markers only from the GitHub Actions bot with a validated repository
 `branch-policy.yml` as the sole status-writing workflow and require every
 workflow job to declare effective token permissions. A completion that differs
 from the marker-bound run remains pending. An exact delayed completion or
-manual trusted refresh may bind an unbound marker. Recheck the current PR
-snapshot before and after publishing statuses and invalidate stale
-same-snapshot results with pending.
-Non-producing metadata updates do not replace that marker. Any subsequent edit,
-synchronization, base advance, or refresh needs a new short-lived
+manual trusted refresh may bind an existing unbound marker, but refresh cannot
+create a marker or supply quality evidence. Version 3 quality markers use
+`v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
+`u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
+records a confirmed transition without a bound run, a positive run ID records
+the confirmed exact binding, and `x` permanently tombstones the cutoff. A `u`
+marker cannot bind a run, publish quality success, or consume an authorization
+receipt. The qualifying exact `labeled` event appends durable `p` before any
+optional run binding, and a label handler never consumes an authorization
+receipt. Opening-label reconciliation is authorized only when the server-owned
+label timestamp is at or after the original `opened` transition cutoff and no
+more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
+cannot extend that window. GitHub may serialize distinct creation and label
+mutations to the same whole-second timestamp. Equality is accepted only with
+the complete direct or inverse proof; a timestamp even 1 ms before the cutoff
+is not reconciliation authority. Direct ordering also requires the label
+timestamp to strictly precede the earliest exact-lineage status creation, while
+inverse ordering requires identical event and live `updated_at` values and
+allows the marker on either side of the label. An exact replay of the same
+qualifying `labeled` event is inert after `p` or a run is durable; a later label
+mutation remains drift.
+The broad opening snapshot mismatch permits only fail-closed inspection and
+never grants reconciliation: an out-of-window replay without a marker stays
+pending, an existing mismatch writes the permanent tombstone, and any
+intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
+replaced or revived; only a strictly later `edited`, `synchronize`, or
+`reopened` transition can recover the lineage. Preserve the original cutoff,
+run binding, and policy-run target. `labeled` and `unlabeled` are non-producing
+refreshes; any other label drift permanently tombstones that lineage, and
+restoring labels cannot revive it. At the greatest cutoff, `x` dominates every
+other state; absent `x`, any version 1 or version 2 marker makes that cutoff
+fail-closed legacy; otherwise one compatible version 3 lineage resolves
+positive run ID over `p` over `u`, independent of status order. Conflicting
+positive run IDs or incompatible action, content, policy-run target, or label
+progression fail closed, and a lower state cannot downgrade a higher state.
+Version 1 and version 2 markers cannot newly bind, succeed, or consume an
+authorization receipt; a version 2 `x` remains a permanent tombstone. Only a
+strictly later `edited`, `synchronize`, or `reopened` transition may recover,
+never a later or replayed `opened` event. Once any version 3 marker exists,
+operational rollback must retain version 3 parsing or use a reviewed forward
+correction. Other non-producing metadata is excluded from marker identity.
+Recheck the current PR snapshot before and after publishing statuses and
+invalidate concurrent results with pending. Any subsequent edit,
+synchronization, base advance, or refresh needs the applicable short-lived
 authorization and receipt anchor.
 
 Return `NO_GO` for a direct `master` push, a non-`dev` PR into `master`, a stale promotion, missing or stale checks, incomplete production approval, or unsynchronized branches after promotion.

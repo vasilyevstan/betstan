@@ -206,12 +206,54 @@ mutable repository default. Only the bound run may satisfy the transition; a
 different `workflow_run` completion remains pending, and the selected run must
 strictly postdate both the event timestamp and any authorization issuance. A
 delayed run can bind an unbound marker through its exact `workflow_run` or a
-manual trusted refresh. A later non-producing metadata update does not
-invalidate the marker, while changed PR content cannot reuse it. The publisher
-rechecks the complete current PR snapshot before and after status publication
-and replaces any same-snapshot stale result with pending. Any later edit,
-synchronization, base advance, or status refresh requires a new short-lived
-authorization and receipt anchor; a consumed receipt is never reset or reused.
+manual trusted refresh, but a manual refresh cannot create a missing marker or
+act as quality evidence. Version 3 quality markers use
+`v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
+`u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
+records a confirmed transition without a bound run, a positive run ID records
+the confirmed exact binding, and `x` permanently tombstones the cutoff. A `u`
+marker cannot bind a run, publish quality success, or consume an authorization
+receipt. The qualifying exact `labeled` event appends durable `p` before any
+optional run binding, and a label handler never consumes an authorization
+receipt. Opening-label reconciliation is authorized only when the server-owned
+label timestamp is at or after the original `opened` transition cutoff and no
+more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
+cannot extend that window. GitHub may serialize distinct creation and label
+mutations to the same whole-second timestamp. Equality is accepted only with
+the complete direct or inverse proof; a timestamp even 1 ms before the cutoff
+is not reconciliation authority. Direct ordering also requires the label
+timestamp to strictly precede the earliest exact-lineage status creation, while
+inverse ordering requires identical event and live `updated_at` values and
+allows the marker on either side of the label. An exact replay of the same
+qualifying `labeled` event is inert after `p` or a run is durable; a later label
+mutation remains drift.
+The broad opening snapshot mismatch permits only fail-closed inspection and
+never grants reconciliation: an out-of-window replay without a marker stays
+pending, an existing mismatch writes the permanent tombstone, and any
+intervening `updated_at` change fails closed. A same-cutoff tombstone cannot be
+replaced or revived; only a strictly later `edited`, `synchronize`, or
+`reopened` transition can recover the lineage. The original transition cutoff,
+run binding, and policy-run target remain authoritative. `labeled` and
+`unlabeled` are non-producing refreshes. All other post-marker label drift
+appends a permanent pending tombstone, so restoring labels, completing an older
+run, or manually refreshing cannot revive that lineage. At the greatest
+cutoff, `x` dominates every other state; absent `x`, any version 1 or version 2
+marker makes that cutoff fail-closed legacy; otherwise one compatible version
+3 lineage resolves positive run ID over `p` over `u`, independent of status
+order. Conflicting positive run IDs or incompatible action, content, policy-run
+target, or label progression fail closed, and a lower state cannot downgrade a
+higher state. Version 1 and version 2 markers cannot newly bind, succeed, or
+consume an authorization receipt; a version 2 `x` remains a permanent
+tombstone. Only a strictly later `edited`, `synchronize`, or `reopened`
+transition may recover, never a later or replayed `opened` event. Once any
+version 3 marker exists, operational rollback must retain version 3 parsing or
+use a reviewed forward correction. Other non-producing metadata does not form
+marker identity.
+The publisher uses the fetched `updated_at` only to recheck the complete PR
+snapshot before and after status publication and replaces any concurrent result
+with pending. Any later edit, synchronization, base advance, or status refresh
+still requires the applicable short-lived authorization and receipt anchor; a
+consumed receipt is never reset or reused.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 

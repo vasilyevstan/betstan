@@ -15,7 +15,11 @@ SERVICE_CONTRACT_REVIEWER="$AGENT_DIR/betstan-service-contract-reviewer.agent.md
 TEST_ENGINEER="$AGENT_DIR/betstan-test-engineer.agent.md"
 PR_TEMPLATE="$ROOT_DIR/.github/pull_request_template.md"
 CONTRIBUTING="$ROOT_DIR/CONTRIBUTING.md"
+BRANCH_SKILL="$ROOT_DIR/.github/skills/betstan-branch-governance/SKILL.md"
+DEPLOYMENT_SAFETY="$AGENT_DIR/betstan-deployment-safety.agent.md"
+LEARNINGS="$ROOT_DIR/LEARNINGS.md"
 MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
+POLICY_PUBLISHER="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
 
 fail() {
   echo "agent governance contract failed: $*" >&2
@@ -349,6 +353,80 @@ grep -Fq 'Every other PR requires `APPROVED_SHA` equal to its exact current head
   fail "CONTRIBUTING.md does not require exact-head human approval"
 grep -Fq 'operational convention' <<<"$contributing_flat" ||
   fail "CONTRIBUTING.md does not disclose the label-only limitation"
+
+require_flat_literal "$CONTRIBUTING" \
+  'manual refresh cannot create a missing marker or act as quality evidence'
+require_flat_literal "$CONTRIBUTING" \
+  '`labeled` and `unlabeled` are non-producing refreshes'
+require_flat_literal "$CONTRIBUTING" \
+  'permanent pending tombstone'
+require_flat_literal "$CONTRIBUTING" \
+  'strictly postdate both the event timestamp'
+
+require_flat_literal "$BRANCH_SKILL" \
+  'refresh cannot create a marker or supply quality evidence'
+require_flat_literal "$BRANCH_SKILL" \
+  '`labeled` and `unlabeled` are non-producing refreshes'
+require_flat_literal "$BRANCH_SKILL" \
+  'permanently tombstones that lineage'
+require_flat_literal "$BRANCH_SKILL" \
+  'must strictly postdate the event'
+
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'Manual refresh may bind an existing marker but cannot create one or supply quality evidence'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  '`labeled` and `unlabeled` remain non-producing refreshes'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'permanently tombstones that lineage'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'created strictly after the original cutoff'
+
+require_flat_literal "$LEARNINGS" \
+  'Manual refresh may bind an existing marker but never creates one or supplies quality evidence'
+require_flat_literal "$LEARNINGS" \
+  'Label events remain non-producing'
+require_flat_literal "$LEARNINGS" \
+  'permanent pending tombstone'
+require_flat_literal "$LEARNINGS" \
+  'created strictly after the original cutoff'
+
+require_literal "$POLICY_PUBLISHER" \
+  'const OPENING_RACE_WINDOW_MS = 300_000;'
+for marker_authority_file in \
+  "$CONTRIBUTING" \
+  "$BRANCH_SKILL" \
+  "$DEPLOYMENT_SAFETY" \
+  "$LEARNINGS"; do
+  require_flat_literal "$marker_authority_file" \
+    'Version 3 quality markers use `v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.'
+  require_flat_literal "$marker_authority_file" \
+    'A `u` marker cannot bind a run, publish quality success, or consume an authorization receipt.'
+  require_flat_literal "$marker_authority_file" \
+    'The qualifying exact `labeled` event appends durable `p` before any optional run binding, and a label handler never consumes an authorization receipt.'
+  require_flat_literal "$marker_authority_file" \
+    'An exact replay of the same qualifying `labeled` event is inert after `p` or a run is durable; a later label mutation remains drift.'
+  require_flat_literal "$marker_authority_file" \
+    'At the greatest cutoff, `x` dominates every other state; absent `x`, any version 1 or version 2 marker makes that cutoff fail-closed legacy; otherwise one compatible version 3 lineage resolves positive run ID over `p` over `u`, independent of status order.'
+  require_flat_literal "$marker_authority_file" \
+    'Conflicting positive run IDs or incompatible action, content, policy-run target, or label progression fail closed, and a lower state cannot downgrade a higher state.'
+  require_flat_literal "$marker_authority_file" \
+    'Version 1 and version 2 markers cannot newly bind, succeed, or consume an authorization receipt; a version 2 `x` remains a permanent tombstone.'
+  require_flat_literal "$marker_authority_file" \
+    'Only a strictly later `edited`, `synchronize`, or `reopened` transition may recover, never a later or replayed `opened` event.'
+  require_flat_literal "$marker_authority_file" \
+    'Once any version 3 marker exists, operational rollback must retain version 3 parsing or use a reviewed forward correction.'
+  require_flat_literal "$marker_authority_file" \
+    'Opening-label reconciliation is authorized only when the server-owned label timestamp is at or after the original `opened` transition cutoff and no more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution cannot extend that window.'
+  require_flat_literal "$marker_authority_file" \
+    'GitHub may serialize distinct creation and label mutations to the same whole-second timestamp. Equality is accepted only with the complete direct or inverse proof; a timestamp even 1 ms before the cutoff is not reconciliation authority.'
+  require_flat_literal "$marker_authority_file" \
+    'Direct ordering also requires the label timestamp to strictly precede the earliest exact-lineage status creation, while inverse ordering requires identical event and live `updated_at` values and allows the marker on either side of the label.'
+  require_flat_literal "$marker_authority_file" \
+    'The broad opening snapshot mismatch permits only fail-closed inspection and never grants reconciliation: an out-of-window replay without a marker stays pending, an existing mismatch writes the permanent tombstone, and any intervening `updated_at` change fails closed.'
+  require_flat_literal "$marker_authority_file" \
+    'A same-cutoff tombstone cannot be replaced or revived; only a strictly later `edited`, `synchronize`, or `reopened` transition can recover the lineage.'
+done
+
 require_literal "$MERGE_SAFETY" 'human approval requires APPROVED_SHA='
 
 echo "agent_governance_contract=PASS"
