@@ -809,6 +809,22 @@ validated.
 - GitHub compare responses do not expose `head_commit`. Bind a complete
   ordered compare list to its requested head by requiring its final unique
   full-SHA commit to equal that head; containment alone is insufficient.
+- Raw paginated Compare responses can exceed the private evidence-size bound
+  because they carry commit/file/patch detail. Fetch every page with a
+  SHA-only projection, require identical typed metadata, normalize the full
+  aggregate, and retain no raw pages. A partial 250-entry list is never
+  ancestry proof.
+- The live-data workflow blob
+  `c6c113b49a36518b7b106aa1406998a4abca10a0` predates only the `hold` and
+  exact acceptance-slip cleanup mutation tokens. Its cryptographically
+  verified blob identity selects that reviewed reduced profile; every other
+  historical source requires the full current token profile.
+- Keep workflow-specific supersession successor chains: capacity needs one
+  later exact success; live data needs later dry-run, backfill, and slip-index
+  successes; activation needs a later exact activation success. A recovered
+  ghost is not completion—reconcile the entire nonterminal run inventory
+  until no unexplained blocker remains. Reject removing live-data or activation
+  supersession as a substitute for their successor chains.
 - A critical path blocked by a repository-introduced rule, policy, or guard is
   not automatically an external safety wait. The conductor must prove the
   exact self-imposed cause and the intended invariant; if real production

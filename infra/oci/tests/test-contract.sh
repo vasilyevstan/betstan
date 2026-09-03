@@ -1142,6 +1142,18 @@ for prospective_contract in \
   grep -Fq "$prospective_contract" "$deployment_safety_agent" ||
     fail "deployment safety omits prospective-master bootstrap contract: $prospective_contract"
 done
+for compare_contract in \
+    'capacity requires one later exact success' \
+    'live data requires later dry-run, backfill, and slip-index successes' \
+    'activation requires one later exact activation success' \
+    'reject any proposal to remove live-data' \
+    'Fetch Compare evidence with `--paginate` and a compact SHA-only projection' \
+    'complete unique ordered commit list to end at the requested head' \
+    'c6c113b49a36518b7b106aa1406998a4abca10a0' \
+    'complete nonterminal production-run inventory'; do
+  grep -Fq "$compare_contract" "$deployment_safety_agent" ||
+    fail "deployment safety omits compact Compare recovery contract: $compare_contract"
+done
 for recovery_contract in \
     'reason=unmaterialized' \
     'regardless of control SHA' \
@@ -1158,6 +1170,13 @@ for prospective_contract in \
     '`EXCLUDE_RUN_ID` and generic disabled handling are never'; do
   grep -Fq "$prospective_contract" "$conductor_agent" ||
     fail "conductor omits prospective-master bootstrap contract: $prospective_contract"
+done
+for inventory_contract in \
+    'A recovered original blocker is not completion' \
+    'nonterminal production-run inventory' \
+    'zero unexplained blockers'; do
+  grep -Fq "$inventory_contract" "$conductor_agent" ||
+    fail "conductor omits recovered-blocker inventory contract: $inventory_contract"
 done
 for recovery_contract in \
     'Promotion cannot silently clear the fence' \
@@ -1188,12 +1207,28 @@ done
 grep -Fq 'GitHub compare responses do not expose `head_commit`' \
   "$ROOT_DIR/LEARNINGS.md" ||
   fail "learnings omit GitHub compare head binding"
+for compare_learning in \
+    'Raw paginated Compare responses can exceed the private evidence-size bound' \
+    'SHA-only projection' \
+    'c6c113b49a36518b7b106aa1406998a4abca10a0' \
+    'Keep workflow-specific supersession successor chains' \
+    'supersession as a substitute for their successor chains' \
+    'reconcile the entire nonterminal run inventory'; do
+  grep -Fq "$compare_learning" "$ROOT_DIR/LEARNINGS.md" ||
+    fail "learnings omit compact Compare recovery guidance: $compare_learning"
+done
 grep -Fq 'classify-unmaterialized-run' "$run_exclusivity_script" ||
   fail "production exclusivity does not invoke unmaterialized classification"
 grep -Fq 'retire-unmaterialized-claim' "$authority_helper" ||
   fail "authority helper does not expose unmaterialized retirement"
 grep -Fq 'verify_prospective_promotion' "$run_exclusivity_script" ||
   fail "production exclusivity does not verify prospective promotion evidence"
+grep -Fq 'fetch_complete_compare' "$run_exclusivity_script" ||
+  fail "production exclusivity does not normalize complete Compare evidence"
+grep -Fq -- '--paginate --jq "$COMPARE_JQ"' "$run_exclusivity_script" ||
+  fail "production exclusivity does not fetch compact paginated Compare evidence"
+grep -Fq 'HISTORICAL_MUTATION_PROFILES' "$authority_helper" ||
+  fail "authority helper omits blob-bound historical mutation profiles"
 grep -Fq 'PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' "$pr_merge_safety" ||
   fail "merge safety does not pass the exact prospective promotion PR"
 grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' \

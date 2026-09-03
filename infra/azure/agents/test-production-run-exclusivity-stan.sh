@@ -449,6 +449,52 @@ emit_successful_runs() {
   esac
 }
 
+emit_complete_compare_pages() {
+  local base_sha="$1"
+  local head_sha="$2"
+  local total_commits="$3"
+  python3 - "$base_sha" "$head_sha" "$total_commits" <<'PY'
+import json
+import sys
+
+base_sha, head_sha, total_text = sys.argv[1:]
+total = int(total_text)
+commits = [{"sha": f"{index:040x}"} for index in range(1, total)]
+commits.append({"sha": head_sha})
+for start in range(0, total, 100):
+    print(json.dumps({
+        "status": "ahead",
+        "ahead_by": total,
+        "behind_by": 0,
+        "total_commits": total,
+        "base_commit": {"sha": base_sha},
+        "merge_base_commit": {"sha": base_sha},
+        "commits": commits[start:start + 100],
+    }, separators=(",", ":")))
+PY
+}
+
+emit_inconsistent_compare_pages() {
+  local base_sha="$1"
+  local head_sha="$2"
+  printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"0000000000000000000000000000000000000001"}]}\n' \
+    "$base_sha" "$base_sha"
+  printf '{"status":"ahead","ahead_by":3,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+    "$base_sha" "$base_sha" "$head_sha"
+}
+
+require_compact_compare_query() {
+  [[ " $* " == *" --paginate "* && " $* " == *" --jq "* ]] || {
+    echo "compare query was not fully paginated and projected" >&2
+    return 1
+  }
+  [[ "$*" == *'status,ahead_by,behind_by,total_commits'* &&
+    "$*" == *'commits:[.commits[]|{sha:.sha}]'* ]] || {
+    echo "compare query did not use the compact SHA-only projection" >&2
+    return 1
+  }
+}
+
 gh() {
   if [[ "$1 $2" == "pr view" ]]; then
     emit_prospective_promotion "$3"
@@ -531,7 +577,15 @@ gh() {
   fi
 
   if [[ "$endpoint" == "repos/$REPOSITORY/compare/$MASTER_SHA...$PROSPECTIVE_SHA" ]]; then
+    require_compact_compare_query "$@" || return 1
     case "$mode" in
+      prospective-paginated-unmaterialized-data)
+        emit_complete_compare_pages \
+          "$MASTER_SHA" "$PROSPECTIVE_SHA" 540
+        ;;
+      prospective-inconsistent-pages-data)
+        emit_inconsistent_compare_pages "$MASTER_SHA" "$PROSPECTIVE_SHA"
+        ;;
       prospective-nonancestor-data)
         printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
           "$MASTER_SHA" "$OLD_SHA" "$PROSPECTIVE_SHA"
@@ -610,7 +664,28 @@ gh() {
       printf '{"object":{"sha":"%s"}}\n' "$MASTER_SHA"
       ;;
     "repos/$REPOSITORY/compare/"*)
+      require_compact_compare_query "$@" || return 1
       case "$mode" in
+        paginated-unmaterialized-data)
+          emit_complete_compare_pages "$OLD_SHA" "$MASTER_SHA" 540
+          ;;
+        inconsistent-pages-unmaterialized-data)
+          emit_inconsistent_compare_pages "$OLD_SHA" "$MASTER_SHA"
+          ;;
+        empty-pages-unmaterialized-data)
+          ;;
+        duplicate-json-page-unmaterialized-data)
+          printf '{"status":"ahead","ahead_by":1,"ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA"
+          ;;
+        malformed-page-commits-unmaterialized-data)
+          printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":{}}\n' \
+            "$OLD_SHA" "$OLD_SHA"
+          ;;
+        duplicate-commits-unmaterialized-data)
+          printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"},{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA" "$MASTER_SHA"
+          ;;
         nonancestor-*|nonancestor-superseded-data)
           printf '{"status":"diverged","ahead_by":1,"behind_by":1,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"cccccccccccccccccccccccccccccccccccccccc"},"commits":[{"sha":"%s"}]}\n' \
             "$OLD_SHA" "$MASTER_SHA"
@@ -652,7 +727,9 @@ gh() {
 export -f \
   gh run_path run_status run_event run_attempt run_head run_title workflow_state \
   historical_source emit_historical_workflow emit_inventory emit_full_run \
-  emit_successful_runs emit_other_active_inventory emit_prospective_promotion
+  emit_successful_runs emit_other_active_inventory emit_prospective_promotion \
+  emit_complete_compare_pages emit_inconsistent_compare_pages \
+  require_compact_compare_query
 export \
   ROOT_DIR EXCLUSIVITY RUN_ID WORKFLOW_ID MASTER_SHA OLD_SHA PROSPECTIVE_SHA \
   WRONG_FINAL_SHA \
@@ -700,6 +777,7 @@ done
 
 for mode in \
   unmaterialized-data \
+  paginated-unmaterialized-data \
   active-unmaterialized-data \
   unmaterialized-activation \
   unmaterialized-capacity; do
@@ -725,6 +803,14 @@ for expected in \
   }
 done
 
+prospective_paginated_output="$(
+  run_prospective_case prospective-paginated-unmaterialized-data
+)"
+grep -qF 'prospective_unmaterialized=yes' <<<"$prospective_paginated_output" || {
+  echo "prospective paginated compare did not classify the exact ghost" >&2
+  exit 1
+}
+
 ordinary_output="$(run_prospective_case unmaterialized-data)"
 if grep -qF 'prospective_unmaterialized=yes' <<<"$ordinary_output"; then
   echo "prospective context altered an already historical ghost" >&2
@@ -742,6 +828,7 @@ for mode in \
   prospective-wrong-number-data \
   prospective-nonancestor-data \
   prospective-malformed-compare-data \
+  prospective-inconsistent-pages-data \
   prospective-wrong-final-compare-data \
   prospective-head-present-not-final-data \
   prospective-rendered-title-data \
@@ -796,6 +883,11 @@ for mode in \
   missing-compare-unmaterialized-data \
   malformed-compare-unmaterialized-data \
   incomplete-compare-unmaterialized-data \
+  inconsistent-pages-unmaterialized-data \
+  empty-pages-unmaterialized-data \
+  duplicate-json-page-unmaterialized-data \
+  malformed-page-commits-unmaterialized-data \
+  duplicate-commits-unmaterialized-data \
   wrong-final-compare-unmaterialized-data \
   malformed-historical-unmaterialized-data \
   missing-guards-unmaterialized-data \

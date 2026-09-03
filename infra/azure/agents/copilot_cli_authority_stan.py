@@ -210,6 +210,25 @@ UNMATERIALIZED_WORKFLOWS = {
         ),
     },
 }
+LIVE_DATA_HISTORICAL_PROFILE_BLOB = (
+    "c6c113b49a36518b7b106aa1406998a4abca10a0"
+)
+LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS = {
+    "./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+}
+HISTORICAL_MUTATION_PROFILES = {
+    (
+        ".github/workflows/oci-live-data-rollout.yml",
+        LIVE_DATA_HISTORICAL_PROFILE_BLOB,
+    ): tuple(
+        token
+        for token in UNMATERIALIZED_WORKFLOWS[
+            ".github/workflows/oci-live-data-rollout.yml"
+        ]["mutationTokens"]
+        if token not in LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS
+    ),
+}
 CURRENT_MASTER_GUARD_LINES = (
     '[ "$SOURCE_SHA" = "$GITHUB_SHA" ]',
     "git fetch --quiet origin master:refs/remotes/origin/master",
@@ -1180,6 +1199,16 @@ def decode_historical_workflow(historical, path, *, expected_blob_sha=None):
     return source, blob_sha
 
 
+def historical_mutation_tokens(path, blob_sha):
+    specification = UNMATERIALIZED_WORKFLOWS.get(path)
+    if specification is None:
+        fail("workflow is not allowlisted for unmaterialized retirement")
+    return HISTORICAL_MUTATION_PROFILES.get(
+        (path, blob_sha),
+        specification["mutationTokens"],
+    )
+
+
 def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=None):
     specification = UNMATERIALIZED_WORKFLOWS.get(path)
     if specification is None:
@@ -1242,7 +1271,7 @@ def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=No
         fail("historical workflow protected environment is invalid")
 
     mutation_positions = []
-    for token in specification["mutationTokens"]:
+    for token in historical_mutation_tokens(path, observed_blob_sha):
         positions = executable_token_positions(source, token)
         if not positions:
             fail(f"historical workflow is missing mutation token: {token}")

@@ -286,6 +286,14 @@ import sys
 source_path, directory, run_id, old_sha, master_sha, repository, mode = sys.argv[1:]
 directory_path = Path(directory)
 source = Path(source_path).read_bytes()
+if mode == "changed-blob-missing-current-tokens":
+    for token in (
+        b"./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+        b"./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+    ):
+        if token not in source:
+            raise SystemExit(f"current live-data fixture is missing {token!r}")
+        source = source.replace(token, b"", 1)
 blob_sha = hashlib.sha1(
     f"blob {len(source)}\0".encode("utf-8") + source
 ).hexdigest()
@@ -482,6 +490,36 @@ write_advanced_normalized() {
     --repo-root "$ROOT_DIR" \
     --output "$ADVANCED_NORMALIZED"
 }
+
+PYTHONDONTWRITEBYTECODE=1 python3 - "$HELPER" <<'PY'
+import importlib.util
+import sys
+
+helper_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("authority_helper", helper_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = ".github/workflows/oci-live-data-rollout.yml"
+full_profile = module.UNMATERIALIZED_WORKFLOWS[path]["mutationTokens"]
+historical_profile = module.historical_mutation_tokens(
+    path,
+    module.LIVE_DATA_HISTORICAL_PROFILE_BLOB,
+)
+expected_historical = tuple(
+    token
+    for token in full_profile
+    if token not in module.LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS
+)
+if historical_profile != expected_historical:
+    raise SystemExit("exact historical live-data mutation profile drifted")
+for omission in module.LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS:
+    if omission in historical_profile or omission not in full_profile:
+        raise SystemExit("historical live-data mutation profile omissions drifted")
+if module.historical_mutation_tokens(path, "0" * 40) != full_profile:
+    raise SystemExit("non-profile live-data blob did not require current mutations")
+if len(module.HISTORICAL_MUTATION_PROFILES) != 1:
+    raise SystemExit("unexpected historical mutation profile was allowlisted")
+PY
 
 write_request
 if STUB_DIRTY_CHECKOUT=true \
@@ -775,7 +813,8 @@ retire_test_run_id=7310
 for rejection in \
   nonancestor rendered-title wrong-identity wrong-run-id wrong-path wrong-event \
   wrong-head wrong-branch wrong-attempt wrong-repository jobs pending artifacts \
-  malformed wrong-final head-present-not-final; do
+  malformed wrong-final head-present-not-final \
+  changed-blob-missing-current-tokens; do
   prepare_unmaterialized_claim "$retire_test_run_id" "$rejection"
   if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then
     echo "unsafe unmaterialized retirement unexpectedly passed: $rejection" >&2
