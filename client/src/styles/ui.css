@@ -94,15 +94,18 @@ body {
   border-radius: var(--radius-pill);
   border: 1px solid var(--border-subtle);
   background: var(--surface-soft);
+  color: var(--text-main);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  text-decoration: none;
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
 }
 
 .nav-icon-link:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-elevated);
+  color: var(--text-main);
 }
 
 .nav-icon-link--labelled {
@@ -440,7 +443,7 @@ body {
   font-size: 0.9rem;
 }
 
-.auth-card .auth-submit {
+.auth-submit {
   min-height: 3rem;
   border-color: var(--accent);
   background: linear-gradient(
@@ -453,7 +456,7 @@ body {
   box-shadow: 0 10px 22px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
-.auth-card .auth-submit:hover {
+.auth-submit:hover {
   border-color: color-mix(in srgb, var(--accent) 84%, #ffffff);
   background: linear-gradient(
     135deg,
@@ -464,7 +467,7 @@ body {
   transform: translateY(-1px);
 }
 
-.auth-card .auth-submit:focus-visible {
+.auth-submit:focus-visible {
   box-shadow:
     0 0 0 0.2rem color-mix(in srgb, var(--accent) 28%, transparent),
     0 10px 22px color-mix(in srgb, var(--accent) 24%, transparent);
@@ -777,6 +780,7 @@ body {
 
 .ui-variant-v1 {
   --accent: #59b8ad;
+  --accent-contrast: #071520;
   --surface-soft: rgba(25, 37, 64, 0.82);
   --surface-elevated: rgba(36, 52, 88, 0.84);
   --radius-card: 18px;
@@ -811,6 +815,7 @@ body {
 
 .ui-variant-v2 {
   --accent: #4db5ad;
+  --accent-contrast: #071520;
   --surface-base: #071019;
   --surface-soft: #0f1a26;
   --surface-elevated: #172534;
@@ -943,6 +948,7 @@ body {
 
 .ui-variant-v3 {
   --accent: #cf8dff;
+  --accent-contrast: #221135;
   --surface-soft: #1d1730;
   --surface-elevated: #291d45;
   --radius-card: 22px;

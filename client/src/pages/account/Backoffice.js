@@ -65,7 +65,7 @@ const HandleBackoffice = ({
         </p>
         {!currentUser && (
           <Link
-            className="btn btn-primary"
+            className="btn auth-submit"
             to={{ pathname: '/login', search: location.search }}
           >
             Log in
