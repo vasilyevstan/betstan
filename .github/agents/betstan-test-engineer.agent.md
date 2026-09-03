@@ -89,6 +89,15 @@ confirmations, and require stale-quote reselection before resubmission.
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.
 
+For `common/**` changes, read `common/README.md`, report the source-candidate
+version separately from every service's installed version, and run the Common
+build, legacy runtime/export checks, immediate-predecessor assignability, and
+legacy AMQP type check. Follow the canonical packed-artifact, lock-exact
+consumer, and rolling-version matrix in that guide. Never use
+`npm install --no-save <tarball>` as evidence. Require all eight manifests and
+lockfiles to retain one exact published pin and exercise the applicable
+rollback matrix.
+
 ## Boundaries
 
 - Remain read-only. Never edit code/tests, weaken assertions, add `.skip`, catch

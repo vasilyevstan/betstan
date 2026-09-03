@@ -8,6 +8,32 @@
 
 ## Architecture patterns
 
+### Shared package source and publication
+
+- `common/src/` is the canonical source for the next `@betstan/common`
+  candidate, while each deployable service compiles against its exact
+  published manifest/lockfile pin. Always inspect and report both versions;
+  repository source being newer does not make it available in a service image.
+- npm versions are immutable. After publishing a version, bump the Common
+  source version before its next content change so a locally packed artifact
+  cannot silently share a name with different registry content.
+- Keep all eight backend consumers on one exact version. Never use a caret,
+  dist-tag, `file:`, workspace, symlink, gitlink, or submodule as a deployment
+  dependency.
+- Validate Common with legacy runtime/export checks, immediate-predecessor
+  assignability, legacy AMQP types, and `npm pack`. For unpublished consumer
+  testing, start from lock-exact `npm ci` and replace only the isolated
+  `node_modules/@betstan/common` directory with the unpacked tarball.
+  `npm install --no-save <tarball>` is not valid evidence because it can
+  re-resolve unrelated TypeScript, Mongoose, or transitive dependencies.
+- Record source SHA, packed file list, npm integrity/shasum, independent
+  tarball SHA-256, publish authorization, dist-tag, and downloaded registry
+  hash. Publish first; repin and clean-install all consumers second.
+- Service-local compatibility bridges are temporary rolling-release adapters,
+  not another contract owner. Add the wire value to `common/src/` in the same
+  feature, keep it additive, and remove the bridge after consumers adopt the
+  published package containing it.
+
 ### Messaging (AMQP / RabbitMQ)
 - Every service communicates through RabbitMQ exchanges.
 - Base classes live in `@betstan/common`: `AListener<T>` (consumers) and `APublisher<T>` (producers).
@@ -720,13 +746,13 @@ validated.
   only when that exact run appears. Use `--resume-captured` after a pre-bind
   crash and `--resume-run` after delayed materialization. Never infer identity
   from title or timing, and never redispatch a URL-less unresolved intent.
-- Treat an unresolved same-release authority state as global, not
-  request-local. Any `dispatching`/`bound` intent or `claimed`/`inflight`
-  record blocks every protected request for the repository and control SHA.
-  `issued` and `consumed` are one-use for the same operation and exact
-  transport input hash; changed inputs form a new request but do not bypass
-  policy, lineage, recovery, or exclusivity. `retired` is the only inert
-  replacement exception.
+- Treat unresolved authority as repository-global, not request-local. Any
+  `dispatching`/`bound` intent or `claimed`/`inflight` record blocks every
+  protected request for that repository even after control SHA advances.
+  Promotion cannot silently clear the fence. `issued` and `consumed` remain
+  one-use for the same operation and exact transport input hash; changed
+  inputs form a new request but do not bypass policy, lineage, recovery, or
+  exclusivity. `retired` is the only inert replacement exception.
 - Persisting an intent is not the last dispatch check. Revalidate current
   master, workflow blob, and active state after creating it, and cancel only a
   pristine untouched intent if authority drifted before the GitHub call.
@@ -754,6 +780,61 @@ validated.
   and receipt lifecycle as directly dispatched runs. A captured terminal run
   is safe to mark `retired` only with zero jobs and zero pending deployments;
   that proof, not age or a generic conclusion, permits a replacement dispatch.
+- A claimed accepted-but-unmaterialized run is not a terminal claim. Keep its
+  affected workflow disabled while its generic-title ghost SHA is current,
+  and never grant it human or CLI environment approval. Promote the
+  current-master safety guard first; never reset master to the poisoned SHA.
+  After that SHA is a strict ancestor, only
+  `retire-unmaterialized-claim` may migrate the exact v1 claim to a retired
+  record, with optimistic version locking and a digest of complete run,
+  jobs, pending-deployment, artifact, compare, and historical-workflow
+  evidence. The path is restricted to data rollout, live activation, and
+  capacity acquisition; it requires queued/null first-attempt manual identity,
+  equal untouched timestamps, zero exact count/list jobs and artifacts,
+  zero pending deployments, a generic workflow-name title that cannot match
+  a legitimate rendered title, and a one-job historical protected workflow
+  whose `oci-control-plane` non-cancelling guards precede every mutation.
+  Then rebuild the complete exact-SHA chain; retirement never authorizes an
+  automatic redispatch or approval. A cancellation `409` is journal
+  corroboration only, never classifier or retirement evidence.
+- A current-master ghost can block the guard promotion that would make it
+  safely historical. The merge-safety path may pass only its exact promotion
+  PR number; exclusivity must independently prove an OPEN CLI-managed
+  same-repository `dev` -> `master` PR, exact current-master base, and strict
+  prospective-head ancestry. Use that prospective SHA only for the
+  allowlisted queued unmaterialized ghost, never for normal dispatch,
+  approval, another active run, or the repository-global claimed/inflight
+  authority fence. `EXCLUDE_RUN_ID` and generic disabled handling cannot
+  supply prospective-bootstrap evidence.
+- GitHub compare responses do not expose `head_commit`. Bind a complete
+  ordered compare list to its requested head by requiring its final unique
+  full-SHA commit to equal that head; containment alone is insufficient.
+- Raw paginated Compare responses can exceed the private evidence-size bound
+  because they carry commit/file/patch detail. Fetch every page with a
+  SHA-only projection, require identical typed metadata, normalize the full
+  aggregate, and retain no raw pages. A partial 250-entry list is never
+  ancestry proof.
+- The live-data workflow blob
+  `c6c113b49a36518b7b106aa1406998a4abca10a0` predates only the `hold` and
+  exact acceptance-slip cleanup mutation tokens. Its cryptographically
+  verified blob identity selects that reviewed reduced profile; every other
+  historical source requires the full current token profile.
+- Keep workflow-specific supersession successor chains: capacity needs one
+  later exact success; live data needs later dry-run, backfill, and slip-index
+  successes; activation needs a later exact activation success. A recovered
+  ghost is not completion—reconcile the entire nonterminal run inventory
+  until no unexplained blocker remains. Reject removing live-data or activation
+  supersession as a substitute for their successor chains.
+- A critical path blocked by a repository-introduced rule, policy, or guard is
+  not automatically an external safety wait. The conductor must prove the
+  exact self-imposed cause and the intended invariant; if real production
+  risk, provenance, approval, health, rollback, or authority evidence remains
+  unresolved, keep the block. Otherwise it owns one focused correction through
+  branch -> `dev` -> `master`, with a reproducing test. It requires an
+  independent deployment-safety challenge, rollback preservation, and
+  post-promotion exact-SHA revalidation before automatic resumption of the
+  exact original job.
+  Never weaken a gate to make progress or edit live authority state ad hoc.
 - Expired `claimed` and `inflight` records stay inspectable so exact recovery
   remains possible. Issuing an active claimed run or restoring retry authority
   for the same active gate renews the bounded window; reconciled consumption,

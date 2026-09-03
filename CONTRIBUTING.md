@@ -76,6 +76,22 @@ immutable-SHA gates, or production safety.
 Do not merge a PR until `pr-merge-safety-stan.sh` passes in the correct
 automatic or human mode for its exact current head.
 
+## Shared Common package
+
+`common/src/` is the repository-owned source for the next
+`@betstan/common` package candidate. It must remain a normal tracked directory,
+never a submodule, gitlink, workspace dependency, or `file:` dependency.
+Deployable services compile against the exact published version in their own
+manifest and lockfile; source existing in this repository is not implicitly
+available to those images.
+
+Read `common/README.md` before changing a shared contract. Keep all eight
+backend consumers on one exact published version, bump the Common source
+version after an immutable version has been published, prove old/new
+producer-consumer and rollback compatibility, and validate the packed artifact
+without allowing npm to re-resolve unrelated dependencies. Package publication
+and consumer repinning are separate reviewed release steps.
+
 Protected environment approval is classified by origin, not workflow type.
 Every protected operation dispatched by the active Copilot CLI must use
 `copilot-cli-dispatch-stan.sh` with an operation-specific JSON request stored

@@ -19,8 +19,10 @@ Read the current versions of:
 - `client/src/App.js`, `client/src/Header.js`, and affected pages;
 - `.github/workflows/production-build.yml` and affected test/deploy workflows;
 - relevant `infra/k8s*` manifests;
-- the installed `@betstan/common` declarations or package contents when `common/` is
-  absent. State the exact package version and never assume unavailable source.
+- `common/README.md` and `common/src/` when present;
+- every affected service's installed `@betstan/common` declarations and exact
+  manifest/lockfile version. Source may be ahead of the published package, so
+  state both versions and never substitute one for the other.
 
 Always inspect the current git graph, target branch, worktree status, and exact diff.
 Do not rely on an earlier conversation or stale branch.
@@ -51,7 +53,11 @@ Do not rely on an earlier conversation or stale branch.
 4. Distinguish source compatibility, runtime compatibility, data compatibility, and
    rollback compatibility.
 5. Require database-enforced invariants for concurrency-sensitive uniqueness.
-6. Map the minimum affected test set, including `common` consumers.
+6. For shared contracts, verify package-version ownership, exports, enum wire
+   values, temporary local bridges, packed-artifact contents, and exact pins
+   across all eight backend consumers. Reject `file:`, workspace, symlink, or
+   implicit dist-tag consumption.
+7. Map the minimum affected test set, including `common` consumers.
 
 ## Output
 

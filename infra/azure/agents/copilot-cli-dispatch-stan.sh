@@ -325,7 +325,7 @@ materialize_record() {
     fi
   done
 
-  fail "dispatch was accepted as run $run_id, but exact materialization was not proven; do not redispatch, resume this run"
+  fail "dispatch was accepted as run $run_id, but it remains in an accepted-but-unmaterialized provider state; exact materialization was not proven, do not redispatch, resume this run"
 }
 
 if [[ -n "$ACTION" ]]; then
@@ -391,7 +391,8 @@ if [[ -n "$blocking_record" ]]; then
 fi
 
 revalidate_dispatch_target
-REPO="$repository" "$RUN_EXCLUSIVITY_SCRIPT"
+REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+  "$RUN_EXCLUSIVITY_SCRIPT"
 revalidate_dispatch_target
 
 intent_summary="$(

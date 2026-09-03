@@ -179,7 +179,8 @@ if [[ "$base_ref" == "master" ]]; then
   [[ "$compare_status" == "ahead" || "$compare_status" == "identical" ]] ||
     fail "current master tip is not an ancestor of the promotion head status=$compare_status"
 
-  REPO="$REPO" "$PRODUCTION_RUN_EXCLUSIVITY" ||
+  REPO="$REPO" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER" \
+    "$PRODUCTION_RUN_EXCLUSIVITY" ||
     fail "another actionable production-capable workflow is active"
 
   expected_workflows="$(

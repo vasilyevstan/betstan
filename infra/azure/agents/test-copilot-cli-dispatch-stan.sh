@@ -3,7 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DISPATCHER="$ROOT_DIR/infra/azure/agents/copilot-cli-dispatch-stan.sh"
+POLICY="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 SHA="1111111111111111111111111111111111111111"
+ADVANCED_SHA="3333333333333333333333333333333333333333"
 BLOB="2222222222222222222222222222222222222222"
 WORKFLOW_ID="301"
 REPOSITORY="example/repo"
@@ -195,6 +198,16 @@ gh() {
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
+      if [[ "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" ]]; then
+        if [[ -n "${PROSPECTIVE_PROMOTION_PR:-}" ]]; then
+          echo "normal dispatcher leaked prospective promotion context" >&2
+          return 1
+        fi
+        if [[ -n "${EXCLUDE_RUN_ID:-}" ]]; then
+          echo "normal dispatcher leaked an exclusion bypass" >&2
+          return 1
+        fi
+      fi
       printf '{"total_count":0,"workflow_runs":[]}\n'
       ;;
     *)
@@ -214,6 +227,313 @@ run_dispatcher() {
   COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS=0 \
     "$DISPATCHER" "$@"
 }
+
+write_live_data_request() {
+  local path="$1"
+  local control_sha="$2"
+  python3 - "$path" "$control_sha" "$REPOSITORY" <<'PY'
+import json
+import os
+import sys
+
+path, control_sha, repository = sys.argv[1:]
+request = {
+    "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+    "repository": repository,
+    "operation": "oci-live-data-apply-backfills",
+    "controlSha": control_sha,
+    "subjectSha": control_sha,
+    "targetSha": None,
+    "inputs": {
+        "approved_sha": control_sha,
+        "build_run_id": "42",
+        "infrastructure_run_id": "43",
+        "phase": "apply-backfills",
+        "prerequisite_run_id": "44",
+        "baseline_recovery_run_id": "0",
+        "failed_deploy_run_id": "0",
+        "failed_activation_run_id": "0",
+        "failed_activation_user_id": "0",
+        "confirmation": "APPLY LIVE BACKFILLS EXACT SHA",
+    },
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(request, handle)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
+}
+
+write_unmaterialized_evidence() {
+  local directory="$1"
+  local run_id="$2"
+  local mode="${3:-valid}"
+  python3 - \
+    "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" \
+    "$directory" \
+    "$run_id" \
+    "$SHA" \
+    "$ADVANCED_SHA" \
+    "$REPOSITORY" \
+    "$mode" <<'PY'
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+source_path, directory, run_id, old_sha, master_sha, repository, mode = sys.argv[1:]
+directory_path = Path(directory)
+source = Path(source_path).read_bytes()
+if mode == "changed-blob-missing-current-tokens":
+    for token in (
+        b"./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+        b"./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+    ):
+        if token not in source:
+            raise SystemExit(f"current live-data fixture is missing {token!r}")
+        source = source.replace(token, b"", 1)
+blob_sha = hashlib.sha1(
+    f"blob {len(source)}\0".encode("utf-8") + source
+).hexdigest()
+title = "oci-live-data-rollout"
+if mode == "rendered-title":
+    title = f"oci-live-data apply-backfills {old_sha}"
+run = {
+    "id": int(run_id),
+    "workflow_id": 313,
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "display_title": title,
+    "event": "workflow_dispatch",
+    "head_sha": old_sha,
+    "head_branch": "master",
+    "head_repository": {"full_name": repository},
+    "run_attempt": 1,
+    "status": "queued",
+    "conclusion": None,
+    "created_at": "1970-01-01T00:00:00Z",
+    "run_started_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+}
+if mode == "wrong-identity":
+    run["workflow_id"] = 314
+elif mode == "wrong-run-id":
+    run["id"] += 1
+elif mode == "wrong-path":
+    run["path"] = ".github/workflows/oci-production-deploy.yml"
+elif mode == "wrong-event":
+    run["event"] = "push"
+elif mode == "wrong-head":
+    run["head_sha"] = "d" * 40
+elif mode == "wrong-branch":
+    run["head_branch"] = "dev"
+elif mode == "wrong-attempt":
+    run["run_attempt"] = 2
+elif mode == "wrong-repository":
+    run["head_repository"] = {"full_name": "another/repository"}
+jobs = {"total_count": 0, "jobs": []}
+if mode == "jobs":
+    jobs = {"total_count": 1, "jobs": [{"id": 1}]}
+pending = [] if mode != "pending" else [{"environment": {"id": 1}}]
+artifacts = {"total_count": 0, "artifacts": []}
+if mode == "artifacts":
+    artifacts = {"total_count": 1, "artifacts": [{"id": 1}]}
+compare = {
+    "status": "ahead",
+    "ahead_by": 1,
+    "behind_by": 0,
+    "total_commits": 1,
+    "base_commit": {"sha": old_sha},
+    "merge_base_commit": {"sha": old_sha},
+    "commits": [{"sha": master_sha}],
+}
+if mode == "nonancestor":
+    compare["status"] = "diverged"
+    compare["behind_by"] = 1
+    compare["merge_base_commit"] = {"sha": "c" * 40}
+elif mode == "malformed":
+    compare = {"status": "ahead"}
+elif mode == "wrong-final":
+    compare["commits"] = [{"sha": "e" * 40}]
+elif mode == "head-present-not-final":
+    compare["ahead_by"] = 2
+    compare["total_commits"] = 2
+    compare["commits"] = [
+        {"sha": master_sha},
+        {"sha": "e" * 40},
+    ]
+historical = {
+    "type": "file",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+    "encoding": "base64",
+    "size": len(source),
+    "sha": blob_sha,
+    "content": base64.b64encode(source).decode("ascii"),
+}
+directory_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+directory_path.chmod(0o700)
+for name, value in {
+    "run.json": run,
+    "workflow.json": {
+        "id": 313,
+        "path": ".github/workflows/oci-live-data-rollout.yml",
+        "state": "disabled_manually",
+    },
+    "jobs.json": jobs,
+    "pending.json": pending,
+    "artifacts.json": artifacts,
+    "compare.json": compare,
+    "historical.json": historical,
+}.items():
+    path = directory_path / name
+    path.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+PY
+}
+
+prepare_unmaterialized_claim() {
+  local run_id="$1"
+  local mode="${2:-valid}"
+  local intent_summary capture_path intent_version blob_sha
+  UNMATERIALIZED_RUN_ID="$run_id"
+  UNMATERIALIZED_EVIDENCE_DIR="$tmp_dir/unmaterialized-evidence-$run_id"
+  UNMATERIALIZED_AUTHORITY_DIR="$tmp_dir/unmaterialized-authority-$run_id"
+  UNMATERIALIZED_POLICY="$UNMATERIALIZED_EVIDENCE_DIR/policy.json"
+  UNMATERIALIZED_REQUEST="$UNMATERIALIZED_EVIDENCE_DIR/request.json"
+  UNMATERIALIZED_NORMALIZED="$UNMATERIALIZED_EVIDENCE_DIR/normalized.json"
+  write_unmaterialized_evidence \
+    "$UNMATERIALIZED_EVIDENCE_DIR" "$run_id" "$mode"
+  "$POLICY" get oci-live-data-apply-backfills >"$UNMATERIALIZED_POLICY"
+  chmod 600 "$UNMATERIALIZED_POLICY"
+  write_live_data_request "$UNMATERIALIZED_REQUEST" "$SHA"
+  "$HELPER" validate-request \
+    --request "$UNMATERIALIZED_REQUEST" \
+    --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+    --repository "$REPOSITORY" \
+    --current-master "$SHA" \
+    --repo-root "$ROOT_DIR" \
+    --output "$UNMATERIALIZED_NORMALIZED"
+  blob_sha="$(jq -r '.sha' "$UNMATERIALIZED_EVIDENCE_DIR/historical.json")"
+  intent_summary="$(
+    "$HELPER" claim-request \
+      --normalized "$UNMATERIALIZED_NORMALIZED" \
+      --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+      --repository "$REPOSITORY" \
+      --current-master "$SHA" \
+      --workflow-id 313 \
+      --workflow-blob-sha "$blob_sha" \
+      --owner-pid "$$" \
+      --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR"
+  )"
+  capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
+  intent_version="$(jq -r '.version' <<<"$intent_summary")"
+  printf 'https://github.com/%s/actions/runs/%s\n' \
+    "$REPOSITORY" "$run_id" >"$capture_path"
+  "$HELPER" record-dispatch-status \
+    --normalized "$UNMATERIALIZED_NORMALIZED" \
+    --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+    --repository "$REPOSITORY" \
+    --current-master "$SHA" \
+    --workflow-id 313 \
+    --workflow-blob-sha "$blob_sha" \
+    --expected-version "$intent_version" \
+    --dispatch-status 0 \
+    --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" >/dev/null
+  "$HELPER" bind-intent \
+    --normalized "$UNMATERIALIZED_NORMALIZED" \
+    --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+    --repository "$REPOSITORY" \
+    --current-master "$SHA" \
+    --workflow-id 313 \
+    --workflow-blob-sha "$blob_sha" \
+    --expected-run-id "$run_id" \
+    --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" >/dev/null
+}
+
+retire_unmaterialized_claim() {
+  local current_master="${1:-$ADVANCED_SHA}"
+  local expected_version="${2:-1}"
+  "$HELPER" retire-unmaterialized-claim \
+    --run-id "$UNMATERIALIZED_RUN_ID" \
+    --run-json "$UNMATERIALIZED_EVIDENCE_DIR/run.json" \
+    --workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/workflow.json" \
+    --jobs-json "$UNMATERIALIZED_EVIDENCE_DIR/jobs.json" \
+    --pending-json "$UNMATERIALIZED_EVIDENCE_DIR/pending.json" \
+    --artifacts-json "$UNMATERIALIZED_EVIDENCE_DIR/artifacts.json" \
+    --compare-json "$UNMATERIALIZED_EVIDENCE_DIR/compare.json" \
+    --historical-workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/historical.json" \
+    --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+    --repository "$REPOSITORY" \
+    --current-master "$current_master" \
+    --expected-version "$expected_version" \
+    --minimum-age-seconds 600 \
+    --now-epoch 2000 \
+    --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR"
+}
+
+write_advanced_normalized() {
+  local directory="$1"
+  local request="$directory/advanced-request.json"
+  ADVANCED_NORMALIZED="$directory/advanced-normalized.json"
+  write_live_data_request "$request" "$ADVANCED_SHA"
+  "$HELPER" validate-request \
+    --request "$request" \
+    --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+    --repository "$REPOSITORY" \
+    --current-master "$ADVANCED_SHA" \
+    --repo-root "$ROOT_DIR" \
+    --output "$ADVANCED_NORMALIZED"
+}
+
+PYTHONDONTWRITEBYTECODE=1 python3 - "$HELPER" <<'PY'
+import importlib.util
+import sys
+
+helper_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("authority_helper", helper_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = ".github/workflows/oci-live-data-rollout.yml"
+full_profile = module.UNMATERIALIZED_WORKFLOWS[path]["mutationTokens"]
+historical_profile = module.historical_mutation_tokens(
+    path,
+    module.LIVE_DATA_HISTORICAL_PROFILE_BLOB,
+)
+expected_historical = (
+    "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+    "./infra/oci/scripts/authorize-github-runner.sh authorize",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+    "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+    "./infra/oci/scripts/revoke-github-runner.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+if (
+    historical_profile != expected_historical
+    or module.LIVE_DATA_HISTORICAL_PROFILE_TOKENS != expected_historical
+):
+    raise SystemExit("exact historical live-data mutation profile drifted")
+for missing_token in (
+    "./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+):
+    if missing_token in historical_profile or missing_token not in full_profile:
+        raise SystemExit("historical live-data mutation profile omissions drifted")
+if module.historical_mutation_tokens(path, "0" * 40) != full_profile:
+    raise SystemExit("non-profile live-data blob did not require current mutations")
+if len(module.HISTORICAL_MUTATION_PROFILES) != 1:
+    raise SystemExit("unexpected historical mutation profile was allowlisted")
+PY
 
 write_request
 if STUB_DIRTY_CHECKOUT=true \
@@ -273,7 +593,9 @@ fi
 grep -qF "non-symlink directory" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
 
-run_dispatcher "$request_file" --dispatch >"$output_file"
+EXCLUDE_RUN_ID=9999 PROSPECTIVE_PROMOTION_PR=224 \
+  STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
+  run_dispatcher "$request_file" --dispatch >"$output_file"
 grep -qF "authority_state=issued" "$output_file"
 [[ "$(cat "$dispatch_count_file")" = "1" ]]
 [[ "$(stat -c '%a' "$authority_dir" 2>/dev/null || stat -f '%Lp' "$authority_dir")" = "700" ]]
@@ -347,6 +669,7 @@ if STUB_RUN_ID=7003 STUB_MATERIALIZE_FAIL=true \
   exit 1
 fi
 grep -qF "do not redispatch" "$error_file"
+grep -qF "accepted-but-unmaterialized provider state" "$error_file"
 [[ "$(cat "$dispatch_count_file")" = "3" ]]
 jq -e '.state == "claimed" and .runId == 7003' "$authority_dir/7003.json" >/dev/null
 write_request blocked
@@ -473,6 +796,200 @@ grep -qF "authority_state=issued" "$output_file"
 jq -e '.state == "issued" and .runId == 7011' \
   "$authority_dir/7011.json" >/dev/null
 [[ "$(cat "$dispatch_count_file")" = "8" ]]
+
+prepare_unmaterialized_claim 7300
+unmaterialized_record="$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json"
+jq -e '
+  .schemaVersion == "betstan.copilot-cli-authority.v1" and
+  .state == "claimed" and
+  .version == 1 and
+  (has("retirement") | not)
+' "$unmaterialized_record" >/dev/null
+retire_unmaterialized_claim >"$output_file"
+jq -e '
+  .runId == 7300 and
+  .state == "retired" and
+  .version == 2 and
+  .retirement.reason == "unmaterialized" and
+  (.retirement.evidenceDigest | test("^[0-9a-f]{64}$")) and
+  .retirement.masterShaAtRetirement == $master and
+  (.retirement.retiredAt | type == "string")
+' --arg master "$ADVANCED_SHA" "$output_file" >/dev/null
+jq -e '
+  .schemaVersion == "betstan.copilot-cli-authority.v2" and
+  .state == "retired" and
+  .version == 2 and
+  .retirement.reason == "unmaterialized" and
+  .retirement.masterShaAtRetirement == $master
+' --arg master "$ADVANCED_SHA" "$unmaterialized_record" >/dev/null
+
+retire_test_run_id=7310
+for rejection in \
+  nonancestor rendered-title wrong-identity wrong-run-id wrong-path wrong-event \
+  wrong-head wrong-branch wrong-attempt wrong-repository jobs pending artifacts \
+  malformed wrong-final head-present-not-final \
+  changed-blob-missing-current-tokens; do
+  prepare_unmaterialized_claim "$retire_test_run_id" "$rejection"
+  if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then
+    echo "unsafe unmaterialized retirement unexpectedly passed: $rejection" >&2
+    exit 1
+  fi
+  jq -e '.schemaVersion == "betstan.copilot-cli-authority.v1" and .state == "claimed"' \
+    "$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json" >/dev/null
+  retire_test_run_id=$((retire_test_run_id + 1))
+done
+
+prepare_unmaterialized_claim 7380
+if retire_unmaterialized_claim "$SHA" >"$output_file" 2>"$error_file"; then
+  echo "current-control authority unexpectedly retired as unmaterialized" >&2
+  exit 1
+fi
+grep -qF "current-master authority record" "$error_file"
+
+prepare_unmaterialized_claim 7381
+if retire_unmaterialized_claim "$ADVANCED_SHA" 2 >"$output_file" 2>"$error_file"; then
+  echo "wrong-version unmaterialized retirement unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "changed before unmaterialized retirement" "$error_file"
+
+prepare_unmaterialized_claim 7382
+python3 - "$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+record = json.load(open(path, encoding="utf-8"))
+record["state"] = "issued"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
+if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then
+  echo "non-claimed unmaterialized retirement unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "only a claimed authority record" "$error_file"
+
+prepare_unmaterialized_claim 7383
+python3 - "$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+record = json.load(open(path, encoding="utf-8"))
+record["workflowBlobSha"] = "0" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
+if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then
+  echo "wrong historical blob unexpectedly retired an authority record" >&2
+  exit 1
+fi
+grep -qF "historical workflow blob does not match authority record" "$error_file"
+
+prepare_unmaterialized_claim 7390
+write_advanced_normalized "$UNMATERIALIZED_EVIDENCE_DIR"
+blocking="$(
+  "$HELPER" blocking-record \
+    --normalized "$ADVANCED_NORMALIZED" \
+    --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR"
+)"
+[[ "$blocking" == $'7390\tclaimed' ]] || {
+  echo "advanced master did not retain a stale claimed authority fence" >&2
+  exit 1
+}
+if "$HELPER" claim-request \
+  --normalized "$ADVANCED_NORMALIZED" \
+  --policy-json "$(cat "$UNMATERIALIZED_POLICY")" \
+  --repository "$REPOSITORY" \
+  --current-master "$ADVANCED_SHA" \
+  --workflow-id 313 \
+  --workflow-blob-sha "$BLOB" \
+  --owner-pid "$$" \
+  --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+  --repo-root "$ROOT_DIR" >"$output_file" 2>"$error_file"; then
+  echo "claim request bypassed an advanced stale authority fence" >&2
+  exit 1
+fi
+grep -qF "blocked by claimed authority 7390" "$error_file"
+
+python3 - "$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+record = json.load(open(path, encoding="utf-8"))
+record["state"] = "inflight"
+record["version"] += 1
+record["inflightApproval"] = {
+    "runId": record["runId"],
+    "operation": record["operation"],
+    "environmentId": 1,
+    "gateKey": "0" * 64,
+    "claimedAt": record["createdAt"],
+    "previousState": "issued",
+    "reviewer": "copilot-test-user",
+    "approvalComment": "test",
+    "approvalCountBefore": 0,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
+blocking="$(
+  "$HELPER" blocking-record \
+    --normalized "$ADVANCED_NORMALIZED" \
+    --authority-dir "$UNMATERIALIZED_AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR"
+)"
+[[ "$blocking" == $'7390\tinflight' ]] || {
+  echo "advanced master did not retain a stale inflight authority fence" >&2
+  exit 1
+}
+
+unresolved_authority_dir="$tmp_dir/unresolved-authority-fence"
+unresolved_evidence_dir="$tmp_dir/unresolved-authority-evidence"
+write_unmaterialized_evidence "$unresolved_evidence_dir" 7391
+"$POLICY" get oci-live-data-apply-backfills >"$unresolved_evidence_dir/policy.json"
+chmod 600 "$unresolved_evidence_dir/policy.json"
+write_live_data_request "$unresolved_evidence_dir/request.json" "$SHA"
+"$HELPER" validate-request \
+  --request "$unresolved_evidence_dir/request.json" \
+  --policy-json "$(cat "$unresolved_evidence_dir/policy.json")" \
+  --repository "$REPOSITORY" \
+  --current-master "$SHA" \
+  --repo-root "$ROOT_DIR" \
+  --output "$unresolved_evidence_dir/normalized.json"
+unresolved_blob="$(jq -r '.sha' "$unresolved_evidence_dir/historical.json")"
+"$HELPER" claim-request \
+  --normalized "$unresolved_evidence_dir/normalized.json" \
+  --policy-json "$(cat "$unresolved_evidence_dir/policy.json")" \
+  --repository "$REPOSITORY" \
+  --current-master "$SHA" \
+  --workflow-id 313 \
+  --workflow-blob-sha "$unresolved_blob" \
+  --owner-pid "$$" \
+  --authority-dir "$unresolved_authority_dir" \
+  --repo-root "$ROOT_DIR" >/dev/null
+blocking="$(
+  "$HELPER" blocking-record \
+    --normalized "$ADVANCED_NORMALIZED" \
+    --authority-dir "$unresolved_authority_dir" \
+    --repo-root "$ROOT_DIR"
+)"
+[[ "$blocking" == intent:*$'\tdispatching' ]] || {
+  echo "advanced master did not retain an unresolved dispatch intent fence" >&2
+  exit 1
+}
 
 chmod 644 "$request_file"
 if run_dispatcher "$request_file" >"$output_file" 2>"$error_file"; then

@@ -9,6 +9,10 @@ SIMPLIFIER="$AGENT_DIR/betstan-simplifier.agent.md"
 CONDUCTOR="$AGENT_DIR/betstan-conductor.agent.md"
 FINAL_VALIDATOR="$AGENT_DIR/betstan-final-validator.agent.md"
 BRANCH_REVIEWER="$AGENT_DIR/betstan-branch-governance-reviewer.agent.md"
+ARCHITECT="$AGENT_DIR/betstan-architect.agent.md"
+BACKEND_DEVELOPER="$AGENT_DIR/betstan-backend-developer.agent.md"
+SERVICE_CONTRACT_REVIEWER="$AGENT_DIR/betstan-service-contract-reviewer.agent.md"
+TEST_ENGINEER="$AGENT_DIR/betstan-test-engineer.agent.md"
 PR_TEMPLATE="$ROOT_DIR/.github/pull_request_template.md"
 CONTRIBUTING="$ROOT_DIR/CONTRIBUTING.md"
 MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
@@ -135,6 +139,14 @@ require_flat_literal "$README" \
   'Every authority-bearing unit is registered regardless of synchronous or background execution'
 require_flat_literal "$README" \
   'Every handoff preserves the original `root_task_authority_id`'
+require_flat_literal "$ARCHITECT" \
+  'Source present in `common/` does not make an unpublished contract available to service images'
+require_flat_literal "$BACKEND_DEVELOPER" \
+  'source for the next package candidate while each service compiles against its exact published `@betstan/common` pin'
+require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
+  'state both versions and never substitute one for the other'
+require_flat_literal "$TEST_ENGINEER" \
+  'Never use `npm install --no-save <tarball>` as evidence'
 
 simplifier_flat="$(tr '\n' ' ' <"$SIMPLIFIER" | tr -s '[:space:]' ' ')"
 for marker in \
@@ -278,6 +290,35 @@ require_flat_literal "$CONDUCTOR" \
   'if it repeats the mismatch, close that advisory result as unavailable'
 require_flat_literal "$CONDUCTOR" \
   'Every other PR remains approval-bound to its exact current head SHA'
+require_literal "$CONDUCTOR" 'tools: [read, search, execute, edit, web]'
+require_flat_literal "$CONDUCTOR" \
+  'When a critical path is blocked by a checked-in rule, policy, or guard that this repository introduced, the conductor must not classify that as an external wait, passively wait, or repeatedly hand it off'
+require_flat_literal "$CONDUCTOR" \
+  'It owns one bounded governed correction under the original registered work ID; do not create another agent or a duplicate policy page'
+require_flat_literal "$CONDUCTOR" \
+  'A self-imposed correction is ineligible when the evidence shows a real unresolved production risk'
+require_flat_literal "$CONDUCTOR" \
+  'normal focused branch -> `dev` -> `master` path'
+require_flat_literal "$CONDUCTOR" \
+  'independent safety challenge through the existing deployment-safety quality gate, not a new agent'
+require_flat_literal "$CONDUCTOR" \
+  'Preserve rollback evidence and revalidate the exact promoted SHA'
+require_flat_literal "$CONDUCTOR" \
+  'resume the original registered job automatically from its exact persisted state'
+require_flat_literal "$CONDUCTOR" \
+  'Never bypass or edit live authority state ad hoc'
+require_flat_literal "$CONDUCTOR" \
+  'Never weaken a gate merely to make progress'
+require_flat_literal "$CONDUCTOR" \
+  'For the narrow current-master unmaterialized promotion deadlock'
+require_flat_literal "$CONDUCTOR" \
+  'The guard independently proves the OPEN CLI-managed same-repository `dev` -> `master` PR'
+require_flat_literal "$CONDUCTOR" \
+  'A raw prospective SHA is never authority'
+require_flat_literal "$CONDUCTOR" \
+  'A recovered original blocker is not completion'
+require_flat_literal "$CONDUCTOR" \
+  'do not report the promotion or release healthy until zero unexplained blockers remain'
 
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'

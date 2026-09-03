@@ -756,7 +756,8 @@ PY
 }
 
 validate_exclusivity() {
-  REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" "$RUN_EXCLUSIVITY_SCRIPT"
+  REPO="$repository" EXCLUDE_RUN_ID="$RUN_ID" PROSPECTIVE_PROMOTION_PR="" \
+    "$RUN_EXCLUSIVITY_SCRIPT"
 }
 
 if [[ "$ACTION" = "--reconcile" ]]; then

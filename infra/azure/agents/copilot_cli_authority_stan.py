@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -15,7 +16,14 @@ from pathlib import Path
 REQUEST_SCHEMA = "betstan.copilot-cli-dispatch-request.v1"
 NORMALIZED_SCHEMA = "betstan.copilot-cli-dispatch-normalized.v1"
 INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v1"
-RECORD_SCHEMA = "betstan.copilot-cli-authority.v1"
+RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
+RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
+# New records retain the established v1 shape. Only the explicit,
+# evidence-bound stale-claim retirement migrates a record to v2.
+RECORD_SCHEMA = RECORD_SCHEMA_V1
+UNMATERIALIZED_EVIDENCE_SCHEMA = (
+    "betstan.copilot-cli-unmaterialized-evidence.v1"
+)
 AUTHORITY_OWNER = "github-copilot-cli"
 AUTHORITY_TTL_SECONDS = 24 * 60 * 60
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -69,7 +77,7 @@ INTENT_KEYS = {
     "runId",
     "runUrl",
 }
-RECORD_KEYS = {
+RECORD_V1_KEYS = {
     "schemaVersion",
     "repository",
     "operation",
@@ -95,6 +103,15 @@ RECORD_KEYS = {
     "approvals",
     "inflightApproval",
 }
+RETIREMENT_KEYS = {
+    "reason",
+    "evidenceDigest",
+    "retiredAt",
+    "masterShaAtRetirement",
+}
+RECORD_V2_KEYS = RECORD_V1_KEYS | {"retirement"}
+# Kept as an alias for callers that inspect the established v1 schema.
+RECORD_KEYS = RECORD_V1_KEYS
 APPROVAL_KEYS = {
     "runId",
     "operation",
@@ -118,6 +135,108 @@ LOCK_KEYS = {
     "ownerPid",
     "createdAt",
 }
+
+# This is intentionally an allowlist rather than policy-derived behavior. A
+# stale record can be ignored only where the historical workflow is proven to
+# contain the current-master mutation fence. Adding a protected workflow here
+# is a safety-policy change, not an operational convenience.
+UNMATERIALIZED_WORKFLOWS = {
+    ".github/workflows/oci-live-data-rollout.yml": {
+        "workflow": "oci-live-data-rollout.yml",
+        "name": "oci-live-data-rollout",
+        "runName": (
+            "oci-live-data ${{ inputs.phase }} "
+            "${{ inputs.approved_sha }}"
+        ),
+        "environment": "oci-migration",
+        "job": "rollout",
+        "renderedTitle": re.compile(
+            r"^oci-live-data "
+            r"(?:dry-run|apply-backfills|apply-slip-index) "
+            r"[0-9a-f]{40}$"
+        ),
+        "mutationTokens": (
+            "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+            "./infra/oci/scripts/authorize-github-runner.sh authorize",
+            "./infra/oci/scripts/configure-k3s-access.sh open",
+            "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+            "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+            "./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+            "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+            "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+            "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+            "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+            "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+            "./infra/oci/scripts/revoke-github-runner.sh",
+            "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+        ),
+    },
+    ".github/workflows/oci-live-betting-activate.yml": {
+        "workflow": "oci-live-betting-activate.yml",
+        "name": "oci-live-betting-activate",
+        "runName": "oci-live-activate ${{ inputs.approved_sha }}",
+        "environment": "oci-production",
+        "job": "activate-and-validate",
+        "renderedTitle": re.compile(r"^oci-live-activate [0-9a-f]{40}$"),
+        "mutationTokens": (
+            "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+            "./infra/oci/scripts/authorize-github-runner.sh authorize",
+            "./infra/oci/scripts/configure-k3s-access.sh open",
+            'kubectl exec -n "$OCI_K8S_NAMESPACE"',
+            "node dist/scripts/SetUserRole.js",
+            "curl --fail-with-body",
+            "./client/node_modules/.bin/playwright test",
+            "./infra/oci/scripts/live-betting-control-stan.sh",
+            "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+            "./infra/oci/scripts/revoke-github-runner.sh",
+            "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+        ),
+    },
+    ".github/workflows/oci-capacity-acquire.yml": {
+        "workflow": "oci-capacity-acquire.yml",
+        "name": "oci-capacity-acquire",
+        "runName": (
+            "oci-capacity-acquire "
+            "${{ inputs.approved_sha || 'scheduled-master' }}"
+        ),
+        "environment": "oci-capacity-acquire",
+        "job": "acquire",
+        "renderedTitle": re.compile(
+            r"^oci-capacity-acquire "
+            r"(?:[0-9a-f]{40}|scheduled-master)$"
+        ),
+        "mutationTokens": (
+            "./infra/oci/scripts/acquire-a1.sh",
+        ),
+    },
+}
+LIVE_DATA_HISTORICAL_PROFILE_BLOB = (
+    "c6c113b49a36518b7b106aa1406998a4abca10a0"
+)
+LIVE_DATA_HISTORICAL_PROFILE_TOKENS = (
+    "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+    "./infra/oci/scripts/authorize-github-runner.sh authorize",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+    "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+    "./infra/oci/scripts/revoke-github-runner.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+HISTORICAL_MUTATION_PROFILES = {
+    (
+        ".github/workflows/oci-live-data-rollout.yml",
+        LIVE_DATA_HISTORICAL_PROFILE_BLOB,
+    ): LIVE_DATA_HISTORICAL_PROFILE_TOKENS,
+}
+CURRENT_MASTER_GUARD_LINES = (
+    '[ "$SOURCE_SHA" = "$GITHUB_SHA" ]',
+    "git fetch --quiet origin master:refs/remotes/origin/master",
+    '[ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]',
+)
 
 
 def fail(message):
@@ -773,15 +892,22 @@ def load_record(directory, run_id):
         exact_mode=0o600,
         recover_atomic_link=True,
     )
-    if not isinstance(record, dict) or set(record) != RECORD_KEYS:
+    if not isinstance(record, dict):
         fail("authority record has an unexpected schema")
-    if record["schemaVersion"] != RECORD_SCHEMA:
+    schema_version = record.get("schemaVersion")
+    if schema_version == RECORD_SCHEMA_V1:
+        if set(record) != RECORD_V1_KEYS:
+            fail("authority record has an unexpected schema")
+    elif schema_version == RECORD_SCHEMA_V2:
+        if set(record) != RECORD_V2_KEYS:
+            fail("authority record has an unexpected schema")
+    else:
         fail("authority record schema version is unsupported")
     if str(record["runId"]) != str(run_id):
         fail("authority record run ID does not match its file")
     if record["authorityOwner"] != AUTHORITY_OWNER:
         fail("authority record owner is invalid")
-    if record["runAttempt"] != 1:
+    if type(record["runAttempt"]) is not int or record["runAttempt"] != 1:
         fail("authority record attempt must be one")
     if record["state"] not in {
         "claimed",
@@ -791,7 +917,7 @@ def load_record(directory, run_id):
         "retired",
     }:
         fail("authority record state is invalid")
-    if not isinstance(record["version"], int) or record["version"] < 1:
+    if type(record["version"]) is not int or record["version"] < 1:
         fail("authority record version is invalid")
     if not isinstance(record["approvals"], list):
         fail("authority record approvals must be a list")
@@ -846,6 +972,30 @@ def load_record(directory, run_id):
         fail("non-inflight authority record has an inflight claim")
     if record["state"] == "retired" and record["approvals"]:
         fail("retired authority record unexpectedly has approval receipts")
+    if schema_version == RECORD_SCHEMA_V2:
+        retirement = record["retirement"]
+        if not isinstance(retirement, dict) or set(retirement) != RETIREMENT_KEYS:
+            fail("retired authority provenance has an unexpected schema")
+        if record["state"] != "retired":
+            fail("retired authority provenance requires retired state")
+        if retirement["reason"] != "unmaterialized":
+            fail("retired authority provenance reason is invalid")
+        if (
+            not isinstance(retirement["evidenceDigest"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", retirement["evidenceDigest"])
+        ):
+            fail("retired authority provenance digest is invalid")
+        retired_at = parse_utc(
+            retirement["retiredAt"],
+            "authority retirement time",
+        )
+        if retired_at < parse_utc(record["createdAt"], "authority creation time"):
+            fail("retired authority provenance predates record creation")
+        if (
+            not isinstance(retirement["masterShaAtRetirement"], str)
+            or not FULL_SHA.fullmatch(retirement["masterShaAtRetirement"])
+        ):
+            fail("retired authority provenance master SHA is invalid")
     return record
 
 
@@ -884,6 +1034,8 @@ def verify_record(
             "targetSha": record["targetSha"],
             "inputs": record["inputs"],
         }
+        # This retirement-only check validates the immutable v1 request at its
+        # recorded control SHA; all ordinary commands still require current master.
         normalized = validate_request_data(
             request,
             policy,
@@ -981,6 +1133,622 @@ def validate_run_against_record(run, record):
     failures = [label for valid, label in checks if not valid]
     if failures:
         fail("workflow run does not match authority record: " + ", ".join(failures))
+
+
+def require_exact_integer(value, label, *, minimum=0):
+    if type(value) is not int or value < minimum:
+        fail(f"{label} must be an integer no smaller than {minimum}")
+    return value
+
+
+def direct_command_positions(source, command):
+    expression = re.compile(
+        rf"^[ \t]*{re.escape(command)}[ \t]*(?:#.*)?$",
+        re.MULTILINE,
+    )
+    return [match.start() for match in expression.finditer(source)]
+
+
+def executable_token_positions(source, token):
+    positions = []
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        if not line.lstrip().startswith("#"):
+            start = 0
+            while True:
+                found = line.find(token, start)
+                if found < 0:
+                    break
+                positions.append(offset + found)
+                start = found + len(token)
+        offset += len(line)
+    return positions
+
+
+def decode_historical_workflow(historical, path, *, expected_blob_sha=None):
+    if not isinstance(historical, dict):
+        fail("historical workflow response must be an object")
+    if historical.get("path") != path:
+        fail("historical workflow path does not match the run")
+    if historical.get("type") != "file":
+        fail("historical workflow response is not a file")
+    if historical.get("encoding") != "base64":
+        fail("historical workflow encoding is unsupported")
+    blob_sha = historical.get("sha")
+    if not isinstance(blob_sha, str) or not FULL_SHA.fullmatch(blob_sha):
+        fail("historical workflow blob SHA is invalid")
+    if expected_blob_sha is not None and blob_sha != expected_blob_sha:
+        fail("historical workflow blob does not match authority record")
+    encoded = historical.get("content")
+    if not isinstance(encoded, str) or not encoded:
+        fail("historical workflow content is missing")
+    size = historical.get("size")
+    require_exact_integer(size, "historical workflow size")
+    try:
+        source_bytes = base64.b64decode(
+            "".join(encoded.split()),
+            validate=True,
+        )
+        source = source_bytes.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as error:
+        fail(f"historical workflow content is malformed: {error}")
+    if len(source_bytes) != size:
+        fail("historical workflow content size does not match metadata")
+    calculated_blob_sha = hashlib.sha1(
+        f"blob {len(source_bytes)}\0".encode("utf-8") + source_bytes
+    ).hexdigest()
+    if calculated_blob_sha != blob_sha:
+        fail("historical workflow content does not match blob SHA")
+    return source, blob_sha
+
+
+def historical_mutation_tokens(path, blob_sha):
+    specification = UNMATERIALIZED_WORKFLOWS.get(path)
+    if specification is None:
+        fail("workflow is not allowlisted for unmaterialized retirement")
+    return HISTORICAL_MUTATION_PROFILES.get(
+        (path, blob_sha),
+        specification["mutationTokens"],
+    )
+
+
+def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=None):
+    specification = UNMATERIALIZED_WORKFLOWS.get(path)
+    if specification is None:
+        fail("workflow is not allowlisted for unmaterialized retirement")
+    source, observed_blob_sha = decode_historical_workflow(
+        historical,
+        path,
+        expected_blob_sha=blob_sha,
+    )
+
+    for field, expected in (
+        ("name", specification["name"]),
+        ("run-name", specification["runName"]),
+    ):
+        matches = list(
+            re.finditer(
+                rf"^{re.escape(field)}:[ \t]*{re.escape(expected)}[ \t]*$",
+                source,
+                re.MULTILINE,
+            )
+        )
+        if len(matches) != 1:
+            fail(f"historical workflow {field} does not match allowlisted shape")
+
+    concurrency_matches = list(
+        re.finditer(
+            r"^concurrency:\n"
+            r"  group:[ \t]*oci-control-plane[ \t]*\n"
+            r"  cancel-in-progress:[ \t]*false[ \t]*$",
+            source,
+            re.MULTILINE,
+        )
+    )
+    if len(concurrency_matches) != 1:
+        fail("historical workflow concurrency is not the protected control plane")
+
+    jobs_match = re.search(
+        r"^jobs:\n(?P<body>.*?)(?=^[^ \t]|\Z)",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    if jobs_match is None:
+        fail("historical workflow jobs block is missing")
+    jobs = re.findall(
+        r"^  ([A-Za-z0-9_-]+):[ \t]*(?:#.*)?$",
+        jobs_match.group("body"),
+        re.MULTILINE,
+    )
+    if jobs != [specification["job"]]:
+        fail("historical workflow must contain exactly its one protected job")
+    environment_matches = list(
+        re.finditer(
+            r"^    environment:[ \t]*\n"
+            rf"      name:[ \t]*{re.escape(specification['environment'])}[ \t]*$",
+            jobs_match.group("body"),
+            re.MULTILINE,
+        )
+    )
+    if len(environment_matches) != 1:
+        fail("historical workflow protected environment is invalid")
+
+    mutation_positions = []
+    for token in historical_mutation_tokens(path, observed_blob_sha):
+        positions = executable_token_positions(source, token)
+        if not positions:
+            fail(f"historical workflow is missing mutation token: {token}")
+        mutation_positions.extend(positions)
+    first_mutation = min(mutation_positions)
+    for guard in CURRENT_MASTER_GUARD_LINES:
+        positions = direct_command_positions(source, guard)
+        if not positions or min(positions) >= first_mutation:
+            fail(
+                "historical workflow lacks an exact current-master guard "
+                "before every mutation"
+            )
+    return specification, observed_blob_sha
+
+
+def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
+    if not isinstance(compare, dict):
+        fail("GitHub compare evidence must be an object")
+    ahead_by = require_exact_integer(compare.get("ahead_by"), "compare ahead_by")
+    behind_by = require_exact_integer(
+        compare.get("behind_by"),
+        "compare behind_by",
+    )
+    total_commits = require_exact_integer(
+        compare.get("total_commits"),
+        "compare total_commits",
+    )
+    if (
+        compare.get("status") != "ahead"
+        or ahead_by < 1
+        or behind_by != 0
+        or total_commits != ahead_by
+    ):
+        fail("GitHub compare evidence does not prove a strict ancestor")
+
+    for field, expected in (
+        ("base_commit", ancestor_sha),
+        ("merge_base_commit", ancestor_sha),
+    ):
+        commit = compare.get(field)
+        if not isinstance(commit, dict) or commit.get("sha") != expected:
+            fail(f"GitHub compare {field} does not match the requested ancestry")
+
+    commits = compare.get("commits")
+    if not isinstance(commits, list) or len(commits) != total_commits:
+        fail("GitHub compare commit list is incomplete")
+    commit_shas = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            fail("GitHub compare commit entry is malformed")
+        sha = commit.get("sha")
+        if not isinstance(sha, str) or not FULL_SHA.fullmatch(sha):
+            fail("GitHub compare commit SHA is malformed")
+        commit_shas.append(sha)
+    if (
+        not commit_shas
+        or len(set(commit_shas)) != len(commit_shas)
+        or commit_shas[-1] != current_master
+    ):
+        fail("GitHub compare commit list does not end at current master")
+
+
+def validate_unmaterialized_run_evidence(
+    *,
+    run,
+    workflow,
+    jobs,
+    pending,
+    artifacts,
+    compare,
+    historical_workflow,
+    repository,
+    current_master,
+    now_epoch,
+    minimum_age_seconds,
+    record=None,
+    expected_run_id=None,
+    expected_workflow_id=None,
+    expected_path=None,
+    expected_head_sha=None,
+):
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+        repository,
+    ):
+        fail("repository is invalid")
+    if not isinstance(current_master, str) or not FULL_SHA.fullmatch(
+        current_master
+    ):
+        fail("current master SHA is invalid")
+    require_exact_integer(now_epoch, "unmaterialized evidence clock", minimum=1)
+    require_exact_integer(
+        minimum_age_seconds,
+        "unmaterialized stale minimum age",
+        minimum=1,
+    )
+    if not isinstance(run, dict):
+        fail("workflow run response must be an object")
+    path = run.get("path")
+    if not isinstance(path, str) or path not in UNMATERIALIZED_WORKFLOWS:
+        fail("workflow is not allowlisted for unmaterialized retirement")
+    specification = UNMATERIALIZED_WORKFLOWS[path]
+    run_id = require_exact_integer(run.get("id"), "workflow run ID", minimum=1)
+    workflow_id = require_exact_integer(
+        run.get("workflow_id"),
+        "workflow run workflow ID",
+        minimum=1,
+    )
+    expected_identity = (
+        (expected_run_id, run_id, "run ID"),
+        (expected_workflow_id, workflow_id, "workflow ID"),
+        (expected_path, path, "path"),
+        (expected_head_sha, run.get("head_sha"), "head SHA"),
+    )
+    for expected, observed, label in expected_identity:
+        if expected is not None and str(expected) != str(observed):
+            fail(f"workflow run does not match inventory {label}")
+    if (
+        run.get("event") != "workflow_dispatch"
+        or run.get("head_branch") != "master"
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] != 1
+        or run.get("status") != "queued"
+        or run.get("conclusion") is not None
+    ):
+        fail("workflow run is not a queued first-attempt manual ghost")
+    head_sha = run.get("head_sha")
+    if (
+        not isinstance(head_sha, str)
+        or not FULL_SHA.fullmatch(head_sha)
+        or head_sha == current_master
+    ):
+        fail("workflow run head SHA is not an old complete SHA")
+    head_repository = run.get("head_repository")
+    if (
+        not isinstance(head_repository, dict)
+        or head_repository.get("full_name") != repository
+    ):
+        fail("workflow run head repository does not match")
+    expected_url = f"https://github.com/{repository}/actions/runs/{run_id}"
+    if run.get("html_url") != expected_url:
+        fail("workflow run URL does not match the exact run identity")
+
+    timestamps = [
+        run.get("created_at"),
+        run.get("run_started_at"),
+        run.get("updated_at"),
+    ]
+    if (
+        any(not isinstance(value, str) for value in timestamps)
+        or len(set(timestamps)) != 1
+    ):
+        fail("workflow run was not never-transitioned")
+    created_at = parse_utc(timestamps[0], "workflow run creation time")
+    now = dt.datetime.fromtimestamp(now_epoch, dt.timezone.utc)
+    age_seconds = int((now - created_at).total_seconds())
+    if age_seconds < minimum_age_seconds:
+        fail("workflow run is too recent to be an unmaterialized ghost")
+
+    if not isinstance(workflow, dict):
+        fail("workflow metadata response must be an object")
+    if (
+        type(workflow.get("id")) is not int
+        or workflow["id"] != workflow_id
+        or workflow.get("path") != path
+        or workflow.get("state") not in {"active", "disabled_manually"}
+    ):
+        fail("workflow metadata does not match the exact run")
+
+    for payload, list_name, label in (
+        (jobs, "jobs", "workflow jobs"),
+        (artifacts, "artifacts", "workflow artifacts"),
+    ):
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("total_count")) is not int
+            or payload["total_count"] != 0
+            or payload.get(list_name) != []
+        ):
+            fail(f"{label} are not an exact zero-count list")
+    if not isinstance(pending, list) or pending:
+        fail("workflow run has pending deployments")
+
+    _, historical_blob_sha = decode_historical_workflow(
+        historical_workflow,
+        path,
+        expected_blob_sha=(
+            record["workflowBlobSha"] if record is not None else None
+        ),
+    )
+    # Validate the source before examining title behavior so the title is
+    # always tied to the immutable workflow definition that produced the run.
+    validate_historical_unmaterialized_workflow(
+        path,
+        historical_workflow,
+        blob_sha=historical_blob_sha,
+    )
+    display_title = run.get("display_title")
+    validate_scalar_string(
+        display_title,
+        "workflow run display title",
+        allow_empty=False,
+    )
+    if display_title != specification["name"]:
+        fail("workflow run does not have the generic workflow-name title")
+    if specification["renderedTitle"].fullmatch(display_title):
+        fail("workflow run title matches a legitimate rendered run name")
+
+    validate_strict_ancestor_compare(compare, head_sha, current_master)
+    if record is not None:
+        if (
+            run_id != record["runId"]
+            or workflow_id != record["workflowId"]
+            or path != f".github/workflows/{record['workflow']}"
+            or run.get("html_url") != record["runUrl"]
+            or record["controlSha"] != head_sha
+            or record["runAttempt"] != 1
+        ):
+            fail("workflow run does not match authority record identity")
+        if display_title == record["displayTitle"]:
+            fail("workflow run title equals the recorded rendered title")
+    return {
+        "ageSeconds": age_seconds,
+        "historicalWorkflowBlobSha": historical_blob_sha,
+        "path": path,
+        "runId": run_id,
+    }
+
+
+def load_unmaterialized_evidence(args):
+    now_epoch = (
+        args.now_epoch
+        if args.now_epoch is not None
+        else int(utc_now().timestamp())
+    )
+    return {
+        "artifacts": load_json_file(
+            args.artifacts_json,
+            "workflow artifacts response",
+            private=True,
+        ),
+        "compare": load_json_file(
+            args.compare_json,
+            "GitHub compare response",
+            private=True,
+        ),
+        "historical_workflow": load_json_file(
+            args.historical_workflow_json,
+            "historical workflow response",
+            private=True,
+        ),
+        "jobs": load_json_file(
+            args.jobs_json,
+            "workflow jobs response",
+            private=True,
+        ),
+        "minimum_age_seconds": args.minimum_age_seconds,
+        "now_epoch": now_epoch,
+        "pending": load_json_file(
+            args.pending_json,
+            "pending deployments response",
+            private=True,
+        ),
+        "run": load_json_file(
+            args.run_json,
+            "workflow run response",
+            private=True,
+        ),
+        "workflow": load_json_file(
+            args.workflow_json,
+            "workflow metadata response",
+            private=True,
+        ),
+    }
+
+
+def validate_stale_claim_for_unmaterialized_retirement(
+    record,
+    policy,
+    repository,
+    current_master,
+    expected_version,
+):
+    policy = validate_policy(policy)
+    if record["schemaVersion"] != RECORD_SCHEMA_V1:
+        fail("only an existing v1 authority record may migrate on retirement")
+    if (
+        expected_version < 1
+        or type(record["version"]) is not int
+        or record["version"] != expected_version
+    ):
+        fail("authority record changed before unmaterialized retirement")
+    if record["state"] != "claimed":
+        fail("only a claimed authority record can be retired as unmaterialized")
+    if record["approvals"] or record["inflightApproval"] is not None:
+        fail("claimed authority record has unexpected approval state")
+    if (
+        record["repository"] != repository
+        or record["operation"] != policy["operation"]
+        or record["workflow"] != policy["workflow"]
+        or record["event"] != policy["event"]
+        or record["environment"] != policy["environment"]
+        or policy["authority"] != "dispatch-record"
+    ):
+        fail("authority record does not match retirement policy identity")
+    if record["workflow"] not in {
+        specification["workflow"]
+        for specification in UNMATERIALIZED_WORKFLOWS.values()
+    }:
+        fail("authority workflow is not allowlisted for unmaterialized retirement")
+    if (
+        type(record["workflowId"]) is not int
+        or record["workflowId"] < 1
+        or type(record["runId"]) is not int
+        or record["runId"] < 1
+        or type(record["runAttempt"]) is not int
+        or record["runAttempt"] != 1
+        or not isinstance(record["workflowBlobSha"], str)
+        or not FULL_SHA.fullmatch(record["workflowBlobSha"])
+        or not isinstance(record["controlSha"], str)
+        or not FULL_SHA.fullmatch(record["controlSha"])
+    ):
+        fail("authority record identity is malformed")
+    if record["controlSha"] == current_master:
+        fail("current-master authority record cannot be retired as unmaterialized")
+    expected_url = (
+        f"https://github.com/{repository}/actions/runs/{record['runId']}"
+    )
+    if record["runUrl"] != expected_url:
+        fail("authority record run URL is invalid")
+    created_at = parse_utc(record["createdAt"], "authority creation time")
+    expires_at = parse_utc(record["expiresAt"], "authority expiry time")
+    if (
+        expires_at <= created_at
+        or (expires_at - created_at).total_seconds() > AUTHORITY_TTL_SECONDS
+    ):
+        fail("authority record expiry is invalid")
+
+    request = {
+        "schemaVersion": REQUEST_SCHEMA,
+        "repository": record["repository"],
+        "operation": record["operation"],
+        "controlSha": record["controlSha"],
+        "subjectSha": record["subjectSha"],
+        "targetSha": record["targetSha"],
+        "inputs": record["inputs"],
+    }
+    normalized = validate_request_data(
+        request,
+        policy,
+        repository,
+        record["controlSha"],
+    )
+    if record["inputHash"] != normalized["inputHash"]:
+        fail("authority record input hash mismatch")
+    expected_title = render_template(
+        policy["titleTemplate"],
+        request,
+        run_id=record["runId"],
+    )
+    if record["displayTitle"] != expected_title:
+        fail("authority record display title mismatch")
+
+
+def command_classify_unmaterialized_run(args):
+    if (
+        not POSITIVE_INTEGER.fullmatch(str(args.expected_run_id))
+        or not POSITIVE_INTEGER.fullmatch(str(args.expected_workflow_id))
+        or args.expected_path not in UNMATERIALIZED_WORKFLOWS
+        or not FULL_SHA.fullmatch(args.expected_head_sha)
+    ):
+        fail("unmaterialized inventory identity is malformed")
+    evidence = load_unmaterialized_evidence(args)
+    facts = validate_unmaterialized_run_evidence(
+        **evidence,
+        repository=args.repository,
+        current_master=args.current_master,
+        expected_run_id=args.expected_run_id,
+        expected_workflow_id=args.expected_workflow_id,
+        expected_path=args.expected_path,
+        expected_head_sha=args.expected_head_sha,
+    )
+    print(
+        "reason=unmaterialized "
+        f"run_id={facts['runId']} path={facts['path']} "
+        f"age_seconds={facts['ageSeconds']}"
+    )
+
+
+def command_retire_unmaterialized_claim(args):
+    if args.expected_version < 1:
+        fail("expected authority record version must be positive")
+    evidence = load_unmaterialized_evidence(args)
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
+    if not POSITIVE_INTEGER.fullmatch(str(args.run_id)):
+        fail("run ID must be a positive integer")
+    token = acquire_lock_file(directory, args.run_id, os.getpid())
+    try:
+        def retire(record):
+            validate_stale_claim_for_unmaterialized_retirement(
+                record,
+                policy,
+                args.repository,
+                args.current_master,
+                args.expected_version,
+            )
+            if record["runId"] != int(args.run_id):
+                fail("authority record run ID does not match retirement target")
+            validate_unmaterialized_run_evidence(
+                **evidence,
+                repository=args.repository,
+                current_master=args.current_master,
+                record=record,
+            )
+            digest = hashlib.sha256(
+                canonical_json(
+                    {
+                        "schemaVersion": UNMATERIALIZED_EVIDENCE_SCHEMA,
+                        "repository": args.repository,
+                        "currentMaster": args.current_master,
+                        "minimumAgeSeconds": evidence["minimum_age_seconds"],
+                        "nowEpoch": evidence["now_epoch"],
+                        "authorityRecord": {
+                            "controlSha": record["controlSha"],
+                            "displayTitle": record["displayTitle"],
+                            "inputHash": record["inputHash"],
+                            "runId": record["runId"],
+                            "version": record["version"],
+                            "workflowBlobSha": record["workflowBlobSha"],
+                            "workflowId": record["workflowId"],
+                        },
+                        "run": evidence["run"],
+                        "workflow": evidence["workflow"],
+                        "jobs": evidence["jobs"],
+                        "pending": evidence["pending"],
+                        "artifacts": evidence["artifacts"],
+                        "compare": evidence["compare"],
+                        "historicalWorkflow": evidence["historical_workflow"],
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+            retired_at = utc_text(utc_now())
+            record["schemaVersion"] = RECORD_SCHEMA_V2
+            record["state"] = "retired"
+            record["version"] += 1
+            record["retirement"] = {
+                "reason": "unmaterialized",
+                "evidenceDigest": digest,
+                "retiredAt": retired_at,
+                "masterShaAtRetirement": args.current_master,
+            }
+            return record
+
+        updated = update_record_with_lock(directory, args.run_id, token, retire)
+    finally:
+        try:
+            require_lock(directory, args.run_id, token).unlink()
+        except FileNotFoundError:
+            pass
+    print(
+        canonical_json(
+            {
+                "runId": updated["runId"],
+                "state": updated["state"],
+                "version": updated["version"],
+                "retirement": updated["retirement"],
+            }
+        )
+    )
 
 
 def load_lock(directory, run_id):
@@ -1218,6 +1986,13 @@ def command_claim_request(args):
             "version": intent["version"],
         }))
         return
+    blocking_matches = find_blocking_authorities(directory, normalized)
+    if blocking_matches:
+        authority, state = blocking_matches[0]
+        fail(
+            f"dispatch is blocked by {state} authority {authority}; "
+            "do not redispatch"
+        )
     capture_name = f"dispatch-{secrets.token_hex(16)}.log"
     capture_path = directory / capture_name
     create_private_file(capture_path)
@@ -1540,6 +2315,34 @@ def command_ensure_automatic_record(args):
     }))
 
 
+def find_blocking_authorities(directory, normalized):
+    matches = []
+    for candidate in sorted(directory.glob("request-*.json")):
+        key = candidate.stem.removeprefix("request-")
+        intent = load_intent(directory, key)
+        if intent["repository"] == normalized["repository"]:
+            matches.append((f"intent:{key}", intent["state"]))
+    for candidate in sorted(directory.glob("*.json")):
+        run_id = candidate.stem
+        if run_id.startswith("request-"):
+            continue
+        if not POSITIVE_INTEGER.fullmatch(run_id):
+            fail("authority directory contains an unexpected JSON file")
+        record = load_record(directory, run_id)
+        if record["repository"] != normalized["repository"]:
+            continue
+        globally_unresolved = record["state"] in {"claimed", "inflight"}
+        exact_one_use = (
+            record["controlSha"] == normalized["controlSha"]
+            and record["operation"] == normalized["operation"]
+            and record["inputHash"] == normalized["inputHash"]
+            and record["state"] in {"issued", "consumed"}
+        )
+        if globally_unresolved or exact_one_use:
+            matches.append((run_id, record["state"]))
+    return matches
+
+
 def command_blocking_record(args):
     authority_path = Path(args.authority_dir)
     if not authority_path.exists():
@@ -1558,34 +2361,7 @@ def command_blocking_record(args):
         fail("normalized request has an unexpected schema")
     if normalized["schemaVersion"] != NORMALIZED_SCHEMA:
         fail("normalized request schema version is unsupported")
-    matches = []
-    for candidate in sorted(directory.glob("request-*.json")):
-        key = candidate.stem.removeprefix("request-")
-        intent = load_intent(directory, key)
-        if (
-            intent["repository"] == normalized["repository"]
-            and intent["controlSha"] == normalized["controlSha"]
-        ):
-            matches.append((f"intent:{key}", intent["state"]))
-    for candidate in sorted(directory.glob("*.json")):
-        run_id = candidate.stem
-        if run_id.startswith("request-"):
-            continue
-        if not POSITIVE_INTEGER.fullmatch(run_id):
-            fail("authority directory contains an unexpected JSON file")
-        record = load_record(directory, run_id)
-        if (
-            record["repository"] == normalized["repository"]
-            and record["controlSha"] == normalized["controlSha"]
-        ):
-            globally_unresolved = record["state"] in {"claimed", "inflight"}
-            exact_one_use = (
-                record["operation"] == normalized["operation"]
-                and record["inputHash"] == normalized["inputHash"]
-                and record["state"] in {"issued", "consumed"}
-            )
-            if globally_unresolved or exact_one_use:
-                matches.append((run_id, record["state"]))
+    matches = find_blocking_authorities(directory, normalized)
     if matches:
         print(f"{matches[0][0]}\t{matches[0][1]}")
 
@@ -2145,6 +2921,74 @@ def build_parser():
     issue.add_argument("--workflow-blob-sha", required=True)
     common_authority_arguments(issue)
     issue.set_defaults(function=command_issue)
+
+    classify_unmaterialized = subparsers.add_parser(
+        "classify-unmaterialized-run"
+    )
+    classify_unmaterialized.add_argument("--run-json", required=True)
+    classify_unmaterialized.add_argument("--workflow-json", required=True)
+    classify_unmaterialized.add_argument("--jobs-json", required=True)
+    classify_unmaterialized.add_argument("--pending-json", required=True)
+    classify_unmaterialized.add_argument("--artifacts-json", required=True)
+    classify_unmaterialized.add_argument("--compare-json", required=True)
+    classify_unmaterialized.add_argument(
+        "--historical-workflow-json",
+        required=True,
+    )
+    classify_unmaterialized.add_argument("--repository", required=True)
+    classify_unmaterialized.add_argument("--current-master", required=True)
+    classify_unmaterialized.add_argument("--expected-run-id", required=True)
+    classify_unmaterialized.add_argument(
+        "--expected-workflow-id",
+        required=True,
+    )
+    classify_unmaterialized.add_argument("--expected-path", required=True)
+    classify_unmaterialized.add_argument(
+        "--expected-head-sha",
+        required=True,
+    )
+    classify_unmaterialized.add_argument(
+        "--minimum-age-seconds",
+        required=True,
+        type=int,
+    )
+    classify_unmaterialized.add_argument("--now-epoch", type=int)
+    classify_unmaterialized.set_defaults(
+        function=command_classify_unmaterialized_run
+    )
+
+    retire_unmaterialized_claim = subparsers.add_parser(
+        "retire-unmaterialized-claim"
+    )
+    retire_unmaterialized_claim.add_argument("--run-id", required=True)
+    retire_unmaterialized_claim.add_argument("--run-json", required=True)
+    retire_unmaterialized_claim.add_argument("--workflow-json", required=True)
+    retire_unmaterialized_claim.add_argument("--jobs-json", required=True)
+    retire_unmaterialized_claim.add_argument("--pending-json", required=True)
+    retire_unmaterialized_claim.add_argument("--artifacts-json", required=True)
+    retire_unmaterialized_claim.add_argument("--compare-json", required=True)
+    retire_unmaterialized_claim.add_argument(
+        "--historical-workflow-json",
+        required=True,
+    )
+    retire_unmaterialized_claim.add_argument("--policy-json", required=True)
+    retire_unmaterialized_claim.add_argument("--repository", required=True)
+    retire_unmaterialized_claim.add_argument("--current-master", required=True)
+    retire_unmaterialized_claim.add_argument(
+        "--expected-version",
+        required=True,
+        type=int,
+    )
+    retire_unmaterialized_claim.add_argument(
+        "--minimum-age-seconds",
+        required=True,
+        type=int,
+    )
+    retire_unmaterialized_claim.add_argument("--now-epoch", type=int)
+    common_authority_arguments(retire_unmaterialized_claim)
+    retire_unmaterialized_claim.set_defaults(
+        function=command_retire_unmaterialized_claim
+    )
 
     retire_inert_claim = subparsers.add_parser("retire-inert-claim")
     retire_inert_claim.add_argument("--run-id", required=True)
