@@ -52,6 +52,62 @@ const REPRESENTATIVE_VIEWPORTS = [
 const UI_VARIANTS = ['v1', 'v2', 'v3'];
 const THEMES = ['dark', 'light'];
 
+const getTokenContrastMetrics = (locator, {
+  backgroundToken,
+  foregroundToken,
+  surfaceSelector,
+}) => locator.evaluate((element, options) => {
+  const parseColor = (value) => {
+    const normalized = value.trim();
+    if (normalized.startsWith('#')) {
+      const hex = normalized.slice(1);
+      const expanded = hex.length === 3
+        ? hex.split('').map((digit) => `${digit}${digit}`).join('')
+        : hex;
+      return [0, 2, 4].map((offset) => parseInt(expanded.slice(offset, offset + 2), 16));
+    }
+
+    const components = normalized.match(/[\d.]+/g);
+    return components?.slice(0, 3).map(Number) ?? [];
+  };
+  const luminance = (rgb) => {
+    const channels = rgb.map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    return (0.2126 * channels[0]) + (0.7152 * channels[1]) + (0.0722 * channels[2]);
+  };
+  const contrast = (foreground, background) => {
+    const foregroundLuminance = luminance(foreground);
+    const backgroundLuminance = luminance(background);
+    return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+      / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+  };
+
+  const style = getComputedStyle(element);
+  const surface = options.surfaceSelector
+    ? element.closest(options.surfaceSelector)
+    : element;
+  const surfaceStyle = getComputedStyle(surface);
+  const actualForeground = parseColor(style.color);
+  const tokenForeground = parseColor(style.getPropertyValue(options.foregroundToken));
+  const tokenBackground = parseColor(
+    surfaceStyle.getPropertyValue(options.backgroundToken)
+  );
+  const bounds = element.getBoundingClientRect();
+
+  return {
+    contrast: contrast(tokenForeground, tokenBackground),
+    height: bounds.height,
+    usesForegroundToken: actualForeground.every(
+      (channel, index) => channel === tokenForeground[index]
+    ),
+    width: bounds.width,
+  };
+}, { backgroundToken, foregroundToken, surfaceSelector });
+
 // Ten distinct, plausible score/price pairs backing the Correct Score fixture below, shared
 // between the fixture builder and the test assertions so they can never drift apart.
 const CORRECT_SCORE_OPTIONS = [
@@ -611,30 +667,53 @@ test('live betting main page flow is deterministic without a backend', async ({ 
 });
 
 for (const uiVariant of UI_VARIANTS) {
-  test(`anonymous visitors can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
-    const state = createLiveBettingMockState();
-    state.currentUser = null;
-    const liveFeed = await installFakeEventSource(page);
-    await installAppApiMocks(page, state);
+  for (const theme of THEMES) {
+    test(`anonymous visitors can visibly discover Backoffice in ${uiVariant} ${theme}`, async ({ page }) => {
+      const state = createLiveBettingMockState();
+      state.currentUser = null;
+      const liveFeed = await installFakeEventSource(page);
+      await installAppApiMocks(page, state);
 
-    await page.goto(`/?ui=${uiVariant}&theme=dark`, { waitUntil: 'domcontentloaded' });
-    await liveFeed.waitForSource();
-    await liveFeed.openAll();
+      await page.goto(`/?ui=${uiVariant}&theme=${theme}`, { waitUntil: 'domcontentloaded' });
+      await liveFeed.waitForSource();
+      await liveFeed.openAll();
 
-    const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
-    await expect(backofficeLink).toBeVisible();
-    await expect(backofficeLink).toContainText('Backoffice');
-    await backofficeLink.click();
-    await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
-    await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
-    await expect(page.getByText(
-      'Log in with an administrator account to use Backoffice.'
-    )).toBeVisible();
-    await expect(
-      page.locator('main').getByRole('link', { name: 'Log in' })
-    ).toBeVisible();
-    expect(state.requestCounts['GET /api/backoffice'] ?? 0).toBe(0);
-  });
+      const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
+      const backofficeLabel = backofficeLink.locator(
+        uiVariant === 'v2' ? '.nav-picture-button__label' : '.nav-icon-link__label'
+      );
+      await expect(backofficeLink).toBeVisible();
+      await expect(backofficeLink).toContainText('Backoffice');
+      const navigationMetrics = await getTokenContrastMetrics(backofficeLabel, {
+        backgroundToken: '--surface-soft',
+        foregroundToken: '--text-main',
+        surfaceSelector: 'a',
+      });
+      expect(navigationMetrics.usesForegroundToken).toBe(true);
+      expect(navigationMetrics.contrast).toBeGreaterThanOrEqual(4.5);
+      expect(navigationMetrics.width).toBeGreaterThan(40);
+      expect(navigationMetrics.height).toBeGreaterThan(8);
+
+      await backofficeLink.click();
+      await expect(page).toHaveURL(
+        new RegExp(`/backoffice\\?ui=${uiVariant}&theme=${theme}$`)
+      );
+      await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+      await expect(page.getByText(
+        'Log in with an administrator account to use Backoffice.'
+      )).toBeVisible();
+      const loginLink = page.locator('main').getByRole('link', { name: 'Log in' });
+      await expect(loginLink).toBeVisible();
+      const loginMetrics = await getTokenContrastMetrics(loginLink, {
+        backgroundToken: '--accent',
+        foregroundToken: '--accent-contrast',
+      });
+      expect(loginMetrics.usesForegroundToken).toBe(true);
+      expect(loginMetrics.contrast).toBeGreaterThanOrEqual(4.5);
+      expect(loginMetrics.height).toBeGreaterThanOrEqual(44);
+      expect(state.requestCounts['GET /api/backoffice'] ?? 0).toBe(0);
+    });
+  }
 
   test(`administrators can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
     const state = createLiveBettingMockState();
