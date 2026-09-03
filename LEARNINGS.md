@@ -857,3 +857,8 @@ validated.
   exact-run resume, an inert terminal claim invokes retirement, and an
   inflight record invokes explicit reconciliation. None should wait for a
   routine polling interval or cause a replacement dispatch.
+- A top-level GitHub `waiting` status is not progress to observe. Inspect the
+  exact jobs and `pending_deployments` immediately; when durable authority
+  proves a CLI-owned automatic gate, run the checked-in approval path before
+  retaining a watcher. A watcher transports notifications but never owns the
+  pending mutation, and human-originated work remains personally gated.

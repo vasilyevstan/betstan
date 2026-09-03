@@ -12,11 +12,33 @@ PROTECTED_OPERATION_POLICY_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-p
 CLI_DISPATCH_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-dispatch-stan.sh"
 RUN_APPROVAL_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-run-approval-stan.sh"
 RUN_EXCLUSIVITY_TEST="$ROOT_DIR/infra/azure/agents/test-production-run-exclusivity-stan.sh"
+WORKFLOW_TRIGGER_GUARD="$ROOT_DIR/infra/azure/agents/workflow-trigger-guard-stan.sh"
 LIVE_DATA_ROLLOUT_TEST="$ROOT_DIR/infra/oci/tests/test-live-betting-data-rollout-stan.sh"
 GHCR_CONTRACT_TEST="$ROOT_DIR/infra/oci/tests/test-ghcr-contract.sh"
 
 test_output="$(mktemp)"
-trap 'rm -f "$test_output"' EXIT
+secret_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-secret-scan.XXXXXX")"
+permission_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-status-writers.XXXXXX")"
+secret_guard="$secret_fixture_dir/ingress-guard"
+cleanup() {
+  rm -f "$test_output"
+  rm -f "$secret_fixture_dir/safe.yml" "$secret_fixture_dir/unsafe.yml" "$secret_guard"
+  rmdir "$secret_fixture_dir" 2>/dev/null || true
+  rm -rf "$permission_fixture_dir"
+}
+trap cleanup EXIT
+
+assert_secret_fixture_rejected() {
+  local label="$1"
+  if BRANCH_NAME=feature/test \
+      INFRA_DIRS="$secret_fixture_dir" \
+      INGRESS_GUARD="$secret_guard" \
+      "$PRE_COMMIT_CHECK" >"$test_output" 2>&1; then
+    echo "ERROR: $label unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "possible hard-coded secret value" "$test_output"
+}
 
 if BRANCH_NAME=master GITHUB_ACTIONS=false "$PRE_COMMIT_CHECK" >"$test_output" 2>&1; then
   echo "ERROR: local master pre-commit check unexpectedly passed" >&2
@@ -29,6 +51,120 @@ if grep -qF "direct work on master is forbidden" "$test_output"; then
   echo "ERROR: GitHub Actions master validation was blocked" >&2
   exit 1
 fi
+
+cat >"$secret_guard" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "ingress_fixture=PASS"
+SH
+chmod +x "$secret_guard"
+cat >"$secret_fixture_dir/safe.yml" <<'YAML'
+permissions:
+  id-token: read
+  id-token: write
+  id-token: none
+contracts:
+  - contents=read,id-token=read
+  - contents=read,id-token=write
+  - contents=read,id-token=none
+token: ${SAFE_TOKEN}
+token: $SAFE_TOKEN
+token: "${SAFE_TOKEN}"
+token: $(printf safe)
+token: ${{ secrets.NPM_TOKEN }}
+NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+MONGO_PASSWORD: ${MONGO_PASSWORD}
+authToken: "$AUTH_TOKEN"
+SSH_PRIVATE_KEY: "${SSH_PRIVATE_KEY:-}"
+"NODE_AUTH_TOKEN": "${{ secrets.NPM_TOKEN }}"
+'MONGO_PASSWORD': '${MONGO_PASSWORD}'
+{"authToken":"${AUTH_TOKEN}"}
+YAML
+BRANCH_NAME=feature/test \
+  INFRA_DIRS="$secret_fixture_dir" \
+  INGRESS_GUARD="$secret_guard" \
+  "$PRE_COMMIT_CHECK" >"$test_output" 2>&1
+printf '%s%s\n%s%s\n' \
+  'evil-id-to' 'ken: writehunter2xyz' \
+  'contract: id-to' 'ken=writehunter2xyz' \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "malformed id-token fixtures"
+printf '%s%s\n%s%s\n%s%s\n%s%s\n%s%s\n%s%s\n%s%s\n%s%s\n' \
+  'to' 'ken=${SAFE_TOKEN}fixed' \
+  'to' 'ken=$SAFE_TOKEN-fixed' \
+  'to' 'ken=${{ secrets.NPM_TOKEN }}fixed' \
+  'to' 'ken="${SAFE_TOKEN}"fixed' \
+  'to' 'ken=$(printf safe)fixed' \
+  'to' 'ken=${SAFE_TOKEN},fixed-literal' \
+  'to' 'ken=${SAFE_TOKEN}]fixed-literal' \
+  'to' 'ken: ${{ secrets.NPM_TOKEN }} fixed-literal' \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "safe-value literal suffix fixtures"
+printf '%s%s\n' \
+  'safe_ref: ${SAFE_TOKEN}, to' \
+  'ken: hunter2xyz' \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "mixed safe reference and hard-coded token fixture"
+printf '%s%s\n' \
+  'to' \
+  'ken: hunter2xyz # synthetic inline comment' \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "commented hard-coded token fixture"
+printf '%s%s\n' 'to' 'ken: hunter2xyz' >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "hard-coded token fixture"
+printf '%s%s\n%s%s\n%s%s\n%s%s\n' \
+  'MONGO_PASS' 'WORD: hunter2xyz' \
+  'JWT_SEC' 'RET=hunter2xyz' \
+  'NODE_AUTH_TO' 'KEN: hunter2xyz' \
+  'authTo' 'ken: hunter2xyz' \
+  >"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "prefixed secret-key fixtures"
+printf '"NODE_AUTH_TO%s": "hunter2xyz"\n' 'KEN' \
+  >"$secret_fixture_dir/unsafe.yml"
+printf "'MONGO_PASS%s': 'hunter2xyz'\n" 'WORD' \
+  >>"$secret_fixture_dir/unsafe.yml"
+printf '{"authTo%s":"hunter2xyz"}\n' 'ken' \
+  >>"$secret_fixture_dir/unsafe.yml"
+assert_secret_fixture_rejected "quoted secret-key fixtures"
+rm -f "$secret_fixture_dir/unsafe.yml"
+
+cp "$ROOT_DIR"/.github/workflows/*.yml "$permission_fixture_dir/"
+WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
+  "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1
+cat >"$permission_fixture_dir/rogue-status-writer.yml" <<'YAML'
+name: rogue-status-writer
+on: workflow_dispatch
+permissions:
+  statuses: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+YAML
+if WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
+    "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1; then
+  echo "ERROR: secondary statuses:write workflow unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "branch-policy.yml must be the sole explicit statuses:write workflow" \
+  "$test_output"
+rm -f "$permission_fixture_dir/rogue-status-writer.yml"
+cat >"$permission_fixture_dir/implicit-permissions.yml" <<'YAML'
+name: implicit-permissions
+on: workflow_dispatch
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.token }}"
+YAML
+if WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
+    "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1; then
+  echo "ERROR: implicit workflow permissions unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "every workflow job must declare effective permissions" "$test_output"
 
 "$PR_MERGE_SAFETY_TEST"
 "$PROTECTED_OPERATION_POLICY_TEST"

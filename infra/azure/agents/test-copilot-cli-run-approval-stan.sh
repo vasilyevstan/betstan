@@ -42,6 +42,7 @@ workflow_id_for() {
     oci-live-data-rollout.yml) echo 313 ;;
     oci-migrate.yml) echo 314 ;;
     oci-migration-recovery.yml) echo 315 ;;
+    common-package-publish.yml) echo 316 ;;
     *) return 1 ;;
   esac
 }

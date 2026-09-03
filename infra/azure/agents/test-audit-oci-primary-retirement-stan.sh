@@ -1418,8 +1418,8 @@ assert_contains "$RUN_OUTPUT" "temp_secret_oci_migration=incomplete_listing" \
   "secret listing completeness is enforced"
 
 new_case secret-present
-present_secret='{"total_count":1,"secrets":[{"name":"OCI_MIGRATION_AZURE_CREDENTIALS"}]}'
-run_audit "" "$RECENT_CUTOFF_EPOCH" "STUB_MIGRATION_SECRETS=${present_secret}"
+present_inventory='{"total_count":1,"secrets":[{"name":"OCI_MIGRATION_AZURE_CREDENTIALS"}]}'
+run_audit "" "$RECENT_CUTOFF_EPOCH" "STUB_MIGRATION_SECRETS=${present_inventory}"
 assert_eq 1 "$RUN_RC" "temporary migration secret is NO_GO"
 assert_contains "$RUN_OUTPUT" "temp_secret_oci_migration=present" \
   "temporary secret presence is explicit"

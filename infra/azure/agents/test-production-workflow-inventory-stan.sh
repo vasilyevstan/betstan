@@ -29,6 +29,7 @@ PY
   cp "$ROOT_DIR/.github/workflows/production-build.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/production-deploy.yml" "$tmp_dir/"
   cp "$ROOT_DIR/.github/workflows/production-rollback.yml" "$tmp_dir/"
+  cp "$ROOT_DIR/.github/workflows/common-package-publish.yml" "$tmp_dir/"
 
   cat > "$tmp_dir/oci-validate.yml" <<'YAML'
 name: oci-validate
@@ -679,8 +680,45 @@ current_path.rename(target_path)
 PY
 }
 
-azure_set="production-build,production-deploy,production-rollback"
-full_set="ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
+write_rogue_npm_publisher() {
+  local destination_root="$1"
+  cat >"$destination_root/rogue-npm-publisher.yml" <<'YAML'
+name: rogue-npm-publisher
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish ./rogue-package.tgz
+YAML
+}
+
+write_oidc_npm_mutation_workflow() {
+  local destination_root="$1"
+  local command="$2"
+  cat >"$destination_root/rogue-npm-publisher.yml" <<'YAML'
+name: rogue-npm-publisher
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+YAML
+  printf '      - run: %s\n' "$command" \
+    >>"$destination_root/rogue-npm-publisher.yml"
+}
+
+azure_set="common-package-publish,production-build,production-deploy,production-rollback"
+full_set="common-package-publish,ghcr-package-management,oci-capacity-acquire,oci-ghcr-cache-recovery,oci-infrastructure,oci-live-betting-activate,oci-live-betting-disable,oci-live-data-rollout,oci-migrate,oci-migration-recovery,oci-production-build,oci-production-deploy,oci-production-rollback,production-build,production-deploy,production-rollback"
 install_pr_gh_stub
 
 reset_fixtures
@@ -689,6 +727,361 @@ assert_fail "Azure-only set" "expected $full_set; found $azure_set"
 reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+write_rogue_npm_publisher "$tmp_dir"
+assert_fail "second local npm publisher" \
+  "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
+
+for mutation_command in \
+  "npm pu ./rogue-package.tgz" \
+  "npm pub ./rogue-package.tgz" \
+  "npm unp @betstan/common@1.1.0-rc.2" \
+  "npm unpub @betstan/common@1.1.0-rc.2" \
+  "npm dist-tags add @betstan/common@1.1.0-rc.2 next"; do
+  reset_fixtures
+  write_complete_oci_set
+  write_oidc_npm_mutation_workflow "$tmp_dir" "$mutation_command"
+  assert_fail "OIDC-only local npm mutation: $mutation_command" \
+    "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
+done
+
+reset_fixtures
+write_complete_oci_set
+write_oidc_npm_mutation_workflow "$tmp_dir" "npm un left-pad"
+assert_pass "$full_set"
+
+reset_fixtures
+write_complete_oci_set
+rm "$tmp_dir/common-package-publish.yml"
+assert_fail "missing Common publisher" "expected $full_set; found"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/^  workflow_dispatch:/  push:/' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "non-dispatch Common publisher" \
+  "common-package-publish must be workflow_dispatch-only"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/name: common-package-release/name: production-emergency/' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "wrong Common publisher environment" \
+  "common-package-publish job publish must use reviewer-gated common-package-release"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020#actions/setup-node@v4#' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "mutable Common publisher action" \
+  "common-package-publish line"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/--provenance/d' "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without provenance" \
+  "common-package-publish must publish with --provenance"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/npm pack --json --pack-destination/a\
+          npm pack --json --pack-destination "$artifact_dir"' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with two candidate packs" \
+  "common-package-publish must create exactly one lifecycle-enabled tarball"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/\[ "$SOURCE_SHA" = "$(git rev-parse origin\/master)" \]/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without current-master binding" \
+  "common-package-publish must bind source_sha to current master"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\[ "$GITHUB_SHA" = "$SOURCE_SHA" \]/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without final workflow-SHA binding" \
+  "common-package-publish must refetch master and recheck the exact tarball immediately before publication"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/\[ "$(sha256sum "$TARBALL" | awk '"'"'{print $1}'"'"')" = \\/,+1d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without final tarball digest fence" \
+  "common-package-publish must refetch master and recheck the exact tarball immediately before publication"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/continue-on-error: true/continue-on-error: false/' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without failure evidence continuation" \
+  "common-package-publish must continue to sanitized evidence capture after publication"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "/^        if: always() && steps.candidate.outcome == 'success'$/d" \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without unconditional evidence upload" \
+  "common-package-publish must upload safely available evidence after verification failure"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/^          npm ci$/d' "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without exact Common install" \
+  "common-package-publish must install the Common lockfile exactly"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/^          npm run test:ci$/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without Common compatibility tests" \
+  "common-package-publish must run the Common compatibility suite"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\[ "$next_version" = "$PACKAGE_VERSION" \]/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without next-tag assertion" \
+  "common-package-publish must prove the next dist-tag names the published version"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\[ "$latest_after" = "$LATEST_BEFORE" \]/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without latest-tag assertion" \
+  "common-package-publish must prove the latest dist-tag is unchanged"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/^            auth backoffice /            backoffice /' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without Auth consumer validation" \
+  "common-package-publish must validate the candidate against every current backend"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/cmp --silent "$CANDIDATE_TARBALL" "$registry_tarball"/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without registry byte comparison" \
+  "common-package-publish must compare registry bytes with the reviewed tarball"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\.readdirSync("\.", { withFileTypes: true })/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without consumer discovery" \
+  "common-package-publish must discover every top-level Common consumer"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/\.\/node_modules\/\.bin\/tsc --noEmit/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without backend typechecks" \
+  "common-package-publish must typecheck every backend against the candidate"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak '/npm run test:ci -- --runInBand/d' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without backend tests" \
+  "common-package-publish must run every backend suite against the candidate"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/secrets.NPM_TOKEN/secrets.OTHER_TOKEN/g' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with wrong secret" \
+  "common-package-publish must receive only the NPM_TOKEN secret"
+
+for publish_flag in "--tag next" "--access public" "--ignore-scripts"; do
+  reset_fixtures
+  write_complete_oci_set
+  escaped_flag="${publish_flag// /\\ }"
+  sed -i.bak "/$escaped_flag/d" "$tmp_dir/common-package-publish.yml"
+  rm "$tmp_dir/common-package-publish.yml.bak"
+  assert_fail "Common publisher without $publish_flag" \
+    "common-package-publish must publish with $publish_flag"
+done
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/common-package-publish.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+old = '''          npm publish "$TARBALL" \\
+            --tag next \\
+            --access public \\
+            --provenance \\
+            --ignore-scripts
+'''
+new = '''          npm publish "$TARBALL"
+          # --tag next --access public --provenance --ignore-scripts
+'''
+if old not in text:
+    raise SystemExit("publish command fixture not found")
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
+assert_fail "Common publisher with detached publication flags" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/common-package-publish.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+command = '''          npm publish "$TARBALL" \\
+            --tag next \\
+            --access public \\
+            --provenance \\
+            --ignore-scripts
+'''
+if command not in text:
+    raise SystemExit("publish command fixture not found")
+path.write_text(text.replace(command, command + command, 1), encoding="utf-8")
+PY
+assert_fail "Common publisher with a second publication command" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^          npm publish "$TARBALL" \\/i\
+          "npm" publish "$TARBALL"' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with quoted npm executable" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^          npm publish "$TARBALL" \\/i\
+          npm --silent publish "$TARBALL"' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with npm global option before publish" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^          npm publish "$TARBALL" \\/i\
+          npm pub "$TARBALL"' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with npm publication alias" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  '/^          npm publish "$TARBALL" \\/i\
+          npm pu "$TARBALL"' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with shortest npm publication abbreviation" \
+  "common-package-publish must execute exactly one reviewed npm publish command with bound flags"
+
+for mutation_command in \
+  'npm unp @betstan/common@1.1.0-rc.2' \
+  'npm unpub @betstan/common@1.1.0-rc.2' \
+  'npm dist-tags add @betstan/common@1.1.0-rc.2 next'; do
+  reset_fixtures
+  write_complete_oci_set
+  sed -i.bak \
+    "/^          npm publish \"\\\$TARBALL\" \\\\/i\\
+          $mutation_command" \
+    "$tmp_dir/common-package-publish.yml"
+  rm "$tmp_dir/common-package-publish.yml.bak"
+  assert_fail "Common publisher with npm mutation alias: $mutation_command" \
+    "common-package-publish must not mutate package history or re-resolve dependencies"
+done
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "s/github.run_attempt == 1 && github.repository/github.run_attempt >= 1 \\&\\& github.repository/" \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without first-attempt job guard" \
+  "common-package-publish must reject rerun attempts"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/vasilyevstan\/betstan/other\/repository/g' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher for wrong repository" \
+  "common-package-publish must bind publication to the canonical repository"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/contents: read/contents: write/' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with broad permissions" \
+  "common-package-publish must set exact permissions contents=read,id-token=write"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak 's/cancel-in-progress: false/cancel-in-progress: true/' \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher with cancelling concurrency" \
+  "common-package-publish must serialize publication without cancellation"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "/^        if: always() && steps.candidate.outcome == 'success' && steps.publish.outcome != 'skipped'$/d" \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without attempted-publish evidence path" \
+  "common-package-publish must inspect every attempted publication outcome"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  "/^        if: always() && steps.registry.outcome == 'failure'$/d" \
+  "$tmp_dir/common-package-publish.yml"
+rm "$tmp_dir/common-package-publish.yml.bak"
+assert_fail "Common publisher without terminal registry enforcement" \
+  "common-package-publish must fail after retaining incomplete registry evidence"
 
 reset_fixtures
 write_complete_oci_set
@@ -1327,6 +1720,25 @@ assert_fail "reusable workflow from governed OCI job" "must not call a reusable 
 
 prepare_pr_remote
 assert_pr_pass "$full_set"
+
+prepare_pr_remote
+write_rogue_npm_publisher "$pr_remote_root/.github/workflows"
+assert_pr_fail "second PR-tree npm publisher" \
+  "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
+
+for mutation_command in \
+  "npm pu ./rogue-package.tgz" \
+  "npm pub ./rogue-package.tgz" \
+  "npm unp @betstan/common@1.1.0-rc.2" \
+  "npm unpub @betstan/common@1.1.0-rc.2" \
+  "npm dist-tags add @betstan/common@1.1.0-rc.2 next"; do
+  prepare_pr_remote
+  write_oidc_npm_mutation_workflow \
+    "$pr_remote_root/.github/workflows" \
+    "$mutation_command"
+  assert_pr_fail "OIDC-only PR-tree npm mutation: $mutation_command" \
+    "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
+done
 
 prepare_pr_remote
 cat > "$pr_remote_root/.github/workflows/safe space.yml" <<'YAML'

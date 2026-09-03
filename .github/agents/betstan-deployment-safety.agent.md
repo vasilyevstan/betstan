@@ -152,13 +152,19 @@ inactive. Fail closed when either query is incomplete or fails.
 - Inventory every production-capable workflow before reasoning about triggers.
   OCI is the operational service primary and is active; that statement is not
   evidence that Azure data cutover or retirement is complete. The governed set includes `production-build`,
-  `production-deploy`, `production-rollback`, `oci-production-build`,
+  `production-deploy`, `production-rollback`, `common-package-publish`,
+  `oci-production-build`,
   `oci-production-deploy`, `oci-production-rollback`, `oci-infrastructure`,
   `oci-capacity-acquire`, `ghcr-package-management`,
   `oci-ghcr-cache-recovery`, `oci-live-data-rollout`,
   `oci-live-betting-activate`, `oci-live-betting-disable`, `oci-migrate`, and
   the stop-only `oci-migration-recovery`; use the checked-in policy and
   inventory as authority when they change.
+- Common package publication participates in production-run exclusivity. If an
+  emergency runtime rollback is required while it is active, first cancel the
+  exact publication run, reconcile whether npm accepted the immutable version,
+  and prove the run terminal before dispatching rollback; never bypass the
+  exclusivity check or mutate a published version or dist-tag as a shortcut.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - OCI application images are public GHCR only:
