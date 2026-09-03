@@ -75,8 +75,9 @@ and prove the atomic write preserves that current decision.
 For semantic-control and layout changes, prove accessible names remain
 distinct from compact visual tokens, cross-card computed geometry (bounding
 boxes, baselines, equal-height groups) holds across sibling cards, and
-role-gated navigation is visible for the correct role and absent otherwise in
-every affected UI variant. Re-run generated-board geometry in every changed
+public protected navigation is visible in every required auth state and UI
+variant while routed capability messaging and API/mutation authorization
+remain fail-closed. Re-run generated-board geometry in every changed
 parent context and around each container-layout transition: assert label and
 price bounds stay inside their controls, sibling controls do not intersect,
 and a shared section heading spans the whole product group rather than

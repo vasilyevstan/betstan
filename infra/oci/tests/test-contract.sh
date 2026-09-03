@@ -77,6 +77,10 @@ grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
   grep -Fq 'expect(publicBackoffice.status()).toBe(401)' "$acceptance_spec" ||
   fail "OCI live acceptance does not prove anonymous backoffice reads fail closed"
+grep -Fq 'const publicBackofficeLink = publicPage.getByTitle' "$acceptance_spec" &&
+  grep -Fq 'await expect(publicBackofficeLink).toBeVisible()' "$acceptance_spec" &&
+  grep -Fq 'Log in with an administrator account to use Backoffice.' "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove public Backoffice navigation remains available"
   grep -Fq "pathname === '/api/event/stream'" "$acceptance_spec" &&
     grep -Fq '!expectedStreamDisconnect' "$acceptance_spec" ||
     fail "OCI live acceptance treats expected long-lived SSE disconnects as API failures"
@@ -380,7 +384,7 @@ for ux_reinforced_check in \
     'Centered sibling market headings' \
     'Stable, non-volatile board order with exact ID preservation' \
     'Coupled-market plausibility' \
-    'Visible role-gated navigation in every UI variant' \
+    'Publicly discoverable protected navigation in every UI variant' \
     'Single-live-card width and relative-height budget' \
     'Phantom auto-fill tracks' \
     'Equal-height market groups' \
@@ -404,7 +408,7 @@ for critic_reinforced_check in \
     'Fail-dark terminal placeholders' \
     'Unresolved-auth retained `OFFLINE` data' \
     'Presentation ordering that changes selection identity' \
-    'Hidden or icon-only role-gated navigation' \
+    'Hidden or icon-only protected navigation' \
     'Cross-card computed-geometry regressions'; do
   grep -Fq "$critic_reinforced_check" "$ux_critic_agent" ||
     fail "validation critic omits reinforced finding: $critic_reinforced_check"

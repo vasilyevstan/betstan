@@ -264,6 +264,14 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       publicPage.getByRole('article', { name: fixture.name }),
     ).toHaveCount(0);
   }
+  const publicBackofficeLink = publicPage.getByTitle('Backoffice');
+  await expect(publicBackofficeLink).toBeVisible();
+  await expect(publicBackofficeLink).toContainText('Backoffice');
+  await publicBackofficeLink.click();
+  await expect(publicPage).toHaveURL(/\/backoffice\?ui=v2&theme=dark$/);
+  await expect(
+    publicPage.getByText('Log in with an administrator account to use Backoffice.'),
+  ).toBeVisible();
   await publicContext.close();
 
   await page.goto(

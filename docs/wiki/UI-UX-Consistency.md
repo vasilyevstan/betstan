@@ -91,6 +91,16 @@ Do not demand a full Cartesian test matrix when the same shared primitive and
 evidence prove several cells. Do not omit a materially different state merely
 because the happy path looks consistent.
 
+## Public entry points and protected capabilities
+
+Do not hide a product-level navigation entry as a substitute for
+authorization. When an entry point such as Backoffice is intentionally public,
+it must remain visibly labelled and navigable for anonymous, ordinary,
+legacy-roleless, and administrator states in every UI variant. The routed
+surface must explain the access requirement without silently falling back to
+unrelated content, while protected reads and mutations remain fail-closed at
+the server boundary.
+
 ## Classifying differences
 
 | Classification | Meaning | Required outcome |
