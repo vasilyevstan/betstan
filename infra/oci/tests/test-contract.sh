@@ -12,7 +12,13 @@ fail() {
 
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/provenance"
-trap 'rm -rf "$WORK_DIR"' EXIT
+cleanup() {
+  local status=$?
+  trap - EXIT
+  rm -rf "$WORK_DIR"
+  exit "$status"
+}
+trap cleanup EXIT
 
 command -v ruby >/dev/null 2>&1 || fail "ruby is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
@@ -1127,6 +1133,11 @@ grep -Fq 'dispatch URL proves event acceptance, not job materialization' \
   "$deployment_safety_agent"
 grep -Fq 'Treat PR title/body changes as workflow-producing' \
   "$deployment_safety_agent"
+grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
+  fail "deployment safety omits bounded external tool installation"
+grep -Fq 'different authority root to disguise the same request' \
+  "$deployment_safety_agent" ||
+  fail "deployment safety permits replay through an alternate authority root"
 grep -Fq 'through the checked-in bounded supersession or unmaterialized classifier' \
   "$deployment_safety_agent" ||
   fail "deployment safety omits bounded provider-ghost classification"
@@ -1748,6 +1759,20 @@ grep -Fq '"oci-cli==${OCI_CLI_VERSION}"' "$cli_installer" ||
   fail "OCI CLI package installation is not pinned to OCI_CLI_VERSION"
 grep -Fq 'python3 -m pip install' "$cli_installer" ||
   fail "OCI CLI installer does not use the runner's explicit Python 3"
+grep -Fq 'bounded-command.py' "$cli_installer" ||
+  fail "OCI CLI installer does not use the shared bounded command runner"
+grep -Fq -- '--timeout-seconds "$OCI_CLI_INSTALL_TIMEOUT_SECONDS"' "$cli_installer" ||
+  fail "OCI CLI installer lacks a hard per-attempt deadline"
+grep -Fq -- '--attempts "$OCI_CLI_INSTALL_ATTEMPTS"' "$cli_installer" ||
+  fail "OCI CLI installer lacks bounded complete-command retries"
+grep -Fq -- '--timeout "$OCI_CLI_PIP_TIMEOUT_SECONDS"' "$cli_installer" ||
+  fail "OCI CLI installer lacks an explicit pip network timeout"
+grep -Fq -- '--retries "$OCI_CLI_PIP_RETRIES"' "$cli_installer" ||
+  fail "OCI CLI installer lacks explicit pip transport retries"
+grep -Fq -- '--user' "$cli_installer" ||
+  fail "OCI CLI installer no longer targets the isolated runner home"
+grep -Fq '"$TESTS_DIR/test-install-cli-stan.sh"' "$OCI_DIR/tests/run-contracts.sh" ||
+  fail "OCI CLI installer tests are not part of the complete contract entrypoint"
 ! grep -R --include='*.sh' -F -- '--network-security-group-id' "$OCI_DIR/scripts" >/dev/null ||
   fail "OCI scripts use the unsupported NSG rule argument --network-security-group-id"
 grep -Fq -- '--nsg-id "$nsg_id"' "$OCI_DIR/scripts/provision.sh" ||

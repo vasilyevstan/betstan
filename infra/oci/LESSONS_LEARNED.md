@@ -116,6 +116,13 @@ conversation summaries are not authority.
   build authority. MongoDB index inspection returns error 26 when a collection
   has never existed; handle only that exact empty-namespace case as no indexes
   and keep all other readiness failures closed.
+- Pinning a release tool is not enough when its package download precedes a
+  one-use, first-attempt-only gate. Wrap the complete install command in a hard
+  per-attempt deadline with bounded retries and backoff, and keep an explicit
+  package-manager network timeout. A transport timeout before OCI access or
+  data mutation is still terminal evidence for that exact request; preserve
+  its consumed authority and promote a substantive hardened SHA rather than
+  rerunning, replaying, or switching authority roots.
 - Capture and validate rollback evidence before acquiring a database lock or
   changing a workload. An ordinary baseline is valid only when all nine live
   references and its exact deploy provenance identify public GHCR digests;

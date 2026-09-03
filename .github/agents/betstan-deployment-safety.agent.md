@@ -220,6 +220,12 @@ inactive. Fail closed when either query is incomplete or fails.
   require OCI-attested Bastion and target host keys, strict checking, and a
   normalized loopback-only kubeconfig with no executable, provider, proxy,
   token, or external credential-file directives.
+- External tool installation before a one-use, first-attempt-only protected
+  operation must keep the exact version pin while adding a hard per-attempt
+  deadline, bounded complete-command retries and backoff, and focused
+  transient, permanent, and timeout tests. A pre-mutation transport failure is
+  terminal evidence for that SHA; never replay its consumed authority or use a
+  different authority root to disguise the same request.
 - Require a rollback baseline to pass the shared rollback validator before any
   database lock, fence, scaling, or data mutation. Zero-recovery capture is
   allowed only for nine matching public-GHCR live references and exact GHCR

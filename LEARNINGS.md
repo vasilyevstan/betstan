@@ -729,6 +729,14 @@ validated.
 - A failed first attempt is evidence, not a retry candidate. The corrected
   acceptance assertion and persisted-board repair required a new exact master
   SHA and complete release chain.
+- A pinned external CLI install can still make a one-use release gate fragile
+  when the package host times out. Bound the complete install command with a
+  hard per-attempt deadline, finite retries/backoff, and an explicit package
+  transport timeout; test transient success, permanent failure, timeout, and
+  final version identity. If that bootstrap fails before production access or
+  mutation, preserve the consumed authority as terminal evidence and promote a
+  substantive hardened SHA instead of replaying the request or changing the
+  authority root.
 
 ## CLI-originated protected authority — 2026-08-31
 
