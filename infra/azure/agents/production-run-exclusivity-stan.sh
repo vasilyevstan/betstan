@@ -12,6 +12,7 @@ EXCLUDE_RUN_ID="${EXCLUDE_RUN_ID:-}"
 STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 PROSPECTIVE_PROMOTION_PR="${PROSPECTIVE_PROMOTION_PR:-}"
+COMPARE_JQ='{status,ahead_by,behind_by,total_commits,base_commit:{sha:.base_commit.sha},merge_base_commit:{sha:.merge_base_commit.sha},commits:[.commits[]|{sha:.sha}]}'
 
 [[ -z "$EXCLUDE_RUN_ID" || "$EXCLUDE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
   echo "EXCLUDE_RUN_ID must be empty or a positive integer" >&2
@@ -52,6 +53,134 @@ if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
     raise SystemExit("current master SHA is unavailable or malformed")
 print(sha)
 '
+}
+
+fetch_complete_compare() {
+  local endpoint="$1"
+  local output_file="$2"
+  local expected_head_sha="$3"
+
+  chmod 600 "$tmp_compare_pages" "$output_file"
+  if ! gh api "$endpoint" --paginate --jq "$COMPARE_JQ" \
+    >"$tmp_compare_pages"; then
+    : >"$tmp_compare_pages"
+    return 1
+  fi
+  if ! python3 - "$tmp_compare_pages" "$output_file" "$expected_head_sha" <<'PY'
+import json
+import re
+import sys
+
+pages_path, output_path, expected_head_sha = sys.argv[1:]
+try:
+    payload = open(pages_path, encoding="utf-8").read()
+except OSError as error:
+    raise SystemExit(f"compact compare evidence is unavailable: {error}")
+def duplicate_safe_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+decoder = json.JSONDecoder(object_pairs_hook=duplicate_safe_object)
+index = 0
+pages = []
+expected_keys = {
+    "status",
+    "ahead_by",
+    "behind_by",
+    "total_commits",
+    "base_commit",
+    "merge_base_commit",
+    "commits",
+}
+sha_pattern = re.compile(r"^[0-9a-f]{40}$")
+if sha_pattern.fullmatch(expected_head_sha) is None:
+    raise SystemExit("compact compare requested head is malformed")
+metadata = None
+commits = []
+while index < len(payload):
+    while index < len(payload) and payload[index].isspace():
+        index += 1
+    if index >= len(payload):
+        break
+    try:
+        page, index = decoder.raw_decode(payload, index)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise SystemExit(f"compact compare page is malformed: {error}")
+    if not isinstance(page, dict) or set(page) != expected_keys:
+        raise SystemExit("compact compare page has an unexpected schema")
+    if (
+        not isinstance(page["status"], str)
+        or not page["status"]
+        or any(
+            type(page[name]) is not int or page[name] < 0
+            for name in ("ahead_by", "behind_by", "total_commits")
+        )
+    ):
+        raise SystemExit("compact compare page metadata is malformed")
+    for name in ("base_commit", "merge_base_commit"):
+        commit = page[name]
+        if (
+            not isinstance(commit, dict)
+            or set(commit) != {"sha"}
+            or not isinstance(commit["sha"], str)
+            or sha_pattern.fullmatch(commit["sha"]) is None
+        ):
+            raise SystemExit(f"compact compare page {name} is malformed")
+    if not isinstance(page["commits"], list):
+        raise SystemExit("compact compare page commit list is malformed")
+    if page["total_commits"] > 0 and not page["commits"]:
+        raise SystemExit("compact compare page commit list is empty")
+    page_metadata = {
+        name: page[name]
+        for name in expected_keys - {"commits"}
+    }
+    if metadata is None:
+        metadata = page_metadata
+    elif page_metadata != metadata:
+        raise SystemExit("compact compare page metadata is inconsistent")
+    for commit in page["commits"]:
+        if (
+            not isinstance(commit, dict)
+            or set(commit) != {"sha"}
+            or not isinstance(commit["sha"], str)
+            or sha_pattern.fullmatch(commit["sha"]) is None
+        ):
+            raise SystemExit("compact compare page commit is malformed")
+        commits.append(commit)
+    pages.append(page)
+    if len(commits) > page["total_commits"]:
+        raise SystemExit("compact compare aggregate exceeds total commits")
+if not pages or metadata is None:
+    raise SystemExit("compact compare has no pages")
+if len(commits) != metadata["total_commits"]:
+    raise SystemExit("compact compare aggregate is incomplete")
+if len({commit["sha"] for commit in commits}) != len(commits):
+    raise SystemExit("compact compare aggregate contains duplicate commits")
+if not commits or commits[-1]["sha"] != expected_head_sha:
+    raise SystemExit("compact compare aggregate does not end at requested head")
+try:
+    with open(output_path, "w", encoding="utf-8") as output:
+        json.dump(
+            {
+                **metadata,
+                "commits": commits,
+            },
+            output,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        output.write("\n")
+except OSError as error:
+    raise SystemExit(f"compact compare output cannot be written: {error}")
+PY
+  then
+    : >"$tmp_compare_pages"
+    return 1
+  fi
+  : >"$tmp_compare_pages"
 }
 
 verify_prospective_promotion() {
@@ -107,8 +236,9 @@ if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", head_sha) is N
 print(head_sha)
 PY
   )" || return 1
-  gh api "repos/$REPO/compare/${actual_master}...${prospective_sha}" \
-    >"$compare_file" || return 1
+  fetch_complete_compare \
+    "repos/$REPO/compare/${actual_master}...${prospective_sha}" \
+    "$compare_file" "$prospective_sha" || return 1
   python3 - "$compare_file" "$actual_master" "$prospective_sha" <<'PY' || return 1
 import json
 import re
@@ -139,7 +269,6 @@ if (
 for field, expected in (
     ("base_commit", actual_master),
     ("merge_base_commit", actual_master),
-    ("head_commit", prospective_sha),
 ):
     commit = compare.get(field)
     if not isinstance(commit, dict) or commit.get("sha") != expected:
@@ -155,8 +284,12 @@ for commit in commits:
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise SystemExit("prospective promotion compare commit SHA is malformed")
     commit_shas.append(sha)
-if len(set(commit_shas)) != len(commit_shas) or prospective_sha not in commit_shas:
-    raise SystemExit("prospective promotion compare does not reach its head")
+if (
+    not commit_shas
+    or len(set(commit_shas)) != len(commit_shas)
+    or commit_shas[-1] != prospective_sha
+):
+    raise SystemExit("prospective promotion compare commit list does not end at its head")
 PY
   rechecked_master="$(read_current_master)" || return 1
   [[ "$rechecked_master" == "$actual_master" ]] || {
@@ -178,11 +311,13 @@ tmp_jobs="$(mktemp)"
 tmp_pending="$(mktemp)"
 tmp_artifacts="$(mktemp)"
 tmp_prospective_ancestry="$(mktemp)"
+tmp_compare_pages="$(mktemp)"
 cleanup() {
   rm -f \
     "$tmp_runs" "$tmp_candidates" "$tmp_workflows" "$tmp_successful_runs" \
     "$tmp_ancestry" "$tmp_historical_workflow" "$tmp_run" "$tmp_workflow" \
-    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts" "$tmp_prospective_ancestry"
+    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts" "$tmp_prospective_ancestry" \
+    "$tmp_compare_pages"
 }
 trap cleanup EXIT
 
@@ -297,7 +432,14 @@ do
     gh api \
       "repos/$REPO/actions/workflows/$workflow_id/runs?head_sha=$head_sha&event=workflow_dispatch&status=success&per_page=100" \
       >"$tmp_successful_runs"
-    gh api "repos/$REPO/compare/$head_sha...$master_sha" >"$tmp_ancestry"
+    if [[ "$head_sha" != "$master_sha" ]]; then
+      fetch_complete_compare \
+        "repos/$REPO/compare/$head_sha...$master_sha" \
+        "$tmp_ancestry" "$master_sha" || {
+        echo "GitHub compare evidence could not be compactly completed" >&2
+        exit 1
+      }
+    fi
     gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
     gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
       >"$tmp_artifacts"

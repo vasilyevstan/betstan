@@ -59,7 +59,11 @@ inactive. Fail closed when either query is incomplete or fails.
   through the checked-in bounded supersession or unmaterialized classifier.
   Supersession requires an old jobless and approval-free first-attempt manual
   dispatch for a non-current ancestor SHA plus the exact workflow-specific
-  successful successor chain. The separate `reason=unmaterialized` path is
+  successful successor chain: capacity requires one later exact success,
+  live data requires later dry-run, backfill, and slip-index successes, and
+  activation requires one later exact activation success. Do not remove or
+  substitute those successor chains; reject any proposal to remove live-data
+  or activation supersession. The separate `reason=unmaterialized` path is
   limited exactly to `oci-live-data-rollout.yml`,
   `oci-live-betting-activate.yml`, and `oci-capacity-acquire.yml`: it requires
   a queued/null first attempt whose created, started, and updated timestamps
@@ -69,6 +73,14 @@ inactive. Fail closed when either query is incomplete or fails.
   `oci-control-plane` non-cancelling concurrency, and exact-current-master
   guards before every known mutation token. The generic title must equal the
   workflow `name:` and must not match any legitimate rendered `run-name`.
+  Fetch Compare evidence with `--paginate` and a compact SHA-only projection,
+  normalize every page only after exact metadata agreement, and require the
+  complete unique ordered commit list to end at the requested head. Never
+  retain an oversized raw Compare payload or accept a truncated list. The
+  exact historical live-data blob
+  `c6c113b49a36518b7b106aa1406998a4abca10a0` may use only its reviewed
+  blob-bound mutation profile; every other blob requires the full current
+  mutation-token profile.
   A cancellation `409` is corroborative journal evidence only, never a
   classifier input. Never extend either classifier to deployment, disable,
   rollback,
@@ -85,6 +97,9 @@ inactive. Fail closed when either query is incomplete or fails.
   prospective-bootstrap evidence.
   The repository-global claimed/inflight authority fence remains unresolved
   until its explicit evidence-bound retirement.
+- A recovered current-master ghost is not a completed release gate. Reconcile
+  the complete nonterminal production-run inventory and retain every
+  unexplained blocker before accepting the promotion or release as safe.
 - Classify protected approval by origin, not workflow type. Every direct
   Copilot CLI operation must use `copilot-cli-dispatch-stan.sh` and its exact
   private one-run authority record; this includes infrastructure `prepare`,

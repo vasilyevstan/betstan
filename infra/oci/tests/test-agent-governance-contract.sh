@@ -315,6 +315,10 @@ require_flat_literal "$CONDUCTOR" \
   'The guard independently proves the OPEN CLI-managed same-repository `dev` -> `master` PR'
 require_flat_literal "$CONDUCTOR" \
   'A raw prospective SHA is never authority'
+require_flat_literal "$CONDUCTOR" \
+  'A recovered original blocker is not completion'
+require_flat_literal "$CONDUCTOR" \
+  'do not report the promotion or release healthy until zero unexplained blockers remain'
 
 require_flat_literal "$FINAL_VALIDATOR" \
   'three distinct model families whose pass statuses are'

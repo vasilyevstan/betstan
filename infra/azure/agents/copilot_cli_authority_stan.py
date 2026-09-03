@@ -210,6 +210,28 @@ UNMATERIALIZED_WORKFLOWS = {
         ),
     },
 }
+LIVE_DATA_HISTORICAL_PROFILE_BLOB = (
+    "c6c113b49a36518b7b106aa1406998a4abca10a0"
+)
+LIVE_DATA_HISTORICAL_PROFILE_TOKENS = (
+    "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+    "./infra/oci/scripts/authorize-github-runner.sh authorize",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+    "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+    "./infra/oci/scripts/revoke-github-runner.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
+HISTORICAL_MUTATION_PROFILES = {
+    (
+        ".github/workflows/oci-live-data-rollout.yml",
+        LIVE_DATA_HISTORICAL_PROFILE_BLOB,
+    ): LIVE_DATA_HISTORICAL_PROFILE_TOKENS,
+}
 CURRENT_MASTER_GUARD_LINES = (
     '[ "$SOURCE_SHA" = "$GITHUB_SHA" ]',
     "git fetch --quiet origin master:refs/remotes/origin/master",
@@ -1180,6 +1202,16 @@ def decode_historical_workflow(historical, path, *, expected_blob_sha=None):
     return source, blob_sha
 
 
+def historical_mutation_tokens(path, blob_sha):
+    specification = UNMATERIALIZED_WORKFLOWS.get(path)
+    if specification is None:
+        fail("workflow is not allowlisted for unmaterialized retirement")
+    return HISTORICAL_MUTATION_PROFILES.get(
+        (path, blob_sha),
+        specification["mutationTokens"],
+    )
+
+
 def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=None):
     specification = UNMATERIALIZED_WORKFLOWS.get(path)
     if specification is None:
@@ -1242,7 +1274,7 @@ def validate_historical_unmaterialized_workflow(path, historical, *, blob_sha=No
         fail("historical workflow protected environment is invalid")
 
     mutation_positions = []
-    for token in specification["mutationTokens"]:
+    for token in historical_mutation_tokens(path, observed_blob_sha):
         positions = executable_token_positions(source, token)
         if not positions:
             fail(f"historical workflow is missing mutation token: {token}")
@@ -1281,7 +1313,6 @@ def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
     for field, expected in (
         ("base_commit", ancestor_sha),
         ("merge_base_commit", ancestor_sha),
-        ("head_commit", current_master),
     ):
         commit = compare.get(field)
         if not isinstance(commit, dict) or commit.get("sha") != expected:
@@ -1299,10 +1330,11 @@ def validate_strict_ancestor_compare(compare, ancestor_sha, current_master):
             fail("GitHub compare commit SHA is malformed")
         commit_shas.append(sha)
     if (
-        len(set(commit_shas)) != len(commit_shas)
-        or current_master not in commit_shas
+        not commit_shas
+        or len(set(commit_shas)) != len(commit_shas)
+        or commit_shas[-1] != current_master
     ):
-        fail("GitHub compare commit list does not reach current master")
+        fail("GitHub compare commit list does not end at current master")
 
 
 def validate_unmaterialized_run_evidence(

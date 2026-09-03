@@ -309,6 +309,11 @@ approval, authority-fence, and every other active-run decision remain bound
 to actual master. `EXCLUDE_RUN_ID` and generic disabled handling are never
 prospective-bootstrap evidence.
 
+A recovered original blocker is not completion. Reconcile the entire
+nonterminal production-run inventory through its next state transition and
+do not report the promotion or release healthy until zero unexplained blockers
+remain.
+
 Never bypass or edit live authority state ad hoc. Use only the checked-in
 authority transitions and evidence requirements.
 Never weaken a gate merely to make progress. Never change a policy when the
