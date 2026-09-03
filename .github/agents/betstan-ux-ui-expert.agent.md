@@ -154,10 +154,12 @@ contract above.
   sharing one underlying model (for example 1X2 versus Correct Score) using
   the existing betting-plausibility rule; a technically valid but implausible
   or contradictory pairing is a usability defect.
-- **Visible role-gated navigation in every UI variant**: role-gated global
-  navigation (for example Backoffice) must render discoverable visible text,
-  not only an icon, for the correct role in every affected UI variant, and
-  remain absent for every non-privileged and anonymous state.
+- **Publicly discoverable protected navigation in every UI variant**:
+  product-level entry points such as Backoffice must render discoverable
+  visible text, not only an icon, for anonymous, ordinary, legacy-roleless,
+  and administrator states in every affected UI variant. Authorization belongs
+  at the routed capability and API boundary: non-admin users receive clear
+  access guidance, while protected reads and mutations remain fail-closed.
 - **Single-live-card width and relative-height budget**: when exactly one
   countdown, active-live, or retained-finished event occupies the upper
   section, it uses the full event-stage width and stays within a bounded

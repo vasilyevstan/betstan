@@ -53,9 +53,10 @@ named-reference, cross-state, exception, and exact-head UX review contract.
 - Compact pre-kickoff market grids collapse phantom empty tracks with
   `auto-fit`, stretch cards sharing a row to equal height, and wrap status
   words only between words.
-- Backoffice navigation shows visible discoverable text for administrators in
-  every UI variant and stays hidden for ordinary users, legacy roleless users,
-  and anonymous visitors.
+- Backoffice navigation shows visible discoverable text in every UI variant
+  for anonymous, ordinary, legacy-roleless, and administrator states.
+  Non-admin users reach an explicit access screen rather than a silent route
+  fallback, while `/api/backoffice` reads and mutations remain admin-only.
 
 ## Timeline completeness and terminal safeguards
 

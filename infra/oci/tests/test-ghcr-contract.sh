@@ -837,7 +837,11 @@ smoke_text = smoke.read_text(encoding="utf-8")
 if "process.env.OCI_ALLOW_LEGACY_ADMIN_UI === '1'" not in smoke_text:
     raise SystemExit("browser smoke does not consume the historical UI compatibility control")
 if "if (!allowLegacyAdminUi)" not in smoke_text:
-    raise SystemExit("browser smoke does not default to strict Backoffice authorization")
+    raise SystemExit("browser smoke does not scope historical Backoffice UI compatibility")
+if "await expect(backofficeLink).toBeVisible();" not in smoke_text:
+    raise SystemExit("browser smoke does not require public Backoffice navigation by default")
+if "Administrator access is required to use Backoffice." not in smoke_text:
+    raise SystemExit("browser smoke does not verify the protected route boundary")
 if 'needs: [recover, public-validate]' not in workflow_text:
     raise SystemExit("OCIR retirement does not depend on successful public validation")
 retirement = workflow_text.split(
