@@ -239,6 +239,11 @@ grep -Fq 'A still-running `gh run watch` is notification transport, not evidence
 grep -Fq 'A user asking for status or whether work is stuck triggers that checkpoint immediately' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow does not force an immediate checkpoint on status requests"
+grep -Fq 'A GitHub `waiting` state is an action trigger, not a polling state.' \
+    "$conductor_agent" ||
+  fail "conductor can leave an actionable protected gate in passive polling"
+grep -Fq 'copilot-cli-run-approval-stan.sh --approve' "$conductor_agent" ||
+  fail "conductor does not route eligible CLI-owned waiting gates to automatic approval"
 grep -Fq 'remains proactive from before a registered job starts through its terminal evidence and accepted downstream handoff' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow does not retain start-to-terminal conductor ownership"

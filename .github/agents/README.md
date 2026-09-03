@@ -128,6 +128,11 @@ lost observation from exact underlying references, and assigns the next
 bounded check. A completed unit with no confirmed next-owner handoff is itself
 a stall; a still-running watcher never closes conductor ownership.
 
+A GitHub `waiting` run or job is an immediate action trigger. The conductor
+checks its exact jobs and `pending_deployments` in the same checkpoint and
+routes an eligible CLI-owned gate through the checked-in automatic approval
+path before retaining any watcher; human-originated gates remain personal.
+
 At the first missed checkpoint the conductor restores read-side monitoring,
 classifies the underlying job, and routes any mutation to one exact owner with
 a deadline. At the second missed checkpoint it escalates the same unit instead

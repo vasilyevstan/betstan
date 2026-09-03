@@ -350,6 +350,14 @@ its owner. It is never healthy by default.
   after dispatch and after each top-level state transition. A top-level
   `queued` run can contain jobs waiting for a protected environment, so never
   schedule a long wait from run status alone.
+- A GitHub `waiting` state is an action trigger, not a polling state. In that
+  checkpoint inspect the exact jobs and `pending_deployments`; when the
+  environment and durable authority identify an automatic CLI-owned gate,
+  invoke the checked-in `copilot-cli-run-approval-stan.sh --approve` path with
+  the exact operation, control SHA, and upstream identity before starting or
+  retaining a watcher. Human-originated work remains personally gated. A
+  missing pending deployment requires immediate materialization or approval
+  reconciliation, not another routine polling interval.
 - A workflow dispatch URL is not job materialization. Capture its exact run ID
   immediately, keep a manually enabled workflow active until that run has a
   real job and expected protected gate, then route disable-before-approval to
