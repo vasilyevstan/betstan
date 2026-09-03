@@ -611,6 +611,31 @@ test('live betting main page flow is deterministic without a backend', async ({ 
 });
 
 for (const uiVariant of UI_VARIANTS) {
+  test(`anonymous visitors can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
+    const state = createLiveBettingMockState();
+    state.currentUser = null;
+    const liveFeed = await installFakeEventSource(page);
+    await installAppApiMocks(page, state);
+
+    await page.goto(`/?ui=${uiVariant}&theme=dark`, { waitUntil: 'domcontentloaded' });
+    await liveFeed.waitForSource();
+    await liveFeed.openAll();
+
+    const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
+    await expect(backofficeLink).toBeVisible();
+    await expect(backofficeLink).toContainText('Backoffice');
+    await backofficeLink.click();
+    await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
+    await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+    await expect(page.getByText(
+      'Log in with an administrator account to use Backoffice.'
+    )).toBeVisible();
+    await expect(
+      page.locator('main').getByRole('link', { name: 'Log in' })
+    ).toBeVisible();
+    expect(state.requestCounts['GET /api/backoffice'] ?? 0).toBe(0);
+  });
+
   test(`administrators can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
     const state = createLiveBettingMockState();
     state.currentUser.role = 'ADMIN';
@@ -626,6 +651,8 @@ for (const uiVariant of UI_VARIANTS) {
     await expect(backofficeLink).toContainText('Backoffice');
     await backofficeLink.click();
     await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
+    await expect(page.getByText('Create new event')).toBeVisible();
+    expect(state.requestCounts['GET /api/backoffice']).toBe(1);
   });
 }
 

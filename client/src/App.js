@@ -111,16 +111,12 @@ const App = () => {
               <Route path="/login" element={<LogIn callback={handleAuthChange} />} />
               <Route
                 path="/backoffice"
-                element={currentUser?.role === 'ADMIN'
-                  ? <Backoffice onChanged={refreshBackoffice} refreshToken={backofficeRefreshToken} />
-                  : <EventList
-                      onSelectionPlaced={requestSlipRefresh}
-                      selectedSelectionKeys={selectedSelectionKeys}
-                      uiVariant={uiVariant}
-                      visibleOfflineEventIds={visibleOfflineEventIds}
-                      onScopedAccessFailure={fetchData}
-                      isScopedAccessResolved={isCurrentUserResolved}
-                    />}
+                element={<Backoffice
+                  currentUser={currentUser}
+                  isCurrentUserResolved={isCurrentUserResolved}
+                  onChanged={refreshBackoffice}
+                  refreshToken={backofficeRefreshToken}
+                />}
               />
               <Route path="/bets" element={<MyBets />} />
               <Route

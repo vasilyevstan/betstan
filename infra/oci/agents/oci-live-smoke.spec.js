@@ -47,11 +47,25 @@ test('OCI reusable-user login and navigation journey', async ({ page }) => {
   await page.getByTitle('My bets').click();
   await expect(page).toHaveURL(/\/bets/);
   if (!allowLegacyAdminUi) {
-    await expect(page.getByTitle('Backoffice')).toHaveCount(0);
+    const backofficeLink = page.getByTitle('Backoffice');
+    await expect(backofficeLink).toBeVisible();
+    await backofficeLink.click();
+    await expect(page).toHaveURL(/\/backoffice/);
+    await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+    await expect(page.getByText(
+      'Administrator access is required to use Backoffice.'
+    )).toBeVisible();
   }
 
   await page.getByTitle('Log out').click();
   await expect(page.getByTitle('Log in')).toBeVisible();
+  if (!allowLegacyAdminUi) {
+    await expect(page.getByTitle('Backoffice')).toBeVisible();
+    await page.getByTitle('Backoffice').click();
+    await expect(page.getByText(
+      'Log in with an administrator account to use Backoffice.'
+    )).toBeVisible();
+  }
   await page.getByTitle('Log in').click();
   await page.getByLabel('Username or email').fill(username);
   const passwordInput = page.getByLabel('Password', { exact: true });
@@ -84,4 +98,7 @@ test('OCI reusable-user login and navigation journey', async ({ page }) => {
 
   await page.getByTitle('Log out').click();
   await expect(page.getByTitle('Log in')).toBeVisible();
+  if (!allowLegacyAdminUi) {
+    await expect(page.getByTitle('Backoffice')).toBeVisible();
+  }
 });

@@ -5,37 +5,37 @@ import { MemoryRouter } from 'react-router-dom';
 import Header from './Header';
 
 const renderHeader = (currentUser, uiVariant = 'v2') => render(
-  <MemoryRouter initialEntries={['/?ui=v2&theme=light']}>
+  <MemoryRouter initialEntries={[`/?ui=${uiVariant}&theme=light`]}>
     <Header currentUser={currentUser} uiVariant={uiVariant} theme="light" />
   </MemoryRouter>
 );
 
+const userStates = [
+  undefined,
+  { email: 'user@example.com', role: 'USER' },
+  { email: 'legacy@example.com' },
+  { email: 'admin@example.com', role: 'ADMIN' },
+];
+
 it.each(['v1', 'v2', 'v3'])(
-  'shows a visible Backoffice label to administrators in %s',
+  'shows a visible public Backoffice entry in %s',
   (uiVariant) => {
-    const { unmount } = renderHeader({
-      email: 'admin@example.com',
-      role: 'ADMIN',
-    }, uiVariant);
+    for (const currentUser of userStates) {
+      const { unmount } = renderHeader(currentUser, uiVariant);
 
-    const link = screen.getByRole('link', { name: 'Backoffice' });
-    expect(link).toHaveAttribute('href', '/backoffice?ui=v2&theme=light');
-    expect(link).toHaveTextContent('Backoffice');
-    expect(screen.getByText('Backoffice')).toBeVisible();
+      const link = screen.getByRole('link', { name: 'Backoffice' });
+      expect(link).toHaveAttribute(
+        'href',
+        `/backoffice?ui=${uiVariant}&theme=light`
+      );
+      expect(link).toHaveTextContent('Backoffice');
+      expect(screen.getByText('Backoffice')).toBeVisible();
+      expect(link).toHaveAccessibleName('Backoffice');
 
-    unmount();
+      unmount();
+      expect(
+        screen.queryByRole('link', { name: 'Backoffice' })
+      ).not.toBeInTheDocument();
+    }
   },
 );
-
-it('keeps Backoffice hidden for ordinary users', () => {
-  renderHeader({ email: 'user@example.com', role: 'USER' });
-  expect(screen.queryByRole('link', { name: 'Backoffice' })).not.toBeInTheDocument();
-});
-
-it('keeps Backoffice hidden for legacy users without a role', () => {
-  renderHeader({ email: 'legacy@example.com' });
-
-  expect(
-    screen.queryByRole('link', { name: 'Backoffice' })
-  ).not.toBeInTheDocument();
-});

@@ -171,10 +171,11 @@
   stretch to equal height and top alignment; a status badge wraps only between
   words; and sibling pre-match cards keep aligned market headings, control
   bounds, and odds baselines regardless of team-name length.
-- Visible admin navigation: role-gated global navigation (for example
-  Backoffice) needs visible discoverable text, not only an icon, for the
-  correct role in every UI variant, while staying absent for every non-admin
-  and anonymous state.
+- Public admin entry versus protected capability: Backoffice navigation needs
+  visible discoverable text for anonymous, ordinary, legacy-roleless, and
+  administrator states in every UI variant. Do not use hidden navigation as
+  authorization; route non-admin users to clear access guidance while keeping
+  protected reads and mutations fail-closed at the API boundary.
 - Terminal ordering and auth safeguards: a result/`FULL_TIME` write decision
   must be atomic against the current live phase and explicit/legacy offline
   intent so no interleaving can leave a fully onboarded, non-retired terminal

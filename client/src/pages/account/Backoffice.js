@@ -1,24 +1,79 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
+import { Link, useLocation } from 'react-router-dom';
 
-const HandleBackoffice = ({ onChanged, refreshToken }) => {
+const HandleBackoffice = ({
+  currentUser,
+  isCurrentUserResolved,
+  onChanged,
+  refreshToken,
+}) => {
+  const location = useLocation();
   const [events, setEvents] = useState({});
   const [newEventHome, setNewEventHome] = useState('');
   const [newEventAway, setNewEventAway] = useState('');
-
-  const fetchEvents = async () => {
-    try {
-      const response = await axios.get('/api/backoffice');
-      const data = response.data;
-      setEvents(data && typeof data === 'object' ? data : {});
-    } catch (error) {
-      // ignore
-    }
-  };
+  const [loadError, setLoadError] = useState('');
+  const isAdmin = currentUser?.role === 'ADMIN';
 
   useEffect(() => {
+    if (!isCurrentUserResolved || !isAdmin) {
+      setEvents({});
+      setLoadError('');
+      return undefined;
+    }
+
+    let isActive = true;
+    const fetchEvents = async () => {
+      try {
+        const response = await axios.get('/api/backoffice');
+        const data = response.data;
+        if (isActive) {
+          setEvents(data && typeof data === 'object' ? data : {});
+          setLoadError('');
+        }
+      } catch (error) {
+        if (isActive) {
+          setEvents({});
+          setLoadError('Unable to load Backoffice events.');
+        }
+      }
+    };
+
     fetchEvents();
-  }, [refreshToken]);
+    return () => {
+      isActive = false;
+    };
+  }, [isAdmin, isCurrentUserResolved, refreshToken]);
+
+  if (!isCurrentUserResolved) {
+    return <section className="card backoffice-create" aria-labelledby="backoffice-access-title">
+      <div className="card-body">
+        <h1 className="h4" id="backoffice-access-title">Backoffice</h1>
+        <p className="mb-0" role="status">Checking administrator access...</p>
+      </div>
+    </section>;
+  }
+
+  if (!isAdmin) {
+    return <section className="card backoffice-create" aria-labelledby="backoffice-access-title">
+      <div className="card-body">
+        <h1 className="h4" id="backoffice-access-title">Backoffice</h1>
+        <p>
+          {currentUser
+            ? 'Administrator access is required to use Backoffice.'
+            : 'Log in with an administrator account to use Backoffice.'}
+        </p>
+        {!currentUser && (
+          <Link
+            className="btn btn-primary"
+            to={{ pathname: '/login', search: location.search }}
+          >
+            Log in
+          </Link>
+        )}
+      </div>
+    </section>;
+  }
 
   const eventValues = [];
 
@@ -96,6 +151,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
   });
 
   return <div className="backoffice-board">
+    {loadError && <div className="alert alert-danger" role="alert">{loadError}</div>}
     <div className="card backoffice-create">
       <div className="card-body">
         <h5 className="card-title mb-3">Create new event</h5>

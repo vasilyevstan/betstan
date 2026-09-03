@@ -98,9 +98,10 @@ Read:
 - Presentation ordering that changes selection identity: display sorting must
   never rewrite an ID/name/value tuple by array position or move a control
   under an active pointer/keyboard focus.
-- Hidden or icon-only role-gated navigation: verify visible discoverable text
-  for the correct role in every affected UI variant, not only server-side
-  authorization.
+- Hidden or icon-only protected navigation: when the product entry point is
+  public, verify visible discoverable text for anonymous and authenticated
+  states in every affected UI variant. Separately prove that the routed
+  capability and protected APIs still deny non-admin reads and mutations.
 - Cross-card computed-geometry regressions: unresolved bounding-box, baseline,
   or equal-height claims across sibling cards are an acceptance gap, not
   optional polish.
