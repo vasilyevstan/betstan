@@ -36,7 +36,7 @@ You may edit only:
 
 - `common/**`;
 - backend source/test/config files under `auth`, `backoffice`, `bet`, `event`,
-  `gamemaster`, `moderation`, `resulting`, and `slip`;
+  `gamemaster`, `moderation`, `resulting`, `slip`, and `telemetry`;
 - a backend service's own `package.json`, `package-lock.json`, and TypeScript
   configuration when the slice explicitly requires it.
 

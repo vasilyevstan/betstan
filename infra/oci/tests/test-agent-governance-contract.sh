@@ -143,6 +143,8 @@ require_flat_literal "$ARCHITECT" \
   'Source present in `common/` does not make an unpublished contract available to service images'
 require_flat_literal "$BACKEND_DEVELOPER" \
   'source for the next package candidate while each service compiles against its exact published `@betstan/common` pin'
+require_flat_literal "$BACKEND_DEVELOPER" \
+  '`gamemaster`, `moderation`, `resulting`, `slip`, and `telemetry`'
 require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
   'state both versions and never substitute one for the other'
 require_flat_literal "$TEST_ENGINEER" \

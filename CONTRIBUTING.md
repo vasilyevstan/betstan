@@ -92,6 +92,11 @@ producer-consumer and rollback compatibility, and validate the packed artifact
 without allowing npm to re-resolve unrelated dependencies. Package publication
 and consumer repinning are separate reviewed release steps.
 
+Only `.github/workflows/common-package-publish.yml` may publish this package.
+It is a protected, first-attempt, exact-current-`master` dispatch through
+`common-package-release`; it publishes one reviewed tarball under `next`,
+preserves `latest`, and retains registry byte-identity and provenance evidence.
+
 Protected environment approval is classified by origin, not workflow type.
 Every protected operation dispatched by the active Copilot CLI must use
 `copilot-cli-dispatch-stan.sh` with an operation-specific JSON request stored
@@ -186,6 +191,27 @@ Do not rewrite or force-push `master` or `dev`. Preserve unrelated tracked, stag
 The trusted publisher currently requires the protected quality workflow to be byte-identical to the default-branch copy. Prefer extending an existing checked-in guard or test entrypoint that `production-build.yml` already invokes; this preserves the trusted workflow identity while still exercising the new validation.
 
 If the workflow file itself must change, first add and independently review a fail-closed, one-use exact-blob authorization mechanism in the trusted publisher without changing the workflow. Promote that policy separately, then authorize and merge only the intended workflow blob, remove the authorization, and verify fresh statuses come from the expected workflow IDs. Do not invent or document an authorization variable before the publisher implements and tests it.
+
+An exact-blob authorization is consumed by the first successful exact quality
+run for its PR transition. A workflow-producing pull-request event first
+publishes an unbound pending transition barrier, then binds the exact newly
+registered quality run. Only that transition's completed workflow run may
+publish success. The trusted marker is stored on the exact merge snapshot and
+includes a bounded title/body fingerprint. The publisher accepts it only from
+the GitHub Actions bot with a validated repository `branch-policy` run target,
+and that run must carry the exact PR, head, and base relation. Governance keeps
+`branch-policy.yml` as the sole status-writing workflow and requires every
+workflow job to declare effective token permissions instead of inheriting the
+mutable repository default. Only the bound run may satisfy the transition; a
+different `workflow_run` completion remains pending, and the selected run must
+strictly postdate both the event timestamp and any authorization issuance. A
+delayed run can bind an unbound marker through its exact `workflow_run` or a
+manual trusted refresh. A later non-producing metadata update does not
+invalidate the marker, while changed PR content cannot reuse it. The publisher
+rechecks the complete current PR snapshot before and after status publication
+and replaces any same-snapshot stale result with pending. Any later edit,
+synchronization, base advance, or status refresh requires a new short-lived
+authorization and receipt anchor; a consumed receipt is never reset or reused.
 
 The trusted publisher binds both required status targets to the same current PR head SHA, base SHA, repository, trusted workflow runs, and unique test-merge SHA. Head-only or merge-only evidence is not a promotion gate.
 
