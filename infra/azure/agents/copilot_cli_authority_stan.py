@@ -213,21 +213,24 @@ UNMATERIALIZED_WORKFLOWS = {
 LIVE_DATA_HISTORICAL_PROFILE_BLOB = (
     "c6c113b49a36518b7b106aa1406998a4abca10a0"
 )
-LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS = {
-    "./infra/oci/scripts/live-data-maintenance-stan.sh hold",
-    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
-}
+LIVE_DATA_HISTORICAL_PROFILE_TOKENS = (
+    "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+    "./infra/oci/scripts/authorize-github-runner.sh authorize",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+    "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+    "./infra/oci/scripts/revoke-github-runner.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh cleanup",
+)
 HISTORICAL_MUTATION_PROFILES = {
     (
         ".github/workflows/oci-live-data-rollout.yml",
         LIVE_DATA_HISTORICAL_PROFILE_BLOB,
-    ): tuple(
-        token
-        for token in UNMATERIALIZED_WORKFLOWS[
-            ".github/workflows/oci-live-data-rollout.yml"
-        ]["mutationTokens"]
-        if token not in LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS
-    ),
+    ): LIVE_DATA_HISTORICAL_PROFILE_TOKENS,
 }
 CURRENT_MASTER_GUARD_LINES = (
     '[ "$SOURCE_SHA" = "$GITHUB_SHA" ]',

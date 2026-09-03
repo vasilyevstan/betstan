@@ -705,6 +705,10 @@ gh() {
           printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
             "$OLD_SHA" "$OLD_SHA" "$WRONG_FINAL_SHA"
           ;;
+        head-present-not-final-compare-unmaterialized-data)
+          printf '{"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"},{"sha":"%s"}]}\n' \
+            "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA" "$WRONG_FINAL_SHA"
+          ;;
         *)
           printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}\n' \
             "$OLD_SHA" "$OLD_SHA" "$MASTER_SHA"
@@ -889,6 +893,7 @@ for mode in \
   malformed-page-commits-unmaterialized-data \
   duplicate-commits-unmaterialized-data \
   wrong-final-compare-unmaterialized-data \
+  head-present-not-final-compare-unmaterialized-data \
   malformed-historical-unmaterialized-data \
   missing-guards-unmaterialized-data \
   mutation-before-guard-unmaterialized-data \

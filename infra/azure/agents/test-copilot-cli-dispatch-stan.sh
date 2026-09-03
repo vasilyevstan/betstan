@@ -505,15 +505,29 @@ historical_profile = module.historical_mutation_tokens(
     path,
     module.LIVE_DATA_HISTORICAL_PROFILE_BLOB,
 )
-expected_historical = tuple(
-    token
-    for token in full_profile
-    if token not in module.LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS
+expected_historical = (
+    "./infra/oci/scripts/authorize-github-runner.sh cleanup-stale",
+    "./infra/oci/scripts/authorize-github-runner.sh authorize",
+    "./infra/oci/scripts/configure-k3s-access.sh open",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh enter",
+    "./infra/oci/scripts/live-betting-data-rollout-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh restore",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew",
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh release",
+    "./infra/oci/scripts/revoke-github-runner.sh",
+    "./infra/oci/scripts/configure-k3s-access.sh cleanup",
 )
-if historical_profile != expected_historical:
+if (
+    historical_profile != expected_historical
+    or module.LIVE_DATA_HISTORICAL_PROFILE_TOKENS != expected_historical
+):
     raise SystemExit("exact historical live-data mutation profile drifted")
-for omission in module.LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS:
-    if omission in historical_profile or omission not in full_profile:
+for missing_token in (
+    "./infra/oci/scripts/live-data-maintenance-stan.sh hold",
+    "./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh",
+):
+    if missing_token in historical_profile or missing_token not in full_profile:
         raise SystemExit("historical live-data mutation profile omissions drifted")
 if module.historical_mutation_tokens(path, "0" * 40) != full_profile:
     raise SystemExit("non-profile live-data blob did not require current mutations")

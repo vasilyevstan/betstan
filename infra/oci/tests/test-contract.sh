@@ -1229,6 +1229,11 @@ grep -Fq -- '--paginate --jq "$COMPARE_JQ"' "$run_exclusivity_script" ||
   fail "production exclusivity does not fetch compact paginated Compare evidence"
 grep -Fq 'HISTORICAL_MUTATION_PROFILES' "$authority_helper" ||
   fail "authority helper omits blob-bound historical mutation profiles"
+grep -Fq 'LIVE_DATA_HISTORICAL_PROFILE_TOKENS' "$authority_helper" ||
+  fail "authority helper does not retain the explicit historical token profile"
+if grep -Fq 'LIVE_DATA_HISTORICAL_PROFILE_OMISSIONS' "$authority_helper"; then
+  fail "authority helper derives historical tokens from mutable omissions"
+fi
 grep -Fq 'PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' "$pr_merge_safety" ||
   fail "merge safety does not pass the exact prospective promotion PR"
 grep -Fq 'EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="$PR_NUMBER"' \
