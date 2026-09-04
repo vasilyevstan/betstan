@@ -52,6 +52,30 @@ const REPRESENTATIVE_VIEWPORTS = [
 const UI_VARIANTS = ['v1', 'v2', 'v3'];
 const THEMES = ['dark', 'light'];
 
+const createEventThroughBackoffice = async (page, state, label) => {
+  const home = `${label} Home`;
+  const away = `${label} Away`;
+
+  await page.getByLabel('Home team').fill(home);
+  await page.getByLabel('Away team').fill(away);
+  await page.getByRole('button', { name: 'Create' }).click();
+
+  await expect.poll(
+    () => state.requestCount('POST /api/backoffice/new_event')
+  ).toBe(1);
+  const createRequest = state.requests.find(
+    ({ key }) => key === 'POST /api/backoffice/new_event'
+  );
+  expect(createRequest?.body).toEqual({
+    home,
+    away,
+    requestId: expect.any(String),
+  });
+  await expect(page.getByRole('status')).toContainText(
+    `${home} - ${away} was created.`
+  );
+};
+
 const getTokenContrastMetrics = (locator, {
   backgroundToken,
   foregroundToken,
@@ -668,7 +692,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
 
 for (const uiVariant of UI_VARIANTS) {
   for (const theme of THEMES) {
-    test(`anonymous visitors can visibly discover Backoffice in ${uiVariant} ${theme}`, async ({ page }) => {
+    test(`anonymous visitors can use Backoffice in ${uiVariant} ${theme}`, async ({ page }) => {
       const state = createLiveBettingMockState();
       state.currentUser = null;
       const liveFeed = await installFakeEventSource(page);
@@ -699,40 +723,43 @@ for (const uiVariant of UI_VARIANTS) {
         new RegExp(`/backoffice\\?ui=${uiVariant}&theme=${theme}$`)
       );
       await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
-      await expect(page.getByText(
-        'Log in with an administrator account to use Backoffice.'
-      )).toBeVisible();
-      const loginLink = page.locator('main').getByRole('link', { name: 'Log in' });
-      await expect(loginLink).toBeVisible();
-      const loginMetrics = await getTokenContrastMetrics(loginLink, {
-        backgroundToken: '--accent',
-        foregroundToken: '--accent-contrast',
-      });
-      expect(loginMetrics.usesForegroundToken).toBe(true);
-      expect(loginMetrics.contrast).toBeGreaterThanOrEqual(4.5);
-      expect(loginMetrics.height).toBeGreaterThanOrEqual(44);
-      expect(state.requestCounts['GET /api/backoffice'] ?? 0).toBe(0);
+      await expect(page.getByText('Create new event')).toBeVisible();
+      await expect(page.getByLabel('Home team')).toBeVisible();
+      await expect(page.getByLabel('Away team')).toBeVisible();
+      expect(state.requestCounts['GET /api/backoffice']).toBe(1);
+      await createEventThroughBackoffice(
+        page,
+        state,
+        `Anonymous ${uiVariant} ${theme}`
+      );
     });
   }
 
-  test(`administrators can visibly discover Backoffice in ${uiVariant}`, async ({ page }) => {
-    const state = createLiveBettingMockState();
-    state.currentUser.role = 'ADMIN';
-    const liveFeed = await installFakeEventSource(page);
-    await installAppApiMocks(page, state);
+  for (const [authLabel, currentUser] of [
+    ['ordinary users', { email: 'user@example.com', role: 'USER' }],
+    ['legacy roleless users', { email: 'legacy@example.com' }],
+    ['administrators', { email: 'admin@example.com', role: 'ADMIN' }],
+  ]) {
+    test(`${authLabel} can use Backoffice in ${uiVariant}`, async ({ page }) => {
+      const state = createLiveBettingMockState();
+      state.currentUser = currentUser;
+      const liveFeed = await installFakeEventSource(page);
+      await installAppApiMocks(page, state);
 
-    await page.goto(`/?ui=${uiVariant}&theme=dark`, { waitUntil: 'domcontentloaded' });
-    await liveFeed.waitForSource();
-    await liveFeed.openAll();
+      await page.goto(`/?ui=${uiVariant}&theme=dark`, { waitUntil: 'domcontentloaded' });
+      await liveFeed.waitForSource();
+      await liveFeed.openAll();
 
-    const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
-    await expect(backofficeLink).toBeVisible();
-    await expect(backofficeLink).toContainText('Backoffice');
-    await backofficeLink.click();
-    await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
-    await expect(page.getByText('Create new event')).toBeVisible();
-    expect(state.requestCounts['GET /api/backoffice']).toBe(1);
-  });
+      const backofficeLink = page.getByRole('link', { name: 'Backoffice' });
+      await expect(backofficeLink).toBeVisible();
+      await expect(backofficeLink).toContainText('Backoffice');
+      await backofficeLink.click();
+      await expect(page).toHaveURL(new RegExp(`/backoffice\\?ui=${uiVariant}&theme=dark$`));
+      await expect(page.getByText('Create new event')).toBeVisible();
+      expect(state.requestCounts['GET /api/backoffice']).toBe(1);
+      await createEventThroughBackoffice(page, state, `${authLabel} ${uiVariant}`);
+    });
+  }
 }
 
 for (const uiVariant of UI_VARIANTS) {

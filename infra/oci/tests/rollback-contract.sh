@@ -552,6 +552,15 @@ case "$*" in
   "cat-file -e ${STUB_TARGET_SHA}:event/src/route/EventLiveStream.ts")
     [[ "${STUB_DEPLOYED_SOURCE_HAS_SSE:-1}" == "1" ]]
     ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/PublicBackofficeAccess.ts")
+    [[ "${STUB_TARGET_HAS_PUBLIC_BACKOFFICE:-0}" == "1" ]]
+    ;;
+  "grep -Fq app.use(\"/api/backoffice\", publicBackofficeAccess) ${STUB_TARGET_SHA} -- backoffice/src/app.ts")
+    [[ "${STUB_TARGET_PUBLIC_BACKOFFICE_MOUNTED:-1}" == "1" ]]
+    ;;
+  "grep -Fq requireAdmin ${STUB_TARGET_SHA} -- backoffice/src/route")
+    [[ "${STUB_TARGET_PUBLIC_ROUTES_REQUIRE_ADMIN:-0}" == "1" ]]
+    ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
     ;;
@@ -560,6 +569,20 @@ case "$*" in
     ;;
   "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/service/VerifyAdminSession.ts")
     [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
+    ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/service/BackofficePublicationService.ts")
+    [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
+    cat <<'EOF_PUBLICATION_SERVICE'
+async replayPending() {}
+this.scheduleReplay()
+newEventPublicationPending
+resultPublicationPending
+visibilityPublicationPending
+EOF_PUBLICATION_SERVICE
+    ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/index.ts")
+    [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
+    printf '%s\n' 'await publicationService.start()'
     ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
@@ -1187,6 +1210,10 @@ EOF_QUEUES
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
         "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
+    elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/gaming_backoffice"* ]]; then
+      [[ "${STUB_BACKOFFICE_QUERY_FAIL:-0}" != "1" ]] || exit 1
+      printf '%s\n' \
+        "${STUB_BACKOFFICE_PENDING_PUBLICATION_OUTPUT:-${STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT:-0}}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/"* ]]; then
       [[ "${STUB_AUTH_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' "${STUB_NORMALIZED_IDENTIFIER_COUNT:-0}"
@@ -1535,6 +1562,23 @@ cat "$OUTPUT_DIR/summary.env"
 STUB
 chmod +x "$BIN_DIR/transition-readiness-stub.sh"
 
+cat >"$BIN_DIR/rollback-mutation-fence-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-}"
+case "$action" in
+  fence-writes|release)
+    printf '%s\n' "$action" >>"${ROLLBACK_MUTATION_FENCE_TRACE_FILE:?}"
+    [[ "${STUB_MUTATION_FENCE_FAIL_ACTION:-}" != "$action" ]]
+    ;;
+  *)
+    printf 'unexpected rollback mutation fence action: %s\n' "$action" >&2
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$BIN_DIR/rollback-mutation-fence-stub.sh"
+
 common_env=(
   "PATH=$BIN_DIR:$PATH"
   "REPO=example/repo"
@@ -1553,8 +1597,12 @@ common_env=(
   "OCI_RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT"
   "OCI_RUNTIME_MODE=k3s"
   "STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE=$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
+  "STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=protected"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
+  "ROLLBACK_MUTATION_FENCE_SCRIPT=$BIN_DIR/rollback-mutation-fence-stub.sh"
+  "BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS=1"
+  "BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS=0"
 )
 
 run_script() {
@@ -1573,6 +1621,7 @@ run_script() {
     STUB_KUBECTL_LOG="$scenario_kubectl_log" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-good" \
     STUB_CURL_TRACE_FILE="$output_dir/curl-trace.tsv" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
     LIVE_BETTING_SSE_PROBE_TRACE_FILE="$output_dir/sse-probe-trace.tsv" \
     LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$output_dir/sse-validation-trace.tsv" \
     OUTPUT_DIR="$output_dir" TARGET_SHA="$TARGET_SHA" \
@@ -2047,16 +2096,59 @@ if ! run_script "$WORK_DIR/oci-auth-compatible" \
 fi
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_normalized_identifiers=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_publication_replay=false'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
 
+run_expect_failure oci-backoffice-publication-pending \
+  STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending.out" \
+  'OCI rollback readiness rejected the rollback'
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=pending'
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=2'
+
+run_expect_failure oci-backoffice-publication-query-failed \
+  STUB_BACKOFFICE_QUERY_FAIL=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-failed/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=query-failed'
+
+run_expect_failure oci-backoffice-publication-query-malformed \
+  STUB_BACKOFFICE_PENDING_PUBLICATION_OUTPUT=not-a-count ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-malformed/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=invalid-query-result'
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-malformed/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=not-a-count'
+
+publication_compatible_output="$WORK_DIR/oci-backoffice-publication-compatible"
+if ! run_script "$publication_compatible_output" \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+    STUB_BACKOFFICE_QUERY_FAIL=1 \
+    STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 \
+    ROLLBACK_MODE=dry-run >"$publication_compatible_output.out" 2>&1; then
+  cat "$publication_compatible_output.out" >&2
+  fail 'OCI replay-compatible Backoffice target unexpectedly required a marker drain'
+fi
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=compatible-target'
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=not-required'
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_publication_replay=true'
+
 protected_backoffice_output="$WORK_DIR/protected-backoffice-transition"
 if ! run_script "$protected_backoffice_output" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 \
+    STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
     STUB_BACKOFFICE_MODE=protected \
     STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=public \
     ROLLBACK_MODE=execute >"$WORK_DIR/protected-backoffice-transition.out" 2>&1; then
   cat "$WORK_DIR/protected-backoffice-transition.out" >&2
-  fail 'OCI rollback rejected the protected-to-historical Backoffice transition'
+  fail 'OCI rollback rejected the protected-to-public Backoffice transition'
 fi
 grep -Fq $'canonical\t/api/backoffice\t401\t' \
   "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
@@ -2065,6 +2157,12 @@ grep -Fq $'\tunauthorized.errors' \
   "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
   fail 'OCI rollback readiness did not validate the protected Backoffice payload'
 assert_route_row "$protected_backoffice_output/public-verification.tsv" canonical /api/backoffice
+assert_contains "$protected_backoffice_output/rollback-summary.env" \
+  'backoffice_access_mode=public'
+assert_contains "$protected_backoffice_output/rollback-summary.env" \
+  'rollback_http_mutation_fence=not-required'
+[[ ! -s "$protected_backoffice_output/write-fence-trace.tsv" ]] ||
+  fail 'replay-compatible Backoffice rollback unexpectedly fenced mutations'
 
 run_expect_failure malformed-protected-backoffice \
   STUB_BACKOFFICE_MODE=malformed-protected ROLLBACK_MODE=dry-run
@@ -2074,7 +2172,7 @@ assert_contains "$WORK_DIR/malformed-protected-backoffice/rollback-readiness/fai
 run_expect_failure forbidden-backoffice \
   STUB_BACKOFFICE_MODE=forbidden ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/forbidden-backoffice/rollback-readiness/failures.txt" \
-  'expected 200 or protected 401 got 403'
+  'expected 200 or legacy protected 401 got 403'
 
 run_expect_failure infra-run-id-mismatch \
   ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
@@ -2182,6 +2280,30 @@ fi
 assert_contains "$WORK_DIR/admin-auth-capability-accepted/rollback-summary.env" \
   'admin_auth_rollback_check=explicit-capability-override'
 
+if ! run_script "$WORK_DIR/public-backoffice-target" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+    ROLLBACK_MODE=dry-run \
+    >"$WORK_DIR/public-backoffice-target.out" 2>&1; then
+  cat "$WORK_DIR/public-backoffice-target.out" >&2
+  fail 'OCI intentional-public-Backoffice dry-run unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
+  'admin_auth_rollback_check=intentional-public-backoffice'
+assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
+  'backoffice_access_mode=public'
+
+run_expect_failure public-backoffice-marker-not-mounted \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+  STUB_TARGET_PUBLIC_BACKOFFICE_MOUNTED=0 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/public-backoffice-marker-not-mounted.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
+
+run_expect_failure public-backoffice-route-still-protected \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+  STUB_TARGET_PUBLIC_ROUTES_REQUIRE_ADMIN=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/public-backoffice-route-still-protected.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
+
 run_expect_failure oci-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/oci-prematch-live-only.out" 'OCI rollback readiness rejected the rollback'
@@ -2193,6 +2315,8 @@ assert_contains "$WORK_DIR/migration-transition-block.out" 'do not roll applicat
 assert_contains "$WORK_DIR/migration-transition-block.out" 'infra/oci/scripts/reviewed-topology-rollback-stan.sh'
 assert_contains "$WORK_DIR/migration-transition-block/rollback-readiness/summary.env" 'mode=migration-transition'
 [[ ! -s "$STATE_DIR/migration-transition-block/kubectl.log" ]] || fail 'OCI migration-transition guard should prevent image mutation'
+assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'release'
 
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
@@ -2226,8 +2350,26 @@ assert_contains "$WORK_DIR/partial-failure.out" 'rollout did not complete for ga
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_service=event'
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_deployment=gaming-event-depl'
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_stage=rollout-status'
+assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'rollback_http_mutation_fence=active'
 [[ "$(wc -l <"$WORK_DIR/partial-failure/rollout-order.tsv" | tr -d ' ')" == '5' ]] || fail 'OCI partial failure should stop after event rollout'
 ! grep -Fxq 'moderation' "$WORK_DIR/partial-failure/rollout-order.tsv" || fail 'OCI partial failure should not continue after event'
+assert_line "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'fence-writes'
+assert_not_contains "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'release'
+
+run_expect_failure rollback-fence-release-failure \
+  STUB_MUTATION_FENCE_FAIL_ACTION=release ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/rollback-fence-release-failure.out" \
+  'rollback completed but the HTTP mutation fence could not be released safely'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'failed_service=post-rollback'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'failed_stage=write-fence-release'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'rollback_http_mutation_fence=active'
+assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+  'release'
 
 run_expect_failure post-rollback-prematch-refusal \
   STUB_EVENT_MODE_AFTER_ROLLBACK=live-only ROLLBACK_MODE=execute
@@ -2360,6 +2502,11 @@ assert_line "$WORK_DIR/success/sse-validation-trace.tsv" $'https://betstan.xyz/a
 assert_contains "$WORK_DIR/success/rollback-summary.env" 'status=PASS'
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'rollback_readiness=GO'
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
+assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
+assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
+assert_contains "$WORK_DIR/success/rollback-summary.env" 'rollback_http_mutation_fence=used-and-released'
+assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'release'
 assert_contains "$WORK_DIR/success/preflight-live-readiness/summary.env" 'mode=rollback-drain'
 assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'mode=rollback-drain'
 assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'secondary_redirect_status=308'
@@ -2386,6 +2533,7 @@ failed_service=event
 failed_deployment=gaming-event-depl
 failed_stage=public-api
 failed_step_label=failed-event
+rollback_http_mutation_fence=active
 message=public API verification failed after gaming-event-depl
 EOF
 : >"$partial_source/pre-rollback-state.tsv"
@@ -2449,29 +2597,25 @@ chmod +x "$BIN_DIR/partial-recovery-service-ops-stub.sh"
 
 set_partial_recovery_state() {
   local state_root="$1"
+  local source_dir="${2:-$partial_source}"
   rm -rf "$state_root"
   mkdir -p "$state_root"
-  for service in "${SERVICES[@]}"; do
-    image="$(current_image_ref "$service")"
-    case "$service" in
-      bet|backoffice|client|event)
-        image="$(target_image_ref "$service")"
-        ;;
-    esac
+  while IFS=$'\t' read -r service image _revision; do
     write_text_atomic "$state_root/${service}.env" <<EOF
 image=$image
 revision=8
 EOF
-  done
+  done <"$source_dir/partial-state.tsv"
 }
 
 run_partial_recovery() {
   local label="$1"
   local state_dir="$STATE_DIR/$label/current"
   local output_dir="$WORK_DIR/$label"
+  local source_dir="${PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE:-$partial_source}"
   shift
   if [[ "${PRESERVE_PARTIAL_RECOVERY_STATE:-0}" != "1" ]]; then
-    set_partial_recovery_state "$state_dir"
+    set_partial_recovery_state "$state_dir" "$source_dir"
   fi
   rm -rf "$output_dir"
   rm -f "$STATE_DIR/$label/kubectl.log"
@@ -2481,7 +2625,7 @@ run_partial_recovery() {
     STUB_KUBECTL_LOG="$STATE_DIR/$label/kubectl.log" \
     TARGET_SHA="$TARGET_SHA" \
     PARTIAL_ROLLBACK_RUN_ID=33131321686 \
-    PARTIAL_ROLLBACK_SOURCE_DIR="$partial_source" \
+    PARTIAL_ROLLBACK_SOURCE_DIR="$source_dir" \
     PARTIAL_RECOVERY_BUILD_DIR="${PARTIAL_RECOVERY_BUILD_DIR_OVERRIDE:-$partial_recovery_build}" \
     PARTIAL_RECOVERY_BUILD_RUN_ID="$BUILD_RUN_ID" \
     PARTIAL_RECOVERY_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
@@ -2497,6 +2641,8 @@ run_partial_recovery() {
     OCI_INFRASTRUCTURE_PROVENANCE_FILE="$INFRASTRUCTURE_PROVENANCE_FIXTURE" \
     ROLLBACK_READINESS_SCRIPT="$BIN_DIR/partial-recovery-readiness-stub.sh" \
     SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
+    ROLLBACK_MUTATION_FENCE_SCRIPT="$BIN_DIR/rollback-mutation-fence-stub.sh" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
     CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
     GITHUB_REF_NAME=master \
     GITHUB_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
@@ -2548,10 +2694,45 @@ assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.e
   "restored_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA"
 assert_contains "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" \
   'CrashLoopBackOff'
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-summary.env" \
+  'rollback_http_mutation_fence=released'
+assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'release'
 run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
   >"$WORK_DIR/partial-recovery-authority-success.out"
 assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
   'partial_recovery_authority_validation=PASS'
+
+if ! PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE="$WORK_DIR/rollback-fence-release-failure" \
+    run_partial_recovery partial-recovery-after-fence-release-failure \
+    >"$WORK_DIR/partial-recovery-after-fence-release-failure.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-after-fence-release-failure.out" >&2
+  fail 'OCI recovery could not terminate a post-rollback stranded write fence'
+fi
+assert_contains \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/partial-recovery-summary.env" \
+  'rollback_http_mutation_fence=released'
+assert_contains \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/partial-recovery-summary.env" \
+  'recovered_services=gamemaster slip resulting moderation event client backoffice bet auth'
+assert_line \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  'release'
+
+if run_partial_recovery partial-recovery-fence-release-failure \
+    STUB_MUTATION_FENCE_FAIL_ACTION=release \
+    >"$WORK_DIR/partial-recovery-fence-release-failure.out" 2>&1; then
+  fail 'OCI partial rollback recovery accepted a stranded HTTP mutation fence'
+fi
+assert_contains "$WORK_DIR/partial-recovery-fence-release-failure.out" \
+  'HTTP mutation fence could not be released safely'
+assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+  'release'
 
 partial_capture_dir="$WORK_DIR/partial-recovery-baseline-capture"
 if ! run_capture "$partial_capture_dir" \

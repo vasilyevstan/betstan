@@ -669,6 +669,16 @@ body {
   gap: 0.65rem;
 }
 
+.backoffice-header,
+.backoffice-empty {
+  padding-inline: 0.15rem;
+}
+
+.backoffice-header p,
+.backoffice-empty {
+  color: var(--text-subtle);
+}
+
 .backoffice-create,
 .backoffice-event {
   background: var(--surface-soft);

@@ -54,9 +54,15 @@ named-reference, cross-state, exception, and exact-head UX review contract.
   `auto-fit`, stretch cards sharing a row to equal height, and wrap status
   words only between words.
 - Backoffice navigation shows visible discoverable text in every UI variant
-  for anonymous, ordinary, legacy-roleless, and administrator states.
-  Non-admin users reach an explicit access screen rather than a silent route
-  fallback, while `/api/backoffice` reads and mutations remain admin-only.
+  for anonymous, ordinary, legacy-roleless, and administrator states. The
+  Backoffice catalog and controls are intentionally public in every one of
+  those states; responses are marked `Cache-Control: no-store`, inputs are
+  bounded, blank scores cannot become an accidental `0-0`, result writes
+  distinguish identical retries from conflicting final scores, and
+  visibility updates submit an explicit target state. Every mutation persists
+  a retry marker with its state change, uses a durable broker confirm, and is
+  replayed after restart until confirmed; event creation carries a stable
+  request ID so an ambiguous response cannot create a second event.
 
 ## Timeline completeness and terminal safeguards
 
@@ -163,6 +169,25 @@ A missing event phase defaults only for a truly scheduled pre-match record.
 Resulted or positive-sequence/cursor records retain their existing authority
 instead of being relabelled. Additive schemas remain readable by the recorded
 fallback application.
+
+The public Backoffice image no longer consumes authentication settings, but
+its Deployment intentionally retains `AUTH_SERVICE_URL` and the `JWT_KEY`
+secret binding. Rollback changes the image without restoring an older
+manifest, so those legacy inputs must remain available for the immediately
+previous protected Backoffice image to start.
+
+Backoffice mutations also persist pending broker-publication markers. Before
+rolling back to a generation that predates their replay worker, the rollback
+operator installs the reviewed HTTP write fence, leaves the current worker
+running, and waits for the pending marker count to reach zero. Query failure,
+malformed output, or a nonzero count blocks image mutation. The drain is
+skipped only when exact target-source evidence proves that the rollback image
+starts the compatible worker. A partial rollback keeps the fence active for
+recovery and records that state in the failed-run artifact. The partial
+recovery operator re-establishes the fence, restores the exact pre-run images,
+rechecks readiness, and only then releases writes; a successful rollback also
+releases the fence after all health gates pass. The older protected image can
+read the additive documents, but it cannot replay an undelivered mutation.
 
 Scheduler events are inserted with `$setOnInsert`, so pricing improvements
 apply automatically to new slots but do not rewrite the already persisted

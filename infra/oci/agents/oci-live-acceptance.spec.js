@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { test, expect } = require('@playwright/test');
 
 const LIVE_MARKETS = [
@@ -160,10 +161,53 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     }
   });
 
-  const unauthorized = await page.request.post('/api/backoffice/new_event', {
-    data: { home: 'Unauthorized', away: 'Mutation' },
+  const suffix = String(runId).slice(-10);
+  const fixtures = [
+    {
+      home: `E2E-${suffix}-Alpha`,
+      away: `E2E-${suffix}-Bravo`,
+      kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS,
+      visibility: 'OFFLINE',
+      requestId: randomUUID(),
+    },
+    {
+      home: `E2E-${suffix}-Charlie`,
+      away: `E2E-${suffix}-Delta`,
+      kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS,
+      visibility: 'OFFLINE',
+      requestId: randomUUID(),
+    },
+    {
+      home: `E2E-${suffix}-Future`,
+      away: `E2E-${suffix}-Reserve`,
+      kickoffDelaySeconds: 30 * 60,
+      visibility: 'OFFLINE',
+      requestId: randomUUID(),
+    },
+  ];
+  const publicContext = await browser.newContext({
+    baseURL: process.env.E2E_BASE_URL,
   });
-  expect(unauthorized.status()).toBe(401);
+  for (const fixture of fixtures) {
+    const response = await publicContext.request.post('/api/backoffice/new_event', {
+      data: fixture,
+    });
+    expect(response.ok()).toBeTruthy();
+    const body = await response.json();
+    fixture.eventId = body.event.eventId;
+    fixture.name = body.event.name;
+  }
+  const idempotentVisibility = await publicContext.request.post(
+    '/api/backoffice/event_visibility',
+    {
+      data: {
+        eventId: fixtures[0].eventId,
+        visibility: 'OFFLINE',
+      },
+    },
+  );
+  expect(idempotentVisibility.ok()).toBeTruthy();
+  expect((await idempotentVisibility.json()).visibility).toBe('OFFLINE');
 
   await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
   await page.getByLabel('Username or email').fill(username);
@@ -190,38 +234,6 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   expect(loginResponse.ok()).toBeTruthy();
   await expect(page.getByTitle('Backoffice')).toBeVisible();
 
-  const suffix = String(runId).slice(-10);
-  const fixtures = [
-    {
-      home: `E2E-${suffix}-Alpha`,
-      away: `E2E-${suffix}-Bravo`,
-      kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS,
-      visibility: 'OFFLINE',
-    },
-    {
-      home: `E2E-${suffix}-Charlie`,
-      away: `E2E-${suffix}-Delta`,
-      kickoffDelaySeconds: LIVE_FIXTURE_KICKOFF_DELAY_SECONDS,
-      visibility: 'OFFLINE',
-    },
-    {
-      home: `E2E-${suffix}-Future`,
-      away: `E2E-${suffix}-Reserve`,
-      kickoffDelaySeconds: 30 * 60,
-      visibility: 'OFFLINE',
-    },
-  ];
-
-  for (const fixture of fixtures) {
-    const response = await page.request.post('/api/backoffice/new_event', {
-      data: fixture,
-    });
-    expect(response.ok()).toBeTruthy();
-    const body = await response.json();
-    fixture.eventId = body.event.eventId;
-    fixture.name = body.event.name;
-  }
-
   const acceptanceEventIds = fixtures
     .map((fixture) => fixture.eventId)
     .join(',');
@@ -239,14 +251,20 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     intervals: [500, 1000, 2000],
   }).toBe(true);
 
-  const publicContext = await browser.newContext({
-    baseURL: process.env.E2E_BASE_URL,
-  });
   const publicBackoffice = await publicContext.request.get('/api/backoffice');
-  expect(publicBackoffice.status()).toBe(401);
-  const publicBackofficeBody = await publicBackoffice.text();
+  expect(publicBackoffice.status()).toBe(200);
+  const publicBackofficeBody = await publicBackoffice.json();
+  expect(Array.isArray(publicBackofficeBody)).toBe(true);
   for (const fixture of fixtures) {
-    expect(publicBackofficeBody).not.toContain(fixture.name);
+    expect(publicBackofficeBody).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventId: fixture.eventId,
+          name: fixture.name,
+          visibility: 'OFFLINE',
+        }),
+      ]),
+    );
   }
   const publicPage = await publicContext.newPage();
   const publicEventsLoaded = publicPage.waitForResponse(
@@ -269,10 +287,14 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   await expect(publicBackofficeLink).toContainText('Backoffice');
   await publicBackofficeLink.click();
   await expect(publicPage).toHaveURL(/\/backoffice\?ui=v2&theme=dark$/);
-  await expect(
-    publicPage.getByText('Log in with an administrator account to use Backoffice.'),
-  ).toBeVisible();
-  await publicContext.close();
+  await expect(publicPage.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+  await expect(publicPage.getByText('Create new event')).toBeVisible();
+  for (const fixture of fixtures) {
+    await expect(
+      publicPage.getByRole('heading', { name: fixture.name }),
+    ).toBeVisible();
+  }
+  await publicPage.close();
 
   await page.goto(
     `/?ui=v2&theme=dark&acceptanceEventIds=${acceptanceEventIds}`,
@@ -596,7 +618,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     intervals: [500, 1000, 2000],
   }).toBe('CONFIRMED');
 
-  const manualResult = await page.request.post('/api/backoffice/result', {
+  const manualResult = await publicContext.request.post('/api/backoffice/result', {
     data: {
       eventId: futureFixture.eventId,
       homeResult: 1,
@@ -604,6 +626,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     },
   });
   expect(manualResult.ok()).toBeTruthy();
+  await publicContext.close();
   await expect.poll(async () => {
     const bets = await (await page.request.get('/api/bet')).json();
     return findBySlipId(bets, preMatchSlipId)?.status;

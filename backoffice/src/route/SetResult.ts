@@ -1,62 +1,121 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
-import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { EventStatus, messengerWrapper } from "@betstan/common";
-import { requireAdmin } from "../middleware/RequireAdmin";
+import { getBackofficePublicationService } from "../service/BackofficePublicationService";
+import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 
 const router = express.Router();
+const MAX_SCORE = 99;
 
-let _publisher: ResultSetPublisher | null = null;
-const getPublisher = async (): Promise<ResultSetPublisher> => {
-  if (!_publisher) {
-    _publisher = new ResultSetPublisher(messengerWrapper.connection);
-    await _publisher.init();
+const normalizeScore = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === "") {
+    return null;
   }
-  return _publisher;
+
+  const score =
+    typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  if (
+    typeof score !== "number"
+    || !Number.isInteger(score)
+    || score < 0
+    || score > MAX_SCORE
+  ) {
+    return null;
+  }
+
+  return score;
 };
 
-router.post("/api/backoffice/result", requireAdmin, async (req: Request, res: Response) => {
-  let { eventId, homeResult, awayResult } = req.body;
+router.post("/api/backoffice/result", async (req: Request, res: Response) => {
+  const eventId =
+    typeof req.body.eventId === "string" ? req.body.eventId.trim() : "";
+  const homeResult = normalizeScore(req.body.homeResult);
+  const awayResult = normalizeScore(req.body.awayResult);
 
-  const event = await Event.findOne({ eventId: eventId });
-
-  if (!event) {
+  if (!eventId) {
     res.status(400).send({ message: "No event id" });
     return;
   }
 
-  if (!homeResult || homeResult < 0 || isNaN(homeResult)) {
-    homeResult = 0;
-  }
-
-  if (!awayResult || awayResult < 0 || isNaN(awayResult)) {
-    awayResult = 0;
-  }
-
-  if (event.status === EventStatus.RESULTED) {
-    res.send({ event });
+  if (homeResult === null || awayResult === null) {
+    res.status(400).send({
+      message: `Scores must be whole numbers between 0 and ${MAX_SCORE}`,
+    });
     return;
   }
 
-  event.set({ homeResult: homeResult });
-  event.set({ awayResult: awayResult });
-  event.set({ status: EventStatus.RESULTED });
-
-  await event.save();
-
-  const publisher = await getPublisher();
-
-  publisher.publish({
-    data: {
-      eventId: event.eventId,
-      homeScore: homeResult,
-      awayScore: awayResult,
-      home: event.home,
-      away: event.away,
+  const event = await Event.findOneAndUpdate(
+    {
+      eventId,
+      status: { $ne: EventStatus.RESULTED },
+      newEventPublicationPending: { $ne: true },
     },
-  });
+    {
+      $set: {
+        homeResult,
+        awayResult,
+        status: EventStatus.RESULTED,
+        resultPublicationPending: true,
+      },
+    },
+    { new: true }
+  ).select("+resultPublicationPending +newEventPublicationPending");
 
-  res.send({ event });
+  if (!event) {
+    const existingEvent = await Event.findOne({ eventId }).select(
+      "+resultPublicationPending +newEventPublicationPending"
+    );
+    if (!existingEvent) {
+      res.status(404).send({ message: "Event not found" });
+      return;
+    }
+
+    if (
+      existingEvent.status !== EventStatus.RESULTED
+      && existingEvent.newEventPublicationPending
+    ) {
+      res.status(409).send({
+        message: "Event creation is still being published",
+      });
+      return;
+    }
+
+    const resultMatches =
+      existingEvent.status === EventStatus.RESULTED
+      && existingEvent.homeResult === homeResult
+      && existingEvent.awayResult === awayResult;
+    if (!resultMatches) {
+      res.status(409).send({
+        message: "Event already has a different result",
+        event: serializeBackofficeEvent(existingEvent),
+      });
+      return;
+    }
+
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishResultNow(existingEvent.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      event: serializeBackofficeEvent(existingEvent),
+      unchanged: true,
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Result saved; publication is retrying" }
+        : {}),
+    });
+    return;
+  }
+
+  const publication = await getBackofficePublicationService(
+    messengerWrapper.connection
+  ).publishResultNow(event.eventId);
+  res.status(publication === "PUBLISHED" ? 200 : 202).send({
+    event: serializeBackofficeEvent(event),
+    publication,
+    ...(publication === "PENDING"
+      ? { message: "Result saved; publication is retrying" }
+      : {}),
+  });
 });
 
 export { router as SetResult };

@@ -91,15 +91,15 @@ Do not demand a full Cartesian test matrix when the same shared primitive and
 evidence prove several cells. Do not omit a materially different state merely
 because the happy path looks consistent.
 
-## Public entry points and protected capabilities
+## Public entry points and usable capabilities
 
-Do not hide a product-level navigation entry as a substitute for
-authorization. When an entry point such as Backoffice is intentionally public,
-it must remain visibly labelled and navigable for anonymous, ordinary,
-legacy-roleless, and administrator states in every UI variant. The routed
-surface must explain the access requirement without silently falling back to
-unrelated content, while protected reads and mutations remain fail-closed at
-the server boundary.
+Do not treat navigation as proof that a feature is accessible. When a
+capability such as Backoffice is intentionally public, it must remain visibly
+labelled and navigable for anonymous, ordinary, legacy-roleless, and
+administrator states in every UI variant, and every state must reach the real
+data and intended controls. A denial or login-guidance screen is not public
+access. Verify loading, empty, failure, success, destructive-action, keyboard,
+and responsive states on the routed surface.
 
 ## Classifying differences
 
@@ -162,9 +162,10 @@ The compact live-betting work established reusable examples:
   instead of reconnecting a value to a selection by array position;
 - coupled markets sharing one pricing model (for example 1X2 and Correct
   Score) are cross-checked for numeric plausibility against each other;
-- role-gated navigation: a role-gated global entry (for example Backoffice)
-  needs visible discoverable text, not only an icon, for the correct role in
-  every affected UI variant, and stays absent for every non-privileged state;
+- access semantics: visible navigation proves discovery only; a capability
+  described as public must load its data and intended controls for anonymous,
+  ordinary, legacy-roleless, and administrator states in every affected UI
+  variant;
 - phantom sparse-grid tracks: a compact market grid collapses empty tracks
   with `auto-fit` rather than reserving them with `auto-fill`, so occupied
   tracks equal visible market cards;

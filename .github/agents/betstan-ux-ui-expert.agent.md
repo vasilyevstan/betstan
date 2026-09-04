@@ -154,12 +154,15 @@ contract above.
   sharing one underlying model (for example 1X2 versus Correct Score) using
   the existing betting-plausibility rule; a technically valid but implausible
   or contradictory pairing is a usability defect.
-- **Publicly discoverable protected navigation in every UI variant**:
+- **Public access means usable capability, not only discoverable navigation**:
   product-level entry points such as Backoffice must render discoverable
   visible text, not only an icon, for anonymous, ordinary, legacy-roleless,
-  and administrator states in every affected UI variant. Authorization belongs
-  at the routed capability and API boundary: non-admin users receive clear
-  access guidance, while protected reads and mutations remain fail-closed.
+  and administrator states in every affected UI variant. When the product
+  requirement says the capability itself is public, every one of those states
+  must reach the real controls and data; a denial or login-guidance screen is
+  a blocking mismatch, not successful access. Verify labelled controls,
+  loading/error/empty states, action feedback, and responsive layout rather
+  than accepting route navigation as a proxy for usability.
 - **Single-live-card width and relative-height budget**: when exactly one
   countdown, active-live, or retained-finished event occupies the upper
   section, it uses the full event-stage width and stays within a bounded

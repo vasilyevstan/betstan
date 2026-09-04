@@ -70,6 +70,32 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
+public_backoffice_middleware="$ROOT_DIR/backoffice/src/middleware/PublicBackofficeAccess.ts"
+[[ -f "$public_backoffice_middleware" ]] ||
+  fail "Backoffice does not declare its intentional public access policy"
+grep -Fq 'app.use("/api/backoffice", publicBackofficeAccess)' \
+  "$ROOT_DIR/backoffice/src/app.ts" ||
+  fail "Backoffice does not mount its public no-store access policy"
+if grep -R -Fq 'requireAdmin' "$ROOT_DIR/backoffice/src/route"; then
+  fail "Backoffice routes still enforce administrator-only access"
+fi
+backoffice_manifest="$ROOT_DIR/infra/k8s/backoffice-depl.yaml"
+grep -Fq -- '- name: AUTH_SERVICE_URL' "$backoffice_manifest" &&
+  grep -Fq -- '- name: JWT_KEY' "$backoffice_manifest" ||
+  fail "Backoffice manifest cannot boot the protected image during image-only rollback"
+grep -A 4 -- '- name: JWT_KEY' "$backoffice_manifest" |
+  grep -Fq 'name: jwt-secret' ||
+  fail "Backoffice rollback JWT binding references the wrong Kubernetes secret"
+backoffice_publication_service="$ROOT_DIR/backoffice/src/service/BackofficePublicationService.ts"
+[[ -f "$backoffice_publication_service" ]] &&
+  grep -Fq 'publishWithConfirm' "$backoffice_publication_service" &&
+  grep -Fq 'newEventPublicationPending' "$backoffice_publication_service" &&
+  grep -Fq 'resultPublicationPending' "$backoffice_publication_service" &&
+  grep -Fq 'visibilityPublicationPending' "$backoffice_publication_service" ||
+  fail "Backoffice mutations do not retain confirmed replayable publication"
+grep -Fq 'requestId: creationRequestId.current' \
+  "$ROOT_DIR/client/src/pages/account/Backoffice.js" ||
+  fail "Backoffice event creation is not retry-safe after an ambiguous response"
 grep -Fq 'const publicContext = await browser.newContext({' "$acceptance_spec" &&
   grep -Fq 'baseURL: process.env.E2E_BASE_URL' "$acceptance_spec" ||
   fail "OCI live acceptance public context is not bound to the configured base URL"
@@ -81,12 +107,21 @@ grep -Fq "new URL(response.url()).pathname === '/api/auth/login'" \
 grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
   fail "OCI live acceptance does not pass scoped event IDs into the browser context"
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
-  grep -Fq 'expect(publicBackoffice.status()).toBe(401)' "$acceptance_spec" ||
-  fail "OCI live acceptance does not prove anonymous backoffice reads fail closed"
+  grep -Fq 'expect(publicBackoffice.status()).toBe(200)' "$acceptance_spec" &&
+  grep -Fq 'expect(Array.isArray(publicBackofficeBody)).toBe(true)' "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove anonymous Backoffice reads are usable"
+grep -Fq "publicContext.request.post('/api/backoffice/new_event'" "$acceptance_spec" &&
+  grep -Fq "publicContext.request.post('/api/backoffice/result'" "$acceptance_spec" &&
+  grep -Fq "'/api/backoffice/event_visibility'" "$acceptance_spec" ||
+  fail "OCI live acceptance does not exercise anonymous Backoffice mutations"
+if grep -A 5 -E "/api/backoffice/(new_event|result)" "$acceptance_spec" |
+    grep -Fq 'toBe(401)'; then
+  fail "OCI live acceptance still expects a public Backoffice mutation to be unauthorized"
+fi
 grep -Fq 'const publicBackofficeLink = publicPage.getByTitle' "$acceptance_spec" &&
   grep -Fq 'await expect(publicBackofficeLink).toBeVisible()' "$acceptance_spec" &&
-  grep -Fq 'Log in with an administrator account to use Backoffice.' "$acceptance_spec" ||
-  fail "OCI live acceptance does not prove public Backoffice navigation remains available"
+  grep -Fq "publicPage.getByText('Create new event')" "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove the public Backoffice panel is usable"
   grep -Fq "pathname === '/api/event/stream'" "$acceptance_spec" &&
     grep -Fq '!expectedStreamDisconnect' "$acceptance_spec" ||
     fail "OCI live acceptance treats expected long-lived SSE disconnects as API failures"
@@ -364,6 +399,9 @@ backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
 grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
     <<<"$backend_agent_flat" ||
   fail "backend developer does not carry applicable UX evidence into the critic handoff"
+grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
+    <<<"$backend_agent_flat" ||
+  fail "backend developer omits durable mutation publication"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
 grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
     <<<"$frontend_agent_flat" ||
@@ -374,12 +412,18 @@ grep -Fq 'Missing or stale UX evidence is an acceptance' \
 grep -Fq 'gap. Do not replace the UX specialist with subjective style review' \
     "$ux_critic_agent" ||
   fail "validation critic does not fail missing UX evidence"
+critic_agent_flat="$(tr '\n' ' ' <"$ux_critic_agent")"
+grep -Eq 'obsolete authorization expectation performs a real[[:space:]]+mutation' \
+    <<<"$critic_agent_flat" ||
+  fail "validation critic can miss side-effecting stale authorization probes"
 grep -Fq 'Do not add or require a screenshot/image-diff matrix' "$ux_test_agent" ||
   fail "test engineer turns user-facing work into a blanket visual-test gate"
 test_agent_flat="$(tr '\n' ' ' <"$ux_test_agent")"
-grep -Fq 'set or clear `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` explicitly' \
+grep -Eq 'set or clear `GITHUB_RUN_ID` and[[:space:]]+`GITHUB_RUN_ATTEMPT` explicitly' \
     <<<"$test_agent_flat" ||
   fail "test engineer does not isolate first-attempt fixtures from ambient CI metadata"
+grep -Eq 'prove a[[:space:]]+restart replay clears it' <<<"$test_agent_flat" ||
+  fail "test engineer omits pending-publication recovery coverage"
 grep -Fq '`betstan-ux-ui-expert: UX_REVIEW_PASSED` result' "$ux_final_agent" ||
   fail "final validator does not require exact-head UX evidence"
 grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
@@ -390,7 +434,7 @@ for ux_reinforced_check in \
     'Centered sibling market headings' \
     'Stable, non-volatile board order with exact ID preservation' \
     'Coupled-market plausibility' \
-    'Publicly discoverable protected navigation in every UI variant' \
+    'Public access means usable capability, not only discoverable navigation' \
     'Single-live-card width and relative-height budget' \
     'Phantom auto-fill tracks' \
     'Equal-height market groups' \
@@ -414,7 +458,7 @@ for critic_reinforced_check in \
     'Fail-dark terminal placeholders' \
     'Unresolved-auth retained `OFFLINE` data' \
     'Presentation ordering that changes selection identity' \
-    'Hidden or icon-only protected navigation' \
+    'Access-proxy false positives' \
     'Cross-card computed-geometry regressions'; do
   grep -Fq "$critic_reinforced_check" "$ux_critic_agent" ||
     fail "validation critic omits reinforced finding: $critic_reinforced_check"
@@ -1112,6 +1156,26 @@ pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
 
+deployment_safety_agent_flat="$(tr '\n' ' ' <"$deployment_safety_agent")"
+grep -Fq 'image-only rollback reuses the current Deployment manifest' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can remove fallback-required environment bindings"
+grep -Fq 'pending-publication markers are drained' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can strand durable publications during rollback"
+grep -Fq 'establish the reviewed HTTP write fence' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent omits the durable-publication mutation fence"
+grep -Fq 'exact target-source evidence' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can infer replay compatibility without exact target source"
+grep -Fq 'Keep the fence active after any partial image mutation' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can reopen writes after a partial rollback"
+grep -Fq 'partial-rollback recovery operator to re-establish then release' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent omits the terminating owner for a rollback fence"
+
 [[ "$(git -C "$ROOT_DIR" ls-tree HEAD common | awk '{print $1}')" = "040000" ]] ||
   fail "common source is not a normal tracked directory"
 if [[ -f "$ROOT_DIR/.gitmodules" ]] &&
@@ -1425,7 +1489,7 @@ for literal in (
         raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
-    ('"$BASE_URL/api/backoffice/result"', "401"),
+    ('"$BASE_URL/api/auth/admin/verify"', "401"),
     ('"$BASE_URL/api/auth/login"', "200"),
 ):
     tail = cleanup.split(endpoint, 1)[1]
