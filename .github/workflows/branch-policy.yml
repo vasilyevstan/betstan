@@ -6,14 +6,14 @@ on:
     branches:
       - dev
       - master
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled]
   workflow_run:
     workflows: ["production-build"]
     types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: Open pull request number to refresh after trusted-check bootstrap
+        description: Open pull request number to reconcile an existing trusted transition
         required: true
         type: number
 
