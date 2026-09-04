@@ -55,6 +55,11 @@ For `client`, `auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`,
    checks.
 6. Validate exact-SHA provenance, environment approvals, post-deploy health checks, and
    rollback-readiness requirements.
+7. Require the mandatory public-wiki assessment and relevant canonical page
+   updates before final validation.
+8. Treat several protected feature commits in one current-master candidate as
+   a normal aggregate release. Require ancestry for each declared commit and
+   full-candidate checks; do not create a session-exclusive deployment gate.
 
 ## Output
 

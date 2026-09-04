@@ -30,7 +30,10 @@ it("allows an anonymous visitor to create a new event and publishes trimmed name
   expect(response.body.event.creationRequestId).toBeUndefined();
   expect(response.body.event.newEventPublicationPending).toBeUndefined();
   expect(new Date(response.body.event.time).getTime()).toBeGreaterThanOrEqual(
-    beforeRequest + 30 * 60 * 1000
+    beforeRequest + 15 * 60 * 1000
+  );
+  expect(new Date(response.body.event.time).getTime()).toBeLessThan(
+    beforeRequest + 15 * 60 * 1000 + 1000
   );
 
   const storedEvent = await Event.findOne({ eventId: response.body.event.eventId });

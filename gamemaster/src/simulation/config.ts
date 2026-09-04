@@ -22,6 +22,8 @@ const DEFAULT_RATES: IncidentRates = {
   corners: 10.5,
   penaltyAwards: 0.27,
   freeKicks: 8,
+  throwIns: 38,
+  goalKicks: 16,
   penaltyScoreProbability: 0.76,
 };
 
@@ -32,6 +34,8 @@ export const HARD_CAPS: IncidentCaps = {
   corners: 30,
   penaltyAwards: 6,
   freeKicks: 24,
+  throwIns: 60,
+  goalKicks: 30,
 };
 
 const RATE_LIMITS: IncidentRates = {

@@ -56,6 +56,9 @@ TypeScript change is not sufficient by itself.
 - Keep message identity and ordering semantics stable. In live betting,
   `marketId + marketVersion` identifies settlement authority, while
   `quoteVersion` validates price freshness.
+- Keep selection identity distinct from coarse outcome grouping. An optional
+  display label may be added compatibly, but when multiple selections share a
+  side value, moderation and settlement must compare exact selection IDs.
 - Keep the legacy `APublisher.publish()` behavior stable. Confirmed persistent
   publication remains an explicit opt-in through `publishWithConfirm()`.
 - Keep AMQP APIs structural through `IAmqpConnection`; services intentionally

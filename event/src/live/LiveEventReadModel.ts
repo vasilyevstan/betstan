@@ -48,6 +48,7 @@ export interface PublicLiveMarketSelection {
   selectionId: string;
   side: TeamSide;
   odds: number;
+  label?: string;
 }
 
 export interface PublicLiveMarket {
@@ -88,6 +89,22 @@ export interface PublicEventSnapshot {
 }
 
 type UnknownRecord = Record<string, unknown>;
+const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+const removeExpiredEventProjections = async (
+  currentEventId: string,
+  referenceKickoff: Date
+): Promise<void> => {
+  const cutoff = new Date(referenceKickoff.getTime() - EVENT_RETENTION_MS);
+  await Event.deleteMany({
+    eventId: { $ne: currentEventId },
+    time: { $lt: cutoff },
+    $or: [
+      { status: EventStatus.RESULTED },
+      { visibility: EventVisibility.OFFLINE },
+    ],
+  });
+};
 type LiveUpdateIncident = NonNullable<ILiveEventUpdateEvent["data"]["incident"]>;
 type LiveEventUpdateData = ILiveEventUpdateEvent["data"] & {
   incidents?: LiveUpdateIncident[];
@@ -96,7 +113,7 @@ type LiveEventUpdateData = ILiveEventUpdateEvent["data"] & {
 
 const FALLBACK_EVENT_STATUS = EventStatus.NO_RESULT;
 const FALLBACK_EVENT_VISIBILITY = EventVisibility.ONLINE;
-const FULL_TIME_INCIDENT_HISTORY_FLOOR = 128;
+const FULL_TIME_INCIDENT_HISTORY_FLOOR = 256;
 const NUMERIC_SCORELINE_PATTERN = /^(\d+)\s*-\s*(\d+)$/;
 const VALID_INCIDENT_TYPES = new Set<string>(
   Object.values(CompatibleLiveIncidentType)
@@ -240,6 +257,7 @@ const cloneMarketSelections = (
     selectionId: selection.selectionId,
     side: selection.side,
     odds: selection.odds,
+    ...(selection.label ? { label: selection.label } : {}),
   }));
 
 const cloneMarkets = (markets: PublicLiveMarket[]): PublicLiveMarket[] =>
@@ -390,6 +408,9 @@ const normalizeLiveSelection = (
     selectionId,
     side: selectionRecord.side as TeamSide,
     odds: selectionRecord.odds,
+    ...(asString(selectionRecord.label)
+      ? { label: asString(selectionRecord.label) }
+      : {}),
   };
 };
 
@@ -997,8 +1018,11 @@ export const applyLiveEventUpdate = async (
     { $unset: { live: 1 } }
   );
 
+  let updateResult;
   try {
-    await Event.updateOne(filter, updateOperations, { upsert: true });
+    updateResult = await Event.updateOne(filter, updateOperations, {
+      upsert: true,
+    });
   } catch (err: any) {
     if (err?.code !== 11000) {
       throw err;
@@ -1006,7 +1030,7 @@ export const applyLiveEventUpdate = async (
 
     const retryUpdate = { ...updateOperations };
     delete retryUpdate.$setOnInsert;
-    await Event.updateOne(filter, retryUpdate);
+    updateResult = await Event.updateOne(filter, retryUpdate);
   }
 
   const currentEvent = await Event.findOne({ eventId: event.data.eventId }).lean();
@@ -1016,15 +1040,17 @@ export const applyLiveEventUpdate = async (
 
   let currentRecord = currentEvent as unknown as UnknownRecord;
 
-  // "Accepted" means this exact call's sequence is the one now stored --
-  // i.e. the sequence gate above did not reject it as stale/duplicate.
+  // "Accepted" means this call actually wrote or inserted the sequence.
+  // Reading the same stored sequence is insufficient because an at-least-once
+  // duplicate must not repeat cross-event retention side effects.
   // Every side effect below must only run for an accepted update: a
   // delayed/duplicate message keeps the phase it originally carried (e.g.
   // PRE_MATCH) even after being rejected, so gating on `event.data.phase`
   // alone (without also requiring acceptance) would let a late, rejected
   // message for one event still mutate a *different* event's visibility.
-  const liveRecord = currentRecord.live as UnknownRecord | undefined;
-  const accepted = liveRecord?.sequence === event.data.sequence;
+  const accepted = updateResult.modifiedCount === 1
+    || updateResult.upsertedCount === 1
+    || updateResult.upsertedId != null;
 
   if (accepted) {
     const isRaceResulted = Boolean(currentRecord.liveRaceResultedAt);
@@ -1094,6 +1120,7 @@ export const applyLiveEventUpdate = async (
             },
           }
         );
+        await removeExpiredEventProjections(event.data.eventId, kickoffDate);
       }
     }
   }

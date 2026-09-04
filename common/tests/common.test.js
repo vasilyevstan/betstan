@@ -328,3 +328,16 @@ test("live update payload keeps legacy incident and additive incidents history",
   assert.equal(event.data.incidentsComplete, true);
   assert.equal(event.data.incidents.length, 3);
 });
+
+test("live contracts expose rotating incidents and Second Half Score labels", () => {
+  assert.equal(common.LiveIncidentType.THROW_IN, "THROW_IN");
+  assert.equal(common.LiveIncidentType.GOAL_KICK, "GOAL_KICK");
+  assert.equal(common.LiveMarketType.NEXT_THROW_IN, "NEXT_THROW_IN");
+  assert.equal(common.LiveMarketType.NEXT_FREE_KICK, "NEXT_FREE_KICK");
+  assert.equal(common.LiveMarketType.NEXT_GOAL_KICK, "NEXT_GOAL_KICK");
+  assert.equal(common.LiveMarketType.SECOND_HALF_SCORE, "SECOND_HALF_SCORE");
+  assert.equal(
+    common.LiveSettlementReason.SECOND_HALF_SCORE,
+    "SECOND_HALF_SCORE",
+  );
+});

@@ -45,6 +45,32 @@ fail() {
   exit 1
 }
 
+validate_pr_title() {
+  local raw_title="$1"
+  local normalized_title
+  local lower_title
+
+  normalized_title="$(
+    printf '%s' "$raw_title" |
+      sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g'
+  )"
+  ((${#normalized_title} >= 5 && ${#normalized_title} <= 72)) || return 1
+  [[ "$normalized_title" == *" "* ]] || return 1
+
+  lower_title="$(printf '%s' "$normalized_title" | tr '[:upper:]' '[:lower:]')"
+  case "$lower_title" in
+    chore|chore:*|chore\ *|chore\(*|chore/*|chore-*)
+      return 1
+      ;;
+    misc|misc:*|misc\ *|misc\(*|misc/*|misc-*)
+      return 1
+      ;;
+    wip|wip:*|wip\ *|wip\(*|wip/*|wip-*)
+      return 1
+      ;;
+  esac
+}
+
 meta_json="$(
   gh pr view "$PR_NUMBER" --repo "$REPO" \
     --json number,title,state,mergeable,mergeStateStatus,headRefName,headRefOid,headRepository,baseRefName,baseRefOid,labels,url
@@ -114,6 +140,8 @@ echo "base_ref=$base_ref"
 echo "base_sha=$base_sha"
 echo "cli_managed=$cli_managed"
 
+validate_pr_title "$title" ||
+  fail "pull request title must be a short, meaningful plain-language outcome and must not use ambiguous prefixes such as chore, misc, or wip"
 [[ "$state" == "OPEN" ]] || fail "pull request is not open"
 [[ "$mergeable" == "MERGEABLE" ]] || fail "pull request is not currently mergeable"
 if [[ "$AUTO_APPROVE" == "true" ]]; then

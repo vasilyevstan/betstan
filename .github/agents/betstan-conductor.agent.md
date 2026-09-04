@@ -23,6 +23,8 @@ Read:
 - current git branch/status and exact base/head SHA;
 - every active-work registration supplied by the orchestrator;
 - the relevant specialist definition before interpreting its status;
+- `.github/agents/betstan-public-wiki-editor.agent.md` for every repository
+  change;
 - `.github/agents/betstan-deployment-safety.agent.md` for any release-capable
   workflow or production operation.
 
@@ -39,7 +41,7 @@ regardless of synchronous/background execution or expected duration:
 work_id: <stable-kebab-id>
 kind: agent|local-process|github-run|external-wait|documentation
 unit_class: quality-gate|intra-gate|specialist|supporting
-logical_gate: <architect|simplifier|developer|critic|test|final-validator-or-null>
+logical_gate: <architect|simplifier|developer|public-wiki|critic|test|final-validator-or-null>
 parent_work_id: <stable-kebab-id-or-null>
 owner: <single-agent-or-orchestrator>
 objective: <bounded-result>
@@ -54,6 +56,7 @@ expected_base_ref: <authoritative-git-ref-or-not-applicable>
 expected_base_sha: <full-sha-or-not-applicable>
 expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>
 expected_head_sha: <full-sha-or-not-applicable>
+required_commit_shas: [<full-sha>]
 expected_merge_base_sha: <full-sha-or-not-applicable>
 expected_tree_sha: <full-git-tree-sha-or-not-applicable>
 changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>
@@ -91,11 +94,14 @@ sibling worktree.
 workspace and refs, or the canonical GitHub PR URL/number that supplies them.
 It never changes during the workflow. Every downstream handoff carries the
 same `root_task_authority_id` and may narrow scope, but it cannot redefine the
-repository, workspace, base, or head. Before registration, the conductor
-derives repository identity, workspace, base, and head from the root authority;
+repository, workspace, or required feature commits. A release work unit may
+advance its expected head to a newer protected `master` only after proving
+every `required_commit_shas` entry is its ancestor and revalidating the complete
+aggregate candidate. Before registration, the conductor derives repository
+identity, workspace, source refs, and required commits from the root authority;
 caller-supplied registration values are comparisons, never the source of truth.
-Any handoff or registration that breaks root-authority continuity is
-`STALE_EVIDENCE`.
+Any handoff or registration that breaks root-authority continuity or drops a
+required commit is `STALE_EVIDENCE`.
 
 Translate user-facing access requirements into action-level acceptance
 criteria before implementation. “Visible” proves discoverability only;
@@ -110,6 +116,9 @@ message as successful access.
 diff-based unit, `expected_base_sha` is its immutable resolved value, and
 `expected_head_ref` identifies the authoritative remote branch or PR head when
 the unit evaluates branch, PR, merge, release, or deployment state.
+`required_commit_shas` identifies the reviewed feature or fix commits that the
+eventual release must contain. It does not require the deployed tree to be
+exclusive to one session.
 `expected_merge_base_sha` is the canonical merge base for diff review.
 `expected_tree_sha` is the immutable Git tree for `expected_head_sha`.
 `changed_paths_sha256` hashes the NUL-delimited name/status manifest returned by
@@ -218,6 +227,11 @@ accepted by the next owner.
   universal handoffs. Route the developer gate to the registered owner with
   edit authority for the affected paths; do not require an application
   developer to cross its ownership boundary for infrastructure or governance.
+- Register `betstan-public-wiki-editor` after implementation for every change.
+  Relevant canonical pages must be updated before the critic receives the
+  immutable candidate; a no-change result must be justified from the exact
+  diff. Register byte-identical GitHub wiki publication as a post-merge
+  supporting unit.
 - Register `betstan-ux-ui-expert` as one two-phase specialist work unit for
   every user-facing visual or interaction change. Its first phase establishes
   the named consistency baseline before implementation; its second phase
@@ -473,6 +487,12 @@ its owner. It is never healthy by default.
   commit. Never bypass a trusted publisher that rejects changes to its own
   workflow; use its documented authorization bootstrap or keep the trusted
   workflow unchanged.
+- Do not reserve a release SHA for one development session. Multiple sessions
+  may merge compatible reviewed work while production operations remain
+  serialized. When `master` advances, mark the older release chain superseded
+  and adopt the exact new current-master candidate if it contains every
+  registered required commit; rerun candidate-wide gates rather than blocking
+  on extra protected commits or deploying the stale SHA.
 - Treat a terminal run that leaves a production maintenance fence, operation
   lock, zero-replica workload, or unavailable ingress as an active incident,
   not merely failed release evidence. Immediately return `ATTENTION_REQUIRED`
@@ -480,11 +500,11 @@ its owner. It is never healthy by default.
   health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
-- When the user required durable learning, register a terminal learning and documentation unit.
-  Successful deployment or activation alone cannot
-  produce `ORCHESTRATION_COMPLETE`; Markdown, wiki, reusable-agent guidance,
-  PR/release evidence, and todo reconciliation must reach their accepted
-  handoff.
+- For every change, require the public-wiki gate and a terminal publication
+  unit. Successful deployment or activation alone cannot produce
+  `ORCHESTRATION_COMPLETE`; relevant Markdown, wiki, reusable-agent guidance,
+  PR/release evidence, publication verification, and todo reconciliation must
+  reach their accepted handoff.
 - Surface a blocker immediately when it affects the critical path. Keep
   unrelated ready work moving only when ownership and side effects are
   disjoint.

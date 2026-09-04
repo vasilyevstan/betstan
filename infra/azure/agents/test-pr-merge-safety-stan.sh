@@ -63,8 +63,9 @@ gh() {
     fi
     local base_ref="${STUB_BASE_REF:-master}"
     local head_ref="${STUB_HEAD_REF:-dev}"
+    local title="${STUB_TITLE:-Improve release safety}"
     printf '%s\n' \
-      "{\"number\":224,\"title\":\"safe change\",\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefName\":\"$head_ref\",\"headRefOid\":\"$HEAD_SHA\",\"headRepository\":{\"nameWithOwner\":\"example/repo\"},\"baseRefName\":\"$base_ref\",\"baseRefOid\":\"$BASE_SHA\",\"labels\":$labels,\"url\":\"https://example.invalid/pr/224\"}"
+      "{\"number\":224,\"title\":\"$title\",\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefName\":\"$head_ref\",\"headRefOid\":\"$HEAD_SHA\",\"headRepository\":{\"nameWithOwner\":\"example/repo\"},\"baseRefName\":\"$base_ref\",\"baseRefOid\":\"$BASE_SHA\",\"labels\":$labels,\"url\":\"https://example.invalid/pr/224\"}"
   elif [[ "$1 $2" == "api graphql" ]]; then
     local nodes='[]'
     if [[ "${STUB_UNRESOLVED:-false}" == "true" ]]; then
@@ -91,6 +92,24 @@ common_env=(
 )
 
 env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  "$MERGE_SAFETY" 224 >/dev/null
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_TITLE='chore: update files' \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "merge safety accepted an ambiguous chore title" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_TITLE='Update' \
+  "$MERGE_SAFETY" 224 >/dev/null 2>&1; then
+  echo "merge safety accepted a single-word title" >&2
+  exit 1
+fi
+
+env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \
+  STUB_TITLE='Fix live slip alignment' \
   "$MERGE_SAFETY" 224 >/dev/null
 
 if env "${common_env[@]}" COPILOT_CLI_AUTO_APPROVE=true \

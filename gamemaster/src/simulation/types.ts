@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = 1 as const;
+export const ENGINE_VERSION = 2 as const;
 
 export const EventPhase = {
   PRE_MATCH: "PRE_MATCH",
@@ -37,6 +37,8 @@ export const LiveIncidentType = {
   RED_CARD: "RED_CARD",
   FREE_KICK: "FREE_KICK",
   CORNER: "CORNER",
+  THROW_IN: "THROW_IN",
+  GOAL_KICK: "GOAL_KICK",
   PENALTY_AWARDED: "PENALTY_AWARDED",
   PENALTY_SCORED: "PENALTY_SCORED",
   PENALTY_MISSED: "PENALTY_MISSED",
@@ -54,7 +56,11 @@ export const LiveMarketType = {
   NEXT_RED_CARD: "NEXT_RED_CARD",
   NEXT_CORNER: "NEXT_CORNER",
   NEXT_PENALTY: "NEXT_PENALTY",
+  NEXT_THROW_IN: "NEXT_THROW_IN",
+  NEXT_FREE_KICK: "NEXT_FREE_KICK",
+  NEXT_GOAL_KICK: "NEXT_GOAL_KICK",
   HALF_TIME_RESULT: "HALF_TIME_RESULT",
+  SECOND_HALF_SCORE: "SECOND_HALF_SCORE",
   KICKOFF_TEAM: "KICKOFF_TEAM",
   FIRST_MINUTE_GOAL: "FIRST_MINUTE_GOAL",
 } as const;
@@ -64,7 +70,10 @@ export type NextMarketType =
   | typeof LiveMarketType.NEXT_YELLOW_CARD
   | typeof LiveMarketType.NEXT_RED_CARD
   | typeof LiveMarketType.NEXT_CORNER
-  | typeof LiveMarketType.NEXT_PENALTY;
+  | typeof LiveMarketType.NEXT_PENALTY
+  | typeof LiveMarketType.NEXT_THROW_IN
+  | typeof LiveMarketType.NEXT_FREE_KICK
+  | typeof LiveMarketType.NEXT_GOAL_KICK;
 export type PreKickoffMarketType =
   | typeof LiveMarketType.KICKOFF_TEAM
   | typeof LiveMarketType.FIRST_MINUTE_GOAL;
@@ -81,6 +90,7 @@ export type LiveMarketStatus =
 export const LiveSettlementReason = {
   INCIDENT: "INCIDENT",
   HALF_TIME: "HALF_TIME",
+  SECOND_HALF_SCORE: "SECOND_HALF_SCORE",
   FULL_TIME_NONE: "FULL_TIME_NONE",
   MANUAL_VOID: "MANUAL_VOID",
   KICK_OFF: "KICK_OFF",
@@ -101,6 +111,8 @@ export interface IncidentRates {
   corners: number;
   penaltyAwards: number;
   freeKicks: number;
+  throwIns: number;
+  goalKicks: number;
   penaltyScoreProbability: number;
 }
 
@@ -111,6 +123,8 @@ export interface IncidentCaps {
   corners: number;
   penaltyAwards: number;
   freeKicks: number;
+  throwIns: number;
+  goalKicks: number;
 }
 
 export interface StoppageRange {
@@ -168,7 +182,7 @@ export interface SimTimelineEntry {
 }
 
 export interface SimTimeline {
-  engineVersion: typeof ENGINE_VERSION;
+  engineVersion: number;
   eventId: string;
   seed: string | number;
   durationMs: number;
@@ -195,6 +209,7 @@ export interface LiveMarketSelection {
   selectionId: string;
   side: TeamSide;
   odds: number;
+  label?: string;
 }
 
 export interface LiveMarketSnapshot {
@@ -232,7 +247,7 @@ export interface SimulationTransition {
 }
 
 export interface SimulationResult {
-  engineVersion: typeof ENGINE_VERSION;
+  engineVersion: number;
   timeline: SimTimeline;
   transitions: SimulationTransition[];
   finalScore: LiveScore;

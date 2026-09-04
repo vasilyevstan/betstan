@@ -184,6 +184,7 @@ const liveUpdate: ILiveEventUpdateEvent = {
             selectionId: "home",
             side: TeamSide.HOME,
             odds: 1.5,
+            label: "Home",
           },
         ],
       },

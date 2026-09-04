@@ -112,6 +112,10 @@ obsolete.
 - For dynamic-list changes, challenge unbounded density. Require the responsive
   card count, wrapping behavior, and maximum visible control density to remain
   readable without overlap or hidden betting-decision information.
+- For rotating live products, verify the non-terminal card cap without
+  implying that hidden terminal versions disappeared from authoritative
+  history. A replacement card must use a stable human label and must not move
+  or relabel an already selected outcome.
 - For event-grid changes, prove dense sections preserve three desktop cards,
   two tablet cards, and one mobile card. Prove sparse one- and two-card sections
   use the available stage intentionally instead of leaving a third-width
@@ -120,6 +124,10 @@ obsolete.
   wrapped labels may increase a row's height, but button bounds and odds
   baselines must align. Fixed-size generated boards such as ten-option Correct
   Score must use balanced rows rather than an orphaned final control.
+- When several selections intentionally share one internal side value, require
+  explicit user-facing labels for every option. Repeating the neutral side
+  name is an identity and alignment defect; exact scoreline labels must remain
+  readable and balanced at desktop, tablet, and mobile widths.
 - Treat implausible, duplicated, or contradictory score and odds presentation
   as a usability defect even when the underlying values are technically valid.
 - Separate blocking usability defects and required consistency fixes from
@@ -144,6 +152,10 @@ contract above.
 - **Centered sibling market headings**: markets sharing one route/card family
   use one shared centered heading treatment; an off-center or differently
   aligned sibling heading is a required consistency fix.
+- **User terminology versus internal model names**: user-facing betting copy
+  consistently says `slip`; internal persistence or implementation concepts
+  may remain `board`. Empty, loading, error, moderation, action, and history
+  states must not leak the internal term into the interface.
 - **Stable, non-volatile board order with exact ID preservation**: a
   fixed-size selectable board (for example a scoreline board) uses a stable
   domain order, never a volatile value such as current odds that can move a

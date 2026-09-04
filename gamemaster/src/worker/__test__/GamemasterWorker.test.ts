@@ -356,6 +356,8 @@ function buildSimulationResult(eventId: string): SimulationResult {
           corners: 0,
           penaltyAwards: 0,
           freeKicks: 0,
+          throwIns: 0,
+          goalKicks: 0,
           penaltyScoreProbability: 0.75,
         },
         caps: {
@@ -365,6 +367,8 @@ function buildSimulationResult(eventId: string): SimulationResult {
           corners: 5,
           penaltyAwards: 5,
           freeKicks: 5,
+          throwIns: 5,
+          goalKicks: 5,
         },
         stoppage: {
           first: { min: 1, max: 1 },
@@ -662,6 +666,7 @@ class FakeClock implements WorkerClock {
 it("persists a simulation before kickoff publication and replays it after restart", async () => {
   const event = await createEvent(baseKickoff);
   const simulation = buildSimulationResult(event.eventId);
+  simulation.transitions[0].markets[0].selections[0].label = "Labelled selection";
   const simulate = jest.fn(() => simulation);
   const privateSeed = "a".repeat(64);
   const firstClock: WorkerClock = {
@@ -706,6 +711,9 @@ it("persists a simulation before kickoff publication and replays it after restar
   ).toEqual([simulation.transitions[0].incident.id]);
   expect(kickoffPayload.data.incidentsComplete).toBe(true);
   expect(kickoffPayload.data.incident.id).toBe(simulation.transitions[0].incident.id);
+  expect(kickoffPayload.data.markets[0].selections[0].label).toBe(
+    "Labelled selection"
+  );
   const kickoffOpenMarkets = kickoffPayload.data.markets.filter(
     (market: { status: LiveMarketStatus }) =>
       market.status === LiveMarketStatus.OPEN
@@ -1443,7 +1451,7 @@ it("voids remaining markets and archives once when a manual result arrives", asy
   expect(await Event.countDocuments({ eventId: event.eventId })).toBe(0);
 });
 
-it("explicitly voids a pending CLOSED first-minute-goal market on a manual result, without disturbing an already terminal cap-closed market", async () => {
+it("voids pending CLOSED timed markets on a manual result without disturbing an already terminal cap-closed market", async () => {
   const event = await createEvent(baseKickoff);
   const simulation = buildSimulationResult(event.eventId);
   // A generic NEXT_* market that already reached its incident cap: it is
@@ -1466,6 +1474,11 @@ it("explicitly voids a pending CLOSED first-minute-goal market on a manual resul
     LiveMarketType.FIRST_MINUTE_GOAL,
     LiveMarketStatus.CLOSED
   );
+  const pendingSecondHalfScore = buildMarket(
+    event.eventId,
+    LiveMarketType.SECOND_HALF_SCORE,
+    LiveMarketStatus.CLOSED
+  );
   const settledKickoffTeam = buildMarket(
     event.eventId,
     LiveMarketType.KICKOFF_TEAM,
@@ -1474,7 +1487,12 @@ it("explicitly voids a pending CLOSED first-minute-goal market on a manual resul
 
   await storeSimulation(event, simulation, 1, {
     phase: EventPhase.FIRST_HALF,
-    liveMarkets: [settledKickoffTeam, pendingFirstMinuteGoal, capClosedNextYellowCard],
+    liveMarkets: [
+      settledKickoffTeam,
+      pendingFirstMinuteGoal,
+      pendingSecondHalfScore,
+      capClosedNextYellowCard,
+    ],
     liveHomeScore: 0,
     liveAwayScore: 0,
   });
@@ -1510,6 +1528,16 @@ it("explicitly voids a pending CLOSED first-minute-goal market on a manual resul
     LiveSettlementReason.MANUAL_VOID
   );
   expect(firstMinuteGoalSettlement.winningSide).toBe(TeamSide.NONE);
+
+  const secondHalfScoreSettlement = liveUpdate.data.settlements.find(
+    (settlement: any) =>
+      settlement.marketId
+      === `${event.eventId}:${LiveMarketType.SECOND_HALF_SCORE}`
+  );
+  expect(secondHalfScoreSettlement).toMatchObject({
+    settlementReason: LiveSettlementReason.MANUAL_VOID,
+    winningSide: TeamSide.NONE,
+  });
 
   // The already-terminal cap-closed market must stay untouched: still
   // CLOSED, and never re-settled by the manual-void path.

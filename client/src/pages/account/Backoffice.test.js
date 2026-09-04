@@ -16,6 +16,7 @@ const event = {
   away: 'Away',
   status: 'NO_RESULT',
   visibility: 'ONLINE',
+  time: '2030-01-01T12:00:00.000Z',
 };
 
 const renderBackoffice = (props = {}) => render(
@@ -43,6 +44,9 @@ describe('public Backoffice access', () => {
 
     expect(screen.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
     expect(await screen.findByText('Home - Away')).toBeVisible();
+    expect(screen.getByText('Kickoff:', { exact: false })).toBeVisible();
+    expect(screen.getByText('Kickoff:', { exact: false }).querySelector('time'))
+      .toHaveAttribute('datetime', event.time);
     expect(screen.getByText('Create new event')).toBeVisible();
     expect(axios.get).toHaveBeenCalledWith('/api/backoffice');
     expect(screen.queryByText(/administrator access/i)).not.toBeInTheDocument();
@@ -77,6 +81,7 @@ describe('public Backoffice access', () => {
       {
         home: 'Team A',
         away: 'Team B',
+        kickoffDelaySeconds: 15 * 60,
         requestId: expect.any(String),
       }
     ));
@@ -84,6 +89,7 @@ describe('public Backoffice access', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Team A - Team B was created.'
     );
+    expect(screen.getByText('Kickoff is scheduled 15 minutes after creation.')).toBeVisible();
   });
 
   it('reuses the creation request id after an ambiguous network failure', async () => {

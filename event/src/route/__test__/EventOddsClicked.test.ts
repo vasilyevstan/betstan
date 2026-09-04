@@ -268,7 +268,7 @@ it("publishes normalized live selections with server-authoritative values", asyn
     data: expect.objectContaining({
       eventId: "test-event-id",
       productId: "market-1",
-      productName: "Next Corner",
+      productName: "Next Corner Kick",
       oddsId: "market-1:home",
       oddsName: "Team A",
       oddsValue: 1.8,
@@ -279,6 +279,50 @@ it("publishes normalized live selections with server-authoritative values", asyn
       quoteVersion: 4,
       selectionId: "home",
       side: TeamSide.HOME,
+    }),
+  });
+});
+
+it("publishes the exact labelled Second Half Score selection", async () => {
+  const marketType = LiveMarketType.SECOND_HALF_SCORE;
+  await createLiveEvent({
+    currentMarkets: [
+      {
+        marketId: `test-event-id:${marketType}`,
+        marketType,
+        marketVersion: 1,
+        quoteVersion: 3,
+        quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+        status: LiveMarketStatus.OPEN,
+        selections: [
+          {
+            selectionId: `test-event-id:${marketType}:1:SCORE_1_0`,
+            side: TeamSide.NONE,
+            odds: 5.5,
+            label: "1 - 0",
+          },
+        ],
+      },
+    ],
+  });
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      marketId: `test-event-id:${marketType}`,
+      marketVersion: 1,
+      quoteVersion: 3,
+      selectionId: `test-event-id:${marketType}:1:SCORE_1_0`,
+    })
+    .expect(200);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).toHaveBeenCalledWith({
+    data: expect.objectContaining({
+      productName: "Second Half Score",
+      oddsName: "1 - 0",
+      selectionId: `test-event-id:${marketType}:1:SCORE_1_0`,
+      side: TeamSide.NONE,
     }),
   });
 });

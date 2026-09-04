@@ -20,6 +20,7 @@ const formatRowTimestamp = (value) => formatTimestamp(value, '—');
 const HandleMyBetsList = () => {
   const [bets, setBets] = useState({});
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [betKindFilter, setBetKindFilter] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
   const [datePreset, setDatePreset] = useState('ALL');
   const [sortOrder, setSortOrder] = useState('DESC');
@@ -51,6 +52,7 @@ const HandleMyBetsList = () => {
     return betsList
       .filter((bet) => {
         if (statusFilter !== 'ALL' && bet.status !== statusFilter) return false;
+        if (betKindFilter !== 'ALL' && normalizeBetKind(bet.betKind) !== betKindFilter) return false;
 
         if (datePreset !== 'ALL') {
           const betTime = new Date(bet.timestamp);
@@ -89,11 +91,11 @@ const HandleMyBetsList = () => {
         const rightTime = new Date(right.timestamp).getTime() || 0;
         return sortOrder === 'DESC' ? rightTime - leftTime : leftTime - rightTime;
       });
-  }, [betsList, statusFilter, datePreset, searchTerm, sortOrder]);
+  }, [betsList, statusFilter, betKindFilter, datePreset, searchTerm, sortOrder]);
 
   useEffect(() => {
     setVisibleCount(20);
-  }, [statusFilter, datePreset, searchTerm, sortOrder]);
+  }, [statusFilter, betKindFilter, datePreset, searchTerm, sortOrder]);
 
   const visibleBets = filteredAndSortedBets.slice(0, visibleCount);
   const hasMoreBets = visibleCount < filteredAndSortedBets.length;
@@ -215,17 +217,39 @@ const HandleMyBetsList = () => {
   return <div className="my-bets-board">
     <section className="card my-bets-toolbar mb-2">
       <div className="card-body d-grid gap-2">
-        <div className="d-flex flex-wrap gap-2">
-          {['ALL', 'PENDING', 'CONFIRMED', 'WIN', 'LOSS', 'VOID', 'DECLINED'].map((status) => (
-            <button
-              key={status}
-              type="button"
-              className={`btn btn-sm ${statusFilter === status ? 'btn-primary' : 'btn-shell my-bets-filter'}`}
-              onClick={() => setStatusFilter(status)}
-            >
-              {status}
-            </button>
-          ))}
+        <div className="my-bets-filter-groups">
+          <div className="my-bets-filter-group" role="group" aria-label="Filter bets by status">
+            <span className="my-bets-filter-label">Status</span>
+            {['ALL', 'PENDING', 'CONFIRMED', 'WIN', 'LOSS', 'VOID', 'DECLINED'].map((status) => (
+              <button
+                aria-pressed={statusFilter === status}
+                key={status}
+                type="button"
+                className={`btn btn-sm ${statusFilter === status ? 'btn-primary' : 'btn-shell my-bets-filter'}`}
+                onClick={() => setStatusFilter(status)}
+              >
+                {status}
+              </button>
+            ))}
+          </div>
+          <div className="my-bets-filter-group" role="group" aria-label="Filter bets by type">
+            <span className="my-bets-filter-label">Bet type</span>
+            {[
+              { value: 'ALL', label: 'ALL TYPES' },
+              { value: 'PRE_MATCH', label: 'PRE-MATCH' },
+              { value: 'LIVE', label: 'LIVE' },
+            ].map(({ value, label }) => (
+              <button
+                aria-pressed={betKindFilter === value}
+                key={value}
+                type="button"
+                className={`btn btn-sm ${betKindFilter === value ? 'btn-primary' : 'btn-shell my-bets-filter'}`}
+                onClick={() => setBetKindFilter(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="d-flex flex-wrap gap-2 align-items-center">
           <input

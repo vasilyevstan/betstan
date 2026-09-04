@@ -100,6 +100,7 @@ const buildRawEventDocument = () => {
               selectionId: "home",
               side: TeamSide.HOME,
               odds: 1.8,
+              label: "Home scoreline",
               traderLimit: 10,
             },
           ],
@@ -254,6 +255,7 @@ it("creates immutable public snapshots without mutating source documents", () =>
               selectionId: "home",
               side: TeamSide.HOME,
               odds: 1.8,
+              label: "Home scoreline",
             },
           ],
         },
@@ -353,7 +355,7 @@ it("preserves full-time completeness across live-update construction, public clo
       homeScore: 4,
       awayScore: 2,
       bettingStatus: BettingStatus.CLOSED,
-      incidentHistory: buildIncidentsThrough(130),
+      incidentHistory: buildIncidentsThrough(260),
       incidentHistoryComplete: true,
       currentMarkets: [],
     },
@@ -362,7 +364,7 @@ it("preserves full-time completeness across live-update construction, public clo
   const storedSnapshot = await getStoredPublicEventSnapshot(
     "stored-full-time-truncated"
   );
-  expect(storedSnapshot?.live?.incidentHistory).toHaveLength(128);
+  expect(storedSnapshot?.live?.incidentHistory).toHaveLength(256);
   expect(storedSnapshot?.live?.incidentHistoryComplete).toBeUndefined();
 });
 
@@ -784,7 +786,7 @@ it("retries duplicate key races and handles mismatch, missing document, and non-
   updateOneSpy
     .mockResolvedValueOnce({} as any)
     .mockRejectedValueOnce({ code: 11000 } as any)
-    .mockResolvedValueOnce({} as any);
+    .mockResolvedValueOnce({ modifiedCount: 1 } as any);
   findOneSpy.mockReturnValueOnce({
     lean: jest.fn().mockResolvedValue({
       eventId: "event-id",

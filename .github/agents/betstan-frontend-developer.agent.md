@@ -68,6 +68,10 @@ instead of crossing the boundary.
   label, keep full identity in the accessible name and card header, and never
   let the visual token change the underlying selection ID, click payload, or
   slip data.
+- For rotating live products, render only the bounded non-terminal set and
+  keep suspended/stale state explanatory. Use an authoritative selection
+  label when several options share one internal side value, while preserving
+  the exact selection ID in state and click payloads.
 - Add focused React tests for user-visible behavior. Use existing Playwright or
   computed-layout coverage when interaction, responsive geometry, clipping, or
   another factual UX claim cannot be proved at the unit level; do not create a
@@ -99,4 +103,4 @@ label or exact-ID-preservation evidence, tests and exit codes, known risks,
 and unresolved findings. For user-facing work, return the
 immutable exact-head result to the same registered `betstan-ux-ui-expert` work
 unit and include its `UX_REVIEW_PASSED` result when handing off to
-`betstan-validation-critic`; do not approve your own work.
+`betstan-public-wiki-editor`; do not approve your own work.

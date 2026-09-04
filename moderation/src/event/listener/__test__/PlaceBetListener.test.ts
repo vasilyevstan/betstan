@@ -463,6 +463,50 @@ it("invalid live selections are declined with current row metadata", async () =>
   });
 });
 
+it("does not fall back to an arbitrary NONE selection for score markets", async () => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const marketId = `${eventId}:SECOND_HALF_SCORE`;
+  const market = createLiveMarket(eventId, {
+    marketId,
+    marketType: LiveMarketType.SECOND_HALF_SCORE,
+    selections: [
+      {
+        selectionId: `${marketId}:1:SCORE_0_0`,
+        side: TeamSide.NONE,
+        odds: 3.5,
+      },
+      {
+        selectionId: `${marketId}:1:SCORE_1_0`,
+        side: TeamSide.NONE,
+        odds: 4.5,
+      },
+    ],
+  });
+  await saveMirror(eventId, market);
+  const message = createMessage();
+  const data = createLivePlaceBetEvent(market, {
+    row: {
+      selectionId: `${marketId}:1:SCORE_9_9`,
+      side: TeamSide.NONE,
+    },
+  });
+
+  await listener.onMessage(data, message);
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  const publishMock =
+    BetModerationResultPublisher.prototype.publishWithConfirm as jest.Mock;
+  const affectedRow = publishMock.mock.calls[0][0].data.affectedRows[0];
+
+  expect(savedBet!.status).toEqual(ModerationStatus.DECLINED);
+  expect(savedBet!.declineReason).toEqual(
+    ModerationDeclineReason.INVALID_SELECTION
+  );
+  expect(affectedRow).not.toHaveProperty("selectionId");
+  expect(affectedRow).not.toHaveProperty("currentOdds");
+});
+
 it("expired live quotes are declined", async () => {
   const { listener } = await setup();
   const eventId = new mongoose.Types.ObjectId().toHexString();

@@ -69,9 +69,10 @@ const createEventThroughBackoffice = async (page, state, label) => {
   expect(createRequest?.body).toEqual({
     home,
     away,
+    kickoffDelaySeconds: 15 * 60,
     requestId: expect.any(String),
   });
-  await expect(page.getByRole('status')).toContainText(
+  await expect(page.locator('.alert[role="status"]')).toContainText(
     `${home} - ${away} was created.`
   );
 };
@@ -264,6 +265,14 @@ const getCompactLiveGeometry = (page) => page.evaluate(() => {
   const marketBounds = marketCards.map((card) => card.getBoundingClientRect());
   const firstMarketTop = marketBounds[0]?.top;
   const firstMarketRow = marketBounds.filter((bounds) => Math.abs(bounds.top - firstMarketTop) < 2);
+  const marketButtonTops = marketCards.map(
+    (card) => card.querySelector('.event-market-buttons')?.getBoundingClientRect().top ?? null,
+  );
+  const countdown = liveCard.querySelector('.event-countdown')?.getBoundingClientRect();
+  const countdownSectionTitleTops = [
+    liveCard.querySelector('.event-card__countdown-products > .event-card__section-title'),
+    liveCard.querySelector('.event-card__countdown-markets > .event-card__section-title'),
+  ].map((title) => title?.getBoundingClientRect().top ?? null);
   const statuses = Array.from(liveCard.querySelectorAll('.event-market-status')).map((status) => {
     const style = getComputedStyle(status);
     return {
@@ -281,6 +290,9 @@ const getCompactLiveGeometry = (page) => page.evaluate(() => {
         && Math.max(region.top, other.top) < Math.min(region.bottom, other.bottom)
       ))),
     liveHeight: liveCard.getBoundingClientRect().height,
+    countdownRatio: countdown ? countdown.width / countdown.height : null,
+    countdownSectionTitleTops,
+    marketButtonTops,
     marketFirstRowCount: firstMarketRow.length,
     marketFirstRowHeightSpread: firstMarketRow.length > 0
       ? Math.max(...firstMarketRow.map((bounds) => bounds.height))
@@ -326,31 +338,38 @@ const getCorrectScoreGeometry = async (article) => {
   });
 };
 
+const getLiveScoreGeometry = async (article) => {
+  const buttons = article.locator('.event-market-buttons--score > *');
+  return buttons.evaluateAll((elements) => {
+    const rows = new Map();
+    const sizes = [];
+    for (const button of elements) {
+      const bounds = button.getBoundingClientRect();
+      const top = Math.round(bounds.top);
+      rows.set(top, (rows.get(top) ?? 0) + 1);
+      sizes.push({
+        height: bounds.height,
+        width: bounds.width,
+      });
+    }
+    return { rowSizes: [...rows.values()], sizes };
+  });
+};
+
 const getCountdownProductsGeometry = async (article) => (
   article.locator('.event-card__countdown-products').evaluate((container) => {
-    const containerBounds = container.getBoundingClientRect();
-    const header = container.querySelector(':scope > .event-card__section-header');
-    const headerBounds = header?.getBoundingClientRect();
-    const badgesBounds = header?.querySelector('.event-card__badges')?.getBoundingClientRect();
-    const titleBounds = header?.querySelector('.event-card__section-title')?.getBoundingClientRect();
+    const title = container.querySelector(':scope > .event-card__section-title');
+    const titleBounds = title?.getBoundingClientRect();
     const productBounds = Array.from(container.querySelectorAll(':scope > .product-block'))
       .map((product) => product.getBoundingClientRect());
     const productLeft = Math.min(...productBounds.map((bounds) => bounds.left));
-    const productRight = Math.max(...productBounds.map((bounds) => bounds.right));
 
     return {
-      headerSpansProductDeck: Boolean(
-        headerBounds
-        && Math.abs(headerBounds.left - containerBounds.left) < 1
-        && Math.abs(headerBounds.right - containerBounds.right) < 1
-        && headerBounds.left <= productLeft + 1
-        && headerBounds.right >= productRight - 1
+      headingAlignedWithProductDeck: Boolean(
+        titleBounds && Math.abs(titleBounds.left - productLeft) < 1
       ),
-      headerItemsShareRow: Boolean(
-        badgesBounds
-        && titleBounds
-        && badgesBounds.top < titleBounds.bottom
-        && titleBounds.top < badgesBounds.bottom
+      hasRedundantBetKindBadge: Boolean(
+        container.querySelector(':scope > .event-card__badges, :scope > .event-card__section-header .event-card__badges')
       ),
     };
   })
@@ -546,7 +565,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   // excluded from the rendered card list entirely, leaving the 5 still-active markets.
   await expect(liveArticle.getByText('5 markets')).toBeVisible();
   await expect(liveArticle.locator('.event-market-card')).toHaveCount(5);
-  await expect(liveArticle.getByText('Next Corner', { exact: true })).toBeVisible();
+  await expect(liveArticle.getByText('Next Corner Kick', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Yellow Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Red Card', { exact: true })).toBeVisible();
   await expect(liveArticle.getByText('Next Penalty', { exact: true })).toBeVisible();
@@ -598,7 +617,7 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await liveFeed.emitSnapshot(state.snapshots.sequence1Ignored);
   await expect(liveArticle.getByLabel('Score Raptors 1, Sharks 1')).toBeVisible();
   await expect(page.getByRole('button', { name: state.fixtures.liveUpdatedAwaySelectionLabel })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Select Next Corner: Sharks at 9.9' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Select Next Corner Kick: Sharks at 9.9' })).toHaveCount(0);
 
   await page.getByRole('button', { name: state.fixtures.liveUpdatedAwaySelectionLabel }).click();
   await expect(liveBoard.locator('.slip-row-card__selection')).toHaveText('Sharks');
@@ -679,9 +698,25 @@ test('live betting main page flow is deterministic without a backend', async ({ 
   await expect(preMatchHistoryCard).toContainText('Pre-match');
   // The raw stored identifier is never rendered verbatim -- it is normalized into a readable
   // "<market>: <side>" label derived from the row's own structured live fields.
-  await expect(legacyIdentifierCard).toContainText('Next Corner: Raptors');
-  await expect(legacyIdentifierCard).toContainText('Won · Winner: Next Corner: Raptors');
+  await expect(legacyIdentifierCard).toContainText('Next Corner Kick: Raptors');
+  await expect(legacyIdentifierCard).toContainText('Won · Winner: Next Corner Kick: Raptors');
   await expect(page.getByText(legacyRawIdentifier, { exact: false })).toHaveCount(0);
+
+  const betTypeFilters = page.getByRole('group', { name: 'Filter bets by type' });
+  await betTypeFilters.getByRole('button', { name: 'LIVE' }).click();
+  await expect(declinedCard).toBeVisible();
+  await expect(legacyIdentifierCard).toBeVisible();
+  await expect(preMatchHistoryCard).toHaveCount(0);
+  await expect(betTypeFilters.getByRole('button', { name: 'LIVE' }))
+    .toHaveAttribute('aria-pressed', 'true');
+
+  await betTypeFilters.getByRole('button', { name: 'PRE-MATCH' }).click();
+  await expect(main.locator('.my-bets-card').filter({ hasText: 'Historic Derby' })).toBeVisible();
+  await expect(main.locator('.my-bets-card').filter({ hasText: 'Declined: Quote changed' })).toHaveCount(0);
+
+  await betTypeFilters.getByRole('button', { name: 'ALL TYPES' }).click();
+  await expect(main.locator('.my-bets-card').filter({ hasText: 'Declined: Quote changed' })).toBeVisible();
+  await expect(main.locator('.my-bets-card').filter({ hasText: 'Historic Derby' })).toBeVisible();
   await expect.poll(async () => (await liveFeed.getMetrics()).open).toBe(0);
   await expect.poll(async () => (await liveFeed.getMetrics()).closed).toBe(2);
 
@@ -767,6 +802,9 @@ for (const uiVariant of UI_VARIANTS) {
     for (const viewport of REPRESENTATIVE_VIEWPORTS) {
       test(`event/market layout stays responsive (${viewport.expectedColumns}-column), aligned, and unclipped (ui=${uiVariant}, theme=${theme}, ${viewport.label})`, async ({ page }) => {
         const state = buildResponsiveLayoutState();
+        if (viewport.width >= 1200) {
+          state.events[0].live.currentMarkets[1].status = 'OPEN';
+        }
         const liveFeed = await installFakeEventSource(page);
         await installAppApiMocks(page, state);
 
@@ -787,8 +825,13 @@ for (const uiVariant of UI_VARIANTS) {
         const kickoffTeamButton = page.getByRole('button', { name: 'Select Kickoff Team: South Henriton at 1.85' });
         const suspendedButton = page.getByRole('button', { name: 'Select Goal in First Minute: Yes at 6.5' });
         await expect(kickoffTeamButton).toBeEnabled();
-        await expect(suspendedButton).toBeDisabled();
-        await expect(countdownArticle.getByText('Temporarily suspended')).toBeVisible();
+        if (viewport.width >= 1200) {
+          await expect(suspendedButton).toBeEnabled();
+          await expect(countdownArticle.getByText('Temporarily suspended')).toHaveCount(0);
+        } else {
+          await expect(suspendedButton).toBeDisabled();
+          await expect(countdownArticle.getByText('Temporarily suspended')).toBeVisible();
+        }
         await expect(countdownArticle.getByText('Half Time Result', { exact: true })).toHaveCount(0);
 
         await expect.poll(() => getPreMatchColumnCount(page)).toBe(viewport.expectedColumns);
@@ -829,8 +872,8 @@ for (const uiVariant of UI_VARIANTS) {
         expect(countdownCorrectScoreGeometry.sizes.every(({ valueFits }) => valueFits)).toBe(true);
 
         const countdownProductsGeometry = await getCountdownProductsGeometry(countdownArticle);
-        expect(countdownProductsGeometry.headerSpansProductDeck).toBe(true);
-        expect(countdownProductsGeometry.headerItemsShareRow).toBe(true);
+        expect(countdownProductsGeometry.headingAlignedWithProductDeck).toBe(true);
+        expect(countdownProductsGeometry.hasRedundantBetKindBadge).toBe(false);
 
         const baselines = await getPreMatchRowBaselines(page);
         expect(baselines).not.toBeNull();
@@ -851,7 +894,18 @@ for (const uiVariant of UI_VARIANTS) {
         if (viewport.width >= 1200) {
           expect(compactGeometry.marketFirstRowCount).toBe(2);
           expect(compactGeometry.marketFirstRowHeightSpread).toBeLessThan(2);
+          expect(compactGeometry.countdownSectionTitleTops.every(Number.isFinite)).toBe(true);
+          expect(
+            Math.max(...compactGeometry.countdownSectionTitleTops)
+              - Math.min(...compactGeometry.countdownSectionTitleTops),
+          ).toBeLessThan(2);
+          expect(compactGeometry.marketButtonTops.every(Number.isFinite)).toBe(true);
+          expect(
+            Math.max(...compactGeometry.marketButtonTops)
+              - Math.min(...compactGeometry.marketButtonTops),
+          ).toBeLessThan(2);
         }
+        expect(compactGeometry.countdownRatio).toBeGreaterThanOrEqual(1.9);
         expect(compactGeometry.statuses.every(({ overflows }) => !overflows)).toBe(true);
         expect(compactGeometry.statuses.every(
           ({ overflowWrap, wordBreak }) => overflowWrap === 'normal' && wordBreak === 'normal',
@@ -871,6 +925,12 @@ for (const uiVariant of UI_VARIANTS) {
           page,
           '.event-card--countdown .product-cs-grid > *',
         )).toBe(false);
+
+        const [liveSlipBackground, preMatchSlipBackground] = await Promise.all([
+          getBoard(page, BET_KIND.LIVE).evaluate((board) => getComputedStyle(board).backgroundImage),
+          getBoard(page, BET_KIND.PRE_MATCH).evaluate((board) => getComputedStyle(board).backgroundImage),
+        ]);
+        expect(liveSlipBackground).not.toBe(preMatchSlipBackground);
 
         // Native button semantics remain intact after the layout-only correction.
         await kickoffTeamButton.focus();
@@ -909,8 +969,8 @@ test('countdown product controls stay balanced through live-card layout transiti
     ).toBe(true);
 
     const productGeometry = await getCountdownProductsGeometry(countdownArticle);
-    expect(productGeometry.headerSpansProductDeck, `${width}px shared heading`).toBe(true);
-    expect(productGeometry.headerItemsShareRow, `${width}px compact heading row`).toBe(true);
+    expect(productGeometry.headingAlignedWithProductDeck, `${width}px shared heading`).toBe(true);
+    expect(productGeometry.hasRedundantBetKindBadge, `${width}px redundant badge`).toBe(false);
     expect(await hasInternalOverflow(
       page,
       '.event-card--countdown .product-cs-grid',
@@ -928,6 +988,59 @@ test('countdown product controls stay balanced through live-card layout transiti
       ).toBeLessThanOrEqual(compactGeometry.preMatchRowHeight + 8);
     }
   }
+});
+
+test('Second Half Score uses five desktop columns and two mobile columns without clipping', async ({ page }) => {
+  const state = createLiveBettingMockState();
+  const liveEvent = state.events.find(({ eventId }) => eventId === 'live-1');
+  liveEvent.live.currentMarkets = [{
+    marketId: 'live-1:SECOND_HALF_SCORE',
+    marketType: 'SECOND_HALF_SCORE',
+    marketVersion: 1,
+    quoteVersion: 1,
+    status: 'OPEN',
+    quoteValidUntil: '2030-01-01T13:00:00.000Z',
+    selections: [
+      ['SCORE_0_0', '0 - 0'],
+      ['SCORE_1_0', '1 - 0'],
+      ['SCORE_0_1', '0 - 1'],
+      ['SCORE_1_1', '1 - 1'],
+      ['SCORE_2_0', '2 - 0'],
+      ['SCORE_0_2', '0 - 2'],
+      ['SCORE_2_1', '2 - 1'],
+      ['SCORE_1_2', '1 - 2'],
+      ['SCORE_2_2', '2 - 2'],
+      ['OTHER', 'Other'],
+    ].map(([key, label], index) => ({
+      selectionId: `live-1:SECOND_HALF_SCORE:1:${key}`,
+      side: 'NONE',
+      odds: 2 + index / 10,
+      label,
+    })),
+  }];
+  const liveFeed = await installFakeEventSource(page);
+  await installAppApiMocks(page, state);
+
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
+  await liveFeed.waitForSource();
+  await liveFeed.openAll();
+
+  const article = page.getByRole('article', { name: 'Raptors - Sharks' });
+  await expect(article.getByText('Second Half Score', { exact: true })).toBeVisible();
+  await expect(article.locator('.event-market-buttons--score > *')).toHaveCount(10);
+  expect((await getLiveScoreGeometry(article)).rowSizes).toEqual([5, 5]);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await getLiveScoreGeometry(article);
+  expect(mobileGeometry.rowSizes).toEqual([2, 2, 2, 2, 2]);
+  expect(mobileGeometry.sizes.every(
+    ({ height, width }) => height >= 44 && width >= 44,
+  )).toBe(true);
+  expect(await hasInternalOverflow(
+    page,
+    '.event-market-buttons--score',
+  )).toBe(false);
 });
 
 test('two-card live and pre-match sections fill balanced rows and stack on mobile', async ({ page }) => {

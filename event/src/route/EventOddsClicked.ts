@@ -18,9 +18,13 @@ const router = express.Router();
 const LIVE_MARKET_NAMES: Record<LiveMarketType, string> = {
   [LiveMarketType.NEXT_YELLOW_CARD]: "Next Yellow Card",
   [LiveMarketType.NEXT_RED_CARD]: "Next Red Card",
-  [LiveMarketType.NEXT_CORNER]: "Next Corner",
+  [LiveMarketType.NEXT_CORNER]: "Next Corner Kick",
   [LiveMarketType.NEXT_PENALTY]: "Next Penalty",
+  [LiveMarketType.NEXT_THROW_IN]: "Next Throw-In",
+  [LiveMarketType.NEXT_FREE_KICK]: "Next Free Kick",
+  [LiveMarketType.NEXT_GOAL_KICK]: "Next Goal Kick",
   [LiveMarketType.HALF_TIME_RESULT]: "Half Time Result",
+  [LiveMarketType.SECOND_HALF_SCORE]: "Second Half Score",
   [LiveMarketType.KICKOFF_TEAM]: "Kickoff Team",
   [LiveMarketType.FIRST_MINUTE_GOAL]: "Goal In First Minute",
 };
@@ -250,7 +254,9 @@ router.post(
           eventName: event.name,
           oddsId: `${selectedMarket.marketId}:${selectedSelection.selectionId}`,
           oddsValue: selectedSelection.odds,
-          oddsName: getSelectionName(selectedSelection.side, event),
+          oddsName:
+            selectedSelection.label
+            || getSelectionName(selectedSelection.side, event),
           productName:
             LIVE_MARKET_NAMES[selectedMarket.marketType] ||
             selectedMarket.marketType,
