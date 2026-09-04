@@ -224,12 +224,34 @@ conversation summaries are not authority.
   remain server-filtered, while exact fixture IDs require current persisted
   administrator verification; the odds path repeats that verification before
   allowing a synthetic selection.
-- Acceptance must also prove that an anonymous backoffice catalog read returns
-  `401` without fixture names. Live-update-first projections stay `OFFLINE`
-  until event metadata establishes visibility; metadata repair must not undo a
-  newer visibility message. Revoked scoped clients purge cached fixtures
-  immediately, while healthy SSE clients still reconcile REST periodically so
-  newly hidden events disappear.
+- Acceptance must prove that an anonymous Backoffice catalog read returns a
+  valid `200` array and that the anonymous page renders the real controls and
+  acceptance fixtures. Reuse those intentional fixtures to exercise anonymous
+  creation/result/visibility; an obsolete negative mutation probe can both
+  fail the release and leave unintended production data. Rollback
+  capture/readiness may accept the historical protected `401` response only
+  when checking an older generation.
+- Public mutation acceptance requires more than a `2xx`: blank destructive
+  values must fail, conflicting terminal writes must return a conflict, and
+  successful state changes must have confirmed durable publication or a
+  persisted retry marker that the service replays after restart.
+- Image-only rollback does not restore an older Deployment manifest. Retain
+  the legacy Backoffice `AUTH_SERVICE_URL` and `JWT_KEY` bindings while the
+  protected fallback image remains a supported rollback target, even though
+  the current public image does not consume them.
+- Before an image-only rollback crosses a durable-publication boundary, prove
+  pending mutation markers are empty while a reviewed HTTP write fence prevents
+  new public mutations and the current replay worker remains available. Skip
+  the drain only when exact target source proves that the rollback image starts
+  the compatible worker. After partial image mutation, record the active fence
+  in failure evidence; recovery re-establishes it before restoring exact
+  pre-run images and releases it only after readiness passes. Additive marker
+  fields remain readable by the old image, but an image without the worker
+  cannot deliver them.
+  Live-update-first projections stay `OFFLINE` until event metadata establishes
+  visibility; metadata repair must not undo a newer visibility message.
+  Revoked scoped clients purge cached fixtures immediately, while healthy SSE
+  clients still reconcile REST periodically so newly hidden events disappear.
 
 ## OCI provider behavior
 

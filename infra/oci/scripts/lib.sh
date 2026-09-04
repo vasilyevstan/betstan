@@ -244,3 +244,27 @@ oci_assert_repository_root() {
   [[ -f "$OCI_ROOT_DIR/CONTRIBUTING.md" && -d "$OCI_ROOT_DIR/infra/k8s" ]] ||
     oci_die "unable to identify the BetStan repository root"
 }
+
+oci_target_supports_backoffice_publication_replay() {
+  local target_sha="$1"
+  local service_source index_source marker
+
+  [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  service_source="$(
+    git show "${target_sha}:backoffice/src/service/BackofficePublicationService.ts" \
+      2>/dev/null
+  )" || return 1
+  index_source="$(
+    git show "${target_sha}:backoffice/src/index.ts" 2>/dev/null
+  )" || return 1
+
+  grep -Fq 'async replayPending()' <<<"$service_source" || return 1
+  grep -Fq 'this.scheduleReplay()' <<<"$service_source" || return 1
+  for marker in \
+    newEventPublicationPending \
+    resultPublicationPending \
+    visibilityPublicationPending; do
+    grep -Fq "$marker" <<<"$service_source" || return 1
+  done
+  grep -Fq 'await publicationService.start()' <<<"$index_source"
+}

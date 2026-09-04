@@ -528,9 +528,7 @@ jobs:
                 --output /dev/null \
                 --write-out '%{http_code}' \
                 --cookie "$LIVE_ACCEPTANCE_COOKIE_JAR" \
-                --header 'Content-Type: application/json' \
-                --data '{"eventId":"revoked-admin-check","homeResult":1,"awayResult":0}' \
-                "$BASE_URL/api/backoffice/result"
+                "$BASE_URL/api/auth/admin/verify"
             )"; then
               [ "$status" = "401" ] || cleanup_failed=1
             else

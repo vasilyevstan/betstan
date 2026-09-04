@@ -107,6 +107,14 @@ instead of crossing the boundary.
   persist it before publication, and never include it in public DTOs.
 - Reuse existing helpers and patterns; avoid broad catches and silent failures.
 - Keep publisher instances singleton-scoped as documented in `LEARNINGS.md`.
+- For a database mutation that must publish an event, persist a retry marker
+  in the same atomic write, use publisher confirms, and clear the marker only
+  after confirmation. Replay pending markers after restart and make every
+  downstream handler safe for duplicate delivery.
+- For public irreversible controls, never coerce a missing value into a valid
+  destructive default. Return `404` for a missing aggregate, accept an exact
+  repeated terminal write as idempotent, and return `409` when the requested
+  terminal state conflicts with what already won.
 - Run the smallest existing tests that prove the slice.
 - Use `npm ci`, not `npm install`, unless an intentional dependency change owns
   the lockfile update.

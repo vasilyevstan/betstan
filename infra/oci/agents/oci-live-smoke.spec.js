@@ -52,9 +52,7 @@ test('OCI reusable-user login and navigation journey', async ({ page }) => {
     await backofficeLink.click();
     await expect(page).toHaveURL(/\/backoffice/);
     await expect(page.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
-    await expect(page.getByText(
-      'Administrator access is required to use Backoffice.'
-    )).toBeVisible();
+    await expect(page.getByText('Create new event')).toBeVisible();
   }
 
   await page.getByTitle('Log out').click();
@@ -62,9 +60,7 @@ test('OCI reusable-user login and navigation journey', async ({ page }) => {
   if (!allowLegacyAdminUi) {
     await expect(page.getByTitle('Backoffice')).toBeVisible();
     await page.getByTitle('Backoffice').click();
-    await expect(page.getByText(
-      'Log in with an administrator account to use Backoffice.'
-    )).toBeVisible();
+    await expect(page.getByText('Create new event')).toBeVisible();
   }
   await page.getByTitle('Log in').click();
   await page.getByLabel('Username or email').fill(username);

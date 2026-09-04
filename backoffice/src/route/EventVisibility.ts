@@ -1,57 +1,139 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
-import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublisher";
-import { requireAdmin } from "../middleware/RequireAdmin";
+import { getBackofficePublicationService } from "../service/BackofficePublicationService";
+import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 
 const router = express.Router();
 
-let _publisher: EventVisibilityPublisher | null = null;
-const getPublisher = async (): Promise<EventVisibilityPublisher> => {
-  if (!_publisher) {
-    _publisher = new EventVisibilityPublisher(messengerWrapper.connection);
-    await _publisher.init();
-  }
-  return _publisher;
-};
-
 router.post(
   "/api/backoffice/event_visibility",
-  requireAdmin,
   async (req: Request, res: Response) => {
-    const { eventId } = req.body;
-    const event = await Event.findOne({ eventId: eventId });
-
-    if (!event) {
-      res.send({ message: "Event not found" });
+    const eventId =
+      typeof req.body.eventId === "string" ? req.body.eventId.trim() : "";
+    const requestedVisibility = req.body.visibility;
+    if (!eventId) {
+      res.status(400).send({ message: "No event id" });
       return;
     }
 
-    // flipping the event status
-    // TODO: concurrency magic
-    let newEventVisibility: EventVisibility;
-    if (event.visibility === EventVisibility.ONLINE) {
-      newEventVisibility = EventVisibility.OFFLINE;
-    } else if (event.visibility === EventVisibility.OFFLINE) {
-      newEventVisibility = EventVisibility.ONLINE;
-    } else {
-      // seems that data was corrupted
-      newEventVisibility = EventVisibility.OFFLINE;
+    if (
+      requestedVisibility !== undefined
+      && !Object.values(EventVisibility).includes(requestedVisibility)
+    ) {
+      res.status(400).send({ message: "Event visibility is invalid" });
+      return;
     }
 
-    event.visibility = newEventVisibility;
-    await event.save();
+    const event = requestedVisibility
+      ? await Event.findOneAndUpdate(
+        {
+          eventId,
+          visibility: { $ne: requestedVisibility },
+          visibilityPublicationPending: { $ne: true },
+        },
+        {
+          $set: {
+            visibility: requestedVisibility,
+            visibilityPublicationPending: true,
+            visibilityPublicationTarget: requestedVisibility,
+          },
+        },
+        { new: true }
+      ).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
+      )
+      : await Event.findOneAndUpdate(
+        { eventId, visibilityPublicationPending: { $ne: true } },
+        [
+          {
+            $set: {
+              visibility: {
+                $cond: [
+                  { $eq: ["$visibility", EventVisibility.ONLINE] },
+                  EventVisibility.OFFLINE,
+                  {
+                    $cond: [
+                      { $eq: ["$visibility", EventVisibility.OFFLINE] },
+                      EventVisibility.ONLINE,
+                      EventVisibility.OFFLINE,
+                    ],
+                  },
+                ],
+              },
+              visibilityPublicationPending: true,
+              visibilityPublicationTarget: {
+                $cond: [
+                  { $eq: ["$visibility", EventVisibility.ONLINE] },
+                  EventVisibility.OFFLINE,
+                  {
+                    $cond: [
+                      { $eq: ["$visibility", EventVisibility.OFFLINE] },
+                      EventVisibility.ONLINE,
+                      EventVisibility.OFFLINE,
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        { new: true }
+      ).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
+      );
 
-    const publisher = await getPublisher();
+    if (!event) {
+      const existingEvent = await Event.findOne({ eventId }).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
+      );
+      if (!existingEvent) {
+        res.status(404).send({ message: "Event not found" });
+        return;
+      }
 
-    publisher.publish({
-      data: {
-        eventId: eventId,
-        visibility: newEventVisibility,
-      },
+      if (existingEvent.visibilityPublicationPending) {
+        if (
+          requestedVisibility
+          && existingEvent.visibilityPublicationTarget === requestedVisibility
+        ) {
+          const publication = await getBackofficePublicationService(
+            messengerWrapper.connection
+          ).publishVisibilityNow(existingEvent.eventId);
+          res.status(publication === "PUBLISHED" ? 200 : 202).send({
+            ...serializeBackofficeEvent(existingEvent),
+            publication,
+            ...(publication === "PENDING"
+              ? { message: "Visibility saved; publication is retrying" }
+              : {}),
+          });
+          return;
+        }
+
+        res.status(409).send({
+          message: "Another visibility change is still being published",
+        });
+        return;
+      }
+
+      res.send({
+        ...serializeBackofficeEvent(existingEvent),
+        unchanged: true,
+        publication: "PUBLISHED",
+      });
+      return;
+    }
+
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishVisibilityNow(event.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      ...serializeBackofficeEvent(event),
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Visibility saved; publication is retrying" }
+        : {}),
     });
-
-    res.send(event);
   }
 );
 

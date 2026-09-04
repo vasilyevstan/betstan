@@ -840,8 +840,8 @@ if "if (!allowLegacyAdminUi)" not in smoke_text:
     raise SystemExit("browser smoke does not scope historical Backoffice UI compatibility")
 if "await expect(backofficeLink).toBeVisible();" not in smoke_text:
     raise SystemExit("browser smoke does not require public Backoffice navigation by default")
-if "Administrator access is required to use Backoffice." not in smoke_text:
-    raise SystemExit("browser smoke does not verify the protected route boundary")
+if smoke_text.count("await expect(page.getByText('Create new event')).toBeVisible();") < 2:
+    raise SystemExit("browser smoke does not verify public Backoffice use before and after logout")
 if 'needs: [recover, public-validate]' not in workflow_text:
     raise SystemExit("OCIR retirement does not depend on successful public validation")
 retirement = workflow_text.split(

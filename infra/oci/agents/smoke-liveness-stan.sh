@@ -156,6 +156,7 @@ api_paths=(
   /api/slip
   /api/bet
   /api/bet/stats
+  /api/backoffice
 )
 for api_path in "${api_paths[@]}"; do
   body="$WORK_DIR/api.body"
@@ -176,29 +177,23 @@ for api_path in "${api_paths[@]}"; do
   if [[ "$api_path" == "/api/auth/currentuser" ]]; then
     jq -e 'type == "object" and has("currentUser")' "$body" >/dev/null ||
       fail "current-user API JSON shape is invalid"
+  elif [[ "$api_path" == "/api/backoffice" ]]; then
+    jq -e 'type == "array"' "$body" >/dev/null ||
+      fail "public Backoffice API JSON shape is invalid"
+    cache_control="$(
+      awk 'tolower($1)=="cache-control:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+        "$headers" | tail -n 1
+    )"
+    [[ ",${cache_control}," == *",no-store,"* ]] ||
+      fail "public Backoffice API is missing Cache-Control: no-store"
+    access_mode="$(
+      awk 'tolower($1)=="x-backoffice-access:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+        "$headers" | tail -n 1
+    )"
+    [[ "$access_mode" == "public" ]] ||
+      fail "public Backoffice API is missing X-Backoffice-Access: public"
   fi
 done
-
-backoffice_body="$WORK_DIR/backoffice.body"
-backoffice_headers="$WORK_DIR/backoffice.headers"
-backoffice_status="$(
-  curl --silent --show-error --max-time "$REQUEST_TIMEOUT" \
-    --output "$backoffice_body" --dump-header "$backoffice_headers" \
-    --write-out '%{http_code}' "${PUBLIC_URL}/api/backoffice"
-)" || fail "canonical Backoffice protection request failed"
-[[ "$backoffice_status" == "401" ]] ||
-  fail "canonical Backoffice API did not reject an unauthenticated request"
-backoffice_content_type="$(
-  awk 'tolower($1)=="content-type:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
-    "$backoffice_headers" | tail -n 1
-)"
-[[ "$backoffice_content_type" == application/json* ]] ||
-  fail "canonical Backoffice rejection returned non-JSON content"
-jq -e '
-  type == "object" and
-  (.errors | type == "array" and length >= 1)
-' "$backoffice_body" >/dev/null ||
-  fail "canonical Backoffice rejection JSON shape is invalid"
 
 diagnostic_body="$WORK_DIR/diagnostic.body"
 diagnostic_headers="$WORK_DIR/diagnostic.headers"
@@ -217,6 +212,37 @@ diagnostic_content_type="$(
   fail "diagnostic API returned non-JSON content"
 jq -e 'type == "object" and has("currentUser")' "$diagnostic_body" >/dev/null ||
   fail "diagnostic API JSON shape is invalid"
+
+diagnostic_backoffice_body="$WORK_DIR/diagnostic-backoffice.body"
+diagnostic_backoffice_headers="$WORK_DIR/diagnostic-backoffice.headers"
+diagnostic_backoffice_status="$(
+  curl --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+    --output "$diagnostic_backoffice_body" \
+    --dump-header "$diagnostic_backoffice_headers" \
+    --write-out '%{http_code}' "${DIAGNOSTIC_URL}/api/backoffice"
+)" || fail "trusted diagnostic Backoffice request failed"
+[[ "$diagnostic_backoffice_status" == "200" ]] ||
+  fail "diagnostic Backoffice API route did not return HTTP 200"
+diagnostic_backoffice_content_type="$(
+  awk 'tolower($1)=="content-type:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ "$diagnostic_backoffice_content_type" == application/json* ]] ||
+  fail "diagnostic Backoffice API returned non-JSON content"
+jq -e 'type == "array"' "$diagnostic_backoffice_body" >/dev/null ||
+  fail "diagnostic Backoffice API JSON shape is invalid"
+diagnostic_backoffice_cache_control="$(
+  awk 'tolower($1)=="cache-control:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ ",${diagnostic_backoffice_cache_control}," == *",no-store,"* ]] ||
+  fail "diagnostic Backoffice API is missing Cache-Control: no-store"
+diagnostic_backoffice_access_mode="$(
+  awk 'tolower($1)=="x-backoffice-access:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ "$diagnostic_backoffice_access_mode" == "public" ]] ||
+  fail "diagnostic Backoffice API is missing X-Backoffice-Access: public"
 
 if [[ "$EXPECT_HTTP_MUTATION_FENCE" == "1" ]]; then
   require_http_mutation_fence "$PUBLIC_URL" canonical

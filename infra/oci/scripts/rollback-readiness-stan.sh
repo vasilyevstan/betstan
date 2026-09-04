@@ -25,6 +25,11 @@ AUTH_USER_COLLECTION="${AUTH_USER_COLLECTION:-users}"
 AUTH_DEPLOYMENT="${AUTH_DEPLOYMENT:-gaming-auth-depl}"
 AUTH_POD_SELECTOR="${AUTH_POD_SELECTOR:-app=gaming-auth}"
 AUTH_CONTAINER="${AUTH_CONTAINER:-gaming-auth}"
+BACKOFFICE_MONGO_SELECTOR="${BACKOFFICE_MONGO_SELECTOR:-app=gaming-auth-mongo}"
+BACKOFFICE_DB_NAME="${BACKOFFICE_DB_NAME:-gaming_backoffice}"
+BACKOFFICE_EVENT_COLLECTION="${BACKOFFICE_EVENT_COLLECTION:-events}"
+BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS="${BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS:-13}"
+BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS="${BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS:-5}"
 ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
 API_CONTRACTS=(
   "/|html"
@@ -97,7 +102,7 @@ capture_http() {
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
   expected_status_label=200
   if [[ "$expected_kind" == "backoffice" ]]; then
-    expected_status_label="200 or protected 401"
+    expected_status_label="200 or legacy protected 401"
   fi
   if [[ "$status" != "200" &&
       ! ("$expected_kind" == "backoffice" && "$status" == "401") ]]; then
@@ -259,7 +264,13 @@ prepare_private_dir "$WORK_PARENT_DIR"
 WORK_DIR="$(create_unique_private_dir "$WORK_PARENT_DIR" readiness)"
 trap cleanup_work_dir EXIT
 
-for command_name in kubectl curl python3 awk; do
+: >"$OUTPUT_DIR/failures.txt"
+: >"$OUTPUT_DIR/workload-state.tsv"
+: >"$OUTPUT_DIR/rollout-history.tsv"
+: >"$OUTPUT_DIR/current-http.tsv"
+: >"$OUTPUT_DIR/queue-state.tsv"
+
+for command_name in kubectl curl python3 awk git; do
   oci_require_command "$command_name"
 done
 [[ "$OCI_PUBLIC_URL" == https://* ]] || oci_die "OCI_PUBLIC_URL must use https://"
@@ -277,15 +288,25 @@ fi
 if ! [[ "$AUTH_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || ! [[ "$AUTH_USER_COLLECTION" =~ ^[A-Za-z0-9_-]+$ ]]; then
   failures_file_append "auth database and collection names must contain only letters, numbers, underscores, or hyphens"
 fi
+if ! [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]] ||
+  ! [[ "$BACKOFFICE_EVENT_COLLECTION" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  failures_file_append "Backoffice database and collection names must contain only letters, numbers, underscores, or hyphens"
+fi
+if ! [[ "$BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
+  (( BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS > 120 )); then
+  failures_file_append "BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS must be between 1 and 120"
+fi
+if ! [[ "$BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS" =~ ^[0-9]+$ ]] ||
+  (( BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS > 30 )); then
+  failures_file_append "BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS must be between 0 and 30"
+fi
 
-: >"$OUTPUT_DIR/failures.txt"
-: >"$OUTPUT_DIR/workload-state.tsv"
-: >"$OUTPUT_DIR/rollout-history.tsv"
-: >"$OUTPUT_DIR/current-http.tsv"
-: >"$OUTPUT_DIR/queue-state.tsv"
 AUTH_IDENTIFIER_ROLLBACK_CHECK="unknown"
 AUTH_NORMALIZED_IDENTIFIER_COUNT="unknown"
 TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS="unknown"
+BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="unknown"
+BACKOFFICE_PENDING_PUBLICATION_COUNT="unknown"
+TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="unknown"
 
 for service in "${ROLLBACK_SERVICES[@]}"; do
   deployment="gaming-${service}-depl"
@@ -373,6 +394,69 @@ print(f'total_unack={total_unack}')
 PY
     else
       failures_file_append 'rabbitmq: queue output was malformed'
+    fi
+  fi
+fi
+
+if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+  [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]] &&
+  [[ "$BACKOFFICE_EVENT_COLLECTION" =~ ^[A-Za-z0-9_-]+$ ]] &&
+  [[ "$BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] &&
+  [[ "$BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS" =~ ^[0-9]+$ ]]; then
+  if oci_target_supports_backoffice_publication_replay "$TARGET_SHA"; then
+    TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="true"
+    BACKOFFICE_PENDING_PUBLICATION_COUNT="not-required"
+    BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="compatible-target"
+  else
+    TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="false"
+    backoffice_mongo_pod="$(
+      kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$BACKOFFICE_MONGO_SELECTOR" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+    )"
+    if [[ -z "$backoffice_mongo_pod" ]]; then
+      BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="missing-mongo"
+      failures_file_append "Backoffice publication rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
+    else
+      backoffice_query="db.getCollection('${BACKOFFICE_EVENT_COLLECTION}').countDocuments({\$or: [{newEventPublicationPending: true}, {resultPublicationPending: true}, {visibilityPublicationPending: true}]})"
+      for ((attempt = 1; attempt <= BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS; attempt++)); do
+        if ! pending_count="$(
+          kubectl exec -n "$OCI_K8S_NAMESPACE" "$backoffice_mongo_pod" -- \
+            mongosh --quiet "mongodb://localhost:27017/${BACKOFFICE_DB_NAME}" \
+            --eval "$backoffice_query" 2>/dev/null
+        )"; then
+          BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="query-failed"
+        else
+          pending_count="$(tail -n 1 <<<"$pending_count" | tr -d '\r[:space:]')"
+          BACKOFFICE_PENDING_PUBLICATION_COUNT="$pending_count"
+          if ! [[ "$pending_count" =~ ^[0-9]+$ ]]; then
+            BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="invalid-query-result"
+            break
+          fi
+          if [[ "$pending_count" -eq 0 ]]; then
+            BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="drained"
+            break
+          fi
+          BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="pending"
+        fi
+
+        if (( attempt < BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS )); then
+          sleep "$BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS"
+        fi
+      done
+
+      case "$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK" in
+        drained)
+          ;;
+        pending)
+          failures_file_append "Backoffice publication rollback compatibility: target at $TARGET_SHA lacks replay support and ${BACKOFFICE_PENDING_PUBLICATION_COUNT} pending publication marker(s) remain"
+          ;;
+        query-failed)
+          failures_file_append "Backoffice publication rollback compatibility: unable to count pending publication markers"
+          ;;
+        invalid-query-result)
+          failures_file_append "Backoffice publication rollback compatibility: unexpected pending publication count ${BACKOFFICE_PENDING_PUBLICATION_COUNT}"
+          ;;
+      esac
     fi
   fi
 fi
@@ -481,6 +565,9 @@ target_sha=$TARGET_SHA
 auth_identifier_rollback_check=$AUTH_IDENTIFIER_ROLLBACK_CHECK
 auth_normalized_identifier_count=$AUTH_NORMALIZED_IDENTIFIER_COUNT
 target_supports_normalized_identifiers=$TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS
+backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
+backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
+target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
 rollback_operator=
 EOF
 

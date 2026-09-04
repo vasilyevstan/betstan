@@ -112,8 +112,6 @@ const App = () => {
               <Route
                 path="/backoffice"
                 element={<Backoffice
-                  currentUser={currentUser}
-                  isCurrentUserResolved={isCurrentUserResolved}
                   onChanged={refreshBackoffice}
                   refreshToken={backofficeRefreshToken}
                 />}

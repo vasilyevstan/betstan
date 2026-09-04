@@ -134,14 +134,22 @@ elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
   : > "$output"
   printf '308'
 elif [[ "$url" == */api/backoffice ]]; then
-  if [[ "${STUB_PUBLIC_BACKOFFICE:-0}" == "1" ]]; then
-    printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
-    printf '[]' > "$output"
-    printf '200'
-  else
+  if [[ "${STUB_PROTECTED_BACKOFFICE:-0}" == "1" ]]; then
     printf 'HTTP/2 401\r\ncontent-type: application/json\r\n\r\n' > "$headers"
     printf '{"errors":[{"message":"Authentication required"}]}' > "$output"
     printf '401'
+  else
+    if [[ "${STUB_BAD_BACKOFFICE_HEADERS:-0}" == "1" ]]; then
+      printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+    else
+      printf 'HTTP/2 200\r\ncontent-type: application/json\r\ncache-control: no-store\r\nx-backoffice-access: public\r\n\r\n' > "$headers"
+    fi
+    if [[ "${STUB_BAD_BACKOFFICE:-0}" == "1" ]]; then
+      printf '{}' > "$output"
+    else
+      printf '[]' > "$output"
+    fi
+    printf '200'
   fi
 elif [[ "$url" == */api/* ]]; then
   printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
@@ -236,18 +244,42 @@ PATH="$WORK_DIR/bin:$PATH" \
   OCI_REDIRECT_URL=https://www.betstan.xyz \
   OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
   OUTPUT_DIR="$WORK_DIR/smoke-good" "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null
-if PATH="$WORK_DIR/bin:$PATH" STUB_PUBLIC_BACKOFFICE=1 \
+  if PATH="$WORK_DIR/bin:$PATH" STUB_PROTECTED_BACKOFFICE=1 \
   OCI_PUBLIC_URL=https://betstan.xyz \
   OCI_REDIRECT_URL=https://www.betstan.xyz \
   OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
-  OUTPUT_DIR="$WORK_DIR/smoke-public-backoffice" \
+    OUTPUT_DIR="$WORK_DIR/smoke-protected-backoffice" \
     "$OCI_DIR/agents/smoke-liveness-stan.sh" \
-    >"$WORK_DIR/smoke-public-backoffice.out" 2>&1; then
-  echo "public Backoffice API unexpectedly passed" >&2
+      >"$WORK_DIR/smoke-protected-backoffice.out" 2>&1; then
+    echo "protected Backoffice API unexpectedly passed" >&2
   exit 1
 fi
-grep -Fq 'Backoffice API did not reject an unauthenticated request' \
-  "$WORK_DIR/smoke-public-backoffice.out"
+  grep -Fq 'canonical API route did not return HTTP 200: /api/backoffice' \
+    "$WORK_DIR/smoke-protected-backoffice.out"
+  if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_BACKOFFICE=1 \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OUTPUT_DIR="$WORK_DIR/smoke-malformed-backoffice" \
+      "$OCI_DIR/agents/smoke-liveness-stan.sh" \
+      >"$WORK_DIR/smoke-malformed-backoffice.out" 2>&1; then
+    echo "malformed public Backoffice API unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -Fq 'public Backoffice API JSON shape is invalid' \
+    "$WORK_DIR/smoke-malformed-backoffice.out"
+  if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_BACKOFFICE_HEADERS=1 \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OUTPUT_DIR="$WORK_DIR/smoke-backoffice-headers" \
+      "$OCI_DIR/agents/smoke-liveness-stan.sh" \
+      >"$WORK_DIR/smoke-backoffice-headers.out" 2>&1; then
+    echo "public Backoffice without no-store headers unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -Fq 'public Backoffice API is missing Cache-Control: no-store' \
+    "$WORK_DIR/smoke-backoffice-headers.out"
 PATH="$WORK_DIR/bin:$PATH" \
 STUB_MUTATION_FENCE=1 \
 OCI_EXPECT_HTTP_MUTATION_FENCE=1 \

@@ -42,9 +42,41 @@ const eventSchema = new Schema({
     enum: Object.values(EventVisibility),
     default: EventVisibility.ONLINE,
   },
+  creationRequestId: {
+    type: String,
+    required: false,
+    select: false,
+  },
+  creationRequestFingerprint: {
+    type: String,
+    required: false,
+    select: false,
+  },
+  newEventPublicationPending: {
+    type: Boolean,
+    required: false,
+    select: false,
+  },
+  resultPublicationPending: {
+    type: Boolean,
+    required: false,
+    select: false,
+  },
+  visibilityPublicationPending: {
+    type: Boolean,
+    required: false,
+    select: false,
+  },
+  visibilityPublicationTarget: {
+    type: String,
+    required: false,
+    enum: Object.values(EventVisibility),
+    select: false,
+  },
 });
 
 eventSchema.index({ eventId: 1 }, { unique: true });
+eventSchema.index({ creationRequestId: 1 }, { unique: true, sparse: true });
 
 const Event = model("Event", eventSchema);
 

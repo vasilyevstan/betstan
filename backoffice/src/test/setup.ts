@@ -1,6 +1,5 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
 import mongoose from "mongoose";
-import { setAdminSessionVerifierForTests } from "../middleware/RequireAdmin";
 
 jest.mock("@betstan/common", () => {
   const actual = jest.requireActual("@betstan/common");
@@ -24,10 +23,14 @@ jest.mock("@betstan/common", () => {
   class APublisher<T> {
     constructor(public connection: unknown) {}
     async init() {}
+    async initConfirmChannel() {}
     publish(_event: T) {}
+    async publishWithConfirm(_event: T) {}
   }
   APublisher.prototype.init = jest.fn(async () => {});
+  APublisher.prototype.initConfirmChannel = jest.fn(async () => {});
   APublisher.prototype.publish = jest.fn();
+  APublisher.prototype.publishWithConfirm = jest.fn(async () => {});
 
   return {
     ...actual,
@@ -42,8 +45,6 @@ jest.setTimeout(60000);
 let mongo: any;
 
 beforeAll(async () => {
-  process.env.JWT_KEY = "qwerty";
-
   mongo = await MongoMemoryServer.create();
   const mongoUri = mongo.getUri();
 
@@ -56,7 +57,6 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   jest.clearAllMocks();
-  setAdminSessionVerifierForTests(async () => 204);
   const collections = await mongoose.connection.db.collections();
 
   for (let collection of collections) {
