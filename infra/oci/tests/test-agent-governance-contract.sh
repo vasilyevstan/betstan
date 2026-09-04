@@ -7,6 +7,7 @@ INSTRUCTIONS="$ROOT_DIR/.github/copilot-instructions.md"
 README="$AGENT_DIR/README.md"
 SIMPLIFIER="$AGENT_DIR/betstan-simplifier.agent.md"
 CONDUCTOR="$AGENT_DIR/betstan-conductor.agent.md"
+PUBLIC_WIKI_EDITOR="$AGENT_DIR/betstan-public-wiki-editor.agent.md"
 FINAL_VALIDATOR="$AGENT_DIR/betstan-final-validator.agent.md"
 BRANCH_REVIEWER="$AGENT_DIR/betstan-branch-governance-reviewer.agent.md"
 ARCHITECT="$AGENT_DIR/betstan-architect.agent.md"
@@ -112,9 +113,10 @@ tokens = [
     "1. `betstan-architect`",
     "2. `betstan-simplifier`",
     "3. **Developer gate**",
-    "4. `betstan-validation-critic`",
-    "5. `betstan-test-engineer`",
-    "6. `betstan-final-validator`",
+    "4. `betstan-public-wiki-editor`",
+    "5. `betstan-validation-critic`",
+    "6. `betstan-test-engineer`",
+    "7. `betstan-final-validator`",
 ]
 positions = [text.find(token) for token in tokens]
 if any(position < 0 for position in positions) or positions != sorted(positions):
@@ -144,6 +146,18 @@ require_flat_literal "$README" \
   'Every authority-bearing unit is registered regardless of synchronous or background execution'
 require_flat_literal "$README" \
   'Every handoff preserves the original `root_task_authority_id`'
+require_flat_literal "$README" \
+  'Every change has `WIKI_UPDATE_READY` or a justified `WIKI_NO_PUBLIC_CHANGE`'
+[[ -f "$PUBLIC_WIKI_EDITOR" ]] || fail "public wiki editor agent is missing"
+for marker in \
+  'name: betstan-public-wiki-editor' \
+  'Every repository change receives a documentation-impact assessment' \
+  'WIKI_UPDATE_READY' \
+  'WIKI_NO_PUBLIC_CHANGE' \
+  'byte-identical publication' \
+  'Never publish credentials'; do
+  require_flat_literal "$PUBLIC_WIKI_EDITOR" "$marker"
+done
 require_flat_literal "$ARCHITECT" \
   'Source present in `common/` does not make an unpublished contract available to service images'
 require_flat_literal "$BACKEND_DEVELOPER" \
@@ -183,6 +197,7 @@ for marker in \
   'expected_base_sha: <full-sha-or-not-applicable>' \
   'expected_head_ref: <authoritative-remote-or-pr-ref-or-not-applicable>' \
   'expected_head_sha: <full-sha-or-not-applicable>' \
+  'required_commit_shas: [<full-sha>]' \
   'expected_merge_base_sha: <full-sha-or-not-applicable>' \
   'expected_tree_sha: <full-git-tree-sha-or-not-applicable>' \
   'changed_paths_sha256: <canonical-compare-manifest-sha256-or-not-applicable>' \
@@ -208,13 +223,17 @@ require_flat_literal "$CONDUCTOR" \
 require_flat_literal "$CONDUCTOR" \
   'Every downstream handoff carries the same `root_task_authority_id`'
 require_flat_literal "$CONDUCTOR" \
-  'it cannot redefine the repository, workspace, base, or head'
+  'it cannot redefine the repository, workspace, or required feature commits'
 require_flat_literal "$CONDUCTOR" \
-  'Before registration, the conductor derives repository identity, workspace, base, and head from the root authority'
+  'A release work unit may advance its expected head to a newer protected `master`'
+require_flat_literal "$CONDUCTOR" \
+  'Do not reserve a release SHA for one development session'
+require_flat_literal "$CONDUCTOR" \
+  'Before registration, the conductor derives repository identity, workspace, source refs, and required commits from the root authority'
 require_flat_literal "$CONDUCTOR" \
   'caller-supplied registration values are comparisons, never the source of truth'
 require_flat_literal "$CONDUCTOR" \
-  'Any handoff or registration that breaks root-authority continuity is `STALE_EVIDENCE`'
+  'Any handoff or registration that breaks root-authority continuity or drops a required commit is `STALE_EVIDENCE`'
 require_flat_literal "$CONDUCTOR" \
   '`repository_id` is the canonical GitHub `owner/repository`'
 require_flat_literal "$CONDUCTOR" \

@@ -11,6 +11,7 @@ import { Bet } from "../../model/Bet";
 import { LiveEventMirror } from "../../model/LiveEventMirror";
 import { Resulted } from "../../model/Resulted";
 import ModerationService, {
+  MAX_MARKET_HISTORY_VERSIONS_PER_MARKET,
   MAX_MARKET_HISTORY_WRITE_ATTEMPTS,
   ModerationPublisher,
 } from "../ModerationService";
@@ -374,9 +375,9 @@ it("bounds persisted market history to the most recent versions per market", asy
   const service = new ModerationService(createPublisher());
   const eventId = new mongoose.Types.ObjectId().toHexString();
   const marketId = `${eventId}:bounded`;
-  // One more than the documented worst-case per-marketId bound (100), so the
-  // oldest 10 entries must be pruned and only the most recent 100 remain.
-  const totalVersions = 110;
+  // Ten more than the documented worst-case per-marketId bound, so the
+  // oldest ten entries must be pruned.
+  const totalVersions = MAX_MARKET_HISTORY_VERSIONS_PER_MARKET + 10;
 
   for (let quoteVersion = 1; quoteVersion <= totalVersions; quoteVersion += 1) {
     await service.upsertLiveEventMirror(
@@ -400,10 +401,15 @@ it("bounds persisted market history to the most recent versions per market", asy
     (entry) => entry.marketId === marketId
   );
 
-  expect(historyForMarket).toHaveLength(100);
+  expect(historyForMarket).toHaveLength(
+    MAX_MARKET_HISTORY_VERSIONS_PER_MARKET
+  );
   expect(
     historyForMarket.map((entry) => entry.quoteVersion).sort((a, b) => a - b)
-  ).toEqual(Array.from({ length: 100 }, (_, index) => index + 11));
+  ).toEqual(Array.from(
+    { length: MAX_MARKET_HISTORY_VERSIONS_PER_MARKET },
+    (_, index) => index + 11
+  ));
 });
 
 it("an early quote submitted before expiry survives the full documented per-market history lineage bound", async () => {
@@ -430,7 +436,11 @@ it("an early quote submitted before expiry survives the full documented per-mark
 
   // Simulate repricing this same market up to (and including) the maximum
   // documented lineage length for a single marketId across an entire match.
-  for (let quoteVersion = 2; quoteVersion <= 100; quoteVersion += 1) {
+  for (
+    let quoteVersion = 2;
+    quoteVersion <= MAX_MARKET_HISTORY_VERSIONS_PER_MARKET;
+    quoteVersion += 1
+  ) {
     await service.upsertLiveEventMirror(
       createLiveUpdateEvent({
         eventId,
@@ -452,7 +462,9 @@ it("an early quote submitted before expiry survives the full documented per-mark
     (entry) => entry.marketId === marketId
   );
 
-  expect(historyForMarket).toHaveLength(100);
+  expect(historyForMarket).toHaveLength(
+    MAX_MARKET_HISTORY_VERSIONS_PER_MARKET
+  );
   expect(historyForMarket.some((entry) => entry.quoteVersion === 1)).toBe(true);
 
   const placeBet = createLivePlaceBetEvent(earlyQuote, {

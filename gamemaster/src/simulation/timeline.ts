@@ -479,6 +479,36 @@ export function generateTimeline(input: SimulateMatchInput): SimTimeline {
     secondStoppage,
     halfDurationMs
   );
+  addStandardIncidents(
+    drafts,
+    input.seed,
+    "throw-ins",
+    LiveIncidentType.THROW_IN,
+    eventCount(
+      config.rates.throwIns * scaled,
+      config.caps.throwIns,
+      createNamedRng(input.seed, "throw-ins.count")
+    ),
+    factors.homeAttackShare,
+    firstStoppage,
+    secondStoppage,
+    halfDurationMs
+  );
+  addStandardIncidents(
+    drafts,
+    input.seed,
+    "goal-kicks",
+    LiveIncidentType.GOAL_KICK,
+    eventCount(
+      config.rates.goalKicks * scaled * factors.attack,
+      config.caps.goalKicks,
+      createNamedRng(input.seed, "goal-kicks.count")
+    ),
+    1 - factors.homeAttackShare,
+    firstStoppage,
+    secondStoppage,
+    halfDurationMs
+  );
 
   const entries = sortTimelineEntries(
     drafts.map(({ draftOrder: _draftOrder, ...entry }) => ({

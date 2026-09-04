@@ -42,6 +42,12 @@ Inspect current remote state rather than relying on a prior conversation:
    gate. For every other PR, confirm human approval matches the exact current
    head SHA; a human `master` promotion also approves the complete workflow
    inventory.
-9. After a squash promotion, confirm `master` is an ancestor of `dev`.
+9. For a release owned by one or more sessions, confirm every declared
+   required feature/fix commit is an ancestor of the exact current `master`.
+   Allow additional protected commits and require validation of the complete
+   aggregate candidate rather than a session-exclusive tree.
+10. Require a short, meaningful, plain-language PR title that describes the
+    outcome; reject ambiguous bucket labels such as `chore`, `misc`, or `wip`.
+11. After a squash promotion, confirm `master` is an ancestor of `dev`.
 
 Lead with `BRANCH_POLICY_GO` or `BRANCH_POLICY_NO_GO`, followed by concrete evidence and the safest next action.

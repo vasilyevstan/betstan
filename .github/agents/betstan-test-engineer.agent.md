@@ -17,8 +17,8 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- acceptance criteria, developer and critic handoffs, applicable UX
-  specification and immutable-result review, and open findings;
+- acceptance criteria, developer, public-wiki, and critic handoffs, applicable
+  UX specification and immutable-result review, and open findings;
 - current branch, status, exact base/head SHA, and changed files;
 - affected package scripts, Jest config, test setup, lockfiles, client
   Playwright config, and relevant CI workflow.
@@ -93,6 +93,20 @@ only one market.
 Keep browser API fixtures faithful to concurrency contracts: include and
 rotate board revisions/fingerprints, reject mismatched placement
 confirmations, and require stale-quote reselection before resubmission.
+
+For rotating live-market changes, prove the maximum actionable count at every
+transition, deterministic slot replacement and version increments, settlement
+before reuse, restart replay from persisted transitions, and legacy engine
+version readability. Exercise every new incident-to-market trigger. For
+multi-option markets whose selections share a side, test one exact winner, one
+same-side loser, invalid-selection moderation without arbitrary side fallback,
+and label preservation across publisher, projection, history, click payload,
+and settled-bet display.
+
+For bounded production cleanup, cover identity mismatch, dependency blockers,
+dry-run immutability, exact apply, idempotent verification, tombstone
+validation, independently confirmed rollback, and evidence sanitization. Do
+not execute the production mutation as part of a test.
 
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.

@@ -340,15 +340,15 @@ it("retains full-time cumulative histories up to the terminal floor and marks on
   expect(completeLive.incidentHistoryComplete).toBe(true);
 
   await listener.onMessage(
-    buildLiveUpdate(130, {
+    buildLiveUpdate(260, {
       eventId: "full-time-truncated",
       minute: 90,
       phase: EventPhase.FULL_TIME,
       homeScore: 5,
       awayScore: 3,
       bettingStatus: BettingStatus.CLOSED,
-      incident: buildIncident(130),
-      incidents: buildIncidentsThrough(130),
+      incident: buildIncident(260),
+      incidents: buildIncidentsThrough(260),
       incidentsComplete: true,
       markets: [],
     }),
@@ -359,9 +359,9 @@ it("retains full-time cumulative histories up to the terminal floor and marks on
     eventId: "full-time-truncated",
   }).lean();
   const truncatedLive = truncatedEvent?.live as any;
-  expect(truncatedLive.incidentHistory).toHaveLength(128);
-  expect(truncatedLive.incidentHistory[0].id).toEqual("incident-3");
-  expect(truncatedLive.incidentHistory[127].id).toEqual("incident-130");
+  expect(truncatedLive.incidentHistory).toHaveLength(256);
+  expect(truncatedLive.incidentHistory[0].id).toEqual("incident-5");
+  expect(truncatedLive.incidentHistory[255].id).toEqual("incident-260");
   expect(truncatedLive.incidentHistoryComplete).toBeUndefined();
 
   await listener.onMessage(

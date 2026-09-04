@@ -31,6 +31,13 @@ when they do not apply.
 - UX specialist baseline status and final exact-head status/SHA:
 - Evidence used and unresolved uncertainty:
 
+## Public wiki
+
+- Documentation impact:
+- Canonical `docs/wiki/` pages updated, or exact no-public-change rationale:
+- Public-safety review:
+- Post-merge byte-identical publication owner/status:
+
 ## Validation
 
 <!-- List exact commands/checks and their outcomes. Do not write only "tests passed". -->

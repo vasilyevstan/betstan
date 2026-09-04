@@ -14,9 +14,10 @@ The fixed quality gates are:
 3. **Developer gate**: `betstan-backend-developer` and/or
    `betstan-frontend-developer` for application code, or the authorized
    infrastructure/governance implementation owner for its owned paths
-4. `betstan-validation-critic`
-5. `betstan-test-engineer`
-6. `betstan-final-validator`
+4. `betstan-public-wiki-editor`
+5. `betstan-validation-critic`
+6. `betstan-test-engineer`
+7. `betstan-final-validator`
 
 The conductor spans the workflow but is not a quality gate.
 `betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction
@@ -31,6 +32,8 @@ AKS or OCI operator.
 No agent status is permission to merge or deploy. Follow the exact-SHA approval
 mode in `CONTRIBUTING.md`: CLI-managed PRs may use the bounded automatic path,
 while every other PR requires approval bound to its current head SHA.
+Pull request titles use short plain-language outcomes; ambiguous prefixes such
+as `chore`, `misc`, or `wip` are not accepted.
 
 ## Work-unit taxonomy
 
@@ -39,8 +42,9 @@ while every other PR requires approval bound to its current head SHA.
 - The **developer gate** means the registered implementation owner with edit
   authority for the slice. It is not an exemption for non-application work:
   backend/frontend agents own application paths, deployment/runtime
-  specialists own their infrastructure paths, and the human/orchestrator owns
-  governance definitions and documentation.
+  specialists own their infrastructure paths, the public-wiki editor owns
+  canonical public documentation, and the human/orchestrator owns governance
+  definitions.
 - **Intra-gate work** stays under the same logical gate and `work_id`. The three
   simplifier passes, simplifier synthesis, and same-developer correction rounds
   are not additional quality-chain handoffs.
@@ -48,8 +52,12 @@ while every other PR requires approval bound to its current head SHA.
   it does not insert itself into the universal chain or issue a competing
   approval.
 - A **registered supporting unit** is an agent, local process, GitHub run,
-  protected approval, external wait, or terminal documentation task monitored
+  protected approval, external wait, or post-merge publication task monitored
   by the conductor.
+- The **public-wiki gate** assesses every change. It updates the canonical
+  public documentation whenever behavior, architecture, operations, UI,
+  quality, release, or agent responsibilities change; a no-change result
+  requires exact-diff evidence.
 
 Only a completed logical quality gate hands work to the exact next gate.
 Corrections return to the same agent conversation unless that owner has failed
@@ -171,10 +179,11 @@ treats that state as an active production incident and routes the exact runtime
 owner to restore service or complete the verified handoff before starting a
 replacement candidate.
 
-When durable learning was requested, activation is followed by a registered
-terminal documentation handoff. Orchestration is incomplete until the relevant
-Markdown, wiki, reusable agents, PR/release evidence, and todos are updated and
-validated.
+Every change includes the public-wiki gate before immutable review. After
+merge, a registered publication handoff publishes the canonical
+`docs/wiki/*.md` files byte-identically and verifies the public pages.
+Orchestration is incomplete until relevant Markdown, reusable agents,
+PR/release evidence, wiki publication, and todos are updated and validated.
 
 ## Three-model simplifier gate
 
@@ -224,6 +233,7 @@ validation.
 | `common/**` and backend service source/tests/manifests | `betstan-backend-developer` |
 | `client/src/**`, `client/public/**`, and client tests/config | `betstan-frontend-developer` |
 | `infra/**`, workflows, Dockerfiles, runtime proxy config | Existing deployment/runtime specialists |
+| `README.md`, `docs/wiki/**`, and public-documentation contract tests | `betstan-public-wiki-editor` |
 | `.github/agents/**`, skills, governance docs | Human/orchestrator acting as the developer-gate implementation owner; agents never edit their own definitions |
 
 Developers are file editors, not git actors. They never stage, commit, switch,
@@ -233,6 +243,8 @@ allowed only with disjoint ownership and a stable shared contract.
 ## Specialist routing
 
 - Active-work coordination: `betstan-conductor`
+- Public documentation assessment, canonical wiki updates, and publication
+  safety: `betstan-public-wiki-editor`
 - Every user-facing visual or interaction change, including hierarchy,
   cross-page consistency, accessibility, responsive density, state
   presentation, and interaction behavior: `betstan-ux-ui-expert`
@@ -259,7 +271,7 @@ paths, credentials, private identifiers, or production records in a handoff.
 handoff_id: <slice>-<from-agent>-<utc>
 slice_id: <stable-kebab-id>
 from_agent: betstan-backend-developer
-to_agent: betstan-validation-critic
+to_agent: betstan-public-wiki-editor
 status: IMPLEMENTED_LOCAL
 blocked_reason: null
 
@@ -272,6 +284,7 @@ baseline:
   branch: <branch>
   base_sha: <40-hex>
   head_sha: <40-hex-or-null>
+  required_commit_shas: []
   ancestry_verified: true
 
 ownership:
@@ -300,7 +313,7 @@ approvals: []
 orchestration:
   root_task_authority_id: <stable-root-authority-id>
   work_id: <stable-kebab-id>
-  logical_gate: <architect|simplifier|developer|critic|test|final-validator>
+  logical_gate: <architect|simplifier|developer|public-wiki|critic|test|final-validator>
   unit_class: <quality-gate|intra-gate|specialist|supporting>
   parent_work_id: <stable-kebab-id-or-null>
   owner: <single-owner>
@@ -323,7 +336,9 @@ Required invariants:
   interval, a recovery action, a stop condition, and required terminal
   evidence.
 - Every handoff preserves the original `root_task_authority_id`; it may narrow
-  scope but cannot redefine repository, workspace, base, or head.
+  scope but cannot redefine repository, workspace, or required feature
+  commits. A release head may advance only to protected current `master` after
+  ancestry and complete-candidate revalidation.
 - Every quality gate has one logical `work_id`, one exact next owner, and a
   bounded correction count.
 - Three simplifier pass records use distinct model families and one synthesized
@@ -335,6 +350,9 @@ Required invariants:
 - Every user-facing change has one exact-head `UX_REVIEW_PASSED` result whose
   consistency matrix names its stable references, required fixes, and accepted
   intentional exceptions.
+- Every change has `WIKI_UPDATE_READY` or a justified
+  `WIKI_NO_PUBLIC_CHANGE`; relevant canonical pages are included before the
+  critic reviews the immutable candidate.
 - `from_agent` never appears in `approvals`.
 - Feature flags remain dark until the approved activation gate.
 - Draft writes/deletes require owner, kind, status, and board-identity CAS;
@@ -356,6 +374,7 @@ Required invariants:
 | Architect | `ARCHITECTURE_READY`, `ARCHITECTURE_CHANGES_REQUIRED`, `DECISION_REQUIRED` |
 | UX/UI expert | `UX_SPEC_READY`, `UX_REVIEW_PASSED`, `UX_CHANGES_REQUIRED`, `UX_CLARIFICATION_NEEDED` |
 | Developer gate | `IMPLEMENTED_LOCAL`, `BLOCKED` |
+| Public wiki editor | `WIKI_UPDATE_READY`, `WIKI_NO_PUBLIC_CHANGE`, `WIKI_BLOCKED` |
 | Simplifier pass | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
 | Simplifier synthesis | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |
 | Validation critic | `APPROVE_SLICE`, `CHANGES_REQUIRED` |

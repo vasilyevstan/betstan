@@ -610,7 +610,7 @@ describe('Slip', () => {
       return Promise.reject(buildAxiosError({
         status: 409,
         data: {
-          message: 'This board changed before placement. Review the latest selections and try again.',
+          message: 'This slip changed before placement. Review the latest selections and try again.',
           slip: updatedLiveBoard,
           placement: {
             requestedPlacementAttemptId: 'placement-attempt-1',
@@ -644,7 +644,7 @@ describe('Slip', () => {
       placementAttemptId: 'placement-attempt-1',
     })));
     await waitFor(() => expect(within(liveSection()).getByText('Away')).toBeInTheDocument());
-    expect(within(liveSection()).getByText('This board changed before placement. Review the latest selections and try again.')).toBeInTheDocument();
+    expect(within(liveSection()).getByText('This slip changed before placement. Review the latest selections and try again.')).toBeInTheDocument();
     expect(screen.getByLabelText('Wager for LIVE SLIP')).toHaveValue(22);
     expect(within(liveSection()).getByRole('button', { name: 'BET!' })).toBeEnabled();
     expect(screen.getByLabelText('Wager for PRE-MATCH SLIP')).toHaveValue(11);
@@ -711,7 +711,7 @@ describe('Slip', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText('Build your live board')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Build your live slip')).toBeInTheDocument());
 
     await act(async () => {
       lateSubmit.resolve({ data: submittedLiveBoard });
@@ -719,7 +719,7 @@ describe('Slip', () => {
     });
     await flushAsync();
 
-    expect(screen.getByText('Build your live board')).toBeInTheDocument();
+    expect(screen.getByText('Build your live slip')).toBeInTheDocument();
     expect(screen.queryByText('Awaiting live moderation and approval…')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Wager for LIVE SLIP')).not.toBeInTheDocument();
     expect(onBoardSubmitted).not.toHaveBeenCalled();
@@ -764,7 +764,7 @@ describe('Slip', () => {
     });
 
     expect(axios.post).toHaveBeenCalledTimes(1);
-    expect(within(liveSection()).getByText('This slip changed after a previous placement attempt. Wait for the board to update before placing it again.')).toBeInTheDocument();
+    expect(within(liveSection()).getByText('This slip changed after a previous placement attempt. Wait for the slip to update before placing it again.')).toBeInTheDocument();
 
     fireEvent.change(liveWagerInput, { target: { value: '22' } });
     await act(async () => {
@@ -1013,7 +1013,7 @@ describe('Slip', () => {
 
     expect(screen.getByText('Declined: Quote changed')).toBeInTheDocument();
     expect(screen.getByLabelText('Wager for LIVE SLIP')).toBeEnabled();
-    expect(screen.queryByText('Build your live board')).not.toBeInTheDocument();
+    expect(screen.queryByText('Build your live slip')).not.toBeInTheDocument();
   });
 
   it('prefers authoritative replacement drafts over local submitted snapshots and keeps kinds independent', async () => {
@@ -1085,7 +1085,7 @@ describe('Slip', () => {
 
     await advanceTime(POLL_INTERVAL_MS);
 
-    await waitFor(() => expect(within(getLiveSection()).getByText('Build your live board')).toBeInTheDocument());
+    await waitFor(() => expect(within(getLiveSection()).getByText('Build your live slip')).toBeInTheDocument());
     expect(within(getLiveSection()).queryByText('Awaiting live moderation and approval…')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Wager for LIVE SLIP')).not.toBeInTheDocument();
 

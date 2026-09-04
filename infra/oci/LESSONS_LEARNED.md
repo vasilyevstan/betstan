@@ -564,6 +564,12 @@ conversation summaries are not authority.
   from the complete domain snapshot. Whenever UX changes which terminal states
   are rendered, update the production journey and its static contract test in
   the same change.
+- The rotating-market contract supersedes the fixed five-card in-play
+  contract for future releases. Acceptance must assert no more than six
+  non-terminal cards, select a lifecycle-stable market by explicit market type
+  rather than DOM index, and verify the complete market lineage from
+  authoritative snapshots rather than assuming every type is visible at
+  kickoff.
 - Sparse event sections need their own width invariant. Preserve the dense
   three/two/one-card grid, but let one desktop card use a bounded two-thirds row
   and two cards fill a balanced row. Stretch labelled odds buttons to the

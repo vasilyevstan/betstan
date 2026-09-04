@@ -115,6 +115,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   const isSelectable = isLiveMarketSelectable(event, market);
   const quoteValidLabel = formatQuoteValidity(market?.quoteValidUntil);
   const marketAvailability = getMarketAvailabilityLabel(event, market);
+  const isScoreMarket = market?.marketType === 'SECOND_HALF_SCORE';
 
   const handleSelection = async (selectionId) => {
     try {
@@ -131,11 +132,14 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
     }
   };
 
-  return <div className={`card event-market-card${isSelectable ? '' : ' event-market-card--inactive'} event-market-card--${uiVariant}`}>
+  return <div
+    className={`card event-market-card${isSelectable ? '' : ' event-market-card--inactive'}${isScoreMarket ? ' event-market-card--score' : ''} event-market-card--${uiVariant}`}
+    data-market-type={market.marketType}
+  >
     <div className="card-body">
       <div className="event-market-card__header">
         <div className="event-market-card__title">
-          <div className="fw-semibold">{formatLiveMarketType(market.marketType)}</div>
+          <div className="event-market-card__name fw-semibold">{formatLiveMarketType(market.marketType)}</div>
           <div className="event-market-meta">
             <span>Quote v{market.quoteVersion}</span>
             <span>{formatMarketStatus(market.status)}</span>
@@ -144,7 +148,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
         </div>
         <span className={`event-market-status event-market-status--${isSelectable ? 'open' : 'inactive'}`}>{marketAvailability}</span>
       </div>
-      <div className="event-market-buttons">
+      <div className={`event-market-buttons${isScoreMarket ? ' event-market-buttons--score' : ''}`}>
         {(market.selections ?? []).map((selection) => {
           const selectionKey = getLiveSelectionKey({
             eventId: event.eventId,
@@ -181,7 +185,9 @@ const LiveEventCard = ({ event, onSelectionPlaced, selectedSelectionKeys, uiVari
   // Terminal (SETTLED/CLOSED) markets are done and no longer worth a card; SUSPENDED, stale/
   // expired, missing-expiry, and unknown statuses stay visible (disabled, with an explanatory
   // label) exactly as before.
-  const liveMarkets = (event.live?.currentMarkets ?? []).filter((market) => !isTerminalMarketStatus(market?.status));
+  const liveMarkets = (event.live?.currentMarkets ?? [])
+    .filter((market) => !isTerminalMarketStatus(market?.status))
+    .slice(0, 6);
   const progressValue = getMatchProgressValue(event.live);
 
   return <article className="card event-card event-card--live event-card--active-live h-100" aria-label={event.name}>
@@ -264,6 +270,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
   const countdownLabel = remainingMs === null
     ? 'Kickoff time unavailable'
     : (remainingMs > 0 ? formatCountdownDuration(remainingMs) : 'Kickoff imminent');
+  const isUrgentCountdown = remainingMs !== null && remainingMs <= 60_000;
   const countdownMarkets = (event.live?.currentMarkets ?? [])
     .filter((market) => isCountdownMarketType(market?.marketType))
     .filter((market) => !isTerminalMarketStatus(market?.status));
@@ -282,7 +289,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
           </div>
           <div
             aria-label={`Kickoff countdown: ${countdownLabel}`}
-            className="event-countdown"
+            className={`event-countdown${isUrgentCountdown ? ' event-countdown--urgent' : ''}`}
             role="timer"
           >
             <span className="event-countdown__eyebrow">Kickoff in</span>
@@ -293,12 +300,7 @@ const CountdownEventCard = ({ event, now, onSelectionPlaced, selectedSelectionKe
 
       {preMatchProducts.length > 0 ? (
         <div className="event-card__section event-card__countdown-products">
-          <div className="event-card__section-header">
-            <div className="event-card__badges">
-              <span className="event-card__badge event-card__badge--prematch">PRE-MATCH</span>
-            </div>
-            <div className="event-card__section-title">Pre-match markets</div>
-          </div>
+          <div className="event-card__section-title">Pre-match markets</div>
           {/* Same ProductsList/click path as PreMatchEventCard: pre-match boards accept selections
               up to kickoff (enforced server-side by EventOddsClicked), independent of the new
               live-slip countdown markets below. */}

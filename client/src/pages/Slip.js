@@ -29,7 +29,7 @@ const getBoardPrompt = (betKind, currentUser) => {
   }
 
   return {
-    title: betKind === BET_KIND.LIVE ? 'Build your live board' : 'Build your pre-match board',
+    title: betKind === BET_KIND.LIVE ? 'Build your live slip' : 'Build your pre-match slip',
     body: betKind === BET_KIND.LIVE
       ? 'Choose an in-play market to keep live bets separate from pre-match picks.'
       : 'Pick pre-match odds from the events page to compose your slip.',
@@ -44,7 +44,7 @@ const getBoardStatusMessage = (betKind, boardState) => {
   if (boardState.targetedStatus === 'DECLINED') {
     return betKind === BET_KIND.LIVE
       ? 'Review declined. Syncing the latest live quote…'
-      : 'Review declined. Restoring the latest board…';
+      : 'Review declined. Restoring the latest slip…';
   }
 
   return betKind === BET_KIND.LIVE
@@ -228,7 +228,7 @@ const HandleSlip = ({ currentUser, onBoardSubmitted, onSelectionKeysChange, refr
           aria-labelledby={`loading-slip-board-${betKind}`}
         >
           <div id={`loading-slip-board-${betKind}`} className="slip-board__title">{getBoardTitle(betKind)}</div>
-          <div className="card card-body empty-state-card">Loading {getBetKindLabel(betKind).toLowerCase()} board…</div>
+          <div className="card card-body empty-state-card">Loading {getBetKindLabel(betKind).toLowerCase()} slip…</div>
         </section>
       ))}
     </div>;

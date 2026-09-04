@@ -94,6 +94,9 @@ const nextMarketCases = [
   LiveMarketType.NEXT_RED_CARD,
   LiveMarketType.NEXT_CORNER,
   LiveMarketType.NEXT_PENALTY,
+  "NEXT_THROW_IN" as LiveMarketType,
+  "NEXT_FREE_KICK" as LiveMarketType,
+  "NEXT_GOAL_KICK" as LiveMarketType,
 ].flatMap((marketType) => [
   {
     marketType,
@@ -398,6 +401,60 @@ it("first live loss immediately voids the remaining unsettled rows", async () =>
   expect(archivedBet!.rows.find((row: any) => row.id === pendingRow.id)!.result).toEqual(
     ResultingStatus.ROW_VOID
   );
+});
+
+it("uses exact selection identity for scoreline markets whose sides are all NONE", async () => {
+  const marketType = "SECOND_HALF_SCORE" as LiveMarketType;
+  const settlementReason = "SECOND_HALF_SCORE" as LiveSettlementReason;
+  const eventId = "second-half-event";
+  const marketId = `${eventId}:${marketType}`;
+  const losingRow = createLiveRow({
+    eventId,
+    marketId,
+    marketType,
+    side: TeamSide.NONE,
+    selectionId: `${marketId}:1:SCORE_1_0`,
+    oddsName: "1 - 0",
+  });
+  const winningRow = createLiveRow({
+    eventId,
+    marketId,
+    marketType,
+    side: TeamSide.NONE,
+    selectionId: `${marketId}:1:SCORE_0_0`,
+    oddsName: "0 - 0",
+  });
+  const losingBet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [losingRow],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const winningBet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [winningRow],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await createLiveListener();
+
+  await listener.onMessage(
+    settlementEventForRow(losingRow, {
+      settlementReason,
+      winningSide: TeamSide.NONE,
+      winningSelection: `${marketId}:1:SCORE_0_0`,
+    }),
+    createMessage()
+  );
+
+  const archivedLosingBet = await BetArchive.findOne({
+    slipId: losingBet.slipId,
+  });
+  const archivedWinningBet = await BetArchive.findOne({
+    slipId: winningBet.slipId,
+  });
+  expect(archivedLosingBet?.status).toEqual(ResultingStatus.BET_LOSS);
+  expect(archivedLosingBet?.rows[0].result).toEqual(ResultingStatus.ROW_LOSS);
+  expect(archivedWinningBet?.status).toEqual(ResultingStatus.BET_WIN);
+  expect(archivedWinningBet?.rows[0].result).toEqual(ResultingStatus.ROW_WIN);
 });
 
 it("settles multi-row live accumulators once every remaining row wins", async () => {

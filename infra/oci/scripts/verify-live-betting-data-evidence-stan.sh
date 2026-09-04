@@ -157,6 +157,7 @@ provenance_keys = {
     "status",
     "backfill_complete",
     "index_ready",
+    "obsolete_event_cleanup_complete",
     "maintenance_fence_enforced",
     "writers_quiesced",
     "runtime_held_for_deploy",
@@ -176,6 +177,8 @@ if provenance["backfill_complete"] not in {"true", "false"}:
     fail("backfill_complete is not boolean")
 if provenance["index_ready"] not in {"true", "false"}:
     fail("index_ready is not boolean")
+if provenance["obsolete_event_cleanup_complete"] not in {"true", "false"}:
+    fail("obsolete_event_cleanup_complete is not boolean")
 if not re.fullmatch(r"[0-9a-f]{64}", provenance["baseline_sha256"]):
     fail("baseline_sha256 is not a SHA-256 digest")
 for key in (
@@ -298,6 +301,8 @@ if resume_baseline_dir:
 if phase in {"apply-backfills", "apply-slip-index"}:
     if provenance["backfill_complete"] != "true":
         fail("mutating phase did not prove completed backfills")
+    if provenance["obsolete_event_cleanup_complete"] != "true":
+        fail("mutating phase did not prove obsolete event cleanup")
 if phase == "apply-slip-index" and provenance["index_ready"] != "true":
     fail("final phase did not prove the Slip index")
 if phase == "dry-run":
@@ -331,6 +336,7 @@ required_reports = {
             "event", "gamemaster", "moderation", "resulting", "bet", "slip"
         )),
         "reports/preflight-slip-index.json",
+        "reports/preflight-obsolete-event.json",
     },
     "apply-backfills": {
         *(f"reports/preflight-{service}.json" for service in (
@@ -344,6 +350,9 @@ required_reports = {
         )),
         "reports/preflight-slip-index.json",
         "reports/final-slip-index.json",
+        "reports/preflight-obsolete-event.json",
+        "reports/apply-obsolete-event.json",
+        "reports/verify-obsolete-event.json",
     },
     "apply-slip-index": {
         *(f"reports/preflight-{service}.json" for service in (
@@ -359,6 +368,7 @@ required_reports = {
         "reports/final-slip-index.json",
         "reports/apply-slip-index.json",
         "reports/verify-slip-index.json",
+        "reports/preflight-obsolete-event.json",
     },
 }[phase]
 if not required_reports.issubset(actual_files):
@@ -389,6 +399,36 @@ for relative in sorted(actual_files):
         fail(f"{relative} is not valid JSON: {exc}")
     inspect_json(payload)
 
+cleanup_reports = sorted(
+    relative
+    for relative in actual_files
+    if relative.endswith("-obsolete-event.json")
+)
+for relative in cleanup_reports:
+    cleanup = json.loads((root / relative).read_text(encoding="utf-8"))
+    if cleanup.get("kind") != "obsolete-event-cleanup":
+        fail(f"{relative} has an invalid cleanup kind")
+    if cleanup.get("targetEventId") != "6a623af592af5a95b1d0bb79":
+        fail(f"{relative} targets an unexpected event")
+    if cleanup.get("ready") is not True or cleanup.get("blockerCount") != 0:
+        fail(f"{relative} did not prove safe cleanup state")
+if phase == "apply-backfills":
+    for relative in (
+        "reports/apply-obsolete-event.json",
+        "reports/verify-obsolete-event.json",
+    ):
+        cleanup = json.loads((root / relative).read_text(encoding="utf-8"))
+        if cleanup.get("state") not in {"absent", "removed"}:
+            fail(f"{relative} did not prove completed cleanup")
+if phase == "apply-slip-index":
+    cleanup = json.loads(
+        (root / "reports/preflight-obsolete-event.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if cleanup.get("state") not in {"absent", "removed"}:
+        fail("final phase did not inherit completed obsolete event cleanup")
+
 journal = json.loads((root / "journal.json").read_text(encoding="utf-8"))
 for key, value in expected.items():
     if str(journal.get(key, "")) != value:
@@ -398,6 +438,7 @@ if journal.get("status") != "PASS":
 if journal.get("baseline_sha256") != provenance["baseline_sha256"]:
     fail("journal baseline digest differs from provenance")
 for key in (
+    "obsolete_event_cleanup_complete",
     "maintenance_fence_enforced",
     "writers_quiesced",
     "runtime_held_for_deploy",
@@ -420,6 +461,7 @@ if phase == "apply-slip-index":
         "data_run_attempt",
         "backfill_complete",
         "index_ready",
+        "obsolete_event_cleanup_complete",
         "maintenance_fence_enforced",
         "writers_quiesced",
         "runtime_held_for_deploy",
@@ -439,6 +481,7 @@ if phase == "apply-slip-index":
         "data_run_attempt": expected["workflow_run_attempt"],
         "backfill_complete": "true",
         "index_ready": "true",
+        "obsolete_event_cleanup_complete": "true",
         "maintenance_fence_enforced": "true",
         "writers_quiesced": "true",
         "runtime_held_for_deploy": "true",

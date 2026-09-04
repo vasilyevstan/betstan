@@ -350,6 +350,20 @@ cd resulting && npm ci && npm run test:ci
 
 - Never commit or push directly to `master`.
 - Normal work enters `dev`; production promotion is an up-to-date `dev`-to-`master` pull request.
+- Parallel sessions may merge compatible reviewed work independently. Record
+  each session's required feature/fix commits, prove they are ancestors of the
+  exact current `master`, and validate the complete aggregate candidate.
+  Additional protected commits are not blockers; if `master` advances,
+  supersede the stale release chain instead of resetting shared history or
+  deploying an older SHA. Keep production mutations serialized.
+- Every change receives a `betstan-public-wiki-editor` assessment. Relevant
+  canonical `docs/wiki/` pages change in the same PR, and merged pages are
+  published byte-identically after merge. Public content describes behavior
+  and safety invariants without private authority, infrastructure, user, or
+  recovery details.
+- PR titles are short plain-language outcomes, not ambiguous work buckets.
+  Merge safety rejects single-word or overlong titles and prefixes such as
+  `chore`, `misc`, and `wip`.
 - Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
 - The conductor owns every registered unit from before launch through terminal
@@ -964,3 +978,31 @@ validated.
   proves a CLI-owned automatic gate, run the checked-in approval path before
   retaining a watcher. A watcher transports notifications but never owns the
   pending mutation, and human-originated work remains personally gated.
+
+## Rotating live-market inventory — 2026-09-04
+
+- A visible-card limit is not an authoritative-data retention limit. Keep
+  settled and closed market versions in the snapshot for moderation,
+  settlement replay, and audit, while the client renders only the bounded
+  non-terminal set.
+- Rotation must be deterministic state, not UI sampling. Replace a
+  next-incident market only after settlement or explicit closure, increment
+  the market version when its type returns, and replay the persisted
+  transition list after restart.
+- Adding a high-frequency incident category must use its own named random
+  stream. Otherwise one new draw silently changes goals, cards, scores, and
+  every golden simulation generated from the same seed.
+- A side is not always a selection identity. Exact-score options can all be
+  neutral-sided, so moderation and resulting must prefer exact selection IDs
+  and may use side fallback only when it identifies one unique legacy option.
+- A denser market can use an authoritative per-selection display label
+  without changing wire identity. Preserve that optional label through
+  persistence, REST/SSE, click publication, slip snapshots, and history.
+- Bound retention from the configured worst case, not yesterday's average.
+  New incident caps and rotating quote versions require recalculating both
+  terminal incident history and moderation quote-history limits.
+- One-off production cleanup must not become a general delete API. Bind one
+  reviewed identity in code, scan every financial and settlement store,
+  quiesce writers under the shared operation lock, create a checksummed
+  canonical-EJSON tombstone before exact deletes, and require a distinct
+  confirmation to restore it.

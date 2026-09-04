@@ -36,9 +36,9 @@ const EMPTY_ERRORS = Object.freeze({
   [BET_KIND.LIVE]: null,
 });
 const RETRYABLE_PLACEMENT_ERROR = 'Placement status is still reconciling. Retry with the same wager and selections.';
-const CHANGED_PLACEMENT_ERROR = 'This slip changed after a previous placement attempt. Wait for the board to update before placing it again.';
-const RELOAD_REQUIRED_PLACEMENT_ERROR = 'This board changed before placement. Review the latest selections and try again.';
-const BOARD_CONFIRMATION_MISSING_ERROR = 'Board is refreshing. Wait for the latest selections before placing it again.';
+const CHANGED_PLACEMENT_ERROR = 'This slip changed after a previous placement attempt. Wait for the slip to update before placing it again.';
+const RELOAD_REQUIRED_PLACEMENT_ERROR = 'This slip changed before placement. Review the latest selections and try again.';
+const BOARD_CONFIRMATION_MISSING_ERROR = 'Slip is refreshing. Wait for the latest selections before placing it again.';
 
 const getBoardId = (board) => board?._id ?? board?.id ?? null;
 const getRowId = (row) => row?._id ?? row?.id ?? null;
@@ -684,7 +684,7 @@ const useSlipBoards = ({ currentUser, refreshSignal, onBoardSubmitted }) => {
     clearBoardError(betKind);
 
     if (!slipId) {
-      setBoardError(betKind, 'No board ready to submit');
+      setBoardError(betKind, 'No slip ready to submit');
       return;
     }
 

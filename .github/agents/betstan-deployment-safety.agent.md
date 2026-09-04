@@ -52,6 +52,18 @@ inactive. Fail closed when either query is incomplete or fails.
 - Commits and pushes to non-`master` branches do not deploy production.
 - Never commit or push directly to `master`, even with generic user approval.
 - Normal changes enter `dev`. Only an up-to-date pull request from `dev` may promote to `master`.
+- Multiple sessions may merge compatible reviewed work independently. A
+  promotion or deployment may contain several features: record each required
+  feature/fix commit, prove it is an ancestor of the exact current `master`,
+  and validate the complete aggregate candidate. Extra protected commits are
+  not a blocker and must not be removed to recreate a session-exclusive tree.
+- If `master` advances after an older candidate was selected, do not deploy the
+  stale SHA. Mark that chain superseded and adopt the new exact current-master
+  candidate when it still contains every required commit, then obtain fresh
+  candidate-wide build, data, rollback, and acceptance evidence.
+- Keep development, review, and merges concurrent where ownership is safe;
+  retain production-run exclusivity and the shared operation lock for
+  dispatches, data mutation, deployment, activation, rollback, and recovery.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Never add that label to an existing human PR.
 - Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.
@@ -140,6 +152,8 @@ inactive. Fail closed when either query is incomplete or fails.
   nonnegative integer count, an array of runs, exact count/list agreement, and
   no pagination overflow.
 - Keep changes on a focused branch and integrate them into `dev` before production promotion.
+- Require every PR title to be a short, understandable outcome. Reject
+  ambiguous category prefixes such as `chore`, `misc`, or `wip`.
 - After a squash promotion, immediately merge the new `master` commit back into `dev` and verify ancestry.
 - Do not amend, rewrite, reset, or force-push history unless explicitly requested.
 - Preserve unrelated tracked, untracked, and staged user work.
@@ -166,6 +180,9 @@ inactive. Fail closed when either query is incomplete or fails.
   and prove the run terminal before dispatching rollback; never bypass the
   exclusivity check or mutate a published version or dist-tag as a shortcut.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
+- Before promotion, require the public-wiki editor's exact-diff result and all
+  relevant canonical wiki updates. After merge, publication must be
+  byte-identical and public-safe before the release is reported complete.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - OCI application images are public GHCR only:
   `ghcr.io/vasilyevstan/betstan-images@sha256:...`. Require provider, host,
@@ -283,6 +300,9 @@ Before deployment:
   valid only for the documented CLI-managed allowlist, otherwise require
   explicit user approval;
 - confirm the production PR is an up-to-date `dev`-to-`master` promotion;
+- confirm every declared required feature/fix commit is an ancestor of the
+  exact current-master deployment SHA; additional protected commits are
+  allowed;
 - confirm the target branch/SHA and workflow provenance;
 - run `pre-commit-infra-check-stan.sh`;
 - validate manifest YAML offline;

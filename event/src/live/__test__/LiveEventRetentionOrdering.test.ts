@@ -34,6 +34,8 @@ afterEach(() => {
 //   4. The single currently-retained finished (FULL_TIME) event must keep
 //      showing in `listPublicEvents` regardless of how long ago its
 //      scheduled kickoff was, until it is actually retired (tombstoned).
+//   5. An accepted PRE_MATCH handoff also removes terminal or already-offline
+//      Event projections whose kickoff is more than seven days old.
 
 const buildMessage = (): ConsumeMessage => ({
   content: Buffer.alloc(5),
@@ -178,6 +180,49 @@ it("does not retire a retained finished event when a delayed, already-superseded
   expect(staleOlder?.live?.phase).toEqual(EventPhase.FIRST_HALF);
 });
 
+it("does not repeat retention cleanup for an equal-sequence PRE_MATCH redelivery", async () => {
+  const kickoffAt = "2030-01-10T12:00:00.000Z";
+  await Event.create([
+    {
+      eventId: "duplicate-countdown",
+      name: "Duplicate Countdown",
+      time: new Date(kickoffAt),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+      live: {
+        sequence: 0,
+        occurredAt: kickoffAt,
+        kickoffAt,
+        minute: 0,
+        phase: EventPhase.PRE_MATCH,
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    },
+    {
+      eventId: "expired-after-first-delivery",
+      name: "Expired After First Delivery",
+      time: new Date("2030-01-01T12:00:00.000Z"),
+      status: EventStatus.RESULTED,
+      visibility: EventVisibility.OFFLINE,
+      products: [],
+    },
+  ]);
+
+  const result = await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate("duplicate-countdown", kickoffAt, 0)
+  );
+
+  expect(result).toBeNull();
+  expect(
+    await Event.exists({ eventId: "expired-after-first-delivery" })
+  ).not.toBeNull();
+});
+
 it("only retires events strictly older (by scheduled kickoff time) than the event whose accepted PRE_MATCH snapshot just landed", async () => {
   // A currently-retained finished event scheduled *after* the incoming
   // event's own kickoff -- it must never be retired by an
@@ -226,6 +271,118 @@ it("only retires events strictly older (by scheduled kickoff time) than the even
   }).lean();
   expect(retainedLater?.visibility).toEqual(EventVisibility.ONLINE);
   expect(retainedLater?.liveRetiredAt ?? null).toBeNull();
+});
+
+it("removes only terminal or offline event projections older than seven days during an accepted PRE_MATCH handoff", async () => {
+  const referenceKickoff = "2030-01-10T12:00:00.000Z";
+  await Event.create([
+    {
+      eventId: "expired-offline",
+      name: "Expired Offline",
+      time: new Date("2030-01-02T11:59:59.000Z"),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.OFFLINE,
+      products: [],
+    },
+    {
+      eventId: "expired-resulted",
+      name: "Expired Resulted",
+      time: new Date("2030-01-03T11:59:59.000Z"),
+      status: EventStatus.RESULTED,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+    },
+    {
+      eventId: "expired-active-anomaly",
+      name: "Expired Active Anomaly",
+      time: new Date("2030-01-01T12:00:00.000Z"),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+      live: {
+        sequence: 5,
+        occurredAt: "2030-01-01T12:12:00.000Z",
+        kickoffAt: "2030-01-01T12:00:00.000Z",
+        minute: 12,
+        phase: EventPhase.FIRST_HALF,
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    },
+    {
+      eventId: "fresh-offline",
+      name: "Fresh Offline",
+      time: new Date("2030-01-04T12:00:00.000Z"),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.OFFLINE,
+      products: [],
+    },
+    {
+      eventId: "retention-trigger",
+      name: "Retention Trigger",
+      time: new Date(referenceKickoff),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+    },
+  ]);
+
+  await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate("retention-trigger", referenceKickoff, 0)
+  );
+
+  expect(await Event.findOne({ eventId: "expired-offline" })).toBeNull();
+  expect(await Event.findOne({ eventId: "expired-resulted" })).toBeNull();
+  expect(await Event.findOne({ eventId: "expired-active-anomaly" })).not.toBeNull();
+  expect(await Event.findOne({ eventId: "fresh-offline" })).not.toBeNull();
+  expect(await Event.findOne({ eventId: "retention-trigger" })).not.toBeNull();
+});
+
+it("does not run the seven-day cleanup for a stale rejected PRE_MATCH update", async () => {
+  await Event.create([
+    {
+      eventId: "expired-but-not-cleaned",
+      name: "Expired But Not Cleaned",
+      time: new Date("2030-01-01T00:00:00.000Z"),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.OFFLINE,
+      products: [],
+    },
+    {
+      eventId: "stale-retention-trigger",
+      name: "Stale Retention Trigger",
+      time: new Date("2030-01-10T12:00:00.000Z"),
+      status: EventStatus.NO_RESULT,
+      visibility: EventVisibility.ONLINE,
+      products: [],
+      live: {
+        sequence: 1,
+        occurredAt: "2030-01-10T11:51:00.000Z",
+        kickoffAt: "2030-01-10T12:00:00.000Z",
+        minute: 0,
+        phase: EventPhase.PRE_MATCH,
+        homeScore: 0,
+        awayScore: 0,
+        bettingStatus: BettingStatus.OPEN,
+        incidentHistory: [],
+        currentMarkets: [],
+      },
+    },
+  ]);
+
+  const result = await applyLiveEventUpdate(
+    buildPreMatchLiveUpdate(
+      "stale-retention-trigger",
+      "2030-01-10T12:00:00.000Z",
+      0
+    )
+  );
+
+  expect(result).toBeNull();
+  expect(await Event.findOne({ eventId: "expired-but-not-cleaned" })).not.toBeNull();
 });
 
 it("keeps a terminal result hidden through delayed non-FULL_TIME updates and restores only its FULL_TIME projection", async () => {
@@ -787,7 +944,7 @@ it("keeps a retained finished event visible past the kickoff-time history bound 
   );
 });
 
-it("keeps an intentionally retired (tombstoned) event hidden even when a late duplicate update for it is accepted", async () => {
+it("keeps an intentionally retired event hidden when a late duplicate update is rejected", async () => {
   await Event.create({
     eventId: "retired-event",
     name: "Retired Event",
@@ -830,8 +987,7 @@ it("keeps an intentionally retired (tombstoned) event hidden even when a late du
   expect(retiredAfterHandoff?.liveRetiredAt).toBeTruthy();
 
   // A late duplicate re-delivery of the retired event's own final
-  // sequence is idempotent/accepted (its stored sequence already equals
-  // the incoming one), but must not resurrect it.
+  // sequence is rejected by the sequence gate and must not resurrect it.
   const lateDuplicate = await applyLiveEventUpdate({
     timestamp: new Date().toISOString(),
     data: {
@@ -852,7 +1008,7 @@ it("keeps an intentionally retired (tombstoned) event hidden even when a late du
     },
   } as unknown as ILiveEventUpdateEvent);
 
-  expect(lateDuplicate?.visibility).toEqual(EventVisibility.OFFLINE);
+  expect(lateDuplicate).toBeNull();
 
   const stillRetired = await Event.findOne({ eventId: "retired-event" }).lean();
   expect(stillRetired?.visibility).toEqual(EventVisibility.OFFLINE);

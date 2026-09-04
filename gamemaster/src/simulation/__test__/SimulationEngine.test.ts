@@ -27,6 +27,9 @@ const NEXT_MARKET_TYPES: LiveMarketType[] = [
   LiveMarketType.NEXT_RED_CARD,
   LiveMarketType.NEXT_CORNER,
   LiveMarketType.NEXT_PENALTY,
+  LiveMarketType.NEXT_THROW_IN,
+  LiveMarketType.NEXT_FREE_KICK,
+  LiveMarketType.NEXT_GOAL_KICK,
 ];
 
 function digest(value: unknown): string {
@@ -147,8 +150,8 @@ describe("simulation timeline", () => {
     const different = simulateMatch({ eventId: "determinism", seed: "golden-8" });
     expect(first).toEqual(second);
     expect(first).not.toEqual(different);
-    expect(first.engineVersion).toBe(1);
-    expect(digest(first)).toBe("7c1a4e3c43634c6e745c596c5890ff1754571be8bad4efd30d1b9475bf99aa7c");
+    expect(first.engineVersion).toBe(2);
+    expect(digest(first)).toBe("845b8858e73555e0b7eaafabcc5fabc5d920707e79019dc0cb59be23c49bd3ed");
   });
 
   it("has exact structural anchors and ordered structural ties", () => {
@@ -194,7 +197,16 @@ describe("simulation timeline", () => {
   });
 
   it("satisfies calibration, cap, phase, and rare-event corpus expectations", () => {
-    const totals = { goals: 0, yellows: 0, reds: 0, corners: 0, penalties: 0, freeKicks: 0 };
+    const totals = {
+      goals: 0,
+      yellows: 0,
+      reds: 0,
+      corners: 0,
+      penalties: 0,
+      freeKicks: 0,
+      throwIns: 0,
+      goalKicks: 0,
+    };
     let firstHalfNormalIncidents = 0;
     let secondHalfNormalIncidents = 0;
     let stoppageNormalIncidents = 0;
@@ -221,6 +233,8 @@ describe("simulation timeline", () => {
       totals.corners += types.filter((type) => type === LiveIncidentType.CORNER).length;
       totals.penalties += types.filter((type) => type === LiveIncidentType.PENALTY_AWARDED).length;
       totals.freeKicks += types.filter((type) => type === LiveIncidentType.FREE_KICK).length;
+      totals.throwIns += types.filter((type) => type === LiveIncidentType.THROW_IN).length;
+      totals.goalKicks += types.filter((type) => type === LiveIncidentType.GOAL_KICK).length;
       firstHalfNormalIncidents += result.transitions.filter(
         (transition) =>
           transition.phase === EventPhase.FIRST_HALF
@@ -269,6 +283,10 @@ describe("simulation timeline", () => {
     expect(means.penalties).toBeLessThan(0.45);
     expect(means.freeKicks).toBeGreaterThan(6.3);
     expect(means.freeKicks).toBeLessThan(9.7);
+    expect(means.throwIns).toBeGreaterThan(34);
+    expect(means.throwIns).toBeLessThan(42);
+    expect(means.goalKicks).toBeGreaterThan(13);
+    expect(means.goalKicks).toBeLessThan(19);
     expect(firstHalfNormalIncidents).toBeGreaterThan(0);
     expect(secondHalfNormalIncidents).toBeGreaterThan(0);
     expect(stoppageNormalIncidents).toBeLessThan(
@@ -343,7 +361,9 @@ describe("simulation timeline", () => {
         (transition) => transition.incident.type === LiveIncidentType.FULL_TIME
       )!;
       sawClosedNextMarket = sawClosedNextMarket || fullTime.markets.some(
-        (market) => market.status === LiveMarketStatus.CLOSED
+        (market) =>
+          NEXT_MARKET_TYPES.includes(market.marketType)
+          && market.status === LiveMarketStatus.SETTLED
       );
       sawFullTimeNone = sawFullTimeNone || fullTime.settlements.some(
         (settlement) =>
@@ -357,73 +377,71 @@ describe("simulation timeline", () => {
 });
 
 describe("market projection", () => {
-  it("settles triggers, phases, versions, and same-offset goals correctly", () => {
+  it("rotates products after settlement and never exposes more than six actionable markets", () => {
     const transitions = projectTransitions(marketTimeline());
     const byType = (type: LiveIncidentType) =>
       transitions.find((transition) => transition.incident.type === type)!;
+    const actionable = (transition: (typeof transitions)[number]) =>
+      transition.markets.filter((market) =>
+        market.status === LiveMarketStatus.OPEN
+        || market.status === LiveMarketStatus.SUSPENDED
+      );
     const yellow = byType(LiveIncidentType.YELLOW_CARD);
     const red = byType(LiveIncidentType.RED_CARD);
     const corner = byType(LiveIncidentType.CORNER);
     const award = byType(LiveIncidentType.PENALTY_AWARDED);
     const outcome = byType(LiveIncidentType.PENALTY_SCORED);
     expect(yellow.settlements[0].marketId).toBe("market-event:NEXT_YELLOW_CARD");
-    expect(red.settlements[0].marketId).toBe("market-event:NEXT_RED_CARD");
-    expect(red.settlements).toHaveLength(1);
+    expect(red.settlements).toHaveLength(0);
     expect(corner.settlements[0].marketId).toBe("market-event:NEXT_CORNER");
     expect(award.settlements[0].marketId).toBe("market-event:NEXT_PENALTY");
     expect(outcome.settlements).toEqual([]);
+    expect(transitions.every((transition) => actionable(transition).length <= 6)).toBe(true);
     expect(yellow.markets.find((market) =>
-      market.marketType === LiveMarketType.NEXT_YELLOW_CARD
-    )?.marketVersion).toBe(2);
-    expect(red.markets.find((market) =>
-      market.marketType === LiveMarketType.NEXT_YELLOW_CARD
-    )?.marketVersion).toBe(2);
-    const secondYellow = transitions
-      .filter((transition) => transition.incident.type === LiveIncidentType.YELLOW_CARD)
-      .pop()!;
-    expect(secondYellow.markets.find((market) =>
-      market.marketType === LiveMarketType.NEXT_YELLOW_CARD
-    )?.marketVersion).toBe(3);
+      market.marketType === LiveMarketType.NEXT_GOAL_KICK
+    )?.status).toBe(LiveMarketStatus.OPEN);
+    expect(corner.markets.find((market) =>
+      market.marketType === LiveMarketType.NEXT_PENALTY
+    )?.status).toBe(LiveMarketStatus.OPEN);
+    expect(award.markets.find((market) =>
+      market.marketType === LiveMarketType.NEXT_RED_CARD
+    )?.status).toBe(LiveMarketStatus.OPEN);
 
     const halfTime = byType(LiveIncidentType.HALF_TIME);
     const secondKick = byType(LiveIncidentType.SECOND_HALF_KICK_OFF);
-    const beforeHalfTime = transitions[transitions.indexOf(halfTime) - 1];
     expect(halfTime.settlements[0]).toMatchObject({
       settlementReason: LiveSettlementReason.HALF_TIME,
       winningSide: "HOME",
     });
-    expect(halfTime.markets.filter((market) =>
-      NEXT_MARKET_TYPES.includes(market.marketType)
-    ).every((market) => market.status === LiveMarketStatus.SUSPENDED)).toBe(true);
-    expect(secondKick.markets.filter((market) =>
-      NEXT_MARKET_TYPES.includes(market.marketType)
-    ).every((market) => market.status === LiveMarketStatus.OPEN)).toBe(true);
-    expect(halfTime.markets.filter((market) =>
-      NEXT_MARKET_TYPES.includes(market.marketType)
-    ).map((market) => market.quoteVersion)).toEqual(
-      beforeHalfTime.markets.filter((market) =>
-        NEXT_MARKET_TYPES.includes(market.marketType)
-      ).map((market) => market.quoteVersion)
-    );
-    expect(secondKick.markets.some((market, index) =>
-      NEXT_MARKET_TYPES.includes(market.marketType)
-      && market.quoteVersion
-        > halfTime.markets[index].quoteVersion
+    expect(actionable(halfTime).every(
+      (market) => market.status === LiveMarketStatus.SUSPENDED
     )).toBe(true);
+    expect(halfTime.markets.find((market) =>
+      market.marketType === LiveMarketType.SECOND_HALF_SCORE
+    )?.status).toBe(LiveMarketStatus.SUSPENDED);
+    expect(actionable(secondKick)).toHaveLength(6);
+    expect(actionable(secondKick).every(
+      (market) => market.status === LiveMarketStatus.OPEN
+    )).toBe(true);
+    expect(secondKick.markets.find((market) =>
+      market.marketType === LiveMarketType.SECOND_HALF_SCORE
+    )?.status).toBe(LiveMarketStatus.CLOSED);
 
     const fullTime = byType(LiveIncidentType.FULL_TIME);
-    expect(fullTime.settlements).toHaveLength(4);
-    expect(fullTime.settlements.every((settlement) =>
+    expect(fullTime.settlements.filter((settlement) =>
       settlement.settlementReason === LiveSettlementReason.FULL_TIME_NONE
-      && settlement.winningSide === "NONE"
-    )).toBe(true);
+    )).toHaveLength(6);
+    expect(fullTime.settlements).toContainEqual(expect.objectContaining({
+      settlementReason: LiveSettlementReason.SECOND_HALF_SCORE,
+      winningSelection: "market-event:SECOND_HALF_SCORE:1:SCORE_0_0",
+    }));
     const outcomeIndex = transitions.indexOf(outcome);
     expect(outcome.markets.map((market) => market.quoteVersion)).toEqual(
       transitions[outcomeIndex - 1].markets.map((market) => market.quoteVersion)
     );
   });
 
-  it("closes exhausted next-event markets without inventing doomed none-only versions", () => {
+  it("leaves exhausted next-event versions settled without inventing doomed replacements", () => {
     const timeline = cappedYellowTimeline();
     const transitions = projectTransitions(timeline);
     const byType = (type: LiveIncidentType) =>
@@ -434,30 +452,57 @@ describe("market projection", () => {
       )!;
 
     expect(nextYellowStatus(LiveIncidentType.YELLOW_CARD)).toMatchObject({
-      marketVersion: 2,
-      quoteVersion: 1,
-      status: LiveMarketStatus.CLOSED,
+      marketVersion: 1,
+      status: LiveMarketStatus.SETTLED,
     });
     expect(nextYellowStatus(LiveIncidentType.HALF_TIME).status).toBe(
-      LiveMarketStatus.CLOSED
+      LiveMarketStatus.SETTLED
     );
     expect(
       nextYellowStatus(LiveIncidentType.SECOND_HALF_KICK_OFF).status
-    ).toBe(LiveMarketStatus.CLOSED);
+    ).toBe(LiveMarketStatus.SETTLED);
     expect(nextYellowStatus(LiveIncidentType.FULL_TIME).status).toBe(
-      LiveMarketStatus.CLOSED
+      LiveMarketStatus.SETTLED
     );
 
     const fullTime = byType(LiveIncidentType.FULL_TIME);
-    expect(fullTime.settlements.map((settlement) => settlement.marketId).sort()).toEqual([
-      "market-event:NEXT_CORNER",
-      "market-event:NEXT_PENALTY",
-      "market-event:NEXT_RED_CARD",
-    ]);
-    expect(fullTime.settlements.every((settlement) =>
+    expect(fullTime.settlements).not.toContainEqual(expect.objectContaining({
+      marketId: "market-event:NEXT_YELLOW_CARD",
+    }));
+    expect(fullTime.settlements.filter((settlement) =>
       settlement.settlementReason === LiveSettlementReason.FULL_TIME_NONE
-      && settlement.winningSide === "NONE"
-    )).toBe(true);
+    ).every((settlement) => settlement.winningSide === "NONE")).toBe(true);
+  });
+
+  it("settles Second Half Score from goals after half-time, including Other", () => {
+    const exact = marketTimeline();
+    exact.entries.push(
+      entry(20, 35000, LiveIncidentType.GOAL, EventPhase.SECOND_HALF, 55, "HOME"),
+      entry(21, 45000, LiveIncidentType.GOAL, EventPhase.SECOND_HALF, 70, "AWAY")
+    );
+    const exactSettlement = projectTransitions(exact)
+      .find((transition) => transition.incident.type === LiveIncidentType.FULL_TIME)!
+      .settlements.find((settlement) =>
+        settlement.settlementReason === LiveSettlementReason.SECOND_HALF_SCORE
+      )!;
+    expect(exactSettlement.winningSelection).toBe(
+      "market-event:SECOND_HALF_SCORE:1:SCORE_1_1"
+    );
+
+    const other = marketTimeline();
+    other.entries.push(
+      entry(20, 34000, LiveIncidentType.GOAL, EventPhase.SECOND_HALF, 53, "HOME"),
+      entry(21, 41000, LiveIncidentType.GOAL, EventPhase.SECOND_HALF, 63, "HOME"),
+      entry(22, 50000, LiveIncidentType.GOAL, EventPhase.SECOND_HALF, 78, "HOME")
+    );
+    const otherSettlement = projectTransitions(other)
+      .find((transition) => transition.incident.type === LiveIncidentType.FULL_TIME)!
+      .settlements.find((settlement) =>
+        settlement.settlementReason === LiveSettlementReason.SECOND_HALF_SCORE
+      )!;
+    expect(otherSettlement.winningSelection).toBe(
+      "market-event:SECOND_HALF_SCORE:1:OTHER"
+    );
   });
 
   it("settles the half-time market to home, draw, and away", () => {
@@ -554,7 +599,7 @@ describe("simulation invariant failures", () => {
       LiveIncidentType.SECOND_HALF_KICK_OFF,
       LiveIncidentType.FULL_TIME,
     ];
-    expectInvalid((result) => { result.engineVersion = 2 as 1; });
+    expectInvalid((result) => { result.engineVersion = 1; });
     expectInvalid((result) => { result.timeline.durationMs += 1; });
     expectInvalid((result) => { result.timeline.entries.pop(); });
     expectInvalid((result) => {

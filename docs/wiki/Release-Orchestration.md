@@ -1,163 +1,246 @@
 # Release Orchestration
 
-## Normal path
+## Release principles
 
-1. Focused branch to `dev`.
-2. Up-to-date `dev` promotion to `master`.
-3. Synchronize the resulting master merge back into `dev`.
-4. Build immutable exact-SHA images.
-5. Validate GHCR, capacity, and infrastructure evidence.
-6. Produce a new exact-SHA final data handoff for every deployment.
-   Application or schema changes run dry-run, backfill, and final index in
-   order. Only the workflow's validated GitHub/infra/docs-only resume may
-   reuse an already applied chain.
-7. Deploy immediately from the final handoff.
-8. Activate through a bounded lease and commit permanent enablement only after
-   complete acceptance.
+BetStan releases are built around one rule: every review, build, deployment,
+activation, and rollback decision must resolve to an exact immutable source
+and artifact identity.
 
-Never rerun a failed run when downstream evidence requires
-`run_attempt == 1`. Preserve it and create a fresh exact candidate or dispatch
-as allowed by the owning workflow.
+Production is never updated directly from a developer worktree, a mutable
+image tag, a stale branch name, or an unverified workflow rerun.
+
+## Branch flow
+
+1. Create a focused feature, fix, operations, or documentation branch.
+2. Open a pull request to `dev`.
+3. Pass the exact-head and merge-snapshot quality gates.
+4. Merge the focused change into `dev`.
+5. Promote an up-to-date `dev` to `master` through a separate pull request.
+6. Synchronize the resulting `master` ancestry back into `dev`.
+
+Direct pushes to `dev` or `master` are not part of the supported flow. Only
+`dev` may be promoted to `master`.
+
+### Concurrent feature delivery
+
+Several development sessions may prepare and merge compatible features at the
+same time. A production promotion may therefore contain more than one reviewed
+feature. The release contract is inclusion-based rather than
+session-exclusive:
+
+1. each session records the protected commit or commits required for its
+   outcome;
+2. the release selects the exact current `master` SHA;
+3. every required commit must be an ancestor of that SHA;
+4. the complete aggregate SHA receives fresh build, data, rollback, and
+   acceptance evidence.
+
+Additional protected commits are not a reason to reset `master`, discard
+another session's work, or deploy an older candidate. If `master` advances
+during a release chain, the older chain is superseded and the new current
+candidate is used when it still contains all required commits.
+
+Development, review, and branch integration can remain concurrent. Production
+dispatches, data changes, deployments, activation, rollback, and recovery stay
+serialized so two sessions cannot mutate the live system at the same time.
+
+## End-to-end release structure
+
+```mermaid
+flowchart LR
+    Branch["Focused branch"] --> DevPR["PR to dev"]
+    DevPR --> DevChecks["Architecture, review,<br/>tests, and trusted CI"]
+    DevChecks --> Dev["dev"]
+    Dev --> Wiki["Canonical public wiki<br/>updated in the PR"]
+    Wiki --> Promote["dev to master PR"]
+    Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
+    MergeChecks --> Master["master"]
+    Master --> Build["Exact-SHA builds"]
+    Build --> Registry["Immutable GHCR digests"]
+    Registry --> Infra["Infrastructure and<br/>data readiness"]
+    Infra --> Deploy["Protected deployment"]
+    Deploy --> Dark["Dark validation"]
+    Dark --> Activate["Bounded activation"]
+    Activate --> Accept["Production acceptance"]
+    Accept --> Commit["Permanent enablement"]
+    Master --> Sync["Synchronize ancestry<br/>back to dev"]
+```
+
+Documentation-only changes use the same reviewed branch and promotion model.
+They do not require a runtime deployment when no runtime artifact changed.
+
+## Pull-request evidence
+
+Every pull request records:
+
+- a short plain-language title that describes the outcome rather than an
+  ambiguous category such as `chore`, `misc`, or `wip`;
+- why the change exists;
+- exact base and head identity;
+- scope and explicit exclusions;
+- compatibility and migration effects;
+- user-facing consistency impact;
+- commands and results;
+- release and rollback impact;
+- unresolved exceptions or remaining work.
+
+Metadata is part of the reviewed evidence. It is completed before the release
+critical path rather than repeatedly edited while production work is active.
 
 ## Quality chain
 
-The universal quality gates are architect, three-model simplifier synthesis,
-developer, critic, test engineer, and final validator. The conductor spans that
-chain but is not a quality gate. Model passes and same-agent corrections are
-intra-gate work. UX and other specialists are conditional evidence providers,
-but `betstan-ux-ui-expert` is mandatory for every user-facing visual or
-interaction change. Register one two-phase UX work unit: establish the named
-consistency baseline before implementation, then review the immutable exact
-head in the same agent context. GitHub runs, approvals, external waits, and
-durable documentation are monitored supporting units.
+The universal quality gates are:
 
-Three independent simplifier passes use distinct model families and high
-reasoning. One xhigh synthesis produces the only developer-gate handoff. Fewer
-than three eligible completed passes blocks the gate, and unresolved material
-disagreement is reported rather than averaged away.
+1. architect;
+2. three-model simplifier synthesis;
+3. registered implementation owner;
+4. public-wiki editor;
+5. validation critic;
+6. test engineer;
+7. final validator.
 
-## Conductor rules
+The conductor spans the chain but is not a quality gate.
+`betstan-ux-ui-expert` is mandatory for every user-facing visual or
+interaction change. Other specialists join when their explicit trigger
+applies.
 
-- Register every agent, local process, workflow, approval, and handoff with one
-  owner, an objective, progress signal, checkpoint, recovery action, and stop
-  condition.
-- Tool calls, logs, and a running watcher are activity, not deliverable
-  progress. Agents have a separate first-response deadline.
-- A status request is an immediate checkpoint. Inspect exact jobs and
-  `pending_deployments`, not only top-level run status.
-- Before declaring an executing GitHub job stalled, compare its current step
-  and elapsed time with recent successful runs of the same workflow and job on
-  a comparable runner. A much faster local run is not a CI baseline.
-- One missed checkpoint triggers bounded recovery. Two misses require an
-  explicit safe action; do not duplicate mutation-capable work.
-- Keep corrections in the same agent context with a bounded attempt count.
-  A completed gate without acknowledgement from its exact next owner is a
-  stall.
-- Revalidate late specialist findings against the current SHA, workflow tree,
-  and runtime topology.
-- When production is the explicit priority, freeze unrelated metadata and
-  documentation until the terminal gate.
-- If durable learning was requested, activation is followed by a required
-  documentation/wiki/agent handoff before task completion.
+No agent may approve its own implementation, and no agent verdict replaces
+GitHub branch protection or protected-environment approval.
 
-## GitHub-specific failure prevention
+## Approval model
 
-- PR title/body edits trigger protected CI through `pull_request.edited`.
-  Never perform them during production exclusivity or the data-to-deploy
-  handoff. Derive the exact head SHA programmatically and prefer one complete
-  metadata edit over repeated corrections that start duplicate runs.
-- A workflow dispatch URL means the event was accepted; it does not mean a job
-  exists. Keep a manually enabled workflow active until the exact run has a job
-  and expected protected gate, then disable before approval.
-- Capture the run ID through the durable dispatcher intent. If a local process
-  fails after the URL is captured, recover that exact run instead of retrying.
-- A terminal record with zero jobs and zero pending deployments is not release
-  authority; only exact persisted retirement permits replacement.
-- Query upstream artifact names instead of guessing them in a mutation
-  preflight.
+Approval is classified by origin:
 
-## CLI protected-operation authority
+- a Copilot CLI-created and CLI-owned pull request may use the bounded
+  no-personal-prompt path after every technical, lineage, review, and
+  exclusivity check passes;
+- a human-originated pull request or protected operation remains personally
+  approved;
+- neither path can skip required tests, exact-SHA provenance, environment
+  controls, rollback readiness, or post-deployment validation.
 
-- Classify protected approval by origin, not operation type. Every direct
-  Copilot CLI dispatch uses `copilot-cli-dispatch-stan.sh`; a direct human
-  `gh workflow run` or scheduled run has no authority record and stays
-  personally gated.
-- Requests are operation-specific JSON files outside the worktree with mode
-  `0600`. They contain every typed workflow input. Boolean request values stay
-  typed in the private request and authority record, then normalize to
-  lowercase string values for the exact canonical `gh workflow run --json`
-  transport bytes whose SHA-256 is bound to the returned run ID.
-- Authority state lives outside Git in an owner-only `0700` directory. Before
-  invoking GitHub, the dispatcher creates a `dispatching` intent and
-  mode-`0600` output capture. The bound record identifies repository,
-  operation, workflow ID/path/blob, event, run ID and attempt, current control
-  SHA, subject and historical target SHAs, exact title, environment, and input
-  hash.
-- A captured URL proves event acceptance, not materialization. Bind that exact
-  URL to a `claimed` record, issue it only when the exact run appears, use
-  `--resume-captured` after a pre-bind crash, and use `--resume-run` after
-  delayed materialization. Never redispatch either case. A URL-less capture is
-  unresolved external mutation and remains fail-closed; do not infer a run
-  from title or time.
-- Any unresolved intent or `claimed`/`inflight` record blocks all protected
-  dispatches for the same repository and control SHA, even when inputs or the
-  operation change. An `issued` or `consumed` record blocks the same operation
-  and exact transport input hash. A changed request is distinct but still
-  requires complete policy, lineage, recovery, and exclusivity validation;
-  only `retired` is an inert replacement exception.
-- After creating a pristine intent, revalidate current master, workflow blob,
-  and active state. Cancel that untouched intent rather than dispatching if
-  authority drifted.
-- The policy's approval workflow state is exact. Capacity, infrastructure,
-  activation, live-data, migration-recovery, and production-deploy workflows
-  must be `disabled_manually` before approval; all other protected workflows
-  must be `active`.
-- Approval uses an `inflight` claim before mutation and records a consumed
-  receipt only after GitHub accepts the POST. An ambiguous response must use
-  explicit `--reconcile`. The claim records the exact reviewer, comment,
-  environment, downstream run, operation, and matching review-history count
-  before mutation. Reconciliation must target that same run and operation.
-  Consume only when GitHub reports a new exact approved review; restore retry
-  authority only when no review appeared and the same gate remains active.
-  Otherwise preserve the inflight ambiguity. Gate disappearance, a terminal
-  conclusion, or missing pending evidence does not prove approval.
-- Revalidate master, workflow blob/state, and promotion authority after the
-  local `inflight` claim. Drift releases the exact claim to its prior state and
-  prohibits the approval POST.
-- A consumed record cannot replay the same
-  run/environment/waiting-job-set fingerprint. It may authorize a different
-  sequential job on the same environment and exact run, or a policy-declared
-  automatic downstream run such as GHCR build repair or migration recovery.
-- `production-build` derives authority from the unique CLI-managed
-  `dev -> master` promotion. Normal `oci-production-build` derives from that
-  exact first-attempt build. Both receive durable automatic records and the
-  same `issued -> inflight -> consumed` receipt lifecycle. GHCR repair and
-  failed-migration recovery trace to the exact consumed dispatch record of
-  their upstream run.
-- A terminal captured run can be `retired` only after exact evidence proves
-  zero jobs and zero pending deployments; only persisted retirement permits a
-  replacement request. Expired `claimed` and `inflight` records remain
-  inspectable for bounded recovery, while other authority remains
-  expiry-bound.
-- Current control code always equals current `master`. A subject may be the
-  deployed release, while rollback or recovery may name an older ancestor as
-  target. Historical target authority never permits stale control code.
-- Production exclusivity accepts only complete active-run responses: an
-  object with nonnegative integer `total_count`, an array of `workflow_runs`,
-  exact count/list agreement, and at most the requested 100 results.
-- The shared GitHub account is not a separate cryptographic CLI identity. The
-  private record is an operational ownership mechanism; never create or
-  retrofit one for a human-originated run.
+The implementation uses private, one-operation authority records outside the
+repository. Their payloads and state transitions are deliberately not
+documented on the public wiki.
 
-## Pull request record
+## Build and registry
 
-Every implementation, promotion, ancestry synchronization, and intentionally
-closed PR documents its rationale, exact SHAs, scope and exclusions,
-validation outcomes, release impact, rollback evidence, and exceptions.
-Core evidence is mandatory; conditional operational fields remain present and
-say `not applicable` when they do not apply.
+- A push to the production branch starts the first-attempt production build.
+- Service images are tied to the full source SHA.
+- OCI-compatible images are published to public GHCR.
+- Deployment references immutable digests.
+- Registry validation proves repository linkage, image architecture, source
+  provenance, and anonymous pull.
+- Retention protects the current, candidate, and rollback generations before
+  deleting older images.
 
-Only a CLI-created and CLI-owned PR uses `copilot-cli-managed` and the bounded
-no-personal-prompt path. Every other PR requires approval bound to its exact
-current head SHA. Neither path waives technical or production gates; see
-`CONTRIBUTING.md` for the classifier limitation and exact approval procedure.
+When downstream provenance requires attempt one, a failed run remains failed
+evidence. The correction creates a fresh exact candidate rather than
+retroactively turning a rerun into the original trusted build.
+
+## Infrastructure and data handoff
+
+Before deployment, the release chain verifies:
+
+- current infrastructure provenance and capacity;
+- current `master` identity;
+- image digest availability;
+- migration and schema compatibility;
+- dry-run results;
+- required backfills and indexes;
+- public-write fencing and writer quiescence when data mutation requires it;
+- a matching pre-mutation rollback baseline;
+- absence of competing production operations.
+
+The final data phase hands its lock and maintenance state directly to the
+matching deployment. That prevents an application rollout from racing a
+schema, index, rollback, or recovery operation.
+
+## Deployment
+
+Deployment proceeds in dependency-safe order:
+
+1. roll out services sequentially in the checked-in deployment order;
+2. verify each live workload is ready and running its expected digest before
+   continuing;
+3. deploy Gamemaster last so event production starts only after its consumers
+   are healthy;
+4. validate routes, TLS, response shapes, SSE, storage, queues, consumers, and
+   restart state.
+
+A successful deployment command is not the release conclusion. Protected and
+public validation must both pass.
+
+## Activation
+
+User-facing live behavior is activated separately from image deployment.
+
+1. Enable the feature under a bounded lease.
+2. Run the full browser and API acceptance journey.
+3. Create and complete synthetic events.
+4. Place and settle separate live and pre-match bets.
+5. Check moderation, SSE, history, Backoffice, queues, workloads, and logs.
+6. Permanently commit activation only after all evidence passes.
+7. On failure, disable the feature and restore the known safe state.
+
+This separates "the code is deployed" from "the feature is safe to expose."
+
+## Rollback and recovery
+
+Every production deployment captures the exact previous application generation
+before mutation.
+
+A rollback requires:
+
+- an exact historical source and image set;
+- a matching baseline artifact;
+- compatibility with the current database and message state;
+- healthy queues, consumers, storage, and workloads;
+- a defined write-fence or drain when the old version cannot process new
+  pending work;
+- post-rollback digest and application validation.
+
+If a rollback fails after partial mutation, recovery restores the exact
+pre-run images and keeps writes fenced until health is proven. Data restore is
+used only when application rollback is insufficient and separately justified.
+
+## Stall and incident handling
+
+The conductor monitors the real blocking object: agent result, process,
+GitHub job, protected approval, handoff, or runtime health signal.
+
+- A running watcher is notification transport, not proof of progress.
+- A waiting approval is actionable and routed immediately.
+- One missed checkpoint triggers bounded recovery.
+- Two missed checkpoints require a concrete safe action or an explicit
+  blocker.
+- Failed or missing first-attempt provenance is never repaired with an empty
+  commit or an unsafe bypass.
+- A terminal workflow that leaves a write fence, operation lock, unavailable
+  ingress, or unhealthy workload is an active production incident.
+- A proven repository-policy false block is corrected narrowly, with focused
+  regression coverage, through the normal branch path.
+
+## Mandatory public-wiki handoff
+
+Every change receives a documentation-impact assessment. Product behavior,
+architecture, contracts, data lifecycle, security, infrastructure, quality
+gates, release behavior, UI/UX, and agent-role changes update their canonical
+`docs/wiki/` pages in the same pull request before final validation.
+
+After merge, the repository pages are published byte-for-byte to the GitHub
+wiki and their links are verified. A no-change result is acceptable only when
+the exact diff has no public documentation impact. Matching reusable-agent
+guidance, PR/release evidence, and explicit accepted exceptions remain part of
+the handoff.
+
+Private runtime identifiers, credentials, approval records, and emergency
+procedures remain outside the public wiki.
+
+## Related pages
+
+- [[Quality Gates]]
+- [[Agents]]
+- [[Infrastructure]]
+- [[Security]]
+- [[Engineering Learnings]]

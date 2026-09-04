@@ -1,6 +1,6 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import axios from 'axios';
 import MyBets from './MyBets';
 
@@ -67,7 +67,7 @@ describe('MyBets', () => {
 
     expect(screen.getAllByText('Live')[0]).toBeInTheDocument();
     expect(screen.getAllByText('Pre-match')[0]).toBeInTheDocument();
-    expect(screen.getAllByText('Next Corner')[0]).toBeInTheDocument();
+    expect(screen.getAllByText('Next Corner Kick')[0]).toBeInTheDocument();
     expect(screen.getByText('Declined: Quote changed')).toBeInTheDocument();
     expect(screen.getByText('Void · Manual void')).toBeInTheDocument();
     expect(screen.getByText('Pending result')).toBeInTheDocument();
@@ -111,7 +111,50 @@ describe('MyBets', () => {
     // The raw stored identifier is never rendered verbatim; it is normalized into a readable
     // "<market>: <side>" label derived from the row's own structured live fields.
     expect(screen.queryByText(rawIdentifier, { exact: false })).toBeNull();
-    expect(screen.getAllByText('Next Corner: Raptors', { exact: false }).length).toBeGreaterThan(0);
-    expect(screen.getByText('Won · Winner: Next Corner: Raptors')).toBeInTheDocument();
+    expect(screen.getAllByText('Next Corner Kick: Raptors', { exact: false }).length).toBeGreaterThan(0);
+    expect(screen.getByText('Won · Winner: Next Corner Kick: Raptors')).toBeInTheDocument();
+  });
+
+  it('filters independently by bet type and composes the type with the status filter', async () => {
+    axios.get.mockResolvedValue({
+      data: [
+        {
+          _id: 'bet-live',
+          slipId: 'live-slip-1',
+          status: 'DECLINED',
+          wager: 10,
+          timestamp: '2030-01-01T12:00:00.000Z',
+          betKind: 'LIVE',
+          rows: [{ _id: 'row-live', eventName: 'Live Derby', oddsValue: 2, marketType: 'NEXT_CORNER', betKind: 'LIVE' }],
+        },
+        {
+          _id: 'bet-prematch',
+          slipId: 'prematch-slip-1',
+          status: 'CONFIRMED',
+          wager: 5,
+          timestamp: '2030-01-02T12:00:00.000Z',
+          betKind: 'PRE_MATCH',
+          rows: [{ _id: 'row-prematch', eventName: 'Scheduled Derby', oddsValue: 3, productName: '1X2', betKind: 'PRE_MATCH' }],
+        },
+      ],
+    });
+
+    render(<MyBets />);
+    await screen.findByText('Live Derby');
+
+    const liveFilter = screen.getByRole('button', { name: 'LIVE' });
+    fireEvent.click(liveFilter);
+    expect(liveFilter).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Live Derby')).toBeInTheDocument();
+    expect(screen.queryByText('Scheduled Derby')).toBeNull();
+    expect(screen.getByText('1 bets found')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'CONFIRMED' }));
+    expect(screen.getByText('No bets match the active filters.')).toBeInTheDocument();
+    expect(screen.getByText('0 bets found')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'ALL TYPES' }));
+    expect(screen.getByText('Scheduled Derby')).toBeInTheDocument();
+    expect(screen.queryByText('Live Derby')).toBeNull();
   });
 });

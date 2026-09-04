@@ -88,6 +88,13 @@ instead of crossing the boundary.
   that ended authority. Persist authority ends from payload `occurredAt`,
   preserve them under out-of-order delivery, and keep old records readable
   when the additive field is absent.
+- For rotating live markets, persist the complete authoritative lineage while
+  bounding only the non-terminal actionable set. A market type may re-enter
+  only with a higher market version, and an accepted version must receive one
+  terminal settlement before reuse.
+- Treat selection ID as authoritative whenever a market can expose multiple
+  selections with the same side classification. Side fallback is valid only
+  for legacy payloads and only when it resolves to exactly one selection.
 - For rolling clients, prove both old and new request shapes. Scope any legacy
   confirmation to a bounded hash of the authenticated session and the exact
   user, aggregate, kind, revision, and fingerprint; never use one
@@ -115,6 +122,11 @@ instead of crossing the boundary.
   destructive default. Return `404` for a missing aggregate, accept an exact
   repeated terminal write as idempotent, and return `409` when the requested
   terminal state conflicts with what already won.
+- One-off cross-database cleanup is an offline maintenance exception, not a
+  service API. Fix the target identity in code, prove zero financial/audit
+  dependencies, snapshot with canonical Extended JSON, establish a
+  recreation-preventing tombstone, use exact optimistic deletes, and require
+  a distinct confirmation for rollback.
 - Run the smallest existing tests that prove the slice.
 - Use `npm ci`, not `npm install`, unless an intentional dependency change owns
   the lockfile update.
@@ -172,5 +184,5 @@ semantics, tests and exit codes, known risks, and unresolved findings. For
 user-visible read-model, formatter, ordering, or contract work, return the
 immutable exact-head result to the same registered `betstan-ux-ui-expert` work
 unit and include its `UX_REVIEW_PASSED` result when handing off to
-`betstan-validation-critic`.
+`betstan-public-wiki-editor`.
 Do not approve your own work.
