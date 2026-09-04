@@ -589,6 +589,61 @@ async function main() {
     confirmedDirectTransitionCount,
   );
 
+  const delayedConfirmedOpeningPull = pull({
+    updated_at: timestampAfter(PULL_UPDATED_AT, 86_400_000),
+    labels: managedLabels,
+    head: featureHead,
+    base: devBase,
+  });
+  const confirmedOpeningTombstoneCount = () =>
+    directRaceTransitions.filter(
+      ({ description }) =>
+        transitionBinding(description) === "x",
+    ).length;
+  const delayedConfirmedOpenedReplay = await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: openedEventPull,
+    currentPull: delayedConfirmedOpeningPull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: directRaceTransitions,
+  });
+  assert.deepEqual(
+    delayedConfirmedOpenedReplay.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert.equal(confirmedOpeningTombstoneCount(), 0);
+  assert.equal(
+    transitionBinding(directRaceTransitions[0].description),
+    "102",
+  );
+  for (const eventName of ["workflow_dispatch", "workflow_run"]) {
+    const confirmedRefresh = await execute({
+      eventName,
+      currentPull: delayedConfirmedOpeningPull,
+      run: workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      listedRuns: [
+        workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      ],
+      transitionStatuses: directRaceTransitions,
+    });
+    assert.deepEqual(
+      confirmedRefresh.statuses
+        .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+        .map(({ state }) => state),
+      ["success"],
+    );
+    assert.equal(confirmedOpeningTombstoneCount(), 0);
+    assert.equal(
+      transitionBinding(directRaceTransitions[0].description),
+      "102",
+    );
+  }
+
   const directProofOnlyTransitions = [
     qualityTransitionStatus({
       context: "trusted-quality-transition/dev",
@@ -1412,7 +1467,7 @@ async function main() {
   assert.equal(matchingOpenedReplayRunCalls.length, 0);
   assert.equal(matchingOpenedReplayReceipts.length, 0);
 
-  for (const binding of [null, 102]) {
+  for (const binding of ["u", null, 102]) {
     const lateExistingTransitions = [
       qualityTransitionStatus({
         context: "trusted-quality-transition/dev",
@@ -1421,9 +1476,15 @@ async function main() {
           action: "opened",
           binding,
           contentFingerprint: PULL_CONTENT_FINGERPRINT,
+          labelsFingerprint:
+            binding === "u"
+              ? managedLabelsFingerprint
+              : PULL_LABELS_FINGERPRINT,
         }),
       }),
     ];
+    const lateExistingReceipts = [];
+    const lateExistingRunCalls = [];
     for (let replay = 0; replay < 2; replay += 1) {
       const lateExistingReplay = await execute({
         eventName: "pull_request_target",
@@ -1433,7 +1494,10 @@ async function main() {
         listedRuns: [
           workflowRun({ created_at: "2026-09-04T09:00:00.000Z" }),
         ],
+        workflowAuthorizations: [workflowAuthorization()],
+        authorizationStatuses: lateExistingReceipts,
         transitionStatuses: lateExistingTransitions,
+        workflowRunListCalls: lateExistingRunCalls,
       });
       assertNoQualitySuccess(lateExistingReplay);
     }
@@ -1442,11 +1506,16 @@ async function main() {
         ({ description }) =>
           transitionBinding(description) === "x",
       ).length;
-    assert.equal(tombstoneCount(), 0);
+    assert.equal(tombstoneCount(), 1);
+    assert.equal(lateExistingRunCalls.length, 0);
+    assert.equal(lateExistingReceipts.length, 0);
 
     const lateManualRefresh = await execute({
       currentPull: lateLabeledPull,
+      workflowAuthorizations: [workflowAuthorization()],
+      authorizationStatuses: lateExistingReceipts,
       transitionStatuses: lateExistingTransitions,
+      workflowRunListCalls: lateExistingRunCalls,
     });
     assertNoQualitySuccess(lateManualRefresh);
     const lateWorkflowRefresh = await execute({
@@ -1456,10 +1525,15 @@ async function main() {
       listedRuns: [
         workflowRun({ created_at: "2026-09-04T09:00:00.000Z" }),
       ],
+      workflowAuthorizations: [workflowAuthorization()],
+      authorizationStatuses: lateExistingReceipts,
       transitionStatuses: lateExistingTransitions,
+      workflowRunListCalls: lateExistingRunCalls,
     });
     assertNoQualitySuccess(lateWorkflowRefresh);
-    assert.equal(tombstoneCount(), 0);
+    assert.equal(tombstoneCount(), 1);
+    assert.equal(lateExistingRunCalls.length, 0);
+    assert.equal(lateExistingReceipts.length, 0);
   }
 
   for (const markerLabelsFingerprint of [

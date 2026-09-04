@@ -1570,6 +1570,29 @@ async function bindPendingQualityTransition({
     return false;
   }
   if (eventAction === "opened") {
+    if (
+      transition.action === "opened" &&
+      (transition.unconfirmed ||
+        !transitionMatchesPullIdentity(transition, pull)) &&
+      isOpeningCliLabelRace(pull, eventPull) &&
+      transition.transitionAt ===
+        githubTimestampMilliseconds(
+          eventPull.updatedAt,
+          "opened pull request updated_at",
+        ) &&
+      !isBoundedOpeningCliLabelRace(pull, eventPull)
+    ) {
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: QUALITY_TRANSITION_STALE,
+        targetUrl: transition.targetUrl,
+      });
+    }
     return false;
   }
   const labelRefresh =
