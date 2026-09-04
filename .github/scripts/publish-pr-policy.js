@@ -756,6 +756,7 @@ function resolveQualityTransition(transitions) {
   const unconfirmed = candidates.filter(
     (candidate) => candidate.unconfirmed,
   );
+  let hasInverseOpeningLabelPredecessor = false;
   if (
     unconfirmed.some(
       (candidate) =>
@@ -791,13 +792,18 @@ function resolveQualityTransition(transitions) {
     ) {
       throw new Error("quality transition marker label binding regressed");
     }
+    hasInverseOpeningLabelPredecessor = true;
   }
 
-  return candidates.sort(
+  const resolved = candidates.sort(
     (left, right) =>
       qualityTransitionRank(right) - qualityTransitionRank(left) ||
       right.statusId - left.statusId,
   )[0];
+  return {
+    ...resolved,
+    hasInverseOpeningLabelPredecessor,
+  };
 }
 
 async function getQualityTransition({
@@ -1440,6 +1446,26 @@ function canReconcileOpeningLabelLineage({
   );
 }
 
+function isConfirmedInverseOpeningLabelReplay({
+  transition,
+  pull,
+  eventAction,
+  eventLabelName,
+  eventPull,
+}) {
+  return (
+    transition.hasInverseOpeningLabelPredecessor === true &&
+    transitionMatchesPullIdentity(transition, pull) &&
+    hasInverseOpeningLabelEvidence({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    })
+  );
+}
+
 function hasDirectOpeningLabelEvidence({
   transition,
   pull,
@@ -1620,6 +1646,17 @@ async function bindPendingQualityTransition({
       eventLabelName,
       eventPull,
     });
+  const confirmedInverseOpeningLabelReplay =
+    isConfirmedInverseOpeningLabelReplay({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+  if (confirmedInverseOpeningLabelReplay) {
+    return false;
+  }
   let confirmedDirectOpeningLabel = false;
   if (transition.unconfirmed) {
     if (!directOpeningLabelEvidence) {

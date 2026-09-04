@@ -1201,6 +1201,7 @@ async function main() {
       workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
     ],
     transitionStatuses: wholeSecondInverseTransitions,
+    transitionStatusCreatedAt: wholeSecondTimestamp,
   });
   const wholeSecondInverseStates = wholeSecondInverse.statuses
     .filter(({ context }) => context.startsWith("pr-quality-gates/"))
@@ -1217,6 +1218,118 @@ async function main() {
       labelsFingerprint: managedLabelsFingerprint,
     }),
   );
+  const wholeSecondInverseCount = wholeSecondInverseTransitions.length;
+  const wholeSecondInverseReplayReceipts = [];
+  const wholeSecondInverseReplay = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: CLI_MANAGED_LABEL,
+    eventPull: wholeSecondManagedPull,
+    currentPull: wholeSecondManagedPull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    workflowAuthorizations: [
+      workflowAuthorization({
+        headRef: "feature/marker-recovery",
+        baseRef: "dev",
+      }),
+    ],
+    authorizationStatuses: wholeSecondInverseReplayReceipts,
+    transitionStatuses: wholeSecondInverseTransitions,
+    transitionStatusCreatedAt: wholeSecondTimestamp,
+  });
+  assert.deepEqual(
+    wholeSecondInverseReplay.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert.equal(
+    wholeSecondInverseTransitions.length,
+    wholeSecondInverseCount,
+  );
+  assert.equal(
+    wholeSecondInverseTransitions.some(
+      ({ description }) => transitionBinding(description) === "x",
+    ),
+    false,
+  );
+  assert.equal(wholeSecondInverseReplayReceipts.length, 0);
+
+  const wholeSecondInversePendingTransitions = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      created_at: wholeSecondTimestamp,
+      description: transitionDescription({
+        action: "opened",
+        timestamp: wholeSecondTimestamp,
+        binding: null,
+        contentFingerprint: PULL_CONTENT_FINGERPRINT,
+      }),
+    }),
+  ];
+  const wholeSecondInversePending = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: CLI_MANAGED_LABEL,
+    eventPull: wholeSecondManagedPull,
+    currentPull: wholeSecondManagedPull,
+    listedRuns: [],
+    transitionStatuses: wholeSecondInversePendingTransitions,
+    transitionStatusCreatedAt: wholeSecondTimestamp,
+  });
+  assertNoQualitySuccess(wholeSecondInversePending);
+  assert.equal(
+    transitionBinding(
+      wholeSecondInversePendingTransitions[0].description,
+    ),
+    "p",
+  );
+  assert.equal(
+    transitionLabelsFingerprint(
+      wholeSecondInversePendingTransitions[0].description,
+    ),
+    managedLabelsFingerprint,
+  );
+  const wholeSecondInversePendingCount =
+    wholeSecondInversePendingTransitions.length;
+  const wholeSecondInversePendingReplayCalls = [];
+  const wholeSecondInversePendingReplayReceipts = [];
+  const wholeSecondInversePendingReplay = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: CLI_MANAGED_LABEL,
+    eventPull: wholeSecondManagedPull,
+    currentPull: wholeSecondManagedPull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        headRef: "feature/marker-recovery",
+        baseRef: "dev",
+      }),
+    ],
+    authorizationStatuses: wholeSecondInversePendingReplayReceipts,
+    transitionStatuses: wholeSecondInversePendingTransitions,
+    transitionStatusCreatedAt: wholeSecondTimestamp,
+    workflowRunListCalls: wholeSecondInversePendingReplayCalls,
+  });
+  assertNoQualitySuccess(wholeSecondInversePendingReplay);
+  assert.equal(
+    wholeSecondInversePendingTransitions.length,
+    wholeSecondInversePendingCount,
+  );
+  assert.equal(
+    wholeSecondInversePendingTransitions.some(
+      ({ description }) => transitionBinding(description) === "x",
+    ),
+    false,
+  );
+  assert.equal(wholeSecondInversePendingReplayCalls.length, 0);
+  assert.equal(wholeSecondInversePendingReplayReceipts.length, 0);
 
   const inWindowLabelTimestamp = timestampAfter(PULL_UPDATED_AT, 2_000);
   const inWindowLabeledPull = pull({
