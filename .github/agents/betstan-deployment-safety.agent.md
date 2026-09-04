@@ -415,9 +415,13 @@ A Running broker with missing consumers is not healthy production.
   `copilot-cli-managed` `labeled` event within the original five-minute window
   and no matching `unlabeled` event. Any managed-label removal, second
   application, or application outside that window is proven drift and writes
-  permanent `x`. Unavailable, malformed, repeated-ID, missing, or incomplete
-  ledger evidence fails the current invocation without writing `x`, and a later
-  invocation must obtain a complete proof before it can bind or succeed.
+  permanent `x`. Any fully validated managed `unlabeled` event, second managed
+  `labeled` event, or out-of-window managed `labeled` event is individually
+  sufficient, irreversible disproof: it writes permanent `x` immediately even
+  on a full ledger page because unread appended events cannot restore the
+  lineage; only positive authority requires scan completion. API, schema,
+  duplicate-ID, missing, and incomplete ledger evidence remains inconclusive
+  without `x` only when no disqualifying event has already been observed.
   `branch-policy.yml` grants only `issues: read` for this ledger; the publisher
   and permission must promote together.
 - At the greatest cutoff, `x` dominates every other state; absent `x`, any
@@ -431,8 +435,12 @@ A Running broker with missing consumers is not healthy production.
   `synchronize`, or `reopened` transition may recover, never a later or
   replayed `opened` event.
 - Once any version 3 marker exists, operational rollback must retain version 3
-  parsing or use a reviewed forward correction. A version-2-only publisher is
-  fail-closed compatibility, not restored release authority.
+  parsing and ledger authority: recovered opening-label authority is not
+  durable in marker v3, so every publisher able to bind or succeed such a
+  lineage must revalidate the ledger; retaining version 3 parsing alone is
+  insufficient, and rollback to a publisher lacking ledger authority is
+  prohibited; use a reviewed forward correction. A version-2-only publisher
+  is fail-closed compatibility, not restored release authority.
 - Use `pr-validation-stan.sh` to verify the exact current head, base, unique merge snapshot, and trusted workflow identities.
 - Use `COPILOT_CLI_AUTO_APPROVE=true pr-merge-safety-stan.sh` only for PRs created and labelled `copilot-cli-managed` by the active CLI workflow. Use normal human-approval mode with `APPROVED_SHA` equal to the current head for every other PR, including PRs into `dev`.
 - Treat skipped, stale, pending, neutral, or branch-name-only runs as non-success.

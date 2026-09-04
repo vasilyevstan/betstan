@@ -233,9 +233,13 @@ bounded server-owned issue-event ledger. The ledger must prove exactly one
 `copilot-cli-managed` `labeled` event within the original five-minute window
 and no matching `unlabeled` event. Any managed-label removal, second
 application, or application outside that window is proven drift and writes
-permanent `x`. Unavailable, malformed, repeated-ID, missing, or incomplete
-ledger evidence fails the current invocation without writing `x`, and a later
-invocation must obtain a complete proof before it can bind or succeed.
+permanent `x`. Any fully validated managed `unlabeled` event, second managed
+`labeled` event, or out-of-window managed `labeled` event is individually
+sufficient, irreversible disproof: it writes permanent `x` immediately even
+on a full ledger page because unread appended events cannot restore the
+lineage; only positive authority requires scan completion. API, schema,
+duplicate-ID, missing, and incomplete ledger evidence remains inconclusive
+without `x` only when no disqualifying event has already been observed.
 `branch-policy.yml` grants only `issues: read` for this ledger; the publisher
 and permission must promote together.
 The broad opening snapshot mismatch permits only fail-closed inspection and
@@ -257,9 +261,13 @@ higher state. Version 1 and version 2 markers cannot newly bind, succeed, or
 consume an authorization receipt; a version 2 `x` remains a permanent
 tombstone. Only a strictly later `edited`, `synchronize`, or `reopened`
 transition may recover, never a later or replayed `opened` event. Once any
-version 3 marker exists, operational rollback must retain version 3 parsing or
-use a reviewed forward correction. Other non-producing metadata does not form
-marker identity.
+version 3 marker exists, operational rollback must retain version 3 parsing
+and ledger authority: recovered opening-label authority is not durable in
+marker v3, so every publisher able to bind or succeed such a lineage must
+revalidate the ledger; retaining version 3 parsing alone is insufficient, and
+rollback to a publisher lacking ledger authority is prohibited; use a
+reviewed forward correction. Other non-producing metadata does not form marker
+identity.
 The publisher uses the fetched `updated_at` only to recheck the complete PR
 snapshot before and after status publication and replaces any concurrent result
 with pending. Any later edit, synchronization, base advance, or status refresh

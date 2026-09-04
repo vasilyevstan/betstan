@@ -1925,10 +1925,21 @@ async function main() {
     binding: null,
   });
   const earlyDriftCalls = [];
+  const earlyDriftRunCalls = [];
+  const earlyDriftReceipts = [];
   const earlyDrift = await execute({
     eventName: "workflow_run",
     currentPull: wholeSecondManagedPull,
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        headRef: "feature/marker-recovery",
+        baseRef: "dev",
+      }),
+    ],
+    authorizationStatuses: earlyDriftReceipts,
     transitionStatuses: earlyDriftTransitions,
+    workflowRunListCalls: earlyDriftRunCalls,
     issueEventPages: [earlyDriftPage],
     issueEventListCalls: earlyDriftCalls,
   });
@@ -1940,8 +1951,41 @@ async function main() {
     ).length,
     1,
   );
+  assert.equal(earlyDriftRunCalls.length, 0);
+  assert.equal(earlyDriftReceipts.length, 0);
 
   for (const { name, options, expectedCalls } of [
+    {
+      name: "second managed label on a full page",
+      options: {
+        issueEventPages: [
+          [
+            issueEvent({ id: 830 }),
+            issueEvent({ id: 831 }),
+            ...earlyDriftPage.slice(2),
+          ],
+        ],
+      },
+      expectedCalls: 1,
+    },
+    {
+      name: "managed label outside the opening window on a full page",
+      options: {
+        issueEventPages: [
+          [
+            issueEvent({
+              id: 830,
+              created_at: timestampAfter(
+                wholeSecondTimestamp,
+                300_001,
+              ),
+            }),
+            ...earlyDriftPage.slice(1),
+          ],
+        ],
+      },
+      expectedCalls: 1,
+    },
     {
       name: "second managed label",
       options: {

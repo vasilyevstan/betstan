@@ -413,7 +413,9 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'Any managed-label removal, second application, or application outside that window is proven drift and writes permanent `x`.'
   require_flat_literal "$marker_authority_file" \
-    'Unavailable, malformed, repeated-ID, missing, or incomplete ledger evidence fails the current invocation without writing `x`, and a later invocation must obtain a complete proof before it can bind or succeed.'
+    'Any fully validated managed `unlabeled` event, second managed `labeled` event, or out-of-window managed `labeled` event is individually sufficient, irreversible disproof: it writes permanent `x` immediately even on a full ledger page because unread appended events cannot restore the lineage; only positive authority requires scan completion.'
+  require_flat_literal "$marker_authority_file" \
+    'API, schema, duplicate-ID, missing, and incomplete ledger evidence remains inconclusive without `x` only when no disqualifying event has already been observed.'
   require_flat_literal "$marker_authority_file" \
     '`branch-policy.yml` grants only `issues: read` for this ledger; the publisher and permission must promote together.'
   require_flat_literal "$marker_authority_file" \
@@ -425,7 +427,7 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'Only a strictly later `edited`, `synchronize`, or `reopened` transition may recover, never a later or replayed `opened` event.'
   require_flat_literal "$marker_authority_file" \
-    'Once any version 3 marker exists, operational rollback must retain version 3 parsing or use a reviewed forward correction.'
+    'Once any version 3 marker exists, operational rollback must retain version 3 parsing and ledger authority: recovered opening-label authority is not durable in marker v3, so every publisher able to bind or succeed such a lineage must revalidate the ledger; retaining version 3 parsing alone is insufficient, and rollback to a publisher lacking ledger authority is prohibited; use a reviewed forward correction.'
   require_flat_literal "$marker_authority_file" \
     'Opening-label reconciliation is authorized only when the server-owned label timestamp is at or after the original `opened` transition cutoff and no more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution cannot extend that window.'
   require_flat_literal "$marker_authority_file" \
