@@ -15,13 +15,48 @@ const GITHUB_ACTIONS_BOT = Object.freeze({
   login: "github-actions[bot]",
   type: "Bot",
 });
+const CLI_MANAGED_LABEL = "copilot-cli-managed";
 const QUALITY_TRIGGER_ACTIONS = new Set([
   "edited",
   "opened",
   "reopened",
   "synchronize",
 ]);
+const SUPPORTED_PULL_REQUEST_TARGET_ACTIONS = new Set([
+  ...QUALITY_TRIGGER_ACTIONS,
+  "labeled",
+  "ready_for_review",
+  "unlabeled",
+]);
+const QUALITY_TRANSITION_PENDING = "p";
+const QUALITY_TRANSITION_UNCONFIRMED = "u";
+const QUALITY_TRANSITION_STALE = "x";
+const MAX_STATUS_DESCRIPTION_LENGTH = 140;
+const OPENING_RACE_WINDOW_MS = 300_000;
 const MAX_WORKFLOW_AUTHORIZATION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const WORKFLOW_RUN_NONTERMINAL_STATUSES = new Set([
+  "in_progress",
+  "pending",
+  "queued",
+  "requested",
+  "waiting",
+]);
+const WORKFLOW_RUN_CONCLUSIONS = new Set([
+  "action_required",
+  "cancelled",
+  "failure",
+  "neutral",
+  "skipped",
+  "stale",
+  "startup_failure",
+  "success",
+  "timed_out",
+]);
+const WORKFLOW_RUN_TERMINAL_STATUSES = new Set(
+  [...WORKFLOW_RUN_CONCLUSIONS].filter(
+    (conclusion) => conclusion !== "startup_failure",
+  ),
+);
 const WORKFLOW_AUTHORIZATION_FIELDS = [
   "authorizedBlob",
   "baseRef",
@@ -44,7 +79,47 @@ const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
 const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function fingerprint(value) {
+  return crypto
+    .createHash("sha256")
+    .update(value)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function canonicalLabels(labels) {
+  if (!Array.isArray(labels)) {
+    throw new Error("Pull request labels are malformed");
+  }
+  const names = labels.map((label) => label?.name);
+  if (
+    names.some(
+      (name) =>
+        typeof name !== "string" ||
+        name.length === 0 ||
+        name.includes("\0"),
+    )
+  ) {
+    throw new Error("Pull request labels are malformed");
+  }
+  names.sort();
+  if (names.some((name, index) => index > 0 && name === names[index - 1])) {
+    throw new Error("Pull request labels contain duplicate names");
+  }
+  return names;
+}
+
+function labelsFingerprint(labels) {
+  return fingerprint(JSON.stringify(labels));
+}
+
+const EMPTY_LABELS_FINGERPRINT = labelsFingerprint([]);
+const CLI_MANAGED_LABELS_FINGERPRINT = labelsFingerprint([
+  CLI_MANAGED_LABEL,
+]);
+
 function pullIdentity(pull) {
+  const labels = canonicalLabels(pull.labels);
   return {
     number: pull.number,
     state: pull.state,
@@ -55,17 +130,18 @@ function pullIdentity(pull) {
     baseSha: pull.base.sha,
     mergeSha: pull.merge_commit_sha || "",
     updatedAt: pull.updated_at,
-    contentFingerprint: crypto
-      .createHash("sha256")
-      .update(`${pull.title || ""}\0${pull.body || ""}`)
-      .digest("hex")
-      .slice(0, 32),
+    contentFingerprint: fingerprint(
+      `${pull.title || ""}\0${pull.body || ""}`,
+    ),
+    labels,
+    labelsFingerprint: labelsFingerprint(labels),
   };
 }
 
 function assertExpectedPull(actual, expected) {
   for (const key of [
     "number",
+    "state",
     "headRef",
     "headSha",
     "headRepository",
@@ -73,6 +149,7 @@ function assertExpectedPull(actual, expected) {
     "baseSha",
     "updatedAt",
     "contentFingerprint",
+    "labelsFingerprint",
   ]) {
     if (expected[key] !== undefined && actual[key] !== expected[key]) {
       throw new Error(
@@ -81,6 +158,77 @@ function assertExpectedPull(actual, expected) {
       );
     }
   }
+}
+
+function isOpeningCliLabelRace(actual, expected) {
+  if (
+    expected.labels?.length !== 0 ||
+    actual.labels?.length !== 1 ||
+    actual.labels[0] !== CLI_MANAGED_LABEL
+  ) {
+    return false;
+  }
+  for (const key of [
+    "number",
+    "state",
+    "headRef",
+    "headSha",
+    "headRepository",
+    "baseRef",
+    "baseSha",
+    "contentFingerprint",
+  ]) {
+    if (actual[key] !== expected[key]) {
+      return false;
+    }
+  }
+  const actualUpdatedAt = Date.parse(actual.updatedAt);
+  const expectedUpdatedAt = Date.parse(expected.updatedAt);
+  return (
+    Number.isFinite(actualUpdatedAt) &&
+    Number.isFinite(expectedUpdatedAt) &&
+    actualUpdatedAt >= expectedUpdatedAt
+  );
+}
+
+function isBoundedOpeningCliLabelRace(actual, expected) {
+  if (!isOpeningCliLabelRace(actual, expected)) {
+    return false;
+  }
+  return isWithinOpeningRaceWindow(
+    githubTimestampMilliseconds(
+      expected.updatedAt,
+      "opened pull request updated_at",
+    ),
+    githubTimestampMilliseconds(
+      actual.updatedAt,
+      "current pull request updated_at",
+    ),
+  );
+}
+
+function isLabelRefreshSnapshot(actual, expected) {
+  for (const key of [
+    "number",
+    "state",
+    "headRef",
+    "headSha",
+    "headRepository",
+    "baseRef",
+    "baseSha",
+    "contentFingerprint",
+  ]) {
+    if (actual[key] !== expected[key]) {
+      return false;
+    }
+  }
+  const actualUpdatedAt = Date.parse(actual.updatedAt);
+  const expectedUpdatedAt = Date.parse(expected.updatedAt);
+  return (
+    Number.isFinite(actualUpdatedAt) &&
+    Number.isFinite(expectedUpdatedAt) &&
+    actualUpdatedAt >= expectedUpdatedAt
+  );
 }
 
 function branchDecision(pull, repository) {
@@ -400,12 +548,262 @@ function qualityTransitionContext(pull) {
   return `${QUALITY_TRANSITION_CONTEXT_PREFIX}/${pull.baseRef}`;
 }
 
-function qualityTransitionDescription(pull, action, timestamp, runId) {
+function transitionTimestampMilliseconds(timestamp) {
+  const transitionAt =
+    typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  if (
+    !Number.isSafeInteger(transitionAt) ||
+    transitionAt < 0
+  ) {
+    throw new Error("workflow-producing transition timestamp is invalid");
+  }
+  return transitionAt;
+}
+
+function githubTimestampMilliseconds(timestamp, label) {
+  if (
+    typeof timestamp !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(
+      timestamp,
+    )
+  ) {
+    throw new Error(`${label} timestamp is malformed`);
+  }
+  const milliseconds = Date.parse(timestamp);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+    throw new Error(`${label} timestamp is malformed`);
+  }
+  return milliseconds;
+}
+
+function isWithinOpeningRaceWindow(transitionAt, labelAt) {
   return (
-    `PR #${pull.number} ${action} ${timestamp} run ` +
-    `${runId === null ? "pending" : runId} ` +
-    `content ${pull.contentFingerprint}`
+    labelAt >= transitionAt &&
+    labelAt - transitionAt <= OPENING_RACE_WINDOW_MS
   );
+}
+
+function workflowRunUrl(serverUrl, owner, repo, runId) {
+  return (
+    `${serverUrl.replace(/\/$/, "")}/${owner}/${repo}/actions/runs/` +
+    runId
+  );
+}
+
+function qualityTransitionDescription(pull, action, timestamp, binding) {
+  if (
+    !Number.isSafeInteger(pull.number) ||
+    pull.number < 1 ||
+    !QUALITY_TRIGGER_ACTIONS.has(action)
+  ) {
+    throw new Error("quality transition marker fields are invalid");
+  }
+  const transitionAt = transitionTimestampMilliseconds(timestamp);
+  let bindingText;
+  if (binding === null) {
+    bindingText = QUALITY_TRANSITION_PENDING;
+  } else if (binding === QUALITY_TRANSITION_UNCONFIRMED) {
+    bindingText = QUALITY_TRANSITION_UNCONFIRMED;
+  } else if (binding === QUALITY_TRANSITION_STALE) {
+    bindingText = QUALITY_TRANSITION_STALE;
+  } else if (Number.isSafeInteger(binding) && binding > 0) {
+    bindingText = String(binding);
+  } else {
+    throw new Error("quality transition marker binding is invalid");
+  }
+  const description =
+    `v3|${pull.number}|${action}|${transitionAt}|${bindingText}|` +
+    `${pull.contentFingerprint}|${pull.labelsFingerprint}`;
+  if (
+    description.length > MAX_STATUS_DESCRIPTION_LENGTH ||
+    Buffer.byteLength(description, "utf8") > MAX_STATUS_DESCRIPTION_LENGTH
+  ) {
+    throw new Error("quality transition marker description is too long");
+  }
+  return description;
+}
+
+function parseQualityTransitionDescription(description, pullNumber) {
+  const versionedMatch = description.match(
+    /^v(2|3)\|([1-9][0-9]*)\|(edited|opened|reopened|synchronize)\|(0|[1-9][0-9]*)\|(u|p|x|[1-9][0-9]*)\|([0-9a-f]{32})\|([0-9a-f]{32})$/,
+  );
+  if (versionedMatch) {
+    const version = Number(versionedMatch[1]);
+    const markerPullNumber = Number(versionedMatch[2]);
+    const action = versionedMatch[3];
+    const transitionAt = Number(versionedMatch[4]);
+    const binding = versionedMatch[5];
+    const contentFingerprint = versionedMatch[6];
+    const labelsFingerprint = versionedMatch[7];
+    const runId =
+      binding === QUALITY_TRANSITION_PENDING ||
+      binding === QUALITY_TRANSITION_UNCONFIRMED ||
+      binding === QUALITY_TRANSITION_STALE
+        ? null
+        : Number(binding);
+    if (
+      !Number.isSafeInteger(markerPullNumber) ||
+      markerPullNumber !== pullNumber ||
+      !Number.isSafeInteger(transitionAt) ||
+      !(runId === null || Number.isSafeInteger(runId)) ||
+      (version === 2 && binding === QUALITY_TRANSITION_UNCONFIRMED) ||
+      (binding === QUALITY_TRANSITION_UNCONFIRMED &&
+        (action !== "opened" ||
+          labelsFingerprint !== CLI_MANAGED_LABELS_FINGERPRINT))
+    ) {
+      throw new Error(
+        "quality transition marker does not match the pull request",
+      );
+    }
+    return {
+      version,
+      action,
+      transitionAt,
+      runId,
+      unconfirmed: binding === QUALITY_TRANSITION_UNCONFIRMED,
+      stale: binding === QUALITY_TRANSITION_STALE,
+      contentFingerprint,
+      labelsFingerprint,
+    };
+  }
+
+  const escapedNumber = String(pullNumber).replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const legacyMatch = description.match(
+    new RegExp(
+      `^PR #${escapedNumber} ` +
+        `(edited|opened|reopened|synchronize) ` +
+        `(\\S+) run (pending|[1-9][0-9]*) ` +
+        `content ([0-9a-f]{32})$`,
+    ),
+  );
+  if (!legacyMatch) {
+    throw new Error(
+      "quality transition marker does not match the pull request",
+    );
+  }
+  const transitionAt = Date.parse(legacyMatch[2]);
+  const runId =
+    legacyMatch[3] === "pending" ? null : Number(legacyMatch[3]);
+  if (
+    !Number.isFinite(transitionAt) ||
+    !(runId === null || Number.isSafeInteger(runId))
+  ) {
+    throw new Error("quality transition marker is malformed");
+  }
+  return {
+    version: 1,
+    action: legacyMatch[1],
+    transitionAt,
+    runId,
+    unconfirmed: false,
+    stale: false,
+    contentFingerprint: legacyMatch[4],
+    labelsFingerprint: null,
+  };
+}
+
+function qualityTransitionRank(transition) {
+  if (transition.runId !== null) {
+    return 3;
+  }
+  if (!transition.unconfirmed) {
+    return 2;
+  }
+  return 1;
+}
+
+function resolveQualityTransition(transitions) {
+  const transitionAt = Math.max(
+    ...transitions.map((transition) => transition.transitionAt),
+  );
+  const candidates = transitions.filter(
+    (transition) => transition.transitionAt === transitionAt,
+  );
+  const tombstones = candidates.filter((candidate) => candidate.stale);
+  if (tombstones.length > 0) {
+    return tombstones.sort(
+      (left, right) => right.statusId - left.statusId,
+    )[0];
+  }
+  const legacy = candidates.filter((candidate) => candidate.version !== 3);
+  if (legacy.length > 0) {
+    return legacy.sort(
+      (left, right) => right.statusId - left.statusId,
+    )[0];
+  }
+  for (const field of ["action", "contentFingerprint", "targetUrl"]) {
+    if (new Set(candidates.map((candidate) => candidate[field])).size !== 1) {
+      throw new Error("quality transition marker lineage conflicts");
+    }
+  }
+
+  const runIds = new Set(
+    candidates
+      .map((candidate) => candidate.runId)
+      .filter((runId) => runId !== null),
+  );
+  if (runIds.size > 1) {
+    throw new Error("quality transition marker run bindings conflict");
+  }
+
+  const action = candidates[0].action;
+  const labelsFingerprints = new Set(
+    candidates.map((candidate) => candidate.labelsFingerprint),
+  );
+  const unconfirmed = candidates.filter(
+    (candidate) => candidate.unconfirmed,
+  );
+  let hasInverseOpeningLabelPredecessor = false;
+  if (
+    unconfirmed.some(
+      (candidate) =>
+        candidate.action !== "opened" ||
+        candidate.labelsFingerprint !== CLI_MANAGED_LABELS_FINGERPRINT,
+    )
+  ) {
+    throw new Error("quality transition marker provisional state is invalid");
+  }
+  if (action !== "opened" && labelsFingerprints.size !== 1) {
+    throw new Error("quality transition marker label lineage conflicts");
+  }
+  if (action === "opened" && labelsFingerprints.size > 1) {
+    if (
+      labelsFingerprints.size !== 2 ||
+      !labelsFingerprints.has(EMPTY_LABELS_FINGERPRINT) ||
+      !labelsFingerprints.has(CLI_MANAGED_LABELS_FINGERPRINT) ||
+      unconfirmed.length > 0
+    ) {
+      throw new Error("quality transition marker label lineage conflicts");
+    }
+    const emptyLabelTransitions = candidates.filter(
+      (candidate) =>
+        candidate.labelsFingerprint === EMPTY_LABELS_FINGERPRINT,
+    );
+    const managedLabelTransitions = candidates.filter(
+      (candidate) =>
+        candidate.labelsFingerprint === CLI_MANAGED_LABELS_FINGERPRINT,
+    );
+    if (
+      emptyLabelTransitions.some((candidate) => candidate.runId !== null) &&
+      managedLabelTransitions.some((candidate) => candidate.runId === null)
+    ) {
+      throw new Error("quality transition marker label binding regressed");
+    }
+    hasInverseOpeningLabelPredecessor = true;
+  }
+
+  const resolved = candidates.sort(
+    (left, right) =>
+      qualityTransitionRank(right) - qualityTransitionRank(left) ||
+      right.statusId - left.statusId,
+  )[0];
+  return {
+    ...resolved,
+    hasInverseOpeningLabelPredecessor,
+  };
 }
 
 async function getQualityTransition({
@@ -438,7 +836,10 @@ async function getQualityTransition({
       marker.creator?.login !== GITHUB_ACTIONS_BOT.login ||
       marker.creator?.type !== GITHUB_ACTIONS_BOT.type ||
       typeof marker.target_url !== "string" ||
-      !marker.target_url.startsWith(expectedRunUrlPrefix)
+      !marker.target_url.startsWith(expectedRunUrlPrefix) ||
+      marker.description.length > MAX_STATUS_DESCRIPTION_LENGTH ||
+      Buffer.byteLength(marker.description, "utf8") >
+        MAX_STATUS_DESCRIPTION_LENGTH
     ) {
       throw new Error("quality transition marker is malformed");
     }
@@ -452,80 +853,80 @@ async function getQualityTransition({
     ) {
       throw new Error("quality transition marker run URL is malformed");
     }
-    const escapedNumber = String(pull.number).replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&",
+    const transition = parseQualityTransitionDescription(
+      marker.description,
+      pull.number,
     );
-    const match = marker.description.match(
-      new RegExp(
-        `^PR #${escapedNumber} ` +
-          `(edited|opened|reopened|synchronize) ` +
-          `(\\S+) run (pending|[1-9][0-9]*) ` +
-          `content ([0-9a-f]{32})$`,
-      ),
-    );
-    if (!match) {
-      throw new Error(
-        "quality transition marker does not match the pull request",
-      );
-    }
-    const transitionAt = Date.parse(match[2]);
-    const runId = match[3] === "pending" ? null : Number(match[3]);
-    if (
-      !QUALITY_TRIGGER_ACTIONS.has(match[1]) ||
-      !Number.isFinite(transitionAt) ||
-      !(runId === null || Number.isSafeInteger(runId))
-    ) {
-      throw new Error("quality transition marker is malformed");
-    }
     return {
-      action: match[1],
-      timestamp: match[2],
-      transitionAt,
-      runId,
-      contentFingerprint: match[4],
+      ...transition,
       policyRunId,
       targetUrl: marker.target_url,
       statusId: marker.id,
+      statusCreatedAt: githubTimestampMilliseconds(
+        marker.created_at,
+        "quality transition marker",
+      ),
     };
   });
-  const transition = parsed.sort(
-    (left, right) =>
-      right.transitionAt - left.transitionAt ||
-      right.statusId - left.statusId,
-  )[0];
-  const [workflowResponse, runResponse] = await Promise.all([
-    github.rest.actions.getWorkflow({
-      owner,
-      repo,
-      workflow_id: BRANCH_WORKFLOW,
-    }),
-    github.rest.actions.getWorkflowRun({
-      owner,
-      repo,
-      run_id: transition.policyRunId,
-    }),
-  ]);
-  const policyRun = runResponse.data;
-  const relations = policyRun.pull_requests || [];
-  const relation = relations[0];
-  if (
-    policyRun.id !== transition.policyRunId ||
-    policyRun.workflow_id !== workflowResponse.data.id ||
-    policyRun.path !== BRANCH_WORKFLOW_PATH ||
-    policyRun.event !== "pull_request_target" ||
-    policyRun.repository?.full_name !== `${owner}/${repo}` ||
-    policyRun.html_url !== transition.targetUrl ||
-    relations.length !== 1 ||
-    relation.number !== pull.number ||
-    relation.head?.sha !== pull.headSha ||
-    relation.base?.sha !== pull.baseSha
-  ) {
-    throw new Error(
-      "quality transition marker does not originate from branch-policy",
+  const workflowResponse = await github.rest.actions.getWorkflow({
+    owner,
+    repo,
+    workflow_id: BRANCH_WORKFLOW,
+  });
+  const policyRuns = new Map(
+    await Promise.all(
+      [...new Set(parsed.map(({ policyRunId }) => policyRunId))].map(
+        async (policyRunId) => {
+          const response = await github.rest.actions.getWorkflowRun({
+            owner,
+            repo,
+            run_id: policyRunId,
+          });
+          return [policyRunId, response.data];
+        },
+      ),
+    ),
+  );
+  for (const candidate of parsed) {
+    const policyRun = policyRuns.get(candidate.policyRunId);
+    const relations = Array.isArray(policyRun?.pull_requests)
+      ? policyRun.pull_requests
+      : [];
+    const relation = relations[0];
+    if (
+      !policyRun ||
+      policyRun.id !== candidate.policyRunId ||
+      policyRun.workflow_id !== workflowResponse.data.id ||
+      policyRun.path !== BRANCH_WORKFLOW_PATH ||
+      policyRun.event !== "pull_request_target" ||
+      policyRun.repository?.full_name !== `${owner}/${repo}` ||
+      policyRun.html_url !== candidate.targetUrl ||
+      relations.length !== 1 ||
+      relation.number !== pull.number ||
+      relation.head?.sha !== pull.headSha ||
+      relation.base?.sha !== pull.baseSha
+    ) {
+      throw new Error(
+        "quality transition marker does not originate from branch-policy",
+      );
+    }
+  }
+  for (const candidate of parsed) {
+    candidate.lineageCreatedAt = Math.min(
+      ...parsed
+        .filter(
+          (marker) =>
+            marker.version === candidate.version &&
+            marker.action === candidate.action &&
+            marker.transitionAt === candidate.transitionAt &&
+            marker.contentFingerprint === candidate.contentFingerprint &&
+            marker.labelsFingerprint === candidate.labelsFingerprint &&
+            marker.targetUrl === candidate.targetUrl,
+        )
+        .map(({ statusCreatedAt }) => statusCreatedAt),
     );
   }
-  return transition;
+  return resolveQualityTransition(parsed);
 }
 
 async function getWorkflowBlob(github, repository, path, ref) {
@@ -542,229 +943,14 @@ async function getWorkflowBlob(github, repository, path, ref) {
   return response.data.sha;
 }
 
-async function getCurrentPull(github, owner, repo, number, expected) {
-  let current;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const response = await github.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: number,
-    });
-    current = pullIdentity(response.data);
-    assertExpectedPull(current, expected);
-
-    if (current.state !== "open") {
-      throw new Error(`Pull request #${number} is not open`);
-    }
-    if (response.data.mergeable === false) {
-      throw new Error(`Pull request #${number} has no mergeable snapshot`);
-    }
-    if (current.mergeSha && response.data.mergeable !== null) {
-      if (current.mergeSha === current.headSha) {
-        throw new Error(`Pull request #${number} has no unique merge snapshot`);
-      }
-      return current;
-    }
-    await sleep(2000);
-  }
-
-  throw new Error(`GitHub did not produce a current merge snapshot for #${number}`);
-}
-
-async function listQualityWorkflowRuns(
-  github,
-  owner,
-  repo,
-  workflowId,
-  headSha,
-) {
-  const runs = [];
-  const seenRunIds = new Set();
-  let expectedTotal = null;
-  for (let page = 1; page <= 10; page += 1) {
-    const response = await github.rest.actions.listWorkflowRuns({
-      owner,
-      repo,
-      workflow_id: workflowId,
-      event: "pull_request",
-      head_sha: headSha,
-      per_page: 100,
-      page,
-    });
-    const totalCount = response.data?.total_count;
-    const pageRuns = response.data?.workflow_runs;
-    if (
-      !Number.isInteger(totalCount) ||
-      totalCount < 0 ||
-      totalCount > 1000 ||
-      !Array.isArray(pageRuns) ||
-      pageRuns.length > 100 ||
-      pageRuns.some(
-        (run) =>
-          !run ||
-          typeof run !== "object" ||
-          !Number.isInteger(run.id) ||
-          run.id < 1,
-      )
-    ) {
-      throw new Error("quality workflow run inventory is malformed");
-    }
-    if (expectedTotal === null) {
-      expectedTotal = totalCount;
-    } else if (totalCount !== expectedTotal) {
-      throw new Error("quality workflow run inventory changed while paging");
-    }
-    for (const run of pageRuns) {
-      if (seenRunIds.has(run.id)) {
-        throw new Error("quality workflow run inventory contains duplicate IDs");
-      }
-      seenRunIds.add(run.id);
-    }
-    runs.push(...pageRuns);
-    if (runs.length === expectedTotal) {
-      return runs;
-    }
-    if (runs.length > expectedTotal || pageRuns.length < 100) {
-      throw new Error("quality workflow run inventory is incomplete");
-    }
-  }
-  throw new Error("quality workflow run inventory exceeds the bounded scan");
-}
-
-async function findQualityTransitionRun({
+async function resolveQualityWorkflowTrust({
   github,
   owner,
   repo,
   pull,
-  timestamp,
-}) {
-  const transitionAt = Date.parse(timestamp);
-  if (!Number.isFinite(transitionAt)) {
-    throw new Error("workflow-producing transition timestamp is invalid");
-  }
-  const workflowResponse = await github.rest.actions.getWorkflow({
-    owner,
-    repo,
-    workflow_id: QUALITY_WORKFLOW,
-  });
-  const workflowId = workflowResponse.data.id;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const runs = await listQualityWorkflowRuns(
-      github,
-      owner,
-      repo,
-      workflowId,
-      pull.headSha,
-    );
-    const candidate = selectQualityTransitionRun(
-      runs,
-      pull,
-      workflowId,
-      transitionAt,
-    );
-    if (candidate) {
-      return candidate;
-    }
-    if (attempt < 5) {
-      await sleep(2000);
-    }
-  }
-  return null;
-}
-
-function selectQualityTransitionRun(runs, pull, workflowId, transitionAt) {
-  return (
-    runs
-      .filter((run) => runMatchesPull(run, pull, workflowId))
-      .filter((run) => {
-        const createdAt = Date.parse(run.created_at);
-        return Number.isFinite(createdAt) && createdAt > transitionAt;
-      })
-      .sort((left, right) => right.id - left.id)[0] || null
-  );
-}
-
-async function bindPendingQualityTransition({
-  github,
-  owner,
-  repo,
-  pull,
-  candidateRun,
-  serverUrl,
-}) {
-  const transition = await getQualityTransition({
-    github,
-    owner,
-    repo,
-    pull,
-    serverUrl,
-  });
-  if (
-    !transition ||
-    transition.runId !== null ||
-    transition.contentFingerprint !== pull.contentFingerprint
-  ) {
-    return false;
-  }
-
-  const workflowResponse = await github.rest.actions.getWorkflow({
-    owner,
-    repo,
-    workflow_id: QUALITY_WORKFLOW,
-  });
-  const workflowId = workflowResponse.data.id;
-  const runs = await listQualityWorkflowRuns(
-    github,
-    owner,
-    repo,
-    workflowId,
-    pull.headSha,
-  );
-  if (candidateRun && !runs.some((run) => run.id === candidateRun.id)) {
-    runs.push(candidateRun);
-  }
-  const run = selectQualityTransitionRun(
-    runs,
-    pull,
-    workflowId,
-    transition.transitionAt,
-  );
-  if (!run) {
-    return false;
-  }
-
-  const description = qualityTransitionDescription(
-    pull,
-    transition.action,
-    transition.timestamp,
-    run.id,
-  );
-  for (const target of statusTargets(pull)) {
-    await publishStatus(
-      github,
-      owner,
-      repo,
-      target,
-      qualityTransitionContext(pull),
-      "pending",
-      description,
-      transition.targetUrl,
-    );
-  }
-  return true;
-}
-
-async function qualityDecision({
-  github,
-  owner,
-  repo,
-  pull,
-  candidateRun,
-  fallbackUrl,
   workflowAuthorizations,
   authorizationNow,
-  requireFreshRun,
-  serverUrl,
+  fallbackUrl,
 }) {
   const repository = `${owner}/${repo}`;
   const repositoryResponse = await github.rest.repos.get({ owner, repo });
@@ -795,10 +981,12 @@ async function qualityDecision({
     ]);
   } catch (error) {
     return {
-      state: "failure",
-      description: `PR #${pull.number} cannot verify trusted quality workflow`,
-      targetUrl: fallbackUrl,
-      reason: error.message,
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} cannot verify trusted quality workflow`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      },
     };
   }
 
@@ -816,23 +1004,868 @@ async function qualityDecision({
       });
     } catch (error) {
       return {
-        state: "failure",
-        description: `PR #${pull.number} has invalid workflow authorization`,
-        targetUrl: fallbackUrl,
-        reason: error.message,
+        failure: {
+          state: "failure",
+          description: `PR #${pull.number} has invalid workflow authorization`,
+          targetUrl: fallbackUrl,
+          reason: error.message,
+        },
       };
     }
     if (!authorization) {
       return {
-        state: "failure",
-        description: `PR #${pull.number} changes the trusted quality workflow`,
-        targetUrl: fallbackUrl,
-        reason:
-          "quality workflow differs from the current default branch without " +
-          "an exact PR-bound authorization",
+        failure: {
+          state: "failure",
+          description: `PR #${pull.number} changes the trusted quality workflow`,
+          targetUrl: fallbackUrl,
+          reason:
+            "quality workflow differs from the current default branch without " +
+            "an exact PR-bound authorization",
+        },
       };
     }
   }
+
+  return { workflowId, authorization, failure: null };
+}
+
+async function getCurrentPull(
+  github,
+  owner,
+  repo,
+  number,
+  expected,
+  {
+    allowLabelRefreshReconciliation = false,
+    allowOpeningLabelSnapshotMismatch = false,
+  } = {},
+) {
+  let current;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const response = await github.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: number,
+    });
+    current = pullIdentity(response.data);
+    if (
+      !(
+        (allowOpeningLabelSnapshotMismatch &&
+          isOpeningCliLabelRace(current, expected)) ||
+        (allowLabelRefreshReconciliation &&
+          isLabelRefreshSnapshot(current, expected))
+      )
+    ) {
+      assertExpectedPull(current, expected);
+    }
+
+    if (current.state !== "open") {
+      throw new Error(`Pull request #${number} is not open`);
+    }
+    if (response.data.mergeable === false) {
+      throw new Error(`Pull request #${number} has no mergeable snapshot`);
+    }
+    if (current.mergeSha && response.data.mergeable !== null) {
+      if (current.mergeSha === current.headSha) {
+        throw new Error(`Pull request #${number} has no unique merge snapshot`);
+      }
+      return current;
+    }
+    await sleep(2000);
+  }
+
+  throw new Error(`GitHub did not produce a current merge snapshot for #${number}`);
+}
+
+async function listQualityWorkflowRuns(
+  github,
+  owner,
+  repo,
+  workflowId,
+  headSha,
+  serverUrl,
+) {
+  const runs = [];
+  const seenRunIds = new Set();
+  let expectedTotal = null;
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await github.rest.actions.listWorkflowRuns({
+      owner,
+      repo,
+      workflow_id: workflowId,
+      event: "pull_request",
+      head_sha: headSha,
+      per_page: 100,
+      page,
+    });
+    const totalCount = response.data?.total_count;
+    const pageRuns = response.data?.workflow_runs;
+    if (
+      !Number.isInteger(totalCount) ||
+      totalCount < 0 ||
+      totalCount > 1000 ||
+      !Array.isArray(pageRuns) ||
+      pageRuns.length > 100 ||
+      pageRuns.some(
+        (run) => {
+          try {
+            assertQualityWorkflowRunInventoryEntry({
+              run,
+              owner,
+              repo,
+              serverUrl,
+            });
+            return false;
+          } catch {
+            return true;
+          }
+        },
+      )
+    ) {
+      throw new Error("quality workflow run inventory is malformed");
+    }
+    if (expectedTotal === null) {
+      expectedTotal = totalCount;
+    } else if (totalCount !== expectedTotal) {
+      throw new Error("quality workflow run inventory changed while paging");
+    }
+    for (const run of pageRuns) {
+      if (seenRunIds.has(run.id)) {
+        throw new Error("quality workflow run inventory contains duplicate IDs");
+      }
+      seenRunIds.add(run.id);
+    }
+    runs.push(...pageRuns);
+    if (runs.length === expectedTotal) {
+      return runs;
+    }
+    if (runs.length > expectedTotal || pageRuns.length < 100) {
+      throw new Error("quality workflow run inventory is incomplete");
+    }
+  }
+  throw new Error("quality workflow run inventory exceeds the bounded scan");
+}
+
+function assertQualityWorkflowRunInventoryEntry({
+  run,
+  owner,
+  repo,
+  serverUrl,
+}) {
+  const safeString = (value, maximumLength) =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    !/[\u0000-\u001f\u007f]/.test(value);
+  const validRelations =
+    Array.isArray(run?.pull_requests) &&
+    run.pull_requests.length <= 100 &&
+    run.pull_requests.every(
+      (relation) =>
+        relation &&
+        typeof relation === "object" &&
+        !Array.isArray(relation) &&
+        Number.isSafeInteger(relation.number) &&
+        relation.number > 0 &&
+        relation.head &&
+        typeof relation.head === "object" &&
+        !Array.isArray(relation.head) &&
+        /^[0-9a-f]{40}$/.test(relation.head.sha) &&
+        relation.base &&
+        typeof relation.base === "object" &&
+        !Array.isArray(relation.base) &&
+        /^[0-9a-f]{40}$/.test(relation.base.sha),
+    );
+  let validCreatedAt = true;
+  try {
+    githubTimestampMilliseconds(
+      run?.created_at,
+      "quality workflow run created_at",
+    );
+  } catch {
+    validCreatedAt = false;
+  }
+  if (
+    !run ||
+    typeof run !== "object" ||
+    Array.isArray(run) ||
+    !Number.isSafeInteger(run.id) ||
+    run.id < 1 ||
+    !Number.isSafeInteger(run.run_attempt) ||
+    run.run_attempt < 1 ||
+    !Number.isSafeInteger(run.workflow_id) ||
+    run.workflow_id < 1 ||
+    !safeString(run.path, 1024) ||
+    !safeString(run.event, 100) ||
+    !/^[0-9a-f]{40}$/.test(run.head_sha) ||
+    !run.head_repository ||
+    typeof run.head_repository !== "object" ||
+    Array.isArray(run.head_repository) ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(
+      run.head_repository.full_name,
+    ) ||
+    !validRelations ||
+    !validCreatedAt ||
+    !isValidWorkflowRunState(run.status, run.conclusion) ||
+    run.html_url !== workflowRunUrl(serverUrl, owner, repo, run.id)
+  ) {
+    throw new Error("quality workflow run inventory entry is malformed");
+  }
+}
+
+function assertQualityWorkflowRunCandidate({
+  run,
+  owner,
+  repo,
+  serverUrl,
+}) {
+  assertQualityWorkflowRunInventoryEntry({
+    run,
+    owner,
+    repo,
+    serverUrl,
+  });
+  if (run.pull_requests.length !== 1) {
+    throw new Error(
+      "Completed quality workflow must have exactly one pull request relation",
+    );
+  }
+}
+
+function isValidWorkflowRunState(status, conclusion) {
+  if (status === "completed") {
+    return WORKFLOW_RUN_CONCLUSIONS.has(conclusion);
+  }
+  if (WORKFLOW_RUN_NONTERMINAL_STATUSES.has(status)) {
+    return conclusion === null;
+  }
+  return (
+    WORKFLOW_RUN_TERMINAL_STATUSES.has(status) &&
+    conclusion === status
+  );
+}
+
+function qualityWorkflowRunEvidence(run) {
+  return JSON.stringify([
+    run.id,
+    run.run_attempt,
+    run.workflow_id,
+    run.path,
+    run.event,
+    run.head_sha,
+    run.head_repository.full_name,
+    run.pull_requests.map((relation) => [
+      relation.number,
+      relation.head.sha,
+      relation.base.sha,
+    ]),
+    run.html_url,
+    githubTimestampMilliseconds(
+      run.created_at,
+      "quality workflow run created_at",
+    ),
+    run.status,
+    run.conclusion,
+  ]);
+}
+
+function matchingWorkflowRunCandidate({
+  candidateRun,
+  runs,
+  owner,
+  repo,
+  serverUrl,
+}) {
+  assertQualityWorkflowRunCandidate({
+    run: candidateRun,
+    owner,
+    repo,
+    serverUrl,
+  });
+  const listedRun = runs.find((run) => run.id === candidateRun.id);
+  return (
+    listedRun &&
+    qualityWorkflowRunEvidence(candidateRun) ===
+      qualityWorkflowRunEvidence(listedRun)
+      ? listedRun
+      : null
+  );
+}
+
+async function findQualityTransitionRun({
+  github,
+  owner,
+  repo,
+  pull,
+  timestamp,
+  serverUrl,
+  authorization = null,
+}) {
+  const transitionAt = Date.parse(timestamp);
+  if (!Number.isFinite(transitionAt)) {
+    throw new Error("workflow-producing transition timestamp is invalid");
+  }
+  const workflowResponse = await github.rest.actions.getWorkflow({
+    owner,
+    repo,
+    workflow_id: QUALITY_WORKFLOW,
+  });
+  const workflowId = workflowResponse.data.id;
+  const minimumCreatedAt = qualityRunSelectionCutoff(
+    transitionAt,
+    authorization,
+  );
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const runs = await listQualityWorkflowRuns(
+      github,
+      owner,
+      repo,
+      workflowId,
+      pull.headSha,
+      serverUrl,
+    );
+    const candidate = selectQualityTransitionRun(
+      runs,
+      pull,
+      workflowId,
+      minimumCreatedAt,
+    );
+    if (candidate) {
+      return candidate;
+    }
+    if (attempt < 5) {
+      await sleep(2000);
+    }
+  }
+  return null;
+}
+
+function selectQualityTransitionRun(
+  runs,
+  pull,
+  workflowId,
+  minimumCreatedAt,
+) {
+  return (
+    runs
+      .filter((run) => runMatchesPull(run, pull, workflowId))
+      .filter((run) => {
+        const createdAt = Date.parse(run.created_at);
+        return Number.isFinite(createdAt) && createdAt > minimumCreatedAt;
+      })
+      .sort((left, right) => right.id - left.id)[0] || null
+  );
+}
+
+function qualityRunSelectionCutoff(transitionAt, authorization) {
+  if (!authorization) {
+    return transitionAt;
+  }
+  return Math.max(
+    transitionAt,
+    parseAuthorizationTime(authorization.issuedAt, "issuedAt"),
+  );
+}
+
+function transitionMatchesPullIdentity(transition, pull) {
+  return (
+    transition.contentFingerprint === pull.contentFingerprint &&
+    transition.labelsFingerprint === pull.labelsFingerprint
+  );
+}
+
+function hasSameValidatedPullUpdate(eventPull, pull) {
+  return (
+    githubTimestampMilliseconds(
+      eventPull.updatedAt,
+      "pull request event updated_at",
+    ) ===
+    githubTimestampMilliseconds(
+      pull.updatedAt,
+      "current pull request updated_at",
+    )
+  );
+}
+
+function isOpeningLabelLineage(transition, pull) {
+  return (
+    transition.version === 3 &&
+    transition.action === "opened" &&
+    !transition.unconfirmed &&
+    !transition.stale &&
+    transition.contentFingerprint === pull.contentFingerprint &&
+    transition.labelsFingerprint === EMPTY_LABELS_FINGERPRINT &&
+    pull.labels.length === 1 &&
+    pull.labels[0] === CLI_MANAGED_LABEL
+  );
+}
+
+function hasInverseOpeningLabelEvidence({
+  transition,
+  pull,
+  eventAction,
+  eventLabelName,
+  eventPull,
+}) {
+  if (
+    eventAction !== "labeled" ||
+    eventLabelName !== CLI_MANAGED_LABEL ||
+    eventPull?.labels?.length !== 1 ||
+    eventPull.labels[0] !== CLI_MANAGED_LABEL ||
+    eventPull.contentFingerprint !== pull.contentFingerprint ||
+    eventPull.labelsFingerprint !== pull.labelsFingerprint ||
+    !hasSameValidatedPullUpdate(eventPull, pull)
+  ) {
+    return false;
+  }
+  return isWithinOpeningRaceWindow(
+    transition.transitionAt,
+    githubTimestampMilliseconds(
+      eventPull.updatedAt,
+      "pull request event updated_at",
+    ),
+  );
+}
+
+function canReconcileOpeningLabelLineage({
+  transition,
+  pull,
+  eventAction,
+  eventLabelName,
+  eventPull,
+}) {
+  return (
+    isOpeningLabelLineage(transition, pull) &&
+    hasInverseOpeningLabelEvidence({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    })
+  );
+}
+
+function isConfirmedInverseOpeningLabelReplay({
+  transition,
+  pull,
+  eventAction,
+  eventLabelName,
+  eventPull,
+}) {
+  if (
+    transition.hasInverseOpeningLabelPredecessor !== true ||
+    !transitionMatchesPullIdentity(transition, pull) ||
+    !hasInverseOpeningLabelEvidence({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    })
+  ) {
+    return false;
+  }
+  return (
+    githubTimestampMilliseconds(
+      eventPull.updatedAt,
+      "pull request event updated_at",
+    ) === transition.lineageCreatedAt
+  );
+}
+
+function hasDirectOpeningLabelEvidence({
+  transition,
+  pull,
+  eventAction,
+  eventLabelName,
+  eventPull,
+}) {
+  if (
+    eventAction !== "labeled" ||
+    eventLabelName !== CLI_MANAGED_LABEL ||
+    eventPull?.labels?.length !== 1 ||
+    eventPull.labels[0] !== CLI_MANAGED_LABEL ||
+    pull.labels.length !== 1 ||
+    pull.labels[0] !== CLI_MANAGED_LABEL ||
+    transition.version !== 3 ||
+    transition.action !== "opened" ||
+    transition.stale ||
+    !transitionMatchesPullIdentity(transition, pull) ||
+    eventPull.contentFingerprint !== pull.contentFingerprint ||
+    eventPull.labelsFingerprint !== pull.labelsFingerprint ||
+    !hasSameValidatedPullUpdate(eventPull, pull)
+  ) {
+    return false;
+  }
+  const eventAt = githubTimestampMilliseconds(
+    eventPull.updatedAt,
+    "pull request event updated_at",
+  );
+  return (
+    isWithinOpeningRaceWindow(transition.transitionAt, eventAt) &&
+    eventAt < transition.lineageCreatedAt
+  );
+}
+
+async function publishQualityTransitionMarker({
+  github,
+  owner,
+  repo,
+  pull,
+  action,
+  transitionAt,
+  binding,
+  targetUrl,
+}) {
+  const description = qualityTransitionDescription(
+    pull,
+    action,
+    transitionAt,
+    binding,
+  );
+  for (const target of statusTargets(pull)) {
+    await publishStatus(
+      github,
+      owner,
+      repo,
+      target,
+      qualityTransitionContext(pull),
+      "pending",
+      description,
+      targetUrl,
+    );
+  }
+}
+
+async function shouldCreateQualityTransition({
+  github,
+  owner,
+  repo,
+  pull,
+  action,
+  timestamp,
+  serverUrl,
+  hasOpeningSnapshotMismatch,
+}) {
+  const transitionAt = transitionTimestampMilliseconds(timestamp);
+  const transition = await getQualityTransition({
+    github,
+    owner,
+    repo,
+    pull,
+    serverUrl,
+  });
+  if (!transition) {
+    return (
+      !hasOpeningSnapshotMismatch ||
+      isWithinOpeningRaceWindow(
+        transitionAt,
+        githubTimestampMilliseconds(
+          pull.updatedAt,
+          "current pull request updated_at",
+        ),
+      )
+    );
+  }
+  return action !== "opened" && transition.transitionAt < transitionAt;
+}
+
+async function bindPendingQualityTransition({
+  github,
+  owner,
+  repo,
+  pull,
+  candidateRun,
+  serverUrl,
+  eventAction,
+  eventLabelName,
+  eventPull,
+  workflowAuthorizations,
+  authorizationNow,
+  fallbackUrl,
+}) {
+  if (candidateRun) {
+    assertQualityWorkflowRunCandidate({
+      run: candidateRun,
+      owner,
+      repo,
+      serverUrl,
+    });
+  }
+  let transition = await getQualityTransition({
+    github,
+    owner,
+    repo,
+    pull,
+    serverUrl,
+  });
+  if (!transition || transition.version !== 3 || transition.stale) {
+    return false;
+  }
+  if (eventAction === "opened") {
+    if (
+      transition.action === "opened" &&
+      (transition.unconfirmed ||
+        !transitionMatchesPullIdentity(transition, pull)) &&
+      isOpeningCliLabelRace(pull, eventPull) &&
+      transition.transitionAt ===
+        githubTimestampMilliseconds(
+          eventPull.updatedAt,
+          "opened pull request updated_at",
+        ) &&
+      !isBoundedOpeningCliLabelRace(pull, eventPull)
+    ) {
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: QUALITY_TRANSITION_STALE,
+        targetUrl: transition.targetUrl,
+      });
+    }
+    return false;
+  }
+  const labelRefresh =
+    eventAction === "labeled" || eventAction === "unlabeled";
+  if (
+    labelRefresh &&
+    transitionTimestampMilliseconds(eventPull.updatedAt) <
+      transition.transitionAt
+  ) {
+    return false;
+  }
+  const openingLabelReconciliation =
+    canReconcileOpeningLabelLineage({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+  const directOpeningLabelEvidence =
+    hasDirectOpeningLabelEvidence({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+  const confirmedInverseOpeningLabelReplay =
+    isConfirmedInverseOpeningLabelReplay({
+      transition,
+      pull,
+      eventAction,
+      eventLabelName,
+      eventPull,
+    });
+  if (confirmedInverseOpeningLabelReplay) {
+    return false;
+  }
+  let confirmedDirectOpeningLabel = false;
+  if (transition.unconfirmed) {
+    if (!directOpeningLabelEvidence) {
+      if (labelRefresh) {
+        await publishQualityTransitionMarker({
+          github,
+          owner,
+          repo,
+          pull,
+          action: transition.action,
+          transitionAt: transition.transitionAt,
+          binding: QUALITY_TRANSITION_STALE,
+          targetUrl: transition.targetUrl,
+        });
+      }
+      return false;
+    }
+    confirmedDirectOpeningLabel = true;
+    await publishQualityTransitionMarker({
+      github,
+      owner,
+      repo,
+      pull,
+      action: transition.action,
+      transitionAt: transition.transitionAt,
+      binding: null,
+      targetUrl: transition.targetUrl,
+    });
+    transition = {
+      ...transition,
+      runId: null,
+      unconfirmed: false,
+    };
+  }
+  const labelEventProvesDrift =
+    labelRefresh &&
+    !openingLabelReconciliation &&
+    !directOpeningLabelEvidence;
+  if (labelEventProvesDrift) {
+    await publishQualityTransitionMarker({
+      github,
+      owner,
+      repo,
+      pull,
+      action: transition.action,
+      transitionAt: transition.transitionAt,
+      binding: QUALITY_TRANSITION_STALE,
+      targetUrl: transition.targetUrl,
+    });
+    return false;
+  }
+  if (
+    isOpeningLabelLineage(transition, pull) &&
+    !openingLabelReconciliation
+  ) {
+    return false;
+  }
+  if (!transitionMatchesPullIdentity(transition, pull)) {
+    if (openingLabelReconciliation) {
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: transition.runId,
+        targetUrl: transition.targetUrl,
+      });
+      transition = {
+        ...transition,
+        contentFingerprint: pull.contentFingerprint,
+        labelsFingerprint: pull.labelsFingerprint,
+        unconfirmed: false,
+      };
+    } else {
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: QUALITY_TRANSITION_STALE,
+        targetUrl: transition.targetUrl,
+      });
+      return false;
+    }
+  }
+  if (
+    directOpeningLabelEvidence &&
+    !confirmedDirectOpeningLabel &&
+    !openingLabelReconciliation
+  ) {
+    return false;
+  }
+  if (transition.runId !== null) {
+    return false;
+  }
+
+  const trust = await resolveQualityWorkflowTrust({
+    github,
+    owner,
+    repo,
+    pull,
+    workflowAuthorizations,
+    authorizationNow,
+    fallbackUrl,
+  });
+  if (trust.failure) {
+    return false;
+  }
+  const minimumCreatedAt = qualityRunSelectionCutoff(
+    transition.transitionAt,
+    trust.authorization,
+  );
+  const runs = await listQualityWorkflowRuns(
+    github,
+    owner,
+    repo,
+    trust.workflowId,
+    pull.headSha,
+    serverUrl,
+  );
+  if (
+    candidateRun &&
+    !matchingWorkflowRunCandidate({
+      candidateRun,
+      runs,
+      owner,
+      repo,
+      serverUrl,
+    })
+  ) {
+    return false;
+  }
+  const run = selectQualityTransitionRun(
+    runs,
+    pull,
+    trust.workflowId,
+    minimumCreatedAt,
+  );
+  if (!run) {
+    return false;
+  }
+
+  await publishQualityTransitionMarker({
+    github,
+    owner,
+    repo,
+    pull,
+    action: transition.action,
+    transitionAt: transition.transitionAt,
+    binding: run.id,
+    targetUrl: transition.targetUrl,
+  });
+  return true;
+}
+
+async function qualityDecision({
+  github,
+  owner,
+  repo,
+  pull,
+  candidateRun,
+  fallbackUrl,
+  workflowAuthorizations,
+  authorizationNow,
+  requireFreshRun,
+  serverUrl,
+}) {
+  if (candidateRun) {
+    try {
+      assertQualityWorkflowRunCandidate({
+        run: candidateRun,
+        owner,
+        repo,
+        serverUrl,
+      });
+    } catch (error) {
+      return {
+        state: "failure",
+        description: `PR #${pull.number} workflow completion is invalid`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      };
+    }
+  }
+  const trust = await resolveQualityWorkflowTrust({
+    github,
+    owner,
+    repo,
+    pull,
+    workflowAuthorizations,
+    authorizationNow,
+    fallbackUrl,
+  });
+  if (trust.failure) {
+    return trust.failure;
+  }
+  const { workflowId, authorization } = trust;
 
   if (requireFreshRun) {
     return {
@@ -840,6 +1873,7 @@ async function qualityDecision({
       description: `PR #${pull.number} awaits this transition's quality gates`,
       targetUrl: fallbackUrl,
       reason: "workflow-producing pull request transition awaits its exact run",
+      authorization,
     };
   }
 
@@ -868,12 +1902,28 @@ async function qualityDecision({
       reason: "no workflow-producing pull request transition is recorded",
     };
   }
-  if (transition.runId === null) {
+  if (transition.version !== 3) {
     return {
       state: "pending",
-      description: `PR #${pull.number} awaits transition run registration`,
+      description: `PR #${pull.number} awaits a current quality transition`,
       targetUrl: fallbackUrl,
-      reason: "the workflow-producing transition has no bound quality run yet",
+      reason: "legacy quality transition markers cannot produce new success",
+    };
+  }
+  if (transition.stale) {
+    return {
+      state: "pending",
+      description: `PR #${pull.number} awaits a new quality transition`,
+      targetUrl: fallbackUrl,
+      reason: "the current quality transition lineage is permanently stale",
+    };
+  }
+  if (transition.unconfirmed) {
+    return {
+      state: "pending",
+      description: `PR #${pull.number} awaits opening label confirmation`,
+      targetUrl: fallbackUrl,
+      reason: "the opening quality transition has no durable label proof",
     };
   }
   if (transition.contentFingerprint !== pull.contentFingerprint) {
@@ -882,6 +1932,22 @@ async function qualityDecision({
       description: `PR #${pull.number} awaits its current content transition`,
       targetUrl: fallbackUrl,
       reason: "the quality transition marker predates current PR content",
+    };
+  }
+  if (transition.labelsFingerprint !== pull.labelsFingerprint) {
+    return {
+      state: "pending",
+      description: `PR #${pull.number} awaits its current label transition`,
+      targetUrl: fallbackUrl,
+      reason: "the quality transition marker predates current PR labels",
+    };
+  }
+  if (transition.runId === null) {
+    return {
+      state: "pending",
+      description: `PR #${pull.number} awaits transition run registration`,
+      targetUrl: fallbackUrl,
+      reason: "the workflow-producing transition has no bound quality run yet",
     };
   }
   if (candidateRun && candidateRun.id !== transition.runId) {
@@ -901,6 +1967,7 @@ async function qualityDecision({
       repo,
       workflowId,
       pull.headSha,
+      serverUrl,
     );
   } catch (error) {
     return {
@@ -910,8 +1977,33 @@ async function qualityDecision({
       reason: error.message,
     };
   }
-  if (candidateRun && !candidates.some((run) => run.id === candidateRun.id)) {
-    candidates.push(candidateRun);
+  if (candidateRun) {
+    let listedCandidate;
+    try {
+      listedCandidate = matchingWorkflowRunCandidate({
+        candidateRun,
+        runs: candidates,
+        owner,
+        repo,
+        serverUrl,
+      });
+    } catch (error) {
+      return {
+        state: "failure",
+        description: `PR #${pull.number} workflow completion is invalid`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      };
+    }
+    if (!listedCandidate) {
+      return {
+        state: "pending",
+        description: `PR #${pull.number} awaits its exact quality completion`,
+        targetUrl: fallbackUrl,
+        reason:
+          "workflow completion disagrees with trusted run inventory",
+      };
+    }
   }
   const matchingRuns = candidates.filter((run) =>
     runMatchesPull(run, pull, workflowId),
@@ -1114,22 +2206,31 @@ module.exports = async function publishPrPolicy({
   let work;
   if (context.eventName === "pull_request_target") {
     const action = context.payload.action;
-    if (
-      ![
-        "edited",
-        "opened",
-        "ready_for_review",
-        "reopened",
-        "synchronize",
-      ].includes(action)
-    ) {
+    if (!SUPPORTED_PULL_REQUEST_TARGET_ACTIONS.has(action)) {
       throw new Error(`Unsupported pull_request_target action: ${action}`);
     }
+    const eventLabelName =
+      action === "labeled" || action === "unlabeled"
+        ? context.payload.label?.name
+        : null;
+    if (
+      (action === "labeled" || action === "unlabeled") &&
+      (typeof eventLabelName !== "string" || eventLabelName.length === 0)
+    ) {
+      throw new Error(`${action} requires a valid label name`);
+    }
+    const eventPull = eventPullIdentity(context.payload.pull_request);
     work = [
       {
         number: context.payload.pull_request.number,
-        expected: eventPullIdentity(context.payload.pull_request),
+        expected: eventPull,
+        eventPull,
         candidateRun: null,
+        eventAction: action,
+        eventLabelName,
+        allowLabelRefreshReconciliation:
+          action === "labeled" || action === "unlabeled",
+        allowOpeningLabelSnapshotMismatch: action === "opened",
         requireFreshRun: QUALITY_TRIGGER_ACTIONS.has(action),
         transitionAction: QUALITY_TRIGGER_ACTIONS.has(action)
           ? action
@@ -1141,12 +2242,13 @@ module.exports = async function publishPrPolicy({
     ];
   } else if (context.eventName === "workflow_run") {
     const workflowRun = context.payload.workflow_run;
-    const relations = workflowRun.pull_requests || [];
-    if (relations.length !== 1) {
-      throw new Error(
-        "Completed quality workflow must have exactly one pull request relation",
-      );
-    }
+    assertQualityWorkflowRunCandidate({
+      run: workflowRun,
+      owner,
+      repo,
+      serverUrl: context.serverUrl,
+    });
+    const relations = workflowRun.pull_requests;
     work = relations.map((relation) => ({
       number: relation.number,
       expected: {
@@ -1155,6 +2257,11 @@ module.exports = async function publishPrPolicy({
         baseSha: relation.base.sha,
       },
       candidateRun: workflowRun,
+      eventPull: null,
+      eventAction: null,
+      eventLabelName: null,
+      allowLabelRefreshReconciliation: false,
+      allowOpeningLabelSnapshotMismatch: false,
       requireFreshRun: false,
       transitionAction: null,
       transitionTimestamp: null,
@@ -1168,7 +2275,12 @@ module.exports = async function publishPrPolicy({
       {
         number,
         expected: { number },
+        eventPull: null,
         candidateRun: null,
+        eventAction: null,
+        eventLabelName: null,
+        allowLabelRefreshReconciliation: false,
+        allowOpeningLabelSnapshotMismatch: false,
         requireFreshRun: false,
         transitionAction: null,
         transitionTimestamp: null,
@@ -1186,13 +2298,47 @@ module.exports = async function publishPrPolicy({
       repo,
       item.number,
       item.expected,
+      {
+        allowLabelRefreshReconciliation:
+          item.allowLabelRefreshReconciliation,
+        allowOpeningLabelSnapshotMismatch:
+          item.allowOpeningLabelSnapshotMismatch,
+      },
     );
     const branch = branchDecision(pull, repository);
     const branchContext = `${BRANCH_CONTEXT_PREFIX}/${pull.baseRef}`;
     const qualityContext = `${QUALITY_CONTEXT_PREFIX}/${pull.baseRef}`;
     const targets = statusTargets(pull);
     let transitionBindingError = null;
-    if (branch.allowed && !item.transitionAction) {
+    let createTransition = Boolean(item.transitionAction);
+    const hasOpeningSnapshotMismatch =
+      item.allowOpeningLabelSnapshotMismatch &&
+      isOpeningCliLabelRace(pull, item.expected);
+    const hasBoundedOpeningSnapshotMismatch =
+      item.allowOpeningLabelSnapshotMismatch &&
+      isBoundedOpeningCliLabelRace(pull, item.expected);
+    if (branch.allowed && item.transitionAction) {
+      try {
+        createTransition = await shouldCreateQualityTransition({
+          github,
+          owner,
+          repo,
+          pull,
+          action: item.transitionAction,
+          timestamp: item.transitionTimestamp,
+          serverUrl: context.serverUrl,
+          hasOpeningSnapshotMismatch,
+        });
+      } catch (error) {
+        transitionBindingError = error;
+        createTransition = false;
+      }
+    }
+    if (
+      branch.allowed &&
+      !transitionBindingError &&
+      (!item.transitionAction || !createTransition)
+    ) {
       try {
         await bindPendingQualityTransition({
           github,
@@ -1201,6 +2347,12 @@ module.exports = async function publishPrPolicy({
           pull,
           candidateRun: item.candidateRun,
           serverUrl: context.serverUrl,
+          eventAction: item.eventAction,
+          eventLabelName: item.eventLabelName,
+          eventPull: item.eventPull,
+          workflowAuthorizations,
+          authorizationNow,
+          fallbackUrl: policyRunUrl,
         });
       } catch (error) {
         transitionBindingError = error;
@@ -1215,7 +2367,7 @@ module.exports = async function publishPrPolicy({
       fallbackUrl: policyRunUrl,
       workflowAuthorizations,
       authorizationNow,
-      requireFreshRun: item.requireFreshRun,
+      requireFreshRun: item.requireFreshRun && createTransition,
       serverUrl: context.serverUrl,
     });
     if (transitionBindingError) {
@@ -1237,6 +2389,7 @@ module.exports = async function publishPrPolicy({
     if (
       branch.allowed &&
       item.transitionAction &&
+      createTransition &&
       quality.state === "pending"
     ) {
       for (const target of targets) {
@@ -1252,60 +2405,49 @@ module.exports = async function publishPrPolicy({
         );
       }
       qualityPrepublished = true;
-      const transitionContext = qualityTransitionContext(pull);
-      const transitionBarrier = qualityTransitionDescription(
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
         pull,
-        item.transitionAction,
-        item.transitionTimestamp,
-        null,
-      );
-      for (const target of targets) {
-        await publishStatus(
-          github,
-          owner,
-          repo,
-          target,
-          transitionContext,
-          "pending",
-          transitionBarrier,
-          policyRunUrl,
-        );
-      }
-      try {
-        const transitionRun = await findQualityTransitionRun({
-          github,
-          owner,
-          repo,
-          pull,
-          timestamp: item.transitionTimestamp,
-        });
-        if (transitionRun) {
-          const transitionDescription = qualityTransitionDescription(
+        action: item.transitionAction,
+        transitionAt: item.transitionTimestamp,
+        binding: hasBoundedOpeningSnapshotMismatch
+          ? QUALITY_TRANSITION_UNCONFIRMED
+          : null,
+        targetUrl: policyRunUrl,
+      });
+      if (!hasBoundedOpeningSnapshotMismatch) {
+        try {
+          const transitionRun = await findQualityTransitionRun({
+            github,
+            owner,
+            repo,
             pull,
-            item.transitionAction,
-            item.transitionTimestamp,
-            transitionRun.id,
-          );
-          for (const target of targets) {
-            await publishStatus(
+            timestamp: item.transitionTimestamp,
+            serverUrl: context.serverUrl,
+            authorization: quality.authorization,
+          });
+          if (transitionRun) {
+            await publishQualityTransitionMarker({
               github,
               owner,
               repo,
-              target,
-              transitionContext,
-              "pending",
-              transitionDescription,
-              policyRunUrl,
-            );
+              pull,
+              action: item.transitionAction,
+              transitionAt: item.transitionTimestamp,
+              binding: transitionRun.id,
+              targetUrl: policyRunUrl,
+            });
           }
+        } catch (error) {
+          quality = {
+            state: "failure",
+            description: `PR #${pull.number} cannot register its quality run`,
+            targetUrl: policyRunUrl,
+            reason: error.message,
+          };
         }
-      } catch (error) {
-        quality = {
-          state: "failure",
-          description: `PR #${pull.number} cannot register its quality run`,
-          targetUrl: policyRunUrl,
-          reason: error.message,
-        };
       }
     }
     try {
@@ -1411,7 +2553,10 @@ module.exports.branchDecision = branchDecision;
 module.exports.claimWorkflowAuthorization = claimWorkflowAuthorization;
 module.exports.findWorkflowAuthorization = findWorkflowAuthorization;
 module.exports.findQualityTransitionRun = findQualityTransitionRun;
+module.exports.labelsFingerprint = labelsFingerprint;
 module.exports.listQualityWorkflowRuns = listQualityWorkflowRuns;
+module.exports.pullIdentity = pullIdentity;
+module.exports.qualityTransitionDescription = qualityTransitionDescription;
 module.exports.runMatchesPull = runMatchesPull;
 module.exports.trustedWorkflowBlobAuthorizations =
   TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS;

@@ -393,6 +393,51 @@ cd resulting && npm ci && npm run test:ci
   to their current head SHA.
 - `copilot-cli-managed` is a repository convention rather than cryptographic
   provenance because CLI and human `gh` operations share one GitHub identity.
+- Opening-label reconciliation is authorized only when the server-owned label
+  timestamp is at or after the original `opened` transition cutoff and no more
+  than 300,000 ms (five minutes) after it; queueing, replay, or re-execution
+  cannot extend that window. GitHub may serialize distinct creation and label
+  mutations to the same whole-second timestamp. Equality is accepted only with
+  the complete direct or inverse proof; a timestamp even 1 ms before the cutoff
+  is not reconciliation authority. Direct ordering also requires the label
+  timestamp to strictly precede the earliest exact-lineage status creation,
+  while inverse ordering requires identical event and live `updated_at` values
+  and allows the marker on either side of the label. The broad opening snapshot
+  mismatch permits only fail-closed inspection and never grants reconciliation:
+  an out-of-window replay without a marker stays pending, an existing mismatch
+  writes the permanent tombstone, and any intervening `updated_at` change fails
+  closed. A same-cutoff tombstone cannot be replaced or revived; only a strictly
+  later `edited`, `synchronize`, or `reopened` transition can recover the
+  lineage. Preserve the original event cutoff, run binding, and policy-run
+  target. Label events remain non-producing; any other later label drift writes
+  a permanent pending tombstone that label restoration, workflow completion,
+  or manual refresh cannot revive. Manual refresh may bind an existing marker
+  but never creates one or supplies quality evidence. Only an exact quality run
+  created strictly after the original cutoff may bind.
+- Version 3 quality markers use
+  `v3|<pr>|<action>|<cutoff-ms>|<u|p|x|runId>|<content-fingerprint>|<labels-fingerprint>`.
+  `u` records only an unconfirmed direct opening-label snapshot mismatch, `p`
+  records a confirmed transition without a bound run, a positive run ID
+  records the confirmed exact binding, and `x` permanently tombstones the
+  cutoff. A `u` marker cannot bind a run, publish quality success, or consume an
+  authorization receipt. The qualifying exact `labeled` event appends durable
+  `p` before any optional run binding, and a label handler never consumes an
+  authorization receipt. An exact replay of the same qualifying `labeled`
+  event is inert after `p` or a run is durable; a later label mutation remains
+  drift.
+- At the greatest cutoff, `x` dominates every other state; absent `x`, any
+  version 1 or version 2 marker makes that cutoff fail-closed legacy; otherwise
+  one compatible version 3 lineage resolves positive run ID over `p` over `u`,
+  independent of status order. Conflicting positive run IDs or incompatible
+  action, content, policy-run target, or label progression fail closed, and a
+  lower state cannot downgrade a higher state. Version 1 and version 2 markers
+  cannot newly bind, succeed, or consume an authorization receipt; a version 2
+  `x` remains a permanent tombstone. Only a strictly later `edited`,
+  `synchronize`, or `reopened` transition may recover, never a later or
+  replayed `opened` event.
+- Once any version 3 marker exists, operational rollback must retain version 3
+  parsing or use a reviewed forward correction. A version-2-only publisher is
+  fail-closed compatibility, not restored release authority.
 
 ## Resolved failures and durable rules
 
