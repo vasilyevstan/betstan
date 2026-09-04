@@ -25,6 +25,10 @@ const selectionSchema = new Schema(
       type: Number,
       required: true,
     },
+    label: {
+      type: String,
+      required: false,
+    },
   },
   { _id: false }
 );

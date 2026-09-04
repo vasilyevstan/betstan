@@ -11,6 +11,8 @@ export const LiveIncidentType = {
   ...PublishedLiveIncidentType,
   FIRST_MINUTE_ELAPSED:
     "FIRST_MINUTE_ELAPSED" as PublishedLiveIncidentType,
+  THROW_IN: "THROW_IN" as PublishedLiveIncidentType,
+  GOAL_KICK: "GOAL_KICK" as PublishedLiveIncidentType,
 };
 export type LiveIncidentType = PublishedLiveIncidentType;
 
@@ -18,6 +20,10 @@ export const LiveMarketType = {
   ...PublishedLiveMarketType,
   KICKOFF_TEAM: "KICKOFF_TEAM" as PublishedLiveMarketType,
   FIRST_MINUTE_GOAL: "FIRST_MINUTE_GOAL" as PublishedLiveMarketType,
+  NEXT_THROW_IN: "NEXT_THROW_IN" as PublishedLiveMarketType,
+  NEXT_FREE_KICK: "NEXT_FREE_KICK" as PublishedLiveMarketType,
+  NEXT_GOAL_KICK: "NEXT_GOAL_KICK" as PublishedLiveMarketType,
+  SECOND_HALF_SCORE: "SECOND_HALF_SCORE" as PublishedLiveMarketType,
 };
 export type LiveMarketType = PublishedLiveMarketType;
 
@@ -26,6 +32,8 @@ export const LiveSettlementReason = {
   KICK_OFF: "KICK_OFF" as PublishedLiveSettlementReason,
   FIRST_MINUTE_GOAL:
     "FIRST_MINUTE_GOAL" as PublishedLiveSettlementReason,
+  SECOND_HALF_SCORE:
+    "SECOND_HALF_SCORE" as PublishedLiveSettlementReason,
 };
 export type LiveSettlementReason = PublishedLiveSettlementReason;
 

@@ -6,7 +6,7 @@ const BET_KIND = Object.freeze({
 const MARKET_LABELS = Object.freeze({
   NEXT_YELLOW_CARD: 'Next Yellow Card',
   NEXT_RED_CARD: 'Next Red Card',
-  NEXT_CORNER: 'Next Corner',
+  NEXT_CORNER: 'Next Corner Kick',
   NEXT_PENALTY: 'Next Penalty',
   HALF_TIME_RESULT: 'Half Time Result',
   KICKOFF_TEAM: 'Kickoff Team',
@@ -366,10 +366,10 @@ const createLiveBettingMockState = () => {
     liveEventName: sequence1.name,
     preMatchEventName: preMatchEvent.name,
     preMatchSelectionLabel: 'Select 1X2 X: Draw in Falcons - Owls at 3.2',
-    liveInitialSelectionLabel: 'Select Next Corner: Raptors at 1.8',
-    liveUpdatedHomeSelectionLabel: 'Select Next Corner: Raptors at 1.92',
-    liveUpdatedAwaySelectionLabel: 'Select Next Corner: Sharks at 2.25',
-    liveReplacementSelectionLabel: 'Select Next Corner: Sharks at 2.35',
+    liveInitialSelectionLabel: 'Select Next Corner Kick: Raptors at 1.8',
+    liveUpdatedHomeSelectionLabel: 'Select Next Corner Kick: Raptors at 1.92',
+    liveUpdatedAwaySelectionLabel: 'Select Next Corner Kick: Sharks at 2.25',
+    liveReplacementSelectionLabel: 'Select Next Corner Kick: Sharks at 2.35',
   };
   state.snapshots = {
     sequence2,

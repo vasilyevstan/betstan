@@ -142,6 +142,59 @@ if [[ "${1:-}" == "logs" ]]; then
   is_apply=false
   grep -Fq -- '- "--apply"' "$manifest" && is_apply=true
 
+  if grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$manifest"; then
+    mode=dry-run
+    cleanup_state=candidate
+    matched=2
+    changed=0
+    tombstone_verified=false
+    snapshot_document_count=2
+    if [[ "$scenario" == "final" ]]; then
+      cleanup_state=removed
+      matched=0
+      tombstone_verified=true
+    fi
+    if grep -Fq -- '- "apply"' "$manifest"; then
+      mode=apply
+      cleanup_state=removed
+      changed=2
+      tombstone_verified=true
+      touch "$state/applied/obsolete-event"
+    elif [[ -f "$state/applied/obsolete-event" ]]; then
+      cleanup_state=removed
+      matched=0
+      tombstone_verified=true
+    fi
+    jq -n \
+      --arg mode "$mode" \
+      --arg state "$cleanup_state" \
+      --argjson matched "$matched" \
+      --argjson changed "$changed" \
+      --argjson tombstone_verified "$tombstone_verified" \
+      --argjson snapshot_document_count "$snapshot_document_count" '{
+        mode:$mode,
+        targetEventId:"6a623af592af5a95b1d0bb79",
+        state:$state,
+        ready:true,
+        scanned:18,
+        matched:$matched,
+        changed:$changed,
+        errorCount:0,
+        tombstoneVerified:$tombstone_verified,
+        snapshotDocumentCount:$snapshot_document_count,
+        blockers:[]
+      } + (
+        if $tombstone_verified
+        then {
+          snapshotSha256:
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+        else {}
+        end
+      )'
+    exit 0
+  fi
+
   if grep -Fq 'ensureDraftIndexes.js' "$manifest"; then
     index_state=missing
     ready=false
@@ -352,6 +405,7 @@ run_phase dry-run pending 4001 "$pending_output"
 grep -Fxq 'phase=dry-run' "$pending_output/provenance.env"
 grep -Fxq 'backfill_complete=false' "$pending_output/provenance.env"
 grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
+grep -Fxq 'obsolete_event_cleanup_complete=false' "$pending_output/provenance.env"
 [[ ! -e "$pending_output/schema.env" ]] ||
   fail "dry-run emitted final schema evidence"
 if grep -R -E 'secret-user|secret-slip|mongodb://' "$pending_output" >/dev/null; then
@@ -370,6 +424,7 @@ backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
 grep -Fxq 'phase=apply-backfills' "$backfill_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
+grep -Fxq 'obsolete_event_cleanup_complete=true' "$backfill_output/provenance.env"
 [[ ! -e "$backfill_output/schema.env" ]] ||
   fail "backfill phase emitted final schema evidence"
 
@@ -380,6 +435,7 @@ run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_s
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
+grep -Fxq 'obsolete_event_cleanup_complete=true' "$final_output/schema.env"
 grep -Fxq 'runtime_held_for_deploy=true' "$final_output/schema.env"
 grep -Fxq 'operation_lock_handoff=true' "$final_output/schema.env"
 grep -Fxq 'baseline_recovery_source_sha=none' "$final_output/schema.env"

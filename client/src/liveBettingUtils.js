@@ -63,9 +63,13 @@ const EVENT_PHASE_LABELS = Object.freeze({
 const LIVE_MARKET_LABELS = Object.freeze({
   NEXT_YELLOW_CARD: 'Next Yellow Card',
   NEXT_RED_CARD: 'Next Red Card',
-  NEXT_CORNER: 'Next Corner',
+  NEXT_CORNER: 'Next Corner Kick',
   NEXT_PENALTY: 'Next Penalty',
+  NEXT_THROW_IN: 'Next Throw-In',
+  NEXT_FREE_KICK: 'Next Free Kick',
+  NEXT_GOAL_KICK: 'Next Goal Kick',
   HALF_TIME_RESULT: 'Half Time Result',
+  SECOND_HALF_SCORE: 'Second Half Score',
   KICKOFF_TEAM: 'Kickoff Team',
   FIRST_MINUTE_GOAL: 'Goal in First Minute',
 });
@@ -84,6 +88,7 @@ const DECLINE_REASON_LABELS = Object.freeze({
 const SETTLEMENT_REASON_LABELS = Object.freeze({
   INCIDENT: 'Settled by incident',
   HALF_TIME: 'Settled at half-time',
+  SECOND_HALF_SCORE: 'Settled from second-half goals',
   FULL_TIME_NONE: 'No deciding outcome at full-time',
   MANUAL_VOID: 'Manual void',
   ACCUMULATOR_SETTLED: 'Accumulator settled',
@@ -95,6 +100,8 @@ const INCIDENT_LABELS = Object.freeze({
   RED_CARD: 'Red card',
   FREE_KICK: 'Notable free kick',
   CORNER: 'Corner',
+  THROW_IN: 'Throw-in',
+  GOAL_KICK: 'Goal kick',
   PENALTY_AWARDED: 'Penalty awarded',
   PENALTY_SCORED: 'Penalty scored',
   PENALTY_MISSED: 'Penalty missed',
@@ -737,6 +744,16 @@ const extractSideFromRawIdentifier = (value) => {
   return '';
 };
 
+const extractSecondHalfScoreLabel = (value) => {
+  const segments = splitRawIdentifierSegments(value);
+  const outcome = segments[segments.length - 1] ?? '';
+  if (outcome === 'OTHER') {
+    return 'Other';
+  }
+  const match = /^SCORE_(\d+)_(\d+)$/.exec(outcome);
+  return match ? `${Number(match[1])} - ${Number(match[2])}` : '';
+};
+
 /**
  * Defensive display formatter for a stored slip-row selection label (`row.oddsName` or
  * `row.winningSelection`). Historical/legacy data can contain a raw internal live-selection
@@ -766,6 +783,14 @@ export const formatLegacyLiveSelectionLabel = (value, row, perspective = 'select
   const marketType = normalizeText(row?.marketType) || extractMarketTypeFromRawIdentifier(value);
   const selectionId = normalizeText(row?.selectionId).toLowerCase();
   const pseudoEvent = buildPseudoEventFromName(row?.eventName);
+  const marketLabel = marketType ? formatLiveMarketType(marketType) : '';
+
+  if (marketType === 'SECOND_HALF_SCORE') {
+    const scoreLabel = extractSecondHalfScoreLabel(value);
+    if (scoreLabel) {
+      return `${marketLabel}: ${scoreLabel}`;
+    }
+  }
 
   let side = perspective === 'winning'
     ? normalizeText(row?.winningSide).toUpperCase()
@@ -780,8 +805,6 @@ export const formatLegacyLiveSelectionLabel = (value, row, perspective = 'select
   }
 
   const selectionLabel = side ? getSideLabel(side, pseudoEvent) : '';
-  const marketLabel = marketType ? formatLiveMarketType(marketType) : '';
-
   if (marketLabel && selectionLabel) {
     return `${marketLabel}: ${selectionLabel}`;
   }

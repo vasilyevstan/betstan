@@ -161,26 +161,46 @@ create_job() {
   local job_name="$5"
   local database="gaming_${service}"
   local args
-  if [[ "$command_path" == "dist/scripts/backfillDataCompatibility.js" ]]; then
-    args='
+  case "$command_path:$mode" in
+    dist/scripts/backfillDataCompatibility.js:dry-run)
+      args='
           args:
             - "--batch-size"
             - "'"$BATCH_SIZE"'"'
-  else
-    args=""
-  fi
-  if [[ "$mode" == "apply" ]]; then
-    args+='
-          args:
-            - "--apply"'
-    if [[ "$command_path" == "dist/scripts/backfillDataCompatibility.js" ]]; then
+      ;;
+    dist/scripts/backfillDataCompatibility.js:apply)
       args='
           args:
             - "--batch-size"
             - "'"$BATCH_SIZE"'"
             - "--apply"'
-    fi
-  fi
+      ;;
+    dist/scripts/ensureDraftIndexes.js:dry-run)
+      args=""
+      ;;
+    dist/scripts/ensureDraftIndexes.js:apply)
+      args='
+          args:
+            - "--apply"'
+      ;;
+    dist/scripts/cleanupObsoleteSyntheticEvent.js:dry-run)
+      args='
+          args:
+            - "--mode"
+            - "dry-run"'
+      ;;
+    dist/scripts/cleanupObsoleteSyntheticEvent.js:apply)
+      args='
+          args:
+            - "--mode"
+            - "apply"
+            - "--confirmation"
+            - "REMOVE_OBSOLETE_EVENT:6a623af592af5a95b1d0bb79"'
+      ;;
+    *)
+      fail "unsupported data job command or mode: $command_path/$mode"
+      ;;
+  esac
 
   cat <<YAML | kubectl create -f - >/dev/null
 apiVersion: batch/v1
@@ -222,6 +242,8 @@ spec:
           env:
             - name: MONGO_URI
               value: "mongodb://gaming-shared-mongo-srv:27017/$database"
+            - name: SOURCE_SHA
+              value: "$SOURCE_SHA"
           resources:
             requests:
               cpu: 50m
@@ -502,6 +524,68 @@ sanitize_index_report() {
   LAST_REPORT="$output"
 }
 
+sanitize_cleanup_report() {
+  local raw_file="$1"
+  local stage="$2"
+  local expected_mode="$3"
+  local output="$OUTPUT_DIR/reports/${stage}-obsolete-event.json"
+  local temporary="${output}.tmp"
+
+  jq -e \
+    --arg stage "$stage" \
+    --arg expected_mode "$expected_mode" \
+    --arg target_event_id "6a623af592af5a95b1d0bb79" '
+      def nonnegative_integer:
+        type == "number" and . >= 0 and . == floor;
+      select(
+        (.mode == $expected_mode) and
+        (.targetEventId == $target_event_id) and
+        (.state == "absent" or
+         .state == "candidate" or
+         .state == "partial" or
+         .state == "removed" or
+         .state == "restored" or
+         .state == "blocked") and
+        (.ready | type == "boolean") and
+        (.scanned | nonnegative_integer) and
+        (.matched | nonnegative_integer) and
+        (.changed | nonnegative_integer) and
+        (.errorCount | nonnegative_integer) and
+        (.tombstoneVerified | type == "boolean") and
+        (.snapshotDocumentCount | nonnegative_integer) and
+        ((has("snapshotSha256") | not) or
+         (.snapshotSha256 | test("^[0-9a-f]{64}$"))) and
+        (.blockers | type == "array") and
+        ([.blockers[] |
+          (.database | type == "string") and
+          (.collection | type == "string") and
+          (.count | nonnegative_integer) and
+          (.reason | type == "string")
+        ] | all)
+      ) |
+      {
+        kind: "obsolete-event-cleanup",
+        stage: $stage,
+        mode,
+        targetEventId,
+        state,
+        ready,
+        scanned,
+        matched,
+        changed,
+        errorCount,
+        tombstoneVerified,
+        snapshotDocumentCount,
+        snapshotSha256,
+        blockerCount: (.blockers | length)
+      }
+    ' "$raw_file" >"$temporary" ||
+    fail "obsolete event cleanup report contract failed for $stage"
+  mv "$temporary" "$output"
+  rm -f -- "$raw_file"
+  LAST_REPORT="$output"
+}
+
 run_backfill() {
   local service="$1"
   local mode="$2"
@@ -519,6 +603,27 @@ run_index() {
   [[ "$mode" == "apply" ]] && expected_mode="apply"
   run_job slip "dist/scripts/ensureDraftIndexes.js" "$mode"
   sanitize_index_report "$LAST_RAW_FILE" "$stage" "$expected_mode"
+}
+
+run_obsolete_event_cleanup() {
+  local mode="$1"
+  local stage="$2"
+  run_job event "dist/scripts/cleanupObsoleteSyntheticEvent.js" "$mode"
+  sanitize_cleanup_report "$LAST_RAW_FILE" "$stage" "$mode"
+}
+
+require_cleanup_ready() {
+  local report="$1"
+  [[ "$(jq -r '.ready' "$report")" == "true" ]] ||
+    fail "obsolete event cleanup is blocked"
+}
+
+require_cleanup_complete() {
+  local report="$1"
+  local state
+  state="$(jq -r '.state' "$report")"
+  [[ "$state" == "absent" || "$state" == "removed" ]] ||
+    fail "obsolete event cleanup is incomplete: $state"
 }
 
 require_safe_slip_report() {
@@ -612,9 +717,18 @@ run_all_dry() {
 
 backfill_complete=false
 index_ready=false
+obsolete_event_cleanup_complete=false
 
 case "$PHASE" in
   dry-run)
+    run_obsolete_event_cleanup dry-run preflight
+    require_cleanup_ready "$LAST_REPORT"
+    cleanup_state="$(jq -r '.state' "$LAST_REPORT")"
+    [[ "$cleanup_state" != "partial" ]] ||
+      fail "obsolete event cleanup is partially applied"
+    if [[ "$cleanup_state" == "absent" || "$cleanup_state" == "removed" ]]; then
+      obsolete_event_cleanup_complete=true
+    fi
     run_all_dry preflight false
     run_index dry-run preflight
     require_non_conflicting_index "$LAST_REPORT"
@@ -628,6 +742,8 @@ case "$PHASE" in
     fi
     ;;
   apply-backfills)
+    run_obsolete_event_cleanup dry-run preflight
+    require_cleanup_ready "$LAST_REPORT"
     run_all_dry preflight false
     run_index dry-run preflight
     require_non_conflicting_index "$LAST_REPORT"
@@ -639,6 +755,14 @@ case "$PHASE" in
       [[ "$service" != "slip" ]] || require_safe_slip_report "$LAST_REPORT"
       require_empty_backfill_report "$LAST_REPORT"
     done
+    run_obsolete_event_cleanup apply apply
+    require_cleanup_ready "$LAST_REPORT"
+    require_cleanup_complete "$LAST_REPORT"
+    verify_cluster_runtime
+    run_obsolete_event_cleanup dry-run verify
+    require_cleanup_ready "$LAST_REPORT"
+    require_cleanup_complete "$LAST_REPORT"
+    obsolete_event_cleanup_complete=true
     run_index dry-run final
     require_non_conflicting_index "$LAST_REPORT"
     [[ "$(jq -r '.ready' "$LAST_REPORT")" == "true" ]] ||
@@ -648,6 +772,10 @@ case "$PHASE" in
       index_ready=true
     ;;
   apply-slip-index)
+    run_obsolete_event_cleanup dry-run preflight
+    require_cleanup_ready "$LAST_REPORT"
+    require_cleanup_complete "$LAST_REPORT"
+    obsolete_event_cleanup_complete=true
     run_all_dry preflight false
     run_index dry-run preflight
     require_non_conflicting_index "$LAST_REPORT"
@@ -695,6 +823,7 @@ phase=$PHASE
 status=PASS
 backfill_complete=$backfill_complete
 index_ready=$index_ready
+obsolete_event_cleanup_complete=$obsolete_event_cleanup_complete
 maintenance_fence_enforced=$MAINTENANCE_FENCE_ENFORCED
 writers_quiesced=$WRITERS_QUIESCED
 runtime_held_for_deploy=$RUNTIME_HELD_FOR_DEPLOY
@@ -716,6 +845,7 @@ jq -s \
   --arg completed_at "$completed_at" \
   --argjson backfill_complete "$backfill_complete" \
   --argjson index_ready "$index_ready" \
+  --argjson obsolete_event_cleanup_complete "$obsolete_event_cleanup_complete" \
   --argjson maintenance_fence_enforced "$MAINTENANCE_FENCE_ENFORCED" \
   --argjson writers_quiesced "$WRITERS_QUIESCED" \
   --argjson runtime_held_for_deploy "$RUNTIME_HELD_FOR_DEPLOY" \
@@ -735,6 +865,7 @@ jq -s \
       status: "PASS",
       backfill_complete: $backfill_complete,
       index_ready: $index_ready,
+      obsolete_event_cleanup_complete: $obsolete_event_cleanup_complete,
       maintenance_fence_enforced: $maintenance_fence_enforced,
       writers_quiesced: $writers_quiesced,
       runtime_held_for_deploy: $runtime_held_for_deploy,
@@ -758,6 +889,7 @@ data_run_id=$RUN_ID
 data_run_attempt=$RUN_ATTEMPT
 backfill_complete=true
 index_ready=true
+obsolete_event_cleanup_complete=true
 maintenance_fence_enforced=true
 writers_quiesced=true
 runtime_held_for_deploy=true

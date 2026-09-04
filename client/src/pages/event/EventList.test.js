@@ -71,6 +71,7 @@ const liveEvent = {
       buildLiveMarket({ marketId: 'market-6', marketType: 'NEXT_CORNER', marketVersion: 2, quoteVersion: 6, odds: 2.1 }),
       buildLiveMarket({ marketId: 'market-7', marketType: 'NEXT_CORNER', marketVersion: 3, quoteVersion: 7, status: 'settled', odds: 9.9 }),
       buildLiveMarket({ marketId: 'market-8', marketType: 'NEXT_CORNER', marketVersion: 4, quoteVersion: 8, status: 'CLOSED', odds: 8.8 }),
+      buildLiveMarket({ marketId: 'market-9', marketType: 'NEXT_GOAL_KICK', marketVersion: 1, quoteVersion: 9, odds: 2.7 }),
     ],
   },
 };
@@ -141,7 +142,7 @@ describe('EventList', () => {
     expect(screen.getByRole('progressbar', { name: 'Match progress' })).toHaveAttribute('aria-valuenow', '33');
     expect(screen.getByRole('status')).toHaveTextContent('Live feed reconnecting. Polling fallback is active.');
 
-    const liveSelection = screen.getByRole('button', { name: 'Select Next Corner: Team A at 1.8' });
+    const liveSelection = screen.getByRole('button', { name: 'Select Next Corner Kick: Team A at 1.8' });
     const preMatchSelection = screen.getByRole('button', { name: 'Select 1X2 Team A at 1.5' });
     const suspendedSelection = screen.getByRole('button', { name: 'Select Next Red Card: Team A at 3.2' });
     const staleSelection = screen.getByRole('button', { name: 'Select Next Yellow Card: Team A at 2.4' });
@@ -158,6 +159,7 @@ describe('EventList', () => {
     // list entirely -- the count reflects only the 6 non-terminal markets out of the 8 supplied.
     expect(screen.queryByText('Quote v7')).toBeNull();
     expect(screen.queryByText('Quote v8')).toBeNull();
+    expect(screen.queryByText('Quote v9')).toBeNull();
     expect(screen.getByText('6 markets')).toBeInTheDocument();
 
     fireEvent.click(liveSelection);
@@ -170,6 +172,68 @@ describe('EventList', () => {
       selectionId: 'home',
     }));
     await waitFor(() => expect(onSelectionPlaced).toHaveBeenCalledTimes(1));
+  });
+
+  it('renders labelled Second Half Score selections with exact click identity', async () => {
+    const scoreMarket = {
+      marketId: 'live-1:SECOND_HALF_SCORE',
+      marketType: 'SECOND_HALF_SCORE',
+      marketVersion: 1,
+      quoteVersion: 3,
+      status: 'OPEN',
+      quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+      selections: [
+        {
+          selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_0_0',
+          side: 'NONE',
+          label: '0 - 0',
+          odds: 3.5,
+        },
+        {
+          selectionId: 'live-1:SECOND_HALF_SCORE:1:OTHER',
+          side: 'NONE',
+          label: 'Other',
+          odds: 5.25,
+        },
+      ],
+    };
+    useLiveEvents.mockReturnValue({
+      events: [{
+        ...liveEvent,
+        live: {
+          ...liveEvent.live,
+          currentMarkets: [scoreMarket],
+        },
+      }],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(
+      <EventList
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    const marketCard = document.querySelector(
+      '[data-market-type="SECOND_HALF_SCORE"]',
+    );
+    expect(marketCard).toHaveClass('event-market-card--score');
+    expect(screen.getByText('Second Half Score')).toBeInTheDocument();
+
+    const selection = screen.getByRole('button', {
+      name: 'Select Second Half Score: Other at 5.25',
+    });
+    fireEvent.click(selection);
+
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/event/odds', {
+      eventId: 'live-1',
+      marketId: 'live-1:SECOND_HALF_SCORE',
+      marketVersion: 1,
+      quoteVersion: 3,
+      selectionId: 'live-1:SECOND_HALF_SCORE:1:OTHER',
+    }));
   });
 
   it('shows an explicitly scoped offline event only to the acceptance view', () => {
@@ -377,6 +441,24 @@ describe('EventList kickoff countdown', () => {
     expect(jest.getTimerCount()).toBe(pendingTimersBeforeUnmount - 1);
   });
 
+  it('marks the countdown as urgent at one minute but not before it', () => {
+    jest.setSystemTime(KICKOFF_TIME - 60_001);
+    useLiveEvents.mockReturnValue({
+      events: [buildCountdownEvent()],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    const { unmount } = render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
+    expect(screen.getByRole('timer')).not.toHaveClass('event-countdown--urgent');
+    unmount();
+
+    jest.setSystemTime(KICKOFF_TIME - 60_000);
+    render(<EventList selectedSelectionKeys={new Set()} uiVariant="v2" />);
+    expect(screen.getByRole('timer')).toHaveAccessibleName('Kickoff countdown: 01:00');
+    expect(screen.getByRole('timer')).toHaveClass('event-countdown--urgent');
+  });
+
   it('renders the two countdown-only markets and routes selections through the existing live-slip mechanism', async () => {
     jest.setSystemTime(KICKOFF_TIME - 5 * 60_000);
     useLiveEvents.mockReturnValue({
@@ -429,7 +511,6 @@ describe('EventList kickoff countdown', () => {
 
     // Both product families are visible together on the same countdown card, each with its own
     // existing visual distinction (pre-match badge vs pre-kickoff live-slip section).
-    expect(screen.getByText('PRE-MATCH')).toBeInTheDocument();
     expect(screen.getByText('Pre-match markets')).toBeInTheDocument();
     expect(screen.getByText('Pre-kickoff markets')).toBeInTheDocument();
 

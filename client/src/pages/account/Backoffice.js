@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
+import { format } from 'date-fns';
 
 const MAX_TEAM_NAME_LENGTH = 80;
+const BACKOFFICE_KICKOFF_DELAY_SECONDS = 15 * 60;
 const MAX_SCORE = 99;
 let fallbackRequestSequence = 0;
 
@@ -21,6 +23,11 @@ const createRequestId = () => {
 
   fallbackRequestSequence += 1;
   return `backoffice-${Date.now()}-${fallbackRequestSequence}`;
+};
+
+const formatKickoff = (value) => {
+  const parsed = new Date(value ?? '');
+  return Number.isNaN(parsed.getTime()) ? null : format(parsed, 'MMMM do, yyyy H:mm');
 };
 
 const normalizeEvents = (data) => {
@@ -169,6 +176,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       () => axios.post('/api/backoffice/new_event', {
         home,
         away,
+        kickoffDelaySeconds: BACKOFFICE_KICKOFF_DELAY_SECONDS,
         requestId: creationRequestId.current,
       }),
       `${home} - ${away} was created.`
@@ -187,10 +195,16 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     const awayInputId = `backoffice-away-result-${event.eventId}`;
     const resultActionId = `result:${event.eventId}`;
     const visibilityActionId = `visibility:${event.eventId}`;
+    const kickoffLabel = formatKickoff(event.time);
 
     return <article className="card backoffice-event" key={event.eventId} aria-labelledby={`backoffice-event-${event.eventId}`}>
       <div className="card-body">
-        <h2 className="h5 card-title mb-3" id={`backoffice-event-${event.eventId}`}>{event.name}</h2>
+        <h2 className="h5 card-title mb-1" id={`backoffice-event-${event.eventId}`}>{event.name}</h2>
+        <div className="small text-secondary mb-3">
+          {kickoffLabel
+            ? <>Kickoff: <time dateTime={event.time}>{kickoffLabel}</time></>
+            : 'Kickoff time unavailable'}
+        </div>
         <form className="row g-2" onSubmit={(submitEvent) => {
           submitEvent.preventDefault();
           setResults(event.eventId, event.name);
@@ -324,6 +338,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
             </button>
           </div>
         </form>
+        <p className="form-text mb-0">Kickoff is scheduled 15 minutes after creation.</p>
       </div>
     </div>
     {isLoading && <p className="mb-0" role="status">Loading Backoffice events...</p>}

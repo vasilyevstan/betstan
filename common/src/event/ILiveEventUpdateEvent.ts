@@ -21,6 +21,7 @@ export interface ILiveMarketSelection {
   selectionId: string;
   side: TeamSide;
   odds: number;
+  label?: string;
 }
 
 export interface ILiveMarketSnapshot {

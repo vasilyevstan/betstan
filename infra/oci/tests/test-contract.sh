@@ -132,9 +132,13 @@ for countdown_contract in \
     "{ marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' }" \
     "{ marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' }" \
     '...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),' \
-    'LIVE_MARKETS.length,' \
+    "{ marketType: 'NEXT_CORNER', label: 'Next Corner Kick' }" \
+    "const SETTLEMENT_MARKET_TYPE = 'SECOND_HALF_SCORE';" \
+    'data-market-type="${marketType}"' \
+    '.toBeLessThanOrEqual(6);' \
     'await expect(article.getByText(label, { exact: true })).toHaveCount(0);' \
-    ').toEqual([...ALL_LIVE_MARKET_TYPES].sort());'; do
+    'const observedMarketTypes = new Set(' \
+    '[...ALL_LIVE_MARKET_TYPES].sort(),'; do
   grep -Fq "$countdown_contract" "$acceptance_spec" ||
     fail "OCI live acceptance omits countdown-market coverage: $countdown_contract"
 done
@@ -155,7 +159,7 @@ for selection_contract in \
     "submittedLiveBet.rows.some((row) => row.declineReason === 'STALE_QUOTE')," \
     'declinedLiveSlipIds.push(liveSlipId);' \
     ').toBe(`DRAFT:${liveSlipId}`);' \
-    'expect(selectedBoards.LIVE.rows).toHaveLength(LIVE_MARKETS.length * 2);' \
+    'expect(selectedBoards.LIVE.rows).toHaveLength(' \
     'await liveBoard.getByRole('\''button'\'', { name: '\''CLEAN'\'' }).click();' \
     'expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);'; do
   grep -Fq "$selection_contract" "$acceptance_spec" ||
@@ -243,7 +247,7 @@ for conductor_contract in \
     'Never bypass a trusted publisher that rejects changes to its own' \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
-    'terminal learning and documentation unit' \
+    'public-wiki gate and a terminal publication' \
     'one two-phase specialist work unit for' \
     'duration for the same workflow and job on a comparable runner' \
     'Never use name-based process discovery or termination' \
@@ -304,8 +308,12 @@ grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
 grep -Fq 'Pull-request metadata edits are workflow-producing' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow ignores pull-request edit triggers"
-grep -Fq 'terminal documentation handoff' <<<"$agent_readme_flat" ||
-  fail "agent workflow can complete before required durable learning"
+grep -Fq 'Every change includes the public-wiki gate before immutable review' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow can complete before mandatory public-wiki review"
+grep -Fq 'byte-identically and verifies the public pages' \
+    <<<"$agent_readme_flat" ||
+  fail "agent workflow omits post-merge wiki publication"
 grep -Fq 'At the second missed checkpoint it escalates the same unit' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow can replace or indefinitely defer stalled work"
@@ -327,18 +335,130 @@ grep -Fq 'treats that state as an active production incident' \
 ux_agent="$ROOT_DIR/.github/agents/betstan-ux-ui-expert.agent.md"
 ux_wiki="$ROOT_DIR/docs/wiki/UI-UX-Consistency.md"
 ux_home="$ROOT_DIR/docs/wiki/Home.md"
+repository_readme="$ROOT_DIR/README.md"
 ux_release_wiki="$ROOT_DIR/docs/wiki/Release-Orchestration.md"
 ux_backend_agent="$ROOT_DIR/.github/agents/betstan-backend-developer.agent.md"
 ux_frontend_agent="$ROOT_DIR/.github/agents/betstan-frontend-developer.agent.md"
 ux_critic_agent="$ROOT_DIR/.github/agents/betstan-validation-critic.agent.md"
 ux_test_agent="$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md"
 ux_final_agent="$ROOT_DIR/.github/agents/betstan-final-validator.agent.md"
+public_wiki_agent="$ROOT_DIR/.github/agents/betstan-public-wiki-editor.agent.md"
+pr_merge_safety="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
+pr_merge_safety_test="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
+while IFS='|' read -r wiki_file wiki_link; do
+  [[ -f "$ROOT_DIR/docs/wiki/$wiki_file" ]] ||
+    fail "canonical public wiki page is missing: $wiki_file"
+  grep -Fq "$wiki_link" "$ux_home" ||
+    fail "wiki Home does not link canonical page: $wiki_link"
+done <<'EOF'
+Product-Overview.md|[[Product Overview]]
+Architecture.md|[[Architecture]]
+Message-Flows.md|[[Message Flows]]
+Security.md|[[Security]]
+Infrastructure.md|[[Infrastructure]]
+Quality-Gates.md|[[Quality Gates]]
+Release-Orchestration.md|[[Release Orchestration]]
+Agents.md|[[Agents]]
+Engineering-Learnings.md|[[Engineering Learnings]]
+Application-Processes.md|[[Application Processes]]
+User-Interface.md|[[User Interface]]
+Live-Betting-Production.md|[[Live Betting Production]]
+UI-UX-Consistency.md|[[UI UX Consistency]]
+EOF
+[[ -f "$repository_readme" ]] ||
+  fail "repository landing-page README is missing"
+grep -Fq 'https://github.com/vasilyevstan/betstan/wiki' "$repository_readme" ||
+  fail "repository README does not link the published wiki"
+for wiki_slug in \
+    Product-Overview \
+    Application-Processes \
+    Architecture \
+    Message-Flows \
+    User-Interface \
+    Security \
+    Infrastructure \
+    Quality-Gates \
+    Release-Orchestration \
+    Agents \
+    Engineering-Learnings; do
+  grep -Fq "https://github.com/vasilyevstan/betstan/wiki/$wiki_slug" \
+    "$repository_readme" ||
+    fail "repository README does not link wiki page: $wiki_slug"
+done
+python3 - "$ROOT_DIR/docs/wiki" "$repository_readme" <<'PY'
+import ipaddress
+import pathlib
+import re
+import sys
+
+wiki_dir = pathlib.Path(sys.argv[1])
+repository_readme = pathlib.Path(sys.argv[2])
+forbidden_literals = (
+    "/Users/",
+    "session-state/",
+    "--resume-captured",
+    "--resume-run",
+    "`pending_deployments`",
+    "mode-`0600`",
+    "owner-only `0700`",
+)
+secret_patterns = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
+ipv4_pattern = re.compile(
+    r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"
+)
+
+failures = []
+for path in [*sorted(wiki_dir.glob("*.md")), repository_readme]:
+    text = path.read_text(encoding="utf-8")
+    for literal in forbidden_literals:
+        if literal in text:
+            failures.append(f"{path.name}: forbidden public detail {literal!r}")
+    for pattern in secret_patterns:
+        if pattern.search(text):
+            failures.append(f"{path.name}: secret-like value matches {pattern.pattern!r}")
+    for match in ipv4_pattern.finditer(text):
+        try:
+            address = ipaddress.ip_address(match.group(0))
+        except ValueError:
+            continue
+        if address.is_global:
+            failures.append(
+                f"{path.name}: globally routable IPv4 address {address} is not public-wiki-safe"
+            )
+
+if failures:
+    raise SystemExit("\n".join(failures))
+PY
 [[ -f "$ux_agent" ]] || fail "required UX/UI expert agent is missing"
+[[ -f "$public_wiki_agent" ]] || fail "required public wiki editor agent is missing"
 [[ -f "$ux_wiki" ]] || fail "canonical UI/UX consistency wiki page is missing"
 [[ -f "$ux_backend_agent" ]] || fail "backend developer agent is missing"
 [[ -f "$ux_frontend_agent" ]] || fail "frontend developer agent is missing"
 grep -Fq 'name: betstan-ux-ui-expert' "$ux_agent" ||
   fail "UX/UI expert frontmatter has the wrong name"
+grep -Fq 'name: betstan-public-wiki-editor' "$public_wiki_agent" ||
+  fail "public wiki editor frontmatter has the wrong name"
+public_wiki_agent_flat="$(tr '\n' ' ' <"$public_wiki_agent" | tr -s '[:space:]' ' ')"
+grep -Fq 'Every repository change receives a documentation-impact assessment' \
+    <<<"$public_wiki_agent_flat" ||
+  fail "public wiki editor does not assess every change"
+grep -Fq 'byte-identical publication' <<<"$public_wiki_agent_flat" ||
+  fail "public wiki editor omits byte-identical publication"
+grep -Fq 'Additional protected commits are allowed' \
+    "$ROOT_DIR/CONTRIBUTING.md" ||
+  fail "contribution policy still assumes session-exclusive releases"
+grep -Fq 'Multiple sessions may merge compatible reviewed work independently' \
+    "$ROOT_DIR/.github/agents/betstan-deployment-safety.agent.md" ||
+  fail "deployment safety does not support aggregate concurrent-session releases"
+grep -Fq 'ambiguous prefixes such as chore, misc, or wip' "$pr_merge_safety" ||
+  fail "merge safety does not reject ambiguous PR titles"
+grep -Fq "STUB_TITLE='chore: update files'" "$pr_merge_safety_test" ||
+  fail "merge safety lacks an ambiguous-title regression test"
 grep -Fq 'tools: [read, search]' "$ux_agent" ||
   fail "UX/UI expert does not remain read-only"
 if grep -Eq '^tools:.*execute' "$ux_agent"; then
@@ -396,16 +516,16 @@ grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
     "$ux_release_wiki" ||
   fail "release orchestration omits the mandatory UX handoff"
 backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
     <<<"$backend_agent_flat" ||
-  fail "backend developer does not carry applicable UX evidence into the critic handoff"
+  fail "backend developer does not carry applicable UX evidence into the wiki handoff"
 grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
     <<<"$backend_agent_flat" ||
   fail "backend developer omits durable mutation publication"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-validation-critic`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
     <<<"$frontend_agent_flat" ||
-  fail "frontend developer does not carry UX evidence into the critic handoff"
+  fail "frontend developer does not carry UX evidence into the wiki handoff"
 grep -Fq 'Missing or stale UX evidence is an acceptance' \
     "$ux_critic_agent" ||
   fail "validation critic does not identify missing UX evidence"
@@ -432,6 +552,7 @@ for ux_reinforced_check in \
     'Cross-card baseline drift' \
     'Selection tokens versus event identity' \
     'Centered sibling market headings' \
+    'User terminology versus internal model names' \
     'Stable, non-volatile board order with exact ID preservation' \
     'Coupled-market plausibility' \
     'Public access means usable capability, not only discoverable navigation' \
@@ -444,6 +565,9 @@ for ux_reinforced_check in \
   grep -Fq "$ux_reinforced_check" "$ux_agent" ||
     fail "UX/UI expert omits reinforced consistency check: $ux_reinforced_check"
 done
+grep -Fq 'user-facing betting terminology consistently says **slip**' \
+    "$ux_wiki" ||
+  fail "UI/UX consistency wiki does not protect slip terminology"
 grep -Fq 'For live-history and presentation-order changes, prove producer-attested' \
     "$ux_test_agent" ||
   fail "test engineer omits live-history/presentation-order coverage requirements"
@@ -1681,6 +1805,28 @@ grep -Fq 'APPLY LIVE SLIP INDEX EXACT SHA' "$data_workflow"
 grep -Fq 'shared-mongo-operation-lock-stan.sh acquire' "$data_workflow"
 grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
 grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
+obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
+[[ -f "$obsolete_cleanup" ]] ||
+  fail "fixed obsolete-event cleanup tool is missing"
+for cleanup_contract in \
+    'export const OBSOLETE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
+    'REMOVE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
+    'RESTORE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
+    'const DEPENDENCY_LOCATIONS:' \
+    'const assertRollbackHasNoConflicts' \
+    'snapshotSha256'; do
+  grep -Fq "$cleanup_contract" "$obsolete_cleanup" ||
+    fail "obsolete-event cleanup omits safety contract: $cleanup_contract"
+done
+! grep -Eq -- '--(event|event-id|target)(=|[[:space:]])' "$obsolete_cleanup" ||
+  fail "obsolete-event cleanup accepts a caller-selected target"
+grep -Fq 'run_obsolete_event_cleanup dry-run preflight' \
+  "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" &&
+  grep -Fq 'run_obsolete_event_cleanup apply apply' \
+    "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" &&
+  grep -Fq 'obsolete_event_cleanup_complete=true' \
+    "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" ||
+  fail "protected live-data rollout does not apply and verify the fixed cleanup"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||

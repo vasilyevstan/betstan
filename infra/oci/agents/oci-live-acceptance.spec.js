@@ -3,19 +3,32 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const { test, expect } = require('@playwright/test');
 
-const LIVE_MARKETS = [
-  'NEXT_YELLOW_CARD',
-  'NEXT_RED_CARD',
-  'NEXT_CORNER',
-  'NEXT_PENALTY',
-  'HALF_TIME_RESULT',
+const ROTATING_LIVE_MARKETS = [
+  { marketType: 'NEXT_YELLOW_CARD', label: 'Next Yellow Card' },
+  { marketType: 'NEXT_CORNER', label: 'Next Corner Kick' },
+  { marketType: 'NEXT_FREE_KICK', label: 'Next Free Kick' },
+  { marketType: 'NEXT_THROW_IN', label: 'Next Throw-In' },
+  { marketType: 'NEXT_GOAL_KICK', label: 'Next Goal Kick' },
+  { marketType: 'NEXT_PENALTY', label: 'Next Penalty' },
+  { marketType: 'NEXT_RED_CARD', label: 'Next Red Card' },
 ];
+const FIXED_IN_MATCH_MARKETS = [
+  'HALF_TIME_RESULT',
+  'SECOND_HALF_SCORE',
+];
+const SETTLEMENT_MARKET_TYPE = 'SECOND_HALF_SCORE';
 const COUNTDOWN_MARKETS = [
   { marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' },
   { marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' },
 ];
 const ALL_LIVE_MARKET_TYPES = [
-  ...LIVE_MARKETS,
+  ...ROTATING_LIVE_MARKETS.map(({ marketType }) => marketType),
+  ...FIXED_IN_MATCH_MARKETS,
+  ...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),
+];
+const REQUIRED_PER_EVENT_MARKETS = [
+  ...ROTATING_LIVE_MARKETS.slice(0, 4).map(({ marketType }) => marketType),
+  ...FIXED_IN_MATCH_MARKETS,
   ...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),
 ];
 const STRUCTURAL_INCIDENTS = [
@@ -66,17 +79,16 @@ const liveMarketSignature = async (marketCard) => {
 
 const selectLiveMarket = async ({
   fixture,
-  marketIndex,
+  marketType,
   page,
 }) => {
-  const marketType = LIVE_MARKETS[marketIndex];
   const marketId = `${fixture.eventId}:${marketType}`;
   const marketCard = page
     .getByRole('article', { name: fixture.name })
-    .locator('.event-market-card')
-    .nth(marketIndex);
+    .locator(`[data-market-type="${marketType}"]`);
 
   for (let attempt = 1; attempt <= 5; attempt += 1) {
+    await expect(marketCard).toHaveCount(1);
     const selection = marketCard.getByRole('button').first();
     await expect(selection).toBeEnabled({ timeout: 10000 });
     const signature = await liveMarketSignature(marketCard);
@@ -350,18 +362,15 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   for (const fixture of fixtures.slice(0, 2)) {
     const article = page.getByRole('article', { name: fixture.name });
     await expect(article).toBeVisible({ timeout: 100000 });
-    await expect(article.locator('.event-market-card')).toHaveCount(
-      LIVE_MARKETS.length,
-    );
-    for (const marketName of [
-      'Next Yellow Card',
-      'Next Red Card',
-      'Next Corner',
-      'Next Penalty',
-      'Half Time Result',
-    ]) {
-      await expect(article.getByText(marketName, { exact: true })).toBeVisible();
-    }
+    await expect.poll(
+      () => article.locator('.event-market-card').count(),
+      { timeout: 100000 },
+    ).toBeGreaterThan(0);
+    expect(await article.locator('.event-market-card').count())
+      .toBeLessThanOrEqual(6);
+    await expect(
+      article.locator(`[data-market-type="${SETTLEMENT_MARKET_TYPE}"]`),
+    ).toBeVisible();
     for (const { label } of COUNTDOWN_MARKETS) {
       await expect(article.getByText(label, { exact: true })).toHaveCount(0);
     }
@@ -378,29 +387,29 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   );
 
   for (const fixture of fixtures.slice(0, 2)) {
-    for (let marketIndex = 0; marketIndex < LIVE_MARKETS.length; marketIndex += 1) {
-      await selectLiveMarket({
-        fixture,
-        marketIndex,
-        page,
-      });
-    }
+    await selectLiveMarket({
+      fixture,
+      marketType: SETTLEMENT_MARKET_TYPE,
+      page,
+    });
   }
 
   const selectedBoards = await (
     await page.request.get('/api/slip/boards')
   ).json();
-  expect(selectedBoards.LIVE.rows).toHaveLength(LIVE_MARKETS.length * 2);
+  expect(selectedBoards.LIVE.rows).toHaveLength(
+    EXPECTED_LIVE_SETTLEMENT_ROWS,
+  );
 
-  // A confirmed duplicate selection schedules a refresh after all ten rows exist.
+  // A confirmed duplicate selection schedules a refresh after both rows exist.
   await selectLiveMarket({
     fixture: fixtures[1],
-    marketIndex: LIVE_MARKETS.length - 1,
+    marketType: SETTLEMENT_MARKET_TYPE,
     page,
   });
   const liveBoard = board(page, 'LIVE');
   await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
-    LIVE_MARKETS.length * 2,
+    EXPECTED_LIVE_SETTLEMENT_ROWS,
     { timeout: 15000 },
   );
   await expect(liveBoard).toContainText(fixtures[0].name);
@@ -421,7 +430,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     for (const fixture of fixtures.slice(0, 2)) {
       await selectLiveMarket({
         fixture,
-        marketIndex: 0,
+        marketType: SETTLEMENT_MARKET_TYPE,
         page,
       });
     }
@@ -429,7 +438,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     // Reselect the last row so the UI refresh follows both confirmed writes.
     await selectLiveMarket({
       fixture: fixtures[1],
-      marketIndex: 0,
+      marketType: SETTLEMENT_MARKET_TYPE,
       page,
     });
     await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
@@ -556,9 +565,36 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     const kickoffSnapshot = eventSnapshots.find(
       (snapshot) => snapshot.live.phase === 'FIRST_HALF',
     );
+    expect(kickoffSnapshot).toBeDefined();
+    const kickoffActionableMarkets = kickoffSnapshot.live.currentMarkets.filter(
+      (market) => ['OPEN', 'SUSPENDED'].includes(market.status),
+    );
+    expect(kickoffActionableMarkets.length).toBeLessThanOrEqual(6);
     expect(
-      kickoffSnapshot.live.currentMarkets.map((market) => market.marketType).sort(),
-    ).toEqual([...ALL_LIVE_MARKET_TYPES].sort());
+      kickoffActionableMarkets.some(
+        (market) => market.marketType === SETTLEMENT_MARKET_TYPE,
+      ),
+    ).toBe(true);
+    for (const snapshot of eventSnapshots) {
+      expect(
+        snapshot.live.currentMarkets.filter(
+          (market) => ['OPEN', 'SUSPENDED'].includes(market.status),
+        ).length,
+      ).toBeLessThanOrEqual(6);
+    }
+    const eventMarketTypes = new Set(eventSnapshots.flatMap(
+      (snapshot) => snapshot.live.currentMarkets.map(
+        (market) => market.marketType,
+      ),
+    ));
+    for (const marketType of REQUIRED_PER_EVENT_MARKETS) {
+      expect(eventMarketTypes.has(marketType)).toBe(true);
+    }
+    expect(
+      ROTATING_LIVE_MARKETS.filter(
+        ({ marketType }) => eventMarketTypes.has(marketType),
+      ).length,
+    ).toBeGreaterThanOrEqual(6);
 
     const finalSnapshot = [...eventSnapshots].reverse().find(
       (snapshot) => snapshot.live.phase === 'FULL_TIME',
@@ -578,6 +614,41 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     }
     expect(finalSnapshot.live.homeScore).toBe(goals.HOME);
     expect(finalSnapshot.live.awayScore).toBe(goals.AWAY);
+    const secondHalfScoreMarket = finalSnapshot.live.currentMarkets.find(
+      (market) => market.marketType === SETTLEMENT_MARKET_TYPE,
+    );
+    const secondHalfScoreSettlement = (
+      Array.isArray(finalSnapshot.live.settlements)
+        ? finalSnapshot.live.settlements
+        : []
+    ).find(
+      (settlement) => settlement.marketId
+        === `${fixture.eventId}:${SETTLEMENT_MARKET_TYPE}`,
+    );
+    expect(secondHalfScoreMarket).toBeDefined();
+    expect(secondHalfScoreMarket.status).toBe('SETTLED');
+    expect(secondHalfScoreMarket.selections).toHaveLength(10);
+    expect(
+      secondHalfScoreMarket.selections.map((selection) => selection.label),
+    ).toEqual([
+      '0 - 0',
+      '1 - 0',
+      '0 - 1',
+      '1 - 1',
+      '2 - 0',
+      '0 - 2',
+      '2 - 1',
+      '1 - 2',
+      '2 - 2',
+      'Other',
+    ]);
+    expect(secondHalfScoreSettlement).toBeDefined();
+    expect(
+      secondHalfScoreMarket.selections.some(
+        (selection) =>
+          selection.selectionId === secondHalfScoreSettlement.winningSelection,
+      ),
+    ).toBe(true);
 
     const resultedEvent = backofficeEvents.find(
       (event) => event.eventId === fixture.eventId,
@@ -591,8 +662,24 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       homeScore: finalSnapshot.live.homeScore,
       awayScore: finalSnapshot.live.awayScore,
       incidentTypes: [...incidentTypes].sort(),
+      marketTypes: [...new Set(eventSnapshots.flatMap(
+        (snapshot) => snapshot.live.currentMarkets.map(
+          (market) => market.marketType,
+        ),
+      ))].sort(),
     };
   });
+  const observedIncidentTypes = new Set(
+    eventEvidence.flatMap(({ incidentTypes }) => incidentTypes),
+  );
+  const observedMarketTypes = new Set(
+    eventEvidence.flatMap(({ marketTypes }) => marketTypes),
+  );
+  expect(observedIncidentTypes.has('THROW_IN')).toBe(true);
+  expect(observedIncidentTypes.has('GOAL_KICK')).toBe(true);
+  expect([...observedMarketTypes].sort()).toEqual(
+    [...ALL_LIVE_MARKET_TYPES].sort(),
+  );
 
   const settledBets = await (await page.request.get('/api/bet')).json();
   const liveBet = findBySlipId(settledBets, liveSlipId);

@@ -17,7 +17,10 @@ before acting; do not rely on stale conversation state or branch names.
 
 - Never commit or push directly to protected `dev` or `master`.
 - Use the fixed quality chain: architect, three-model simplifier synthesis,
-  developer, critic, test engineer, then final validator.
+  developer, public-wiki editor, critic, test engineer, then final validator.
+- Treat the public-wiki assessment as mandatory. Relevant product,
+  architecture, operations, UI, quality, release, or agent changes update
+  canonical `docs/wiki/` sources before final validation.
 - Keep corrections in the originating agent context; do not create duplicate
   agents or status-only handoffs.
 - Preserve unrelated tracked, staged, and untracked work.
@@ -28,6 +31,9 @@ before acting; do not rely on stale conversation state or branch names.
   as non-success.
 - Keep changes backward compatible unless an explicit migration and rollback
   contract says otherwise.
+- Multiple sessions may contribute to one release. Prove each required feature
+  commit is an ancestor of the exact current `master`; additional protected
+  commits are allowed, while production mutations remain serialized.
 
 ## Pull requests
 

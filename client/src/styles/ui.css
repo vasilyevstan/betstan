@@ -602,6 +602,27 @@ body {
   color: var(--text-main);
 }
 
+.my-bets-filter-groups {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.my-bets-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.my-bets-filter-label {
+  min-width: 4.5rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
 .my-bets-search {
   min-width: min(100%, 22rem);
   flex: 1 1 18rem;
@@ -1298,7 +1319,7 @@ body {
 
 .bet-kind-badge--live,
 .event-card__badge--live,
-.slip-board--kind-live {
+.slip-board.slip-board--kind-live {
   border-color: rgba(255, 119, 119, 0.34);
 }
 
@@ -1356,10 +1377,13 @@ body {
 }
 
 .event-countdown {
-  min-width: 7.5rem;
-  padding: 0.65rem 0.8rem;
+  display: grid;
+  align-content: center;
+  inline-size: 9rem;
+  min-block-size: 4.5rem;
+  padding: 0.55rem 0.9rem;
   border-radius: 0.9rem;
-  text-align: right;
+  text-align: center;
   background: color-mix(in srgb, var(--warning) 12%, var(--surface-elevated));
   border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border-subtle));
 }
@@ -1378,6 +1402,10 @@ body {
   font-size: 1.35rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+}
+
+.event-countdown--urgent .event-countdown__value {
+  color: var(--danger);
 }
 
 .event-card__live-body {
@@ -1501,14 +1529,6 @@ body {
   min-width: 0;
 }
 
-.event-card__section-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
 .event-card__section-title {
   font-size: 0.78rem;
   font-weight: 700;
@@ -1623,6 +1643,14 @@ body {
   overflow-wrap: break-word;
 }
 
+.event-market-card__name {
+  line-height: 1.25;
+}
+
+.event-card--countdown .event-market-card__name {
+  min-block-size: 2.5rem;
+}
+
 .event-market-meta,
 .slip-row-card__moderation-meta,
 .my-bets-market-meta,
@@ -1653,6 +1681,14 @@ body {
   min-width: 0;
 }
 
+.event-market-card--score {
+  grid-column: span 2;
+}
+
+.event-market-buttons--score {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .event-market-button {
   display: flex;
   flex-wrap: wrap;
@@ -1679,6 +1715,16 @@ body {
   .event-card--active-live .event-market-button {
     gap: 0.35rem;
     padding-inline: 0.5rem;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .event-market-card--score {
+    grid-column: auto;
+  }
+
+  .event-market-buttons--score {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1740,9 +1786,13 @@ body {
   position: relative;
 }
 
-.slip-board--kind-live {
+.slip-board.slip-board--kind-live {
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-subtle));
-  background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 9%, transparent), var(--surface-soft));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--danger) 13%, var(--surface-soft)),
+    color-mix(in srgb, var(--danger) 5%, var(--surface-soft))
+  );
 }
 
 .slip-board--kind-pre_match {

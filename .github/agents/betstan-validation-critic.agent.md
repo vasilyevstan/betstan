@@ -19,14 +19,17 @@ Read:
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
 - the architecture, synthesized simplifier artifact, acceptance criteria,
-  developer handoff, applicable UX specification and immutable-result review,
-  and every open finding from prior rounds;
+  developer and public-wiki handoffs, applicable UX specification and
+  immutable-result review, and every open finding from prior rounds;
 - current git state and the exact immutable `base_sha..head_sha` diff;
 - affected source, models, contracts, tests, and callers/consumers.
 
 ## Review focus
 
 - Incorrect behavior and unmet acceptance criteria.
+- Missing, stale, unsafe, or contradictory canonical public documentation.
+  Require the wiki editor's exact-diff result and reject public claims that
+  expose protected details or do not match implemented behavior.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
 - Raw-write/Mongoose-version interactions, including historical documents
@@ -105,6 +108,12 @@ Read:
 - Presentation ordering that changes selection identity: display sorting must
   never rewrite an ID/name/value tuple by array position or move a control
   under an active pointer/keyboard focus.
+- Shared-side selection ambiguity: exact-score or other multi-option markets
+  must not let a common side value select, moderate, or settle an arbitrary
+  row when exact selection IDs are available.
+- Rotating-market state loss: a visible-card cap must not delete authoritative
+  terminal history, strand an accepted version, reuse a market version, or
+  choose a different replacement after restart.
 - Access-proxy false positives: visible navigation proves only discovery. If
   the product says a capability is available to anonymous or ordinary users,
   require those states to load its real data and complete its intended

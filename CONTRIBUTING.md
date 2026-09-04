@@ -15,6 +15,28 @@ Use this flow:
 
 Never push directly to `dev`; integrate focused feature, fix, or operations branches through pull requests. Pull requests into `master` from any branch other than `dev` are forbidden.
 
+### Concurrent feature delivery
+
+Independent sessions may develop and merge compatible changes through separate
+pull requests. A `dev`-to-`master` promotion may intentionally contain several
+reviewed features; a release is not required to reproduce one session's tree
+in isolation.
+
+Each releasing session records the commit or commits its requirement depends
+on. Before claiming release completion, prove every required commit is an
+ancestor of the exact current `master` SHA selected for build and deployment.
+Additional protected commits are allowed, but the complete aggregate candidate
+must pass its own exact-SHA checks, workflow inventory, rollback readiness, and
+production acceptance. If `master` advances during a release chain, supersede
+the stale chain and adopt the new exact current-master candidate when it still
+contains the required commits; never reset `master` or deploy an older SHA to
+preserve session exclusivity.
+
+Development and PR integration may proceed concurrently. Production-capable
+workflow dispatches, data mutations, deployments, activation, rollback, and
+recovery remain serialized by the existing exclusivity and operation-lock
+contracts.
+
 ## Pull request evidence
 
 Treat every pull request description as durable review and release evidence,
@@ -40,6 +62,29 @@ components, states, UI variants, themes, and viewport classes; the stable
 reference screens/components/tokens; every intentional exception and its
 product rationale; the final UX status and head SHA; and any evidence gap.
 Non-user-facing changes write `not applicable`.
+
+Pull request titles must be short, plain-language outcomes that a reviewer can
+understand without opening the diff, such as `Add second-half score betting` or
+`Fix live slip alignment`. Do not use ambiguous category labels such as
+`chore`, `misc`, or `wip`. Merge safety rejects those prefixes, single-word
+titles, and titles longer than 72 characters.
+
+## Public wiki gate
+
+Every change receives a `betstan-public-wiki-editor` assessment after
+implementation and before immutable review. Changes to product behavior,
+architecture, contracts, data lifecycle, security, infrastructure, quality
+gates, release behavior, UI/UX, or agent responsibilities update the relevant
+canonical `docs/wiki/` pages in the same pull request. A no-change result is
+valid only when the exact diff has no public documentation impact and the
+assessment explains why.
+
+The repository files are the reviewed source of truth. After the exact commit
+is merged, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify
+the resulting pages and links. Public documentation must omit credentials,
+private approval records, local/session paths, private infrastructure
+identifiers, unredacted production data, and actionable bypass or emergency
+procedures.
 
 The UX specialist may establish a consistency finding from source, stable
 references, or supplied screenshots. A new screenshot suite is not mandatory

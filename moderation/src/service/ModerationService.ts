@@ -61,6 +61,7 @@ interface MirrorSelection {
   selectionId: string;
   side: TeamSide;
   odds: number;
+  label?: string;
 }
 
 interface MirrorMarket {
@@ -203,15 +204,16 @@ const DEFAULT_PUBLICATION_LEASE_HEARTBEAT_MS = 10_000;
  * entire match regardless of configured duration (caps do not scale with
  * `durationMs`):
  *   own-type trigger incidents: goals(12) + yellows(14) + reds(4)
- *     + corners(30) + penaltyAwards(6) + freeKicks(24)              =  90
- *   + one PENALTY_SCORED/PENALTY_MISSED outcome per penaltyAwards   =  96
- *   + ADDED_TIME_ANNOUNCED (fixed: exactly once per half)           =  98
- *   + SECOND_HALF_KICK_OFF (fixed: exactly once)                   =  99
- *   + the market's own initial KICK_OFF creation                   = 100
+ *     + corners(30) + penaltyAwards(6) + freeKicks(24)
+ *     + throwIns(60) + goalKicks(30)                               = 180
+ *   + one PENALTY_SCORED/PENALTY_MISSED outcome per penaltyAwards  = 186
+ *   + ADDED_TIME_ANNOUNCED (fixed: exactly once per half)          = 188
+ *   + SECOND_HALF_KICK_OFF (fixed: exactly once)                   = 189
+ *   + the market's own initial KICK_OFF creation                   = 190
  * If the simulator's HARD_CAPS or fixed-incident schedule ever changes, this
  * bound must be re-derived alongside it.
  */
-export const MAX_MARKET_HISTORY_VERSIONS_PER_MARKET = 100;
+export const MAX_MARKET_HISTORY_VERSIONS_PER_MARKET = 256;
 /** Bounded optimistic-concurrency retries when two updates race to append history. */
 export const MAX_MARKET_HISTORY_WRITE_ATTEMPTS = 5;
 const LIVE_PHASES = new Set<EventPhase>([
@@ -1951,8 +1953,16 @@ class ModerationService {
         )
       : undefined;
 
-    if (byId) {
-      return byId;
+    if (row.selectionId) {
+      if (byId || !row.side) {
+        return byId;
+      }
+      const sameSideSelections = market.selections.filter(
+        (selection) => selection.side === row.side
+      );
+      return sameSideSelections.length === 1
+        ? sameSideSelections[0]
+        : undefined;
     }
 
     return row.side

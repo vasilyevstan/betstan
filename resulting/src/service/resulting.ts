@@ -297,13 +297,17 @@ function evaluateLiveDecision(
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "_");
-  const matchesSelection =
+  const hasSelectionIdentity = Boolean(
     row.selectionId && settlement.winningSelection
-      ? row.selectionId === settlement.winningSelection
-      : false;
-  const matchesSide = row.side
-    ? row.side === settlement.winningSide
-    : normalizedOddsName === settlement.winningSide;
+  );
+  const matchesSelection = hasSelectionIdentity
+    ? row.selectionId === settlement.winningSelection
+    : false;
+  const matchesSide = hasSelectionIdentity
+    ? false
+    : row.side
+      ? row.side === settlement.winningSide
+      : normalizedOddsName === settlement.winningSide;
 
   return {
     result:

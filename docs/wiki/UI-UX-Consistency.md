@@ -5,6 +5,9 @@ A page can be locally functional and still be defective when its hierarchy,
 spacing, controls, states, or interaction behavior conflict with stable
 patterns elsewhere in the product.
 
+For the implemented application shell, visual variants, themes, route
+structure, and component behavior, see [[User Interface]].
+
 ## When the specialist is required
 
 Every change that alters what a user sees or how a user interacts requires
@@ -156,6 +159,9 @@ The compact live-betting work established reusable examples:
   compaction;
 - markets sharing one route/card family use one shared centered heading
   treatment;
+- user-facing betting terminology consistently says **slip** across empty,
+  loading, error, moderation, action, and history states; `board` remains an
+  internal data-model term and should not leak into interface copy;
 - stable board order: a fixed-size selectable board uses a stable domain
   order rather than a volatile value such as current odds, and any
   presentation sort preserves each option's original ID/name/value tuple

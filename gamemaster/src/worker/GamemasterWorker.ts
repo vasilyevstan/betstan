@@ -861,6 +861,7 @@ export class GamemasterWorker {
           selectionId: selection.selectionId,
           side: asPublishedTeamSide(selection.side),
           odds: selection.odds,
+          ...(selection.label ? { label: selection.label } : {}),
         })),
       })),
       settlements: transition.settlements.map((settlement) => ({
@@ -963,6 +964,7 @@ export class GamemasterWorker {
           selectionId: selection.selectionId,
           side: selection.side as unknown as TeamSide,
           odds: selection.odds,
+          ...(selection.label ? { label: selection.label } : {}),
         })),
       })),
       settlements: [],
@@ -1054,7 +1056,10 @@ export class GamemasterWorker {
     }
 
     return (
-      market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+      (
+        market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+        || market.marketType === LiveMarketType.SECOND_HALF_SCORE
+      )
       && market.status === LiveMarketStatus.CLOSED
     );
   }

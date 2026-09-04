@@ -3,7 +3,9 @@ import {
   COUNTDOWN_LIVE_MARKET_TYPE,
   COUNTDOWN_WINDOW_MS,
   formatCountdownDuration,
+  formatIncident,
   formatLegacyLiveSelectionLabel,
+  formatLiveMarketType,
   formatRowOutcome,
   getMarketAvailabilityLabel,
   getMarketSelectionLabel,
@@ -200,6 +202,31 @@ describe('getMarketSelectionLabel', () => {
 
     expect(getMarketSelectionLabel(market, { selectionId: 'yes', side: 'YES', label: 'Definitely' }, event)).toBe('Definitely');
   });
+
+  it('uses explicit scoreline labels for Second Half Score selections', () => {
+    const event = buildScheduledEvent();
+    const market = buildMarket({ marketType: 'SECOND_HALF_SCORE' });
+
+    expect(getMarketSelectionLabel(
+      market,
+      { selectionId: 'score-1-0', side: 'NONE', odds: 5.5, label: '1 - 0' },
+      event,
+    )).toBe('1 - 0');
+  });
+});
+
+it('formats the expanded live incident and product catalog', () => {
+  const event = buildScheduledEvent();
+
+  expect(formatLiveMarketType('NEXT_CORNER')).toBe('Next Corner Kick');
+  expect(formatLiveMarketType('NEXT_THROW_IN')).toBe('Next Throw-In');
+  expect(formatLiveMarketType('NEXT_FREE_KICK')).toBe('Next Free Kick');
+  expect(formatLiveMarketType('NEXT_GOAL_KICK')).toBe('Next Goal Kick');
+  expect(formatLiveMarketType('SECOND_HALF_SCORE')).toBe('Second Half Score');
+  expect(formatIncident({ type: 'THROW_IN', side: 'HOME', minute: 12 }, event))
+    .toBe("12' Team A throw-in");
+  expect(formatIncident({ type: 'GOAL_KICK', side: 'AWAY', minute: 13 }, event))
+    .toBe("13' Team B goal kick");
 });
 
 describe('getMarketAvailabilityLabel for countdown markets', () => {
@@ -495,7 +522,7 @@ describe('formatLegacyLiveSelectionLabel', () => {
       selectionId: 'home',
     };
 
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner Kick: Raptors');
   });
 
   it('derives an AWAY label from a raw identifier', () => {
@@ -506,7 +533,7 @@ describe('formatLegacyLiveSelectionLabel', () => {
       selectionId: 'away',
     };
 
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row)).toBe('Next Corner: Sharks');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row)).toBe('Next Corner Kick: Sharks');
   });
 
   it('derives a Draw label from a raw identifier for a market with a draw side', () => {
@@ -520,6 +547,25 @@ describe('formatLegacyLiveSelectionLabel', () => {
     expect(formatLegacyLiveSelectionLabel('event-42:HALF_TIME_RESULT:1:DRAW', row)).toBe('Half Time Result: Draw');
   });
 
+  it('derives exact and Other Second Half Score winners from raw identifiers', () => {
+    const row = {
+      eventName: 'Raptors - Sharks',
+      marketType: 'SECOND_HALF_SCORE',
+      side: 'NONE',
+    };
+
+    expect(formatLegacyLiveSelectionLabel(
+      'event-42:SECOND_HALF_SCORE:1:SCORE_2_1',
+      row,
+      'winning',
+    )).toBe('Second Half Score: 2 - 1');
+    expect(formatLegacyLiveSelectionLabel(
+      'event-42:SECOND_HALF_SCORE:1:OTHER',
+      row,
+      'winning',
+    )).toBe('Second Half Score: Other');
+  });
+
   it('normalizes a known market type without a recognizable side into just the market label', () => {
     const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_PENALTY' };
 
@@ -528,28 +574,28 @@ describe('formatLegacyLiveSelectionLabel', () => {
 
   it('derives the full label purely from the raw identifier when the row has no structured fields at all', () => {
     const raw = 'event-42:NEXT_CORNER:1:HOME';
-    expect(formatLegacyLiveSelectionLabel(raw, {})).toBe('Next Corner: Home');
-    expect(formatLegacyLiveSelectionLabel(raw, undefined)).toBe('Next Corner: Home');
+    expect(formatLegacyLiveSelectionLabel(raw, {})).toBe('Next Corner Kick: Home');
+    expect(formatLegacyLiveSelectionLabel(raw, undefined)).toBe('Next Corner Kick: Home');
   });
 
   it('falls back to a side encoded in the raw identifier when the relevant structured side field is absent', () => {
     const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_CORNER' };
 
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'selected')).toBe('Next Corner: Sharks');
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'winning')).toBe('Next Corner: Sharks');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'selected')).toBe('Next Corner Kick: Sharks');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:AWAY', row, 'winning')).toBe('Next Corner Kick: Sharks');
   });
 
   it('falls back to a market type encoded in the raw identifier when row.marketType is absent', () => {
     const row = { eventName: 'Raptors - Sharks', side: 'HOME' };
 
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner Kick: Raptors');
   });
 
   it('for the "selected" perspective (default, used for oddsName), uses the bettor\'s own row.side', () => {
     const row = { eventName: 'Raptors - Sharks', marketType: 'NEXT_CORNER', side: 'HOME', winningSide: 'AWAY' };
 
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'selected')).toBe('Next Corner: Raptors');
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner: Raptors');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'selected')).toBe('Next Corner Kick: Raptors');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row)).toBe('Next Corner Kick: Raptors');
   });
 
   it('for the "winning" perspective (used for winningSelection), prefers row.winningSide over the bettor\'s own row.side', () => {
@@ -558,7 +604,7 @@ describe('formatLegacyLiveSelectionLabel', () => {
     // The raw text itself even encodes "HOME" (the bettor's own historical selection identifier),
     // but the authoritative winner is `row.winningSide` -- never `row.side` -- so the result must
     // still be the away team, not the home team.
-    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'winning')).toBe('Next Corner: Sharks');
+    expect(formatLegacyLiveSelectionLabel('event-42:NEXT_CORNER:1:HOME', row, 'winning')).toBe('Next Corner Kick: Sharks');
   });
 
   it('leaves malformed/unknown non-live values unchanged (no colon, or no recognizable segment)', () => {
@@ -582,7 +628,7 @@ describe('formatRowOutcome winning-selection normalization', () => {
       winningSelection: 'event-42:NEXT_CORNER:1:HOME',
     };
 
-    expect(formatRowOutcome(row)).toBe('Won · Winner: Next Corner: Raptors');
+    expect(formatRowOutcome(row)).toBe('Won · Winner: Next Corner Kick: Raptors');
   });
 
   it('leaves an already-readable winningSelection unchanged for a LOSS row', () => {
@@ -605,7 +651,7 @@ describe('formatRowOutcome winning-selection normalization', () => {
       winningSelection: 'event-42:NEXT_CORNER:1:AWAY',
     };
 
-    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner: Sharks');
+    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner Kick: Sharks');
   });
 
   it('regression: falls back to the side encoded in the raw winningSelection identifier when row.winningSide is absent (never using the bettor\'s own row.side)', () => {
@@ -620,6 +666,6 @@ describe('formatRowOutcome winning-selection normalization', () => {
       winningSelection: 'event-42:NEXT_CORNER:1:AWAY',
     };
 
-    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner: Sharks');
+    expect(formatRowOutcome(row)).toBe('Lost · Winner: Next Corner Kick: Sharks');
   });
 });

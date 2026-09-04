@@ -25,6 +25,12 @@ interface MarketState {
   odds: number[];
 }
 
+interface MarketSelectionDefinition {
+  key: string;
+  side: TeamSide;
+  label?: string;
+}
+
 interface PricingFactors {
   attackFactor: number;
   disciplineFactor: number;
@@ -34,15 +40,21 @@ interface PricingFactors {
 
 const NEXT_MARKETS: NextMarketType[] = [
   LiveMarketType.NEXT_YELLOW_CARD,
-  LiveMarketType.NEXT_RED_CARD,
   LiveMarketType.NEXT_CORNER,
+  LiveMarketType.NEXT_FREE_KICK,
+  LiveMarketType.NEXT_THROW_IN,
+  LiveMarketType.NEXT_GOAL_KICK,
   LiveMarketType.NEXT_PENALTY,
+  LiveMarketType.NEXT_RED_CARD,
 ];
 
-const ALL_MARKETS: LiveMarketType[] = [
-  ...NEXT_MARKETS,
+const FIXED_IN_MATCH_MARKETS: LiveMarketType[] = [
   LiveMarketType.HALF_TIME_RESULT,
+  LiveMarketType.SECOND_HALF_SCORE,
 ];
+
+const FIRST_HALF_NEXT_MARKET_SLOTS = 4;
+const SECOND_HALF_NEXT_MARKET_SLOTS = 6;
 
 /**
  * The two live-slip products exposed as "live-betting candidates" from
@@ -59,7 +71,8 @@ const PRE_KICKOFF_MARKETS: LiveMarketType[] = [
 ];
 
 const SNAPSHOT_MARKETS: LiveMarketType[] = [
-  ...ALL_MARKETS,
+  ...FIXED_IN_MATCH_MARKETS,
+  ...NEXT_MARKETS,
   ...PRE_KICKOFF_MARKETS,
 ];
 
@@ -68,31 +81,65 @@ const NEXT_MARKET_CAPS: Record<NextMarketType, keyof IncidentCaps> = {
   [LiveMarketType.NEXT_RED_CARD]: "reds",
   [LiveMarketType.NEXT_CORNER]: "corners",
   [LiveMarketType.NEXT_PENALTY]: "penaltyAwards",
+  [LiveMarketType.NEXT_THROW_IN]: "throwIns",
+  [LiveMarketType.NEXT_FREE_KICK]: "freeKicks",
+  [LiveMarketType.NEXT_GOAL_KICK]: "goalKicks",
 };
+
+const SECOND_HALF_SCORE_SELECTIONS: MarketSelectionDefinition[] = [
+  { key: "SCORE_0_0", side: TeamSide.NONE, label: "0 - 0" },
+  { key: "SCORE_1_0", side: TeamSide.NONE, label: "1 - 0" },
+  { key: "SCORE_0_1", side: TeamSide.NONE, label: "0 - 1" },
+  { key: "SCORE_1_1", side: TeamSide.NONE, label: "1 - 1" },
+  { key: "SCORE_2_0", side: TeamSide.NONE, label: "2 - 0" },
+  { key: "SCORE_0_2", side: TeamSide.NONE, label: "0 - 2" },
+  { key: "SCORE_2_1", side: TeamSide.NONE, label: "2 - 1" },
+  { key: "SCORE_1_2", side: TeamSide.NONE, label: "1 - 2" },
+  { key: "SCORE_2_2", side: TeamSide.NONE, label: "2 - 2" },
+  { key: "OTHER", side: TeamSide.NONE, label: "Other" },
+];
 
 function marketId(eventId: string, marketType: LiveMarketType): string {
   return `${eventId}:${marketType}`;
 }
 
-function sides(marketType: LiveMarketType): TeamSide[] {
+function selectionDefinitions(
+  marketType: LiveMarketType
+): MarketSelectionDefinition[] {
   switch (marketType) {
     case LiveMarketType.HALF_TIME_RESULT:
-      return ["HOME", "DRAW", "AWAY"];
+      return [
+        { key: TeamSide.HOME, side: TeamSide.HOME },
+        { key: TeamSide.DRAW, side: TeamSide.DRAW },
+        { key: TeamSide.AWAY, side: TeamSide.AWAY },
+      ];
+    case LiveMarketType.SECOND_HALF_SCORE:
+      return SECOND_HALF_SCORE_SELECTIONS;
     case LiveMarketType.KICKOFF_TEAM:
-      return ["HOME", "AWAY"];
+      return [
+        { key: TeamSide.HOME, side: TeamSide.HOME },
+        { key: TeamSide.AWAY, side: TeamSide.AWAY },
+      ];
     case LiveMarketType.FIRST_MINUTE_GOAL:
-      return ["YES", "NO"];
+      return [
+        { key: TeamSide.YES, side: TeamSide.YES },
+        { key: TeamSide.NO, side: TeamSide.NO },
+      ];
     default:
-      return ["HOME", "AWAY", "NONE"];
+      return [
+        { key: TeamSide.HOME, side: TeamSide.HOME },
+        { key: TeamSide.AWAY, side: TeamSide.AWAY },
+        { key: TeamSide.NONE, side: TeamSide.NONE },
+      ];
   }
 }
 
 function selectionId(
   eventId: string,
   state: Pick<MarketState, "marketType" | "marketVersion">,
-  side: TeamSide
+  key: string
 ): string {
-  return `${marketId(eventId, state.marketType)}:${state.marketVersion}:${side}`;
+  return `${marketId(eventId, state.marketType)}:${state.marketVersion}:${key}`;
 }
 
 function rounded(value: number): number {
@@ -156,6 +203,21 @@ function marketRate(
       return {
         rate: rates.penaltyAwards * rateScale * pricing.attackFactor,
         homeShare: pricing.homeAttackShare,
+      };
+    case LiveMarketType.NEXT_THROW_IN:
+      return {
+        rate: rates.throwIns * rateScale,
+        homeShare: pricing.homeAttackShare,
+      };
+    case LiveMarketType.NEXT_FREE_KICK:
+      return {
+        rate: rates.freeKicks * rateScale * pricing.disciplineFactor,
+        homeShare: pricing.homeDisciplineShare,
+      };
+    case LiveMarketType.NEXT_GOAL_KICK:
+      return {
+        rate: rates.goalKicks * rateScale * pricing.attackFactor,
+        homeShare: 1 - pricing.homeAttackShare,
       };
   }
 }
@@ -252,6 +314,39 @@ function firstMinuteGoalOdds(timeline: SimTimeline): number[] {
   ];
 }
 
+function secondHalfScoreOdds(timeline: SimTimeline): number[] {
+  const pricing = factors(timeline);
+  const expectedSecondHalfGoals = (
+    timeline.config.rates.goals
+    + timeline.config.rates.penaltyAwards
+      * timeline.config.rates.penaltyScoreProbability
+  )
+    * timeline.config.rateScale
+    * pricing.attackFactor
+    / 2;
+  const homeLambda = expectedSecondHalfGoals * pricing.homeAttackShare;
+  const awayLambda = expectedSecondHalfGoals * (1 - pricing.homeAttackShare);
+  const exactProbabilities = SECOND_HALF_SCORE_SELECTIONS
+    .slice(0, -1)
+    .map((selection) => {
+      const match = /^SCORE_(\d+)_(\d+)$/.exec(selection.key);
+      if (!match) {
+        throw new Error(`invalid second-half score selection ${selection.key}`);
+      }
+      return poissonPmf(homeLambda, Number(match[1]))
+        * poissonPmf(awayLambda, Number(match[2]));
+    });
+  const listedProbability = exactProbabilities.reduce(
+    (sum, probability) => sum + probability,
+    0
+  );
+
+  return [
+    ...exactProbabilities.map((probability) => price(probability, timeline)),
+    price(Math.max(0, 1 - listedProbability), timeline),
+  ];
+}
+
 function oddsFor(
   type: LiveMarketType,
   offsetMs: number,
@@ -266,6 +361,8 @@ function oddsFor(
       return kickoffTeamOdds(timeline);
     case LiveMarketType.FIRST_MINUTE_GOAL:
       return firstMinuteGoalOdds(timeline);
+    case LiveMarketType.SECOND_HALF_SCORE:
+      return secondHalfScoreOdds(timeline);
     default:
       return nextEventOdds(type, offsetMs, timeline);
   }
@@ -288,15 +385,6 @@ function createMarket(
   };
 }
 
-function closeMarket(state: MarketState): MarketState {
-  return {
-    ...state,
-    marketVersion: state.marketVersion + 1,
-    quoteVersion: 1,
-    status: LiveMarketStatus.CLOSED,
-  };
-}
-
 function hasIncidentCapacityRemaining(
   type: NextMarketType,
   count: number,
@@ -306,12 +394,15 @@ function hasIncidentCapacityRemaining(
 }
 
 function snapshot(eventId: string, state: MarketState): LiveMarketSnapshot {
-  const marketSides = sides(state.marketType);
-  const selections: LiveMarketSelection[] = marketSides.map((side, index) => ({
-    selectionId: selectionId(eventId, state, side),
-    side,
-    odds: state.odds[index],
-  }));
+  const definitions = selectionDefinitions(state.marketType);
+  const selections: LiveMarketSelection[] = definitions.map(
+    (definition, index) => ({
+      selectionId: selectionId(eventId, state, definition.key),
+      side: definition.side,
+      odds: state.odds[index],
+      ...(definition.label ? { label: definition.label } : {}),
+    })
+  );
   return {
     marketId: marketId(eventId, state.marketType),
     marketType: state.marketType,
@@ -359,6 +450,12 @@ function trigger(type: LiveIncidentType): NextMarketType | undefined {
       return LiveMarketType.NEXT_CORNER;
     case LiveIncidentType.PENALTY_AWARDED:
       return LiveMarketType.NEXT_PENALTY;
+    case LiveIncidentType.THROW_IN:
+      return LiveMarketType.NEXT_THROW_IN;
+    case LiveIncidentType.FREE_KICK:
+      return LiveMarketType.NEXT_FREE_KICK;
+    case LiveIncidentType.GOAL_KICK:
+      return LiveMarketType.NEXT_GOAL_KICK;
     default:
       return undefined;
   }
@@ -369,7 +466,8 @@ function marketSettlement(
   state: MarketState,
   sequence: number,
   winningSide: TeamSide,
-  settlementReason: LiveSettlementReason
+  settlementReason: LiveSettlementReason,
+  winningSelectionKey: string = winningSide
 ): LiveMarketSettlement {
   return {
     marketId: marketId(eventId, state.marketType),
@@ -377,8 +475,88 @@ function marketSettlement(
     settlementReason,
     settlementSequence: sequence,
     winningSide,
-    winningSelection: selectionId(eventId, state, winningSide),
+    winningSelection: selectionId(eventId, state, winningSelectionKey),
   };
+}
+
+function isActionableMarket(state: MarketState | undefined): boolean {
+  return state?.status === LiveMarketStatus.OPEN
+    || state?.status === LiveMarketStatus.SUSPENDED;
+}
+
+function nextMarketSlotLimit(phase: EventPhase): number {
+  return phase === EventPhase.FIRST_HALF
+    || phase === EventPhase.FIRST_HALF_STOPPAGE
+    || phase === EventPhase.HALF_TIME
+    ? FIRST_HALF_NEXT_MARKET_SLOTS
+    : SECOND_HALF_NEXT_MARKET_SLOTS;
+}
+
+function activeNextMarketCount(
+  markets: Map<LiveMarketType, MarketState>
+): number {
+  return NEXT_MARKETS.filter((type) => isActionableMarket(markets.get(type))).length;
+}
+
+function fillNextMarketSlots(
+  markets: Map<LiveMarketType, MarketState>,
+  triggeredCounts: Map<NextMarketType, number>,
+  targetCount: number,
+  cursor: number,
+  offsetMs: number,
+  homeScore: number,
+  awayScore: number,
+  timeline: SimTimeline,
+  status: LiveMarketStatus
+): number {
+  let nextCursor = cursor;
+  let attempts = 0;
+
+  while (
+    activeNextMarketCount(markets) < targetCount
+    && attempts < NEXT_MARKETS.length
+  ) {
+    const type = NEXT_MARKETS[nextCursor % NEXT_MARKETS.length];
+    nextCursor = (nextCursor + 1) % NEXT_MARKETS.length;
+    attempts += 1;
+
+    if (
+      isActionableMarket(markets.get(type))
+      || !hasIncidentCapacityRemaining(
+        type,
+        triggeredCounts.get(type) ?? 0,
+        timeline
+      )
+    ) {
+      continue;
+    }
+
+    const previousVersion = markets.get(type)?.marketVersion ?? 0;
+    const market = createMarket(
+      type,
+      previousVersion + 1,
+      offsetMs,
+      homeScore,
+      awayScore,
+      timeline
+    );
+    market.status = status;
+    markets.set(type, market);
+  }
+
+  return nextCursor;
+}
+
+function secondHalfScoreSelectionKey(
+  homeScore: number,
+  awayScore: number
+): string {
+  const exactKey = `SCORE_${homeScore}_${awayScore}`;
+  return SECOND_HALF_SCORE_SELECTIONS.some(
+    (selection) => selection.key === exactKey
+  )
+    ? exactKey
+    : "OTHER";
 }
 
 function repriceOpenMarkets(
@@ -411,10 +589,15 @@ function isMaterialIncident(type: LiveIncidentType): boolean {
 export function projectTransitions(timeline: SimTimeline): SimulationTransition[] {
   const markets = new Map<LiveMarketType, MarketState>();
   const transitions: SimulationTransition[] = [];
-  const triggeredCounts = new Map<NextMarketType, number>();
+  const triggeredCounts = new Map<NextMarketType, number>(
+    NEXT_MARKETS.map((type) => [type, 0])
+  );
   let homeScore = 0;
   let awayScore = 0;
+  let halfTimeHomeScore: number | undefined;
+  let halfTimeAwayScore: number | undefined;
   let bettingStatus: BettingStatus = BettingStatus.OPEN;
+  let rotationCursor = 0;
 
   const sortedEntries = sortTimelineEntries(timeline.entries);
   // First-minute-goal settles on whether any goal fell strictly before this
@@ -446,12 +629,23 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
     }
 
     if (incident.type === LiveIncidentType.KICK_OFF) {
-      ALL_MARKETS.forEach((type) => {
+      FIXED_IN_MATCH_MARKETS.forEach((type) => {
         markets.set(
           type,
           createMarket(type, 1, entry.offsetMs, homeScore, awayScore, timeline)
         );
       });
+      rotationCursor = fillNextMarketSlots(
+        markets,
+        triggeredCounts,
+        FIRST_HALF_NEXT_MARKET_SLOTS,
+        rotationCursor,
+        entry.offsetMs,
+        homeScore,
+        awayScore,
+        timeline,
+        LiveMarketStatus.OPEN
+      );
 
       // Kickoff team and first-minute-goal close atomically at kickoff.
       // Kickoff team settles immediately (the side is already decided in
@@ -516,36 +710,34 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
 
     const triggered = trigger(incident.type);
     if (triggered) {
-      const current = markets.get(triggered);
-      if (!current) {
-        throw new Error(`missing market ${triggered}`);
-      }
-      const winner = incident.side as CompetingSide;
-      settlements.push(
-        marketSettlement(
-          timeline.eventId,
-          current,
-          sequence,
-          winner,
-          LiveSettlementReason.INCIDENT
-        )
-      );
       const count = (triggeredCounts.get(triggered) ?? 0) + 1;
       triggeredCounts.set(triggered, count);
-      markets.set(
-        triggered,
-        hasIncidentCapacityRemaining(triggered, count, timeline)
-          ? createMarket(
-              triggered,
-              current.marketVersion + 1,
-              entry.offsetMs,
-              homeScore,
-              awayScore,
-              timeline
-            )
-          : closeMarket(current)
-      );
-      freshMarkets.add(triggered);
+      const current = markets.get(triggered);
+      if (isActionableMarket(current)) {
+        const winner = incident.side as CompetingSide;
+        settlements.push(
+          marketSettlement(
+            timeline.eventId,
+            current!,
+            sequence,
+            winner,
+            LiveSettlementReason.INCIDENT
+          )
+        );
+        current!.status = LiveMarketStatus.SETTLED;
+        rotationCursor = fillNextMarketSlots(
+          markets,
+          triggeredCounts,
+          nextMarketSlotLimit(entry.phase),
+          rotationCursor,
+          entry.offsetMs,
+          homeScore,
+          awayScore,
+          timeline,
+          LiveMarketStatus.OPEN
+        );
+        freshMarkets.add(triggered);
+      }
     }
 
     if (incident.type === LiveIncidentType.HALF_TIME) {
@@ -564,48 +756,92 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
         )
       );
       halfTime.status = LiveMarketStatus.SETTLED;
+      halfTimeHomeScore = homeScore;
+      halfTimeAwayScore = awayScore;
       NEXT_MARKETS.forEach((type) => {
         const market = markets.get(type);
         if (market?.status === LiveMarketStatus.OPEN) {
           market.status = LiveMarketStatus.SUSPENDED;
         }
       });
+      const secondHalfScore = markets.get(LiveMarketType.SECOND_HALF_SCORE);
+      if (secondHalfScore?.status === LiveMarketStatus.OPEN) {
+        secondHalfScore.status = LiveMarketStatus.SUSPENDED;
+      }
       bettingStatus = BettingStatus.SUSPENDED;
     }
 
     if (incident.type === LiveIncidentType.SECOND_HALF_KICK_OFF) {
+      const secondHalfScore = markets.get(LiveMarketType.SECOND_HALF_SCORE);
+      if (
+        secondHalfScore?.status === LiveMarketStatus.OPEN
+        || secondHalfScore?.status === LiveMarketStatus.SUSPENDED
+      ) {
+        secondHalfScore.status = LiveMarketStatus.CLOSED;
+      }
       NEXT_MARKETS.forEach((type) => {
         const market = markets.get(type);
         if (market && market.status === LiveMarketStatus.SUSPENDED) {
           market.status = LiveMarketStatus.OPEN;
         }
       });
+      rotationCursor = fillNextMarketSlots(
+        markets,
+        triggeredCounts,
+        SECOND_HALF_NEXT_MARKET_SLOTS,
+        rotationCursor,
+        entry.offsetMs,
+        homeScore,
+        awayScore,
+        timeline,
+        LiveMarketStatus.OPEN
+      );
       bettingStatus = BettingStatus.OPEN;
     }
 
     if (incident.type === LiveIncidentType.FULL_TIME) {
       NEXT_MARKETS.forEach((type) => {
         const market = markets.get(type);
-        if (!market) {
-          throw new Error(`missing market ${type}`);
-        }
-        if (market.status === LiveMarketStatus.CLOSED) {
+        if (!isActionableMarket(market)) {
           return;
-        }
-        if (market.status !== LiveMarketStatus.OPEN) {
-          throw new Error(`unexpected market status for ${type} at full-time`);
         }
         settlements.push(
           marketSettlement(
             timeline.eventId,
-            market,
+            market!,
             sequence,
-            "NONE",
+            TeamSide.NONE,
             LiveSettlementReason.FULL_TIME_NONE
           )
         );
-        market.status = LiveMarketStatus.SETTLED;
+        market!.status = LiveMarketStatus.SETTLED;
       });
+      const secondHalfScore = markets.get(LiveMarketType.SECOND_HALF_SCORE);
+      if (
+        secondHalfScore
+        && secondHalfScore.status !== LiveMarketStatus.SETTLED
+      ) {
+        if (
+          halfTimeHomeScore === undefined
+          || halfTimeAwayScore === undefined
+        ) {
+          throw new Error("missing half-time score for second-half settlement");
+        }
+        settlements.push(
+          marketSettlement(
+            timeline.eventId,
+            secondHalfScore,
+            sequence,
+            TeamSide.NONE,
+            LiveSettlementReason.SECOND_HALF_SCORE,
+            secondHalfScoreSelectionKey(
+              homeScore - halfTimeHomeScore,
+              awayScore - halfTimeAwayScore
+            )
+          )
+        );
+        secondHalfScore.status = LiveMarketStatus.SETTLED;
+      }
       bettingStatus = BettingStatus.CLOSED;
     }
 
@@ -632,13 +868,10 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
       scores: { home: homeScore, away: awayScore },
       bettingStatus,
       incident: { ...incident },
-      markets: SNAPSHOT_MARKETS.map((type) => {
-        const market = markets.get(type);
-        if (!market) {
-          throw new Error(`missing market ${type}`);
-        }
-        return snapshot(timeline.eventId, market);
-      }),
+      markets: SNAPSHOT_MARKETS
+        .map((type) => markets.get(type))
+        .filter((market): market is MarketState => market !== undefined)
+        .map((market) => snapshot(timeline.eventId, market)),
       settlements,
     });
   });

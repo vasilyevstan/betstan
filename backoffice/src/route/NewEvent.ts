@@ -13,6 +13,7 @@ import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 const router = express.Router();
 const MAX_TEAM_NAME_LENGTH = 80;
 const MAX_REQUEST_ID_LENGTH = 128;
+const DEFAULT_KICKOFF_DELAY_SECONDS = 15 * 60;
 
 router.post("/api/backoffice/new_event", async (req: Request, res: Response) => {
   const home = typeof req.body.home === "string" ? req.body.home.trim() : "";
@@ -34,7 +35,7 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     return;
   }
 
-  const delaySeconds = kickoffDelaySeconds ?? 30 * 60;
+  const delaySeconds = kickoffDelaySeconds ?? DEFAULT_KICKOFF_DELAY_SECONDS;
   if (
     !Number.isInteger(delaySeconds)
     || delaySeconds < 15
