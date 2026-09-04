@@ -322,6 +322,11 @@ release_runtime() {
 }
 
 case "$ACTION" in
+  fence-writes)
+    set_fence_config true
+    wait_for_fence true
+    echo "live_data_maintenance=fence-writes status=PASS http_mutation_fence=true writers_quiesced=false"
+    ;;
   enter)
     [[ "$(fence_config_status)" == "false" ]] ||
       fail "maintenance entry requires the reviewed unfenced baseline"
@@ -353,7 +358,7 @@ case "$ACTION" in
     echo "live_data_maintenance=release status=PASS http_mutation_fence=false writers_quiesced=false"
     ;;
   *)
-    echo "usage: $0 {enter|verify-held|verify-quiesced|restore|hold|release}" >&2
+    echo "usage: $0 {fence-writes|enter|verify-held|verify-quiesced|restore|hold|release}" >&2
     exit 2
     ;;
 esac

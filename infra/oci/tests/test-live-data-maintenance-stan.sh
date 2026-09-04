@@ -186,6 +186,17 @@ assert_replicas() {
   done
 }
 
+run_maintenance fence-writes
+grep -Fq 'request_method' "$stub_state/server-snippet" ||
+  fail "fence-only maintenance did not install the HTTP write fence"
+assert_replicas 1
+run_maintenance fence-writes
+run_maintenance release
+if grep -Fq 'request_method' "$stub_state/server-snippet"; then
+  fail "fence-only maintenance release retained the HTTP write fence"
+fi
+assert_replicas 1
+
 printf '2\n' >"$stub_state/unstable/event"
 run_maintenance enter
 [[ "$(cat "$stub_state/unstable/event")" == "0" ]] ||

@@ -32,6 +32,7 @@ MAX_POST_ROLLBACK_QUEUE_READY_GROWTH="${MAX_POST_ROLLBACK_QUEUE_READY_GROWTH:-0}
 MAX_POST_ROLLBACK_QUEUE_UNACK_GROWTH="${MAX_POST_ROLLBACK_QUEUE_UNACK_GROWTH:-0}"
 LIVE_BETTING_READINESS_SCRIPT="${LIVE_BETTING_READINESS_SCRIPT:-infra/oci/agents/live-betting-readiness-stan.sh}"
 ROLLBACK_READINESS_SCRIPT="${ROLLBACK_READINESS_SCRIPT:-infra/oci/scripts/rollback-readiness-stan.sh}"
+ROLLBACK_MUTATION_FENCE_SCRIPT="${ROLLBACK_MUTATION_FENCE_SCRIPT:-infra/oci/scripts/live-data-maintenance-stan.sh}"
 ROLLBACK_ORDER=(auth bet backoffice client event moderation resulting slip gamemaster)
 API_CONTRACTS=(
   "/|html"
@@ -95,6 +96,7 @@ validate_positive_int() {
 enforce_rollback_readiness_contract() {
   local summary_file="$1"
   local readiness_status readiness_mode readiness_phase readiness_operator
+  local publication_check pending_count target_supports_replay
   [[ -f "$summary_file" ]] || oci_die "rollback readiness summary is missing"
   readiness_status="$(live_betting_env_file_value "$summary_file" rollback_readiness || true)"
   [[ "$readiness_status" == "GO" ]] || oci_die "rollback readiness summary did not authorize the rollback"
@@ -117,6 +119,25 @@ enforce_rollback_readiness_contract() {
       oci_die "rollback readiness reported unsupported mode: $readiness_mode"
       ;;
   esac
+
+  publication_check="$(
+    live_betting_env_file_value "$summary_file" backoffice_publication_rollback_check || true
+  )"
+  pending_count="$(
+    live_betting_env_file_value "$summary_file" backoffice_pending_publication_count || true
+  )"
+  target_supports_replay="$(
+    live_betting_env_file_value "$summary_file" target_supports_backoffice_publication_replay || true
+  )"
+  [[ "$target_supports_replay" == "$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY" ]] ||
+    oci_die "rollback readiness Backoffice replay capability does not match exact target source"
+  if [[ "$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY" == "true" ]]; then
+    [[ "$publication_check" == "compatible-target" && "$pending_count" == "not-required" ]] ||
+      oci_die "rollback readiness did not recognize the target Backoffice replay worker"
+  else
+    [[ "$publication_check" == "drained" && "$pending_count" == "0" ]] ||
+      oci_die "rollback readiness did not prove pending Backoffice publications are drained"
+  fi
 }
 
 validate_source_run() {
@@ -890,11 +911,27 @@ cleanup_work_dir() {
   rmdir "$WORK_PARENT_DIR" 2>/dev/null || true
 }
 
+cleanup_rollback() {
+  local exit_status=$?
+  if [[ "${ROLLBACK_WRITE_FENCE_ACTIVE:-false}" == "true" &&
+    "${ROLLBACK_MUTATION_STARTED:-false}" != "true" ]]; then
+    if "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
+      >"$OUTPUT_DIR/write-fence-release-on-exit.txt" 2>&1; then
+      ROLLBACK_WRITE_FENCE_ACTIVE=false
+    fi
+  fi
+  cleanup_work_dir
+  return "$exit_status"
+}
+
 prepare_private_dir "$OUTPUT_DIR"
 WORK_PARENT_DIR="$OUTPUT_DIR/.workdirs"
 prepare_private_dir "$WORK_PARENT_DIR"
 WORK_DIR="$(create_unique_private_dir "$WORK_PARENT_DIR" rollback)"
-trap cleanup_work_dir EXIT
+ROLLBACK_WRITE_FENCE_ACTIVE=false
+ROLLBACK_MUTATION_STARTED=false
+ROLLBACK_WRITE_FENCE_STATUS=not-required
+trap cleanup_rollback EXIT
 
 oci_require_command gh
 oci_require_command git
@@ -931,6 +968,14 @@ resolved_target_sha="$(git rev-parse "${TARGET_SHA}^{commit}")"
 [[ "$resolved_target_sha" == "$TARGET_SHA" ]] || oci_die "TARGET_SHA must be a full immutable commit SHA"
 git merge-base --is-ancestor "$TARGET_SHA" "$current_master_sha" ||
   oci_die "TARGET_SHA must be an ancestor of current master"
+if oci_target_supports_backoffice_publication_replay "$TARGET_SHA"; then
+  TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY=true
+else
+  TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY=false
+  if [[ "$ROLLBACK_MODE" == "dry-run" ]]; then
+    ROLLBACK_WRITE_FENCE_STATUS=required-on-execute
+  fi
+fi
 
 ADMIN_AUTH_EVIDENCE_PATHS=(
   "backoffice/src/middleware/RequireAdmin.ts"
@@ -1656,6 +1701,17 @@ capture_pre_rollback_state "$OUTPUT_DIR/pre-rollback-state.tsv" "$OUTPUT_DIR/cur
 
 ROLLBACK_READINESS_OUTPUT_DIR="$OUTPUT_DIR/rollback-readiness"
 [[ -x "$ROLLBACK_READINESS_SCRIPT" ]] || oci_die "rollback readiness script is not executable: $ROLLBACK_READINESS_SCRIPT"
+if [[ "$ROLLBACK_MODE" == "execute" &&
+  "$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY" == "false" ]]; then
+  [[ -x "$ROLLBACK_MUTATION_FENCE_SCRIPT" ]] ||
+    oci_die "rollback mutation fence script is not executable: $ROLLBACK_MUTATION_FENCE_SCRIPT"
+  if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" fence-writes \
+    >"$OUTPUT_DIR/write-fence.txt" 2>&1; then
+    oci_die "unable to establish the rollback HTTP mutation fence"
+  fi
+  ROLLBACK_WRITE_FENCE_ACTIVE=true
+  ROLLBACK_WRITE_FENCE_STATUS=active
+fi
 if ! TARGET_SHA="$TARGET_SHA" \
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
@@ -1666,6 +1722,16 @@ if ! TARGET_SHA="$TARGET_SHA" \
   oci_die "OCI rollback readiness rejected the rollback"
 fi
 enforce_rollback_readiness_contract "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env"
+BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="$(
+  live_betting_env_file_value \
+    "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env" \
+    backoffice_publication_rollback_check
+)"
+BACKOFFICE_PENDING_PUBLICATION_COUNT="$(
+  live_betting_env_file_value \
+    "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env" \
+    backoffice_pending_publication_count
+)"
 [[ -x "$LIVE_BETTING_READINESS_SCRIPT" ]] || oci_die "live-betting readiness script is not executable: $LIVE_BETTING_READINESS_SCRIPT"
 if ! run_live_betting_readiness \
     preflight-live-gate \
@@ -1687,6 +1753,10 @@ deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
 deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
 admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
+backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
+backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
+target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 database_restore=disabled
 EOF2
   oci_log "oci_rollback_validation=PASS mode=dry-run target_sha=$TARGET_SHA"
@@ -1703,6 +1773,7 @@ for service in "${ROLLBACK_ORDER[@]}"; do
   deployment="gaming-${service}-depl"
   container="gaming-${service}"
   printf '%s\n' "$service" >>"$OUTPUT_DIR/rollout-order.tsv"
+  ROLLBACK_MUTATION_STARTED=true
   if ! kubectl set image "deployment/${deployment}" -n "$OCI_K8S_NAMESPACE" \
       "${container}=$(expected_ref "$service")" >/dev/null; then
     record_partial_failure "$service" "$deployment" set-image "failed to update ${deployment} to the baseline image"
@@ -1752,6 +1823,25 @@ EOF
   oci_die "post-rollback live readiness rejected the target digest set"
 fi
 
+if [[ "$ROLLBACK_WRITE_FENCE_ACTIVE" == "true" ]]; then
+  CURRENT_STEP_LABEL=release-write-fence
+  if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
+    >"$OUTPUT_DIR/write-fence-release.txt" 2>&1; then
+    capture_summary_state "$OUTPUT_DIR/partial-state.tsv"
+    write_text_atomic "$OUTPUT_DIR/failure-state.env" <<EOF
+status=FAIL
+failed_service=post-rollback
+failed_deployment=ingress-nginx-controller
+failed_stage=write-fence-release
+failed_step_label=$CURRENT_STEP_LABEL
+message=rollback completed but the HTTP mutation fence could not be released safely
+EOF
+    oci_die "rollback completed but the HTTP mutation fence could not be released safely"
+  fi
+  ROLLBACK_WRITE_FENCE_ACTIVE=false
+  ROLLBACK_WRITE_FENCE_STATUS=used-and-released
+fi
+
 capture_summary_state "$OUTPUT_DIR/final-state.tsv"
 write_text_atomic "$OUTPUT_DIR/rollback-summary.env" <<EOF2
 status=PASS
@@ -1764,6 +1854,10 @@ deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
 deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
 admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
 backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
+backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
+backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
+target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 completed_services=${completed_services[*]}
 database_restore=disabled
 EOF2

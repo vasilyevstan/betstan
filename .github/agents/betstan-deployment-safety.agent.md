@@ -452,9 +452,12 @@ A Running broker with missing consumers is not healthy production.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
 - Before rolling back across a durable-publication implementation boundary,
-  prove its persisted pending-publication markers are drained or keep a
-  compatible replay worker running until they are. An older image that does
-  not understand the markers must never be treated as their recovery path.
+  establish the reviewed HTTP write fence, keep the current replay worker
+  running, and prove persisted pending-publication markers are drained before
+  image mutation. Skip that drain only when exact target-source evidence
+  proves the rollback image contains and starts the compatible replay worker.
+  Keep the fence active after any partial image mutation until recovery is
+  complete.
 - Prefer application rollback over disk restore when data integrity is healthy.
 - Restore Mongo snapshots only when integrity checks justify it.
 - Never delete a current nodepool, disk, snapshot, or deployment history

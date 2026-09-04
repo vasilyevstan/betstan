@@ -240,9 +240,12 @@ conversation summaries are not authority.
   protected fallback image remains a supported rollback target, even though
   the current public image does not consume them.
 - Before an image-only rollback crosses a durable-publication boundary, prove
-  pending mutation markers are empty or keep a compatible replay worker
-  running until they drain. Additive marker fields remain readable by the old
-  image, but an image without the worker cannot deliver them.
+  pending mutation markers are empty while a reviewed HTTP write fence prevents
+  new public mutations and the current replay worker remains available. Skip
+  the drain only when exact target source proves that the rollback image starts
+  the compatible worker; leave the fence active after partial image mutation.
+  Additive marker fields remain readable by the old image, but an image without
+  the worker cannot deliver them.
   Live-update-first projections stay `OFFLINE` until event metadata establishes
   visibility; metadata repair must not undo a newer visibility message.
   Revoked scoped clients purge cached fixtures immediately, while healthy SSE

@@ -1163,6 +1163,15 @@ grep -Fq 'image-only rollback reuses the current Deployment manifest' \
 grep -Fq 'pending-publication markers are drained' \
     <<<"$deployment_safety_agent_flat" ||
   fail "deployment safety agent can strand durable publications during rollback"
+grep -Fq 'establish the reviewed HTTP write fence' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent omits the durable-publication mutation fence"
+grep -Fq 'exact target-source evidence' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can infer replay compatibility without exact target source"
+grep -Fq 'Keep the fence active after any partial image mutation' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent can reopen writes after a partial rollback"
 
 [[ "$(git -C "$ROOT_DIR" ls-tree HEAD common | awk '{print $1}')" = "040000" ]] ||
   fail "common source is not a normal tracked directory"

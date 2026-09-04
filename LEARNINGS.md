@@ -223,9 +223,12 @@
   image-only rollback reuses the current Deployment environment, and the
   immediately previous protected image still needs both values to boot.
 - A durable publication marker is forward-compatible data but not a backward
-  replay mechanism. Before rolling back to an image without the worker, drain
-  every pending marker or retain a compatible worker until it does; otherwise
-  the older image can strand a database mutation that never reached RabbitMQ.
+  replay mechanism. Before rolling back to an image without the worker,
+  establish the reviewed HTTP write fence, keep the current worker alive, and
+  fail closed until every pending marker drains. Skip the drain only when exact
+  target source proves that the rollback image starts the compatible worker,
+  and keep the fence active after partial image mutation; otherwise the older
+  image can strand a database mutation that never reached RabbitMQ.
 - A live update received before `NEW_EVENT` creates an `OFFLINE` projection. Metadata and visibility initialize independently so `NEW_EVENT` can repair legacy/event-visibility-first placeholders without undoing a newer visibility change.
 - A visibility message may arrive before any event row. Persist it as pending on an `OFFLINE` placeholder, then apply it only after authoritative metadata arrives; ambiguous legacy hidden placeholders stay hidden.
 - Competing `NEW_EVENT` and visibility placeholder upserts can race on the unique event ID. Both paths must treat duplicate-key as convergence and retry the pending decision against the winning row before acknowledging.

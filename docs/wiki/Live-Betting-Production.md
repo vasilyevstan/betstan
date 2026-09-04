@@ -177,10 +177,15 @@ manifest, so those legacy inputs must remain available for the immediately
 previous protected Backoffice image to start.
 
 Backoffice mutations also persist pending broker-publication markers. Before
-rolling back to a generation that predates their replay worker, verify the
-pending marker count is zero or retain a compatible pod until it drains them.
-The older protected image can read the additive documents, but it cannot replay
-an undelivered mutation.
+rolling back to a generation that predates their replay worker, the rollback
+operator installs the reviewed HTTP write fence, leaves the current worker
+running, and waits for the pending marker count to reach zero. Query failure,
+malformed output, or a nonzero count blocks image mutation. The drain is
+skipped only when exact target-source evidence proves that the rollback image
+starts the compatible worker. A partial rollback keeps the fence active for
+recovery; a successful rollback releases it after all health gates pass. The
+older protected image can read the additive documents, but it cannot replay an
+undelivered mutation.
 
 Scheduler events are inserted with `$setOnInsert`, so pricing improvements
 apply automatically to new slots but do not rewrite the already persisted

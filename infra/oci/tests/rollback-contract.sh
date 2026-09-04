@@ -570,6 +570,20 @@ case "$*" in
   "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/service/VerifyAdminSession.ts")
     [[ "${STUB_TARGET_HAS_ADMIN_AUTH:-1}" == "1" ]]
     ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/service/BackofficePublicationService.ts")
+    [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
+    cat <<'EOF_PUBLICATION_SERVICE'
+async replayPending() {}
+this.scheduleReplay()
+newEventPublicationPending
+resultPublicationPending
+visibilityPublicationPending
+EOF_PUBLICATION_SERVICE
+    ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/index.ts")
+    [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
+    printf '%s\n' 'await publicationService.start()'
+    ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
       current)
@@ -1196,6 +1210,10 @@ EOF_QUEUES
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
         "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
+    elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/gaming_backoffice"* ]]; then
+      [[ "${STUB_BACKOFFICE_QUERY_FAIL:-0}" != "1" ]] || exit 1
+      printf '%s\n' \
+        "${STUB_BACKOFFICE_PENDING_PUBLICATION_OUTPUT:-${STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT:-0}}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/"* ]]; then
       [[ "${STUB_AUTH_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' "${STUB_NORMALIZED_IDENTIFIER_COUNT:-0}"
@@ -1544,6 +1562,23 @@ cat "$OUTPUT_DIR/summary.env"
 STUB
 chmod +x "$BIN_DIR/transition-readiness-stub.sh"
 
+cat >"$BIN_DIR/rollback-mutation-fence-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-}"
+case "$action" in
+  fence-writes|release)
+    printf '%s\n' "$action" >>"${ROLLBACK_MUTATION_FENCE_TRACE_FILE:?}"
+    [[ "${STUB_MUTATION_FENCE_FAIL_ACTION:-}" != "$action" ]]
+    ;;
+  *)
+    printf 'unexpected rollback mutation fence action: %s\n' "$action" >&2
+    exit 1
+    ;;
+esac
+STUB
+chmod +x "$BIN_DIR/rollback-mutation-fence-stub.sh"
+
 common_env=(
   "PATH=$BIN_DIR:$PATH"
   "REPO=example/repo"
@@ -1565,6 +1600,9 @@ common_env=(
   "STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=protected"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
+  "ROLLBACK_MUTATION_FENCE_SCRIPT=$BIN_DIR/rollback-mutation-fence-stub.sh"
+  "BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS=1"
+  "BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS=0"
 )
 
 run_script() {
@@ -1583,6 +1621,7 @@ run_script() {
     STUB_KUBECTL_LOG="$scenario_kubectl_log" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-good" \
     STUB_CURL_TRACE_FILE="$output_dir/curl-trace.tsv" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
     LIVE_BETTING_SSE_PROBE_TRACE_FILE="$output_dir/sse-probe-trace.tsv" \
     LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$output_dir/sse-validation-trace.tsv" \
     OUTPUT_DIR="$output_dir" TARGET_SHA="$TARGET_SHA" \
@@ -2057,13 +2096,54 @@ if ! run_script "$WORK_DIR/oci-auth-compatible" \
 fi
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_normalized_identifiers=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_publication_replay=false'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+run_expect_failure oci-backoffice-publication-pending \
+  STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending.out" \
+  'OCI rollback readiness rejected the rollback'
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=pending'
+assert_contains "$WORK_DIR/oci-backoffice-publication-pending/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=2'
+
+run_expect_failure oci-backoffice-publication-query-failed \
+  STUB_BACKOFFICE_QUERY_FAIL=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-failed/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=query-failed'
+
+run_expect_failure oci-backoffice-publication-query-malformed \
+  STUB_BACKOFFICE_PENDING_PUBLICATION_OUTPUT=not-a-count ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-malformed/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=invalid-query-result'
+assert_contains "$WORK_DIR/oci-backoffice-publication-query-malformed/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=not-a-count'
+
+publication_compatible_output="$WORK_DIR/oci-backoffice-publication-compatible"
+if ! run_script "$publication_compatible_output" \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+    STUB_BACKOFFICE_QUERY_FAIL=1 \
+    STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 \
+    ROLLBACK_MODE=dry-run >"$publication_compatible_output.out" 2>&1; then
+  cat "$publication_compatible_output.out" >&2
+  fail 'OCI replay-compatible Backoffice target unexpectedly required a marker drain'
+fi
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_publication_rollback_check=compatible-target'
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_pending_publication_count=not-required'
+assert_contains "$publication_compatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_publication_replay=true'
 
 protected_backoffice_output="$WORK_DIR/protected-backoffice-transition"
 if ! run_script "$protected_backoffice_output" \
     STUB_TARGET_HAS_ADMIN_AUTH=0 \
     STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
     STUB_BACKOFFICE_MODE=protected \
     STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=public \
     ROLLBACK_MODE=execute >"$WORK_DIR/protected-backoffice-transition.out" 2>&1; then
@@ -2079,6 +2159,10 @@ grep -Fq $'\tunauthorized.errors' \
 assert_route_row "$protected_backoffice_output/public-verification.tsv" canonical /api/backoffice
 assert_contains "$protected_backoffice_output/rollback-summary.env" \
   'backoffice_access_mode=public'
+assert_contains "$protected_backoffice_output/rollback-summary.env" \
+  'rollback_http_mutation_fence=not-required'
+[[ ! -s "$protected_backoffice_output/write-fence-trace.tsv" ]] ||
+  fail 'replay-compatible Backoffice rollback unexpectedly fenced mutations'
 
 run_expect_failure malformed-protected-backoffice \
   STUB_BACKOFFICE_MODE=malformed-protected ROLLBACK_MODE=dry-run
@@ -2231,6 +2315,8 @@ assert_contains "$WORK_DIR/migration-transition-block.out" 'do not roll applicat
 assert_contains "$WORK_DIR/migration-transition-block.out" 'infra/oci/scripts/reviewed-topology-rollback-stan.sh'
 assert_contains "$WORK_DIR/migration-transition-block/rollback-readiness/summary.env" 'mode=migration-transition'
 [[ ! -s "$STATE_DIR/migration-transition-block/kubectl.log" ]] || fail 'OCI migration-transition guard should prevent image mutation'
+assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'release'
 
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
@@ -2266,6 +2352,8 @@ assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_deployment
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_stage=rollout-status'
 [[ "$(wc -l <"$WORK_DIR/partial-failure/rollout-order.tsv" | tr -d ' ')" == '5' ]] || fail 'OCI partial failure should stop after event rollout'
 ! grep -Fxq 'moderation' "$WORK_DIR/partial-failure/rollout-order.tsv" || fail 'OCI partial failure should not continue after event'
+assert_line "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'fence-writes'
+assert_not_contains "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'release'
 
 run_expect_failure post-rollback-prematch-refusal \
   STUB_EVENT_MODE_AFTER_ROLLBACK=live-only ROLLBACK_MODE=execute
@@ -2398,6 +2486,11 @@ assert_line "$WORK_DIR/success/sse-validation-trace.tsv" $'https://betstan.xyz/a
 assert_contains "$WORK_DIR/success/rollback-summary.env" 'status=PASS'
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'rollback_readiness=GO'
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'auth_identifier_rollback_check=compatible'
+assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
+assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
+assert_contains "$WORK_DIR/success/rollback-summary.env" 'rollback_http_mutation_fence=used-and-released'
+assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'release'
 assert_contains "$WORK_DIR/success/preflight-live-readiness/summary.env" 'mode=rollback-drain'
 assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'mode=rollback-drain'
 assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'secondary_redirect_status=308'
