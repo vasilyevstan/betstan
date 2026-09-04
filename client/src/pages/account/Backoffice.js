@@ -6,12 +6,13 @@ const MAX_SCORE = 99;
 let fallbackRequestSequence = 0;
 
 const createRequestId = () => {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
+  const browserCrypto = typeof window !== 'undefined' ? window.crypto : undefined;
+  if (typeof browserCrypto?.randomUUID === 'function') {
+    return browserCrypto.randomUUID();
   }
-  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+  if (typeof browserCrypto?.getRandomValues === 'function') {
     const bytes = new Uint8Array(16);
-    globalThis.crypto.getRandomValues(bytes);
+    browserCrypto.getRandomValues(bytes);
     return Array.from(
       bytes,
       (value) => value.toString(16).padStart(2, '0')
