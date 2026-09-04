@@ -20,6 +20,7 @@ DEPLOYMENT_SAFETY="$AGENT_DIR/betstan-deployment-safety.agent.md"
 LEARNINGS="$ROOT_DIR/LEARNINGS.md"
 MERGE_SAFETY="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
 POLICY_PUBLISHER="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
+BRANCH_POLICY="$ROOT_DIR/.github/workflows/branch-policy.yml"
 
 fail() {
   echo "agent governance contract failed: $*" >&2
@@ -406,6 +407,18 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'An exact replay of the same qualifying `labeled` event is inert after `p` or a run is durable; a later label mutation remains drift.'
   require_flat_literal "$marker_authority_file" \
+    'Recovered opening-label authority is revalidated before every success-capable refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a bounded server-owned issue-event ledger.'
+  require_flat_literal "$marker_authority_file" \
+    'The ledger must prove exactly one `copilot-cli-managed` `labeled` event within the original five-minute window and no matching `unlabeled` event.'
+  require_flat_literal "$marker_authority_file" \
+    'Any managed-label removal, second application, or application outside that window is proven drift and writes permanent `x`.'
+  require_flat_literal "$marker_authority_file" \
+    'Any fully validated managed `unlabeled` event, second managed `labeled` event, or out-of-window managed `labeled` event is individually sufficient, irreversible disproof: it writes permanent `x` immediately even on a full ledger page because unread appended events cannot restore the lineage; only positive authority requires scan completion.'
+  require_flat_literal "$marker_authority_file" \
+    'API, schema, duplicate-ID, missing, and incomplete ledger evidence remains inconclusive without `x` only when no disqualifying event has already been observed.'
+  require_flat_literal "$marker_authority_file" \
+    '`branch-policy.yml` grants only `issues: read` for this ledger; the publisher and permission must promote together.'
+  require_flat_literal "$marker_authority_file" \
     'At the greatest cutoff, `x` dominates every other state; absent `x`, any version 1 or version 2 marker makes that cutoff fail-closed legacy; otherwise one compatible version 3 lineage resolves positive run ID over `p` over `u`, independent of status order.'
   require_flat_literal "$marker_authority_file" \
     'Conflicting positive run IDs or incompatible action, content, policy-run target, or label progression fail closed, and a lower state cannot downgrade a higher state.'
@@ -414,7 +427,7 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'Only a strictly later `edited`, `synchronize`, or `reopened` transition may recover, never a later or replayed `opened` event.'
   require_flat_literal "$marker_authority_file" \
-    'Once any version 3 marker exists, operational rollback must retain version 3 parsing or use a reviewed forward correction.'
+    'Once any version 3 marker exists, operational rollback must retain version 3 parsing and ledger authority: recovered opening-label authority is not durable in marker v3, so every publisher able to bind or succeed such a lineage must revalidate the ledger; retaining version 3 parsing alone is insufficient, and rollback to a publisher lacking ledger authority is prohibited; use a reviewed forward correction.'
   require_flat_literal "$marker_authority_file" \
     'Opening-label reconciliation is authorized only when the server-owned label timestamp is at or after the original `opened` transition cutoff and no more than 300,000 ms (five minutes) after it; queueing, replay, or re-execution cannot extend that window.'
   require_flat_literal "$marker_authority_file" \
@@ -426,6 +439,9 @@ for marker_authority_file in \
   require_flat_literal "$marker_authority_file" \
     'A same-cutoff tombstone cannot be replaced or revived; only a strictly later `edited`, `synchronize`, or `reopened` transition can recover the lineage.'
 done
+
+require_flat_literal "$BRANCH_POLICY" \
+  'permissions: actions: read contents: read issues: read pull-requests: read statuses: write'
 
 require_literal "$MERGE_SAFETY" 'human approval requires APPROVED_SHA='
 

@@ -33,6 +33,8 @@ const QUALITY_TRANSITION_UNCONFIRMED = "u";
 const QUALITY_TRANSITION_STALE = "x";
 const MAX_STATUS_DESCRIPTION_LENGTH = 140;
 const OPENING_RACE_WINDOW_MS = 300_000;
+const MANAGED_LABEL_LEDGER_PAGE_SIZE = 100;
+const MANAGED_LABEL_LEDGER_MAX_PAGES = 10;
 const MAX_WORKFLOW_AUTHORIZATION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const WORKFLOW_RUN_NONTERMINAL_STATUSES = new Set([
   "in_progress",
@@ -464,6 +466,123 @@ async function listCommitStatuses(github, owner, repo, ref) {
   throw new Error("workflow authorization receipt inventory is incomplete");
 }
 
+async function inspectManagedLabelLedger({
+  github,
+  owner,
+  repo,
+  pull,
+  transition,
+}) {
+  const seenIds = new Set();
+  let managedLabelAt = null;
+  for (let page = 1; page <= MANAGED_LABEL_LEDGER_MAX_PAGES; page += 1) {
+    let response;
+    try {
+      response = await github.rest.issues.listEvents({
+        owner,
+        repo,
+        issue_number: pull.number,
+        per_page: MANAGED_LABEL_LEDGER_PAGE_SIZE,
+        page,
+      });
+    } catch {
+      return {
+        status: "inconclusive",
+        reason: "managed-label-ledger-unavailable",
+      };
+    }
+    if (
+      !Array.isArray(response.data) ||
+      response.data.length > MANAGED_LABEL_LEDGER_PAGE_SIZE
+    ) {
+      return {
+        status: "inconclusive",
+        reason: "managed-label-ledger-malformed-page",
+      };
+    }
+    for (const event of response.data) {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        !Number.isSafeInteger(event.id) ||
+        event.id < 1 ||
+        seenIds.has(event.id) ||
+        typeof event.event !== "string" ||
+        event.event.length < 1 ||
+        /[\u0000-\u001f\u007f]/.test(event.event)
+      ) {
+        return {
+          status: "inconclusive",
+          reason: "managed-label-ledger-malformed-event",
+        };
+      }
+      seenIds.add(event.id);
+      if (event.event !== "labeled" && event.event !== "unlabeled") {
+        continue;
+      }
+      const labelName = event.label?.name;
+      if (
+        typeof labelName !== "string" ||
+        labelName.length < 1 ||
+        labelName.includes("\0")
+      ) {
+        return {
+          status: "inconclusive",
+          reason: "managed-label-ledger-malformed-event",
+        };
+      }
+      if (labelName !== CLI_MANAGED_LABEL) {
+        continue;
+      }
+      let eventAt;
+      try {
+        eventAt = githubTimestampMilliseconds(
+          event.created_at,
+          "managed label event created_at",
+        );
+      } catch {
+        return {
+          status: "inconclusive",
+          reason: "managed-label-ledger-malformed-event",
+        };
+      }
+      if (event.event === "unlabeled") {
+        return {
+          status: "drift",
+          reason: "managed-label-ledger-unlabeled",
+        };
+      }
+      if (managedLabelAt !== null) {
+        return {
+          status: "drift",
+          reason: "managed-label-ledger-multiple-labeled",
+        };
+      }
+      if (
+        !isWithinOpeningRaceWindow(transition.transitionAt, eventAt)
+      ) {
+        return {
+          status: "drift",
+          reason: "managed-label-ledger-outside-window",
+        };
+      }
+      managedLabelAt = eventAt;
+    }
+    if (response.data.length < MANAGED_LABEL_LEDGER_PAGE_SIZE) {
+      return managedLabelAt === null
+        ? {
+            status: "inconclusive",
+            reason: "managed-label-ledger-missing-proof",
+          }
+        : { status: "satisfied", reason: null };
+    }
+  }
+  return {
+    status: "inconclusive",
+    reason: "managed-label-ledger-incomplete",
+  };
+}
+
 async function claimWorkflowAuthorization({
   github,
   owner,
@@ -756,6 +875,7 @@ function resolveQualityTransition(transitions) {
   const unconfirmed = candidates.filter(
     (candidate) => candidate.unconfirmed,
   );
+  const hasDirectOpeningLabelPredecessor = unconfirmed.length > 0;
   let hasInverseOpeningLabelPredecessor = false;
   if (
     unconfirmed.some(
@@ -802,6 +922,7 @@ function resolveQualityTransition(transitions) {
   )[0];
   return {
     ...resolved,
+    hasDirectOpeningLabelPredecessor,
     hasInverseOpeningLabelPredecessor,
   };
 }
@@ -1400,6 +1521,15 @@ function isOpeningLabelLineage(transition, pull) {
   );
 }
 
+function requiresOpeningLabelLedgerAuthority(transition, pull) {
+  return (
+    transition.action === "opened" &&
+    (transition.hasDirectOpeningLabelPredecessor === true ||
+      transition.hasInverseOpeningLabelPredecessor === true ||
+      isOpeningLabelLineage(transition, pull))
+  );
+}
+
 function hasInverseOpeningLabelEvidence({
   transition,
   pull,
@@ -1603,6 +1733,33 @@ async function bindPendingQualityTransition({
   if (!transition || transition.version !== 3 || transition.stale) {
     return false;
   }
+  if (requiresOpeningLabelLedgerAuthority(transition, pull)) {
+    const ledger = await inspectManagedLabelLedger({
+      github,
+      owner,
+      repo,
+      pull,
+      transition,
+    });
+    if (ledger.status === "drift") {
+      await publishQualityTransitionMarker({
+        github,
+        owner,
+        repo,
+        pull,
+        action: transition.action,
+        transitionAt: transition.transitionAt,
+        binding: QUALITY_TRANSITION_STALE,
+        targetUrl: transition.targetUrl,
+      });
+      throw new Error("opening managed-label ledger proves drift");
+    }
+    if (ledger.status !== "satisfied") {
+      throw new Error(
+        `opening managed-label ledger is inconclusive: ${ledger.reason}`,
+      );
+    }
+  }
   if (eventAction === "opened") {
     if (
       transition.action === "opened" &&
@@ -1626,6 +1783,7 @@ async function bindPendingQualityTransition({
         binding: QUALITY_TRANSITION_STALE,
         targetUrl: transition.targetUrl,
       });
+      throw new Error("quality transition lineage is permanently stale");
     }
     return false;
   }
@@ -1679,6 +1837,7 @@ async function bindPendingQualityTransition({
           binding: QUALITY_TRANSITION_STALE,
           targetUrl: transition.targetUrl,
         });
+        throw new Error("quality transition lineage is permanently stale");
       }
       return false;
     }
@@ -1714,7 +1873,7 @@ async function bindPendingQualityTransition({
       binding: QUALITY_TRANSITION_STALE,
       targetUrl: transition.targetUrl,
     });
-    return false;
+    throw new Error("quality transition lineage is permanently stale");
   }
   if (
     isOpeningLabelLineage(transition, pull) &&
@@ -1751,7 +1910,7 @@ async function bindPendingQualityTransition({
         binding: QUALITY_TRANSITION_STALE,
         targetUrl: transition.targetUrl,
       });
-      return false;
+      throw new Error("quality transition lineage is permanently stale");
     }
   }
   if (

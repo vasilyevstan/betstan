@@ -454,6 +454,21 @@ cd resulting && npm ci && npm run test:ci
   authorization receipt. An exact replay of the same qualifying `labeled`
   event is inert after `p` or a run is durable; a later label mutation remains
   drift.
+- Recovered opening-label authority is revalidated before every success-capable
+  refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a
+  bounded server-owned issue-event ledger. The ledger must prove exactly one
+  `copilot-cli-managed` `labeled` event within the original five-minute window
+  and no matching `unlabeled` event. Any managed-label removal, second
+  application, or application outside that window is proven drift and writes
+  permanent `x`. Any fully validated managed `unlabeled` event, second managed
+  `labeled` event, or out-of-window managed `labeled` event is individually
+  sufficient, irreversible disproof: it writes permanent `x` immediately even
+  on a full ledger page because unread appended events cannot restore the
+  lineage; only positive authority requires scan completion. API, schema,
+  duplicate-ID, missing, and incomplete ledger evidence remains inconclusive
+  without `x` only when no disqualifying event has already been observed.
+  `branch-policy.yml` grants only `issues: read` for this ledger; the publisher
+  and permission must promote together.
 - At the greatest cutoff, `x` dominates every other state; absent `x`, any
   version 1 or version 2 marker makes that cutoff fail-closed legacy; otherwise
   one compatible version 3 lineage resolves positive run ID over `p` over `u`,
@@ -465,8 +480,12 @@ cd resulting && npm ci && npm run test:ci
   `synchronize`, or `reopened` transition may recover, never a later or
   replayed `opened` event.
 - Once any version 3 marker exists, operational rollback must retain version 3
-  parsing or use a reviewed forward correction. A version-2-only publisher is
-  fail-closed compatibility, not restored release authority.
+  parsing and ledger authority: recovered opening-label authority is not
+  durable in marker v3, so every publisher able to bind or succeed such a
+  lineage must revalidate the ledger; retaining version 3 parsing alone is
+  insufficient, and rollback to a publisher lacking ledger authority is
+  prohibited; use a reviewed forward correction. A version-2-only publisher
+  is fail-closed compatibility, not restored release authority.
 
 ## Resolved failures and durable rules
 
