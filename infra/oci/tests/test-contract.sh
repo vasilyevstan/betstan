@@ -70,6 +70,15 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
+public_backoffice_middleware="$ROOT_DIR/backoffice/src/middleware/PublicBackofficeAccess.ts"
+[[ -f "$public_backoffice_middleware" ]] ||
+  fail "Backoffice does not declare its intentional public access policy"
+grep -Fq 'app.use("/api/backoffice", publicBackofficeAccess)' \
+  "$ROOT_DIR/backoffice/src/app.ts" ||
+  fail "Backoffice does not mount its public no-store access policy"
+if grep -R -Fq 'requireAdmin' "$ROOT_DIR/backoffice/src/route"; then
+  fail "Backoffice routes still enforce administrator-only access"
+fi
 grep -Fq 'const publicContext = await browser.newContext({' "$acceptance_spec" &&
   grep -Fq 'baseURL: process.env.E2E_BASE_URL' "$acceptance_spec" ||
   fail "OCI live acceptance public context is not bound to the configured base URL"
@@ -81,12 +90,13 @@ grep -Fq "new URL(response.url()).pathname === '/api/auth/login'" \
 grep -Fq '}, acceptanceEventIds);' "$acceptance_spec" ||
   fail "OCI live acceptance does not pass scoped event IDs into the browser context"
 grep -Fq "publicContext.request.get('/api/backoffice')" "$acceptance_spec" &&
-  grep -Fq 'expect(publicBackoffice.status()).toBe(401)' "$acceptance_spec" ||
-  fail "OCI live acceptance does not prove anonymous backoffice reads fail closed"
+  grep -Fq 'expect(publicBackoffice.status()).toBe(200)' "$acceptance_spec" &&
+  grep -Fq 'expect(Array.isArray(publicBackofficeBody)).toBe(true)' "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove anonymous Backoffice reads are usable"
 grep -Fq 'const publicBackofficeLink = publicPage.getByTitle' "$acceptance_spec" &&
   grep -Fq 'await expect(publicBackofficeLink).toBeVisible()' "$acceptance_spec" &&
-  grep -Fq 'Log in with an administrator account to use Backoffice.' "$acceptance_spec" ||
-  fail "OCI live acceptance does not prove public Backoffice navigation remains available"
+  grep -Fq "publicPage.getByText('Create new event')" "$acceptance_spec" ||
+  fail "OCI live acceptance does not prove the public Backoffice panel is usable"
   grep -Fq "pathname === '/api/event/stream'" "$acceptance_spec" &&
     grep -Fq '!expectedStreamDisconnect' "$acceptance_spec" ||
     fail "OCI live acceptance treats expected long-lived SSE disconnects as API failures"
@@ -390,7 +400,7 @@ for ux_reinforced_check in \
     'Centered sibling market headings' \
     'Stable, non-volatile board order with exact ID preservation' \
     'Coupled-market plausibility' \
-    'Publicly discoverable protected navigation in every UI variant' \
+    'Public access means usable capability, not only discoverable navigation' \
     'Single-live-card width and relative-height budget' \
     'Phantom auto-fill tracks' \
     'Equal-height market groups' \
@@ -414,7 +424,7 @@ for critic_reinforced_check in \
     'Fail-dark terminal placeholders' \
     'Unresolved-auth retained `OFFLINE` data' \
     'Presentation ordering that changes selection identity' \
-    'Hidden or icon-only protected navigation' \
+    'Access-proxy false positives' \
     'Cross-card computed-geometry regressions'; do
   grep -Fq "$critic_reinforced_check" "$ux_critic_agent" ||
     fail "validation critic omits reinforced finding: $critic_reinforced_check"
@@ -1425,7 +1435,7 @@ for literal in (
         raise SystemExit(f"live activation cleanup is missing: {literal}")
 
 for endpoint, expected_status in (
-    ('"$BASE_URL/api/backoffice/result"', "401"),
+    ('"$BASE_URL/api/auth/admin/verify"', "401"),
     ('"$BASE_URL/api/auth/login"', "200"),
 ):
     tail = cleanup.split(endpoint, 1)[1]

@@ -3,26 +3,22 @@ import { app } from "../../app";
 import { Event } from "../../model/Event";
 import { EventStatus, EventVisibility } from "@betstan/common";
 import NewEventPublisher from "../../event/publisher/NewEventPublisher";
-import { buildSessionCookie } from "../../test/session";
 
-const adminCookie = () => buildSessionCookie("ADMIN");
-
-it("returns empty object when home or away is missing", async () => {
+it("rejects a public create request when home or away is missing", async () => {
   const response = await request(app)
     .post("/api/backoffice/new_event")
-    .set("Cookie", adminCookie())
     .send({ home: "Team A" })
-    .expect(200);
+    .expect(400);
 
-  expect(response.body).toEqual({});
+  expect(response.body.message).toContain("Team names");
+  expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
 });
 
-it("creates a new event and publishes it", async () => {
+it("allows an anonymous visitor to create a new event and publishes trimmed names", async () => {
   const beforeRequest = Date.now();
   const response = await request(app)
     .post("/api/backoffice/new_event")
-    .set("Cookie", adminCookie())
-    .send({ home: "Team A", away: "Team B" })
+    .send({ home: "  Team A ", away: " Team B  " })
     .expect(200);
 
   expect(response.body.event).toBeDefined();
@@ -39,11 +35,10 @@ it("creates a new event and publishes it", async () => {
   expect(NewEventPublisher.prototype.publish).toHaveBeenCalledTimes(1);
 });
 
-it("allows an administrator to schedule a bounded near-term kickoff", async () => {
+it("allows a public caller to schedule a bounded near-term kickoff", async () => {
   const beforeRequest = Date.now();
   const response = await request(app)
     .post("/api/backoffice/new_event")
-    .set("Cookie", adminCookie())
     .send({
       home: "Team A",
       away: "Team B",
@@ -56,10 +51,9 @@ it("allows an administrator to schedule a bounded near-term kickoff", async () =
   expect(kickoffTime).toBeLessThan(beforeRequest + 16 * 1000);
 });
 
-it("creates an offline event without exposing it during acceptance setup", async () => {
+it("creates an offline event for production acceptance setup", async () => {
   const response = await request(app)
     .post("/api/backoffice/new_event")
-    .set("Cookie", adminCookie())
     .send({
       home: "Hidden A",
       away: "Hidden B",
@@ -79,7 +73,6 @@ it("creates an offline event without exposing it during acceptance setup", async
 it("rejects an invalid event visibility", async () => {
   await request(app)
     .post("/api/backoffice/new_event")
-    .set("Cookie", adminCookie())
     .send({
       home: "Team A",
       away: "Team B",
@@ -95,10 +88,18 @@ it.each([14, 86401, 15.5, "15"])(
   async (kickoffDelaySeconds) => {
     await request(app)
       .post("/api/backoffice/new_event")
-      .set("Cookie", adminCookie())
       .send({ home: "Team A", away: "Team B", kickoffDelaySeconds })
       .expect(400);
 
     expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
   }
 );
+
+it("rejects team names longer than 80 characters", async () => {
+  await request(app)
+    .post("/api/backoffice/new_event")
+    .send({ home: "A".repeat(81), away: "Team B" })
+    .expect(400);
+
+  expect(NewEventPublisher.prototype.publish).not.toHaveBeenCalled();
+});

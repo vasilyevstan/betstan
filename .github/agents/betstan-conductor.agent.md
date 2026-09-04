@@ -97,6 +97,14 @@ caller-supplied registration values are comparisons, never the source of truth.
 Any handoff or registration that breaks root-authority continuity is
 `STALE_EVIDENCE`.
 
+Translate user-facing access requirements into action-level acceptance
+criteria before implementation. “Visible” proves discoverability only;
+“available” or “accessible” requires the routed content and intended actions
+to work in every named authentication state. Never preserve an inferred
+authorization boundary when the user explicitly requires anonymous or
+ordinary-user capability, and never report a navigation link plus denial
+message as successful access.
+
 `repository_id` is the canonical GitHub `owner/repository`.
 `expected_base_ref` identifies the authoritative comparison source for a
 diff-based unit, `expected_base_sha` is its immutable resolved value, and

@@ -1,40 +1,56 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Link, useLocation } from 'react-router-dom';
 
-const HandleBackoffice = ({
-  currentUser,
-  isCurrentUserResolved,
-  onChanged,
-  refreshToken,
-}) => {
-  const location = useLocation();
-  const [events, setEvents] = useState({});
+const MAX_TEAM_NAME_LENGTH = 80;
+const MAX_SCORE = 99;
+
+const normalizeEvents = (data) => {
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return data && typeof data === 'object' ? Object.values(data) : [];
+};
+
+const initialResultValues = (events) => Object.fromEntries(events.map((event) => [
+  event.eventId,
+  {
+    home: event.homeResult ?? '',
+    away: event.awayResult ?? '',
+  },
+]));
+
+const HandleBackoffice = ({ onChanged, refreshToken }) => {
+  const [events, setEvents] = useState([]);
+  const [eventResults, setEventResults] = useState({});
   const [newEventHome, setNewEventHome] = useState('');
   const [newEventAway, setNewEventAway] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState('');
   const [loadError, setLoadError] = useState('');
-  const isAdmin = currentUser?.role === 'ADMIN';
+  const [actionError, setActionError] = useState('');
+  const [actionMessage, setActionMessage] = useState('');
 
   useEffect(() => {
-    if (!isCurrentUserResolved || !isAdmin) {
-      setEvents({});
-      setLoadError('');
-      return undefined;
-    }
-
     let isActive = true;
     const fetchEvents = async () => {
+      setIsLoading(true);
       try {
         const response = await axios.get('/api/backoffice');
-        const data = response.data;
+        const nextEvents = normalizeEvents(response.data);
         if (isActive) {
-          setEvents(data && typeof data === 'object' ? data : {});
+          setEvents(nextEvents);
+          setEventResults(initialResultValues(nextEvents));
           setLoadError('');
         }
       } catch (error) {
         if (isActive) {
-          setEvents({});
+          setEvents([]);
+          setEventResults({});
           setLoadError('Unable to load Backoffice events.');
+        }
+      } finally {
+        if (isActive) {
+          setIsLoading(false);
         }
       }
     };
@@ -43,131 +59,230 @@ const HandleBackoffice = ({
     return () => {
       isActive = false;
     };
-  }, [isAdmin, isCurrentUserResolved, refreshToken]);
+  }, [refreshToken]);
 
-  if (!isCurrentUserResolved) {
-    return <section className="card backoffice-create" aria-labelledby="backoffice-access-title">
-      <div className="card-body">
-        <h1 className="h4" id="backoffice-access-title">Backoffice</h1>
-        <p className="mb-0" role="status">Checking administrator access...</p>
-      </div>
-    </section>;
-  }
-
-  if (!isAdmin) {
-    return <section className="card backoffice-create" aria-labelledby="backoffice-access-title">
-      <div className="card-body">
-        <h1 className="h4" id="backoffice-access-title">Backoffice</h1>
-        <p>
-          {currentUser
-            ? 'Administrator access is required to use Backoffice.'
-            : 'Log in with an administrator account to use Backoffice.'}
-        </p>
-        {!currentUser && (
-          <Link
-            className="btn auth-submit"
-            to={{ pathname: '/login', search: location.search }}
-          >
-            Log in
-          </Link>
-        )}
-      </div>
-    </section>;
-  }
-
-  const eventValues = [];
-
-  const setHomeResult = (event, value) => {
-    const eventId = event.currentTarget.getAttribute('eventid');
-    const eventValue = eventValues.find((result) => result.id === eventId);
-    if (eventValue) {
-      eventValue.home = value;
+  const runAction = async (actionId, action, successMessage) => {
+    setBusyAction(actionId);
+    setActionError('');
+    setActionMessage('');
+    try {
+      await action();
+      setActionMessage(successMessage);
+      onChanged?.();
+      return true;
+    } catch (error) {
+      setActionError(
+        error?.response?.data?.message || 'Unable to complete the Backoffice action.'
+      );
+      return false;
+    } finally {
+      setBusyAction('');
     }
   };
 
-  const setAwayResult = (event, value) => {
-    const eventId = event.currentTarget.getAttribute('eventid');
-    const eventValue = eventValues.find((result) => result.id === eventId);
-    if (eventValue) {
-      eventValue.away = value;
+  const updateResultValue = (eventId, side, value) => {
+    setEventResults((currentValues) => ({
+      ...currentValues,
+      [eventId]: {
+        ...currentValues[eventId],
+        [side]: value,
+      },
+    }));
+  };
+
+  const setResults = async (eventId, eventName) => {
+    const values = eventResults[eventId] ?? {};
+    const homeResult = values.home === '' ? 0 : Number(values.home);
+    const awayResult = values.away === '' ? 0 : Number(values.away);
+    if (
+      !Number.isInteger(homeResult)
+      || !Number.isInteger(awayResult)
+      || homeResult < 0
+      || awayResult < 0
+      || homeResult > MAX_SCORE
+      || awayResult > MAX_SCORE
+    ) {
+      setActionError(`Scores must be whole numbers between 0 and ${MAX_SCORE}.`);
+      return;
     }
+
+    await runAction(
+      `result:${eventId}`,
+      () => axios.post('/api/backoffice/result', {
+        eventId,
+        homeResult,
+        awayResult,
+      }),
+      `Result saved for ${eventName}.`
+    );
   };
 
-  const setResults = async (event) => {
-    const eventId = event.currentTarget.getAttribute('eventid');
-    const eventValue = eventValues.find((result) => result.id === eventId);
-
-    await axios.post('/api/backoffice/result', {
-      eventId,
-      homeResult: eventValue?.home,
-      awayResult: eventValue?.away,
-    });
-
-    onChanged?.();
-  };
-
-  const setVisibility = async (event) => {
-    const eventId = event.currentTarget.getAttribute('eventid');
-
-    await axios.post('/api/backoffice/event_visibility', { eventId });
-    onChanged?.();
+  const setVisibility = async (eventId, eventName, currentVisibility) => {
+    const visibility = currentVisibility === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
+    await runAction(
+      `visibility:${eventId}`,
+      () => axios.post('/api/backoffice/event_visibility', { eventId, visibility }),
+      `Visibility changed for ${eventName}.`
+    );
   };
 
   const createNewEvent = async () => {
-    await axios.post('/api/backoffice/new_event', { home: newEventHome, away: newEventAway });
-    setNewEventHome('');
-    setNewEventAway('');
-    onChanged?.();
+    const home = newEventHome.trim();
+    const away = newEventAway.trim();
+    if (!home || !away) {
+      setActionError('Enter both home and away team names.');
+      return;
+    }
+
+    const wasCreated = await runAction(
+      'create',
+      () => axios.post('/api/backoffice/new_event', { home, away }),
+      `${home} - ${away} was created.`
+    );
+    if (wasCreated) {
+      setNewEventHome('');
+      setNewEventAway('');
+    }
   };
 
-  const renderedEvents = Object.values(events ?? {}).map((event) => {
-    eventValues.push({ id: event.eventId, home: event.homeResult, away: event.awayResult });
+  const renderedEvents = events.map((event) => {
+    const isResulted = event.status === 'RESULTED';
+    const values = eventResults[event.eventId] ?? { home: '', away: '' };
+    const homeInputId = `backoffice-home-result-${event.eventId}`;
+    const awayInputId = `backoffice-away-result-${event.eventId}`;
+    const resultActionId = `result:${event.eventId}`;
+    const visibilityActionId = `visibility:${event.eventId}`;
 
-    const buttonOptions = event.status === 'RESULT' ? ' btn-secondary disabled' : ' btn-danger';
-
-    return <div className="card backoffice-event" key={event.eventId}>
+    return <article className="card backoffice-event" key={event.eventId} aria-labelledby={`backoffice-event-${event.eventId}`}>
       <div className="card-body">
-        <h5 className="card-title mb-3">{event.name}</h5>
-        <div className="row g-2">
+        <h2 className="h5 card-title mb-3" id={`backoffice-event-${event.eventId}`}>{event.name}</h2>
+        <form className="row g-2" onSubmit={(submitEvent) => {
+          submitEvent.preventDefault();
+          setResults(event.eventId, event.name);
+        }}>
           <div className="col-12 col-md">
-            <input className="form-control" eventid={event.eventId} onChange={(changeEvent) => setHomeResult(changeEvent, changeEvent.target.value)} placeholder={`${event.home} result`} defaultValue={event.homeResult} />
+            <label className="form-label" htmlFor={homeInputId}>{event.home} score</label>
+            <input
+              id={homeInputId}
+              className="form-control"
+              type="number"
+              min="0"
+              max={MAX_SCORE}
+              step="1"
+              value={values.home}
+              disabled={isResulted || Boolean(busyAction)}
+              onChange={(changeEvent) => updateResultValue(
+                event.eventId,
+                'home',
+                changeEvent.target.value
+              )}
+            />
           </div>
           <div className="col-12 col-md">
-            <input className="form-control" eventid={event.eventId} onChange={(changeEvent) => setAwayResult(changeEvent, changeEvent.target.value)} placeholder={`${event.away} result`} defaultValue={event.awayResult} />
+            <label className="form-label" htmlFor={awayInputId}>{event.away} score</label>
+            <input
+              id={awayInputId}
+              className="form-control"
+              type="number"
+              min="0"
+              max={MAX_SCORE}
+              step="1"
+              value={values.away}
+              disabled={isResulted || Boolean(busyAction)}
+              onChange={(changeEvent) => updateResultValue(
+                event.eventId,
+                'away',
+                changeEvent.target.value
+              )}
+            />
           </div>
-          <div className="col-12 col-md-auto d-grid">
-            <button eventid={event.eventId} className={`btn backoffice-action${buttonOptions}`} onClick={setResults}>Set results</button>
+          <div className="col-12 col-md-auto d-grid align-self-end">
+            <button
+              type="submit"
+              className={`btn backoffice-action ${isResulted ? 'btn-secondary' : 'btn-danger'}`}
+              disabled={isResulted || Boolean(busyAction)}
+              aria-label={`Set results for ${event.name}`}
+            >
+              {busyAction === resultActionId ? 'Saving...' : 'Set results'}
+            </button>
           </div>
-        </div>
+        </form>
 
         <div className="row g-2 mt-1 align-items-center">
           <div className="col-12 col-md">Event is: <strong>{event.visibility}</strong></div>
           <div className="col-12 col-md-auto d-grid">
-            <button eventid={event.eventId} className="btn btn-warning backoffice-action backoffice-action--warn" onClick={setVisibility}>Change</button>
+            <button
+              type="button"
+              className="btn btn-warning backoffice-action backoffice-action--warn"
+              disabled={Boolean(busyAction)}
+              onClick={() => setVisibility(
+                event.eventId,
+                event.name,
+                event.visibility
+              )}
+              aria-label={`Change visibility for ${event.name}`}
+            >
+              {busyAction === visibilityActionId ? 'Changing...' : 'Change visibility'}
+            </button>
           </div>
         </div>
       </div>
-    </div>;
+    </article>;
   });
 
   return <div className="backoffice-board">
+    <header className="backoffice-header">
+      <h1 className="h3 mb-1">Backoffice</h1>
+      <p className="mb-0">Manage event creation, visibility, and final results.</p>
+    </header>
     {loadError && <div className="alert alert-danger" role="alert">{loadError}</div>}
+    {actionError && <div className="alert alert-danger" role="alert">{actionError}</div>}
+    {actionMessage && <div className="alert alert-success" role="status">{actionMessage}</div>}
     <div className="card backoffice-create">
       <div className="card-body">
-        <h5 className="card-title mb-3">Create new event</h5>
-        <div className="row g-2">
+        <h2 className="h5 card-title mb-3">Create new event</h2>
+        <form className="row g-2" onSubmit={(submitEvent) => {
+          submitEvent.preventDefault();
+          createNewEvent();
+        }}>
           <div className="col-12 col-md">
-            <input value={newEventHome} className="form-control" onChange={(event) => setNewEventHome(event.target.value)} placeholder="Home team" />
+            <label className="form-label" htmlFor="backoffice-new-home">Home team</label>
+            <input
+              id="backoffice-new-home"
+              value={newEventHome}
+              className="form-control"
+              maxLength={MAX_TEAM_NAME_LENGTH}
+              disabled={Boolean(busyAction)}
+              onChange={(event) => setNewEventHome(event.target.value)}
+            />
           </div>
           <div className="col-12 col-md">
-            <input value={newEventAway} className="form-control" onChange={(event) => setNewEventAway(event.target.value)} placeholder="Away team" />
+            <label className="form-label" htmlFor="backoffice-new-away">Away team</label>
+            <input
+              id="backoffice-new-away"
+              value={newEventAway}
+              className="form-control"
+              maxLength={MAX_TEAM_NAME_LENGTH}
+              disabled={Boolean(busyAction)}
+              onChange={(event) => setNewEventAway(event.target.value)}
+            />
           </div>
-          <div className="col-12 col-md-auto d-grid">
-            <button className="btn btn-success backoffice-action backoffice-action--create" onClick={createNewEvent}>Create</button>
+          <div className="col-12 col-md-auto d-grid align-self-end">
+            <button
+              type="submit"
+              className="btn btn-success backoffice-action backoffice-action--create"
+              disabled={Boolean(busyAction)}
+            >
+              {busyAction === 'create' ? 'Creating...' : 'Create'}
+            </button>
           </div>
-        </div>
+        </form>
       </div>
     </div>
+    {isLoading && <p className="mb-0" role="status">Loading Backoffice events...</p>}
+    {!isLoading && !loadError && renderedEvents.length === 0 && (
+      <p className="mb-0 backoffice-empty">No events are available yet.</p>
+    )}
     {renderedEvents}
   </div>;
 };

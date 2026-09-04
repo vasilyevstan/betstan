@@ -243,10 +243,19 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     baseURL: process.env.E2E_BASE_URL,
   });
   const publicBackoffice = await publicContext.request.get('/api/backoffice');
-  expect(publicBackoffice.status()).toBe(401);
-  const publicBackofficeBody = await publicBackoffice.text();
+  expect(publicBackoffice.status()).toBe(200);
+  const publicBackofficeBody = await publicBackoffice.json();
+  expect(Array.isArray(publicBackofficeBody)).toBe(true);
   for (const fixture of fixtures) {
-    expect(publicBackofficeBody).not.toContain(fixture.name);
+    expect(publicBackofficeBody).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventId: fixture.eventId,
+          name: fixture.name,
+          visibility: 'OFFLINE',
+        }),
+      ]),
+    );
   }
   const publicPage = await publicContext.newPage();
   const publicEventsLoaded = publicPage.waitForResponse(
@@ -269,9 +278,13 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   await expect(publicBackofficeLink).toContainText('Backoffice');
   await publicBackofficeLink.click();
   await expect(publicPage).toHaveURL(/\/backoffice\?ui=v2&theme=dark$/);
-  await expect(
-    publicPage.getByText('Log in with an administrator account to use Backoffice.'),
-  ).toBeVisible();
+  await expect(publicPage.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+  await expect(publicPage.getByText('Create new event')).toBeVisible();
+  for (const fixture of fixtures) {
+    await expect(
+      publicPage.getByRole('heading', { name: fixture.name }),
+    ).toBeVisible();
+  }
   await publicContext.close();
 
   await page.goto(

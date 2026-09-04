@@ -564,7 +564,7 @@ capture_http() {
   local body_file="$WORK_DIR/http-body"
   local headers_file="$WORK_DIR/http-headers"
   local summary_file="$WORK_DIR/http-summary.json"
-  local meta status effective_url content_type shape
+  local meta status effective_url content_type shape expected_status
 
   meta="$({
     curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
@@ -576,8 +576,11 @@ capture_http() {
     return 1
   }
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
-  [[ "$status" == "200" ||
-     ("$expected_kind" == "backoffice" && "$status" == "401") ]] || {
+  expected_status=200
+  if [[ "$expected_kind" == "backoffice-protected" ]]; then
+    expected_status=401
+  fi
+  [[ "$status" == "$expected_status" ]] || {
     printf 'ERROR: HTTP %s for %s%s\n' "$status" "$base_url" "$path" >&2
     return 1
   }
@@ -651,7 +654,7 @@ PY
         return 1
       }
       ;;
-    backoffice)
+    backoffice-public|backoffice-protected)
       [[ "$content_type" == application/json* ]] || {
         printf 'ERROR: expected JSON for %s%s\n' "$base_url" "$path" >&2
         return 1
@@ -933,13 +936,25 @@ ADMIN_AUTH_EVIDENCE_PATHS=(
   "backoffice/src/middleware/RequireAdmin.ts"
   "backoffice/src/service/VerifyAdminSession.ts"
 )
+PUBLIC_BACKOFFICE_EVIDENCE_PATHS=(
+  "backoffice/src/middleware/PublicBackofficeAccess.ts"
+)
+public_backoffice_evidence_present=true
+for public_backoffice_evidence_path in "${PUBLIC_BACKOFFICE_EVIDENCE_PATHS[@]}"; do
+  git cat-file -e "${TARGET_SHA}:${public_backoffice_evidence_path}" 2>/dev/null ||
+    public_backoffice_evidence_present=false
+done
 admin_auth_evidence_present=true
 for admin_auth_evidence_path in "${ADMIN_AUTH_EVIDENCE_PATHS[@]}"; do
   git cat-file -e "${TARGET_SHA}:${admin_auth_evidence_path}" 2>/dev/null ||
     admin_auth_evidence_present=false
 done
-if [[ "$admin_auth_evidence_present" == "true" ]]; then
+if [[ "$public_backoffice_evidence_present" == "true" ]]; then
+  ADMIN_AUTH_ROLLBACK_CHECK=intentional-public-backoffice
+  BACKOFFICE_ACCESS_MODE=public
+elif [[ "$admin_auth_evidence_present" == "true" ]]; then
   ADMIN_AUTH_ROLLBACK_CHECK=persisted-admin-evidence
+  BACKOFFICE_ACCESS_MODE=protected
 else
   ADMIN_AUTH_CAPABILITY_FILE="${ADMIN_AUTH_CAPABILITY_FILE:-}"
   [[ -n "$ADMIN_AUTH_CAPABILITY_FILE" ]] ||
@@ -959,7 +974,9 @@ else
   [[ -n "$admin_auth_approved_by" ]] ||
     oci_die "ADMIN_AUTH_CAPABILITY_FILE approved_by must be non-empty"
   ADMIN_AUTH_ROLLBACK_CHECK=explicit-capability-override
+  BACKOFFICE_ACCESS_MODE=protected
 fi
+API_CONTRACTS[6]="/api/backoffice|backoffice-${BACKOFFICE_ACCESS_MODE}"
 
 source_run_json="$WORK_DIR/source-run.json"
 trusted_source_workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-deploy.yml" --jq '.id')"
@@ -1660,6 +1677,7 @@ infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
 deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
 admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
+backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
 database_restore=disabled
 EOF2
   oci_log "oci_rollback_validation=PASS mode=dry-run target_sha=$TARGET_SHA"
@@ -1736,6 +1754,7 @@ infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 deploy_provenance_origin=$DEPLOY_PROVENANCE_ORIGIN
 deploy_provenance_binding=$DEPLOY_PROVENANCE_BINDING
 admin_auth_rollback_check=$ADMIN_AUTH_ROLLBACK_CHECK
+backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
 completed_services=${completed_services[*]}
 database_restore=disabled
 EOF2

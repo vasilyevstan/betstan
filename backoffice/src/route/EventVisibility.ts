@@ -2,7 +2,6 @@ import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
 import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublisher";
-import { requireAdmin } from "../middleware/RequireAdmin";
 
 const router = express.Router();
 
@@ -17,37 +16,70 @@ const getPublisher = async (): Promise<EventVisibilityPublisher> => {
 
 router.post(
   "/api/backoffice/event_visibility",
-  requireAdmin,
   async (req: Request, res: Response) => {
-    const { eventId } = req.body;
-    const event = await Event.findOne({ eventId: eventId });
-
-    if (!event) {
-      res.send({ message: "Event not found" });
+    const eventId =
+      typeof req.body.eventId === "string" ? req.body.eventId.trim() : "";
+    const requestedVisibility = req.body.visibility;
+    if (!eventId) {
+      res.status(400).send({ message: "No event id" });
       return;
     }
 
-    // flipping the event status
-    // TODO: concurrency magic
-    let newEventVisibility: EventVisibility;
-    if (event.visibility === EventVisibility.ONLINE) {
-      newEventVisibility = EventVisibility.OFFLINE;
-    } else if (event.visibility === EventVisibility.OFFLINE) {
-      newEventVisibility = EventVisibility.ONLINE;
-    } else {
-      // seems that data was corrupted
-      newEventVisibility = EventVisibility.OFFLINE;
+    if (
+      requestedVisibility !== undefined
+      && !Object.values(EventVisibility).includes(requestedVisibility)
+    ) {
+      res.status(400).send({ message: "Event visibility is invalid" });
+      return;
     }
 
-    event.visibility = newEventVisibility;
-    await event.save();
+    const event = requestedVisibility
+      ? await Event.findOneAndUpdate(
+        { eventId, visibility: { $ne: requestedVisibility } },
+        { $set: { visibility: requestedVisibility } },
+        { new: true }
+      )
+      : await Event.findOneAndUpdate(
+        { eventId },
+        [
+          {
+            $set: {
+              visibility: {
+                $cond: [
+                  { $eq: ["$visibility", EventVisibility.ONLINE] },
+                  EventVisibility.OFFLINE,
+                  {
+                    $cond: [
+                      { $eq: ["$visibility", EventVisibility.OFFLINE] },
+                      EventVisibility.ONLINE,
+                      EventVisibility.OFFLINE,
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        { new: true }
+      );
+
+    if (!event) {
+      const existingEvent = await Event.findOne({ eventId });
+      if (!existingEvent) {
+        res.send({ message: "Event not found" });
+        return;
+      }
+
+      res.send(existingEvent);
+      return;
+    }
 
     const publisher = await getPublisher();
 
     publisher.publish({
       data: {
-        eventId: eventId,
-        visibility: newEventVisibility,
+        eventId,
+        visibility: event.visibility,
       },
     });
 

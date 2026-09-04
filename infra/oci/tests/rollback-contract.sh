@@ -552,6 +552,9 @@ case "$*" in
   "cat-file -e ${STUB_TARGET_SHA}:event/src/route/EventLiveStream.ts")
     [[ "${STUB_DEPLOYED_SOURCE_HAS_SSE:-1}" == "1" ]]
     ;;
+  "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/PublicBackofficeAccess.ts")
+    [[ "${STUB_TARGET_HAS_PUBLIC_BACKOFFICE:-0}" == "1" ]]
+    ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
     ;;
@@ -1553,6 +1556,7 @@ common_env=(
   "OCI_RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT"
   "OCI_RUNTIME_MODE=k3s"
   "STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE=$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
+  "STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=protected"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
 )
@@ -2052,11 +2056,13 @@ assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth
 
 protected_backoffice_output="$WORK_DIR/protected-backoffice-transition"
 if ! run_script "$protected_backoffice_output" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 \
+    STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
     STUB_BACKOFFICE_MODE=protected \
     STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=public \
     ROLLBACK_MODE=execute >"$WORK_DIR/protected-backoffice-transition.out" 2>&1; then
   cat "$WORK_DIR/protected-backoffice-transition.out" >&2
-  fail 'OCI rollback rejected the protected-to-historical Backoffice transition'
+  fail 'OCI rollback rejected the protected-to-public Backoffice transition'
 fi
 grep -Fq $'canonical\t/api/backoffice\t401\t' \
   "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
@@ -2065,6 +2071,8 @@ grep -Fq $'\tunauthorized.errors' \
   "$protected_backoffice_output/rollback-readiness/current-http.tsv" ||
   fail 'OCI rollback readiness did not validate the protected Backoffice payload'
 assert_route_row "$protected_backoffice_output/public-verification.tsv" canonical /api/backoffice
+assert_contains "$protected_backoffice_output/rollback-summary.env" \
+  'backoffice_access_mode=public'
 
 run_expect_failure malformed-protected-backoffice \
   STUB_BACKOFFICE_MODE=malformed-protected ROLLBACK_MODE=dry-run
@@ -2074,7 +2082,7 @@ assert_contains "$WORK_DIR/malformed-protected-backoffice/rollback-readiness/fai
 run_expect_failure forbidden-backoffice \
   STUB_BACKOFFICE_MODE=forbidden ROLLBACK_MODE=dry-run
 assert_contains "$WORK_DIR/forbidden-backoffice/rollback-readiness/failures.txt" \
-  'expected 200 or protected 401 got 403'
+  'expected 200 or legacy protected 401 got 403'
 
 run_expect_failure infra-run-id-mismatch \
   ROLLBACK_MODE=dry-run INFRASTRUCTURE_RUN_ID=9999
@@ -2181,6 +2189,18 @@ if ! run_script "$WORK_DIR/admin-auth-capability-accepted" \
 fi
 assert_contains "$WORK_DIR/admin-auth-capability-accepted/rollback-summary.env" \
   'admin_auth_rollback_check=explicit-capability-override'
+
+if ! run_script "$WORK_DIR/public-backoffice-target" \
+    STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+    ROLLBACK_MODE=dry-run \
+    >"$WORK_DIR/public-backoffice-target.out" 2>&1; then
+  cat "$WORK_DIR/public-backoffice-target.out" >&2
+  fail 'OCI intentional-public-Backoffice dry-run unexpectedly failed'
+fi
+assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
+  'admin_auth_rollback_check=intentional-public-backoffice'
+assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
+  'backoffice_access_mode=public'
 
 run_expect_failure oci-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run

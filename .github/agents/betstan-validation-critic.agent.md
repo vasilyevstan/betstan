@@ -98,10 +98,12 @@ Read:
 - Presentation ordering that changes selection identity: display sorting must
   never rewrite an ID/name/value tuple by array position or move a control
   under an active pointer/keyboard focus.
-- Hidden or icon-only protected navigation: when the product entry point is
-  public, verify visible discoverable text for anonymous and authenticated
-  states in every affected UI variant. Separately prove that the routed
-  capability and protected APIs still deny non-admin reads and mutations.
+- Access-proxy false positives: visible navigation proves only discovery. If
+  the product says a capability is available to anonymous or ordinary users,
+  require those states to load its real data and complete its intended
+  actions; a denial/login-guidance screen or a `401` API hidden behind a public
+  link fails the requirement. Preserve authorization only where the product
+  requirement actually declares a protected boundary.
 - Cross-card computed-geometry regressions: unresolved bounding-box, baseline,
   or equal-height claims across sibling cards are an acceptance gap, not
   optional polish.

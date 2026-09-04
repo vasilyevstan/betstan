@@ -73,15 +73,16 @@ before auth resolution. For delayed terminal recovery, inject an administrator
 and prove the atomic write preserves that current decision.
 
 For semantic-control and layout changes, prove accessible names remain
-distinct from compact visual tokens, cross-card computed geometry (bounding
-boxes, baselines, equal-height groups) holds across sibling cards, and
-public protected navigation is visible in every required auth state and UI
-variant while routed capability messaging and API/mutation authorization
-remain fail-closed. Re-run generated-board geometry in every changed
-parent context and around each container-layout transition: assert label and
-price bounds stay inside their controls, sibling controls do not intersect,
-and a shared section heading spans the whole product group rather than
-auto-placing above only one market.
+distinct from compact visual tokens and cross-card computed geometry
+(bounding boxes, baselines, equal-height groups) holds across sibling cards.
+For access requirements, test the exact requested capability rather than a
+proxy: visible navigation proves discovery, while “available to anonymous and
+ordinary users” requires successful data loading and intended actions in
+those states. Re-run generated-board geometry in every changed parent context
+and around each container-layout transition: assert label and price bounds
+stay inside their controls, sibling controls do not intersect, and a shared
+section heading spans the whole product group rather than auto-placing above
+only one market.
 
 Keep browser API fixtures faithful to concurrency contracts: include and
 rotate board revisions/fingerprints, reject mismatched placement

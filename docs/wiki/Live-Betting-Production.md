@@ -54,9 +54,11 @@ named-reference, cross-state, exception, and exact-head UX review contract.
   `auto-fit`, stretch cards sharing a row to equal height, and wrap status
   words only between words.
 - Backoffice navigation shows visible discoverable text in every UI variant
-  for anonymous, ordinary, legacy-roleless, and administrator states.
-  Non-admin users reach an explicit access screen rather than a silent route
-  fallback, while `/api/backoffice` reads and mutations remain admin-only.
+  for anonymous, ordinary, legacy-roleless, and administrator states. The
+  Backoffice catalog and controls are intentionally public in every one of
+  those states; responses are marked `Cache-Control: no-store`, inputs are
+  bounded, result writes are idempotent, and visibility updates submit an
+  explicit target state.
 
 ## Timeline completeness and terminal safeguards
 

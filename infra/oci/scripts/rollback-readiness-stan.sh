@@ -97,7 +97,7 @@ capture_http() {
   IFS=$'\t' read -r status effective_url content_type <<<"$meta"
   expected_status_label=200
   if [[ "$expected_kind" == "backoffice" ]]; then
-    expected_status_label="200 or protected 401"
+    expected_status_label="200 or legacy protected 401"
   fi
   if [[ "$status" != "200" &&
       ! ("$expected_kind" == "backoffice" && "$status" == "401") ]]; then

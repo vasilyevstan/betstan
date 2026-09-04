@@ -1,21 +1,21 @@
 import request from "supertest";
 import { app } from "../../app";
 import { Event } from "../../model/Event";
-import { EventStatus } from "@betstan/common";
-import { buildSessionCookie } from "../../test/session";
+import { EventStatus, EventVisibility } from "@betstan/common";
 
-it("returns empty array when no events exist", async () => {
+it("returns an empty array to an anonymous visitor when no events exist", async () => {
   const response = await request(app)
     .get("/api/backoffice")
-    .set("Cookie", buildSessionCookie("ADMIN"))
     .send()
     .expect(200);
 
   expect(Array.isArray(response.body)).toBe(true);
   expect(response.body.length).toEqual(0);
+  expect(response.headers["cache-control"]).toEqual("no-store");
+  expect(response.headers["x-backoffice-access"]).toEqual("public");
 });
 
-it("returns all events sorted by status and time", async () => {
+it("returns all events, including offline events, to anonymous visitors", async () => {
   await Event.create({
     eventId: "evt-1",
     name: "A - B",
@@ -23,6 +23,7 @@ it("returns all events sorted by status and time", async () => {
     home: "A",
     away: "B",
     status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.OFFLINE,
   });
 
   await Event.create({
@@ -36,9 +37,16 @@ it("returns all events sorted by status and time", async () => {
 
   const response = await request(app)
     .get("/api/backoffice")
-    .set("Cookie", buildSessionCookie("ADMIN"))
     .send()
     .expect(200);
 
   expect(response.body.length).toEqual(2);
+  expect(response.body).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        eventId: "evt-1",
+        visibility: EventVisibility.OFFLINE,
+      }),
+    ])
+  );
 });

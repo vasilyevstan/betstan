@@ -224,12 +224,14 @@ conversation summaries are not authority.
   remain server-filtered, while exact fixture IDs require current persisted
   administrator verification; the odds path repeats that verification before
   allowing a synthetic selection.
-- Acceptance must also prove that an anonymous backoffice catalog read returns
-  `401` without fixture names. Live-update-first projections stay `OFFLINE`
-  until event metadata establishes visibility; metadata repair must not undo a
-  newer visibility message. Revoked scoped clients purge cached fixtures
-  immediately, while healthy SSE clients still reconcile REST periodically so
-  newly hidden events disappear.
+- Acceptance must prove that an anonymous Backoffice catalog read returns a
+  valid `200` array and that the anonymous page renders the real controls and
+  acceptance fixtures. Rollback capture/readiness may accept the historical
+  protected `401` response only when checking an older generation.
+  Live-update-first projections stay `OFFLINE` until event metadata establishes
+  visibility; metadata repair must not undo a newer visibility message.
+  Revoked scoped clients purge cached fixtures immediately, while healthy SSE
+  clients still reconcile REST periodically so newly hidden events disappear.
 
 ## OCI provider behavior
 
