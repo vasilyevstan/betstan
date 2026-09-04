@@ -83,6 +83,17 @@ inverse ordering requires identical event and live `updated_at` values and
 allows the marker on either side of the label. An exact replay of the same
 qualifying `labeled` event is inert after `p` or a run is durable; a later label
 mutation remains drift.
+Recovered opening-label authority is revalidated before every success-capable
+refresh, `workflow_run`, manual dispatch, or replayed `opened` event by a
+bounded server-owned issue-event ledger. The ledger must prove exactly one
+`copilot-cli-managed` `labeled` event within the original five-minute window
+and no matching `unlabeled` event. Any managed-label removal, second
+application, or application outside that window is proven drift and writes
+permanent `x`. Unavailable, malformed, repeated-ID, missing, or incomplete
+ledger evidence fails the current invocation without writing `x`, and a later
+invocation must obtain a complete proof before it can bind or succeed.
+`branch-policy.yml` grants only `issues: read` for this ledger; the publisher
+and permission must promote together.
 The broad opening snapshot mismatch permits only fail-closed inspection and
 never grants reconciliation: an out-of-window replay without a marker stays
 pending, an existing mismatch writes the permanent tombstone, and any

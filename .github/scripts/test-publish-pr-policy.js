@@ -163,6 +163,16 @@ function qualityTransitionStatus(overrides = {}) {
   };
 }
 
+function issueEvent(overrides = {}) {
+  return {
+    id: 700,
+    event: "labeled",
+    label: { name: CLI_MANAGED_LABEL },
+    created_at: PULL_UPDATED_AT,
+    ...overrides,
+  };
+}
+
 async function execute({
   currentPull = pull(),
   currentPulls,
@@ -183,14 +193,44 @@ async function execute({
   policyRunOverridesById = {},
   eventLabelName,
   contextRunId = 101,
+  issueEvents = [issueEvent()],
+  issueEventPages,
+  issueEventError,
+  issueEventListCalls,
+  staleTransitionStatusReads = false,
   transitionStatusCreatedAt = NOW,
   workflowRunListCalls,
 } = {}) {
   const statuses = statusSink || [];
   const messages = [];
+  const transitionStatusReadSnapshot = transitionStatuses.slice();
   let pullGetCount = 0;
   const github = {
     rest: {
+      issues: {
+        listEvents: async ({
+          owner,
+          repo,
+          issue_number: issueNumber,
+          per_page: perPage,
+          page,
+        }) => {
+          assert.equal(owner, "example");
+          assert.equal(repo, "repo");
+          assert.equal(issueNumber, 63);
+          assert.equal(perPage, 100);
+          issueEventListCalls?.push({ page, perPage });
+          if (issueEventError) {
+            throw issueEventError;
+          }
+          const events = issueEventPages
+            ? page <= issueEventPages.length
+              ? issueEventPages[page - 1]
+              : []
+            : issueEvents.slice((page - 1) * perPage, page * perPage);
+          return { data: events };
+        },
+      },
       pulls: {
         get: async () => {
           const data = currentPulls
@@ -240,7 +280,11 @@ async function execute({
         },
         listCommitStatusesForRef: async ({ ref, page }) => {
           const inventory =
-            ref === MERGE_SHA ? transitionStatuses : authorizationStatuses;
+            ref === MERGE_SHA
+              ? staleTransitionStatusReads
+                ? transitionStatusReadSnapshot
+                : transitionStatuses
+              : authorizationStatuses;
           return {
             data: inventory.slice((page - 1) * 100, page * 100),
           };
@@ -360,6 +404,17 @@ async function main() {
           context.startsWith("pr-quality-gates/") && state === "success",
       ),
       false,
+    );
+  }
+
+  function assertQualityFailure(result) {
+    const states = result.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state);
+    assert(states.length > 0);
+    assert(
+      states.every((state) => state === "failure"),
+      `expected only quality failures, received: ${states.join(", ")}`,
     );
   }
 
@@ -1459,6 +1514,652 @@ async function main() {
       assert.equal(laterReAddReceipts.length, 0);
     }
   }
+
+  const recoveredOpeningTransitions = ({ ancestry, binding }) => {
+    const confirmed = qualityTransitionStatus({
+      id: 901,
+      context: "trusted-quality-transition/dev",
+      created_at: wholeSecondTimestamp,
+      description: transitionDescription({
+        action: "opened",
+        timestamp: wholeSecondTimestamp,
+        binding,
+        contentFingerprint: PULL_CONTENT_FINGERPRINT,
+        labelsFingerprint: managedLabelsFingerprint,
+      }),
+    });
+    const predecessor =
+      ancestry === "direct"
+        ? qualityTransitionStatus({
+            id: 900,
+            context: "trusted-quality-transition/dev",
+            created_at: timestampAfter(wholeSecondTimestamp, 1_000),
+            description: transitionDescription({
+              action: "opened",
+              timestamp: wholeSecondTimestamp,
+              binding: "u",
+              contentFingerprint: PULL_CONTENT_FINGERPRINT,
+              labelsFingerprint: managedLabelsFingerprint,
+            }),
+          })
+        : qualityTransitionStatus({
+            id: 900,
+            context: "trusted-quality-transition/dev",
+            created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+            description: transitionDescription({
+              action: "opened",
+              timestamp: wholeSecondTimestamp,
+              binding,
+              contentFingerprint: PULL_CONTENT_FINGERPRINT,
+            }),
+          });
+    return [confirmed, predecessor];
+  };
+  const sameSecondManagedLabelChurn = [
+    issueEvent({ id: 701, created_at: wholeSecondTimestamp }),
+    issueEvent({
+      id: 702,
+      event: "unlabeled",
+      created_at: wholeSecondTimestamp,
+    }),
+    issueEvent({ id: 703, created_at: wholeSecondTimestamp }),
+  ];
+
+  for (const ancestry of ["direct", "inverse"]) {
+    const firstProofTransitions =
+      ancestry === "direct"
+        ? [
+            qualityTransitionStatus({
+              context: "trusted-quality-transition/dev",
+              created_at: timestampAfter(wholeSecondTimestamp, 1_000),
+              description: transitionDescription({
+                action: "opened",
+                timestamp: wholeSecondTimestamp,
+                binding: "u",
+                contentFingerprint: PULL_CONTENT_FINGERPRINT,
+                labelsFingerprint: managedLabelsFingerprint,
+              }),
+            }),
+          ]
+        : [
+            qualityTransitionStatus({
+              context: "trusted-quality-transition/dev",
+              created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+              description: transitionDescription({
+                action: "opened",
+                timestamp: wholeSecondTimestamp,
+                binding: null,
+                contentFingerprint: PULL_CONTENT_FINGERPRINT,
+              }),
+            }),
+          ];
+    const firstProofCalls = [];
+    const firstProofRunCalls = [];
+    const firstProofReceipts = [];
+    const firstProof = await execute({
+      eventName: "pull_request_target",
+      eventAction: "labeled",
+      eventLabelName: CLI_MANAGED_LABEL,
+      eventPull: wholeSecondManagedPull,
+      currentPull: wholeSecondManagedPull,
+      listedRuns: [
+        workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      ],
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          headRef: "feature/marker-recovery",
+          baseRef: "dev",
+        }),
+      ],
+      authorizationStatuses: firstProofReceipts,
+      transitionStatuses: firstProofTransitions,
+      workflowRunListCalls: firstProofRunCalls,
+      issueEvents: sameSecondManagedLabelChurn,
+      issueEventListCalls: firstProofCalls,
+    });
+    assertQualityFailure(firstProof);
+    assert.equal(
+      firstProofTransitions.filter(
+        ({ description }) => transitionBinding(description) === "x",
+      ).length,
+      1,
+    );
+    assert.equal(firstProofCalls.length, 1);
+    assert.equal(firstProofRunCalls.length, 0);
+    assert.equal(firstProofReceipts.length, 0);
+  }
+
+  for (const { ancestry, binding, eventName } of [
+    { ancestry: "direct", binding: null, eventName: "workflow_run" },
+    { ancestry: "direct", binding: 102, eventName: "workflow_dispatch" },
+    { ancestry: "inverse", binding: null, eventName: "workflow_dispatch" },
+    { ancestry: "inverse", binding: 102, eventName: "workflow_run" },
+    {
+      ancestry: "inverse",
+      binding: 102,
+      eventName: "pull_request_target",
+    },
+  ]) {
+    const churnTransitions = recoveredOpeningTransitions({
+      ancestry,
+      binding,
+    });
+    const churnReceipts = [];
+    const churnRunCalls = [];
+    const churnLedgerCalls = [];
+    const churnEvent =
+      eventName === "pull_request_target"
+        ? {
+            eventName,
+            eventAction: "opened",
+            eventPull: wholeSecondOpenedPull,
+          }
+        : { eventName };
+    const churn = await execute({
+      ...churnEvent,
+      currentPull: wholeSecondManagedPull,
+      listedRuns: [
+        workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      ],
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          headRef: "feature/marker-recovery",
+          baseRef: "dev",
+        }),
+      ],
+      authorizationStatuses: churnReceipts,
+      transitionStatuses: churnTransitions,
+      workflowRunListCalls: churnRunCalls,
+      issueEvents: sameSecondManagedLabelChurn,
+      issueEventListCalls: churnLedgerCalls,
+    });
+    assertQualityFailure(churn);
+    const churnTombstoneCount = () =>
+      churnTransitions.filter(
+        ({ description }) => transitionBinding(description) === "x",
+      ).length;
+    assert.equal(churnTombstoneCount(), 1);
+    assert.equal(churnLedgerCalls.length, 1);
+    assert.equal(churnRunCalls.length, 0);
+    assert.equal(churnReceipts.length, 0);
+
+    const repeatedChurn = await execute({
+      ...churnEvent,
+      currentPull: wholeSecondManagedPull,
+      transitionStatuses: churnTransitions,
+      issueEvents: sameSecondManagedLabelChurn,
+      issueEventListCalls: churnLedgerCalls,
+    });
+    assertNoQualitySuccess(repeatedChurn);
+    assert.equal(churnTombstoneCount(), 1);
+    assert.equal(churnLedgerCalls.length, 1);
+  }
+
+  const statusLagTransitions = recoveredOpeningTransitions({
+    ancestry: "inverse",
+    binding: 102,
+  });
+  const statusLagReceipts = [];
+  const statusLag = await execute({
+    eventName: "workflow_run",
+    currentPull: wholeSecondManagedPull,
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [
+      workflowAuthorization({
+        headRef: "feature/marker-recovery",
+        baseRef: "dev",
+      }),
+    ],
+    authorizationStatuses: statusLagReceipts,
+    transitionStatuses: statusLagTransitions,
+    issueEvents: sameSecondManagedLabelChurn,
+    staleTransitionStatusReads: true,
+  });
+  assertQualityFailure(statusLag);
+  assert.equal(
+    statusLagTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
+  assert.equal(statusLagReceipts.length, 0);
+
+  const unrelatedLedgerEvents = [
+    issueEvent({ id: 711, event: "assigned", label: undefined }),
+    issueEvent({
+      id: 712,
+      event: "labeled",
+      label: { name: "reviewed" },
+    }),
+    issueEvent({ id: 713 }),
+  ];
+  const pagedPositiveEvents = [
+    Array.from({ length: 100 }, (_, index) =>
+      issueEvent({
+        id: 800 + index,
+        event: "assigned",
+        label: undefined,
+      }),
+    ),
+    [issueEvent({ id: 900 })],
+  ];
+  for (const { issueEvents, issueEventPages, expectedCalls } of [
+    { issueEvents: unrelatedLedgerEvents, expectedCalls: 1 },
+    { issueEventPages: pagedPositiveEvents, expectedCalls: 2 },
+  ]) {
+    const positiveTransitions = recoveredOpeningTransitions({
+      ancestry: "inverse",
+      binding: null,
+    });
+    const positiveLedgerCalls = [];
+    const positive = await execute({
+      eventName: "workflow_run",
+      currentPull: wholeSecondManagedPull,
+      transitionStatuses: positiveTransitions,
+      issueEvents,
+      issueEventPages,
+      issueEventListCalls: positiveLedgerCalls,
+    });
+    assert.deepEqual(
+      positive.statuses
+        .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+        .map(({ state }) => state),
+      ["success"],
+    );
+    assert.equal(positiveLedgerCalls.length, expectedCalls);
+    assert.equal(
+      positiveTransitions.some(
+        ({ description }) => transitionBinding(description) === "x",
+      ),
+      false,
+    );
+  }
+
+  const inconclusiveLedgerCases = [
+    {
+      name: "api error",
+      options: { issueEventError: new Error("forbidden") },
+      expectedCalls: 1,
+    },
+    {
+      name: "malformed page",
+      options: { issueEventPages: [null] },
+      expectedCalls: 1,
+    },
+    {
+      name: "oversized page",
+      options: {
+        issueEventPages: [
+          Array.from({ length: 101 }, (_, index) =>
+            issueEvent({
+              id: 2_100 + index,
+              event: "assigned",
+              label: undefined,
+            }),
+          ),
+        ],
+      },
+      expectedCalls: 1,
+    },
+    {
+      name: "malformed event",
+      options: { issueEvents: [issueEvent({ event: null })] },
+      expectedCalls: 1,
+    },
+    {
+      name: "malformed label",
+      options: { issueEvents: [issueEvent({ label: { name: "" } })] },
+      expectedCalls: 1,
+    },
+    {
+      name: "malformed timestamp",
+      options: { issueEvents: [issueEvent({ created_at: "invalid" })] },
+      expectedCalls: 1,
+    },
+    {
+      name: "duplicate event id",
+      options: {
+        issueEvents: [
+          issueEvent({ id: 721 }),
+          issueEvent({
+            id: 721,
+            event: "assigned",
+            label: undefined,
+          }),
+        ],
+      },
+      expectedCalls: 1,
+    },
+    {
+      name: "missing proof",
+      options: { issueEvents: [] },
+      expectedCalls: 1,
+    },
+    {
+      name: "incomplete pagination",
+      options: {
+        issueEventPages: Array.from({ length: 10 }, (_, page) =>
+          Array.from({ length: 100 }, (_, index) =>
+            issueEvent({
+              id: 1_000 + page * 100 + index,
+              event: "assigned",
+              label: undefined,
+            }),
+          ),
+        ),
+      },
+      expectedCalls: 10,
+    },
+  ];
+  for (const { name, options, expectedCalls } of inconclusiveLedgerCases) {
+    const inconclusiveTransitions = recoveredOpeningTransitions({
+      ancestry: "inverse",
+      binding: null,
+    });
+    const inconclusiveLedgerCalls = [];
+    const inconclusiveRunCalls = [];
+    const inconclusiveReceipts = [];
+    const inconclusive = await execute({
+      eventName: "workflow_run",
+      currentPull: wholeSecondManagedPull,
+      listedRuns: [
+        workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      ],
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          headRef: "feature/marker-recovery",
+          baseRef: "dev",
+        }),
+      ],
+      authorizationStatuses: inconclusiveReceipts,
+      transitionStatuses: inconclusiveTransitions,
+      workflowRunListCalls: inconclusiveRunCalls,
+      issueEventListCalls: inconclusiveLedgerCalls,
+      ...options,
+    });
+    assertQualityFailure(inconclusive);
+    assert.equal(
+      inconclusiveTransitions.some(
+        ({ description }) => transitionBinding(description) === "x",
+      ),
+      false,
+      `${name} must remain retriable`,
+    );
+    assert.equal(inconclusiveLedgerCalls.length, expectedCalls);
+    assert.equal(inconclusiveRunCalls.length, 0);
+    assert.equal(inconclusiveReceipts.length, 0);
+
+    const retry = await execute({
+      eventName: "workflow_run",
+      currentPull: wholeSecondManagedPull,
+      transitionStatuses: inconclusiveTransitions,
+    });
+    assert.deepEqual(
+      retry.statuses
+        .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+        .map(({ state }) => state),
+      ["success"],
+      `${name} must allow a later complete proof`,
+    );
+  }
+
+  const earlyDriftPage = [
+    issueEvent({
+      id: 730,
+      event: "unlabeled",
+      created_at: wholeSecondTimestamp,
+    }),
+    ...Array.from({ length: 99 }, (_, index) =>
+      issueEvent({
+        id: 731 + index,
+        event: "assigned",
+        label: undefined,
+      }),
+    ),
+  ];
+  const earlyDriftTransitions = recoveredOpeningTransitions({
+    ancestry: "direct",
+    binding: null,
+  });
+  const earlyDriftCalls = [];
+  const earlyDrift = await execute({
+    eventName: "workflow_run",
+    currentPull: wholeSecondManagedPull,
+    transitionStatuses: earlyDriftTransitions,
+    issueEventPages: [earlyDriftPage],
+    issueEventListCalls: earlyDriftCalls,
+  });
+  assertQualityFailure(earlyDrift);
+  assert.equal(earlyDriftCalls.length, 1);
+  assert.equal(
+    earlyDriftTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
+
+  for (const { name, options, expectedCalls } of [
+    {
+      name: "second managed label",
+      options: {
+        issueEvents: [
+          issueEvent({ id: 740 }),
+          issueEvent({ id: 741 }),
+        ],
+      },
+      expectedCalls: 1,
+    },
+    {
+      name: "managed label outside the opening window",
+      options: {
+        issueEvents: [
+          issueEvent({
+            id: 742,
+            created_at: timestampAfter(
+              wholeSecondTimestamp,
+              300_001,
+            ),
+          }),
+        ],
+      },
+      expectedCalls: 1,
+    },
+    {
+      name: "managed removal on the second page",
+      options: {
+        issueEventPages: [
+          pagedPositiveEvents[0],
+          [
+            issueEvent({
+              id: 743,
+              event: "unlabeled",
+              created_at: wholeSecondTimestamp,
+            }),
+          ],
+        ],
+      },
+      expectedCalls: 2,
+    },
+  ]) {
+    const provenDriftTransitions = recoveredOpeningTransitions({
+      ancestry: "inverse",
+      binding: null,
+    });
+    const provenDriftCalls = [];
+    const provenDriftRunCalls = [];
+    const provenDriftReceipts = [];
+    const provenDrift = await execute({
+      eventName: "workflow_run",
+      currentPull: wholeSecondManagedPull,
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          headRef: "feature/marker-recovery",
+          baseRef: "dev",
+        }),
+      ],
+      authorizationStatuses: provenDriftReceipts,
+      transitionStatuses: provenDriftTransitions,
+      workflowRunListCalls: provenDriftRunCalls,
+      issueEventListCalls: provenDriftCalls,
+      ...options,
+    });
+    assertQualityFailure(provenDrift);
+    assert.equal(
+      provenDriftTransitions.filter(
+        ({ description }) => transitionBinding(description) === "x",
+      ).length,
+      1,
+      `${name} must tombstone`,
+    );
+    assert.equal(provenDriftCalls.length, expectedCalls);
+    assert.equal(provenDriftRunCalls.length, 0);
+    assert.equal(provenDriftReceipts.length, 0);
+  }
+
+  const ordinaryLedgerCalls = [];
+  await execute({ issueEventListCalls: ordinaryLedgerCalls });
+  assert.equal(ordinaryLedgerCalls.length, 0);
+  const staleLedgerCalls = [];
+  await execute({
+    currentPull: wholeSecondManagedPull,
+    transitionStatuses: [
+      qualityTransitionStatus({
+        context: "trusted-quality-transition/dev",
+        description: transitionDescription({
+          action: "opened",
+          timestamp: wholeSecondTimestamp,
+          binding: "x",
+          labelsFingerprint: managedLabelsFingerprint,
+        }),
+      }),
+    ],
+    issueEventListCalls: staleLedgerCalls,
+  });
+  assert.equal(staleLedgerCalls.length, 0);
+  const legacyLedgerCalls = [];
+  await execute({
+    currentPull: wholeSecondManagedPull,
+    transitionStatuses: [
+      qualityTransitionStatus({
+        context: "trusted-quality-transition/dev",
+        description: transitionDescription({
+          version: 2,
+          action: "opened",
+          timestamp: wholeSecondTimestamp,
+          binding: null,
+          labelsFingerprint: managedLabelsFingerprint,
+        }),
+      }),
+    ],
+    issueEventListCalls: legacyLedgerCalls,
+  });
+  assert.equal(legacyLedgerCalls.length, 0);
+
+  const staleOpenedReplayTransitions = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      created_at: "2026-09-02T09:00:01.000Z",
+      description: transitionDescription({
+        action: "opened",
+        timestamp: wholeSecondTimestamp,
+        binding: null,
+      }),
+    }),
+  ];
+  const staleOpenedReplay = await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: wholeSecondOpenedPull,
+    currentPull: pull({
+      updated_at: timestampAfter(wholeSecondTimestamp, 300_001),
+      labels: managedLabels,
+      head: featureHead,
+      base: devBase,
+    }),
+    transitionStatuses: staleOpenedReplayTransitions,
+    staleTransitionStatusReads: true,
+  });
+  assertQualityFailure(staleOpenedReplay);
+  assert.equal(
+    staleOpenedReplayTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
+
+  const staleUnconfirmedTransitions = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      created_at: wholeSecondTimestamp,
+      description: transitionDescription({
+        action: "opened",
+        timestamp: wholeSecondTimestamp,
+        binding: "u",
+        labelsFingerprint: managedLabelsFingerprint,
+      }),
+    }),
+  ];
+  const staleUnconfirmed = await execute({
+    eventName: "pull_request_target",
+    eventAction: "unlabeled",
+    eventLabelName: CLI_MANAGED_LABEL,
+    eventPull: pull({
+      updated_at: wholeSecondTimestamp,
+      labels: [],
+      head: featureHead,
+      base: devBase,
+    }),
+    currentPull: pull({
+      updated_at: wholeSecondTimestamp,
+      labels: [],
+      head: featureHead,
+      base: devBase,
+    }),
+    transitionStatuses: staleUnconfirmedTransitions,
+    issueEvents: [issueEvent()],
+    staleTransitionStatusReads: true,
+  });
+  assertQualityFailure(staleUnconfirmed);
+  assert.equal(
+    staleUnconfirmedTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
+
+  const staleLabelDriftTransitions = [
+    qualityTransitionStatus({
+      description: transitionDescription({
+        action: "synchronize",
+        binding: 102,
+      }),
+    }),
+  ];
+  const staleLabelDriftReceipts = [];
+  const staleLabelDrift = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: "reviewed",
+    eventPull: pull({ labels: [{ name: "reviewed" }] }),
+    currentPull: pull(),
+    headBlob: CHANGED_BLOB,
+    workflowAuthorizations: [workflowAuthorization()],
+    authorizationStatuses: staleLabelDriftReceipts,
+    transitionStatuses: staleLabelDriftTransitions,
+    staleTransitionStatusReads: true,
+  });
+  assertQualityFailure(staleLabelDrift);
+  assert.equal(
+    staleLabelDriftTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
+  assert.equal(staleLabelDriftReceipts.length, 0);
 
   const inWindowLabelTimestamp = timestampAfter(PULL_UPDATED_AT, 2_000);
   const inWindowLabeledPull = pull({
@@ -3287,7 +3988,7 @@ async function main() {
     staleContentRefresh.statuses
       .filter(({ context }) => context.startsWith("pr-quality-gates/"))
       .map(({ state }) => state),
-    ["pending", "pending"],
+    ["failure", "failure"],
   );
 
   const divergedReceipt = await execute({
@@ -4127,6 +4828,11 @@ async function main() {
     branchPolicy,
     /types:\s*\[opened, synchronize, reopened, edited, ready_for_review, labeled, unlabeled\]/,
   );
+  assert.match(
+    branchPolicy,
+    /permissions:\s*\n\s*actions: read\s*\n\s*contents: read\s*\n\s*issues: read\s*\n\s*pull-requests: read\s*\n\s*statuses: write/,
+  );
+  assert.doesNotMatch(branchPolicy, /issues: write/);
   assert.match(
     branchPolicy,
     /description: Open pull request number to reconcile an existing trusted transition/,
