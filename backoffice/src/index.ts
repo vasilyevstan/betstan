@@ -3,6 +3,12 @@ import { app } from "./app";
 import { messengerWrapper } from "@betstan/common";
 import NewEventListener from "./event/listener/NewEventListener";
 import EventResultListener from "./event/listener/EventResultListener";
+import {
+  BackofficePublicationService,
+  getBackofficePublicationService,
+} from "./service/BackofficePublicationService";
+
+let publicationService: BackofficePublicationService | null = null;
 
 const startUp = async () => {
   console.log("Starting up...");
@@ -29,6 +35,11 @@ const startUp = async () => {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("Connected to database");
+
+    publicationService = getBackofficePublicationService(
+      messengerWrapper.connection
+    );
+    await publicationService.start();
   } catch (err) {
     console.log(err);
   }
@@ -40,6 +51,7 @@ const startUp = async () => {
   process.on("uncaughtException", async function (err) {
     console.log("logging general error", err);
     try {
+      await publicationService?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       // await channel.close();
@@ -55,6 +67,7 @@ const startUp = async () => {
   process.on("SIGINT", async () => {
     console.log("Received sigint command");
     try {
+      await publicationService?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       server.close();
@@ -67,6 +80,7 @@ const startUp = async () => {
   process.on("SIGTERM", async () => {
     console.log("Received sigterm command");
     try {
+      await publicationService?.stop();
       await mongoose.connection.close();
       await mongoose.disconnect();
       server.close();

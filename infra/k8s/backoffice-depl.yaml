@@ -36,6 +36,14 @@ spec:
               value: "mongodb://gaming-shared-mongo-srv:27017/gaming_backoffice"
             - name: RABBITMQ_URI
               value: "amqp://gaming-rabbitmq-srv"
+            # Preserve image-only rollback compatibility with protected Backoffice releases.
+            - name: AUTH_SERVICE_URL
+              value: "http://gaming-auth-srv:3000"
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gaming-jwt-secret
+                  key: JWT_KEY
             - name: CLIENT_ID
               valueFrom:
                 fieldRef:

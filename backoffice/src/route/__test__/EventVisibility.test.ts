@@ -23,14 +23,14 @@ it("rejects a public visibility request without an event id", async () => {
     .expect(400);
 
   expect(response.body.message).toEqual("No event id");
-  expect(EventVisibilityPublisher.prototype.publish).not.toHaveBeenCalled();
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
 it("returns message when event not found", async () => {
   const response = await request(app)
     .post("/api/backoffice/event_visibility")
     .send({ eventId: "nonexistent" })
-    .expect(200);
+    .expect(404);
 
   expect(response.body.message).toEqual("Event not found");
 });
@@ -47,7 +47,72 @@ it("allows an anonymous visitor to flip event visibility from ONLINE to OFFLINE"
     .expect(200);
 
   expect(response.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
-  expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a failed visibility publication pending and repairs it on retry", async () => {
+  const publishWithConfirm =
+    EventVisibilityPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockRejectedValueOnce(new Error("confirm unavailable"));
+  await createEvent("evt-visibility-retry", EventVisibilityStatus.ONLINE);
+
+  const firstResponse = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({
+      eventId: "evt-visibility-retry",
+      visibility: EventVisibilityStatus.OFFLINE,
+    })
+    .expect(202);
+
+  expect(firstResponse.body.publication).toEqual("PENDING");
+  const pendingEvent = await Event.findOne({
+    eventId: "evt-visibility-retry",
+  }).select("+visibilityPublicationPending +visibilityPublicationTarget");
+  expect(pendingEvent?.visibilityPublicationPending).toBe(true);
+  expect(pendingEvent?.visibilityPublicationTarget).toEqual(
+    EventVisibilityStatus.OFFLINE
+  );
+
+  const retryResponse = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({
+      eventId: "evt-visibility-retry",
+      visibility: EventVisibilityStatus.OFFLINE,
+    })
+    .expect(200);
+
+  expect(retryResponse.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
+  const publishedEvent = await Event.findOne({
+    eventId: "evt-visibility-retry",
+  }).select("+visibilityPublicationPending +visibilityPublicationTarget");
+  expect(publishedEvent?.visibilityPublicationPending).toBeUndefined();
+  expect(publishedEvent?.visibilityPublicationTarget).toBeUndefined();
+  expect(publishWithConfirm).toHaveBeenCalledTimes(2);
+});
+
+it("rejects a conflicting visibility change while publication is pending", async () => {
+  await Event.create({
+    eventId: "evt-visibility-pending",
+    name: "A - B",
+    time: new Date().toISOString(),
+    home: "A",
+    away: "B",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibilityStatus.OFFLINE,
+    visibilityPublicationPending: true,
+    visibilityPublicationTarget: EventVisibilityStatus.OFFLINE,
+  });
+
+  const response = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({
+      eventId: "evt-visibility-pending",
+      visibility: EventVisibilityStatus.ONLINE,
+    })
+    .expect(409);
+
+  expect(response.body.message).toContain("still being published");
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
 it("flips event visibility from OFFLINE to ONLINE", async () => {
@@ -62,7 +127,7 @@ it("flips event visibility from OFFLINE to ONLINE", async () => {
     .expect(200);
 
   expect(response.body.visibility).toEqual(EventVisibilityStatus.ONLINE);
-  expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
 });
 
 it("defaults corrupted visibility to OFFLINE before publishing", async () => {
@@ -74,7 +139,7 @@ it("defaults corrupted visibility to OFFLINE before publishing", async () => {
     .expect(200);
 
   expect(response.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
-  expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledWith({
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).toHaveBeenCalledWith({
     data: { eventId: "evt-3", visibility: EventVisibilityStatus.OFFLINE },
   });
 });
@@ -100,7 +165,7 @@ it("keeps repeated public visibility requests idempotent", async () => {
   expect(responses.every((response) => response.status === 200)).toBe(true);
   const event = await Event.findOne({ eventId: "evt-race" });
   expect(event?.visibility).toEqual(EventVisibilityStatus.OFFLINE);
-  expect(EventVisibilityPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).toHaveBeenCalled();
 });
 
 it("keeps the legacy toggle request compatible", async () => {

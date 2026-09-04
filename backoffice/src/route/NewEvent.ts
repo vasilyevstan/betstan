@@ -1,30 +1,25 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
-import NewEventPublisher from "../event/publisher/NewEventPublisher";
 import {
   EventStatus,
   EventVisibility,
   messengerWrapper,
 } from "@betstan/common";
 import mongoose from "mongoose";
+import { randomUUID } from "crypto";
+import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 
 const router = express.Router();
 const MAX_TEAM_NAME_LENGTH = 80;
-
-let _publisher: NewEventPublisher | null = null;
-const getPublisher = async (): Promise<NewEventPublisher> => {
-  if (!_publisher) {
-    _publisher = new NewEventPublisher(messengerWrapper.connection);
-    await _publisher.init();
-  }
-  return _publisher;
-};
+const MAX_REQUEST_ID_LENGTH = 128;
 
 router.post("/api/backoffice/new_event", async (req: Request, res: Response) => {
   const home = typeof req.body.home === "string" ? req.body.home.trim() : "";
   const away = typeof req.body.away === "string" ? req.body.away.trim() : "";
   const { kickoffDelaySeconds } = req.body;
   const visibility = req.body.visibility ?? EventVisibility.ONLINE;
+  const suppliedRequestId =
+    typeof req.body.requestId === "string" ? req.body.requestId.trim() : "";
 
   if (
     !home
@@ -53,6 +48,45 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     res.status(400).send({ message: "Event visibility is invalid" });
     return;
   }
+  if (
+    req.body.requestId !== undefined
+    && (!suppliedRequestId || suppliedRequestId.length > MAX_REQUEST_ID_LENGTH)
+  ) {
+    res.status(400).send({ message: "Creation request id is invalid" });
+    return;
+  }
+
+  const creationRequestId = suppliedRequestId || randomUUID();
+  const creationRequestFingerprint = JSON.stringify({
+    home,
+    away,
+    delaySeconds,
+    visibility,
+  });
+  const existingEvent = await Event.findOne({ creationRequestId }).select(
+    "+creationRequestId +creationRequestFingerprint "
+    + "+newEventPublicationPending"
+  );
+  if (existingEvent) {
+    if (existingEvent.creationRequestFingerprint !== creationRequestFingerprint) {
+      res.status(409).send({
+        message: "Creation request id was already used for another event",
+      });
+      return;
+    }
+
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishNewEventNow(existingEvent.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      event: existingEvent.toObject({ useProjection: true }),
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Event saved; publication is retrying" }
+        : {}),
+    });
+    return;
+  }
 
   const eventTime = new Date(Date.now() + delaySeconds * 1000);
 
@@ -64,25 +98,55 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     away,
     status: EventStatus.NO_RESULT,
     visibility,
+    creationRequestId,
+    creationRequestFingerprint,
+    newEventPublicationPending: true,
   });
 
-  await event.save();
+  try {
+    await event.save();
+  } catch (error: any) {
+    if (error?.code !== 11000) {
+      throw error;
+    }
 
-  const publisher = await getPublisher();
+    const concurrentEvent = await Event.findOne({ creationRequestId }).select(
+      "+creationRequestId +creationRequestFingerprint "
+      + "+newEventPublicationPending"
+    );
+    if (
+      !concurrentEvent
+      || concurrentEvent.creationRequestFingerprint !== creationRequestFingerprint
+    ) {
+      res.status(409).send({
+        message: "Creation request id was already used for another event",
+      });
+      return;
+    }
 
-  const newEventMessage = {
-    data: {
-      id: event.eventId,
-      name: event.name,
-      time: event.time,
-      home: event.home,
-      away: event.away,
-      visibility,
-    },
-  };
-  publisher.publish(newEventMessage);
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishNewEventNow(concurrentEvent.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      event: concurrentEvent.toObject({ useProjection: true }),
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Event saved; publication is retrying" }
+        : {}),
+    });
+    return;
+  }
 
-  res.send({ event });
+  const publication = await getBackofficePublicationService(
+    messengerWrapper.connection
+  ).publishNewEventNow(event.eventId);
+  res.status(publication === "PUBLISHED" ? 200 : 202).send({
+    event: event.toObject({ useProjection: true }),
+    publication,
+    ...(publication === "PENDING"
+      ? { message: "Event saved; publication is retrying" }
+      : {}),
+  });
 });
 
 export { router as NewEvent };

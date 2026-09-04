@@ -180,6 +180,18 @@ for api_path in "${api_paths[@]}"; do
   elif [[ "$api_path" == "/api/backoffice" ]]; then
     jq -e 'type == "array"' "$body" >/dev/null ||
       fail "public Backoffice API JSON shape is invalid"
+    cache_control="$(
+      awk 'tolower($1)=="cache-control:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+        "$headers" | tail -n 1
+    )"
+    [[ ",${cache_control}," == *",no-store,"* ]] ||
+      fail "public Backoffice API is missing Cache-Control: no-store"
+    access_mode="$(
+      awk 'tolower($1)=="x-backoffice-access:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+        "$headers" | tail -n 1
+    )"
+    [[ "$access_mode" == "public" ]] ||
+      fail "public Backoffice API is missing X-Backoffice-Access: public"
   fi
 done
 
@@ -200,6 +212,37 @@ diagnostic_content_type="$(
   fail "diagnostic API returned non-JSON content"
 jq -e 'type == "object" and has("currentUser")' "$diagnostic_body" >/dev/null ||
   fail "diagnostic API JSON shape is invalid"
+
+diagnostic_backoffice_body="$WORK_DIR/diagnostic-backoffice.body"
+diagnostic_backoffice_headers="$WORK_DIR/diagnostic-backoffice.headers"
+diagnostic_backoffice_status="$(
+  curl --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+    --output "$diagnostic_backoffice_body" \
+    --dump-header "$diagnostic_backoffice_headers" \
+    --write-out '%{http_code}' "${DIAGNOSTIC_URL}/api/backoffice"
+)" || fail "trusted diagnostic Backoffice request failed"
+[[ "$diagnostic_backoffice_status" == "200" ]] ||
+  fail "diagnostic Backoffice API route did not return HTTP 200"
+diagnostic_backoffice_content_type="$(
+  awk 'tolower($1)=="content-type:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ "$diagnostic_backoffice_content_type" == application/json* ]] ||
+  fail "diagnostic Backoffice API returned non-JSON content"
+jq -e 'type == "array"' "$diagnostic_backoffice_body" >/dev/null ||
+  fail "diagnostic Backoffice API JSON shape is invalid"
+diagnostic_backoffice_cache_control="$(
+  awk 'tolower($1)=="cache-control:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ ",${diagnostic_backoffice_cache_control}," == *",no-store,"* ]] ||
+  fail "diagnostic Backoffice API is missing Cache-Control: no-store"
+diagnostic_backoffice_access_mode="$(
+  awk 'tolower($1)=="x-backoffice-access:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+    "$diagnostic_backoffice_headers" | tail -n 1
+)"
+[[ "$diagnostic_backoffice_access_mode" == "public" ]] ||
+  fail "diagnostic Backoffice API is missing X-Backoffice-Access: public"
 
 if [[ "$EXPECT_HTTP_MUTATION_FENCE" == "1" ]]; then
   require_http_mutation_fence "$PUBLIC_URL" canonical

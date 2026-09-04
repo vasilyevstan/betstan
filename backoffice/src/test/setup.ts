@@ -23,10 +23,14 @@ jest.mock("@betstan/common", () => {
   class APublisher<T> {
     constructor(public connection: unknown) {}
     async init() {}
+    async initConfirmChannel() {}
     publish(_event: T) {}
+    async publishWithConfirm(_event: T) {}
   }
   APublisher.prototype.init = jest.fn(async () => {});
+  APublisher.prototype.initConfirmChannel = jest.fn(async () => {});
   APublisher.prototype.publish = jest.fn();
+  APublisher.prototype.publishWithConfirm = jest.fn(async () => {});
 
   return {
     ...actual,

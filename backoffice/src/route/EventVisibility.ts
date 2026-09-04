@@ -1,18 +1,9 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
-import EventVisibilityPublisher from "../event/publisher/EventVisibilityPublisher";
+import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 
 const router = express.Router();
-
-let _publisher: EventVisibilityPublisher | null = null;
-const getPublisher = async (): Promise<EventVisibilityPublisher> => {
-  if (!_publisher) {
-    _publisher = new EventVisibilityPublisher(messengerWrapper.connection);
-    await _publisher.init();
-  }
-  return _publisher;
-};
 
 router.post(
   "/api/backoffice/event_visibility",
@@ -35,12 +26,24 @@ router.post(
 
     const event = requestedVisibility
       ? await Event.findOneAndUpdate(
-        { eventId, visibility: { $ne: requestedVisibility } },
-        { $set: { visibility: requestedVisibility } },
+        {
+          eventId,
+          visibility: { $ne: requestedVisibility },
+          visibilityPublicationPending: { $ne: true },
+        },
+        {
+          $set: {
+            visibility: requestedVisibility,
+            visibilityPublicationPending: true,
+            visibilityPublicationTarget: requestedVisibility,
+          },
+        },
         { new: true }
+      ).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
       )
       : await Event.findOneAndUpdate(
-        { eventId },
+        { eventId, visibilityPublicationPending: { $ne: true } },
         [
           {
             $set: {
@@ -57,33 +60,79 @@ router.post(
                   },
                 ],
               },
+              visibilityPublicationPending: true,
+              visibilityPublicationTarget: {
+                $cond: [
+                  { $eq: ["$visibility", EventVisibility.ONLINE] },
+                  EventVisibility.OFFLINE,
+                  {
+                    $cond: [
+                      { $eq: ["$visibility", EventVisibility.OFFLINE] },
+                      EventVisibility.ONLINE,
+                      EventVisibility.OFFLINE,
+                    ],
+                  },
+                ],
+              },
             },
           },
         ],
         { new: true }
+      ).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
       );
 
     if (!event) {
-      const existingEvent = await Event.findOne({ eventId });
+      const existingEvent = await Event.findOne({ eventId }).select(
+        "+visibilityPublicationPending +visibilityPublicationTarget"
+      );
       if (!existingEvent) {
-        res.send({ message: "Event not found" });
+        res.status(404).send({ message: "Event not found" });
         return;
       }
 
-      res.send(existingEvent);
+      if (existingEvent.visibilityPublicationPending) {
+        if (
+          requestedVisibility
+          && existingEvent.visibilityPublicationTarget === requestedVisibility
+        ) {
+          const publication = await getBackofficePublicationService(
+            messengerWrapper.connection
+          ).publishVisibilityNow(existingEvent.eventId);
+          res.status(publication === "PUBLISHED" ? 200 : 202).send({
+            ...existingEvent.toObject({ useProjection: true }),
+            publication,
+            ...(publication === "PENDING"
+              ? { message: "Visibility saved; publication is retrying" }
+              : {}),
+          });
+          return;
+        }
+
+        res.status(409).send({
+          message: "Another visibility change is still being published",
+        });
+        return;
+      }
+
+      res.send({
+        ...existingEvent.toObject({ useProjection: true }),
+        unchanged: true,
+        publication: "PUBLISHED",
+      });
       return;
     }
 
-    const publisher = await getPublisher();
-
-    publisher.publish({
-      data: {
-        eventId,
-        visibility: event.visibility,
-      },
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishVisibilityNow(event.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      ...event.toObject({ useProjection: true }),
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Visibility saved; publication is retrying" }
+        : {}),
     });
-
-    res.send(event);
   }
 );
 

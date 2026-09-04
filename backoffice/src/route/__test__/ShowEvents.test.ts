@@ -24,6 +24,9 @@ it("returns all events, including offline events, to anonymous visitors", async 
     away: "B",
     status: EventStatus.NO_RESULT,
     visibility: EventVisibility.OFFLINE,
+    creationRequestId: "private-request-id",
+    creationRequestFingerprint: "private-fingerprint",
+    newEventPublicationPending: true,
   });
 
   await Event.create({
@@ -49,4 +52,10 @@ it("returns all events, including offline events, to anonymous visitors", async 
       }),
     ])
   );
+  const offlineEvent = response.body.find(
+    (event: { eventId: string }) => event.eventId === "evt-1"
+  );
+  expect(offlineEvent.creationRequestId).toBeUndefined();
+  expect(offlineEvent.creationRequestFingerprint).toBeUndefined();
+  expect(offlineEvent.newEventPublicationPending).toBeUndefined();
 });

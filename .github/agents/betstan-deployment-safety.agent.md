@@ -313,6 +313,9 @@ During deployment:
 - treat lock acquisition or release failure as deployment failure;
 - apply shared infrastructure without causing intermediate untagged application rollouts;
 - apply SHA-pinned application Deployments sequentially;
+- remember that image-only rollback reuses the current Deployment manifest;
+  retain environment and secret bindings required by every still-supported
+  fallback image even when the forward image no longer consumes them;
 - wait for each rollout before pulling the next image;
 - preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation;
 - avoid concurrent image pulls that can exhaust the node OS filesystem;
@@ -403,6 +406,10 @@ A Running broker with missing consumers is not healthy production.
   recreated.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
+- Before rolling back across a durable-publication implementation boundary,
+  prove its persisted pending-publication markers are drained or keep a
+  compatible replay worker running until they are. An older image that does
+  not understand the markers must never be treated as their recovery path.
 - Prefer application rollback over disk restore when data integrity is healthy.
 - Restore Mongo snapshots only when integrity checks justify it.
 - Never delete a current nodepool, disk, snapshot, or deployment history

@@ -78,8 +78,14 @@ distinct from compact visual tokens and cross-card computed geometry
 For access requirements, test the exact requested capability rather than a
 proxy: visible navigation proves discovery, while “available to anonymous and
 ordinary users” requires successful data loading and intended actions in
-those states. Re-run generated-board geometry in every changed parent context
-and around each container-layout transition: assert label and price bounds
+those states. Production acceptance must reuse intentional synthetic fixtures
+for public mutations; an obsolete negative mutation probe must not create
+untracked data before failing. For persisted mutations with broker side
+effects, inject confirmation failure, prove the retry marker survives, prove a
+restart replay clears it, and verify exact retries converge while conflicting
+terminal writes return `409`. Re-run generated-board geometry in every
+changed parent context and around each container-layout transition: assert
+label and price bounds
 stay inside their controls, sibling controls do not intersect, and a shared
 section heading spans the whole product group rather than auto-placing above
 only one market.

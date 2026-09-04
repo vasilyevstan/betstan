@@ -4,7 +4,12 @@ import { Event } from "../../model/Event";
 import { EventStatus } from "@betstan/common";
 import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
 
-const createEvent = async (eventId: string, status = EventStatus.NO_RESULT) => {
+const createEvent = async (
+  eventId: string,
+  status = EventStatus.NO_RESULT,
+  homeResult?: number,
+  awayResult?: number
+) => {
   return Event.create({
     eventId,
     name: "A - B",
@@ -12,16 +17,18 @@ const createEvent = async (eventId: string, status = EventStatus.NO_RESULT) => {
     home: "A",
     away: "B",
     status,
+    homeResult,
+    awayResult,
   });
 };
 
-it("returns 400 when event not found", async () => {
+it("returns 404 when event not found", async () => {
   const response = await request(app)
     .post("/api/backoffice/result")
     .send({ eventId: "nonexistent", homeResult: 2, awayResult: 1 })
-    .expect(400);
+    .expect(404);
 
-  expect(response.body.message).toEqual("No event id");
+  expect(response.body.message).toEqual("Event not found");
 });
 
 it("allows an anonymous visitor to set a result and publishes the event", async () => {
@@ -36,11 +43,61 @@ it("allows an anonymous visitor to set a result and publishes the event", async 
   expect(response.body.event.homeResult).toEqual(3);
   expect(response.body.event.awayResult).toEqual(1);
 
-  expect(ResultSetPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
 });
 
-it("returns event without change if already resulted", async () => {
-  await createEvent("evt-2", EventStatus.RESULTED);
+it("keeps a failed result publication pending and repairs it on retry", async () => {
+  const publishWithConfirm =
+    ResultSetPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockRejectedValueOnce(new Error("confirm unavailable"));
+  await createEvent("evt-result-retry");
+
+  const firstResponse = await request(app)
+    .post("/api/backoffice/result")
+    .send({ eventId: "evt-result-retry", homeResult: 2, awayResult: 1 })
+    .expect(202);
+
+  expect(firstResponse.body.publication).toEqual("PENDING");
+  const pendingEvent = await Event.findOne({
+    eventId: "evt-result-retry",
+  }).select("+resultPublicationPending");
+  expect(pendingEvent?.resultPublicationPending).toBe(true);
+
+  const retryResponse = await request(app)
+    .post("/api/backoffice/result")
+    .send({ eventId: "evt-result-retry", homeResult: 2, awayResult: 1 })
+    .expect(200);
+
+  expect(retryResponse.body.unchanged).toBe(true);
+  const publishedEvent = await Event.findOne({
+    eventId: "evt-result-retry",
+  }).select("+resultPublicationPending");
+  expect(publishedEvent?.resultPublicationPending).toBeUndefined();
+  expect(publishWithConfirm).toHaveBeenCalledTimes(2);
+});
+
+it("does not result an event before its creation publication is confirmed", async () => {
+  await Event.create({
+    eventId: "evt-creation-pending",
+    name: "A - B",
+    time: new Date().toISOString(),
+    home: "A",
+    away: "B",
+    status: EventStatus.NO_RESULT,
+    newEventPublicationPending: true,
+  });
+
+  const response = await request(app)
+    .post("/api/backoffice/result")
+    .send({ eventId: "evt-creation-pending", homeResult: 2, awayResult: 1 })
+    .expect(409);
+
+  expect(response.body.message).toContain("creation is still being published");
+  expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
+it("treats an identical repeated result as an idempotent success", async () => {
+  await createEvent("evt-2", EventStatus.RESULTED, 1, 0);
 
   const response = await request(app)
     .post("/api/backoffice/result")
@@ -48,19 +105,21 @@ it("returns event without change if already resulted", async () => {
     .expect(200);
 
   expect(response.body.event.status).toEqual(EventStatus.RESULTED);
-  expect(ResultSetPublisher.prototype.publish).not.toHaveBeenCalled();
+  expect(response.body.unchanged).toBe(true);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
-it("defaults omitted scores to 0 for compatibility", async () => {
+it("rejects omitted scores instead of silently settling a public event 0-0", async () => {
   await createEvent("evt-3");
 
-  const response = await request(app)
+  await request(app)
     .post("/api/backoffice/result")
     .send({ eventId: "evt-3" })
-    .expect(200);
+    .expect(400);
 
-  expect(response.body.event.homeResult).toEqual(0);
-  expect(response.body.event.awayResult).toEqual(0);
+  const event = await Event.findOne({ eventId: "evt-3" });
+  expect(event?.status).toEqual(EventStatus.NO_RESULT);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
 it("accepts numeric score strings from older clients", async () => {
@@ -90,10 +149,24 @@ it.each([
 
   const event = await Event.findOne({ eventId: "evt-invalid" });
   expect(event?.status).toEqual(EventStatus.NO_RESULT);
-  expect(ResultSetPublisher.prototype.publish).not.toHaveBeenCalled();
+  expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
-it("publishes only once when concurrent callers result the same event", async () => {
+it("rejects a conflicting repeated result", async () => {
+  await createEvent("evt-conflict", EventStatus.RESULTED, 2, 1);
+
+  const response = await request(app)
+    .post("/api/backoffice/result")
+    .send({ eventId: "evt-conflict", homeResult: 3, awayResult: 2 })
+    .expect(409);
+
+  expect(response.body.message).toEqual("Event already has a different result");
+  expect(response.body.event.homeResult).toEqual(2);
+  expect(response.body.event.awayResult).toEqual(1);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
+it("publishes only once and rejects the losing conflicting caller", async () => {
   await createEvent("evt-race");
 
   const responses = await Promise.all([
@@ -105,6 +178,22 @@ it("publishes only once when concurrent callers result the same event", async ()
       .send({ eventId: "evt-race", homeResult: 3, awayResult: 2 }),
   ]);
 
+  expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
+});
+
+it("keeps identical concurrent result requests idempotent", async () => {
+  await createEvent("evt-same-result");
+
+  const responses = await Promise.all([
+    request(app)
+      .post("/api/backoffice/result")
+      .send({ eventId: "evt-same-result", homeResult: 2, awayResult: 1 }),
+    request(app)
+      .post("/api/backoffice/result")
+      .send({ eventId: "evt-same-result", homeResult: 2, awayResult: 1 }),
+  ]);
+
   expect(responses.every((response) => response.status === 200)).toBe(true);
-  expect(ResultSetPublisher.prototype.publish).toHaveBeenCalledTimes(1);
+  expect(ResultSetPublisher.prototype.publishWithConfirm).toHaveBeenCalledTimes(1);
 });

@@ -57,8 +57,12 @@ named-reference, cross-state, exception, and exact-head UX review contract.
   for anonymous, ordinary, legacy-roleless, and administrator states. The
   Backoffice catalog and controls are intentionally public in every one of
   those states; responses are marked `Cache-Control: no-store`, inputs are
-  bounded, result writes are idempotent, and visibility updates submit an
-  explicit target state.
+  bounded, blank scores cannot become an accidental `0-0`, result writes
+  distinguish identical retries from conflicting final scores, and
+  visibility updates submit an explicit target state. Every mutation persists
+  a retry marker with its state change, uses a durable broker confirm, and is
+  replayed after restart until confirmed; event creation carries a stable
+  request ID so an ambiguous response cannot create a second event.
 
 ## Timeline completeness and terminal safeguards
 
@@ -165,6 +169,18 @@ A missing event phase defaults only for a truly scheduled pre-match record.
 Resulted or positive-sequence/cursor records retain their existing authority
 instead of being relabelled. Additive schemas remain readable by the recorded
 fallback application.
+
+The public Backoffice image no longer consumes authentication settings, but
+its Deployment intentionally retains `AUTH_SERVICE_URL` and the `JWT_KEY`
+secret binding. Rollback changes the image without restoring an older
+manifest, so those legacy inputs must remain available for the immediately
+previous protected Backoffice image to start.
+
+Backoffice mutations also persist pending broker-publication markers. Before
+rolling back to a generation that predates their replay worker, verify the
+pending marker count is zero or retain a compatible pod until it drains them.
+The older protected image can read the additive documents, but it cannot replay
+an undelivered mutation.
 
 Scheduler events are inserted with `$setOnInsert`, so pricing improvements
 apply automatically to new slots but do not rewrite the already persisted

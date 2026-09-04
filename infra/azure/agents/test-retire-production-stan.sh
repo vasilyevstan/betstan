@@ -365,7 +365,7 @@ elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
   : > "$output"
   printf 308
 elif [[ "$url" == */api/backoffice ]]; then
-  printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+  printf 'HTTP/2 200\r\ncontent-type: application/json\r\ncache-control: no-store\r\nx-backoffice-access: public\r\n\r\n' > "$headers"
   printf '%s\n' '[]' > "$output"
   printf 200
 elif [[ "$url" == */api/* ]]; then

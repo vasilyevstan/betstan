@@ -555,6 +555,12 @@ case "$*" in
   "cat-file -e ${STUB_TARGET_SHA}:backoffice/src/middleware/PublicBackofficeAccess.ts")
     [[ "${STUB_TARGET_HAS_PUBLIC_BACKOFFICE:-0}" == "1" ]]
     ;;
+  "grep -Fq app.use(\"/api/backoffice\", publicBackofficeAccess) ${STUB_TARGET_SHA} -- backoffice/src/app.ts")
+    [[ "${STUB_TARGET_PUBLIC_BACKOFFICE_MOUNTED:-1}" == "1" ]]
+    ;;
+  "grep -Fq requireAdmin ${STUB_TARGET_SHA} -- backoffice/src/route")
+    [[ "${STUB_TARGET_PUBLIC_ROUTES_REQUIRE_ADMIN:-0}" == "1" ]]
+    ;;
   "merge-base --is-ancestor ${STUB_TARGET_SHA} ${STUB_CURRENT_MASTER_SHA}")
     exit 0
     ;;
@@ -2201,6 +2207,18 @@ assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
   'admin_auth_rollback_check=intentional-public-backoffice'
 assert_contains "$WORK_DIR/public-backoffice-target/rollback-summary.env" \
   'backoffice_access_mode=public'
+
+run_expect_failure public-backoffice-marker-not-mounted \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+  STUB_TARGET_PUBLIC_BACKOFFICE_MOUNTED=0 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/public-backoffice-marker-not-mounted.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
+
+run_expect_failure public-backoffice-route-still-protected \
+  STUB_TARGET_HAS_ADMIN_AUTH=0 STUB_TARGET_HAS_PUBLIC_BACKOFFICE=1 \
+  STUB_TARGET_PUBLIC_ROUTES_REQUIRE_ADMIN=1 ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/public-backoffice-route-still-protected.out" \
+  'TARGET_SHA is missing persisted-admin Backoffice authorization evidence and no ADMIN_AUTH_CAPABILITY_FILE was supplied'
 
 run_expect_failure oci-prematch-live-only \
   STUB_EVENT_MODE=live-only ROLLBACK_MODE=dry-run

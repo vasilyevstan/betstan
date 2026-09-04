@@ -66,7 +66,11 @@ const createEventThroughBackoffice = async (page, state, label) => {
   const createRequest = state.requests.find(
     ({ key }) => key === 'POST /api/backoffice/new_event'
   );
-  expect(createRequest?.body).toEqual({ home, away });
+  expect(createRequest?.body).toEqual({
+    home,
+    away,
+    requestId: expect.any(String),
+  });
   await expect(page.getByRole('status')).toContainText(
     `${home} - ${away} was created.`
   );

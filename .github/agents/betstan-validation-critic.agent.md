@@ -56,6 +56,13 @@ Read:
   publisher-stamped envelope metadata; require retries with identical domain
   data and changed transport timestamps.
 - Authorization, ownership, input trust, and silent-failure behavior.
+- Public irreversible actions that turn blank input into a valid destructive
+  default, return `2xx` when a conflicting write lost, or commit database
+  state without confirmed/replayable publication. Challenge retry behavior
+  after a lost response and after process restart.
+- Acceptance probes whose obsolete authorization expectation performs a real
+  mutation before failing. Require them to reuse bounded synthetic fixtures
+  and leave no untracked production data.
 - Long-lived stream and synthetic-fixture isolation after stale-role,
   demotion, unavailable-auth, malformed-scope, and ordinary-public requests.
 - Distinguish intentional bounded SSE backpressure disconnects from data loss:

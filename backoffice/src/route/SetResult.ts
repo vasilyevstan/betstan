@@ -1,23 +1,14 @@
 import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
-import ResultSetPublisher from "../event/publisher/ResultSetPublisher";
 import { EventStatus, messengerWrapper } from "@betstan/common";
+import { getBackofficePublicationService } from "../service/BackofficePublicationService";
 
 const router = express.Router();
 const MAX_SCORE = 99;
 
-let _publisher: ResultSetPublisher | null = null;
-const getPublisher = async (): Promise<ResultSetPublisher> => {
-  if (!_publisher) {
-    _publisher = new ResultSetPublisher(messengerWrapper.connection);
-    await _publisher.init();
-  }
-  return _publisher;
-};
-
 const normalizeScore = (value: unknown): number | null => {
   if (value === undefined || value === null || value === "") {
-    return 0;
+    return null;
   }
 
   const score =
@@ -53,41 +44,77 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
   }
 
   const event = await Event.findOneAndUpdate(
-    { eventId, status: { $ne: EventStatus.RESULTED } },
+    {
+      eventId,
+      status: { $ne: EventStatus.RESULTED },
+      newEventPublicationPending: { $ne: true },
+    },
     {
       $set: {
         homeResult,
         awayResult,
         status: EventStatus.RESULTED,
+        resultPublicationPending: true,
       },
     },
     { new: true }
-  );
+  ).select("+resultPublicationPending +newEventPublicationPending");
 
   if (!event) {
-    const existingEvent = await Event.findOne({ eventId });
+    const existingEvent = await Event.findOne({ eventId }).select(
+      "+resultPublicationPending +newEventPublicationPending"
+    );
     if (!existingEvent) {
-      res.status(400).send({ message: "No event id" });
+      res.status(404).send({ message: "Event not found" });
       return;
     }
 
-    res.send({ event: existingEvent });
+    if (
+      existingEvent.status !== EventStatus.RESULTED
+      && existingEvent.newEventPublicationPending
+    ) {
+      res.status(409).send({
+        message: "Event creation is still being published",
+      });
+      return;
+    }
+
+    const resultMatches =
+      existingEvent.status === EventStatus.RESULTED
+      && existingEvent.homeResult === homeResult
+      && existingEvent.awayResult === awayResult;
+    if (!resultMatches) {
+      res.status(409).send({
+        message: "Event already has a different result",
+        event: existingEvent,
+      });
+      return;
+    }
+
+    const publication = await getBackofficePublicationService(
+      messengerWrapper.connection
+    ).publishResultNow(existingEvent.eventId);
+    res.status(publication === "PUBLISHED" ? 200 : 202).send({
+      event: existingEvent.toObject({ useProjection: true }),
+      unchanged: true,
+      publication,
+      ...(publication === "PENDING"
+        ? { message: "Result saved; publication is retrying" }
+        : {}),
+    });
     return;
   }
 
-  const publisher = await getPublisher();
-
-  publisher.publish({
-    data: {
-      eventId: event.eventId,
-      homeScore: homeResult,
-      awayScore: awayResult,
-      home: event.home,
-      away: event.away,
-    },
+  const publication = await getBackofficePublicationService(
+    messengerWrapper.connection
+  ).publishResultNow(event.eventId);
+  res.status(publication === "PUBLISHED" ? 200 : 202).send({
+    event: event.toObject({ useProjection: true }),
+    publication,
+    ...(publication === "PENDING"
+      ? { message: "Result saved; publication is retrying" }
+      : {}),
   });
-
-  res.send({ event });
 });
 
 export { router as SetResult };

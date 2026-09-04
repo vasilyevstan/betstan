@@ -944,6 +944,15 @@ for public_backoffice_evidence_path in "${PUBLIC_BACKOFFICE_EVIDENCE_PATHS[@]}";
   git cat-file -e "${TARGET_SHA}:${public_backoffice_evidence_path}" 2>/dev/null ||
     public_backoffice_evidence_present=false
 done
+if [[ "$public_backoffice_evidence_present" == "true" ]]; then
+  git grep -Fq 'app.use("/api/backoffice", publicBackofficeAccess)' \
+    "$TARGET_SHA" -- backoffice/src/app.ts ||
+    public_backoffice_evidence_present=false
+fi
+if [[ "$public_backoffice_evidence_present" == "true" ]] &&
+    git grep -Fq 'requireAdmin' "$TARGET_SHA" -- backoffice/src/route; then
+  public_backoffice_evidence_present=false
+fi
 admin_auth_evidence_present=true
 for admin_auth_evidence_path in "${ADMIN_AUTH_EVIDENCE_PATHS[@]}"; do
   git cat-file -e "${TARGET_SHA}:${admin_auth_evidence_path}" 2>/dev/null ||

@@ -1,8 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 
 const MAX_TEAM_NAME_LENGTH = 80;
 const MAX_SCORE = 99;
+let fallbackRequestSequence = 0;
+
+const createRequestId = () => {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(
+      bytes,
+      (value) => value.toString(16).padStart(2, '0')
+    ).join('');
+  }
+
+  fallbackRequestSequence += 1;
+  return `backoffice-${Date.now()}-${fallbackRequestSequence}`;
+};
 
 const normalizeEvents = (data) => {
   if (Array.isArray(data)) {
@@ -29,6 +47,8 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
   const [actionMessage, setActionMessage] = useState('');
+  const [actionMessageTone, setActionMessageTone] = useState('success');
+  const creationRequestId = useRef('');
 
   useEffect(() => {
     let isActive = true;
@@ -66,8 +86,9 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     setActionError('');
     setActionMessage('');
     try {
-      await action();
-      setActionMessage(successMessage);
+      const response = await action();
+      setActionMessage(response?.data?.message || successMessage);
+      setActionMessageTone(response?.status === 202 ? 'warning' : 'success');
       onChanged?.();
       return true;
     } catch (error) {
@@ -92,8 +113,13 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
 
   const setResults = async (eventId, eventName) => {
     const values = eventResults[eventId] ?? {};
-    const homeResult = values.home === '' ? 0 : Number(values.home);
-    const awayResult = values.away === '' ? 0 : Number(values.away);
+    if (values.home === '' || values.away === '') {
+      setActionError('Enter both scores before setting the result.');
+      return;
+    }
+
+    const homeResult = Number(values.home);
+    const awayResult = Number(values.away);
     if (
       !Number.isInteger(homeResult)
       || !Number.isInteger(awayResult)
@@ -133,13 +159,21 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
       setActionError('Enter both home and away team names.');
       return;
     }
+    if (!creationRequestId.current) {
+      creationRequestId.current = createRequestId();
+    }
 
     const wasCreated = await runAction(
       'create',
-      () => axios.post('/api/backoffice/new_event', { home, away }),
+      () => axios.post('/api/backoffice/new_event', {
+        home,
+        away,
+        requestId: creationRequestId.current,
+      }),
       `${home} - ${away} was created.`
     );
     if (wasCreated) {
+      creationRequestId.current = '';
       setNewEventHome('');
       setNewEventAway('');
     }
@@ -169,6 +203,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               min="0"
               max={MAX_SCORE}
               step="1"
+              required
               value={values.home}
               disabled={isResulted || Boolean(busyAction)}
               onChange={(changeEvent) => updateResultValue(
@@ -187,6 +222,7 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               min="0"
               max={MAX_SCORE}
               step="1"
+              required
               value={values.away}
               disabled={isResulted || Boolean(busyAction)}
               onChange={(changeEvent) => updateResultValue(
@@ -237,7 +273,11 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
     </header>
     {loadError && <div className="alert alert-danger" role="alert">{loadError}</div>}
     {actionError && <div className="alert alert-danger" role="alert">{actionError}</div>}
-    {actionMessage && <div className="alert alert-success" role="status">{actionMessage}</div>}
+    {actionMessage && (
+      <div className={`alert alert-${actionMessageTone}`} role="status">
+        {actionMessage}
+      </div>
+    )}
     <div className="card backoffice-create">
       <div className="card-body">
         <h2 className="h5 card-title mb-3">Create new event</h2>
@@ -253,7 +293,10 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               className="form-control"
               maxLength={MAX_TEAM_NAME_LENGTH}
               disabled={Boolean(busyAction)}
-              onChange={(event) => setNewEventHome(event.target.value)}
+              onChange={(event) => {
+                creationRequestId.current = '';
+                setNewEventHome(event.target.value);
+              }}
             />
           </div>
           <div className="col-12 col-md">
@@ -264,7 +307,10 @@ const HandleBackoffice = ({ onChanged, refreshToken }) => {
               className="form-control"
               maxLength={MAX_TEAM_NAME_LENGTH}
               disabled={Boolean(busyAction)}
-              onChange={(event) => setNewEventAway(event.target.value)}
+              onChange={(event) => {
+                creationRequestId.current = '';
+                setNewEventAway(event.target.value);
+              }}
             />
           </div>
           <div className="col-12 col-md-auto d-grid align-self-end">

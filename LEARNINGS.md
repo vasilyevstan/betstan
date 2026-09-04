@@ -178,6 +178,16 @@
   anonymous access. Backoffice is intentionally a public, no-store control
   surface; preserve bounded input validation and idempotent/atomic writes
   rather than reintroducing an inferred administrator gate.
+- Public irreversible mutations must not convert absent values into valid
+  destructive defaults or return success for a conflicting write. Require
+  explicit scores, return `404` for a missing event, treat only an identical
+  repeated result as idempotent, and return `409` for a different terminal
+  result or an overlapping visibility change.
+- A database write plus an unconfirmed broker send is not a completed
+  mutation. Persist a retry marker in the same event write, publish through a
+  confirm channel, clear the marker only after confirmation, and replay
+  pending markers after restart. Creation retries also need a stable request
+  ID so an ambiguous response cannot create a second event.
 - Terminal ordering and auth safeguards: a result/`FULL_TIME` write decision
   must be atomic against the current live phase and explicit/legacy offline
   intent so no interleaving can leave a fully onboarded, non-retired terminal
@@ -208,6 +218,14 @@
   acceptance must prove anonymous `200` array responses and usable controls,
   while rollback probes may accept the historical protected `401` shape only
   when validating an older generation.
+- Keep the legacy Backoffice `AUTH_SERVICE_URL` and `JWT_KEY` deployment
+  bindings even when the current public image no longer reads them. An
+  image-only rollback reuses the current Deployment environment, and the
+  immediately previous protected image still needs both values to boot.
+- A durable publication marker is forward-compatible data but not a backward
+  replay mechanism. Before rolling back to an image without the worker, drain
+  every pending marker or retain a compatible worker until it does; otherwise
+  the older image can strand a database mutation that never reached RabbitMQ.
 - A live update received before `NEW_EVENT` creates an `OFFLINE` projection. Metadata and visibility initialize independently so `NEW_EVENT` can repair legacy/event-visibility-first placeholders without undoing a newer visibility change.
 - A visibility message may arrive before any event row. Persist it as pending on an `OFFLINE` placeholder, then apply it only after authoritative metadata arrives; ambiguous legacy hidden placeholders stay hidden.
 - Competing `NEW_EVENT` and visibility placeholder upserts can race on the unique event ID. Both paths must treat duplicate-key as convergence and retry the pending decision against the winning row before acknowledging.
