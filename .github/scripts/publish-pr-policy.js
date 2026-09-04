@@ -1453,16 +1453,24 @@ function isConfirmedInverseOpeningLabelReplay({
   eventLabelName,
   eventPull,
 }) {
-  return (
-    transition.hasInverseOpeningLabelPredecessor === true &&
-    transitionMatchesPullIdentity(transition, pull) &&
-    hasInverseOpeningLabelEvidence({
+  if (
+    transition.hasInverseOpeningLabelPredecessor !== true ||
+    !transitionMatchesPullIdentity(transition, pull) ||
+    !hasInverseOpeningLabelEvidence({
       transition,
       pull,
       eventAction,
       eventLabelName,
       eventPull,
     })
+  ) {
+    return false;
+  }
+  return (
+    githubTimestampMilliseconds(
+      eventPull.updatedAt,
+      "pull request event updated_at",
+    ) === transition.lineageCreatedAt
   );
 }
 

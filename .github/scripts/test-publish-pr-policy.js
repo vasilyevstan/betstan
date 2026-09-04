@@ -1331,6 +1331,135 @@ async function main() {
   assert.equal(wholeSecondInversePendingReplayCalls.length, 0);
   assert.equal(wholeSecondInversePendingReplayReceipts.length, 0);
 
+  for (const binding of [null, 102]) {
+    const laterMarkerReplayTransitions = [
+      qualityTransitionStatus({
+        id: 901,
+        context: "trusted-quality-transition/dev",
+        created_at: timestampAfter(wholeSecondTimestamp, 1_000),
+        description: transitionDescription({
+          action: "opened",
+          timestamp: wholeSecondTimestamp,
+          binding,
+          contentFingerprint: PULL_CONTENT_FINGERPRINT,
+          labelsFingerprint: managedLabelsFingerprint,
+        }),
+      }),
+      qualityTransitionStatus({
+        id: 900,
+        context: "trusted-quality-transition/dev",
+        created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+        description: transitionDescription({
+          action: "opened",
+          timestamp: wholeSecondTimestamp,
+          binding,
+          contentFingerprint: PULL_CONTENT_FINGERPRINT,
+        }),
+      }),
+    ];
+    const laterMarkerReplayReceipts = [];
+    const laterMarkerReplay = await execute({
+      eventName: "pull_request_target",
+      eventAction: "labeled",
+      eventLabelName: CLI_MANAGED_LABEL,
+      eventPull: wholeSecondManagedPull,
+      currentPull: wholeSecondManagedPull,
+      listedRuns: [
+        workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+      ],
+      headBlob: CHANGED_BLOB,
+      workflowAuthorizations: [
+        workflowAuthorization({
+          headRef: "feature/marker-recovery",
+          baseRef: "dev",
+        }),
+      ],
+      authorizationStatuses: laterMarkerReplayReceipts,
+      transitionStatuses: laterMarkerReplayTransitions,
+    });
+    assertNoQualitySuccess(laterMarkerReplay);
+    assert.equal(
+      laterMarkerReplayTransitions.some(
+        ({ description }) => transitionBinding(description) === "x",
+      ),
+      false,
+    );
+    assert.equal(laterMarkerReplayTransitions.length, 2);
+    assert.equal(laterMarkerReplayReceipts.length, 0);
+  }
+
+  for (const binding of [null, 102]) {
+    for (const offset of [1, 300_000]) {
+      const laterReAddPull = pull({
+        updated_at: timestampAfter(wholeSecondTimestamp, offset),
+        labels: managedLabels,
+        head: featureHead,
+        base: devBase,
+      });
+      const laterReAddTransitions = [
+        qualityTransitionStatus({
+          id: 901,
+          context: "trusted-quality-transition/dev",
+          created_at: wholeSecondTimestamp,
+          description: transitionDescription({
+            action: "opened",
+            timestamp: wholeSecondTimestamp,
+            binding,
+            contentFingerprint: PULL_CONTENT_FINGERPRINT,
+            labelsFingerprint: managedLabelsFingerprint,
+          }),
+        }),
+        qualityTransitionStatus({
+          id: 900,
+          context: "trusted-quality-transition/dev",
+          created_at: wholeSecondTimestamp,
+          description: transitionDescription({
+            action: "opened",
+            timestamp: wholeSecondTimestamp,
+            binding,
+            contentFingerprint: PULL_CONTENT_FINGERPRINT,
+          }),
+        }),
+      ];
+      const laterReAddCalls = [];
+      const laterReAddReceipts = [];
+      for (let replay = 0; replay < 2; replay += 1) {
+        const laterReAdd = await execute({
+          eventName: "pull_request_target",
+          eventAction: "labeled",
+          eventLabelName: CLI_MANAGED_LABEL,
+          eventPull: laterReAddPull,
+          currentPull: laterReAddPull,
+          listedRuns: [
+            workflowRun({
+              created_at: timestampAfter(wholeSecondTimestamp, 300_001),
+            }),
+          ],
+          headBlob: CHANGED_BLOB,
+          workflowAuthorizations: [
+            workflowAuthorization({
+              headRef: "feature/marker-recovery",
+              baseRef: "dev",
+            }),
+          ],
+          authorizationStatuses: laterReAddReceipts,
+          transitionStatuses: laterReAddTransitions,
+          workflowRunListCalls: laterReAddCalls,
+        });
+        assertNoQualitySuccess(laterReAdd);
+      }
+      assert.equal(
+        laterReAddTransitions.filter(
+          ({ description }) => transitionBinding(description) === "x",
+        ).length,
+        1,
+        `inverse ${binding === null ? "p" : "run"} re-add at ${offset} ms must tombstone once`,
+      );
+      assert.equal(laterReAddCalls.length, 0);
+      assert.equal(laterReAddReceipts.length, 0);
+    }
+  }
+
   const inWindowLabelTimestamp = timestampAfter(PULL_UPDATED_AT, 2_000);
   const inWindowLabeledPull = pull({
     updated_at: inWindowLabelTimestamp,
