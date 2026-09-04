@@ -8,6 +8,7 @@ import {
 import mongoose from "mongoose";
 import { randomUUID } from "crypto";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
+import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 
 const router = express.Router();
 const MAX_TEAM_NAME_LENGTH = 80;
@@ -79,7 +80,7 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
       messengerWrapper.connection
     ).publishNewEventNow(existingEvent.eventId);
     res.status(publication === "PUBLISHED" ? 200 : 202).send({
-      event: existingEvent.toObject({ useProjection: true }),
+      event: serializeBackofficeEvent(existingEvent),
       publication,
       ...(publication === "PENDING"
         ? { message: "Event saved; publication is retrying" }
@@ -128,7 +129,7 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
       messengerWrapper.connection
     ).publishNewEventNow(concurrentEvent.eventId);
     res.status(publication === "PUBLISHED" ? 200 : 202).send({
-      event: concurrentEvent.toObject({ useProjection: true }),
+      event: serializeBackofficeEvent(concurrentEvent),
       publication,
       ...(publication === "PENDING"
         ? { message: "Event saved; publication is retrying" }
@@ -141,7 +142,7 @@ router.post("/api/backoffice/new_event", async (req: Request, res: Response) => 
     messengerWrapper.connection
   ).publishNewEventNow(event.eventId);
   res.status(publication === "PUBLISHED" ? 200 : 202).send({
-    event: event.toObject({ useProjection: true }),
+    event: serializeBackofficeEvent(event),
     publication,
     ...(publication === "PENDING"
       ? { message: "Event saved; publication is retrying" }

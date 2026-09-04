@@ -184,6 +184,43 @@ it("times out an unconfirmed publication and leaves it pending", async () => {
   expect(event?.newEventPublicationPending).toBe(true);
 });
 
+it("closes stale confirm channels before reinitializing after failure", async () => {
+  const publishWithConfirm =
+    NewEventPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockRejectedValueOnce(new Error("channel closed"));
+  await Event.create({
+    eventId: "closed-channel-event",
+    name: "Closed A - Closed B",
+    time: new Date().toISOString(),
+    home: "Closed A",
+    away: "Closed B",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibility.ONLINE,
+    newEventPublicationPending: true,
+  });
+  const service = new BackofficePublicationService(messengerWrapper.connection);
+  const closeChannels = [jest.fn(), jest.fn(), jest.fn()];
+  [
+    "newEventPublisher",
+    "resultSetPublisher",
+    "eventVisibilityPublisher",
+  ].forEach((property, index) => {
+    Reflect.set(
+      Reflect.get(service, property) as object,
+      "_confirmChannel",
+      { close: closeChannels[index] }
+    );
+  });
+
+  await expect(
+    service.publishNewEventNow("closed-channel-event")
+  ).resolves.toEqual("PENDING");
+
+  for (const closeChannel of closeChannels) {
+    expect(closeChannel).toHaveBeenCalledTimes(1);
+  }
+});
+
 it("can retry initialization and start and stop its replay loop safely", async () => {
   const initConfirmChannel =
     NewEventPublisher.prototype.initConfirmChannel as jest.Mock;

@@ -17,7 +17,7 @@ interface BackofficePublicationOptions {
 
 const DEFAULT_OPTIONS: BackofficePublicationOptions = {
   pollIntervalMs: 5_000,
-  confirmTimeoutMs: 1_000,
+  confirmTimeoutMs: 5_000,
   replayBatchSize: 25,
 };
 
@@ -52,8 +52,8 @@ export class BackofficePublicationService {
         this.eventVisibilityPublisher.initConfirmChannel(),
       ])
         .then(() => undefined)
-        .catch((error) => {
-          this.initialization = null;
+        .catch(async (error) => {
+          await this.resetConfirmChannels();
           throw error;
         });
     }
@@ -279,8 +279,7 @@ export class BackofficePublicationService {
       await clear();
       return "PUBLISHED";
     } catch (error) {
-      // A failed or closed confirm channel must be recreated before replay.
-      this.initialization = null;
+      await this.resetConfirmChannels();
       const reason = error instanceof Error ? error.message : "unknown error";
       console.log(
         `Backoffice ${operation} publication remains pending for ${eventId}: ${reason}`
@@ -306,6 +305,29 @@ export class BackofficePublicationService {
         clearTimeout(timeout);
       }
     }
+  }
+
+  private async resetConfirmChannels() {
+    const publishers = [
+      this.newEventPublisher,
+      this.resultSetPublisher,
+      this.eventVisibilityPublisher,
+    ];
+    const channels = publishers.map((publisher) =>
+      Reflect.get(publisher, "_confirmChannel") as
+        | { close?: () => Promise<void> }
+        | undefined
+    );
+
+    this.initialization = null;
+    for (const publisher of publishers) {
+      Reflect.set(publisher, "_confirmChannel", undefined);
+    }
+    await Promise.allSettled(
+      channels.map(async (channel) => {
+        await channel?.close?.();
+      })
+    );
   }
 }
 

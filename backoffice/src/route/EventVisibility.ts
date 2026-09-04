@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventVisibility, messengerWrapper } from "@betstan/common";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
+import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 
 const router = express.Router();
 
@@ -100,7 +101,7 @@ router.post(
             messengerWrapper.connection
           ).publishVisibilityNow(existingEvent.eventId);
           res.status(publication === "PUBLISHED" ? 200 : 202).send({
-            ...existingEvent.toObject({ useProjection: true }),
+            ...serializeBackofficeEvent(existingEvent),
             publication,
             ...(publication === "PENDING"
               ? { message: "Visibility saved; publication is retrying" }
@@ -116,7 +117,7 @@ router.post(
       }
 
       res.send({
-        ...existingEvent.toObject({ useProjection: true }),
+        ...serializeBackofficeEvent(existingEvent),
         unchanged: true,
         publication: "PUBLISHED",
       });
@@ -127,7 +128,7 @@ router.post(
       messengerWrapper.connection
     ).publishVisibilityNow(event.eventId);
     res.status(publication === "PUBLISHED" ? 200 : 202).send({
-      ...event.toObject({ useProjection: true }),
+      ...serializeBackofficeEvent(event),
       publication,
       ...(publication === "PENDING"
         ? { message: "Visibility saved; publication is retrying" }

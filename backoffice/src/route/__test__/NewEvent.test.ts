@@ -11,6 +11,8 @@ it("rejects a public create request when home or away is missing", async () => {
     .expect(400);
 
   expect(response.body.message).toContain("Team names");
+  expect(response.headers["cache-control"]).toEqual("no-store");
+  expect(response.headers["x-backoffice-access"]).toEqual("public");
   expect(NewEventPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
@@ -67,6 +69,9 @@ it("retries a failed publication without creating a duplicate event", async () =
   expect(retryResponse.body.event.eventId).toEqual(
     firstResponse.body.event.eventId
   );
+  expect(retryResponse.body.event.creationRequestId).toBeUndefined();
+  expect(retryResponse.body.event.creationRequestFingerprint).toBeUndefined();
+  expect(retryResponse.body.event.newEventPublicationPending).toBeUndefined();
   expect(await Event.countDocuments()).toEqual(1);
   const publishedEvent = await Event.findOne({
     eventId: firstResponse.body.event.eventId,

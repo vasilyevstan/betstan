@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { Event } from "../model/Event";
 import { EventStatus, messengerWrapper } from "@betstan/common";
 import { getBackofficePublicationService } from "../service/BackofficePublicationService";
+import { serializeBackofficeEvent } from "../service/serializeBackofficeEvent";
 
 const router = express.Router();
 const MAX_SCORE = 99;
@@ -86,7 +87,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
     if (!resultMatches) {
       res.status(409).send({
         message: "Event already has a different result",
-        event: existingEvent,
+        event: serializeBackofficeEvent(existingEvent),
       });
       return;
     }
@@ -95,7 +96,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
       messengerWrapper.connection
     ).publishResultNow(existingEvent.eventId);
     res.status(publication === "PUBLISHED" ? 200 : 202).send({
-      event: existingEvent.toObject({ useProjection: true }),
+      event: serializeBackofficeEvent(existingEvent),
       unchanged: true,
       publication,
       ...(publication === "PENDING"
@@ -109,7 +110,7 @@ router.post("/api/backoffice/result", async (req: Request, res: Response) => {
     messengerWrapper.connection
   ).publishResultNow(event.eventId);
   res.status(publication === "PUBLISHED" ? 200 : 202).send({
-    event: event.toObject({ useProjection: true }),
+    event: serializeBackofficeEvent(event),
     publication,
     ...(publication === "PENDING"
       ? { message: "Result saved; publication is retrying" }

@@ -29,6 +29,8 @@ it("returns 404 when event not found", async () => {
     .expect(404);
 
   expect(response.body.message).toEqual("Event not found");
+  expect(response.headers["cache-control"]).toEqual("no-store");
+  expect(response.headers["x-backoffice-access"]).toEqual("public");
 });
 
 it("allows an anonymous visitor to set a result and publishes the event", async () => {
@@ -58,6 +60,8 @@ it("keeps a failed result publication pending and repairs it on retry", async ()
     .expect(202);
 
   expect(firstResponse.body.publication).toEqual("PENDING");
+  expect(firstResponse.body.event.resultPublicationPending).toBeUndefined();
+  expect(firstResponse.body.event.newEventPublicationPending).toBeUndefined();
   const pendingEvent = await Event.findOne({
     eventId: "evt-result-retry",
   }).select("+resultPublicationPending");
@@ -69,6 +73,8 @@ it("keeps a failed result publication pending and repairs it on retry", async ()
     .expect(200);
 
   expect(retryResponse.body.unchanged).toBe(true);
+  expect(retryResponse.body.event.resultPublicationPending).toBeUndefined();
+  expect(retryResponse.body.event.newEventPublicationPending).toBeUndefined();
   const publishedEvent = await Event.findOne({
     eventId: "evt-result-retry",
   }).select("+resultPublicationPending");
@@ -153,7 +159,17 @@ it.each([
 });
 
 it("rejects a conflicting repeated result", async () => {
-  await createEvent("evt-conflict", EventStatus.RESULTED, 2, 1);
+  await Event.create({
+    eventId: "evt-conflict",
+    name: "A - B",
+    time: new Date().toISOString(),
+    home: "A",
+    away: "B",
+    status: EventStatus.RESULTED,
+    homeResult: 2,
+    awayResult: 1,
+    resultPublicationPending: true,
+  });
 
   const response = await request(app)
     .post("/api/backoffice/result")
@@ -163,6 +179,8 @@ it("rejects a conflicting repeated result", async () => {
   expect(response.body.message).toEqual("Event already has a different result");
   expect(response.body.event.homeResult).toEqual(2);
   expect(response.body.event.awayResult).toEqual(1);
+  expect(response.body.event.resultPublicationPending).toBeUndefined();
+  expect(response.body.event.newEventPublicationPending).toBeUndefined();
   expect(ResultSetPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 

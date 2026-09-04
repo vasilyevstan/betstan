@@ -83,6 +83,9 @@ backoffice_manifest="$ROOT_DIR/infra/k8s/backoffice-depl.yaml"
 grep -Fq -- '- name: AUTH_SERVICE_URL' "$backoffice_manifest" &&
   grep -Fq -- '- name: JWT_KEY' "$backoffice_manifest" ||
   fail "Backoffice manifest cannot boot the protected image during image-only rollback"
+grep -A 4 -- '- name: JWT_KEY' "$backoffice_manifest" |
+  grep -Fq 'name: jwt-secret' ||
+  fail "Backoffice rollback JWT binding references the wrong Kubernetes secret"
 backoffice_publication_service="$ROOT_DIR/backoffice/src/service/BackofficePublicationService.ts"
 [[ -f "$backoffice_publication_service" ]] &&
   grep -Fq 'publishWithConfirm' "$backoffice_publication_service" &&

@@ -23,6 +23,8 @@ it("rejects a public visibility request without an event id", async () => {
     .expect(400);
 
   expect(response.body.message).toEqual("No event id");
+  expect(response.headers["cache-control"]).toEqual("no-store");
+  expect(response.headers["x-backoffice-access"]).toEqual("public");
   expect(EventVisibilityPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
 });
 
@@ -65,6 +67,8 @@ it("keeps a failed visibility publication pending and repairs it on retry", asyn
     .expect(202);
 
   expect(firstResponse.body.publication).toEqual("PENDING");
+  expect(firstResponse.body.visibilityPublicationPending).toBeUndefined();
+  expect(firstResponse.body.visibilityPublicationTarget).toBeUndefined();
   const pendingEvent = await Event.findOne({
     eventId: "evt-visibility-retry",
   }).select("+visibilityPublicationPending +visibilityPublicationTarget");
@@ -82,6 +86,8 @@ it("keeps a failed visibility publication pending and repairs it on retry", asyn
     .expect(200);
 
   expect(retryResponse.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
+  expect(retryResponse.body.visibilityPublicationPending).toBeUndefined();
+  expect(retryResponse.body.visibilityPublicationTarget).toBeUndefined();
   const publishedEvent = await Event.findOne({
     eventId: "evt-visibility-retry",
   }).select("+visibilityPublicationPending +visibilityPublicationTarget");
