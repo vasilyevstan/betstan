@@ -46,15 +46,20 @@ export class BackofficePublicationService {
 
   async init() {
     if (!this.initialization) {
-      this.initialization = Promise.all([
+      this.initialization = Promise.allSettled([
         this.newEventPublisher.initConfirmChannel(),
         this.resultSetPublisher.initConfirmChannel(),
         this.eventVisibilityPublisher.initConfirmChannel(),
       ])
-        .then(() => undefined)
-        .catch(async (error) => {
-          await this.resetConfirmChannels();
-          throw error;
+        .then((results) => {
+          const failure = results.find(
+            (result): result is PromiseRejectedResult =>
+              result.status === "rejected"
+          );
+          if (failure) {
+            this.resetConfirmChannels();
+            throw failure.reason;
+          }
         });
     }
 
@@ -279,7 +284,7 @@ export class BackofficePublicationService {
       await clear();
       return "PUBLISHED";
     } catch (error) {
-      await this.resetConfirmChannels();
+      this.resetConfirmChannels();
       const reason = error instanceof Error ? error.message : "unknown error";
       console.log(
         `Backoffice ${operation} publication remains pending for ${eventId}: ${reason}`
@@ -307,7 +312,7 @@ export class BackofficePublicationService {
     }
   }
 
-  private async resetConfirmChannels() {
+  private resetConfirmChannels() {
     const publishers = [
       this.newEventPublisher,
       this.resultSetPublisher,
@@ -323,11 +328,16 @@ export class BackofficePublicationService {
     for (const publisher of publishers) {
       Reflect.set(publisher, "_confirmChannel", undefined);
     }
-    await Promise.allSettled(
-      channels.map(async (channel) => {
-        await channel?.close?.();
-      })
-    );
+    for (const channel of channels) {
+      try {
+        const closing = channel?.close?.();
+        void closing?.catch((error) => {
+          console.log("Backoffice confirm channel cleanup failed", error);
+        });
+      } catch (error) {
+        console.log("Backoffice confirm channel cleanup failed", error);
+      }
+    }
   }
 }
 
