@@ -23,6 +23,7 @@ OCI_RUNTIME_FINGERPRINT="${OCI_RUNTIME_FINGERPRINT:-}"
 OCI_INFRASTRUCTURE_PROVENANCE_SHA256="${OCI_INFRASTRUCTURE_PROVENANCE_SHA256:-}"
 ROLLBACK_READINESS_SCRIPT="${ROLLBACK_READINESS_SCRIPT:-$SCRIPT_DIR/rollback-readiness-stan.sh}"
 SERVICE_OPS_SCRIPT="${SERVICE_OPS_SCRIPT:-$OCI_ROOT_DIR/infra/oci/agents/service-ops-stan.sh}"
+ROLLBACK_MUTATION_FENCE_SCRIPT="${ROLLBACK_MUTATION_FENCE_SCRIPT:-$SCRIPT_DIR/live-data-maintenance-stan.sh}"
 CONFIRMATION="${CONFIRMATION:-}"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
 
@@ -307,6 +308,7 @@ for index, left in enumerate(paths):
 PY
 oci_prepare_safe_private_dir "$OUTPUT_DIR"
 
+PARTIAL_ROLLBACK_WRITE_FENCE="$(
 python3 - \
   "$PARTIAL_ROLLBACK_SOURCE_DIR" \
   "$TARGET_SHA" \
@@ -349,17 +351,41 @@ def env(path):
 
 failure = env(root / "failure-state.env")
 baseline = env(root / "baseline/baseline-provenance.env")
+write_fence = failure.get(
+    "rollback_http_mutation_fence",
+    "legacy-not-recorded",
+)
+if write_fence not in {"active", "not-required", "legacy-not-recorded"}:
+    raise SystemExit("partial rollback mutation fence state is invalid")
 if baseline.get("baseline_source_sha") != target_sha:
     raise SystemExit("partial rollback artifact target does not match TARGET_SHA")
 if failure.get("status") != "FAIL":
     raise SystemExit("partial rollback artifact is not a failed run")
 failed_service = failure.get("failed_service", "")
-if failed_service not in services:
+service_failure = failed_service in services
+post_rollback_failure = failed_service == "post-rollback"
+if service_failure:
+    if failure.get("failed_deployment") != f"gaming-{failed_service}-depl":
+        raise SystemExit("partial rollback failed deployment is invalid")
+    if failure.get("failed_step_label") != f"failed-{failed_service}":
+        raise SystemExit("partial rollback failed step label is invalid")
+elif post_rollback_failure:
+    post_failure = (
+        failure.get("failed_deployment"),
+        failure.get("failed_stage"),
+        failure.get("failed_step_label"),
+    )
+    if post_failure not in {
+        ("live-readiness", "post-rollback-readiness", "failed-live-readiness"),
+        (
+            "ingress-nginx-controller",
+            "write-fence-release",
+            "release-write-fence",
+        ),
+    }:
+        raise SystemExit("partial rollback post-rollback failure is invalid")
+else:
     raise SystemExit("partial rollback failed service is invalid")
-if failure.get("failed_deployment") != f"gaming-{failed_service}-depl":
-    raise SystemExit("partial rollback failed deployment is invalid")
-if failure.get("failed_step_label") != f"failed-{failed_service}":
-    raise SystemExit("partial rollback failed step label is invalid")
 
 def tsv(path, width):
     with path.open(encoding="utf-8", newline="") as handle:
@@ -384,9 +410,11 @@ order_rows = tsv(root / "rollout-order.tsv", 1)
 order = [row[0] for row in order_rows]
 if len(order) != len(set(order)) or order != services[: len(order)]:
     raise SystemExit("partial rollback rollout order is invalid")
-if order[-1] != failed_service:
+if service_failure and order[-1] != failed_service:
     raise SystemExit("partial rollback failed service is not the final attempted service")
-if pre[failed_service][2] == partial[failed_service][1]:
+if post_rollback_failure and order != services:
+    raise SystemExit("post-rollback failure did not attempt every service")
+if service_failure and pre[failed_service][2] == partial[failed_service][1]:
     raise SystemExit("partial rollback did not change the failed service")
 for service in services[len(order) :]:
     if pre[service][2] != partial[service][1]:
@@ -398,13 +426,27 @@ for service in reversed(order):
     partial_image = partial[service][1]
     if pre_image != partial_image:
         plan.append((service, f"gaming-{service}-depl", pre_image, partial_image))
-if not plan or plan[0][0] != failed_service:
+if not plan:
+    raise SystemExit("partial rollback recovery plan is empty")
+if service_failure and plan[0][0] != failed_service:
     raise SystemExit("partial rollback recovery plan does not start with the failed service")
 
 with output.open("w", encoding="utf-8", newline="") as handle:
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
     writer.writerows(plan)
+print(write_fence)
 PY
+)"
+
+PARTIAL_RECOVERY_WRITE_FENCE_STATUS="$PARTIAL_ROLLBACK_WRITE_FENCE"
+if [[ "$PARTIAL_ROLLBACK_WRITE_FENCE" == "active" ]]; then
+  [[ -x "$ROLLBACK_MUTATION_FENCE_SCRIPT" ]] ||
+    oci_die "rollback mutation fence script is not executable"
+  if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" fence-writes \
+    >"$OUTPUT_DIR/write-fence.txt" 2>&1; then
+    oci_die "unable to re-establish the partial rollback HTTP mutation fence"
+  fi
+fi
 
 WORK_PARENT_DIR="$OUTPUT_DIR/.workdirs"
 oci_prepare_private_dir "$WORK_PARENT_DIR"
@@ -547,6 +589,14 @@ if ! TARGET_SHA="$TARGET_SHA" \
   oci_die "recovered pre-run state failed rollback readiness"
 fi
 
+if [[ "$PARTIAL_ROLLBACK_WRITE_FENCE" == "active" ]]; then
+  if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
+    >"$OUTPUT_DIR/write-fence-release.txt" 2>&1; then
+    oci_die "partial rollback recovery completed but the HTTP mutation fence could not be released safely"
+  fi
+  PARTIAL_RECOVERY_WRITE_FENCE_STATUS="released"
+fi
+
 recovered_services="$(
   awk -F '\t' '{ values = values (values ? " " : "") $1 } END { print values }' \
     "$OUTPUT_DIR/recovery-plan.tsv"
@@ -557,6 +607,7 @@ mode=abort-partial-rollback
 target_sha=$TARGET_SHA
 source_rollback_run_id=$PARTIAL_ROLLBACK_RUN_ID
 recovered_services=$recovered_services
+rollback_http_mutation_fence=$PARTIAL_RECOVERY_WRITE_FENCE_STATUS
 database_restore=disabled
 EOF
 

@@ -93,8 +93,9 @@ for name, expected_digest in manifest.items():
         raise SystemExit(f"partial recovery authority checksum mismatch: {name}")
 
 
-def exact_env(path, expected_keys):
+def exact_env(path, expected_keys, optional_keys=frozenset()):
     values = {}
+    allowed_keys = expected_keys | optional_keys
     for raw in path.read_text(encoding="utf-8").splitlines():
         if not raw or "=" not in raw:
             raise SystemExit(f"{path.name} is malformed")
@@ -102,11 +103,11 @@ def exact_env(path, expected_keys):
         if (
             not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
             or key in values
-            or key not in expected_keys
+            or key not in allowed_keys
         ):
             raise SystemExit(f"{path.name} has an unexpected or duplicate key")
         values[key] = value
-    if set(values) != expected_keys:
+    if not expected_keys.issubset(values):
         raise SystemExit(f"{path.name} key set is incomplete")
     return values
 
@@ -245,6 +246,11 @@ summary = exact_env(
         "recovered_services",
         "database_restore",
     },
+    {"rollback_http_mutation_fence"},
+)
+summary_fence = summary.get(
+    "rollback_http_mutation_fence",
+    "legacy-not-recorded",
 )
 if (
     summary["status"] != "PASS"
@@ -252,6 +258,7 @@ if (
     or summary["target_sha"] != authority["target_sha"]
     or summary["source_rollback_run_id"] != authority["source_rollback_run_id"]
     or summary["database_restore"] != "disabled"
+    or summary_fence not in {"released", "not-required", "legacy-not-recorded"}
 ):
     raise SystemExit("partial recovery summary is invalid")
 

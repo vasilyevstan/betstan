@@ -2350,10 +2350,26 @@ assert_contains "$WORK_DIR/partial-failure.out" 'rollout did not complete for ga
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_service=event'
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_deployment=gaming-event-depl'
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_stage=rollout-status'
+assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'rollback_http_mutation_fence=active'
 [[ "$(wc -l <"$WORK_DIR/partial-failure/rollout-order.tsv" | tr -d ' ')" == '5' ]] || fail 'OCI partial failure should stop after event rollout'
 ! grep -Fxq 'moderation' "$WORK_DIR/partial-failure/rollout-order.tsv" || fail 'OCI partial failure should not continue after event'
 assert_line "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'fence-writes'
 assert_not_contains "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'release'
+
+run_expect_failure rollback-fence-release-failure \
+  STUB_MUTATION_FENCE_FAIL_ACTION=release ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/rollback-fence-release-failure.out" \
+  'rollback completed but the HTTP mutation fence could not be released safely'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'failed_service=post-rollback'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'failed_stage=write-fence-release'
+assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
+  'rollback_http_mutation_fence=active'
+assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+  'release'
 
 run_expect_failure post-rollback-prematch-refusal \
   STUB_EVENT_MODE_AFTER_ROLLBACK=live-only ROLLBACK_MODE=execute
@@ -2517,6 +2533,7 @@ failed_service=event
 failed_deployment=gaming-event-depl
 failed_stage=public-api
 failed_step_label=failed-event
+rollback_http_mutation_fence=active
 message=public API verification failed after gaming-event-depl
 EOF
 : >"$partial_source/pre-rollback-state.tsv"
@@ -2580,29 +2597,25 @@ chmod +x "$BIN_DIR/partial-recovery-service-ops-stub.sh"
 
 set_partial_recovery_state() {
   local state_root="$1"
+  local source_dir="${2:-$partial_source}"
   rm -rf "$state_root"
   mkdir -p "$state_root"
-  for service in "${SERVICES[@]}"; do
-    image="$(current_image_ref "$service")"
-    case "$service" in
-      bet|backoffice|client|event)
-        image="$(target_image_ref "$service")"
-        ;;
-    esac
+  while IFS=$'\t' read -r service image _revision; do
     write_text_atomic "$state_root/${service}.env" <<EOF
 image=$image
 revision=8
 EOF
-  done
+  done <"$source_dir/partial-state.tsv"
 }
 
 run_partial_recovery() {
   local label="$1"
   local state_dir="$STATE_DIR/$label/current"
   local output_dir="$WORK_DIR/$label"
+  local source_dir="${PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE:-$partial_source}"
   shift
   if [[ "${PRESERVE_PARTIAL_RECOVERY_STATE:-0}" != "1" ]]; then
-    set_partial_recovery_state "$state_dir"
+    set_partial_recovery_state "$state_dir" "$source_dir"
   fi
   rm -rf "$output_dir"
   rm -f "$STATE_DIR/$label/kubectl.log"
@@ -2612,7 +2625,7 @@ run_partial_recovery() {
     STUB_KUBECTL_LOG="$STATE_DIR/$label/kubectl.log" \
     TARGET_SHA="$TARGET_SHA" \
     PARTIAL_ROLLBACK_RUN_ID=33131321686 \
-    PARTIAL_ROLLBACK_SOURCE_DIR="$partial_source" \
+    PARTIAL_ROLLBACK_SOURCE_DIR="$source_dir" \
     PARTIAL_RECOVERY_BUILD_DIR="${PARTIAL_RECOVERY_BUILD_DIR_OVERRIDE:-$partial_recovery_build}" \
     PARTIAL_RECOVERY_BUILD_RUN_ID="$BUILD_RUN_ID" \
     PARTIAL_RECOVERY_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
@@ -2628,6 +2641,8 @@ run_partial_recovery() {
     OCI_INFRASTRUCTURE_PROVENANCE_FILE="$INFRASTRUCTURE_PROVENANCE_FIXTURE" \
     ROLLBACK_READINESS_SCRIPT="$BIN_DIR/partial-recovery-readiness-stub.sh" \
     SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
+    ROLLBACK_MUTATION_FENCE_SCRIPT="$BIN_DIR/rollback-mutation-fence-stub.sh" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
     CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
     GITHUB_REF_NAME=master \
     GITHUB_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
@@ -2679,10 +2694,45 @@ assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.e
   "restored_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA"
 assert_contains "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" \
   'CrashLoopBackOff'
+assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-summary.env" \
+  'rollback_http_mutation_fence=released'
+assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'fence-writes'
+assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'release'
 run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
   >"$WORK_DIR/partial-recovery-authority-success.out"
 assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
   'partial_recovery_authority_validation=PASS'
+
+if ! PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE="$WORK_DIR/rollback-fence-release-failure" \
+    run_partial_recovery partial-recovery-after-fence-release-failure \
+    >"$WORK_DIR/partial-recovery-after-fence-release-failure.out" 2>&1; then
+  cat "$WORK_DIR/partial-recovery-after-fence-release-failure.out" >&2
+  fail 'OCI recovery could not terminate a post-rollback stranded write fence'
+fi
+assert_contains \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/partial-recovery-summary.env" \
+  'rollback_http_mutation_fence=released'
+assert_contains \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/partial-recovery-summary.env" \
+  'recovered_services=gamemaster slip resulting moderation event client backoffice bet auth'
+assert_line \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line \
+  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  'release'
+
+if run_partial_recovery partial-recovery-fence-release-failure \
+    STUB_MUTATION_FENCE_FAIL_ACTION=release \
+    >"$WORK_DIR/partial-recovery-fence-release-failure.out" 2>&1; then
+  fail 'OCI partial rollback recovery accepted a stranded HTTP mutation fence'
+fi
+assert_contains "$WORK_DIR/partial-recovery-fence-release-failure.out" \
+  'HTTP mutation fence could not be released safely'
+assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+  'fence-writes'
+assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+  'release'
 
 partial_capture_dir="$WORK_DIR/partial-recovery-baseline-capture"
 if ! run_capture "$partial_capture_dir" \

@@ -227,8 +227,11 @@
   establish the reviewed HTTP write fence, keep the current worker alive, and
   fail closed until every pending marker drains. Skip the drain only when exact
   target source proves that the rollback image starts the compatible worker,
-  and keep the fence active after partial image mutation; otherwise the older
-  image can strand a database mutation that never reached RabbitMQ.
+  and keep the fence active after partial image mutation. Record that state in
+  failure evidence so partial recovery can re-establish the fence, restore the
+  exact pre-run images, and release writes only after readiness passes;
+  otherwise the older image can strand a database mutation that never reached
+  RabbitMQ.
 - A live update received before `NEW_EVENT` creates an `OFFLINE` projection. Metadata and visibility initialize independently so `NEW_EVENT` can repair legacy/event-visibility-first placeholders without undoing a newer visibility change.
 - A visibility message may arrive before any event row. Persist it as pending on an `OFFLINE` placeholder, then apply it only after authoritative metadata arrives; ambiguous legacy hidden placeholders stay hidden.
 - Competing `NEW_EVENT` and visibility placeholder upserts can race on the unique event ID. Both paths must treat duplicate-key as convergence and retry the pending decision against the winning row before acknowledging.

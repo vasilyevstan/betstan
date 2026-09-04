@@ -243,9 +243,11 @@ conversation summaries are not authority.
   pending mutation markers are empty while a reviewed HTTP write fence prevents
   new public mutations and the current replay worker remains available. Skip
   the drain only when exact target source proves that the rollback image starts
-  the compatible worker; leave the fence active after partial image mutation.
-  Additive marker fields remain readable by the old image, but an image without
-  the worker cannot deliver them.
+  the compatible worker. After partial image mutation, record the active fence
+  in failure evidence; recovery re-establishes it before restoring exact
+  pre-run images and releases it only after readiness passes. Additive marker
+  fields remain readable by the old image, but an image without the worker
+  cannot deliver them.
   Live-update-first projections stay `OFFLINE` until event metadata establishes
   visibility; metadata repair must not undo a newer visibility message.
   Revoked scoped clients purge cached fixtures immediately, while healthy SSE

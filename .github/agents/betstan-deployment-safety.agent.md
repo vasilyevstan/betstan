@@ -457,7 +457,9 @@ A Running broker with missing consumers is not healthy production.
   image mutation. Skip that drain only when exact target-source evidence
   proves the rollback image contains and starts the compatible replay worker.
   Keep the fence active after any partial image mutation until recovery is
-  complete.
+  complete, record that active state in the failed-run evidence, and require
+  the partial-rollback recovery operator to re-establish then release the
+  fence only after exact pre-run images and readiness are restored.
 - Prefer application rollback over disk restore when data integrity is healthy.
 - Restore Mongo snapshots only when integrity checks justify it.
 - Never delete a current nodepool, disk, snapshot, or deployment history

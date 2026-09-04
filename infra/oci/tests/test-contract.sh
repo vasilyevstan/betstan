@@ -1172,6 +1172,9 @@ grep -Fq 'exact target-source evidence' \
 grep -Fq 'Keep the fence active after any partial image mutation' \
     <<<"$deployment_safety_agent_flat" ||
   fail "deployment safety agent can reopen writes after a partial rollback"
+grep -Fq 'partial-rollback recovery operator to re-establish then release' \
+    <<<"$deployment_safety_agent_flat" ||
+  fail "deployment safety agent omits the terminating owner for a rollback fence"
 
 [[ "$(git -C "$ROOT_DIR" ls-tree HEAD common | awk '{print $1}')" = "040000" ]] ||
   fail "common source is not a normal tracked directory"

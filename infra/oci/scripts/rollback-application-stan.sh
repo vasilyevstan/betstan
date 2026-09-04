@@ -902,6 +902,7 @@ failed_service=$service
 failed_deployment=$deployment
 failed_stage=$stage
 failed_step_label=$CURRENT_STEP_LABEL
+rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 message=$message
 EOF
 }
@@ -1818,6 +1819,7 @@ failed_service=post-rollback
 failed_deployment=live-readiness
 failed_stage=post-rollback-readiness
 failed_step_label=$CURRENT_STEP_LABEL
+rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 message=post-rollback live readiness rejected the target digest set
 EOF
   oci_die "post-rollback live readiness rejected the target digest set"
@@ -1834,6 +1836,7 @@ failed_service=post-rollback
 failed_deployment=ingress-nginx-controller
 failed_stage=write-fence-release
 failed_step_label=$CURRENT_STEP_LABEL
+rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 message=rollback completed but the HTTP mutation fence could not be released safely
 EOF
     oci_die "rollback completed but the HTTP mutation fence could not be released safely"
