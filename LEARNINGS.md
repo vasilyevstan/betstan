@@ -41,6 +41,13 @@
 - `APublisher.publish()` stamps `data.timestamp` and `data.sender` onto every outgoing event before serialising it. This means the `timestamp` field on an `IEvent` is **set by the publisher at send time**, not by the originating request.
 - A publisher retry stamps a different envelope timestamp. Persisted domain time, ordering, and idempotency fingerprints must prefer an immutable timestamp captured in the event data, such as placement `submittedAt`; use the envelope or row timestamp only for backward-compatible messages that lack it.
 - Because of the above, when creating events manually in tests (without going through a publisher), `event.timestamp` is `undefined`. Any code that reads `event.timestamp` to populate a required model field must provide a fallback (e.g. `event.timestamp ?? new Date().toISOString()`).
+- A durable pending-publication marker provides restart recovery, not
+  same-process serialization. For an immutable idempotent terminal operation,
+  share the active publication promise by exact operation and aggregate
+  identity so concurrent HTTP retries do not send twice. Keep consumers
+  duplicate-safe because rolling pods can still publish the same marker, and
+  do not coalesce mutable targets unless their version or exact target is part
+  of the key.
 
 ### Singleton publishers — channel-leak fix (PR #29)
 - The original code opened a new AMQP channel on every message by calling `new XPublisher(...); await publisher.init()` inside `onMessage`.

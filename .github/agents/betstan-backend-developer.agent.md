@@ -118,6 +118,12 @@ instead of crossing the boundary.
   in the same atomic write, use publisher confirms, and clear the marker only
   after confirmation. Replay pending markers after restart and make every
   downstream handler safe for duplicate delivery.
+- A persisted retry marker provides recovery, not request serialization. For
+  an immutable idempotent terminal operation, share an in-flight publication
+  by exact operation and aggregate identity within one process so concurrent
+  retries do not send twice. Keep downstream consumers duplicate-safe because
+  rolling pods may still publish the same marker; never coalesce a mutable
+  target unless its version or exact target is part of the key.
 - For public irreversible controls, never coerce a missing value into a valid
   destructive default. Return `404` for a missing aggregate, accept an exact
   repeated terminal write as idempotent, and return `409` when the requested

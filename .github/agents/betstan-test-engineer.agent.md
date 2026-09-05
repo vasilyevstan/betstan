@@ -57,6 +57,12 @@ authority-ending `occurredAt`, plus legacy history without the additive end
 field. For SSE, verify intentional backpressure disconnect and monotonic
 REST/reconnect recovery together.
 
+For an idempotent mutation with a durable publication marker, hold the first
+broker confirmation open, invoke identical concurrent callers, and prove they
+share one same-process send and outcome. Test restart replay and duplicate-safe
+consumption separately because rolling pods still provide at-least-once rather
+than globally exactly-once delivery.
+
 For live-history and presentation-order changes, prove producer-attested
 full-versus-partial completeness: an attested cumulative payload, legacy
 single-incident input, malformed raw incidents, and non-terminal phases must
