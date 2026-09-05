@@ -14,6 +14,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$OCI_ROOT_DIR/artifacts/oci-live-data-rollout}"
 OCI_K8S_NAMESPACE="${OCI_K8S_NAMESPACE:-betstan-oci}"
 BATCH_SIZE="${BATCH_SIZE:-100}"
 JOB_TIMEOUT_SECONDS="${JOB_TIMEOUT_SECONDS:-1800}"
+JOB_TERMINAL_STATE_GRACE_SECONDS="${JOB_TERMINAL_STATE_GRACE_SECONDS:-30}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
 BASELINE_SHA256="${BASELINE_SHA256:-}"
@@ -35,6 +36,7 @@ LAST_JOB_POD_PHASE=""
 LAST_JOB_CONTAINER_STATE=""
 LAST_JOB_CONTAINER_REASON=""
 LAST_JOB_EXIT_CODE=""
+LAST_JOB_SIGNAL=""
 
 fail() {
   echo "live_betting_data_rollout=FAIL phase=${PHASE:-missing} reason=$*" >&2
@@ -51,7 +53,8 @@ cleanup() {
     kubectl delete job "$job" \
       -n "$OCI_K8S_NAMESPACE" \
       --ignore-not-found=true \
-      --wait=false >/dev/null 2>&1
+      --wait=false \
+      --request-timeout=5s >/dev/null 2>&1
   done
   local raw_file
   for raw_file in "${raw_files[@]:-}"; do
@@ -83,6 +86,10 @@ esac
   fail "JOB_TIMEOUT_SECONDS must be a positive integer"
 (( JOB_TIMEOUT_SECONDS <= 3600 )) ||
   fail "JOB_TIMEOUT_SECONDS exceeds the reviewed one-hour bound"
+[[ "$JOB_TERMINAL_STATE_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+  fail "JOB_TERMINAL_STATE_GRACE_SECONDS must be a positive integer"
+(( JOB_TERMINAL_STATE_GRACE_SECONDS <= 60 )) ||
+  fail "JOB_TERMINAL_STATE_GRACE_SECONDS exceeds the reviewed one-minute bound"
 [[ "$OCI_K8S_NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
   fail "OCI_K8S_NAMESPACE is invalid"
 [[ -f "$IMAGE_PROVENANCE_FILE" ]] ||
@@ -266,14 +273,57 @@ spec:
 YAML
 }
 
+sleep_before_job_retry() {
+  local retry_deadline="$1"
+  local now sleep_seconds
+
+  now="$(date +%s)"
+  sleep_seconds=$(( retry_deadline - now ))
+  (( sleep_seconds > 0 )) || return 0
+  (( sleep_seconds <= 2 )) || sleep_seconds=2
+  sleep "$sleep_seconds"
+}
+
+collect_complete_job_report() {
+  local job_name="$1"
+  local raw_file="$2"
+  local report_deadline="$3"
+  local now request_timeout
+
+  while true; do
+    now="$(date +%s)"
+    (( now < report_deadline )) || break
+    request_timeout=$(( report_deadline - now ))
+    (( request_timeout <= 10 )) || request_timeout=10
+    : >"$raw_file"
+    if kubectl logs "job/$job_name" \
+        -n "$OCI_K8S_NAMESPACE" \
+        --container data-rollout \
+        --request-timeout="${request_timeout}s" >"$raw_file" 2>/dev/null; then
+      return 0
+    fi
+    rm -f -- "$raw_file"
+    sleep_before_job_retry "$report_deadline"
+  done
+
+  rm -f -- "$raw_file"
+  return 1
+}
+
 wait_for_job_report() {
   local job_name="$1"
   local raw_file="$2"
   local allow_blocked_cleanup="${3:-false}"
   local expected_mode="${4:-}"
   local deadline=$(( $(date +%s) + JOB_TIMEOUT_SECONDS ))
-  local job_json pod_state pod_count pod_phase container_state container_reason
-  local container_exit_code job_failed
+  local job_json="" pod_state="" pod_count="unknown" pod_phase="Unknown"
+  local container_state="unknown" container_reason="Unknown"
+  local container_exit_code="unknown" container_signal="unknown" job_state=""
+  local job_complete job_failure_target job_failed_condition
+  local job_deadline_exceeded job_failed_count
+  local terminal_failure_observed=false
+  local terminal_state_observed_at=0 terminal_state_deadline=0
+  local status_deadline request_timeout sleep_seconds now
 
   [[ "$allow_blocked_cleanup" == "true" ||
      "$allow_blocked_cleanup" == "false" ]] ||
@@ -283,27 +333,22 @@ wait_for_job_report() {
       fail "blocked cleanup report mode is invalid"
   fi
 
-  while (( $(date +%s) < deadline )); do
-    job_json="$(kubectl get job "$job_name" -n "$OCI_K8S_NAMESPACE" -o json)"
-    if jq -e '(.status.succeeded // 0) == 1' <<<"$job_json" >/dev/null; then
-      kubectl logs "job/$job_name" \
-        -n "$OCI_K8S_NAMESPACE" \
-        --container data-rollout >"$raw_file" 2>/dev/null ||
-        fail "unable to collect completed job report"
-      LAST_JOB_OUTCOME="success"
-      LAST_JOB_POD_COUNT=""
-      LAST_JOB_POD_PHASE=""
-      LAST_JOB_CONTAINER_STATE=""
-      LAST_JOB_CONTAINER_REASON=""
-      LAST_JOB_EXIT_CODE="0"
-      return 0
+  while true; do
+    if [[ "$terminal_failure_observed" == "true" ]]; then
+      status_deadline="$terminal_state_deadline"
+    else
+      status_deadline="$deadline"
     fi
-
-    pod_state="$(
+    now="$(date +%s)"
+    (( now < status_deadline )) || break
+    request_timeout=$(( status_deadline - now ))
+    (( request_timeout <= 10 )) || request_timeout=10
+    if ! pod_state="$(
       kubectl get pods \
         -n "$OCI_K8S_NAMESPACE" \
         -l "job-name=$job_name" \
-        -o json |
+        -o json \
+        --request-timeout="${request_timeout}s" 2>/dev/null |
         jq -er '
           def safe:
             if type == "string" and
@@ -314,13 +359,14 @@ wait_for_job_report() {
 
           (.items // []) as $items |
           if ($items | length) == 0 then
-            ["0", "Missing", "unknown", "PodNotCreated", "unknown"]
+            ["0", "Missing", "unknown", "PodNotCreated", "unknown", "unknown"]
           elif ($items | length) > 1 then
             [
               ($items | length | tostring),
               "Ambiguous",
               "unknown",
               "MultiplePods",
+              "unknown",
               "unknown"
             ]
           else
@@ -336,6 +382,7 @@ wait_for_job_report() {
                 (($pod.status.phase // "Unknown") | safe),
                 "waiting",
                 (($condition.reason // "ContainerNotStarted") | safe),
+                "unknown",
                 "unknown"
               ]
             elif ($statuses | length) > 1 then
@@ -344,6 +391,7 @@ wait_for_job_report() {
                 (($pod.status.phase // "Unknown") | safe),
                 "unknown",
                 "MultipleContainers",
+                "unknown",
                 "unknown"
               ]
             else
@@ -354,6 +402,7 @@ wait_for_job_report() {
                   (($pod.status.phase // "Unknown") | safe),
                   "waiting",
                   (($state.waiting.reason // "Unknown") | safe),
+                  "unknown",
                   "unknown"
                 ]
               elif $state.running then
@@ -362,6 +411,7 @@ wait_for_job_report() {
                   (($pod.status.phase // "Unknown") | safe),
                   "running",
                   "Running",
+                  "unknown",
                   "unknown"
                 ]
               elif $state.terminated then
@@ -377,6 +427,19 @@ wait_for_job_report() {
                     then ($state.terminated.exitCode | tostring)
                     else "unknown"
                     end
+                  ),
+                  (
+                    if (
+                      (($state.terminated.signal // 0) | type) == "number"
+                    ) and
+                       (($state.terminated.signal // 0) >= 0) and
+                       (
+                         ($state.terminated.signal // 0) ==
+                         (($state.terminated.signal // 0) | floor)
+                       )
+                    then (($state.terminated.signal // 0) | tostring)
+                    else "unknown"
+                    end
                   )
                 ]
               else
@@ -385,47 +448,31 @@ wait_for_job_report() {
                   (($pod.status.phase // "Unknown") | safe),
                   "unknown",
                   "StateMissing",
+                  "unknown",
                   "unknown"
                 ]
               end
             end
           end |
           @tsv
-        '
-    )" || fail "unable to inspect sanitized pod state for $job_name"
+        ' 2>/dev/null
+    )"; then
+      sleep_before_job_retry "$status_deadline"
+      continue
+    fi
     IFS=$'\t' read -r \
       pod_count pod_phase container_state container_reason \
-      container_exit_code <<<"$pod_state"
+      container_exit_code container_signal <<<"$pod_state"
 
-    job_failed=false
-    if jq -e '(.status.failed // 0) > 0' <<<"$job_json" >/dev/null; then
-      job_failed=true
-    fi
-    if [[ "$job_failed" == "true" ||
-      ("$container_state" == "terminated" &&
-       "$container_reason" != "Completed") ]]; then
-      kubectl logs "job/$job_name" \
-        -n "$OCI_K8S_NAMESPACE" \
-        --container data-rollout >"$raw_file" 2>/dev/null || true
-      if [[ "$allow_blocked_cleanup" == "true" &&
-        "$pod_count" == "1" &&
-        "$pod_phase" == "Failed" &&
-        "$container_state" == "terminated" &&
-        "$container_reason" == "Error" &&
-        "$container_exit_code" =~ ^[1-9][0-9]*$ ]] &&
-        validate_blocked_cleanup_report "$raw_file" "$expected_mode"; then
-        LAST_JOB_OUTCOME="structured-blocked"
-        LAST_JOB_POD_COUNT="$pod_count"
-        LAST_JOB_POD_PHASE="$pod_phase"
-        LAST_JOB_CONTAINER_STATE="$container_state"
-        LAST_JOB_CONTAINER_REASON="$container_reason"
-        LAST_JOB_EXIT_CODE="$container_exit_code"
-        return 0
+    if [[ "$container_state" == "terminated" &&
+      "$container_reason" != "Completed" ]]; then
+      if [[ "$terminal_failure_observed" == "false" ]]; then
+        terminal_failure_observed=true
+        terminal_state_observed_at="$(date +%s)"
+        terminal_state_deadline=$((
+          terminal_state_observed_at + JOB_TERMINAL_STATE_GRACE_SECONDS
+        ))
       fi
-      if [[ "$job_failed" == "true" ]]; then
-        fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
-      fi
-      fail "data job terminated for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
     fi
     case "$container_reason" in
       ErrImagePull|ImagePullBackOff|InvalidImageName|CreateContainerConfigError|\
@@ -434,9 +481,133 @@ wait_for_job_report() {
         fail "data job startup failed for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
         ;;
     esac
-    sleep 5
+
+    if [[ "$terminal_failure_observed" == "true" ]]; then
+      status_deadline="$terminal_state_deadline"
+    else
+      status_deadline="$deadline"
+    fi
+    now="$(date +%s)"
+    (( now < status_deadline )) || continue
+    request_timeout=$(( status_deadline - now ))
+    (( request_timeout <= 10 )) || request_timeout=10
+    if ! job_json="$(
+      kubectl get job "$job_name" \
+        -n "$OCI_K8S_NAMESPACE" \
+        -o json \
+        --request-timeout="${request_timeout}s" 2>/dev/null
+    )"; then
+      sleep_before_job_retry "$status_deadline"
+      continue
+    fi
+    if ! job_state="$(
+      jq -er '
+        (.status.conditions // []) as $conditions |
+        [
+          (any($conditions[];
+            .type == "Complete" and .status == "True")),
+          (any($conditions[];
+            .type == "FailureTarget" and .status == "True")),
+          (any($conditions[];
+            .type == "Failed" and .status == "True")),
+          (any($conditions[];
+            (
+              .type == "FailureTarget" or
+              .type == "Failed"
+            ) and
+            .status == "True" and
+            .reason == "DeadlineExceeded"
+          )),
+          ((.status.failed // 0) > 0)
+        ] |
+        @tsv
+      ' <<<"$job_json" 2>/dev/null
+    )"; then
+      sleep_before_job_retry "$status_deadline"
+      continue
+    fi
+    IFS=$'\t' read -r \
+      job_complete job_failure_target job_failed_condition \
+      job_deadline_exceeded job_failed_count <<<"$job_state"
+
+    if [[ "$job_deadline_exceeded" == "true" ]]; then
+      fail "data Job exceeded its active deadline for $job_name"
+    fi
+    if [[ "$job_complete" == "true" &&
+      ("$terminal_failure_observed" == "true" ||
+       "$job_failure_target" == "true" ||
+       "$job_failed_condition" == "true" ||
+       "$job_failed_count" == "true") ]]; then
+      fail "data Job reported contradictory completion and failure for $job_name"
+    fi
+    if [[ ("$job_failure_target" == "true" ||
+          "$job_failed_condition" == "true" ||
+          "$job_failed_count" == "true") &&
+      "$terminal_failure_observed" == "false" ]]; then
+      terminal_failure_observed=true
+      terminal_state_observed_at="$(date +%s)"
+      terminal_state_deadline=$((
+        terminal_state_observed_at + JOB_TERMINAL_STATE_GRACE_SECONDS
+      ))
+    fi
+    if [[ "$job_complete" == "true" ]]; then
+      collect_complete_job_report "$job_name" "$raw_file" "$deadline" ||
+        fail "unable to collect completed job report"
+      LAST_JOB_OUTCOME="success"
+      LAST_JOB_POD_COUNT=""
+      LAST_JOB_POD_PHASE=""
+      LAST_JOB_CONTAINER_STATE=""
+      LAST_JOB_CONTAINER_REASON=""
+      LAST_JOB_EXIT_CODE="0"
+      LAST_JOB_SIGNAL="0"
+      return 0
+    fi
+
+    if [[ "$terminal_failure_observed" == "true" &&
+      ("$job_failed_condition" != "true" || "$pod_phase" != "Failed") ]]; then
+      # K3s may expose the terminated container before Pod and Job status converge.
+      now="$(date +%s)"
+      sleep_seconds=$(( terminal_state_deadline - now ))
+      (( sleep_seconds > 0 )) || continue
+      (( sleep_seconds <= 2 )) || sleep_seconds=2
+      sleep "$sleep_seconds"
+      continue
+    fi
+    if [[ "$terminal_failure_observed" == "true" ]]; then
+      if ! collect_complete_job_report \
+          "$job_name" "$raw_file" "$terminal_state_deadline"; then
+        fail "unable to collect complete failed job report for $job_name"
+      fi
+      if [[ "$allow_blocked_cleanup" == "true" &&
+        "$pod_count" == "1" &&
+        "$pod_phase" == "Failed" &&
+        "$container_state" == "terminated" &&
+        "$container_reason" == "Error" &&
+        "$container_exit_code" == "1" &&
+        "$container_signal" == "0" ]] &&
+        validate_blocked_cleanup_report "$raw_file" "$expected_mode"; then
+        LAST_JOB_OUTCOME="structured-blocked"
+        LAST_JOB_POD_COUNT="$pod_count"
+        LAST_JOB_POD_PHASE="$pod_phase"
+        LAST_JOB_CONTAINER_STATE="$container_state"
+        LAST_JOB_CONTAINER_REASON="$container_reason"
+        LAST_JOB_EXIT_CODE="$container_exit_code"
+        LAST_JOB_SIGNAL="$container_signal"
+        return 0
+      fi
+      fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+    fi
+
+    now="$(date +%s)"
+    sleep_seconds=$(( deadline - now ))
+    (( sleep_seconds > 0 )) || continue
+    (( sleep_seconds <= 5 )) || sleep_seconds=5
+    sleep "$sleep_seconds"
   done
 
+  if (( terminal_state_deadline > 0 )); then
+    fail "data job terminal state did not converge for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+  fi
   fail "data job timed out for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
 }
 
@@ -458,11 +629,12 @@ run_job() {
   create_job "$service" "$command_path" "$mode" "$image_ref" "$job_name"
   wait_for_job_report \
     "$job_name" "$raw_file" "$allow_blocked_cleanup" "$mode"
+  LAST_RAW_FILE="$raw_file"
   kubectl delete job "$job_name" \
     -n "$OCI_K8S_NAMESPACE" \
     --ignore-not-found=true \
-    --wait=false >/dev/null
-  LAST_RAW_FILE="$raw_file"
+    --wait=false \
+    --request-timeout=5s >/dev/null 2>&1 || true
 }
 
 sanitize_backfill_report() {
@@ -836,7 +1008,8 @@ write_cleanup_blocker_evidence() {
      "$LAST_JOB_POD_PHASE" == "Failed" &&
      "$LAST_JOB_CONTAINER_STATE" == "terminated" &&
      "$LAST_JOB_CONTAINER_REASON" == "Error" &&
-     "$LAST_JOB_EXIT_CODE" =~ ^[1-9][0-9]*$ ]] ||
+     "$LAST_JOB_EXIT_CODE" == "1" &&
+     "$LAST_JOB_SIGNAL" == "0" ]] ||
     fail "blocked cleanup report is missing its exact failed-job evidence"
   jq -e '
     .state == "blocked" and
@@ -873,6 +1046,7 @@ PY
     --arg container_reason "$LAST_JOB_CONTAINER_REASON" \
     --argjson pod_count "$LAST_JOB_POD_COUNT" \
     --argjson exit_code "$LAST_JOB_EXIT_CODE" \
+    --argjson container_signal "$LAST_JOB_SIGNAL" \
     --arg completed_at "$completed_at" '
       {
         schemaVersion: "live-betting-cleanup-blocker-v1",
@@ -898,7 +1072,8 @@ PY
           podPhase: $pod_phase,
           containerState: $container_state,
           containerReason: $container_reason,
-          exitCode: $exit_code
+          exitCode: $exit_code,
+          signal: $container_signal
         },
         completedAt: $completed_at
       }
