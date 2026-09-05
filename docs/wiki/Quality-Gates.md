@@ -159,6 +159,8 @@ After deployment:
 
 - workloads run the expected digests;
 - health, routing, TLS, APIs, SSE, queues, consumers, and storage pass;
+- accelerated live acceptance proves a stable multi-event pre-kickoff slip
+  separately from a moving in-play selection governed by one event clock;
 - the browser acceptance journey has no page, console, API, or log errors;
 - activation is committed only after its bounded acceptance succeeds.
 

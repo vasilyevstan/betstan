@@ -17,6 +17,7 @@ const FIXED_IN_MATCH_MARKETS = [
   'SECOND_HALF_SCORE',
 ];
 const SETTLEMENT_MARKET_TYPE = 'SECOND_HALF_SCORE';
+const PRE_KICKOFF_PLACEMENT_MARKET_TYPE = 'KICKOFF_TEAM';
 const COUNTDOWN_MARKETS = [
   { marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' },
   { marketType: 'FIRST_MINUTE_GOAL', label: 'Goal in First Minute' },
@@ -40,7 +41,8 @@ const STRUCTURAL_INCIDENTS = [
 ];
 const TERMINAL_BET_STATUSES = ['WIN', 'LOSS', 'VOID'];
 const LIVE_FIXTURE_KICKOFF_DELAY_SECONDS = 90;
-const EXPECTED_LIVE_SETTLEMENT_ROWS = 2;
+const EXPECTED_PRE_KICKOFF_LIVE_ROWS = 2;
+const EXPECTED_LIVE_SETTLEMENT_ROWS = 1;
 const MAX_LIVE_PLACEMENT_ATTEMPTS = 5;
 const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([
   'Live quote is stale',
@@ -200,7 +202,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const publicContext = await browser.newContext({
     baseURL: process.env.E2E_BASE_URL,
   });
-  for (const fixture of fixtures) {
+  const createFixture = async (fixture) => {
     const response = await publicContext.request.post('/api/backoffice/new_event', {
       data: fixture,
     });
@@ -208,18 +210,9 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     const body = await response.json();
     fixture.eventId = body.event.eventId;
     fixture.name = body.event.name;
-  }
-  const idempotentVisibility = await publicContext.request.post(
-    '/api/backoffice/event_visibility',
-    {
-      data: {
-        eventId: fixtures[0].eventId,
-        visibility: 'OFFLINE',
-      },
-    },
-  );
-  expect(idempotentVisibility.ok()).toBeTruthy();
-  expect((await idempotentVisibility.json()).visibility).toBe('OFFLINE');
+  };
+  const futureFixture = fixtures[2];
+  await createFixture(futureFixture);
 
   await page.goto('/login?ui=v2&theme=dark', { waitUntil: 'domcontentloaded' });
   await page.getByLabel('Username or email').fill(username);
@@ -245,6 +238,47 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   expect(loginResponse).toBeTruthy();
   expect(loginResponse.ok()).toBeTruthy();
   await expect(page.getByTitle('Backoffice')).toBeVisible();
+
+  const publicPage = await publicContext.newPage();
+  const publicEventsLoaded = publicPage.waitForResponse(
+    (response) => (
+      new URL(response.url()).pathname === '/api/event'
+      && response.request().method() === 'GET'
+    ),
+  );
+  await publicPage.goto('/?ui=v2&theme=dark', {
+    waitUntil: 'domcontentloaded',
+  });
+  await publicEventsLoaded;
+  await expect(
+    publicPage.getByRole('article', { name: futureFixture.name }),
+  ).toHaveCount(0);
+  const publicBackofficeLink = publicPage.getByTitle('Backoffice');
+  await expect(publicBackofficeLink).toBeVisible();
+  await expect(publicBackofficeLink).toContainText('Backoffice');
+  await publicBackofficeLink.click();
+  await expect(publicPage).toHaveURL(/\/backoffice\?ui=v2&theme=dark$/);
+  await expect(publicPage.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
+  await expect(publicPage.getByText('Create new event')).toBeVisible();
+  await expect(
+    publicPage.getByRole('heading', { name: futureFixture.name }),
+  ).toBeVisible();
+  await publicPage.close();
+
+  for (const fixture of fixtures.slice(0, 2)) {
+    await createFixture(fixture);
+  }
+  const idempotentVisibility = await publicContext.request.post(
+    '/api/backoffice/event_visibility',
+    {
+      data: {
+        eventId: fixtures[0].eventId,
+        visibility: 'OFFLINE',
+      },
+    },
+  );
+  expect(idempotentVisibility.ok()).toBeTruthy();
+  expect((await idempotentVisibility.json()).visibility).toBe('OFFLINE');
 
   const acceptanceEventIds = fixtures
     .map((fixture) => fixture.eventId)
@@ -278,35 +312,6 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       ]),
     );
   }
-  const publicPage = await publicContext.newPage();
-  const publicEventsLoaded = publicPage.waitForResponse(
-    (response) => (
-      new URL(response.url()).pathname === '/api/event'
-      && response.request().method() === 'GET'
-    ),
-  );
-  await publicPage.goto('/?ui=v2&theme=dark', {
-    waitUntil: 'domcontentloaded',
-  });
-  await publicEventsLoaded;
-  for (const fixture of fixtures) {
-    await expect(
-      publicPage.getByRole('article', { name: fixture.name }),
-    ).toHaveCount(0);
-  }
-  const publicBackofficeLink = publicPage.getByTitle('Backoffice');
-  await expect(publicBackofficeLink).toBeVisible();
-  await expect(publicBackofficeLink).toContainText('Backoffice');
-  await publicBackofficeLink.click();
-  await expect(publicPage).toHaveURL(/\/backoffice\?ui=v2&theme=dark$/);
-  await expect(publicPage.getByRole('heading', { name: 'Backoffice' })).toBeVisible();
-  await expect(publicPage.getByText('Create new event')).toBeVisible();
-  for (const fixture of fixtures) {
-    await expect(
-      publicPage.getByRole('heading', { name: fixture.name }),
-    ).toBeVisible();
-  }
-  await publicPage.close();
 
   await page.goto(
     `/?ui=v2&theme=dark&acceptanceEventIds=${acceptanceEventIds}`,
@@ -344,7 +349,6 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     }
   }
 
-  const futureFixture = fixtures[2];
   const futureArticle = page.getByRole('article', { name: futureFixture.name });
   await expect(futureArticle.getByText('1X2', { exact: true })).toBeVisible();
   await expect(
@@ -355,6 +359,96 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const preMatchBoard = board(page, 'PRE_MATCH');
   await expect(preMatchBoard).toContainText(futureFixture.name);
   await page.getByLabel('Wager for PRE-MATCH SLIP').fill('10');
+
+  const liveBoard = board(page, 'LIVE');
+  for (const fixture of fixtures.slice(0, 2)) {
+    await selectLiveMarket({
+      fixture,
+      marketType: PRE_KICKOFF_PLACEMENT_MARKET_TYPE,
+      page,
+    });
+  }
+  await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
+    EXPECTED_PRE_KICKOFF_LIVE_ROWS,
+    { timeout: 15000 },
+  );
+  await expect(liveBoard).toContainText(fixtures[0].name);
+  await expect(liveBoard).toContainText(fixtures[1].name);
+  await expect(preMatchBoard).toContainText(futureFixture.name);
+
+  await expect.poll(async () => {
+    const events = await (
+      await page.request.get(`/api/event?${acceptanceQuery}`)
+    ).json();
+    return fixtures.slice(0, 2).every((fixture) => (
+      events.some((event) => (
+        event.eventId === fixture.eventId
+        && event.live?.phase === 'PRE_MATCH'
+      ))
+    ));
+  }, {
+    timeout: 10000,
+    intervals: [250, 500, 1000],
+  }).toBe(true);
+
+  const preKickoffSelectedBoards = await (
+    await page.request.get('/api/slip/boards')
+  ).json();
+  const preKickoffLiveSlipId = preKickoffSelectedBoards.LIVE._id;
+  expect(preKickoffSelectedBoards.LIVE.rows).toHaveLength(
+    EXPECTED_PRE_KICKOFF_LIVE_ROWS,
+  );
+  expect(
+    preKickoffSelectedBoards.LIVE.rows.every(
+      (row) => row.marketType === PRE_KICKOFF_PLACEMENT_MARKET_TYPE,
+    ),
+  ).toBe(true);
+
+  await page.getByLabel('Wager for LIVE SLIP').fill('5');
+  const preKickoffPlacementResponsePromise = page.waitForResponse((response) => (
+    new URL(response.url()).pathname === '/api/slip/bet'
+    && response.request().method() === 'POST'
+  ));
+  await liveBoard.getByRole('button', { name: 'BET!' }).click();
+  const preKickoffPlacementResponse = await preKickoffPlacementResponsePromise;
+  expect(preKickoffPlacementResponse.ok()).toBeTruthy();
+
+  await expect.poll(async () => {
+    const bets = await (await page.request.get('/api/bet')).json();
+    return findBySlipId(bets, preKickoffLiveSlipId)?.status;
+  }, {
+    timeout: 30000,
+    intervals: [500, 1000, 2000],
+  }).toMatch(/^(CONFIRMED|WIN|LOSS|VOID)$/);
+
+  const preKickoffPlacedBets = await (
+    await page.request.get('/api/bet')
+  ).json();
+  const preKickoffLiveBetAtPlacement = findBySlipId(
+    preKickoffPlacedBets,
+    preKickoffLiveSlipId,
+  );
+  expect(preKickoffLiveBetAtPlacement).toBeDefined();
+  expect(preKickoffLiveBetAtPlacement.status).not.toBe('DECLINED');
+  expect(preKickoffLiveBetAtPlacement.betKind).toBe('LIVE');
+  expect(preKickoffLiveBetAtPlacement.rows).toHaveLength(
+    EXPECTED_PRE_KICKOFF_LIVE_ROWS,
+  );
+  expect(
+    preKickoffLiveBetAtPlacement.rows
+      .map((row) => row.eventId)
+      .sort(),
+  ).toEqual(
+    fixtures.slice(0, 2).map((fixture) => fixture.eventId).sort(),
+  );
+  expect(
+    preKickoffLiveBetAtPlacement.rows.every(
+      (row) => row.marketType === PRE_KICKOFF_PLACEMENT_MARKET_TYPE,
+    ),
+  ).toBe(true);
+  await expect(liveBoard.locator('.slip-row-card')).toHaveCount(0, {
+    timeout: 30000,
+  });
 
   await expect(page.getByRole('heading', { name: 'Live now' })).toBeVisible({
     timeout: 100000,
@@ -386,13 +480,11 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     articleLabels.indexOf(futureFixture.name),
   );
 
-  for (const fixture of fixtures.slice(0, 2)) {
-    await selectLiveMarket({
-      fixture,
-      marketType: SETTLEMENT_MARKET_TYPE,
-      page,
-    });
-  }
+  await selectLiveMarket({
+    fixture: fixtures[0],
+    marketType: SETTLEMENT_MARKET_TYPE,
+    page,
+  });
 
   const selectedBoards = await (
     await page.request.get('/api/slip/boards')
@@ -401,19 +493,11 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     EXPECTED_LIVE_SETTLEMENT_ROWS,
   );
 
-  // A confirmed duplicate selection schedules a refresh after both rows exist.
-  await selectLiveMarket({
-    fixture: fixtures[1],
-    marketType: SETTLEMENT_MARKET_TYPE,
-    page,
-  });
-  const liveBoard = board(page, 'LIVE');
   await expect(liveBoard.locator('.slip-row-card')).toHaveCount(
     EXPECTED_LIVE_SETTLEMENT_ROWS,
     { timeout: 15000 },
   );
   await expect(liveBoard).toContainText(fixtures[0].name);
-  await expect(liveBoard).toContainText(fixtures[1].name);
   await expect(preMatchBoard).toContainText(futureFixture.name);
 
   await liveBoard.getByRole('button', { name: 'CLEAN' }).click();
@@ -422,22 +506,15 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   let liveSlipId;
   let acceptedLiveBet;
 
+  // A single moving event clock keeps this in-play acceptance deterministic.
+  // The separate pre-kickoff placement above covers the multi-event slip.
   for (
     let placementAttempt = 1;
     placementAttempt <= MAX_LIVE_PLACEMENT_ATTEMPTS;
     placementAttempt += 1
   ) {
-    for (const fixture of fixtures.slice(0, 2)) {
-      await selectLiveMarket({
-        fixture,
-        marketType: SETTLEMENT_MARKET_TYPE,
-        page,
-      });
-    }
-
-    // Reselect the last row so the UI refresh follows both confirmed writes.
     await selectLiveMarket({
-      fixture: fixtures[1],
+      fixture: fixtures[0],
       marketType: SETTLEMENT_MARKET_TYPE,
       page,
     });
@@ -682,7 +759,31 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   );
 
   const settledBets = await (await page.request.get('/api/bet')).json();
+  const preKickoffLiveBet = findBySlipId(
+    settledBets,
+    preKickoffLiveSlipId,
+  );
+  expect(preKickoffLiveBet).toBeDefined();
+  expect(TERMINAL_BET_STATUSES).toContain(preKickoffLiveBet.status);
+  expect(preKickoffLiveBet.betKind).toBe('LIVE');
+  expect(preKickoffLiveBet.rows).toHaveLength(
+    EXPECTED_PRE_KICKOFF_LIVE_ROWS,
+  );
+  expect(
+    preKickoffLiveBet.rows.map((row) => row.eventId).sort(),
+  ).toEqual(
+    fixtures.slice(0, 2).map((fixture) => fixture.eventId).sort(),
+  );
+  expect(
+    preKickoffLiveBet.rows.every((row) => (
+      row.betKind === 'LIVE'
+      && row.marketType === PRE_KICKOFF_PLACEMENT_MARKET_TYPE
+      && row.status !== 'NOT_SETTLED'
+    )),
+  ).toBe(true);
+
   const liveBet = findBySlipId(settledBets, liveSlipId);
+  expect(liveBet).toBeDefined();
   expect(TERMINAL_BET_STATUSES).toContain(liveBet.status);
   expect(liveBet.betKind).toBe('LIVE');
   expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);
@@ -723,11 +824,19 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   }).toBe('WIN');
 
   await page.getByTitle('My bets').click();
-  const liveHistory = page.locator('.my-bets-card').filter({
-    hasText: fixtures[0].name,
-  });
-  await expect(liveHistory).toContainText('Live');
-  await expect(liveHistory).toContainText(liveBet.status);
+  const preKickoffLiveHistory = page.locator('.my-bets-card')
+    .filter({ hasText: `Slip ${preKickoffLiveSlipId}` });
+  await expect(preKickoffLiveHistory).toContainText('Live');
+  await expect(preKickoffLiveHistory).toContainText('Kickoff Team');
+  await expect(preKickoffLiveHistory).toContainText(fixtures[0].name);
+  await expect(preKickoffLiveHistory).toContainText(fixtures[1].name);
+  await expect(preKickoffLiveHistory).toContainText(preKickoffLiveBet.status);
+  const inPlayLiveHistory = page.locator('.my-bets-card')
+    .filter({ hasText: `Slip ${liveSlipId}` });
+  await expect(inPlayLiveHistory).toContainText('Live');
+  await expect(inPlayLiveHistory).toContainText('Second Half Score');
+  await expect(inPlayLiveHistory).toContainText(fixtures[0].name);
+  await expect(inPlayLiveHistory).toContainText(liveBet.status);
   const preMatchHistory = page.locator('.my-bets-card').filter({
     hasText: futureFixture.name,
   });
@@ -743,6 +852,13 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   fs.writeFileSync(evidenceFile, `${JSON.stringify({
     runId,
     events: eventEvidence,
+    preKickoffLiveSlipId,
+    preKickoffLiveBetStatus: preKickoffLiveBet.status,
+    preKickoffLiveRows: preKickoffLiveBet.rows.map((row) => ({
+      eventId: row.eventId,
+      marketType: row.marketType,
+      status: row.status,
+    })),
     liveSlipId,
     declinedLiveSlipIds,
     liveBetStatus: liveBet.status,

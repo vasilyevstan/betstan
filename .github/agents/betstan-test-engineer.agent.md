@@ -99,6 +99,11 @@ only one market.
 Keep browser API fixtures faithful to concurrency contracts: include and
 rotate board revisions/fingerprints, reject mismatched placement
 confirmations, and require stale-quote reselection before resubmission.
+Accelerated production acceptance must not require simultaneous fresh quotes
+from independent event clocks. Prove multi-event live placement with stable
+pre-kickoff quotes and prove moving in-play placement separately against one
+event clock, while retaining bounded stale-quote decline and restored-draft
+coverage.
 
 For rotating live-market changes, prove the maximum actionable count at every
 transition, deterministic slot replacement and version increments, settlement
