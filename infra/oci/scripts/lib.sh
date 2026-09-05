@@ -180,7 +180,17 @@ for name in names:
         value,
     )
     value = re.sub(
-        rf"(?im)({escaped}\s*[:=]\s*)[^\s\r\n\"]+",
+        rf"(?im)({escaped}\s*[:=]\s*)\"(?:[^\"\\]|\\.)*\"",
+        lambda match: match.group(1) + "\"[REDACTED]\"",
+        value,
+    )
+    value = re.sub(
+        rf"(?im)({escaped}\s*[:=]\s*)\x27(?:[^\x27\\]|\\.)*\x27",
+        lambda match: match.group(1) + chr(39) + "[REDACTED]" + chr(39),
+        value,
+    )
+    value = re.sub(
+        rf"(?im)({escaped}\s*[:=]\s*)[^\s\r\n\"\x27]+",
         lambda match: match.group(1) + "[REDACTED]",
         value,
     )

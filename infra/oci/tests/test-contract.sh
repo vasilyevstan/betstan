@@ -797,6 +797,19 @@ jq -e '
   fail "OCI Mongo redaction left a trailing private-host delimiter"
 [[ "$mongo_host_json" != *"host-secret"* ]] ||
   fail "OCI Mongo host-only redaction leaked fixture credentials"
+quoted_assignments="$(
+  printf '%s\n' \
+    'token="quoted-token-secret"' \
+    "password='quoted-password-secret'" |
+    oci_redact
+)"
+for secret in quoted-token-secret quoted-password-secret; do
+  [[ "$quoted_assignments" != *"$secret"* ]] ||
+    fail "OCI quoted assignment redaction leaked fixture secret: $secret"
+done
+[[ "$quoted_assignments" == *'token="[REDACTED]"'* ]] &&
+  [[ "$quoted_assignments" == *"password='[REDACTED]'"* ]] ||
+  fail "OCI quoted assignment redaction did not preserve delimiters"
 
 ruby -ryaml - "$ROOT_DIR" <<'RUBY'
 root = ARGV.fetch(0)
