@@ -46,8 +46,12 @@ Inspect current remote state rather than relying on a prior conversation:
    required feature/fix commit is an ancestor of the exact current `master`.
    Allow additional protected commits and require validation of the complete
    aggregate candidate rather than a session-exclusive tree.
-10. Require a short, meaningful, plain-language PR title that describes the
+10. Confirm implementation, promotion, and ancestry-sync PRs carry the
+    declared public-safe `session:` and `feature:` labels. Report missing or
+    inconsistent context labels as traceability metadata only; never use them
+    to grant or deny branch, approval, merge, release, or rollback authority.
+11. Require a short, meaningful, plain-language PR title that describes the
     outcome; reject ambiguous bucket labels such as `chore`, `misc`, or `wip`.
-11. After a squash promotion, confirm `master` is an ancestor of `dev`.
+12. After a squash promotion, confirm `master` is an ancestor of `dev`.
 
 Lead with `BRANCH_POLICY_GO` or `BRANCH_POLICY_NO_GO`, followed by concrete evidence and the safest next action.

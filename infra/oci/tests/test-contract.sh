@@ -1276,9 +1276,36 @@ authority_helper="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 pr_merge_safety="$ROOT_DIR/infra/azure/agents/pr-merge-safety-stan.sh"
 cli_dispatcher="$ROOT_DIR/infra/azure/agents/copilot-cli-dispatch-stan.sh"
 run_approver="$ROOT_DIR/infra/azure/agents/copilot-cli-run-approval-stan.sh"
+pr_context_labels="$ROOT_DIR/infra/azure/agents/pr-context-labels-stan.sh"
+pr_context_labels_test="$ROOT_DIR/infra/azure/agents/test-pr-context-labels-stan.sh"
+pr_policy="$ROOT_DIR/.github/scripts/publish-pr-policy.js"
+pr_policy_test="$ROOT_DIR/.github/scripts/test-publish-pr-policy.js"
 pr_template="$ROOT_DIR/.github/pull_request_template.md"
 azure_deploy_workflow="$ROOT_DIR/.github/workflows/production-deploy.yml"
 oci_live_readiness="$OCI_DIR/agents/live-betting-readiness-stan.sh"
+
+[[ -x "$pr_context_labels" ]] ||
+  fail "PR context-label helper is missing or not executable"
+bash -n "$pr_context_labels" "$pr_context_labels_test"
+"$pr_context_labels_test" >/dev/null
+grep -Fq 'INFORMATIONAL_CONTEXT_LABEL_PATTERN' "$pr_policy" &&
+  grep -Fq 'policyLabels(labels)' "$pr_policy" &&
+  grep -Fq '!INFORMATIONAL_CONTEXT_LABEL_PATTERN.test(label)' "$pr_policy" ||
+  fail "trusted PR policy does not isolate informational context labels"
+grep -Fq 'feature:live-betting' "$pr_policy_test" &&
+  grep -Fq 'session:live-betting-2026-09-04' "$pr_policy_test" ||
+  fail "trusted PR policy lacks context-label regression coverage"
+grep -Fq 'PR_CONTEXT_LABELS_STRICT:-false' "$pr_context_labels" ||
+  fail "PR context labels can block normal PR flow by default"
+if grep -Fq -- '--remove-label' "$pr_context_labels"; then
+  fail "PR context-label helper can remove existing labels"
+fi
+grep -Fq 'Session label(s)' "$pr_template" &&
+  grep -Fq 'Feature label(s)' "$pr_template" ||
+  fail "PR template omits session and feature traceability"
+grep -Fq 'These labels are discoverability metadata only' \
+    "$ROOT_DIR/CONTRIBUTING.md" ||
+  fail "contribution policy can treat PR context labels as authority"
 
 deployment_safety_agent_flat="$(tr '\n' ' ' <"$deployment_safety_agent")"
 grep -Fq 'image-only rollback reuses the current Deployment manifest' \

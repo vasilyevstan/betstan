@@ -8,6 +8,16 @@ when they do not apply.
 
 <!-- State the user requirement, defect, incident, or operational need. -->
 
+## Development context
+
+<!--
+Use public-safe GitHub labels, never a private session UUID or local path.
+Aggregate PRs may list more than one value.
+-->
+
+- Session label(s), for example `session:live-betting-2026-09-04`:
+- Feature label(s), for example `feature:live-betting`:
+
 ## Exact source and ancestry
 
 - Base branch/SHA:

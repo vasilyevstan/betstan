@@ -57,6 +57,10 @@ inactive. Fail closed when either query is incomplete or fails.
   feature/fix commit, prove it is an ancestor of the exact current `master`,
   and validate the complete aggregate candidate. Extra protected commits are
   not a blocker and must not be removed to recreate a session-exclusive tree.
+- Preserve every session's public-safe `session:` and `feature:` PR labels
+  across implementation, promotion, and ancestry synchronization. They are
+  informational traceability only: never treat them as source, ancestry,
+  approval, workflow, deployment, activation, or rollback authority.
 - If `master` advances after an older candidate was selected, do not deploy the
   stale SHA. Mark that chain superseded and adopt the new exact current-master
   candidate when it still contains every required commit, then obtain fresh
