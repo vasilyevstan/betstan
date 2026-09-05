@@ -217,6 +217,10 @@ accepted by the next owner.
   underlying agent, process, run jobs, or external dependency directly; never
   assume that a dead watcher means the underlying work stopped, or that a
   live watcher means it progressed.
+- A recovered endpoint does not close an unexplained runtime outage. Preserve
+  the safe feature fence, record the per-container termination evidence, and
+  route bounded probe or diagnostic hardening before authorizing the next
+  deployment or activation.
 - Return the updated private registry after every state transition so another
   conductor turn can resume without relying on conversational memory.
 - A terminal unit without a confirmed downstream handoff is a stall. Unblock

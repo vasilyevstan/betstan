@@ -155,7 +155,13 @@ value = re.sub(
     "[REDACTED_EMAIL]",
     value,
 )
-value = re.sub(r"mongodb(?:\+srv)?://[^\s]+", "mongodb://[REDACTED]", value)
+value = re.sub(
+    r"mongodb(?:\+srv)?://[^\s\"\x27<>]+",
+    lambda match: "mongodb://[REDACTED]" + (
+        match.group(0)[len(match.group(0).rstrip(",;)}]")):]
+    ),
+    value,
+)
 value = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*", r"\1 [REDACTED]", value)
 names = [
     "Author" + "ization",
@@ -167,9 +173,15 @@ names = [
     "cookie",
 ]
 for name in names:
+    escaped = re.escape(name)
     value = re.sub(
-        rf"(?im)({re.escape(name)}\s*[:=]\s*)[^\s\r\n]+",
-        rf"\1[REDACTED]",
+        rf"(?i)(\"{escaped}\"\s*:\s*)\"(?:[^\"\\]|\\.)*\"",
+        lambda match: match.group(1) + "\"[REDACTED]\"",
+        value,
+    )
+    value = re.sub(
+        rf"(?im)({escaped}\s*[:=]\s*)[^\s\r\n\"]+",
+        lambda match: match.group(1) + "[REDACTED]",
         value,
     )
 sys.stdout.write(value)

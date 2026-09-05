@@ -184,6 +184,14 @@ Long-running output or a queued workflow can hide a waiting approval, missing
 job, or completed handoff. Orchestration should inspect the underlying state
 at bounded checkpoints and assign the next action immediately.
 
+### Recovery is not diagnosis
+
+A service returning `200` again proves current availability, not why it
+failed. Keep risky feature activation fenced until container-level previous
+state, exit code, reason, timestamps, and bounded previous logs are captured.
+Separate startup allowance from steady-state liveness so a dead listener is
+restarted promptly without penalizing normal boot time.
+
 ### Correct false safety blocks without weakening safety
 
 When a repository rule itself causes a proven false block, fix that exact rule

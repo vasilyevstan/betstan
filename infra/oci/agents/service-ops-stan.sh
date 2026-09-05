@@ -35,6 +35,8 @@ else
     oci_die "diagnostics refuse a non-Bastion k3s context"
 fi
 
+pods_json="$(kubectl get pods -n "$NAMESPACE" -o json)"
+
 {
   echo "=== workload readiness ==="
   kubectl get deployments,statefulsets -n "$NAMESPACE" -o json |
@@ -43,16 +45,38 @@ fi
       (.status.availableReplicas // .status.readyReplicas // 0)
     ] | @tsv'
 
-  echo "=== pod status ==="
-  kubectl get pods -n "$NAMESPACE" -o json |
-    jq -r '.items[] | [
-      .metadata.name,
-      .status.phase,
-      ([.status.containerStatuses[]?.restartCount] | add // 0),
-      ([.status.containerStatuses[]?.state.waiting.reason,
-        .status.containerStatuses[]?.lastState.terminated.reason]
-        | map(select(. != null)) | join(","))
-    ] | @tsv'
+  echo "=== per-container status ==="
+  printf '%s\n' \
+    $'pod\tcontainer\tphase\tready\trestarts\tcurrent_state\tcurrent_reason\tcurrent_exit_code\tcurrent_started_at\tcurrent_finished_at\tlast_state\tlast_reason\tlast_exit_code\tlast_started_at\tlast_finished_at'
+  jq -r '
+    def state_fields:
+      if .running then
+        ["running", "", "", (.running.startedAt // ""), ""]
+      elif .waiting then
+        ["waiting", (.waiting.reason // ""), "", "", ""]
+      elif .terminated then
+        [
+          "terminated",
+          (.terminated.reason // ""),
+          ((.terminated.exitCode // "") | tostring),
+          (.terminated.startedAt // ""),
+          (.terminated.finishedAt // "")
+        ]
+      else
+        ["none", "", "", "", ""]
+      end;
+    .items[] as $pod |
+    $pod.status.containerStatuses[]? as $container |
+    ($container.state | state_fields) as $current |
+    ($container.lastState | state_fields) as $last |
+    [
+      $pod.metadata.name,
+      $container.name,
+      $pod.status.phase,
+      ($container.ready // false),
+      ($container.restartCount // 0)
+    ] + $current + $last | @tsv
+  ' <<<"$pods_json"
 
   echo "=== service endpoint readiness ==="
   kubectl get endpointslices.discovery.k8s.io -n "$NAMESPACE" -o json |
@@ -82,5 +106,36 @@ fi
       printf '%s\n' "$errors" |
         sed -E 's/(error|exception|failed|panic|fatal|oom).*/\1 [REDACTED_DETAIL]/Ig'
     fi
-  done < <(kubectl get pods -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+  done < <(jq -r '.items[].metadata.name' <<<"$pods_json")
+
+  echo "=== redacted previous-container error logs ==="
+  while IFS=$'\t' read -r pod container restart_count; do
+    [[ "$restart_count" =~ ^[0-9]+$ ]] && ((restart_count > 0)) || continue
+    printf 'previous\t%s\t%s\t%s\n' \
+      "$pod" "$container" "$restart_count"
+    if previous_logs="$(
+      kubectl logs -n "$NAMESPACE" "$pod" -c "$container" --previous \
+        --tail=200 --timestamps=true 2>/dev/null
+    )"; then
+      errors="$(
+        printf '%s\n' "$previous_logs" |
+          grep -Ei 'error|exception|failed|panic|fatal|oom' |
+          tail -n 40 || true
+      )"
+      if [[ -n "$errors" ]]; then
+        printf '%s\n' "$errors" |
+          sed -E 's/(error|exception|failed|panic|fatal|oom).*/\1 [REDACTED_DETAIL]/Ig'
+      else
+        echo "previous_logs=no_matching_error_lines"
+      fi
+    else
+      echo "previous_logs=unavailable"
+    fi
+  done < <(
+    jq -r '
+      .items[] as $pod |
+      $pod.status.containerStatuses[]? |
+      [$pod.metadata.name, .name, (.restartCount // 0)] | @tsv
+    ' <<<"$pods_json"
+  )
 } | oci_redact
