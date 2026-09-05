@@ -186,7 +186,8 @@ for lesson in \
     "Never return a blind \`NO_GO\`" \
     "A workflow-dispatch URL is not job materialization" \
     "\`pull_request.edited\`" \
-    "A late advisory verdict is stale until revalidated"; do
+    "A late advisory verdict is stale until revalidated" \
+    "A Ready pod or recovered \`200\` response is current-health evidence"; do
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
@@ -198,6 +199,13 @@ for agent in \
     [[ -f "$agent_file" ]] || fail "required recovery agent is missing: $agent"
     grep -Fq "infra/oci/LESSONS_LEARNED.md" "$agent_file" ||
       fail "recovery agent does not read OCI lessons: $agent"
+done
+for agent in betstan-oci-health-reviewer betstan-oci-operator; do
+  agent_file="$ROOT_DIR/.github/agents/${agent}.agent.md"
+  [[ -f "$agent_file" ]] || fail "required runtime agent is missing: $agent"
+  grep -Fq 'restartCount > 0' "$agent_file" &&
+    grep -Fq 'termination reason, exit code' "$agent_file" ||
+    fail "runtime agent omits restart-bound termination evidence: $agent"
 done
 conductor_agent="$ROOT_DIR/.github/agents/betstan-conductor.agent.md"
 agent_readme="$ROOT_DIR/.github/agents/README.md"
@@ -220,6 +228,7 @@ for conductor_contract in \
     'critical-path scope freeze' \
     'Treat a pull request metadata edit as workflow-producing' \
     'Revalidate every late specialist result' \
+    'A recovered endpoint does not close an unexplained runtime outage' \
     'A workflow dispatch URL is not job materialization' \
     'A jobless queued dispatch with zero jobs and zero pending approvals' \
     'zero completed turns after its first-response deadline' \
@@ -761,6 +770,69 @@ header_value="header-fixture-value"
 header_redacted="$(printf '%s: %s\n' "$header_key" "$header_value" | oci_redact)"
 [[ "$header_redacted" != *"$header_value"* ]] ||
   fail "OCI redaction leaked a constructed header value"
+mongo_json_input='{"uri":"mongodb://user:fixture-secret@mongo.internal:27017/event?replicaSet=rs0","status":"failed","token":"json-secret","nested":{"ok":false}}'
+mongo_json="$(printf '%s\n' "$mongo_json_input" | oci_redact)"
+jq -e '
+  .uri == "mongodb://[REDACTED]" and
+  .status == "failed" and
+  .token == "[REDACTED]" and
+  .nested.ok == false
+' <<<"$mongo_json" >/dev/null ||
+  fail "OCI Mongo redaction no longer preserves parseable structured JSON"
+for secret in fixture-secret json-secret; do
+  [[ "$mongo_json" != *"$secret"* ]] ||
+    fail "OCI structured redaction leaked fixture secret: $secret"
+done
+[[ "$(tr -cd '"' <<<"$mongo_json_input" | wc -c | tr -d ' ')" == \
+   "$(tr -cd '"' <<<"$mongo_json" | wc -c | tr -d ' ')" ]] ||
+  fail "OCI structured redaction changed JSON quote boundaries"
+mongo_host_json="$(
+  printf '%s\n' \
+    '{"uri":"mongodb://user:host-secret@mongo.internal","status":"failed"}' |
+    oci_redact
+)"
+jq -e '
+  .uri == "mongodb://[REDACTED]" and .status == "failed"
+' <<<"$mongo_host_json" >/dev/null ||
+  fail "OCI Mongo redaction left a trailing private-host delimiter"
+[[ "$mongo_host_json" != *"host-secret"* ]] ||
+  fail "OCI Mongo host-only redaction leaked fixture credentials"
+quoted_assignments="$(
+  printf '%s\n' \
+    'token="quoted-token-secret"' \
+    "password='quoted-password-secret'" |
+    oci_redact
+)"
+for secret in quoted-token-secret quoted-password-secret; do
+  [[ "$quoted_assignments" != *"$secret"* ]] ||
+    fail "OCI quoted assignment redaction leaked fixture secret: $secret"
+done
+[[ "$quoted_assignments" == *'token="[REDACTED]"'* ]] &&
+  [[ "$quoted_assignments" == *"password='[REDACTED]'"* ]] ||
+  fail "OCI quoted assignment redaction did not preserve delimiters"
+malformed_assignments="$(
+  printf '%s\n' \
+    'token="unterminated-double-secret' \
+    "password='unterminated-single-secret" \
+    '{"secret":"unterminated-json-secret' \
+    '{"token":"first-malformed-secret,"password":"second-malformed-secret"}' \
+    'safe-tail' |
+    oci_redact
+)"
+for secret in \
+    unterminated-double-secret \
+    unterminated-single-secret \
+    unterminated-json-secret \
+    first-malformed-secret \
+    second-malformed-secret; do
+  [[ "$malformed_assignments" != *"$secret"* ]] ||
+    fail "OCI malformed assignment redaction leaked fixture secret: $secret"
+done
+[[ "$malformed_assignments" == *'token="[REDACTED]"'* ]] &&
+  [[ "$malformed_assignments" == *"password='[REDACTED]'"* ]] &&
+  [[ "$malformed_assignments" == *'"secret":"[REDACTED]"'* ]] &&
+  [[ "$malformed_assignments" == *"safe-tail"* ]] ||
+  fail "OCI malformed assignment redaction crossed line boundaries"
 
 ruby -ryaml - "$ROOT_DIR" <<'RUBY'
 root = ARGV.fetch(0)
@@ -903,10 +975,32 @@ abort "expected canonical and diagnostic certificates" unless by_kind.fetch("Cer
 event = by_kind.fetch("Deployment").find {
   |deployment| deployment.dig("metadata", "name") == "gaming-event-depl"
 }
-event_env = event.dig("spec", "template", "spec", "containers", 0, "env").to_h {
+event_container = event.dig("spec", "template", "spec", "containers", 0)
+event_env = event_container.fetch("env").to_h {
   |entry| [entry.fetch("name"), entry["value"]]
 }
 abort "event SSE connection cap differs" unless event_env["EVENT_PUBLIC_SSE_MAX_CONNECTIONS"] == "250"
+startup_probe = event_container.fetch("startupProbe")
+readiness_probe = event_container.fetch("readinessProbe")
+liveness_probe = event_container.fetch("livenessProbe")
+probes = [startup_probe, readiness_probe, liveness_probe]
+abort "event probes must remain TCP-only" unless probes.all? {
+  |probe| probe.dig("tcpSocket", "port") == 3000 &&
+    !probe.key?("exec") && !probe.key?("httpGet")
+}
+startup_budget = startup_probe["periodSeconds"] * startup_probe["failureThreshold"]
+abort "event startup probe is outside the bounded rollout budget" unless
+  startup_probe["initialDelaySeconds"] == 5 &&
+    startup_probe["timeoutSeconds"] == 2 &&
+    startup_budget >= 120 && startup_budget <= 600
+readiness_budget = readiness_probe["periodSeconds"] * readiness_probe["failureThreshold"]
+abort "event readiness probe is too slow" unless
+  readiness_probe["timeoutSeconds"] == 2 && readiness_budget <= 15
+liveness_budget = liveness_probe["periodSeconds"] * liveness_probe["failureThreshold"]
+abort "event liveness no longer detects refusal within about one minute" unless
+  liveness_probe["timeoutSeconds"] == 3 && liveness_budget <= 60
+abort "event termination grace must remain explicit" unless
+  event.dig("spec", "template", "spec", "terminationGracePeriodSeconds") == 30
 ingress_hosts = by_kind.fetch("Ingress").flat_map {
   |ingress| ingress.fetch("spec").fetch("rules").map { |rule| rule.fetch("host") }
 }.sort
@@ -2060,6 +2154,8 @@ grep -Fq -- '--user' "$cli_installer" ||
   fail "OCI CLI installer no longer targets the isolated runner home"
 grep -Fq '"$TESTS_DIR/test-install-cli-stan.sh"' "$OCI_DIR/tests/run-contracts.sh" ||
   fail "OCI CLI installer tests are not part of the complete contract entrypoint"
+grep -Fq '"$TESTS_DIR/test-service-ops-stan.sh"' "$OCI_DIR/tests/run-contracts.sh" ||
+  fail "OCI service diagnostics tests are not part of the complete contract entrypoint"
 ! grep -R --include='*.sh' -F -- '--network-security-group-id' "$OCI_DIR/scripts" >/dev/null ||
   fail "OCI scripts use the unsupported NSG rule argument --network-security-group-id"
 grep -Fq -- '--nsg-id "$nsg_id"' "$OCI_DIR/scripts/provision.sh" ||
@@ -2508,6 +2604,7 @@ validate_production_build_deployment_safety_contract \
   "$ROOT_DIR/.github/workflows/production-build.yml"
 
 if [[ "${BETSTAN_CONTRACT_ORCHESTRATED:-0}" != "1" ]]; then
+  "$OCI_DIR/tests/test-service-ops-stan.sh"
   "$OCI_DIR/tests/test-migration-success-contract.sh"
   "$OCI_DIR/tests/test-capacity-contract.sh"
   "$OCI_DIR/tests/test-image-reuse-contract.sh"

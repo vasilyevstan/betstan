@@ -155,7 +155,13 @@ value = re.sub(
     "[REDACTED_EMAIL]",
     value,
 )
-value = re.sub(r"mongodb(?:\+srv)?://[^\s]+", "mongodb://[REDACTED]", value)
+value = re.sub(
+    r"mongodb(?:\+srv)?://[^\s\"\x27<>]+",
+    lambda match: "mongodb://[REDACTED]" + (
+        match.group(0)[len(match.group(0).rstrip(",;)}")):]
+    ),
+    value,
+)
 value = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*", r"\1 [REDACTED]", value)
 names = [
     "Author" + "ization",
@@ -167,9 +173,37 @@ names = [
     "cookie",
 ]
 for name in names:
+    escaped = re.escape(name)
+    json_pattern = (
+        r"(?im)(\"" + escaped + r"\"\s*:\s*)"
+        r"(?:\"(?:[^\"\\\r\n]|\\.)*\"(?=\s*(?:[,}\]]|$))|\"[^\r\n]*$)"
+    )
     value = re.sub(
-        rf"(?im)({re.escape(name)}\s*[:=]\s*)[^\s\r\n]+",
-        rf"\1[REDACTED]",
+        json_pattern,
+        lambda match: match.group(1) + "\"[REDACTED]\"",
+        value,
+    )
+    double_quoted_pattern = (
+        r"(?im)(" + escaped + r"\s*[:=]\s*)"
+        r"(?:\"(?:[^\"\\\r\n]|\\.)*\"(?=\s*(?:[,;]|$))|\"[^\r\n]*$)"
+    )
+    value = re.sub(
+        double_quoted_pattern,
+        lambda match: match.group(1) + "\"[REDACTED]\"",
+        value,
+    )
+    single_quoted_pattern = (
+        r"(?im)(" + escaped + r"\s*[:=]\s*)"
+        r"(?:\x27(?:[^\x27\\\r\n]|\\.)*\x27(?=\s*(?:[,;]|$))|\x27[^\r\n]*$)"
+    )
+    value = re.sub(
+        single_quoted_pattern,
+        lambda match: match.group(1) + chr(39) + "[REDACTED]" + chr(39),
+        value,
+    )
+    value = re.sub(
+        rf"(?im)({escaped}\s*[:=]\s*)[^\s\r\n\"\x27]+",
+        lambda match: match.group(1) + "[REDACTED]",
         value,
     )
 sys.stdout.write(value)

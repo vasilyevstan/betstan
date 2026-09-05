@@ -69,6 +69,12 @@ Diagnostics must remain sanitized and may contain only workload status,
 events, restart reasons, metrics, certificate/endpoint state, queue counts,
 and redacted error lines.
 
+For every restarted container, require its current and previous state,
+termination reason, exit code, and start/finish timestamps. Read bounded
+`kubectl logs --previous` output only when `restartCount > 0`, report
+unavailable previous logs explicitly, and never treat aggregate pod readiness
+or a recovered HTTP response as a complete explanation of the outage.
+
 ## Decision
 
 Return exactly one:

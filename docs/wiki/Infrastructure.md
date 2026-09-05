@@ -127,9 +127,19 @@ Deployment health is broader than "pods are running." The release checks:
 - data-operation locks and maintenance fences;
 - browser acceptance and service logs.
 
-The HTTP services expose Kubernetes readiness/liveness checks. Headless
-workers are validated through process health, broker connectivity, queue
-consumption, workflow evidence, and end-to-end outcomes.
+The HTTP services expose Kubernetes readiness/liveness checks. Event also has
+a bounded five-minute TCP startup budget; after startup, readiness checks run
+every five seconds and sustained refusal is restarted in approximately one
+minute rather than waiting through a long initial liveness delay. Headless workers are
+validated through process health, broker connectivity, queue consumption,
+workflow evidence, and end-to-end outcomes.
+
+Runtime diagnostics report each container independently, including restart
+count, current and previous state, termination reason, exit code, and
+start/finish timestamps. Previous-container logs are requested only when a
+restart proves that they may exist, are bounded and redacted, and report
+unavailability explicitly. A recovered endpoint or Ready pod does not by
+itself explain a prior outage.
 
 ## Environment structure
 

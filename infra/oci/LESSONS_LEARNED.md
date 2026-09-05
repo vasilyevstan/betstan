@@ -4,6 +4,27 @@ These rules summarize proven BetStan OCI failure modes. Re-read live provider,
 GitHub, DNS, and Kubernetes state before applying them; old run IDs and
 conversation summaries are not authority.
 
+## Diagnose recovered service outages
+
+- Separate bounded startup allowance from steady-state liveness. Event may
+  take up to five minutes to open its TCP listener during startup, but after it
+  has started, three failed twenty-second TCP probes should replace a non-serving
+  container in approximately one minute.
+- A Ready pod or recovered `200` response is current-health evidence, not root
+  cause. Preserve each container's restart count, current and previous state,
+  termination reason, exit code, and start/finish timestamps.
+- Request bounded `kubectl logs --previous` output only when the matching
+  container has a positive restart count. Report unavailable previous logs
+  explicitly and never substitute current logs as if they described the
+  terminated process.
+- Redaction is part of evidence integrity. Secret removal must preserve JSON
+  delimiters and parseability so sanitized Kubernetes evidence can still be
+  inspected mechanically.
+- Keep backend process-supervision changes fleet-consistent. The Event probe
+  correction deliberately does not change the shared
+  `npm -> ts-node-dev -> node` entrypoint; replace that chain for all backend
+  services in a separate image and rollout review.
+
 ## GHCR migration after OCIR deletion
 
 - OCIR absence is not rollback capacity. A running k3s pod can survive only
