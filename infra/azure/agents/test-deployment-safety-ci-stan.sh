@@ -20,6 +20,9 @@ test_output="$(mktemp)"
 secret_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-secret-scan.XXXXXX")"
 permission_fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-status-writers.XXXXXX")"
 secret_guard="$secret_fixture_dir/ingress-guard"
+node_runtime_fixture_dir="$permission_fixture_dir/node-runtime"
+node_poison_dir="$node_runtime_fixture_dir/poison"
+node_invocation_sentinel="$node_runtime_fixture_dir/node-invoked"
 cleanup() {
   rm -f "$test_output"
   rm -f "$secret_fixture_dir/safe.yml" "$secret_fixture_dir/unsafe.yml" "$secret_guard"
@@ -27,6 +30,55 @@ cleanup() {
   rm -rf "$permission_fixture_dir"
 }
 trap cleanup EXIT
+
+write_node_poison_shim() {
+  mkdir -p "$node_poison_dir"
+  cat >"$node_poison_dir/node" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: >"${BETSTAN_NODE_INVOCATION_SENTINEL:?}"
+exit 97
+SH
+  chmod +x "$node_poison_dir/node"
+}
+
+run_workflow_trigger_guard_without_node() {
+  local guard="${1:-$WORKFLOW_TRIGGER_GUARD}"
+  PATH="$node_poison_dir:$PATH" \
+    BETSTAN_NODE_INVOCATION_SENTINEL="$node_invocation_sentinel" \
+    "$guard"
+}
+
+assert_node_not_invoked() {
+  if [[ -e "$node_invocation_sentinel" ]]; then
+    echo "ERROR: inert coverage guard invoked Node before activation" >&2
+    exit 1
+  fi
+}
+
+write_node_poison_shim
+masked_node_guard="$node_runtime_fixture_dir/masked-node-guard"
+cat >"$masked_node_guard" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+node --version >/dev/null 2>&1 || true
+echo "expected negative guard failure" >&2
+exit 1
+SH
+chmod +x "$masked_node_guard"
+if (
+  rm -f "$node_invocation_sentinel"
+  if run_workflow_trigger_guard_without_node "$masked_node_guard"; then
+    exit 1
+  fi
+  assert_node_not_invoked
+) >"$test_output" 2>&1; then
+  echo "ERROR: Node poison harness accepted a masked Node invocation" >&2
+  exit 1
+fi
+grep -qF "expected negative guard failure" "$test_output"
+test -e "$node_invocation_sentinel"
+rm -f "$node_invocation_sentinel"
 
 assert_secret_fixture_rejected() {
   local label="$1"
@@ -130,7 +182,9 @@ rm -f "$secret_fixture_dir/unsafe.yml"
 
 cp "$ROOT_DIR"/.github/workflows/*.yml "$permission_fixture_dir/"
 WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
-  "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1
+  run_workflow_trigger_guard_without_node >"$test_output" 2>&1
+assert_node_not_invoked
+
 cat >"$permission_fixture_dir/rogue-status-writer.yml" <<'YAML'
 name: rogue-status-writer
 on: workflow_dispatch
@@ -143,12 +197,13 @@ jobs:
       - run: echo unsafe
 YAML
 if WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
-    "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1; then
+    run_workflow_trigger_guard_without_node >"$test_output" 2>&1; then
   echo "ERROR: secondary statuses:write workflow unexpectedly passed" >&2
   exit 1
 fi
 grep -qF "branch-policy.yml must be the sole explicit statuses:write workflow" \
   "$test_output"
+assert_node_not_invoked
 rm -f "$permission_fixture_dir/rogue-status-writer.yml"
 cat >"$permission_fixture_dir/implicit-permissions.yml" <<'YAML'
 name: implicit-permissions
@@ -160,11 +215,13 @@ jobs:
       - run: echo "${{ github.token }}"
 YAML
 if WORKFLOW_PERMISSION_DIR="$permission_fixture_dir" \
-    "$WORKFLOW_TRIGGER_GUARD" >"$test_output" 2>&1; then
+    run_workflow_trigger_guard_without_node >"$test_output" 2>&1; then
   echo "ERROR: implicit workflow permissions unexpectedly passed" >&2
   exit 1
 fi
 grep -qF "every workflow job must declare effective permissions" "$test_output"
+assert_node_not_invoked
+echo "coverage_node_non_invocation=PASS"
 
 "$PR_MERGE_SAFETY_TEST"
 "$PROTECTED_OPERATION_POLICY_TEST"

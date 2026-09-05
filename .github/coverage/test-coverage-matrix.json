@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "node": "20.19.5"
+  },
+  "thresholds": {
+    "lines": 80,
+    "branches": 80
+  },
+  "entries": [
+    {
+      "id": "auth",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "backoffice",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "bet",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "client",
+      "profile": "react-scripts"
+    },
+    {
+      "id": "common",
+      "profile": "node-typescript-c8"
+    },
+    {
+      "id": "event",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "gamemaster",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "moderation",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "resulting",
+      "profile": "jest-typescript"
+    },
+    {
+      "id": "slip",
+      "profile": "jest-typescript"
+    }
+  ]
+}

@@ -734,6 +734,53 @@ write_rogue_npm_publisher "$tmp_dir"
 assert_fail "second local npm publisher" \
   "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
 
+for forbidden_file in tests-telemetry.yml tests-telemetry.yaml; do
+  reset_fixtures
+  write_complete_oci_set
+  cat >"$tmp_dir/$forbidden_file" <<'YAML'
+name: harmless-name
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+  assert_fail "forbidden local $forbidden_file" \
+    "tests-telemetry workflow is forbidden"
+done
+
+reset_fixtures
+write_complete_oci_set
+cat >"$tmp_dir/TeStS-TeLeMeTrY.yml" <<'YAML'
+name: harmless-name
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+assert_fail "forbidden mixed-case local tests-telemetry workflow file" \
+  "tests-telemetry workflow is forbidden"
+
+reset_fixtures
+write_complete_oci_set
+cat >"$tmp_dir/telemetry-checks.yml" <<'YAML'
+name: TeStS-TeLeMeTrY
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+assert_fail "forbidden local tests-telemetry workflow name" \
+  "tests-telemetry workflow is forbidden"
+
 for mutation_command in \
   "npm pu ./rogue-package.tgz" \
   "npm pub ./rogue-package.tgz" \
@@ -1725,6 +1772,48 @@ prepare_pr_remote
 write_rogue_npm_publisher "$pr_remote_root/.github/workflows"
 assert_pr_fail "second PR-tree npm publisher" \
   "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"
+
+prepare_pr_remote
+cat >"$pr_remote_root/.github/workflows/tests-telemetry.yml" <<'YAML'
+name: harmless-name
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+assert_pr_fail "forbidden PR tests-telemetry workflow file" \
+  "tests-telemetry workflow is forbidden"
+
+prepare_pr_remote
+cat >"$pr_remote_root/.github/workflows/TeStS-TeLeMeTrY.yml" <<'YAML'
+name: harmless-name
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+assert_pr_fail "forbidden mixed-case PR tests-telemetry workflow file" \
+  "tests-telemetry workflow is forbidden"
+
+prepare_pr_remote
+cat >"$pr_remote_root/.github/workflows/telemetry-checks.yml" <<'YAML'
+name: TeStS-TeLeMeTrY
+on:
+  pull_request:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inert
+YAML
+assert_pr_fail "forbidden PR tests-telemetry workflow name" \
+  "tests-telemetry workflow is forbidden"
 
 for mutation_command in \
   "npm pu ./rogue-package.tgz" \

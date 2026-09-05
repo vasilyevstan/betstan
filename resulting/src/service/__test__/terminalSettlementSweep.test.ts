@@ -13,6 +13,7 @@ import SettleSlipPublisher from "../../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../../event/publisher/SettleSlipRowPublisher";
 import { TerminalSettlementSweepWorker } from "../terminalSettlementSweep";
 import { reconcileSlip } from "../resulting";
+import * as resultingService from "../resulting";
 import {
   createBet,
   createLiveMarketSnapshot,
@@ -437,4 +438,109 @@ it("does not let a stale publisher confirm a replacement claim", async () => {
     "replacement-claim"
   );
   expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+});
+
+it("requires initialization and keeps start/stop lifecycle idempotent", async () => {
+  const uninitialised = new TerminalSettlementSweepWorker(
+    messengerWrapper.connection,
+    { batchSize: 1, pollIntervalMs: 25 }
+  );
+  await expect(uninitialised.runOnce()).rejects.toThrow(
+    "must be initialised before running"
+  );
+
+  const worker = await createSweepWorker();
+  const runOnce = jest.spyOn(worker, "runOnce").mockResolvedValue(0);
+  jest.useFakeTimers();
+  try {
+    await worker.start();
+    await worker.start();
+    expect(runOnce).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(runOnce).toHaveBeenCalledTimes(2);
+
+    await worker.stop();
+    await worker.stop();
+  } finally {
+    jest.useRealTimers();
+    runOnce.mockRestore();
+  }
+});
+
+it("swallows a scheduled sweep failure but reports it", async () => {
+  const worker = await createSweepWorker();
+  const failure = new Error("scheduled sweep failed");
+  const runOnce = jest.spyOn(worker, "runOnce").mockRejectedValueOnce(failure);
+  const consoleError = jest
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+  try {
+    const result = await Reflect.apply(
+      Reflect.get(worker, "triggerRun"),
+      worker,
+      []
+    );
+
+    expect(result).toEqual(0);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Terminal settlement sweep run failed:",
+      failure
+    );
+  } finally {
+    runOnce.mockRestore();
+    consoleError.mockRestore();
+  }
+});
+
+it("continues a bounded sweep after one slip reconciliation fails", async () => {
+  const findPending = jest
+    .spyOn(resultingService, "findTerminalPendingSlipIds")
+    .mockResolvedValue(["slip-one", "slip-two"]);
+  const reconcile = jest
+    .spyOn(resultingService, "reconcileSlip")
+    .mockRejectedValueOnce(new Error("first failed"))
+    .mockResolvedValueOnce(undefined);
+  const consoleError = jest
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+  try {
+    const worker = await createSweepWorker();
+    await expect(worker.runOnce()).resolves.toEqual(2);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Terminal settlement sweep failed for slip:",
+      {
+        error: expect.any(Error),
+        slipId: "slip-one",
+      }
+    );
+  } finally {
+    findPending.mockRestore();
+    reconcile.mockRestore();
+    consoleError.mockRestore();
+  }
+});
+
+it("does not arm the interval when stopped during the initial sweep", async () => {
+  const worker = await createSweepWorker();
+  let resolveRun: ((value: number) => void) | undefined;
+  const runOnce = jest.spyOn(worker, "runOnce").mockImplementation(
+    () => new Promise<number>((resolve) => {
+      resolveRun = resolve;
+    })
+  );
+  try {
+    const starting = worker.start();
+    while (!resolveRun) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const stopping = worker.stop();
+    resolveRun(0);
+    await Promise.all([starting, stopping]);
+    await worker.stop();
+    expect(runOnce).toHaveBeenCalledTimes(1);
+  } finally {
+    runOnce.mockRestore();
+  }
 });
