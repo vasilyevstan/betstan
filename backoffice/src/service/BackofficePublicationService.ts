@@ -29,6 +29,10 @@ export class BackofficePublicationService {
   private initialization: Promise<void> | null = null;
   private replayTimer: NodeJS.Timeout | null = null;
   private activeReplay: Promise<number> | null = null;
+  private readonly activeResultPublications = new Map<
+    string,
+    Promise<PublicationOutcome>
+  >();
   private running = false;
 
   constructor(
@@ -121,6 +125,23 @@ export class BackofficePublicationService {
   }
 
   async publishResultNow(eventId: string): Promise<PublicationOutcome> {
+    const activePublication = this.activeResultPublications.get(eventId);
+    if (activePublication) {
+      return activePublication;
+    }
+
+    const publication = this.runResultPublication(eventId).finally(() => {
+      if (this.activeResultPublications.get(eventId) === publication) {
+        this.activeResultPublications.delete(eventId);
+      }
+    });
+    this.activeResultPublications.set(eventId, publication);
+    return publication;
+  }
+
+  private async runResultPublication(
+    eventId: string
+  ): Promise<PublicationOutcome> {
     const event = await Event.findOne({
       eventId,
       resultPublicationPending: true,
