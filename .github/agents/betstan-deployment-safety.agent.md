@@ -357,6 +357,20 @@ After deployment:
   evidence, delete raw logs, and still fail the phase. Never treat a failed Job
   as readiness, and never accept exception text, contradictory counters,
   unknown reason codes, or multiple JSON values as diagnostic evidence;
+- remember that Pod and Job status are eventually consistent. When the sole
+  container has terminated but the terminal Pod phase has not converged, poll
+  for a short bounded interval before classifying the result; never discard a
+  valid structured blocker solely because one status read was transient.
+  Latch the observed failure, bound every Kubernetes status request, reject a
+  later contradictory success, and accept diagnostics only for the CLI's exact
+  intentional exit code with no termination signal or deadline-exceeded Job.
+  Use authoritative `Complete=True`, `FailureTarget=True`, and `Failed=True`
+  Job conditions rather than intermediate success/failure counters, switch to
+  the short terminal-only deadline after failure is latched, and make Job
+  deletion bounded and best-effort so cleanup cannot suppress evidence. A
+  failed or timed-out log stream is incomplete: discard every captured byte,
+  retry transient status and complete-log reads only within their active
+  bounded deadline, and never sanitize partial output;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
