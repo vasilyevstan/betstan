@@ -50,6 +50,10 @@ Read:
 - Verify PR approval mode matches repository policy: automatic mode is limited
   to CLI-created and CLI-owned `copilot-cli-managed` PRs; every other PR has
   approval bound to its exact current head SHA.
+- Verify each session's implementation, promotion, and ancestry-sync PRs carry
+  its declared public-safe `session:` and `feature:` labels, while confirming
+  those labels remain informational and are absent from every approval,
+  required-check, merge, release, deployment, and rollback decision.
 - Verify protected-run approval mode matches origin policy. A direct automatic
   approval requires a pre-dispatch private intent/capture and the exact
   dispatcher-issued record; automatic build or recovery requires exact

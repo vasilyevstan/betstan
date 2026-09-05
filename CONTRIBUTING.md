@@ -54,6 +54,30 @@ remain present and say `not applicable` when they do not apply:
 - the reason for an intentional closure, replacement, or zero-diff ancestry
   change.
 
+Every PR also carries public-safe informational context labels:
+
+- `session:<slug>` identifies the bounded development session, for example
+  `session:live-betting-2026-09-04`;
+- `feature:<slug>` groups the durable product or engineering feature, for
+  example `feature:live-betting`.
+
+Keep the same pair on the session's implementation, promotion, and
+ancestry-synchronization PRs. A shared promotion may carry multiple session
+and feature labels because it can aggregate reviewed work from several
+sessions. Never expose an internal session UUID, local path, user identity,
+credential, private runtime reference, or production identifier in a label.
+CLI work applies a pair with
+`PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug>
+./infra/azure/agents/pr-context-labels-stan.sh <pr>`.
+
+These labels are discoverability metadata only. They never grant authority,
+select automatic approval, satisfy a check, block a merge, authorize a
+release, or alter rollback. Valid `session:` and `feature:` labels are excluded
+from the trusted PR-label fingerprint; `copilot-cli-managed` and every unknown
+or malformed label retain their existing policy meaning. The helper adds
+labels without removing current labels and warns rather than blocking the PR
+flow when GitHub label mutation is temporarily unavailable.
+
 Every pull request that changes what a user sees or how a user interacts must
 also include an exact-head `betstan-ux-ui-expert` result. Use one registered
 two-phase specialist work unit: establish the named reference pattern before

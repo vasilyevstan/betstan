@@ -41,6 +41,16 @@ Every PR uses the repository template and records core evidence. Conditional
 release, data, feature-flag, and rollback fields remain present and say
 `not applicable` when they do not apply.
 
+Choose one public-safe `session:<slug>` label for the bounded development
+session and one stable `feature:<slug>` label for the product or engineering
+feature. Keep the pair on implementation, promotion, and ancestry-sync PRs;
+aggregate PRs may carry multiple pairs. After creating each PR, run
+`PR_SESSION_TAG=<slug> PR_FEATURE_TAG=<slug>
+./infra/azure/agents/pr-context-labels-stan.sh <pr>`. Never use a private
+session UUID, local path, credential, user identity, or production identifier.
+These labels are informational only: do not branch checks, approval, merge,
+release, or rollback decisions on their presence or value.
+
 Only Copilot CLI may apply `copilot-cli-managed` to a PR it created and owns.
 That label selects the no-personal-prompt path but never bypasses technical
 gates. Every other PR requires approval bound to its exact current head SHA.

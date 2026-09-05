@@ -16,6 +16,8 @@ const GITHUB_ACTIONS_BOT = Object.freeze({
   type: "Bot",
 });
 const CLI_MANAGED_LABEL = "copilot-cli-managed";
+const INFORMATIONAL_CONTEXT_LABEL_PATTERN =
+  /^(?:feature|session):[a-z0-9](?:[a-z0-9-]{0,40}[a-z0-9])?$/;
 const QUALITY_TRIGGER_ACTIONS = new Set([
   "edited",
   "opened",
@@ -112,7 +114,27 @@ function canonicalLabels(labels) {
 }
 
 function labelsFingerprint(labels) {
-  return fingerprint(JSON.stringify(labels));
+  return fingerprint(JSON.stringify(policyLabels(labels)));
+}
+
+function policyLabels(labels) {
+  if (
+    !Array.isArray(labels) ||
+    labels.some((label) => typeof label !== "string")
+  ) {
+    throw new Error("Pull request label names are malformed");
+  }
+  return labels.filter(
+    (label) => !INFORMATIONAL_CONTEXT_LABEL_PATTERN.test(label),
+  );
+}
+
+function hasOnlyCliManagedPolicyLabel(labels) {
+  if (!Array.isArray(labels)) {
+    return false;
+  }
+  const names = policyLabels(labels);
+  return names.length === 1 && names[0] === CLI_MANAGED_LABEL;
 }
 
 const EMPTY_LABELS_FINGERPRINT = labelsFingerprint([]);
@@ -163,10 +185,12 @@ function assertExpectedPull(actual, expected) {
 }
 
 function isOpeningCliLabelRace(actual, expected) {
+  const expectedPolicyLabels = policyLabels(expected.labels);
+  const actualPolicyLabels = policyLabels(actual.labels);
   if (
-    expected.labels?.length !== 0 ||
-    actual.labels?.length !== 1 ||
-    actual.labels[0] !== CLI_MANAGED_LABEL
+    expectedPolicyLabels.length !== 0 ||
+    actualPolicyLabels.length !== 1 ||
+    actualPolicyLabels[0] !== CLI_MANAGED_LABEL
   ) {
     return false;
   }
@@ -1516,8 +1540,7 @@ function isOpeningLabelLineage(transition, pull) {
     !transition.stale &&
     transition.contentFingerprint === pull.contentFingerprint &&
     transition.labelsFingerprint === EMPTY_LABELS_FINGERPRINT &&
-    pull.labels.length === 1 &&
-    pull.labels[0] === CLI_MANAGED_LABEL
+    hasOnlyCliManagedPolicyLabel(pull.labels)
   );
 }
 
@@ -1540,8 +1563,7 @@ function hasInverseOpeningLabelEvidence({
   if (
     eventAction !== "labeled" ||
     eventLabelName !== CLI_MANAGED_LABEL ||
-    eventPull?.labels?.length !== 1 ||
-    eventPull.labels[0] !== CLI_MANAGED_LABEL ||
+    !hasOnlyCliManagedPolicyLabel(eventPull?.labels) ||
     eventPull.contentFingerprint !== pull.contentFingerprint ||
     eventPull.labelsFingerprint !== pull.labelsFingerprint ||
     !hasSameValidatedPullUpdate(eventPull, pull)
@@ -1614,10 +1636,8 @@ function hasDirectOpeningLabelEvidence({
   if (
     eventAction !== "labeled" ||
     eventLabelName !== CLI_MANAGED_LABEL ||
-    eventPull?.labels?.length !== 1 ||
-    eventPull.labels[0] !== CLI_MANAGED_LABEL ||
-    pull.labels.length !== 1 ||
-    pull.labels[0] !== CLI_MANAGED_LABEL ||
+    !hasOnlyCliManagedPolicyLabel(eventPull?.labels) ||
+    !hasOnlyCliManagedPolicyLabel(pull.labels) ||
     transition.version !== 3 ||
     transition.action !== "opened" ||
     transition.stale ||
@@ -1715,6 +1735,14 @@ async function bindPendingQualityTransition({
   authorizationNow,
   fallbackUrl,
 }) {
+  const labelRefresh =
+    eventAction === "labeled" || eventAction === "unlabeled";
+  if (
+    labelRefresh &&
+    INFORMATIONAL_CONTEXT_LABEL_PATTERN.test(eventLabelName || "")
+  ) {
+    return false;
+  }
   if (candidateRun) {
     assertQualityWorkflowRunCandidate({
       run: candidateRun,
@@ -1787,8 +1815,6 @@ async function bindPendingQualityTransition({
     }
     return false;
   }
-  const labelRefresh =
-    eventAction === "labeled" || eventAction === "unlabeled";
   if (
     labelRefresh &&
     transitionTimestampMilliseconds(eventPull.updatedAt) <

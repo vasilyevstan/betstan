@@ -238,6 +238,23 @@ Use the PR validation agent to inspect trusted required checks for the PR's exac
 ./infra/azure/agents/pr-validation-stan.sh 41
 ```
 
+Add the session's public-safe informational labels without replacing any
+existing label:
+
+```bash
+PR_SESSION_TAG=live-betting-2026-09-04 \
+PR_FEATURE_TAG=live-betting \
+  ./infra/azure/agents/pr-context-labels-stan.sh 41
+```
+
+The helper ensures `session:<slug>` and `feature:<slug>` labels exist, adds
+them to the PR, and verifies them. GitHub mutation failures produce a warning
+and a zero exit by default so FYI metadata cannot interrupt PR creation or
+protected release work; use `PR_CONTEXT_LABELS_STRICT=true` only for a
+dedicated final traceability check. Never put a private session UUID, local
+path, credential, user identity, runtime reference, or production identifier
+in either slug. The helper never adds or removes `copilot-cli-managed`.
+
 Use the merge-safety agent when you want a conservative yes/no recommendation:
 
 ```bash
