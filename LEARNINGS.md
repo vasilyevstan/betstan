@@ -371,6 +371,13 @@ cd resulting && npm ci && npm run test:ci
 - PR titles are short plain-language outcomes, not ambiguous work buckets.
   Merge safety rejects single-word or overlong titles and prefixes such as
   `chore`, `misc`, and `wip`.
+- PR origin is recorded with one public-safe `session:<slug>` label and one
+  stable `feature:<slug>` label. Reuse the pair across implementation,
+  promotion, and ancestry-sync PRs; aggregate promotions can retain several
+  pairs. These labels are FYI metadata, never authority, and valid context
+  labels are excluded from trusted label fingerprints so adding them cannot
+  perturb checks or release flow. Keep private session UUIDs and runtime
+  references out of public labels.
 - Promotion requires base-scoped statuses whose head and unique merge-snapshot copies point to the same trusted runs and current PR head/base/repository. Head-only, merge-only, or branch-name evidence can be stale or unrelated.
 - Skipped, stale, pending, neutral, or unrelated runs are not green gates.
 - The conductor owns every registered unit from before launch through terminal

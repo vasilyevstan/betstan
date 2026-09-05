@@ -84,6 +84,19 @@ Every pull request records:
 - release and rollback impact;
 - unresolved exceptions or remaining work.
 
+Each PR also has public-safe GitHub labels for traceability:
+
+- `session:<slug>` identifies the bounded development session;
+- `feature:<slug>` groups the durable product or engineering feature.
+
+The same pair follows implementation, promotion, and ancestry-sync PRs. A
+shared promotion can carry several pairs when it aggregates work from multiple
+sessions. These labels are informational only: they do not satisfy or change
+checks, approvals, merge policy, release authority, deployment, activation, or
+rollback. Internal session identifiers, local paths, user identities,
+credentials, private runtime references, and production identifiers are never
+used as public labels.
+
 Metadata is part of the reviewed evidence. It is completed before the release
 critical path rather than repeatedly edited while production work is active.
 

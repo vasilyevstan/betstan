@@ -21,6 +21,11 @@ Use this skill whenever a task involves branches, commits, pushes, pull requests
   structure. Core rationale, exact refs, scope/exclusions, compatibility,
   validation, risks, and remaining work are required on every PR; conditional
   operational fields stay present and say `not applicable` when appropriate.
+- Assign public-safe `session:<slug>` and `feature:<slug>` labels to every PR
+  with `pr-context-labels-stan.sh`. Reuse the session pair across
+  implementation, promotion, and ancestry-sync PRs; aggregate promotions may
+  carry multiple pairs. The labels are informational only and never affect
+  checks, approval, merge, release, or rollback authority.
 - Only CLI-created and CLI-owned PRs may carry `copilot-cli-managed` and use
   automatic mode. Every other PR requires `APPROVED_SHA` equal to its current
   head; human `master` promotions also require the exact workflow inventory.

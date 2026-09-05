@@ -471,6 +471,25 @@ async function main() {
   const managedLabels = [{ name: CLI_MANAGED_LABEL }];
   const managedLabelsFingerprint =
     publishPrPolicy.labelsFingerprint([CLI_MANAGED_LABEL]);
+  const contextLabels = [
+    { name: "feature:live-betting" },
+    { name: "session:live-betting-2026-09-04" },
+  ];
+  assert.equal(
+    publishPrPolicy.labelsFingerprint(contextLabels.map(({ name }) => name)),
+    PULL_LABELS_FINGERPRINT,
+  );
+  assert.equal(
+    publishPrPolicy.labelsFingerprint([
+      CLI_MANAGED_LABEL,
+      ...contextLabels.map(({ name }) => name),
+    ]),
+    managedLabelsFingerprint,
+  );
+  assert.notEqual(
+    publishPrPolicy.labelsFingerprint(["feature:Live-Betting"]),
+    PULL_LABELS_FINGERPRINT,
+  );
   const featureHead = {
     ref: "feature/marker-recovery",
     sha: HEAD_SHA,
@@ -514,6 +533,49 @@ async function main() {
         context.startsWith("trusted-quality-transition/"),
       )
       .every(({ sha }) => sha === MERGE_SHA),
+  );
+  const contextRacePull = pull({
+    updated_at: "2026-09-02T09:00:02.000Z",
+    labels: [...managedLabels, ...contextLabels],
+    head: featureHead,
+    base: devBase,
+  });
+  const contextRaceTransitions = [];
+  const contextRace = await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: openedEventPull,
+    currentPull: contextRacePull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: contextRaceTransitions,
+  });
+  assertNoQualitySuccess(contextRace);
+  assert.equal(
+    contextRaceTransitions[0].description,
+    transitionDescription({
+      action: "opened",
+      binding: "u",
+      labelsFingerprint: managedLabelsFingerprint,
+    }),
+  );
+  const contextOpeningLabelConfirmation = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: CLI_MANAGED_LABEL,
+    eventPull: contextRacePull,
+    currentPull: contextRacePull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: contextRaceTransitions,
+  });
+  assert.deepEqual(
+    contextOpeningLabelConfirmation.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
   );
   const directRaceTransitionCount = directRaceTransitions.length;
   const directPreLabelManual = await execute({
@@ -606,9 +668,37 @@ async function main() {
     transitionBinding(directRaceTransitions[1].description),
     "p",
   );
+  const contextAddedPull = pull({
+    updated_at: "2026-09-02T09:00:03.000Z",
+    labels: [...managedLabels, ...contextLabels],
+    head: featureHead,
+    base: devBase,
+  });
+  const directContextLabelCount = directRaceTransitions.length;
+  const directContextLabelRefresh = await execute({
+    eventName: "pull_request_target",
+    eventAction: "labeled",
+    eventLabelName: "feature:live-betting",
+    eventPull: contextAddedPull,
+    currentPull: contextAddedPull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: directRaceTransitions,
+    issueEventError: new Error(
+      "informational labels must not inspect the managed-label ledger",
+    ),
+  });
+  assert.deepEqual(
+    directContextLabelRefresh.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert.equal(directRaceTransitions.length, directContextLabelCount);
   const directRaceCompletion = await execute({
     eventName: "workflow_run",
-    currentPull: openedRacePull,
+    currentPull: contextAddedPull,
     run: workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
     listedRuns: [
       workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),

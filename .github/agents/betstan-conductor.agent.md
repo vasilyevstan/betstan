@@ -452,6 +452,13 @@ its owner. It is never healthy by default.
   automatic mode does not need a separate personal approval prompt after all
   technical gates pass. Never add the label to an existing human PR. Every
   other PR remains approval-bound to its exact current head SHA.
+- Before opening the first PR, register one public-safe session slug and one
+  stable feature slug. Apply `session:<slug>` and `feature:<slug>` with
+  `pr-context-labels-stan.sh` to every implementation, promotion, and
+  ancestry-sync PR owned by that session. Reuse the same pair, add rather than
+  replace labels on aggregate PRs, and never expose a private session ID or
+  runtime reference. Treat these labels as FYI metadata only; they cannot
+  create authority or block progress.
 - Classify no-progress work as `SUSPECTED_STALL` after one missed checkpoint
   and apply the recovery ladder. After two missed checkpoints, return
   `ATTENTION_REQUIRED` with the exact safe interruption or recovery action.
