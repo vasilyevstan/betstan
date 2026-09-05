@@ -29,6 +29,12 @@ services=(event gamemaster moderation resulting bet slip)
 created_jobs=()
 raw_files=()
 job_sequence=0
+LAST_JOB_OUTCOME=""
+LAST_JOB_POD_COUNT=""
+LAST_JOB_POD_PHASE=""
+LAST_JOB_CONTAINER_STATE=""
+LAST_JOB_CONTAINER_REASON=""
+LAST_JOB_EXIT_CODE=""
 
 fail() {
   echo "live_betting_data_rollout=FAIL phase=${PHASE:-missing} reason=$*" >&2
@@ -263,8 +269,19 @@ YAML
 wait_for_job_report() {
   local job_name="$1"
   local raw_file="$2"
+  local allow_blocked_cleanup="${3:-false}"
+  local expected_mode="${4:-}"
   local deadline=$(( $(date +%s) + JOB_TIMEOUT_SECONDS ))
   local job_json pod_state pod_count pod_phase container_state container_reason
+  local container_exit_code job_failed
+
+  [[ "$allow_blocked_cleanup" == "true" ||
+     "$allow_blocked_cleanup" == "false" ]] ||
+    fail "blocked cleanup report policy is invalid"
+  if [[ "$allow_blocked_cleanup" == "true" ]]; then
+    [[ "$expected_mode" == "dry-run" || "$expected_mode" == "apply" ]] ||
+      fail "blocked cleanup report mode is invalid"
+  fi
 
   while (( $(date +%s) < deadline )); do
     job_json="$(kubectl get job "$job_name" -n "$OCI_K8S_NAMESPACE" -o json)"
@@ -273,6 +290,12 @@ wait_for_job_report() {
         -n "$OCI_K8S_NAMESPACE" \
         --container data-rollout >"$raw_file" 2>/dev/null ||
         fail "unable to collect completed job report"
+      LAST_JOB_OUTCOME="success"
+      LAST_JOB_POD_COUNT=""
+      LAST_JOB_POD_PHASE=""
+      LAST_JOB_CONTAINER_STATE=""
+      LAST_JOB_CONTAINER_REASON=""
+      LAST_JOB_EXIT_CODE="0"
       return 0
     fi
 
@@ -291,9 +314,15 @@ wait_for_job_report() {
 
           (.items // []) as $items |
           if ($items | length) == 0 then
-            ["0", "Missing", "unknown", "PodNotCreated"]
+            ["0", "Missing", "unknown", "PodNotCreated", "unknown"]
           elif ($items | length) > 1 then
-            [($items | length | tostring), "Ambiguous", "unknown", "MultiplePods"]
+            [
+              ($items | length | tostring),
+              "Ambiguous",
+              "unknown",
+              "MultiplePods",
+              "unknown"
+            ]
           else
             $items[0] as $pod |
             ($pod.status.containerStatuses // []) as $statuses |
@@ -306,14 +335,16 @@ wait_for_job_report() {
                 "1",
                 (($pod.status.phase // "Unknown") | safe),
                 "waiting",
-                (($condition.reason // "ContainerNotStarted") | safe)
+                (($condition.reason // "ContainerNotStarted") | safe),
+                "unknown"
               ]
             elif ($statuses | length) > 1 then
               [
                 "1",
                 (($pod.status.phase // "Unknown") | safe),
                 "unknown",
-                "MultipleContainers"
+                "MultipleContainers",
+                "unknown"
               ]
             else
               $statuses[0].state as $state |
@@ -322,28 +353,39 @@ wait_for_job_report() {
                   "1",
                   (($pod.status.phase // "Unknown") | safe),
                   "waiting",
-                  (($state.waiting.reason // "Unknown") | safe)
+                  (($state.waiting.reason // "Unknown") | safe),
+                  "unknown"
                 ]
               elif $state.running then
                 [
                   "1",
                   (($pod.status.phase // "Unknown") | safe),
                   "running",
-                  "Running"
+                  "Running",
+                  "unknown"
                 ]
               elif $state.terminated then
                 [
                   "1",
                   (($pod.status.phase // "Unknown") | safe),
                   "terminated",
-                  (($state.terminated.reason // "Unknown") | safe)
+                  (($state.terminated.reason // "Unknown") | safe),
+                  (
+                    if (($state.terminated.exitCode | type) == "number") and
+                       ($state.terminated.exitCode >= 0) and
+                       ($state.terminated.exitCode == ($state.terminated.exitCode | floor))
+                    then ($state.terminated.exitCode | tostring)
+                    else "unknown"
+                    end
+                  )
                 ]
               else
                 [
                   "1",
                   (($pod.status.phase // "Unknown") | safe),
                   "unknown",
-                  "StateMissing"
+                  "StateMissing",
+                  "unknown"
                 ]
               end
             end
@@ -352,13 +394,38 @@ wait_for_job_report() {
         '
     )" || fail "unable to inspect sanitized pod state for $job_name"
     IFS=$'\t' read -r \
-      pod_count pod_phase container_state container_reason <<<"$pod_state"
+      pod_count pod_phase container_state container_reason \
+      container_exit_code <<<"$pod_state"
 
+    job_failed=false
     if jq -e '(.status.failed // 0) > 0' <<<"$job_json" >/dev/null; then
+      job_failed=true
+    fi
+    if [[ "$job_failed" == "true" ||
+      ("$container_state" == "terminated" &&
+       "$container_reason" != "Completed") ]]; then
       kubectl logs "job/$job_name" \
         -n "$OCI_K8S_NAMESPACE" \
         --container data-rollout >"$raw_file" 2>/dev/null || true
-      fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+      if [[ "$allow_blocked_cleanup" == "true" &&
+        "$pod_count" == "1" &&
+        "$pod_phase" == "Failed" &&
+        "$container_state" == "terminated" &&
+        "$container_reason" == "Error" &&
+        "$container_exit_code" =~ ^[1-9][0-9]*$ ]] &&
+        validate_blocked_cleanup_report "$raw_file" "$expected_mode"; then
+        LAST_JOB_OUTCOME="structured-blocked"
+        LAST_JOB_POD_COUNT="$pod_count"
+        LAST_JOB_POD_PHASE="$pod_phase"
+        LAST_JOB_CONTAINER_STATE="$container_state"
+        LAST_JOB_CONTAINER_REASON="$container_reason"
+        LAST_JOB_EXIT_CODE="$container_exit_code"
+        return 0
+      fi
+      if [[ "$job_failed" == "true" ]]; then
+        fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
+      fi
+      fail "data job terminated for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
     fi
     case "$container_reason" in
       ErrImagePull|ImagePullBackOff|InvalidImageName|CreateContainerConfigError|\
@@ -367,13 +434,6 @@ wait_for_job_report() {
         fail "data job startup failed for $job_name; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
         ;;
     esac
-    if [[ "$container_state" == "terminated" &&
-      "$container_reason" != "Completed" ]]; then
-      kubectl logs "job/$job_name" \
-        -n "$OCI_K8S_NAMESPACE" \
-        --container data-rollout >"$raw_file" 2>/dev/null || true
-      fail "data job terminated for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
-    fi
     sleep 5
   done
 
@@ -387,6 +447,7 @@ run_job() {
   local raw_file
   local image_ref
   local job_name
+  local allow_blocked_cleanup="${4:-false}"
 
   job_sequence=$((job_sequence + 1))
   job_name="live-data-${service}-${RUN_ID}-${job_sequence}"
@@ -395,7 +456,8 @@ run_job() {
   raw_files+=("$raw_file")
   created_jobs+=("$job_name")
   create_job "$service" "$command_path" "$mode" "$image_ref" "$job_name"
-  wait_for_job_report "$job_name" "$raw_file"
+  wait_for_job_report \
+    "$job_name" "$raw_file" "$allow_blocked_cleanup" "$mode"
   kubectl delete job "$job_name" \
     -n "$OCI_K8S_NAMESPACE" \
     --ignore-not-found=true \
@@ -524,45 +586,139 @@ sanitize_index_report() {
   LAST_REPORT="$output"
 }
 
-sanitize_cleanup_report() {
+project_cleanup_report() {
   local raw_file="$1"
   local stage="$2"
   local expected_mode="$3"
-  local output="$OUTPUT_DIR/reports/${stage}-obsolete-event.json"
-  local temporary="${output}.tmp"
+  local output="$4"
 
   jq -e \
+    -s \
     --arg stage "$stage" \
     --arg expected_mode "$expected_mode" \
     --arg target_event_id "6a623af592af5a95b1d0bb79" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
+      def exact_keys($required; $optional):
+        (keys_unsorted) as $actual |
+        (($required - $actual) | length) == 0 and
+        (($actual - ($required + $optional)) | length) == 0;
+      def service:
+        if . == "gaming_event" then "event"
+        elif . == "gaming_gamemaster" then "gamemaster"
+        elif . == "gaming_moderation" then "moderation"
+        elif . == "gaming_resulting" then "resulting"
+        elif . == "gaming_bet" then "bet"
+        elif . == "gaming_slip" then "slip"
+        else null
+        end;
+      def allowed_collection($service; $collection):
+        if $service == "event" then
+          $collection == "events"
+        elif $service == "gamemaster" then
+          $collection == "eventarchives"
+        elif $service == "moderation" then
+          ["bets", "resulteds", "parkedplacebets"] | index($collection) != null
+        elif $service == "resulting" then
+          [
+            "bets",
+            "betarchives",
+            "finalscoreledgers",
+            "livesettlementledgers",
+            "pendingmoderationresults",
+            "retryrecords"
+          ] | index($collection) != null
+        elif $service == "bet" then
+          ["bets", "pendingbetupdates", "betplacementconflicts"] |
+            index($collection) != null
+        elif $service == "slip" then
+          ["slips", "sliparchives"] | index($collection) != null
+        else false
+        end;
+      def reason_code:
+        if . == "event reference" then "event_reference"
+        elif . == "event source identity does not match the reviewed fixture" or
+             . == "Gamemaster identity does not match the reviewed fixture"
+        then "identity_mismatch"
+        elif . == "duplicate Gamemaster archive records"
+        then "duplicate_tombstone"
+        elif . == "Gamemaster archive contains an unrelated or invalid record" or
+             . == "Gamemaster tombstone snapshot is invalid" or
+             . == "invalid tombstone"
+        then "invalid_tombstone"
+        else null
+        end;
+      select(length == 1) |
+      .[0] as $report |
       select(
-        (.mode == $expected_mode) and
-        (.targetEventId == $target_event_id) and
-        (.state == "absent" or
-         .state == "candidate" or
-         .state == "partial" or
-         .state == "removed" or
-         .state == "restored" or
-         .state == "blocked") and
-        (.ready | type == "boolean") and
-        (.scanned | nonnegative_integer) and
-        (.matched | nonnegative_integer) and
-        (.changed | nonnegative_integer) and
-        (.errorCount | nonnegative_integer) and
-        (.tombstoneVerified | type == "boolean") and
-        (.snapshotDocumentCount | nonnegative_integer) and
-        ((has("snapshotSha256") | not) or
-         (.snapshotSha256 | test("^[0-9a-f]{64}$"))) and
-        (.blockers | type == "array") and
-        ([.blockers[] |
-          (.database | type == "string") and
-          (.collection | type == "string") and
-          (.count | nonnegative_integer) and
-          (.reason | type == "string")
-        ] | all)
+        ($report | type == "object") and
+        ($report | exact_keys(
+          [
+            "mode",
+            "targetEventId",
+            "state",
+            "ready",
+            "scanned",
+            "matched",
+            "changed",
+            "errorCount",
+            "tombstoneVerified",
+            "snapshotDocumentCount",
+            "blockers"
+          ];
+          ["snapshotSha256"]
+        )) and
+        ($report.mode == $expected_mode) and
+        ($report.targetEventId == $target_event_id) and
+        ($report.state == "absent" or
+         $report.state == "candidate" or
+         $report.state == "partial" or
+         $report.state == "removed" or
+         $report.state == "restored" or
+         $report.state == "blocked") and
+        ($report.ready | type == "boolean") and
+        ($report.scanned | nonnegative_integer) and
+        ($report.matched | nonnegative_integer) and
+        ($report.changed | nonnegative_integer) and
+        ($report.errorCount | nonnegative_integer) and
+        ($report.tombstoneVerified | type == "boolean") and
+        ($report.snapshotDocumentCount | nonnegative_integer) and
+        (($report | has("snapshotSha256") | not) or
+         ($report.snapshotSha256 | test("^[0-9a-f]{64}$"))) and
+        ($report.blockers | type == "array") and
+        ([$report.blockers[] |
+          . as $blocker |
+          ($blocker | type == "object") and
+          ($blocker | exact_keys(
+            ["database", "collection", "count", "reason"];
+            []
+          )) and
+          ($blocker.database | service) as $service |
+          ($blocker.reason | reason_code) as $reason_code |
+          ($service != null) and
+          ($reason_code != null) and
+          allowed_collection($service; $blocker.collection) and
+          ($blocker.count | nonnegative_integer) and
+          ($blocker.count > 0)
+        ] | all) and
+        (
+          (
+            $report.ready == true and
+            $report.state != "blocked" and
+            $report.errorCount == 0 and
+            ($report.blockers | length) == 0
+          ) or
+          (
+            $report.ready == false and
+            $report.state == "blocked" and
+            $report.changed == 0 and
+            $report.errorCount > 0 and
+            $report.errorCount == ($report.blockers | length)
+          )
+        ) and
+        (($expected_mode != "dry-run") or $report.changed == 0)
       ) |
+      $report |
       {
         kind: "obsolete-event-cleanup",
         stage: $stage,
@@ -577,9 +733,50 @@ sanitize_cleanup_report() {
         tombstoneVerified,
         snapshotDocumentCount,
         snapshotSha256,
-        blockerCount: (.blockers | length)
+        blockerCount: (.blockers | length),
+        blockers: [
+          .blockers[] |
+          (.database | service) as $service |
+          {
+            service: $service,
+            collection,
+            count,
+            reasonCode: (.reason | reason_code)
+          }
+        ]
       }
-    ' "$raw_file" >"$temporary" ||
+    ' "$raw_file" >"$output"
+}
+
+validate_blocked_cleanup_report() {
+  local raw_file="$1"
+  local expected_mode="$2"
+  local temporary="${raw_file}.sanitized"
+
+  if project_cleanup_report \
+      "$raw_file" job-failure-validation "$expected_mode" "$temporary" &&
+    jq -e '
+      .state == "blocked" and
+      .ready == false and
+      .changed == 0 and
+      .errorCount > 0 and
+      .blockerCount > 0
+    ' "$temporary" >/dev/null; then
+    rm -f -- "$temporary"
+    return 0
+  fi
+  rm -f -- "$temporary"
+  return 1
+}
+
+sanitize_cleanup_report() {
+  local raw_file="$1"
+  local stage="$2"
+  local expected_mode="$3"
+  local output="$OUTPUT_DIR/reports/${stage}-obsolete-event.json"
+  local temporary="${output}.tmp"
+
+  project_cleanup_report "$raw_file" "$stage" "$expected_mode" "$temporary" ||
     fail "obsolete event cleanup report contract failed for $stage"
   mv "$temporary" "$output"
   rm -f -- "$raw_file"
@@ -608,14 +805,114 @@ run_index() {
 run_obsolete_event_cleanup() {
   local mode="$1"
   local stage="$2"
-  run_job event "dist/scripts/cleanupObsoleteSyntheticEvent.js" "$mode"
+  run_job event "dist/scripts/cleanupObsoleteSyntheticEvent.js" "$mode" true
   sanitize_cleanup_report "$LAST_RAW_FILE" "$stage" "$mode"
+}
+
+write_evidence_manifest() {
+  python3 - "$OUTPUT_DIR" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest = root / "SHA256SUMS"
+rows = []
+for path in sorted(root.rglob("*")):
+    if not path.is_file() or path == manifest:
+        continue
+    relative = path.relative_to(root).as_posix()
+    rows.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
+manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+PY
+}
+
+write_cleanup_blocker_evidence() {
+  local report="$1"
+  local completed_at report_sha256 output temporary
+
+  [[ "$LAST_JOB_OUTCOME" == "structured-blocked" &&
+     "$LAST_JOB_POD_COUNT" == "1" &&
+     "$LAST_JOB_POD_PHASE" == "Failed" &&
+     "$LAST_JOB_CONTAINER_STATE" == "terminated" &&
+     "$LAST_JOB_CONTAINER_REASON" == "Error" &&
+     "$LAST_JOB_EXIT_CODE" =~ ^[1-9][0-9]*$ ]] ||
+    fail "blocked cleanup report is missing its exact failed-job evidence"
+  jq -e '
+    .state == "blocked" and
+    .ready == false and
+    .changed == 0 and
+    .errorCount > 0 and
+    .blockerCount > 0
+  ' "$report" >/dev/null ||
+    fail "blocked cleanup report cannot produce failure evidence"
+
+  completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  report_sha256="$(
+    python3 - "$report" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  )"
+  output="$OUTPUT_DIR/cleanup-blocker-failure.json"
+  temporary="${output}.tmp"
+  jq -n \
+    --slurpfile cleanup "$report" \
+    --arg source_sha "$SOURCE_SHA" \
+    --arg build_run_id "$BUILD_RUN_ID" \
+    --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" \
+    --arg workflow_run_id "$RUN_ID" \
+    --arg workflow_run_attempt "$RUN_ATTEMPT" \
+    --arg phase "$PHASE" \
+    --arg report_sha256 "$report_sha256" \
+    --arg pod_phase "$LAST_JOB_POD_PHASE" \
+    --arg container_state "$LAST_JOB_CONTAINER_STATE" \
+    --arg container_reason "$LAST_JOB_CONTAINER_REASON" \
+    --argjson pod_count "$LAST_JOB_POD_COUNT" \
+    --argjson exit_code "$LAST_JOB_EXIT_CODE" \
+    --arg completed_at "$completed_at" '
+      {
+        schemaVersion: "live-betting-cleanup-blocker-v1",
+        status: "FAIL",
+        sourceSha: $source_sha,
+        buildRunId: $build_run_id,
+        infrastructureRunId: $infrastructure_run_id,
+        workflowRunId: $workflow_run_id,
+        workflowRunAttempt: $workflow_run_attempt,
+        phase: $phase,
+        stage: $cleanup[0].stage,
+        targetEventId: $cleanup[0].targetEventId,
+        mode: $cleanup[0].mode,
+        state: $cleanup[0].state,
+        ready: $cleanup[0].ready,
+        changed: $cleanup[0].changed,
+        errorCount: $cleanup[0].errorCount,
+        blockerCount: $cleanup[0].blockerCount,
+        reportSha256: $report_sha256,
+        job: {
+          outcome: "failed",
+          podCount: $pod_count,
+          podPhase: $pod_phase,
+          containerState: $container_state,
+          containerReason: $container_reason,
+          exitCode: $exit_code
+        },
+        completedAt: $completed_at
+      }
+    ' >"$temporary"
+  mv "$temporary" "$output"
+  write_evidence_manifest
 }
 
 require_cleanup_ready() {
   local report="$1"
-  [[ "$(jq -r '.ready' "$report")" == "true" ]] ||
-    fail "obsolete event cleanup is blocked"
+  if [[ "$(jq -r '.ready' "$report")" != "true" ]]; then
+    write_cleanup_blocker_evidence "$report"
+    fail "obsolete event cleanup is blocked; sanitized failure evidence recorded"
+  fi
 }
 
 require_cleanup_complete() {
@@ -898,21 +1195,7 @@ operation_lock_handoff=true
 EOF
 fi
 
-python3 - "$OUTPUT_DIR" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-manifest = root / "SHA256SUMS"
-rows = []
-for path in sorted(root.rglob("*")):
-    if not path.is_file() or path == manifest:
-        continue
-    relative = path.relative_to(root).as_posix()
-    rows.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
-manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
-PY
+write_evidence_manifest
 
 EVIDENCE_DIR="$OUTPUT_DIR" \
 EXPECTED_SOURCE_SHA="$SOURCE_SHA" \

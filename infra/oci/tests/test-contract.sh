@@ -1805,6 +1805,38 @@ grep -Fq 'APPLY LIVE SLIP INDEX EXACT SHA' "$data_workflow"
 grep -Fq 'shared-mongo-operation-lock-stan.sh acquire' "$data_workflow"
 grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
 grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
+data_runner="$OCI_DIR/scripts/live-betting-data-rollout-stan.sh"
+for cleanup_failure_contract in \
+    'validate_blocked_cleanup_report' \
+    'write_cleanup_blocker_evidence' \
+    'live-betting-cleanup-blocker-v1' \
+    'structured-blocked' \
+    'sanitized failure evidence recorded'; do
+  grep -Fq "$cleanup_failure_contract" "$data_runner" ||
+    fail "live-data rollout omits cleanup failure contract: $cleanup_failure_contract"
+done
+grep -Fq \
+  'when a protected Job intentionally exits nonzero after emitting a structured' \
+  "$deployment_safety_agent" ||
+  fail "deployment safety does not require sanitized structured blocker evidence"
+data_evidence_gate="$(
+  sed -n \
+    '/- name: Require executed data-step evidence/,/- name: Upload exact sanitized data evidence/p' \
+    "$data_workflow"
+)"
+grep -Fq "steps.data.outcome != 'skipped'" <<<"$data_evidence_gate" &&
+  grep -Fq \
+    'test -f artifacts/oci-live-data-rollout/evidence/SHA256SUMS' \
+    <<<"$data_evidence_gate" ||
+  fail "live-data workflow does not require checksummed executed-step evidence"
+data_evidence_upload="$(
+  sed -n \
+    '/- name: Upload exact sanitized data evidence/,/- name: Upload protected rollout baselines/p' \
+    "$data_workflow"
+)"
+grep -Fq 'if: always()' <<<"$data_evidence_upload" &&
+  grep -Fq 'if-no-files-found: ignore' <<<"$data_evidence_upload" ||
+  fail "live-data workflow does not preserve available pre-data evidence"
 obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
 [[ -f "$obsolete_cleanup" ]] ||
   fail "fixed obsolete-event cleanup tool is missing"
@@ -1814,6 +1846,7 @@ for cleanup_contract in \
     'RESTORE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \
     'const assertRollbackHasNoConflicts' \
+    'cleanupReportExitCode' \
     'snapshotSha256'; do
   grep -Fq "$cleanup_contract" "$obsolete_cleanup" ||
     fail "obsolete-event cleanup omits safety contract: $cleanup_contract"
@@ -1821,11 +1854,11 @@ done
 ! grep -Eq -- '--(event|event-id|target)(=|[[:space:]])' "$obsolete_cleanup" ||
   fail "obsolete-event cleanup accepts a caller-selected target"
 grep -Fq 'run_obsolete_event_cleanup dry-run preflight' \
-  "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" &&
+  "$data_runner" &&
   grep -Fq 'run_obsolete_event_cleanup apply apply' \
-    "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" &&
+    "$data_runner" &&
   grep -Fq 'obsolete_event_cleanup_complete=true' \
-    "$OCI_DIR/scripts/live-betting-data-rollout-stan.sh" ||
+    "$data_runner" ||
   fail "protected live-data rollout does not apply and verify the fixed cleanup"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"

@@ -71,6 +71,18 @@ state="${STUB_STATE_DIR:?}"
 scenario="${STUB_SCENARIO:?}"
 mkdir -p "$state/jobs" "$state/applied"
 
+is_blocked_cleanup_job() {
+  local job="$1"
+  local manifest="$state/jobs/$job.yaml"
+  [[ -f "$manifest" ]] || return 1
+  grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$manifest" || return 1
+  if [[ "$scenario" == "cleanup-blocked-apply" ]]; then
+    grep -Fq -- '- "apply"' "$manifest"
+  else
+    [[ "$scenario" == cleanup-blocked* ]]
+  fi
+}
+
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(mktemp "$state/jobs/pending.XXXXXX")"
   cat >"$manifest"
@@ -103,7 +115,9 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     job)
-      if [[ "$scenario" == "image-pull" ]]; then
+      if is_blocked_cleanup_job "${3:-}"; then
+        printf '{"status":{"failed":1}}\n'
+      elif [[ "$scenario" == "image-pull" ]]; then
         printf '{"status":{}}\n'
       else
         printf '{"status":{"succeeded":1}}\n'
@@ -115,7 +129,17 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     pods)
-      if [[ "$scenario" == "image-pull" && "$*" == *"job-name="* ]]; then
+      selected_job=""
+      for argument in "$@"; do
+        if [[ "$argument" == job-name=* ]]; then
+          selected_job="${argument#job-name=}"
+        fi
+      done
+      if [[ -n "$selected_job" ]] &&
+        is_blocked_cleanup_job "$selected_job"; then
+        printf '%s\n' \
+          '{"items":[{"status":{"phase":"Failed","containerStatuses":[{"state":{"terminated":{"reason":"Error","exitCode":1,"message":"private runtime detail"}}}]}}]}'
+      elif [[ "$scenario" == "image-pull" && "$*" == *"job-name="* ]]; then
         printf '%s\n' \
           '{"items":[{"status":{"phase":"Pending","containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff","message":"secret registry detail"}}}]}}]}'
       elif [[ "$*" == *"app=gaming-auth-mongo"* ]]; then
@@ -143,6 +167,48 @@ if [[ "${1:-}" == "logs" ]]; then
   grep -Fq -- '- "--apply"' "$manifest" && is_apply=true
 
   if grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$manifest"; then
+    if is_blocked_cleanup_job "$job" &&
+      [[ "$scenario" == "cleanup-blocked-exception" ]]; then
+      printf 'database exception for secret-user\n'
+      exit 0
+    fi
+    if is_blocked_cleanup_job "$job"; then
+      changed=0
+      reason="event reference"
+      mode=dry-run
+      grep -Fq -- '- "apply"' "$manifest" && mode=apply
+      [[ "$scenario" != "cleanup-blocked-changed" ]] || changed=1
+      [[ "$scenario" != "cleanup-blocked-unknown-reason" ]] ||
+        reason="event reference for secret-user"
+      blocked_report="$(
+        jq -n \
+          --arg mode "$mode" \
+          --arg reason "$reason" \
+          --argjson changed "$changed" '{
+            mode:$mode,
+            targetEventId:"6a623af592af5a95b1d0bb79",
+            state:"blocked",
+            ready:false,
+            scanned:18,
+            matched:1,
+            changed:$changed,
+            errorCount:1,
+            tombstoneVerified:false,
+            snapshotDocumentCount:0,
+            blockers:[{
+              database:"gaming_bet",
+              collection:"bets",
+              count:1,
+              reason:$reason
+            }]
+          }'
+      )"
+      printf '%s\n' "$blocked_report"
+      if [[ "$scenario" == "cleanup-blocked-multiple" ]]; then
+        printf '%s\n' "$blocked_report"
+      fi
+      exit 0
+    fi
     mode=dry-run
     cleanup_state=candidate
     matched=2
@@ -298,6 +364,12 @@ if [[ "${1:-}" == "logs" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
+  mkdir -p "$state/deleted"
+  touch "$state/deleted/${3:-unknown}"
+  exit 0
+fi
+
 if [[ "${1:-}" == "delete" || "${1:-}" == "rollout" || "${1:-}" == "exec" ]]; then
   exit 0
 fi
@@ -419,6 +491,165 @@ grep -Fxq 'baseline_recovery_run_id=799' "$recovery_output/provenance.env"
 grep -Fxq \
   "baseline_recovery_source_sha=$recovery_source_sha" \
   "$recovery_output/provenance.env"
+
+blocked_output="$work_dir/cleanup-blocked"
+blocked_log="$work_dir/cleanup-blocked.out"
+if run_phase dry-run cleanup-blocked 4009 "$blocked_output" \
+    >"$blocked_log" 2>&1; then
+  fail "structured blocked cleanup report was accepted as rollout readiness"
+fi
+grep -Fq \
+  'obsolete event cleanup is blocked; sanitized failure evidence recorded' \
+  "$blocked_log" ||
+  fail "structured blocked cleanup did not report retained sanitized evidence"
+blocked_report="$blocked_output/reports/preflight-obsolete-event.json"
+blocked_failure="$blocked_output/cleanup-blocker-failure.json"
+[[ -f "$blocked_report" && -f "$blocked_failure" &&
+   -f "$blocked_output/SHA256SUMS" ]] ||
+  fail "structured blocked cleanup did not retain checksummed evidence"
+jq -e '
+  .kind == "obsolete-event-cleanup" and
+  .stage == "preflight" and
+  .mode == "dry-run" and
+  .state == "blocked" and
+  .ready == false and
+  .changed == 0 and
+  .errorCount == 1 and
+  .blockerCount == 1 and
+  .blockers == [{
+    service:"bet",
+    collection:"bets",
+    count:1,
+    reasonCode:"event_reference"
+  }]
+' "$blocked_report" >/dev/null ||
+  fail "structured blocked cleanup report was not normalized"
+jq -e \
+  --arg source_sha "$SOURCE_SHA" \
+  --arg build_run_id "$BUILD_RUN_ID" \
+  --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" '
+    .schemaVersion == "live-betting-cleanup-blocker-v1" and
+    .status == "FAIL" and
+    .sourceSha == $source_sha and
+    .buildRunId == $build_run_id and
+    .infrastructureRunId == $infrastructure_run_id and
+    .workflowRunId == "4009" and
+    .workflowRunAttempt == "1" and
+    .phase == "dry-run" and
+    .stage == "preflight" and
+    .targetEventId == "6a623af592af5a95b1d0bb79" and
+    .mode == "dry-run" and
+    .state == "blocked" and
+    .ready == false and
+    .changed == 0 and
+    .errorCount == 1 and
+    .blockerCount == 1 and
+    (.reportSha256 | test("^[0-9a-f]{64}$")) and
+    .job == {
+      outcome:"failed",
+      podCount:1,
+      podPhase:"Failed",
+      containerState:"terminated",
+      containerReason:"Error",
+      exitCode:1
+    } and
+    (.completedAt | test(
+      "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    ))
+  ' "$blocked_failure" >/dev/null ||
+  fail "cleanup blocker failure envelope is incomplete"
+expected_report_sha="$(shasum -a 256 "$blocked_report" | awk '{print $1}')"
+[[ "$(jq -r '.reportSha256' "$blocked_failure")" == "$expected_report_sha" ]] ||
+  fail "cleanup blocker failure envelope does not bind the sanitized report"
+(
+  cd "$blocked_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "cleanup blocker failure evidence checksum is invalid"
+if EVIDENCE_DIR="$blocked_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=dry-run \
+  EXPECTED_RUN_ID=4009 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "cleanup blocker diagnostics were accepted as successful data evidence"
+fi
+[[ ! -e "$blocked_output/provenance.env" &&
+   ! -e "$blocked_output/journal.json" &&
+   ! -e "$blocked_output/schema.env" ]] ||
+  fail "blocked cleanup emitted success-shaped rollout evidence"
+if grep -R -E \
+    'gaming_bet|event reference|secret-user|mongodb://|private runtime detail' \
+    "$blocked_output" >/dev/null; then
+  fail "cleanup blocker evidence retained raw or sensitive diagnostics"
+fi
+[[ -e "$stub_state/deleted/live-data-event-4009-1" ]] ||
+  fail "blocked cleanup did not delete its Kubernetes Job"
+
+for blocked_scenario in \
+  cleanup-blocked-changed \
+  cleanup-blocked-multiple \
+  cleanup-blocked-exception \
+  cleanup-blocked-unknown-reason; do
+  invalid_output="$work_dir/$blocked_scenario"
+  invalid_log="$work_dir/$blocked_scenario.out"
+  if run_phase dry-run "$blocked_scenario" 4010 "$invalid_output" \
+      >"$invalid_log" 2>&1; then
+    fail "invalid blocked cleanup output was accepted: $blocked_scenario"
+  fi
+  if [[ -d "$invalid_output" ]] &&
+    find "$invalid_output" -type f -print -quit | grep -q .; then
+    fail "invalid blocked cleanup output persisted evidence: $blocked_scenario"
+  fi
+  if grep -R -E \
+      'secret-user|mongodb://|private runtime detail' \
+      "$invalid_output" "$invalid_log" 2>/dev/null | grep -q .; then
+    fail "invalid blocked cleanup output leaked raw diagnostics: $blocked_scenario"
+  fi
+  [[ -e "$stub_state/deleted/live-data-event-4010-1" ]] ||
+    fail "invalid blocked cleanup did not delete its Kubernetes Job: $blocked_scenario"
+done
+
+apply_blocked_output="$work_dir/cleanup-blocked-apply"
+apply_blocked_log="$work_dir/cleanup-blocked-apply.out"
+if run_phase apply-backfills cleanup-blocked-apply 4011 \
+    "$apply_blocked_output" >"$apply_blocked_log" 2>&1; then
+  fail "structured blocked cleanup apply was accepted as rollout readiness"
+fi
+apply_blocked_report="$apply_blocked_output/reports/apply-obsolete-event.json"
+[[ -f "$apply_blocked_report" &&
+   -f "$apply_blocked_output/cleanup-blocker-failure.json" &&
+   -f "$apply_blocked_output/SHA256SUMS" ]] ||
+  fail "blocked cleanup apply did not retain checksummed evidence"
+jq -e '
+  .mode == "apply" and
+  .stage == "apply" and
+  .state == "blocked" and
+  .ready == false and
+  .changed == 0 and
+  .blockers[0].reasonCode == "event_reference"
+' "$apply_blocked_report" >/dev/null ||
+  fail "blocked cleanup apply evidence is invalid"
+jq -e '
+  .status == "FAIL" and
+  .phase == "apply-backfills" and
+  .stage == "apply" and
+  .mode == "apply" and
+  .changed == 0 and
+  .job.exitCode == 1
+' "$apply_blocked_output/cleanup-blocker-failure.json" >/dev/null ||
+  fail "blocked cleanup apply failure envelope is invalid"
+(
+  cd "$apply_blocked_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "blocked cleanup apply evidence checksum is invalid"
+[[ ! -e "$apply_blocked_output/provenance.env" &&
+   ! -e "$apply_blocked_output/journal.json" &&
+   ! -e "$apply_blocked_output/schema.env" ]] ||
+  fail "blocked cleanup apply emitted success-shaped evidence"
+[[ -e "$stub_state/deleted/live-data-event-4011-21" ]] ||
+  fail "blocked cleanup apply did not delete its Kubernetes Job"
 
 backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
@@ -634,6 +865,16 @@ grep -Fq 'could not determine whether the legacy OCIR pull secret exists' \
   fail "secret API failure reached live data job creation"
 
 for literal in \
+  'validate_blocked_cleanup_report' \
+  'write_cleanup_blocker_evidence' \
+  'live-betting-cleanup-blocker-v1' \
+  'structured-blocked' \
+  'sanitized failure evidence recorded'; do
+  grep -Fq "$literal" "$RUNNER" ||
+    fail "data runner is missing structured cleanup failure contract: $literal"
+done
+
+for literal in \
   'name: oci-migration' \
   'DRY RUN LIVE DATA EXACT SHA' \
   'APPLY LIVE BACKFILLS EXACT SHA' \
@@ -712,6 +953,9 @@ for literal in \
   'SHARED_MONGO_HANDOFF_LOCK_LEASE_SECONDS: "1800"' \
   '(failure() || cancelled())' \
   "steps.maintenance_enter.outcome == 'success'" \
+  'Require executed data-step evidence' \
+  "steps.data.outcome != 'skipped'" \
+  'test -f artifacts/oci-live-data-rollout/evidence/SHA256SUMS' \
   'verify-live-betting-data-evidence-stan.sh'; do
   grep -Fq "$literal" "$WORKFLOW" ||
     fail "data workflow is missing safety contract: $literal"
