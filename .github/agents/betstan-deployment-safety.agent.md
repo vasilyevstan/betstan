@@ -392,6 +392,10 @@ After deployment:
 - enable live kickoffs only through a bounded worker-enforced activation lease;
   permit the same run/SHA to remove that lease only after complete acceptance,
   protected evidence upload, and final current-master/provenance revalidation;
+- reject an activation journey whose success requires overlapping moving-quote
+  authority windows from independent accelerated fixtures. Prove multi-event
+  placement with stable pre-kickoff quotes, then exercise moving in-play
+  placement against one event clock with bounded exact stale-quote retries;
 - on disable or any ambiguous activation/commit write, set the kickoff flag
   false and remove the lease together. Never treat signal cleanup alone as
   protection from hard runner termination.

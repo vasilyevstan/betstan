@@ -149,6 +149,16 @@ for selection_contract in \
     'const RETRYABLE_LIVE_SELECTION_ERRORS = new Set([' \
     "'Live quote is stale'" \
     "'Market version mismatch'" \
+    "const PRE_KICKOFF_PLACEMENT_MARKET_TYPE = 'KICKOFF_TEAM';" \
+    'const EXPECTED_PRE_KICKOFF_LIVE_ROWS = 2;' \
+    'const EXPECTED_LIVE_SETTLEMENT_ROWS = 1;' \
+    'preKickoffSelectedBoards.LIVE.rows.every(' \
+    "expect(preKickoffLiveBetAtPlacement.status).not.toBe('DECLINED');" \
+    'preKickoffLiveBetAtPlacement.rows' \
+    'preKickoffLiveBet.rows.map((row) => row.eventId).sort(),' \
+    '.filter({ hasText: `Slip ${preKickoffLiveSlipId}` });' \
+    'preKickoffLiveRows: preKickoffLiveBet.rows.map((row) => ({' \
+    'A single moving event clock keeps this in-play acceptance deterministic.' \
     'const response = await responsePromise;' \
     'if (response.ok()) {' \
     'row.marketVersion === acceptedQuote.marketVersion' \

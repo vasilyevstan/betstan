@@ -124,6 +124,12 @@ Event retains up to 256 terminal incidents and Moderation retains up to 256
 quote-history entries per market. These bounds exceed the configured
 worst-case generated lineage while remaining finite.
 
+Production acceptance keeps two different timing claims separate. It places a
+multi-event live slip while the countdown quotes are stable until kickoff, then
+places an in-play selection against one moving event clock with bounded
+stale-quote retries. It never weakens Moderation or depends on overlapping
+authority windows from independent accelerated matches.
+
 ## Timeline completeness and terminal safeguards
 
 - `incidentHistoryComplete`/`incidentsComplete` is an optional, additive

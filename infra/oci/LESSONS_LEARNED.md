@@ -199,9 +199,12 @@ conversation summaries are not authority.
   retry only exact stale-quote/version races after the rendered quote advances,
   and confirm the accepted market version, quote version, and selection reached
   the boards API. Row existence alone is not confirmation because a duplicate
-  reselection may still be in flight while the previous row is visible. Exercise
-  all products on the draft, then submit fresh quotes rather than an
-  intentionally stale ten-row accumulator. If a material update wins the final
+  reselection may still be in flight while the previous row is visible. Do not
+  make acceptance depend on overlapping authority windows from independently
+  evolving accelerated fixtures: prove multi-event placement with stable
+  pre-kickoff quotes, then prove moving in-play placement against one event
+  clock. Exercise all products on the draft, then submit fresh quotes rather
+  than an intentionally stale accumulator. If a material update wins the final
   submit race, require the exact `STALE_QUOTE` decline, wait for the replacement
   draft, reselect, and retry with a small bound; never weaken server-side quote
   validation to make acceptance pass.
