@@ -272,6 +272,18 @@ Gamemaster archive tombstone before exact optimistic deletes, verifies that
 the active projections are gone, and supports a separately confirmed rollback
 that restores the exact snapshot and removes the tombstone.
 
+When every target projection and cleanup tombstone is already absent,
+`dry-run` and `apply` treat the cleanup as an idempotent zero-write `absent`
+result. Durable bet, settlement, and archive references remain untouched;
+they cannot justify deleting user history or blocking an unrelated release
+after there is no target left to remove. Replayable operational records still
+fail closed in this state, including parked placements, pending updates or
+moderation results, retry records, and active slips. If any target projection
+or tombstone exists, the complete dependency scan remains mandatory before
+mutation. Slip-keyed replay stores are checked through a bounded in-memory
+join from the fixed event's preserved records; those identifiers are never
+written to release evidence.
+
 A blocked cleanup remains a failed data phase even though the cleanup CLI
 emits a structured report before exiting nonzero. The rollout wrapper accepts
 that failed Job only long enough to validate one exact report, normalize its
