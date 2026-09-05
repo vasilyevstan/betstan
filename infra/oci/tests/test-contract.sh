@@ -1858,6 +1858,10 @@ for cleanup_contract in \
     'REMOVE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
     'RESTORE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \
+    'const ABSENT_TARGET_BLOCKING_DEPENDENCY_LOCATIONS:' \
+    'const MAX_REFERENCED_SLIP_IDS = 128;' \
+    'const dependencyReferenceFilter' \
+    'const dependencyLocationsForCleanupState' \
     'const assertRollbackHasNoConflicts' \
     'cleanupReportExitCode' \
     'snapshotSha256'; do

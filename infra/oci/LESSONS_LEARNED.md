@@ -663,6 +663,15 @@ conversation summaries are not authority.
   path, so retry them within the existing execution or terminal deadline
   instead of aborting a still-running mutating Job or losing a stable terminal
   report; a persistent failure at the deadline remains a hard failure.
+- A fixed-target delete is already complete when every target projection and
+  its cleanup tombstone are absent. In that state, durable bet, settlement, and
+  archive references must be preserved rather than treated as reasons to
+  delete user history or deadlock unrelated releases. Still scan replayable
+  operational stores and fail closed on parked placements, pending updates or
+  moderation results, retries, and active slips; if any target or tombstone
+  exists, retain the full dependency gate before mutation. Replay queues keyed
+  only by Slip ID require a bounded in-memory join from preserved event
+  references; an event-only query creates false readiness.
 - When the user chooses the fastest safe go-live path, apply a critical-path
   scope freeze: continue required gates and recovery, but defer unrelated PR
   metadata and documentation until activation is terminal.

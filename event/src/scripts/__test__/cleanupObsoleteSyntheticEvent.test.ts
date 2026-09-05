@@ -241,6 +241,186 @@ it("blocks cleanup when a financial record references the event", async () => {
   }
 });
 
+it("preserves historical references when the cleanup target is already absent", async () => {
+  const names = databaseNames();
+  const gamemasterDb = mongoose.connection.useDb(
+    names.gamemaster,
+    { useCache: true }
+  ).db!;
+  const moderationDb = mongoose.connection.useDb(
+    names.moderation,
+    { useCache: true }
+  ).db!;
+  const resultingDb = mongoose.connection.useDb(
+    names.resulting,
+    { useCache: true }
+  ).db!;
+  const betDb = mongoose.connection.useDb(names.bet, { useCache: true }).db!;
+  const slipDb = mongoose.connection.useDb(names.slip, { useCache: true }).db!;
+
+  try {
+    const slipId = new mongoose.Types.ObjectId().toHexString();
+    const historicalRecords = [
+      [moderationDb, "bets"],
+      [resultingDb, "bets"],
+      [betDb, "bets"],
+      [slipDb, "sliparchives"],
+    ] as const;
+    await Promise.all(
+      historicalRecords.map(([db, collection]) =>
+        db.collection(collection).insertOne({
+          _id: new mongoose.Types.ObjectId(),
+          slipId,
+          rows: [{ eventId: OBSOLETE_EVENT_ID }],
+        })
+      )
+    );
+
+    const dryRun = await runObsoleteSyntheticEventCleanup({
+      mode: "dry-run",
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(dryRun).toMatchObject({
+      state: "absent",
+      ready: true,
+      scanned: 18,
+      matched: 0,
+      changed: 0,
+      errorCount: 0,
+      tombstoneVerified: false,
+      snapshotDocumentCount: 0,
+      blockers: [],
+    });
+
+    const applied = await runObsoleteSyntheticEventCleanup({
+      mode: "apply",
+      confirmation: APPLY_CONFIRMATION,
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(applied).toMatchObject({
+      state: "absent",
+      ready: true,
+      scanned: 18,
+      matched: 0,
+      changed: 0,
+      errorCount: 0,
+      tombstoneVerified: false,
+      snapshotDocumentCount: 0,
+      blockers: [],
+    });
+
+    for (const [db, collection] of historicalRecords) {
+      expect(
+        await db.collection(collection).countDocuments({
+          "rows.eventId": OBSOLETE_EVENT_ID,
+        })
+      ).toBe(1);
+    }
+    expect(
+      await gamemasterDb.collection("eventarchives").countDocuments({
+        eventId: OBSOLETE_EVENT_ID,
+      })
+    ).toBe(0);
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
+it("blocks slip-keyed replay records when the cleanup target is absent", async () => {
+  const names = databaseNames();
+  const resultingDb = mongoose.connection.useDb(
+    names.resulting,
+    { useCache: true }
+  ).db!;
+  const betDb = mongoose.connection.useDb(names.bet, { useCache: true }).db!;
+
+  try {
+    const slipId = new mongoose.Types.ObjectId().toHexString();
+    await betDb.collection("bets").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      slipId,
+      rows: [{ eventId: OBSOLETE_EVENT_ID }],
+    });
+    await resultingDb.collection("pendingmoderationresults").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      slipId,
+    });
+    await betDb.collection("pendingbetupdates").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      slipId,
+    });
+    await resultingDb.collection("retryrecords").insertOne({
+      _id: new mongoose.Types.ObjectId(),
+      identity: slipId,
+      payloadSummary: {
+        kind: "MODERATION_RESULT",
+        slipId,
+      },
+    });
+
+    for (const options of [
+      { mode: "dry-run" as const },
+      { mode: "apply" as const, confirmation: APPLY_CONFIRMATION },
+    ]) {
+      const cleanup = await runObsoleteSyntheticEventCleanup({
+        ...options,
+        connection: mongoose.connection,
+        databaseNames: names,
+      });
+      expect(cleanup).toMatchObject({
+        state: "blocked",
+        ready: false,
+        matched: 0,
+        changed: 0,
+        errorCount: 3,
+      });
+      expect(cleanup.blockers).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          database: names.resulting,
+          collection: "pendingmoderationresults",
+        }),
+        expect.objectContaining({
+          database: names.resulting,
+          collection: "retryrecords",
+        }),
+        expect.objectContaining({
+          database: names.bet,
+          collection: "pendingbetupdates",
+        }),
+      ]));
+    }
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
+it("fails closed when the referenced Slip identity set exceeds its bound", async () => {
+  const names = databaseNames();
+  const betDb = mongoose.connection.useDb(names.bet, { useCache: true }).db!;
+
+  try {
+    await betDb.collection("bets").insertMany(
+      Array.from({ length: 129 }, () => ({
+        _id: new mongoose.Types.ObjectId(),
+        slipId: new mongoose.Types.ObjectId().toHexString(),
+        rows: [{ eventId: OBSOLETE_EVENT_ID }],
+      }))
+    );
+
+    await expect(
+      runObsoleteSyntheticEventCleanup({
+        mode: "dry-run",
+        connection: mongoose.connection,
+        databaseNames: names,
+      })
+    ).rejects.toThrow("referenced-slip set exceeds the reviewed bound");
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
 it("blocks queued and summarized event references", async () => {
   const names = databaseNames();
   const moderationDb = mongoose.connection.useDb(
