@@ -810,6 +810,29 @@ done
 [[ "$quoted_assignments" == *'token="[REDACTED]"'* ]] &&
   [[ "$quoted_assignments" == *"password='[REDACTED]'"* ]] ||
   fail "OCI quoted assignment redaction did not preserve delimiters"
+malformed_assignments="$(
+  printf '%s\n' \
+    'token="unterminated-double-secret' \
+    "password='unterminated-single-secret" \
+    '{"secret":"unterminated-json-secret' \
+    '{"token":"first-malformed-secret,"password":"second-malformed-secret"}' \
+    'safe-tail' |
+    oci_redact
+)"
+for secret in \
+    unterminated-double-secret \
+    unterminated-single-secret \
+    unterminated-json-secret \
+    first-malformed-secret \
+    second-malformed-secret; do
+  [[ "$malformed_assignments" != *"$secret"* ]] ||
+    fail "OCI malformed assignment redaction leaked fixture secret: $secret"
+done
+[[ "$malformed_assignments" == *'token="[REDACTED]"'* ]] &&
+  [[ "$malformed_assignments" == *"password='[REDACTED]'"* ]] &&
+  [[ "$malformed_assignments" == *'"secret":"[REDACTED]"'* ]] &&
+  [[ "$malformed_assignments" == *"safe-tail"* ]] ||
+  fail "OCI malformed assignment redaction crossed line boundaries"
 
 ruby -ryaml - "$ROOT_DIR" <<'RUBY'
 root = ARGV.fetch(0)

@@ -174,18 +174,30 @@ names = [
 ]
 for name in names:
     escaped = re.escape(name)
+    json_pattern = (
+        r"(?im)(\"" + escaped + r"\"\s*:\s*)"
+        r"(?:\"(?:[^\"\\\r\n]|\\.)*\"(?=\s*(?:[,}\]]|$))|\"[^\r\n]*$)"
+    )
     value = re.sub(
-        rf"(?i)(\"{escaped}\"\s*:\s*)\"(?:[^\"\\]|\\.)*\"",
+        json_pattern,
         lambda match: match.group(1) + "\"[REDACTED]\"",
         value,
     )
+    double_quoted_pattern = (
+        r"(?im)(" + escaped + r"\s*[:=]\s*)"
+        r"(?:\"(?:[^\"\\\r\n]|\\.)*\"(?=\s*(?:[,;]|$))|\"[^\r\n]*$)"
+    )
     value = re.sub(
-        rf"(?im)({escaped}\s*[:=]\s*)\"(?:[^\"\\]|\\.)*\"",
+        double_quoted_pattern,
         lambda match: match.group(1) + "\"[REDACTED]\"",
         value,
     )
+    single_quoted_pattern = (
+        r"(?im)(" + escaped + r"\s*[:=]\s*)"
+        r"(?:\x27(?:[^\x27\\\r\n]|\\.)*\x27(?=\s*(?:[,;]|$))|\x27[^\r\n]*$)"
+    )
     value = re.sub(
-        rf"(?im)({escaped}\s*[:=]\s*)\x27(?:[^\x27\\]|\\.)*\x27",
+        single_quoted_pattern,
         lambda match: match.group(1) + chr(39) + "[REDACTED]" + chr(39),
         value,
     )
