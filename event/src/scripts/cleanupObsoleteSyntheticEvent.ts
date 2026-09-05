@@ -112,6 +112,28 @@ const DEPENDENCY_LOCATIONS: DocumentLocation[] = [
   { database: "slip", collection: "sliparchives" },
 ];
 
+// These stores can still replay work even after every target projection is gone.
+const ABSENT_TARGET_BLOCKING_DEPENDENCY_LOCATIONS: DocumentLocation[] = [
+  { database: "moderation", collection: "parkedplacebets" },
+  { database: "resulting", collection: "pendingmoderationresults" },
+  { database: "resulting", collection: "retryrecords" },
+  { database: "bet", collection: "pendingbetupdates" },
+  { database: "slip", collection: "slips" },
+];
+
+const SLIP_ID_SOURCE_LOCATIONS: DocumentLocation[] = [
+  { database: "moderation", collection: "bets" },
+  { database: "moderation", collection: "parkedplacebets" },
+  { database: "resulting", collection: "bets" },
+  { database: "resulting", collection: "betarchives" },
+  { database: "resulting", collection: "retryrecords" },
+  { database: "bet", collection: "bets" },
+  { database: "slip", collection: "slips" },
+  { database: "slip", collection: "sliparchives" },
+];
+
+const MAX_REFERENCED_SLIP_IDS = 128;
+
 const EVENT_REFERENCE_PATHS = [
   "eventId",
   "rows.eventId",
@@ -134,6 +156,21 @@ const EVENT_REFERENCE_PATHS = [
   "request.rows.eventId",
   "request.data.eventId",
   "request.data.rows.eventId",
+];
+
+const SLIP_REFERENCE_PATHS = [
+  "slipId",
+  "data.slipId",
+  "payload.slipId",
+  "payload.data.slipId",
+  "payloadSummary.slipId",
+  "event.slipId",
+  "event.data.slipId",
+  "message.data.slipId",
+  "request.slipId",
+  "request.data.slipId",
+  "submittedEvent.slipId",
+  "identity",
 ];
 
 const canonicalEjson = (value: unknown): string =>
@@ -159,6 +196,39 @@ const referenceFilter = () => ({
     [path]: OBSOLETE_EVENT_ID,
   })),
 });
+
+const dependencyReferenceFilter = (slipIds: string[]) => ({
+  $or: [
+    ...referenceFilter().$or,
+    ...SLIP_REFERENCE_PATHS.map((path) => ({
+      [path]: { $in: slipIds },
+    })),
+  ],
+});
+
+const valueAtPath = (document: RawDocument, path: string): unknown =>
+  path.split(".").reduce<unknown>((value, segment) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    return (value as RawDocument)[segment];
+  }, document);
+
+const normalizedSlipId = (value: unknown): string | undefined => {
+  if (typeof value === "string" && value.length > 0) {
+    if (
+      value.length > 128
+      || !/^[A-Za-z0-9._:-]+$/.test(value)
+    ) {
+      throw new Error("cleanup found an invalid referenced Slip identity");
+    }
+    return value;
+  }
+  if (value instanceof mongoose.Types.ObjectId) {
+    return value.toHexString();
+  }
+  return undefined;
+};
 
 const database = (
   connection: Connection,
@@ -310,13 +380,15 @@ const parseTombstoneSnapshot = (
 
 const scanDependencies = async (
   connection: Connection,
-  names: DatabaseNames
+  names: DatabaseNames,
+  locations: DocumentLocation[],
+  filter: RawDocument
 ): Promise<CleanupBlocker[]> => {
   const blockers: CleanupBlocker[] = [];
-  for (const location of DEPENDENCY_LOCATIONS) {
+  for (const location of locations) {
     const count = await database(connection, names, location.database)
       .collection(location.collection)
-      .countDocuments(referenceFilter(), { limit: 1 });
+      .countDocuments(filter, { limit: 1 });
     if (count > 0) {
       blockers.push({
         database: names[location.database],
@@ -328,6 +400,61 @@ const scanDependencies = async (
   }
   return blockers;
 };
+
+const findReferencedSlipIds = async (
+  connection: Connection,
+  names: DatabaseNames
+): Promise<string[]> => {
+  const slipIds = new Set<string>();
+  const projection = Object.fromEntries([
+    ["_id", 1],
+    ...SLIP_REFERENCE_PATHS.map((path) => [path, 1]),
+  ]);
+
+  for (const location of SLIP_ID_SOURCE_LOCATIONS) {
+    const documents = (
+      await database(connection, names, location.database)
+        .collection(location.collection)
+        .find(referenceFilter())
+        .project(projection)
+        .limit(MAX_REFERENCED_SLIP_IDS + 1)
+        .toArray()
+    ) as RawDocument[];
+    if (documents.length > MAX_REFERENCED_SLIP_IDS) {
+      throw new Error("cleanup referenced-slip set exceeds the reviewed bound");
+    }
+
+    for (const document of documents) {
+      const values = SLIP_REFERENCE_PATHS.map((path) =>
+        valueAtPath(document, path)
+      );
+      if (location.database === "slip") {
+        values.push(document._id);
+      }
+      for (const value of values) {
+        const slipId = normalizedSlipId(value);
+        if (slipId) {
+          slipIds.add(slipId);
+        }
+      }
+      if (slipIds.size > MAX_REFERENCED_SLIP_IDS) {
+        throw new Error(
+          "cleanup referenced-slip set exceeds the reviewed bound"
+        );
+      }
+    }
+  }
+
+  return [...slipIds];
+};
+
+const dependencyLocationsForCleanupState = (
+  documents: SnapshotDocument[],
+  tombstones: RawDocument[]
+): DocumentLocation[] =>
+  documents.length > 0 || tombstones.length > 0
+    ? DEPENDENCY_LOCATIONS
+    : ABSENT_TARGET_BLOCKING_DEPENDENCY_LOCATIONS;
 
 const buildSnapshot = (documents: SnapshotDocument[]): {
   snapshot: CleanupSnapshot;
@@ -482,7 +609,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
     throw new Error(`rollback requires confirmation ${ROLLBACK_CONFIRMATION}`);
   }
 
-  const blockers = await scanDependencies(connection, names);
+  const blockers: CleanupBlocker[] = [];
   let documents = await findTargetDocuments(connection, names);
   const identityProblems = identityErrors(documents);
   blockers.push(...identityProblems.map((reason) => ({
@@ -518,12 +645,27 @@ export const runObsoleteSyntheticEventCleanup = async ({
     }
   }
 
+  const dependencyLocations = dependencyLocationsForCleanupState(
+    documents,
+    tombstones
+  );
+  const referencedSlipIds = await findReferencedSlipIds(connection, names);
+  blockers.unshift(
+    ...await scanDependencies(
+      connection,
+      names,
+      dependencyLocations,
+      dependencyReferenceFilter(referencedSlipIds)
+    )
+  );
+  const scanned = DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1;
+
   if (blockers.length > 0) {
     return report({
       mode,
       state: "blocked",
       ready: false,
-      scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+      scanned,
       matched: documents.length,
       changed: 0,
       tombstoneVerified: Boolean(storedSnapshot),
@@ -545,7 +687,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
       mode,
       state,
       ready: true,
-      scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+      scanned,
       matched: documents.length,
       changed: 0,
       tombstoneVerified: Boolean(storedSnapshot),
@@ -562,7 +704,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
         mode,
         state: "absent",
         ready: true,
-        scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+        scanned,
         matched: 0,
         changed: 0,
         tombstoneVerified: false,
@@ -625,7 +767,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
       mode,
       state: "removed",
       ready: true,
-      scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+      scanned,
       matched: documents.length,
       changed,
       tombstoneVerified: true,
@@ -641,7 +783,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
         mode,
         state: "restored",
         ready: true,
-        scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+        scanned,
         matched: documents.length,
         changed: 0,
         tombstoneVerified: false,
@@ -689,7 +831,7 @@ export const runObsoleteSyntheticEventCleanup = async ({
     mode,
     state: "restored",
     ready: true,
-    scanned: DEPENDENCY_LOCATIONS.length + TARGET_LOCATIONS.length + 1,
+    scanned,
     matched: restoredDocuments.length,
     changed: changed + 1,
     tombstoneVerified: false,

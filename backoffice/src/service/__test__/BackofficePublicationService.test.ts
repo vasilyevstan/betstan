@@ -4,6 +4,7 @@ import {
   messengerWrapper,
 } from "@betstan/common";
 import NewEventPublisher from "../../event/publisher/NewEventPublisher";
+import ResultSetPublisher from "../../event/publisher/ResultSetPublisher";
 import { Event } from "../../model/Event";
 import { BackofficePublicationService } from "../BackofficePublicationService";
 
@@ -120,6 +121,111 @@ it("treats absent pending markers as already published", async () => {
     "PUBLISHED"
   );
   expect(NewEventPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
+it("shares an in-flight result publication for identical callers", async () => {
+  await Event.create({
+    eventId: "concurrent-result",
+    name: "Concurrent A - Concurrent B",
+    time: new Date().toISOString(),
+    home: "Concurrent A",
+    away: "Concurrent B",
+    homeResult: 2,
+    awayResult: 1,
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    resultPublicationPending: true,
+  });
+
+  const publishWithConfirm =
+    ResultSetPublisher.prototype.publishWithConfirm as jest.Mock;
+  let releasePublication: (() => void) | undefined;
+  let markPublicationStarted: (() => void) | undefined;
+  const publicationStarted = new Promise<void>((resolve) => {
+    markPublicationStarted = resolve;
+  });
+  publishWithConfirm.mockImplementationOnce(() => {
+    markPublicationStarted?.();
+    return new Promise<void>((resolve) => {
+      releasePublication = resolve;
+    });
+  });
+
+  const service = new BackofficePublicationService(messengerWrapper.connection);
+  const firstPublication = service.publishResultNow("concurrent-result");
+  await publicationStarted;
+  const secondPublication = service.publishResultNow("concurrent-result");
+  let secondPublicationSettled = false;
+  void secondPublication.finally(() => {
+    secondPublicationSettled = true;
+  });
+  await Promise.resolve();
+
+  expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(secondPublicationSettled).toBe(false);
+  expect(releasePublication).toBeDefined();
+  releasePublication!();
+  await expect(
+    Promise.all([firstPublication, secondPublication])
+  ).resolves.toEqual(["PUBLISHED", "PUBLISHED"]);
+
+  const event = await Event.findOne({ eventId: "concurrent-result" }).select(
+    "+resultPublicationPending"
+  );
+  expect(event?.resultPublicationPending).toBeUndefined();
+});
+
+it("shares a failed result publication and permits a later retry", async () => {
+  await Event.create({
+    eventId: "concurrent-result-retry",
+    name: "Concurrent Retry A - Concurrent Retry B",
+    time: new Date().toISOString(),
+    home: "Concurrent Retry A",
+    away: "Concurrent Retry B",
+    homeResult: 2,
+    awayResult: 1,
+    status: EventStatus.RESULTED,
+    visibility: EventVisibility.ONLINE,
+    resultPublicationPending: true,
+  });
+
+  const publishWithConfirm =
+    ResultSetPublisher.prototype.publishWithConfirm as jest.Mock;
+  let rejectPublication: ((error: Error) => void) | undefined;
+  let markPublicationStarted: (() => void) | undefined;
+  const publicationStarted = new Promise<void>((resolve) => {
+    markPublicationStarted = resolve;
+  });
+  publishWithConfirm.mockImplementationOnce(() => {
+    markPublicationStarted?.();
+    return new Promise<void>((_resolve, reject) => {
+      rejectPublication = reject;
+    });
+  });
+
+  const service = new BackofficePublicationService(messengerWrapper.connection);
+  const firstPublication = service.publishResultNow("concurrent-result-retry");
+  await publicationStarted;
+  const secondPublication = service.publishResultNow(
+    "concurrent-result-retry"
+  );
+
+  expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(rejectPublication).toBeDefined();
+  rejectPublication!(new Error("confirm unavailable"));
+  await expect(
+    Promise.all([firstPublication, secondPublication])
+  ).resolves.toEqual(["PENDING", "PENDING"]);
+
+  const pendingEvent = await Event.findOne({
+    eventId: "concurrent-result-retry",
+  }).select("+resultPublicationPending");
+  expect(pendingEvent?.resultPublicationPending).toBe(true);
+
+  await expect(
+    service.publishResultNow("concurrent-result-retry")
+  ).resolves.toEqual("PUBLISHED");
+  expect(publishWithConfirm).toHaveBeenCalledTimes(2);
 });
 
 it("keeps malformed pending result and visibility records for repair", async () => {

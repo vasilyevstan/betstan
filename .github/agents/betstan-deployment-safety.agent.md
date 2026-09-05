@@ -371,6 +371,14 @@ After deployment:
   failed or timed-out log stream is incomplete: discard every captured byte,
   retry transient status and complete-log reads only within their active
   bounded deadline, and never sanitize partial output;
+- for a fixed-target cleanup, distinguish deletion blockers from preserved
+  historical references. If every target projection and cleanup tombstone is
+  already absent, `dry-run` and `apply` may return a zero-write `absent` result
+  only after replayable operational stores are clear. Never delete durable
+  betting, settlement, or archive records to manufacture cleanup readiness,
+  and never let parked, pending, retry, or active-slip work pass as absent.
+  Resolve indirect queue ownership through a bounded in-memory identifier set
+  derived from the fixed event's preserved records, without logging it;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before
