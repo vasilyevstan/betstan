@@ -6,6 +6,7 @@ import {
   OBSOLETE_EVENT_ID,
   OBSOLETE_EVENT_NAME,
   ROLLBACK_CONFIRMATION,
+  cleanupReportExitCode,
   parseCleanupArgs,
   runObsoleteSyntheticEventCleanup,
 } from "../cleanupObsoleteSyntheticEvent";
@@ -332,6 +333,11 @@ it("requires explicit independent confirmation for apply and rollback", async ()
   await expect(
     runObsoleteSyntheticEventCleanup({ mode: "rollback" })
   ).rejects.toThrow(ROLLBACK_CONFIRMATION);
+});
+
+it("keeps blocked CLI reports nonzero for the rollout wrapper", () => {
+  expect(cleanupReportExitCode({ ready: true })).toBe(0);
+  expect(cleanupReportExitCode({ ready: false })).toBe(1);
 });
 
 it("blocks an unrelated pre-existing Gamemaster archive", async () => {

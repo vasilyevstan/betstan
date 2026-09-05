@@ -351,6 +351,12 @@ After deployment:
 - confirm API responses have the expected JSON shape, not merely HTTP 200;
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
 - upload diagnostics when validation fails;
+- when a protected Job intentionally exits nonzero after emitting a structured
+  blocker report, require the wrapper to validate exactly one allowlisted,
+  zero-mutation report, retain only checksummed source/run-bound sanitized
+  evidence, delete raw logs, and still fail the phase. Never treat a failed Job
+  as readiness, and never accept exception text, contradictory counters,
+  unknown reason codes, or multiple JSON values as diagnostic evidence;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
   all six data writers, and retain or reacquire the exact handoff lock before

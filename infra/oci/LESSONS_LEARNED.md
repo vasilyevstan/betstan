@@ -637,6 +637,13 @@ conversation summaries are not authority.
   source SHA, the current authoritative workflow tree, and runtime topology.
   The one-retained-PVC shared-Mongo journal and contract tests outrank an old
   eight-PVC assumption.
+- A CLI may intentionally emit a complete structured blocker report and then
+  exit nonzero. A Job wrapper must not discard that report before sanitization,
+  but it also must not reinterpret the failed Job as readiness. Accept exactly
+  one allowlisted, zero-mutation blocker report long enough to write
+  checksummed source/run-bound failure evidence, delete raw logs, and fail the
+  phase. Exception text, contradictory counters, unknown reasons, extra JSON
+  values, or missing artifacts remain hard failures.
 - When the user chooses the fastest safe go-live path, apply a critical-path
   scope freeze: continue required gates and recovery, but defer unrelated PR
   metadata and documentation until activation is terminal.

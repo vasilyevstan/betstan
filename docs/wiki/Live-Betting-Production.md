@@ -272,6 +272,16 @@ Gamemaster archive tombstone before exact optimistic deletes, verifies that
 the active projections are gone, and supports a separately confirmed rollback
 that restores the exact snapshot and removes the tombstone.
 
+A blocked cleanup remains a failed data phase even though the cleanup CLI
+emits a structured report before exiting nonzero. The rollout wrapper accepts
+that failed Job only long enough to validate one exact report, normalize its
+allowlisted service, collection, count, and reason code, and write checksummed
+failure evidence bound to the source SHA and workflow attempt. Raw pod logs,
+database documents, connection strings, and user or bet identifiers are
+deleted rather than uploaded. Missing, malformed, contradictory, or
+exception-only output remains a hard failure without diagnostic acceptance,
+and no success provenance or schema handoff is produced.
+
 The immediate pre-deploy rollback baseline captured former production source
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment
 `33443908124`; its original OCI build is `33369011703` and deployment is

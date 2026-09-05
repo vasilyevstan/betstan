@@ -726,6 +726,10 @@ export const parseCleanupArgs = (
   return { mode, confirmation };
 };
 
+export const cleanupReportExitCode = (
+  cleanupReport: Pick<CleanupReport, "ready">
+): 0 | 1 => cleanupReport.ready ? 0 : 1;
+
 export const runCleanupCli = async (
   argv: string[] = process.argv.slice(2)
 ): Promise<void> => {
@@ -740,7 +744,7 @@ export const runCleanupCli = async (
       sourceSha: process.env.SOURCE_SHA,
     });
     process.stdout.write(`${JSON.stringify(cleanupReport)}\n`);
-    if (!cleanupReport.ready) {
+    if (cleanupReportExitCode(cleanupReport) !== 0) {
       process.exitCode = 1;
     }
   } finally {
