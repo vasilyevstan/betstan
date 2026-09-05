@@ -14,6 +14,13 @@ Security is divided into five boundaries:
 4. runtime network and secret isolation;
 5. source, build, and deployment provenance.
 
+## Reporting vulnerabilities
+
+Use the repository's
+[security policy](https://github.com/vasilyevstan/betstan/blob/master/SECURITY.md)
+and GitHub private vulnerability reporting. Do not publish exploit details,
+credentials, private data, or unredacted production evidence in an issue.
+
 ## Identity and sessions
 
 - Passwords are derived with `scrypt` and a random per-password salt.

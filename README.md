@@ -83,7 +83,14 @@ over SSE, while persisted state and replay remain the recovery authority.
 | `docs/wiki/` | Canonical source for the published GitHub wiki |
 | `.github/agents/` | Reusable specialist and orchestration agents |
 
-Contribution and local-development conventions are documented in
-[CONTRIBUTING.md](CONTRIBUTING.md). Reviewed wiki content is maintained in
-`docs/wiki/` and published byte-for-byte to the
+## Project policies
+
+- Contribution and local-development conventions:
+  [CONTRIBUTING.md](CONTRIBUTING.md)
+- Private vulnerability reporting and supported versions:
+  [SECURITY.md](SECURITY.md)
+- Source-code license: [ISC License](LICENSE)
+
+Reviewed wiki content is maintained in `docs/wiki/` and published
+byte-for-byte to the
 [GitHub wiki](https://github.com/vasilyevstan/betstan/wiki).
