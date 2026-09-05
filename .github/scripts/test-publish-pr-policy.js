@@ -577,6 +577,118 @@ async function main() {
       .map(({ state }) => state),
     ["success"],
   );
+  const cancelledLabelTransitions = [];
+  await execute({
+    eventName: "pull_request_target",
+    eventAction: "opened",
+    eventPull: openedEventPull,
+    currentPull: contextRacePull,
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: cancelledLabelTransitions,
+  });
+  const cancelledLabelLedgerCalls = [];
+  const cancelledLabelRecovery = await execute({
+    eventName: "workflow_run",
+    currentPull: contextRacePull,
+    run: workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    listedRuns: [
+      workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
+    ],
+    transitionStatuses: cancelledLabelTransitions,
+    issueEvents: [
+      issueEvent({
+        id: 701,
+        created_at: "2026-09-02T09:00:01.000Z",
+      }),
+      issueEvent({
+        id: 702,
+        label: { name: "session:live-betting-2026-09-04" },
+        created_at: "2026-09-02T09:00:02.000Z",
+      }),
+      issueEvent({
+        id: 703,
+        label: { name: "feature:live-betting" },
+        created_at: "2026-09-02T09:00:03.000Z",
+      }),
+    ],
+    issueEventListCalls: cancelledLabelLedgerCalls,
+  });
+  assert.deepEqual(
+    cancelledLabelRecovery.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert.equal(cancelledLabelLedgerCalls.length, 1);
+  assert(
+    cancelledLabelTransitions.some(
+      ({ description }) => transitionBinding(description) === "p",
+    ),
+  );
+  assert(
+    cancelledLabelTransitions.some(
+      ({ description }) => transitionBinding(description) === "102",
+    ),
+  );
+  const unavailableLedgerTransitions = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      description: transitionDescription({
+        action: "opened",
+        binding: "u",
+        labelsFingerprint: managedLabelsFingerprint,
+      }),
+    }),
+  ];
+  const unavailableLedgerRunCalls = [];
+  const unavailableLedgerRecovery = await execute({
+    eventName: "workflow_run",
+    currentPull: contextRacePull,
+    transitionStatuses: unavailableLedgerTransitions,
+    issueEventError: new Error("forbidden"),
+    workflowRunListCalls: unavailableLedgerRunCalls,
+  });
+  assertQualityFailure(unavailableLedgerRecovery);
+  assert.equal(unavailableLedgerRunCalls.length, 0);
+  assert.equal(
+    unavailableLedgerTransitions.some(
+      ({ description }) => transitionBinding(description) === "x",
+    ),
+    false,
+  );
+  const lateLedgerTransitions = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+      created_at: "2026-09-02T09:00:01.000Z",
+      description: transitionDescription({
+        action: "opened",
+        binding: "u",
+        labelsFingerprint: managedLabelsFingerprint,
+      }),
+    }),
+  ];
+  const lateLedgerRunCalls = [];
+  const lateLedgerRecovery = await execute({
+    eventName: "workflow_run",
+    currentPull: contextRacePull,
+    transitionStatuses: lateLedgerTransitions,
+    issueEvents: [
+      issueEvent({
+        created_at: "2026-09-02T09:00:02.000Z",
+      }),
+    ],
+    workflowRunListCalls: lateLedgerRunCalls,
+  });
+  assertQualityFailure(lateLedgerRecovery);
+  assert.equal(lateLedgerRunCalls.length, 0);
+  assert.equal(
+    lateLedgerTransitions.filter(
+      ({ description }) => transitionBinding(description) === "x",
+    ).length,
+    1,
+  );
   const directRaceTransitionCount = directRaceTransitions.length;
   const directPreLabelManual = await execute({
     currentPull: openedRacePull,
@@ -584,6 +696,7 @@ async function main() {
       workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
     ],
     transitionStatuses: directRaceTransitions,
+    issueEvents: [],
   });
   assertNoQualitySuccess(directPreLabelManual);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
@@ -600,6 +713,7 @@ async function main() {
       workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
     ],
     transitionStatuses: directRaceTransitions,
+    issueEvents: [],
   });
   assertNoQualitySuccess(directPreLabelCompletion);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
@@ -621,6 +735,7 @@ async function main() {
     ],
     authorizationStatuses: directPreLabelAuthorizationStatuses,
     transitionStatuses: directRaceTransitions,
+    issueEvents: [],
   });
   assertNoQualitySuccess(directPreLabelAuthorizedCompletion);
   assert.equal(directPreLabelAuthorizationStatuses.length, 0);
@@ -635,6 +750,7 @@ async function main() {
       workflowRun({ created_at: "2026-09-02T09:00:01.000Z" }),
     ],
     transitionStatuses: directRaceTransitions,
+    issueEvents: [],
   });
   assertNoQualitySuccess(directPreLabelOpenedReplay);
   assert.equal(directRaceTransitions.length, directRaceTransitionCount);
