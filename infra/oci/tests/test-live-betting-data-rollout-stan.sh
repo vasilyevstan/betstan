@@ -116,11 +116,41 @@ if [[ "${1:-}" == "get" ]]; then
       ;;
     job)
       if is_blocked_cleanup_job "${3:-}"; then
-        printf '{"status":{"failed":1}}\n'
+        if [[ "$scenario" == "cleanup-blocked-status-retry" &&
+          ! -e "$state/job-status-read-failed" ]]; then
+          touch "$state/job-status-read-failed"
+          exit 9
+        fi
+        if [[ "$scenario" == "cleanup-blocked-succeeded-deadline" ]]; then
+          printf '%s\n' \
+            '{"status":{"succeeded":1,"conditions":[{"type":"Failed","status":"True","reason":"DeadlineExceeded"}]}}'
+        elif [[ ("$scenario" == "cleanup-blocked-pod-phase-race" ||
+              "$scenario" == "cleanup-blocked-contradictory-success") &&
+          ! -e "$state/pod-phase-race-observed" ]]; then
+          printf '{"status":{}}\n'
+        elif [[ "$scenario" == "cleanup-blocked-contradictory-success" ]]; then
+          printf '%s\n' \
+            '{"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True","reason":"CompletionsReached"}]}}'
+        else
+          failure_reason=BackoffLimitExceeded
+          [[ "$scenario" != "cleanup-blocked-deadline" ]] ||
+            failure_reason=DeadlineExceeded
+          jq -n --arg reason "$failure_reason" '{
+            status:{
+              failed:1,
+              conditions:[{
+                type:"Failed",
+                status:"True",
+                reason:$reason
+              }]
+            }
+          }'
+        fi
       elif [[ "$scenario" == "image-pull" ]]; then
         printf '{"status":{}}\n'
       else
-        printf '{"status":{"succeeded":1}}\n'
+        printf '%s\n' \
+          '{"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True","reason":"CompletionsReached"}]}}'
       fi
       exit 0
       ;;
@@ -137,8 +167,42 @@ if [[ "${1:-}" == "get" ]]; then
       done
       if [[ -n "$selected_job" ]] &&
         is_blocked_cleanup_job "$selected_job"; then
-        printf '%s\n' \
-          '{"items":[{"status":{"phase":"Failed","containerStatuses":[{"state":{"terminated":{"reason":"Error","exitCode":1,"message":"private runtime detail"}}}]}}]}'
+        [[ "$scenario" != "cleanup-blocked-status-error" ]] || exit 9
+        if [[ "$scenario" == "cleanup-blocked-status-retry" &&
+          ! -e "$state/pod-status-read-failed" ]]; then
+          touch "$state/pod-status-read-failed"
+          exit 9
+        fi
+        pod_phase=Failed
+        if [[ ("$scenario" == "cleanup-blocked-pod-phase-race" ||
+              "$scenario" == "cleanup-blocked-contradictory-success") &&
+          ! -e "$state/pod-phase-race-observed" ]]; then
+          pod_phase=Running
+          touch "$state/pod-phase-race-observed"
+        elif [[ "$scenario" == "cleanup-blocked-never-converges" ]]; then
+          pod_phase=Running
+        fi
+        container_signal=0
+        [[ "$scenario" != "cleanup-blocked-signaled" ]] || container_signal=15
+        jq -n \
+          --arg pod_phase "$pod_phase" \
+          --argjson container_signal "$container_signal" '{
+          items:[{
+            status:{
+              phase:$pod_phase,
+              containerStatuses:[{
+                state:{
+                  terminated:{
+                    reason:"Error",
+                    exitCode:1,
+                    signal:$container_signal,
+                    message:"private runtime detail"
+                  }
+                }
+              }]
+            }
+          }]
+        }'
       elif [[ "$scenario" == "image-pull" && "$*" == *"job-name="* ]]; then
         printf '%s\n' \
           '{"items":[{"status":{"phase":"Pending","containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff","message":"secret registry detail"}}}]}}]}'
@@ -207,6 +271,12 @@ if [[ "${1:-}" == "logs" ]]; then
       if [[ "$scenario" == "cleanup-blocked-multiple" ]]; then
         printf '%s\n' "$blocked_report"
       fi
+      if [[ "$scenario" == "cleanup-blocked-log-retry" &&
+        ! -e "$state/log-read-failed" ]]; then
+        touch "$state/log-read-failed"
+        exit 9
+      fi
+      [[ "$scenario" != "cleanup-blocked-log-error" ]] || exit 9
       exit 0
     fi
     mode=dry-run
@@ -365,6 +435,7 @@ if [[ "${1:-}" == "logs" ]]; then
 fi
 
 if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
+  [[ "$scenario" != "cleanup-blocked-delete-error" ]] || exit 9
   mkdir -p "$state/deleted"
   touch "$state/deleted/${3:-unknown}"
   exit 0
@@ -434,6 +505,8 @@ run_phase() {
   local recovery_run_id="${5:-0}"
   local recovery_source_sha="${6:-none}"
   local baseline_sha="${7:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+  local job_timeout="${JOB_TIMEOUT_OVERRIDE_SECONDS:-10}"
+  local terminal_grace="${JOB_TERMINAL_GRACE_OVERRIDE_SECONDS:-30}"
   local maintenance_fence=false
   local writers_quiesced=false
   local runtime_handoff=false
@@ -458,7 +531,8 @@ run_phase() {
   IMAGE_PROVENANCE_FILE="$images_file" \
   OUTPUT_DIR="$output" \
   OCI_K8S_NAMESPACE=betstan-oci \
-  JOB_TIMEOUT_SECONDS=10 \
+  JOB_TIMEOUT_SECONDS="$job_timeout" \
+  JOB_TERMINAL_STATE_GRACE_SECONDS="$terminal_grace" \
   GITHUB_RUN_ID="$run_id" \
   GITHUB_RUN_ATTEMPT=1 \
   BASELINE_SHA256="$baseline_sha" \
@@ -551,7 +625,8 @@ jq -e \
       podPhase:"Failed",
       containerState:"terminated",
       containerReason:"Error",
-      exitCode:1
+      exitCode:1,
+      signal:0
     } and
     (.completedAt | test(
       "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
@@ -587,14 +662,135 @@ fi
 [[ -e "$stub_state/deleted/live-data-event-4009-1" ]] ||
   fail "blocked cleanup did not delete its Kubernetes Job"
 
+race_output="$work_dir/cleanup-blocked-pod-phase-race"
+race_log="$work_dir/cleanup-blocked-pod-phase-race.out"
+if JOB_TIMEOUT_OVERRIDE_SECONDS=1 \
+  run_phase dry-run cleanup-blocked-pod-phase-race 4012 "$race_output" \
+      >"$race_log" 2>&1; then
+  fail "pod-phase race blocker was accepted as rollout readiness"
+fi
+[[ -e "$stub_state/pod-phase-race-observed" ]] ||
+  fail "pod-phase race scenario did not expose the transient Running phase"
+[[ -f "$race_output/reports/preflight-obsolete-event.json" &&
+   -f "$race_output/cleanup-blocker-failure.json" &&
+   -f "$race_output/SHA256SUMS" ]] ||
+  fail "pod-phase race discarded structured cleanup evidence"
+jq -e '
+  .status == "FAIL" and
+  .workflowRunId == "4012" and
+  .job == {
+    outcome:"failed",
+    podCount:1,
+    podPhase:"Failed",
+    containerState:"terminated",
+    containerReason:"Error",
+    exitCode:1,
+    signal:0
+  }
+' "$race_output/cleanup-blocker-failure.json" >/dev/null ||
+  fail "pod-phase race did not retain converged failed-job evidence"
+(
+  cd "$race_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "pod-phase race evidence checksum is invalid"
+if grep -R -E \
+    'gaming_bet|event reference|secret-user|mongodb://|private runtime detail' \
+    "$race_output" "$race_log" 2>/dev/null | grep -q .; then
+  fail "pod-phase race evidence leaked raw diagnostics"
+fi
+[[ -e "$stub_state/deleted/live-data-event-4012-1" ]] ||
+  fail "pod-phase race did not delete its Kubernetes Job"
+
+nonconverging_output="$work_dir/cleanup-blocked-never-converges"
+nonconverging_log="$work_dir/cleanup-blocked-never-converges.out"
+nonconverging_started="$SECONDS"
+if JOB_TERMINAL_GRACE_OVERRIDE_SECONDS=1 \
+  run_phase dry-run cleanup-blocked-never-converges 4013 \
+      "$nonconverging_output" >"$nonconverging_log" 2>&1; then
+  fail "non-converging failed Job was accepted as rollout readiness"
+fi
+nonconverging_elapsed=$(( SECONDS - nonconverging_started ))
+(( nonconverging_elapsed < 8 )) ||
+  fail "terminal convergence used the longer execution deadline"
+if [[ -d "$nonconverging_output" ]] &&
+  find "$nonconverging_output" -type f -print -quit | grep -q .; then
+  fail "non-converging failed Job persisted diagnostic evidence"
+fi
+
+delete_error_output="$work_dir/cleanup-blocked-delete-error"
+delete_error_log="$work_dir/cleanup-blocked-delete-error.out"
+if run_phase dry-run cleanup-blocked-delete-error 4014 \
+    "$delete_error_output" >"$delete_error_log" 2>&1; then
+  fail "delete-error blocker was accepted as rollout readiness"
+fi
+[[ -f "$delete_error_output/reports/preflight-obsolete-event.json" &&
+   -f "$delete_error_output/cleanup-blocker-failure.json" &&
+   -f "$delete_error_output/SHA256SUMS" ]] ||
+  fail "Kubernetes Job deletion failure discarded blocker evidence"
+(
+  cd "$delete_error_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "delete-error blocker evidence checksum is invalid"
+[[ ! -e "$stub_state/deleted/live-data-event-4014-1" ]] ||
+  fail "delete-error scenario unexpectedly reported successful Job deletion"
+
+status_retry_output="$work_dir/cleanup-blocked-status-retry"
+status_retry_log="$work_dir/cleanup-blocked-status-retry.out"
+if run_phase dry-run cleanup-blocked-status-retry 4015 \
+    "$status_retry_output" >"$status_retry_log" 2>&1; then
+  fail "status-retry blocker was accepted as rollout readiness"
+fi
+[[ -e "$stub_state/pod-status-read-failed" &&
+   -e "$stub_state/job-status-read-failed" ]] ||
+  fail "status-retry scenario did not exercise both transient status failures"
+[[ -f "$status_retry_output/reports/preflight-obsolete-event.json" &&
+   -f "$status_retry_output/cleanup-blocker-failure.json" &&
+   -f "$status_retry_output/SHA256SUMS" ]] ||
+  fail "transient Kubernetes status failures discarded blocker evidence"
+(
+  cd "$status_retry_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "status-retry blocker evidence checksum is invalid"
+
+log_retry_output="$work_dir/cleanup-blocked-log-retry"
+log_retry_log="$work_dir/cleanup-blocked-log-retry.out"
+if run_phase dry-run cleanup-blocked-log-retry 4016 \
+    "$log_retry_output" >"$log_retry_log" 2>&1; then
+  fail "log-retry blocker was accepted as rollout readiness"
+fi
+[[ -e "$stub_state/log-read-failed" ]] ||
+  fail "log-retry scenario did not exercise a transient partial log read"
+[[ -f "$log_retry_output/reports/preflight-obsolete-event.json" &&
+   -f "$log_retry_output/cleanup-blocker-failure.json" &&
+   -f "$log_retry_output/SHA256SUMS" ]] ||
+  fail "transient partial log failure discarded blocker evidence"
+(
+  cd "$log_retry_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "log-retry blocker evidence checksum is invalid"
+
 for blocked_scenario in \
   cleanup-blocked-changed \
   cleanup-blocked-multiple \
   cleanup-blocked-exception \
-  cleanup-blocked-unknown-reason; do
+  cleanup-blocked-unknown-reason \
+  cleanup-blocked-deadline \
+  cleanup-blocked-signaled \
+  cleanup-blocked-succeeded-deadline \
+  cleanup-blocked-status-error \
+  cleanup-blocked-log-error \
+  cleanup-blocked-contradictory-success; do
   invalid_output="$work_dir/$blocked_scenario"
   invalid_log="$work_dir/$blocked_scenario.out"
-  if run_phase dry-run "$blocked_scenario" 4010 "$invalid_output" \
+  invalid_job_timeout=10
+  [[ "$blocked_scenario" != "cleanup-blocked-status-error" ]] ||
+    invalid_job_timeout=1
+  invalid_terminal_grace=30
+  [[ "$blocked_scenario" != "cleanup-blocked-log-error" ]] ||
+    invalid_terminal_grace=1
+  if JOB_TIMEOUT_OVERRIDE_SECONDS="$invalid_job_timeout" \
+    JOB_TERMINAL_GRACE_OVERRIDE_SECONDS="$invalid_terminal_grace" \
+    run_phase dry-run "$blocked_scenario" 4010 "$invalid_output" \
       >"$invalid_log" 2>&1; then
     fail "invalid blocked cleanup output was accepted: $blocked_scenario"
   fi

@@ -1811,6 +1811,15 @@ for cleanup_failure_contract in \
     'write_cleanup_blocker_evidence' \
     'live-betting-cleanup-blocker-v1' \
     'structured-blocked' \
+    'terminal_state_observed_at' \
+    'JOB_TERMINAL_STATE_GRACE_SECONDS' \
+    '.type == "Complete"' \
+    '.type == "FailureTarget"' \
+    'data Job reported contradictory completion and failure' \
+    'request-timeout="${request_timeout}s"' \
+    'sleep_before_job_retry' \
+    'collect_complete_job_report' \
+    'unable to collect complete failed job report' \
     'sanitized failure evidence recorded'; do
   grep -Fq "$cleanup_failure_contract" "$data_runner" ||
     fail "live-data rollout omits cleanup failure contract: $cleanup_failure_contract"
@@ -1819,6 +1828,10 @@ grep -Fq \
   'when a protected Job intentionally exits nonzero after emitting a structured' \
   "$deployment_safety_agent" ||
   fail "deployment safety does not require sanitized structured blocker evidence"
+grep -Fq \
+  'Pod and Job status are eventually consistent' \
+  "$deployment_safety_agent" ||
+  fail "deployment safety does not account for terminal pod-status convergence"
 data_evidence_gate="$(
   sed -n \
     '/- name: Require executed data-step evidence/,/- name: Upload exact sanitized data evidence/p' \

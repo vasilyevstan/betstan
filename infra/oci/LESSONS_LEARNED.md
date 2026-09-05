@@ -644,6 +644,25 @@ conversation summaries are not authority.
   checksummed source/run-bound failure evidence, delete raw logs, and fail the
   phase. Exception text, contradictory counters, unknown reasons, extra JSON
   values, or missing artifacts remain hard failures.
+- Kubernetes Job and Pod status do not become terminal atomically. A wrapper
+  that observes a terminated nonzero container while the Pod still says
+  `Running` must poll for a short bounded convergence window before applying
+  its strict terminal-state checks. Treating the first mixed snapshot as final
+  can discard the exact structured evidence the failure path was designed to
+  preserve. The observation must also be latched: a later contradictory
+  success cannot erase it, status calls need their own request timeouts, and
+  only the CLI's intentional exit code without a signal or active-deadline
+  failure may enter the sanitized blocker path. Kubernetes Job counters are
+  intermediate; terminal decisions must use `Complete`, `FailureTarget`, and
+  `Failed` conditions. After failure is latched, use the short convergence
+  deadline instead of the longer execution timeout, and never let best-effort
+  Job deletion suppress already validated evidence. Log transport is part of
+  the evidence boundary too: if a bounded log read fails, discard all partial
+  bytes rather than validating a prefix that merely looks complete. Status
+  and complete-log transport failures can be transient across the Bastion
+  path, so retry them within the existing execution or terminal deadline
+  instead of aborting a still-running mutating Job or losing a stable terminal
+  report; a persistent failure at the deadline remains a hard failure.
 - When the user chooses the fastest safe go-live path, apply a critical-path
   scope freeze: continue required gates and recovery, but defer unrelated PR
   metadata and documentation until activation is terminal.

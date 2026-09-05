@@ -280,7 +280,22 @@ failure evidence bound to the source SHA and workflow attempt. Raw pod logs,
 database documents, connection strings, and user or bet identifiers are
 deleted rather than uploaded. Missing, malformed, contradictory, or
 exception-only output remains a hard failure without diagnostic acceptance,
-and no success provenance or schema handoff is produced.
+and no success provenance or schema handoff is produced. Because Kubernetes
+may expose a terminated container before the Job and Pod phase fields
+converge, the wrapper waits through a short bounded status window before
+applying those strict terminal checks; a transient `Running` phase alone must
+not discard an otherwise valid blocker report. Once observed, that failure is
+latched so a contradictory later success cannot authorize readiness. Status
+requests are independently bounded, and diagnostic acceptance requires the
+cleanup CLI's exact intentional exit code with no signal or active-deadline
+failure. Completion and failure authority comes from terminal Kubernetes Job
+conditions rather than intermediate counters. Once failure is latched, only
+the short convergence deadline remains active, and bounded best-effort Job
+deletion cannot prevent the sanitized report from being persisted. A failed
+or timed-out log read is never interpreted as evidence; any partial bytes are
+discarded before sanitization. Transient status and complete-log transport
+failures are retried only within the active execution or terminal deadline;
+persistent failures still stop the phase without success-shaped evidence.
 
 The immediate pre-deploy rollback baseline captured former production source
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment
