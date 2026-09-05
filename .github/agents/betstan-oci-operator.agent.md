@@ -106,3 +106,9 @@ sanitized evidence, rollback state, remaining risk, and one of:
 Never equate successful OCI CLI output or manifest apply with a healthy
 deployment. A `NO_GO` must include bounded sanitized diagnostics, a failure
 classification, and the exact safe next action.
+
+After a service refusal or restart, retain per-container current/previous
+state, termination reason, exit code, and start/finish timestamps. Retrieve
+bounded previous-container logs only when `restartCount > 0` proves that a
+prior container may exist; surface missing logs instead of silently
+substituting current logs.
