@@ -158,7 +158,7 @@ value = re.sub(
 value = re.sub(
     r"mongodb(?:\+srv)?://[^\s\"\x27<>]+",
     lambda match: "mongodb://[REDACTED]" + (
-        match.group(0)[len(match.group(0).rstrip(",;)}]")):]
+        match.group(0)[len(match.group(0).rstrip(",;)}")):]
     ),
     value,
 )

@@ -786,6 +786,17 @@ done
 [[ "$(tr -cd '"' <<<"$mongo_json_input" | wc -c | tr -d ' ')" == \
    "$(tr -cd '"' <<<"$mongo_json" | wc -c | tr -d ' ')" ]] ||
   fail "OCI structured redaction changed JSON quote boundaries"
+mongo_host_json="$(
+  printf '%s\n' \
+    '{"uri":"mongodb://user:host-secret@mongo.internal","status":"failed"}' |
+    oci_redact
+)"
+jq -e '
+  .uri == "mongodb://[REDACTED]" and .status == "failed"
+' <<<"$mongo_host_json" >/dev/null ||
+  fail "OCI Mongo redaction left a trailing private-host delimiter"
+[[ "$mongo_host_json" != *"host-secret"* ]] ||
+  fail "OCI Mongo host-only redaction leaked fixture credentials"
 
 ruby -ryaml - "$ROOT_DIR" <<'RUBY'
 root = ARGV.fetch(0)
