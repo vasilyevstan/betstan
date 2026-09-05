@@ -590,6 +590,15 @@ async function inspectManagedLabelLedger({
           reason: "managed-label-ledger-outside-window",
         };
       }
+      if (
+        transition.unconfirmed &&
+        eventAt > transition.lineageCreatedAt
+      ) {
+        return {
+          status: "drift",
+          reason: "managed-label-ledger-after-provisional-marker",
+        };
+      }
       managedLabelAt = eventAt;
     }
     if (response.data.length < MANAGED_LABEL_LEDGER_PAGE_SIZE) {
@@ -1544,6 +1553,18 @@ function isOpeningLabelLineage(transition, pull) {
   );
 }
 
+function isRecoverableUnconfirmedOpeningLabelLineage(transition, pull) {
+  return (
+    transition.version === 3 &&
+    transition.action === "opened" &&
+    transition.unconfirmed &&
+    !transition.stale &&
+    transitionMatchesPullIdentity(transition, pull) &&
+    transition.labelsFingerprint === CLI_MANAGED_LABELS_FINGERPRINT &&
+    hasOnlyCliManagedPolicyLabel(pull.labels)
+  );
+}
+
 function requiresOpeningLabelLedgerAuthority(transition, pull) {
   return (
     transition.action === "opened" &&
@@ -1761,7 +1782,13 @@ async function bindPendingQualityTransition({
   if (!transition || transition.version !== 3 || transition.stale) {
     return false;
   }
-  if (requiresOpeningLabelLedgerAuthority(transition, pull)) {
+  const recoverUnconfirmedOpeningLabel =
+    isRecoverableUnconfirmedOpeningLabelLineage(transition, pull) &&
+    eventAction === null;
+  if (
+    requiresOpeningLabelLedgerAuthority(transition, pull) ||
+    recoverUnconfirmedOpeningLabel
+  ) {
     const ledger = await inspectManagedLabelLedger({
       github,
       owner,
@@ -1787,6 +1814,23 @@ async function bindPendingQualityTransition({
         `opening managed-label ledger is inconclusive: ${ledger.reason}`,
       );
     }
+  }
+  if (recoverUnconfirmedOpeningLabel) {
+    await publishQualityTransitionMarker({
+      github,
+      owner,
+      repo,
+      pull,
+      action: transition.action,
+      transitionAt: transition.transitionAt,
+      binding: null,
+      targetUrl: transition.targetUrl,
+    });
+    transition = {
+      ...transition,
+      runId: null,
+      unconfirmed: false,
+    };
   }
   if (eventAction === "opened") {
     if (
