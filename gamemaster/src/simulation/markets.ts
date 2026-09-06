@@ -113,6 +113,10 @@ function selectionDefinitions(
         { key: TeamSide.DRAW, side: TeamSide.DRAW },
         { key: TeamSide.AWAY, side: TeamSide.AWAY },
       ];
+    case LiveMarketType.SECOND_HALF_TIME_RESULT:
+      throw new Error(
+        "Second Half Time Result generation requires simulation engine v4"
+      );
     case LiveMarketType.SECOND_HALF_SCORE:
       return SECOND_HALF_SCORE_SELECTIONS;
     case LiveMarketType.KICKOFF_TEAM:
@@ -362,6 +366,7 @@ function oddsFor(
     case LiveMarketType.FIRST_MINUTE_GOAL:
       return firstMinuteGoalOdds(timeline);
     case LiveMarketType.SECOND_HALF_TIME_RESULT:
+      // Unreachable on engine v3; fail closed if it is wired prematurely.
       throw new Error(
         "Second Half Time Result generation requires simulation engine v4"
       );
