@@ -492,6 +492,11 @@ its owner. It is never healthy by default.
   `run_attempt == 1`, never recommend rerunning that run: retain it as failed
   evidence and return `ATTENTION_REQUIRED` with the owning specialist and the
   normal path to a fresh exact-master candidate.
+- Every bounded fresh reselection returning exact `STALE_QUOTE` is evidence of
+  a systemic quote-authority defect, not permission to increase the retry
+  count. Require per-attempt identity, expiry, submission-time, and decline
+  evidence; route a repository fix and a new exact-master first attempt while
+  preserving the failed run unchanged.
 - Register replacement work only after the prior run is terminal and the new
   candidate SHA exists. Reuse another independently required change when one is
   already ready; otherwise report `BLOCKED` rather than manufacture an empty

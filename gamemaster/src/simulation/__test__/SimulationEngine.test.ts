@@ -150,8 +150,8 @@ describe("simulation timeline", () => {
     const different = simulateMatch({ eventId: "determinism", seed: "golden-8" });
     expect(first).toEqual(second);
     expect(first).not.toEqual(different);
-    expect(first.engineVersion).toBe(2);
-    expect(digest(first)).toBe("845b8858e73555e0b7eaafabcc5fabc5d920707e79019dc0cb59be23c49bd3ed");
+    expect(first.engineVersion).toBe(3);
+    expect(digest(first)).toBe("0c595e9d069d86d73d83c004d06d88f26c5340d20bf2416778a1f9c3ee54ca20");
   });
 
   it("has exact structural anchors and ordered structural ties", () => {
@@ -399,7 +399,10 @@ describe("market projection", () => {
     expect(transitions.every((transition) => actionable(transition).length <= 6)).toBe(true);
     expect(yellow.markets.find((market) =>
       market.marketType === LiveMarketType.NEXT_GOAL_KICK
-    )?.status).toBe(LiveMarketStatus.OPEN);
+    )).toMatchObject({
+      status: LiveMarketStatus.OPEN,
+      quoteVersion: 1,
+    });
     expect(corner.markets.find((market) =>
       market.marketType === LiveMarketType.NEXT_PENALTY
     )?.status).toBe(LiveMarketStatus.OPEN);
@@ -426,6 +429,20 @@ describe("market projection", () => {
     expect(secondKick.markets.find((market) =>
       market.marketType === LiveMarketType.SECOND_HALF_SCORE
     )?.status).toBe(LiveMarketStatus.CLOSED);
+    const suspendedMarket = halfTime.markets.find(
+      (market) =>
+        NEXT_MARKET_TYPES.includes(market.marketType)
+        && market.status === LiveMarketStatus.SUSPENDED
+    )!;
+    const reopenedMarket = secondKick.markets.find(
+      (market) =>
+        market.marketType === suspendedMarket.marketType
+        && market.marketVersion === suspendedMarket.marketVersion
+    )!;
+    expect(reopenedMarket.status).toBe(LiveMarketStatus.OPEN);
+    expect(reopenedMarket.quoteVersion).toBe(
+      suspendedMarket.quoteVersion + 1
+    );
 
     const fullTime = byType(LiveIncidentType.FULL_TIME);
     expect(fullTime.settlements.filter((settlement) =>
@@ -436,8 +453,21 @@ describe("market projection", () => {
       winningSelection: "market-event:SECOND_HALF_SCORE:1:SCORE_0_0",
     }));
     const outcomeIndex = transitions.indexOf(outcome);
-    expect(outcome.markets.map((market) => market.quoteVersion)).toEqual(
-      transitions[outcomeIndex - 1].markets.map((market) => market.quoteVersion)
+    const beforeOutcome = transitions[outcomeIndex - 1];
+    const secondHalfScoreBeforeOutcome = beforeOutcome.markets.find(
+      (market) => market.marketType === LiveMarketType.SECOND_HALF_SCORE
+    )!;
+    const secondHalfScoreAtOutcome = outcome.markets.find(
+      (market) => market.marketType === LiveMarketType.SECOND_HALF_SCORE
+    )!;
+    expect(secondHalfScoreAtOutcome.selections).toEqual(
+      secondHalfScoreBeforeOutcome.selections
+    );
+    expect(secondHalfScoreAtOutcome.marketVersion).toBe(
+      secondHalfScoreBeforeOutcome.marketVersion
+    );
+    expect(secondHalfScoreAtOutcome.quoteVersion).toBe(
+      secondHalfScoreBeforeOutcome.quoteVersion + 1
     );
   });
 

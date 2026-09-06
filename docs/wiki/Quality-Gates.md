@@ -155,7 +155,12 @@ focus, or dynamic interaction. A screenshot-only assertion is not enough.
 - deterministic corpus tests cover realistic normal and stoppage-time
   distribution;
 - simulation restart produces the same authoritative outcome;
-- quote, phase, market, and settlement transitions remain monotonic;
+- quote, phase, market, and settlement transitions remain monotonic; every
+  material validity-window advance receives a new quote version even when odds
+  stay equal, fresh markets begin at quote version 1, and non-material markers
+  preserve identity and expiry;
+- Moderation retains same-price quote windows independently and accepts each
+  only inside its own expiry and authority interval;
 - every transition exposes no more than six non-terminal products, rotation
   settles before replacement, and market versions increase before a type
   re-enters;
@@ -192,6 +197,9 @@ After deployment:
 - health, routing, TLS, APIs, SSE, queues, consumers, and storage pass;
 - accelerated live acceptance proves a stable multi-event pre-kickoff slip
   separately from a moving in-play selection governed by one event clock;
+- every bounded in-play placement attempt records quote identity, expiry,
+  immutable submission time, and decline details before the final success
+  assertion;
 - acceptance observes each fact on its owning public read model: Event proves
   phase, score, and terminal market state, while Bet history proves accepted
   quote identity, winning selection, settlement reason/sequence, and outcome;

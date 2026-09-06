@@ -129,7 +129,12 @@
 - The persisted engine version and generated transitions are authoritative for an in-progress match; never regenerate them after an engine change.
 - New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
-- Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
+- Live settlement identity is `marketId + marketVersion`; quote authority is
+  `marketId + marketVersion + quoteVersion`. One quote identity must map to
+  one `quoteValidUntil`: every material validity-window advance increments the
+  quote version even when odds are unchanged, fresh markets start at quote
+  version 1, and non-material markers preserve identity. Remaining next-event
+  markets settle explicitly to `NONE` at full-time.
 - Acceptance evidence follows service ownership. Event snapshots prove phase,
   score, incidents, and terminal market state; Bet history proves accepted
   quote identity, winning selection, settlement reason/sequence, and row

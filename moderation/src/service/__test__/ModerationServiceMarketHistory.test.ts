@@ -94,6 +94,79 @@ it("approves a live bet whose valid quote predates a newer snapshot that already
   ).toBe(true);
 });
 
+it("keeps same-price validity windows independently authoritative under one market version", async () => {
+  const publisher = createPublisher();
+  const service = new ModerationService(publisher);
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const firstMarket = createLiveMarket(eventId, {
+    marketVersion: 1,
+    quoteVersion: 1,
+    quoteValidUntil: timelineAt(10_000),
+  });
+  const secondMarket = createLiveMarket(eventId, {
+    marketVersion: 1,
+    quoteVersion: 2,
+    quoteValidUntil: timelineAt(20_000),
+  });
+
+  expect(secondMarket.selections).toEqual(firstMarket.selections);
+
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 1,
+      occurredAt: timelineAt(0),
+      markets: [firstMarket],
+    })
+  );
+  await service.upsertLiveEventMirror(
+    createLiveUpdateEvent({
+      eventId,
+      sequence: 2,
+      occurredAt: timelineAt(10_000),
+      markets: [secondMarket],
+    })
+  );
+
+  const firstPlaceBet = createLivePlaceBetEvent(firstMarket, {
+    data: { submittedAt: timelineAt(5_000) },
+  });
+  const secondPlaceBet = createLivePlaceBetEvent(secondMarket, {
+    data: { submittedAt: timelineAt(15_000) },
+  });
+
+  await service.handlePlaceBet(firstPlaceBet);
+  await service.handlePlaceBet(secondPlaceBet);
+
+  const savedBets = await Bet.find({
+    slipId: {
+      $in: [firstPlaceBet.data.slipId, secondPlaceBet.data.slipId],
+    },
+  }).lean();
+  expect(savedBets).toHaveLength(2);
+  expect(
+    savedBets.every((bet) => bet.status === ModerationStatus.APPROVED)
+  ).toBe(true);
+
+  const mirror = await LiveEventMirror.findOne({ eventId }).lean();
+  const sameMarketHistory = mirror!.marketHistory!.filter(
+    (historyEntry) =>
+      historyEntry.marketId === firstMarket.marketId
+      && historyEntry.marketVersion === firstMarket.marketVersion
+  );
+  expect(sameMarketHistory).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      quoteVersion: 1,
+      quoteValidUntil: timelineAt(10_000),
+      authorityEndedAt: timelineAt(10_000),
+    }),
+    expect.objectContaining({
+      quoteVersion: 2,
+      quoteValidUntil: timelineAt(20_000),
+    }),
+  ]));
+});
+
 it("declines a live bet against an ordinary market's frozen PRE_MATCH-phase history entry, even though it was recorded OPEN", async () => {
   const publisher = createPublisher();
   const service = new ModerationService(publisher);

@@ -81,6 +81,13 @@ function sameOdds(
     );
 }
 
+function advancesQuoteAuthority(type: LiveIncidentType): boolean {
+  return type !== LiveIncidentType.KICK_OFF
+    && type !== LiveIncidentType.HALF_TIME
+    && type !== LiveIncidentType.FULL_TIME
+    && type !== LiveIncidentType.FIRST_MINUTE_ELAPSED;
+}
+
 function expectedSelectionCount(marketType: LiveMarketType): number {
   if (marketType === LiveMarketType.SECOND_HALF_SCORE) {
     return 10;
@@ -274,11 +281,17 @@ function assertMarketLifecycle(
       if (previous) {
         if (market.marketVersion === previous.marketVersion) {
           const oddsChanged = !sameOdds(market, previous);
+          const quoteAuthorityAdvanced =
+            market.status === LiveMarketStatus.OPEN
+            && advancesQuoteAuthority(transition.incident.type);
           if (
             market.quoteVersion
-            !== previous.quoteVersion + (oddsChanged ? 1 : 0)
+            !== previous.quoteVersion + (quoteAuthorityAdvanced ? 1 : 0)
           ) {
             fail(`invalid quote version for ${market.marketType}`);
+          }
+          if (oddsChanged && !quoteAuthorityAdvanced) {
+            fail(`odds changed outside a quote boundary for ${market.marketType}`);
           }
         } else if (
           market.marketVersion !== previous.marketVersion + 1

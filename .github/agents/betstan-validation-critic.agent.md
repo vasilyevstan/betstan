@@ -50,6 +50,12 @@ Read:
   or other authority-ending transitions. Require immutable `submittedAt` to
   precede both expiry and the earliest authoritative `occurredAt`, including
   equal-boundary, out-of-order, restart, and missing-additive-field cases.
+- A changed `quoteValidUntil` under an unchanged
+  `(marketId, marketVersion, quoteVersion)` identity. Treat this as an
+  authority collision even when prices are numerically unchanged; require a
+  new quote version at every material validity boundary, while preserving
+  quote version 1 for newly opened markets and identity across non-material
+  markers.
 - Old-client/new-API and new-client/old-API rolling combinations. Legacy
   compatibility evidence must be scoped to the authenticated session, exact
   user, and aggregate so another session cannot refresh stale evidence, and

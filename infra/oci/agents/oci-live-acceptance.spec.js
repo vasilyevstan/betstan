@@ -156,6 +156,18 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const password = requiredEnv('LIVE_ACCEPTANCE_PASSWORD');
   const runId = requiredEnv('LIVE_ACCEPTANCE_RUN_ID');
   const evidenceFile = requiredEnv('LIVE_ACCEPTANCE_EVIDENCE_FILE');
+  const livePlacementEvidenceFile = path.join(
+    path.dirname(evidenceFile),
+    'live-placement-attempts.json',
+  );
+  const livePlacementAttempts = [];
+  const persistLivePlacementAttempts = () => {
+    fs.mkdirSync(path.dirname(livePlacementEvidenceFile), { recursive: true });
+    fs.writeFileSync(
+      livePlacementEvidenceFile,
+      `${JSON.stringify({ runId, attempts: livePlacementAttempts }, null, 2)}\n`,
+    );
+  };
   const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
@@ -550,6 +562,34 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     const submittedBets = await (await page.request.get('/api/bet')).json();
     const submittedLiveBet = findBySlipId(submittedBets, liveSlipId);
     expect(submittedLiveBet).toBeDefined();
+    livePlacementAttempts.push({
+      placementAttempt,
+      slipId: liveSlipId,
+      selectedQuote: {
+        eventId: selectedLiveQuote.eventId,
+        marketId: selectedLiveQuote.marketId,
+        marketVersion: selectedLiveQuote.marketVersion,
+        quoteVersion: selectedLiveQuote.quoteVersion,
+        quoteValidUntil: selectedLiveQuote.quoteValidUntil,
+        selectionId: selectedLiveQuote.selectionId,
+        oddsValue: selectedLiveQuote.oddsValue,
+      },
+      submittedAt: submittedLiveBet.timestamp,
+      status: submittedLiveBet.status,
+      declineReason: submittedLiveBet.declineReason,
+      rows: submittedLiveBet.rows.map((row) => ({
+        rowId: row.id,
+        marketId: row.marketId,
+        marketVersion: row.marketVersion,
+        quoteVersion: row.quoteVersion,
+        quoteValidUntil: row.quoteValidUntil,
+        selectionId: row.selectionId,
+        oddsValue: row.oddsValue,
+        declineReason: row.declineReason,
+        currentOdds: row.currentOdds,
+      })),
+    });
+    persistLivePlacementAttempts();
 
     if (submittedLiveBet.status !== 'DECLINED') {
       acceptedLiveBet = submittedLiveBet;
@@ -918,6 +958,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     })),
     liveSlipId,
     declinedLiveSlipIds,
+    livePlacementAttempts,
     liveBetStatus: liveBet.status,
     liveRow: {
       eventId: liveRow.eventId,

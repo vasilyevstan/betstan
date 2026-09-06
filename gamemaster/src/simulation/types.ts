@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = 2 as const;
+export const ENGINE_VERSION = 3 as const;
 
 export const EventPhase = {
   PRE_MATCH: "PRE_MATCH",

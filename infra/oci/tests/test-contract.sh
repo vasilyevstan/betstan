@@ -166,6 +166,12 @@ for selection_contract in \
     'row.quoteVersion === acceptedQuote.quoteVersion' \
     'row.selectionId === acceptedQuote.selectionId' \
     'const MAX_LIVE_PLACEMENT_ATTEMPTS = 5;' \
+    "const livePlacementEvidenceFile = path.join(" \
+    'const livePlacementAttempts = [];' \
+    'persistLivePlacementAttempts();' \
+    'quoteValidUntil: selectedLiveQuote.quoteValidUntil,' \
+    'submittedAt: submittedLiveBet.timestamp,' \
+    'declineReason: submittedLiveBet.declineReason,' \
     'let acceptedLiveQuote;' \
     'acceptedLiveQuote = selectedLiveQuote;' \
     "expect(submittedLiveBet.declineReason).toBe('STALE_QUOTE');" \
@@ -213,7 +219,8 @@ for lesson in \
     "A workflow-dispatch URL is not job materialization" \
     "\`pull_request.edited\`" \
     "A late advisory verdict is stale until revalidated" \
-    "A Ready pod or recovered \`200\` response is current-health evidence"; do
+    "A Ready pod or recovered \`200\` response is current-health evidence" \
+    "One quote identity must never carry multiple expiry values"; do
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
@@ -557,6 +564,9 @@ grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-pub
 grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
     <<<"$backend_agent_flat" ||
   fail "backend developer omits durable mutation publication"
+grep -Fq 'A quote identity owns exactly one validity window' \
+    "$ux_backend_agent" ||
+  fail "backend developer permits quote expiry mutation under one identity"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
 grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
     <<<"$frontend_agent_flat" ||
@@ -579,6 +589,13 @@ grep -Eq 'set or clear `GITHUB_RUN_ID` and[[:space:]]+`GITHUB_RUN_ATTEMPT` expli
   fail "test engineer does not isolate first-attempt fixtures from ambient CI metadata"
 grep -Eq 'prove a[[:space:]]+restart replay clears it' <<<"$test_agent_flat" ||
   fail "test engineer omits pending-publication recovery coverage"
+grep -Fq 'stable-odds material transition whose' "$ux_test_agent" ||
+  fail "test engineer omits unchanged-price quote-boundary coverage"
+grep -Fq 'changed `quoteValidUntil` under an unchanged' "$ux_critic_agent" ||
+  fail "validation critic omits quote-authority collision detection"
+grep -Fq 'Every bounded fresh reselection returning exact `STALE_QUOTE`' \
+    "$conductor_agent" ||
+  fail "conductor can misclassify repeated stale quotes as transient retries"
 grep -Fq '`betstan-ux-ui-expert: UX_REVIEW_PASSED` result' "$ux_final_agent" ||
   fail "final validator does not require exact-head UX evidence"
 grep -Fq '### Product-wide UI/UX consistency' "$ROOT_DIR/LEARNINGS.md" ||
@@ -637,6 +654,14 @@ grep -Fq 'exact-ID-preservation evidence' \
   fail "frontend developer omits semantic-control-label/exact-ID handoff evidence"
 grep -Fq '### Live timeline completeness and market alignment' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning omits the live timeline completeness and market alignment contract"
+grep -Fq 'One quote identity must map to' "$ROOT_DIR/LEARNINGS.md" ||
+  fail "durable learning omits one-expiry-per-quote identity"
+grep -Fq 'material validity-window advance receives a new quote version' \
+    "$ROOT_DIR/docs/wiki/Quality-Gates.md" ||
+  fail "quality gates omit stable-odds quote-version rollover"
+grep -Fq 'owns exactly one validity window' \
+    "$ROOT_DIR/docs/wiki/Live-Betting-Production.md" ||
+  fail "live-betting wiki omits quote validity identity"
 grep -Fq 'Superseded narrow-live-card rule' "$ROOT_DIR/LEARNINGS.md" ||
   fail "durable learning does not supersede the earlier narrow-live-card rule"
 grep -Fq 'cross-card baseline drift: a sibling' "$ux_wiki" ||
