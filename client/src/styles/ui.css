@@ -1604,7 +1604,7 @@ body {
 
 .event-market-card {
   margin: 0;
-  /* This card is a grid item of `.event-market-grid--compact`'s auto-fill track; without
+  /* This card is a grid item of `.event-market-grid--compact`'s auto-fit track; without
      overriding the default `min-width: auto`, its own un-shrinkable content (below) could force
      the track -- and therefore the card -- wider than the space actually assigned to it. */
   min-width: 0;
@@ -1681,12 +1681,8 @@ body {
   min-width: 0;
 }
 
-.event-market-card--score {
-  grid-column: span 2;
-}
-
 .event-market-buttons--score {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .event-market-button {
@@ -1695,6 +1691,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 0.25rem 0.75rem;
+  min-height: 2.75rem;
   min-width: 0;
   white-space: normal;
 }
@@ -1715,16 +1712,6 @@ body {
   .event-card--active-live .event-market-button {
     gap: 0.35rem;
     padding-inline: 0.5rem;
-  }
-}
-
-@media (max-width: 767.98px) {
-  .event-market-card--score {
-    grid-column: auto;
-  }
-
-  .event-market-buttons--score {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -219,7 +219,9 @@ describe('EventList', () => {
     const marketCard = document.querySelector(
       '[data-market-type="SECOND_HALF_SCORE"]',
     );
-    expect(marketCard).toHaveClass('event-market-card--score');
+    expect(marketCard).not.toHaveClass('event-market-card--score');
+    expect(marketCard.querySelector('.event-market-buttons'))
+      .toHaveClass('event-market-buttons--score');
     expect(screen.getByText('Second Half Score')).toBeInTheDocument();
 
     const selection = screen.getByRole('button', {
@@ -233,6 +235,73 @@ describe('EventList', () => {
       marketVersion: 1,
       quoteVersion: 3,
       selectionId: 'live-1:SECOND_HALF_SCORE:1:OTHER',
+    }));
+  });
+
+  it('renders Second Half Time Result as a regular one-slot market', async () => {
+    const resultMarket = {
+      marketId: 'live-1:SECOND_HALF_TIME_RESULT',
+      marketType: 'SECOND_HALF_TIME_RESULT',
+      marketVersion: 1,
+      quoteVersion: 3,
+      status: 'OPEN',
+      quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+      selections: [
+        {
+          selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:HOME',
+          side: 'HOME',
+          odds: 2.25,
+        },
+        {
+          selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:DRAW',
+          side: 'DRAW',
+          odds: 3.2,
+        },
+        {
+          selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:AWAY',
+          side: 'AWAY',
+          odds: 2.85,
+        },
+      ],
+    };
+    useLiveEvents.mockReturnValue({
+      events: [{
+        ...liveEvent,
+        live: {
+          ...liveEvent.live,
+          currentMarkets: [resultMarket],
+        },
+      }],
+      feedState: 'open',
+      isLoading: false,
+    });
+
+    render(
+      <EventList
+        selectedSelectionKeys={new Set()}
+        uiVariant="v2"
+      />,
+    );
+
+    const marketCard = document.querySelector(
+      '[data-market-type="SECOND_HALF_TIME_RESULT"]',
+    );
+    expect(marketCard).not.toHaveClass('event-market-card--score');
+    expect(marketCard.querySelector('.event-market-buttons'))
+      .not.toHaveClass('event-market-buttons--score');
+    expect(screen.getByText('Second Half Time Result')).toBeInTheDocument();
+
+    const selection = screen.getByRole('button', {
+      name: 'Select Second Half Time Result: Draw at 3.2',
+    });
+    fireEvent.click(selection);
+
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/event/odds', {
+      eventId: 'live-1',
+      marketId: 'live-1:SECOND_HALF_TIME_RESULT',
+      marketVersion: 1,
+      quoteVersion: 3,
+      selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:DRAW',
     }));
   });
 

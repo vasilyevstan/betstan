@@ -186,6 +186,11 @@ contract above.
 - **Equal-height market groups**: market cards sharing one row stretch to
   equal height and top alignment without fixed pixel heights, clipping, or
   nested scrolling.
+- **One product, one grid slot**: every live market card occupies exactly one
+  normal product-grid cell at desktop, tablet, and mobile widths. Reject
+  product-specific column spans or full-row widening; a market may arrange
+  several selections inside its own card only when every option remains
+  visible, usable, and contained.
 - **Readable status words**: a status badge wraps only between words; a
   status label broken inside a word is a required consistency fix.
 - **Nested-board content fit in every card context**: measure generated-board

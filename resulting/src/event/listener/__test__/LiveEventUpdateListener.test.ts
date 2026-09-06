@@ -1,13 +1,15 @@
 import {
   BetKind,
   EventPhase,
-  LiveMarketType,
-  LiveSettlementReason,
   ModerationStatus,
   ResultingStatus,
-  TeamSide,
   messengerWrapper,
 } from "@betstan/common";
+import {
+  LiveMarketType,
+  LiveSettlementReason,
+  TeamSide,
+} from "../../../compat/LiveContract";
 import LiveEventUpdateListener from "../LiveEventUpdateListener";
 import ModerationResultListener from "../ModerationResultListener";
 import PlaceBetListener from "../PlaceBetListener";
@@ -182,6 +184,75 @@ it.each([TeamSide.HOME, TeamSide.DRAW, TeamSide.AWAY])(
     );
   }
 );
+
+it.each([TeamSide.HOME, TeamSide.DRAW, TeamSide.AWAY])(
+  "SECOND_HALF_TIME_RESULT settles %s rows from exact selection identity",
+  async (winningSide) => {
+    const row = createLiveRow({
+      marketType: LiveMarketType.SECOND_HALF_TIME_RESULT,
+      side: winningSide,
+    });
+    const bet = await createBet({
+      betKind: BetKind.LIVE,
+      rows: [row],
+      status: ResultingStatus.BET_APPROVED,
+    });
+    const listener = await createLiveListener();
+
+    await listener.onMessage(
+      settlementEventForRow(row, {
+        winningSide,
+        settlementReason: LiveSettlementReason.SECOND_HALF_TIME_RESULT,
+        winningSelection: row.selectionId,
+      }),
+      createMessage()
+    );
+
+    const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+    expect(archivedBet).not.toBeNull();
+    expect(archivedBet!.status).toEqual(ResultingStatus.BET_WIN);
+    expect(archivedBet!.rows[0]).toMatchObject({
+      result: ResultingStatus.ROW_WIN,
+      winningSide,
+      winningSelection: row.selectionId,
+      settlementReason: LiveSettlementReason.SECOND_HALF_TIME_RESULT,
+    });
+  }
+);
+
+it("loses a Second Half Time Result row when a different exact selection wins", async () => {
+  const row = createLiveRow({
+    marketType: LiveMarketType.SECOND_HALF_TIME_RESULT,
+    side: TeamSide.HOME,
+  });
+  const bet = await createBet({
+    betKind: BetKind.LIVE,
+    rows: [row],
+    status: ResultingStatus.BET_APPROVED,
+  });
+  const listener = await createLiveListener();
+
+  await listener.onMessage(
+    settlementEventForRow(row, {
+      winningSide: TeamSide.AWAY,
+      settlementReason: LiveSettlementReason.SECOND_HALF_TIME_RESULT,
+      winningSelection:
+        `${row.marketId}:${row.marketVersion}:${TeamSide.AWAY}`,
+    }),
+    createMessage()
+  );
+
+  const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
+  expect(archivedBet).not.toBeNull();
+  expect(archivedBet!.status).toEqual(ResultingStatus.BET_LOSS);
+  expect(archivedBet!.rows[0]).toMatchObject({
+    result: ResultingStatus.ROW_LOSS,
+    winningSide: TeamSide.AWAY,
+    winningSelection:
+      `${row.marketId}:${row.marketVersion}:${TeamSide.AWAY}`,
+    settlementReason: LiveSettlementReason.SECOND_HALF_TIME_RESULT,
+  });
+});
 
 it("settles repeated market versions independently", async () => {
   const eventId = "repeat-event";

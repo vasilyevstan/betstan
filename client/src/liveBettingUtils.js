@@ -69,6 +69,7 @@ const LIVE_MARKET_LABELS = Object.freeze({
   NEXT_FREE_KICK: 'Next Free Kick',
   NEXT_GOAL_KICK: 'Next Goal Kick',
   HALF_TIME_RESULT: 'Half Time Result',
+  SECOND_HALF_TIME_RESULT: 'Second Half Time Result',
   SECOND_HALF_SCORE: 'Second Half Score',
   KICKOFF_TEAM: 'Kickoff Team',
   FIRST_MINUTE_GOAL: 'Goal in First Minute',
@@ -88,7 +89,8 @@ const DECLINE_REASON_LABELS = Object.freeze({
 const SETTLEMENT_REASON_LABELS = Object.freeze({
   INCIDENT: 'Settled by incident',
   HALF_TIME: 'Settled at half-time',
-  SECOND_HALF_SCORE: 'Settled from second-half goals',
+  SECOND_HALF_TIME_RESULT: 'Settled by second-half result',
+  SECOND_HALF_SCORE: 'Settled from exact second-half score',
   FULL_TIME_NONE: 'No deciding outcome at full-time',
   MANUAL_VOID: 'Manual void',
   ACCUMULATOR_SETTLED: 'Accumulator settled',

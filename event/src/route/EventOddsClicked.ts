@@ -24,6 +24,7 @@ const LIVE_MARKET_NAMES: Record<LiveMarketType, string> = {
   [LiveMarketType.NEXT_FREE_KICK]: "Next Free Kick",
   [LiveMarketType.NEXT_GOAL_KICK]: "Next Goal Kick",
   [LiveMarketType.HALF_TIME_RESULT]: "Half Time Result",
+  [LiveMarketType.SECOND_HALF_TIME_RESULT]: "Second Half Time Result",
   [LiveMarketType.SECOND_HALF_SCORE]: "Second Half Score",
   [LiveMarketType.KICKOFF_TEAM]: "Kickoff Team",
   [LiveMarketType.FIRST_MINUTE_GOAL]: "Goal In First Minute",

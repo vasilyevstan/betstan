@@ -115,7 +115,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   const isSelectable = isLiveMarketSelectable(event, market);
   const quoteValidLabel = formatQuoteValidity(market?.quoteValidUntil);
   const marketAvailability = getMarketAvailabilityLabel(event, market);
-  const isScoreMarket = market?.marketType === 'SECOND_HALF_SCORE';
+  const isLegacyScoreMarket = market?.marketType === 'SECOND_HALF_SCORE';
 
   const handleSelection = async (selectionId) => {
     try {
@@ -133,7 +133,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
   };
 
   return <div
-    className={`card event-market-card${isSelectable ? '' : ' event-market-card--inactive'}${isScoreMarket ? ' event-market-card--score' : ''} event-market-card--${uiVariant}`}
+    className={`card event-market-card${isSelectable ? '' : ' event-market-card--inactive'} event-market-card--${uiVariant}`}
     data-market-type={market.marketType}
   >
     <div className="card-body">
@@ -148,7 +148,7 @@ const LiveMarketCard = ({ event, market, onSelectionPlaced, selectedSelectionKey
         </div>
         <span className={`event-market-status event-market-status--${isSelectable ? 'open' : 'inactive'}`}>{marketAvailability}</span>
       </div>
-      <div className={`event-market-buttons${isScoreMarket ? ' event-market-buttons--score' : ''}`}>
+      <div className={`event-market-buttons${isLegacyScoreMarket ? ' event-market-buttons--score' : ''}`}>
         {(market.selections ?? []).map((selection) => {
           const selectionKey = getLiveSelectionKey({
             eventId: event.eventId,
