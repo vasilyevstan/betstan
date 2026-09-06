@@ -9,6 +9,7 @@ const MARKET_LABELS = Object.freeze({
   NEXT_CORNER: 'Next Corner Kick',
   NEXT_PENALTY: 'Next Penalty',
   HALF_TIME_RESULT: 'Half Time Result',
+  SECOND_HALF_TIME_RESULT: 'Second Half Time Result',
   KICKOFF_TEAM: 'Kickoff Team',
   FIRST_MINUTE_GOAL: 'Goal in First Minute',
 });

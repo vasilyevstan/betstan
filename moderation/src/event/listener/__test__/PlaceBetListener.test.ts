@@ -646,6 +646,59 @@ it("valid live bets are approved against the mirrored market", async () => {
   });
 });
 
+it("approves the exact Second Half Time Result selection", async () => {
+  const { listener } = await setup();
+  const eventId = new mongoose.Types.ObjectId().toHexString();
+  const marketId = `${eventId}:${LiveMarketType.SECOND_HALF_TIME_RESULT}`;
+  const market = await saveMirror(
+    eventId,
+    createLiveMarket(eventId, {
+      marketId,
+      marketType: LiveMarketType.SECOND_HALF_TIME_RESULT,
+      quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+      selections: [
+        {
+          selectionId: `${marketId}:1:${TeamSide.HOME}`,
+          side: TeamSide.HOME,
+          odds: 2.4,
+        },
+        {
+          selectionId: `${marketId}:1:${TeamSide.DRAW}`,
+          side: TeamSide.DRAW,
+          odds: 3.1,
+        },
+        {
+          selectionId: `${marketId}:1:${TeamSide.AWAY}`,
+          side: TeamSide.AWAY,
+          odds: 2.8,
+        },
+      ],
+    })
+  );
+  const drawSelection = market.selections.find(
+    (selection) => selection.side === TeamSide.DRAW
+  )!;
+  const data = createLivePlaceBetEvent(market, {
+    row: {
+      selectionId: drawSelection.selectionId,
+      side: drawSelection.side,
+      oddsValue: drawSelection.odds,
+    },
+  });
+
+  await listener.onMessage(data, createMessage());
+
+  const savedBet = await Bet.findOne({ slipId: data.data.slipId });
+  expect(savedBet).not.toBeNull();
+  expect(savedBet!.status).toEqual(ModerationStatus.APPROVED);
+  expect(savedBet!.rows[0]).toMatchObject({
+    marketId,
+    marketType: LiveMarketType.SECOND_HALF_TIME_RESULT,
+    selectionId: drawSelection.selectionId,
+    side: TeamSide.DRAW,
+  });
+});
+
 it("concurrent duplicate deliveries publish one confirmed logical result", async () => {
   const { listener } = await setup();
   const publishStarted = createDeferred();

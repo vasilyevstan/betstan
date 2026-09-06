@@ -70,6 +70,8 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
+client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
+client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
 public_backoffice_middleware="$ROOT_DIR/backoffice/src/middleware/PublicBackofficeAccess.ts"
 [[ -f "$public_backoffice_middleware" ]] ||
   fail "Backoffice does not declare its intentional public access policy"
@@ -143,6 +145,15 @@ for countdown_contract in \
   grep -Fq "$countdown_contract" "$acceptance_spec" ||
     fail "OCI live acceptance omits countdown-market coverage: $countdown_contract"
 done
+! grep -Fq '.event-market-card--score {' "$client_ui_css" ||
+  fail "legacy score markets can still span multiple live-product slots"
+! grep -Fq 'event-market-card--score' "$ROOT_DIR/client/src/pages/event/EventList.js" ||
+  fail "legacy score markets still carry a dead product-card layout class"
+grep -Fq "every live product occupies one grid slot at desktop, tablet, and mobile widths" \
+  "$client_live_regression" &&
+  grep -Fq "gridColumnStart === 'auto' && gridColumnEnd === 'auto'" \
+    "$client_live_regression" ||
+  fail "client browser coverage does not enforce one grid slot per live product"
 if grep -Fq 'ALL_LIVE_MARKET_TYPES.length,' "$acceptance_spec"; then
   fail "OCI live acceptance still expects terminal countdown markets to remain visible after kickoff"
 fi
@@ -1495,6 +1506,9 @@ grep -Fq 'Treat PR title/body changes as workflow-producing' \
   "$deployment_safety_agent"
 grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
   fail "deployment safety omits bounded external tool installation"
+grep -Fq 'separate compatibility baseline release first' "$deployment_safety_agent" &&
+  grep -Fq 'Compatibility-first producer changes' "$ux_release_wiki" ||
+  fail "release guidance omits compatibility-first additive producer rollout"
 grep -Fq 'different authority root to disguise the same request' \
   "$deployment_safety_agent" ||
   fail "deployment safety permits replay through an alternate authority root"

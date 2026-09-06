@@ -177,6 +177,10 @@ The compact live-betting work established reusable examples:
   tracks equal visible market cards;
 - equal-height market groups: market cards sharing one row stretch to equal
   height and top alignment without fixed pixel heights or nested scrolling;
+- one product, one grid slot: every live market card occupies exactly one
+  normal product-grid cell at desktop, tablet, and mobile widths. A market can
+  arrange several selections inside its card, but product-specific column
+  spans or full-row widening are consistency defects;
 - readable status words: a status badge wraps only between words, never
   inside one;
 - nested-board content fit: repeat generated-board geometry checks inside

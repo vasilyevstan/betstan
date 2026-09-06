@@ -1058,6 +1058,7 @@ export class GamemasterWorker {
     return (
       (
         market.marketType === LiveMarketType.FIRST_MINUTE_GOAL
+        || market.marketType === LiveMarketType.SECOND_HALF_TIME_RESULT
         || market.marketType === LiveMarketType.SECOND_HALF_SCORE
       )
       && market.status === LiveMarketStatus.CLOSED

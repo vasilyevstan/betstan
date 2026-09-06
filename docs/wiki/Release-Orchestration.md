@@ -184,6 +184,22 @@ Deployment proceeds in dependency-safe order:
 A successful deployment command is not the release conclusion. Protected and
 public validation must both pass.
 
+### Compatibility-first producer changes
+
+When a producer begins persisting or publishing a new additive enum value, the
+immediately previous production generation must already understand that value.
+Use two immutable releases:
+
+1. deploy a compatibility baseline in which consumers, persistence schemas,
+   clients, and the producer's replay and manual-recovery paths accept the new
+   value, while generation remains on the old engine;
+2. capture and validate that compatibility baseline as the rollback source;
+3. deploy the producer activation that starts creating the new value.
+
+Do not activate the producer change with a pre-compatibility rollback image.
+The rollback target for that activation is the compatibility baseline, so
+persisted transitions and historical rows remain readable after rollback.
+
 ## Activation
 
 User-facing live behavior is activated separately from image deployment.

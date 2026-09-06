@@ -283,7 +283,7 @@ it("publishes normalized live selections with server-authoritative values", asyn
   });
 });
 
-it("publishes the exact labelled Second Half Score selection", async () => {
+it("publishes the exact labelled legacy Second Half Score selection", async () => {
   const marketType = LiveMarketType.SECOND_HALF_SCORE;
   await createLiveEvent({
     currentMarkets: [
@@ -323,6 +323,49 @@ it("publishes the exact labelled Second Half Score selection", async () => {
       oddsName: "1 - 0",
       selectionId: `test-event-id:${marketType}:1:SCORE_1_0`,
       side: TeamSide.NONE,
+    }),
+  });
+});
+
+it("publishes a Second Half Time Result selection with exact identity", async () => {
+  const marketType = LiveMarketType.SECOND_HALF_TIME_RESULT;
+  await createLiveEvent({
+    currentMarkets: [
+      {
+        marketId: `test-event-id:${marketType}`,
+        marketType,
+        marketVersion: 1,
+        quoteVersion: 3,
+        quoteValidUntil: new Date(Date.now() + 60_000).toISOString(),
+        status: LiveMarketStatus.OPEN,
+        selections: [
+          {
+            selectionId: `test-event-id:${marketType}:1:${TeamSide.DRAW}`,
+            side: TeamSide.DRAW,
+            odds: 3.25,
+          },
+        ],
+      },
+    ],
+  });
+
+  await request(app)
+    .post("/api/event/odds")
+    .send({
+      eventId: "test-event-id",
+      marketId: `test-event-id:${marketType}`,
+      marketVersion: 1,
+      quoteVersion: 3,
+      selectionId: `test-event-id:${marketType}:1:${TeamSide.DRAW}`,
+    })
+    .expect(200);
+
+  expect(EventOddsSelectedPublisher.prototype.publish).toHaveBeenCalledWith({
+    data: expect.objectContaining({
+      productName: "Second Half Time Result",
+      oddsName: "Draw",
+      selectionId: `test-event-id:${marketType}:1:${TeamSide.DRAW}`,
+      side: TeamSide.DRAW,
     }),
   });
 });
