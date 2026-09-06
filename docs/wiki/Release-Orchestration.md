@@ -240,6 +240,9 @@ GitHub job, protected approval, handoff, or runtime health signal.
 
 - A running watcher is notification transport, not proof of progress.
 - A waiting approval is actionable and routed immediately.
+- Approval eligibility comes from the machine-readable protected-operation
+  policy and exact durable authority, never an agent's remembered workflow
+  category; an eligible CLI-issued gate is approved in the same checkpoint.
 - One missed checkpoint triggers bounded recovery.
 - Two missed checkpoints require a concrete safe action or an explicit
   blocker.
