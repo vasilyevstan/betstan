@@ -46,6 +46,7 @@ coverage_lock=".github/coverage/package-lock.json"
 coverage_engine=".github/scripts/test-coverage-matrix.js"
 coverage_engine_tests=".github/scripts/test-test-coverage-matrix.js"
 production_workflow_inventory_source="infra/azure/agents/production-workflow-inventory-stan.rb"
+production_workflow_inventory_test_source="infra/azure/agents/test-production-workflow-inventory-stan.sh"
 deployment_safety_test_source="infra/azure/agents/test-deployment-safety-ci-stan.sh"
 
 for file in \
@@ -77,6 +78,9 @@ require_literal "$production_workflow_inventory_source" \
 require_literal "$production_workflow_inventory_source" \
   'name.unicode_normalize(:nfc).downcase == "tests-telemetry"' \
   "reserved Telemetry workflow name rule"
+require_literal "$production_workflow_inventory_test_source" \
+  'telemetry_workflow_reservation_tests=PASS' \
+  "reserved Telemetry workflow inventory test sentinel"
 require_literal "$deployment_safety_test_source" \
   'coverage_node_non_invocation=PASS' \
   "coverage guard Node non-invocation harness"

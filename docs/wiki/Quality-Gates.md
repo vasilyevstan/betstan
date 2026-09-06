@@ -91,9 +91,10 @@ the inventory owns that rejection. The guard protects the inert foundation by
 requiring its descriptor, package, lockfile, engine, and engine-test files to
 exist as non-symlink files, and by checking that the engine retains pinned
 integrity literals, including the reserved identity. It also pins both
-inventory reservation-rule literals and the deployment-safety harness's
-Node-non-invocation sentinel. Focused negative tests fail closed when inert
-files are missing or symlinked, or when those pins are removed.
+inventory reservation-rule literals, the inventory test's reservation
+completion sentinel, and the deployment-safety harness's Node-non-invocation
+sentinel. Focused negative tests fail closed when inert files are missing or
+symlinked, or when those pins are removed.
 
 Alongside the reservation the repository carries an inert coverage descriptor
 and its supporting tooling. The descriptor records ten packages - Auth,

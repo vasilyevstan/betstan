@@ -26,6 +26,7 @@ node_invocation_sentinel="$node_runtime_fixture_dir/node-invoked"
 coverage_tooling_fixture_root="$permission_fixture_dir/coverage-tooling"
 coverage_guard_fixture="$permission_fixture_dir/workflow-trigger-guard-stan.sh"
 inventory_source_fixture="$permission_fixture_dir/production-workflow-inventory-stan.rb"
+inventory_test_source_fixture="$permission_fixture_dir/test-production-workflow-inventory-stan.sh"
 deployment_safety_source_fixture="$permission_fixture_dir/test-deployment-safety-ci-stan.sh"
 cleanup() {
   rm -f "$test_output"
@@ -63,6 +64,7 @@ assert_node_not_invoked() {
 prepare_coverage_guard_fixture() {
   local inventory_source="${1:-$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb}"
   local deployment_safety_source="${2:-$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh}"
+  local inventory_test_source="${3:-$ROOT_DIR/infra/azure/agents/test-production-workflow-inventory-stan.sh}"
   rm -rf "$coverage_tooling_fixture_root"
   mkdir -p \
     "$coverage_tooling_fixture_root/.github/coverage" \
@@ -81,7 +83,8 @@ prepare_coverage_guard_fixture() {
     "$coverage_guard_fixture" \
     "$coverage_tooling_fixture_root" \
     "$inventory_source" \
-    "$deployment_safety_source" <<'PY'
+    "$deployment_safety_source" \
+    "$inventory_test_source" <<'PY'
 import pathlib
 import shlex
 import sys
@@ -90,6 +93,7 @@ guard_path = pathlib.Path(sys.argv[1])
 tooling_root = pathlib.Path(sys.argv[2])
 inventory_source = pathlib.Path(sys.argv[3])
 deployment_safety_source = pathlib.Path(sys.argv[4])
+inventory_test_source = pathlib.Path(sys.argv[5])
 content = guard_path.read_text(encoding="utf-8")
 replacements = {
     'coverage_descriptor=".github/coverage/test-coverage-matrix.json"':
@@ -106,6 +110,8 @@ replacements = {
         f"production_workflow_inventory_source={shlex.quote(str(inventory_source))}",
     'deployment_safety_test_source="infra/azure/agents/test-deployment-safety-ci-stan.sh"':
         f"deployment_safety_test_source={shlex.quote(str(deployment_safety_source))}",
+    'production_workflow_inventory_test_source="infra/azure/agents/test-production-workflow-inventory-stan.sh"':
+        f"production_workflow_inventory_test_source={shlex.quote(str(inventory_test_source))}",
 }
 for old, new in replacements.items():
     if content.count(old) != 1:
@@ -203,6 +209,27 @@ prepare_coverage_guard_fixture "$inventory_source_fixture"
 assert_coverage_guard_rejected \
   "coverage guard with a removed inventory name rule" \
   "reserved Telemetry workflow name rule"
+
+cp "$ROOT_DIR/infra/azure/agents/test-production-workflow-inventory-stan.sh" \
+  "$inventory_test_source_fixture"
+python3 - "$inventory_test_source_fixture" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+needle = "telemetry_workflow_reservation_tests=PASS"
+if content.count(needle) != 1:
+    raise SystemExit("inventory-test fixture sentinel count changed")
+path.write_text(content.replace(needle, "telemetry_workflow_reservation_tests=REMOVED"), encoding="utf-8")
+PY
+prepare_coverage_guard_fixture \
+  "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
+  "$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh" \
+  "$inventory_test_source_fixture"
+assert_coverage_guard_rejected \
+  "coverage guard with a removed inventory test sentinel" \
+  "reserved Telemetry workflow inventory test sentinel"
 
 cp "$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh" \
   "$deployment_safety_source_fixture"

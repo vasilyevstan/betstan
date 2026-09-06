@@ -2003,4 +2003,5 @@ assert_pr_fail_no_fetch "PR duplicate workflow path" \
 
 "$ROOT_DIR/infra/azure/agents/test-shared-mongo-consolidation-stan.sh"
 
+echo "telemetry_workflow_reservation_tests=PASS"
 echo "production_workflow_inventory_tests=PASS"
