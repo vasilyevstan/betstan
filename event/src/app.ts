@@ -24,8 +24,8 @@ app.use(ListllEvents);
 app.use(EventLiveStream);
 app.use(EventOddsClicked);
 
-app.all("*", async (req, res, next) => {
-  throw new BadRequestError("");
+app.all("*", (req, res, next) => {
+  next(new BadRequestError(""));
 });
 
 app.use(errorHandler);
