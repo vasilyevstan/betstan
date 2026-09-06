@@ -208,6 +208,14 @@ conversation summaries are not authority.
   submit race, require the exact `STALE_QUOTE` decline, wait for the replacement
   draft, reselect, and retry with a small bound; never weaken server-side quote
   validation to make acceptance pass.
+- Production acceptance must observe each fact on the public read model that
+  owns it. Event proves phase, score, incidents, and terminal market state;
+  Bet history proves the accepted quote, winning selection, settlement
+  reason/sequence, and row outcome. A transient live-update settlement is not
+  an Event public-snapshot field, and the public API must not be expanded only
+  to make an acceptance assertion convenient. A non-void synthetic market must
+  settle to an exact `WIN` or `LOSS`; unexpected `VOID` is not successful
+  activation evidence.
 - Post-deletion login checks must preserve the public authentication contract:
   unknown credentials return `400`, while a deleted account's previously
   authenticated administrator session returns `401`. Cleanup assertions must

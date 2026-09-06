@@ -161,6 +161,11 @@ After deployment:
 - health, routing, TLS, APIs, SSE, queues, consumers, and storage pass;
 - accelerated live acceptance proves a stable multi-event pre-kickoff slip
   separately from a moving in-play selection governed by one event clock;
+- acceptance observes each fact on its owning public read model: Event proves
+  phase, score, and terminal market state, while Bet history proves accepted
+  quote identity, winning selection, settlement reason/sequence, and outcome;
+- a non-void synthetic live market must resolve to exact `WIN` or `LOSS`;
+  unexpected `VOID` fails acceptance;
 - the browser acceptance journey has no page, console, API, or log errors;
 - activation is committed only after its bounded acceptance succeeds.
 

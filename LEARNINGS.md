@@ -130,6 +130,13 @@
 - New simulations use an independent 256-bit lowercase hexadecimal seed. Treat a missing, malformed, short, uppercase, or public-ID-derived seed as unsafe and replace it before persisting the timeline; never expose seeds in public event payloads.
 - Only `GOAL` transitions change the score. Penalty awards resolve later in the same half, and a scored penalty emits a linked goal.
 - Live settlement identity is `marketId + marketVersion`; quote versions track price changes only, and remaining next-event markets settle explicitly to `NONE` at full-time.
+- Acceptance evidence follows service ownership. Event snapshots prove phase,
+  score, incidents, and terminal market state; Bet history proves accepted
+  quote identity, winning selection, settlement reason/sequence, and row
+  outcome. Do not read transient broker-only fields from unrelated public
+  projections or expand an API only to satisfy a test. A non-void synthetic
+  market must resolve to exact `WIN` or `LOSS`; unexpected `VOID` fails the
+  acceptance gate.
 - Every open quote expires at the next persisted simulation transition. Slip records one immutable server-generated submission time during its atomic draft-to-submitted transition, and Moderation requires an exact mirrored expiry plus `submittedAt` strictly before both `quoteValidUntil` and the first later transition that ended that quote's authority. Persist that authority end from the update payload's domain `occurredAt`, choose the earliest later sequence under out-of-order delivery, and use the current terminal mirror timestamp only as a backward-compatible fallback when old history lacks the additive field.
 - Missing, malformed, or boundary-equal live expiry evidence fails closed at Event, client, and Moderation boundaries. A delayed market mirror may park a provably pre-cutoff submission, but it must not authorize an outcome-known bet.
 
