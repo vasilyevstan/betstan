@@ -81,22 +81,26 @@ complete offline OCI contract suite.
 
 The repository reserves the single workflow identity `tests-telemetry` for a
 future, separately authorized coverage-telemetry workflow. Until that
-activation the workflow guard and the production workflow inventory reject any
-workflow claiming that identity, whether through a matching filename in any
-letter case or a workflow name that normalizes to it, so the identity can never
-become ambiguous or duplicated.
+activation the production workflow inventory rejects a workflow file with a
+`.yml` or `.yaml` extension when its filename stem case-normalizes to
+`tests-telemetry`, and rejects a workflow name that normalizes to that identity,
+so it cannot become ambiguous or duplicated. The workflow trigger guard does
+not enumerate workflow identities. It protects the inert foundation by
+requiring its descriptor, package, lockfile, engine, and engine-test files to
+exist as non-symlink files, and by checking that the engine retains pinned
+integrity literals, including the reserved identity.
 
 Alongside the reservation the repository carries an inert coverage descriptor
 and its supporting tooling. The descriptor records ten packages - Auth,
 Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
 Slip - a pinned Node runtime, and the same 80% line and 80% branch thresholds
 the current gate applies. This foundation is not a required check today: no
-current workflow runs it, current guard runs stay inert and do not execute it,
-and the aggregate above remains the complete set of enforced pull-request CI
-areas. Coverage continues to be enforced by the existing per-package coverage
-gate. Turning the descriptor-driven run into an enforced check, including its
-pinned runtime, requires a separate authorized change with its own review and
-rollback story.
+current workflow invokes the engine, the workflow trigger guard does not
+execute it, and the aggregate above remains the complete set of enforced
+pull-request CI areas. Coverage continues to be enforced by the existing
+per-package coverage gate. Turning the descriptor-driven run into an enforced
+check, including its pinned runtime, requires a separate authorized change
+with its own review and rollback story.
 
 ## Application test layers
 
