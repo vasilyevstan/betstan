@@ -37,6 +37,16 @@ it("returns message when event not found", async () => {
   expect(response.body.message).toEqual("Event not found");
 });
 
+it("rejects an unsupported explicit visibility", async () => {
+  const response = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({ eventId: "evt-invalid", visibility: "HIDDEN" })
+    .expect(400);
+
+  expect(response.body.message).toEqual("Event visibility is invalid");
+  expect(EventVisibilityPublisher.prototype.publishWithConfirm).not.toHaveBeenCalled();
+});
+
 it("allows an anonymous visitor to flip event visibility from ONLINE to OFFLINE", async () => {
   await createEvent("evt-1", EventVisibilityStatus.ONLINE);
 
@@ -94,6 +104,34 @@ it("keeps a failed visibility publication pending and repairs it on retry", asyn
   expect(publishedEvent?.visibilityPublicationPending).toBeUndefined();
   expect(publishedEvent?.visibilityPublicationTarget).toBeUndefined();
   expect(publishWithConfirm).toHaveBeenCalledTimes(2);
+});
+
+it("keeps an idempotent retry pending while broker confirmation is unavailable", async () => {
+  const publishWithConfirm =
+    EventVisibilityPublisher.prototype.publishWithConfirm as jest.Mock;
+  publishWithConfirm.mockRejectedValueOnce(new Error("confirm unavailable"));
+  await Event.create({
+    eventId: "evt-visibility-still-pending",
+    name: "A - B",
+    time: new Date().toISOString(),
+    home: "A",
+    away: "B",
+    status: EventStatus.NO_RESULT,
+    visibility: EventVisibilityStatus.OFFLINE,
+    visibilityPublicationPending: true,
+    visibilityPublicationTarget: EventVisibilityStatus.OFFLINE,
+  });
+
+  const response = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({
+      eventId: "evt-visibility-still-pending",
+      visibility: EventVisibilityStatus.OFFLINE,
+    })
+    .expect(202);
+
+  expect(response.body.publication).toEqual("PENDING");
+  expect(response.body.message).toContain("publication is retrying");
 });
 
 it("rejects a conflicting visibility change while publication is pending", async () => {
@@ -172,6 +210,25 @@ it("keeps repeated public visibility requests idempotent", async () => {
   const event = await Event.findOne({ eventId: "evt-race" });
   expect(event?.visibility).toEqual(EventVisibilityStatus.OFFLINE);
   expect(EventVisibilityPublisher.prototype.publishWithConfirm).toHaveBeenCalled();
+
+  const publishWithConfirm =
+    EventVisibilityPublisher.prototype.publishWithConfirm as jest.Mock;
+  const callCountBeforeSequentialRequest = publishWithConfirm.mock.calls.length;
+
+  const sequentialResponse = await request(app)
+    .post("/api/backoffice/event_visibility")
+    .send({
+      eventId: "evt-race",
+      visibility: EventVisibilityStatus.OFFLINE,
+    })
+    .expect(200);
+
+  expect(sequentialResponse.body.visibility).toEqual(EventVisibilityStatus.OFFLINE);
+  expect(sequentialResponse.body.unchanged).toBe(true);
+  expect(sequentialResponse.body.publication).toEqual("PUBLISHED");
+  expect(publishWithConfirm).toHaveBeenCalledTimes(
+    callCountBeforeSequentialRequest
+  );
 });
 
 it("keeps the legacy toggle request compatible", async () => {

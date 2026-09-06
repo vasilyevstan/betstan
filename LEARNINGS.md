@@ -555,6 +555,11 @@ cd resulting && npm ci && npm run test:ci
   unrelated semantics.
 - An async `forEach` does not await database operations. Use `for...of` with `await` when completion order or connection lifetime matters.
 - Coverage instrumentation can report `branches=0` with a non-zero branch total. Keep line coverage mandatory and apply the branch threshold only when a meaningful branch percentage exists.
+- The broad root `coverage/` ignore rule also matches untracked
+  `.github/coverage/**` files. When adding or reconstructing coverage-tool
+  inputs there, verify the ignore source, add the intended files explicitly,
+  and confirm their exact blobs are present in the candidate tree; a clean
+  status alone cannot prove an ignored new file was preserved.
 
 ## OCI cutover and Azure retirement
 

@@ -118,6 +118,63 @@ it("converges concurrent retries with the same creation request id", async () =>
   expect(await Event.countDocuments()).toEqual(1);
 });
 
+it("recovers when a matching creation wins before save", async () => {
+  const requestBody = {
+    home: "Team A",
+    away: "Team B",
+    requestId: "request-save-race-1234",
+    kickoffDelaySeconds: 15,
+    visibility: EventVisibility.ONLINE,
+  };
+  const winner = new Event({
+    eventId: "68bb1160da8f12e5bd8ca123",
+    name: "Team A - Team B",
+    time: new Date(Date.now() + 15 * 1000).toISOString(),
+    home: requestBody.home,
+    away: requestBody.away,
+    status: EventStatus.NO_RESULT,
+    visibility: requestBody.visibility,
+    creationRequestId: requestBody.requestId,
+    newEventPublicationPending: true,
+    creationRequestFingerprint: JSON.stringify({
+      home: requestBody.home,
+      away: requestBody.away,
+      delaySeconds: 15,
+      visibility: requestBody.visibility,
+    }),
+  });
+  const saveSpy = jest
+    .spyOn(Event.prototype, "save")
+    .mockImplementationOnce(async () => {
+      await Event.collection.insertOne(winner.toObject());
+      throw Object.assign(new Error("E11000 duplicate key"), { code: 11000 });
+    });
+
+  try {
+    const response = await request(app)
+      .post("/api/backoffice/new_event")
+      .send(requestBody);
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(response.status).toEqual(200);
+    expect(response.body.publication).toEqual("PUBLISHED");
+    expect(response.body.event.eventId).toEqual(winner.eventId);
+    expect(await Event.countDocuments()).toEqual(1);
+    expect(
+      NewEventPublisher.prototype.publishWithConfirm
+    ).toHaveBeenCalledTimes(1);
+    expect(NewEventPublisher.prototype.publishWithConfirm).toHaveBeenCalledWith({
+      data: expect.objectContaining({ id: winner.eventId }),
+    });
+    const publishedWinner = await Event.findOne({
+      eventId: winner.eventId,
+    }).select("+newEventPublicationPending");
+    expect(publishedWinner?.newEventPublicationPending).toBeUndefined();
+  } finally {
+    saveSpy.mockRestore();
+  }
+});
+
 it("allows a public caller to schedule a bounded near-term kickoff", async () => {
   const beforeRequest = Date.now();
   const response = await request(app)

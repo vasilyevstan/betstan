@@ -1698,11 +1698,20 @@ workflow_files = Dir.children(directory).sort.each_with_object([]) do |entry, fi
 end
 
 names = workflow_files.each_with_object([]) do |file, result|
+  normalized_filename = File.basename(file).unicode_normalize(:nfc).downcase
+  if %w[tests-telemetry.yml tests-telemetry.yaml].include?(normalized_filename)
+    fail_inventory("tests-telemetry workflow is forbidden: #{File.basename(file)}")
+  end
+
   content = File.read(file)
   document = YAML.safe_load(content, aliases: true) || {}
   next unless document.is_a?(Hash)
 
   name = document["name"] || File.basename(file, File.extname(file))
+  if name.is_a?(String) &&
+      name.unicode_normalize(:nfc).downcase == "tests-telemetry"
+    fail_inventory("tests-telemetry workflow is forbidden: #{File.basename(file)}")
+  end
   fail_inventory("duplicate workflow identity: #{name}") if documents.key?(name)
 
   documents[name] = [file, document, content]
