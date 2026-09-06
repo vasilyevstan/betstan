@@ -7,7 +7,9 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const SCHEMA_VERSION = 1;
+const DESCRIPTOR_SCHEMA_VERSION = 1;
+const RUN_CONTEXT_SCHEMA_VERSION = 1;
+const EVIDENCE_SCHEMA_VERSION = 3;
 const REQUIRED_NODE_VERSION = "20.19.5";
 const REQUIRED_THRESHOLDS = Object.freeze({ lines: 80, branches: 80 });
 const DESCRIPTOR_PATH = ".github/coverage/test-coverage-matrix.json";
@@ -16,7 +18,25 @@ const ENGINE_PATH = ".github/scripts/test-coverage-matrix.js";
 const TOOL_LOCK_PATH = ".github/coverage/package-lock.json";
 const WORKFLOW_PATH = ".github/workflows/production-build.yml";
 const ARTIFACT_ROOT = "artifacts/test-coverage";
+const OUTPUT_ARTIFACT_ROOT = "test-coverage";
 const CANONICAL_REPOSITORY = "vasilyevstan/betstan";
+const ENFORCED_PACKAGE_IDS = Object.freeze(["common"]);
+const SUPPLEMENTAL_PACKAGE_IDS = Object.freeze({
+  common: Object.freeze([
+    "auth",
+    "backoffice",
+    "bet",
+    "event",
+    "gamemaster",
+    "moderation",
+    "resulting",
+    "slip",
+  ]),
+});
+const SUPPLEMENTAL_MANIFEST_FILES = Object.freeze([
+  "package-lock.json",
+  "package.json",
+]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const POSITIVE_INTEGER_PATTERN = /^[1-9][0-9]*$/;
 const SAFE_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
@@ -42,6 +62,140 @@ const CURRENT_PROFILE_REQUIREMENTS = Object.freeze({
   resulting: "jest-typescript",
   slip: "jest-typescript",
 });
+const FORBIDDEN_COVERAGE_CONFIG_FILES = Object.freeze([
+  ".c8rc",
+  ".c8rc.cjs",
+  ".c8rc.js",
+  ".c8rc.json",
+  ".c8rc.yaml",
+  ".c8rc.yml",
+  ".istanbul.yml",
+  ".nycrc",
+  ".nycrc.json",
+  ".nycrc.yaml",
+  ".nycrc.yml",
+  "c8.config.cjs",
+  "c8.config.js",
+  "c8.config.mjs",
+  "nyc.config.cjs",
+  "nyc.config.js",
+  "nyc.config.mjs",
+]);
+const FORBIDDEN_COVERAGE_MANIFEST_KEYS = Object.freeze(["c8", "istanbul", "nyc"]);
+const COMMAND_ROLES = Object.freeze(["controller", "worker"]);
+const CONTROLLER_UID = 0;
+const CONTROLLER_GID = 0;
+const WORKER_UID = 10001;
+const WORKER_GID = 10001;
+const WORKER_UMASK = 0o077;
+const CONTAINER_MARKER_VARIABLE = "BETSTAN_COVERAGE_CONTAINER";
+const CONTAINER_ROOTS = Object.freeze({
+  home: "/betstan/home",
+  frozen: "/betstan/frozen",
+  output: "/betstan/out",
+  raw: "/betstan/raw",
+  tool: "/betstan/tool",
+});
+const FORBIDDEN_CONTAINER_PATHS = Object.freeze([
+  "/github/file_commands",
+  "/github/home",
+  "/github/workflow/event.json",
+  "/github/workspace",
+  "/home/runner/work",
+  "/run/docker.sock",
+  "/var/run/docker.sock",
+]);
+const GITHUB_COMMAND_CHANNEL_VARIABLES = Object.freeze([
+  "GITHUB_ENV",
+  "GITHUB_OUTPUT",
+  "GITHUB_PATH",
+  "GITHUB_STATE",
+  "GITHUB_STEP_SUMMARY",
+]);
+const FORBIDDEN_ENVIRONMENT_PREFIX = /^(?:ACTIONS_|GH_|GITHUB_|INPUT_|RUNNER_)/;
+const FORBIDDEN_ENVIRONMENT_NAMES = Object.freeze([
+  "ALL_PROXY",
+  "EXPERIMENTAL_MONOCART",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "NODE_V8_COVERAGE",
+  "NO_PROXY",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "all_proxy",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+]);
+const COMMAND_PLACEHOLDERS = Object.freeze([
+  "<C8_CONFIG>",
+  "<FROZEN>",
+  "<NODE>",
+  "<OUT>",
+  "<PKG>",
+  "<PKG_BIN>",
+  "<RAW>",
+  "<REPO>",
+  "<REPORT>",
+  "<TOOL>",
+  "<TOOL_BIN>",
+]);
+const PLACEHOLDER_TOKEN_PATTERN = /<[^<>]*>/g;
+const LITERAL_COMMAND_TOKENS = Object.freeze(["<rootDir>"]);
+const RAW_COVERAGE_FILE_PATTERN = /^coverage-[0-9]+-[0-9]+-[0-9]+\.json$/;
+const RAW_COVERAGE_KEYS = Object.freeze(["result", "source-map-cache", "timestamp"]);
+const C8_CONFIG_CONTENT = "{}\n";
+const SAFE_STDOUT_KEYS = Object.freeze([
+  "branches",
+  "commands",
+  "coverage",
+  "entries",
+  "id",
+  "include",
+  "lines",
+  "node",
+  "packages",
+  "rawFiles",
+  "reportSha256",
+  "schemaVersion",
+  "status",
+  "tests",
+  "thresholds",
+]);
+const SAFE_STDOUT_TEXT_PATTERN = /^[\x20-\x7e]*$/;
+const CONTROLLER_CAPABILITY_MASK = "00000000000000eb";
+const CONTROLLER_CAPABILITY_NAMES = Object.freeze([
+  "CAP_CHOWN",
+  "CAP_DAC_OVERRIDE",
+  "CAP_FOWNER",
+  "CAP_KILL",
+  "CAP_SETGID",
+  "CAP_SETUID",
+]);
+const ZERO_CAPABILITY_MASK = "0000000000000000";
+const WORKER_HOME_MODE = 0o755;
+const SUPPLEMENTAL_DIRECTORY_MODE = 0o555;
+const SUPPLEMENTAL_FILE_MODE = 0o444;
+const EVIDENCE_LIMITATION =
+  "provenance-bound review evidence, not tamper-proof execution proof: a " +
+  "tracked test or source map can shape its own V8 coverage data; TAP counts " +
+  "and test names are self-reported by the measured run and are only " +
+  "structurally cross-checked against the plan, the trailing summary block, " +
+  "the subtest headers and the suite-aware result lines, while the executed " +
+  "test-file set is bound by the trusted command plan argv rather than by any " +
+  "name in the TAP stream; raw V8 digests are controller-recorded assertions " +
+  "about the frozen run rather than artifacts revalidated later; the worker " +
+  "runs with asserted-empty effective, permitted, ambient and inheritable " +
+  "capability sets and a bounding set asserted equal to the controller's " +
+  "minimal 00000000000000eb mask, so exec privilege gain is closed by " +
+  "no_new_privs rather than by an empty bounding set; and the container image " +
+  "digest is optional here, recorded from the run context and checked for " +
+  "shape and cross-match only, so mandatory external image attestation " +
+  "remains an activation obligation outside this engine";
 const LIMITS = Object.freeze({
   descriptorBytes: 64 * 1024,
   entries: 32,
@@ -59,6 +213,10 @@ const LIMITS = Object.freeze({
   commands: 16,
   failures: 64,
   outputBytes: 32 * 1024 * 1024,
+  rawCoverageFiles: 1024,
+  rawCoverageFileBytes: 64 * 1024 * 1024,
+  rawCoverageTotalBytes: 512 * 1024 * 1024,
+  rawCoverageResults: 200000,
 });
 const COMMAND_TIMEOUTS = Object.freeze({
   install: 10 * 60 * 1000,
@@ -150,9 +308,68 @@ const stoppedChildBootstrap = [
   "import os",
   "import signal",
   "import sys",
+  "target_uid = int(sys.argv[1])",
+  "target_gid = int(sys.argv[2])",
+  "target_umask = int(sys.argv[3])",
+  "if target_uid >= 0:",
+  "    if os.getuid() != 0 or os.geteuid() != 0:",
+  "        sys.stderr.write('coverage worker identity drop requires a root controller\\n')",
+  "        raise SystemExit(127)",
+  "    if target_uid == 0 or target_gid == 0:",
+  "        sys.stderr.write('coverage worker identity must not be root\\n')",
+  "        raise SystemExit(127)",
+  "    import ctypes",
+  "    libc = ctypes.CDLL(None, use_errno=True)",
+  "    if libc.prctl(38, 1, 0, 0, 0) != 0:",
+  "        sys.stderr.write('coverage worker could not set no_new_privs\\n')",
+  "        raise SystemExit(127)",
+  "    os.setgroups([])",
+  "    os.setgid(target_gid)",
+  "    os.setuid(target_uid)",
+  "    os.umask(target_umask)",
+  "    if (",
+  "        os.getuid() != target_uid",
+  "        or os.geteuid() != target_uid",
+  "        or os.getgid() != target_gid",
+  "        or os.getegid() != target_gid",
+  "    ):",
+  "        sys.stderr.write('coverage worker identity drop did not take effect\\n')",
+  "        raise SystemExit(127)",
+  "    if [group for group in os.getgroups() if group != target_gid]:",
+  "        sys.stderr.write('coverage worker retained supplementary groups\\n')",
+  "        raise SystemExit(127)",
+  "    try:",
+  "        os.setuid(0)",
+  "        regained = True",
+  "    except OSError:",
+  "        regained = False",
+  "    if regained:",
+  "        sys.stderr.write('coverage worker regained uid 0\\n')",
+  "        raise SystemExit(127)",
+  "    try:",
+  "        with open('/proc/self/status', 'r') as status_file:",
+  "            status = status_file.read()",
+  "    except OSError:",
+  "        sys.stderr.write('coverage worker could not read /proc/self/status\\n')",
+  "        raise SystemExit(127)",
+  "    observed = {}",
+  "    for line in status.splitlines():",
+  "        parts = line.split()",
+  "        if parts:",
+  "            observed[parts[0].rstrip(':')] = parts[1:]",
+  "    for field in ('CapEff', 'CapPrm', 'CapAmb'):",
+  "        if field not in observed:",
+  "            sys.stderr.write('coverage worker status is incomplete\\n')",
+  "            raise SystemExit(127)",
+  "        if int(observed[field][0], 16) != 0:",
+  "            sys.stderr.write('coverage worker retained capabilities\\n')",
+  "            raise SystemExit(127)",
+  "    if observed.get('NoNewPrivs', ['0'])[0] != '1':",
+  "        sys.stderr.write('coverage worker no_new_privs is not set\\n')",
+  "        raise SystemExit(127)",
   "os.kill(os.getpid(), signal.SIGSTOP)",
   "try:",
-  "    os.execvp(sys.argv[1], sys.argv[1:])",
+  "    os.execvp(sys.argv[4], sys.argv[4:])",
   "except OSError:",
   "    raise SystemExit(127)",
 ].join("\n");
@@ -183,9 +400,40 @@ if (
     item.allowedTopLevel.every((value) => typeof value === "string")
   ) ||
   !(payload.watchRoot === null || path.isAbsolute(payload.watchRoot)) ||
-  typeof payload.captureStdout !== "boolean"
+  typeof payload.captureStdout !== "boolean" ||
+  !(
+    payload.identityReportPath === null ||
+    (typeof payload.identityReportPath === "string" &&
+      path.isAbsolute(payload.identityReportPath))
+  ) ||
+  !payload.childEnvironment ||
+  typeof payload.childEnvironment !== "object" ||
+  Array.isArray(payload.childEnvironment) ||
+  Object.entries(payload.childEnvironment).some(
+    ([name, value]) =>
+      typeof name !== "string" ||
+      name.length === 0 ||
+      typeof value !== "string" ||
+      /[\0\n\r]/.test(value)
+  ) ||
+  !payload.identity ||
+  typeof payload.identity !== "object" ||
+  !Number.isSafeInteger(payload.identity.uid) ||
+  !Number.isSafeInteger(payload.identity.gid) ||
+  !Number.isSafeInteger(payload.identity.umask) ||
+  payload.identity.uid < -1 ||
+  payload.identity.gid < -1 ||
+  payload.identity.umask < 0 ||
+  payload.identity.umask > 0o777 ||
+  (payload.identity.uid >= 0) !== (payload.identity.gid >= 0) ||
+  (payload.identity.uid === 0 || payload.identity.gid === 0)
 ) {
   console.error("coverage command supervisor received invalid input");
+  process.exit(127);
+}
+
+if (payload.identity.uid >= 0 && process.platform !== "linux") {
+  console.error("coverage command supervisor requires Linux to drop privileges");
   process.exit(127);
 }
 
@@ -199,13 +447,21 @@ if (process.platform === "linux") {
 }
 
 const childOptions = {
-  cwd: process.cwd(), env: process.env, detached: true, shell: false,
+  cwd: process.cwd(),
+  env: { ...process.env, ...payload.childEnvironment },
+  detached: true, shell: false,
   stdio: ["ignore", "pipe", "pipe"],
 };
 const child = process.platform === "linux"
   ? spawn(
     "/usr/bin/python3",
-    ["-I", "-S", "-c", stoppedChildBootstrap, payload.executable, ...payload.args],
+    [
+      "-I", "-S", "-c", stoppedChildBootstrap,
+      String(payload.identity.uid),
+      String(payload.identity.gid),
+      String(payload.identity.umask),
+      payload.executable, ...payload.args,
+    ],
     childOptions,
   )
   : spawn(process.execPath,
@@ -261,6 +517,83 @@ const finalize = () => {
     process.exitCode = childCode;
   } else {
     process.exitCode = childSignal ? 128 : 1;
+  }
+};
+
+const readObservedIdentity = (pid) => {
+  if (process.platform !== "linux") {
+    return {
+      source: "supervisor",
+      uid: process.getuid(),
+      euid: process.getuid(),
+      gid: process.getgid(),
+      egid: process.getgid(),
+      groups: process.getgroups().sort((left, right) => left - right),
+      noNewPrivs: null,
+      capEff: null,
+      capPrm: null,
+      capAmb: null,
+      capBnd: null,
+      capInh: null,
+    };
+  }
+  const status = fs.readFileSync("/proc/" + pid + "/status", "utf8");
+  const fields = new Map();
+  for (const line of status.split("\n")) {
+    const parts = line.split(/\s+/).filter((value) => value.length > 0);
+    if (parts.length > 0) {
+      fields.set(parts[0].replace(/:$/, ""), parts.slice(1));
+    }
+  }
+  const numeric = (name, index) => {
+    const values = fields.get(name);
+    if (!values || values.length <= index) {
+      throw new Error("procfs status is missing " + name);
+    }
+    return Number(values[index]);
+  };
+  const capability = (name) => {
+    const values = fields.get(name);
+    if (!values || values.length === 0) {
+      throw new Error("procfs status is missing " + name);
+    }
+    return values[0];
+  };
+  return {
+    source: "proc",
+    uid: numeric("Uid", 0),
+    euid: numeric("Uid", 1),
+    gid: numeric("Gid", 0),
+    egid: numeric("Gid", 1),
+    groups: (fields.get("Groups") || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value))
+      .sort((left, right) => left - right),
+    noNewPrivs: numeric("NoNewPrivs", 0),
+    capEff: capability("CapEff"),
+    capPrm: capability("CapPrm"),
+    capAmb: capability("CapAmb"),
+    capBnd: capability("CapBnd"),
+    capInh: capability("CapInh"),
+  };
+};
+
+const reportObservedIdentity = (pid) => {
+  if (payload.identityReportPath === null) {
+    return true;
+  }
+  try {
+    fs.writeFileSync(
+      payload.identityReportPath,
+      JSON.stringify(readObservedIdentity(pid)),
+      { mode: 0o600 },
+    );
+    return true;
+  } catch (error) {
+    writeBoundedSupervisorError(
+      "coverage command supervisor could not record the child identity",
+    );
+    return false;
   }
 };
 
@@ -610,6 +943,8 @@ if (process.platform === "linux") {
   }
   if (originalChildIdentity === null) {
     beginCleanup(127);
+  } else if (!reportObservedIdentity(child.pid)) {
+    beginCleanup(127);
   } else if (!cleanupStarted) {
     processScan = setInterval(refreshDescendants, 20);
     timeout = setTimeout(() => {
@@ -622,9 +957,13 @@ if (process.platform === "linux") {
     }
   }
 } else if (!cleanupStarted) {
-  timeout = setTimeout(() => {
-    beginCleanup(124);
-  }, payload.timeoutMs);
+  if (!reportObservedIdentity(child.pid)) {
+    beginCleanup(127);
+  } else {
+    timeout = setTimeout(() => {
+      beginCleanup(124);
+    }, payload.timeoutMs);
+  }
 }
 `;
 const EVIDENCE_KEYS = Object.freeze([
@@ -642,6 +981,7 @@ const EVIDENCE_KEYS = Object.freeze([
   "toolchain",
   "commands",
   "reports",
+  "execution",
   "failures",
 ]);
 
@@ -652,59 +992,231 @@ class CoverageMatrixError extends Error {
   }
 }
 
-function sanitizedChildEnvironment(environment = process.env) {
-  const sanitized = { ...environment };
-  for (const name of Object.keys(sanitized)) {
-    const normalized = name.toLowerCase();
-    if (
-      name.startsWith("PYTHON") ||
-      normalized.startsWith("git_") ||
-      normalized.startsWith("npm_config_") ||
-      [
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "NODE_REPL_EXTERNAL_MODULE",
-        "NODE_EXTRA_CA_CERTS",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-      ].includes(name)
-    ) {
-      delete sanitized[name];
+function assertEnvironmentAllowlist(environment, expectedKeys, label) {
+  const actual = Object.keys(environment).sort();
+  const expected = [...expectedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    fail(
+      `${label} keys must be exactly ${expected.join(",")}; found ${actual.join(",")}`,
+    );
+  }
+  for (const key of actual) {
+    if (FORBIDDEN_ENVIRONMENT_PREFIX.test(key)) {
+      fail(`${label} must not contain workflow-controlled variable ${key}`);
+    }
+    if (FORBIDDEN_ENVIRONMENT_NAMES.includes(key)) {
+      fail(`${label} must not contain interpreter or proxy variable ${key}`);
+    }
+    if (key.toLowerCase().startsWith("npm_config_") && !expected.includes(key)) {
+      fail(`${label} must not contain unpinned npm setting ${key}`);
+    }
+    const value = environment[key];
+    if (typeof value !== "string" || /[\0\n\r]/.test(value)) {
+      fail(`${label} value for ${key} is unsafe`);
     }
   }
-  return sanitized;
+  return environment;
 }
 
-function sanitizedGitEnvironment(environment = process.env) {
-  return {
-    ...sanitizedChildEnvironment(environment),
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: os.devNull,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_SYSTEM: os.devNull,
-    GIT_EXTERNAL_DIFF: "",
-    GIT_LITERAL_PATHSPECS: "1",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_PAGER: "",
-    GIT_TERMINAL_PROMPT: "0",
-  };
+function baseEnvironment({ home }) {
+  const environment = Object.create(null);
+  environment.PATH = "/usr/local/bin:/usr/bin:/bin";
+  environment.HOME = home;
+  environment.LANG = "C.UTF-8";
+  environment.LC_ALL = "C.UTF-8";
+  environment.TZ = "UTC";
+  return environment;
+}
+
+function applyNpmEnvironment(environment, { cache, userConfig, globalConfig }) {
+  environment.npm_config_ignore_scripts = "true";
+  environment.npm_config_registry = "https://registry.npmjs.org/";
+  environment.npm_config_replace_registry_host = "never";
+  environment.npm_config_strict_ssl = "true";
+  environment.npm_config_userconfig = userConfig;
+  environment.npm_config_globalconfig = globalConfig;
+  environment.npm_config_cache = cache;
+  environment.npm_config_fund = "false";
+  environment.npm_config_audit = "false";
+  environment.npm_config_update_notifier = "false";
+  return environment;
+}
+
+const NPM_ENVIRONMENT_KEYS = Object.freeze([
+  "npm_config_ignore_scripts",
+  "npm_config_registry",
+  "npm_config_replace_registry_host",
+  "npm_config_strict_ssl",
+  "npm_config_userconfig",
+  "npm_config_globalconfig",
+  "npm_config_cache",
+  "npm_config_fund",
+  "npm_config_audit",
+  "npm_config_update_notifier",
+]);
+const BASE_ENVIRONMENT_KEYS = Object.freeze([
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+]);
+const CONTROLLER_ENVIRONMENT_KEYS = Object.freeze([
+  ...BASE_ENVIRONMENT_KEYS,
+  ...NPM_ENVIRONMENT_KEYS,
+]);
+
+function buildCommandEnvironment(layout, role, options = {}) {
+  if (!COMMAND_ROLES.includes(role)) {
+    fail("command role must be controller or worker");
+  }
+  const label = `${role} environment`;
+  const environment = applyNpmEnvironment(
+    baseEnvironment({
+      home: role === "worker" ? layout.workerHome : layout.controllerHome,
+    }),
+    role === "worker"
+      ? {
+        cache: layout.workerCache,
+        userConfig: layout.workerUserConfig,
+        globalConfig: layout.workerGlobalConfig,
+      }
+      : {
+        cache: layout.controllerCache,
+        userConfig: layout.controllerUserConfig,
+        globalConfig: layout.controllerGlobalConfig,
+      },
+  );
+  const expected = [...CONTROLLER_ENVIRONMENT_KEYS];
+  if (options.rawSink === true) {
+    environment.NODE_V8_COVERAGE = layout.raw;
+    expected.push("NODE_V8_COVERAGE");
+  }
+  if (options.continuousIntegration === true) {
+    environment.CI = "true";
+    expected.push("CI");
+  }
+  if (options.buildPath === true) {
+    environment.BUILD_PATH = "build";
+    expected.push("BUILD_PATH");
+  }
+  const actual = Object.keys(environment).sort();
+  const permitted = [...expected].sort();
+  if (
+    actual.length !== permitted.length ||
+    actual.some((key, index) => key !== permitted[index])
+  ) {
+    fail(
+      `${label} keys must be exactly ${permitted.join(",")}; found ${actual.join(",")}`,
+    );
+  }
+  for (const key of actual) {
+    if (FORBIDDEN_ENVIRONMENT_PREFIX.test(key)) {
+      fail(`${label} must not contain workflow-controlled variable ${key}`);
+    }
+    if (
+      FORBIDDEN_ENVIRONMENT_NAMES.includes(key) &&
+      !(key === "NODE_V8_COVERAGE" && options.rawSink === true)
+    ) {
+      fail(`${label} must not contain interpreter or proxy variable ${key}`);
+    }
+    const value = environment[key];
+    if (typeof value !== "string" || /[\0\n\r]/.test(value)) {
+      fail(`${label} value for ${key} is unsafe`);
+    }
+  }
+  return environment;
+}
+
+function controllerEnvironment(layout, options = {}) {
+  return buildCommandEnvironment(layout, "controller", options);
+}
+
+function workerEnvironment(layout, options = {}) {
+  return buildCommandEnvironment(layout, "worker", options);
+}
+
+function sanitizedGitEnvironment(layout) {
+  const environment = baseEnvironment({
+    home: layout && layout.controllerHome ? layout.controllerHome : os.tmpdir(),
+  });
+  environment.GIT_ATTR_NOSYSTEM = "1";
+  environment.GIT_CONFIG_GLOBAL = os.devNull;
+  environment.GIT_CONFIG_NOSYSTEM = "1";
+  environment.GIT_CONFIG_SYSTEM = os.devNull;
+  environment.GIT_EXTERNAL_DIFF = "";
+  environment.GIT_LITERAL_PATHSPECS = "1";
+  environment.GIT_NO_REPLACE_OBJECTS = "1";
+  environment.GIT_OPTIONAL_LOCKS = "0";
+  environment.GIT_PAGER = "";
+  environment.GIT_TERMINAL_PROMPT = "0";
+  return assertEnvironmentAllowlist(
+    environment,
+    [
+      ...BASE_ENVIRONMENT_KEYS,
+      "GIT_ATTR_NOSYSTEM",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_EXTERNAL_DIFF",
+      "GIT_LITERAL_PATHSPECS",
+      "GIT_NO_REPLACE_OBJECTS",
+      "GIT_OPTIONAL_LOCKS",
+      "GIT_PAGER",
+      "GIT_TERMINAL_PROMPT",
+    ],
+    "git environment",
+  );
 }
 
 function assertSafeNodeStartupEnvironment() {
-  for (const name of ["NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE"]) {
+  for (const name of [
+    "EXPERIMENTAL_MONOCART",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "NODE_REPL_EXTERNAL_MODULE",
+    "NODE_V8_COVERAGE",
+  ]) {
     if (Object.prototype.hasOwnProperty.call(process.env, name)) {
       fail(`${name} must be unset before starting the trusted coverage engine`);
     }
   }
+}
+
+function emitSafeLine(value) {
+  assertPlainObject(value, "structured output");
+  const keys = Object.keys(value);
+  if (keys.length === 0) {
+    fail("structured output must contain at least one field");
+  }
+  for (const key of keys) {
+    if (!SAFE_STDOUT_KEYS.includes(key)) {
+      fail(`structured output field ${key} is not permitted`);
+    }
+  }
+  const serialized = JSON.stringify(value, (key, item) => {
+    if (typeof item === "string") {
+      if (!SAFE_STDOUT_TEXT_PATTERN.test(item)) {
+        fail("structured output contains control or non-ASCII characters");
+      }
+      if (item.includes("::") || item.includes("##[")) {
+        fail("structured output must not contain a workflow command");
+      }
+    }
+    return item;
+  });
+  if (typeof serialized !== "string" || !SAFE_STDOUT_TEXT_PATTERN.test(serialized)) {
+    fail("structured output is not printable ASCII");
+  }
+  if (serialized.includes("::") || serialized.includes("##[")) {
+    fail("structured output must not contain a workflow command");
+  }
+  process.stdout.write(`${serialized}\n`);
+  return serialized;
 }
 
 function fail(message) {
@@ -1078,11 +1590,6 @@ function ensureSafeMutationPath(repoRoot, repoPath, label) {
   return path.join(canonicalRoot, ...parts);
 }
 
-function removeGeneratedPath(repoRoot, repoPath, label) {
-  const destination = ensureSafeMutationPath(repoRoot, repoPath, label);
-  fs.rmSync(destination, { recursive: true, force: true });
-}
-
 function writeFileSafely(filePath, bytes, label) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   try {
@@ -1230,8 +1737,8 @@ function validateDescriptorObject(descriptor) {
     ["schemaVersion", "runtime", "thresholds", "entries"],
     "descriptor",
   );
-  if (descriptor.schemaVersion !== SCHEMA_VERSION) {
-    fail(`descriptor schemaVersion must equal ${SCHEMA_VERSION}`);
+  if (descriptor.schemaVersion !== DESCRIPTOR_SCHEMA_VERSION) {
+    fail(`descriptor schemaVersion must equal ${DESCRIPTOR_SCHEMA_VERSION}`);
   }
   assertExactKeys(descriptor.runtime, ["node"], "descriptor.runtime");
   if (descriptor.runtime.node !== REQUIRED_NODE_VERSION) {
@@ -1293,6 +1800,33 @@ function readDescriptor(repoRoot, descriptorPath = DESCRIPTOR_PATH) {
   );
 }
 
+function assertNoCoverageManifestKeys(manifest, label) {
+  if (!isPlainObject(manifest)) {
+    return manifest;
+  }
+  for (const key of FORBIDDEN_COVERAGE_MANIFEST_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(manifest, key)) {
+      fail(`${label} must not declare a ${key} coverage configuration key`);
+    }
+  }
+  return manifest;
+}
+
+function assertNoCoverageConfigurationFiles(repoRoot, trackedPaths, directories) {
+  for (const directory of directories) {
+    for (const name of FORBIDDEN_COVERAGE_CONFIG_FILES) {
+      const repoPath = directory === "" ? name : `${directory}/${name}`;
+      if (
+        trackedPaths.has(repoPath) ||
+        fs.existsSync(path.join(repoRoot, ...repoPath.split("/")))
+      ) {
+        fail(`repository coverage tool configuration is forbidden: ${repoPath}`);
+      }
+    }
+  }
+  return true;
+}
+
 function validateToolPackage(repoRoot) {
   const packageJson = readJsonFile(
     ensureRegularInRoot(repoRoot, TOOL_PACKAGE_PATH, "coverage tool package"),
@@ -1304,6 +1838,7 @@ function validateToolPackage(repoRoot) {
     ["name", "version", "private", "engines", "devDependencies"],
     "coverage tool package",
   );
+  assertNoCoverageManifestKeys(packageJson, "coverage tool package");
   assertExactKeys(packageJson.engines, ["node"], "coverage tool package engines");
   assertExactKeys(
     packageJson.devDependencies,
@@ -1564,6 +2099,7 @@ function validateProfileManifest(repoRoot, treeish, entry) {
   const lock = parseJsonBytes(lockResult.bytes, `${entry.id} package lock`);
   assertPlainObject(manifest, `${entry.id} package manifest`);
   assertPlainObject(lock, `${entry.id} package lock`);
+  assertNoCoverageManifestKeys(manifest, `${entry.id} package manifest`);
   const scripts = isPlainObject(manifest.scripts) ? manifest.scripts : {};
   for (const hook of [
     "preinstall",
@@ -2074,6 +2610,11 @@ function validateRepository(repoRoot, options = {}) {
       fail(`repository npm configuration is forbidden: ${npmConfigPath}`);
     }
   }
+  assertNoCoverageConfigurationFiles(repoRoot, trackedPaths, [
+    "",
+    ".github/coverage",
+    ...descriptor.entries.map((entry) => entry.id),
+  ]);
   const inventory = discoverPackageInventory(repoRoot, treeish);
   const ids = descriptor.entries.map((entry) => entry.id);
   if (
@@ -2178,13 +2719,22 @@ function deriveChangedSources(repoRoot, baseSha, headSha, entry, eligible) {
 }
 
 function validateRunContext(repoRoot, context) {
-  assertExactKeys(
-    context,
-    ["schemaVersion", "repository", "workflow", "engine"],
-    "run context",
-  );
-  if (context.schemaVersion !== SCHEMA_VERSION) {
-    fail(`run context schemaVersion must equal ${SCHEMA_VERSION}`);
+  const contextKeys = ["schemaVersion", "repository", "workflow", "engine"];
+  if (isPlainObject(context) && Object.prototype.hasOwnProperty.call(context, "container")) {
+    contextKeys.push("container");
+  }
+  assertExactKeys(context, contextKeys, "run context");
+  if (context.schemaVersion !== RUN_CONTEXT_SCHEMA_VERSION) {
+    fail(`run context schemaVersion must equal ${RUN_CONTEXT_SCHEMA_VERSION}`);
+  }
+  if (contextKeys.includes("container")) {
+    assertExactKeys(context.container, ["imageDigest"], "run context container");
+    if (
+      typeof context.container.imageDigest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/.test(context.container.imageDigest)
+    ) {
+      fail("run context container.imageDigest must be a sha256 image digest");
+    }
   }
   assertExactKeys(
     context.repository,
@@ -2309,6 +2859,7 @@ function verifyTrustedAssets(repoRoot, trustedRoot, context) {
     ["validator", ENGINE_PATH, LIMITS.reportBytes],
     ["toolPackage", TOOL_PACKAGE_PATH, LIMITS.descriptorBytes],
     ["toolLock", TOOL_LOCK_PATH, LIMITS.reportBytes],
+    ["descriptor", DESCRIPTOR_PATH, LIMITS.descriptorBytes],
   ]) {
     const candidatePath = ensureRegularInRoot(repoRoot, repoPath, `candidate ${repoPath}`);
     const trustedPath = ensureRegularInRoot(trusted, repoPath, `trusted ${repoPath}`);
@@ -2343,43 +2894,6 @@ function verifyTrustedAssets(repoRoot, trustedRoot, context) {
       sha256: sha256Bytes(trustedBytes),
     };
   }
-  const descriptorPath = ensureRegularInRoot(
-    repoRoot,
-    DESCRIPTOR_PATH,
-    `candidate ${DESCRIPTOR_PATH}`,
-  );
-  const descriptorBytes = readBoundedFile(
-    descriptorPath,
-    LIMITS.descriptorBytes,
-    `candidate ${DESCRIPTOR_PATH}`,
-  );
-  const descriptorBlob = gitHashFile(
-    repoRoot,
-    descriptorPath,
-    `candidate ${DESCRIPTOR_PATH}`,
-  );
-  const headDescriptorBlob = gitBlobAt(
-    repoRoot,
-    context.repository.headSha,
-    DESCRIPTOR_PATH,
-    `candidate head ${DESCRIPTOR_PATH}`,
-  );
-  const checkoutDescriptorBlob = gitBlobAt(
-    repoRoot,
-    context.repository.checkoutSha,
-    DESCRIPTOR_PATH,
-    `candidate checkout ${DESCRIPTOR_PATH}`,
-  );
-  if (
-    descriptorBlob !== headDescriptorBlob ||
-    descriptorBlob !== checkoutDescriptorBlob
-  ) {
-    fail(`${DESCRIPTOR_PATH} differs across working, head, or checkout snapshots`);
-  }
-  result.descriptor = {
-    gitBlob: descriptorBlob,
-    sha256: sha256Bytes(descriptorBytes),
-  };
   return result;
 }
 
@@ -2610,8 +3124,1133 @@ function mapSourceToBuild(entryId, repoPath) {
   return `build/${relative.slice(4, -extension.length)}.js`;
 }
 
-function artifactDirectoryFor(entryId) {
-  return `${ARTIFACT_ROOT}/${entryId}`;
+function assertControlledDirectory(absolute, label, expectation) {
+  let stat;
+  try {
+    stat = fs.lstatSync(absolute);
+  } catch (error) {
+    fail(`${label} is missing`);
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    fail(`${label} must be a regular directory`);
+  }
+  if ((stat.mode & 0o777) !== 0o700) {
+    fail(`${label} must use mode 0700`);
+  }
+  if (
+    typeof expectation.uid === "number" &&
+    stat.uid !== expectation.uid
+  ) {
+    fail(`${label} must be owned by uid ${expectation.uid}`);
+  }
+  if (
+    typeof expectation.gid === "number" &&
+    stat.gid !== expectation.gid
+  ) {
+    fail(`${label} must be owned by gid ${expectation.gid}`);
+  }
+  if (expectation.notUid !== undefined && stat.uid === expectation.notUid) {
+    fail(`${label} must not be owned by uid ${expectation.notUid}`);
+  }
+  if (fs.realpathSync(absolute) !== absolute) {
+    fail(`${label} must not contain a symlinked path component`);
+  }
+  return stat;
+}
+
+function assertEmptyDirectory(absolute, label) {
+  const entries = fs.readdirSync(absolute);
+  if (entries.length !== 0) {
+    fail(
+      `${label} must be empty before the run: found ${entries.sort().join(",")}; ` +
+        "each attempt requires a fresh container because controlled roots are " +
+        "never reused",
+    );
+  }
+}
+
+function createControlledDirectory(absolute, label, owner) {
+  fs.mkdirSync(absolute, { recursive: true, mode: 0o700 });
+  if (owner && process.getuid && process.getuid() === CONTROLLER_UID) {
+    fs.chownSync(absolute, owner.uid, owner.gid);
+  }
+  fs.chmodSync(absolute, 0o700);
+  const stat = fs.lstatSync(absolute);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    fail(`${label} must be a regular directory`);
+  }
+  return absolute;
+}
+
+function restoreWritablePermissions(target) {
+  let stat;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error) {
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    return;
+  }
+  fs.chmodSync(target, stat.isDirectory() ? 0o700 : 0o600);
+  if (stat.isDirectory()) {
+    for (const name of fs.readdirSync(target)) {
+      restoreWritablePermissions(path.join(target, name));
+    }
+  }
+}
+
+function releaseExecutionLayout(layout) {
+  if (!layout || !layout.temporaryRoot) {
+    return;
+  }
+  try {
+    fs.rmSync(layout.temporaryRoot, { recursive: true, force: true });
+  } catch (error) {
+    restoreWritablePermissions(layout.temporaryRoot);
+    fs.rmSync(layout.temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function clearDirectoryContents(absolute) {
+  let entries;
+  try {
+    entries = fs.readdirSync(absolute);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  for (const name of entries) {
+    fs.rmSync(path.join(absolute, name), { recursive: true, force: true });
+  }
+}
+
+function resetControlledDirectory(absolute, label, owner) {
+  clearDirectoryContents(absolute);
+  createControlledDirectory(absolute, label, owner);
+  assertEmptyDirectory(absolute, label);
+  return absolute;
+}
+
+function parseCapabilityMask(value, label) {
+  if (typeof value !== "string" || !/^[0-9a-f]{1,16}$/.test(value)) {
+    fail(`${label} must be a hexadecimal capability mask`);
+  }
+  return BigInt(`0x${value}`);
+}
+
+function assertControllerCapabilityContract(identity, label) {
+  const expected = parseCapabilityMask(
+    CONTROLLER_CAPABILITY_MASK,
+    "controller capability contract",
+  );
+  for (const field of ["capEff", "capPrm", "capBnd"]) {
+    const actual = parseCapabilityMask(identity[field], `${label}.${field}`);
+    if (actual !== expected) {
+      fail(
+        `${label}.${field} must equal exactly ${CONTROLLER_CAPABILITY_MASK} ` +
+          `(${CONTROLLER_CAPABILITY_NAMES.join(",")}); found ${identity[field]}`,
+      );
+    }
+  }
+  for (const field of ["capAmb", "capInh"]) {
+    if (parseCapabilityMask(identity[field], `${label}.${field}`) !== 0n) {
+      fail(`${label}.${field} must be empty; found ${identity[field]}`);
+    }
+  }
+  return identity;
+}
+
+function readProcessIdentityFromProc(pid = "self") {
+  let status;
+  try {
+    status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
+  } catch (error) {
+    fail(`/proc/${pid}/status must be readable to verify execution identity`);
+  }
+  const fields = new Map();
+  for (const line of status.split("\n")) {
+    const parts = line.split(/\s+/).filter((value) => value.length > 0);
+    if (parts.length > 0) {
+      fields.set(parts[0].replace(/:$/, ""), parts.slice(1));
+    }
+  }
+  const numeric = (name, index) => {
+    const values = fields.get(name);
+    if (!values || values.length <= index) {
+      fail(`/proc/${pid}/status is missing ${name}`);
+    }
+    return Number(values[index]);
+  };
+  const capability = (name) => {
+    const values = fields.get(name);
+    if (!values || values.length === 0) {
+      fail(`/proc/${pid}/status is missing ${name}`);
+    }
+    return values[0].toLowerCase();
+  };
+  return {
+    source: "proc",
+    uid: numeric("Uid", 0),
+    euid: numeric("Uid", 1),
+    gid: numeric("Gid", 0),
+    egid: numeric("Gid", 1),
+    supplementaryGroups: (fields.get("Groups") || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value)),
+    noNewPrivs: numeric("NoNewPrivs", 0),
+    capEff: capability("CapEff"),
+    capPrm: capability("CapPrm"),
+    capAmb: capability("CapAmb"),
+    capBnd: capability("CapBnd"),
+    capInh: capability("CapInh"),
+  };
+}
+
+function assertAuthoritativeContainer(layout) {
+  if (process.platform !== "linux") {
+    fail("authoritative coverage execution requires Linux process containment");
+  }
+  if (
+    typeof process.getuid !== "function" ||
+    typeof process.getgid !== "function" ||
+    process.getuid() !== CONTROLLER_UID ||
+    process.getgid() !== CONTROLLER_GID
+  ) {
+    fail("authoritative coverage execution requires a root controller identity");
+  }
+  if (process.env[CONTAINER_MARKER_VARIABLE] !== "1") {
+    fail(
+      `authoritative coverage execution requires ${CONTAINER_MARKER_VARIABLE}=1`,
+    );
+  }
+  const controllerIdentity = readProcessIdentityFromProc("self");
+  if (
+    controllerIdentity.uid !== CONTROLLER_UID ||
+    controllerIdentity.euid !== CONTROLLER_UID ||
+    controllerIdentity.gid !== CONTROLLER_GID ||
+    controllerIdentity.egid !== CONTROLLER_GID
+  ) {
+    fail("authoritative coverage execution requires a root controller identity");
+  }
+  assertControllerCapabilityContract(
+    controllerIdentity,
+    "authoritative controller identity",
+  );
+  for (const forbidden of FORBIDDEN_CONTAINER_PATHS) {
+    if (fs.existsSync(forbidden)) {
+      fail(`authoritative coverage execution forbids host path ${forbidden}`);
+    }
+  }
+  for (const name of GITHUB_COMMAND_CHANNEL_VARIABLES) {
+    if (Object.prototype.hasOwnProperty.call(process.env, name)) {
+      fail(`authoritative coverage execution forbids workflow command channel ${name}`);
+    }
+  }
+  for (const name of Object.keys(process.env)) {
+    if (name === CONTAINER_MARKER_VARIABLE) {
+      continue;
+    }
+    if (FORBIDDEN_ENVIRONMENT_PREFIX.test(name)) {
+      fail(`authoritative coverage execution forbids inherited variable ${name}`);
+    }
+  }
+  assertControlledDirectory(layout.tool, "controller tool root", {
+    uid: CONTROLLER_UID,
+    gid: CONTROLLER_GID,
+  });
+  assertControlledDirectory(layout.frozen, "frozen coverage root", {
+    uid: CONTROLLER_UID,
+    gid: CONTROLLER_GID,
+  });
+  assertControlledDirectory(layout.raw, "raw coverage root", {
+    uid: WORKER_UID,
+    gid: WORKER_GID,
+  });
+  const homeStat = fs.lstatSync(layout.workerHome, { throwIfNoEntry: false });
+  if (!homeStat || homeStat.isSymbolicLink() || !homeStat.isDirectory()) {
+    fail("worker home root must be a regular directory");
+  }
+  if (homeStat.uid !== CONTROLLER_UID || homeStat.gid !== CONTROLLER_GID) {
+    fail("worker home root must be owned by the trusted controller");
+  }
+  if (fs.realpathSync(layout.workerHome) !== layout.workerHome) {
+    fail("worker home root must not contain a symlinked path component");
+  }
+  const outputStat = fs.lstatSync(layout.out, { throwIfNoEntry: false });
+  if (!outputStat || outputStat.isSymbolicLink() || !outputStat.isDirectory()) {
+    fail("controlled output root must be a regular directory");
+  }
+  if (outputStat.uid !== CONTROLLER_UID || outputStat.gid !== CONTROLLER_GID) {
+    fail("controlled output root must be owned by the trusted controller");
+  }
+  fs.chmodSync(layout.out, 0o700);
+  assertControlledDirectory(layout.out, "controlled output root", {
+    uid: CONTROLLER_UID,
+    gid: CONTROLLER_GID,
+  });
+  return layout;
+}
+
+function assertNoCoverageDiscovery(
+  startDirectory,
+  allowedManifestDirectories,
+  label,
+  options = {},
+) {
+  const allowed = new Set(allowedManifestDirectories);
+  const boundary = options.stopAt ? path.resolve(options.stopAt) : null;
+  let current = path.resolve(startDirectory);
+  const seen = new Set();
+  while (!seen.has(current)) {
+    seen.add(current);
+    let entries;
+    try {
+      entries = fs.readdirSync(current);
+    } catch (error) {
+      fail(`${label} could not be inspected at ${current}`);
+    }
+    for (const name of entries) {
+      if (FORBIDDEN_COVERAGE_CONFIG_FILES.includes(name)) {
+        fail(`${label} contains forbidden coverage configuration ${current}/${name}`);
+      }
+      if (name === ".npmrc") {
+        fail(`${label} contains forbidden npm configuration ${current}/${name}`);
+      }
+      if (name === "package.json" && !allowed.has(current)) {
+        fail(`${label} contains an unexpected manifest ${current}/${name}`);
+      }
+    }
+    if (boundary !== null && current === boundary) {
+      break;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return true;
+}
+
+function supplementalPackageIds(entryId) {
+  const ids = SUPPLEMENTAL_PACKAGE_IDS[entryId];
+  return ids ? [...ids] : [];
+}
+
+function supplementalInputPaths(entryId) {
+  const paths = [];
+  for (const id of supplementalPackageIds(entryId)) {
+    for (const name of SUPPLEMENTAL_MANIFEST_FILES) {
+      paths.push(`${id}/${name}`);
+    }
+  }
+  return paths.sort();
+}
+
+function workerHomeInventory(entryId) {
+  return [
+    entryId,
+    ".npm-cache",
+    ".npm-global-config",
+    ".npm-user-config",
+    ...supplementalPackageIds(entryId),
+  ].sort();
+}
+
+function resolveExecutionLayout(options) {
+  const entryId = options.entryId;
+  const repo = fs.realpathSync(options.repoRoot);
+  if (options.authoritative === true) {
+    const outputRoot = options.outputRoot;
+    if (outputRoot !== CONTAINER_ROOTS.output) {
+      fail(
+        `authoritative output root must equal ${CONTAINER_ROOTS.output}`,
+      );
+    }
+    const workerHome = CONTAINER_ROOTS.home;
+    const tool = CONTAINER_ROOTS.tool;
+    const artifactsRoot = path.join(outputRoot, OUTPUT_ARTIFACT_ROOT);
+    return {
+      authoritative: true,
+      entryId,
+      repo,
+      pkg: path.join(workerHome, entryId),
+      workerHome,
+      workerHomeEntries: workerHomeInventory(entryId),
+      supplementalIds: supplementalPackageIds(entryId),
+      identityRoot: path.join(tool, "identity"),
+      workerCache: path.join(workerHome, ".npm-cache"),
+      workerUserConfig: path.join(workerHome, ".npm-user-config"),
+      workerGlobalConfig: path.join(workerHome, ".npm-global-config"),
+      tool,
+      controllerHome: path.join(tool, "controller-home"),
+      controllerCache: path.join(tool, "controller-cache"),
+      controllerUserConfig: path.join(tool, "controller-user-config"),
+      controllerGlobalConfig: path.join(tool, "controller-global-config"),
+      c8Config: path.join(tool, "c8-config.json"),
+      raw: CONTAINER_ROOTS.raw,
+      frozen: CONTAINER_ROOTS.frozen,
+      out: outputRoot,
+      artifactsRoot,
+      artifactDirectory: path.join(artifactsRoot, entryId),
+      report: path.join(artifactsRoot, entryId, "report"),
+      coverageRoot: workerHome,
+      temporaryRoot: null,
+    };
+  }
+  const temporaryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "betstan-coverage-local-"),
+  );
+  const artifactsRoot = path.join(repo, ...ARTIFACT_ROOT.split("/"));
+  return {
+    authoritative: false,
+    entryId,
+    repo,
+    pkg: path.join(repo, entryId),
+    workerHome: repo,
+    workerHomeEntries: null,
+    supplementalIds: supplementalPackageIds(entryId),
+    identityRoot: path.join(temporaryRoot, "identity"),
+    workerCache: path.join(temporaryRoot, "worker-cache"),
+    workerUserConfig: path.join(temporaryRoot, "worker-user-config"),
+    workerGlobalConfig: path.join(temporaryRoot, "worker-global-config"),
+    tool: path.join(repo, ".github", "coverage"),
+    controllerHome: path.join(temporaryRoot, "controller-home"),
+    controllerCache: path.join(temporaryRoot, "controller-cache"),
+    controllerUserConfig: path.join(temporaryRoot, "controller-user-config"),
+    controllerGlobalConfig: path.join(temporaryRoot, "controller-global-config"),
+    c8Config: path.join(temporaryRoot, "c8-config.json"),
+    raw: path.join(temporaryRoot, "raw"),
+    frozen: path.join(temporaryRoot, "frozen"),
+    out: repo,
+    artifactsRoot,
+    artifactDirectory: path.join(artifactsRoot, entryId),
+    report: path.join(temporaryRoot, "report"),
+    coverageRoot: repo,
+    temporaryRoot,
+  };
+}
+
+function writeGeneratedC8Configuration(layout) {
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  let descriptor;
+  try {
+    fs.rmSync(layout.c8Config, { force: true });
+    descriptor = fs.openSync(
+      layout.c8Config,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    );
+    fs.writeSync(descriptor, C8_CONFIG_CONTENT);
+  } catch (error) {
+    fail("generated c8 configuration could not be created exclusively");
+  } finally {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
+  }
+  const stat = fs.lstatSync(layout.c8Config);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    fail("generated c8 configuration must be a non-hardlinked regular file");
+  }
+  if (fs.readFileSync(layout.c8Config, "utf8") !== C8_CONFIG_CONTENT) {
+    fail("generated c8 configuration must contain exactly an empty object");
+  }
+  return layout.c8Config;
+}
+
+function prepareControlledRoots(layout) {
+  const controllerOwner = { uid: CONTROLLER_UID, gid: CONTROLLER_GID };
+  const workerOwner = { uid: WORKER_UID, gid: WORKER_GID };
+  if (layout.authoritative) {
+    assertEmptyDirectory(layout.raw, "raw coverage root");
+    resetControlledDirectory(layout.frozen, "frozen coverage root", controllerOwner);
+    createControlledDirectory(layout.controllerHome, "controller home", controllerOwner);
+    createControlledDirectory(layout.controllerCache, "controller cache", controllerOwner);
+    resetControlledDirectory(layout.identityRoot, "command identity root", controllerOwner);
+    createControlledDirectory(layout.workerCache, "worker cache", workerOwner);
+    fs.chmodSync(layout.workerHome, WORKER_HOME_MODE);
+  } else {
+    createControlledDirectory(layout.raw, "raw coverage root", null);
+    resetControlledDirectory(layout.frozen, "frozen coverage root", null);
+    createControlledDirectory(layout.controllerHome, "controller home", null);
+    createControlledDirectory(layout.controllerCache, "controller cache", null);
+    resetControlledDirectory(layout.identityRoot, "command identity root", null);
+    createControlledDirectory(layout.workerCache, "worker cache", null);
+    assertEmptyDirectory(layout.raw, "raw coverage root");
+  }
+  resetControlledDirectory(layout.report, "coverage report root", controllerOwner);
+  for (const configPath of [
+    layout.controllerUserConfig,
+    layout.controllerGlobalConfig,
+    layout.workerUserConfig,
+    layout.workerGlobalConfig,
+  ]) {
+    fs.rmSync(configPath, { force: true });
+    fs.writeFileSync(configPath, "", { flag: "wx", mode: 0o600 });
+    if (layout.authoritative) {
+      fs.chownSync(configPath, CONTROLLER_UID, CONTROLLER_GID);
+      fs.chmodSync(configPath, SUPPLEMENTAL_FILE_MODE);
+    }
+  }
+  writeGeneratedC8Configuration(layout);
+  return layout;
+}
+
+function assertSupplementalFile(absolute, record, label, authoritative) {
+  let stat;
+  try {
+    stat = fs.lstatSync(absolute, { bigint: true });
+  } catch (error) {
+    fail(`${label} is missing`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    fail(`${label} must be a regular file`);
+  }
+  if (stat.nlink !== 1n) {
+    fail(`${label} must not be hardlinked`);
+  }
+  if (Number(stat.size) !== record.byteLength) {
+    fail(`${label} size differs from the exact checkout snapshot`);
+  }
+  if (authoritative) {
+    if (
+      Number(stat.uid) !== CONTROLLER_UID ||
+      Number(stat.gid) !== CONTROLLER_GID
+    ) {
+      fail(`${label} must be owned by the trusted controller`);
+    }
+    if ((Number(stat.mode) & 0o777) !== SUPPLEMENTAL_FILE_MODE) {
+      fail(`${label} must stay read-only for the worker`);
+    }
+  }
+  const actual = sha256File(absolute, LIMITS.reportBytes, label);
+  if (actual !== record.sha256) {
+    fail(`${label} differs from the verified candidate manifest`);
+  }
+  return actual;
+}
+
+function deriveSupplementalSnapshot(repoRoot, treeish, entryId) {
+  const expected = supplementalInputPaths(entryId);
+  if (expected.length === 0) {
+    return { paths: [], records: [] };
+  }
+  const records = new Map();
+  for (const id of supplementalPackageIds(entryId)) {
+    const entries = listTreeEntries(repoRoot, treeish, id).filter((item) =>
+      SUPPLEMENTAL_MANIFEST_FILES.includes(path.posix.basename(item.path)) &&
+      item.path.split("/").length === 2,
+    );
+    for (const item of entries) {
+      if (item.mode === "120000" || item.type !== "blob") {
+        fail(`supplemental manifest is not a regular tracked file: ${item.path}`);
+      }
+      if (item.mode !== "100644") {
+        fail(`supplemental manifest mode is unsupported: ${item.path}`);
+      }
+      if (!Number.isSafeInteger(item.size) || item.size > LIMITS.reportBytes) {
+        fail(`supplemental manifest size is unsupported: ${item.path}`);
+      }
+      records.set(item.path, {
+        path: item.path,
+        gitBlob: item.object,
+        gitMode: item.mode,
+        byteLength: item.size,
+        sha256: null,
+      });
+    }
+  }
+  const actual = [...records.keys()].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((value, index) => value !== expected[index])
+  ) {
+    fail(
+      `supplemental Common inputs must be exactly ${expected.join(",")}; found ${actual.join(",")}`,
+    );
+  }
+  const ordered = expected.map((repoPath) => records.get(repoPath));
+  for (const record of ordered) {
+    const serviceId = record.path.split("/")[0];
+    const digest = hashStablePackageInput(repoRoot, {
+      path: record.path,
+      gitBlob: record.gitBlob,
+      gitMode: record.gitMode,
+      byteLength: record.byteLength,
+    }, { id: serviceId });
+    if (digest !== record.gitBlob) {
+      fail(`${record.path} differs from the exact checkout snapshot`);
+    }
+    record.sha256 = sha256File(
+      ensureRegularInRoot(repoRoot, record.path, record.path),
+      LIMITS.reportBytes,
+      record.path,
+    );
+  }
+  return { paths: expected, records: ordered };
+}
+
+function verifySupplementalOrigin(repoRoot, snapshot) {
+  for (const record of snapshot.records) {
+    const serviceId = record.path.split("/")[0];
+    const digest = hashStablePackageInput(repoRoot, {
+      path: record.path,
+      gitBlob: record.gitBlob,
+      gitMode: record.gitMode,
+      byteLength: record.byteLength,
+    }, { id: serviceId });
+    if (digest !== record.gitBlob) {
+      fail(`${record.path} differs from the exact checkout snapshot`);
+    }
+    const actual = sha256File(
+      ensureRegularInRoot(repoRoot, record.path, record.path),
+      LIMITS.reportBytes,
+      record.path,
+    );
+    if (actual !== record.sha256) {
+      fail(`${record.path} differs from the verified candidate manifest`);
+    }
+  }
+  return snapshot;
+}
+
+function isInsideDirectory(parent, child) {
+  const relative = path.relative(parent, child);
+  return (
+    relative !== "" &&
+    !relative.startsWith(`..${path.sep}`) &&
+    relative !== ".." &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function canonicalStagingDirectory(candidate, label) {
+  if (typeof candidate !== "string" || !path.isAbsolute(candidate)) {
+    fail(`${label} must be an absolute path`);
+  }
+  const normalized = path.resolve(candidate);
+  let stat;
+  try {
+    stat = fs.lstatSync(normalized);
+  } catch (error) {
+    fail(`${label} is missing`);
+  }
+  if (stat.isSymbolicLink()) {
+    fail(`${label} must not be a symlink`);
+  }
+  if (!stat.isDirectory()) {
+    fail(`${label} must be a regular directory`);
+  }
+  return fs.realpathSync(normalized);
+}
+
+// Destructive staging primitives are only allowed to delete inside a worker
+// home that is provably separate from the candidate checkout. This runs before
+// any removal and never relies on the caller's authoritative flag.
+function assertIsolatedStagingLayout(repoRoot, entryId, layout) {
+  if (!isPlainObject(layout)) {
+    fail("staging layout must be an object");
+  }
+  if (typeof entryId !== "string" || !SAFE_ID_PATTERN.test(entryId)) {
+    fail("staging package id is unsafe");
+  }
+  if (layout.entryId !== entryId) {
+    fail("staging layout package id does not match the staged entry");
+  }
+  const repo = canonicalStagingDirectory(repoRoot, "candidate repository root");
+  const workerHome = canonicalStagingDirectory(
+    layout.workerHome,
+    "staging worker home root",
+  );
+  if (workerHome === repo) {
+    fail("staging worker home must not be the candidate checkout");
+  }
+  if (isInsideDirectory(repo, workerHome)) {
+    fail("staging worker home must not resolve inside the candidate checkout");
+  }
+  if (isInsideDirectory(workerHome, repo)) {
+    fail("candidate checkout must not resolve inside the staging worker home");
+  }
+  const expectedPkg = path.join(workerHome, entryId);
+  if (typeof layout.pkg !== "string" || !path.isAbsolute(layout.pkg)) {
+    fail("staged package root must be an absolute path");
+  }
+  const resolvedPkg = path.resolve(layout.pkg);
+  const pkgParent = canonicalStagingDirectory(
+    path.dirname(resolvedPkg),
+    "staged package parent",
+  );
+  if (
+    path.basename(resolvedPkg) !== entryId ||
+    pkgParent !== workerHome ||
+    path.join(pkgParent, path.basename(resolvedPkg)) !== expectedPkg
+  ) {
+    fail(
+      `staged package root must resolve to the worker home entry ${expectedPkg}`,
+    );
+  }
+  const expectedInventory = workerHomeInventory(entryId);
+  if (
+    !Array.isArray(layout.workerHomeEntries) ||
+    layout.workerHomeEntries.length !== expectedInventory.length ||
+    [...layout.workerHomeEntries]
+      .sort()
+      .some((name, index) => name !== expectedInventory[index])
+  ) {
+    fail(
+      `staging worker home inventory must be exactly ${expectedInventory.join(",")}`,
+    );
+  }
+  const supplementalIds = Array.isArray(layout.supplementalIds)
+    ? layout.supplementalIds
+    : null;
+  if (supplementalIds === null) {
+    fail("staging supplemental package ids must be an array");
+  }
+  const expectedSupplemental = supplementalPackageIds(entryId);
+  if (
+    supplementalIds.length !== expectedSupplemental.length ||
+    [...supplementalIds]
+      .sort()
+      .some((id, index) => id !== [...expectedSupplemental].sort()[index])
+  ) {
+    fail(
+      `staging supplemental package ids must be exactly ${expectedSupplemental.join(",")}`,
+    );
+  }
+  for (const id of [entryId, ...supplementalIds]) {
+    if (!SAFE_ID_PATTERN.test(id)) {
+      fail(`staging target id is unsafe: ${id}`);
+    }
+    const target = path.join(workerHome, id);
+    if (!isInsideDirectory(workerHome, target)) {
+      fail(`staging target must resolve inside the worker home: ${id}`);
+    }
+    if (target === repo || isInsideDirectory(target, repo)) {
+      fail(`staging target must not contain the candidate checkout: ${id}`);
+    }
+    const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (stat && stat.isSymbolicLink()) {
+      fail(`staging target must not be a symlink: ${id}`);
+    }
+    if (stat && !stat.isDirectory()) {
+      fail(`staging target must be a regular directory: ${id}`);
+    }
+    if (stat && fs.realpathSync(target) !== path.join(workerHome, id)) {
+      fail(`staging target must not resolve through a symlink: ${id}`);
+    }
+  }
+  return { repo, workerHome, pkg: expectedPkg };
+}
+
+function stageSupplementalInputs(repoRoot, snapshot, layout) {
+  assertIsolatedStagingLayout(repoRoot, layout.entryId, layout);
+  for (const id of layout.supplementalIds) {
+    const directory = path.join(layout.workerHome, id);
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.mkdirSync(directory, { mode: 0o700 });
+  }
+  for (const record of snapshot.records) {
+    const [serviceId, name] = record.path.split("/");
+    const source = ensureRegularInRoot(repoRoot, record.path, record.path);
+    const bytes = readBoundedFile(source, LIMITS.reportBytes, record.path);
+    if (bytes.length !== record.byteLength || sha256Bytes(bytes) !== record.sha256) {
+      fail(`${record.path} changed while it was staged for the worker`);
+    }
+    const target = path.join(layout.workerHome, serviceId, name);
+    fs.writeFileSync(target, bytes, { flag: "wx", mode: 0o600 });
+    if (layout.authoritative) {
+      fs.chownSync(target, CONTROLLER_UID, CONTROLLER_GID);
+      fs.chmodSync(target, SUPPLEMENTAL_FILE_MODE);
+    }
+  }
+  for (const id of layout.supplementalIds) {
+    const directory = path.join(layout.workerHome, id);
+    if (layout.authoritative) {
+      fs.chownSync(directory, CONTROLLER_UID, CONTROLLER_GID);
+      fs.chmodSync(directory, SUPPLEMENTAL_DIRECTORY_MODE);
+    }
+  }
+  return verifyWorkerHomeClosure(repoRoot, snapshot, layout);
+}
+
+function verifyWorkerHomeClosure(repoRoot, snapshot, layout) {
+  if (
+    !snapshot ||
+    !Array.isArray(layout.supplementalIds) ||
+    layout.supplementalIds.length === 0
+  ) {
+    return snapshot;
+  }
+  const enforceOwnership = layout.authoritative === true;
+  const homeStat = fs.lstatSync(layout.workerHome, { bigint: true });
+  if (homeStat.isSymbolicLink() || !homeStat.isDirectory()) {
+    fail("worker home root must be a regular directory");
+  }
+  if (enforceOwnership) {
+    if (
+      Number(homeStat.uid) !== CONTROLLER_UID ||
+      Number(homeStat.gid) !== CONTROLLER_GID
+    ) {
+      fail("worker home root must be owned by the trusted controller");
+    }
+    if ((Number(homeStat.mode) & 0o777) !== WORKER_HOME_MODE) {
+      fail(`worker home root must use mode 0${WORKER_HOME_MODE.toString(8)}`);
+    }
+  }
+  if (!Array.isArray(layout.workerHomeEntries)) {
+    fail("worker home inventory is not defined for this run");
+  }
+  const actualEntries = fs.readdirSync(layout.workerHome).sort();
+  const expectedEntries = [...layout.workerHomeEntries].sort();
+  if (
+    actualEntries.length !== expectedEntries.length ||
+    actualEntries.some((name, index) => name !== expectedEntries[index])
+  ) {
+    fail(
+      `worker home must contain exactly ${expectedEntries.join(",")}; found ${actualEntries.join(",")}`,
+    );
+  }
+  for (const id of layout.supplementalIds) {
+    const directory = path.join(layout.workerHome, id);
+    const stat = fs.lstatSync(directory, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      fail(`supplemental package root must be a regular directory: ${id}`);
+    }
+    if (enforceOwnership) {
+      if (Number(stat.uid) !== CONTROLLER_UID || Number(stat.gid) !== CONTROLLER_GID) {
+        fail(`supplemental package root must be owned by the trusted controller: ${id}`);
+      }
+      if ((Number(stat.mode) & 0o777) !== SUPPLEMENTAL_DIRECTORY_MODE) {
+        fail(`supplemental package root must stay read-only for the worker: ${id}`);
+      }
+    }
+    const names = fs.readdirSync(directory).sort();
+    const expectedNames = [...SUPPLEMENTAL_MANIFEST_FILES].sort();
+    if (
+      names.length !== expectedNames.length ||
+      names.some((name, index) => name !== expectedNames[index])
+    ) {
+      fail(
+        `supplemental package ${id} must contain exactly ${expectedNames.join(",")}; found ${names.join(",")}`,
+      );
+    }
+  }
+  for (const record of snapshot.records) {
+    const [serviceId, name] = record.path.split("/");
+    assertSupplementalFile(
+      path.join(layout.workerHome, serviceId, name),
+      record,
+      `staged supplemental ${record.path}`,
+      enforceOwnership,
+    );
+  }
+  verifySupplementalOrigin(repoRoot, snapshot);
+  return snapshot;
+}
+
+function stageControllerToolchain(trustedRoot, layout) {
+  const staged = [];
+  for (const name of ["package.json", "package-lock.json"]) {
+    const repoPath = `.github/coverage/${name}`;
+    const source = ensureRegularInRoot(trustedRoot, repoPath, `trusted ${repoPath}`);
+    const bytes = readBoundedFile(source, LIMITS.reportBytes, `trusted ${repoPath}`);
+    const target = path.join(layout.tool, name);
+    writeFileSafely(target, bytes, `controller tool ${name}`);
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+      fail(`controller tool ${name} must be a non-hardlinked regular file`);
+    }
+    if (sha256File(target, LIMITS.reportBytes, `controller tool ${name}`) !==
+      sha256Bytes(bytes)) {
+      fail(`controller tool ${name} differs from the trusted coverage package`);
+    }
+    staged.push({ path: repoPath, sha256: sha256Bytes(bytes) });
+  }
+  return staged;
+}
+
+function chownRecursively(absolute, uid, gid) {
+  const stat = fs.lstatSync(absolute);
+  if (stat.isSymbolicLink()) {
+    fail(`staged workspace must not contain symlink ${absolute}`);
+  }
+  fs.chownSync(absolute, uid, gid);
+  if (stat.isDirectory()) {
+    for (const name of fs.readdirSync(absolute)) {
+      chownRecursively(path.join(absolute, name), uid, gid);
+    }
+  }
+}
+
+function stageWorkerPackage(repoRoot, entry, packageInputSnapshot, layout) {
+  assertIsolatedStagingLayout(repoRoot, entry.id, layout);
+  ensurePackageSnapshot(repoRoot, packageInputSnapshot, entry);
+  fs.rmSync(layout.pkg, { recursive: true, force: true });
+  fs.mkdirSync(layout.pkg, { recursive: true, mode: 0o700 });
+  const staged = [];
+  for (const record of packageInputSnapshot.records) {
+    const relative = relativeFromPackage(entry.id, record.path);
+    const source = ensureRegularInRoot(repoRoot, record.path, record.path);
+    const target = path.join(layout.pkg, ...relative.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    const bytes = readBoundedFile(source, LIMITS.sourceFileBytes, record.path);
+    if (bytes.length !== record.byteLength) {
+      fail(`${record.path} changed while it was staged for the worker`);
+    }
+    fs.writeFileSync(target, bytes, {
+      flag: "wx",
+      mode: record.gitMode === "100755" ? 0o700 : 0o600,
+    });
+    staged.push({ path: record.path, sha256: sha256Bytes(bytes) });
+  }
+  if (layout.authoritative) {
+    chownRecursively(layout.pkg, WORKER_UID, WORKER_GID);
+  }
+  verifyStagedWorkspace(entry, packageInputSnapshot, layout, staged);
+  return staged;
+}
+
+function verifyStagedWorkspace(entry, packageInputSnapshot, layout, staged) {
+  if (!Array.isArray(staged) || staged.length !== packageInputSnapshot.records.length) {
+    fail(`${entry.id} staged workspace inventory is invalid`);
+  }
+  for (const record of staged) {
+    const relative = relativeFromPackage(entry.id, record.path);
+    const absolute = path.join(layout.pkg, ...relative.split("/"));
+    const stat = fs.lstatSync(absolute, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n) {
+      fail(`${record.path} staged copy must be a non-hardlinked regular file`);
+    }
+    if (
+      layout.authoritative &&
+      (Number(stat.uid) !== WORKER_UID || Number(stat.gid) !== WORKER_GID)
+    ) {
+      fail(`${record.path} staged copy must be owned by the unprivileged worker`);
+    }
+    const actual = sha256File(absolute, LIMITS.sourceFileBytes, record.path);
+    if (actual !== record.sha256) {
+      fail(`${record.path} staged copy differs from the verified candidate input`);
+    }
+  }
+  rejectUnexpectedPackageFiles(
+    layout.workerHome,
+    entry,
+    packageInputSnapshot.paths,
+  );
+  return staged;
+}
+
+function freezeStagedWorkspace(layout, options = {}) {
+  const skipTopLevel = new Set(options.skipTopLevel || ["node_modules"]);
+  const freeze = (absolute) => {
+    const stat = fs.lstatSync(absolute);
+    if (stat.isSymbolicLink()) {
+      fail(`staged workspace must not contain symlink ${absolute}`);
+    }
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(absolute)) {
+        freeze(path.join(absolute, name));
+      }
+      fs.chmodSync(absolute, 0o500);
+      return;
+    }
+    fs.chmodSync(absolute, stat.mode & 0o100 ? 0o500 : 0o400);
+  };
+  for (const name of fs.readdirSync(layout.pkg)) {
+    if (skipTopLevel.has(name)) {
+      continue;
+    }
+    freeze(path.join(layout.pkg, name));
+  }
+  fs.chmodSync(layout.pkg, 0o500);
+  return layout.pkg;
+}
+
+function assertRawCoverageShape(bytes, label) {
+  const parsed = parseJsonBytes(bytes, label);
+  assertPlainObject(parsed, label);
+  for (const key of Object.keys(parsed)) {
+    if (!RAW_COVERAGE_KEYS.includes(key)) {
+      fail(`${label} contains unsupported field ${key}`);
+    }
+  }
+  if (!Array.isArray(parsed.result)) {
+    fail(`${label} must contain a V8 result array`);
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(parsed, "timestamp") &&
+    typeof parsed.timestamp !== "number"
+  ) {
+    fail(`${label} contains a malformed V8 timestamp`);
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(parsed, "source-map-cache") &&
+    !isPlainObject(parsed["source-map-cache"])
+  ) {
+    fail(`${label} contains a malformed V8 source map cache`);
+  }
+  if (parsed.result.length > LIMITS.rawCoverageResults) {
+    fail(`${label} exceeds ${LIMITS.rawCoverageResults} V8 result entries`);
+  }
+  for (const record of parsed.result) {
+    if (!isPlainObject(record) || typeof record.url !== "string") {
+      fail(`${label} contains a malformed V8 script coverage record`);
+    }
+  }
+  return parsed;
+}
+
+function freezeRawCoverage(layout) {
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  const directory = fs.constants.O_DIRECTORY || 0;
+  let handle;
+  try {
+    handle = fs.openSync(layout.raw, fs.constants.O_RDONLY | directory | noFollow);
+    const stat = fs.fstatSync(handle);
+    if (!stat.isDirectory()) {
+      fail("raw coverage root must be a regular directory");
+    }
+  } catch (error) {
+    if (error instanceof CoverageMatrixError) {
+      throw error;
+    }
+    fail("raw coverage root could not be opened safely");
+  } finally {
+    if (handle !== undefined) {
+      fs.closeSync(handle);
+    }
+  }
+  const names = fs.readdirSync(layout.raw).sort();
+  if (names.length === 0) {
+    fail("raw coverage root contains no V8 coverage data");
+  }
+  if (names.length > LIMITS.rawCoverageFiles) {
+    fail(`raw coverage root exceeds ${LIMITS.rawCoverageFiles} files`);
+  }
+  const inventory = [];
+  let totalBytes = 0;
+  for (const name of names) {
+    if (!RAW_COVERAGE_FILE_PATTERN.test(name)) {
+      fail(`raw coverage file name is unexpected: ${name}`);
+    }
+    const absolute = path.join(layout.raw, name);
+    const stat = fs.lstatSync(absolute, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      fail(`raw coverage file must be a regular file: ${name}`);
+    }
+    if (stat.nlink !== 1n) {
+      fail(`raw coverage file must not be hardlinked: ${name}`);
+    }
+    if (layout.authoritative && Number(stat.uid) !== WORKER_UID) {
+      fail(`raw coverage file must be owned by the unprivileged worker: ${name}`);
+    }
+    if (Number(stat.size) > LIMITS.rawCoverageFileBytes) {
+      fail(
+        `raw coverage file exceeds ${LIMITS.rawCoverageFileBytes} bytes: ${name}`,
+      );
+    }
+    totalBytes += Number(stat.size);
+    if (totalBytes > LIMITS.rawCoverageTotalBytes) {
+      fail(`raw coverage data exceeds ${LIMITS.rawCoverageTotalBytes} bytes`);
+    }
+    const bytes = readBoundedFile(
+      absolute,
+      LIMITS.rawCoverageFileBytes,
+      `raw coverage file ${name}`,
+    );
+    assertRawCoverageShape(bytes, `raw coverage file ${name}`);
+    writeFileSafely(
+      path.join(layout.frozen, name),
+      bytes,
+      `frozen coverage file ${name}`,
+    );
+    inventory.push({ name, bytes: bytes.length, sha256: sha256Bytes(bytes) });
+  }
+  fs.chmodSync(layout.raw, 0o500);
+  return inventory;
+}
+
+function hashFrozenCoverage(layout) {
+  const names = fs.readdirSync(layout.frozen).sort();
+  return names
+    .map((name) => {
+      const absolute = path.join(layout.frozen, name);
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        fail(`frozen coverage entry must be a regular file: ${name}`);
+      }
+      return `${name}:${sha256File(
+        absolute,
+        LIMITS.rawCoverageFileBytes,
+        `frozen coverage file ${name}`,
+      )}`;
+    })
+    .join("|");
+}
+
+function placeholderTargets(layout) {
+  return new Map([
+    ["<C8_CONFIG>", layout.c8Config],
+    ["<FROZEN>", layout.frozen],
+    ["<NODE>", process.execPath],
+    ["<OUT>", layout.out],
+    ["<PKG>", layout.pkg],
+    ["<PKG_BIN>", path.join(layout.pkg, "node_modules", ".bin")],
+    ["<RAW>", layout.raw],
+    ["<REPO>", layout.repo],
+    ["<REPORT>", layout.report],
+    ["<TOOL>", layout.tool],
+    ["<TOOL_BIN>", path.join(layout.tool, "node_modules", ".bin")],
+  ]);
+}
+
+function assertClosedPlaceholders(value, label) {
+  if (typeof value !== "string" || value.length === 0) {
+    fail(`${label} must be a non-empty string`);
+  }
+  for (const token of value.match(PLACEHOLDER_TOKEN_PATTERN) || []) {
+    if (
+      !COMMAND_PLACEHOLDERS.includes(token) &&
+      !LITERAL_COMMAND_TOKENS.includes(token)
+    ) {
+      fail(`${label} contains unknown placeholder ${token}`);
+    }
+  }
+  return value;
+}
+
+function assertCommandToken(value, label) {
+  assertClosedPlaceholders(value, label);
+  if (
+    value.includes("\0") ||
+    value.includes("\n") ||
+    value.includes("\r") ||
+    /[\x00-\x1f\x7f]/.test(value)
+  ) {
+    fail(`${label} contains an unsafe value`);
+  }
+  if (value.startsWith("/")) {
+    fail(`${label} must not contain an absolute path: ${value}`);
+  }
+  const temporaryRoot = os.tmpdir();
+  if (temporaryRoot && value.includes(temporaryRoot)) {
+    fail(`${label} must not contain a session temporary path`);
+  }
+  return value;
+}
+
+function substitutePlaceholders(value, layout, label) {
+  assertClosedPlaceholders(value, label);
+  let result = value;
+  for (const [token, target] of placeholderTargets(layout)) {
+    result = result.split(token).join(target);
+  }
+  return result;
 }
 
 function buildCommandPlan(entry, eligible, options = {}) {
@@ -2624,10 +4263,7 @@ function buildCommandPlan(entry, eligible, options = {}) {
   const testMatchArguments = testFiles.map(
     (testFile) => `--testMatch=<rootDir>/${testFile}`,
   );
-  const testResults =
-    entry.profile === "node-typescript-c8"
-      ? "coverage/test-results.tap"
-      : "coverage/test-results.json";
+  const testResults = "coverage/test-results.json";
   const collectArguments = eligible.map(
     (repoPath) => `--collectCoverageFrom=${relativeFromPackage(entry.id, repoPath)}`,
   );
@@ -2635,19 +4271,22 @@ function buildCommandPlan(entry, eligible, options = {}) {
   if (entry.profile === "jest-typescript") {
     commands = [
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: ["npm", ...NPM_CI_ARGUMENTS],
         timeoutMs: COMMAND_TIMEOUTS.install,
       },
       {
-        workingDirectory: entry.id,
-        argv: ["./node_modules/.bin/tsc", "--noEmit"],
+        role: "worker",
+        workingDirectory: "<PKG>",
+        argv: ["<PKG_BIN>/tsc", "--noEmit"],
         timeoutMs: COMMAND_TIMEOUTS.typecheck,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: [
-          "./node_modules/.bin/jest",
+          "<PKG_BIN>/jest",
           "--runInBand",
           "--coverage",
           "--coverageDirectory=coverage",
@@ -2667,14 +4306,16 @@ function buildCommandPlan(entry, eligible, options = {}) {
   } else if (entry.profile === "react-scripts") {
     commands = [
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: ["npm", ...NPM_CI_ARGUMENTS],
         timeoutMs: COMMAND_TIMEOUTS.install,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: [
-          "./node_modules/.bin/react-scripts",
+          "<PKG_BIN>/react-scripts",
           "test",
           "--watchAll=false",
           "--coverage",
@@ -2692,38 +4333,40 @@ function buildCommandPlan(entry, eligible, options = {}) {
         timeoutMs: COMMAND_TIMEOUTS.test,
       },
       {
-        workingDirectory: entry.id,
-        argv: ["./node_modules/.bin/react-scripts", "build"],
+        role: "worker",
+        workingDirectory: "<PKG>",
+        argv: ["<PKG_BIN>/react-scripts", "build"],
         timeoutMs: COMMAND_TIMEOUTS.build,
       },
     ];
   } else if (entry.profile === "node-typescript-c8") {
-    if (!options.repoRoot || !options.treeish) {
-      fail("node-typescript-c8 command planning requires a repository and treeish");
-    }
     const includeArguments = eligible.map(
       (repoPath) => `--include=${mapSourceToBuild(entry.id, repoPath)}`,
     );
     commands = [
       {
-        workingDirectory: ".github/coverage",
+        role: "controller",
+        workingDirectory: "<TOOL>",
         argv: ["npm", ...NPM_CI_ARGUMENTS],
         timeoutMs: COMMAND_TIMEOUTS.install,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: ["npm", ...NPM_CI_ARGUMENTS],
         timeoutMs: COMMAND_TIMEOUTS.install,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: ["npm", "run", "clean"],
         timeoutMs: COMMAND_TIMEOUTS.clean,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: [
-          "./node_modules/.bin/tsc",
+          "<PKG_BIN>/tsc",
           "-p",
           "tsconfig.json",
           "--sourceMap",
@@ -2732,9 +4375,10 @@ function buildCommandPlan(entry, eligible, options = {}) {
         timeoutMs: COMMAND_TIMEOUTS.typecheck,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: [
-          "./node_modules/.bin/tsc",
+          "<PKG_BIN>/tsc",
           "--noEmit",
           "-p",
           "tsconfig.test.json",
@@ -2742,9 +4386,10 @@ function buildCommandPlan(entry, eligible, options = {}) {
         timeoutMs: COMMAND_TIMEOUTS.typecheck,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
         argv: [
-          "./node_modules/.bin/tsc",
+          "<PKG_BIN>/tsc",
           "--noEmit",
           "-p",
           "tsconfig.legacy-amqp.json",
@@ -2752,23 +4397,42 @@ function buildCommandPlan(entry, eligible, options = {}) {
         timeoutMs: COMMAND_TIMEOUTS.typecheck,
       },
       {
-        workingDirectory: entry.id,
+        role: "worker",
+        workingDirectory: "<PKG>",
+        argv: ["<NODE>", "--test", "--test-reporter=tap", ...testFiles],
+        captureStdout: true,
+        rawSink: true,
+        timeoutMs: COMMAND_TIMEOUTS.test,
+      },
+      {
+        role: "controller",
+        workingDirectory: "<PKG>",
         argv: [
-          "../.github/coverage/node_modules/.bin/c8",
-          "--all",
-          "--clean",
-          "--exclude-after-remap=false",
-          "--reports-dir=coverage",
+          "<TOOL_BIN>/c8",
+          "report",
+          "--config=<C8_CONFIG>",
+          "--temp-directory=<FROZEN>",
+          "--reports-dir=<REPORT>",
           "--reporter=json",
           "--reporter=json-summary",
+          "--all",
+          "--src=<PKG>",
           ...includeArguments,
-          "node",
-          "--test",
-          "--test-reporter=tap",
-          ...testFiles,
+          "--exclude=**/node_modules/**",
+          "--extension=.js",
+          "--exclude-after-remap=false",
+          "--exclude-node-modules=true",
+          "--skip-full=false",
+          "--check-coverage=false",
+          "--clean=false",
+          "--resolve=",
+          "--omit-relative=true",
+          "--allowExternal=false",
+          "--merge-async=false",
+          "--experimental-monocart=false",
         ],
-        captureStdout: `${entry.id}/${testResults}`,
-        timeoutMs: COMMAND_TIMEOUTS.test,
+        reportOutput: true,
+        timeoutMs: COMMAND_TIMEOUTS.build,
       },
     ];
   } else {
@@ -2778,21 +4442,20 @@ function buildCommandPlan(entry, eligible, options = {}) {
     fail(`command plan exceeds ${LIMITS.commands} commands`);
   }
   for (const command of commands) {
-    normalizeRepoPath(command.workingDirectory, "command working directory");
+    if (!COMMAND_ROLES.includes(command.role)) {
+      fail("command role must be controller or worker");
+    }
+    command.uid = command.role === "controller" ? CONTROLLER_UID : WORKER_UID;
+    assertCommandToken(command.workingDirectory, "command working directory");
+    if (!COMMAND_PLACEHOLDERS.includes(command.workingDirectory)) {
+      fail("command working directory must be a closed placeholder root");
+    }
     if (!Array.isArray(command.argv) || command.argv.length === 0) {
       fail("command argv must be a non-empty array");
     }
     assertInteger(command.timeoutMs, "command timeout", 1);
     for (const argument of command.argv) {
-      if (
-        typeof argument !== "string" ||
-        argument.length === 0 ||
-        argument.includes("\0") ||
-        argument.includes("\n") ||
-        argument.includes("\r")
-      ) {
-        fail("command argv contains an unsafe value");
-      }
+      assertCommandToken(argument, "command argv");
     }
   }
   return commands;
@@ -2863,6 +4526,11 @@ function prepareEntry(repoRoot, trustedRoot, context, id) {
       );
     }
   }
+  const supplementalSnapshot = deriveSupplementalSnapshot(
+    repoRoot,
+    context.repository.checkoutSha,
+    entry.id,
+  );
   const commands = buildCommandPlan(entry, entry.eligible, {
     repoRoot,
     treeish: context.repository.checkoutSha,
@@ -2870,6 +4538,7 @@ function prepareEntry(repoRoot, trustedRoot, context, id) {
   const prepared = {
     descriptor: validated.descriptor,
     entry,
+    supplementalSnapshot,
     eligible: entry.eligible,
     packageInputs,
     packageInputSnapshot,
@@ -3197,21 +4866,185 @@ function parseJestTestResults(
   return counts;
 }
 
+const TAP_SUMMARY_KEYS = Object.freeze([
+  "tests",
+  "suites",
+  "pass",
+  "fail",
+  "cancelled",
+  "skipped",
+  "todo",
+  "duration_ms",
+]);
+
+function parseTapResultDescription(rawDescription) {
+  let description = "";
+  for (let index = 0; index < rawDescription.length; index += 1) {
+    const character = rawDescription[index];
+    if (character === "\\" && index + 1 < rawDescription.length) {
+      description += rawDescription[index + 1];
+      index += 1;
+      continue;
+    }
+    if (character === "#") {
+      const remainder = rawDescription.slice(index + 1).trim();
+      const directive = /^(skip|todo)\b/i.exec(remainder);
+      return {
+        raw: rawDescription.slice(0, index).trim(),
+        description: description.trim(),
+        directive: directive ? directive[1].toLowerCase() : null,
+        comment: remainder,
+      };
+    }
+    description += character;
+  }
+  return {
+    raw: rawDescription.trim(),
+    description: description.trim(),
+    directive: null,
+    comment: null,
+  };
+}
+
+// Node's TAP stream self-reports test names and never emits per-file result
+// lines, so the executed test-file set is bound by the trusted command plan
+// argv rather than by any name in this document.
 function parseTapTestResults(filePath, entryId) {
   const text = readBoundedFile(
     filePath,
     LIMITS.reportBytes,
     `${entryId} TAP test results`,
   ).toString("utf8");
-  const keys = ["tests", "pass", "fail", "cancelled", "skipped", "todo"];
+  const lines = text.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+  if (lines.length < TAP_SUMMARY_KEYS.length + 1) {
+    fail(`${entryId} TAP results are too short to contain a summary block`);
+  }
+  const summaryLines = lines.slice(-TAP_SUMMARY_KEYS.length);
   const parsed = {};
-  for (const key of keys) {
-    const matches = [...text.matchAll(new RegExp(`^# ${key} ([0-9]+)$`, "gm"))];
-    if (matches.length !== 1) {
+  for (const [index, key] of TAP_SUMMARY_KEYS.entries()) {
+    const match = /^# ([a-z_]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(summaryLines[index]);
+    if (!match || match[1] !== key) {
+      fail(
+        `${entryId} TAP results must end with one contiguous summary block in the order ${TAP_SUMMARY_KEYS.join(",")}`,
+      );
+    }
+    parsed[key] = Number(match[2]);
+  }
+  for (const key of TAP_SUMMARY_KEYS) {
+    if (key === "duration_ms") {
+      continue;
+    }
+    const occurrences = [
+      ...text.matchAll(new RegExp(`^# ${key} [0-9]+$`, "gm")),
+    ];
+    if (occurrences.length !== 1) {
       fail(`${entryId} TAP results must contain one final ${key} count`);
     }
-    parsed[key] = Number(matches[0][1]);
     assertInteger(parsed[key], `${entryId} TAP ${key}`);
+  }
+  const body = lines.slice(0, -TAP_SUMMARY_KEYS.length);
+  const planMatches = body.filter((line) => /^1\.\.[0-9]+$/.test(line));
+  if (planMatches.length !== 1) {
+    fail(`${entryId} TAP results must contain exactly one top-level plan line`);
+  }
+  const planTotal = Number(planMatches[0].slice(3));
+  const allResults = [];
+  const subtestHeaders = new Map();
+  let lastResult = null;
+  for (const line of body) {
+    const header = /^([ \t]*)# Subtest: (.*)$/.exec(line);
+    if (header) {
+      const key = `${header[1].length}\u0000${header[2].trim()}`;
+      subtestHeaders.set(key, (subtestHeaders.get(key) || 0) + 1);
+      continue;
+    }
+    const match = /^([ \t]*)(not ok|ok) ([0-9]+)(?:[ \t]+-[ \t]*(.*))?$/.exec(line);
+    if (match) {
+      const parsedResult = parseTapResultDescription(match[4] || "");
+      lastResult = {
+        depth: match[1].length,
+        ok: match[2] === "ok",
+        number: Number(match[3]),
+        raw: parsedResult.raw,
+        description: parsedResult.description,
+        directive: parsedResult.directive,
+        isSuite: false,
+      };
+      allResults.push(lastResult);
+      continue;
+    }
+    if (lastResult !== null && /^[ \t]*type:[ \t]*'suite'[ \t]*$/.test(line)) {
+      lastResult.isSuite = true;
+    }
+  }
+  for (const result of allResults) {
+    const key = `${result.depth}\u0000${result.raw}`;
+    const remaining = subtestHeaders.get(key) || 0;
+    if (remaining < 1) {
+      fail(
+        `${entryId} TAP result has no matching subtest header at its own depth: ${result.raw || "(unnamed)"}`,
+      );
+    }
+    subtestHeaders.set(key, remaining - 1);
+  }
+  const testResults = allResults.filter((result) => !result.isSuite);
+  const suiteResults = allResults.filter((result) => result.isSuite);
+  const results = allResults.filter((result) => result.depth === 0);
+  const directiveCounts = { skip: 0, todo: 0 };
+  for (const result of allResults) {
+    if (result.directive !== null) {
+      directiveCounts[result.directive] += 1;
+    }
+  }
+  if (directiveCounts.skip > 0 || directiveCounts.todo > 0) {
+    fail(
+      `${entryId} TAP test results contain skipped or todo tests: ` +
+        `${directiveCounts.skip} SKIP and ${directiveCounts.todo} TODO directives ` +
+        `(summary skipped=${parsed.skipped} todo=${parsed.todo})`,
+    );
+  }
+  if (
+    directiveCounts.skip !== parsed.skipped ||
+    directiveCounts.todo !== parsed.todo
+  ) {
+    fail(
+      `${entryId} TAP directive counts disagree with the reported summary: ` +
+        `directives skipped=${directiveCounts.skip} todo=${directiveCounts.todo}; ` +
+        `summary skipped=${parsed.skipped} todo=${parsed.todo}`,
+    );
+  }
+  if (planTotal !== results.length) {
+    fail(
+      `${entryId} TAP plan and top-level results disagree: plan=${planTotal} top-level=${results.length}`,
+    );
+  }
+  if (parsed.tests !== testResults.length) {
+    fail(
+      `${entryId} TAP summary and reported results disagree: summary tests=${parsed.tests} test results=${testResults.length}`,
+    );
+  }
+  if (parsed.suites !== suiteResults.length) {
+    fail(
+      `${entryId} TAP summary and reported suites disagree: summary suites=${parsed.suites} suite results=${suiteResults.length}`,
+    );
+  }
+  for (const [index, result] of results.entries()) {
+    if (result.number !== index + 1) {
+      fail(`${entryId} TAP top-level results are not sequentially numbered`);
+    }
+  }
+  const failedResults = testResults.filter((result) => !result.ok).length;
+  if (failedResults !== parsed.fail + parsed.cancelled) {
+    fail(`${entryId} TAP failure count does not match the reported results`);
+  }
+  if (
+    testResults.length - failedResults !==
+    parsed.pass + parsed.skipped + parsed.todo
+  ) {
+    fail(`${entryId} TAP passing results do not match the reported counts`);
   }
   const counts = {
     total: parsed.tests,
@@ -3228,6 +5061,17 @@ function parseTapTestResults(filePath, entryId) {
   }
   if (counts.failed !== 0) {
     fail(`${entryId} TAP test results are not successful`);
+  }
+  // A suite aggregate fails when its own hooks fail even though every child
+  // test passed and the trailing summary reports zero failures, so failing
+  // suites are rejected independently of the counters.
+  const failedSuites = suiteResults.filter((result) => !result.ok);
+  if (failedSuites.length > 0) {
+    fail(
+      `${entryId} TAP reports ${failedSuites.length} failing suite aggregate(s) ` +
+        `while the summary reports ${parsed.fail + parsed.cancelled} test failures: ` +
+        failedSuites.map((result) => result.description).join(","),
+    );
   }
   if (counts.skipped !== 0 || counts.todo !== 0) {
     fail(`${entryId} TAP test results contain skipped or todo tests`);
@@ -3256,18 +5100,24 @@ function lockDependencyVersion(lock, packageName, label) {
   return record.version;
 }
 
-function readToolchain(repoRoot, entry, authoritative) {
+function readToolchain(repoRoot, entry, authoritative, layout = null) {
   const nodeVersion = process.versions.node;
   if (authoritative && nodeVersion !== REQUIRED_NODE_VERSION) {
     fail(`Node ${REQUIRED_NODE_VERSION} is required; found ${nodeVersion}`);
   }
-  const npmResult = spawnSync(resolveTrustedNpmExecutable(repoRoot), ["--version"], {
-    cwd: repoRoot,
-    env: sanitizedChildEnvironment(),
-    encoding: "utf8",
-    shell: false,
-    maxBuffer: LIMITS.outputBytes,
-  });
+  const npmResult = spawnSync(
+    resolveTrustedNpmExecutable(repoRoot, layout),
+    ["--version"],
+    {
+      cwd: repoRoot,
+      env: layout
+        ? controllerEnvironment(layout)
+        : baseEnvironment({ home: os.tmpdir() }),
+      encoding: "utf8",
+      shell: false,
+      maxBuffer: LIMITS.outputBytes,
+    },
+  );
   if (npmResult.status !== 0) {
     fail("unable to resolve npm version");
   }
@@ -3359,13 +5209,20 @@ function sanitizeFailure(error, roots) {
       message = message.split(root).join(replacement);
     }
   }
-  return message.replace(/[\r\n\t]+/g, " ").slice(0, 1000);
+  return message
+    .replace(/[\x00-\x1f\x7f]+/g, " ")
+    .replace(/[^\x20-\x7e]/g, "?")
+    .replace(/::/g, ": :")
+    .replace(/##\[/g, "# #[")
+    .slice(0, 1000);
 }
 
-function resolveTrustedNpmExecutable(repoRoot) {
+function resolveTrustedNpmExecutable(repoRoot, layout = null) {
   const result = spawnSync("/usr/bin/which", ["npm"], {
     cwd: repoRoot,
-    env: sanitizedChildEnvironment(),
+    env: layout
+      ? controllerEnvironment(layout)
+      : baseEnvironment({ home: os.tmpdir() }),
     encoding: "utf8",
     shell: false,
     maxBuffer: 1024 * 1024,
@@ -3384,6 +5241,96 @@ function resolveTrustedNpmExecutable(repoRoot) {
   return executable;
 }
 
+function resolveCommandDirectory(command, layout, label) {
+  if (COMMAND_PLACEHOLDERS.includes(command.workingDirectory)) {
+    return substitutePlaceholders(command.workingDirectory, layout, label);
+  }
+  if (command.workingDirectory === ".") {
+    return layout.repo;
+  }
+  const relative = normalizeRepoPath(command.workingDirectory, label);
+  return path.join(layout.repo, ...relative.split("/"));
+}
+
+function commandRole(command) {
+  const role = command.role || "controller";
+  if (!COMMAND_ROLES.includes(role)) {
+    fail("command role must be controller or worker");
+  }
+  return role;
+}
+
+function commandIdentity(command, options) {
+  const role = commandRole(command);
+  if (role === "worker" && options.dropPrivileges === true) {
+    return { uid: WORKER_UID, gid: WORKER_GID, umask: WORKER_UMASK };
+  }
+  return { uid: -1, gid: -1, umask: WORKER_UMASK };
+}
+
+function readObservedCommandIdentity(identityReportPath) {
+  if (!identityReportPath || !fs.existsSync(identityReportPath)) {
+    return null;
+  }
+  const observed = readJsonFile(
+    identityReportPath,
+    LIMITS.descriptorBytes,
+    "observed command identity",
+  );
+  assertExactKeys(
+    observed,
+    [
+      "source",
+      "uid",
+      "euid",
+      "gid",
+      "egid",
+      "groups",
+      "noNewPrivs",
+      "capEff",
+      "capPrm",
+      "capAmb",
+      "capBnd",
+      "capInh",
+    ],
+    "observed command identity",
+  );
+  if (!["proc", "supervisor"].includes(observed.source)) {
+    fail("observed command identity source is unsupported");
+  }
+  for (const field of ["uid", "euid", "gid", "egid"]) {
+    assertInteger(observed[field], `observed command identity ${field}`);
+  }
+  if (
+    !Array.isArray(observed.groups) ||
+    observed.groups.some((value) => !Number.isSafeInteger(value) || value < 0)
+  ) {
+    fail("observed command identity groups are invalid");
+  }
+  for (const field of ["capEff", "capPrm", "capAmb", "capBnd", "capInh"]) {
+    if (
+      observed[field] !== null &&
+      (typeof observed[field] !== "string" || !/^[0-9a-f]+$/.test(observed[field]))
+    ) {
+      fail(`observed command identity ${field} is invalid`);
+    }
+  }
+  if (observed.noNewPrivs !== null && ![0, 1].includes(observed.noNewPrivs)) {
+    fail("observed command identity noNewPrivs is invalid");
+  }
+  return observed;
+}
+
+function captureBoundedOutput(value, label) {
+  const bytes = Buffer.isBuffer(value)
+    ? value
+    : Buffer.from(typeof value === "string" ? value : "", "utf8");
+  if (bytes.length > LIMITS.outputBytes) {
+    fail(`${label} exceeded ${LIMITS.outputBytes} bytes`);
+  }
+  return { bytes, sha256: sha256Bytes(bytes) };
+}
+
 function executeCommands(
   repoRoot,
   commands,
@@ -3394,41 +5341,49 @@ function executeCommands(
   if (options.requireLinux === true && process.platform !== "linux") {
     fail("authoritative coverage execution requires Linux process containment");
   }
+  const ownedLayout = options.layout
+    ? null
+    : prepareControlledRoots(
+      resolveExecutionLayout({
+        repoRoot,
+        entryId: entry.id,
+        authoritative: false,
+      }),
+    );
+  const layout = options.layout || ownedLayout;
+  const inputRoot = options.inputRoot || repoRoot;
   const inputPaths = Array.isArray(options.inputPaths)
     ? options.inputPaths
     : [];
   const watchedInputFiles = inputPaths.map((repoPath) =>
-    ensureRegularInRoot(repoRoot, repoPath, `${entry.id} command input`),
+    ensureRegularInRoot(inputRoot, repoPath, `${entry.id} command input`),
   );
   const watchRoot = options.watchRoot
     ? ensureSafeMutationPath(
-      repoRoot,
+      inputRoot,
       options.watchRoot,
       `${entry.id} command input root`,
     )
     : null;
-  const centralToolRoot = ".github/coverage/node_modules";
-  const localToolRoot = `${entry.id}/node_modules`;
   const centralCriticalBins = [{ name: "c8", packageName: "c8", target: "bin/c8.js" }];
   const localCriticalBins = criticalBinsForEntry(entry);
   const snapshotCentralToolchain = () =>
-    snapshotInstalledToolchain(repoRoot, centralToolRoot, centralCriticalBins, "central coverage toolchain");
+    snapshotInstalledToolchain(
+      layout.tool,
+      "node_modules",
+      centralCriticalBins,
+      "central coverage toolchain",
+    );
   const snapshotLocalToolchain = () =>
-    snapshotInstalledToolchain(repoRoot, localToolRoot, localCriticalBins, `${entry.id} installed toolchain`, {
-      excludeTopLevel: [".cache"],
-    });
-  const trustedNpmExecutable = resolveTrustedNpmExecutable(repoRoot);
-  const npmCacheDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), "betstan-coverage-npm-"),
-  );
-  const npmUserConfig = path.join(npmCacheDirectory, "user.npmrc");
-  const npmGlobalConfig = path.join(npmCacheDirectory, "global.npmrc");
-  fs.writeFileSync(npmUserConfig, "");
-  fs.writeFileSync(npmGlobalConfig, "");
-  let centralToolSnapshot = null;
-  let localToolSnapshot = null;
-  try {
-  for (const command of commands) {
+    snapshotInstalledToolchain(
+      layout.pkg,
+      "node_modules",
+      localCriticalBins,
+      `${entry.id} installed toolchain`,
+      { excludeTopLevel: [".cache"] },
+    );
+  const trustedNpmExecutable = resolveTrustedNpmExecutable(repoRoot, layout);
+  const verifyState = () => {
     if (options.packageInputSnapshot) {
       verifyExecutionFilesystemState(
         repoRoot,
@@ -3437,6 +5392,24 @@ function executeCommands(
         options.protectedFileSnapshots || [],
       );
     }
+    if (options.stagedInputs) {
+      verifyStagedWorkspace(
+        entry,
+        options.packageInputSnapshot,
+        layout,
+        options.stagedInputs,
+      );
+    }
+    if (options.supplementalSnapshot) {
+      verifyWorkerHomeClosure(repoRoot, options.supplementalSnapshot, layout);
+    }
+  };
+  let centralToolSnapshot = null;
+  let localToolSnapshot = null;
+  try {
+  for (const [index, command] of commands.entries()) {
+    verifyState();
+    const role = commandRole(command);
     const executable = command.argv[0];
     const isJestCoverage =
       entry.profile === "jest-typescript" &&
@@ -3455,57 +5428,79 @@ function executeCommands(
       command.argv[0] === "npm" &&
       command.argv[1] === "run" &&
       command.argv[2] === "clean";
-    const isCommonCoverage =
-      entry.profile === "node-typescript-c8" &&
-      executable.endsWith("/c8");
     const isCentralToolInstall =
-      entry.profile === "node-typescript-c8" &&
-      command.workingDirectory === ".github/coverage" &&
+      role === "controller" &&
+      command.workingDirectory === "<TOOL>" &&
       command.argv[0] === "npm" &&
       command.argv[1] === "ci";
     const isLocalToolInstall =
-      command.workingDirectory === entry.id &&
+      role === "worker" &&
+      command.workingDirectory === "<PKG>" &&
       command.argv[0] === "npm" &&
       command.argv[1] === "ci";
-    if (isJestCoverage || isReactTest || isCommonCoverage) {
-      removeGeneratedPath(
-        repoRoot,
-        `${entry.id}/coverage`,
-        `${entry.id} coverage directory`,
+    if (isJestCoverage || isReactTest) {
+      fs.rmSync(
+        ensureSafeMutationPath(
+          layout.workerHome,
+          `${entry.id}/coverage`,
+          `${entry.id} coverage directory`,
+        ),
+        { recursive: true, force: true },
       );
     }
     if (isReactBuild || isCommonClean) {
-      removeGeneratedPath(
-        repoRoot,
-        `${entry.id}/build`,
-        `${entry.id} build directory`,
+      fs.rmSync(
+        ensureSafeMutationPath(
+          layout.workerHome,
+          `${entry.id}/build`,
+          `${entry.id} build directory`,
+        ),
+        { recursive: true, force: true },
       );
     }
-    const cwd = path.join(repoRoot, ...command.workingDirectory.split("/"));
-    const args = command.argv.slice(1);
+    if (typeof options.beforeCommand === "function") {
+      options.beforeCommand(command, index);
+    }
+    const cwd = resolveCommandDirectory(
+      command,
+      layout,
+      `${entry.id} command working directory`,
+    );
+    const args = command.argv
+      .slice(1)
+      .map((argument) =>
+        substitutePlaceholders(argument, layout, `${entry.id} command argv`),
+      );
+    const resolvedExecutable = substitutePlaceholders(
+      executable,
+      layout,
+      `${entry.id} command executable`,
+    );
     const actualExecutable =
-      executable === "npm" ? trustedNpmExecutable : executable;
-    const env = sanitizedChildEnvironment();
-    env.npm_config_ignore_scripts = "true";
-    env.npm_config_registry = "https://registry.npmjs.org/";
-    env.npm_config_replace_registry_host = "never";
-    env.npm_config_strict_ssl = "true";
-    env.npm_config_userconfig = npmUserConfig;
-    env.npm_config_globalconfig = npmGlobalConfig;
-    env.npm_config_cache = npmCacheDirectory;
-    if (entry.profile === "react-scripts") {
-      env.CI = "true";
-      delete env.BUILD_PATH;
-      if (isReactBuild) {
-        env.BUILD_PATH = "build";
-      }
+      executable === "npm" ? trustedNpmExecutable : resolvedExecutable;
+    const identityReportPath = layout.identityRoot
+      ? path.join(layout.identityRoot, `command-${index}.json`)
+      : null;
+    if (identityReportPath) {
+      fs.rmSync(identityReportPath, { force: true });
+    }
+    const commandEnvironment = buildCommandEnvironment(layout, role, {
+      rawSink: command.rawSink === true,
+      continuousIntegration: entry.profile === "react-scripts",
+      buildPath: entry.profile === "react-scripts" && isReactBuild,
+    });
+    const env = { ...commandEnvironment };
+    const childEnvironment = {};
+    if (Object.prototype.hasOwnProperty.call(env, "NODE_V8_COVERAGE")) {
+      childEnvironment.NODE_V8_COVERAGE = env.NODE_V8_COVERAGE;
+      delete env.NODE_V8_COVERAGE;
     }
     const protectedRoots = [];
     if (centralToolSnapshot !== null) {
       protectedRoots.push({
         root: ensureSafeMutationPath(
-          repoRoot,
-          centralToolRoot,
+          layout.tool,
+          "node_modules",
           "central coverage toolchain",
         ),
         allowedTopLevel: [],
@@ -3514,8 +5509,8 @@ function executeCommands(
     if (localToolSnapshot !== null) {
       protectedRoots.push({
         root: ensureSafeMutationPath(
-          repoRoot,
-          localToolRoot,
+          layout.pkg,
+          "node_modules",
           `${entry.id} installed toolchain`,
         ),
         allowedTopLevel: [".cache"],
@@ -3530,6 +5525,9 @@ function executeCommands(
       watchRoot,
       protectedRoots,
       captureStdout: Boolean(command.captureStdout),
+      identity: commandIdentity(command, options),
+      identityReportPath,
+      childEnvironment,
     });
     const linuxSupervisor = process.platform === "linux";
     const supervisorExecutable = linuxSupervisor ? "/usr/bin/python3" : process.execPath;
@@ -3545,8 +5543,7 @@ function executeCommands(
       {
         cwd,
         env,
-        encoding: command.captureStdout ? "utf8" : undefined,
-        stdio: command.captureStdout ? ["ignore", "pipe", "inherit"] : "inherit",
+        stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         maxBuffer: LIMITS.outputBytes + 1024 * 1024,
         timeout: command.timeoutMs + COMMAND_KILL_GRACE_MS + 10_000,
@@ -3561,56 +5558,95 @@ function executeCommands(
         : result.error
           ? 127
           : 1;
-    records.push({
+    const stdout = captureBoundedOutput(
+      result.stdout,
+      `${entry.id} command output`,
+    );
+    const stderr = captureBoundedOutput(
+      result.stderr,
+      `${entry.id} command diagnostics`,
+    );
+    const observed = readObservedCommandIdentity(identityReportPath);
+    if (options.requireObservedIdentity === true) {
+      if (observed === null) {
+        fail(
+          `${entry.id} command ${index} did not record an observed execution identity`,
+        );
+      }
+      assertObservedIdentityRecord(
+        observedIdentityRecord(observed),
+        `${entry.id} command ${index} (${role}) identity`,
+        expectedIdentityForRole(role),
+      );
+    }
+    const record = {
+      role,
+      uid:
+        observed !== null
+          ? observed.uid
+          : command.uid ?? (role === "controller" ? CONTROLLER_UID : WORKER_UID),
       workingDirectory: command.workingDirectory,
       argv: [...command.argv],
       exitCode,
-    });
-    if (options.packageInputSnapshot) {
-      verifyExecutionFilesystemState(
-        repoRoot,
-        entry,
-        options.packageInputSnapshot,
-        options.protectedFileSnapshots || [],
-      );
+      identity: observed === null ? null : observedIdentityRecord(observed),
+    };
+    records.push(record);
+    if (options.output) {
+      options.output.stdout = stdout;
+      options.output.stderr = stderr;
     }
+    verifyState();
     if (isCentralToolInstall && exitCode === 0) {
       centralToolSnapshot = snapshotCentralToolchain();
     }
     if (isLocalToolInstall && exitCode === 0) {
       localToolSnapshot = snapshotLocalToolchain();
     }
-    if (command.captureStdout && typeof result.stdout === "string") {
-      const capturePath = ensureSafeMutationPath(
-        repoRoot,
-        command.captureStdout,
-        "captured test result path",
-      );
-      fs.mkdirSync(path.dirname(capturePath), { recursive: true });
+    if (command.captureStdout && options.capture) {
       writeFileSafely(
-        capturePath,
-        result.stdout,
-        "captured test result",
+        options.capture.stdoutPath,
+        stdout.bytes,
+        "captured worker output",
       );
-      process.stdout.write(result.stdout);
-      if (options.packageInputSnapshot) {
-        verifyExecutionFilesystemState(
-          repoRoot,
-          entry,
-          options.packageInputSnapshot,
-          options.protectedFileSnapshots || [],
+      if (options.capture.stderrPath) {
+        writeFileSafely(
+          options.capture.stderrPath,
+          stderr.bytes,
+          "captured worker diagnostics",
         );
       }
+      verifyState();
     }
     if (exitCode !== 0) {
+      if (options.capture && options.capture.diagnosticsPrefix) {
+        for (const [stream, captured] of [
+          ["stdout", stdout],
+          ["stderr", stderr],
+        ]) {
+          writeFileSafely(
+            `${options.capture.diagnosticsPrefix}-${stream}.log`,
+            captured.bytes,
+            `failed command ${stream}`,
+          );
+        }
+      }
       if (exitCode === 124) {
         fail(`${entry.id} command timed out after ${command.timeoutMs}ms`);
       }
       if (exitCode === 125) {
         fail(`${entry.id} command output exceeded ${LIMITS.outputBytes} bytes`);
       }
-      const detail = result.error ? `: ${result.error.message}` : "";
-      fail(`${entry.id} command failed with exit ${exitCode}${detail}`);
+      fail(
+        `${entry.id} command ${index} (${role}) failed with exit ${exitCode}; ` +
+          `stdout ${stdout.bytes.length} bytes sha256 ${stdout.sha256}; ` +
+          `stderr ${stderr.bytes.length} bytes sha256 ${stderr.sha256}; ` +
+          `spawn ${result.error ? result.error.code || "error" : "ok"}; ` +
+          "captured output is retained only in the controller-owned artifact " +
+          "directory",
+      );
+    }
+    if (typeof options.afterCommand === "function") {
+      options.afterCommand(command, index, record);
     }
   }
   if (centralToolSnapshot !== null) {
@@ -3623,26 +5659,21 @@ function executeCommands(
       fail(`${entry.id} installed toolchain changed after command execution`);
     }
   }
-  if (options.packageInputSnapshot) {
-    verifyExecutionFilesystemState(
-      repoRoot,
-      entry,
-      options.packageInputSnapshot,
-      options.protectedFileSnapshots || [],
-    );
-  }
+  verifyState();
   return records;
   } finally {
-    fs.rmSync(npmCacheDirectory, { recursive: true, force: true });
+    releaseExecutionLayout(ownedLayout);
   }
 }
 
-function copyReport(repoRoot, sourceRepoPath, targetRepoPath, label) {
-  const source = ensureRegularInRoot(repoRoot, sourceRepoPath, label);
-  const bytes = readBoundedFile(source, LIMITS.reportBytes, label);
-  const target = ensureSafeMutationPath(repoRoot, targetRepoPath, label);
-  writeFileSafely(target, bytes, label);
-  return target;
+function copyReportFile(sourceAbsolute, targetAbsolute, label) {
+  const stat = fs.lstatSync(sourceAbsolute, { throwIfNoEntry: false });
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+    fail(`${label} must be a regular file`);
+  }
+  const bytes = readBoundedFile(sourceAbsolute, LIMITS.reportBytes, label);
+  writeFileSafely(targetAbsolute, bytes, label);
+  return targetAbsolute;
 }
 
 function buildEvidence({
@@ -3656,6 +5687,7 @@ function buildEvidence({
   tests,
   status,
   failures,
+  execution,
 }) {
   const packageLockPath = `${prepared.entry.id}/package-lock.json`;
   const packageLockAbsolute = ensureRegularInRoot(
@@ -3675,7 +5707,7 @@ function buildEvidence({
       : null,
   };
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
     status,
     package: {
       id: prepared.entry.id,
@@ -3736,7 +5768,70 @@ function buildEvidence({
     toolchain,
     commands,
     reports,
+    execution: buildExecutionRecord(context, execution),
     failures,
+  };
+}
+
+function observedIdentityRecord(identity) {
+  if (!identity) {
+    return null;
+  }
+  return {
+    source: identity.source,
+    uid: identity.uid,
+    euid: identity.euid,
+    gid: identity.gid,
+    egid: identity.egid,
+    supplementaryGroups: [
+      ...(identity.supplementaryGroups || identity.groups || []),
+    ],
+    noNewPrivs: identity.noNewPrivs,
+    capEff: identity.capEff,
+    capPrm: identity.capPrm,
+    capAmb: identity.capAmb,
+    capBnd: identity.capBnd,
+    capInh: identity.capInh,
+  };
+}
+
+function buildExecutionRecord(context, execution) {
+  const source = execution || {};
+  return {
+    container: {
+      imageDigest:
+        context && context.container && typeof context.container.imageDigest === "string"
+          ? context.container.imageDigest
+          : null,
+    },
+    controller: observedIdentityRecord(source.controllerIdentity),
+    worker: observedIdentityRecord(source.workerIdentity),
+    supplemental: {
+      fileCount: Array.isArray(source.supplemental) ? source.supplemental.length : 0,
+      files: Array.isArray(source.supplemental)
+        ? source.supplemental.map((file) => ({ ...file }))
+        : [],
+    },
+    rawSink: {
+      fileCount: Array.isArray(source.rawFiles) ? source.rawFiles.length : 0,
+      files: Array.isArray(source.rawFiles)
+        ? source.rawFiles.map((file) => ({ ...file }))
+        : [],
+    },
+    report: {
+      root: "<REPORT>",
+      outputRoot: "<OUT>",
+      sha256: typeof source.reportSha256 === "string" ? source.reportSha256 : null,
+    },
+    stdout: {
+      bytes: source.stdout ? source.stdout.bytes : 0,
+      sha256: source.stdout ? source.stdout.sha256 : sha256Bytes(Buffer.alloc(0)),
+    },
+    stderr: {
+      bytes: source.stderr ? source.stderr.bytes : 0,
+      sha256: source.stderr ? source.stderr.sha256 : sha256Bytes(Buffer.alloc(0)),
+    },
+    limitation: EVIDENCE_LIMITATION,
   };
 }
 
@@ -3748,28 +5843,17 @@ function writeJson(filePath, value, maximumBytes = LIMITS.evidenceBytes) {
   writeFileSafely(filePath, bytes, "JSON output");
 }
 
-function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) {
-  if (authoritative && process.platform !== "linux") {
-    fail("authoritative coverage execution requires Linux process containment");
-  }
-  const prepared = prepareEntry(repoRoot, trustedRoot, context, id);
-  const artifactRepoPath = artifactDirectoryFor(id);
-  removeGeneratedPath(repoRoot, artifactRepoPath, `${id} artifact directory`);
-  removeGeneratedPath(repoRoot, `${id}/coverage`, `${id} coverage directory`);
-  if (
-    prepared.entry.profile === "node-typescript-c8" ||
-    prepared.entry.profile === "react-scripts"
-  ) {
-    removeGeneratedPath(repoRoot, `${id}/build`, `${id} build directory`);
-  }
-  const artifactDir = ensureSafeMutationPath(
+function runPreparedEntry(options) {
+  const {
     repoRoot,
-    artifactRepoPath,
-    `${id} artifact directory`,
-  );
-  fs.mkdirSync(artifactDir, { recursive: true });
-
-  let commands = [];
+    trustedRoot,
+    context,
+    prepared,
+    layout,
+    authoritative,
+  } = options;
+  const id = prepared.entry.id;
+  const commands = [];
   let toolchain = {
     node: process.versions.node,
     npm: "unavailable",
@@ -3784,8 +5868,46 @@ function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) 
     coverageSummary: null,
     testResults: null,
   };
+  const execution = {
+    controllerIdentity: null,
+    workerIdentity: null,
+    supplemental: prepared.supplementalSnapshot
+      ? prepared.supplementalSnapshot.records.map((record) => ({
+        path: record.path,
+        gitBlob: record.gitBlob,
+        bytes: record.byteLength,
+        sha256: record.sha256,
+      }))
+      : [],
+    rawFiles: [],
+    stdout: null,
+    stderr: null,
+    reportSha256: null,
+  };
+  const output = {};
+  const isSplitProfile = prepared.entry.profile === "node-typescript-c8";
+  const capture = {
+    stdoutPath: path.join(layout.artifactDirectory, "test-results.tap"),
+    stderrPath: path.join(layout.artifactDirectory, "worker-stderr.log"),
+    diagnosticsPrefix: path.join(layout.artifactDirectory, "failed-command"),
+  };
+  let frozenDigest = null;
   try {
-    toolchain = readToolchain(repoRoot, prepared.entry, authoritative);
+    toolchain = readToolchain(repoRoot, prepared.entry, authoritative, layout);
+    if (authoritative) {
+      stageControllerToolchain(prepared.trustedAssets.root, layout);
+    }
+    const staged = authoritative
+      ? stageWorkerPackage(
+        repoRoot,
+        prepared.entry,
+        prepared.packageInputSnapshot,
+        layout,
+      )
+      : null;
+    if (authoritative) {
+      stageSupplementalInputs(repoRoot, prepared.supplementalSnapshot, layout);
+    }
     if (authoritative) {
       sealGitAccess();
     }
@@ -3795,7 +5917,10 @@ function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) 
       prepared.entry,
       commands,
       {
+        layout,
         requireLinux: authoritative,
+        dropPrivileges: authoritative,
+        inputRoot: authoritative ? layout.workerHome : repoRoot,
         inputPaths: authoritative ? prepared.packageInputs : [],
         watchRoot: authoritative ? prepared.entry.id : null,
         packageInputSnapshot: authoritative
@@ -3804,30 +5929,108 @@ function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) 
         protectedFileSnapshots: authoritative
           ? prepared.protectedFileSnapshots
           : [],
+        stagedInputs: staged,
+        supplementalSnapshot: authoritative ? prepared.supplementalSnapshot : null,
+        requireObservedIdentity: authoritative,
+        capture,
+        output,
+        beforeCommand: (command) => {
+          if (command.reportOutput !== true) {
+            return;
+          }
+          const discoveryBoundary = authoritative ? null : layout.repo;
+          assertNoCoverageDiscovery(
+            layout.pkg,
+            [layout.pkg, layout.tool],
+            "coverage report discovery path",
+            { stopAt: discoveryBoundary },
+          );
+          assertNoCoverageDiscovery(
+            layout.tool,
+            [layout.pkg, layout.tool],
+            "coverage tool discovery path",
+            { stopAt: discoveryBoundary },
+          );
+          assertEmptyDirectory(layout.report, "coverage report root");
+          if (authoritative) {
+            assertControlledDirectory(layout.report, "coverage report root", {
+              uid: CONTROLLER_UID,
+              gid: CONTROLLER_GID,
+            });
+            assertControlledDirectory(layout.frozen, "frozen coverage root", {
+              uid: CONTROLLER_UID,
+              gid: CONTROLLER_GID,
+            });
+          }
+          if (hashFrozenCoverage(layout) !== frozenDigest) {
+            fail("frozen coverage data changed before report generation");
+          }
+        },
+        afterCommand: (command, index, record) => {
+          if (record && record.identity !== null && record.identity !== undefined) {
+            if (record.role === "worker") {
+              execution.workerIdentity = record.identity;
+            } else {
+              execution.controllerIdentity = record.identity;
+            }
+          }
+          if (command.rawSink === true) {
+            execution.stdout = {
+              bytes: output.stdout.bytes.length,
+              sha256: output.stdout.sha256,
+            };
+            execution.stderr = {
+              bytes: output.stderr.bytes.length,
+              sha256: output.stderr.sha256,
+            };
+            if (authoritative) {
+              freezeStagedWorkspace(layout);
+              verifyWorkerHomeClosure(
+                repoRoot,
+                prepared.supplementalSnapshot,
+                layout,
+              );
+            }
+            execution.rawFiles = freezeRawCoverage(layout);
+            frozenDigest = hashFrozenCoverage(layout);
+          }
+          if (command.reportOutput === true) {
+            if (hashFrozenCoverage(layout) !== frozenDigest) {
+              fail("frozen coverage data changed during report generation");
+            }
+          }
+        },
       },
     );
-    reportFiles.coverageFinal = copyReport(
-      repoRoot,
-      `${id}/coverage/coverage-final.json`,
-      `${artifactDirectoryFor(id)}/coverage-final.json`,
+    const reportRoot = isSplitProfile
+      ? layout.report
+      : path.join(layout.pkg, "coverage");
+    reportFiles.coverageFinal = copyReportFile(
+      path.join(reportRoot, "coverage-final.json"),
+      path.join(layout.artifactDirectory, "coverage-final.json"),
       `${id} coverage-final report`,
     );
-    reportFiles.coverageSummary = copyReport(
-      repoRoot,
-      `${id}/coverage/coverage-summary.json`,
-      `${artifactDirectoryFor(id)}/coverage-summary.json`,
+    reportFiles.coverageSummary = copyReportFile(
+      path.join(reportRoot, "coverage-summary.json"),
+      path.join(layout.artifactDirectory, "coverage-summary.json"),
       `${id} coverage-summary report`,
     );
-    const testExtension =
-      prepared.entry.profile === "node-typescript-c8" ? "tap" : "json";
-    reportFiles.testResults = copyReport(
-      repoRoot,
-      `${id}/coverage/test-results.${testExtension}`,
-      `${artifactDirectoryFor(id)}/test-results.${testExtension}`,
-      `${id} test results`,
+    if (isSplitProfile) {
+      reportFiles.testResults = capture.stdoutPath;
+    } else {
+      reportFiles.testResults = copyReportFile(
+        path.join(reportRoot, "test-results.json"),
+        path.join(layout.artifactDirectory, "test-results.json"),
+        `${id} test results`,
+      );
+    }
+    execution.reportSha256 = sha256File(
+      reportFiles.coverageFinal,
+      LIMITS.reportBytes,
+      `${id} coverage-final report`,
     );
     coverageResult = validateCoverageReports(
-      repoRoot,
+      layout.coverageRoot,
       prepared.entry,
       prepared.eligible,
       prepared.changedEligible,
@@ -3837,7 +6040,7 @@ function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) 
       prepared.entry,
       reportFiles.testResults,
       prepared.testFiles,
-      repoRoot,
+      layout.coverageRoot,
     );
     if (authoritative) {
       verifyPreparedFilesystemState(repoRoot, prepared);
@@ -3847,38 +6050,89 @@ function executeEntry(repoRoot, trustedRoot, context, id, authoritative = true) 
       sanitizeFailure(error, [
         ["<repo>", repoRoot],
         ["<trusted>", trustedRoot],
+        ["<out>", layout.out],
+        ["<home>", layout.workerHome],
+        ["<tool>", layout.tool],
       ]),
     );
   }
+  return {
+    commands,
+    toolchain,
+    coverageResult,
+    tests,
+    failures,
+    reportFiles,
+    execution,
+  };
+}
 
+function executeEntry(
+  repoRoot,
+  trustedRoot,
+  context,
+  id,
+  authoritative = true,
+  options = {},
+) {
+  if (authoritative && process.platform !== "linux") {
+    fail("authoritative coverage execution requires Linux process containment");
+  }
+  if (authoritative && !ENFORCED_PACKAGE_IDS.includes(id)) {
+    fail(
+      `authoritative coverage runs are limited to ${ENFORCED_PACKAGE_IDS.join(",")}`,
+    );
+  }
+  const layout = resolveExecutionLayout({
+    repoRoot,
+    entryId: id,
+    authoritative,
+    outputRoot: options.outputRoot,
+  });
+  if (authoritative) {
+    assertAuthoritativeContainer(layout);
+  }
+  const prepared = prepareEntry(repoRoot, trustedRoot, context, id);
+  fs.rmSync(layout.artifactDirectory, { recursive: true, force: true });
+  fs.mkdirSync(layout.artifactDirectory, { recursive: true, mode: 0o700 });
+  prepareControlledRoots(layout);
+  const result = runPreparedEntry({
+    repoRoot,
+    trustedRoot,
+    context,
+    prepared,
+    layout,
+    authoritative,
+  });
   const evidence = buildEvidence({
     repoRoot,
     context,
     prepared,
-    commands,
-    toolchain,
-    reportFiles,
-    coverageResult,
-    tests,
-    status: failures.length === 0 ? "success" : "failure",
-    failures,
+    commands: result.commands,
+    toolchain: result.toolchain,
+    reportFiles: result.reportFiles,
+    coverageResult: result.coverageResult,
+    tests: result.tests,
+    status: result.failures.length === 0 ? "success" : "failure",
+    failures: result.failures,
+    execution: result.execution,
   });
-  const evidencePath = ensureSafeMutationPath(
-    repoRoot,
-    `${artifactRepoPath}/evidence.json`,
-    `${id} evidence path`,
-  );
+  const evidencePath = path.join(layout.artifactDirectory, "evidence.json");
   writeJson(evidencePath, evidence);
   if (authoritative) {
     verifyPreparedFilesystemState(repoRoot, prepared);
   }
-  if (failures.length > 0) {
-    fail(`${id} coverage run failed: ${failures.join("; ")}`);
+  if (result.failures.length > 0) {
+    releaseExecutionLayout(layout);
+    fail(`${id} coverage run failed: ${result.failures.join("; ")}`);
   }
-  validateEvidenceAgainstPrepared(repoRoot, context, evidence, prepared);
+  validateEvidenceAgainstPrepared(repoRoot, context, evidence, prepared, {
+    artifactDirectory: layout.artifactDirectory,
+  });
   if (authoritative) {
     verifyPreparedFilesystemState(repoRoot, prepared);
   }
+  releaseExecutionLayout(layout);
   return evidence;
 }
 
@@ -3909,14 +6163,38 @@ function validateCommandRecords(actual, expected) {
   for (let index = 0; index < expected.length; index += 1) {
     assertExactKeys(
       actual[index],
-      ["workingDirectory", "argv", "exitCode"],
+      ["role", "uid", "workingDirectory", "argv", "exitCode", "identity"],
       `evidence commands[${index}]`,
     );
+    if (!COMMAND_ROLES.includes(actual[index].role)) {
+      fail(`evidence commands[${index}].role is not a supported execution role`);
+    }
     if (
+      actual[index].role !== expected[index].role ||
+      actual[index].uid !== expected[index].uid ||
       actual[index].workingDirectory !== expected[index].workingDirectory ||
       JSON.stringify(actual[index].argv) !== JSON.stringify(expected[index].argv)
     ) {
       fail("evidence contains a command outside the fixed profile");
+    }
+    const expectedIdentity = expectedIdentityForRole(expected[index].role);
+    assertObservedIdentityRecord(
+      actual[index].identity,
+      `evidence commands[${index}].identity`,
+      expectedIdentity,
+    );
+    if (actual[index].identity.uid !== actual[index].uid) {
+      fail(`evidence commands[${index}].uid does not match the observed identity`);
+    }
+    assertCommandToken(
+      actual[index].workingDirectory,
+      `evidence commands[${index}].workingDirectory`,
+    );
+    if (!Array.isArray(actual[index].argv) || actual[index].argv.length === 0) {
+      fail(`evidence commands[${index}].argv must be a non-empty array`);
+    }
+    for (const argument of actual[index].argv) {
+      assertCommandToken(argument, `evidence commands[${index}].argv`);
     }
     assertInteger(actual[index].exitCode, `evidence commands[${index}].exitCode`);
     if (actual[index].exitCode !== 0) {
@@ -3925,10 +6203,326 @@ function validateCommandRecords(actual, expected) {
   }
 }
 
-function validateEvidenceAgainstPrepared(repoRoot, context, evidence, prepared) {
+function assertObservedIdentityRecord(value, label, expectedIdentity) {
+  assertExactKeys(
+    value,
+    [
+      "source",
+      "uid",
+      "euid",
+      "gid",
+      "egid",
+      "supplementaryGroups",
+      "noNewPrivs",
+      "capEff",
+      "capPrm",
+      "capAmb",
+      "capBnd",
+      "capInh",
+    ],
+    label,
+  );
+  if (value.source !== "proc") {
+    fail(`${label} must be observed from the container process table`);
+  }
+  for (const field of ["uid", "euid", "gid", "egid"]) {
+    assertInteger(value[field], `${label}.${field}`);
+  }
+  if (
+    value.uid !== expectedIdentity.uid ||
+    value.euid !== expectedIdentity.uid ||
+    value.gid !== expectedIdentity.gid ||
+    value.egid !== expectedIdentity.gid
+  ) {
+    fail(
+      `${label} must be uid ${expectedIdentity.uid} and gid ${expectedIdentity.gid}`,
+    );
+  }
+  if (!Array.isArray(value.supplementaryGroups)) {
+    fail(`${label}.supplementaryGroups must be an array`);
+  }
+  const extraGroups = value.supplementaryGroups.filter(
+    (group) => group !== expectedIdentity.gid,
+  );
+  if (expectedIdentity.requireEmptyGroups === true && extraGroups.length !== 0) {
+    fail(`${label} must not retain supplementary groups`);
+  }
+  if (expectedIdentity.requireNoNewPrivs === true && value.noNewPrivs !== 1) {
+    fail(`${label} must run with no_new_privs enabled`);
+  }
+  for (const field of ["capEff", "capPrm", "capAmb"]) {
+    if (typeof value[field] !== "string" || !/^[0-9a-f]+$/.test(value[field])) {
+      fail(`${label}.${field} must be a hexadecimal capability mask`);
+    }
+    if (
+      expectedIdentity.requireEmptyCapabilities === true &&
+      /[^0]/.test(value[field])
+    ) {
+      fail(`${label} must not retain ${field} capabilities`);
+    }
+  }
+  for (const field of ["capBnd", "capInh"]) {
+    if (typeof value[field] !== "string" || !/^[0-9a-f]+$/.test(value[field])) {
+      fail(`${label}.${field} must be a hexadecimal capability mask`);
+    }
+  }
+  if (expectedIdentity.requireControllerCapabilities === true) {
+    assertControllerCapabilityContract(value, label);
+  }
+  if (expectedIdentity.requireEmptyInheritable === true) {
+    if (parseCapabilityMask(value.capInh, `${label}.capInh`) !== 0n) {
+      fail(`${label} must not retain inheritable capabilities; found ${value.capInh}`);
+    }
+  }
+  if (expectedIdentity.requireControllerBoundingMask === true) {
+    const expectedBounding = parseCapabilityMask(
+      CONTROLLER_CAPABILITY_MASK,
+      "controller capability contract",
+    );
+    if (parseCapabilityMask(value.capBnd, `${label}.capBnd`) !== expectedBounding) {
+      fail(
+        `${label}.capBnd must equal the inherited controller mask ${CONTROLLER_CAPABILITY_MASK}; found ${value.capBnd}`,
+      );
+    }
+  }
+  return value;
+}
+
+function expectedIdentityForRole(role) {
+  if (role === "worker") {
+    return {
+      uid: WORKER_UID,
+      gid: WORKER_GID,
+      requireEmptyGroups: true,
+      requireNoNewPrivs: true,
+      requireEmptyCapabilities: true,
+      requireEmptyInheritable: true,
+      requireControllerBoundingMask: true,
+    };
+  }
+  return {
+    uid: CONTROLLER_UID,
+    gid: CONTROLLER_GID,
+    requireControllerCapabilities: true,
+  };
+}
+
+function validateExecutionRecord(evidence, context, expected) {
+  assertExactKeys(
+    evidence.execution,
+    [
+      "container",
+      "controller",
+      "worker",
+      "supplemental",
+      "rawSink",
+      "report",
+      "stdout",
+      "stderr",
+      "limitation",
+    ],
+    "evidence execution",
+  );
+  const execution = evidence.execution;
+  assertExactKeys(execution.container, ["imageDigest"], "evidence execution container");
+  const contextDigest =
+    context && context.container ? context.container.imageDigest : null;
+  if (
+    execution.container.imageDigest !== (contextDigest ?? null) ||
+    (execution.container.imageDigest !== null &&
+      !/^sha256:[0-9a-f]{64}$/.test(execution.container.imageDigest))
+  ) {
+    fail("evidence execution container digest does not match the run context");
+  }
+  assertObservedIdentityRecord(
+    execution.controller,
+    "evidence execution controller identity",
+    expectedIdentityForRole("controller"),
+  );
+  assertObservedIdentityRecord(
+    execution.worker,
+    "evidence execution worker identity",
+    expectedIdentityForRole("worker"),
+  );
+  assertExactKeys(
+    execution.supplemental,
+    ["fileCount", "files"],
+    "evidence execution supplemental",
+  );
+  const expectedSupplemental = expected && Array.isArray(expected.supplemental)
+    ? expected.supplemental
+    : null;
+  if (
+    !Array.isArray(execution.supplemental.files) ||
+    execution.supplemental.files.length !== execution.supplemental.fileCount
+  ) {
+    fail("evidence execution supplemental inventory is inconsistent");
+  }
+  let previousSupplemental = null;
+  for (const file of execution.supplemental.files) {
+    assertExactKeys(
+      file,
+      ["path", "gitBlob", "bytes", "sha256"],
+      "evidence execution supplemental file",
+    );
+    normalizeRepoPath(file.path, "evidence execution supplemental path");
+    if (
+      !SUPPLEMENTAL_MANIFEST_FILES.includes(path.posix.basename(file.path)) ||
+      file.path.split("/").length !== 2
+    ) {
+      fail("evidence execution supplemental path is outside the fixed manifest set");
+    }
+    if (previousSupplemental !== null && previousSupplemental >= file.path) {
+      fail("evidence execution supplemental inventory must be sorted and unique");
+    }
+    previousSupplemental = file.path;
+    assertSha(file.gitBlob, "evidence execution supplemental gitBlob");
+    assertInteger(file.bytes, "evidence execution supplemental bytes", 1);
+    if (typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+      fail("evidence execution supplemental digest must be a SHA-256 value");
+    }
+  }
+  if (expectedSupplemental !== null) {
+    assertEvidenceIdentity(
+      execution.supplemental.files,
+      expectedSupplemental.map((record) => ({
+        path: record.path,
+        gitBlob: record.gitBlob,
+        bytes: record.byteLength,
+        sha256: record.sha256,
+      })),
+      "evidence execution supplemental inventory",
+    );
+    if (execution.supplemental.fileCount !== expectedSupplemental.length) {
+      fail("evidence execution supplemental count does not match the exact checkout");
+    }
+  }
+  assertExactKeys(execution.rawSink, ["fileCount", "files"], "evidence execution rawSink");
+  assertInteger(
+    execution.rawSink.fileCount,
+    "evidence execution rawSink.fileCount",
+    expected && expected.profile === "node-typescript-c8" ? 1 : 0,
+  );
+  if (
+    !Array.isArray(execution.rawSink.files) ||
+    execution.rawSink.files.length !== execution.rawSink.fileCount ||
+    execution.rawSink.files.length > LIMITS.rawCoverageFiles
+  ) {
+    fail("evidence execution raw coverage inventory is inconsistent");
+  }
+  let previousName = null;
+  let rawTotalBytes = 0;
+  for (const file of execution.rawSink.files) {
+    assertExactKeys(file, ["name", "bytes", "sha256"], "evidence execution raw file");
+    if (typeof file.name !== "string" || !RAW_COVERAGE_FILE_PATTERN.test(file.name)) {
+      fail("evidence execution raw coverage file name is unexpected");
+    }
+    if (previousName !== null && previousName >= file.name) {
+      fail("evidence execution raw coverage inventory must be sorted and unique");
+    }
+    previousName = file.name;
+    assertInteger(file.bytes, "evidence execution raw file bytes", 1);
+    if (file.bytes > LIMITS.rawCoverageFileBytes) {
+      fail(
+        `evidence execution raw file exceeds ${LIMITS.rawCoverageFileBytes} bytes`,
+      );
+    }
+    rawTotalBytes += file.bytes;
+    if (rawTotalBytes > LIMITS.rawCoverageTotalBytes) {
+      fail(
+        `evidence execution raw coverage exceeds ${LIMITS.rawCoverageTotalBytes} bytes`,
+      );
+    }
+    if (typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+      fail("evidence execution raw file digest must be a SHA-256 value");
+    }
+  }
+  assertExactKeys(
+    execution.report,
+    ["root", "outputRoot", "sha256"],
+    "evidence execution report",
+  );
+  if (execution.report.root !== "<REPORT>" || execution.report.outputRoot !== "<OUT>") {
+    fail("evidence execution report identity must use closed placeholders");
+  }
+  if (
+    typeof execution.report.sha256 !== "string" ||
+    execution.report.sha256 !== evidence.reports.coverageFinalSha256
+  ) {
+    fail("evidence execution report digest does not match the copied report");
+  }
+  for (const stream of ["stdout", "stderr"]) {
+    assertExactKeys(execution[stream], ["bytes", "sha256"], `evidence execution ${stream}`);
+    assertInteger(execution[stream].bytes, `evidence execution ${stream}.bytes`);
+    if (
+      typeof execution[stream].sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(execution[stream].sha256)
+    ) {
+      fail(`evidence execution ${stream} digest must be a SHA-256 value`);
+    }
+    if (execution[stream].bytes > LIMITS.outputBytes) {
+      fail(`evidence execution ${stream} exceeds the captured output bound`);
+    }
+  }
+  if (execution.limitation !== EVIDENCE_LIMITATION) {
+    fail("evidence execution must retain the accepted provenance limitation");
+  }
+  if (expected && expected.profile === "node-typescript-c8") {
+    if (execution.stdout.bytes === 0) {
+      fail("evidence execution stdout must record captured worker output");
+    }
+    if (execution.stdout.sha256 !== expected.testResultsSha256) {
+      fail("evidence execution stdout digest does not match the captured test results");
+    }
+    if (expected.artifactDirectory) {
+      const tapPath = path.join(expected.artifactDirectory, "test-results.tap");
+      const tapBytes = readBoundedFile(
+        tapPath,
+        LIMITS.reportBytes,
+        "captured worker output",
+      );
+      if (
+        tapBytes.length !== execution.stdout.bytes ||
+        sha256Bytes(tapBytes) !== execution.stdout.sha256
+      ) {
+        fail(
+          "evidence execution stdout does not reconcile with the captured TAP artifact",
+        );
+      }
+      const stderrPath = path.join(expected.artifactDirectory, "worker-stderr.log");
+      const stderrBytes = readBoundedFile(
+        stderrPath,
+        LIMITS.reportBytes,
+        "captured worker diagnostics",
+      );
+      if (
+        stderrBytes.length !== execution.stderr.bytes ||
+        sha256Bytes(stderrBytes) !== execution.stderr.sha256
+      ) {
+        fail(
+          "evidence execution stderr does not reconcile with the captured diagnostics artifact",
+        );
+      }
+    }
+  }
+  return execution;
+}
+
+function validateEvidenceAgainstPrepared(
+  repoRoot,
+  context,
+  evidence,
+  prepared,
+  options = {},
+) {
   assertExactKeys(evidence, EVIDENCE_KEYS, "evidence");
-  if (evidence.schemaVersion !== SCHEMA_VERSION || evidence.status !== "success") {
-    fail("evidence must be schema version 1 with success status");
+  if (
+    evidence.schemaVersion !== EVIDENCE_SCHEMA_VERSION ||
+    evidence.status !== "success"
+  ) {
+    fail(
+      `evidence must be schema version ${EVIDENCE_SCHEMA_VERSION} with success status`,
+    );
   }
   assertExactKeys(evidence.package, ["id", "profile"], "evidence package");
   if (
@@ -4130,13 +6724,27 @@ function validateEvidenceAgainstPrepared(repoRoot, context, evidence, prepared) 
       fail("successful evidence report hashes must be SHA-256 values");
     }
   }
+  validateExecutionRecord(evidence, context, {
+    profile: prepared.entry.profile,
+    testResultsSha256: evidence.reports.testResultsSha256,
+    supplemental: prepared.supplementalSnapshot
+      ? prepared.supplementalSnapshot.records
+      : null,
+    artifactDirectory: options.artifactDirectory || null,
+  });
   if (!Array.isArray(evidence.failures) || evidence.failures.length !== 0) {
     fail("successful evidence must contain no failures");
   }
   return prepared;
 }
 
-function validateEvidenceObject(repoRoot, trustedRoot, context, evidence) {
+function validateEvidenceObject(
+  repoRoot,
+  trustedRoot,
+  context,
+  evidence,
+  options = {},
+) {
   if (
     !isPlainObject(evidence) ||
     !isPlainObject(evidence.package) ||
@@ -4155,22 +6763,31 @@ function validateEvidenceObject(repoRoot, trustedRoot, context, evidence) {
     context,
     evidence,
     prepared,
+    options,
   );
 }
 
-function validateEvidenceArtifact(repoRoot, trustedRoot, context, evidencePath) {
+function validateEvidenceArtifact(
+  repoRoot,
+  trustedRoot,
+  context,
+  evidencePath,
+  options = {},
+) {
+  const coverageRoot = options.coverageRoot || repoRoot;
   const evidence = readJsonFile(
     evidencePath,
     LIMITS.evidenceBytes,
     "evidence",
   );
+  const directory = path.dirname(evidencePath);
   const prepared = validateEvidenceObject(
     repoRoot,
     trustedRoot,
     context,
     evidence,
+    { artifactDirectory: directory },
   );
-  const directory = path.dirname(evidencePath);
   const testFileName =
     prepared.entry.profile === "node-typescript-c8"
       ? "test-results.tap"
@@ -4203,7 +6820,7 @@ function validateEvidenceArtifact(repoRoot, trustedRoot, context, evidencePath) 
     "evidence report hashes",
   );
   const coverage = validateCoverageReports(
-    repoRoot,
+    coverageRoot,
     prepared.entry,
     prepared.eligible,
     prepared.changedEligible,
@@ -4234,7 +6851,7 @@ function validateEvidenceArtifact(repoRoot, trustedRoot, context, evidencePath) 
       prepared.entry,
       reports.testResults,
       prepared.testFiles,
-      repoRoot,
+      coverageRoot,
     ),
     "evidence raw test counts",
   );
@@ -4284,24 +6901,41 @@ function listEvidenceFiles(root) {
   return result.sort();
 }
 
-function aggregateEvidence(repoRoot, trustedRoot, context, artifactsRoot) {
+function aggregateEvidence(
+  repoRoot,
+  trustedRoot,
+  context,
+  artifactsRoot,
+  options = {},
+) {
+  const authoritative = options.authoritative === true;
+  const outputRoot = authoritative
+    ? options.outputRoot
+    : fs.realpathSync(repoRoot);
+  if (authoritative && outputRoot !== CONTAINER_ROOTS.output) {
+    fail(`authoritative output root must equal ${CONTAINER_ROOTS.output}`);
+  }
+  const coverageRoot = authoritative ? CONTAINER_ROOTS.home : repoRoot;
   let canonicalArtifactsRoot;
   try {
     canonicalArtifactsRoot = fs.realpathSync(path.resolve(artifactsRoot));
   } catch (error) {
     fail("aggregate artifact root is missing");
   }
+  const expectedArtifactRelative = authoritative
+    ? OUTPUT_ARTIFACT_ROOT
+    : ARTIFACT_ROOT;
   const artifactRelative = normalizeRepoPath(
-    path.relative(fs.realpathSync(repoRoot), canonicalArtifactsRoot)
+    path.relative(fs.realpathSync(outputRoot), canonicalArtifactsRoot)
       .split(path.sep)
       .join("/"),
     "aggregate artifact root",
   );
-  if (artifactRelative !== ARTIFACT_ROOT) {
-    fail(`aggregate artifact root must equal ${ARTIFACT_ROOT}`);
+  if (artifactRelative !== expectedArtifactRelative) {
+    fail(`aggregate artifact root must equal ${expectedArtifactRelative}`);
   }
   const safeArtifactsRoot = ensureSafeMutationPath(
-    repoRoot,
+    outputRoot,
     artifactRelative,
     "aggregate artifact root",
   );
@@ -4314,10 +6948,10 @@ function aggregateEvidence(repoRoot, trustedRoot, context, artifactsRoot) {
   if (!artifactStat.isDirectory() || artifactStat.isSymbolicLink()) {
     fail("aggregate artifact root must be a regular directory");
   }
-  const validated = validateRepository(repoRoot, {
+  validateRepository(repoRoot, {
     treeish: context.repository.checkoutSha,
   });
-  const expectedIds = validated.descriptor.entries.map((entry) => entry.id);
+  const expectedIds = [...ENFORCED_PACKAGE_IDS].sort();
   const files = listEvidenceFiles(safeArtifactsRoot);
   const byId = new Map();
   for (const filePath of files) {
@@ -4326,6 +6960,7 @@ function aggregateEvidence(repoRoot, trustedRoot, context, artifactsRoot) {
       trustedRoot,
       context,
       filePath,
+      { coverageRoot },
     );
     const id = evidence.package.id;
     if (byId.has(id)) {
@@ -4371,7 +7006,7 @@ function aggregateEvidence(repoRoot, trustedRoot, context, artifactsRoot) {
     locks.push(...item.evidence.locks.map((lock) => ({ id, ...lock })));
   }
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
     status: "success",
     repository: first.repository,
     workflow: first.workflow,
@@ -4417,8 +7052,8 @@ function helpText() {
     "Commands:",
     "  validate [--repo-root DIR] [--treeish SHA]",
     "  matrix [--repo-root DIR] [--treeish SHA]",
-    "  run --id ID --context FILE --trusted-root DIR [--repo-root DIR]",
-    "  aggregate --context FILE --trusted-root DIR [--repo-root DIR]",
+    "  run --id ID --context FILE --trusted-root DIR --output-root DIR [--repo-root DIR]",
+    "  aggregate --context FILE --trusted-root DIR --output-root DIR [--repo-root DIR]",
     "  dry-run --id ID|all [--repo-root DIR]",
     "",
     `Authoritative run commands require Linux and Node ${REQUIRED_NODE_VERSION}.`,
@@ -4440,49 +7075,81 @@ function cli(argv) {
       treeish: options["--treeish"] || "HEAD",
     });
     if (command === "matrix") {
-      process.stdout.write(
-        `${JSON.stringify({
-          include: validated.descriptor.entries.map((entry) => ({ id: entry.id })),
-        })}\n`,
-      );
+      emitSafeLine({
+        include: validated.descriptor.entries.map((entry) => ({ id: entry.id })),
+      });
     } else {
-      process.stdout.write(
-        `${JSON.stringify({
-          schemaVersion: SCHEMA_VERSION,
-          entries: validated.inventory,
-          thresholds: REQUIRED_THRESHOLDS,
-        })}\n`,
-      );
+      emitSafeLine({
+        schemaVersion: DESCRIPTOR_SCHEMA_VERSION,
+        entries: validated.inventory,
+        thresholds: REQUIRED_THRESHOLDS,
+      });
     }
     return;
   }
   if (command === "run") {
     const options = parseOptions(
       rest,
-      new Set(["--repo-root", "--id", "--context", "--trusted-root"]),
-      ["--id", "--context", "--trusted-root"],
+      new Set([
+        "--repo-root",
+        "--id",
+        "--context",
+        "--trusted-root",
+        "--output-root",
+      ]),
+      ["--id", "--context", "--trusted-root", "--output-root"],
     );
     const repoRoot = resolveRepositoryRoot(options["--repo-root"]);
     const id = options["--id"];
     if (!SAFE_ID_PATTERN.test(id)) {
       fail("package id is unsafe");
     }
+    if (!ENFORCED_PACKAGE_IDS.includes(id)) {
+      fail(
+        `authoritative coverage runs are limited to ${ENFORCED_PACKAGE_IDS.join(",")}`,
+      );
+    }
     const context = readRunContext(repoRoot, options["--context"]);
-    executeEntry(repoRoot, options["--trusted-root"], context, id, true);
-    process.stdout.write(`${JSON.stringify({ id, status: "success" })}\n`);
+    const evidence = executeEntry(
+      repoRoot,
+      options["--trusted-root"],
+      context,
+      id,
+      true,
+      { outputRoot: options["--output-root"] },
+    );
+    emitSafeLine({
+      id,
+      status: "success",
+      node: evidence.toolchain.node,
+      lines: evidence.coverage.lines.covered,
+      branches: evidence.coverage.branches.covered,
+      tests: evidence.tests.total,
+      rawFiles: evidence.execution.rawSink.fileCount,
+      reportSha256: evidence.reports.coverageFinalSha256,
+    });
     return;
   }
   if (command === "aggregate") {
     const options = parseOptions(
       rest,
-      new Set(["--repo-root", "--context", "--trusted-root"]),
-      ["--context", "--trusted-root"],
+      new Set([
+        "--repo-root",
+        "--context",
+        "--trusted-root",
+        "--output-root",
+      ]),
+      ["--context", "--trusted-root", "--output-root"],
     );
     const repoRoot = resolveRepositoryRoot(options["--repo-root"]);
+    const outputRoot = options["--output-root"];
+    if (outputRoot !== CONTAINER_ROOTS.output) {
+      fail(`authoritative output root must equal ${CONTAINER_ROOTS.output}`);
+    }
     const context = readRunContext(repoRoot, options["--context"]);
     const artifactsRoot = ensureSafeMutationPath(
-      repoRoot,
-      ARTIFACT_ROOT,
+      outputRoot,
+      OUTPUT_ARTIFACT_ROOT,
       "aggregate artifact root",
     );
     const aggregate = aggregateEvidence(
@@ -4490,21 +7157,20 @@ function cli(argv) {
       options["--trusted-root"],
       context,
       artifactsRoot,
+      { authoritative: true, outputRoot },
     );
     writeJson(
       ensureSafeMutationPath(
-        repoRoot,
-        `${ARTIFACT_ROOT}/aggregate.json`,
+        outputRoot,
+        `${OUTPUT_ARTIFACT_ROOT}/aggregate.json`,
         "aggregate evidence path",
       ),
       aggregate,
     );
-    process.stdout.write(
-      `${JSON.stringify({
-        status: "success",
-        packages: aggregate.expectedPackageIds,
-      })}\n`,
-    );
+    emitSafeLine({
+      status: "success",
+      packages: aggregate.expectedPackageIds,
+    });
     return;
   }
   if (command === "dry-run") {
@@ -4530,77 +7196,48 @@ function cli(argv) {
         ...validatedEntry,
         testFiles: deriveWorkingTestFiles(repoRoot, validatedEntry),
       };
-      const commands = buildCommandPlan(entry, entry.eligible, {
+      const prepared = {
+        entry,
+        eligible: entry.eligible,
+        changedEligible: [],
+        deletedEligible: [],
+        packageInputs: [],
+        packageInputSnapshot: null,
+        protectedFileSnapshots: [],
+        testFiles: entry.testFiles,
+        commands: buildCommandPlan(entry, entry.eligible, {
+          repoRoot,
+          treeish: resolveCommit(repoRoot, "HEAD", "dry-run treeish"),
+        }),
+      };
+      const layout = resolveExecutionLayout({
         repoRoot,
-        treeish: resolveCommit(repoRoot, "HEAD", "dry-run treeish"),
+        entryId: id,
+        authoritative: false,
       });
-      const artifactRepoPath = artifactDirectoryFor(id);
-      removeGeneratedPath(
+      fs.rmSync(layout.artifactDirectory, { recursive: true, force: true });
+      fs.mkdirSync(layout.artifactDirectory, { recursive: true, mode: 0o700 });
+      prepareControlledRoots(layout);
+      const result = runPreparedEntry({
         repoRoot,
-        artifactRepoPath,
-        `${id} artifact directory`,
-      );
-      removeGeneratedPath(
-        repoRoot,
-        `${id}/coverage`,
-        `${id} coverage directory`,
-      );
-      if (
-        entry.profile === "node-typescript-c8" ||
-        entry.profile === "react-scripts"
-      ) {
-        removeGeneratedPath(repoRoot, `${id}/build`, `${id} build directory`);
+        trustedRoot: repoRoot,
+        context: null,
+        prepared,
+        layout,
+        authoritative: false,
+      });
+      releaseExecutionLayout(layout);
+      if (result.failures.length > 0) {
+        fail(`${id} dry run failed: ${result.failures.join("; ")}`);
       }
-      const artifactDir = ensureSafeMutationPath(
-        repoRoot,
-        artifactRepoPath,
-        `${id} artifact directory`,
-      );
-      fs.mkdirSync(artifactDir, { recursive: true });
-      const records = [];
-      executeCommands(repoRoot, commands, entry, records);
-      const finalPath = copyReport(
-        repoRoot,
-        `${id}/coverage/coverage-final.json`,
-        `${artifactDirectoryFor(id)}/coverage-final.json`,
-        `${id} coverage-final report`,
-      );
-      const summaryPath = copyReport(
-        repoRoot,
-        `${id}/coverage/coverage-summary.json`,
-        `${artifactDirectoryFor(id)}/coverage-summary.json`,
-        `${id} coverage-summary report`,
-      );
-      const extension = entry.profile === "node-typescript-c8" ? "tap" : "json";
-      const testPath = copyReport(
-        repoRoot,
-        `${id}/coverage/test-results.${extension}`,
-        `${artifactDirectoryFor(id)}/test-results.${extension}`,
-        `${id} test results`,
-      );
-      const coverage = validateCoverageReports(
-        repoRoot,
-        entry,
-        entry.eligible,
-        [],
-        { coverageFinal: finalPath, coverageSummary: summaryPath },
-      );
-      const tests = parseTestResults(
-        entry,
-        testPath,
-        entry.testFiles,
-        repoRoot,
-      );
-      process.stdout.write(
-        `${JSON.stringify({
-          id,
-          status: "success",
-          node: process.versions.node,
-          coverage: coverage.totals,
-          tests,
-          commands: records.length,
-        })}\n`,
-      );
+      emitSafeLine({
+        id,
+        status: "success",
+        node: process.versions.node,
+        coverage: result.coverageResult.totals,
+        tests: result.tests,
+        commands: result.commands.length,
+      });
     }
     return;
   }
@@ -4622,13 +7259,28 @@ module.exports = {
   ARTIFACT_ROOT,
   CANONICAL_REPOSITORY,
   COMMAND_KILL_GRACE_MS,
+  COMMAND_PLACEHOLDERS,
+  COMMAND_ROLES,
   COMMAND_SUBREAPER_BOOTSTRAP,
   COMMAND_SUPERVISOR_SOURCE,
   COMMAND_TIMEOUTS,
+  CONTAINER_MARKER_VARIABLE,
+  CONTAINER_ROOTS,
+  CONTROLLER_UID,
   CoverageMatrixError,
   DESCRIPTOR_PATH,
+  DESCRIPTOR_SCHEMA_VERSION,
+  ENFORCED_PACKAGE_IDS,
   ENGINE_PATH,
   EVIDENCE_KEYS,
+  EVIDENCE_LIMITATION,
+  EVIDENCE_SCHEMA_VERSION,
+  FORBIDDEN_COVERAGE_CONFIG_FILES,
+  FORBIDDEN_COVERAGE_MANIFEST_KEYS,
+  OUTPUT_ARTIFACT_ROOT,
+  RUN_CONTEXT_SCHEMA_VERSION,
+  WORKER_GID,
+  WORKER_UID,
   GIT_COMMAND_TIMEOUT_MS,
   LIMITS,
   NPM_CI_ARGUMENTS,
@@ -4664,8 +7316,45 @@ module.exports = {
   readDescriptor,
   readJsonFile,
   rejectUnexpectedPackageFiles,
+  freezeStagedWorkspace,
+  parseTapResultDescription,
   runGit,
   sealGitAccess,
+  stageControllerToolchain,
+  assertAuthoritativeContainer,
+  assertCommandToken,
+  assertControlledDirectory,
+  assertEmptyDirectory,
+  assertControllerCapabilityContract,
+  assertIsolatedStagingLayout,
+  assertObservedIdentityRecord,
+  expectedIdentityForRole,
+  readProcessIdentityFromProc,
+  CONTROLLER_CAPABILITY_MASK,
+  CONTROLLER_CAPABILITY_NAMES,
+  ZERO_CAPABILITY_MASK,
+  deriveSupplementalSnapshot,
+  stageSupplementalInputs,
+  supplementalInputPaths,
+  verifyWorkerHomeClosure,
+  workerHomeInventory,
+  SUPPLEMENTAL_MANIFEST_FILES,
+  SUPPLEMENTAL_PACKAGE_IDS,
+  WORKER_HOME_MODE,
+  assertNoCoverageDiscovery,
+  controllerEnvironment,
+  emitSafeLine,
+  freezeRawCoverage,
+  hashFrozenCoverage,
+  prepareControlledRoots,
+  resolveExecutionLayout,
+  stageWorkerPackage,
+  substitutePlaceholders,
+  validateCommandRecords,
+  validateExecutionRecord,
+  verifyStagedWorkspace,
+  workerEnvironment,
+  writeGeneratedC8Configuration,
   validateCoverageReports,
   validateDescriptorObject,
   validateEvidenceObject,
@@ -4679,7 +7368,6 @@ module.exports = {
   writeFileSafely,
   resolveCommit,
   signalIdentityTargets,
-  sanitizedChildEnvironment,
   sanitizedGitEnvironment,
   validateEvidenceAgainstPrepared,
 };

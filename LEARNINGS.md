@@ -1084,3 +1084,131 @@ validated.
 - Production route probes must use documented endpoints, record restart counts
   before and after any intentional unmatched request, and verify both REST/SSE
   availability and unchanged process continuity.
+
+## Trusted coverage engine hardening — 2026-09-06
+
+- A subtractive environment filter leaks control variables. Building the
+  controller and worker environments from an empty object with an exact
+  positive key set, then asserting that set, is the only way to keep
+  workflow-command, token, preload, proxy, and coverage-tool variables out of
+  candidate execution.
+- A coverage tool's own configuration discovery is a code path. `c8` resolves
+  rc files by walking upward and reads a `c8` manifest key with `extends`, so
+  the engine now pins `--config` to a generated empty file inside the
+  controlled tool root, bans every `.c8rc*`/`.nycrc*`/`nyc.config.*`/
+  `c8.config.*`/`.istanbul.yml` name at the repository root, the coverage
+  directory, and each package root, rejects `c8`/`nyc`/`istanbul` manifest
+  keys, and asserts a clean discovery path from the worker package upward
+  before generating a report.
+- Do not track the generated tool configuration. A file that only exists to
+  neutralize discovery becomes another candidate-writable asset; the trusted
+  controller creates it with exclusive, no-follow creation at run time.
+- Report generation must not share a UID or a lifetime with the code it
+  measures. The unprivileged worker only produces raw V8 data; the root
+  controller freezes that data, hashes it before and after, and runs
+  `c8 report` offline against the frozen copy in a root-only report root.
+- Coverage environment variables propagate to every descendant. Passing
+  `NODE_V8_COVERAGE` in the supervisor's own environment made the privileged
+  supervisor write root-owned raw files into the worker sink; the value now
+  reaches the worker process only, and every raw file must be worker-owned,
+  regular, non-hardlinked, name-checked, bounded, and shape-checked.
+- A generated directory excluded from input verification is an unverified
+  sink. The candidate tree is now read-only input: the controller stages the
+  exact verified package input set into a worker-owned workspace, revalidates
+  it after execution, and never uses the candidate's coverage directory as a
+  report source or sink.
+- An isolated workspace must still satisfy the tracked tests it runs. The
+  Common suite asserts repository topology by reading eight sibling service
+  manifests, so the controller stages exactly those sixteen `package.json` and
+  `package-lock.json` files from the exact checkout, binds each to its Git
+  path, blob, mode, size, and SHA-256, and keeps them controller-owned and
+  read-only. No sibling source is staged and no sibling package is installed
+  or executed; weakening the test or widening the staged set would both have
+  been wrong answers.
+- A destructive primitive must prove its own isolation. Both staging helpers
+  now verify, before any deletion, that the worker home is a real directory
+  that neither is nor contains nor sits inside the candidate checkout, that the
+  staged package resolves to exactly one entry beneath it, that the closed home
+  inventory and supplemental id set are the expected ones, and that no target
+  is a symlink. The caller's mode flag is never the only thing standing
+  between a recursive remove and the reviewed checkout.
+- A writable parent namespace defeats read-only children. The worker home is
+  controller-owned and non-writable, with only explicitly precreated
+  worker-owned subtrees, so the worker cannot rename or replace a sibling
+  directory; a closed top-level and per-sibling inventory is re-checked before
+  and after every command and after the descendant tree exits.
+- Dropping the user is not the same as closing exec privilege gain. The
+  worker sets `PR_SET_NO_NEW_PRIVS` before exec, fails closed if it cannot,
+  treats an unreadable `/proc/self/status` as fatal, and asserts real and
+  effective identity, empty supplementary groups, `NoNewPrivs=1`, empty
+  effective, permitted, ambient **and inheritable** capability sets, and a
+  bounding set exactly equal to the controller's minimal `00000000000000eb`
+  mask. Privilege gain is therefore closed by no_new_privs plus those empty
+  sets, not by an empty bounding set, and a real in-container probe proves it
+  rather than a source-text check.
+- A recorded capability set is not an enforced one. The trusted controller now
+  requires its own observed effective, permitted, and bounding masks to equal
+  exactly `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_KILL`,
+  `CAP_SETGID`, and `CAP_SETUID`, with empty ambient and inheritable sets, and
+  rejects `CAP_SETPCAP` or any other extra bit both in the container
+  preconditions and in evidence validation. Running with the container
+  runtime's default capability list is therefore no longer accepted.
+- Never record an identity you did not observe. The supervisor reads the
+  stopped child's identity from the process table and binds it to each command
+  record and to the evidence execution block, so a run without a drop reports
+  the real account instead of the intended one.
+- Sanitized candidate text is still candidate text. Failure messages carry
+  only trusted fields — command index, role, exit code, byte counts, and
+  digests — while the bytes themselves stay in controller-owned artifacts, and
+  workflow-command delimiters are neutralized anywhere in a string rather than
+  only at the start.
+- Self-reported test counts need structural binding, and the binding must match
+  what the runner actually emits. Node's TAP stream never prints per-file
+  result lines — running two files simply flattens their tests — so a
+  filename check would have been a permanent no-op. The executed test-file set
+  is bound by the trusted command plan argv instead, while the TAP document is
+  checked for one contiguous trailing summary block, exactly one top-level
+  plan agreeing with the sequentially numbered top-level results, a matching
+  `# Subtest:` header at the same depth for every result line, and suite-aware
+  totals: a result carrying `type: 'suite'` counts toward suites, not tests,
+  and a failing suite is not double-counted as a failing test.
+- A green summary can hide a red suite. A `describe()` whose `after()` hook
+  throws reports `not ok` on the suite aggregate while every child test passes
+  and the trailing counters read zero failures, so any failing suite line is
+  rejected on its own, independently of the counters, without letting suite
+  aggregates back into the test totals.
+- Skip and todo are properties of the result line, not of the summary. A
+  directive is detected on any unescaped `#` marker at any depth,
+  case-insensitively and with reasons allowed, and rejected on its own, so a
+  summary that reports zero cannot launder a real directive; escaped `\#`
+  stays literal description text.
+- Evidence should reconcile with the artifacts it describes. Captured stdout
+  and stderr are compared byte-for-byte and by digest against the retained TAP
+  and diagnostics files, and the supplemental inventory is re-derived from the
+  exact checkout during aggregation. Raw V8 digests remain controller-recorded
+  assertions about the frozen run, not artifacts revalidated later, and the
+  limitation says so.
+- Master-byte parity must cover the descriptor. Without it a pull request
+  could change entries, profiles, or thresholds while every other trusted
+  asset still matched.
+- Stored command evidence should be placeholder-form. Closed tokens keep
+  evidence byte-stable across runners, prove no session or host path leaked,
+  and let validation recompute the plan exactly.
+- Structured output is a security boundary. One emitter that rejects control
+  characters, non-ASCII text, and `::`/`##[` sequences anywhere in a value
+  removes workflow-command injection through captured candidate output, which
+  must be written to controller-owned files rather than echoed.
+- Record what you can check, and name what you cannot. In inert Slice E the
+  container image digest is optional: it is validated for shape when present
+  and cross-matched between the run context and the evidence, which proves
+  consistency of the record, not the identity of the process that ran.
+  Mandatory external image attestation is a Slice B activation obligation, so
+  E must never be read as proof of the running image.
+- Say what the evidence proves. A tracked test or source map can still shape
+  its own V8 data and Node reports its own TAP counts, so the record is
+  provenance-bound review evidence, not tamper-proof execution proof, and the
+  evidence states each residual explicitly.
+- Container plumbing is part of the contract. A read-only root filesystem
+  needs writable controller home and cache paths, tmpfs mounts holding
+  executables must allow execution, and a mount point cannot be removed and
+  recreated — clear its contents instead.

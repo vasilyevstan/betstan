@@ -133,6 +133,88 @@ If downstream provenance accepts only attempt one, a failed run is terminal
 evidence. Fix the cause and create a new exact candidate rather than rerunning
 the failed authority.
 
+### Measure candidate code without trusting it
+
+A coverage gate runs code that a pull request controls, so the measurement
+must not inherit the reviewer's authority.
+
+- The decision logic comes from the default-branch copy of the engine, and the
+  engine binds every trusted asset — including the coverage descriptor — to
+  exact default-branch bytes, so a branch cannot widen its own gate.
+- Candidate code executes as an unprivileged account whose effective,
+  permitted, ambient and inheritable capability sets are asserted empty, whose
+  bounding set is asserted equal to the privileged side's minimal capability
+  mask, and for which new-privilege acquisition is disabled before exec. That
+  last property, not an empty bounding set, is what stops a setuid program
+  from raising privilege. The workspace is
+  staged from verified inputs while the repository checkout stays read-only.
+- The privileged side states and enforces its own minimum. The trusted
+  controller must hold exactly the six capabilities it needs to prepare and
+  own the run, with nothing inheritable or ambient and no capability that
+  would let it hand privileges onward; a default runtime capability list is
+  rejected before any candidate command starts and again when the evidence is
+  validated.
+- Isolation must not force a test rewrite. When a tracked suite legitimately
+  needs a few sibling manifests to assert repository topology, the trusted
+  side stages exactly those files from the exact reviewed commit, binds each
+  to its recorded identity and digest, and keeps them read-only; the parent
+  namespace stays owned by the trusted side with a closed inventory so the
+  measured code cannot add, replace, or rename anything beside its own
+  workspace.
+- A helper that deletes must validate its own target. Before removing anything,
+  the staging helpers prove the destination is a real directory fully separate
+  from the reviewed checkout, with the expected closed contents and no symlink
+  in the way, rather than trusting the mode the caller passed in.
+- Separate what a record proves from what an attestation proves. While the
+  gate is inactive, the container image digest is optional evidence: it is
+  shape-checked and cross-matched between the run context and the evidence, so
+  it shows the record is internally consistent, not which image actually ran.
+  Requiring and attesting that image belongs to the activation change that
+  turns the gate on.
+- Report only identities you observed. Execution records carry the identity
+  read from the running process rather than the identity that was intended,
+  so a run that did not drop privileges cannot look like one that did.
+- The privileged side only prepares inputs and produces the report. Raw
+  coverage data is collected by the unprivileged run, frozen into a
+  privileged-only copy, hashed before and after, and turned into a report
+  offline. Report generation never shares a user or a lifetime with the code
+  it measures.
+- Child environments are built from an explicit allowlist rather than filtered,
+  because a filter always misses a variable. Coverage, preload, proxy, token,
+  and workflow-command variables never reach candidate processes, and a
+  coverage variable must reach only the process that needs it.
+- Coverage tools discover configuration by walking parent directories and by
+  reading package manifest keys, so both routes are closed: a pinned generated
+  configuration, banned rc filenames in every relevant directory, banned
+  manifest keys, and a checked discovery path before reporting.
+- Anything the measured code prints is untrusted text. A single structured
+  emitter rejects control characters, non-ASCII bytes, and CI command
+  sequences anywhere in a value; failure messages quote only trusted fields
+  such as exit codes, byte counts, and digests; and the captured bytes stay in
+  protected artifacts rather than the build log.
+- Counts a runner prints about itself are claims, not proof. Test summaries
+  are accepted only when they form one contiguous trailing block that agrees
+  with the declared plan, with the individual result lines, with the subtest
+  headers, and with the distinction between suites and tests. Which test files
+  ran is bound by the exact reviewed command that started them, not by names
+  the runner prints about itself.
+- A summary of zero failures is not a passing run. A grouping construct can
+  fail through its own setup or teardown while every test inside it passes, so
+  a failing group is treated as a failure on its own rather than being inferred
+  from failure counters.
+- Verify a structural check against the tool's real output before trusting it.
+  A check written against an imagined report shape can look strict while
+  matching nothing the runner ever emits.
+- Evidence records provenance — observed identities, digests, placeholder
+  command arguments, and file inventories — reconciles the recorded output
+  sizes and digests against the retained artifacts, and states its own limits:
+  a tracked test or source map can still shape its own coverage data, runner
+  counts are self-reported, raw coverage digests are recorded assertions about
+  the frozen run rather than artifacts revalidated later, and the measured
+  account keeps the privileged side's minimal bounding mask instead of an
+  empty one. The record supports review rather than proving execution was
+  untampered.
+
 ## Release and operations
 
 ### Build and deploy exact immutable identities
