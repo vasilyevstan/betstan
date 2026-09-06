@@ -118,6 +118,11 @@ instead of crossing the boundary.
 - Generate private simulation randomness independently of public identifiers,
   persist it before publication, and never include it in public DTOs.
 - Reuse existing helpers and patterns; avoid broad catches and silent failures.
+- Express 4 does not forward rejected async handlers unless the service loads
+  an established async-error integration. For an unwrapped fallback route,
+  call `next(error)` synchronously or use the service's existing wrapper;
+  never throw from an async catch-all because an anonymous unknown URL can
+  become a process-level unhandled rejection.
 - Keep publisher instances singleton-scoped as documented in `LEARNINGS.md`.
 - For a database mutation that must publish an event, persist a retry marker
   in the same atomic write, use publisher confirms, and clear the marker only

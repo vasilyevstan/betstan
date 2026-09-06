@@ -103,6 +103,12 @@ stay inside their controls, sibling controls do not intersect, and a shared
 section heading spans the whole product group rather than auto-placing above
 only one market.
 
+For fallback or error-middleware changes, request several distinct unmatched
+paths, require the bounded structured error, and then prove a valid route still
+responds without an unhandled rejection. Runtime acceptance must compare the
+target pod's restart count before and after any unknown-route probe; the error
+response alone is not proof that the process stayed healthy.
+
 Keep browser API fixtures faithful to concurrency contracts: include and
 rotate board revisions/fingerprints, reject mismatched placement
 confirmations, and require stale-quote reselection before resubmission.
