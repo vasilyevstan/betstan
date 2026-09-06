@@ -1721,6 +1721,40 @@ test("hardens Git against fsmonitor and inherited configuration injection", () =
 
 test("seals Git before hostile commands and validates evidence from prepared state", () => {
   if (process.platform !== "linux") {
+    const source = fs.readFileSync(
+      path.join(REPOSITORY_ROOT, engine.ENGINE_PATH),
+      "utf8",
+    );
+    const executeEntryStart = source.indexOf("function executeEntry(");
+    const executeEntryEnd = source.indexOf(
+      "\nfunction assertCoverageMetric(",
+      executeEntryStart,
+    );
+    assert.ok(executeEntryStart >= 0);
+    assert.ok(executeEntryEnd > executeEntryStart);
+    const executeEntrySource = source.slice(executeEntryStart, executeEntryEnd);
+    const prepareIndex = executeEntrySource.indexOf(
+      "const prepared = prepareEntry(",
+    );
+    const sealIndex = executeEntrySource.indexOf("sealGitAccess();");
+    const executeIndex = executeEntrySource.indexOf("executeCommands(");
+    const verifyIndex = executeEntrySource.indexOf(
+      "verifyPreparedFilesystemState(repoRoot, prepared);",
+      executeIndex,
+    );
+    const evidenceIndex = executeEntrySource.indexOf(
+      "validateEvidenceAgainstPrepared(repoRoot, context, evidence, prepared);",
+      executeIndex,
+    );
+    assert.ok(prepareIndex >= 0);
+    assert.ok(sealIndex > prepareIndex);
+    assert.ok(executeIndex > sealIndex);
+    assert.ok(verifyIndex > executeIndex);
+    assert.ok(evidenceIndex > verifyIndex);
+    assert.match(
+      source,
+      /if \(gitAccessSealed\) \{\n    fail\("Git access is sealed after package execution begins"\);/,
+    );
     return;
   }
   const fixture = createFixture();

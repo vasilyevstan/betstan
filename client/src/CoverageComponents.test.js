@@ -115,11 +115,83 @@ jest.mock('./pages/auth/LogOut', () => {
   );
 });
 
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+// Local noon on a fixed day. Freezing the clock at midday keeps every fixture
+// bet far from local midnight in both directions, so the "today" bucket cannot
+// flip while the test runs, and no fixture bet sits on the exact 7-day or
+// 30-day cut-off. The date-preset counts asserted below are therefore stable
+// regardless of when, or in which timezone, the suite runs.
+const FROZEN_CLOCK = new Date(2026, 4, 15, 12, 0, 0, 0);
+
+// Bet index -> age at the frozen clock, strictly increasing so the default
+// "Newest first" order matches fixture index order.
+const BET_AGE_BY_INDEX = [
+  1 * HOUR_MS, //    0  today (11:00)
+  2 * HOUR_MS, //    1  today (10:00)
+  3 * HOUR_MS, //    2  today (09:00)
+  4 * HOUR_MS, //    3  today (08:00)
+  5 * HOUR_MS, //    4  today (07:00)          -> TODAY = 5
+  18 * HOUR_MS, //   5  yesterday 18:00: inside a rolling 24h window, not today
+  30 * HOUR_MS, //   6  within 7 days
+  null, //           7  invalid timestamp: excluded from every dated preset
+  102 * HOUR_MS, //  8  within 7 days
+  126 * HOUR_MS, //  9  within 7 days, 42h clear of the 7-day edge -> 7D = 9
+  9 * DAY_MS, //    10  within 30 days, 2d clear of the 7-day edge
+  11 * DAY_MS, //   11
+  13 * DAY_MS, //   12
+  15 * DAY_MS, //   13
+  17 * DAY_MS, //   14
+  19 * DAY_MS, //   15
+  21 * DAY_MS, //   16
+  23 * DAY_MS, //   17  7d clear of the 30-day edge                 -> 30D = 17
+  35 * DAY_MS, //   18  older than 30 days, 5d clear of the edge
+  38 * DAY_MS, //   19
+  41 * DAY_MS, //   20
+  44 * DAY_MS, //   21
+  47 * DAY_MS, //   22
+  50 * DAY_MS, //   23
+  53 * DAY_MS, //   24                                              -> ALL = 25
+];
+
+// Exact expected result counts for the fixture above.
+const EXPECTED_DATE_PRESET_COUNTS = [
+  ['TODAY', 5],
+  ['7D', 9],
+  ['30D', 17],
+  ['ALL', 25],
+];
+
+// Bet-level status -> the exact colour class MyBets must put on `.my-bets-status`.
+const EXPECTED_BET_STATUS_CLASS = {
+  PENDING: 'text-warning',
+  CONFIRMED: 'text-info',
+  DECLINED: 'text-danger',
+  WIN: 'text-success',
+  LOSS: 'text-danger',
+  VOID: 'text-secondary',
+  UNKNOWN: 'text-success', // default branch
+};
+
+const readBetStatusBadges = () =>
+  Array.from(document.querySelectorAll('.my-bets-status')).map((element) => ({
+    element,
+    status: element.textContent,
+  }));
+
+const firstSelectionRow = (card) =>
+  card.querySelector('.my-bets-row:not(.my-bets-row--header)');
+
 describe('coverage components', () => {
   beforeEach(() => {
     axios.get.mockReset();
     axios.post.mockReset();
     axios.post.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it('drives App defaults, accepted parameters, scoped IDs, and refresh callbacks', async () => {
@@ -191,19 +263,20 @@ describe('coverage components', () => {
   });
 
   it('covers My Bets filters, sorting, pagination, status colors, and row fallbacks', async () => {
-    const now = Date.now();
+    jest.useFakeTimers();
+    jest.setSystemTime(FROZEN_CLOCK);
+
+    const now = FROZEN_CLOCK.getTime();
     const statuses = ['PENDING', 'CONFIRMED', 'DECLINED', 'WIN', 'LOSS', 'VOID', 'UNKNOWN'];
     const bets = Array.from({ length: 25 }, (_, index) => {
       const status = statuses[index % statuses.length];
+      const age = BET_AGE_BY_INDEX[index];
       return {
         ...(index === 6 ? {} : { _id: `bet-${index}` }),
         slipId: `slip-${index}`,
         status,
         wager: index + 1,
-        timestamp:
-          index === 7
-            ? 'invalid'
-            : new Date(now - index * 3 * 24 * 60 * 60 * 1000).toISOString(),
+        timestamp: age === null ? 'invalid' : new Date(now - age).toISOString(),
         betKind: index % 2 === 0 ? 'LIVE' : 'PRE_MATCH',
         ...(status === 'DECLINED' ? { declineReason: 'STALE_QUOTE' } : {}),
         rows:
@@ -246,11 +319,34 @@ describe('coverage components', () => {
 
     await screen.findByText('25 bets found');
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
-    expect(document.querySelector('.text-warning')).not.toBeNull();
-    expect(document.querySelector('.text-info')).not.toBeNull();
-    expect(document.querySelector('.text-danger')).not.toBeNull();
-    expect(document.querySelector('.text-success')).not.toBeNull();
-    expect(document.querySelector('.text-secondary')).not.toBeNull();
+
+    // Bet-level status colours are asserted on the status badge itself, never on
+    // an unrelated row, slip, or counter element that happens to share a class.
+    const statusBadges = readBetStatusBadges();
+    expect(statusBadges).toHaveLength(20);
+    expect(new Set(statusBadges.map((badge) => badge.status))).toEqual(
+      new Set(Object.keys(EXPECTED_BET_STATUS_CLASS)),
+    );
+    Object.entries(EXPECTED_BET_STATUS_CLASS).forEach(([status, expectedClass]) => {
+      const badgesForStatus = statusBadges.filter((badge) => badge.status === status);
+      expect(badgesForStatus.length).toBeGreaterThan(0);
+      badgesForStatus.forEach(({ element }) => {
+        expect(element).toHaveTextContent(status);
+        expect(element).toHaveClass('my-bets-status', expectedClass, { exact: true });
+      });
+    });
+
+    // Row-level settlement colouring is asserted inside the owning selection row.
+    const cards = document.querySelectorAll('.my-bets-card');
+    expect(cards).toHaveLength(20);
+    expect(cards[0]).toHaveTextContent('Needle Match');
+    expect(firstSelectionRow(cards[0]).querySelectorAll('.text-success')).toHaveLength(4);
+    expect(cards[1]).toHaveTextContent('Event 1');
+    expect(firstSelectionRow(cards[1]).querySelectorAll('.text-danger')).toHaveLength(4);
+    expect(cards[2]).toHaveTextContent('Event 2');
+    expect(
+      firstSelectionRow(cards[2]).querySelectorAll('.text-success, .text-danger'),
+    ).toHaveLength(0);
 
     fireEvent.click(screen.getByRole('button', { name: 'Show all selections (5)' }));
     expect(screen.getByRole('button', { name: 'Show less selections' })).toBeInTheDocument();
@@ -269,14 +365,18 @@ describe('coverage components', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'DECLINED' }));
     expect(await screen.findByText(/bets found/)).toHaveTextContent('4 bets found');
+    const declinedBadges = readBetStatusBadges();
+    expect(declinedBadges).toHaveLength(4);
+    declinedBadges.forEach(({ element }) => {
+      expect(element).toHaveTextContent('DECLINED');
+      expect(element).toHaveClass('my-bets-status', 'text-danger', { exact: true });
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'ALL' }));
     const dateSelect = screen.getByRole('combobox');
-    for (const preset of ['TODAY', '7D', '30D']) {
+    for (const [preset, expectedCount] of EXPECTED_DATE_PRESET_COUNTS) {
       fireEvent.change(dateSelect, { target: { value: preset } });
-      await waitFor(() => {
-        expect(screen.getByText(/bets found/)).toBeInTheDocument();
-      });
+      expect(await screen.findByText(`${expectedCount} bets found`)).toBeInTheDocument();
     }
 
     fireEvent.click(screen.getByRole('button', { name: 'Newest first' }));

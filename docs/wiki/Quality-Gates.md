@@ -84,11 +84,16 @@ future, separately authorized coverage-telemetry workflow. Until that
 activation the production workflow inventory rejects a workflow file with a
 `.yml` or `.yaml` extension when its filename stem case-normalizes to
 `tests-telemetry`, and rejects a workflow name that normalizes to that identity,
-so it cannot become ambiguous or duplicated. The workflow trigger guard does
-not enumerate workflow identities. It protects the inert foundation by
+so it cannot become ambiguous or duplicated. The workflow trigger guard invokes
+the inventory to verify the exact production workflow set, but does not
+independently parse workflow filenames or names to implement this reservation;
+the inventory owns that rejection. The guard protects the inert foundation by
 requiring its descriptor, package, lockfile, engine, and engine-test files to
 exist as non-symlink files, and by checking that the engine retains pinned
-integrity literals, including the reserved identity.
+integrity literals, including the reserved identity. It also pins both
+inventory reservation-rule literals and the deployment-safety harness's
+Node-non-invocation sentinel. Focused negative tests fail closed when inert
+files are missing or symlinked, or when those pins are removed.
 
 Alongside the reservation the repository carries an inert coverage descriptor
 and its supporting tooling. The descriptor records ten packages - Auth,

@@ -45,6 +45,8 @@ coverage_package=".github/coverage/package.json"
 coverage_lock=".github/coverage/package-lock.json"
 coverage_engine=".github/scripts/test-coverage-matrix.js"
 coverage_engine_tests=".github/scripts/test-test-coverage-matrix.js"
+production_workflow_inventory_source="infra/azure/agents/production-workflow-inventory-stan.rb"
+deployment_safety_test_source="infra/azure/agents/test-deployment-safety-ci-stan.sh"
 
 for file in \
   "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
@@ -69,6 +71,15 @@ require_literal "$coverage_engine" '"jest-typescript"' "fixed Jest profile"
 require_literal "$coverage_engine" '"react-scripts"' "fixed React profile"
 require_literal "$coverage_engine" '"node-typescript-c8"' "fixed Common c8 profile"
 require_literal "$coverage_engine" '"tests-telemetry.yml"' "duplicate Telemetry workflow rejection"
+require_literal "$production_workflow_inventory_source" \
+  '%w[tests-telemetry.yml tests-telemetry.yaml]' \
+  "reserved Telemetry workflow filename rule"
+require_literal "$production_workflow_inventory_source" \
+  'name.unicode_normalize(:nfc).downcase == "tests-telemetry"' \
+  "reserved Telemetry workflow name rule"
+require_literal "$deployment_safety_test_source" \
+  'coverage_node_non_invocation=PASS' \
+  "coverage guard Node non-invocation harness"
 
 for workflow in "$ghcr_package_workflow" "$ghcr_cache_recovery_workflow"; do
   require_literal "$workflow" "  workflow_dispatch:" "manual GHCR control trigger"

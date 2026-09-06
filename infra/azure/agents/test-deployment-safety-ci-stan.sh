@@ -23,6 +23,10 @@ secret_guard="$secret_fixture_dir/ingress-guard"
 node_runtime_fixture_dir="$permission_fixture_dir/node-runtime"
 node_poison_dir="$node_runtime_fixture_dir/poison"
 node_invocation_sentinel="$node_runtime_fixture_dir/node-invoked"
+coverage_tooling_fixture_root="$permission_fixture_dir/coverage-tooling"
+coverage_guard_fixture="$permission_fixture_dir/workflow-trigger-guard-stan.sh"
+inventory_source_fixture="$permission_fixture_dir/production-workflow-inventory-stan.rb"
+deployment_safety_source_fixture="$permission_fixture_dir/test-deployment-safety-ci-stan.sh"
 cleanup() {
   rm -f "$test_output"
   rm -f "$secret_fixture_dir/safe.yml" "$secret_fixture_dir/unsafe.yml" "$secret_guard"
@@ -56,6 +60,75 @@ assert_node_not_invoked() {
   fi
 }
 
+prepare_coverage_guard_fixture() {
+  local inventory_source="${1:-$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb}"
+  local deployment_safety_source="${2:-$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh}"
+  rm -rf "$coverage_tooling_fixture_root"
+  mkdir -p \
+    "$coverage_tooling_fixture_root/.github/coverage" \
+    "$coverage_tooling_fixture_root/.github/scripts"
+  cp \
+    "$ROOT_DIR/.github/coverage/test-coverage-matrix.json" \
+    "$ROOT_DIR/.github/coverage/package.json" \
+    "$ROOT_DIR/.github/coverage/package-lock.json" \
+    "$coverage_tooling_fixture_root/.github/coverage/"
+  cp \
+    "$ROOT_DIR/.github/scripts/test-coverage-matrix.js" \
+    "$ROOT_DIR/.github/scripts/test-test-coverage-matrix.js" \
+    "$coverage_tooling_fixture_root/.github/scripts/"
+  cp "$WORKFLOW_TRIGGER_GUARD" "$coverage_guard_fixture"
+  python3 - \
+    "$coverage_guard_fixture" \
+    "$coverage_tooling_fixture_root" \
+    "$inventory_source" \
+    "$deployment_safety_source" <<'PY'
+import pathlib
+import shlex
+import sys
+
+guard_path = pathlib.Path(sys.argv[1])
+tooling_root = pathlib.Path(sys.argv[2])
+inventory_source = pathlib.Path(sys.argv[3])
+deployment_safety_source = pathlib.Path(sys.argv[4])
+content = guard_path.read_text(encoding="utf-8")
+replacements = {
+    'coverage_descriptor=".github/coverage/test-coverage-matrix.json"':
+        f"coverage_descriptor={shlex.quote(str(tooling_root / '.github/coverage/test-coverage-matrix.json'))}",
+    'coverage_package=".github/coverage/package.json"':
+        f"coverage_package={shlex.quote(str(tooling_root / '.github/coverage/package.json'))}",
+    'coverage_lock=".github/coverage/package-lock.json"':
+        f"coverage_lock={shlex.quote(str(tooling_root / '.github/coverage/package-lock.json'))}",
+    'coverage_engine=".github/scripts/test-coverage-matrix.js"':
+        f"coverage_engine={shlex.quote(str(tooling_root / '.github/scripts/test-coverage-matrix.js'))}",
+    'coverage_engine_tests=".github/scripts/test-test-coverage-matrix.js"':
+        f"coverage_engine_tests={shlex.quote(str(tooling_root / '.github/scripts/test-test-coverage-matrix.js'))}",
+    'production_workflow_inventory_source="infra/azure/agents/production-workflow-inventory-stan.rb"':
+        f"production_workflow_inventory_source={shlex.quote(str(inventory_source))}",
+    'deployment_safety_test_source="infra/azure/agents/test-deployment-safety-ci-stan.sh"':
+        f"deployment_safety_test_source={shlex.quote(str(deployment_safety_source))}",
+}
+for old, new in replacements.items():
+    if content.count(old) != 1:
+        raise SystemExit(f"guard fixture assignment count changed: {old}")
+    content = content.replace(old, new)
+guard_path.write_text(content, encoding="utf-8")
+PY
+  chmod +x "$coverage_guard_fixture"
+}
+
+assert_coverage_guard_rejected() {
+  local label="$1"
+  local expected="$2"
+  rm -f "$node_invocation_sentinel"
+  if run_workflow_trigger_guard_without_node \
+      "$coverage_guard_fixture" >"$test_output" 2>&1; then
+    echo "ERROR: $label unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "$expected" "$test_output"
+  assert_node_not_invoked
+}
+
 write_node_poison_shim
 masked_node_guard="$node_runtime_fixture_dir/masked-node-guard"
 cat >"$masked_node_guard" <<'SH'
@@ -79,6 +152,77 @@ fi
 grep -qF "expected negative guard failure" "$test_output"
 test -e "$node_invocation_sentinel"
 rm -f "$node_invocation_sentinel"
+
+prepare_coverage_guard_fixture
+rm -f "$coverage_tooling_fixture_root/.github/coverage/test-coverage-matrix.json"
+assert_coverage_guard_rejected \
+  "coverage guard with a missing descriptor" \
+  "required inert coverage tooling file missing or symlinked"
+
+prepare_coverage_guard_fixture
+rm -f "$coverage_tooling_fixture_root/.github/scripts/test-coverage-matrix.js"
+ln -s \
+  "$ROOT_DIR/.github/scripts/test-coverage-matrix.js" \
+  "$coverage_tooling_fixture_root/.github/scripts/test-coverage-matrix.js"
+assert_coverage_guard_rejected \
+  "coverage guard with a symlinked engine" \
+  "required inert coverage tooling file missing or symlinked"
+
+cp "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
+  "$inventory_source_fixture"
+python3 - "$inventory_source_fixture" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+needle = "%w[tests-telemetry.yml tests-telemetry.yaml]"
+if content.count(needle) != 1:
+    raise SystemExit("inventory fixture rule count changed")
+path.write_text(content.replace(needle, "%w[unreserved.yml]"), encoding="utf-8")
+PY
+prepare_coverage_guard_fixture "$inventory_source_fixture"
+assert_coverage_guard_rejected \
+  "coverage guard with a removed inventory filename rule" \
+  "reserved Telemetry workflow filename rule"
+
+cp "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
+  "$inventory_source_fixture"
+python3 - "$inventory_source_fixture" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+needle = 'name.unicode_normalize(:nfc).downcase == "tests-telemetry"'
+if content.count(needle) != 1:
+    raise SystemExit("inventory fixture name-rule count changed")
+path.write_text(content.replace(needle, "false"), encoding="utf-8")
+PY
+prepare_coverage_guard_fixture "$inventory_source_fixture"
+assert_coverage_guard_rejected \
+  "coverage guard with a removed inventory name rule" \
+  "reserved Telemetry workflow name rule"
+
+cp "$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh" \
+  "$deployment_safety_source_fixture"
+python3 - "$deployment_safety_source_fixture" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+needle = "coverage_node_non_invocation=PASS"
+if content.count(needle) != 2:
+    raise SystemExit("deployment-safety fixture sentinel count changed")
+path.write_text(content.replace(needle, "coverage_node_non_invocation=REMOVED"), encoding="utf-8")
+PY
+prepare_coverage_guard_fixture \
+  "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
+  "$deployment_safety_source_fixture"
+assert_coverage_guard_rejected \
+  "coverage guard with a removed Node non-invocation sentinel" \
+  "coverage guard Node non-invocation harness"
 
 assert_secret_fixture_rejected() {
   local label="$1"
