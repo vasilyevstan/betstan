@@ -57,6 +57,13 @@ authority-ending `occurredAt`, plus legacy history without the additive end
 field. For SSE, verify intentional backpressure disconnect and monotonic
 REST/reconnect recovery together.
 
+For quote-authority changes, include a stable-odds material transition whose
+validity boundary advances, prove its quote version changes without changing
+market version or prices, and prove a fresh replacement still starts at quote
+version 1. Persist both same-price windows in Moderation history, approve each
+inside its own interval, verify suspension/reopen cannot reuse the earlier
+identity, and verify a non-material marker preserves identity and expiry.
+
 For an idempotent mutation with a durable publication marker, hold the first
 broker confirmation open, invoke identical concurrent callers, and prove they
 share one same-process send and outcome. Test restart replay and duplicate-safe
@@ -103,7 +110,9 @@ Accelerated production acceptance must not require simultaneous fresh quotes
 from independent event clocks. Prove multi-event live placement with stable
 pre-kickoff quotes and prove moving in-play placement separately against one
 event clock, while retaining bounded stale-quote decline and restored-draft
-coverage.
+coverage. Persist each placement attempt's quote identity, expiry, immutable
+submission timestamp, and decline details before asserting that one attempt
+succeeded, so a first-attempt activation failure remains diagnosable.
 Observe each acceptance fact on the public read model that owns it. For live
 settlement, Event proves phase, score, and terminal market state, while Bet
 history proves the accepted quote identity, winning selection, settlement

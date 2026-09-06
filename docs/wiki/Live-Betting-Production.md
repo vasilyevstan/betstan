@@ -112,6 +112,14 @@ authoritative settlement or lifecycle closure; its replacement receives the
 next market version and deterministic opening quote. Restart replay uses the
 persisted transition list, so it cannot choose a different rotation.
 
+A live quote identity is `marketId + marketVersion + quoteVersion`, and it
+owns exactly one validity window. Each material transition that advances
+`quoteValidUntil` advances the quote version even if the calculated odds round
+to the same values. Newly opened replacement markets begin at quote version 1,
+while non-material markers such as the first-minute settlement marker preserve
+the existing identity and expiry. This projection rule is engine-versioned;
+matches already in progress continue replaying their persisted transitions.
+
 Second Half Score represents goals scored after half-time, not the final match
 score. Its stable choices are `0 - 0`, `1 - 0`, `0 - 1`, `1 - 1`, `2 - 0`,
 `0 - 2`, `2 - 1`, `1 - 2`, `2 - 2`, and `Other`. At full-time Gamemaster
@@ -128,7 +136,10 @@ Production acceptance keeps two different timing claims separate. It places a
 multi-event live slip while the countdown quotes are stable until kickoff, then
 places an in-play selection against one moving event clock with bounded
 stale-quote retries. It never weakens Moderation or depends on overlapping
-authority windows from independent accelerated matches.
+authority windows from independent accelerated matches. Each attempt writes
+its quote identity, expiry, immutable submission time, and any decline details
+to the protected activation artifact before the journey requires a successful
+placement.
 
 ## Timeline completeness and terminal safeguards
 
