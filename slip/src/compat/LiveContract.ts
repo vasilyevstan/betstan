@@ -12,6 +12,8 @@ export const LiveMarketType = {
   NEXT_THROW_IN: "NEXT_THROW_IN" as PublishedLiveMarketType,
   NEXT_FREE_KICK: "NEXT_FREE_KICK" as PublishedLiveMarketType,
   NEXT_GOAL_KICK: "NEXT_GOAL_KICK" as PublishedLiveMarketType,
+  SECOND_HALF_TIME_RESULT:
+    "SECOND_HALF_TIME_RESULT" as PublishedLiveMarketType,
   SECOND_HALF_SCORE: "SECOND_HALF_SCORE" as PublishedLiveMarketType,
 };
 export type LiveMarketType = PublishedLiveMarketType;

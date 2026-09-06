@@ -361,6 +361,10 @@ function oddsFor(
       return kickoffTeamOdds(timeline);
     case LiveMarketType.FIRST_MINUTE_GOAL:
       return firstMinuteGoalOdds(timeline);
+    case LiveMarketType.SECOND_HALF_TIME_RESULT:
+      throw new Error(
+        "Second Half Time Result generation requires simulation engine v4"
+      );
     case LiveMarketType.SECOND_HALF_SCORE:
       return secondHalfScoreOdds(timeline);
     default:

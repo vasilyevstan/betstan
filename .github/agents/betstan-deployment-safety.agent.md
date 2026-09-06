@@ -276,6 +276,11 @@ inactive. Fail closed when either query is incomplete or fails.
 - Validate rollout order per runtime rather than forcing AKS and OCI through
   one stale expected list. OCI rolls API dependencies before Client and keeps
   Gamemaster last.
+- When a producer will persist or publish a new additive enum value, require a
+  separate compatibility baseline release first. That baseline must teach
+  consumers, schemas, clients, and producer replay/manual-recovery paths the
+  new value without generating it, and it must become the validated rollback
+  source before the producer activation release.
 - Keep Azure and OCI rollback fixtures synchronized with every required
   readiness safety counter. Missing fixture evidence must remain `unknown`
   and block rollback before any image mutation. Optional nested safety markers
@@ -531,6 +536,9 @@ A Running broker with missing consumers is not healthy production.
   recreated.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
+- Reject a producer activation whose rollback target predates support for any
+  durable value the candidate can create. Roll back to the validated
+  compatibility baseline, not to the pre-compatibility generation.
 - Before rolling back across a durable-publication implementation boundary,
   establish the reviewed HTTP write fence, keep the current replay worker
   running, and prove persisted pending-publication markers are drained before

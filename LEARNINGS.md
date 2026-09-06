@@ -208,6 +208,15 @@
   stretch to equal height and top alignment; a status badge wraps only between
   words; and sibling pre-match cards keep aligned market headings, control
   bounds, and odds baselines regardless of team-name length.
+- One live product owns one normal grid slot. A product-specific span makes
+  sibling rows and baselines depend on market type, so multi-option markets
+  must solve their density inside the card rather than widening the card
+  across neighboring slots. Rendered checks should inspect grid placement,
+  overflow, and touch targets at desktop, tablet, and mobile widths.
+- Before activating a producer that can persist a new additive enum value,
+  deploy and validate a compatibility baseline that accepts and replays the
+  value without generating it. That baseline, not the older generation, is
+  the safe rollback target.
 - Access wording must be validated at the capability level: “visible” means a
   discoverable entry point, while “available” or “accessible” means the real
   routed data and intended actions work in every named authentication state.

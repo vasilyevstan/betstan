@@ -222,6 +222,7 @@ it('formats the expanded live incident and product catalog', () => {
   expect(formatLiveMarketType('NEXT_THROW_IN')).toBe('Next Throw-In');
   expect(formatLiveMarketType('NEXT_FREE_KICK')).toBe('Next Free Kick');
   expect(formatLiveMarketType('NEXT_GOAL_KICK')).toBe('Next Goal Kick');
+  expect(formatLiveMarketType('SECOND_HALF_TIME_RESULT')).toBe('Second Half Time Result');
   expect(formatLiveMarketType('SECOND_HALF_SCORE')).toBe('Second Half Score');
   expect(formatIncident({ type: 'THROW_IN', side: 'HOME', minute: 12 }, event))
     .toBe("12' Team A throw-in");
@@ -545,6 +546,20 @@ describe('formatLegacyLiveSelectionLabel', () => {
     };
 
     expect(formatLegacyLiveSelectionLabel('event-42:HALF_TIME_RESULT:1:DRAW', row)).toBe('Half Time Result: Draw');
+  });
+
+  it('derives Second Half Time Result sides from raw identifiers', () => {
+    const row = {
+      eventName: 'Raptors - Sharks',
+      marketType: 'SECOND_HALF_TIME_RESULT',
+      side: 'AWAY',
+      selectionId: 'away',
+    };
+
+    expect(formatLegacyLiveSelectionLabel(
+      'event-42:SECOND_HALF_TIME_RESULT:1:AWAY',
+      row,
+    )).toBe('Second Half Time Result: Sharks');
   });
 
   it('derives exact and Other Second Half Score winners from raw identifiers', () => {

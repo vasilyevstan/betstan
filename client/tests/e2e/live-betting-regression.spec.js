@@ -338,23 +338,23 @@ const getCorrectScoreGeometry = async (article) => {
   });
 };
 
-const getLiveScoreGeometry = async (article) => {
-  const buttons = article.locator('.event-market-buttons--score > *');
-  return buttons.evaluateAll((elements) => {
-    const rows = new Map();
-    const sizes = [];
-    for (const button of elements) {
-      const bounds = button.getBoundingClientRect();
-      const top = Math.round(bounds.top);
-      rows.set(top, (rows.get(top) ?? 0) + 1);
-      sizes.push({
-        height: bounds.height,
+const getLiveMarketGridGeometry = async (article) => (
+  article.locator('.event-market-grid--compact').evaluate((grid) => ({
+    cards: Array.from(grid.querySelectorAll(':scope > .event-market-card')).map((card) => {
+      const bounds = card.getBoundingClientRect();
+      const style = getComputedStyle(card);
+      return {
+        gridColumnEnd: style.gridColumnEnd,
+        gridColumnStart: style.gridColumnStart,
         width: bounds.width,
-      });
-    }
-    return { rowSizes: [...rows.values()], sizes };
-  });
-};
+      };
+    }),
+    columns: getComputedStyle(grid).gridTemplateColumns
+      .split(' ')
+      .filter(Boolean)
+      .length,
+  }))
+);
 
 const getCountdownProductsGeometry = async (article) => (
   article.locator('.event-card__countdown-products').evaluate((container) => {
@@ -990,10 +990,13 @@ test('countdown product controls stay balanced through live-card layout transiti
   }
 });
 
-test('Second Half Score uses five desktop columns and two mobile columns without clipping', async ({ page }) => {
+test('every live product occupies one grid slot at desktop, tablet, and mobile widths', async ({ page }) => {
   const state = createLiveBettingMockState();
   const liveEvent = state.events.find(({ eventId }) => eventId === 'live-1');
-  liveEvent.live.currentMarkets = [{
+  const otherMarkets = liveEvent.live.currentMarkets
+    .filter(({ marketType }) => marketType.startsWith('NEXT_'))
+    .slice(0, 2);
+  const legacyScoreMarket = {
     marketId: 'live-1:SECOND_HALF_SCORE',
     marketType: 'SECOND_HALF_SCORE',
     marketVersion: 1,
@@ -1001,23 +1004,81 @@ test('Second Half Score uses five desktop columns and two mobile columns without
     status: 'OPEN',
     quoteValidUntil: '2030-01-01T13:00:00.000Z',
     selections: [
-      ['SCORE_0_0', '0 - 0'],
-      ['SCORE_1_0', '1 - 0'],
-      ['SCORE_0_1', '0 - 1'],
-      ['SCORE_1_1', '1 - 1'],
-      ['SCORE_2_0', '2 - 0'],
-      ['SCORE_0_2', '0 - 2'],
-      ['SCORE_2_1', '2 - 1'],
-      ['SCORE_1_2', '1 - 2'],
-      ['SCORE_2_2', '2 - 2'],
-      ['OTHER', 'Other'],
-    ].map(([key, label], index) => ({
-      selectionId: `live-1:SECOND_HALF_SCORE:1:${key}`,
-      side: 'NONE',
-      odds: 2 + index / 10,
-      label,
-    })),
-  }];
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_0_0',
+        side: 'NONE',
+        odds: 3.5,
+        label: '0 - 0',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_0_1',
+        side: 'NONE',
+        odds: 4.2,
+        label: '0 - 1',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_0_2',
+        side: 'NONE',
+        odds: 7.5,
+        label: '0 - 2',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_1_0',
+        side: 'NONE',
+        odds: 3.8,
+        label: '1 - 0',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_1_1',
+        side: 'NONE',
+        odds: 4.6,
+        label: '1 - 1',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_1_2',
+        side: 'NONE',
+        odds: 8.1,
+        label: '1 - 2',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_2_0',
+        side: 'NONE',
+        odds: 6.8,
+        label: '2 - 0',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_2_1',
+        side: 'NONE',
+        odds: 7.2,
+        label: '2 - 1',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:SCORE_2_2',
+        side: 'NONE',
+        odds: 11,
+        label: '2 - 2',
+      },
+      {
+        selectionId: 'live-1:SECOND_HALF_SCORE:1:OTHER',
+        side: 'NONE',
+        odds: 5.25,
+        label: 'Other',
+      },
+    ],
+  };
+  liveEvent.live.currentMarkets = [{
+    marketId: 'live-1:SECOND_HALF_TIME_RESULT',
+    marketType: 'SECOND_HALF_TIME_RESULT',
+    marketVersion: 1,
+    quoteVersion: 1,
+    status: 'OPEN',
+    quoteValidUntil: '2030-01-01T13:00:00.000Z',
+    selections: [
+      { selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:HOME', side: 'HOME', odds: 2.35 },
+      { selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:DRAW', side: 'DRAW', odds: 3.15 },
+      { selectionId: 'live-1:SECOND_HALF_TIME_RESULT:1:AWAY', side: 'AWAY', odds: 2.75 },
+    ],
+  }, legacyScoreMarket, ...otherMarkets];
   const liveFeed = await installFakeEventSource(page);
   await installAppApiMocks(page, state);
 
@@ -1027,20 +1088,62 @@ test('Second Half Score uses five desktop columns and two mobile columns without
   await liveFeed.openAll();
 
   const article = page.getByRole('article', { name: 'Raptors - Sharks' });
-  await expect(article.getByText('Second Half Score', { exact: true })).toBeVisible();
-  await expect(article.locator('.event-market-buttons--score > *')).toHaveCount(10);
-  expect((await getLiveScoreGeometry(article)).rowSizes).toEqual([5, 5]);
+  const resultCard = article.locator(
+    '[data-market-type="SECOND_HALF_TIME_RESULT"]',
+  );
+  const legacyScoreCard = article.locator(
+    '[data-market-type="SECOND_HALF_SCORE"]',
+  );
+  await expect(resultCard.getByText('Second Half Time Result', { exact: true }))
+    .toBeVisible();
+  await expect(resultCard.locator('.event-market-button')).toHaveCount(3);
+  await expect(legacyScoreCard.locator('.event-market-button')).toHaveCount(10);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  const mobileGeometry = await getLiveScoreGeometry(article);
-  expect(mobileGeometry.rowSizes).toEqual([2, 2, 2, 2, 2]);
-  expect(mobileGeometry.sizes.every(
-    ({ height, width }) => height >= 44 && width >= 44,
-  )).toBe(true);
-  expect(await hasInternalOverflow(
-    page,
-    '.event-market-buttons--score',
-  )).toBe(false);
+  for (const viewport of [
+    { width: 1600, height: 1000 },
+    { width: 768, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const geometry = await getLiveMarketGridGeometry(article);
+    expect(geometry.cards).toHaveLength(4);
+    expect(geometry.columns).toBeGreaterThanOrEqual(1);
+    expect(geometry.cards.every(
+      ({ gridColumnEnd, gridColumnStart }) => (
+        gridColumnStart === 'auto' && gridColumnEnd === 'auto'
+      ),
+    ), `${viewport.width}px one-slot placement`).toBe(true);
+    expect(
+      Math.max(...geometry.cards.map(({ width }) => width))
+      - Math.min(...geometry.cards.map(({ width }) => width)),
+      `${viewport.width}px equal slot width`,
+    ).toBeLessThanOrEqual(2);
+
+    const resultButtons = await resultCard.locator('.event-market-button')
+      .evaluateAll((buttons) => buttons.map((button) => {
+        const bounds = button.getBoundingClientRect();
+        return { height: bounds.height, width: bounds.width };
+      }));
+    expect(resultButtons.every(
+      ({ height, width }) => height >= 44 && width >= 44,
+    ), `${viewport.width}px touch targets`).toBe(true);
+    const legacyButtons = await legacyScoreCard.locator('.event-market-button')
+      .evaluateAll((buttons) => buttons.map((button) => {
+        const bounds = button.getBoundingClientRect();
+        return { height: bounds.height, width: bounds.width };
+      }));
+    expect(legacyButtons.every(
+      ({ height, width }) => height >= 44 && width >= 44,
+    ), `${viewport.width}px legacy touch targets`).toBe(true);
+    expect(await hasInternalOverflow(
+      page,
+      '[data-market-type="SECOND_HALF_TIME_RESULT"]',
+    ), `${viewport.width}px market overflow`).toBe(false);
+    expect(await hasInternalOverflow(
+      page,
+      '[data-market-type="SECOND_HALF_SCORE"]',
+    ), `${viewport.width}px legacy market overflow`).toBe(false);
+  }
 });
 
 test('two-card live and pre-match sections fill balanced rows and stack on mobile', async ({ page }) => {

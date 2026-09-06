@@ -101,7 +101,10 @@ changed parent context and around each container-layout transition: assert
 label and price bounds
 stay inside their controls, sibling controls do not intersect, and a shared
 section heading spans the whole product group rather than auto-placing above
-only one market.
+only one market. When live-product placement changes, inspect computed grid
+placement at desktop, tablet, and mobile widths and prove every card owns one
+normal slot; include any legacy product-specific class that could otherwise
+retain a multi-column span.
 
 For fallback or error-middleware changes, request several distinct unmatched
 paths, require the bounded structured error, and then prove a valid route still

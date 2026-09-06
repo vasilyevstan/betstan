@@ -113,6 +113,7 @@ function buildMarket(
 ): LiveMarketSnapshot {
   const sides =
     marketType === LiveMarketType.HALF_TIME_RESULT
+      || marketType === LiveMarketType.SECOND_HALF_TIME_RESULT
       ? [TeamSide.HOME, TeamSide.DRAW, TeamSide.AWAY]
       : marketType === LiveMarketType.KICKOFF_TEAM
         ? [TeamSide.HOME, TeamSide.AWAY]
@@ -1568,7 +1569,12 @@ it("voids pending CLOSED timed markets on a manual result without disturbing an 
     LiveMarketType.FIRST_MINUTE_GOAL,
     LiveMarketStatus.CLOSED
   );
-  const pendingSecondHalfScore = buildMarket(
+  const pendingSecondHalfTimeResult = buildMarket(
+    event.eventId,
+    LiveMarketType.SECOND_HALF_TIME_RESULT,
+    LiveMarketStatus.CLOSED
+  );
+  const pendingLegacySecondHalfScore = buildMarket(
     event.eventId,
     LiveMarketType.SECOND_HALF_SCORE,
     LiveMarketStatus.CLOSED
@@ -1584,7 +1590,8 @@ it("voids pending CLOSED timed markets on a manual result without disturbing an 
     liveMarkets: [
       settledKickoffTeam,
       pendingFirstMinuteGoal,
-      pendingSecondHalfScore,
+      pendingSecondHalfTimeResult,
+      pendingLegacySecondHalfScore,
       capClosedNextYellowCard,
     ],
     liveHomeScore: 0,
@@ -1623,12 +1630,22 @@ it("voids pending CLOSED timed markets on a manual result without disturbing an 
   );
   expect(firstMinuteGoalSettlement.winningSide).toBe(TeamSide.NONE);
 
-  const secondHalfScoreSettlement = liveUpdate.data.settlements.find(
+  const secondHalfTimeResultSettlement = liveUpdate.data.settlements.find(
+    (settlement: any) =>
+      settlement.marketId
+      === `${event.eventId}:${LiveMarketType.SECOND_HALF_TIME_RESULT}`
+  );
+  expect(secondHalfTimeResultSettlement).toMatchObject({
+    settlementReason: LiveSettlementReason.MANUAL_VOID,
+    winningSide: TeamSide.NONE,
+  });
+
+  const legacySecondHalfScoreSettlement = liveUpdate.data.settlements.find(
     (settlement: any) =>
       settlement.marketId
       === `${event.eventId}:${LiveMarketType.SECOND_HALF_SCORE}`
   );
-  expect(secondHalfScoreSettlement).toMatchObject({
+  expect(legacySecondHalfScoreSettlement).toMatchObject({
     settlementReason: LiveSettlementReason.MANUAL_VOID,
     winningSide: TeamSide.NONE,
   });
