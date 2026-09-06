@@ -353,6 +353,11 @@ After deployment:
 - test canonical `betstan.xyz`, permanent `www` redirects, and the diagnostic
   OCI host;
 - confirm API responses have the expected JSON shape, not merely HTTP 200;
+- treat unknown-route probes as potentially availability-changing. Record the
+  target pod's restart count, require a bounded structured application error,
+  then prove the documented valid REST/SSE routes remain healthy and the
+  restart count is unchanged. Never invent `ready`, `live`, or other health
+  URLs that the service does not implement;
 - verify RabbitMQ queues have active consumers and no unexpected backlog;
 - upload diagnostics when validation fails;
 - when a protected Job intentionally exits nonzero after emitting a structured

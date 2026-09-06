@@ -72,6 +72,11 @@ Read:
 - Acceptance probes whose obsolete authorization expectation performs a real
   mutation before failing. Require them to reuse bounded synthetic fixtures
   and leave no untracked production data.
+- Unknown-route probes described as read-only. An unmatched URL still executes
+  application fallback code, so require a structured bounded error, a
+  subsequent valid REST or stream request, and unchanged target-pod restart
+  counts. Reject guessed health paths such as unimplemented `ready` or `live`
+  URLs.
 - Long-lived stream and synthetic-fixture isolation after stale-role,
   demotion, unavailable-auth, malformed-scope, and ordinary-public requests.
 - Distinguish intentional bounded SSE backpressure disconnects from data loss:

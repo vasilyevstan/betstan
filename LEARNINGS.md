@@ -1055,3 +1055,18 @@ validated.
   quiesce writers under the shared operation lock, create a checksummed
   canonical-EJSON tombstone before exact deletes, and require a distinct
   confirmation to restore it.
+
+## Route-fallback availability — 2026-09-06
+
+- An HTTP request is not operationally read-only merely because it does not
+  mutate business data. An unknown URL executes fallback code and can change
+  availability if that path throws outside the framework's error pipeline.
+- Express 4 does not forward a rejected async handler without an explicit
+  integration. Use `next(error)` for an unwrapped synchronous catch-all or the
+  service's established async wrapper; never rely on an async fallback throw.
+- Regression coverage must send repeated unmatched requests, assert the
+  structured application error, and then prove a documented valid route still
+  responds without an unhandled rejection.
+- Production route probes must use documented endpoints, record restart counts
+  before and after any intentional unmatched request, and verify both REST/SSE
+  availability and unchanged process continuity.

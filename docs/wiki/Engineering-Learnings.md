@@ -192,6 +192,16 @@ state, exit code, reason, timestamps, and bounded previous logs are captured.
 Separate startup allowance from steady-state liveness so a dead listener is
 restarted promptly without penalizing normal boot time.
 
+### A read-only HTTP probe can still change availability
+
+An unknown URL still executes application fallback code. Express 4 does not
+automatically forward a rejected async handler unless the service loads an
+explicit integration, so an async catch-all that throws can turn an anonymous
+probe into a process exit. Fallbacks should pass errors through `next` or an
+established wrapper. Tests must repeat unmatched requests, then prove a valid
+route remains available; production checks also compare restart counts and use
+documented routes rather than guessed health URLs.
+
 ### Correct false safety blocks without weakening safety
 
 When a repository rule itself causes a proven false block, fix that exact rule

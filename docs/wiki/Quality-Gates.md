@@ -116,6 +116,12 @@ Backend services use Jest, TypeScript checking, in-memory MongoDB, and mocked
 or controlled RabbitMQ channels. Tests cover routes, models, listeners,
 publishers, retries, idempotency, compatibility, and concurrency.
 
+Fallback and error-middleware tests send repeated unmatched requests, require
+the bounded structured error, and then prove a documented valid route remains
+available. In Express 4, rejected async handlers are not forwarded
+automatically unless the service loads an explicit integration, so catch-all
+routes must be covered against process-level unhandled rejection.
+
 ### Shared package tests
 
 The Common package must:
@@ -206,6 +212,9 @@ After deployment:
 - a non-void synthetic live market must resolve to exact `WIN` or `LOSS`;
   unexpected `VOID` fails acceptance;
 - the browser acceptance journey has no page, console, API, or log errors;
+- when fallback routing changes, bounded unknown-route probes return the
+  application error, documented REST/SSE routes remain healthy, and target-pod
+  restart counts do not change;
 - activation is committed only after its bounded acceptance succeeds.
 
 ## Evidence rules
