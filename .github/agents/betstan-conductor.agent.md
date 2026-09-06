@@ -384,6 +384,13 @@ its owner. It is never healthy by default.
   retaining a watcher. Human-originated work remains personally gated. A
   missing pending deployment requires immediate materialization or approval
   reconciliation, not another routine polling interval.
+- If an owner calls a waiting gate human-only, verify that claim against
+  `copilot-cli-protected-operation-policy-stan.sh` and the exact durable
+  authority record in the same checkpoint. A listed `workflow_dispatch`
+  operation with valid issued CLI authority is an automatic gate even when the
+  workflow is sensitive. Correct the classification and route the approver
+  immediately; never spend a monitoring window waiting for a person based only
+  on agent memory or a workflow category.
 - A workflow dispatch URL is not job materialization. Capture its exact run ID
   immediately, keep a manually enabled workflow active until that run has a
   real job and expected protected gate, then route disable-before-approval to
@@ -446,7 +453,8 @@ its owner. It is never healthy by default.
   mutation owner must revalidate master, workflow blob/state, and promotion
   authority after claiming approval, release the claim on drift, and send no
   POST. A valid record must be routed in the same checkpoint, not after another
-  watch interval. Otherwise report
+  watch interval. The machine-readable operation policy is authoritative over
+  an agent's remembered approval category. Otherwise report
   `BLOCKED` and identify the required human approval owner. Never leave either
   case until the next ordinary progress checkpoint.
 - After handing off a preauthorized approval, set the next trigger to the

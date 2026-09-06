@@ -1036,6 +1036,11 @@ validated.
   proves a CLI-owned automatic gate, run the checked-in approval path before
   retaining a watcher. A watcher transports notifications but never owns the
   pending mutation, and human-originated work remains personally gated.
+- Approval eligibility comes from the machine-readable protected-operation
+  policy plus the exact durable authority record, not an agent's remembered
+  risk category. A dispatcher-issued `ghcr-package-validate` run is an
+  automatic CLI-owned gate when those checks pass; misclassifying it as
+  human-only and polling it is an orchestration defect, not a safety boundary.
 
 ## Rotating live-market inventory — 2026-09-04
 

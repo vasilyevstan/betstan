@@ -201,9 +201,14 @@ inactive. Fail closed when either query is incomplete or fails.
 - `ghcr-package-management` bootstrap/validate/prune/repair-build and
   `oci-ghcr-cache-recovery` are production-capable protected workflows. They
   may auto-approve only when the exact run was issued by the CLI dispatcher;
-  direct human runs remain personally gated. The sentinel may establish
-  package linkage but does not
-  prove public visibility. Build repair must bind an exact failed
+  direct human runs remain personally gated. Do not invent a workflow-wide
+  human-only exception when the machine-readable protected-operation policy
+  lists an automatic CLI-owned operation. In particular,
+  `ghcr-package-validate` must use the checked-in automatic approver when its
+  exact dispatcher authority is valid; a risk label or protected environment
+  name is not evidence that a person must approve it. The sentinel may
+  establish package linkage but does not prove public visibility. Build repair
+  must bind an exact failed
   first-attempt build to its successful first-attempt upstream, then rebuild
   and compare every existing exact tag's ARM64 platform digest while
   preserving its verified manifest identity. Require commit-derived

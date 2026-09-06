@@ -231,7 +231,8 @@ for lesson in \
     "\`pull_request.edited\`" \
     "A late advisory verdict is stale until revalidated" \
     "A Ready pod or recovered \`200\` response is current-health evidence" \
-    "One quote identity must never carry multiple expiry values"; do
+    "One quote identity must never carry multiple expiry values" \
+    "Do not invent a human-only exception for a workflow category"; do
     grep -Fq "$lesson" "$lessons" ||
       fail "OCI lessons omit required recovery guidance: $lesson"
 done
@@ -1506,6 +1507,20 @@ grep -Fq 'Treat PR title/body changes as workflow-producing' \
   "$deployment_safety_agent"
 grep -Fq 'hard per-attempt' "$deployment_safety_agent" ||
   fail "deployment safety omits bounded external tool installation"
+grep -Fq 'Do not invent a workflow-wide' "$deployment_safety_agent" &&
+  grep -Fq '`ghcr-package-validate` must use the checked-in automatic approver' \
+    "$deployment_safety_agent" ||
+  fail "deployment safety can invent a human-only exception for CLI package validation"
+grep -Fq 'verify that claim against' "$conductor_agent" &&
+  grep -Fq 'never spend a monitoring window waiting for a person' \
+    "$conductor_agent" ||
+  fail "conductor can poll an eligible CLI-owned approval as human-only"
+grep -Fq 'Approval eligibility comes from the machine-readable protected-operation' \
+  "$ROOT_DIR/docs/wiki/Release-Orchestration.md" ||
+  fail "release wiki omits machine-readable approval authority"
+grep -Fq '### Approval policy outranks agent memory' \
+  "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
+  fail "engineering learnings omit approval-classification drift"
 grep -Fq 'separate compatibility baseline release first' "$deployment_safety_agent" &&
   grep -Fq 'Compatibility-first producer changes' "$ux_release_wiki" ||
   fail "release guidance omits compatibility-first additive producer rollout"

@@ -184,6 +184,14 @@ Long-running output or a queued workflow can hide a waiting approval, missing
 job, or completed handoff. Orchestration should inspect the underlying state
 at bounded checkpoints and assign the next action immediately.
 
+### Approval policy outranks agent memory
+
+Automatic approval eligibility is determined by the checked-in operation
+policy and the exact durable CLI authority record. A sensitive workflow is not
+human-only merely because an agent remembers it that way. When a listed
+CLI-issued operation reaches a waiting gate, route the bounded approver in the
+same checkpoint; polling an eligible gate is an orchestration defect.
+
 ### Recovery is not diagnosis
 
 A service returning `200` again proves current availability, not why it
