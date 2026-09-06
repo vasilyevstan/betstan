@@ -761,6 +761,12 @@ subject, and historical target. Direct human and scheduled runs have no record
 and remain personally gated. Automatic OCI build repair and migration
 recovery must trace to the exact consumed upstream record.
 
+Do not invent a human-only exception for a workflow category that the
+machine-readable protected-operation policy permits the CLI to approve. The
+operation entry and exact durable dispatcher authority decide eligibility. In
+particular, an issued `ghcr-package-validate` run is routed to the checked-in
+automatic approver in the same checkpoint rather than watched for a person.
+
 Treat authority state as production evidence. A `dispatching` intent exists
 before GitHub mutation and owns the durable run-URL capture; recover it with
 `--resume-captured`, not another dispatch. `claimed` means the bound run still
