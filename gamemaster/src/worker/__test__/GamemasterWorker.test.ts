@@ -1105,6 +1105,100 @@ it("does not advance quoteValidUntil for an unaffected OPEN market's identity ac
   );
 });
 
+it("publishes a new quote identity when a material transition advances a stable-odds validity window", async () => {
+  const event = await createEvent(baseKickoff);
+  const firstQuote = buildMarket(
+    event.eventId,
+    LiveMarketType.NEXT_CORNER,
+    LiveMarketStatus.OPEN,
+    1,
+    1
+  );
+  const secondQuote = buildMarket(
+    event.eventId,
+    LiveMarketType.NEXT_CORNER,
+    LiveMarketStatus.OPEN,
+    1,
+    2
+  );
+  const settledMarket = buildMarket(
+    event.eventId,
+    LiveMarketType.NEXT_CORNER,
+    LiveMarketStatus.SETTLED,
+    1,
+    2
+  );
+  const simulation: SimulationResult = {
+    engineVersion: 1,
+    timeline: {
+      engineVersion: 1,
+      eventId: event.eventId,
+      seed: `seed-${event.eventId}`,
+      durationMs: 60000,
+      stoppage: { first: 1, second: 2 },
+      config: buildSimulationResult(event.eventId).timeline.config,
+      entries: [],
+    },
+    transitions: [
+      buildTransition(
+        event.eventId,
+        1,
+        0,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.KICK_OFF,
+        [firstQuote]
+      ),
+      buildTransition(
+        event.eventId,
+        2,
+        30000,
+        EventPhase.FIRST_HALF,
+        LiveIncidentType.YELLOW_CARD,
+        [secondQuote],
+        { minute: 20, side: TeamSide.HOME }
+      ),
+      buildTransition(
+        event.eventId,
+        3,
+        60000,
+        EventPhase.FULL_TIME,
+        LiveIncidentType.FULL_TIME,
+        [settledMarket],
+        { minute: 90, bettingStatus: BettingStatus.CLOSED }
+      ),
+    ],
+    finalScore: { home: 0, away: 0 },
+  };
+
+  await storeSimulation(event, simulation, 0, {
+    liveNextTransitionAt: baseKickoff,
+  });
+
+  const worker = new GamemasterWorker({
+    clock: createStaticClock(new Date(baseKickoff.getTime() + 31000)),
+  });
+  await worker.checkEventsOnce();
+
+  const calls = (
+    LiveEventUpdatePublisher.prototype.publishWithConfirm as unknown as jest.Mock
+  ).mock.calls;
+  expect(calls).toHaveLength(2);
+
+  const publishedFirstQuote = calls[0][0].data.markets[0];
+  const publishedSecondQuote = calls[1][0].data.markets[0];
+  expect(publishedFirstQuote.selections).toEqual(publishedSecondQuote.selections);
+  expect(publishedFirstQuote).toMatchObject({
+    marketVersion: 1,
+    quoteVersion: 1,
+    quoteValidUntil: new Date(baseKickoff.getTime() + 30000).toISOString(),
+  });
+  expect(publishedSecondQuote).toMatchObject({
+    marketVersion: 1,
+    quoteVersion: 2,
+    quoteValidUntil: new Date(baseKickoff.getTime() + 60000).toISOString(),
+  });
+});
+
 it("deserializes and processes an existing event document that predates the pre-kickoff fields", async () => {
   const event = await createEvent(baseKickoff);
   // Simulate a document written before `livePreKickoffPublishedAt` existed

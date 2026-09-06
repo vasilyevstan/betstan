@@ -296,6 +296,47 @@ it("builds bounded summaries for moderation and live payloads", () => {
   });
 });
 
+it("sanitizes absent retry metadata into allowlisted summary fallbacks", () => {
+  expect(sanitizeRetryText(null, { maxBytes: 32 })).toEqual('""');
+  expect(
+    buildRetryPayloadSummary({
+      kind: "PLACE_BET",
+      payload: null,
+    })
+  ).toEqual({
+    betKind: undefined,
+    eventCount: 0,
+    eventIds: undefined,
+    kind: "PLACE_BET",
+    rowCount: 0,
+    slipId: undefined,
+  });
+  expect(
+    buildRetryPayloadSummary({
+      kind: "MODERATION_RESULT",
+      payload: null,
+    })
+  ).toEqual({
+    affectedRowCount: 0,
+    betKind: undefined,
+    kind: "MODERATION_RESULT",
+    result: undefined,
+    slipId: undefined,
+  });
+  expect(
+    buildRetryPayloadSummary({
+      kind: "LIVE_EVENT_UPDATE",
+      payload: null,
+    })
+  ).toEqual({
+    eventId: undefined,
+    kind: "LIVE_EVENT_UPDATE",
+    marketCount: 0,
+    sequence: undefined,
+    settlementCount: 0,
+  });
+});
+
 it("retains replay payload while retryable and clears it when the retry becomes a dead letter", async () => {
   const processSpy = jest
     .spyOn(resultingService, "upsertPlaceBet")

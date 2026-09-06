@@ -208,6 +208,14 @@ conversation summaries are not authority.
   submit race, require the exact `STALE_QUOTE` decline, wait for the replacement
   draft, reselect, and retry with a small bound; never weaken server-side quote
   validation to make acceptance pass.
+- One quote identity must never carry multiple expiry values. A material
+  transition that advances `quoteValidUntil` must advance `quoteVersion` even
+  when displayed odds remain unchanged; otherwise immutable Moderation history
+  freezes the earlier expiry and rejects every later quote under that reused
+  identity. Repeated exact `STALE_QUOTE` outcomes across all bounded fresh
+  reselections are a repository defect, not transient noise. Persist each
+  attempt's identity, expiry, submission timestamp, and decline details before
+  the final success assertion so failed-run artifacts identify the collision.
 - Production acceptance must observe each fact on the public read model that
   owns it. Event proves phase, score, incidents, and terminal market state;
   Bet history proves the accepted quote, winning selection, settlement

@@ -88,6 +88,11 @@ instead of crossing the boundary.
   that ended authority. Persist authority ends from payload `occurredAt`,
   preserve them under out-of-order delivery, and keep old records readable
   when the additive field is absent.
+- A quote identity owns exactly one validity window. When a material
+  transition advances `quoteValidUntil`, advance `quoteVersion` even if
+  rounded or fixed odds are unchanged; never publish a different expiry under
+  the same market/quote identity. Fresh replacement markets start at quote
+  version 1, while non-material markers must not invent a new window.
 - For rotating live markets, persist the complete authoritative lineage while
   bounding only the non-terminal actionable set. A market type may re-enter
   only with a higher market version, and an accepted version must receive one

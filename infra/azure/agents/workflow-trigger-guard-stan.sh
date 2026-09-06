@@ -40,6 +40,14 @@ oci_recovery_workflow=".github/workflows/oci-migration-recovery.yml"
 oci_rollback_workflow=".github/workflows/oci-production-rollback.yml"
 ghcr_package_workflow=".github/workflows/ghcr-package-management.yml"
 ghcr_cache_recovery_workflow=".github/workflows/oci-ghcr-cache-recovery.yml"
+coverage_descriptor=".github/coverage/test-coverage-matrix.json"
+coverage_package=".github/coverage/package.json"
+coverage_lock=".github/coverage/package-lock.json"
+coverage_engine=".github/scripts/test-coverage-matrix.js"
+coverage_engine_tests=".github/scripts/test-test-coverage-matrix.js"
+production_workflow_inventory_source="infra/azure/agents/production-workflow-inventory-stan.rb"
+production_workflow_inventory_test_source="infra/azure/agents/test-production-workflow-inventory-stan.sh"
+deployment_safety_test_source="infra/azure/agents/test-deployment-safety-ci-stan.sh"
 
 for file in \
   "$build_workflow" "$deploy_workflow" "$branch_workflow" "$policy_script" \
@@ -49,6 +57,33 @@ for file in \
   "$ghcr_package_workflow" "$ghcr_cache_recovery_workflow"; do
   [[ -f "$file" ]] || fail "required workflow missing: $file"
 done
+
+for file in \
+  "$coverage_descriptor" "$coverage_package" "$coverage_lock" \
+  "$coverage_engine" "$coverage_engine_tests"; do
+  [[ -f "$file" && ! -L "$file" ]] ||
+    fail "required inert coverage tooling file missing or symlinked: $file"
+done
+
+require_literal "$coverage_engine" 'shell: false' "shell-free child execution"
+require_literal "$coverage_engine" 'const REQUIRED_NODE_VERSION = "20.19.5"' "exact Node runtime"
+require_literal "$coverage_engine" 'const REQUIRED_THRESHOLDS = Object.freeze({ lines: 80, branches: 80 })' "raw coverage thresholds"
+require_literal "$coverage_engine" '"jest-typescript"' "fixed Jest profile"
+require_literal "$coverage_engine" '"react-scripts"' "fixed React profile"
+require_literal "$coverage_engine" '"node-typescript-c8"' "fixed Common c8 profile"
+require_literal "$coverage_engine" '"tests-telemetry.yml"' "duplicate Telemetry workflow rejection"
+require_literal "$production_workflow_inventory_source" \
+  '%w[tests-telemetry.yml tests-telemetry.yaml]' \
+  "reserved Telemetry workflow filename rule"
+require_literal "$production_workflow_inventory_source" \
+  'name.unicode_normalize(:nfc).downcase == "tests-telemetry"' \
+  "reserved Telemetry workflow name rule"
+require_literal "$production_workflow_inventory_test_source" \
+  'telemetry_workflow_reservation_tests=PASS' \
+  "reserved Telemetry workflow inventory test sentinel"
+require_literal "$deployment_safety_test_source" \
+  'coverage_node_non_invocation=PASS' \
+  "coverage guard Node non-invocation harness"
 
 for workflow in "$ghcr_package_workflow" "$ghcr_cache_recovery_workflow"; do
   require_literal "$workflow" "  workflow_dispatch:" "manual GHCR control trigger"

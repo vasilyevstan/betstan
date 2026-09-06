@@ -1399,8 +1399,8 @@ export class GamemasterWorker {
    * against the later (correct, current) `quoteValidUntil` could then be
    * rejected as stale against the earlier frozen value. Skipping
    * FIRST_MINUTE_ELAPSED here keeps `quoteValidUntil` for an unaffected
-   * market's identity stable across it, exactly preserving pre-existing
-   * behavior for every other transition/incident type.
+   * market's identity stable across it. Other authority-changing transitions
+   * receive a new quote version before their cutoff advances.
    */
   private nextQuoteCutoffAt(
     kickoffAt: Date,

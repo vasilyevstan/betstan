@@ -507,7 +507,8 @@ function fillNextMarketSlots(
   homeScore: number,
   awayScore: number,
   timeline: SimTimeline,
-  status: LiveMarketStatus
+  status: LiveMarketStatus,
+  freshMarkets?: Set<LiveMarketType>
 ): number {
   let nextCursor = cursor;
   let attempts = 0;
@@ -542,6 +543,7 @@ function fillNextMarketSlots(
     );
     market.status = status;
     markets.set(type, market);
+    freshMarkets?.add(type);
   }
 
   return nextCursor;
@@ -574,8 +576,10 @@ function repriceOpenMarkets(
     const odds = oddsFor(type, offsetMs, homeScore, awayScore, timeline);
     if (odds.some((odd, index) => odd !== state.odds[index])) {
       state.odds = odds;
-      state.quoteVersion += 1;
     }
+    // Every material transition starts a new authority window, even when
+    // rounding or fixed pricing leaves the displayed odds unchanged.
+    state.quoteVersion += 1;
   });
 }
 
@@ -734,9 +738,9 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
           homeScore,
           awayScore,
           timeline,
-          LiveMarketStatus.OPEN
+          LiveMarketStatus.OPEN,
+          freshMarkets
         );
-        freshMarkets.add(triggered);
       }
     }
 
@@ -794,7 +798,8 @@ export function projectTransitions(timeline: SimTimeline): SimulationTransition[
         homeScore,
         awayScore,
         timeline,
-        LiveMarketStatus.OPEN
+        LiveMarketStatus.OPEN,
+        freshMarkets
       );
       bettingStatus = BettingStatus.OPEN;
     }

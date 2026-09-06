@@ -77,6 +77,37 @@ required aggregate gate includes:
 The OCI-specific validation workflow also checks workflow syntax and runs the
 complete offline OCI contract suite.
 
+### Reserved telemetry identity and inert coverage foundation
+
+The repository reserves the single workflow identity `tests-telemetry` for a
+future, separately authorized coverage-telemetry workflow. Until that
+activation the production workflow inventory rejects a workflow file with a
+`.yml` or `.yaml` extension when its filename stem case-normalizes to
+`tests-telemetry`, and rejects a workflow name that normalizes to that identity,
+so it cannot become ambiguous or duplicated. The workflow trigger guard invokes
+the inventory to verify the exact production workflow set, but does not
+independently parse workflow filenames or names to implement this reservation;
+the inventory owns that rejection. The guard protects the inert foundation by
+requiring its descriptor, package, lockfile, engine, and engine-test files to
+exist as non-symlink files, and by checking that the engine retains pinned
+integrity literals, including the reserved identity. It also pins both
+inventory reservation-rule literals, the inventory test's reservation
+completion sentinel, and the deployment-safety harness's Node-non-invocation
+sentinel. Focused negative tests fail closed when inert files are missing or
+symlinked, or when those pins are removed.
+
+Alongside the reservation the repository carries an inert coverage descriptor
+and its supporting tooling. The descriptor records ten packages - Auth,
+Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
+Slip - a pinned Node runtime, and the same 80% line and 80% branch thresholds
+the current gate applies. This foundation is not a required check today: no
+current workflow invokes the engine, the workflow trigger guard does not
+execute it, and the aggregate above remains the complete set of enforced
+pull-request CI areas. Coverage continues to be enforced by the existing
+per-package coverage gate. Turning the descriptor-driven run into an enforced
+check, including its pinned runtime, requires a separate authorized change
+with its own review and rollback story.
+
 ## Application test layers
 
 ### Service tests
@@ -124,7 +155,12 @@ focus, or dynamic interaction. A screenshot-only assertion is not enough.
 - deterministic corpus tests cover realistic normal and stoppage-time
   distribution;
 - simulation restart produces the same authoritative outcome;
-- quote, phase, market, and settlement transitions remain monotonic;
+- quote, phase, market, and settlement transitions remain monotonic; every
+  material validity-window advance receives a new quote version even when odds
+  stay equal, fresh markets begin at quote version 1, and non-material markers
+  preserve identity and expiry;
+- Moderation retains same-price quote windows independently and accepts each
+  only inside its own expiry and authority interval;
 - every transition exposes no more than six non-terminal products, rotation
   settles before replacement, and market versions increase before a type
   re-enters;
@@ -161,6 +197,9 @@ After deployment:
 - health, routing, TLS, APIs, SSE, queues, consumers, and storage pass;
 - accelerated live acceptance proves a stable multi-event pre-kickoff slip
   separately from a moving in-play selection governed by one event clock;
+- every bounded in-play placement attempt records quote identity, expiry,
+  immutable submission time, and decline details before the final success
+  assertion;
 - acceptance observes each fact on its owning public read model: Event proves
   phase, score, and terminal market state, while Bet history proves accepted
   quote identity, winning selection, settlement reason/sequence, and outcome;
