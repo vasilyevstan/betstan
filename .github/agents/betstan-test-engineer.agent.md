@@ -104,6 +104,13 @@ from independent event clocks. Prove multi-event live placement with stable
 pre-kickoff quotes and prove moving in-play placement separately against one
 event clock, while retaining bounded stale-quote decline and restored-draft
 coverage.
+Observe each acceptance fact on the public read model that owns it. For live
+settlement, Event proves phase, score, and terminal market state, while Bet
+history proves the accepted quote identity, winning selection, settlement
+reason/sequence, and row outcome. Never assume a transient broker field exists
+on an unrelated public snapshot or expand that API only to satisfy a test. A
+non-void synthetic market must settle to an exact `WIN` or `LOSS`; unexpected
+`VOID` is a failed acceptance proof, not a terminal-success fallback.
 
 For rotating live-market changes, prove the maximum actionable count at every
 transition, deterministic slot replacement and version increments, settlement

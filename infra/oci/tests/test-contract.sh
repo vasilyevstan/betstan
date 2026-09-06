@@ -134,6 +134,7 @@ for countdown_contract in \
     '...COUNTDOWN_MARKETS.map(({ marketType }) => marketType),' \
     "{ marketType: 'NEXT_CORNER', label: 'Next Corner Kick' }" \
     "const SETTLEMENT_MARKET_TYPE = 'SECOND_HALF_SCORE';" \
+    "const SETTLEMENT_REASON = 'SECOND_HALF_SCORE';" \
     'data-market-type="${marketType}"' \
     '.toBeLessThanOrEqual(6);' \
     'await expect(article.getByText(label, { exact: true })).toHaveCount(0);' \
@@ -165,16 +166,31 @@ for selection_contract in \
     'row.quoteVersion === acceptedQuote.quoteVersion' \
     'row.selectionId === acceptedQuote.selectionId' \
     'const MAX_LIVE_PLACEMENT_ATTEMPTS = 5;' \
+    'let acceptedLiveQuote;' \
+    'acceptedLiveQuote = selectedLiveQuote;' \
     "expect(submittedLiveBet.declineReason).toBe('STALE_QUOTE');" \
     "submittedLiveBet.rows.some((row) => row.declineReason === 'STALE_QUOTE')," \
     'declinedLiveSlipIds.push(liveSlipId);' \
     ').toBe(`DRAFT:${liveSlipId}`);' \
     'expect(selectedBoards.LIVE.rows).toHaveLength(' \
     'await liveBoard.getByRole('\''button'\'', { name: '\''CLEAN'\'' }).click();' \
-    'expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);'; do
+    'expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);' \
+    'const halfTimeSnapshot = eventSnapshots.find(' \
+    'const secondHalfScoreWinningSelection = (' \
+    'const expectedLiveBetStatus = (' \
+    'winningSelection: liveEventEvidence.secondHalfScoreWinningSelection,' \
+    'expect(liveRow.marketVersion).toBe(acceptedLiveQuote.marketVersion);' \
+    'expect(liveRow.quoteVersion).toBe(acceptedLiveQuote.quoteVersion);' \
+    'expect(liveRow.selectionId).toBe(acceptedLiveQuote.selectionId);' \
+    'expect(liveRow.winningSelection).toBe(' \
+    'expect(liveRow.settlementReason).toBe(SETTLEMENT_REASON);' \
+    'expect(liveRow.settlementSequence).toBe(liveEventEvidence.finalSequence);'; do
   grep -Fq "$selection_contract" "$acceptance_spec" ||
     fail "OCI live acceptance omits moving-quote selection contract: $selection_contract"
 done
+if grep -Fq 'live.settlements' "$acceptance_spec"; then
+  fail "OCI live acceptance reads transient settlement data from the public Event snapshot"
+fi
 for phase in FIRST_HALF_STOPPAGE SECOND_HALF_STOPPAGE; do
   grep -Fq "'$phase'" "$acceptance_spec" ||
     fail "OCI live acceptance omits runtime phase $phase"

@@ -17,6 +17,7 @@ const FIXED_IN_MATCH_MARKETS = [
   'SECOND_HALF_SCORE',
 ];
 const SETTLEMENT_MARKET_TYPE = 'SECOND_HALF_SCORE';
+const SETTLEMENT_REASON = 'SECOND_HALF_SCORE';
 const PRE_KICKOFF_PLACEMENT_MARKET_TYPE = 'KICKOFF_TEAM';
 const COUNTDOWN_MARKETS = [
   { marketType: 'KICKOFF_TEAM', label: 'Kickoff Team' },
@@ -505,6 +506,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const declinedLiveSlipIds = [];
   let liveSlipId;
   let acceptedLiveBet;
+  let acceptedLiveQuote;
 
   // A single moving event clock keeps this in-play acceptance deterministic.
   // The separate pre-kickoff placement above covers the multi-event slip.
@@ -513,7 +515,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     placementAttempt <= MAX_LIVE_PLACEMENT_ATTEMPTS;
     placementAttempt += 1
   ) {
-    await selectLiveMarket({
+    const selectedLiveQuote = await selectLiveMarket({
       fixture: fixtures[0],
       marketType: SETTLEMENT_MARKET_TYPE,
       page,
@@ -551,6 +553,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
     if (submittedLiveBet.status !== 'DECLINED') {
       acceptedLiveBet = submittedLiveBet;
+      acceptedLiveQuote = selectedLiveQuote;
       break;
     }
 
@@ -573,6 +576,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   }
 
   expect(acceptedLiveBet).toBeDefined();
+  expect(acceptedLiveQuote).toBeDefined();
   expect(liveSlipId).toBeDefined();
 
   await expect(page.getByLabel('Wager for PRE-MATCH SLIP')).toHaveValue('10');
@@ -694,15 +698,11 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     const secondHalfScoreMarket = finalSnapshot.live.currentMarkets.find(
       (market) => market.marketType === SETTLEMENT_MARKET_TYPE,
     );
-    const secondHalfScoreSettlement = (
-      Array.isArray(finalSnapshot.live.settlements)
-        ? finalSnapshot.live.settlements
-        : []
-    ).find(
-      (settlement) => settlement.marketId
-        === `${fixture.eventId}:${SETTLEMENT_MARKET_TYPE}`,
+    const halfTimeSnapshot = eventSnapshots.find(
+      (snapshot) => snapshot.live.phase === 'HALF_TIME',
     );
     expect(secondHalfScoreMarket).toBeDefined();
+    expect(halfTimeSnapshot).toBeDefined();
     expect(secondHalfScoreMarket.status).toBe('SETTLED');
     expect(secondHalfScoreMarket.selections).toHaveLength(10);
     expect(
@@ -719,13 +719,28 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       '2 - 2',
       'Other',
     ]);
-    expect(secondHalfScoreSettlement).toBeDefined();
-    expect(
-      secondHalfScoreMarket.selections.some(
-        (selection) =>
-          selection.selectionId === secondHalfScoreSettlement.winningSelection,
-      ),
-    ).toBe(true);
+    expect(finalSnapshot.live.homeScore).toBeGreaterThanOrEqual(
+      halfTimeSnapshot.live.homeScore,
+    );
+    expect(finalSnapshot.live.awayScore).toBeGreaterThanOrEqual(
+      halfTimeSnapshot.live.awayScore,
+    );
+    const secondHalfHomeScore = (
+      finalSnapshot.live.homeScore - halfTimeSnapshot.live.homeScore
+    );
+    const secondHalfAwayScore = (
+      finalSnapshot.live.awayScore - halfTimeSnapshot.live.awayScore
+    );
+    const secondHalfScoreLabel = `${secondHalfHomeScore} - ${secondHalfAwayScore}`;
+    const secondHalfScoreWinningSelection = (
+      secondHalfScoreMarket.selections.find(
+        (selection) => selection.label === secondHalfScoreLabel,
+      )
+      ?? secondHalfScoreMarket.selections.find(
+        (selection) => selection.label === 'Other',
+      )
+    )?.selectionId;
+    expect(secondHalfScoreWinningSelection).toBeDefined();
 
     const resultedEvent = backofficeEvents.find(
       (event) => event.eventId === fixture.eventId,
@@ -738,6 +753,9 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       finalSequence: finalSnapshot.live.sequence,
       homeScore: finalSnapshot.live.homeScore,
       awayScore: finalSnapshot.live.awayScore,
+      halfTimeHomeScore: halfTimeSnapshot.live.homeScore,
+      halfTimeAwayScore: halfTimeSnapshot.live.awayScore,
+      secondHalfScoreWinningSelection,
       incidentTypes: [...incidentTypes].sort(),
       marketTypes: [...new Set(eventSnapshots.flatMap(
         (snapshot) => snapshot.live.currentMarkets.map(
@@ -757,6 +775,36 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   expect([...observedMarketTypes].sort()).toEqual(
     [...ALL_LIVE_MARKET_TYPES].sort(),
   );
+
+  const liveEventEvidence = eventEvidence.find(
+    ({ eventId }) => eventId === fixtures[0].eventId,
+  );
+  expect(liveEventEvidence).toBeDefined();
+  const expectedLiveBetStatus = (
+    acceptedLiveQuote.selectionId
+      === liveEventEvidence.secondHalfScoreWinningSelection
+  ) ? 'WIN' : 'LOSS';
+  await expect.poll(async () => {
+    const bets = await (await page.request.get('/api/bet')).json();
+    const bet = findBySlipId(bets, liveSlipId);
+    const row = bet?.rows?.[0];
+    return {
+      betStatus: bet?.status,
+      rowStatus: row?.status,
+      winningSelection: row?.winningSelection,
+      settlementReason: row?.settlementReason,
+      settlementSequence: row?.settlementSequence,
+    };
+  }, {
+    timeout: 60000,
+    intervals: [500, 1000, 2000],
+  }).toEqual({
+    betStatus: expectedLiveBetStatus,
+    rowStatus: expectedLiveBetStatus,
+    winningSelection: liveEventEvidence.secondHalfScoreWinningSelection,
+    settlementReason: SETTLEMENT_REASON,
+    settlementSequence: liveEventEvidence.finalSequence,
+  });
 
   const settledBets = await (await page.request.get('/api/bet')).json();
   const preKickoffLiveBet = findBySlipId(
@@ -784,14 +832,23 @@ test('production live matches, dual slips, and settlement stay coherent', async 
 
   const liveBet = findBySlipId(settledBets, liveSlipId);
   expect(liveBet).toBeDefined();
-  expect(TERMINAL_BET_STATUSES).toContain(liveBet.status);
+  expect(liveBet.status).toBe(expectedLiveBetStatus);
   expect(liveBet.betKind).toBe('LIVE');
   expect(liveBet.rows).toHaveLength(EXPECTED_LIVE_SETTLEMENT_ROWS);
-  expect(
-    liveBet.rows.every((row) => (
-      row.betKind === 'LIVE' && row.status !== 'NOT_SETTLED'
-    )),
-  ).toBe(true);
+  const liveRow = liveBet.rows[0];
+  expect(liveRow.eventId).toBe(fixtures[0].eventId);
+  expect(liveRow.betKind).toBe('LIVE');
+  expect(liveRow.marketId).toBe(acceptedLiveQuote.marketId);
+  expect(liveRow.marketType).toBe(SETTLEMENT_MARKET_TYPE);
+  expect(liveRow.marketVersion).toBe(acceptedLiveQuote.marketVersion);
+  expect(liveRow.quoteVersion).toBe(acceptedLiveQuote.quoteVersion);
+  expect(liveRow.selectionId).toBe(acceptedLiveQuote.selectionId);
+  expect(liveRow.status).toBe(expectedLiveBetStatus);
+  expect(liveRow.winningSelection).toBe(
+    liveEventEvidence.secondHalfScoreWinningSelection,
+  );
+  expect(liveRow.settlementReason).toBe(SETTLEMENT_REASON);
+  expect(liveRow.settlementSequence).toBe(liveEventEvidence.finalSequence);
 
   const boardsBeforePreMatchSubmit = await (
     await page.request.get('/api/slip/boards')
@@ -862,7 +919,18 @@ test('production live matches, dual slips, and settlement stay coherent', async 
     liveSlipId,
     declinedLiveSlipIds,
     liveBetStatus: liveBet.status,
-    liveRowStatuses: liveBet.rows.map((row) => row.status),
+    liveRow: {
+      eventId: liveRow.eventId,
+      marketId: liveRow.marketId,
+      marketType: liveRow.marketType,
+      marketVersion: liveRow.marketVersion,
+      quoteVersion: liveRow.quoteVersion,
+      selectionId: liveRow.selectionId,
+      winningSelection: liveRow.winningSelection,
+      settlementReason: liveRow.settlementReason,
+      settlementSequence: liveRow.settlementSequence,
+      status: liveRow.status,
+    },
     preMatchSlipId,
     preMatchBetStatus: 'WIN',
     pageErrors: pageErrors.length,
