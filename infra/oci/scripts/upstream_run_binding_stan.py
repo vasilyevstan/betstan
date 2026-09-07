@@ -15,10 +15,13 @@ the two paths cannot drift.
 
 import argparse
 import datetime as dt
+import io
 import json
 import re
+import stat
 import subprocess
 import sys
+import zipfile
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
@@ -28,8 +31,15 @@ ALLOWED_BINDING_KEYS = {
     "workflow",
     "titleTemplates",
     "artifactTemplate",
+    "artifactContent",
     "afterInput",
 }
+ARTIFACT_CONTENT_KEYS = {"fileName", "format", "equals"}
+ARTIFACT_VALUE_TOKEN = re.compile(
+    r"^\{(subject_sha|run_id|input:[A-Za-z0-9_]+)\}$"
+)
+MAX_ARTIFACT_ARCHIVE_BYTES = 50 * 1024 * 1024
+MAX_ARTIFACT_EVIDENCE_BYTES = 1024 * 1024
 
 
 def fail(message):
@@ -74,6 +84,21 @@ def gh_api_pages(path):
     return payload
 
 
+def gh_api_bytes(path):
+    result = subprocess.run(
+        ["gh", "api", path],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(f"unable to download {path}")
+    if not result.stdout:
+        fail(f"empty download for {path}")
+    if len(result.stdout) > MAX_ARTIFACT_ARCHIVE_BYTES:
+        fail(f"download for {path} exceeds the evidence size limit")
+    return result.stdout
+
+
 def parse_timestamp(value, label):
     if not isinstance(value, str) or not value:
         fail(f"{label} is missing")
@@ -90,6 +115,23 @@ def substitute(template, subject_sha, run_id):
     return template.replace("{subject_sha}", subject_sha).replace(
         "{run_id}", run_id
     )
+
+
+def resolve_artifact_value(value, subject_sha, run_id, dispatch_inputs):
+    if not isinstance(value, str):
+        return value
+    token = ARTIFACT_VALUE_TOKEN.fullmatch(value)
+    if token is None:
+        return value
+    name = token.group(1)
+    if name == "subject_sha":
+        return subject_sha
+    if name == "run_id":
+        return run_id
+    input_name = name.split(":", 1)[1]
+    if input_name not in dispatch_inputs:
+        fail(f"artifact content references missing input {input_name}")
+    return dispatch_inputs[input_name]
 
 
 def validate_binding_shape(binding):
@@ -135,10 +177,145 @@ def validate_binding_shape(binding):
         or after_input == binding["input"]
     ):
         fail("binding afterInput must name a different non-empty input")
+    artifact_content = binding.get("artifactContent")
+    if artifact_content is not None:
+        if (
+            not isinstance(artifact_content, dict)
+            or set(artifact_content) != ARTIFACT_CONTENT_KEYS
+        ):
+            fail("binding artifactContent has an invalid schema")
+        file_name = artifact_content["fileName"]
+        if (
+            not isinstance(file_name, str)
+            or not file_name
+            or "/" in file_name
+            or "\\" in file_name
+            or file_name in {".", ".."}
+        ):
+            fail("binding artifactContent fileName is invalid")
+        if artifact_content["format"] not in {"json", "env"}:
+            fail("binding artifactContent format is unsupported")
+        equals = artifact_content["equals"]
+        if not isinstance(equals, dict) or not equals:
+            fail("binding artifactContent equals must be a non-empty object")
+        for key, value in equals.items():
+            if (
+                not isinstance(key, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                or type(value) not in {str, int, bool}
+            ):
+                fail("binding artifactContent equality is invalid")
+            if isinstance(value, str) and (
+                ("{" in value or "}" in value)
+                and ARTIFACT_VALUE_TOKEN.fullmatch(value) is None
+            ):
+                fail("binding artifactContent contains an invalid token")
 
 
-def validate_binding(repository, binding, subject_sha, run_id):
+def load_artifact_content(
+    repository,
+    binding,
+    artifact,
+    subject_sha,
+    run_id,
+    dispatch_inputs,
+):
+    content_contract = binding.get("artifactContent")
+    if content_contract is None:
+        return
+    artifact_id = artifact.get("id")
+    if type(artifact_id) is not int or artifact_id < 1:
+        fail(f"{binding['input']} artifact has an invalid ID")
+    archive = gh_api_bytes(
+        f"repos/{repository}/actions/artifacts/{artifact_id}/zip"
+    )
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            infos = bundle.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                fail(f"{binding['input']} artifact contains duplicate paths")
+            matches = []
+            for info in infos:
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == stat.S_IFLNK:
+                    fail(f"{binding['input']} artifact contains a symlink")
+                path_parts = info.filename.replace("\\", "/").split("/")
+                if (
+                    info.filename.startswith("/")
+                    or any(part == ".." for part in path_parts)
+                ):
+                    fail(f"{binding['input']} artifact contains an unsafe path")
+                if not info.is_dir() and path_parts[-1] == content_contract[
+                    "fileName"
+                ]:
+                    matches.append(info)
+            if len(matches) != 1:
+                fail(
+                    f"{binding['input']} artifact expects exactly one "
+                    f"{content_contract['fileName']}"
+                )
+            evidence_info = matches[0]
+            if (
+                evidence_info.file_size < 1
+                or evidence_info.file_size > MAX_ARTIFACT_EVIDENCE_BYTES
+            ):
+                fail(f"{binding['input']} artifact evidence size is invalid")
+            raw = bundle.read(evidence_info)
+    except zipfile.BadZipFile:
+        fail(f"{binding['input']} artifact is not a valid ZIP archive")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{binding['input']} artifact evidence is not UTF-8")
+
+    if content_contract["format"] == "json":
+        try:
+            observed = json.loads(text)
+        except json.JSONDecodeError:
+            fail(f"{binding['input']} artifact evidence is malformed JSON")
+        if not isinstance(observed, dict):
+            fail(f"{binding['input']} artifact JSON evidence is not an object")
+    else:
+        observed = {}
+        for line in text.splitlines():
+            if not line:
+                continue
+            if "=" not in line:
+                fail(f"{binding['input']} artifact env evidence is malformed")
+            key, value = line.split("=", 1)
+            if (
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                or key in observed
+                or any(ord(character) < 0x20 for character in value)
+            ):
+                fail(f"{binding['input']} artifact env evidence is unsafe")
+            observed[key] = value
+
+    for key, expected_template in content_contract["equals"].items():
+        expected = resolve_artifact_value(
+            expected_template,
+            subject_sha,
+            run_id,
+            dispatch_inputs,
+        )
+        if observed.get(key) != expected:
+            fail(
+                f"{binding['input']} artifact field {key} is "
+                f"{observed.get(key)!r}, expected {expected!r}"
+            )
+
+
+def validate_binding(
+    repository,
+    binding,
+    subject_sha,
+    run_id,
+    dispatch_inputs=None,
+):
     validate_binding_shape(binding)
+    if dispatch_inputs is None:
+        dispatch_inputs = {}
     if not REPOSITORY.fullmatch(repository):
         fail("repository must be owner/name")
     if not FULL_SHA.fullmatch(subject_sha):
@@ -149,6 +326,8 @@ def validate_binding(repository, binding, subject_sha, run_id):
     workflow = gh_api(
         f"repos/{repository}/actions/workflows/{binding['workflow']}"
     )
+    if not isinstance(workflow, dict):
+        fail(f"workflow metadata for {binding['workflow']} is not an object")
     workflow_id = workflow.get("id")
     if not isinstance(workflow_id, int):
         fail(f"unable to resolve workflow ID for {binding['workflow']}")
@@ -157,6 +336,10 @@ def validate_binding(repository, binding, subject_sha, run_id):
     # /attempts/1 is tautological: a rerun still exposes a first attempt, so a
     # rerun upstream would pass. Reject anything whose current attempt is not 1.
     base = gh_api(f"repos/{repository}/actions/runs/{run_id}")
+    if not isinstance(base, dict):
+        fail(f"{binding['input']} run response is not an object")
+    if base.get("id") != int(run_id):
+        fail(f"{binding['input']} run endpoint returned a different run ID")
     if base.get("run_attempt") != 1:
         fail(
             f"{binding['input']} run {run_id} has been rerun "
@@ -201,10 +384,39 @@ def validate_binding(repository, binding, subject_sha, run_id):
 
     # Bind attempt 1 explicitly and confirm it is the same immutable run.
     attempt = gh_api(f"repos/{repository}/actions/runs/{run_id}/attempts/1")
+    if not isinstance(attempt, dict):
+        fail(f"{binding['input']} first attempt response is not an object")
     if attempt.get("run_attempt") != 1:
         fail(f"{binding['input']} first attempt is not attempt 1")
-    for label in ("head_sha", "workflow_id", "conclusion", "event"):
-        if attempt.get(label) != base.get(label):
+    attempt_checks = {
+        "id": (attempt.get("id"), base.get("id")),
+        "workflow_id": (
+            attempt.get("workflow_id"),
+            base.get("workflow_id"),
+        ),
+        "path": (attempt.get("path"), base.get("path")),
+        "repository": (
+            (attempt.get("head_repository") or {}).get("full_name"),
+            (base.get("head_repository") or {}).get("full_name"),
+        ),
+        "head_branch": (
+            attempt.get("head_branch"),
+            base.get("head_branch"),
+        ),
+        "head_sha": (attempt.get("head_sha"), base.get("head_sha")),
+        "status": (attempt.get("status"), base.get("status")),
+        "conclusion": (
+            attempt.get("conclusion"),
+            base.get("conclusion"),
+        ),
+        "event": (attempt.get("event"), base.get("event")),
+        "display_title": (
+            attempt.get("display_title"),
+            base.get("display_title"),
+        ),
+    }
+    for label, (observed, expected) in attempt_checks.items():
+        if observed != expected:
             fail(
                 f"{binding['input']} first attempt {label} differs from the run"
             )
@@ -248,6 +460,16 @@ def validate_binding(repository, binding, subject_sha, run_id):
         "size_in_bytes"
     ] <= 0:
         fail(f"{binding['input']} artifact {artifact_name} is empty")
+    if artifact["size_in_bytes"] > MAX_ARTIFACT_ARCHIVE_BYTES:
+        fail(f"{binding['input']} artifact {artifact_name} is too large")
+    load_artifact_content(
+        repository,
+        binding,
+        artifact,
+        subject_sha,
+        run_id,
+        dispatch_inputs,
+    )
     return {
         "artifactName": artifact_name,
         "createdAt": base.get("created_at"),
@@ -257,8 +479,15 @@ def validate_binding(repository, binding, subject_sha, run_id):
 
 def command_validate(args):
     binding = json.loads(args.binding)
+    dispatch_inputs = json.loads(args.dispatch_inputs)
+    if not isinstance(dispatch_inputs, dict):
+        fail("dispatch inputs must be an object")
     facts = validate_binding(
-        args.repository, binding, args.subject_sha, args.run_id
+        args.repository,
+        binding,
+        args.subject_sha,
+        args.run_id,
+        dispatch_inputs,
     )
     print(
         f"upstream_binding={binding['input']} run={args.run_id} "
@@ -336,7 +565,11 @@ def command_validate_all(args):
         if inputs[name] in (None, ""):
             fail(f"dispatch input {name} is empty")
         facts = validate_binding(
-            args.repository, binding, args.subject_sha, str(inputs[name])
+            args.repository,
+            binding,
+            args.subject_sha,
+            str(inputs[name]),
+            inputs,
         )
         if name in chronology_inputs:
             facts["createdAt"] = parse_timestamp(
@@ -373,6 +606,7 @@ def main():
     one.add_argument("--binding", required=True)
     one.add_argument("--subject-sha", required=True)
     one.add_argument("--run-id", required=True)
+    one.add_argument("--dispatch-inputs", default="{}")
     one.set_defaults(func=command_validate)
 
     every = sub.add_parser("validate-all")

@@ -498,13 +498,39 @@ do
         --expected-workflow-id "$workflow_id" \
         --expected-path "$path" \
         --expected-head-sha "$head_sha" \
+        --require-disabled-workflow \
         --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
         --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
-        unmaterialized="yes"
-        prospective_annotation=" prospective_unmaterialized=yes"
-        prospective_annotation+=" prospective_promotion_pr=$PROSPECTIVE_PROMOTION_PR"
-        prospective_annotation+=" actual_master_sha=$master_sha"
-        prospective_annotation+=" prospective_master_sha=$prospective_master_sha"
+        gh api "repos/$REPO/actions/workflows/$workflow_id" >"$tmp_workflow"
+        gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+        gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=1" >"$tmp_jobs"
+        gh api "repos/$REPO/actions/runs/$run_id/pending_deployments" \
+          >"$tmp_pending"
+        gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
+          >"$tmp_artifacts"
+        if "$AUTHORITY_HELPER" classify-unmaterialized-run \
+          --run-json "$tmp_run" \
+          --workflow-json "$tmp_workflow" \
+          --jobs-json "$tmp_jobs" \
+          --pending-json "$tmp_pending" \
+          --artifacts-json "$tmp_artifacts" \
+          --compare-json "$tmp_prospective_ancestry" \
+          --historical-workflow-json "$tmp_historical_workflow" \
+          --repository "$REPO" \
+          --current-master "$prospective_master_sha" \
+          --expected-run-id "$run_id" \
+          --expected-workflow-id "$workflow_id" \
+          --expected-path "$path" \
+          --expected-head-sha "$head_sha" \
+          --require-disabled-workflow \
+          --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
+          --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
+          unmaterialized="yes"
+          prospective_annotation=" prospective_unmaterialized=yes"
+          prospective_annotation+=" prospective_promotion_pr=$PROSPECTIVE_PROMOTION_PR"
+          prospective_annotation+=" actual_master_sha=$master_sha"
+          prospective_annotation+=" prospective_master_sha=$prospective_master_sha"
+        fi
       fi
     fi
   fi

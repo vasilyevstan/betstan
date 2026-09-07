@@ -948,6 +948,8 @@ approval_count_before="$(
 )"
 [[ "$approval_count_before" =~ ^[0-9]+$ ]] ||
   fail "workflow approval history baseline is invalid"
+claimed_environment_id="$environment_id"
+claimed_gate_key="$gate_key"
 
 claimed_version="$(
   "$AUTHORITY_HELPER" claim-approval \
@@ -967,6 +969,12 @@ claimed_version="$(
 
 if ! approval_revalidation_error="$(
   {
+    validate_pending_gate
+    [[ "$environment_id" = "$claimed_environment_id" ]] ||
+      fail "pending environment changed after approval authority claim"
+    [[ "$gate_key" = "$claimed_gate_key" ]] ||
+      fail "waiting job set changed after approval authority claim"
+    validate_exclusivity
     revalidate_control
     validate_promotion
     revalidate_upstream_bindings

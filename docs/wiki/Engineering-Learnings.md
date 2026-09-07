@@ -150,7 +150,11 @@ upstream run it depends on. Validate the exact workflow, source revision,
 current first-attempt status, title, complete paginated artifact inventory, and
 chronological lineage before authority is issued, again immediately before
 approval, and inside the workflow before cloud access. Bind package validation
-to the exact build run it inspected rather than only to a shared source SHA.
+to the exact build run it inspected rather than only to a shared source SHA,
+and validate the bounded contents of the exact selected artifacts rather than
+trusting names alone. Serialize the global blocker scan and intent creation
+with a repository claim lock; atomic per-request files do not prevent two
+different requests from claiming an empty store concurrently.
 If a previously dispatched but unissued run loses a prerequisite, match its
 exact request, hold its authority lock, and persist pre-cancel evidence in a
 `rejecting` state before cancellation. Resume delayed terminalization from
@@ -159,11 +163,15 @@ observations prove exact cancellation, no approval, no successful job step,
 and no pending deployment; otherwise preserve the rejecting fence for explicit
 recovery.
 Persist the exact pre-cancel and terminal snapshots as well as canonical
-hashes. If `master` advances while the fence is unresolved, allow only the
-matching old request to continue cancellation from a clean current-master
-checkout after proving the recorded control remains an ancestor and its
-historical workflow blob is unchanged. Never extend that historical-control
-exception to dispatch, issue, or approval.
+hashes. Hash exact multiline diagnostics while storing only a bounded one-line
+summary so diagnostic formatting cannot block durable recovery. If `master`
+advances while the fence is unresolved, allow only the matching old request to
+continue cancellation from a clean current-master checkout after proving the
+recorded control remains an ancestor and its historical workflow blob is
+unchanged. Record both the historical control and the actual live retirement
+master. Never extend that historical-control exception to dispatch, issue, or
+approval, and ignore a current-master ghost only after refreshed evidence
+proves it is pristine and its workflow is manually disabled.
 
 ## Release and operations
 

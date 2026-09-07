@@ -122,21 +122,82 @@ binding_run_json() {
 
 binding_artifacts_json() {
   local run_id="$1"
-  local artifact
+  local artifact artifact_id
   case "$run_id" in
-    41) artifact="oci-image-provenance-$SHA-41-1" ;;
-    42) artifact="ghcr-package-management-validate-42-1" ;;
-    43) artifact="oci-capacity-provenance-43-1" ;;
+    41) artifact="oci-image-provenance-$SHA-41-1"; artifact_id=9041 ;;
+    42) artifact="ghcr-package-management-validate-42-1"; artifact_id=9042 ;;
+    43) artifact="oci-capacity-provenance-43-1"; artifact_id=9043 ;;
     *) return 1 ;;
   esac
-  jq -cn --arg artifact "$artifact" '{
+  jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
     total_count:1,
     artifacts:[{
+      id:$artifact_id,
       name:$artifact,
       expired:false,
       size_in_bytes:4096
     }]
   }'
+}
+
+binding_artifact_zip() {
+  local artifact_id="$1"
+  local file_name content
+  case "$artifact_id" in
+    9041)
+      file_name=build-chain.txt
+      content="source_sha=$SHA
+build_run_id=41
+build_run_attempt=1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public=true
+anonymous_pull=pass
+"
+      ;;
+    9042)
+      file_name=validation-summary.json
+      content="$(jq -cn \
+        --arg candidate_build_run_id \
+          "${STUB_PACKAGE_CANDIDATE_BUILD_ID:-41}" \
+        '{
+          terminal_status:"VALIDATED",
+          registry_provider:"ghcr",
+          registry_host:"ghcr.io",
+          repository:"ghcr.io/vasilyevstan/betstan-images",
+          package_visibility:"public",
+          repository_linked:true,
+          candidate_build_run_id:$candidate_build_run_id
+        }')"
+      ;;
+    9043)
+      file_name=provenance.env
+      content="source_sha=$SHA
+acquisition_run_id=43
+runtime_mode=k3s
+shape=VM.Standard.A1.Flex
+ocpus=2
+memory_gb=12
+boot_volume_gb=50
+boot_volume_vpus_per_gb=10
+"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  python3 - "$file_name" "$content" <<'PY'
+import io
+import sys
+import zipfile
+
+file_name, content = sys.argv[1:]
+archive = io.BytesIO()
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+    bundle.writestr(file_name, content)
+sys.stdout.buffer.write(archive.getvalue())
+PY
 }
 
 git() {
@@ -287,6 +348,13 @@ gh() {
       binding_artifact_run_id="${binding_artifact_run_id%%/*}"
       binding_artifacts_json "$binding_artifact_run_id"
       ;;
+    "repos/$REPOSITORY/actions/artifacts/9041/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9042/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9043/zip")
+      local binding_artifact_id
+      binding_artifact_id="${endpoint%/zip}"
+      binding_artifact_zip "${binding_artifact_id##*/}"
+      ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID")
       local status="${STUB_RUN_STATUS:-waiting}"
       jq -cn \
@@ -408,9 +476,10 @@ PY
   esac
 }
 export -f git gh workflow_id_for approval_state_for
-export -f binding_run_json binding_artifacts_json
+export -f binding_run_json binding_artifacts_json binding_artifact_zip
 export ROOT_DIR SHA TARGET_SHA BLOB REPOSITORY post_count_file approval_history_file
 export workflow_state_count_file
+export STUB_PACKAGE_CANDIDATE_BUILD_ID
 mkdir "$tmp_dir/bin"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -638,6 +707,7 @@ load_record_stub() {
   unset STUB_CHANGE_STATE_ON_CALL
   unset STUB_OCI_RUNTIME_MODE
   unset STUB_PACKAGE_CREATED_AT
+  unset STUB_PACKAGE_CANDIDATE_BUILD_ID
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
   runtime_mode="$(
@@ -736,6 +806,13 @@ if STUB_OCI_RUNTIME_MODE=k3s \
   exit 1
 fi
 grep -qF "began before ghcr_build_run_id completed" "$error_file"
+if STUB_OCI_RUNTIME_MODE=k3s \
+  STUB_PACKAGE_CANDIDATE_BUILD_ID=999 \
+  run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "package validation for a different build unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "candidate_build_run_id" "$error_file"
 STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
   run_approver "$STUB_RUN_ID" --approve >"$output_file"
 grep -qF "status=APPROVED" "$output_file"

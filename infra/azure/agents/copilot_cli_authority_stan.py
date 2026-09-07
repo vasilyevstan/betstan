@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -117,6 +119,7 @@ RECORD_V2_KEYS = RECORD_V1_KEYS | {"retirement"}
 REJECTION_KEYS = {
     "reason",
     "failureReason",
+    "failureEvidenceSha256",
     "evidence",
     "evidenceDigest",
     "startedAt",
@@ -131,6 +134,7 @@ REJECTION_KEYS = {
     "approvalsSha256",
 }
 REJECTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
+    "controlShaAtRetirement",
     "evidence",
     "runSha256",
     "jobsSha256",
@@ -383,6 +387,7 @@ def prerequisite_rejection_digest(
     run_id,
     record_version,
     failure_reason,
+    failure_evidence_sha256,
     evidence,
 ):
     return evidence_digest(
@@ -397,6 +402,7 @@ def prerequisite_rejection_digest(
                 "version": record_version,
             },
             "failureReason": failure_reason,
+            "failureEvidenceSha256": failure_evidence_sha256,
             **evidence,
         }
     )
@@ -404,7 +410,8 @@ def prerequisite_rejection_digest(
 
 def prerequisite_rejection_retirement_digest(
     repository,
-    current_master,
+    control_sha,
+    live_master,
     rejection_evidence_digest,
     evidence,
 ):
@@ -413,7 +420,8 @@ def prerequisite_rejection_retirement_digest(
             "schemaVersion": PREREQUISITE_REJECTION_EVIDENCE_SCHEMA,
             "phase": "terminal",
             "repository": repository,
-            "currentMaster": current_master,
+            "controlSha": control_sha,
+            "currentMaster": live_master,
             "rejectionEvidenceDigest": rejection_evidence_digest,
             **evidence,
         }
@@ -480,6 +488,33 @@ def ensure_authority_dir(path, repo_root, *, create):
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         fail("authority directory must have mode 0700")
     return directory
+
+
+@contextlib.contextmanager
+def repository_claim_lock(directory):
+    path = directory / ".repository-claim.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        fail(f"unable to open repository claim lock: {error}")
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            fail("repository claim lock has unsafe metadata")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def atomic_create(path, value):
@@ -1100,6 +1135,14 @@ def load_record(directory, run_id):
         )
         if len(rejection["failureReason"]) > 4096:
             fail("prerequisite rejection failure reason is too long")
+        if (
+            not isinstance(rejection["failureEvidenceSha256"], str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                rejection["failureEvidenceSha256"],
+            )
+        ):
+            fail("prerequisite rejection failure evidence digest is invalid")
         for digest_key in {
             "evidenceDigest",
             "runSha256",
@@ -1184,6 +1227,7 @@ def load_record(directory, run_id):
             record["runId"],
             rejection["recordVersion"],
             rejection["failureReason"],
+            rejection["failureEvidenceSha256"],
             rejection_evidence,
         ):
             fail("prerequisite rejection digest does not match evidence")
@@ -1231,9 +1275,19 @@ def load_record(directory, run_id):
             if (
                 not isinstance(retirement["masterShaAtRetirement"], str)
                 or not FULL_SHA.fullmatch(retirement["masterShaAtRetirement"])
-                or retirement["masterShaAtRetirement"] != record["controlSha"]
             ):
                 fail("prerequisite rejection retirement master SHA is invalid")
+            if (
+                not isinstance(retirement["controlShaAtRetirement"], str)
+                or not FULL_SHA.fullmatch(
+                    retirement["controlShaAtRetirement"]
+                )
+                or retirement["controlShaAtRetirement"]
+                != record["controlSha"]
+            ):
+                fail(
+                    "prerequisite rejection retirement control SHA is invalid"
+                )
             retirement_evidence = retirement["evidence"]
             if (
                 not isinstance(retirement_evidence, dict)
@@ -1277,6 +1331,7 @@ def load_record(directory, run_id):
                 retirement["evidenceDigest"]
                 != prerequisite_rejection_retirement_digest(
                     record["repository"],
+                    retirement["controlShaAtRetirement"],
                     retirement["masterShaAtRetirement"],
                     rejection["evidenceDigest"],
                     retirement_evidence,
@@ -1652,6 +1707,7 @@ def validate_unmaterialized_run_evidence(
     expected_workflow_id=None,
     expected_path=None,
     expected_head_sha=None,
+    require_disabled_workflow=False,
 ):
     if not isinstance(repository, str) or not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
@@ -1733,11 +1789,16 @@ def validate_unmaterialized_run_evidence(
 
     if not isinstance(workflow, dict):
         fail("workflow metadata response must be an object")
+    permitted_workflow_states = (
+        {"disabled_manually"}
+        if require_disabled_workflow
+        else {"active", "disabled_manually"}
+    )
     if (
         type(workflow.get("id")) is not int
         or workflow["id"] != workflow_id
         or workflow.get("path") != path
-        or workflow.get("state") not in {"active", "disabled_manually"}
+        or workflow.get("state") not in permitted_workflow_states
     ):
         fail("workflow metadata does not match the exact run")
 
@@ -1953,6 +2014,7 @@ def command_classify_unmaterialized_run(args):
         expected_workflow_id=args.expected_workflow_id,
         expected_path=args.expected_path,
         expected_head_sha=args.expected_head_sha,
+        require_disabled_workflow=args.require_disabled_workflow,
     )
     print(
         "reason=unmaterialized "
@@ -2243,28 +2305,15 @@ def build_dispatch_record(
     }
 
 
-def command_claim_request(args):
-    policy = validate_policy(load_json_text(args.policy_json, "policy"))
-    normalized = load_normalized(
-        args.normalized,
-        policy,
-        args.repository,
-        args.current_master,
-    )
-    directory = ensure_authority_dir(
-        args.authority_dir,
-        args.repo_root,
-        create=True,
-    )
-    workflow_id = str(args.workflow_id)
-    if not POSITIVE_INTEGER.fullmatch(workflow_id):
-        fail("workflow ID must be a positive integer")
-    if not re.fullmatch(r"[0-9a-f]{40}", args.workflow_blob_sha):
-        fail("workflow blob SHA must be a full lowercase Git object ID")
-    if args.owner_pid < 1:
-        fail("dispatch intent owner PID must be positive")
-    key = request_key(normalized)
-    path = intent_path(directory, key)
+def claim_request_under_lock(
+    args,
+    policy,
+    normalized,
+    directory,
+    workflow_id,
+    key,
+    path,
+):
     if path.exists() or path.is_symlink():
         intent = verify_intent(
             load_intent(directory, key),
@@ -2275,13 +2324,17 @@ def command_claim_request(args):
             workflow_id,
             args.workflow_blob_sha,
         )
-        print(canonical_json({
-            "capturePath": str(directory / intent["captureFile"]),
-            "created": False,
-            "requestKey": key,
-            "state": intent["state"],
-            "version": intent["version"],
-        }))
+        print(
+            canonical_json(
+                {
+                    "capturePath": str(directory / intent["captureFile"]),
+                    "created": False,
+                    "requestKey": key,
+                    "state": intent["state"],
+                    "version": intent["version"],
+                }
+            )
+        )
         return
     blocking_matches = find_blocking_authorities(directory, normalized)
     if blocking_matches:
@@ -2331,13 +2384,51 @@ def command_claim_request(args):
         except FileNotFoundError:
             pass
         raise
-    print(canonical_json({
-        "capturePath": str(capture_path),
-        "created": True,
-        "requestKey": key,
-        "state": intent["state"],
-        "version": intent["version"],
-    }))
+    print(
+        canonical_json(
+            {
+                "capturePath": str(capture_path),
+                "created": True,
+                "requestKey": key,
+                "state": intent["state"],
+                "version": intent["version"],
+            }
+        )
+    )
+
+
+def command_claim_request(args):
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    normalized = load_normalized(
+        args.normalized,
+        policy,
+        args.repository,
+        args.current_master,
+    )
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=True,
+    )
+    workflow_id = str(args.workflow_id)
+    if not POSITIVE_INTEGER.fullmatch(workflow_id):
+        fail("workflow ID must be a positive integer")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.workflow_blob_sha):
+        fail("workflow blob SHA must be a full lowercase Git object ID")
+    if args.owner_pid < 1:
+        fail("dispatch intent owner PID must be positive")
+    key = request_key(normalized)
+    path = intent_path(directory, key)
+    with repository_claim_lock(directory):
+        claim_request_under_lock(
+            args,
+            policy,
+            normalized,
+            directory,
+            workflow_id,
+            key,
+            path,
+        )
 
 
 def command_record_dispatch_status(args):
@@ -2760,15 +2851,33 @@ def load_approval_reviews(path, label):
 
 
 def validate_rejection_job_steps(job, label):
-    steps = job.get("steps", [])
+    if "steps" not in job or "conclusion" not in job:
+        fail(f"{label} contains incomplete job evidence")
+    steps = job["steps"]
     if not isinstance(steps, list):
         fail(f"{label} contains malformed job steps")
     for step in steps:
         if (
             not isinstance(step, dict)
-            or step.get("conclusion") not in SAFE_REJECTION_STEP_CONCLUSIONS
+            or "conclusion" not in step
+            or step["conclusion"] not in SAFE_REJECTION_STEP_CONCLUSIONS
         ):
             fail(f"{label} proves a job step completed before cancellation")
+
+
+def validate_rejection_jobs_shape(jobs, label):
+    job_ids = []
+    for job in jobs:
+        if (
+            "status" not in job
+            or "conclusion" not in job
+            or not POSITIVE_INTEGER.fullmatch(str(job.get("id", "")))
+        ):
+            fail(f"{label} contains incomplete job identity")
+        job_ids.append(int(job["id"]))
+        validate_rejection_job_steps(job, label)
+    if len(job_ids) != len(set(job_ids)):
+        fail(f"{label} contains duplicate job identity")
 
 
 def validate_prerequisite_rejection_preconditions(
@@ -2779,6 +2888,10 @@ def validate_prerequisite_rejection_preconditions(
     approvals,
 ):
     validate_run_against_record(run, record)
+    validate_rejection_jobs_shape(
+        jobs,
+        "prerequisite-rejected jobs response",
+    )
     if run.get("status") != "waiting" or run.get("conclusion") not in {None, ""}:
         fail("prerequisite-rejected run is not waiting at its protected gate")
     if len(pending) != 1:
@@ -2805,10 +2918,6 @@ def validate_prerequisite_rejection_preconditions(
             fail("prerequisite-rejected run has a started or terminal job")
         if waiting_safe:
             waiting_job_ids.append(int(job["id"]))
-        validate_rejection_job_steps(
-            job,
-            "prerequisite-rejected jobs response",
-        )
     if len(waiting_job_ids) != 1:
         fail("prerequisite-rejected run does not have one waiting job")
     if approvals:
@@ -2827,6 +2936,10 @@ def validate_prerequisite_rejection_terminal(
     approvals,
 ):
     validate_run_against_record(run, record)
+    validate_rejection_jobs_shape(
+        jobs,
+        "cancelled prerequisite-rejected jobs response",
+    )
     if run.get("status") != "completed" or run.get("conclusion") != "cancelled":
         fail("prerequisite-rejected run did not terminate as cancelled")
     if pending:
@@ -2839,10 +2952,6 @@ def validate_prerequisite_rejection_terminal(
             or job.get("conclusion") not in REJECTED_TERMINAL_JOB_CONCLUSIONS
         ):
             fail("cancelled prerequisite-rejected run has an unsafe job outcome")
-        validate_rejection_job_steps(
-            job,
-            "cancelled prerequisite-rejected jobs response",
-        )
     observed_job_ids = {
         int(job["id"])
         for job in jobs
@@ -2871,6 +2980,8 @@ def command_begin_prerequisite_rejection(args):
     )
     if len(args.failure_reason) > 4096:
         fail("prerequisite rejection failure reason is too long")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.failure_evidence_sha256):
+        fail("prerequisite rejection failure evidence digest is invalid")
     run = load_json_file(
         args.pre_run_json,
         "prerequisite-rejected run response",
@@ -2925,6 +3036,7 @@ def command_begin_prerequisite_rejection(args):
         rejection = {
             "reason": "prerequisite-rejected",
             "failureReason": args.failure_reason,
+            "failureEvidenceSha256": args.failure_evidence_sha256,
             "evidence": pre_evidence,
             "evidenceDigest": prerequisite_rejection_digest(
                 args.repository,
@@ -2933,6 +3045,7 @@ def command_begin_prerequisite_rejection(args):
                 verified["runId"],
                 verified["version"],
                 args.failure_reason,
+                args.failure_evidence_sha256,
                 pre_evidence,
             ),
             "startedAt": started_at,
@@ -2997,6 +3110,8 @@ def command_retire_prerequisite_rejected_claim(args):
         "pendingSha256": evidence_digest(terminal_pending),
         "approvalsSha256": evidence_digest(terminal_approvals),
     }
+    if not FULL_SHA.fullmatch(args.live_master_sha):
+        fail("prerequisite rejection live master SHA is invalid")
     terminal_evidence = {
         "run": terminal_run,
         "jobs": terminal_jobs,
@@ -3031,11 +3146,13 @@ def command_retire_prerequisite_rejected_claim(args):
             "evidenceDigest": prerequisite_rejection_retirement_digest(
                 args.repository,
                 args.control_sha,
+                args.live_master_sha,
                 verified["rejection"]["evidenceDigest"],
                 terminal_evidence,
             ),
             "retiredAt": utc_text(utc_now()),
-            "masterShaAtRetirement": args.control_sha,
+            "masterShaAtRetirement": args.live_master_sha,
+            "controlShaAtRetirement": args.control_sha,
             **terminal_digests,
         }
         return record
@@ -3683,6 +3800,10 @@ def build_parser():
         required=True,
     )
     begin_prerequisite_rejection.add_argument(
+        "--failure-evidence-sha256",
+        required=True,
+    )
+    begin_prerequisite_rejection.add_argument(
         "--expected-version",
         required=True,
         type=int,
@@ -3739,6 +3860,7 @@ def build_parser():
     retire_rejected.add_argument("--request", required=True)
     retire_rejected.add_argument("--repository", required=True)
     retire_rejected.add_argument("--control-sha", required=True)
+    retire_rejected.add_argument("--live-master-sha", required=True)
     retire_rejected.add_argument("--workflow-id", required=True)
     retire_rejected.add_argument("--workflow-blob-sha", required=True)
     common_authority_arguments(retire_rejected)
@@ -3770,6 +3892,10 @@ def build_parser():
     classify_unmaterialized.add_argument(
         "--expected-head-sha",
         required=True,
+    )
+    classify_unmaterialized.add_argument(
+        "--require-disabled-workflow",
+        action="store_true",
     )
     classify_unmaterialized.add_argument(
         "--minimum-age-seconds",

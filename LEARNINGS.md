@@ -1207,7 +1207,22 @@ Durable rules:
   revalidate prerequisites under the authority lock immediately before every
   `claimed -> issued` transition, and recheck mutable `master` after
   network-bound prerequisite validation immediately before dispatch.
+- Serialize the repository-global blocker scan and intent creation with one
+  kernel-backed claim lock. Atomic creation of each request file alone cannot
+  prevent two distinct requests from both observing an empty authority store.
+- Preserve exact multiline prerequisite diagnostics by hashing the raw bytes,
+  but put only a bounded one-line summary in durable state and logs. Control
+  characters or line breaks must not make persistence itself fail.
+- Validate the contents of the exact selected artifact, not only its name or
+  source SHA. Package validation must name the exact build run it inspected,
+  and capacity evidence must carry the expected candidate and upstream run
+  identities.
 - When a one-use authority is spent on a pre-mutation failure, preserve it as
   terminal evidence and promote a substantive hardened SHA. Never edit the
   authority store, retire a run that materialized jobs, or invent a placeholder
   input purely to change the hash.
+- Cross-master rejection retirement records both the historical control SHA
+  and the actual live `master` that completed retirement. A prospective
+  current-master ghost may be ignored only after refreshing its run, workflow,
+  jobs, pending deployments, and artifacts and proving the workflow is
+  manually disabled.

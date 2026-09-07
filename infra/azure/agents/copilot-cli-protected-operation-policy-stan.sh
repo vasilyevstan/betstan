@@ -176,6 +176,20 @@ CAPACITY_BINDING = {
         "schedule": "oci-capacity-acquire scheduled-master",
     },
     "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
+    "artifactContent": {
+        "fileName": "provenance.env",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "acquisition_run_id": "{run_id}",
+            "runtime_mode": "k3s",
+            "shape": "VM.Standard.A1.Flex",
+            "ocpus": "2",
+            "memory_gb": "12",
+            "boot_volume_gb": "50",
+            "boot_volume_vpus_per_gb": "10",
+        },
+    },
 }
 
 GHCR_BUILD_BINDING = {
@@ -185,6 +199,20 @@ GHCR_BUILD_BINDING = {
     # bound by an artifact naming both the subject SHA and the exact run.
     "titleTemplates": {"workflow_run": None},
     "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+    "artifactContent": {
+        "fileName": "build-chain.txt",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "build_run_id": "{run_id}",
+            "build_run_attempt": "1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+            "registry_public": "true",
+            "anonymous_pull": "pass",
+        },
+    },
 }
 
 GHCR_PACKAGE_BINDING = {
@@ -195,6 +223,19 @@ GHCR_PACKAGE_BINDING = {
         "workflow_dispatch": "ghcr-package validate {subject_sha}",
     },
     "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+    "artifactContent": {
+        "fileName": "validation-summary.json",
+        "format": "json",
+        "equals": {
+            "terminal_status": "VALIDATED",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "repository": "ghcr.io/vasilyevstan/betstan-images",
+            "package_visibility": "public",
+            "repository_linked": True,
+            "candidate_build_run_id": "{input:ghcr_build_run_id}",
+        },
+    },
 }
 
 GHCR_INPUTS = [

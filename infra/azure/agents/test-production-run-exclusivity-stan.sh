@@ -122,7 +122,7 @@ run_title() {
 
 workflow_state() {
   case "${STUB_MODE:-none}" in
-    active-unmaterialized-data)
+    active-unmaterialized-data|prospective-active-unmaterialized-data)
       printf '%s\n' active
       ;;
     inactive-workflow-unmaterialized-data)
@@ -835,6 +835,7 @@ for mode in \
   prospective-inconsistent-pages-data \
   prospective-wrong-final-compare-data \
   prospective-head-present-not-final-data \
+  prospective-active-unmaterialized-data \
   prospective-rendered-title-data \
   prospective-other-active-data; do
   expect_prospective_rejected "$mode"

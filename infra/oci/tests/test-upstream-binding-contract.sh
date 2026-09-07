@@ -58,6 +58,23 @@ reset_fixtures() {
   export FIXTURE_DIR
 }
 
+artifact_zip_fixture() {
+  local artifact_id="$1"
+  local file_name="$2"
+  local content="$3"
+  local destination
+  destination="$FIXTURE_DIR/$(printf '%s' \
+    "repos/$REPO/actions/artifacts/$artifact_id/zip" | tr '/?=&' '____')"
+  python3 - "$destination" "$file_name" "$content" <<'PY'
+import sys
+import zipfile
+
+destination, file_name, content = sys.argv[1:]
+with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as bundle:
+    bundle.writestr(file_name, content)
+PY
+}
+
 # attempt event title path repo branch sha status conclusion workflow_id
 write_capacity_fixtures() {
   local attempt="${1:-1}" event="${2:-workflow_dispatch}" title="${3:-}"
@@ -70,19 +87,31 @@ write_capacity_fixtures() {
 {"id": $WORKFLOW_ID}
 EOF2
   fixture "repos/$REPO/actions/runs/$CAPACITY_RUN" <<EOF2
-{"run_attempt": $attempt, "workflow_id": $wfid, "path": "$path",
+{"id": $CAPACITY_RUN, "run_attempt": $attempt, "workflow_id": $wfid, "path": "$path",
  "head_repository": {"full_name": "$repo"}, "head_branch": "$branch",
  "head_sha": "$sha", "status": "$status", "conclusion": "$conclusion",
  "event": "$event", "display_title": "$title"}
 EOF2
   fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/attempts/1" <<EOF2
-{"run_attempt": 1, "workflow_id": $wfid, "head_sha": "$sha",
- "conclusion": "$conclusion", "event": "$event"}
+{"id": $CAPACITY_RUN, "run_attempt": 1, "workflow_id": $wfid, "path": "$path",
+ "head_repository": {"full_name": "$repo"}, "head_branch": "$branch",
+ "head_sha": "$sha", "status": "$status", "conclusion": "$conclusion",
+ "event": "$event", "display_title": "$title"}
 EOF2
   fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/artifacts?per_page=100" <<EOF2
 {"total_count": 1, "artifacts": [{"name": "oci-capacity-provenance-$CAPACITY_RUN-1",
- "expired": false, "size_in_bytes": 1361}]}
+ "id": 9001, "expired": false, "size_in_bytes": 1361}]}
 EOF2
+  artifact_zip_fixture 9001 provenance.env \
+    "source_sha=$sha
+acquisition_run_id=$CAPACITY_RUN
+runtime_mode=k3s
+shape=VM.Standard.A1.Flex
+ocpus=2
+memory_gb=12
+boot_volume_gb=50
+boot_volume_vpus_per_gb=10
+"
 }
 
 binding_json() {
@@ -136,6 +165,7 @@ fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/artifacts?per_page=100" <<EOF2
     "artifacts": [
       {
         "name": "oci-capacity-provenance-$CAPACITY_RUN-1",
+        "id": 9001,
         "expired": false,
         "size_in_bytes": 1361
       }
@@ -191,15 +221,144 @@ artifact_case "duplicate artifact" \
 
 reset_fixtures
 write_capacity_fixtures
+artifact_zip_fixture 9001 provenance.env \
+  "source_sha=$(printf 'b%.0s' {1..40})
+acquisition_run_id=$CAPACITY_RUN
+runtime_mode=k3s
+shape=VM.Standard.A1.Flex
+ocpus=2
+memory_gb=12
+boot_volume_gb=50
+boot_volume_vpus_per_gb=10
+"
+if run_validator >/dev/null; then
+  fail "capacity artifact with wrong source SHA was accepted"
+fi
+ok "reject capacity artifact content mismatch"
+
+reset_fixtures
+write_capacity_fixtures
+fixture "repos/$REPO/actions/runs/$CAPACITY_RUN" <<EOF2
+{"id": 99, "run_attempt": 1, "workflow_id": $WORKFLOW_ID,
+ "path": ".github/workflows/oci-capacity-acquire.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$SUBJECT_SHA", "status": "completed", "conclusion": "success",
+ "event": "workflow_dispatch",
+ "display_title": "oci-capacity-acquire $SUBJECT_SHA"}
+EOF2
+if run_validator >/dev/null; then
+  fail "run endpoint with a different ID was accepted"
+fi
+ok "reject run endpoint identity mismatch"
+
+reset_fixtures
+write_capacity_fixtures
 fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/attempts/1" <<EOF2
-{"run_attempt": 1, "workflow_id": $WORKFLOW_ID,
- "head_sha": "$(printf 'c%.0s' {1..40})", "conclusion": "success",
- "event": "workflow_dispatch"}
+{"id": $CAPACITY_RUN, "run_attempt": 1, "workflow_id": $WORKFLOW_ID,
+ "path": ".github/workflows/oci-capacity-acquire.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$(printf 'c%.0s' {1..40})", "status": "completed",
+ "conclusion": "success", "event": "workflow_dispatch",
+ "display_title": "oci-capacity-acquire $SUBJECT_SHA"}
 EOF2
 if run_validator >/dev/null; then
   fail "attempt-1 identity mismatch was accepted"
 fi
 ok "reject attempt-1 identity mismatch"
+
+write_build_package_fixtures() {
+  local candidate_build_id="$1"
+  local build_run=101 package_run=202
+  fixture "repos/$REPO/actions/workflows/oci-production-build.yml" <<'EOF2'
+{"id": 401}
+EOF2
+  fixture "repos/$REPO/actions/runs/$build_run" <<EOF2
+{"id": $build_run, "run_attempt": 1, "workflow_id": 401,
+ "path": ".github/workflows/oci-production-build.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$SUBJECT_SHA", "status": "completed", "conclusion": "success",
+ "event": "workflow_run", "display_title": "unpredictable build title",
+ "created_at": "2026-01-01T00:00:00Z",
+ "updated_at": "2026-01-01T00:10:00Z"}
+EOF2
+  fixture "repos/$REPO/actions/runs/$build_run/attempts/1" <<EOF2
+{"id": $build_run, "run_attempt": 1, "workflow_id": 401,
+ "path": ".github/workflows/oci-production-build.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$SUBJECT_SHA", "status": "completed", "conclusion": "success",
+ "event": "workflow_run", "display_title": "unpredictable build title"}
+EOF2
+  fixture "repos/$REPO/actions/runs/$build_run/artifacts?per_page=100" <<EOF2
+{"total_count": 1, "artifacts": [{
+ "id": 9101,
+ "name": "oci-image-provenance-$SUBJECT_SHA-$build_run-1",
+ "expired": false, "size_in_bytes": 2048}]}
+EOF2
+  artifact_zip_fixture 9101 build-chain.txt \
+    "source_sha=$SUBJECT_SHA
+build_run_id=$build_run
+build_run_attempt=1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public=true
+anonymous_pull=pass
+"
+
+  fixture "repos/$REPO/actions/workflows/ghcr-package-management.yml" <<'EOF2'
+{"id": 402}
+EOF2
+  fixture "repos/$REPO/actions/runs/$package_run" <<EOF2
+{"id": $package_run, "run_attempt": 1, "workflow_id": 402,
+ "path": ".github/workflows/ghcr-package-management.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$SUBJECT_SHA", "status": "completed", "conclusion": "success",
+ "event": "workflow_dispatch",
+ "display_title": "ghcr-package validate $SUBJECT_SHA",
+ "created_at": "2026-01-01T00:11:00Z",
+ "updated_at": "2026-01-01T00:20:00Z"}
+EOF2
+  fixture "repos/$REPO/actions/runs/$package_run/attempts/1" <<EOF2
+{"id": $package_run, "run_attempt": 1, "workflow_id": 402,
+ "path": ".github/workflows/ghcr-package-management.yml",
+ "head_repository": {"full_name": "$REPO"}, "head_branch": "master",
+ "head_sha": "$SUBJECT_SHA", "status": "completed", "conclusion": "success",
+ "event": "workflow_dispatch",
+ "display_title": "ghcr-package validate $SUBJECT_SHA"}
+EOF2
+  fixture "repos/$REPO/actions/runs/$package_run/artifacts?per_page=100" <<EOF2
+{"total_count": 1, "artifacts": [{
+ "id": 9102,
+ "name": "ghcr-package-management-validate-$package_run-1",
+ "expired": false, "size_in_bytes": 2048}]}
+EOF2
+  artifact_zip_fixture 9102 validation-summary.json \
+    "{\"terminal_status\":\"VALIDATED\",\"registry_provider\":\"ghcr\",\"registry_host\":\"ghcr.io\",\"repository\":\"ghcr.io/vasilyevstan/betstan-images\",\"package_visibility\":\"public\",\"repository_linked\":true,\"candidate_build_run_id\":\"$candidate_build_id\"}"
+}
+
+reset_fixtures
+write_build_package_fixtures 101
+PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
+  --repository "$REPO" \
+  --policy-json "$("$POLICY" get oci-infrastructure-finalize-oke)" \
+  --subject-sha "$SUBJECT_SHA" \
+  --dispatch-inputs \
+    '{"ghcr_build_run_id":"101","ghcr_package_validation_run_id":"202"}' \
+  >/dev/null || fail "matching build/package content was rejected"
+ok "accept package artifact bound to the exact build"
+
+reset_fixtures
+write_build_package_fixtures 999
+if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
+  --repository "$REPO" \
+  --policy-json "$("$POLICY" get oci-infrastructure-finalize-oke)" \
+  --subject-sha "$SUBJECT_SHA" \
+  --dispatch-inputs \
+    '{"ghcr_build_run_id":"101","ghcr_package_validation_run_id":"202"}' \
+  >/dev/null 2>&1; then
+  fail "package artifact for a different candidate build was accepted"
+fi
+ok "reject package artifact for a different candidate build"
 
 reset_fixtures
 if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate --repository "$REPO" \

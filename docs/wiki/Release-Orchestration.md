@@ -160,7 +160,9 @@ Before deployment, the release chain verifies:
   authority, immediately before approval, and before workflow cloud access;
 - complete paginated artifact inventories, current first-attempt identity, and
   chronological GHCR build -> package validation -> k3s capacity lineage;
-- package-validation evidence naming the exact build run it inspected;
+- exact bounded artifact contents, including package-validation evidence naming
+  the exact build run it inspected and capacity evidence naming its candidate
+  and upstream runs;
 - current `master` identity;
 - image digest availability;
 - migration and schema compatibility;
@@ -180,12 +182,22 @@ terminal observations prove exact cancellation, no approval, no successful
 job step, and no pending deployment. Ambiguous, started, or partially executed
 runs remain globally fenced rather than being replayed or silently replaced.
 The record retains exact pre-cancel and terminal snapshots plus canonical
-hashes. If a descendant `master` is promoted before cancellation completes,
-the matching old request can continue only from a clean checkout at current
-`master`, after proving the recorded control SHA remains an ancestor and its
-historical workflow blob still matches. This narrow recovery path cannot
+hashes. Raw multiline prerequisite diagnostics are retained by digest while a
+bounded one-line summary is used in state and logs, so hostile formatting
+cannot prevent the rejection record from becoming durable. If a descendant
+`master` is promoted before cancellation completes, the matching old request
+can continue only from a clean checkout at current `master`, after proving the
+recorded control SHA remains an ancestor and its historical workflow blob
+still matches. Retirement records both that historical control and the actual
+live `master` that completed recovery. This narrow recovery path cannot
 dispatch, issue, or approve historical control, and it fails closed if
 `master` moves again during the attempt.
+
+The repository-global blocker scan and dispatch-intent creation run under one
+kernel-backed claim lock. This closes the distinct-request race that per-file
+atomic creation cannot prevent. A prospective current-master workflow ghost is
+ignored only when refreshed run, workflow, job, pending-deployment, and
+artifact evidence remains pristine and the workflow is manually disabled.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a

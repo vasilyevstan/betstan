@@ -174,7 +174,7 @@ run_json() {
 
 jobs_json() {
   local run_id="$1"
-  local state status conclusion steps='[]'
+  local state status conclusion steps='[]' omit_steps=false
   state="$(cat "$STATE_DIR/$run_id")"
   if [[ "$state" = "cancelled" ]]; then
     status=completed
@@ -190,10 +190,18 @@ jobs_json() {
     "${STUB_SUCCESSFUL_STEP_RUN:-}" = "$run_id" ]]; then
     steps='[{"conclusion":"success"}]'
   fi
+  if [[ "$state" = "cancelled" &&
+    "${STUB_INCOMPLETE_STEP_RUN:-}" = "$run_id" ]]; then
+    steps='[{}]'
+  fi
+  if [[ "${STUB_MISSING_STEPS_RUN:-}" = "$run_id" ]]; then
+    omit_steps=true
+  fi
   jq -cn \
     --arg status "$status" \
     --arg conclusion "$conclusion" \
     --argjson steps "$steps" \
+    --argjson omit_steps "$omit_steps" \
     '{
       total_count:2,
       jobs:[
@@ -210,10 +218,16 @@ jobs_json() {
           steps:[]
         }
       ]
-    }'
+    }
+    | if $omit_steps then del(.jobs[0].steps) else . end'
 }
 
 runtime_mode() {
+  if [[ "${STUB_RUNTIME_MODE_API_FAIL:-}" = true ]]; then
+    echo "provider runtime mode read failed" >&2
+    echo "provider diagnostic detail" >&2
+    return 1
+  fi
   if [[ -n "${STUB_MODE_SEQUENCE:-}" ]]; then
     local count=0
     [[ -f "$MODE_COUNT_FILE" ]] && count="$(cat "$MODE_COUNT_FILE")"
@@ -385,6 +399,8 @@ export MASTER_COUNT_FILE STUB_APPROVED_RUN STUB_DELAYED_CANCEL_RUN
 export STUB_MASTER_CHANGE_AT
 export STUB_TERMINAL_API_FAIL_RUN STUB_SUCCESSFUL_STEP_RUN
 export STUB_LIVE_MASTER_SHA
+export STUB_RUNTIME_MODE_API_FAIL
+export STUB_INCOMPLETE_STEP_RUN STUB_MISSING_STEPS_RUN
 
 run_dispatcher() {
   local authority_dir="$1"
@@ -526,6 +542,8 @@ jq -e '
   .state == "retired" and
   .controlSha == "1111111111111111111111111111111111111111" and
   .retirement.masterShaAtRetirement ==
+    "3333333333333333333333333333333333333333" and
+  .retirement.controlShaAtRetirement ==
     "1111111111111111111111111111111111111111"
 ' "$cross_authority/709.json" >/dev/null
 cancel_before="$(cat "$CANCEL_COUNT_FILE")"
@@ -552,6 +570,75 @@ fi
 grep -qF "runSha256 does not match evidence" "$WORK/err"
 [[ "$(cat "$CANCEL_COUNT_FILE")" = "$cancel_before" ]]
 unset STUB_DELAYED_CANCEL_RUN
+
+multiline_authority="$WORK/multiline-authority"
+multiline_request="$WORK/multiline-request.json"
+multiline_normalized="$WORK/multiline-normalized.json"
+make_request oci-infrastructure-prepare-k3s "$multiline_request"
+prepare_unresolved \
+  oci-infrastructure-prepare-k3s \
+  711 \
+  claimed \
+  "$multiline_authority" \
+  "$multiline_request" \
+  "$multiline_normalized"
+if STUB_RUNTIME_MODE_API_FAIL=true \
+  run_dispatcher "$multiline_authority" \
+    "$multiline_request" --resume-run 711 >"$WORK/out" 2>"$WORK/err"; then
+  echo "multi-line prerequisite failure unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "exact run 711 was cancelled" "$WORK/err"
+jq -e '
+  .state == "retired" and
+  (.rejection.failureReason |
+    contains("provider runtime mode read failed | provider diagnostic detail")) and
+  (.rejection.failureEvidenceSha256 | test("^[0-9a-f]{64}$"))
+' "$multiline_authority/711.json" >/dev/null
+
+missing_steps_authority="$WORK/missing-steps-authority"
+missing_steps_request="$WORK/missing-steps-request.json"
+missing_steps_normalized="$WORK/missing-steps-normalized.json"
+make_request oci-infrastructure-prepare-k3s "$missing_steps_request"
+prepare_unresolved \
+  oci-infrastructure-prepare-k3s \
+  712 \
+  claimed \
+  "$missing_steps_authority" \
+  "$missing_steps_request" \
+  "$missing_steps_normalized"
+printf 'oke\n' >"$MODE_FILE"
+cancel_before="$(cat "$CANCEL_COUNT_FILE")"
+if STUB_MISSING_STEPS_RUN=712 \
+  run_dispatcher "$missing_steps_authority" \
+    "$missing_steps_request" --resume-run 712 >"$WORK/out" 2>"$WORK/err"; then
+  echo "incomplete pre-cancel job evidence unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "not provably unstarted" "$WORK/err"
+jq -e '.state == "claimed"' "$missing_steps_authority/712.json" >/dev/null
+[[ "$(cat "$CANCEL_COUNT_FILE")" = "$cancel_before" ]]
+
+incomplete_step_authority="$WORK/incomplete-step-authority"
+incomplete_step_request="$WORK/incomplete-step-request.json"
+incomplete_step_normalized="$WORK/incomplete-step-normalized.json"
+make_request oci-infrastructure-prepare-k3s "$incomplete_step_request"
+prepare_unresolved \
+  oci-infrastructure-prepare-k3s \
+  713 \
+  claimed \
+  "$incomplete_step_authority" \
+  "$incomplete_step_request" \
+  "$incomplete_step_normalized"
+if STUB_INCOMPLETE_STEP_RUN=713 \
+  run_dispatcher "$incomplete_step_authority" \
+    "$incomplete_step_request" --resume-run 713 >"$WORK/out" 2>"$WORK/err"; then
+  echo "incomplete terminal step evidence unexpectedly retired authority" >&2
+  exit 1
+fi
+grep -qF "persisted rejecting authority" "$WORK/err"
+jq -e '.state == "rejecting"' \
+  "$incomplete_step_authority/713.json" >/dev/null
 
 transient_authority="$WORK/transient-authority"
 transient_request="$WORK/transient-request.json"

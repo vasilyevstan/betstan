@@ -530,6 +530,24 @@ materialize_record() {
         fi
         fail "$prerequisite_error; exact run $run_id is not provably unstarted at its protected gate, so claimed authority remains fenced"
       fi
+      if ! gh api \
+        "repos/$repository/actions/runs/$run_id" \
+        >"$run_file" 2>>"$materialization_error"; then
+        release_authority_lock
+        if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+          sleep "$MATERIALIZATION_SLEEP_SECONDS"
+          continue
+        fi
+        break
+      fi
+      chmod 600 "$run_file"
+      run_status="$(jq -r '.status // ""' "$run_file")"
+      if [[ "$run_status" = "completed" ]]; then
+        release_authority_lock
+        retire_terminal_claim "$run_id"
+        return
+      fi
+      revalidate_control
       if "$AUTHORITY_HELPER" issue \
         --authority-dir "$AUTHORITY_DIR" \
         --repo-root "$ROOT_DIR" \
@@ -611,6 +629,7 @@ begin_prerequisite_rejection() {
   local run_id="$1"
   local expected_version="$2"
   local prerequisite_error="$3"
+  local failure_summary failure_reason failure_evidence_sha256
   local rejection_summary rejection_version
 
   rm -f \
@@ -637,13 +656,42 @@ begin_prerequisite_rejection() {
     "$pre_rejection_pending_file" \
     "$pre_rejection_approvals_file"
 
+  failure_summary="$(
+    printf '%s' "$prerequisite_error" |
+      python3 -c '
+import hashlib
+import json
+import sys
+
+raw = sys.stdin.buffer.read()
+text = raw.decode("utf-8")
+parts = [" ".join(line.split()) for line in text.splitlines()]
+reason = " | ".join(part for part in parts if part)
+if not reason:
+    reason = "protected prerequisite validation failed"
+while len(reason.encode("utf-8")) > 4096:
+    reason = reason[:-1]
+print(json.dumps({
+    "reason": reason,
+    "sha256": hashlib.sha256(raw).hexdigest(),
+}, separators=(",", ":"), sort_keys=True))
+'
+  )"
+  failure_reason="$(jq -r '.reason' <<<"$failure_summary")"
+  failure_evidence_sha256="$(jq -r '.sha256' <<<"$failure_summary")"
+  [[ -n "$failure_reason" ]] ||
+    fail "prerequisite rejection failure summary is empty"
+  [[ "$failure_evidence_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "prerequisite rejection failure digest is invalid"
+
   rejection_summary="$(
     "$AUTHORITY_HELPER" begin-prerequisite-rejection \
       --authority-dir "$AUTHORITY_DIR" \
       --repo-root "$ROOT_DIR" \
       --run-id "$run_id" \
       --token "$authority_lock_token" \
-      --failure-reason "$prerequisite_error" \
+      --failure-reason "$failure_reason" \
+      --failure-evidence-sha256 "$failure_evidence_sha256" \
       --expected-version "$expected_version" \
       --pre-run-json "$pre_rejection_run_file" \
       --pre-jobs-json "$pre_rejection_jobs_file" \
@@ -761,6 +809,7 @@ PY
         --request "$REQUEST_FILE" \
         --repository "$repository" \
         --control-sha "$current_master" \
+        --live-master-sha "$live_master" \
         --workflow-id "$workflow_id" \
         --workflow-blob-sha "$workflow_blob_sha" \
         2>>"$materialization_error"; then

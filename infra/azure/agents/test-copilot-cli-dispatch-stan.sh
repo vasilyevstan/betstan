@@ -535,6 +535,155 @@ if len(module.HISTORICAL_MUTATION_PROFILES) != 1:
     raise SystemExit("unexpected historical mutation profile was allowlisted")
 PY
 
+concurrent_authority_dir="$tmp_dir/concurrent-authority"
+concurrent_policy="$tmp_dir/concurrent-policy.json"
+concurrent_request_a="$tmp_dir/concurrent-request-a.json"
+concurrent_request_b="$tmp_dir/concurrent-request-b.json"
+concurrent_normalized_a="$tmp_dir/concurrent-normalized-a.json"
+concurrent_normalized_b="$tmp_dir/concurrent-normalized-b.json"
+"$POLICY" get production-deploy >"$concurrent_policy"
+chmod 600 "$concurrent_policy"
+python3 - \
+  "$concurrent_request_a" \
+  "$concurrent_request_b" \
+  "$SHA" \
+  "$REPOSITORY" <<'PY'
+import json
+import os
+import sys
+
+request_a, request_b, sha, repository = sys.argv[1:]
+for path, build_run_id in (
+    (request_a, "9101"),
+    (request_b, "9102"),
+):
+    request = {
+        "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+        "repository": repository,
+        "operation": "production-deploy",
+        "controlSha": sha,
+        "subjectSha": sha,
+        "targetSha": None,
+        "inputs": {
+            "approved_sha": sha,
+            "build_run_id": build_run_id,
+        },
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle)
+        handle.write("\n")
+    os.chmod(path, 0o600)
+PY
+for request_and_normalized in \
+  "$concurrent_request_a:$concurrent_normalized_a" \
+  "$concurrent_request_b:$concurrent_normalized_b"; do
+  concurrent_request="${request_and_normalized%%:*}"
+  concurrent_normalized="${request_and_normalized#*:}"
+  "$HELPER" validate-request \
+    --request "$concurrent_request" \
+    --policy-json "$(cat "$concurrent_policy")" \
+    --repository "$REPOSITORY" \
+    --current-master "$SHA" \
+    --repo-root "$ROOT_DIR" \
+    --output "$concurrent_normalized"
+done
+python3 - \
+  "$HELPER" \
+  "$concurrent_policy" \
+  "$concurrent_normalized_a" \
+  "$concurrent_normalized_b" \
+  "$concurrent_authority_dir" \
+  "$ROOT_DIR" \
+  "$REPOSITORY" \
+  "$SHA" \
+  "$WORKFLOW_ID" \
+  "$BLOB" <<'PY'
+import fcntl
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+(
+    helper,
+    policy_path,
+    normalized_a,
+    normalized_b,
+    authority_dir_text,
+    repo_root,
+    repository,
+    current_master,
+    workflow_id,
+    workflow_blob_sha,
+) = sys.argv[1:]
+authority_dir = pathlib.Path(authority_dir_text)
+authority_dir.mkdir(mode=0o700)
+lock_path = authority_dir / ".repository-claim.lock"
+lock_descriptor = os.open(
+    lock_path,
+    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+    0o600,
+)
+policy_json = pathlib.Path(policy_path).read_text(encoding="utf-8")
+
+def command(normalized):
+    return [
+        helper,
+        "claim-request",
+        "--normalized",
+        normalized,
+        "--policy-json",
+        policy_json,
+        "--repository",
+        repository,
+        "--current-master",
+        current_master,
+        "--workflow-id",
+        workflow_id,
+        "--workflow-blob-sha",
+        workflow_blob_sha,
+        "--owner-pid",
+        str(os.getpid()),
+        "--authority-dir",
+        str(authority_dir),
+        "--repo-root",
+        repo_root,
+    ]
+
+try:
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    processes = [
+        subprocess.Popen(
+            command(normalized),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for normalized in (normalized_a, normalized_b)
+    ]
+    time.sleep(0.1)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+    results = [
+        (*process.communicate(timeout=10), process.returncode)
+        for process in processes
+    ]
+finally:
+    os.close(lock_descriptor)
+
+if sorted(result[2] for result in results) != [0, 1]:
+    raise SystemExit(f"concurrent claim results were not one success and one rejection: {results!r}")
+failure = next(result for result in results if result[2] != 0)
+if "blocked by dispatching authority intent:" not in failure[1]:
+    raise SystemExit(f"concurrent claim rejection was not repository-global: {failure!r}")
+intent_files = list(authority_dir.glob("request-*.json"))
+capture_files = list(authority_dir.glob("dispatch-*.log"))
+if len(intent_files) != 1 or len(capture_files) != 1:
+    raise SystemExit(
+        "concurrent distinct requests created more than one repository claim"
+    )
+PY
+
 write_request
 if STUB_DIRTY_CHECKOUT=true \
   run_dispatcher "$request_file" >"$output_file" 2>"$error_file"; then
