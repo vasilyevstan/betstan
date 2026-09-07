@@ -839,3 +839,32 @@ Lesson: a lease is a mutex with a lifetime, not a durable safety barrier. Incide
 tooling that may run long after the originating operation must reclaim an expired
 lease through the established contended-safe path and record whether the lock was
 verified or reclaimed.
+
+### Incident outcome — 2026-09-07
+
+The compatibility release deployment **failed** and production was **restored to
+`4ec0d8d3836c336e437be2129bb9e71f412d2b37`**, the last known-good generation.
+
+Terminal state after recovery run `34089233049`:
+
+- nine application Deployments ready at the exact `4ec0d8d` GHCR digests, 9/9
+  matching that generation's build provenance and 0/9 matching the failed
+  generation;
+- `gaming-moderation` stable at zero restarts across the bounded observation
+  window, after crash-looping through the failed deployment;
+- twenty-two RabbitMQ queues each with one consumer and no backlog;
+- maintenance fence released and the transferred database lock released after
+  being reclaimed from an expired lease;
+- canonical and diagnostic hosts serving the full API route set, SSE streaming,
+  and both `www` schemes permanently redirecting with path and query preserved.
+
+Neither `1e73aebf33eafd6cbd47a327c960679361a336d5` nor the promotion merge
+`e86d…` that carried it is an accepted rollback baseline. Both belong to the
+generation that failed its own deployment. The only accepted baseline for this
+incident was `oci-production-baseline-34068978832-1`, whose recorded
+`baseline_source_sha` is `4ec0d8d…`.
+
+The failed rollback attempts remain immutable and are retained as evidence:
+`34070306560` and `34070706815` stopped at the ordinary pre-mutation readiness
+gate, and `34082076542` stopped at the expired-lease check. None of the three
+mutated a workload.
