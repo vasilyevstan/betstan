@@ -34,6 +34,21 @@ on:
         required: true
         default: '0'
         type: string
+      fenced_deploy_run_id:
+        description: Failed first-attempt OCI deploy that re-entered maintenance, or 0
+        required: true
+        default: '0'
+        type: string
+      fenced_data_run_id:
+        description: Applied live-data run ID holding the transferred database lock, or 0
+        required: true
+        default: '0'
+        type: string
+      deployed_source_sha:
+        description: Exact source SHA currently deployed behind the maintenance fence, or none
+        required: true
+        default: none
+        type: string
       allow_legacy_admin_auth:
         description: Explicitly allow rollback to a release without persisted Backoffice admin authorization
         required: true
@@ -45,7 +60,7 @@ on:
         type: string
         default: not-requested
       confirmation:
-        description: Type ROLLBACK OCI EXACT DIGEST or RECOVER OCI PARTIAL ROLLBACK
+        description: Type ROLLBACK OCI EXACT DIGEST, RECOVER OCI PARTIAL ROLLBACK, or RECOVER OCI FENCED ROLLBACK
         required: true
         type: string
 
@@ -72,6 +87,10 @@ jobs:
       INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
       PARTIAL_ROLLBACK_RUN_ID: ${{ inputs.partial_rollback_run_id }}
       PRE_RECOVERY_BUILD_RUN_ID: ${{ inputs.pre_recovery_build_run_id }}
+      FENCED_DEPLOY_RUN_ID: ${{ inputs.fenced_deploy_run_id }}
+      FENCED_DATA_RUN_ID: ${{ inputs.fenced_data_run_id }}
+      DEPLOYED_SOURCE_SHA: ${{ inputs.deployed_source_sha }}
+      SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS: ${{ vars.SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS || '5400' }}
       ALLOW_LEGACY_ADMIN_AUTH: ${{ inputs.allow_legacy_admin_auth }}
       LEGACY_ADMIN_AUTH_REASON: ${{ inputs.legacy_admin_auth_reason }}
       CONFIRMATION: ${{ inputs.confirmation }}
@@ -135,10 +154,23 @@ jobs:
           [ "$GITHUB_REF_NAME" = "master" ]
           [[ "$PARTIAL_ROLLBACK_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
           [[ "$PRE_RECOVERY_BUILD_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
-          if [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ]; then
+          [[ "$FENCED_DEPLOY_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "$FENCED_DATA_RUN_ID" =~ ^(0|[1-9][0-9]*)$ ]]
+          if [ "$FENCED_DEPLOY_RUN_ID" = "0" ]; then
+            [ "$FENCED_DATA_RUN_ID" = "0" ]
+            [ "$DEPLOYED_SOURCE_SHA" = "none" ]
+          else
+            [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ]
+            [ "$PRE_RECOVERY_BUILD_RUN_ID" != "0" ]
+            [ "$FENCED_DATA_RUN_ID" != "0" ]
+            [ "$FENCED_DEPLOY_RUN_ID" != "$GITHUB_RUN_ID" ]
+            [[ "$DEPLOYED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [ "$CONFIRMATION" = "RECOVER OCI FENCED ROLLBACK" ]
+          fi
+          if [ "$PARTIAL_ROLLBACK_RUN_ID" = "0" ] && [ "$FENCED_DEPLOY_RUN_ID" = "0" ]; then
             [ "$CONFIRMATION" = "ROLLBACK OCI EXACT DIGEST" ]
             [ "$PRE_RECOVERY_BUILD_RUN_ID" = "0" ]
-          else
+          elif [ "$PARTIAL_ROLLBACK_RUN_ID" != "0" ]; then
             [ "$CONFIRMATION" = "RECOVER OCI PARTIAL ROLLBACK" ]
             [ "$PARTIAL_ROLLBACK_RUN_ID" != "$GITHUB_RUN_ID" ]
             [ "$PRE_RECOVERY_BUILD_RUN_ID" != "0" ]
@@ -157,6 +189,51 @@ jobs:
           git cat-file -e "${TARGET_SHA}^{commit}"
           [ "$(git rev-parse "${TARGET_SHA}^{commit}")" = "$TARGET_SHA" ]
           git merge-base --is-ancestor "$TARGET_SHA" "$current_master"
+
+          if [ "$FENCED_DEPLOY_RUN_ID" != "0" ]; then
+            # The fenced mode is usable only against an incomplete deployment
+            # that successfully re-entered maintenance and never released the
+            # transferred database lock or the public write fence.
+            git cat-file -e "${DEPLOYED_SOURCE_SHA}^{commit}"
+            [ "$(git rev-parse "${DEPLOYED_SOURCE_SHA}^{commit}")" = "$DEPLOYED_SOURCE_SHA" ]
+            git merge-base --is-ancestor "$DEPLOYED_SOURCE_SHA" "$current_master"
+            [ "$DEPLOYED_SOURCE_SHA" != "$TARGET_SHA" ]
+            git merge-base --is-ancestor "$TARGET_SHA" "$DEPLOYED_SOURCE_SHA"
+            deploy_workflow_id="$(
+              gh api "repos/$REPOSITORY/actions/workflows/oci-production-deploy.yml" --jq '.id'
+            )"
+            read -r fenced_workflow fenced_path fenced_event fenced_head_sha \
+              fenced_branch fenced_repository fenced_status fenced_conclusion \
+              fenced_attempt <<<"$(
+                gh api \
+                  "repos/$REPOSITORY/actions/runs/$FENCED_DEPLOY_RUN_ID/attempts/1" \
+                  --jq '[.workflow_id,.path,.event,.head_sha,.head_branch,.head_repository.full_name,.status,.conclusion,.run_attempt] | @tsv'
+              )"
+            [ "$fenced_workflow" = "$deploy_workflow_id" ]
+            [ "$fenced_path" = ".github/workflows/oci-production-deploy.yml" ]
+            [ "$fenced_event" = "workflow_dispatch" ]
+            [ "$fenced_head_sha" = "$DEPLOYED_SOURCE_SHA" ]
+            [ "$fenced_branch" = "master" ]
+            [ "$fenced_repository" = "$REPOSITORY" ]
+            [ "$fenced_status" = "completed" ]
+            [ "$fenced_conclusion" = "failure" ]
+            [ "$fenced_attempt" = "1" ]
+            [ "$BASELINE_SOURCE_RUN_ID" = "$FENCED_DEPLOY_RUN_ID" ]
+            fenced_jobs="$(
+              gh api "repos/$REPOSITORY/actions/runs/$FENCED_DEPLOY_RUN_ID/attempts/1/jobs"
+            )"
+            # Positive rehold evidence: maintenance was verified, protected
+            # validation failed, neither release step ran, and the rehold step
+            # succeeded.
+            jq -er '
+              [.jobs[] | select(.name == "deploy")] as $jobs |
+              ($jobs | length) == 1 and
+              ([$jobs[0].steps[] | select(.name == "Verify transferred database lock and maintenance fence") | .conclusion] == ["success"]) and
+              ([$jobs[0].steps[] | select(.name == "Release transferred lock after protected validation") | .conclusion] == ["skipped"]) and
+              ([$jobs[0].steps[] | select(.name == "Release live data maintenance fence") | .conclusion] == ["skipped"]) and
+              ([$jobs[0].steps[] | select(.name == "Re-enter maintenance after an incomplete deployment") | .conclusion] == ["success"])
+            ' <<<"$fenced_jobs" >/dev/null
+          fi
 
           if [ "$PARTIAL_ROLLBACK_RUN_ID" != "0" ]; then
             rollback_workflow_id="$(
@@ -194,7 +271,9 @@ jobs:
                 ($matches | length) == 1 and
                 $matches[0].expired == false
               ' >/dev/null
+          fi
 
+          if [ "$PRE_RECOVERY_BUILD_RUN_ID" != "0" ]; then
             build_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-production-build.yml" --jq '.id'
             )"
@@ -214,6 +293,11 @@ jobs:
             [ "$build_status" = "completed" ]
             [ "$build_conclusion" = "success" ]
             [ "$build_attempt" = "1" ]
+            if [ "$FENCED_DEPLOY_RUN_ID" != "0" ]; then
+              # The fenced mode restores away from the generation that is
+              # actually deployed, so the build must describe exactly it.
+              [ "$pre_recovery_source_sha" = "$DEPLOYED_SOURCE_SHA" ]
+            fi
             git cat-file -e "${pre_recovery_source_sha}^{commit}"
             git merge-base --is-ancestor "$pre_recovery_source_sha" "$current_master"
             pre_recovery_artifact_name="oci-image-provenance-${pre_recovery_source_sha}-${PRE_RECOVERY_BUILD_RUN_ID}-1"
@@ -244,6 +328,7 @@ jobs:
             "$HOME/.kube" \
             artifacts/infrastructure \
             artifacts/oci-rollback \
+            artifacts/fenced-baseline \
             artifacts/pre-recovery-build
           chmod 700 "$HOME" "$HOME/.kube"
 
@@ -289,7 +374,7 @@ jobs:
           run-id: ${{ inputs.partial_rollback_run_id }}
 
       - name: Download exact pre-recovery OCI image provenance
-        if: inputs.partial_rollback_run_id != '0'
+        if: inputs.pre_recovery_build_run_id != '0'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ steps.request.outputs.pre_recovery_artifact_name }}
@@ -297,6 +382,16 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.pre_recovery_build_run_id }}
+
+      - name: Download immutable fenced rollback baseline
+        if: inputs.fenced_deploy_run_id != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.baseline_artifact_name }}
+          path: artifacts/fenced-baseline
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.fenced_deploy_run_id }}
 
       - name: Verify current OCI infrastructure provenance
         id: infra
@@ -446,7 +541,7 @@ jobs:
           ./infra/oci/scripts/configure-k3s-access.sh open
 
       - name: Roll back exact immutable OCI images
-        if: inputs.partial_rollback_run_id == '0'
+        if: inputs.partial_rollback_run_id == '0' && inputs.fenced_deploy_run_id == '0'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -475,6 +570,23 @@ jobs:
           OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
           OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
         run: ./infra/oci/scripts/recover-partial-rollback-stan.sh
+
+      - name: Restore exact baseline generation behind the maintenance fence
+        if: inputs.fenced_deploy_run_id != '0'
+        env:
+          DEPLOYED_SOURCE_SHA: ${{ inputs.deployed_source_sha }}
+          FENCED_DEPLOY_RUN_ID: ${{ inputs.fenced_deploy_run_id }}
+          FENCED_DATA_RUN_ID: ${{ inputs.fenced_data_run_id }}
+          BASELINE_DIR: artifacts/fenced-baseline
+          PRE_RECOVERY_BUILD_DIR: artifacts/pre-recovery-build
+          OUTPUT_DIR: artifacts/oci-rollback
+          OCI_PUBLIC_URL: ${{ steps.infra.outputs.public_url }}
+          OCI_REDIRECT_URL: ${{ steps.infra.outputs.redirect_url }}
+          OCI_DIAGNOSTIC_URL: ${{ steps.infra.outputs.diagnostic_url }}
+          OCI_RUNTIME_FINGERPRINT: ${{ steps.infra.outputs.runtime_fingerprint }}
+          OCI_INFRASTRUCTURE_PROVENANCE_SHA256: ${{ steps.infra.outputs.infrastructure_provenance_sha256 }}
+          OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env
+        run: ./infra/oci/scripts/recover-fenced-rollback-stan.sh
 
       - name: Upload rollback diagnostics and provenance
         if: always()

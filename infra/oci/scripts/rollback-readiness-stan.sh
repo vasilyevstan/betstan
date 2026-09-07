@@ -30,7 +30,20 @@ BACKOFFICE_DB_NAME="${BACKOFFICE_DB_NAME:-gaming_backoffice}"
 BACKOFFICE_EVENT_COLLECTION="${BACKOFFICE_EVENT_COLLECTION:-events}"
 BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS="${BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS:-13}"
 BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS="${BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS:-5}"
+# Readiness phase. "steady-state" is the only ordinary value and keeps every
+# historical expectation unchanged. "maintenance-fenced" is accepted only for
+# the narrowly bound fenced rollback recovery operator, which must supply the
+# exact deployed generation evidence below. It never waives a check; it asserts
+# a different, positively specified expected state.
+ROLLBACK_READINESS_PHASE="${ROLLBACK_READINESS_PHASE:-steady-state}"
+MAINTENANCE_DEPLOYED_SOURCE_SHA="${MAINTENANCE_DEPLOYED_SOURCE_SHA:-}"
+MAINTENANCE_LIVE_IMAGES_FILE="${MAINTENANCE_LIVE_IMAGES_FILE:-}"
+MAINTENANCE_MAX_QUEUE_READY="${MAINTENANCE_MAX_QUEUE_READY:-80}"
+MAINTENANCE_MAX_QUEUE_UNACK="${MAINTENANCE_MAX_QUEUE_UNACK:-80}"
 ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+# The six live-data writer Deployments the maintenance handoff quiesces. Every
+# other Deployment must still be fully ready behind the fence.
+MAINTENANCE_QUIESCED_SERVICES=(bet event gamemaster moderation resulting slip)
 API_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
@@ -38,6 +51,19 @@ API_CONTRACTS=(
   "/api/slip|object"
   "/api/bet|object"
   "/api/bet/stats|array"
+  "/api/backoffice|backoffice"
+)
+# Behind the maintenance fence the quiesced application paths must answer 503
+# and the still-served paths must answer their ordinary contract.
+MAINTENANCE_FENCED_CONTRACTS=(
+  "/api/event|503"
+  "/api/slip|503"
+  "/api/bet|503"
+  "/api/bet/stats|503"
+)
+MAINTENANCE_SERVED_CONTRACTS=(
+  "/|html"
+  "/api/auth/currentuser|auth"
   "/api/backoffice|backoffice"
 )
 
@@ -253,6 +279,52 @@ capture_api_contracts() {
   done
 }
 
+# Assert an exact fenced status code. Anything else -- including a healthy 200 --
+# is a failure, because a fenced path answering 200 proves the maintenance fence
+# is not actually protecting writes.
+capture_fenced_http() {
+  local base_url="$1"
+  local label="$2"
+  local path="$3"
+  local expected_status="$4"
+  local body_file="$WORK_DIR/http-body"
+  local headers_file="$WORK_DIR/http-headers"
+  local meta status effective_url content_type
+
+  meta="$({
+    curl --location --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+      --output "$body_file" --dump-header "$headers_file" \
+      --write-out '%{http_code}\t%{url_effective}\t%{content_type}' \
+      "${base_url}${path}"
+  })" || {
+    failures_file_append "fenced ${label}${path}: request failed"
+    return 1
+  }
+  IFS=$'\t' read -r status effective_url content_type <<<"$meta"
+  if [[ "$status" != "$expected_status" ]]; then
+    failures_file_append \
+      "fenced ${label}${path}: expected fenced ${expected_status} got ${status}"
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$label" "$path" "$status" "$effective_url" "$content_type" "fenced" \
+    >>"$OUTPUT_DIR/current-http.tsv"
+}
+
+capture_maintenance_contracts() {
+  local base_url="$1"
+  local label="$2"
+  local contract path expected
+  for contract in "${MAINTENANCE_SERVED_CONTRACTS[@]}"; do
+    IFS='|' read -r path expected <<<"$contract"
+    capture_http "$base_url" "$label" "$path" "$expected" || true
+  done
+  for contract in "${MAINTENANCE_FENCED_CONTRACTS[@]}"; do
+    IFS='|' read -r path expected <<<"$contract"
+    capture_fenced_http "$base_url" "$label" "$path" "$expected" || true
+  done
+}
+
 cleanup_work_dir() {
   rm -rf "$WORK_DIR"
   rmdir "$WORK_PARENT_DIR" 2>/dev/null || true
@@ -273,6 +345,27 @@ trap cleanup_work_dir EXIT
 for command_name in kubectl curl python3 awk git; do
   oci_require_command "$command_name"
 done
+# Fail closed on an unknown phase, and require the fenced phase to carry the
+# exact deployed-generation evidence it asserts against.
+case "$ROLLBACK_READINESS_PHASE" in
+  steady-state)
+    ;;
+  maintenance-fenced)
+    [[ "$MAINTENANCE_DEPLOYED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+      oci_die "maintenance-fenced readiness requires MAINTENANCE_DEPLOYED_SOURCE_SHA"
+    [[ -n "$MAINTENANCE_LIVE_IMAGES_FILE" &&
+      -f "$MAINTENANCE_LIVE_IMAGES_FILE" &&
+      ! -L "$MAINTENANCE_LIVE_IMAGES_FILE" ]] ||
+      oci_die "maintenance-fenced readiness requires a regular MAINTENANCE_LIVE_IMAGES_FILE"
+    [[ "$MAINTENANCE_MAX_QUEUE_READY" =~ ^[0-9]+$ ]] ||
+      oci_die "MAINTENANCE_MAX_QUEUE_READY must be a non-negative integer"
+    [[ "$MAINTENANCE_MAX_QUEUE_UNACK" =~ ^[0-9]+$ ]] ||
+      oci_die "MAINTENANCE_MAX_QUEUE_UNACK must be a non-negative integer"
+    ;;
+  *)
+    oci_die "unsupported ROLLBACK_READINESS_PHASE: $ROLLBACK_READINESS_PHASE"
+    ;;
+esac
 [[ "$OCI_PUBLIC_URL" == https://* ]] || oci_die "OCI_PUBLIC_URL must use https://"
 [[ "$OCI_REDIRECT_URL" == https://* ]] || oci_die "OCI_REDIRECT_URL must use https://"
 [[ -z "$OCI_DIAGNOSTIC_URL" || "$OCI_DIAGNOSTIC_URL" == https://* ]] ||
@@ -316,13 +409,15 @@ for service in "${ROLLBACK_SERVICES[@]}"; do
     failures_file_append "workload ${deployment}: unable to inspect deployment"
     continue
   }
-  python3 - "$deployment_json" "$container" "$service" >>"$OUTPUT_DIR/workload-state.tsv" 2>>"$WORK_DIR/workload-errors.log" <<'PY' || failures_file_append "workload ${deployment}: incompatible deployment state"
+  python3 - "$deployment_json" "$container" "$service" "$ROLLBACK_READINESS_PHASE" "${MAINTENANCE_QUIESCED_SERVICES[*]}" >>"$OUTPUT_DIR/workload-state.tsv" 2>>"$WORK_DIR/workload-errors.log" <<'PY' || failures_file_append "workload ${deployment}: incompatible deployment state"
 import json
 import sys
 
 doc = json.load(open(sys.argv[1], encoding='utf-8'))
 container = sys.argv[2]
 service = sys.argv[3]
+phase = sys.argv[4]
+quiesced = set(sys.argv[5].split())
 image = ''
 for item in doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []):
     if item.get('name') == container:
@@ -334,8 +429,14 @@ desired = int(doc.get('spec', {}).get('replicas', 0) or 0)
 ready = int(doc.get('status', {}).get('readyReplicas', 0) or 0)
 updated = int(doc.get('status', {}).get('updatedReplicas', 0) or 0)
 available = int(doc.get('status', {}).get('availableReplicas', 0) or 0)
-if desired < 1 or ready != desired or updated != desired or available != desired:
-    raise SystemExit(1)
+if phase == 'maintenance-fenced' and service in quiesced:
+    # A quiesced writer must be exactly and completely scaled to zero. A
+    # surviving replica means the maintenance handoff is not intact.
+    if desired != 0 or ready != 0 or updated != 0 or available != 0:
+        raise SystemExit(1)
+else:
+    if desired < 1 or ready != desired or updated != desired or available != desired:
+        raise SystemExit(1)
 print(service, image, desired, ready, updated, available, sep='\t')
 PY
 
@@ -352,8 +453,54 @@ if [[ -n "$OCI_DIAGNOSTIC_URL" ]]; then
 fi
 for entry in "${url_entries[@]}"; do
   IFS='|' read -r label base_url <<<"$entry"
-  capture_api_contracts "$base_url" "$label"
+  if [[ "$ROLLBACK_READINESS_PHASE" == "maintenance-fenced" ]]; then
+    capture_maintenance_contracts "$base_url" "$label"
+  else
+    capture_api_contracts "$base_url" "$label"
+  fi
 done
+
+# In the fenced phase the deployed generation must still be exactly the failed
+# generation the operator was authorized against. Any drift means something
+# else mutated production and the fenced restore must not proceed.
+if [[ "$ROLLBACK_READINESS_PHASE" == "maintenance-fenced" ]]; then
+  if ! python3 - "$OUTPUT_DIR/workload-state.tsv" "$MAINTENANCE_LIVE_IMAGES_FILE" \
+    >>"$OUTPUT_DIR/maintenance-live-digests.tsv" 2>"$WORK_DIR/live-digest.err" <<'PY'
+import csv
+import sys
+
+state_path, expected_path = sys.argv[1:3]
+
+
+def rows(path):
+    with open(path, encoding='utf-8', newline='') as handle:
+        return [row for row in csv.reader(handle, delimiter='\t') if row]
+
+
+live = {}
+for row in rows(state_path):
+    if len(row) < 2:
+        raise SystemExit('workload state row is malformed')
+    live[row[0]] = row[1]
+
+expected = {}
+for row in rows(expected_path):
+    if len(row) < 3:
+        raise SystemExit('expected live image row is malformed')
+    expected[row[0]] = row[2]
+
+if not expected or set(live) != set(expected):
+    raise SystemExit('live workload set does not match the authorized generation')
+for service in sorted(expected):
+    if live[service] != expected[service]:
+        raise SystemExit(f'{service}: live image is not the authorized generation')
+    print(service, live[service], sep='\t')
+PY
+  then
+    failures_file_append \
+      "maintenance digests: $(tr -d '\n' <"$WORK_DIR/live-digest.err")"
+  fi
+fi
 
 rabbit_pod="$(kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$RABBIT_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 if [[ -z "$rabbit_pod" ]]; then
@@ -365,11 +512,19 @@ else
     failures_file_append 'rabbitmq: unable to read queue state'
   if [[ -s "$queue_raw" ]]; then
     if oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queue-state.tsv"; then
-      python3 - "$OUTPUT_DIR/queue-state.tsv" "$REQUIRED_QUEUES" "$MAX_QUEUE_READY" "$MAX_QUEUE_UNACK" <<'PY' || failures_file_append "rabbitmq: queue thresholds violated"
+      python3 - "$OUTPUT_DIR/queue-state.tsv" "$REQUIRED_QUEUES" "$MAX_QUEUE_READY" "$MAX_QUEUE_UNACK" "$ROLLBACK_READINESS_PHASE" "$MAINTENANCE_MAX_QUEUE_READY" "$MAINTENANCE_MAX_QUEUE_UNACK" <<'PY' || failures_file_append "rabbitmq: queue thresholds violated"
 import sys
 from pathlib import Path
 
-queue_file, required_csv, max_ready, max_unack = sys.argv[1:5]
+(
+    queue_file,
+    required_csv,
+    max_ready,
+    max_unack,
+    phase,
+    maintenance_max_ready,
+    maintenance_max_unack,
+) = sys.argv[1:8]
 required = [item for item in required_csv.split(',') if item]
 rows = {}
 for raw_line in Path(queue_file).read_text(encoding='utf-8').splitlines():
@@ -380,12 +535,18 @@ for raw_line in Path(queue_file).read_text(encoding='utf-8').splitlines():
 missing = [name for name in required if name not in rows]
 if missing:
     raise SystemExit(1)
+fenced = phase == 'maintenance-fenced'
+if fenced:
+    max_ready, max_unack = maintenance_max_ready, maintenance_max_unack
 total_ready = 0
 total_unack = 0
 for name, (ready, unack, consumers) in rows.items():
     total_ready += ready
     total_unack += unack
-    if name in required and consumers < 1:
+    # Behind the fence the writer consumers are intentionally gone, so a zero
+    # consumer count is expected. The backlog bound is still enforced so an
+    # unclassified or growing backlog still fails closed.
+    if not fenced and name in required and consumers < 1:
         raise SystemExit(1)
 if total_ready > int(max_ready) or total_unack > int(max_unack):
     raise SystemExit(1)
@@ -552,7 +713,8 @@ fi
 write_text_atomic "$OUTPUT_DIR/summary.env" <<EOF
 rollback_readiness=$status
 mode=application-rollback
-phase=steady-state
+phase=$ROLLBACK_READINESS_PHASE
+maintenance_deployed_source_sha=$MAINTENANCE_DEPLOYED_SOURCE_SHA
 namespace=$OCI_K8S_NAMESPACE
 public_url=$OCI_PUBLIC_URL
 redirect_url=$OCI_REDIRECT_URL
