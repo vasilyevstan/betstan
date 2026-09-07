@@ -13,6 +13,8 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
+POLICY_HELPER="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MANAGED_LABEL="copilot-cli-managed"
@@ -358,6 +360,51 @@ revalidate_control() {
   )"
   [[ "$observed_workflow_state" = "$expected_approval_workflow_state" ]] ||
     fail "trusted workflow is not in its required approval state"
+}
+
+# Re-prove the authoritative runtime mode and every upstream prerequisite that
+# was validated at dispatch time. Authority is one-use, so a prerequisite that
+# decayed between dispatch and approval (deleted or expired artifact, a rerun of
+# the upstream run, or a runtime-mode change) must stop the approval instead of
+# letting the protected run consume authority against an invalid binding. This
+# reuses the shared validator and the same policy definition the dispatcher
+# uses, so there is no third implementation to drift.
+revalidate_upstream_bindings() {
+  local operation subject_sha dispatch_inputs policy_json bindings
+  local bound_mode authoritative_mode environment
+
+  operation="$(jq -r '.operation // ""' <<<"$record_summary")"
+  [[ -n "$operation" ]] ||
+    fail "authority record has no operation for binding revalidation"
+  policy_json="$("$POLICY_HELPER" get "$operation")"
+  bindings="$(jq -c '.upstreamRunBindings // []' <<<"$policy_json")"
+
+  bound_mode="$(jq -r '.inputs.runtime_mode // ""' <<<"$record_summary")"
+  if [[ -n "$bound_mode" ]]; then
+    environment="$(jq -r '.environment // ""' <<<"$record_summary")"
+    [[ -n "$environment" ]] ||
+      fail "authority record has no environment for runtime mode revalidation"
+    authoritative_mode="$(
+      gh api \
+        "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
+        --jq '.value'
+    )"
+    [[ "$bound_mode" = "$authoritative_mode" ]] ||
+      fail "authoritative runtime mode changed since dispatch; approval refused"
+  fi
+
+  [[ "$bindings" != "[]" ]] || return 0
+  subject_sha="$(jq -r '.subjectSha // ""' <<<"$record_summary")"
+  [[ -n "$subject_sha" ]] ||
+    fail "authority record has no subject SHA for binding revalidation"
+  dispatch_inputs="$(jq -c '.inputs' <<<"$record_summary")"
+
+  "$BINDING_VALIDATOR" validate-all \
+    --repository "$repository" \
+    --policy-json "$policy_json" \
+    --subject-sha "$subject_sha" \
+    --dispatch-inputs "$dispatch_inputs" ||
+    fail "upstream prerequisites are no longer valid; approval refused"
 }
 
 record_summary=""
@@ -888,6 +935,7 @@ validate_pending_gate
 validate_exclusivity
 revalidate_control
 validate_promotion
+revalidate_upstream_bindings
 approval_comment="Copilot CLI exact-run approval: $EXPECTED_OPERATION"
 approval_count_before="$(
   matching_approval_count \
@@ -918,6 +966,7 @@ if ! approval_revalidation_error="$(
   {
     revalidate_control
     validate_promotion
+    revalidate_upstream_bindings
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" release-approval \

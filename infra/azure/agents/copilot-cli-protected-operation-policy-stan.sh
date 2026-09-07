@@ -534,11 +534,11 @@ POLICIES = {
         subject_input="approved_sha",
         subject_relation="current",
     ),
-    "oci-infrastructure-prepare": dispatch(
-        "oci-infrastructure-prepare",
+    "oci-infrastructure-prepare-k3s": dispatch(
+        "oci-infrastructure-prepare-k3s",
         "oci-infrastructure.yml",
         "oci-infrastructure",
-        "oci-infrastructure prepare {subject_sha}",
+        "oci-infrastructure prepare k3s {subject_sha}",
         OCI_INFRASTRUCTURE_INPUTS,
         fixed={
             "confirmation": "PROVISION OCI ZERO COST",
@@ -554,10 +554,42 @@ POLICIES = {
             "validation_run_id": "",
             "ghcr_build_run_id": "",
             "ghcr_package_validation_run_id": "",
+            # Capacity acquisition is a k3s-only Free Tier concern and is never
+            # a prepare prerequisite in either runtime mode.
             "capacity_acquisition_run_id": "",
             "runtime_mode": "k3s",
         },
-        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:14],
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:15],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+    ),
+    "oci-infrastructure-prepare-oke": dispatch(
+        "oci-infrastructure-prepare-oke",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure prepare oke {subject_sha}",
+        OCI_INFRASTRUCTURE_INPUTS,
+        fixed={
+            "confirmation": "PROVISION OCI ZERO COST",
+            "phase": "prepare",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            "ghcr_build_run_id": "",
+            "ghcr_package_validation_run_id": "",
+            # Capacity acquisition is a k3s-only Free Tier concern and is never
+            # a prepare prerequisite in either runtime mode.
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "oke",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:15],
         full_shas=["approved_sha"],
         subject_input="approved_sha",
         subject_relation="current",
@@ -566,7 +598,7 @@ POLICIES = {
         "oci-infrastructure-finalize-k3s",
         "oci-infrastructure.yml",
         "oci-infrastructure",
-        "oci-infrastructure finalize {subject_sha}",
+        "oci-infrastructure finalize k3s {subject_sha}",
         OCI_INFRASTRUCTURE_INPUTS,
         fixed={
             "confirmation": "PROVISION OCI ZERO COST",
@@ -601,7 +633,7 @@ POLICIES = {
         "oci-infrastructure-finalize-oke",
         "oci-infrastructure.yml",
         "oci-infrastructure",
-        "oci-infrastructure finalize {subject_sha}",
+        "oci-infrastructure finalize oke {subject_sha}",
         OCI_INFRASTRUCTURE_INPUTS,
         fixed={
             "confirmation": "PROVISION OCI ZERO COST",

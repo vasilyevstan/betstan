@@ -200,17 +200,60 @@ def command_validate(args):
     print(f"upstream_binding={binding['input']} run={args.run_id} artifact={name}")
 
 
-def command_validate_all(args):
+def resolve_bindings(args):
+    """Resolve bindings from an explicit policy or from the shared manifest.
+
+    Fail closed when the requested operation key is absent, null, or an
+    unexpectedly empty list, so a typo or a pruned manifest entry can never be
+    read as "this operation has no prerequisites".
+    """
+    if args.manifest:
+        if not args.operation:
+            fail("--manifest requires --operation")
+        try:
+            with open(args.manifest, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except OSError as error:
+            fail(f"unable to read binding manifest: {error}")
+        except json.JSONDecodeError:
+            fail("binding manifest is not valid JSON")
+        if not isinstance(manifest, dict):
+            fail("binding manifest must be an object")
+        if args.operation not in manifest:
+            fail(f"binding manifest has no entry for {args.operation}")
+        bindings = manifest[args.operation]
+        if bindings is None:
+            fail(f"binding manifest entry for {args.operation} is null")
+        if not isinstance(bindings, list):
+            fail(f"binding manifest entry for {args.operation} must be a list")
+        if not bindings:
+            fail(f"binding manifest entry for {args.operation} is empty")
+        return bindings
     policy = json.loads(args.policy_json)
-    inputs = json.loads(args.dispatch_inputs)
-    bindings = policy.get("upstreamRunBindings") or []
+    if not isinstance(policy, dict):
+        fail("policy must be an object")
+    if "upstreamRunBindings" not in policy:
+        fail("policy does not declare upstreamRunBindings")
+    bindings = policy["upstreamRunBindings"]
+    if bindings is None:
+        fail("policy upstreamRunBindings is null")
     if not isinstance(bindings, list):
         fail("upstreamRunBindings must be a list")
+    return bindings
+
+
+def command_validate_all(args):
+    inputs = json.loads(args.dispatch_inputs)
+    if not isinstance(inputs, dict):
+        fail("dispatch inputs must be an object")
+    bindings = resolve_bindings(args)
     for binding in bindings:
         validate_binding_shape(binding)
         name = binding["input"]
         if name not in inputs:
             fail(f"dispatch inputs are missing bound value {name}")
+        if inputs[name] in (None, ""):
+            fail(f"dispatch input {name} is empty")
         validate_binding(
             args.repository, binding, args.subject_sha, str(inputs[name])
         )
@@ -231,7 +274,9 @@ def main():
 
     every = sub.add_parser("validate-all")
     every.add_argument("--repository", required=True)
-    every.add_argument("--policy-json", required=True)
+    every.add_argument("--policy-json", default="")
+    every.add_argument("--manifest", default="")
+    every.add_argument("--operation", default="")
     every.add_argument("--subject-sha", required=True)
     every.add_argument("--dispatch-inputs", required=True)
     every.set_defaults(func=command_validate_all)

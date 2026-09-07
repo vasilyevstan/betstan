@@ -292,10 +292,12 @@ print("ordering ok")
 PY
 ok "fresh dispatch and both resume paths prove prerequisites before authority"
 
-python3 - "$WORKFLOW" <<'PY' || fail "workflow validates bindings after cloud access"
+python3 - "$WORKFLOW" "$ROOT_DIR/infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh" \
+  <<'PY' || fail "workflow validates bindings after cloud access"
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
+gate_body = open(sys.argv[2], encoding="utf-8").read()
 provision = text.index("\n  provision:")
 gate = text.index("Bind runtime mode and prove upstream prerequisites", provision)
 ghcr = text.index("Verify GHCR build and package evidence content", provision)
@@ -311,10 +313,32 @@ for name in (
         raise SystemExit(f"binding validation must precede: {name}")
 if "--workflow oci-capacity-acquire.yml" in text:
     raise SystemExit("finalize still scans for capacity runs")
-if 'BOUND_RUNTIME_MODE" = "$OCI_RUNTIME_MODE' not in text:
-    raise SystemExit("workflow does not bind runtime mode to the environment")
-if "upstream_run_binding_stan.py validate-all" not in text:
-    raise SystemExit("workflow does not use the shared upstream validator")
+# The gate body lives in an executable script so it can be run under `set -u`
+# instead of only statically inspected; the workflow must invoke exactly it.
+if "bind-infrastructure-prerequisites-stan.sh" not in text:
+    raise SystemExit("workflow does not invoke the extracted prerequisite gate")
+if "DISPATCH_INPUTS: ${{ toJSON(inputs) }}" not in text:
+    raise SystemExit("workflow does not export the real dispatch input map")
+if 'BOUND_RUNTIME_MODE" = "$OCI_RUNTIME_MODE' not in gate_body:
+    raise SystemExit("gate does not bind runtime mode to the environment")
+if "validate-all" not in gate_body:
+    raise SystemExit("gate does not use the shared upstream validator")
+if "$DISPATCH_INPUTS" not in gate_body:
+    raise SystemExit("gate does not forward the exported dispatch input map")
+# Run identity for the finalize prerequisites belongs to the shared validator.
+# A second, weaker copy inside the GHCR/capacity evidence steps is exactly the
+# drift this contract exists to prevent. Unrelated phases (registry prune,
+# image provenance) keep their own long-standing validate_run helper.
+evidence = text.index("Verify GHCR build and package evidence content", provision)
+after_capacity = text.index(
+    "Install pinned OCI CLI and verify identity", provision
+)
+finalize_region = text[evidence:after_capacity]
+for duplicated in ("head_sha", "run_attempt", "actions/workflows/"):
+    if duplicated in finalize_region:
+        raise SystemExit(
+            f"finalize evidence steps duplicate run identity: {duplicated}"
+        )
 print("workflow ordering ok")
 PY
 ok "workflow proves bindings before every cloud access and mutation"
