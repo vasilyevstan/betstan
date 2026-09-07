@@ -931,15 +931,17 @@ validated.
   crash and `--resume-run` after delayed materialization. Never infer identity
   from title or timing, and never redispatch a URL-less unresolved intent.
 - Treat unresolved authority as repository-global, not request-local. Any
-  `dispatching`/`bound` intent or `claimed`/`inflight` record blocks every
-  protected request for that repository even after control SHA advances.
+  `dispatching`/`bound` intent or `claimed`/`inflight`/`rejecting` record
+  blocks every protected request for that repository even after control SHA
+  advances.
   Promotion cannot silently clear the fence. `issued` and `consumed` remain
   one-use for the same operation and exact transport input hash; changed
   inputs form a new request but do not bypass policy, lineage, recovery, or
   exclusivity. `retired` is the only inert replacement exception.
 - Persisting an intent is not the last dispatch check. Revalidate current
-  master, workflow blob, and active state after creating it, and cancel only a
-  pristine untouched intent if authority drifted before the GitHub call.
+  master, workflow blob, active state, and prerequisites after creating it,
+  then recheck the mutable dispatch target immediately before the GitHub call.
+  Cancel only a pristine untouched intent if authority drifted.
 - Approval needs a two-phase local state change. Claim the exact
   run/environment/waiting-job-set fingerprint as `inflight` before the GitHub
   POST, then append a consumed receipt only after acceptance. An ambiguous
@@ -965,9 +967,23 @@ validated.
   is safe to mark `retired` only with zero jobs and zero pending deployments;
   that proof, not age or a generic conclusion, permits a replacement dispatch.
 - A captured or claimed run whose upstream prerequisite decays during resume
-  must be bound to its exact run before the fence can be resolved. Cancel and
-  retire it only when protected-gate, approval-review, job-step, and terminal
-  evidence prove that it never started; otherwise keep the global fence.
+  must match its exact request and run before the fence can be resolved. Under
+  the authority lock, persist a `rejecting` record with the failure reason,
+  exact waiting gate, request identity, exact pre-cancel snapshots, and
+  canonical evidence hashes before sending cancellation. Keep that lock
+  through terminalization. If GitHub
+  cancellation or evidence reads are delayed, resume from the persisted
+  rejection instead of replacing its pre-cancel snapshot. Retire only after
+  two stable terminal observations prove cancellation, no approval, no
+  successful job step, and no pending deployment; otherwise keep the global
+  rejecting fence.
+- A persisted `rejecting` fence must remain recoverable after a normal
+  descendant `master` promotion. Permit only the exact old request to continue
+  cancellation from a clean checkout at current `master`, prove the recorded
+  control SHA is still an ancestor, and re-prove its historical workflow blob
+  before cancellation and retirement. This historical-control path must never
+  dispatch, issue, or approve. If mutable `master` changes during the attempt,
+  fail closed and retry from the new exact checkout.
 - A claimed accepted-but-unmaterialized run is not a terminal claim. Keep its
   affected workflow disabled while its generic-title ghost SHA is current,
   and never grant it human or CLI environment approval. Promote the
@@ -1182,6 +1198,15 @@ Durable rules:
   the input hash, and the immutable evidence.
 - Enforce a binding in both the orchestrator and the executed workflow. One
   layer alone is either bypassable or too late.
+- Cross-run prerequisites are a lineage, not a bag of successes. Enumerate the
+  complete paginated artifact inventory, reject current reruns, require build
+  completion before package validation and validation completion before k3s
+  capacity acquisition, and make the validation artifact name the exact build
+  run it inspected.
+- Revalidate the immutable request identity before any resume cancellation,
+  revalidate prerequisites under the authority lock immediately before every
+  `claimed -> issued` transition, and recheck mutable `master` after
+  network-bound prerequisite validation immediately before dispatch.
 - When a one-use authority is spent on a pre-mutation failure, preserve it as
   terminal evidence and promote a substantive hardened SHA. Never edit the
   authority store, retire a run that materialized jobs, or invent a placeholder

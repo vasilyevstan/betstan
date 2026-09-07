@@ -80,7 +80,7 @@ EOF2
  "conclusion": "$conclusion", "event": "$event"}
 EOF2
   fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/artifacts?per_page=100" <<EOF2
-{"artifacts": [{"name": "oci-capacity-provenance-$CAPACITY_RUN-1",
+{"total_count": 1, "artifacts": [{"name": "oci-capacity-provenance-$CAPACITY_RUN-1",
  "expired": false, "size_in_bytes": 1361}]}
 EOF2
 }
@@ -122,6 +122,31 @@ run_validator >/dev/null || fail "exact capacity run rejected: $(cat "$WORK/err.
 ok "accept exact first-attempt dispatched capacity run"
 
 reset_fixtures
+write_capacity_fixtures
+fixture "repos/$REPO/actions/runs/$CAPACITY_RUN/artifacts?per_page=100" <<EOF2
+[
+  {
+    "total_count": 2,
+    "artifacts": [
+      {"name": "unrelated", "expired": false, "size_in_bytes": 10}
+    ]
+  },
+  {
+    "total_count": 2,
+    "artifacts": [
+      {
+        "name": "oci-capacity-provenance-$CAPACITY_RUN-1",
+        "expired": false,
+        "size_in_bytes": 1361
+      }
+    ]
+  }
+]
+EOF2
+run_validator >/dev/null || fail "artifact on a later page was rejected"
+ok "accept exact artifact from the complete paginated inventory"
+
+reset_fixtures
 write_capacity_fixtures 1 schedule "oci-capacity-acquire scheduled-master"
 run_validator >/dev/null || fail "scheduled capacity run rejected"
 ok "accept scheduled capacity run with its exact title"
@@ -156,13 +181,13 @@ artifact_case() {
   fi
   ok "reject $1"
 }
-artifact_case "missing artifact" '{"artifacts": []}'
+artifact_case "missing artifact" '{"total_count":0,"artifacts":[]}'
 artifact_case "expired artifact" \
-  "{\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":true,\"size_in_bytes\":10}]}"
+  "{\"total_count\":1,\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":true,\"size_in_bytes\":10}]}"
 artifact_case "zero-byte artifact" \
-  "{\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":0}]}"
+  "{\"total_count\":1,\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":0}]}"
 artifact_case "duplicate artifact" \
-  "{\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":5},{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":5}]}"
+  "{\"total_count\":2,\"artifacts\":[{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":5},{\"name\":\"oci-capacity-provenance-$CAPACITY_RUN-1\",\"expired\":false,\"size_in_bytes\":5}]}"
 
 reset_fixtures
 write_capacity_fixtures
@@ -183,6 +208,49 @@ if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate --repository "$REPO" \
   fail "null title without a SHA-bound artifact was accepted"
 fi
 ok "reject null title unless the artifact binds subject SHA and run"
+
+if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
+  --repository "$REPO" \
+  --policy-json '{
+    "upstreamRunBindings": [
+      {
+        "input": "duplicate",
+        "workflow": "a.yml",
+        "titleTemplates": {"workflow_dispatch": "a {subject_sha}"},
+        "artifactTemplate": "a-{run_id}"
+      },
+      {
+        "input": "duplicate",
+        "workflow": "b.yml",
+        "titleTemplates": {"workflow_dispatch": "b {subject_sha}"},
+        "artifactTemplate": "b-{run_id}"
+      }
+    ]
+  }' \
+  --subject-sha "$SUBJECT_SHA" \
+  --dispatch-inputs '{"duplicate":"1"}' >/dev/null 2>&1; then
+  fail "duplicate binding inputs were accepted"
+fi
+ok "reject duplicate binding inputs"
+
+if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
+  --repository "$REPO" \
+  --policy-json '{
+    "upstreamRunBindings": [
+      {
+        "input": "current",
+        "afterInput": "missing",
+        "workflow": "a.yml",
+        "titleTemplates": {"workflow_dispatch": "a {subject_sha}"},
+        "artifactTemplate": "a-{run_id}"
+      }
+    ]
+  }' \
+  --subject-sha "$SUBJECT_SHA" \
+  --dispatch-inputs '{"current":"1"}' >/dev/null 2>&1; then
+  fail "unknown chronology dependency was accepted"
+fi
+ok "reject unknown chronology dependencies"
 
 # ---------------------------------------------------- k3s / OKE mode split ---
 "$POLICY" get oci-infrastructure-finalize-k3s | python3 -c '
@@ -217,11 +285,13 @@ assert build["titleTemplates"] == {"workflow_run": None}
 pkg = by["ghcr_package_validation_run_id"]
 assert pkg["titleTemplates"] == {"workflow_dispatch": "ghcr-package validate {subject_sha}"}
 assert pkg["artifactTemplate"] == "ghcr-package-management-validate-{run_id}-1"
+assert pkg["afterInput"] == "ghcr_build_run_id"
 cap = by["capacity_acquisition_run_id"]
 assert cap["titleTemplates"] == {
     "workflow_dispatch": "oci-capacity-acquire {subject_sha}",
     "schedule": "oci-capacity-acquire scheduled-master"}
 assert "titleOptionalEvents" not in cap
+assert cap["afterInput"] == "ghcr_package_validation_run_id"
 ' || fail "finalize prerequisite bindings are incomplete"
 ok "GHCR build and package validation are bound like capacity"
 
@@ -269,33 +339,32 @@ import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
 definition = text.index("validate_protected_prerequisites() {")
+materialization = text.index("materialize_record() {")
 resume_validation = text.index("resume_with_prerequisite_validation() {")
 resume_run = text.index('if [[ "$ACTION" = "--resume-run" ]]; then')
 resume_captured = text.index('if [[ "$ACTION" = "--resume-captured" ]]; then')
-if not definition < resume_validation < resume_run < resume_captured:
-    raise SystemExit("validator must be defined before both resume paths")
+if not materialization < definition < resume_validation < resume_run < resume_captured:
+    raise SystemExit("materialization and validator must precede both resume paths")
 for start in (resume_run, resume_captured):
     window = text[start:start + 800]
     if "bind-intent" not in window or "resume_with_prerequisite_validation" not in window:
         raise SystemExit("a resume path does not bind and validate its exact run")
     if window.index("bind-intent") > window.index("resume_with_prerequisite_validation"):
         raise SystemExit("a resume path validates before binding the captured run")
-resume_body = text[
-    resume_validation:text.index(
-        '\nif [[ "$ACTION" = "--resume-run" ]]', resume_validation
-    )
+materialization_body = text[
+    materialization:text.index("\nif [[ -n \"$ACTION\" ]]", materialization)
 ]
-if resume_body.index("validate_protected_prerequisites") > resume_body.index(
-    'materialize_record "$run_id"'
+if materialization_body.index("validate_protected_prerequisites") > materialization_body.index(
+    '"$AUTHORITY_HELPER" issue'
 ):
-    raise SystemExit("a resumed claim can be issued before prerequisites pass")
-if "retire_prerequisite_rejected_resume" not in resume_body:
-    raise SystemExit("resume prerequisite rejection leaves a claimed global fence")
+    raise SystemExit("a materialized claim can be issued before prerequisites pass")
+if "begin_prerequisite_rejection" not in materialization_body:
+    raise SystemExit("materialization does not persist prerequisite rejection")
 retirement = text[
-    text.index("retire_prerequisite_rejected_resume() {"):resume_validation
+    text.index("begin_prerequisite_rejection() {"):resume_validation
 ]
 for required in (
-    "check-prerequisite-rejection",
+    "begin-prerequisite-rejection",
     'actions/runs/$run_id/cancel',
     "retire-prerequisite-rejected-claim",
 ):
@@ -311,6 +380,11 @@ post_claim = text.index("dispatch_revalidation_error=", claim)
 dispatch = text.index("gh workflow run", post_claim)
 if "validate_protected_prerequisites" not in text[post_claim:dispatch]:
     raise SystemExit("fresh dispatch does not revalidate prerequisites after its claim")
+post_claim_body = text[post_claim:dispatch]
+if post_claim_body.rfind("revalidate_dispatch_target") < post_claim_body.index(
+    "validate_protected_prerequisites"
+):
+    raise SystemExit("fresh dispatch does not revalidate mutable master after prerequisites")
 if ".dispatchInputs" not in text:
     raise SystemExit("dispatcher must read the hashed dispatchInputs map")
 if "OCI_RUNTIME_MODE" not in text:
@@ -405,6 +479,18 @@ for operation, bindings in manifest.items():
     )
     if policy["upstreamRunBindings"] != bindings:
         raise SystemExit(f"{operation} manifest differs from the policy")
+for operation in (
+    "oci-infrastructure-prepare-k3s",
+    "oci-infrastructure-prepare-oke",
+):
+    policy = json.loads(
+        subprocess.run(
+            [policy_script, "get", operation],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    )
+    if policy["upstreamRunBindings"] != []:
+        raise SystemExit(f"{operation} silently bypasses declared prerequisites")
 print("manifest equivalence ok")
 EQUIV
 ok "workflow binding manifest is byte-equivalent to the dispatcher policy"

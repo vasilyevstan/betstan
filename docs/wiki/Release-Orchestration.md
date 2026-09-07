@@ -158,6 +158,9 @@ Before deployment, the release chain verifies:
 - current infrastructure provenance and capacity;
 - explicit, hash-covered upstream run and artifact identities before one-use
   authority, immediately before approval, and before workflow cloud access;
+- complete paginated artifact inventories, current first-attempt identity, and
+  chronological GHCR build -> package validation -> k3s capacity lineage;
+- package-validation evidence naming the exact build run it inspected;
 - current `master` identity;
 - image digest availability;
 - migration and schema compatibility;
@@ -168,9 +171,21 @@ Before deployment, the release chain verifies:
 - absence of competing production operations.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
-serialization fence is released only when the exact run is cancelled and
-proved never to have started. Ambiguous or started runs remain fenced for
-explicit recovery rather than being replayed or silently replaced.
+request identity is checked before any cancellation path. The dispatcher holds
+the authority lock, refreshes the run, and persists an evidence-bound
+`rejecting` state before cancelling exactly one job waiting at exactly one
+matching protected environment. Delayed cancellation resumes from that
+persisted state. The serialization fence is released only after two stable
+terminal observations prove exact cancellation, no approval, no successful
+job step, and no pending deployment. Ambiguous, started, or partially executed
+runs remain globally fenced rather than being replayed or silently replaced.
+The record retains exact pre-cancel and terminal snapshots plus canonical
+hashes. If a descendant `master` is promoted before cancellation completes,
+the matching old request can continue only from a clean checkout at current
+`master`, after proving the recorded control SHA remains an ancestor and its
+historical workflow blob still matches. This narrow recovery path cannot
+dispatch, issue, or approve historical control, and it fails closed if
+`master` moves again during the attempt.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a

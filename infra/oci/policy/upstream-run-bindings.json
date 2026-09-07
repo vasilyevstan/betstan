@@ -9,6 +9,7 @@
       "workflow": "oci-production-build.yml"
     },
     {
+      "afterInput": "ghcr_build_run_id",
       "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
       "input": "ghcr_package_validation_run_id",
       "titleTemplates": {
@@ -17,6 +18,7 @@
       "workflow": "ghcr-package-management.yml"
     },
     {
+      "afterInput": "ghcr_package_validation_run_id",
       "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
       "input": "capacity_acquisition_run_id",
       "titleTemplates": {
@@ -36,6 +38,7 @@
       "workflow": "oci-production-build.yml"
     },
     {
+      "afterInput": "ghcr_build_run_id",
       "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
       "input": "ghcr_package_validation_run_id",
       "titleTemplates": {

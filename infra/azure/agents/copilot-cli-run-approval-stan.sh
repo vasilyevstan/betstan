@@ -908,6 +908,9 @@ validate_authority_and_run
 ensure_automatic_authority_record
 validate_pending_gate
 validate_exclusivity
+revalidate_control
+validate_promotion
+revalidate_upstream_bindings
 
 printf 'run=%s operation=%s workflow=%s environment=%s control_sha=%s authority=%s status=ELIGIBLE\n' \
   "$RUN_ID" \

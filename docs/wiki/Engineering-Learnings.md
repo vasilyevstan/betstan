@@ -147,11 +147,23 @@ the failed authority.
 
 A protected operation should carry explicit, hash-covered identities for every
 upstream run it depends on. Validate the exact workflow, source revision,
-first-attempt status, title, and retained artifact before authority is issued,
-again immediately before approval, and inside the workflow before cloud
-access. If a previously dispatched but unissued run loses a prerequisite,
-release its serialization fence only after proving the exact run never started
-and ended cancelled; otherwise preserve the fence for explicit recovery.
+current first-attempt status, title, complete paginated artifact inventory, and
+chronological lineage before authority is issued, again immediately before
+approval, and inside the workflow before cloud access. Bind package validation
+to the exact build run it inspected rather than only to a shared source SHA.
+If a previously dispatched but unissued run loses a prerequisite, match its
+exact request, hold its authority lock, and persist pre-cancel evidence in a
+`rejecting` state before cancellation. Resume delayed terminalization from
+that persisted state. Release the serialization fence only after two stable
+observations prove exact cancellation, no approval, no successful job step,
+and no pending deployment; otherwise preserve the rejecting fence for explicit
+recovery.
+Persist the exact pre-cancel and terminal snapshots as well as canonical
+hashes. If `master` advances while the fence is unresolved, allow only the
+matching old request to continue cancellation from a clean current-master
+checkout after proving the recorded control remains an ancestor and its
+historical workflow blob is unchanged. Never extend that historical-control
+exception to dispatch, issue, or approval.
 
 ## Release and operations
 

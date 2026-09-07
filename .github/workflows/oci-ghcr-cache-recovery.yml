@@ -110,8 +110,17 @@ jobs:
           validate_run() {
             local workflow="$1" run_id="$2" event="$3" source_sha="$4"
             local expected_title="${5:-}" legacy_title="${6:-}"
+            local workflow_id base_run run
             workflow_id="$(gh api "repos/$REPOSITORY/actions/workflows/$workflow" --jq .id)"
+            base_run="$(gh api "repos/$REPOSITORY/actions/runs/$run_id")"
             run="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/1")"
+            jq -e '.run_attempt == 1' <<<"$base_run" >/dev/null
+            jq -e --argjson base "$base_run" '
+              .id == $base.id and .workflow_id == $base.workflow_id and
+              .head_sha == $base.head_sha and .event == $base.event and
+              .status == $base.status and .conclusion == $base.conclusion and
+              .run_attempt == $base.run_attempt
+            ' <<<"$run" >/dev/null
             jq -e --argjson workflow_id "$workflow_id" --arg path ".github/workflows/$workflow" \
               --arg event "$event" --arg sha "$source_sha" --arg repo "$REPOSITORY" \
               --arg expected_title "$expected_title" --arg legacy_title "$legacy_title" '
@@ -132,9 +141,19 @@ jobs:
             recovery_workflow_id="$(
               gh api "repos/$REPOSITORY/actions/workflows/oci-ghcr-cache-recovery.yml" --jq .id
             )"
+            resume_base_run="$(
+              gh api "repos/$REPOSITORY/actions/runs/$RESUME_RECOVERY_RUN_ID"
+            )"
             resume_run="$(
               gh api "repos/$REPOSITORY/actions/runs/$RESUME_RECOVERY_RUN_ID/attempts/1"
             )"
+            jq -e '.run_attempt == 1' <<<"$resume_base_run" >/dev/null
+            jq -e --argjson base "$resume_base_run" '
+              .id == $base.id and .workflow_id == $base.workflow_id and
+              .head_sha == $base.head_sha and .event == $base.event and
+              .status == $base.status and .conclusion == $base.conclusion and
+              .run_attempt == $base.run_attempt
+            ' <<<"$resume_run" >/dev/null
             jq -e --argjson workflow_id "$recovery_workflow_id" \
               --arg path ".github/workflows/oci-ghcr-cache-recovery.yml" \
               --arg repo "$REPOSITORY" '

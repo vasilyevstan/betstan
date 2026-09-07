@@ -14,6 +14,7 @@ the two paths cannot drift.
 """
 
 import argparse
+import datetime as dt
 import json
 import re
 import subprocess
@@ -27,6 +28,7 @@ ALLOWED_BINDING_KEYS = {
     "workflow",
     "titleTemplates",
     "artifactTemplate",
+    "afterInput",
 }
 
 
@@ -48,6 +50,40 @@ def gh_api(path):
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         fail(f"malformed response for {path}")
+
+
+def gh_api_pages(path):
+    result = subprocess.run(
+        ["gh", "api", path, "--paginate", "--slurp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(f"unable to read all pages of {path}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        fail(f"malformed paginated response for {path}")
+    if isinstance(payload, dict):
+        return [payload]
+    if not isinstance(payload, list) or not all(
+        isinstance(page, dict) for page in payload
+    ):
+        fail(f"unexpected paginated response for {path}")
+    return payload
+
+
+def parse_timestamp(value, label):
+    if not isinstance(value, str) or not value:
+        fail(f"{label} is missing")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        fail(f"{label} is malformed")
+    if parsed.tzinfo is None:
+        fail(f"{label} has no timezone")
+    return parsed
 
 
 def substitute(template, subject_sha, run_id):
@@ -92,6 +128,13 @@ def validate_binding_shape(binding):
             continue
         if not isinstance(template, str) or not template:
             fail(f"binding title for {event} must be a non-empty string or null")
+    after_input = binding.get("afterInput")
+    if after_input is not None and (
+        not isinstance(after_input, str)
+        or not after_input
+        or after_input == binding["input"]
+    ):
+        fail("binding afterInput must name a different non-empty input")
 
 
 def validate_binding(repository, binding, subject_sha, run_id):
@@ -169,12 +212,28 @@ def validate_binding(repository, binding, subject_sha, run_id):
     artifact_name = substitute(
         binding["artifactTemplate"], subject_sha, run_id
     )
-    payload = gh_api(
+    pages = gh_api_pages(
         f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100"
     )
+    total_counts = {page.get("total_count") for page in pages}
+    if (
+        len(total_counts) != 1
+        or not all(type(count) is int and count >= 0 for count in total_counts)
+    ):
+        fail(f"{binding['input']} artifact inventory has an invalid total count")
+    artifacts = []
+    for page in pages:
+        page_artifacts = page.get("artifacts")
+        if not isinstance(page_artifacts, list) or not all(
+            isinstance(item, dict) for item in page_artifacts
+        ):
+            fail(f"{binding['input']} artifact inventory has an invalid page")
+        artifacts.extend(page_artifacts)
+    if len(artifacts) != next(iter(total_counts)):
+        fail(f"{binding['input']} artifact inventory is incomplete")
     matches = [
         item
-        for item in payload.get("artifacts", [])
+        for item in artifacts
         if item.get("name") == artifact_name
     ]
     if len(matches) != 1:
@@ -185,19 +244,26 @@ def validate_binding(repository, binding, subject_sha, run_id):
     artifact = matches[0]
     if artifact.get("expired") is not False:
         fail(f"{binding['input']} artifact {artifact_name} is expired")
-    if not isinstance(artifact.get("size_in_bytes"), int) or artifact[
+    if type(artifact.get("size_in_bytes")) is not int or artifact[
         "size_in_bytes"
     ] <= 0:
         fail(f"{binding['input']} artifact {artifact_name} is empty")
-    return artifact_name
+    return {
+        "artifactName": artifact_name,
+        "createdAt": base.get("created_at"),
+        "completedAt": base.get("updated_at"),
+    }
 
 
 def command_validate(args):
     binding = json.loads(args.binding)
-    name = validate_binding(
+    facts = validate_binding(
         args.repository, binding, args.subject_sha, args.run_id
     )
-    print(f"upstream_binding={binding['input']} run={args.run_id} artifact={name}")
+    print(
+        f"upstream_binding={binding['input']} run={args.run_id} "
+        f"artifact={facts['artifactName']}"
+    )
 
 
 def resolve_bindings(args):
@@ -249,14 +315,51 @@ def command_validate_all(args):
     bindings = resolve_bindings(args)
     for binding in bindings:
         validate_binding_shape(binding)
+    binding_names = [binding["input"] for binding in bindings]
+    if len(binding_names) != len(set(binding_names)):
+        fail("upstream bindings contain a duplicate input")
+    chronology_inputs = set()
+    for binding in bindings:
+        after_input = binding.get("afterInput")
+        if after_input is not None:
+            if after_input not in binding_names:
+                fail(
+                    f"binding {binding['input']} depends on unknown input "
+                    f"{after_input}"
+                )
+            chronology_inputs.update((binding["input"], after_input))
+    validated = {}
+    for binding in bindings:
         name = binding["input"]
         if name not in inputs:
             fail(f"dispatch inputs are missing bound value {name}")
         if inputs[name] in (None, ""):
             fail(f"dispatch input {name} is empty")
-        validate_binding(
+        facts = validate_binding(
             args.repository, binding, args.subject_sha, str(inputs[name])
         )
+        if name in chronology_inputs:
+            facts["createdAt"] = parse_timestamp(
+                facts["createdAt"],
+                f"{name} run creation time",
+            )
+            facts["completedAt"] = parse_timestamp(
+                facts["completedAt"],
+                f"{name} run completion time",
+            )
+            if facts["completedAt"] < facts["createdAt"]:
+                fail(f"{name} run completion predates creation")
+        after_input = binding.get("afterInput")
+        if after_input is not None:
+            if after_input not in validated:
+                fail(
+                    f"binding {name} depends on unvalidated input {after_input}"
+                )
+            if validated[after_input]["completedAt"] > facts["createdAt"]:
+                fail(
+                    f"binding {name} began before {after_input} completed"
+                )
+        validated[name] = facts
         print(f"upstream_binding={name} run={inputs[name]} status=OK")
     print(f"upstream_bindings_validated={len(bindings)}")
 

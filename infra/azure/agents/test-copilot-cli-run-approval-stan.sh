@@ -65,22 +65,28 @@ approval_state_for() {
 
 binding_run_json() {
   local run_id="$1"
-  local workflow workflow_id event title
+  local workflow workflow_id event title created_at updated_at
   case "$run_id" in
     41)
       workflow=oci-production-build.yml
       event=workflow_run
       title="oci-build $SHA upstream-40"
+      created_at=2026-01-01T00:00:00Z
+      updated_at=2026-01-01T00:01:00Z
       ;;
     42)
       workflow=ghcr-package-management.yml
       event=workflow_dispatch
       title="ghcr-package validate $SHA"
+      created_at="${STUB_PACKAGE_CREATED_AT:-2026-01-01T00:02:00Z}"
+      updated_at=2026-01-01T00:03:00Z
       ;;
     43)
       workflow=oci-capacity-acquire.yml
       event=workflow_dispatch
       title="oci-capacity-acquire $SHA"
+      created_at=2026-01-01T00:04:00Z
+      updated_at=2026-01-01T00:05:00Z
       ;;
     *)
       return 1
@@ -95,6 +101,8 @@ binding_run_json() {
     --arg event "$event" \
     --arg sha "$SHA" \
     --arg repo "$REPOSITORY" \
+    --arg created_at "$created_at" \
+    --arg updated_at "$updated_at" \
     '{
       id:$id,
       workflow_id:$workflow_id,
@@ -106,7 +114,9 @@ binding_run_json() {
       head_repository:{full_name:$repo},
       run_attempt:1,
       status:"completed",
-      conclusion:"success"
+      conclusion:"success",
+      created_at:$created_at,
+      updated_at:$updated_at
     }'
 }
 
@@ -610,7 +620,7 @@ make_record() {
 
 load_record_stub() {
   local operation="$1"
-  local row
+  local row runtime_mode
   row="$(awk -F '\t' -v operation="$operation" '$1 == operation { print; exit }' "$records_file")"
   [[ -n "$row" ]] || {
     echo "missing test record for $operation" >&2
@@ -627,8 +637,16 @@ load_record_stub() {
   unset STUB_API_BLOB STUB_JOB_ID STUB_WORKFLOW_STATE
   unset STUB_CHANGE_STATE_ON_CALL
   unset STUB_OCI_RUNTIME_MODE
+  unset STUB_PACKAGE_CREATED_AT
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
+  runtime_mode="$(
+    "$POLICY" get "$operation" | jq -r '.fixedInputs.runtime_mode // ""'
+  )"
+  if [[ -n "$runtime_mode" ]]; then
+    STUB_OCI_RUNTIME_MODE="$runtime_mode"
+    export STUB_OCI_RUNTIME_MODE
+  fi
 }
 
 run_approver() {
@@ -711,6 +729,13 @@ done < <(
 )
 
 load_record_stub oci-infrastructure-finalize-k3s
+if STUB_OCI_RUNTIME_MODE=k3s \
+  STUB_PACKAGE_CREATED_AT=2025-12-31T23:59:00Z \
+  run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "package validation predating its build unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "began before ghcr_build_run_id completed" "$error_file"
 STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
   run_approver "$STUB_RUN_ID" --approve >"$output_file"
 grep -qF "status=APPROVED" "$output_file"

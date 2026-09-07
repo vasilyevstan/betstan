@@ -18,11 +18,15 @@ NORMALIZED_SCHEMA = "betstan.copilot-cli-dispatch-normalized.v1"
 INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v1"
 RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
+RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
 # New records retain the established v1 shape. Only the explicit,
 # evidence-bound stale-claim retirement migrates a record to v2.
 RECORD_SCHEMA = RECORD_SCHEMA_V1
 UNMATERIALIZED_EVIDENCE_SCHEMA = (
     "betstan.copilot-cli-unmaterialized-evidence.v1"
+)
+PREREQUISITE_REJECTION_EVIDENCE_SCHEMA = (
+    "betstan.copilot-cli-prerequisite-rejection-evidence.v1"
 )
 AUTHORITY_OWNER = "github-copilot-cli"
 AUTHORITY_TTL_SECONDS = 24 * 60 * 60
@@ -110,6 +114,36 @@ RETIREMENT_KEYS = {
     "masterShaAtRetirement",
 }
 RECORD_V2_KEYS = RECORD_V1_KEYS | {"retirement"}
+REJECTION_KEYS = {
+    "reason",
+    "failureReason",
+    "evidence",
+    "evidenceDigest",
+    "startedAt",
+    "masterShaAtRejection",
+    "recordVersion",
+    "inputHash",
+    "environmentId",
+    "waitingJobIds",
+    "runSha256",
+    "jobsSha256",
+    "pendingSha256",
+    "approvalsSha256",
+}
+REJECTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
+    "evidence",
+    "runSha256",
+    "jobsSha256",
+    "pendingSha256",
+    "approvalsSha256",
+}
+RECORD_V3_KEYS = RECORD_V1_KEYS | {"rejection", "retirement"}
+PREREQUISITE_REJECTION_SNAPSHOT_KEYS = {
+    "run",
+    "jobs",
+    "pending",
+    "approvals",
+}
 # Kept as an alias for callers that inspect the established v1 schema.
 RECORD_KEYS = RECORD_V1_KEYS
 APPROVAL_KEYS = {
@@ -336,6 +370,54 @@ def canonical_json(value):
 
 def canonical_input_hash(inputs):
     return hashlib.sha256(canonical_json(inputs).encode("utf-8")).hexdigest()
+
+
+def evidence_digest(value):
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def prerequisite_rejection_digest(
+    repository,
+    current_master,
+    input_hash,
+    run_id,
+    record_version,
+    failure_reason,
+    evidence,
+):
+    return evidence_digest(
+        {
+            "schemaVersion": PREREQUISITE_REJECTION_EVIDENCE_SCHEMA,
+            "phase": "pre-cancel",
+            "repository": repository,
+            "currentMaster": current_master,
+            "authorityRecord": {
+                "inputHash": input_hash,
+                "runId": run_id,
+                "version": record_version,
+            },
+            "failureReason": failure_reason,
+            **evidence,
+        }
+    )
+
+
+def prerequisite_rejection_retirement_digest(
+    repository,
+    current_master,
+    rejection_evidence_digest,
+    evidence,
+):
+    return evidence_digest(
+        {
+            "schemaVersion": PREREQUISITE_REJECTION_EVIDENCE_SCHEMA,
+            "phase": "terminal",
+            "repository": repository,
+            "currentMaster": current_master,
+            "rejectionEvidenceDigest": rejection_evidence_digest,
+            **evidence,
+        }
+    )
 
 
 def workflow_dispatch_inputs(inputs):
@@ -902,6 +984,9 @@ def load_record(directory, run_id):
     elif schema_version == RECORD_SCHEMA_V2:
         if set(record) != RECORD_V2_KEYS:
             fail("authority record has an unexpected schema")
+    elif schema_version == RECORD_SCHEMA_V3:
+        if set(record) != RECORD_V3_KEYS:
+            fail("authority record has an unexpected schema")
     else:
         fail("authority record schema version is unsupported")
     if str(record["runId"]) != str(run_id):
@@ -915,6 +1000,7 @@ def load_record(directory, run_id):
         "issued",
         "inflight",
         "consumed",
+        "rejecting",
         "retired",
     }:
         fail("authority record state is invalid")
@@ -997,6 +1083,216 @@ def load_record(directory, run_id):
             or not FULL_SHA.fullmatch(retirement["masterShaAtRetirement"])
         ):
             fail("retired authority provenance master SHA is invalid")
+    elif schema_version == RECORD_SCHEMA_V3:
+        rejection = record["rejection"]
+        if not isinstance(rejection, dict) or set(rejection) != REJECTION_KEYS:
+            fail("prerequisite rejection provenance has an unexpected schema")
+        if record["state"] not in {"rejecting", "retired"}:
+            fail("prerequisite rejection provenance has an invalid state")
+        if record["approvals"] or record["inflightApproval"] is not None:
+            fail("prerequisite rejection has unexpected approval state")
+        if rejection["reason"] != "prerequisite-rejected":
+            fail("prerequisite rejection provenance reason is invalid")
+        validate_scalar_string(
+            rejection["failureReason"],
+            "prerequisite rejection failure reason",
+            allow_empty=False,
+        )
+        if len(rejection["failureReason"]) > 4096:
+            fail("prerequisite rejection failure reason is too long")
+        for digest_key in {
+            "evidenceDigest",
+            "runSha256",
+            "jobsSha256",
+            "pendingSha256",
+            "approvalsSha256",
+        }:
+            if (
+                not isinstance(rejection[digest_key], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", rejection[digest_key])
+            ):
+                fail("prerequisite rejection provenance digest is invalid")
+        started_at = parse_utc(
+            rejection["startedAt"],
+            "prerequisite rejection time",
+        )
+        if started_at < parse_utc(record["createdAt"], "authority creation time"):
+            fail("prerequisite rejection predates record creation")
+        if (
+            not isinstance(rejection["masterShaAtRejection"], str)
+            or not FULL_SHA.fullmatch(rejection["masterShaAtRejection"])
+            or rejection["masterShaAtRejection"] != record["controlSha"]
+        ):
+            fail("prerequisite rejection master SHA is invalid")
+        if (
+            type(rejection["recordVersion"]) is not int
+            or rejection["recordVersion"] < 1
+            or rejection["recordVersion"] >= record["version"]
+        ):
+            fail("prerequisite rejection record version is invalid")
+        if rejection["inputHash"] != record["inputHash"]:
+            fail("prerequisite rejection input hash is invalid")
+        if not POSITIVE_INTEGER.fullmatch(str(rejection["environmentId"])):
+            fail("prerequisite rejection environment ID is invalid")
+        waiting_job_ids = rejection["waitingJobIds"]
+        if (
+            not isinstance(waiting_job_ids, list)
+            or len(waiting_job_ids) != 1
+            or not POSITIVE_INTEGER.fullmatch(str(waiting_job_ids[0]))
+        ):
+            fail("prerequisite rejection waiting job identity is invalid")
+        rejection_evidence = rejection["evidence"]
+        if (
+            not isinstance(rejection_evidence, dict)
+            or set(rejection_evidence)
+            != PREREQUISITE_REJECTION_SNAPSHOT_KEYS
+            or not isinstance(rejection_evidence["run"], dict)
+            or not isinstance(rejection_evidence["jobs"], list)
+            or not all(
+                isinstance(job, dict) for job in rejection_evidence["jobs"]
+            )
+            or not isinstance(rejection_evidence["pending"], list)
+            or not all(
+                isinstance(deployment, dict)
+                for deployment in rejection_evidence["pending"]
+            )
+            or not isinstance(rejection_evidence["approvals"], list)
+            or not all(
+                isinstance(approval, dict)
+                for approval in rejection_evidence["approvals"]
+            )
+        ):
+            fail("prerequisite rejection evidence is invalid")
+        rejection_hashes = {
+            "runSha256": evidence_digest(rejection_evidence["run"]),
+            "jobsSha256": evidence_digest(rejection_evidence["jobs"]),
+            "pendingSha256": evidence_digest(rejection_evidence["pending"]),
+            "approvalsSha256": evidence_digest(
+                rejection_evidence["approvals"]
+            ),
+        }
+        for digest_key, expected in rejection_hashes.items():
+            if rejection[digest_key] != expected:
+                fail(
+                    f"prerequisite rejection {digest_key} "
+                    "does not match evidence"
+                )
+        if rejection["evidenceDigest"] != prerequisite_rejection_digest(
+            record["repository"],
+            rejection["masterShaAtRejection"],
+            rejection["inputHash"],
+            record["runId"],
+            rejection["recordVersion"],
+            rejection["failureReason"],
+            rejection_evidence,
+        ):
+            fail("prerequisite rejection digest does not match evidence")
+        rejection_facts = validate_prerequisite_rejection_preconditions(
+            record,
+            rejection_evidence["run"],
+            rejection_evidence["jobs"],
+            rejection_evidence["pending"],
+            rejection_evidence["approvals"],
+        )
+        if (
+            rejection_facts["environmentId"] != rejection["environmentId"]
+            or rejection_facts["waitingJobIds"] != waiting_job_ids
+        ):
+            fail("prerequisite rejection identity does not match evidence")
+        retirement = record["retirement"]
+        if record["state"] == "rejecting":
+            if retirement is not None:
+                fail("active prerequisite rejection already has retirement proof")
+        else:
+            if (
+                not isinstance(retirement, dict)
+                or set(retirement) != REJECTION_RETIREMENT_KEYS
+                or retirement["reason"] != "prerequisite-rejected"
+            ):
+                fail("prerequisite rejection retirement has an invalid schema")
+            for digest_key in {
+                "evidenceDigest",
+                "runSha256",
+                "jobsSha256",
+                "pendingSha256",
+                "approvalsSha256",
+            }:
+                if (
+                    not isinstance(retirement[digest_key], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", retirement[digest_key])
+                ):
+                    fail("prerequisite rejection retirement digest is invalid")
+            retired_at = parse_utc(
+                retirement["retiredAt"],
+                "prerequisite rejection retirement time",
+            )
+            if retired_at < started_at:
+                fail("prerequisite rejection retirement predates rejection")
+            if (
+                not isinstance(retirement["masterShaAtRetirement"], str)
+                or not FULL_SHA.fullmatch(retirement["masterShaAtRetirement"])
+                or retirement["masterShaAtRetirement"] != record["controlSha"]
+            ):
+                fail("prerequisite rejection retirement master SHA is invalid")
+            retirement_evidence = retirement["evidence"]
+            if (
+                not isinstance(retirement_evidence, dict)
+                or set(retirement_evidence)
+                != PREREQUISITE_REJECTION_SNAPSHOT_KEYS
+                or not isinstance(retirement_evidence["run"], dict)
+                or not isinstance(retirement_evidence["jobs"], list)
+                or not all(
+                    isinstance(job, dict)
+                    for job in retirement_evidence["jobs"]
+                )
+                or not isinstance(retirement_evidence["pending"], list)
+                or not all(
+                    isinstance(deployment, dict)
+                    for deployment in retirement_evidence["pending"]
+                )
+                or not isinstance(retirement_evidence["approvals"], list)
+                or not all(
+                    isinstance(approval, dict)
+                    for approval in retirement_evidence["approvals"]
+                )
+            ):
+                fail("prerequisite rejection retirement evidence is invalid")
+            retirement_hashes = {
+                "runSha256": evidence_digest(retirement_evidence["run"]),
+                "jobsSha256": evidence_digest(retirement_evidence["jobs"]),
+                "pendingSha256": evidence_digest(
+                    retirement_evidence["pending"]
+                ),
+                "approvalsSha256": evidence_digest(
+                    retirement_evidence["approvals"]
+                ),
+            }
+            for digest_key, expected in retirement_hashes.items():
+                if retirement[digest_key] != expected:
+                    fail(
+                        "prerequisite rejection retirement "
+                        f"{digest_key} does not match evidence"
+                    )
+            if (
+                retirement["evidenceDigest"]
+                != prerequisite_rejection_retirement_digest(
+                    record["repository"],
+                    retirement["masterShaAtRetirement"],
+                    rejection["evidenceDigest"],
+                    retirement_evidence,
+                )
+            ):
+                fail(
+                    "prerequisite rejection retirement digest "
+                    "does not match evidence"
+                )
+            validate_prerequisite_rejection_terminal(
+                record,
+                retirement_evidence["run"],
+                retirement_evidence["jobs"],
+                retirement_evidence["pending"],
+                retirement_evidence["approvals"],
+            )
     return record
 
 
@@ -1101,7 +1397,7 @@ def verify_record(
         fail("authority record lifetime exceeds policy")
     if (
         utc_now() >= expires_at
-        and record["state"] not in {"claimed", "inflight", "retired"}
+        and record["state"] not in {"claimed", "inflight", "rejecting", "retired"}
     ):
         fail("authority record has expired")
     return record
@@ -2334,7 +2630,11 @@ def find_blocking_authorities(directory, normalized):
         record = load_record(directory, run_id)
         if record["repository"] != normalized["repository"]:
             continue
-        globally_unresolved = record["state"] in {"claimed", "inflight"}
+        globally_unresolved = record["state"] in {
+            "claimed",
+            "inflight",
+            "rejecting",
+        }
         exact_one_use = (
             record["controlSha"] == normalized["controlSha"]
             and record["operation"] == normalized["operation"]
@@ -2375,7 +2675,12 @@ def command_issue(args):
         args.repo_root,
         create=False,
     )
-    token = acquire_lock_file(directory, args.run_id, os.getpid())
+    owns_lock = args.token is None
+    token = (
+        acquire_lock_file(directory, args.run_id, os.getpid())
+        if owns_lock
+        else args.token
+    )
     try:
         run = load_json_file(args.run_json, "workflow run response", private=True)
         policy = validate_policy(load_json_text(args.policy_json, "policy"))
@@ -2389,12 +2694,17 @@ def command_issue(args):
                 args.workflow_id,
                 args.workflow_blob_sha,
             )
+            if (
+                args.expected_version is not None
+                and record["version"] != args.expected_version
+            ):
+                fail("claimed authority changed before issuance")
             if record["state"] != "claimed":
                 fail("only a claimed authority record can be issued")
             validate_run_against_record(run, record)
             if (
                 run.get("status")
-                not in {"queued", "in_progress", "waiting", "pending", "requested"}
+                not in {"queued", "waiting", "pending", "requested"}
                 or run.get("conclusion") not in {None, ""}
             ):
                 fail("claimed authority run is not active")
@@ -2409,14 +2719,13 @@ def command_issue(args):
 
         update_record_with_lock(directory, args.run_id, token, issue)
     finally:
-        try:
-            require_lock(directory, args.run_id, token).unlink()
-        except FileNotFoundError:
-            pass
+        if owns_lock:
+            try:
+                require_lock(directory, args.run_id, token).unlink()
+            except FileNotFoundError:
+                pass
 
 
-SAFE_REJECTION_RUN_STATES = {"queued", "waiting", "pending", "requested"}
-SAFE_REJECTION_JOB_STATES = {"queued", "waiting", "pending", "requested"}
 REJECTED_TERMINAL_JOB_CONCLUSIONS = {"cancelled", "skipped"}
 SAFE_REJECTION_STEP_CONCLUSIONS = {None, "", "cancelled", "skipped"}
 
@@ -2470,43 +2779,44 @@ def validate_prerequisite_rejection_preconditions(
     approvals,
 ):
     validate_run_against_record(run, record)
+    if run.get("status") != "waiting" or run.get("conclusion") not in {None, ""}:
+        fail("prerequisite-rejected run is not waiting at its protected gate")
+    if len(pending) != 1:
+        fail("prerequisite-rejected run does not have one pending deployment")
+    environment = pending[0].get("environment")
     if (
-        run.get("status") not in SAFE_REJECTION_RUN_STATES
-        or run.get("conclusion") not in {None, ""}
+        not isinstance(environment, dict)
+        or environment.get("name") != record["environment"]
+        or not POSITIVE_INTEGER.fullmatch(str(environment.get("id", "")))
     ):
-        fail("prerequisite-rejected run is not safely unstarted")
+        fail("prerequisite-rejected run is waiting on a different environment")
+    waiting_job_ids = []
     for job in jobs:
-        active_safe = (
-            job.get("status") in SAFE_REJECTION_JOB_STATES
+        waiting_safe = (
+            job.get("status") == "waiting"
             and job.get("conclusion") in {None, ""}
+            and POSITIVE_INTEGER.fullmatch(str(job.get("id", "")))
         )
         skipped_safe = (
             job.get("status") == "completed"
             and job.get("conclusion") == "skipped"
         )
-        if not active_safe and not skipped_safe:
+        if not waiting_safe and not skipped_safe:
             fail("prerequisite-rejected run has a started or terminal job")
+        if waiting_safe:
+            waiting_job_ids.append(int(job["id"]))
         validate_rejection_job_steps(
             job,
             "prerequisite-rejected jobs response",
         )
+    if len(waiting_job_ids) != 1:
+        fail("prerequisite-rejected run does not have one waiting job")
     if approvals:
         fail("prerequisite-rejected run already has an environment review")
-    if pending:
-        if len(pending) != 1:
-            fail("prerequisite-rejected run has unexpected pending deployments")
-        environment = pending[0].get("environment")
-        if (
-            not isinstance(environment, dict)
-            or environment.get("name") != record["environment"]
-            or not POSITIVE_INTEGER.fullmatch(str(environment.get("id", "")))
-        ):
-            fail("prerequisite-rejected run is waiting on a different environment")
-    elif (
-        run.get("status") in {"waiting", "pending"}
-        or any(job.get("status") in {"waiting", "pending"} for job in jobs)
-    ):
-        fail("waiting prerequisite-rejected run has no protected deployment gate")
+    return {
+        "environmentId": int(environment["id"]),
+        "waitingJobIds": waiting_job_ids,
+    }
 
 
 def validate_prerequisite_rejection_terminal(
@@ -2533,28 +2843,34 @@ def validate_prerequisite_rejection_terminal(
             job,
             "cancelled prerequisite-rejected jobs response",
         )
+    observed_job_ids = {
+        int(job["id"])
+        for job in jobs
+        if POSITIVE_INTEGER.fullmatch(str(job.get("id", "")))
+    }
+    if not set(record["rejection"]["waitingJobIds"]).issubset(observed_job_ids):
+        fail("cancelled prerequisite-rejected run lost its waiting job identity")
 
 
-def load_prerequisite_rejection_context(args):
+def load_prerequisite_rejection_policy(args):
     policy = validate_policy(load_json_text(args.policy_json, "policy"))
     directory = ensure_authority_dir(
         args.authority_dir,
         args.repo_root,
         create=False,
     )
-    record = load_record(directory, args.run_id)
-    verified = verify_record(
-        record,
-        policy,
-        args.repository,
-        args.current_master,
-        args.workflow_id,
-        args.workflow_blob_sha,
+    return directory, policy
+
+
+def command_begin_prerequisite_rejection(args):
+    directory, policy = load_prerequisite_rejection_policy(args)
+    validate_scalar_string(
+        args.failure_reason,
+        "prerequisite rejection failure reason",
+        allow_empty=False,
     )
-    if verified["state"] != "claimed":
-        fail("only a claimed authority can be retired after prerequisite rejection")
-    if verified["version"] != args.expected_version:
-        fail("claimed authority changed before prerequisite rejection")
+    if len(args.failure_reason) > 4096:
+        fail("prerequisite rejection failure reason is too long")
     run = load_json_file(
         args.pre_run_json,
         "prerequisite-rejected run response",
@@ -2572,27 +2888,92 @@ def load_prerequisite_rejection_context(args):
         args.pre_approvals_json,
         "prerequisite-rejected approval reviews response",
     )
-    validate_prerequisite_rejection_preconditions(
-        verified,
-        run,
-        jobs,
-        pending,
-        approvals,
+    pre_digests = {
+        "runSha256": evidence_digest(run),
+        "jobsSha256": evidence_digest(jobs),
+        "pendingSha256": evidence_digest(pending),
+        "approvalsSha256": evidence_digest(approvals),
+    }
+    pre_evidence = {
+        "run": run,
+        "jobs": jobs,
+        "pending": pending,
+        "approvals": approvals,
+    }
+
+    def begin(record):
+        verified = verify_record(
+            record,
+            policy,
+            args.repository,
+            args.current_master,
+            args.workflow_id,
+            args.workflow_blob_sha,
+        )
+        if verified["state"] != "claimed":
+            fail("only a claimed authority can begin prerequisite rejection")
+        if verified["version"] != args.expected_version:
+            fail("claimed authority changed before prerequisite rejection")
+        facts = validate_prerequisite_rejection_preconditions(
+            verified,
+            run,
+            jobs,
+            pending,
+            approvals,
+        )
+        started_at = utc_text(utc_now())
+        rejection = {
+            "reason": "prerequisite-rejected",
+            "failureReason": args.failure_reason,
+            "evidence": pre_evidence,
+            "evidenceDigest": prerequisite_rejection_digest(
+                args.repository,
+                args.current_master,
+                verified["inputHash"],
+                verified["runId"],
+                verified["version"],
+                args.failure_reason,
+                pre_evidence,
+            ),
+            "startedAt": started_at,
+            "masterShaAtRejection": args.current_master,
+            "recordVersion": verified["version"],
+            "inputHash": verified["inputHash"],
+            "environmentId": facts["environmentId"],
+            "waitingJobIds": facts["waitingJobIds"],
+            **pre_digests,
+        }
+        record["schemaVersion"] = RECORD_SCHEMA_V3
+        record["state"] = "rejecting"
+        record["version"] += 1
+        record["rejection"] = rejection
+        record["retirement"] = None
+        return record
+
+    updated = update_record_with_lock(
+        directory,
+        args.run_id,
+        args.token,
+        begin,
     )
-    return directory, policy, verified
-
-
-def command_check_prerequisite_rejection(args):
-    _, _, verified = load_prerequisite_rejection_context(args)
-    print(canonical_json({
-        "runId": verified["runId"],
-        "state": verified["state"],
-        "version": verified["version"],
-    }))
+    print(
+        canonical_json(
+            {
+                "runId": updated["runId"],
+                "state": updated["state"],
+                "version": updated["version"],
+                "rejection": updated["rejection"],
+            }
+        )
+    )
 
 
 def command_retire_prerequisite_rejected_claim(args):
-    directory, policy, _ = load_prerequisite_rejection_context(args)
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
     terminal_run = load_json_file(
         args.terminal_run_json,
         "cancelled prerequisite-rejected run response",
@@ -2610,65 +2991,71 @@ def command_retire_prerequisite_rejected_claim(args):
         args.terminal_approvals_json,
         "cancelled prerequisite-rejected approval reviews response",
     )
-    token = acquire_lock_file(directory, args.run_id, os.getpid())
-    try:
-        def retire(record):
-            verified = verify_record(
-                record,
-                policy,
-                args.repository,
-                args.current_master,
-                args.workflow_id,
-                args.workflow_blob_sha,
-            )
-            if verified["state"] != "claimed":
-                fail(
-                    "only a claimed authority can be retired after "
-                    "prerequisite rejection"
-                )
-            if verified["version"] != args.expected_version:
-                fail("claimed authority changed before prerequisite retirement")
-            pre_run = load_json_file(
-                args.pre_run_json,
-                "prerequisite-rejected run response",
-                private=True,
-            )
-            pre_jobs = load_job_list(
-                args.pre_jobs_json,
-                "prerequisite-rejected jobs response",
-            )
-            pre_pending = load_pending_deployments(
-                args.pre_pending_json,
-                "prerequisite-rejected pending deployments response",
-            )
-            pre_approvals = load_approval_reviews(
-                args.pre_approvals_json,
-                "prerequisite-rejected approval reviews response",
-            )
-            validate_prerequisite_rejection_preconditions(
-                verified,
-                pre_run,
-                pre_jobs,
-                pre_pending,
-                pre_approvals,
-            )
-            validate_prerequisite_rejection_terminal(
-                verified,
-                terminal_run,
-                terminal_jobs,
-                terminal_pending,
-                terminal_approvals,
-            )
-            record["state"] = "retired"
-            record["version"] += 1
-            return record
+    terminal_digests = {
+        "runSha256": evidence_digest(terminal_run),
+        "jobsSha256": evidence_digest(terminal_jobs),
+        "pendingSha256": evidence_digest(terminal_pending),
+        "approvalsSha256": evidence_digest(terminal_approvals),
+    }
+    terminal_evidence = {
+        "run": terminal_run,
+        "jobs": terminal_jobs,
+        "pending": terminal_pending,
+        "approvals": terminal_approvals,
+    }
 
-        update_record_with_lock(directory, args.run_id, token, retire)
-    finally:
-        try:
-            require_lock(directory, args.run_id, token).unlink()
-        except FileNotFoundError:
-            pass
+    def retire(record):
+        request = load_matching_rejection_request(args, record)
+        verified = verify_rejection_continuation_record(
+            record,
+            request,
+            args.repository,
+            args.control_sha,
+            args.workflow_id,
+            args.workflow_blob_sha,
+        )
+        if verified["version"] != args.expected_version:
+            fail("rejecting authority changed before prerequisite retirement")
+        validate_prerequisite_rejection_terminal(
+            verified,
+            terminal_run,
+            terminal_jobs,
+            terminal_pending,
+            terminal_approvals,
+        )
+        record["state"] = "retired"
+        record["version"] += 1
+        record["retirement"] = {
+            "reason": "prerequisite-rejected",
+            "evidence": terminal_evidence,
+            "evidenceDigest": prerequisite_rejection_retirement_digest(
+                args.repository,
+                args.control_sha,
+                verified["rejection"]["evidenceDigest"],
+                terminal_evidence,
+            ),
+            "retiredAt": utc_text(utc_now()),
+            "masterShaAtRetirement": args.control_sha,
+            **terminal_digests,
+        }
+        return record
+
+    updated = update_record_with_lock(
+        directory,
+        args.run_id,
+        args.token,
+        retire,
+    )
+    print(
+        canonical_json(
+            {
+                "runId": updated["runId"],
+                "state": updated["state"],
+                "version": updated["version"],
+                "retirement": updated["retirement"],
+            }
+        )
+    )
 
 
 def command_retire_inert_claim(args):
@@ -2731,6 +3118,107 @@ def command_operation(args):
         create=False,
     )
     print(load_record(directory, args.run_id)["operation"])
+
+
+def load_matching_rejection_request(args, record):
+    request_path = Path(args.request)
+    require_outside_repo(request_path, args.repo_root, "request file")
+    request = load_json_file(
+        request_path,
+        "request file",
+        private=True,
+    )
+    if (
+        not isinstance(request, dict)
+        or set(request) != REQUEST_KEYS
+        or request["schemaVersion"] != REQUEST_SCHEMA
+    ):
+        fail("request has an unexpected schema")
+    expected = {
+        "repository": record["repository"],
+        "operation": record["operation"],
+        "controlSha": record["controlSha"],
+        "subjectSha": record["subjectSha"],
+        "targetSha": record["targetSha"],
+        "inputs": record["inputs"],
+    }
+    for key, value in expected.items():
+        if request.get(key) != value:
+            if key == "inputs":
+                fail("resume request does not match the authority record input hash")
+            fail(f"resume request {key} does not match the authority record")
+    return request
+
+
+def verify_rejection_continuation_record(
+    record,
+    request,
+    repository,
+    control_sha,
+    workflow_id,
+    workflow_blob_sha,
+):
+    if not FULL_SHA.fullmatch(control_sha):
+        fail("rejection continuation control SHA is invalid")
+    if not POSITIVE_INTEGER.fullmatch(str(workflow_id)):
+        fail("rejection continuation workflow ID is invalid")
+    if not FULL_SHA.fullmatch(workflow_blob_sha):
+        fail("rejection continuation workflow blob SHA is invalid")
+    if record["state"] != "rejecting":
+        fail("only a rejecting authority can continue prerequisite cancellation")
+    if (
+        record["schemaVersion"] != RECORD_SCHEMA_V3
+        or record["rejection"]["reason"] != "prerequisite-rejected"
+    ):
+        fail("authority is not a prerequisite-rejection record")
+    checks = {
+        "repository": (record["repository"], repository),
+        "control SHA": (record["controlSha"], control_sha),
+        "workflow ID": (record["workflowId"], int(workflow_id)),
+        "workflow blob SHA": (
+            record["workflowBlobSha"],
+            workflow_blob_sha,
+        ),
+        "request repository": (request["repository"], repository),
+        "request control SHA": (request["controlSha"], control_sha),
+    }
+    for label, (observed, expected) in checks.items():
+        if observed != expected:
+            fail(f"rejection continuation {label} mismatch")
+    return record
+
+
+def command_read_resume_context(args):
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
+    record = load_record(directory, args.run_id)
+    load_matching_rejection_request(args, record)
+    prerequisite_rejection = (
+        record["schemaVersion"] == RECORD_SCHEMA_V3
+        and record["rejection"]["reason"] == "prerequisite-rejected"
+    )
+    print(
+        canonical_json(
+            {
+                "controlSha": record["controlSha"],
+                "environment": record["environment"],
+                "inputHash": record["inputHash"],
+                "operation": record["operation"],
+                "prerequisiteRejection": prerequisite_rejection,
+                "runId": record["runId"],
+                "state": record["state"],
+                "subjectSha": record["subjectSha"],
+                "targetSha": record["targetSha"],
+                "version": record["version"],
+                "workflow": record["workflow"],
+                "workflowBlobSha": record["workflowBlobSha"],
+                "workflowId": record["workflowId"],
+            }
+        )
+    )
 
 
 def command_verify(args):
@@ -3180,48 +3668,58 @@ def build_parser():
     issue.add_argument("--current-master", required=True)
     issue.add_argument("--workflow-id", required=True)
     issue.add_argument("--workflow-blob-sha", required=True)
+    issue.add_argument("--token")
+    issue.add_argument("--expected-version", type=int)
     common_authority_arguments(issue)
     issue.set_defaults(function=command_issue)
 
-    check_prerequisite_rejection = subparsers.add_parser(
-        "check-prerequisite-rejection"
+    begin_prerequisite_rejection = subparsers.add_parser(
+        "begin-prerequisite-rejection"
     )
-    check_prerequisite_rejection.add_argument("--run-id", required=True)
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument("--run-id", required=True)
+    begin_prerequisite_rejection.add_argument("--token", required=True)
+    begin_prerequisite_rejection.add_argument(
+        "--failure-reason",
+        required=True,
+    )
+    begin_prerequisite_rejection.add_argument(
         "--expected-version",
         required=True,
         type=int,
     )
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument(
         "--pre-run-json",
         required=True,
     )
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument(
         "--pre-jobs-json",
         required=True,
     )
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument(
         "--pre-pending-json",
         required=True,
     )
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument(
         "--pre-approvals-json",
         required=True,
     )
-    check_prerequisite_rejection.add_argument("--policy-json", required=True)
-    check_prerequisite_rejection.add_argument("--repository", required=True)
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument("--policy-json", required=True)
+    begin_prerequisite_rejection.add_argument("--repository", required=True)
+    begin_prerequisite_rejection.add_argument(
         "--current-master",
         required=True,
     )
-    check_prerequisite_rejection.add_argument("--workflow-id", required=True)
-    check_prerequisite_rejection.add_argument(
+    begin_prerequisite_rejection.add_argument(
+        "--workflow-id",
+        required=True,
+    )
+    begin_prerequisite_rejection.add_argument(
         "--workflow-blob-sha",
         required=True,
     )
-    common_authority_arguments(check_prerequisite_rejection)
-    check_prerequisite_rejection.set_defaults(
-        function=command_check_prerequisite_rejection
+    common_authority_arguments(begin_prerequisite_rejection)
+    begin_prerequisite_rejection.set_defaults(
+        function=command_begin_prerequisite_rejection
     )
 
     retire_rejected = subparsers.add_parser(
@@ -3233,17 +3731,14 @@ def build_parser():
         required=True,
         type=int,
     )
-    retire_rejected.add_argument("--pre-run-json", required=True)
-    retire_rejected.add_argument("--pre-jobs-json", required=True)
-    retire_rejected.add_argument("--pre-pending-json", required=True)
-    retire_rejected.add_argument("--pre-approvals-json", required=True)
+    retire_rejected.add_argument("--token", required=True)
     retire_rejected.add_argument("--terminal-run-json", required=True)
     retire_rejected.add_argument("--terminal-jobs-json", required=True)
     retire_rejected.add_argument("--terminal-pending-json", required=True)
     retire_rejected.add_argument("--terminal-approvals-json", required=True)
-    retire_rejected.add_argument("--policy-json", required=True)
+    retire_rejected.add_argument("--request", required=True)
     retire_rejected.add_argument("--repository", required=True)
-    retire_rejected.add_argument("--current-master", required=True)
+    retire_rejected.add_argument("--control-sha", required=True)
     retire_rejected.add_argument("--workflow-id", required=True)
     retire_rejected.add_argument("--workflow-blob-sha", required=True)
     common_authority_arguments(retire_rejected)
@@ -3336,6 +3831,12 @@ def build_parser():
     operation.add_argument("--run-id", required=True)
     common_authority_arguments(operation)
     operation.set_defaults(function=command_operation)
+
+    resume_context = subparsers.add_parser("read-resume-context")
+    resume_context.add_argument("--run-id", required=True)
+    resume_context.add_argument("--request", required=True)
+    common_authority_arguments(resume_context)
+    resume_context.set_defaults(function=command_read_resume_context)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--run-id", required=True)

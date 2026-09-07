@@ -10,6 +10,7 @@ DEPLOYED_SHA=2222222222222222222222222222222222222222
 LKG_SHA=3333333333333333333333333333333333333333
 OBSOLETE_SHA=4444444444444444444444444444444444444444
 SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+export CANDIDATE_BUILD_RUN_ID=900
 
 fail() {
   echo "ghcr contract failure: $*" >&2
@@ -202,6 +203,7 @@ OUTPUT_DIR="$OUTPUT_ROOT/package-valid" \
   "$OCI_DIR/scripts/manage-ghcr-package.sh" >/dev/null
 jq -e '
   .terminal_status == "VALIDATED" and
+  .candidate_build_run_id == "900" and
   .planned_deletions == 0 and
   .untagged_versions == 1 and
   (.generations_sha256 | test("^[0-9a-f]{64}$"))
@@ -219,7 +221,10 @@ VALIDATED_DELETE_IDS_FILE="$ROOT_DIR/$OUTPUT_ROOT/package-valid/planned-delete-v
 VALIDATED_GENERATIONS_FILE="$ROOT_DIR/$OUTPUT_ROOT/package-valid/generations.tsv" \
 OUTPUT_DIR="$OUTPUT_ROOT/package-apply-converged" \
   "$OCI_DIR/scripts/manage-ghcr-package.sh" >/dev/null
-jq -e '.terminal_status == "CONVERGED" and .mode == "apply"' \
+jq -e '
+  .terminal_status == "CONVERGED" and .mode == "apply" and
+  .candidate_build_run_id == "900"
+' \
   "$ROOT_DIR/$OUTPUT_ROOT/package-apply-converged/after-summary.json" >/dev/null ||
   fail "unchanged GHCR validate-to-apply handoff did not converge"
 
@@ -748,6 +753,28 @@ for file in \
   ! grep -Eq 'repos/[^[:space:]"]+/packages/container|repos/\$[A-Z_]+/packages/container' "$file" ||
     fail "GHCR package API still uses a nonexistent repository-scoped route in $file"
 done
+grep -Fq '.candidate_build_run_id // ""' \
+  "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" ||
+  fail "infrastructure finalization does not bind package validation to its build run"
+if ! python3 - "$ROOT_DIR/.github/workflows/oci-ghcr-cache-recovery.yml" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index("validate_run() {")
+end = text.index("validate_run oci-production-build.yml", start)
+body = text[start:end]
+if 'actions/runs/$run_id")' not in body:
+    raise SystemExit("validate_run does not read the base run")
+if 'actions/runs/$run_id/attempts/1")' not in body:
+    raise SystemExit("validate_run does not bind attempt one")
+if "jq -e '.run_attempt == 1' <<<\"$base_run\"" not in body:
+    raise SystemExit("validate_run does not reject a current rerun")
+if ".run_attempt == $base.run_attempt" not in body:
+    raise SystemExit("validate_run does not compare base and attempt identity")
+PY
+then
+  fail "cache recovery does not reject rerun upstream evidence"
+fi
 grep -Fq '.github/workflows/ghcr-package-management.yml' \
   "$ROOT_DIR/.github/workflows/oci-validate.yml" ||
   fail "OCI pull-request lint omits the production-capable GHCR package workflow"

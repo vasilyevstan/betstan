@@ -169,6 +169,7 @@ OCI_INFRASTRUCTURE_INPUTS = [
 
 CAPACITY_BINDING = {
     "input": "capacity_acquisition_run_id",
+    "afterInput": "ghcr_package_validation_run_id",
     "workflow": "oci-capacity-acquire.yml",
     "titleTemplates": {
         "workflow_dispatch": "oci-capacity-acquire {subject_sha}",
@@ -188,6 +189,7 @@ GHCR_BUILD_BINDING = {
 
 GHCR_PACKAGE_BINDING = {
     "input": "ghcr_package_validation_run_id",
+    "afterInput": "ghcr_build_run_id",
     "workflow": "ghcr-package-management.yml",
     "titleTemplates": {
         "workflow_dispatch": "ghcr-package validate {subject_sha}",
