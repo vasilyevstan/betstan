@@ -188,7 +188,16 @@ STATE_DIR="${FAKE_STATE_DIR}"
 [[ "$SOURCE_SHA" == "$FAKE_EXPECTED_SOURCE_SHA" ]] || { echo "wrong lock source sha" >&2; exit 1; }
 case "$1" in
   verify)
-    [[ "$(cat "$STATE_DIR/lock")" == "held" ]] || { echo "lock not held" >&2; exit 1; } ;;
+    [[ "$(cat "$STATE_DIR/lock")" == "held" ]] || {
+      echo "shared_mongo_lock=verify status=FAIL reason=active database operation lock has expired" >&2
+      exit 1
+    } ;;
+  acquire)
+    [[ "$(cat "$STATE_DIR/lock")" != "contended" ]] || {
+      echo "another database operation holds the lock" >&2; exit 1
+    }
+    [[ -n "${LOCK_LEASE_SECONDS:-}" ]] || { echo "acquire requires a lease" >&2; exit 1; }
+    printf 'held\n' >"$STATE_DIR/lock" ;;
   release) printf 'released\n' >"$STATE_DIR/lock" ;;
   verify-released)
     [[ "$(cat "$STATE_DIR/lock")" == "released" ]] || { echo "lock still held" >&2; exit 1; } ;;
@@ -250,6 +259,7 @@ assert_contains "$CASE_DIR/out.txt" 'oci_fenced_rollback_recovery=PASS'
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=PASS'
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'maintenance_fence=released'
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=released'
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock_acquisition=verified'
 [[ "$(cat "$STATE_DIR/maintenance")" == "released" ]] ||
   fail 'accepted fenced recovery did not release the maintenance fence'
 [[ "$(cat "$STATE_DIR/lock")" == "released" ]] ||
@@ -286,7 +296,8 @@ mutate_baseline_target() {
     "$BASELINE_DIR/baseline-provenance.env"
 }
 break_fence() { printf 'released\n' >"$STATE_DIR/maintenance"; }
-break_lock() { printf 'released\n' >"$STATE_DIR/lock"; }
+break_lock() { printf 'expired\n' >"$STATE_DIR/lock"; }
+contend_lock() { printf 'contended\n' >"$STATE_DIR/lock"; }
 wrong_live_digest() { printf '%s\n' "$(image_for other event)" >"$STATE_DIR/image-event"; }
 unexpected_quiesced() { printf '1\n' >"$STATE_DIR/replicas-event"; }
 
@@ -294,8 +305,17 @@ expect_reject wrong-target \
   'baseline does not describe the rollback target' mutate_baseline_target
 expect_reject missing-fence \
   'maintenance fence and writer quiescence are not intact' break_fence
-expect_reject missing-lock \
-  'the transferred database lock is not held by the failed deployment' break_lock
+expect_reject contended-lock \
+  'the transferred database lock is held by another live operation' contend_lock
+
+# An expired lease with the fence and quiescence still intact is the documented
+# rehold state: reclaim it (fencing generation bumped) rather than fail.
+new_case expired-lock-reclaim
+break_lock
+run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+  fail "fenced recovery rejected a reclaimable expired lease: $(cat "$CASE_DIR/out.txt")"
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock_acquisition=reclaimed'
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=PASS'
 
 # A live generation that is not the authorized deployed generation must be
 # rejected before any mutation.

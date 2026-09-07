@@ -819,3 +819,23 @@ Lessons:
   operator.
 - A generation that failed its own deployment is never an accepted rollback
   baseline.
+
+### Expired handoff lease during fenced recovery — 2026-09-07
+
+The first fenced rollback attempt (`34082076542`) failed closed before any
+mutation: the maintenance fence and writer quiescence were intact, the nine live
+digests matched the authorized generation, but the transferred database lock had
+lapsed (`active database operation lock has expired`) because hours had passed
+since the incomplete deployment.
+
+Requiring `verify` alone was too strict and left the incident with no exit. The
+deployment's own maintenance-rehold contract already models this correctly:
+`verify`, else `acquire`. Acquire refuses when another operation holds a live
+lease and bumps the fencing generation when reclaiming an expired one, so the
+reclaim is safe. The fence and quiescence -- not the lease -- are what actually
+prevent writes, and both are verified independently first.
+
+Lesson: a lease is a mutex with a lifetime, not a durable safety barrier. Incident
+tooling that may run long after the originating operation must reclaim an expired
+lease through the established contended-safe path and record whether the lock was
+verified or reclaimed.
