@@ -1118,3 +1118,35 @@ Durable rules:
   steady-state readiness with 200 responses, SSE, queues, and consumers.
 - Report failure state truthfully. Re-hold maintenance on any failure, and never
   claim a database lock that the contract already released.
+
+## Progress reporting is a separate obligation from progress — 2026-09-07
+
+A long recovery turn executed continuously and correctly, yet returned nothing
+externally visible until the work was finished. Tools stayed busy the whole
+time, so from the inside it felt like progress; from the outside it was
+indistinguishable from a hang. That is a stall, and the fact that the work
+eventually succeeded does not retire the defect.
+
+Durable rules:
+
+- Executing is not reporting. Active tool calls, provider reasoning time, and
+  growing call counts are activity, never deliverable progress, and they never
+  substitute for a delivered checkpoint.
+- Checkpoint at each safe boundary rather than only at terminal success. A safe
+  boundary is any point with no mutation in flight: after a merge, an approval,
+  a dispatch, or a completed verification sweep.
+- Every checkpoint states the branch and SHA, artifacts created so far, the
+  current step, the last objectively completed milestone with its timestamp,
+  the active command or run, any blocker, and the exact next bounded action.
+- Give every completed phase a milestone timestamp. An interval with no
+  recorded milestone is silence, and silence is bounded, never open-ended.
+- A job, status, or command with no objective state change for fifteen minutes
+  gets exactly one inspection that distinguishes a queued or provider wait from
+  a protected approval wait or a local failure. Report `BLOCKED` with that
+  classification instead of polling indefinitely, and cancel or supersede only
+  when it is safe for production.
+- A command active for thirty minutes without a measurable milestone is stopped
+  or handed off safely, and the checkpoint precedes any further long operation.
+- Long polling loops are the usual disguise. Waiting in large sleep blocks
+  without surfacing intermediate state converts a legitimate provider wait into
+  an invisible one.

@@ -464,4 +464,40 @@ require_flat_literal "$BRANCH_POLICY" \
 
 require_literal "$MERGE_SAFETY" 'human approval requires APPROVED_SHA='
 
+# Anti-stall reporting invariant. Executing tool calls are not a report, so the
+# conductor, the deployment-safety owner, the shared agent contract, and the
+# durable ledger must all require milestone timestamps, bounded silence,
+# one-shot classification of a stalled wait, and explicit escalation.
+require_flat_literal "$CONDUCTOR" \
+  'An owner that is still executing is not thereby reporting. A long turn without an externally visible checkpoint is a communication stall even when tools remain active'
+require_flat_literal "$CONDUCTOR" \
+  'Every checkpoint carries the current branch and SHA, the artifacts created so far, the current step, the last objectively completed milestone with its timestamp, the active command or run, any blocker, and the exact next bounded action.'
+require_flat_literal "$CONDUCTOR" \
+  'Record a milestone timestamp for each completed phase. An elapsed interval with no recorded milestone is silence, and silence is bounded, never open-ended.'
+require_flat_literal "$CONDUCTOR" \
+  'no objective state change for fifteen minutes, inspect it exactly once'
+require_flat_literal "$CONDUCTOR" \
+  'Report `BLOCKED` with that classification instead of polling indefinitely.'
+require_flat_literal "$CONDUCTOR" \
+  'When a command stays active for thirty minutes without producing a measurable milestone, stop it or hand it off safely, then checkpoint.'
+
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'Executing tool calls are not a report, and a long silent turn is a stall even while work continues.'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'Give every completed phase a milestone timestamp'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'no objective state change for fifteen minutes, inspect it once'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'When a command runs thirty minutes without a measurable milestone, stop it or hand it off safely and checkpoint before starting further work.'
+
+require_flat_literal "$README" \
+  'A long turn without an externally visible checkpoint is a communication stall even while tools remain active'
+require_flat_literal "$README" \
+  'Silence between milestones is bounded, never open-ended.'
+
+require_flat_literal "$LEARNINGS" \
+  'Executing is not reporting. Active tool calls, provider reasoning time, and growing call counts are activity, never deliverable progress'
+require_flat_literal "$LEARNINGS" \
+  'Checkpoint at each safe boundary rather than only at terminal success.'
+
 echo "agent_governance_contract=PASS"

@@ -523,6 +523,22 @@ A Running broker with missing consumers is not healthy production.
   pending environment name, and whether the next action is approval-bound,
   provider-bound, or executing. A protected environment wait is progress, not
   a hang.
+- Report that status on a bounded cadence, not only when the operation ends.
+  Executing tool calls are not a report, and a long silent turn is a stall even
+  while work continues. Checkpoint at each safe boundary, meaning any point
+  with no mutation in flight, such as after a merge, approval, dispatch, or
+  completed verification sweep.
+- Give every completed phase a milestone timestamp, and state the last
+  objectively completed milestone in each checkpoint alongside the branch and
+  SHA, artifacts created, active command or run, blocker, and exact next
+  bounded action.
+- When a protected run or command shows no objective state change for fifteen
+  minutes, inspect it once, classify the wait as queued, provider-bound,
+  approval-bound, or locally failed, and report `BLOCKED` with that
+  classification rather than polling indefinitely. Supersede or cancel only
+  when it is safe for production.
+- When a command runs thirty minutes without a measurable milestone, stop it or
+  hand it off safely and checkpoint before starting further work.
 - Do not use top-level run status alone to classify a stale GitHub record.
   Inspect jobs, pending deployments, workflow enablement, timestamps, and head
   provenance. Never re-enable or approve a production-capable workflow merely
