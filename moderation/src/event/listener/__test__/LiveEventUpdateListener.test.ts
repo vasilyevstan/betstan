@@ -21,11 +21,39 @@ const setup = async () => {
   const liveEventListener = new LiveEventUpdateListener(
     messengerWrapper.connection
   );
+  const liveChannel = {
+    prefetch: jest.fn(async () => undefined),
+  };
+  Object.defineProperty(liveEventListener, "channel", {
+    configurable: true,
+    value: liveChannel,
+  });
   await liveEventListener.init();
   const replayWorker = await createReplayWorker();
 
-  return { placeBetListener, liveEventListener, replayWorker };
+  return { placeBetListener, liveEventListener, liveChannel, replayWorker };
 };
+
+it("limits each live-update consumer to one unacknowledged snapshot", async () => {
+  const { liveChannel } = await setup();
+
+  expect(liveChannel.prefetch).toHaveBeenCalledTimes(1);
+  expect(liveChannel.prefetch).toHaveBeenCalledWith(1);
+});
+
+it("fails listener startup when broker backpressure cannot be installed", async () => {
+  const listener = new LiveEventUpdateListener(messengerWrapper.connection);
+  Object.defineProperty(listener, "channel", {
+    configurable: true,
+    value: {
+      prefetch: jest.fn(async () => {
+        throw new Error("prefetch failed");
+      }),
+    },
+  });
+
+  await expect(listener.init()).rejects.toThrow("prefetch failed");
+});
 
 it("stores only the newest live snapshot when duplicates arrive", async () => {
   const { liveEventListener } = await setup();

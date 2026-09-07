@@ -72,6 +72,21 @@ fi
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
 client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
 client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
+moderation_listener="$ROOT_DIR/moderation/src/event/listener/LiveEventUpdateListener.ts"
+moderation_runtime="$ROOT_DIR/moderation/src/runtime/ModerationRuntime.ts"
+moderation_manifest="$ROOT_DIR/infra/k8s/moderation-depl.yaml"
+grep -Fq 'await this.channel.prefetch(1)' "$moderation_listener" ||
+  fail "Moderation live updates are not bounded to one unacknowledged snapshot"
+grep -Fq '"unhandledRejection"' "$moderation_runtime" ||
+  fail "Moderation does not explicitly fail closed on rejected async listeners"
+grep -A 2 -F 'strategy:' "$moderation_manifest" | grep -Fq 'type: Recreate' ||
+  fail "Moderation rollout can run concurrent live-update consumers"
+grep -Fq 'Treat broker backpressure as a consistency boundary' \
+  "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
+  fail "Engineering wiki omits broker backpressure consistency guidance"
+grep -Fq 'Drive a burst through the real consume callback' \
+  "$ROOT_DIR/.github/agents/betstan-test-engineer.agent.md" ||
+  fail "Test agent does not require consume-path backpressure evidence"
 public_backoffice_middleware="$ROOT_DIR/backoffice/src/middleware/PublicBackofficeAccess.ts"
 [[ -f "$public_backoffice_middleware" ]] ||
   fail "Backoffice does not declare its intentional public access policy"

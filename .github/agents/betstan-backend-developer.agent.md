@@ -60,6 +60,11 @@ instead of crossing the boundary.
 - Preserve old payloads and historical Mongo documents when compatibility is
   required.
 - Make message handlers idempotent and explicit about cross-queue ordering.
+- Match AMQP prefetch to the persistence concurrency contract. A consumer that
+  performs bounded compare-and-swap writes must not accept an unbounded batch
+  of unacknowledged messages for the same aggregate, and rejected async
+  handlers must have an explicit process-level failure path rather than rely
+  on a Node runtime default.
 - Treat publisher-stamped envelope timestamps as mutable transport metadata.
   Use an immutable domain timestamp from event data for persisted ordering and
   duplicate fingerprints, with an explicit legacy fallback when old payloads
