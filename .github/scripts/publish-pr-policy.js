@@ -24,6 +24,20 @@ const COVERAGE_AUTHORIZED_PATHS = Object.freeze([
   "docs/wiki/Engineering-Learnings.md",
 ]);
 const COVERAGE_EXPECTED_TEST_COUNT = 102;
+const COVERAGE_AUTHORIZATION_ID_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const COVERAGE_INTEGRATION_CONTEXT_PREFIX =
+  "trusted-coverage-integration";
+const COVERAGE_PROMOTION_CONTEXT_PREFIX =
+  "trusted-coverage-promotion";
+const COVERAGE_RESTRICTED_PATH_PREFIXES = Object.freeze([
+  ".github/coverage/",
+  ".github/scripts/",
+  ".github/workflows/",
+  "infra/azure/agents/",
+]);
+const COVERAGE_RECEIPT_VERSION = "v1";
+const COVERAGE_RECEIPT_FINGERPRINT_LENGTH = 40;
 const GITHUB_ACTIONS_BOT = Object.freeze({
   id: 41898282,
   login: "github-actions[bot]",
@@ -67,6 +81,15 @@ const WORKFLOW_RUN_CONCLUSIONS = new Set([
   "skipped",
   "stale",
   "startup_failure",
+  "success",
+  "timed_out",
+]);
+const WORKFLOW_JOB_CONCLUSIONS = new Set([
+  "action_required",
+  "cancelled",
+  "failure",
+  "neutral",
+  "skipped",
   "success",
   "timed_out",
 ]);
@@ -184,6 +207,10 @@ const CLI_MANAGED_LABELS_FINGERPRINT = labelsFingerprint([
 
 function pullIdentity(pull) {
   const labels = canonicalLabels(pull.labels);
+  githubTimestampMilliseconds(
+    pull.updated_at,
+    "pull request updated_at",
+  );
   return {
     number: pull.number,
     state: pull.state,
@@ -193,6 +220,7 @@ function pullIdentity(pull) {
     baseRef: pull.base.ref,
     baseSha: pull.base.sha,
     mergeSha: pull.merge_commit_sha || "",
+    changedFiles: pull.changed_files,
     updatedAt: pull.updated_at,
     contentFingerprint: fingerprint(
       `${pull.title || ""}\0${pull.body || ""}`,
@@ -211,6 +239,7 @@ function assertExpectedPull(actual, expected) {
     "headRepository",
     "baseRef",
     "baseSha",
+    "changedFiles",
     "updatedAt",
     "contentFingerprint",
     "labelsFingerprint",
@@ -248,11 +277,15 @@ function isOpeningCliLabelRace(actual, expected) {
       return false;
     }
   }
-  const actualUpdatedAt = Date.parse(actual.updatedAt);
-  const expectedUpdatedAt = Date.parse(expected.updatedAt);
+  const actualUpdatedAt = githubTimestampMilliseconds(
+    actual.updatedAt,
+    "current pull request updated_at",
+  );
+  const expectedUpdatedAt = githubTimestampMilliseconds(
+    expected.updatedAt,
+    "opened pull request updated_at",
+  );
   return (
-    Number.isFinite(actualUpdatedAt) &&
-    Number.isFinite(expectedUpdatedAt) &&
     actualUpdatedAt >= expectedUpdatedAt
   );
 }
@@ -288,11 +321,15 @@ function isLabelRefreshSnapshot(actual, expected) {
       return false;
     }
   }
-  const actualUpdatedAt = Date.parse(actual.updatedAt);
-  const expectedUpdatedAt = Date.parse(expected.updatedAt);
+  const actualUpdatedAt = githubTimestampMilliseconds(
+    actual.updatedAt,
+    "current pull request updated_at",
+  );
+  const expectedUpdatedAt = githubTimestampMilliseconds(
+    expected.updatedAt,
+    "label event pull request updated_at",
+  );
   return (
-    Number.isFinite(actualUpdatedAt) &&
-    Number.isFinite(expectedUpdatedAt) &&
     actualUpdatedAt >= expectedUpdatedAt
   );
 }
@@ -520,19 +557,33 @@ function parseCoverageAuthorizationTime(value, label) {
 
 function validateCoverageAssetAuthorization(
   authorization,
-  nowMilliseconds,
+  expectedRepository = null,
 ) {
   assertExactCoverageAuthorizationFields(authorization);
   assertSafeCoverageString(
     authorization.id,
     "id",
-    /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/,
+    COVERAGE_AUTHORIZATION_ID_PATTERN,
   );
   for (const field of ["repository", "headRepository"]) {
     assertSafeCoverageString(
       authorization[field],
       field,
       /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+    );
+  }
+  if (authorization.headRepository !== authorization.repository) {
+    throw new Error(
+      "coverage authorization must use the current repository",
+    );
+  }
+  if (
+    expectedRepository !== null &&
+    (authorization.repository !== expectedRepository ||
+      authorization.headRepository !== expectedRepository)
+  ) {
+    throw new Error(
+      "coverage authorization repository is not the current repository",
     );
   }
   if (authorization.enginePath !== COVERAGE_ENGINE_PATH) {
@@ -601,8 +652,12 @@ function validateCoverageAssetAuthorization(
       throw new Error(`coverage authorization ${field} is invalid`);
     }
   }
-  if (!["dev", "master"].includes(authorization.baseRef)) {
-    throw new Error("coverage authorization baseRef is invalid");
+  if (
+    authorization.headRef === "dev" ||
+    authorization.headRef === "master" ||
+    authorization.baseRef !== "dev"
+  ) {
+    throw new Error("coverage authorization branch is invalid");
   }
 
   const issuedAt = parseCoverageAuthorizationTime(
@@ -614,12 +669,29 @@ function validateCoverageAssetAuthorization(
     "expiresAt",
   );
   if (
-    issuedAt > nowMilliseconds ||
-    expiresAt <= nowMilliseconds ||
     expiresAt <= issuedAt ||
     expiresAt - issuedAt > MAX_WORKFLOW_AUTHORIZATION_AGE_MS
   ) {
-    throw new Error("coverage authorization is stale or expired");
+    throw new Error("coverage authorization interval is invalid");
+  }
+}
+
+function validateCoverageAssetAuthorizations(
+  authorizations,
+  repository,
+) {
+  if (!Array.isArray(authorizations)) {
+    throw new Error("coverage authorizations must be an array");
+  }
+  const seenIds = new Set();
+  for (const authorization of authorizations) {
+    validateCoverageAssetAuthorization(authorization, repository);
+    if (seenIds.has(authorization.id)) {
+      throw new Error(
+        `duplicate coverage authorization id ${authorization.id}`,
+      );
+    }
+    seenIds.add(authorization.id);
   }
 }
 
@@ -632,35 +704,13 @@ function findCoverageAssetAuthorization({
   authorizedHarnessBlob,
   changedPaths,
   pull,
-  now,
 }) {
-  if (!Array.isArray(authorizations)) {
-    throw new Error("coverage authorizations must be an array");
-  }
-  const nowMilliseconds =
-    now instanceof Date ? now.getTime() : Date.parse(String(now));
-  if (!Number.isFinite(nowMilliseconds)) {
-    throw new Error("coverage authorization clock is invalid");
-  }
+  validateCoverageAssetAuthorizations(authorizations, repository);
   if (
     !Array.isArray(changedPaths) ||
     changedPaths.some((path) => typeof path !== "string")
   ) {
     throw new Error("coverage changed paths are invalid");
-  }
-
-  const seenIds = new Set();
-  for (const authorization of authorizations) {
-    validateCoverageAssetAuthorization(
-      authorization,
-      nowMilliseconds,
-    );
-    if (seenIds.has(authorization.id)) {
-      throw new Error(
-        `duplicate coverage authorization id ${authorization.id}`,
-      );
-    }
-    seenIds.add(authorization.id);
   }
 
   const matches = authorizations.filter(
@@ -692,17 +742,93 @@ function findCoverageAssetAuthorization({
   return matches[0];
 }
 
+function findCoveragePromotionAuthorization({
+  authorizations,
+  repository,
+  trustedEngineBlob,
+  authorizedEngineBlob,
+  trustedHarnessBlob,
+  authorizedHarnessBlob,
+}) {
+  validateCoverageAssetAuthorizations(authorizations, repository);
+  const matches = authorizations.filter(
+    (authorization) =>
+      authorization.repository === repository &&
+      authorization.headRepository === repository &&
+      authorization.trustedEngineBlob === trustedEngineBlob &&
+      authorization.authorizedEngineBlob === authorizedEngineBlob &&
+      authorization.trustedHarnessBlob === trustedHarnessBlob &&
+      authorization.authorizedHarnessBlob === authorizedHarnessBlob,
+  );
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      "multiple coverage authorizations match one promotion",
+    );
+  }
+  return matches[0];
+}
+
 function workflowAuthorizationContext(authorization) {
   return `trusted-workflow-authorization/${authorization.id}`;
 }
 
-function coverageAuthorizationContext(authorization) {
-  return `trusted-coverage-authorization/${authorization.id}`;
+function coverageAuthorizationFingerprint(authorization) {
+  validateCoverageAssetAuthorization(authorization);
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify([
+        "betstan.coverage.authorization.v1",
+        authorization.id,
+        authorization.repository,
+        authorization.headRepository,
+        authorization.pullNumber,
+        authorization.headRef,
+        authorization.headSha,
+        authorization.baseRef,
+        authorization.baseSha,
+        authorization.enginePath,
+        authorization.trustedEngineBlob,
+        authorization.authorizedEngineBlob,
+        authorization.harnessPath,
+        authorization.trustedHarnessBlob,
+        authorization.authorizedHarnessBlob,
+        authorization.allowedPaths,
+        authorization.expectedTests,
+        authorization.issuedAt,
+        authorization.expiresAt,
+        authorization.receiptSha,
+        authorization.adoptionSha,
+      ]),
+    )
+    .digest("hex")
+    .slice(0, COVERAGE_RECEIPT_FINGERPRINT_LENGTH);
+}
+
+function coverageAuthorizationContext(authorization, leg) {
+  const prefix =
+    leg === "integration"
+      ? COVERAGE_INTEGRATION_CONTEXT_PREFIX
+      : leg === "promotion"
+        ? COVERAGE_PROMOTION_CONTEXT_PREFIX
+        : null;
+  if (!prefix) {
+    throw new Error("coverage authorization receipt leg is invalid");
+  }
+  const context = `${prefix}/${authorization.id}`;
+  if (Buffer.byteLength(context, "utf8") > 100) {
+    throw new Error("coverage authorization receipt context is too long");
+  }
+  return context;
 }
 
 async function listCommitStatuses(github, owner, repo, ref) {
   const statuses = [];
-  for (let page = 1; page <= 10; page += 1) {
+  const seenIds = new Set();
+  for (let page = 1; Number.isSafeInteger(page); page += 1) {
     const response = await github.rest.repos.listCommitStatusesForRef({
       owner,
       repo,
@@ -714,39 +840,102 @@ async function listCommitStatuses(github, owner, repo, ref) {
       throw new Error("authorization receipt response is malformed");
     }
     for (const status of response.data) {
+      let validCreatedAt = true;
+      try {
+        githubTimestampMilliseconds(
+          status?.created_at,
+          "commit status created_at",
+        );
+      } catch {
+        validCreatedAt = false;
+      }
+      const creator = status?.creator;
       if (
         !status ||
         typeof status !== "object" ||
+        Array.isArray(status) ||
         !Number.isInteger(status.id) ||
         status.id < 1 ||
         typeof status.context !== "string" ||
         status.context.length < 1 ||
-        status.context.length > 100 ||
+        Buffer.byteLength(status.context, "utf8") > 100 ||
         /[\u0000-\u001f\u007f]/.test(status.context) ||
         !["error", "failure", "pending", "success"].includes(status.state) ||
         !(
           status.description === null ||
-          typeof status.description === "string"
+          (typeof status.description === "string" &&
+            Buffer.byteLength(status.description, "utf8") <=
+              MAX_STATUS_DESCRIPTION_LENGTH &&
+            !/[\u0000-\u001f\u007f]/.test(status.description))
         ) ||
-        !(status.target_url === null || typeof status.target_url === "string")
+        !(
+          status.target_url === null ||
+          (typeof status.target_url === "string" &&
+            status.target_url.length > 0 &&
+            status.target_url.length <= 2048 &&
+            !/[\u0000-\u001f\u007f]/.test(status.target_url))
+        ) ||
+        !validCreatedAt ||
+        !creator ||
+        typeof creator !== "object" ||
+        Array.isArray(creator) ||
+        !Number.isSafeInteger(creator.id) ||
+        creator.id < 1 ||
+        typeof creator.login !== "string" ||
+        creator.login.length < 1 ||
+        creator.login.length > 100 ||
+        /[\u0000-\u001f\u007f]/.test(creator.login) ||
+        typeof creator.type !== "string" ||
+        creator.type.length < 1 ||
+        creator.type.length > 100 ||
+        /[\u0000-\u001f\u007f]/.test(creator.type)
       ) {
         throw new Error(
-          "authorization receipt entry is malformed",
+          "commit status entry is malformed",
         );
       }
+      if (seenIds.has(status.id)) {
+        throw new Error(
+          "authorization receipt inventory contains duplicate IDs",
+        );
+      }
+      seenIds.add(status.id);
     }
     statuses.push(...response.data);
     if (response.data.length < 100) {
       return statuses;
     }
   }
-  throw new Error("authorization receipt inventory is incomplete");
+  throw new Error("authorization receipt inventory exceeds safe pagination");
 }
 
-async function listPullRequestPaths(github, owner, repo, pullNumber) {
-  const paths = [];
+function isValidPullRequestPath(path) {
+  return (
+    typeof path === "string" &&
+    path.length > 0 &&
+    path.length <= 4096 &&
+    !path.startsWith("/") &&
+    !path
+      .split("/")
+      .some((part) => part === "" || part === "." || part === "..") &&
+    !/[\u0000-\u001f\u007f]/.test(path)
+  );
+}
+
+async function listPullRequestFiles(
+  github,
+  owner,
+  repo,
+  pullNumber,
+  expectedCount,
+) {
+  if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
+    throw new Error("pull request changed file count is invalid");
+  }
+  const files = [];
   const seenPaths = new Set();
-  for (let page = 1; page <= 10; page += 1) {
+  const lastDataPage = Math.max(1, Math.ceil(expectedCount / 100));
+  for (let page = 1; page <= lastDataPage + 1; page += 1) {
     const response = await github.rest.pulls.listFiles({
       owner,
       repo,
@@ -757,33 +946,107 @@ async function listPullRequestPaths(github, owner, repo, pullNumber) {
     if (!Array.isArray(response.data) || response.data.length > 100) {
       throw new Error("pull request file inventory is malformed");
     }
+    const expectedPageLength =
+      page <= lastDataPage
+        ? Math.min(100, Math.max(0, expectedCount - files.length))
+        : 0;
+    if (response.data.length !== expectedPageLength) {
+      throw new Error("pull request file inventory is incomplete");
+    }
     for (const file of response.data) {
       const filename = file?.filename;
+      const hasPrevious = Object.prototype.hasOwnProperty.call(
+        file || {},
+        "previous_filename",
+      );
+      const previousFilename = hasPrevious
+        ? file.previous_filename
+        : null;
       if (
         !file ||
         typeof file !== "object" ||
-        !["added", "modified", "removed"].includes(file.status) ||
-        Object.prototype.hasOwnProperty.call(file, "previous_filename") ||
-        typeof filename !== "string" ||
-        filename.length < 1 ||
-        filename.length > 4096 ||
-        filename.startsWith("/") ||
-        filename
-          .split("/")
-          .some((part) => part === "" || part === "." || part === "..") ||
-        /[\u0000-\u001f\u007f]/.test(filename) ||
-        seenPaths.has(filename)
+        !["added", "modified", "removed", "renamed"].includes(
+          file.status,
+        ) ||
+        !isValidPullRequestPath(filename) ||
+        (file.status === "renamed"
+          ? !hasPrevious || !isValidPullRequestPath(previousFilename)
+          : hasPrevious) ||
+        seenPaths.has(filename) ||
+        (previousFilename !== null && seenPaths.has(previousFilename))
       ) {
         throw new Error("pull request file inventory entry is malformed");
       }
       seenPaths.add(filename);
-      paths.push(filename);
-    }
-    if (response.data.length < 100) {
-      return paths.sort();
+      if (previousFilename !== null) {
+        seenPaths.add(previousFilename);
+      }
+      files.push({
+        filename,
+        status: file.status,
+        previousFilename,
+      });
     }
   }
-  throw new Error("pull request file inventory exceeds the bounded scan");
+  if (files.length !== expectedCount) {
+    throw new Error("pull request file inventory count changed");
+  }
+  return files;
+}
+
+function assertCoverageSourceFiles(files) {
+  if (
+    files.length !== COVERAGE_AUTHORIZED_PATHS.length ||
+    files.some(
+      (file) =>
+        file.status !== "modified" || file.previousFilename !== null,
+    ) ||
+    JSON.stringify(files.map(({ filename }) => filename).sort()) !==
+      JSON.stringify([...COVERAGE_AUTHORIZED_PATHS].sort())
+  ) {
+    throw new Error(
+      "coverage authorization requires the exact reviewed source paths",
+    );
+  }
+}
+
+function isCoverageRestrictedPath(path) {
+  return COVERAGE_RESTRICTED_PATH_PREFIXES.some((prefix) =>
+    path.startsWith(prefix),
+  );
+}
+
+function assertCoveragePromotionFiles(files) {
+  const restrictedPaths = [];
+  for (const file of files) {
+    const touchedPaths = [
+      file.filename,
+      ...(file.previousFilename ? [file.previousFilename] : []),
+    ];
+    if (!touchedPaths.some(isCoverageRestrictedPath)) {
+      continue;
+    }
+    if (
+      file.status !== "modified" ||
+      file.previousFilename !== null ||
+      ![COVERAGE_ENGINE_PATH, COVERAGE_HARNESS_PATH].includes(
+        file.filename,
+      )
+    ) {
+      throw new Error(
+        "coverage promotion contains an unauthorized restricted path change",
+      );
+    }
+    restrictedPaths.push(file.filename);
+  }
+  if (
+    JSON.stringify(restrictedPaths.sort()) !==
+    JSON.stringify([COVERAGE_ENGINE_PATH, COVERAGE_HARNESS_PATH].sort())
+  ) {
+    throw new Error(
+      "coverage promotion must contain the exact authorized restricted pair",
+    );
+  }
 }
 
 async function inspectManagedLabelLedger({
@@ -912,6 +1175,135 @@ async function inspectManagedLabelLedger({
   };
 }
 
+function assertReceiptStatusEntry(
+  status,
+  { context, state, description, targetUrl },
+) {
+  let createdAt;
+  try {
+    createdAt = githubTimestampMilliseconds(
+      status.created_at,
+      "authorization receipt",
+    );
+  } catch {
+    throw new Error("authorization receipt status is malformed");
+  }
+  if (
+    status.context !== context ||
+    status.state !== state ||
+    status.description !== description ||
+    status.target_url !== targetUrl ||
+    status.creator?.id !== GITHUB_ACTIONS_BOT.id ||
+    status.creator?.login !== GITHUB_ACTIONS_BOT.login ||
+    status.creator?.type !== GITHUB_ACTIONS_BOT.type ||
+    description.length > MAX_STATUS_DESCRIPTION_LENGTH ||
+    Buffer.byteLength(description, "utf8") >
+      MAX_STATUS_DESCRIPTION_LENGTH
+  ) {
+    throw new Error("authorization receipt status is malformed");
+  }
+  return createdAt;
+}
+
+function assertReceiptLedger(
+  statuses,
+  { context, description, targetUrl, states },
+) {
+  const ledger = statuses
+    .filter((status) => status.context === context)
+    .map((status) => ({
+      status,
+      createdAt: assertReceiptStatusEntry(status, {
+        context,
+        state: status.state,
+        description,
+        targetUrl,
+      }),
+    }))
+    .sort(
+      (left, right) =>
+        left.createdAt - right.createdAt ||
+        left.status.id - right.status.id,
+    );
+  if (
+    ledger.length !== states.length ||
+    ledger.some(
+      ({ status }, index) => status.state !== states[index],
+    )
+  ) {
+    throw new Error("authorization receipt ledger is incomplete");
+  }
+  return ledger;
+}
+
+async function claimOneUseReceipt({
+  github,
+  owner,
+  repo,
+  anchorSha,
+  context,
+  description,
+  targetUrl,
+  revalidate,
+}) {
+  if (revalidate) {
+    await revalidate();
+  }
+  let statuses = await listCommitStatuses(
+    github,
+    owner,
+    repo,
+    anchorSha,
+  );
+  if (statuses.some((status) => status.context === context)) {
+    throw new Error("authorization receipt was already started");
+  }
+  await publishStatus(
+    github,
+    owner,
+    repo,
+    anchorSha,
+    context,
+    "pending",
+    description,
+    targetUrl,
+  );
+  statuses = await listCommitStatuses(
+    github,
+    owner,
+    repo,
+    anchorSha,
+  );
+  assertReceiptLedger(statuses, {
+    context,
+    description,
+    targetUrl,
+    states: ["pending"],
+  });
+  await publishStatus(
+    github,
+    owner,
+    repo,
+    anchorSha,
+    context,
+    "success",
+    description,
+    targetUrl,
+  );
+  statuses = await listCommitStatuses(
+    github,
+    owner,
+    repo,
+    anchorSha,
+  );
+  assertReceiptLedger(statuses, {
+    context,
+    description,
+    targetUrl,
+    states: ["pending", "success"],
+  });
+}
+
 async function claimWorkflowAuthorization({
   github,
   owner,
@@ -919,6 +1311,7 @@ async function claimWorkflowAuthorization({
   authorization,
   pull,
   targetUrl,
+  revalidate,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -935,41 +1328,85 @@ async function claimWorkflowAuthorization({
   }
 
   const context = workflowAuthorizationContext(authorization);
-  const statuses = await listCommitStatuses(
-    github,
-    owner,
-    repo,
-    authorization.receiptSha,
-  );
-  if (statuses.some((status) => status.context === context)) {
-    throw new Error(
-      `workflow authorization ${authorization.id} was already consumed`,
-    );
-  }
-
   const description =
     `PR #${pull.number} ${authorization.workflowPath} ` +
     `${authorization.authorizedBlob.slice(0, 12)}`;
-  await publishStatus(
+  await claimOneUseReceipt({
     github,
     owner,
     repo,
-    authorization.receiptSha,
+    anchorSha: authorization.receiptSha,
     context,
-    "pending",
     description,
     targetUrl,
+    revalidate,
+  });
+}
+
+function coverageReceiptDescription({
+  authorization,
+  leg,
+  mergeSha,
+  run,
+  transition,
+}) {
+  if (
+    !["integration", "promotion"].includes(leg) ||
+    !/^[0-9a-f]{40}$/.test(mergeSha) ||
+    !Number.isSafeInteger(run?.id) ||
+    run.id < 1 ||
+    !Number.isSafeInteger(run?.run_attempt) ||
+    run.run_attempt < 1 ||
+    !Number.isSafeInteger(transition?.transitionAt) ||
+    transition.transitionAt < 0
+  ) {
+    throw new Error("coverage authorization receipt fields are invalid");
+  }
+  const legCode = leg === "integration" ? "i" : "p";
+  const description =
+    `${COVERAGE_RECEIPT_VERSION}|${legCode}|` +
+    `${coverageAuthorizationFingerprint(authorization)}|${mergeSha}|` +
+    `${run.id}|${run.run_attempt}|${transition.transitionAt}`;
+  if (
+    description.length > MAX_STATUS_DESCRIPTION_LENGTH ||
+    Buffer.byteLength(description, "utf8") >
+      MAX_STATUS_DESCRIPTION_LENGTH
+  ) {
+    throw new Error(
+      "coverage authorization receipt description is too long",
+    );
+  }
+  return description;
+}
+
+function parseCoverageReceiptDescription(description) {
+  if (typeof description !== "string") {
+    throw new Error("coverage authorization receipt description is malformed");
+  }
+  const match = description.match(
+    /^v1\|(i|p)\|([0-9a-f]{40})\|([0-9a-f]{40})\|([1-9][0-9]*)\|([1-9][0-9]*)\|(0|[1-9][0-9]*)$/,
   );
-  await publishStatus(
-    github,
-    owner,
-    repo,
-    authorization.receiptSha,
-    context,
-    "success",
-    description,
-    targetUrl,
-  );
+  if (!match) {
+    throw new Error("coverage authorization receipt description is malformed");
+  }
+  const runId = Number(match[4]);
+  const runAttempt = Number(match[5]);
+  const transitionAt = Number(match[6]);
+  if (
+    !Number.isSafeInteger(runId) ||
+    !Number.isSafeInteger(runAttempt) ||
+    !Number.isSafeInteger(transitionAt)
+  ) {
+    throw new Error("coverage authorization receipt description is malformed");
+  }
+  return {
+    leg: match[1] === "i" ? "integration" : "promotion",
+    fingerprint: match[2],
+    mergeSha: match[3],
+    runId,
+    runAttempt,
+    transitionAt,
+  };
 }
 
 async function claimCoverageAssetAuthorization({
@@ -978,59 +1415,45 @@ async function claimCoverageAssetAuthorization({
   repo,
   authorization,
   pull,
+  leg,
+  anchorSha,
+  run,
+  transition,
   targetUrl,
+  revalidate,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
     repo,
-    basehead: `${authorization.receiptSha}...${pull.headSha}`,
+    basehead: `${anchorSha}...${pull.headSha}`,
   });
   if (
     !["ahead", "identical"].includes(comparison.data.status) ||
-    comparison.data.merge_base_commit?.sha !== authorization.receiptSha
+    comparison.data.merge_base_commit?.sha !== anchorSha
   ) {
     throw new Error(
       `coverage authorization ${authorization.id} receipt is not an ancestor`,
     );
   }
 
-  const context = coverageAuthorizationContext(authorization);
-  const statuses = await listCommitStatuses(
+  const context = coverageAuthorizationContext(authorization, leg);
+  const description = coverageReceiptDescription({
+    authorization,
+    leg,
+    mergeSha: pull.mergeSha,
+    run,
+    transition,
+  });
+  await claimOneUseReceipt({
     github,
     owner,
     repo,
-    authorization.receiptSha,
-  );
-  if (statuses.some((status) => status.context === context)) {
-    throw new Error(
-      `coverage authorization ${authorization.id} was already consumed`,
-    );
-  }
-
-  const description =
-    `PR #${pull.number} coverage pair ` +
-    `${authorization.authorizedEngineBlob.slice(0, 12)}/` +
-    `${authorization.authorizedHarnessBlob.slice(0, 12)}`;
-  await publishStatus(
-    github,
-    owner,
-    repo,
-    authorization.receiptSha,
+    anchorSha,
     context,
-    "pending",
     description,
     targetUrl,
-  );
-  await publishStatus(
-    github,
-    owner,
-    repo,
-    authorization.receiptSha,
-    context,
-    "success",
-    description,
-    targetUrl,
-  );
+    revalidate,
+  });
 }
 
 function runMatchesPull(run, pull, workflowId) {
@@ -1059,7 +1482,12 @@ function qualityTransitionContext(pull) {
 
 function transitionTimestampMilliseconds(timestamp) {
   const transitionAt =
-    typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+    typeof timestamp === "number"
+      ? timestamp
+      : githubTimestampMilliseconds(
+          timestamp,
+          "workflow-producing transition",
+        );
   if (
     !Number.isSafeInteger(transitionAt) ||
     transitionAt < 0
@@ -1070,16 +1498,44 @@ function transitionTimestampMilliseconds(timestamp) {
 }
 
 function githubTimestampMilliseconds(timestamp, label) {
-  if (
-    typeof timestamp !== "string" ||
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(
-      timestamp,
-    )
-  ) {
+  const match =
+    typeof timestamp === "string"
+      ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(
+          timestamp,
+        )
+      : null;
+  if (!match) {
     throw new Error(`${label} timestamp is malformed`);
   }
-  const milliseconds = Date.parse(timestamp);
-  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0) {
+  const [
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+  ] = match.slice(1, 7).map(Number);
+  const fraction = (match[7] || "").padEnd(3, "0");
+  const milliseconds = Date.UTC(
+    year,
+    month - 1,
+    day,
+    hour,
+    minute,
+    second,
+    Number(fraction || 0),
+  );
+  const parsed = new Date(milliseconds);
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 0 ||
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day ||
+    parsed.getUTCHours() !== hour ||
+    parsed.getUTCMinutes() !== minute ||
+    parsed.getUTCSeconds() !== second
+  ) {
     throw new Error(`${label} timestamp is malformed`);
   }
   return milliseconds;
@@ -1193,7 +1649,10 @@ function parseQualityTransitionDescription(description, pullNumber) {
       "quality transition marker does not match the pull request",
     );
   }
-  const transitionAt = Date.parse(legacyMatch[2]);
+  const transitionAt = githubTimestampMilliseconds(
+    legacyMatch[2],
+    "legacy quality transition",
+  );
   const runId =
     legacyMatch[3] === "pending" ? null : Number(legacyMatch[3]);
   if (
@@ -1384,6 +1843,13 @@ async function getQualityTransition({
     repo,
     workflow_id: BRANCH_WORKFLOW,
   });
+  if (
+    !Number.isSafeInteger(workflowResponse.data?.id) ||
+    workflowResponse.data.id < 1 ||
+    workflowResponse.data.path !== BRANCH_WORKFLOW_PATH
+  ) {
+    throw new Error("branch-policy workflow identity is malformed");
+  }
   const policyRuns = new Map(
     await Promise.all(
       [...new Set(parsed.map(({ policyRunId }) => policyRunId))].map(
@@ -1404,6 +1870,17 @@ async function getQualityTransition({
       ? policyRun.pull_requests
       : [];
     const relation = relations[0];
+    let policyRunCreatedAt = null;
+    try {
+      policyRunCreatedAt = githubTimestampMilliseconds(
+        policyRun?.created_at,
+        "quality transition policy run created_at",
+      );
+    } catch {
+      throw new Error(
+        "quality transition marker does not originate from branch-policy",
+      );
+    }
     if (
       !policyRun ||
       policyRun.id !== candidate.policyRunId ||
@@ -1412,10 +1889,15 @@ async function getQualityTransition({
       policyRun.event !== "pull_request_target" ||
       policyRun.repository?.full_name !== `${owner}/${repo}` ||
       policyRun.html_url !== candidate.targetUrl ||
+      policyRun.status !== "completed" ||
+      policyRun.conclusion !== "success" ||
       relations.length !== 1 ||
       relation.number !== pull.number ||
       relation.head?.sha !== pull.headSha ||
-      relation.base?.sha !== pull.baseSha
+      relation.base?.sha !== pull.baseSha ||
+      policyRunCreatedAt < candidate.transitionAt ||
+      candidate.statusCreatedAt < candidate.transitionAt ||
+      candidate.statusCreatedAt < policyRunCreatedAt
     ) {
       throw new Error(
         "quality transition marker does not originate from branch-policy",
@@ -1457,6 +1939,354 @@ async function getWorkflowBlob(github, repository, path, ref) {
     );
   }
   return response.data.sha;
+}
+
+async function getBranchSha(github, owner, repo, branch) {
+  const response = await github.rest.repos.getCommit({
+    owner,
+    repo,
+    ref: branch,
+  });
+  const sha = response.data?.sha;
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error(`trusted branch ${branch} has an invalid SHA`);
+  }
+  return sha;
+}
+
+async function listOpenPromotionPulls(github, owner, repo, repository) {
+  const pulls = [];
+  const seenNumbers = new Set();
+  for (let page = 1; Number.isSafeInteger(page); page += 1) {
+    const response = await github.rest.pulls.list({
+      owner,
+      repo,
+      state: "open",
+      base: "master",
+      per_page: 100,
+      page,
+    });
+    const pagePulls = response.data;
+    if (!Array.isArray(pagePulls) || pagePulls.length > 100) {
+      throw new Error("open promotion inventory is malformed");
+    }
+    for (const candidate of pagePulls) {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate) ||
+        !Number.isSafeInteger(candidate.number) ||
+        candidate.number < 1 ||
+        candidate.state !== "open" ||
+        typeof candidate.head?.ref !== "string" ||
+        typeof candidate.base?.ref !== "string" ||
+        typeof candidate.head?.repo?.full_name !== "string" ||
+        seenNumbers.has(candidate.number)
+      ) {
+        throw new Error("open promotion inventory entry is malformed");
+      }
+      seenNumbers.add(candidate.number);
+      if (
+        candidate.head.ref === "dev" &&
+        candidate.base.ref === "master" &&
+        candidate.head.repo.full_name === repository
+      ) {
+        pulls.push(candidate.number);
+      }
+    }
+    if (pagePulls.length < 100) {
+      return pulls.sort((left, right) => left - right);
+    }
+  }
+  throw new Error("open promotion inventory exceeds safe pagination");
+}
+
+function completedCoverageReceipt({
+  statuses,
+  authorization,
+  leg,
+}) {
+  const context = coverageAuthorizationContext(authorization, leg);
+  const ledger = statuses.filter((status) => status.context === context);
+  if (ledger.length !== 2) {
+    throw new Error(
+      `coverage ${leg} authorization receipt is incomplete`,
+    );
+  }
+  const description = ledger[0].description;
+  const targetUrl = ledger[0].target_url;
+  if (
+    typeof description !== "string" ||
+    typeof targetUrl !== "string" ||
+    ledger.some(
+      (status) =>
+        status.description !== description ||
+        status.target_url !== targetUrl,
+    )
+  ) {
+    throw new Error(
+      `coverage ${leg} authorization receipt is malformed`,
+    );
+  }
+  assertReceiptLedger(statuses, {
+    context,
+    description,
+    targetUrl,
+    states: ["pending", "success"],
+  });
+  const receipt = parseCoverageReceiptDescription(description);
+  if (
+    receipt.leg !== leg ||
+    receipt.fingerprint !==
+      coverageAuthorizationFingerprint(authorization)
+  ) {
+    throw new Error(
+      `coverage ${leg} authorization receipt is for another authority`,
+    );
+  }
+  return { ...receipt, targetUrl };
+}
+
+async function assertCoverageReceiptPolicyRun({
+  github,
+  owner,
+  repo,
+  repository,
+  serverUrl,
+  receipt,
+  pull,
+  qualityRun,
+}) {
+  const prefix =
+    `${serverUrl.replace(/\/$/, "")}/${owner}/${repo}/actions/runs/`;
+  if (!receipt.targetUrl.startsWith(prefix)) {
+    throw new Error("coverage authorization receipt run URL is malformed");
+  }
+  const policyRunIdText = receipt.targetUrl.slice(prefix.length);
+  const policyRunId = Number(policyRunIdText);
+  if (
+    !/^[1-9][0-9]*$/.test(policyRunIdText) ||
+    !Number.isSafeInteger(policyRunId)
+  ) {
+    throw new Error("coverage authorization receipt run URL is malformed");
+  }
+  const [workflowResponse, runResponse] = await Promise.all([
+    github.rest.actions.getWorkflow({
+      owner,
+      repo,
+      workflow_id: BRANCH_WORKFLOW,
+    }),
+    github.rest.actions.getWorkflowRun({
+      owner,
+      repo,
+      run_id: policyRunId,
+    }),
+  ]);
+  const run = runResponse.data;
+  const relations = Array.isArray(run?.pull_requests)
+    ? run.pull_requests
+    : [];
+  const relation = relations[0];
+  const runCreatedAt = githubTimestampMilliseconds(
+    run?.created_at,
+    "coverage receipt policy run created_at",
+  );
+  const qualityCompletedAt = githubTimestampMilliseconds(
+    qualityRun.updated_at,
+    "quality workflow run updated_at",
+  );
+  if (
+    workflowResponse.data?.id !== run?.workflow_id ||
+    workflowResponse.data?.path !== BRANCH_WORKFLOW_PATH ||
+    run.path !== BRANCH_WORKFLOW_PATH ||
+    run.event !== "workflow_run" ||
+    run.repository?.full_name !== repository ||
+    run.html_url !== receipt.targetUrl ||
+    run.status !== "completed" ||
+    run.conclusion !== "success" ||
+    runCreatedAt < qualityCompletedAt ||
+    relations.length !== 1 ||
+    relation.number !== pull.number ||
+    relation.head?.sha !== pull.headSha ||
+    relation.base?.sha !== pull.baseSha
+  ) {
+    throw new Error(
+      "coverage authorization receipt does not originate from trusted branch-policy",
+    );
+  }
+}
+
+async function getMergedAuthorizedSourcePull({
+  github,
+  owner,
+  repo,
+  repository,
+  authorization,
+}) {
+  const response = await github.rest.pulls.get({
+    owner,
+    repo,
+    pull_number: authorization.pullNumber,
+  });
+  const rawPull = response.data;
+  const pull = pullIdentity(rawPull);
+  if (
+    pull.state !== "closed" ||
+    rawPull.merged !== true ||
+    typeof rawPull.merged_at !== "string" ||
+    !Number.isSafeInteger(
+      githubTimestampMilliseconds(
+        rawPull.merged_at,
+        "authorized source pull merged_at",
+      ),
+    ) ||
+    !/^[0-9a-f]{40}$/.test(rawPull.merge_commit_sha) ||
+    pull.number !== authorization.pullNumber ||
+    pull.headRepository !== repository ||
+    pull.headRepository !== authorization.headRepository ||
+    pull.headRef !== authorization.headRef ||
+    pull.headSha !== authorization.headSha ||
+    pull.baseRef !== authorization.baseRef ||
+    pull.changedFiles !== COVERAGE_AUTHORIZED_PATHS.length
+  ) {
+    throw new Error("authorized coverage source pull is not exactly merged");
+  }
+  return { pull, mergeCommitSha: rawPull.merge_commit_sha };
+}
+
+async function assertCoverageMergeSnapshotLineage({
+  github,
+  owner,
+  repo,
+  pull,
+  mergeSha = pull.mergeSha,
+}) {
+  if (mergeSha === pull.headSha || mergeSha === pull.baseSha) {
+    throw new Error("coverage pull has no unique merge snapshot");
+  }
+  const [baseSnapshotComparison, headSnapshotComparison] =
+    await Promise.all([
+      github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${pull.baseSha}...${mergeSha}`,
+      }),
+      github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${pull.headSha}...${mergeSha}`,
+      }),
+    ]);
+  if (
+    baseSnapshotComparison.data.status !== "ahead" ||
+    baseSnapshotComparison.data.merge_base_commit?.sha !== pull.baseSha ||
+    headSnapshotComparison.data.status !== "ahead" ||
+    headSnapshotComparison.data.merge_base_commit?.sha !== pull.headSha
+  ) {
+    throw new Error("coverage pull merge snapshot lineage is invalid");
+  }
+}
+
+async function assertAuthorizedSourceQuality({
+  github,
+  owner,
+  repo,
+  repository,
+  serverUrl,
+  authorization,
+  sourcePull,
+  integrationReceipt,
+}) {
+  const snapshotPull = {
+    ...sourcePull,
+    mergeSha: integrationReceipt.mergeSha,
+  };
+  await assertCoverageMergeSnapshotLineage({
+    github,
+    owner,
+    repo,
+    pull: sourcePull,
+    mergeSha: snapshotPull.mergeSha,
+  });
+  const transition = await getQualityTransition({
+    github,
+    owner,
+    repo,
+    pull: snapshotPull,
+    serverUrl,
+  });
+  if (
+    !transition ||
+    transition.version !== 3 ||
+    transition.stale ||
+    transition.unconfirmed ||
+    transition.runId !== integrationReceipt.runId ||
+    transition.transitionAt !== integrationReceipt.transitionAt ||
+    !transitionMatchesPullIdentity(transition, snapshotPull)
+  ) {
+    throw new Error(
+      "authorized coverage source transition is incomplete",
+    );
+  }
+  const [workflowResponse, runResponse] = await Promise.all([
+    github.rest.actions.getWorkflow({
+      owner,
+      repo,
+      workflow_id: QUALITY_WORKFLOW,
+    }),
+    github.rest.actions.getWorkflowRun({
+      owner,
+      repo,
+      run_id: integrationReceipt.runId,
+    }),
+  ]);
+  const run = runResponse.data;
+  assertQualityWorkflowRunCandidate({
+    run,
+    owner,
+    repo,
+    serverUrl,
+  });
+  if (
+    workflowResponse.data?.id !== run.workflow_id ||
+    workflowResponse.data?.path !== QUALITY_WORKFLOW_PATH ||
+    !runMatchesPull(run, snapshotPull, workflowResponse.data.id) ||
+    run.run_attempt !== integrationReceipt.runAttempt ||
+    run.status !== "completed" ||
+    run.conclusion !== "success"
+  ) {
+    throw new Error(
+      "authorized coverage source quality run is invalid",
+    );
+  }
+  assertCoverageAuthorizationRunEligibility(
+    authorization,
+    transition,
+    run,
+  );
+  try {
+    await requireSuccessfulAggregateQualityJob({
+      github,
+      owner,
+      repo,
+      run,
+    });
+  } catch {
+    throw new Error(
+      "authorized coverage source aggregate quality job is invalid",
+    );
+  }
+  await assertCoverageReceiptPolicyRun({
+    github,
+    owner,
+    repo,
+    repository,
+    serverUrl,
+    receipt: integrationReceipt,
+    pull: snapshotPull,
+    qualityRun: run,
+  });
+  return { snapshotPull, run, transition };
 }
 
 async function resolveQualityWorkflowTrust({
@@ -1584,6 +2414,49 @@ async function assertCoverageAuthorizationLineage({
       `coverage authorization ${authorization.id} predates trusted adoption`,
     );
   }
+
+  const receiptComparison =
+    await github.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${authorization.receiptSha}...${pull.headSha}`,
+    });
+  if (
+    !["ahead", "identical"].includes(receiptComparison.data.status) ||
+    receiptComparison.data.merge_base_commit?.sha !==
+      authorization.receiptSha
+  ) {
+    throw new Error(
+      `coverage authorization ${authorization.id} receipt is not an ancestor`,
+    );
+  }
+}
+
+async function getCoveragePair(github, repository, ref) {
+  const [engineBlob, harnessBlob] = await Promise.all([
+    getWorkflowBlob(
+      github,
+      repository,
+      COVERAGE_ENGINE_PATH,
+      ref,
+    ),
+    getWorkflowBlob(
+      github,
+      repository,
+      COVERAGE_HARNESS_PATH,
+      ref,
+    ),
+  ]);
+  return { engineBlob, harnessBlob };
+}
+
+function assertCoveragePair(pair, engineBlob, harnessBlob, label) {
+  if (
+    pair.engineBlob !== engineBlob ||
+    pair.harnessBlob !== harnessBlob
+  ) {
+    throw new Error(`${label} coverage pair is not exact`);
+  }
 }
 
 async function resolveCoverageAssetTrust({
@@ -1592,55 +2465,62 @@ async function resolveCoverageAssetTrust({
   repo,
   pull,
   coverageAuthorizations,
-  authorizationNow,
   fallbackUrl,
+  serverUrl,
 }) {
   const repository = `${owner}/${repo}`;
   const repositoryResponse = await github.rest.repos.get({ owner, repo });
   const defaultBranch = repositoryResponse.data.default_branch;
-  let trustedEngineBlob;
-  let authorizedEngineBlob;
-  let trustedHarnessBlob;
-  let authorizedHarnessBlob;
+  if (defaultBranch !== "master") {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} cannot verify trusted coverage assets`,
+        targetUrl: fallbackUrl,
+        reason: "trusted coverage authorization requires master as default",
+      },
+    };
+  }
+  if (
+    !Number.isSafeInteger(pull.changedFiles) ||
+    pull.changedFiles < 0
+  ) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} cannot verify trusted coverage assets`,
+        targetUrl: fallbackUrl,
+        reason: "pull request changed file count is invalid",
+      },
+    };
+  }
+  let trustedPair;
+  let basePair;
+  let authorizedPair;
+  let snapshotPair;
   let trustedReviewBlob;
   let authorizedReviewBlob;
+  let snapshotReviewBlob;
   let trustedInvocationBlob;
   let authorizedInvocationBlob;
+  let snapshotInvocationBlob;
   try {
     [
-      trustedEngineBlob,
-      authorizedEngineBlob,
-      trustedHarnessBlob,
-      authorizedHarnessBlob,
+      trustedPair,
+      basePair,
+      authorizedPair,
+      snapshotPair,
       trustedReviewBlob,
       authorizedReviewBlob,
+      snapshotReviewBlob,
       trustedInvocationBlob,
       authorizedInvocationBlob,
+      snapshotInvocationBlob,
     ] = await Promise.all([
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_ENGINE_PATH,
-        defaultBranch,
-      ),
-      getWorkflowBlob(
-        github,
-        pull.headRepository,
-        COVERAGE_ENGINE_PATH,
-        pull.headSha,
-      ),
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_HARNESS_PATH,
-        defaultBranch,
-      ),
-      getWorkflowBlob(
-        github,
-        pull.headRepository,
-        COVERAGE_HARNESS_PATH,
-        pull.headSha,
-      ),
+      getCoveragePair(github, repository, defaultBranch),
+      getCoveragePair(github, repository, pull.baseSha),
+      getCoveragePair(github, pull.headRepository, pull.headSha),
+      getCoveragePair(github, repository, pull.mergeSha),
       getWorkflowBlob(
         github,
         repository,
@@ -1656,6 +2536,12 @@ async function resolveCoverageAssetTrust({
       getWorkflowBlob(
         github,
         repository,
+        COVERAGE_REVIEW_PATH,
+        pull.mergeSha,
+      ),
+      getWorkflowBlob(
+        github,
+        repository,
         COVERAGE_INVOCATION_PATH,
         defaultBranch,
       ),
@@ -1664,6 +2550,12 @@ async function resolveCoverageAssetTrust({
         pull.headRepository,
         COVERAGE_INVOCATION_PATH,
         pull.headSha,
+      ),
+      getWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_INVOCATION_PATH,
+        pull.mergeSha,
       ),
     ]);
   } catch (error) {
@@ -1679,7 +2571,9 @@ async function resolveCoverageAssetTrust({
 
   if (
     trustedReviewBlob !== authorizedReviewBlob ||
-    trustedInvocationBlob !== authorizedInvocationBlob
+    trustedReviewBlob !== snapshotReviewBlob ||
+    trustedInvocationBlob !== authorizedInvocationBlob ||
+    trustedInvocationBlob !== snapshotInvocationBlob
   ) {
     return {
       failure: {
@@ -1692,8 +2586,34 @@ async function resolveCoverageAssetTrust({
     };
   }
 
-  const engineChanged = trustedEngineBlob !== authorizedEngineBlob;
-  const harnessChanged = trustedHarnessBlob !== authorizedHarnessBlob;
+  try {
+    assertCoveragePair(
+      basePair,
+      trustedPair.engineBlob,
+      trustedPair.harnessBlob,
+      "pull base",
+    );
+    assertCoveragePair(
+      snapshotPair,
+      authorizedPair.engineBlob,
+      authorizedPair.harnessBlob,
+      "merge snapshot",
+    );
+  } catch (error) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} has inconsistent coverage lineage`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      },
+    };
+  }
+
+  const engineChanged =
+    trustedPair.engineBlob !== authorizedPair.engineBlob;
+  const harnessChanged =
+    trustedPair.harnessBlob !== authorizedPair.harnessBlob;
   if (!engineChanged && !harnessChanged) {
     return { authorization: null, failure: null };
   }
@@ -1709,27 +2629,35 @@ async function resolveCoverageAssetTrust({
     };
   }
 
-  let changedPaths;
+  let files;
   let authorization;
+  let leg;
+  let anchorSha;
   try {
-    changedPaths = await listPullRequestPaths(
+    files = await listPullRequestFiles(
       github,
       owner,
       repo,
       pull.number,
+      pull.changedFiles,
     );
-    authorization = findCoverageAssetAuthorization({
-      authorizations: coverageAuthorizations,
-      repository,
-      trustedEngineBlob,
-      authorizedEngineBlob,
-      trustedHarnessBlob,
-      authorizedHarnessBlob,
-      changedPaths,
-      pull,
-      now: authorizationNow,
-    });
-    if (authorization) {
+    if (pull.baseRef === "dev") {
+      assertCoverageSourceFiles(files);
+      authorization = findCoverageAssetAuthorization({
+        authorizations: coverageAuthorizations,
+        repository,
+        trustedEngineBlob: trustedPair.engineBlob,
+        authorizedEngineBlob: authorizedPair.engineBlob,
+        trustedHarnessBlob: trustedPair.harnessBlob,
+        authorizedHarnessBlob: authorizedPair.harnessBlob,
+        changedPaths: files.map(({ filename }) => filename).sort(),
+        pull,
+      });
+      if (!authorization) {
+        throw new Error(
+          "no exact source coverage authorization matches the pull request",
+        );
+      }
       await assertCoverageAuthorizationLineage({
         github,
         owner,
@@ -1737,6 +2665,213 @@ async function resolveCoverageAssetTrust({
         authorization,
         pull,
       });
+      await assertCoverageMergeSnapshotLineage({
+        github,
+        owner,
+        repo,
+        pull,
+      });
+      const statuses = await listCommitStatuses(
+        github,
+        owner,
+        repo,
+        authorization.receiptSha,
+      );
+      const context = coverageAuthorizationContext(
+        authorization,
+        "integration",
+      );
+      if (statuses.some((status) => status.context === context)) {
+        throw new Error(
+          "coverage integration authorization receipt was already started",
+        );
+      }
+      leg = "integration";
+      anchorSha = authorization.receiptSha;
+    } else if (
+      pull.baseRef === "master" &&
+      pull.headRef === "dev" &&
+      pull.headRepository === repository
+    ) {
+      assertCoveragePromotionFiles(files);
+      authorization = findCoveragePromotionAuthorization({
+        authorizations: coverageAuthorizations,
+        repository,
+        trustedEngineBlob: trustedPair.engineBlob,
+        authorizedEngineBlob: authorizedPair.engineBlob,
+        trustedHarnessBlob: trustedPair.harnessBlob,
+        authorizedHarnessBlob: authorizedPair.harnessBlob,
+      });
+      if (!authorization) {
+        throw new Error(
+          "no exact source coverage authorization derives this promotion",
+        );
+      }
+      const [liveMaster, liveDev] = await Promise.all([
+        getBranchSha(github, owner, repo, "master"),
+        getBranchSha(github, owner, repo, "dev"),
+      ]);
+      if (
+        liveMaster !== pull.baseSha ||
+        liveDev !== pull.headSha
+      ) {
+        throw new Error(
+          "coverage promotion does not use the live master and dev tips",
+        );
+      }
+      const promotionComparison =
+        await github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${pull.baseSha}...${pull.headSha}`,
+        });
+      if (
+        !["ahead", "identical"].includes(
+          promotionComparison.data.status,
+        ) ||
+        promotionComparison.data.merge_base_commit?.sha !==
+          pull.baseSha
+      ) {
+        throw new Error(
+          "coverage promotion base is not an ancestor of its head",
+        );
+      }
+      const openPromotions = await listOpenPromotionPulls(
+        github,
+        owner,
+        repo,
+        repository,
+      );
+      if (
+        openPromotions.length === 0 ||
+        openPromotions[0] !== pull.number
+      ) {
+        throw new Error(
+          "coverage promotion is not the canonical lowest-numbered open promotion",
+        );
+      }
+      const source = await getMergedAuthorizedSourcePull({
+        github,
+        owner,
+        repo,
+        repository,
+        authorization,
+      });
+      const sourceFiles = await listPullRequestFiles(
+        github,
+        owner,
+        repo,
+        source.pull.number,
+        source.pull.changedFiles,
+      );
+      assertCoverageSourceFiles(sourceFiles);
+      await assertCoverageAuthorizationLineage({
+        github,
+        owner,
+        repo,
+        authorization,
+        pull: source.pull,
+      });
+      const integrationStatuses = await listCommitStatuses(
+        github,
+        owner,
+        repo,
+        authorization.receiptSha,
+      );
+      const integrationReceipt = completedCoverageReceipt({
+        statuses: integrationStatuses,
+        authorization,
+        leg: "integration",
+      });
+      const sourceQuality = await assertAuthorizedSourceQuality({
+        github,
+        owner,
+        repo,
+        repository,
+        serverUrl,
+        authorization,
+        sourcePull: source.pull,
+        integrationReceipt,
+      });
+      const sourceMergeComparison =
+        await github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${source.mergeCommitSha}...${pull.headSha}`,
+        });
+      if (
+        !["ahead", "identical"].includes(
+          sourceMergeComparison.data.status,
+        ) ||
+        sourceMergeComparison.data.merge_base_commit?.sha !==
+          source.mergeCommitSha
+      ) {
+        throw new Error(
+          "authorized coverage source merge is not in the promotion head",
+        );
+      }
+      const [
+        sourceBasePair,
+        sourceHeadPair,
+        sourceSnapshotPair,
+        sourceMergePair,
+      ] = await Promise.all([
+        getCoveragePair(github, repository, source.pull.baseSha),
+        getCoveragePair(github, repository, source.pull.headSha),
+        getCoveragePair(
+          github,
+          repository,
+          sourceQuality.snapshotPull.mergeSha,
+        ),
+        getCoveragePair(
+          github,
+          repository,
+          source.mergeCommitSha,
+        ),
+      ]);
+      assertCoveragePair(
+        sourceBasePair,
+        authorization.trustedEngineBlob,
+        authorization.trustedHarnessBlob,
+        "authorized source base",
+      );
+      for (const [label, pair] of [
+        ["authorized source head", sourceHeadPair],
+        ["authorized source snapshot", sourceSnapshotPair],
+        ["authorized source merge", sourceMergePair],
+      ]) {
+        assertCoveragePair(
+          pair,
+          authorization.authorizedEngineBlob,
+          authorization.authorizedHarnessBlob,
+          label,
+        );
+      }
+      const promotionStatuses = await listCommitStatuses(
+        github,
+        owner,
+        repo,
+        source.mergeCommitSha,
+      );
+      const promotionContext = coverageAuthorizationContext(
+        authorization,
+        "promotion",
+      );
+      if (
+        promotionStatuses.some(
+          (status) => status.context === promotionContext,
+        )
+      ) {
+        throw new Error(
+          "coverage promotion authorization receipt was already started",
+        );
+      }
+      leg = "promotion";
+      anchorSha = source.mergeCommitSha;
+    } else {
+      throw new Error(
+        "changed coverage assets are not on an integration or promotion pull request",
+      );
     }
   } catch (error) {
     return {
@@ -1748,18 +2883,7 @@ async function resolveCoverageAssetTrust({
       },
     };
   }
-  if (!authorization) {
-    return {
-      failure: {
-        state: "failure",
-        description: `PR #${pull.number} changes trusted coverage assets`,
-        targetUrl: fallbackUrl,
-        reason:
-          "coverage engine and harness differ from the current default branch without an exact PR-bound authorization",
-      },
-    };
-  }
-  return { authorization, failure: null };
+  return { authorization, leg, anchorSha, failure: null };
 }
 
 async function resolveTrustedQualityAssets({
@@ -1771,6 +2895,7 @@ async function resolveTrustedQualityAssets({
   coverageAuthorizations,
   authorizationNow,
   fallbackUrl,
+  serverUrl,
 }) {
   const workflowTrust = await resolveQualityWorkflowTrust({
     github,
@@ -1790,8 +2915,8 @@ async function resolveTrustedQualityAssets({
     repo,
     pull,
     coverageAuthorizations,
-    authorizationNow,
     fallbackUrl,
+    serverUrl,
   });
   if (coverageTrust.failure) {
     return {
@@ -1815,7 +2940,12 @@ async function resolveTrustedQualityAssets({
   const authorization = workflowTrust.authorization
     ? { kind: "workflow", value: workflowTrust.authorization }
     : coverageTrust.authorization
-      ? { kind: "coverage", value: coverageTrust.authorization }
+      ? {
+          kind: "coverage",
+          leg: coverageTrust.leg,
+          anchorSha: coverageTrust.anchorSha,
+          value: coverageTrust.authorization,
+        }
       : null;
   return {
     workflowId: workflowTrust.workflowId,
@@ -1843,6 +2973,12 @@ async function getCurrentPull(
       pull_number: number,
     });
     current = pullIdentity(response.data);
+    if (
+      !Number.isSafeInteger(current.changedFiles) ||
+      current.changedFiles < 0
+    ) {
+      throw new Error(`Pull request #${number} changed file count is invalid`);
+    }
     if (
       !(
         (allowOpeningLabelSnapshotMismatch &&
@@ -1972,6 +3108,8 @@ function assertQualityWorkflowRunInventoryEntry({
         /^[0-9a-f]{40}$/.test(relation.base.sha),
     );
   let validCreatedAt = true;
+  let validStartedAt = true;
+  let validUpdatedAt = true;
   try {
     githubTimestampMilliseconds(
       run?.created_at,
@@ -1979,6 +3117,32 @@ function assertQualityWorkflowRunInventoryEntry({
     );
   } catch {
     validCreatedAt = false;
+  }
+  try {
+    const createdAt = githubTimestampMilliseconds(
+      run?.created_at,
+      "quality workflow run created_at",
+    );
+    const startedAt = githubTimestampMilliseconds(
+      run?.run_started_at,
+      "quality workflow run run_started_at",
+    );
+    validStartedAt = startedAt >= createdAt;
+  } catch {
+    validStartedAt = false;
+  }
+  try {
+    const startedAt = githubTimestampMilliseconds(
+      run?.run_started_at,
+      "quality workflow run run_started_at",
+    );
+    const updatedAt = githubTimestampMilliseconds(
+      run?.updated_at,
+      "quality workflow run updated_at",
+    );
+    validUpdatedAt = updatedAt >= startedAt;
+  } catch {
+    validUpdatedAt = false;
   }
   if (
     !run ||
@@ -1999,8 +3163,14 @@ function assertQualityWorkflowRunInventoryEntry({
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(
       run.head_repository.full_name,
     ) ||
+    !run.repository ||
+    typeof run.repository !== "object" ||
+    Array.isArray(run.repository) ||
+    run.repository.full_name !== `${owner}/${repo}` ||
     !validRelations ||
     !validCreatedAt ||
+    !validStartedAt ||
+    !validUpdatedAt ||
     !isValidWorkflowRunState(run.status, run.conclusion) ||
     run.html_url !== workflowRunUrl(serverUrl, owner, repo, run.id)
   ) {
@@ -2040,6 +3210,102 @@ function isValidWorkflowRunState(status, conclusion) {
   );
 }
 
+function assertWorkflowJobInventoryEntry(job, run) {
+  const validState =
+    job?.status === "completed"
+      ? WORKFLOW_JOB_CONCLUSIONS.has(job.conclusion)
+      : WORKFLOW_RUN_NONTERMINAL_STATUSES.has(job?.status) &&
+        job.conclusion === null;
+  if (
+    !job ||
+    typeof job !== "object" ||
+    Array.isArray(job) ||
+    !Number.isSafeInteger(job.id) ||
+    job.id < 1 ||
+    job.run_id !== run.id ||
+    job.run_attempt !== run.run_attempt ||
+    job.head_sha !== run.head_sha ||
+    typeof job.name !== "string" ||
+    job.name.length < 1 ||
+    job.name.length > 256 ||
+    /[\u0000-\u001f\u007f]/.test(job.name) ||
+    !validState
+  ) {
+    throw new Error("quality workflow job inventory entry is malformed");
+  }
+}
+
+async function requireSuccessfulAggregateQualityJob({
+  github,
+  owner,
+  repo,
+  run,
+}) {
+  const jobs = [];
+  const seenIds = new Set();
+  let expectedTotal = null;
+  for (let page = 1; Number.isSafeInteger(page); page += 1) {
+    const response =
+      await github.rest.actions.listJobsForWorkflowRunAttempt({
+        owner,
+        repo,
+        run_id: run.id,
+        attempt_number: run.run_attempt,
+        per_page: 100,
+        page,
+      });
+    const total = response.data?.total_count;
+    const pageJobs = response.data?.jobs;
+    if (
+      !Number.isSafeInteger(total) ||
+      total < 0 ||
+      !Array.isArray(pageJobs) ||
+      pageJobs.length > 100
+    ) {
+      throw new Error("quality workflow job inventory is malformed");
+    }
+    if (expectedTotal === null) {
+      expectedTotal = total;
+    } else if (total !== expectedTotal) {
+      throw new Error("quality workflow job inventory changed while paging");
+    }
+    const remaining = expectedTotal - jobs.length;
+    if (
+      remaining < 0 ||
+      pageJobs.length !== Math.min(100, remaining)
+    ) {
+      throw new Error("quality workflow job inventory is incomplete");
+    }
+    for (const job of pageJobs) {
+      assertWorkflowJobInventoryEntry(job, run);
+      if (seenIds.has(job.id)) {
+        throw new Error(
+          "quality workflow job inventory contains duplicate IDs",
+        );
+      }
+      seenIds.add(job.id);
+      jobs.push(job);
+    }
+    if (remaining === 0) {
+      break;
+    }
+  }
+  if (jobs.length !== expectedTotal) {
+    throw new Error("quality workflow job inventory is incomplete");
+  }
+  const aggregate = jobs.filter((job) => job.name === QUALITY_JOB);
+  if (
+    aggregate.length !== 1 ||
+    aggregate[0].status !== "completed" ||
+    aggregate[0].conclusion !== "success"
+  ) {
+    throw new Error(
+      "trusted aggregate quality job is missing or unsuccessful",
+    );
+  }
+  return aggregate[0];
+}
+
 function qualityWorkflowRunEvidence(run) {
   return JSON.stringify([
     run.id,
@@ -2049,6 +3315,7 @@ function qualityWorkflowRunEvidence(run) {
     run.event,
     run.head_sha,
     run.head_repository.full_name,
+    run.repository.full_name,
     run.pull_requests.map((relation) => [
       relation.number,
       relation.head.sha,
@@ -2058,6 +3325,14 @@ function qualityWorkflowRunEvidence(run) {
     githubTimestampMilliseconds(
       run.created_at,
       "quality workflow run created_at",
+    ),
+    githubTimestampMilliseconds(
+      run.run_started_at,
+      "quality workflow run run_started_at",
+    ),
+    githubTimestampMilliseconds(
+      run.updated_at,
+      "quality workflow run updated_at",
     ),
     run.status,
     run.conclusion,
@@ -2096,10 +3371,7 @@ async function findQualityTransitionRun({
   serverUrl,
   authorization = null,
 }) {
-  const transitionAt = Date.parse(timestamp);
-  if (!Number.isFinite(transitionAt)) {
-    throw new Error("workflow-producing transition timestamp is invalid");
-  }
+  const transitionAt = transitionTimestampMilliseconds(timestamp);
   const workflowResponse = await github.rest.actions.getWorkflow({
     owner,
     repo,
@@ -2145,8 +3417,11 @@ function selectQualityTransitionRun(
     runs
       .filter((run) => runMatchesPull(run, pull, workflowId))
       .filter((run) => {
-        const createdAt = Date.parse(run.created_at);
-        return Number.isFinite(createdAt) && createdAt > minimumCreatedAt;
+        const createdAt = githubTimestampMilliseconds(
+          run.created_at,
+          "quality workflow run created_at",
+        );
+        return createdAt > minimumCreatedAt;
       })
       .sort((left, right) => right.id - left.id)[0] || null
   );
@@ -2158,12 +3433,73 @@ function qualityRunSelectionCutoff(transitionAt, authorization) {
   }
   return Math.max(
     transitionAt,
-    Date.parse(authorization.value.issuedAt),
+    parseAuthorizationTime(
+      authorization.value.issuedAt,
+      "issuedAt",
+    ),
   );
 }
 
 function authorizationLabel(authorization) {
-  return `${authorization.kind} authorization`;
+  return authorization.kind === "coverage"
+    ? `coverage ${authorization.leg} authorization`
+    : `${authorization.kind} authorization`;
+}
+
+function authorizationClaimEvidence(authorization) {
+  if (!authorization?.run || !authorization?.transition) {
+    throw new Error("authorization claim evidence is incomplete");
+  }
+  return JSON.stringify([
+    authorization.kind,
+    authorization.leg || null,
+    authorization.anchorSha || authorization.value.receiptSha,
+    authorization.value.id,
+    authorization.kind === "coverage"
+      ? coverageAuthorizationFingerprint(authorization.value)
+      : authorization.value.authorizedBlob,
+    qualityWorkflowRunEvidence(authorization.run),
+    authorization.transition.version,
+    authorization.transition.action,
+    authorization.transition.transitionAt,
+    authorization.transition.runId,
+    authorization.transition.contentFingerprint,
+    authorization.transition.labelsFingerprint,
+  ]);
+}
+
+function assertCoverageAuthorizationRunEligibility(
+  authorization,
+  transition,
+  run,
+) {
+  validateCoverageAssetAuthorization(authorization);
+  const issuedAt = parseCoverageAuthorizationTime(
+    authorization.issuedAt,
+    "issuedAt",
+  );
+  const expiresAt = parseCoverageAuthorizationTime(
+    authorization.expiresAt,
+    "expiresAt",
+  );
+  const createdAt = githubTimestampMilliseconds(
+    run.created_at,
+    "quality workflow run created_at",
+  );
+  const startedAt = githubTimestampMilliseconds(
+    run.run_started_at,
+    "quality workflow run run_started_at",
+  );
+  if (
+    issuedAt >= transition.transitionAt ||
+    transition.transitionAt >= createdAt ||
+    createdAt >= expiresAt ||
+    startedAt >= expiresAt
+  ) {
+    throw new Error(
+      "coverage authorization does not contain the immutable transition and run",
+    );
+  }
 }
 
 function transitionMatchesPullIdentity(transition, pull) {
@@ -2649,6 +3985,7 @@ async function bindPendingQualityTransition({
     coverageAuthorizations,
     authorizationNow,
     fallbackUrl,
+    serverUrl,
   });
   if (trust.failure) {
     return false;
@@ -2739,6 +4076,7 @@ async function qualityDecision({
     coverageAuthorizations,
     authorizationNow,
     fallbackUrl,
+    serverUrl,
   });
   if (trust.failure) {
     return trust.failure;
@@ -2915,9 +4253,11 @@ async function qualityDecision({
       reason: "the recorded transition's exact quality run is unavailable",
     };
   }
-  const runCreatedAt = Date.parse(run.created_at);
+  const runCreatedAt = githubTimestampMilliseconds(
+    run.created_at,
+    "quality workflow run created_at",
+  );
   if (
-    !Number.isFinite(runCreatedAt) ||
     runCreatedAt <= transition.transitionAt
   ) {
     return {
@@ -2928,17 +4268,35 @@ async function qualityDecision({
     };
   }
   if (authorization) {
-    const authorizationIssuedAt = Date.parse(
-      authorization.value.issuedAt,
-    );
     const label = authorizationLabel(authorization);
-    if (runCreatedAt <= authorizationIssuedAt) {
-      return {
-        state: "pending",
-        description: `PR #${pull.number} awaits post-authorization quality gates`,
-        targetUrl: fallbackUrl,
-        reason: `matching quality workflow run predates its ${label}`,
-      };
+    if (authorization.kind === "coverage") {
+      try {
+        assertCoverageAuthorizationRunEligibility(
+          authorization.value,
+          transition,
+          run,
+        );
+      } catch (error) {
+        return {
+          state: "failure",
+          description: `PR #${pull.number} has invalid coverage timing`,
+          targetUrl: fallbackUrl,
+          reason: error.message,
+        };
+      }
+    } else {
+      const authorizationIssuedAt = parseAuthorizationTime(
+        authorization.value.issuedAt,
+        "issuedAt",
+      );
+      if (runCreatedAt <= authorizationIssuedAt) {
+        return {
+          state: "pending",
+          description: `PR #${pull.number} awaits post-authorization quality gates`,
+          targetUrl: fallbackUrl,
+          reason: `matching quality workflow run predates its ${label}`,
+        };
+      }
     }
     if (!candidateRun || candidateRun.id !== run.id) {
       return {
@@ -2967,26 +4325,19 @@ async function qualityDecision({
     };
   }
 
-  const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
-    owner,
-    repo,
-    run_id: run.id,
-    filter: "latest",
-    per_page: 100,
-  });
-  const aggregate = jobsResponse.data.jobs.find(
-    (job) => job.name === QUALITY_JOB,
-  );
-  if (
-    !aggregate ||
-    aggregate.status !== "completed" ||
-    aggregate.conclusion !== "success"
-  ) {
+  try {
+    await requireSuccessfulAggregateQualityJob({
+      github,
+      owner,
+      repo,
+      run,
+    });
+  } catch (error) {
     return {
       state: "failure",
       description: `PR #${pull.number} trusted aggregate gate did not succeed`,
       targetUrl: run.html_url,
-      reason: "trusted aggregate quality job is missing or unsuccessful",
+      reason: error.message,
     };
   }
 
@@ -2999,7 +4350,9 @@ async function qualityDecision({
       (authorization
         ? ` authorization=${authorization.value.id}`
         : ""),
-    authorization,
+    authorization: authorization
+      ? { ...authorization, run, transition }
+      : null,
   };
 }
 
@@ -3362,6 +4715,41 @@ module.exports = async function publishPrPolicy({
     }
     if (quality.state === "success" && quality.authorization) {
       try {
+        const expectedClaimEvidence = authorizationClaimEvidence(
+          quality.authorization,
+        );
+        const revalidate = async () => {
+          const currentPull = await getCurrentPull(
+            github,
+            owner,
+            repo,
+            pull.number,
+            pull,
+          );
+          const currentQuality = await qualityDecision({
+            github,
+            owner,
+            repo,
+            pull: currentPull,
+            candidateRun: item.candidateRun,
+            fallbackUrl: policyRunUrl,
+            workflowAuthorizations,
+            coverageAuthorizations,
+            authorizationNow,
+            requireFreshRun: false,
+            serverUrl: context.serverUrl,
+          });
+          if (
+            currentQuality.state !== "success" ||
+            !currentQuality.authorization ||
+            authorizationClaimEvidence(currentQuality.authorization) !==
+              expectedClaimEvidence
+          ) {
+            throw new Error(
+              "authorization authority changed immediately before receipt claim",
+            );
+          }
+        };
         if (quality.authorization.kind === "workflow") {
           await claimWorkflowAuthorization({
             github,
@@ -3370,6 +4758,7 @@ module.exports = async function publishPrPolicy({
             authorization: quality.authorization.value,
             pull,
             targetUrl: policyRunUrl,
+            revalidate,
           });
         } else {
           await claimCoverageAssetAuthorization({
@@ -3378,7 +4767,12 @@ module.exports = async function publishPrPolicy({
             repo,
             authorization: quality.authorization.value,
             pull,
+            leg: quality.authorization.leg,
+            anchorSha: quality.authorization.anchorSha,
+            run: quality.authorization.run,
+            transition: quality.authorization.transition,
             targetUrl: policyRunUrl,
+            revalidate,
           });
         }
       } catch (error) {
@@ -3451,8 +4845,15 @@ module.exports.branchDecision = branchDecision;
 module.exports.claimCoverageAssetAuthorization =
   claimCoverageAssetAuthorization;
 module.exports.claimWorkflowAuthorization = claimWorkflowAuthorization;
+module.exports.coverageAuthorizationContext =
+  coverageAuthorizationContext;
+module.exports.coverageAuthorizationFingerprint =
+  coverageAuthorizationFingerprint;
+module.exports.coverageReceiptDescription = coverageReceiptDescription;
 module.exports.findCoverageAssetAuthorization =
   findCoverageAssetAuthorization;
+module.exports.findCoveragePromotionAuthorization =
+  findCoveragePromotionAuthorization;
 module.exports.findWorkflowAuthorization = findWorkflowAuthorization;
 module.exports.findQualityTransitionRun = findQualityTransitionRun;
 module.exports.labelsFingerprint = labelsFingerprint;

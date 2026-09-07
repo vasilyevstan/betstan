@@ -90,6 +90,12 @@ write_coverage_review_tap() {
 
 initialize_coverage_review_fixture() {
   local mode="$1"
+  coverage_review_pull_number=518
+  coverage_review_head_ref=feature/coverage-engine
+  coverage_review_base_ref=dev
+  coverage_review_run_id=900
+  coverage_review_run_attempt=1
+  unset coverage_review_live_dev_sha
   coverage_review_fixture_root="$permission_fixture_dir/coverage-review-fixture"
   coverage_review_repo="$coverage_review_fixture_root/repository"
   coverage_review_bin="$coverage_review_fixture_root/bin"
@@ -99,12 +105,14 @@ initialize_coverage_review_fixture() {
   coverage_review_docker_stderr="$coverage_review_fixture_root/docker.stderr"
   coverage_review_docker_exit="$coverage_review_fixture_root/docker.exit"
   coverage_review_node_sentinel="$coverage_review_fixture_root/node-invoked"
+  coverage_review_api="$coverage_review_fixture_root/api"
   rm -rf "$coverage_review_fixture_root"
   mkdir -p \
     "$coverage_review_repo/.github/scripts" \
     "$coverage_review_repo/infra/azure/agents" \
     "$coverage_review_repo/docs/wiki" \
-    "$coverage_review_bin"
+    "$coverage_review_bin" \
+    "$coverage_review_api"
   cp \
     "$ROOT_DIR/.github/scripts/test-coverage-matrix.js" \
     "$ROOT_DIR/.github/scripts/test-test-coverage-matrix.js" \
@@ -190,7 +198,6 @@ initialize_coverage_review_fixture() {
       "$coverage_review_engine_blob" \
       "$coverage_review_trusted_harness_blob" \
       "$coverage_review_harness_blob" <<'PY'
-import datetime
 import json
 import pathlib
 import sys
@@ -206,13 +213,8 @@ import sys
     trusted_harness_blob,
     harness_blob,
 ) = sys.argv[1:]
-now = datetime.datetime.now(datetime.timezone.utc)
-issued = (now - datetime.timedelta(minutes=1)).isoformat(
-    timespec="milliseconds"
-).replace("+00:00", "Z")
-expires = (now + datetime.timedelta(hours=1)).isoformat(
-    timespec="milliseconds"
-).replace("+00:00", "Z")
+issued = "2026-09-02T08:00:00.000Z"
+expires = "2026-09-09T08:00:00.000Z"
 expected_tests = {
     "invalid-tests-1": 1,
     "invalid-tests-101": 101,
@@ -277,18 +279,38 @@ PY
   git -C "$coverage_review_repo" merge --quiet --no-ff \
     -m "fixture merge" candidate
   coverage_review_merge_sha="$(git -C "$coverage_review_repo" rev-parse HEAD)"
+  coverage_review_source_head_sha="$coverage_review_head_sha"
+  coverage_review_source_base_sha="$coverage_review_base_sha"
+  coverage_review_source_merge_sha="$coverage_review_merge_sha"
 
   python3 - \
     "$coverage_review_event" \
+    "$coverage_review_api" \
+    "$coverage_review_repo/.github/scripts/publish-pr-policy.js" \
     "$coverage_review_head_sha" \
     "$coverage_review_base_sha" \
     "$coverage_review_merge_sha" \
+    "$coverage_review_root_sha" \
     "$coverage_review_changed_count" <<'PY'
+import hashlib
 import json
 import pathlib
+import re
 import sys
 
-event_path, head_sha, base_sha, merge_sha, changed_count = sys.argv[1:]
+(
+    event_path,
+    api_dir,
+    publisher_path,
+    head_sha,
+    base_sha,
+    merge_sha,
+    root_sha,
+    changed_count,
+) = sys.argv[1:]
+title = "Bootstrap trusted coverage engine review"
+body = "Exercise the exact authorized coverage engine and harness."
+updated_at = "2026-09-02T09:00:00.000Z"
 payload = {
     "repository": {
         "full_name": "vasilyevstan/betstan",
@@ -296,6 +318,12 @@ payload = {
     },
     "pull_request": {
         "number": 518,
+        "state": "open",
+        "mergeable": True,
+        "updated_at": updated_at,
+        "title": title,
+        "body": body,
+        "labels": [],
         "head": {
             "ref": "feature/coverage-engine",
             "sha": head_sha,
@@ -308,6 +336,202 @@ payload = {
 }
 pathlib.Path(event_path).write_text(
     json.dumps(payload, separators=(",", ":")),
+    encoding="utf-8",
+)
+
+api = pathlib.Path(api_dir)
+api.mkdir(parents=True, exist_ok=True)
+(api / "current-pull.json").write_text(
+    json.dumps(payload["pull_request"], separators=(",", ":")),
+    encoding="utf-8",
+)
+(api / "branch-policy-workflow.json").write_text(
+    json.dumps(
+        {"id": 7001, "path": ".github/workflows/branch-policy.yml"},
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+(api / "quality-workflow.json").write_text(
+    json.dumps(
+        {"id": 7002, "path": ".github/workflows/production-build.yml"},
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+relation = {
+    "number": 518,
+    "head": {"sha": head_sha},
+    "base": {"sha": base_sha},
+}
+(api / "quality-run.json").write_text(
+    json.dumps(
+        {
+            "id": 900,
+            "run_attempt": 1,
+            "workflow_id": 7002,
+            "path": ".github/workflows/production-build.yml",
+            "event": "pull_request",
+            "head_sha": head_sha,
+            "head_repository": {"full_name": "vasilyevstan/betstan"},
+            "repository": {"full_name": "vasilyevstan/betstan"},
+            "html_url": (
+                "https://github.com/vasilyevstan/betstan/actions/runs/900"
+            ),
+            "pull_requests": [relation],
+            "created_at": "2026-09-02T10:00:00.000Z",
+            "run_started_at": "2026-09-02T10:01:00.000Z",
+            "updated_at": "2026-09-02T10:05:00.000Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+(api / "policy-run.json").write_text(
+    json.dumps(
+        {
+            "id": 901,
+            "workflow_id": 7001,
+            "path": ".github/workflows/branch-policy.yml",
+            "event": "pull_request_target",
+            "repository": {"full_name": "vasilyevstan/betstan"},
+            "html_url": (
+                "https://github.com/vasilyevstan/betstan/actions/runs/901"
+            ),
+            "pull_requests": [relation],
+            "created_at": "2026-09-02T10:06:00.000Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+
+content_fingerprint = hashlib.sha256(
+    f"{title}\0{body}".encode("utf-8")
+).hexdigest()[:32]
+labels_fingerprint = hashlib.sha256(b"[]").hexdigest()[:32]
+transition_at = 1788339600000
+(api / "transition-statuses.json").write_text(
+    json.dumps(
+        [
+            {
+                "id": 8001,
+                "context": "trusted-quality-transition/dev",
+                "state": "pending",
+                "description": (
+                    f"v3|518|edited|{transition_at}|900|"
+                    f"{content_fingerprint}|{labels_fingerprint}"
+                ),
+                "target_url": (
+                    "https://github.com/vasilyevstan/betstan/"
+                    "actions/runs/901"
+                ),
+                "created_at": "2026-09-02T10:06:00.000Z",
+                "creator": {
+                    "id": 41898282,
+                    "login": "github-actions[bot]",
+                    "type": "Bot",
+                },
+            }
+        ],
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+
+publisher = pathlib.Path(publisher_path).read_text(encoding="utf-8")
+matches = re.findall(
+    r"const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String\.raw`([^`]*)`;",
+    publisher,
+)
+authorizations = json.loads(matches[0]) if len(matches) == 1 else []
+if authorizations:
+    authorization = authorizations[0]
+    values = [
+        "betstan.coverage.authorization.v1",
+        authorization["id"],
+        authorization["repository"],
+        authorization["headRepository"],
+        authorization["pullNumber"],
+        authorization["headRef"],
+        authorization["headSha"],
+        authorization["baseRef"],
+        authorization["baseSha"],
+        authorization["enginePath"],
+        authorization["trustedEngineBlob"],
+        authorization["authorizedEngineBlob"],
+        authorization["harnessPath"],
+        authorization["trustedHarnessBlob"],
+        authorization["authorizedHarnessBlob"],
+        authorization["allowedPaths"],
+        authorization["expectedTests"],
+        authorization["issuedAt"],
+        authorization["expiresAt"],
+        authorization["receiptSha"],
+        authorization["adoptionSha"],
+    ]
+    authorization_fingerprint = hashlib.sha256(
+        json.dumps(
+            values,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:40]
+    receipt_description = (
+        f"v1|i|{authorization_fingerprint}|{merge_sha}|900|1|"
+        f"{transition_at}"
+    )
+else:
+    receipt_description = ""
+(api / "empty-statuses.json").write_text("[]", encoding="utf-8")
+(api / "completed-integration-receipt.json").write_text(
+    json.dumps(
+        [
+            {
+                "id": 8101,
+                "context": (
+                    "trusted-coverage-integration/"
+                    "coverage-engine-review-fixture"
+                ),
+                "state": "pending",
+                "description": receipt_description,
+                "target_url": (
+                    "https://github.com/vasilyevstan/betstan/"
+                    "actions/runs/901"
+                ),
+                "creator": {
+                    "id": 41898282,
+                    "login": "github-actions[bot]",
+                    "type": "Bot",
+                },
+                "created_at": "2026-09-02T10:07:00.000Z",
+            },
+            {
+                "id": 8102,
+                "context": (
+                    "trusted-coverage-integration/"
+                    "coverage-engine-review-fixture"
+                ),
+                "state": "success",
+                "description": receipt_description,
+                "target_url": (
+                    "https://github.com/vasilyevstan/betstan/"
+                    "actions/runs/901"
+                ),
+                "creator": {
+                    "id": 41898282,
+                    "login": "github-actions[bot]",
+                    "type": "Bot",
+                },
+                "created_at": "2026-09-02T10:08:00.000Z",
+            },
+        ],
+        separators=(",", ":"),
+    ),
     encoding="utf-8",
 )
 PY
@@ -358,6 +582,27 @@ case "$url" in
     printf '{"sha":"%s"}\n' \
       "${BETSTAN_COVERAGE_REVIEW_DEFAULT_SHA:?}"
     ;;
+  https://api.github.com/repos/vasilyevstan/betstan/pulls/518)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/current-pull.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/workflows/branch-policy.yml)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/branch-policy-workflow.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/workflows/production-build.yml)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/quality-workflow.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/900)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/quality-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/901)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/policy-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/"${BETSTAN_COVERAGE_REVIEW_MERGE_SHA:?}"/statuses?*)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/transition-statuses.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/"${BETSTAN_COVERAGE_REVIEW_ROOT_SHA:?}"/statuses?*)
+    cat "${BETSTAN_COVERAGE_REVIEW_API_DIR:?}/empty-statuses.json"
+    ;;
   *)
     echo "unexpected fixture curl request" >&2
     exit 22
@@ -373,6 +618,372 @@ SH
   printf '0\n' >"$coverage_review_docker_exit"
 }
 
+initialize_coverage_promotion_fixture() {
+  initialize_coverage_review_fixture authorized
+
+  git -C "$coverage_review_repo" checkout --quiet \
+    -b promotion-head "$coverage_review_source_merge_sha"
+  mkdir -p "$coverage_review_repo/moderation/src"
+  printf 'export const promotionFixture = true;\n' \
+    >"$coverage_review_repo/moderation/src/promotion-fixture.ts"
+  git -C "$coverage_review_repo" add \
+    moderation/src/promotion-fixture.ts
+  git -C "$coverage_review_repo" commit --quiet \
+    -m "fixture promotion content"
+  coverage_review_head_sha="$(
+    git -C "$coverage_review_repo" rev-parse HEAD
+  )"
+  coverage_review_changed_count="$(
+    git -C "$coverage_review_repo" diff --name-only \
+      "$coverage_review_source_base_sha" \
+      "$coverage_review_head_sha" |
+      wc -l |
+      tr -d ' '
+  )"
+
+  git -C "$coverage_review_repo" checkout --quiet \
+    --detach "$coverage_review_source_base_sha"
+  git -C "$coverage_review_repo" merge --quiet --no-ff \
+    -m "fixture promotion merge" promotion-head
+  coverage_review_merge_sha="$(
+    git -C "$coverage_review_repo" rev-parse HEAD
+  )"
+  coverage_review_default_sha="$coverage_review_source_base_sha"
+  coverage_review_pull_number=64
+  coverage_review_head_ref=dev
+  coverage_review_base_ref=master
+  coverage_review_run_id=902
+  coverage_review_live_dev_sha="$coverage_review_head_sha"
+
+  python3 - \
+    "$coverage_review_event" \
+    "$coverage_review_api" \
+    "$coverage_review_source_head_sha" \
+    "$coverage_review_source_base_sha" \
+    "$coverage_review_source_merge_sha" \
+    "$coverage_review_head_sha" \
+    "$coverage_review_merge_sha" \
+    "$coverage_review_changed_count" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+(
+    event_path,
+    api_dir,
+    source_head_sha,
+    source_base_sha,
+    source_merge_sha,
+    promotion_head_sha,
+    promotion_merge_sha,
+    changed_count,
+) = sys.argv[1:]
+api = pathlib.Path(api_dir)
+
+source_pull = json.loads(
+    (api / "current-pull.json").read_text(encoding="utf-8")
+)
+source_pull.update(
+    {
+        "state": "closed",
+        "merged": True,
+        "merged_at": "2026-09-02T10:15:00.000Z",
+        "merge_commit_sha": source_merge_sha,
+    }
+)
+(api / "source-pull.json").write_text(
+    json.dumps(source_pull, separators=(",", ":")),
+    encoding="utf-8",
+)
+(api / "source-quality-run.json").write_text(
+    (api / "quality-run.json").read_text(encoding="utf-8"),
+    encoding="utf-8",
+)
+(api / "source-transition-policy-run.json").write_text(
+    (api / "policy-run.json").read_text(encoding="utf-8"),
+    encoding="utf-8",
+)
+(api / "source-transition-statuses.json").write_text(
+    (api / "transition-statuses.json").read_text(encoding="utf-8"),
+    encoding="utf-8",
+)
+
+title = "Promote trusted coverage engine review"
+body = "Promote the integrated coverage pair through the canonical dev head."
+updated_at = "2026-09-02T11:00:00.000Z"
+promotion_pull = {
+    "number": 64,
+    "state": "open",
+    "mergeable": True,
+    "updated_at": updated_at,
+    "title": title,
+    "body": body,
+    "labels": [],
+    "head": {
+        "ref": "dev",
+        "sha": promotion_head_sha,
+        "repo": {"full_name": "vasilyevstan/betstan"},
+    },
+    "base": {"ref": "master", "sha": source_base_sha},
+    "merge_commit_sha": promotion_merge_sha,
+    "changed_files": int(changed_count),
+}
+event = {
+    "repository": {
+        "full_name": "vasilyevstan/betstan",
+        "default_branch": "master",
+    },
+    "pull_request": promotion_pull,
+}
+pathlib.Path(event_path).write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+(api / "current-pull.json").write_text(
+    json.dumps(promotion_pull, separators=(",", ":")),
+    encoding="utf-8",
+)
+(api / "open-promotions.json").write_text(
+    json.dumps([promotion_pull], separators=(",", ":")),
+    encoding="utf-8",
+)
+
+relation = {
+    "number": 64,
+    "head": {"sha": promotion_head_sha},
+    "base": {"sha": source_base_sha},
+}
+(api / "current-quality-run.json").write_text(
+    json.dumps(
+        {
+            "id": 902,
+            "run_attempt": 1,
+            "workflow_id": 7002,
+            "path": ".github/workflows/production-build.yml",
+            "event": "pull_request",
+            "head_sha": promotion_head_sha,
+            "head_repository": {"full_name": "vasilyevstan/betstan"},
+            "repository": {"full_name": "vasilyevstan/betstan"},
+            "html_url": (
+                "https://github.com/vasilyevstan/betstan/actions/runs/902"
+            ),
+            "pull_requests": [relation],
+            "created_at": "2026-09-02T12:00:00.000Z",
+            "run_started_at": "2026-09-02T12:01:00.000Z",
+            "updated_at": "2026-09-02T12:05:00.000Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+(api / "current-policy-run.json").write_text(
+    json.dumps(
+        {
+            "id": 903,
+            "workflow_id": 7001,
+            "path": ".github/workflows/branch-policy.yml",
+            "event": "pull_request_target",
+            "repository": {"full_name": "vasilyevstan/betstan"},
+            "html_url": (
+                "https://github.com/vasilyevstan/betstan/actions/runs/903"
+            ),
+            "pull_requests": [relation],
+            "created_at": "2026-09-02T11:01:00.000Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+content_fingerprint = hashlib.sha256(
+    f"{title}\0{body}".encode("utf-8")
+).hexdigest()[:32]
+labels_fingerprint = hashlib.sha256(b"[]").hexdigest()[:32]
+transition_at = 1788346800000
+(api / "current-transition-statuses.json").write_text(
+    json.dumps(
+        [
+            {
+                "id": 8201,
+                "context": "trusted-quality-transition/master",
+                "state": "pending",
+                "description": (
+                    f"v3|64|edited|{transition_at}|902|"
+                    f"{content_fingerprint}|{labels_fingerprint}"
+                ),
+                "target_url": (
+                    "https://github.com/vasilyevstan/betstan/"
+                    "actions/runs/903"
+                ),
+                "created_at": "2026-09-02T11:01:00.000Z",
+                "creator": {
+                    "id": 41898282,
+                    "login": "github-actions[bot]",
+                    "type": "Bot",
+                },
+            }
+        ],
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+
+source_relation = {
+    "number": 518,
+    "head": {"sha": source_head_sha},
+    "base": {"sha": source_base_sha},
+}
+(api / "source-receipt-policy-run.json").write_text(
+    json.dumps(
+        {
+            "id": 904,
+            "workflow_id": 7001,
+            "path": ".github/workflows/branch-policy.yml",
+            "event": "workflow_run",
+            "repository": {"full_name": "vasilyevstan/betstan"},
+            "html_url": (
+                "https://github.com/vasilyevstan/betstan/actions/runs/904"
+            ),
+            "pull_requests": [source_relation],
+            "created_at": "2026-09-02T10:06:00.000Z",
+            "status": "completed",
+            "conclusion": "success",
+        },
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+receipt_statuses = json.loads(
+    (api / "completed-integration-receipt.json").read_text(
+        encoding="utf-8"
+    )
+)
+for status in receipt_statuses:
+    status["target_url"] = (
+        "https://github.com/vasilyevstan/betstan/actions/runs/904"
+    )
+(api / "completed-integration-receipt.json").write_text(
+    json.dumps(receipt_statuses, separators=(",", ":")),
+    encoding="utf-8",
+)
+source_jobs = [
+    {
+        "id": 9000 + index,
+        "run_id": 900,
+        "run_attempt": 1,
+        "head_sha": source_head_sha,
+        "name": f"fixture-job-{index}",
+        "status": "completed",
+        "conclusion": "success",
+    }
+    for index in range(1, 101)
+]
+source_jobs.append(
+    {
+        "id": 9101,
+        "run_id": 900,
+        "run_attempt": 1,
+        "head_sha": source_head_sha,
+        "name": "pr-quality-gates",
+        "status": "completed",
+        "conclusion": "success",
+    }
+)
+for page, jobs in enumerate(
+    [source_jobs[:100], source_jobs[100:], []],
+    start=1,
+):
+    (api / f"source-quality-jobs-page-{page}.json").write_text(
+        json.dumps(
+            {"total_count": len(source_jobs), "jobs": jobs},
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+PY
+
+  cat >"$coverage_review_bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+url=""
+for argument in "$@"; do
+  case "$argument" in
+    https://*)
+      url="$argument"
+      ;;
+  esac
+done
+api="${BETSTAN_COVERAGE_REVIEW_API_DIR:?}"
+case "$url" in
+  https://api.github.com/repos/vasilyevstan/betstan/commits/master)
+    printf '{"sha":"%s"}\n' \
+      "${BETSTAN_COVERAGE_REVIEW_DEFAULT_SHA:?}"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/dev)
+    printf '{"sha":"%s"}\n' \
+      "${BETSTAN_COVERAGE_REVIEW_LIVE_DEV_SHA:?}"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/pulls/64)
+    cat "$api/current-pull.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/pulls/518)
+    cat "$api/source-pull.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/pulls?state=open\&base=master\&*)
+    cat "$api/open-promotions.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/workflows/branch-policy.yml)
+    cat "$api/branch-policy-workflow.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/workflows/production-build.yml)
+    cat "$api/quality-workflow.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/900)
+    cat "$api/source-quality-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/900/attempts/1/jobs?per_page=100\&page=1)
+    cat "$api/source-quality-jobs-page-1.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/900/attempts/1/jobs?per_page=100\&page=2)
+    cat "$api/source-quality-jobs-page-2.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/900/attempts/1/jobs?per_page=100\&page=3)
+    cat "$api/source-quality-jobs-page-3.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/901)
+    cat "$api/source-transition-policy-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/902)
+    cat "$api/current-quality-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/903)
+    cat "$api/current-policy-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/actions/runs/904)
+    cat "$api/source-receipt-policy-run.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/"${BETSTAN_COVERAGE_REVIEW_MERGE_SHA:?}"/statuses?*)
+    cat "$api/current-transition-statuses.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/"${BETSTAN_COVERAGE_REVIEW_ROOT_SHA:?}"/statuses?*)
+    cat "$api/completed-integration-receipt.json"
+    ;;
+  https://api.github.com/repos/vasilyevstan/betstan/commits/"${BETSTAN_COVERAGE_REVIEW_SOURCE_MERGE_SHA:?}"/statuses?*)
+    cat "$api/source-transition-statuses.json"
+    ;;
+  *)
+    echo "unexpected promotion fixture curl request: $url" >&2
+    exit 22
+    ;;
+esac
+SH
+  chmod +x "$coverage_review_bin/curl"
+}
+
 run_coverage_review_fixture() {
   (
     cd "$coverage_review_repo"
@@ -382,12 +993,34 @@ run_coverage_review_fixture() {
       GITHUB_EVENT_NAME=pull_request \
       GITHUB_EVENT_PATH="$coverage_review_event" \
       GITHUB_SHA="$coverage_review_merge_sha" \
-      GITHUB_REF=refs/pull/518/merge \
-      GITHUB_HEAD_REF=feature/coverage-engine \
-      GITHUB_BASE_REF=dev \
+      GITHUB_REF="refs/pull/${coverage_review_pull_number}/merge" \
+      GITHUB_HEAD_REF="$coverage_review_head_ref" \
+      GITHUB_BASE_REF="$coverage_review_base_ref" \
+      GITHUB_RUN_ID="$coverage_review_run_id" \
+      GITHUB_RUN_ATTEMPT="$coverage_review_run_attempt" \
       BETSTAN_COVERAGE_REVIEW_DEFAULT_SHA="$coverage_review_default_sha" \
+      BETSTAN_COVERAGE_REVIEW_API_DIR="$coverage_review_api" \
+      BETSTAN_COVERAGE_REVIEW_MERGE_SHA="$coverage_review_merge_sha" \
+      BETSTAN_COVERAGE_REVIEW_ROOT_SHA="$coverage_review_root_sha" \
+      BETSTAN_COVERAGE_REVIEW_HEAD_SHA="$coverage_review_head_sha" \
+      BETSTAN_COVERAGE_REVIEW_LIVE_DEV_SHA="${coverage_review_live_dev_sha:-$coverage_review_head_sha}" \
+      BETSTAN_COVERAGE_REVIEW_SOURCE_MERGE_SHA="$coverage_review_source_merge_sha" \
       ./infra/azure/agents/coverage-engine-review-stan.sh
   )
+}
+
+assert_coverage_review_pre_execution_failure() {
+  local expected_reason="$1"
+  local description="$2"
+
+  rm -f "$coverage_review_docker_args" "$coverage_review_node_sentinel"
+  if run_coverage_review_fixture >"$test_output" 2>&1; then
+    echo "ERROR: $description unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "reason=$expected_reason" "$test_output"
+  [[ ! -e "$coverage_review_docker_args" ]]
+  [[ ! -e "$coverage_review_node_sentinel" ]]
 }
 
 prepare_coverage_guard_fixture() {
@@ -826,11 +1459,389 @@ for lineage_case in \
   [[ ! -e "$coverage_review_node_sentinel" ]]
 done
 
+for pull_boolean_case in \
+  event-number \
+  event-changed-files \
+  current-number \
+  current-changed-files; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$pull_boolean_case" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+case = sys.argv[3]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+target = event["pull_request"] if case.startswith("event-") else current
+field = "number" if case.endswith("number") else "changed_files"
+target[field] = True
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  expected_reason="current-pull-snapshot-mismatch"
+  if [[ "$pull_boolean_case" == event-* ]]; then
+    expected_reason="invalid-pull-metadata"
+  fi
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$pull_boolean_case"
+done
+
+for pull_timestamp_case in calendar-invalid offset four-digit-fraction; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$pull_timestamp_case" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+case = sys.argv[3]
+value = {
+    "calendar-invalid": "2026-02-30T09:00:00.000Z",
+    "offset": "2026-09-02T09:00:00+00:00",
+    "four-digit-fraction": "2026-09-02T09:00:00.0000Z",
+}[case]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+event["pull_request"]["updated_at"] = value
+current["updated_at"] = value
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "invalid-pull-metadata" \
+    "$pull_timestamp_case pull timestamp"
+done
+
+initialize_coverage_review_fixture "authorized"
+python3 - "$coverage_review_api/transition-statuses.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+statuses = json.loads(path.read_text(encoding="utf-8"))
+statuses[0]["created_at"] = "2026-02-30T10:06:00.000Z"
+path.write_text(
+    json.dumps(statuses, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: calendar-invalid transition status unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=quality-transition-status-inventory-is-invalid" \
+  "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_review_fixture "authorized"
+python3 - "$coverage_review_api/policy-run.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+run = json.loads(path.read_text(encoding="utf-8"))
+run["created_at"] = "2026-09-02T08:59:59.000Z"
+path.write_text(json.dumps(run, separators=(",", ":")), encoding="utf-8")
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: pre-transition policy run unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=quality-transition-policy-run-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_review_fixture "authorized"
+python3 - "$coverage_review_api/transition-statuses.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+statuses = json.loads(path.read_text(encoding="utf-8"))
+statuses[0]["created_at"] = "2026-09-02T10:05:59.000Z"
+path.write_text(
+    json.dumps(statuses, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: transition status predating its policy run passed" >&2
+  exit 1
+fi
+grep -qF "reason=quality-transition-policy-run-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_review_fixture "authorized"
+python3 - "$coverage_review_api/quality-run.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+run = json.loads(path.read_text(encoding="utf-8"))
+run.pop("repository")
+path.write_text(json.dumps(run, separators=(",", ":")), encoding="utf-8")
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: quality run without repository unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=current-quality-run-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+for quality_schema_case in \
+  boolean-run-id \
+  boolean-run-attempt \
+  boolean-run-workflow-id \
+  boolean-run-relation-number \
+  boolean-workflow-id \
+  wrong-run-repository; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/quality-run.json" \
+    "$coverage_review_api/quality-workflow.json" \
+    "$quality_schema_case" <<'PY'
+import json
+import pathlib
+import sys
+
+run_path = pathlib.Path(sys.argv[1])
+workflow_path = pathlib.Path(sys.argv[2])
+case = sys.argv[3]
+run = json.loads(run_path.read_text(encoding="utf-8"))
+workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+if case == "boolean-run-id":
+    run["id"] = True
+elif case == "boolean-run-attempt":
+    run["run_attempt"] = True
+elif case == "boolean-run-workflow-id":
+    run["workflow_id"] = True
+elif case == "boolean-run-relation-number":
+    run["pull_requests"][0]["number"] = True
+elif case == "boolean-workflow-id":
+    workflow["id"] = True
+elif case == "wrong-run-repository":
+    run["repository"]["full_name"] = "other/repository"
+else:
+    raise SystemExit("unknown quality schema case")
+run_path.write_text(
+    json.dumps(run, separators=(",", ":")),
+    encoding="utf-8",
+)
+workflow_path.write_text(
+    json.dumps(workflow, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "current-quality-run-is-invalid" \
+    "$quality_schema_case current quality run"
+done
+
+for policy_timestamp_case in offset four-digit-fraction; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/policy-run.json" \
+    "$policy_timestamp_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+run = json.loads(path.read_text(encoding="utf-8"))
+run["created_at"] = {
+    "offset": "2026-09-02T10:06:00+00:00",
+    "four-digit-fraction": "2026-09-02T10:06:00.0000Z",
+}[case]
+path.write_text(
+    json.dumps(run, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "quality-transition-policy-run-is-invalid" \
+    "$policy_timestamp_case policy timestamp"
+done
+
+for status_boolean_case in transition-id transition-creator-id; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/transition-statuses.json" \
+    "$status_boolean_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+statuses = json.loads(path.read_text(encoding="utf-8"))
+if case == "transition-id":
+    statuses[0]["id"] = True
+elif case == "transition-creator-id":
+    statuses[0]["creator"]["id"] = True
+else:
+    raise SystemExit("unknown status Boolean case")
+path.write_text(
+    json.dumps(statuses, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "quality-transition-status-inventory-is-invalid" \
+    "$status_boolean_case"
+done
+
+initialize_coverage_review_fixture "authorized"
+python3 - "$coverage_review_api/empty-statuses.json" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(
+        [
+            {
+                "id": 8999,
+                "context": "unrelated-status",
+                "state": "success",
+                "description": None,
+                "target_url": None,
+            }
+        ],
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: malformed unrelated receipt status unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=coverage-integration-receipt-inventory-is-invalid" \
+  "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+for unrelated_boolean_case in status-id creator-id; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/empty-statuses.json" \
+    "$unrelated_boolean_case" <<'PY'
+import json
+import pathlib
+import sys
+
+case = sys.argv[2]
+status = {
+    "id": 8999,
+    "context": "unrelated-status",
+    "state": "success",
+    "description": None,
+    "target_url": None,
+    "created_at": "2026-09-02T10:07:00.000Z",
+    "creator": {
+        "id": 41898282,
+        "login": "github-actions[bot]",
+        "type": "Bot",
+    },
+}
+if case == "status-id":
+    status["id"] = True
+elif case == "creator-id":
+    status["creator"]["id"] = True
+else:
+    raise SystemExit("unknown unrelated Boolean case")
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps([status], separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "coverage-integration-receipt-inventory-is-invalid" \
+    "unrelated Boolean $unrelated_boolean_case"
+done
+
+initialize_coverage_review_fixture "authorized"
+python3 - \
+  "$coverage_review_event" \
+  "$coverage_review_api/current-pull.json" \
+  "$coverage_review_api/quality-run.json" \
+  "$coverage_review_api/policy-run.json" \
+  "$coverage_review_api/transition-statuses.json" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path, pull_path, quality_path, policy_path, statuses_path = map(
+    pathlib.Path,
+    sys.argv[1:],
+)
+event = json.loads(event_path.read_text(encoding="utf-8"))
+pull = json.loads(pull_path.read_text(encoding="utf-8"))
+quality = json.loads(quality_path.read_text(encoding="utf-8"))
+policy = json.loads(policy_path.read_text(encoding="utf-8"))
+statuses = json.loads(statuses_path.read_text(encoding="utf-8"))
+
+event["pull_request"]["updated_at"] = "2026-09-02T09:00:00Z"
+pull["updated_at"] = "2026-09-02T09:00:00Z"
+quality["created_at"] = "2026-09-02T10:00:00.1Z"
+quality["run_started_at"] = "2026-09-02T10:00:00.12Z"
+quality["updated_at"] = "2026-09-02T10:00:00.123Z"
+policy["created_at"] = "2026-09-02T10:06:00.1Z"
+statuses[0]["created_at"] = "2026-09-02T10:06:00.12Z"
+
+for path, value in (
+    (event_path, event),
+    (pull_path, pull),
+    (quality_path, quality),
+    (policy_path, policy),
+    (statuses_path, statuses),
+):
+    path.write_text(
+        json.dumps(value, separators=(",", ":")),
+        encoding="utf-8",
+    )
+PY
+write_coverage_review_tap "$coverage_review_docker_stdout" 102
+run_coverage_review_fixture >"$test_output"
+grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
 initialize_coverage_review_fixture "authorized"
 write_coverage_review_tap "$coverage_review_docker_stdout" 102
 run_coverage_review_fixture >"$test_output"
 grep -qF \
-  "coverage_engine_review=PASS mode=authorized authorization=coverage-engine-review-fixture" \
+  "coverage_engine_review=PASS mode=integration authorization=coverage-engine-review-fixture" \
   "$test_output"
 grep -qF "tests=102" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
@@ -1005,7 +2016,7 @@ path.write_text(
 )
 PY
 run_coverage_review_fixture >"$test_output"
-grep -qF "coverage_engine_review=PASS mode=authorized" "$test_output"
+grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
 
 for malformed_tap_fragment in \
   "arbitrary trailing text" \
@@ -1064,6 +2075,422 @@ if grep -qF "candidate-secret-output" "$test_output"; then
   echo "ERROR: candidate stdout escaped private capture" >&2
   exit 1
 fi
+
+initialize_coverage_promotion_fixture
+write_coverage_review_tap "$coverage_review_docker_stdout" 102
+run_coverage_review_fixture >"$test_output"
+grep -qF \
+  "coverage_engine_review=PASS mode=promotion authorization=coverage-engine-review-fixture" \
+  "$test_output"
+grep -qF "tests=102" "$test_output"
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+python3 - \
+  "$coverage_review_api/source-quality-jobs-page-1.json" \
+  "$coverage_review_api/source-quality-jobs-page-2.json" \
+  "$coverage_review_api/source-quality-jobs-page-3.json" <<'PY'
+import json
+import pathlib
+import sys
+
+paths = [pathlib.Path(value) for value in sys.argv[1:]]
+pages = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+pages[1]["jobs"].append(
+    {
+        "id": 9102,
+        "run_id": 900,
+        "run_attempt": 1,
+        "head_sha": pages[1]["jobs"][0]["head_sha"],
+        "name": "pr-quality-gates",
+        "status": "completed",
+        "conclusion": "failure",
+    }
+)
+for path, page in zip(paths, pages):
+    page["total_count"] = 102
+    path.write_text(
+        json.dumps(page, separators=(",", ":")),
+        encoding="utf-8",
+    )
+PY
+rm -f "$coverage_review_docker_args" "$coverage_review_node_sentinel"
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: duplicate aggregate job unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=authorized-source-aggregate-job-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+python3 - "$coverage_review_api/source-quality-jobs-page-2.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+page = json.loads(path.read_text(encoding="utf-8"))
+page["jobs"][0]["run_attempt"] = 2
+path.write_text(
+    json.dumps(page, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: wrong-attempt aggregate job unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=authorized-source-aggregate-job-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+for aggregate_schema_case in \
+  duplicate-job-id \
+  boolean-job-id \
+  boolean-job-run-id \
+  boolean-job-attempt \
+  wrong-job-run-id \
+  wrong-job-head-sha; do
+  initialize_coverage_promotion_fixture
+  python3 - \
+    "$coverage_review_api/source-quality-jobs-page-1.json" \
+    "$coverage_review_api/source-quality-jobs-page-2.json" \
+    "$aggregate_schema_case" <<'PY'
+import json
+import pathlib
+import sys
+
+first_path = pathlib.Path(sys.argv[1])
+second_path = pathlib.Path(sys.argv[2])
+case = sys.argv[3]
+first = json.loads(first_path.read_text(encoding="utf-8"))
+second = json.loads(second_path.read_text(encoding="utf-8"))
+aggregate = second["jobs"][0]
+if case == "duplicate-job-id":
+    aggregate["id"] = first["jobs"][0]["id"]
+elif case == "boolean-job-id":
+    aggregate["id"] = True
+elif case == "boolean-job-run-id":
+    aggregate["run_id"] = True
+elif case == "boolean-job-attempt":
+    aggregate["run_attempt"] = True
+elif case == "wrong-job-run-id":
+    aggregate["run_id"] = 901
+elif case == "wrong-job-head-sha":
+    aggregate["head_sha"] = "f" * 40
+else:
+    raise SystemExit("unknown aggregate schema case")
+second_path.write_text(
+    json.dumps(second, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "authorized-source-aggregate-job-is-invalid" \
+    "$aggregate_schema_case"
+done
+
+for aggregate_pagination_case in \
+  boolean-total-count \
+  short-first-page \
+  changing-total \
+  nonempty-terminal-page; do
+  initialize_coverage_promotion_fixture
+  python3 - \
+    "$coverage_review_api/source-quality-jobs-page-1.json" \
+    "$coverage_review_api/source-quality-jobs-page-2.json" \
+    "$coverage_review_api/source-quality-jobs-page-3.json" \
+    "$aggregate_pagination_case" <<'PY'
+import json
+import pathlib
+import sys
+
+paths = [pathlib.Path(value) for value in sys.argv[1:4]]
+case = sys.argv[4]
+pages = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in paths
+]
+if case == "boolean-total-count":
+    pages[0]["total_count"] = True
+elif case == "short-first-page":
+    pages[0]["jobs"].pop()
+elif case == "changing-total":
+    pages[1]["total_count"] = 102
+elif case == "nonempty-terminal-page":
+    pages[2]["jobs"] = [
+        {
+            "id": 9200,
+            "run_id": 900,
+            "run_attempt": 1,
+            "head_sha": pages[1]["jobs"][0]["head_sha"],
+            "name": "unexpected-terminal-job",
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
+else:
+    raise SystemExit("unknown aggregate pagination case")
+for path, page in zip(paths, pages):
+    path.write_text(
+        json.dumps(page, separators=(",", ":")),
+        encoding="utf-8",
+    )
+PY
+  case "$aggregate_pagination_case" in
+    boolean-total-count)
+      expected_reason="workflow-job-response-is-malformed"
+      ;;
+    changing-total)
+      expected_reason="workflow-job-inventory-changed-while-paging"
+      ;;
+    *)
+      expected_reason="workflow-job-inventory-is-incomplete"
+      ;;
+  esac
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$aggregate_pagination_case"
+done
+
+for source_quality_case in \
+  missing-repository \
+  wrong-repository \
+  boolean-run-id \
+  boolean-run-attempt \
+  offset-created-at \
+  four-digit-created-at; do
+  initialize_coverage_promotion_fixture
+  python3 - \
+    "$coverage_review_api/source-quality-run.json" \
+    "$source_quality_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+run = json.loads(path.read_text(encoding="utf-8"))
+if case == "missing-repository":
+    run.pop("repository")
+elif case == "wrong-repository":
+    run["repository"]["full_name"] = "other/repository"
+elif case == "boolean-run-id":
+    run["id"] = True
+elif case == "boolean-run-attempt":
+    run["run_attempt"] = True
+elif case == "offset-created-at":
+    run["created_at"] = "2026-09-02T10:00:00+00:00"
+elif case == "four-digit-created-at":
+    run["created_at"] = "2026-09-02T10:00:00.0000Z"
+else:
+    raise SystemExit("unknown source quality case")
+path.write_text(
+    json.dumps(run, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "authorized-source-quality-run-is-invalid" \
+    "$source_quality_case authorized source quality run"
+done
+
+for source_policy_timestamp_case in offset four-digit-fraction; do
+  initialize_coverage_promotion_fixture
+  python3 - \
+    "$coverage_review_api/source-transition-policy-run.json" \
+    "$source_policy_timestamp_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+run = json.loads(path.read_text(encoding="utf-8"))
+run["created_at"] = {
+    "offset": "2026-09-02T10:06:00+00:00",
+    "four-digit-fraction": "2026-09-02T10:06:00.0000Z",
+}[case]
+path.write_text(
+    json.dumps(run, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "authorized-source-transition-policy-run-is-invalid" \
+    "$source_policy_timestamp_case authorized source policy timestamp"
+done
+
+for merged_timestamp_case in offset four-digit-fraction; do
+  initialize_coverage_promotion_fixture
+  python3 - \
+    "$coverage_review_api/source-pull.json" \
+    "$merged_timestamp_case" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+pull = json.loads(path.read_text(encoding="utf-8"))
+pull["merged_at"] = {
+    "offset": "2026-09-02T10:15:00+00:00",
+    "four-digit-fraction": "2026-09-02T10:15:00.0000Z",
+}[case]
+path.write_text(
+    json.dumps(pull, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "authorized-source-pull-is-not-merged" \
+    "$merged_timestamp_case authorized source merge timestamp"
+done
+
+initialize_coverage_promotion_fixture
+python3 - "$coverage_review_api/source-transition-statuses.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+statuses = json.loads(path.read_text(encoding="utf-8"))
+statuses.append(
+    {
+        "id": 8301,
+        "context": (
+            "trusted-coverage-promotion/"
+            "coverage-engine-review-fixture"
+        ),
+        "state": "pending",
+        "description": None,
+        "target_url": None,
+        "created_at": "2026-09-02T12:06:00.000Z",
+        "creator": {
+            "id": 41898282,
+            "login": "github-actions[bot]",
+            "type": "Bot",
+        },
+    }
+)
+path.write_text(
+    json.dumps(statuses, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+rm -f "$coverage_review_docker_args" "$coverage_review_node_sentinel"
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: replayed promotion receipt unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=coverage-promotion-receipt-is-not-empty" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+python3 - "$coverage_review_api/completed-integration-receipt.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+statuses = json.loads(path.read_text(encoding="utf-8"))
+path.write_text(
+    json.dumps(
+        [status for status in statuses if status.get("state") == "pending"],
+        separators=(",", ":"),
+    ),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: pending-only integration receipt unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=coverage-integration-receipt-is-invalid" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+python3 - "$coverage_review_api/open-promotions.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+promotions = json.loads(path.read_text(encoding="utf-8"))
+earlier = dict(promotions[0])
+earlier["number"] = 63
+promotions.insert(0, earlier)
+path.write_text(
+    json.dumps(promotions, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: non-canonical promotion unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=coverage-promotion-is-not-canonical" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+coverage_review_live_dev_sha="$coverage_review_source_head_sha"
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: stale live dev tip unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=coverage-promotion-dev-tip-drift" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+python3 - "$coverage_review_api/source-pull.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+pull = json.loads(path.read_text(encoding="utf-8"))
+pull.update({"state": "open", "merged": False, "merged_at": None})
+path.write_text(
+    json.dumps(pull, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: unmerged authorized source unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=authorized-source-pull-is-not-merged" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
+python3 - \
+  "$coverage_review_api/source-pull.json" \
+  "$coverage_review_unrelated_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+pull = json.loads(path.read_text(encoding="utf-8"))
+pull["merge_commit_sha"] = sys.argv[2]
+path.write_text(
+    json.dumps(pull, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+if run_coverage_review_fixture >"$test_output" 2>&1; then
+  echo "ERROR: unrelated authorized source merge unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=authorized-source-merge-is-not-in-promotion" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
 echo "coverage_engine_review_tests=PASS"
 
 "$PR_MERGE_SAFETY_TEST"
