@@ -108,7 +108,7 @@ resolve_default_branch_sha() {
   [[ "$default_branch" == "$EXPECTED_DEFAULT_BRANCH" ]] ||
     fail "unexpected-default-branch"
   github_api_get "commits/${default_branch}" "$response"
-  python3 - "$response" "$destination" <<'PY'
+  python3 -I - "$response" "$destination" <<'PY'
 import json
 import pathlib
 import re
@@ -129,7 +129,7 @@ resolve_repository_ref_sha() {
   local response="$work_dir/ref-${ref//\//-}.json"
 
   github_api_get "commits/${ref}" "$response"
-  python3 - "$response" "$destination" <<'PY'
+  python3 -I - "$response" "$destination" <<'PY'
 import json
 import pathlib
 import re
@@ -176,7 +176,7 @@ assert_commit_relationship() {
   relationship_counter=$((relationship_counter + 1))
   response="$work_dir/compare-${relationship_counter}.json"
   github_api_get "compare/${first_sha}...${second_sha}" "$response"
-  python3 - \
+  python3 -I - \
     "$response" \
     "$expected_merge_base" \
     "$first_sha" \
@@ -228,7 +228,7 @@ write_changed_paths_from_git() {
     return 1
   git diff --name-status -z --find-renames "$merge_base" "$head_sha" >"$raw" ||
     return 1
-  python3 - "$raw" "$expected_count" "$destination" <<'PY'
+  python3 -I - "$raw" "$expected_count" "$destination" <<'PY'
 import pathlib
 import sys
 
@@ -309,7 +309,7 @@ write_changed_paths_from_github() {
       "pulls/${pull_number}/files?per_page=100&page=${page}" \
       "$response"
     count="$(
-      python3 - "$response" <<'PY'
+      python3 -I - "$response" <<'PY'
 import json
 import pathlib
 import sys
@@ -333,7 +333,7 @@ PY
     page=$((page + 1))
   done
 
-  python3 - "$pages_file" "$expected_count" "$destination" <<'PY'
+  python3 -I - "$pages_file" "$expected_count" "$destination" <<'PY'
 import json
 import pathlib
 import sys
@@ -403,7 +403,7 @@ PY
 write_pull_metadata() {
   local destination="$1"
   local authoritative_merge_sha="$2"
-  python3 - \
+  python3 -I - \
     "${GITHUB_EVENT_PATH:-}" \
     "$destination" \
     "$authoritative_merge_sha" <<'PY'
@@ -576,7 +576,7 @@ assert_current_pull_merge_snapshot() {
   local current_response="$1"
   local expected_merge_sha="$2"
 
-  python3 - "$current_response" "$expected_merge_sha" <<'PY'
+  python3 -I - "$current_response" "$expected_merge_sha" <<'PY'
 import json
 import pathlib
 import re
@@ -600,7 +600,7 @@ assert_current_pull_metadata() {
   local expected_metadata="$1"
   local current_response="$2"
 
-  python3 - "$expected_metadata" "$current_response" <<'PY'
+  python3 -I - "$expected_metadata" "$current_response" <<'PY'
 import datetime
 import hashlib
 import json
@@ -737,7 +737,7 @@ write_paged_json_array() {
       "${endpoint}${separator}per_page=100&page=${page}" \
       "$response"
     count="$(
-      python3 - "$response" <<'PY'
+      python3 -I - "$response" <<'PY'
 import json
 import pathlib
 import sys
@@ -752,7 +752,7 @@ PY
     [[ "$count" -lt 100 ]] && break
     page=$((page + 1))
   done
-  python3 - "$pages_file" "$destination" <<'PY'
+  python3 -I - "$pages_file" "$destination" <<'PY'
 import json
 import pathlib
 import sys
@@ -774,7 +774,7 @@ PY
 validate_commit_status_inventory() {
   local statuses_path="$1"
 
-  python3 - "$statuses_path" <<'PY'
+  python3 -I - "$statuses_path" <<'PY'
 import datetime
 import json
 import pathlib
@@ -902,7 +902,7 @@ write_paged_workflow_attempt_jobs() {
       "actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100&page=${page}" \
       "$response"
     summary="$(
-      python3 - "$response" <<'PY'
+      python3 -I - "$response" <<'PY'
 import json
 import pathlib
 import sys
@@ -942,7 +942,7 @@ PY
     page=$((page + 1))
   done
 
-  python3 - "$pages_file" "$destination" <<'PY'
+  python3 -I - "$pages_file" "$destination" <<'PY'
 import json
 import pathlib
 import sys
@@ -975,7 +975,7 @@ select_quality_transition() {
   local expected_transition_at="$7"
   local destination="$8"
 
-  python3 - \
+  python3 -I - \
     "$statuses_path" \
     "$base_ref" \
     "$pull_number" \
@@ -1165,7 +1165,7 @@ validate_policy_run() {
   local minimum_created_at="${10:-0}"
   local maximum_created_at="${11:-9007199254740991}"
 
-  python3 - \
+  python3 -I - \
     "$workflow_path" \
     "$run_path" \
     "$expected_run_id" \
@@ -1287,7 +1287,7 @@ validate_quality_run() {
   local require_success="$3"
   local destination="$4"
 
-  python3 - \
+  python3 -I - \
     "$workflow_path" \
     "$run_path" \
     "$expected_run_id" \
@@ -1439,7 +1439,7 @@ select_authorization() {
   local authorized_harness_blob="$4"
   local destination="$5"
 
-  python3 - \
+  python3 -I - \
     "$publisher_source" \
     "$changed_paths" \
     "$repository" \
@@ -1754,7 +1754,7 @@ assert_empty_coverage_receipt() {
   local authorization_id="$2"
   local leg="$3"
 
-  python3 - "$statuses_path" "$authorization_id" "$leg" <<'PY'
+  python3 -I - "$statuses_path" "$authorization_id" "$leg" <<'PY'
 import json
 import pathlib
 import sys
@@ -1793,7 +1793,7 @@ select_completed_coverage_receipt() {
   local leg="$4"
   local destination="$5"
 
-  python3 - \
+  python3 -I - \
     "$statuses_path" \
     "$authorization_id" \
     "$fingerprint" \
@@ -1955,7 +1955,7 @@ write_merged_source_metadata() {
   local authorization_base_sha="$7"
   local destination="$8"
 
-  python3 - \
+  python3 -I - \
     "$response_path" \
     "$authorization_number" \
     "$authorization_head_repository" \
@@ -2077,7 +2077,7 @@ PY
 
 assert_exact_source_files() {
   local inventory_path="$1"
-  python3 - "$inventory_path" <<'PY'
+  python3 -I - "$inventory_path" <<'PY'
 import pathlib
 import sys
 
@@ -2104,7 +2104,7 @@ assert_canonical_open_promotion() {
   local pulls_path="$1"
   local pull_number="$2"
 
-  python3 - \
+  python3 -I - \
     "$pulls_path" \
     "$pull_number" \
     "$EXPECTED_REPOSITORY" <<'PY'
@@ -2147,7 +2147,7 @@ assert_quality_aggregate_job() {
   local run_id="$2"
   local run_attempt="$3"
   local head_sha="$4"
-  python3 - "$jobs_path" "$run_id" "$run_attempt" "$head_sha" <<'PY'
+  python3 -I - "$jobs_path" "$run_id" "$run_attempt" "$head_sha" <<'PY'
 import json
 import pathlib
 import sys
@@ -2225,7 +2225,7 @@ PY
 write_safe_output_fingerprint() {
   local stdout_path="$1"
   local stderr_path="$2"
-  python3 - "$stdout_path" "$stderr_path" <<'PY'
+  python3 -I - "$stdout_path" "$stderr_path" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -2244,7 +2244,7 @@ validate_tap_output() {
   local expected_tests="$3"
   local destination="$4"
 
-  python3 - \
+  python3 -I - \
     "$stdout_path" \
     "$stderr_path" \
     "$expected_tests" \
@@ -3123,7 +3123,7 @@ docker_args=(
   "$container_script"
 )
 
-python3 - \
+python3 -I - \
   "$stdout_path" \
   "$stderr_path" \
   "$status_path" \

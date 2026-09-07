@@ -37,6 +37,70 @@ cleanup() {
 }
 trap cleanup EXIT
 
+assert_isolated_python_invocations() {
+  local script
+
+  for script in "$@"; do
+    if [[ ! -f "$script" || -L "$script" ]]; then
+      echo "ERROR: Python isolation source is missing or symlinked" >&2
+      return 1
+    fi
+    if awk '
+      /^[[:space:]]*python3([[:space:]]|$)/ &&
+      $0 !~ /^[[:space:]]*python3[[:space:]]+-I([[:space:]]|$)/ {
+        found = 1
+      }
+      END {
+        exit found ? 0 : 1
+      }
+    ' "$script"; then
+      echo "ERROR: non-isolated Python invocation in ${script##*/}" >&2
+      return 1
+    fi
+  done
+}
+
+assert_isolated_python_invocations \
+  "$COVERAGE_ENGINE_REVIEW" \
+  "${BASH_SOURCE[0]}"
+echo "coverage_python_isolation=PASS"
+
+python_isolation_fixture_dir="$permission_fixture_dir/python-isolation"
+mkdir -p "$python_isolation_fixture_dir"
+for nonisolated_target in reviewer harness; do
+  cp \
+    "$COVERAGE_ENGINE_REVIEW" \
+    "$python_isolation_fixture_dir/coverage-engine-review-stan.sh"
+  cp \
+    "${BASH_SOURCE[0]}" \
+    "$python_isolation_fixture_dir/test-deployment-safety-ci-stan.sh"
+  if [[ "$nonisolated_target" == "reviewer" ]]; then
+    nonisolated_path="$python_isolation_fixture_dir/coverage-engine-review-stan.sh"
+  else
+    nonisolated_path="$python_isolation_fixture_dir/test-deployment-safety-ci-stan.sh"
+  fi
+  python3 -I - "$nonisolated_path" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+content = path.read_text(encoding="utf-8")
+needle = "python3 -I -"
+if content.count(needle) < 1:
+    raise SystemExit(1)
+path.write_text(content.replace(needle, "python3 -", 1), encoding="utf-8")
+PY
+  if assert_isolated_python_invocations \
+    "$python_isolation_fixture_dir/coverage-engine-review-stan.sh" \
+    "$python_isolation_fixture_dir/test-deployment-safety-ci-stan.sh" \
+      >"$test_output" 2>&1; then
+    echo "ERROR: non-isolated $nonisolated_target fixture unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "ERROR: non-isolated Python invocation" "$test_output"
+done
+echo "coverage_python_isolation_tests=PASS"
+
 write_node_poison_shim() {
   mkdir -p "$node_poison_dir"
   cat >"$node_poison_dir/node" <<'SH'
@@ -162,6 +226,15 @@ initialize_coverage_review_fixture() {
       printf 'candidate public documentation\n' \
         >>"$coverage_review_repo/docs/wiki/Engineering-Learnings.md"
     fi
+    if [[ "$mode" == "python-shadow" ]]; then
+      cat >"$coverage_review_repo/pathlib.py" <<'PY'
+import os
+
+engine = os.environ["BETSTAN_COVERAGE_REVIEW_ENGINE_PATH"]
+os.spawnvp(os.P_WAIT, "node", ["node", engine])
+os.spawnvp(os.P_WAIT, "docker", ["docker", "version"])
+PY
+    fi
     git -C "$coverage_review_repo" add -A
     git -C "$coverage_review_repo" commit --quiet -m "fixture candidate"
   fi
@@ -188,7 +261,7 @@ initialize_coverage_review_fixture() {
       wrong-adoption-lineage | wrong-receipt-lineage | \
       invalid-tests-1 | invalid-tests-101 | invalid-tests-103 | \
       invalid-tests-10000)
-    python3 - \
+    python3 -I - \
       "$coverage_review_repo/.github/scripts/publish-pr-policy.js" \
       "$mode" \
       "$coverage_review_root_sha" \
@@ -287,7 +360,7 @@ PY
   coverage_review_source_base_sha="$coverage_review_base_sha"
   coverage_review_source_merge_sha="$coverage_review_merge_sha"
 
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$coverage_review_api" \
     "$coverage_review_repo/.github/scripts/publish-pr-policy.js" \
@@ -701,7 +774,7 @@ initialize_coverage_promotion_fixture() {
   coverage_review_run_id=902
   coverage_review_live_dev_sha="$coverage_review_head_sha"
 
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$coverage_review_api" \
     "$coverage_review_source_head_sha" \
@@ -1088,6 +1161,7 @@ run_coverage_review_fixture() {
       GITHUB_RUN_ATTEMPT="$coverage_review_run_attempt" \
       BETSTAN_COVERAGE_REVIEW_DEFAULT_SHA="$coverage_review_default_sha" \
       BETSTAN_COVERAGE_REVIEW_API_DIR="$coverage_review_api" \
+      BETSTAN_COVERAGE_REVIEW_ENGINE_PATH="$coverage_review_repo/.github/scripts/test-coverage-matrix.js" \
       BETSTAN_COVERAGE_REVIEW_MERGE_SHA="$coverage_review_merge_sha" \
       BETSTAN_COVERAGE_REVIEW_ROOT_SHA="$coverage_review_root_sha" \
       BETSTAN_COVERAGE_REVIEW_HEAD_SHA="$coverage_review_head_sha" \
@@ -1129,7 +1203,7 @@ prepare_coverage_guard_fixture() {
     "$ROOT_DIR/.github/scripts/test-test-coverage-matrix.js" \
     "$coverage_tooling_fixture_root/.github/scripts/"
   cp "$WORKFLOW_TRIGGER_GUARD" "$coverage_guard_fixture"
-  python3 - \
+  python3 -I - \
     "$coverage_guard_fixture" \
     "$coverage_tooling_fixture_root" \
     "$inventory_source" \
@@ -1226,7 +1300,7 @@ assert_coverage_guard_rejected \
 
 cp "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
   "$inventory_source_fixture"
-python3 - "$inventory_source_fixture" <<'PY'
+python3 -I - "$inventory_source_fixture" <<'PY'
 import pathlib
 import sys
 
@@ -1244,7 +1318,7 @@ assert_coverage_guard_rejected \
 
 cp "$ROOT_DIR/infra/azure/agents/production-workflow-inventory-stan.rb" \
   "$inventory_source_fixture"
-python3 - "$inventory_source_fixture" <<'PY'
+python3 -I - "$inventory_source_fixture" <<'PY'
 import pathlib
 import sys
 
@@ -1262,7 +1336,7 @@ assert_coverage_guard_rejected \
 
 cp "$ROOT_DIR/infra/azure/agents/test-production-workflow-inventory-stan.sh" \
   "$inventory_test_source_fixture"
-python3 - "$inventory_test_source_fixture" <<'PY'
+python3 -I - "$inventory_test_source_fixture" <<'PY'
 import pathlib
 import sys
 
@@ -1283,7 +1357,7 @@ assert_coverage_guard_rejected \
 
 cp "$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh" \
   "$deployment_safety_source_fixture"
-python3 - "$deployment_safety_source_fixture" <<'PY'
+python3 -I - "$deployment_safety_source_fixture" <<'PY'
 import pathlib
 import sys
 
@@ -1507,6 +1581,11 @@ grep -qF "reason=coverage-assets-are-not-authorized" "$test_output"
 [[ ! -e "$coverage_review_docker_args" ]]
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
+initialize_coverage_review_fixture "python-shadow"
+assert_coverage_review_pre_execution_failure \
+  "coverage-assets-are-not-authorized" \
+  "candidate Python import shadow"
+
 initialize_coverage_review_fixture "base-only-authorization"
 if run_coverage_review_fixture >"$test_output" 2>&1; then
   echo "ERROR: base-only coverage authorization unexpectedly passed" >&2
@@ -1553,7 +1632,7 @@ for pull_boolean_case in \
   current-number \
   current-changed-files; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$coverage_review_api/current-pull.json" \
     "$pull_boolean_case" <<'PY'
@@ -1589,7 +1668,7 @@ done
 
 for pull_timestamp_case in calendar-invalid offset four-digit-fraction; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$coverage_review_api/current-pull.json" \
     "$pull_timestamp_case" <<'PY'
@@ -1625,7 +1704,7 @@ done
 
 for event_merge_case in absent null; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$event_merge_case" <<'PY'
 import json
@@ -1655,7 +1734,7 @@ done
 
 for event_merge_case in malformed stale; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$event_merge_case" \
     "$coverage_review_unrelated_sha" <<'PY'
@@ -1686,7 +1765,7 @@ done
 
 for current_merge_case in absent null malformed stale; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/current-pull.json" \
     "$current_merge_case" \
     "$coverage_review_unrelated_sha" <<'PY'
@@ -1731,7 +1810,7 @@ done
 
 for current_commit_case in head base; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/current-pull.json" \
     "$current_commit_case" \
     "$coverage_review_unrelated_sha" <<'PY'
@@ -1774,7 +1853,7 @@ for snapshot_lineage_case in base head; do
   )"
   git -C "$coverage_review_repo" checkout --quiet \
     --detach "$coverage_review_merge_sha"
-  python3 - \
+  python3 -I - \
     "$coverage_review_event" \
     "$coverage_review_api/current-pull.json" \
     "$coverage_review_merge_sha" <<'PY'
@@ -1804,7 +1883,7 @@ PY
 done
 
 initialize_coverage_review_fixture "authorized"
-python3 - "$coverage_review_api/transition-statuses.json" <<'PY'
+python3 -I - "$coverage_review_api/transition-statuses.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -1827,7 +1906,7 @@ grep -qF "reason=quality-transition-status-inventory-is-invalid" \
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_review_fixture "authorized"
-python3 - "$coverage_review_api/policy-run.json" <<'PY'
+python3 -I - "$coverage_review_api/policy-run.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -1846,7 +1925,7 @@ grep -qF "reason=quality-transition-policy-run-is-invalid" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_review_fixture "authorized"
-python3 - "$coverage_review_api/transition-statuses.json" <<'PY'
+python3 -I - "$coverage_review_api/transition-statuses.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -1868,7 +1947,7 @@ grep -qF "reason=quality-transition-policy-run-is-invalid" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_review_fixture "authorized"
-python3 - "$coverage_review_api/quality-run.json" <<'PY'
+python3 -I - "$coverage_review_api/quality-run.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -1894,7 +1973,7 @@ for quality_schema_case in \
   boolean-workflow-id \
   wrong-run-repository; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/quality-run.json" \
     "$coverage_review_api/quality-workflow.json" \
     "$quality_schema_case" <<'PY'
@@ -1937,7 +2016,7 @@ done
 
 for policy_timestamp_case in offset four-digit-fraction; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/policy-run.json" \
     "$policy_timestamp_case" <<'PY'
 import json
@@ -1963,7 +2042,7 @@ done
 
 for status_boolean_case in transition-id transition-creator-id; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/transition-statuses.json" \
     "$status_boolean_case" <<'PY'
 import json
@@ -1990,7 +2069,7 @@ PY
 done
 
 initialize_coverage_review_fixture "authorized"
-python3 - "$coverage_review_api/empty-statuses.json" <<'PY'
+python3 -I - "$coverage_review_api/empty-statuses.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2022,7 +2101,7 @@ grep -qF "reason=coverage-integration-receipt-inventory-is-invalid" \
 
 for unrelated_boolean_case in status-id creator-id; do
   initialize_coverage_review_fixture "authorized"
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/empty-statuses.json" \
     "$unrelated_boolean_case" <<'PY'
 import json
@@ -2060,7 +2139,7 @@ PY
 done
 
 initialize_coverage_review_fixture "authorized"
-python3 - \
+python3 -I - \
   "$coverage_review_event" \
   "$coverage_review_api/current-pull.json" \
   "$coverage_review_api/quality-run.json" \
@@ -2121,7 +2200,7 @@ grep -qF \
   "$test_output"
 grep -qF "tests=102" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
-python3 - \
+python3 -I - \
   "$coverage_review_docker_args" \
   "$coverage_review_repo" <<'PY'
 import pathlib
@@ -2228,7 +2307,7 @@ if (
     raise SystemExit("container command drift")
 PY
 
-python3 - "$coverage_review_docker_stdout" <<'PY'
+python3 -I - "$coverage_review_docker_stdout" <<'PY'
 import pathlib
 import sys
 
@@ -2247,7 +2326,7 @@ grep -qF "reason=invalid-tap" "$test_output"
 
 for tap_directive in SKIP TODO; do
   write_coverage_review_tap "$coverage_review_docker_stdout" 102
-  python3 - "$coverage_review_docker_stdout" "$tap_directive" <<'PY'
+  python3 -I - "$coverage_review_docker_stdout" "$tap_directive" <<'PY'
 import pathlib
 import sys
 
@@ -2277,7 +2356,7 @@ PY
 done
 
 write_coverage_review_tap "$coverage_review_docker_stdout" 102
-python3 - "$coverage_review_docker_stdout" <<'PY'
+python3 -I - "$coverage_review_docker_stdout" <<'PY'
 import pathlib
 import sys
 
@@ -2311,7 +2390,7 @@ done
 
 for separator_hex in 0d 0b 0c 1c 1d 1e; do
   write_coverage_review_tap "$coverage_review_docker_stdout" 102
-  python3 - "$coverage_review_docker_stdout" "$separator_hex" <<'PY'
+  python3 -I - "$coverage_review_docker_stdout" "$separator_hex" <<'PY'
 import pathlib
 import sys
 
@@ -2370,7 +2449,7 @@ grep -qF "tests=102" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - \
+python3 -I - \
   "$coverage_review_api/source-quality-jobs-page-1.json" \
   "$coverage_review_api/source-quality-jobs-page-2.json" \
   "$coverage_review_api/source-quality-jobs-page-3.json" <<'PY'
@@ -2408,7 +2487,7 @@ grep -qF "reason=authorized-source-aggregate-job-is-invalid" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - "$coverage_review_api/source-quality-jobs-page-2.json" <<'PY'
+python3 -I - "$coverage_review_api/source-quality-jobs-page-2.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2437,7 +2516,7 @@ for aggregate_schema_case in \
   wrong-job-run-id \
   wrong-job-head-sha; do
   initialize_coverage_promotion_fixture
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/source-quality-jobs-page-1.json" \
     "$coverage_review_api/source-quality-jobs-page-2.json" \
     "$aggregate_schema_case" <<'PY'
@@ -2481,7 +2560,7 @@ for aggregate_pagination_case in \
   changing-total \
   nonempty-terminal-page; do
   initialize_coverage_promotion_fixture
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/source-quality-jobs-page-1.json" \
     "$coverage_review_api/source-quality-jobs-page-2.json" \
     "$coverage_review_api/source-quality-jobs-page-3.json" \
@@ -2546,7 +2625,7 @@ for source_quality_case in \
   offset-created-at \
   four-digit-created-at; do
   initialize_coverage_promotion_fixture
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/source-quality-run.json" \
     "$source_quality_case" <<'PY'
 import json
@@ -2582,7 +2661,7 @@ done
 
 for source_policy_timestamp_case in offset four-digit-fraction; do
   initialize_coverage_promotion_fixture
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/source-transition-policy-run.json" \
     "$source_policy_timestamp_case" <<'PY'
 import json
@@ -2608,7 +2687,7 @@ done
 
 for merged_timestamp_case in offset four-digit-fraction; do
   initialize_coverage_promotion_fixture
-  python3 - \
+  python3 -I - \
     "$coverage_review_api/source-pull.json" \
     "$merged_timestamp_case" <<'PY'
 import json
@@ -2633,7 +2712,7 @@ PY
 done
 
 initialize_coverage_promotion_fixture
-python3 - "$coverage_review_api/source-transition-statuses.json" <<'PY'
+python3 -I - "$coverage_review_api/source-transition-statuses.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2673,7 +2752,7 @@ grep -qF "reason=coverage-promotion-receipt-is-not-empty" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - "$coverage_review_api/completed-integration-receipt.json" <<'PY'
+python3 -I - "$coverage_review_api/completed-integration-receipt.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2697,7 +2776,7 @@ grep -qF "reason=coverage-integration-receipt-is-invalid" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - "$coverage_review_api/open-promotions.json" <<'PY'
+python3 -I - "$coverage_review_api/open-promotions.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2731,7 +2810,7 @@ grep -qF "reason=coverage-promotion-dev-tip-drift" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - "$coverage_review_api/source-pull.json" <<'PY'
+python3 -I - "$coverage_review_api/source-pull.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -2753,7 +2832,7 @@ grep -qF "reason=authorized-source-pull-is-not-merged" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
 initialize_coverage_promotion_fixture
-python3 - \
+python3 -I - \
   "$coverage_review_api/source-pull.json" \
   "$coverage_review_unrelated_sha" <<'PY'
 import json
@@ -2785,9 +2864,16 @@ echo "coverage_engine_review_tests=PASS"
 "$RUN_EXCLUSIVITY_TEST"
 "$LIVE_DATA_ROLLOUT_TEST"
 "$GHCR_CONTRACT_TEST"
-python3 -B -m py_compile "$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+python3 -I - \
+  "$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py" <<'PY'
+import pathlib
+import sys
 
-python3 - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
+path = pathlib.Path(sys.argv[1])
+compile(path.read_bytes(), str(path), "exec")
+PY
+
+python3 -I - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
 import pathlib
 import re
 import sys
