@@ -63,6 +63,72 @@ approval_state_for() {
   esac
 }
 
+binding_run_json() {
+  local run_id="$1"
+  local workflow workflow_id event title
+  case "$run_id" in
+    41)
+      workflow=oci-production-build.yml
+      event=workflow_run
+      title="oci-build $SHA upstream-40"
+      ;;
+    42)
+      workflow=ghcr-package-management.yml
+      event=workflow_dispatch
+      title="ghcr-package validate $SHA"
+      ;;
+    43)
+      workflow=oci-capacity-acquire.yml
+      event=workflow_dispatch
+      title="oci-capacity-acquire $SHA"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  workflow_id="$(workflow_id_for "$workflow")"
+  jq -cn \
+    --argjson id "$run_id" \
+    --argjson workflow_id "$workflow_id" \
+    --arg path ".github/workflows/$workflow" \
+    --arg title "$title" \
+    --arg event "$event" \
+    --arg sha "$SHA" \
+    --arg repo "$REPOSITORY" \
+    '{
+      id:$id,
+      workflow_id:$workflow_id,
+      path:$path,
+      display_title:$title,
+      event:$event,
+      head_sha:$sha,
+      head_branch:"master",
+      head_repository:{full_name:$repo},
+      run_attempt:1,
+      status:"completed",
+      conclusion:"success"
+    }'
+}
+
+binding_artifacts_json() {
+  local run_id="$1"
+  local artifact
+  case "$run_id" in
+    41) artifact="oci-image-provenance-$SHA-41-1" ;;
+    42) artifact="ghcr-package-management-validate-42-1" ;;
+    43) artifact="oci-capacity-provenance-43-1" ;;
+    *) return 1 ;;
+  esac
+  jq -cn --arg artifact "$artifact" '{
+    total_count:1,
+    artifacts:[{
+      name:$artifact,
+      expired:false,
+      size_in_bytes:4096
+    }]
+  }'
+}
+
 git() {
   if [[ "$1" = "-C" ]]; then
     shift 2
@@ -189,6 +255,28 @@ gh() {
     "repos/$REPOSITORY/contents/.github/workflows/"*"?ref=$SHA")
       printf '%s\n' "${STUB_API_BLOB:-$BLOB}"
       ;;
+    "repos/$REPOSITORY/environments/"*"/variables/OCI_RUNTIME_MODE")
+      printf '%s\n' "${STUB_OCI_RUNTIME_MODE:-k3s}"
+      ;;
+    "repos/$REPOSITORY/actions/runs/41"|\
+    "repos/$REPOSITORY/actions/runs/42"|\
+    "repos/$REPOSITORY/actions/runs/43"|\
+    "repos/$REPOSITORY/actions/runs/41/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/42/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/43/attempts/1")
+      local binding_run_id
+      binding_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
+      binding_run_id="${binding_run_id%%/*}"
+      binding_run_json "$binding_run_id"
+      ;;
+    "repos/$REPOSITORY/actions/runs/41/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/42/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/43/artifacts?per_page=100")
+      local binding_artifact_run_id
+      binding_artifact_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
+      binding_artifact_run_id="${binding_artifact_run_id%%/*}"
+      binding_artifacts_json "$binding_artifact_run_id"
+      ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID")
       local status="${STUB_RUN_STATUS:-waiting}"
       jq -cn \
@@ -310,8 +398,16 @@ PY
   esac
 }
 export -f git gh workflow_id_for approval_state_for
+export -f binding_run_json binding_artifacts_json
 export ROOT_DIR SHA TARGET_SHA BLOB REPOSITORY post_count_file approval_history_file
 export workflow_state_count_file
+mkdir "$tmp_dir/bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'gh "$@"' \
+  >"$tmp_dir/bin/gh"
+chmod 755 "$tmp_dir/bin/gh"
+export PATH="$tmp_dir/bin:$PATH"
 
 make_request() {
   local operation="$1"
@@ -335,6 +431,13 @@ inputs = {
 inputs.update(policy["fixedInputs"])
 for name in policy["positiveIntegerInputs"]:
     inputs[name] = "42"
+for name, value in {
+    "ghcr_build_run_id": "41",
+    "ghcr_package_validation_run_id": "42",
+    "capacity_acquisition_run_id": "43",
+}.items():
+    if name in inputs and inputs[name] != "":
+        inputs[name] = value
 for name in policy["zeroOrPositiveIntegerInputs"]:
     inputs[name] = "0"
 for name in policy["fullShaInputs"]:
@@ -397,6 +500,7 @@ make_record() {
   local operation="$1"
   local run_id="$2"
   local policy_json workflow workflow_id environment request normalized record title run_json
+  local verified_summary
   local intent_summary capture_path intent_version
   policy_json="$("$POLICY" get "$operation")"
   workflow="$(jq -r '.workflow' <<<"$policy_json")"
@@ -483,6 +587,22 @@ make_record() {
     --current-master "$SHA" \
     --workflow-id "$workflow_id" \
     --workflow-blob-sha "$BLOB"
+  verified_summary="$(
+    "$HELPER" verify \
+      --authority-dir "$authority_dir" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --policy-json "$policy_json" \
+      --repository "$REPOSITORY" \
+      --current-master "$SHA" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$BLOB"
+  )"
+  jq -e \
+    --arg environment "$environment" \
+    --slurpfile request "$request" \
+    '.environment == $environment and .inputs == $request[0].inputs' \
+    <<<"$verified_summary" >/dev/null
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$operation" "$run_id" "$workflow" "$workflow_id" "$title" "$environment" \
     >>"$records_file"
@@ -506,6 +626,7 @@ load_record_stub() {
   unset STUB_RUN_STATUS STUB_RUN_CONCLUSION
   unset STUB_API_BLOB STUB_JOB_ID STUB_WORKFLOW_STATE
   unset STUB_CHANGE_STATE_ON_CALL
+  unset STUB_OCI_RUNTIME_MODE
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
 }
@@ -588,6 +709,28 @@ done < <(
   "$POLICY" all |
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
+
+load_record_stub oci-infrastructure-finalize-k3s
+STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file"
+grep -qF "status=APPROVED" "$output_file"
+jq -e '.state == "consumed"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
+load_record_stub oci-infrastructure-prepare-oke
+if STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "prepare-mode drift unexpectedly passed approval" >&2
+  exit 1
+fi
+grep -qF "authoritative runtime mode changed" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
+load_record_stub oci-infrastructure-finalize-oke
+STUB_OCI_RUNTIME_MODE=oke COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file"
+grep -qF "status=APPROVED" "$output_file"
+jq -e '.state == "consumed"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
 
 load_record_stub production-deploy
 PROSPECTIVE_PROMOTION_PR=224 STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \

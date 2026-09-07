@@ -334,6 +334,12 @@ blocks replacement dispatch; do not infer identity from timestamps, titles,
 or nearby runs. A captured terminal run is automatically marked `retired`
 only after GitHub proves it has zero jobs and zero pending deployments, at
 which point a replacement request may proceed.
+For a captured or claimed run with decay-prone prerequisites, resume first
+binds the exact already-dispatched run and then revalidates those prerequisites
+before authority can become `issued`. If they have decayed while the run is
+still provably unstarted at its protected gate, the dispatcher cancels that
+exact run and retires the claimed record. If an unstarted cancellation cannot
+be proven, the global fence remains and must not be bypassed.
 Any unresolved intent or `claimed`/`inflight` record blocks every protected
 dispatch for the same repository and control SHA, including requests with a
 different operation or inputs. An `issued` or `consumed` record blocks the

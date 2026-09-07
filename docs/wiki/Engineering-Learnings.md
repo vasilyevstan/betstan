@@ -143,6 +143,16 @@ If downstream provenance accepts only attempt one, a failed run is terminal
 evidence. Fix the cause and create a new exact candidate rather than rerunning
 the failed authority.
 
+### Prove prerequisites before spending one-use authority
+
+A protected operation should carry explicit, hash-covered identities for every
+upstream run it depends on. Validate the exact workflow, source revision,
+first-attempt status, title, and retained artifact before authority is issued,
+again immediately before approval, and inside the workflow before cloud
+access. If a previously dispatched but unissued run loses a prerequisite,
+release its serialization fence only after proving the exact run never started
+and ended cancelled; otherwise preserve the fence for explicit recovery.
+
 ## Release and operations
 
 ### Build and deploy exact immutable identities

@@ -18,6 +18,7 @@ suites=(
   "$TESTS_DIR/test-upstream-binding-contract.sh"
   "$TESTS_DIR/test-infrastructure-gate-execution-stan.sh"
   "$TESTS_DIR/test-approval-binding-drift-stan.sh"
+  "$TESTS_DIR/test-dispatch-prerequisite-rejection-stan.sh"
   "$TESTS_DIR/test-image-reuse-contract.sh"
   "$TESTS_DIR/test-ghcr-contract.sh"
   "$TESTS_DIR/rollback-contract.sh"

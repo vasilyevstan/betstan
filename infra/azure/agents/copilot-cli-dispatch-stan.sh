@@ -74,6 +74,14 @@ inputs_file="$tmp_dir/inputs.json"
 run_file="$tmp_dir/run.json"
 jobs_file="$tmp_dir/jobs.json"
 pending_file="$tmp_dir/pending.json"
+pre_rejection_run_file="$tmp_dir/pre-rejection-run.json"
+pre_rejection_jobs_file="$tmp_dir/pre-rejection-jobs.json"
+pre_rejection_pending_file="$tmp_dir/pre-rejection-pending.json"
+pre_rejection_approvals_file="$tmp_dir/pre-rejection-approvals.json"
+terminal_rejection_run_file="$tmp_dir/terminal-rejection-run.json"
+terminal_rejection_jobs_file="$tmp_dir/terminal-rejection-jobs.json"
+terminal_rejection_pending_file="$tmp_dir/terminal-rejection-pending.json"
+terminal_rejection_approvals_file="$tmp_dir/terminal-rejection-approvals.json"
 materialization_error="$tmp_dir/materialization.err"
 promotion_file="$tmp_dir/promotion.json"
 cleanup() {
@@ -83,6 +91,14 @@ cleanup() {
     "$run_file" \
     "$jobs_file" \
     "$pending_file" \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file" \
+    "$terminal_rejection_run_file" \
+    "$terminal_rejection_jobs_file" \
+    "$terminal_rejection_pending_file" \
+    "$terminal_rejection_approvals_file" \
     "$materialization_error" \
     "$promotion_file"
   rmdir "$tmp_dir" 2>/dev/null || true
@@ -378,9 +394,141 @@ validate_protected_prerequisites() {
   validate_upstream_run_bindings
 }
 
+retire_prerequisite_rejected_resume() {
+  local run_id="$1"
+  local expected_version="$2"
+  local prerequisite_error="$3"
+  local attempt cancel_status=0
+
+  rm -f \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file" \
+    "$terminal_rejection_run_file" \
+    "$terminal_rejection_jobs_file" \
+    "$terminal_rejection_pending_file" \
+    "$terminal_rejection_approvals_file" \
+    "$materialization_error"
+  gh api "repos/$repository/actions/runs/$run_id" \
+    >"$pre_rejection_run_file"
+  gh api "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
+    >"$pre_rejection_jobs_file"
+  gh api "repos/$repository/actions/runs/$run_id/pending_deployments" \
+    >"$pre_rejection_pending_file"
+  gh api "repos/$repository/actions/runs/$run_id/approvals" \
+    >"$pre_rejection_approvals_file"
+  chmod 600 \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file"
+
+  "$AUTHORITY_HELPER" check-prerequisite-rejection \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$run_id" \
+    --expected-version "$expected_version" \
+    --pre-run-json "$pre_rejection_run_file" \
+    --pre-jobs-json "$pre_rejection_jobs_file" \
+    --pre-pending-json "$pre_rejection_pending_file" \
+    --pre-approvals-json "$pre_rejection_approvals_file" \
+    --policy-json "$policy_json" \
+    --repository "$repository" \
+    --current-master "$current_master" \
+    --workflow-id "$workflow_id" \
+    --workflow-blob-sha "$workflow_blob_sha" \
+    >/dev/null ||
+    fail "$prerequisite_error; the exact run is not provably unstarted, so its claimed authority remains fenced"
+
+  set +e
+  gh api --method POST \
+    "repos/$repository/actions/runs/$run_id/cancel" \
+    >/dev/null 2>"$materialization_error"
+  cancel_status=$?
+  set -e
+
+  for ((attempt = 1; attempt <= MATERIALIZATION_ATTEMPTS; attempt += 1)); do
+    rm -f \
+      "$terminal_rejection_run_file" \
+      "$terminal_rejection_jobs_file" \
+      "$terminal_rejection_pending_file" \
+      "$terminal_rejection_approvals_file"
+    if gh api "repos/$repository/actions/runs/$run_id" \
+        >"$terminal_rejection_run_file" 2>>"$materialization_error" &&
+      [[ "$(jq -r '.status // ""' "$terminal_rejection_run_file")" = "completed" ]]; then
+      gh api "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
+        >"$terminal_rejection_jobs_file"
+      gh api "repos/$repository/actions/runs/$run_id/pending_deployments" \
+        >"$terminal_rejection_pending_file"
+      gh api "repos/$repository/actions/runs/$run_id/approvals" \
+        >"$terminal_rejection_approvals_file"
+      chmod 600 \
+        "$terminal_rejection_run_file" \
+        "$terminal_rejection_jobs_file" \
+        "$terminal_rejection_pending_file" \
+        "$terminal_rejection_approvals_file"
+      if "$AUTHORITY_HELPER" retire-prerequisite-rejected-claim \
+        --authority-dir "$AUTHORITY_DIR" \
+        --repo-root "$ROOT_DIR" \
+        --run-id "$run_id" \
+        --expected-version "$expected_version" \
+        --pre-run-json "$pre_rejection_run_file" \
+        --pre-jobs-json "$pre_rejection_jobs_file" \
+        --pre-pending-json "$pre_rejection_pending_file" \
+        --pre-approvals-json "$pre_rejection_approvals_file" \
+        --terminal-run-json "$terminal_rejection_run_file" \
+        --terminal-jobs-json "$terminal_rejection_jobs_file" \
+        --terminal-pending-json "$terminal_rejection_pending_file" \
+        --terminal-approvals-json "$terminal_rejection_approvals_file" \
+        --policy-json "$policy_json" \
+        --repository "$repository" \
+        --current-master "$current_master" \
+        --workflow-id "$workflow_id" \
+        --workflow-blob-sha "$workflow_blob_sha" \
+        2>>"$materialization_error"; then
+        fail "$prerequisite_error; exact run $run_id was cancelled and its claimed authority retired, submit a corrected request"
+      fi
+    fi
+    if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+      sleep "$MATERIALIZATION_SLEEP_SECONDS"
+    fi
+  done
+
+  fail "$prerequisite_error; exact run $run_id could not be proven safely cancelled (cancel status $cancel_status), so its claimed authority remains fenced"
+}
+
+resume_with_prerequisite_validation() {
+  local run_id="$1"
+  local summary state version prerequisite_error
+
+  summary="$(
+    "$AUTHORITY_HELPER" verify \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --policy-json "$policy_json" \
+      --repository "$repository" \
+      --current-master "$current_master" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$workflow_blob_sha"
+  )"
+  state="$(jq -r '.state' <<<"$summary")"
+  version="$(jq -r '.version' <<<"$summary")"
+  if ! prerequisite_error="$(
+    validate_protected_prerequisites 2>&1
+  )"; then
+    if [[ "$state" = "claimed" ]]; then
+      retire_prerequisite_rejected_resume \
+        "$run_id" "$version" "$prerequisite_error"
+    fi
+    fail "$prerequisite_error; authority state $state cannot be retired as an unissued resume"
+  fi
+  materialize_record "$run_id"
+}
+
 if [[ "$ACTION" = "--resume-run" ]]; then
   revalidate_control
-  validate_protected_prerequisites
   bound_run_id="$(
     "$AUTHORITY_HELPER" bind-intent \
       --normalized "$normalized_file" \
@@ -396,13 +544,12 @@ if [[ "$ACTION" = "--resume-run" ]]; then
   )"
   [[ -z "$bound_run_id" || "$bound_run_id" = "$RESUME_RUN_ID" ]] ||
     fail "resumed dispatch intent returned a different run ID"
-  materialize_record "$RESUME_RUN_ID"
+  resume_with_prerequisite_validation "$RESUME_RUN_ID"
   exit 0
 fi
 
 if [[ "$ACTION" = "--resume-captured" ]]; then
   revalidate_control
-  validate_protected_prerequisites
   bound_run_id="$(
     "$AUTHORITY_HELPER" bind-intent \
       --normalized "$normalized_file" \
@@ -416,7 +563,7 @@ if [[ "$ACTION" = "--resume-captured" ]]; then
   )"
   [[ "$bound_run_id" =~ ^[1-9][0-9]*$ ]] ||
     fail "captured dispatch intent did not identify one exact run"
-  materialize_record "$bound_run_id"
+  resume_with_prerequisite_validation "$bound_run_id"
   exit 0
 fi
 
@@ -462,7 +609,10 @@ capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
 intent_version="$(jq -r '.version' <<<"$intent_summary")"
 
 if ! dispatch_revalidation_error="$(
-  revalidate_dispatch_target 2>&1
+  {
+    revalidate_dispatch_target
+    validate_protected_prerequisites
+  } 2>&1
 )"; then
   "$AUTHORITY_HELPER" cancel-intent \
     --normalized "$normalized_file" \

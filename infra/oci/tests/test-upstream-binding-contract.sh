@@ -269,28 +269,55 @@ import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
 definition = text.index("validate_protected_prerequisites() {")
+resume_validation = text.index("resume_with_prerequisite_validation() {")
 resume_run = text.index('if [[ "$ACTION" = "--resume-run" ]]; then')
 resume_captured = text.index('if [[ "$ACTION" = "--resume-captured" ]]; then')
-if not definition < resume_run < resume_captured:
+if not definition < resume_validation < resume_run < resume_captured:
     raise SystemExit("validator must be defined before both resume paths")
 for start in (resume_run, resume_captured):
-    window = text[start:start + 600]
-    if "validate_protected_prerequisites" not in window:
-        raise SystemExit("a resume path does not prove prerequisites")
-    if window.index("validate_protected_prerequisites") > window.index("bind-intent"):
-        raise SystemExit("a resume path binds intent before proving prerequisites")
+    window = text[start:start + 800]
+    if "bind-intent" not in window or "resume_with_prerequisite_validation" not in window:
+        raise SystemExit("a resume path does not bind and validate its exact run")
+    if window.index("bind-intent") > window.index("resume_with_prerequisite_validation"):
+        raise SystemExit("a resume path validates before binding the captured run")
+resume_body = text[
+    resume_validation:text.index(
+        '\nif [[ "$ACTION" = "--resume-run" ]]', resume_validation
+    )
+]
+if resume_body.index("validate_protected_prerequisites") > resume_body.index(
+    'materialize_record "$run_id"'
+):
+    raise SystemExit("a resumed claim can be issued before prerequisites pass")
+if "retire_prerequisite_rejected_resume" not in resume_body:
+    raise SystemExit("resume prerequisite rejection leaves a claimed global fence")
+retirement = text[
+    text.index("retire_prerequisite_rejected_resume() {"):resume_validation
+]
+for required in (
+    "check-prerequisite-rejection",
+    'actions/runs/$run_id/cancel',
+    "retire-prerequisite-rejected-claim",
+):
+    if required not in retirement:
+        raise SystemExit(f"resume rejection omits safe terminalization: {required}")
 guard = text.index('[[ "$ACTION" = "--dispatch" ]] || exit 0')
 ready = text.index("dispatch=READY operation=")
 call = text.rindex("\nvalidate_protected_prerequisites\n")
 if not call < ready < guard < text.index("blocking-record", guard):
     raise SystemExit("fresh dispatch must prove prerequisites before READY and blocking")
+claim = text.index('"$AUTHORITY_HELPER" claim-request', guard)
+post_claim = text.index("dispatch_revalidation_error=", claim)
+dispatch = text.index("gh workflow run", post_claim)
+if "validate_protected_prerequisites" not in text[post_claim:dispatch]:
+    raise SystemExit("fresh dispatch does not revalidate prerequisites after its claim")
 if ".dispatchInputs" not in text:
     raise SystemExit("dispatcher must read the hashed dispatchInputs map")
 if "OCI_RUNTIME_MODE" not in text:
     raise SystemExit("dispatcher must prove the authoritative runtime mode")
 print("ordering ok")
 PY
-ok "fresh dispatch and both resume paths prove prerequisites before authority"
+ok "fresh dispatch and bound resume paths prove prerequisites before issuance"
 
 python3 - "$WORKFLOW" "$ROOT_DIR/infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh" \
   <<'PY' || fail "workflow validates bindings after cloud access"
@@ -319,6 +346,10 @@ if "bind-infrastructure-prerequisites-stan.sh" not in text:
     raise SystemExit("workflow does not invoke the extracted prerequisite gate")
 if "DISPATCH_INPUTS: ${{ toJSON(inputs) }}" not in text:
     raise SystemExit("workflow does not export the real dispatch input map")
+if "source artifacts/oci-capacity/provenance.env" in text:
+    raise SystemExit("capacity provenance can overwrite values it is checked against")
+if "capacity provenance contains an unsafe or duplicate assignment" not in text:
+    raise SystemExit("capacity provenance is not parsed without shell evaluation")
 if 'BOUND_RUNTIME_MODE" = "$OCI_RUNTIME_MODE' not in gate_body:
     raise SystemExit("gate does not bind runtime mode to the environment")
 if "validate-all" not in gate_body:

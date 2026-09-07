@@ -66,8 +66,9 @@ Read:
   global same-release dispatch fencing, exact-request one-use authority,
   pristine-intent cancellation on pre-dispatch drift, policy-required
   workflow state, post-claim authority revalidation and safe claim release,
-  zero-job/zero-pending retirement, bounded expiry, and complete fail-closed
-  exclusivity responses.
+  zero-job/zero-pending ordinary retirement, no-start cancellation evidence for
+  prerequisite-rejected resume retirement, bounded expiry, and complete
+  fail-closed exclusivity responses.
 - Verify no critic finding remains open and no agent approved its own work.
 - For every user-facing visual or interaction change, require one exact-head
   `betstan-ux-ui-expert: UX_REVIEW_PASSED` result. Verify its named stable

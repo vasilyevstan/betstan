@@ -2304,8 +2304,10 @@ def command_ensure_automatic_record(args):
     print(canonical_json({
         "controlSha": verified["controlSha"],
         "displayTitle": verified["displayTitle"],
+        "environment": verified["environment"],
         "inputHash": verified["inputHash"],
         "inflightApproval": verified["inflightApproval"],
+        "inputs": verified["inputs"],
         "operation": verified["operation"],
         "runId": verified["runId"],
         "state": verified["state"],
@@ -2413,6 +2415,262 @@ def command_issue(args):
             pass
 
 
+SAFE_REJECTION_RUN_STATES = {"queued", "waiting", "pending", "requested"}
+SAFE_REJECTION_JOB_STATES = {"queued", "waiting", "pending", "requested"}
+REJECTED_TERMINAL_JOB_CONCLUSIONS = {"cancelled", "skipped"}
+SAFE_REJECTION_STEP_CONCLUSIONS = {None, "", "cancelled", "skipped"}
+
+
+def load_job_list(path, label):
+    payload = load_json_file(path, label, private=True)
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("total_count"), int)
+        or not isinstance(payload.get("jobs"), list)
+        or payload["total_count"] != len(payload["jobs"])
+    ):
+        fail(f"{label} has an unexpected shape")
+    for job in payload["jobs"]:
+        if not isinstance(job, dict):
+            fail(f"{label} contains a malformed job")
+    return payload["jobs"]
+
+
+def load_pending_deployments(path, label):
+    payload = load_json_file(path, label, private=True)
+    if not isinstance(payload, list):
+        fail(f"{label} must be a list")
+    return payload
+
+
+def load_approval_reviews(path, label):
+    payload = load_json_file(path, label, private=True)
+    if not isinstance(payload, list):
+        fail(f"{label} must be a list")
+    return payload
+
+
+def validate_rejection_job_steps(job, label):
+    steps = job.get("steps", [])
+    if not isinstance(steps, list):
+        fail(f"{label} contains malformed job steps")
+    for step in steps:
+        if (
+            not isinstance(step, dict)
+            or step.get("conclusion") not in SAFE_REJECTION_STEP_CONCLUSIONS
+        ):
+            fail(f"{label} proves a job step completed before cancellation")
+
+
+def validate_prerequisite_rejection_preconditions(
+    record,
+    run,
+    jobs,
+    pending,
+    approvals,
+):
+    validate_run_against_record(run, record)
+    if (
+        run.get("status") not in SAFE_REJECTION_RUN_STATES
+        or run.get("conclusion") not in {None, ""}
+    ):
+        fail("prerequisite-rejected run is not safely unstarted")
+    for job in jobs:
+        active_safe = (
+            job.get("status") in SAFE_REJECTION_JOB_STATES
+            and job.get("conclusion") in {None, ""}
+        )
+        skipped_safe = (
+            job.get("status") == "completed"
+            and job.get("conclusion") == "skipped"
+        )
+        if not active_safe and not skipped_safe:
+            fail("prerequisite-rejected run has a started or terminal job")
+        validate_rejection_job_steps(
+            job,
+            "prerequisite-rejected jobs response",
+        )
+    if approvals:
+        fail("prerequisite-rejected run already has an environment review")
+    if pending:
+        if len(pending) != 1:
+            fail("prerequisite-rejected run has unexpected pending deployments")
+        environment = pending[0].get("environment")
+        if (
+            not isinstance(environment, dict)
+            or environment.get("name") != record["environment"]
+            or not POSITIVE_INTEGER.fullmatch(str(environment.get("id", "")))
+        ):
+            fail("prerequisite-rejected run is waiting on a different environment")
+    elif (
+        run.get("status") in {"waiting", "pending"}
+        or any(job.get("status") in {"waiting", "pending"} for job in jobs)
+    ):
+        fail("waiting prerequisite-rejected run has no protected deployment gate")
+
+
+def validate_prerequisite_rejection_terminal(
+    record,
+    run,
+    jobs,
+    pending,
+    approvals,
+):
+    validate_run_against_record(run, record)
+    if run.get("status") != "completed" or run.get("conclusion") != "cancelled":
+        fail("prerequisite-rejected run did not terminate as cancelled")
+    if pending:
+        fail("cancelled prerequisite-rejected run still has a pending deployment")
+    if approvals:
+        fail("cancelled prerequisite-rejected run has an environment review")
+    for job in jobs:
+        if (
+            job.get("status") != "completed"
+            or job.get("conclusion") not in REJECTED_TERMINAL_JOB_CONCLUSIONS
+        ):
+            fail("cancelled prerequisite-rejected run has an unsafe job outcome")
+        validate_rejection_job_steps(
+            job,
+            "cancelled prerequisite-rejected jobs response",
+        )
+
+
+def load_prerequisite_rejection_context(args):
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    directory = ensure_authority_dir(
+        args.authority_dir,
+        args.repo_root,
+        create=False,
+    )
+    record = load_record(directory, args.run_id)
+    verified = verify_record(
+        record,
+        policy,
+        args.repository,
+        args.current_master,
+        args.workflow_id,
+        args.workflow_blob_sha,
+    )
+    if verified["state"] != "claimed":
+        fail("only a claimed authority can be retired after prerequisite rejection")
+    if verified["version"] != args.expected_version:
+        fail("claimed authority changed before prerequisite rejection")
+    run = load_json_file(
+        args.pre_run_json,
+        "prerequisite-rejected run response",
+        private=True,
+    )
+    jobs = load_job_list(
+        args.pre_jobs_json,
+        "prerequisite-rejected jobs response",
+    )
+    pending = load_pending_deployments(
+        args.pre_pending_json,
+        "prerequisite-rejected pending deployments response",
+    )
+    approvals = load_approval_reviews(
+        args.pre_approvals_json,
+        "prerequisite-rejected approval reviews response",
+    )
+    validate_prerequisite_rejection_preconditions(
+        verified,
+        run,
+        jobs,
+        pending,
+        approvals,
+    )
+    return directory, policy, verified
+
+
+def command_check_prerequisite_rejection(args):
+    _, _, verified = load_prerequisite_rejection_context(args)
+    print(canonical_json({
+        "runId": verified["runId"],
+        "state": verified["state"],
+        "version": verified["version"],
+    }))
+
+
+def command_retire_prerequisite_rejected_claim(args):
+    directory, policy, _ = load_prerequisite_rejection_context(args)
+    terminal_run = load_json_file(
+        args.terminal_run_json,
+        "cancelled prerequisite-rejected run response",
+        private=True,
+    )
+    terminal_jobs = load_job_list(
+        args.terminal_jobs_json,
+        "cancelled prerequisite-rejected jobs response",
+    )
+    terminal_pending = load_pending_deployments(
+        args.terminal_pending_json,
+        "cancelled prerequisite-rejected pending deployments response",
+    )
+    terminal_approvals = load_approval_reviews(
+        args.terminal_approvals_json,
+        "cancelled prerequisite-rejected approval reviews response",
+    )
+    token = acquire_lock_file(directory, args.run_id, os.getpid())
+    try:
+        def retire(record):
+            verified = verify_record(
+                record,
+                policy,
+                args.repository,
+                args.current_master,
+                args.workflow_id,
+                args.workflow_blob_sha,
+            )
+            if verified["state"] != "claimed":
+                fail(
+                    "only a claimed authority can be retired after "
+                    "prerequisite rejection"
+                )
+            if verified["version"] != args.expected_version:
+                fail("claimed authority changed before prerequisite retirement")
+            pre_run = load_json_file(
+                args.pre_run_json,
+                "prerequisite-rejected run response",
+                private=True,
+            )
+            pre_jobs = load_job_list(
+                args.pre_jobs_json,
+                "prerequisite-rejected jobs response",
+            )
+            pre_pending = load_pending_deployments(
+                args.pre_pending_json,
+                "prerequisite-rejected pending deployments response",
+            )
+            pre_approvals = load_approval_reviews(
+                args.pre_approvals_json,
+                "prerequisite-rejected approval reviews response",
+            )
+            validate_prerequisite_rejection_preconditions(
+                verified,
+                pre_run,
+                pre_jobs,
+                pre_pending,
+                pre_approvals,
+            )
+            validate_prerequisite_rejection_terminal(
+                verified,
+                terminal_run,
+                terminal_jobs,
+                terminal_pending,
+                terminal_approvals,
+            )
+            record["state"] = "retired"
+            record["version"] += 1
+            return record
+
+        update_record_with_lock(directory, args.run_id, token, retire)
+    finally:
+        try:
+            require_lock(directory, args.run_id, token).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def command_retire_inert_claim(args):
     directory = ensure_authority_dir(
         args.authority_dir,
@@ -2494,8 +2752,10 @@ def command_verify(args):
     print(canonical_json({
         "controlSha": verified["controlSha"],
         "displayTitle": verified["displayTitle"],
+        "environment": verified["environment"],
         "inputHash": verified["inputHash"],
         "inflightApproval": verified["inflightApproval"],
+        "inputs": verified["inputs"],
         "operation": verified["operation"],
         "runId": verified["runId"],
         "state": verified["state"],
@@ -2922,6 +3182,74 @@ def build_parser():
     issue.add_argument("--workflow-blob-sha", required=True)
     common_authority_arguments(issue)
     issue.set_defaults(function=command_issue)
+
+    check_prerequisite_rejection = subparsers.add_parser(
+        "check-prerequisite-rejection"
+    )
+    check_prerequisite_rejection.add_argument("--run-id", required=True)
+    check_prerequisite_rejection.add_argument(
+        "--expected-version",
+        required=True,
+        type=int,
+    )
+    check_prerequisite_rejection.add_argument(
+        "--pre-run-json",
+        required=True,
+    )
+    check_prerequisite_rejection.add_argument(
+        "--pre-jobs-json",
+        required=True,
+    )
+    check_prerequisite_rejection.add_argument(
+        "--pre-pending-json",
+        required=True,
+    )
+    check_prerequisite_rejection.add_argument(
+        "--pre-approvals-json",
+        required=True,
+    )
+    check_prerequisite_rejection.add_argument("--policy-json", required=True)
+    check_prerequisite_rejection.add_argument("--repository", required=True)
+    check_prerequisite_rejection.add_argument(
+        "--current-master",
+        required=True,
+    )
+    check_prerequisite_rejection.add_argument("--workflow-id", required=True)
+    check_prerequisite_rejection.add_argument(
+        "--workflow-blob-sha",
+        required=True,
+    )
+    common_authority_arguments(check_prerequisite_rejection)
+    check_prerequisite_rejection.set_defaults(
+        function=command_check_prerequisite_rejection
+    )
+
+    retire_rejected = subparsers.add_parser(
+        "retire-prerequisite-rejected-claim"
+    )
+    retire_rejected.add_argument("--run-id", required=True)
+    retire_rejected.add_argument(
+        "--expected-version",
+        required=True,
+        type=int,
+    )
+    retire_rejected.add_argument("--pre-run-json", required=True)
+    retire_rejected.add_argument("--pre-jobs-json", required=True)
+    retire_rejected.add_argument("--pre-pending-json", required=True)
+    retire_rejected.add_argument("--pre-approvals-json", required=True)
+    retire_rejected.add_argument("--terminal-run-json", required=True)
+    retire_rejected.add_argument("--terminal-jobs-json", required=True)
+    retire_rejected.add_argument("--terminal-pending-json", required=True)
+    retire_rejected.add_argument("--terminal-approvals-json", required=True)
+    retire_rejected.add_argument("--policy-json", required=True)
+    retire_rejected.add_argument("--repository", required=True)
+    retire_rejected.add_argument("--current-master", required=True)
+    retire_rejected.add_argument("--workflow-id", required=True)
+    retire_rejected.add_argument("--workflow-blob-sha", required=True)
+    common_authority_arguments(retire_rejected)
+    retire_rejected.set_defaults(
+        function=command_retire_prerequisite_rejected_claim
+    )
 
     classify_unmaterialized = subparsers.add_parser(
         "classify-unmaterialized-run"

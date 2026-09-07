@@ -431,8 +431,11 @@ its owner. It is never healthy by default.
   record as a global fence on every protected request for the same repository
   regardless of control SHA; promotion does not clear it, and changing
   operation or inputs is not recovery. An exact `issued`/`consumed` operation
-  and transport-input request is one-use. A terminal claimed run may be
-  retired only after exact zero-job and zero-pending evidence. An `inflight`
+  and transport-input request is one-use. An ordinary terminal claimed run may
+  be retired only after exact zero-job and zero-pending evidence. A claim whose
+  prerequisite decayed during resume may be retired only after exact
+  cancellation, no environment review, no successful job step, and no pending
+  gate prove that it never started. An `inflight`
   record triggers
   explicit `--reconcile`, never a direct replay. Reconciliation consumes only
   for the recorded downstream run and operation, with a new exact GitHub

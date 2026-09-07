@@ -136,12 +136,18 @@ inactive. Fail closed when either query is incomplete or fails.
   exist before direct dispatch mutation; use `--resume-captured` or
   `--resume-run` for their exact recovery. Promotion-derived builds require
   durable automatic records. An ambiguous approval POST leaves an `inflight`
-  record and must use `--reconcile`, never direct replay. Require a new exact
+  record and must use `--reconcile`, never direct replay. Before a resumed
+  claimed record becomes issued, re-prove every decay-prone prerequisite. If
+  that proof fails, release the repository-wide fence only by cancelling the
+  exact run and proving it never started at the protected gate before retiring
+  the claimed record; otherwise preserve the fence. Require a new exact
   approved GitHub review for the same downstream run and operation relative to
   the recorded pre-POST reviewer/comment/environment baseline before consuming
-  it; gate disappearance or terminal status alone stays unresolved. Accept
-  `retired` only for an exact terminal run with zero jobs and zero pending
-  deployments. A claimed never-transitioned generic-title ghost is different:
+  it; gate disappearance or terminal status alone stays unresolved. Ordinary
+  terminal claims may become `retired` only with zero jobs and zero pending
+  deployments. Prerequisite-rejected claims require exact cancellation, no
+  environment review, no successful job step, and no remaining pending gate.
+  A claimed never-transitioned generic-title ghost is different:
   keep it fenced and unapproved until master advances; only the explicit
   evidence-bound `retire-unmaterialized-claim` transition may retire it after
   strict-ancestor, historical-blob, zero-job/pending/artifact, and

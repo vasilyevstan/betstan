@@ -156,6 +156,8 @@ retroactively turning a rerun into the original trusted build.
 Before deployment, the release chain verifies:
 
 - current infrastructure provenance and capacity;
+- explicit, hash-covered upstream run and artifact identities before one-use
+  authority, immediately before approval, and before workflow cloud access;
 - current `master` identity;
 - image digest availability;
 - migration and schema compatibility;
@@ -164,6 +166,11 @@ Before deployment, the release chain verifies:
 - public-write fencing and writer quiescence when data mutation requires it;
 - a matching pre-mutation rollback baseline;
 - absence of competing production operations.
+
+If an already-dispatched but unissued operation loses a prerequisite, its
+serialization fence is released only when the exact run is cancelled and
+proved never to have started. Ambiguous or started runs remain fenced for
+explicit recovery rather than being replayed or silently replaced.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a

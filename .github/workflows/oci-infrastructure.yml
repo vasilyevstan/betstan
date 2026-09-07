@@ -849,22 +849,43 @@ jobs:
             --dir artifacts/oci-capacity
           [ -z "$(find artifacts/oci-capacity -type l -print -quit)" ]
           test -s artifacts/oci-capacity/provenance.env
-          # Only source a file whose every line is a safe KEY=value assignment,
-          # so a tampered artifact cannot execute shell code.
-          if grep -qvE '^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:+-]*$' \
-            artifacts/oci-capacity/provenance.env; then
-            echo "capacity provenance contains an unsafe assignment" >&2
-            exit 1
-          fi
-          source artifacts/oci-capacity/provenance.env
-          [ "$source_sha" = "$SOURCE_SHA" ]
-          [ "$acquisition_run_id" = "$CAPACITY_ACQUISITION_RUN_ID" ]
-          [ "$runtime_mode" = "k3s" ]
-          [ "$shape" = "VM.Standard.A1.Flex" ]
-          [ "$ocpus" = "2" ]
-          [ "$memory_gb" = "12" ]
-          [ "$boot_volume_gb" = "50" ]
-          [ "$boot_volume_vpus_per_gb" = "10" ]
+          python3 - \
+            artifacts/oci-capacity/provenance.env \
+            "$SOURCE_SHA" \
+            "$CAPACITY_ACQUISITION_RUN_ID" <<'PY'
+          import re
+          import sys
+
+          path, source_sha, acquisition_run_id = sys.argv[1:]
+          assignment = re.compile(
+              r"^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./:+-]*)$"
+          )
+          values = {}
+          with open(path, encoding="utf-8") as handle:
+              for raw in handle:
+                  line = raw.rstrip("\n")
+                  match = assignment.fullmatch(line)
+                  if not match or match.group(1) in values:
+                      raise SystemExit(
+                          "capacity provenance contains an unsafe or duplicate assignment"
+                      )
+                  values[match.group(1)] = match.group(2)
+          expected = {
+              "source_sha": source_sha,
+              "acquisition_run_id": acquisition_run_id,
+              "runtime_mode": "k3s",
+              "shape": "VM.Standard.A1.Flex",
+              "ocpus": "2",
+              "memory_gb": "12",
+              "boot_volume_gb": "50",
+              "boot_volume_vpus_per_gb": "10",
+          }
+          for key, expected_value in expected.items():
+              if values.get(key) != expected_value:
+                  raise SystemExit(
+                      f"capacity provenance {key} does not match the bound value"
+                  )
+          PY
 
       - name: Install pinned OCI CLI and verify identity
         env:

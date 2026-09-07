@@ -888,6 +888,16 @@ if "          path: artifacts/ghcr-cache-recovery\n" in terminal_upload:
     raise SystemExit("terminal recovery authority still uploads unbound diagnostics")
 if 'validate_run oci-infrastructure.yml "$INFRASTRUCTURE_RUN_ID" workflow_dispatch \\\n            "$SOURCE_SHA"' not in workflow_text:
     raise SystemExit("cache recovery is not bound to baseline infrastructure provenance")
+new_infrastructure_title = "oci-infrastructure finalize k3s $SOURCE_SHA"
+legacy_infrastructure_title = "oci-infrastructure finalize $SOURCE_SHA"
+if new_infrastructure_title not in workflow_text:
+    raise SystemExit("cache recovery does not accept the current k3s finalize title")
+if legacy_infrastructure_title not in workflow_text:
+    raise SystemExit("cache recovery no longer accepts retained pre-split baselines")
+policy = root / "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+policy_text = policy.read_text(encoding="utf-8")
+if '"oci-infrastructure finalize k3s {subject_sha}"' not in policy_text:
+    raise SystemExit("k3s infrastructure policy title drifted from cache recovery")
 
 build_workflow = workflow.parent / "oci-production-build.yml"
 build_text = build_workflow.read_text(encoding="utf-8")

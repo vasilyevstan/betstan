@@ -964,6 +964,10 @@ validated.
   and receipt lifecycle as directly dispatched runs. A captured terminal run
   is safe to mark `retired` only with zero jobs and zero pending deployments;
   that proof, not age or a generic conclusion, permits a replacement dispatch.
+- A captured or claimed run whose upstream prerequisite decays during resume
+  must be bound to its exact run before the fence can be resolved. Cancel and
+  retire it only when protected-gate, approval-review, job-step, and terminal
+  evidence prove that it never started; otherwise keep the global fence.
 - A claimed accepted-but-unmaterialized run is not a terminal claim. Keep its
   affected workflow disabled while its generic-title ghost SHA is current,
   and never grant it human or CLI environment approval. Promote the
