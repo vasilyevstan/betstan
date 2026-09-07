@@ -577,6 +577,7 @@ jobs:
           DEPLOYED_SOURCE_SHA: ${{ inputs.deployed_source_sha }}
           FENCED_DEPLOY_RUN_ID: ${{ inputs.fenced_deploy_run_id }}
           FENCED_DATA_RUN_ID: ${{ inputs.fenced_data_run_id }}
+          FENCED_LOCK_LEASE_SECONDS: ${{ vars.SHARED_MONGO_DEPLOY_LOCK_LEASE_SECONDS || '5400' }}
           BASELINE_DIR: artifacts/fenced-baseline
           PRE_RECOVERY_BUILD_DIR: artifacts/pre-recovery-build
           OUTPUT_DIR: artifacts/oci-rollback

@@ -41,6 +41,7 @@ INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 MODERATION_OBSERVATION_ATTEMPTS="${MODERATION_OBSERVATION_ATTEMPTS:-10}"
 MODERATION_OBSERVATION_SLEEP_SECONDS="${MODERATION_OBSERVATION_SLEEP_SECONDS:-6}"
+FENCED_LOCK_LEASE_SECONDS="${FENCED_LOCK_LEASE_SECONDS:-5400}"
 READINESS_SCRIPT="${READINESS_SCRIPT:-$SCRIPT_DIR/rollback-readiness-stan.sh}"
 MAINTENANCE_SCRIPT="${MAINTENANCE_SCRIPT:-$SCRIPT_DIR/live-data-maintenance-stan.sh}"
 LOCK_SCRIPT="${LOCK_SCRIPT:-$SCRIPT_DIR/shared-mongo-operation-lock-stan.sh}"
@@ -51,6 +52,7 @@ RESTORE_ORDER=(auth bet backoffice event moderation resulting slip client gamema
 QUIESCED_SERVICES=(bet event gamemaster moderation resulting slip)
 
 MAINTENANCE_REHELD=false
+FENCED_LOCK_ACQUISITION=unknown
 # Tracks whether the transferred database lock has actually been released, so a
 # later failure summary reports the true state instead of assuming it is held.
 DATABASE_LOCK_STATE=retained
@@ -100,6 +102,7 @@ fenced_deploy_run_id=$FENCED_DEPLOY_RUN_ID
 fenced_data_run_id=$FENCED_DATA_RUN_ID
 maintenance_fence=re-held
 database_lock=$DATABASE_LOCK_STATE
+database_lock_acquisition=$FENCED_LOCK_ACQUISITION
 database_restore=disabled
 message=$reason
 EOF
@@ -304,13 +307,35 @@ while IFS=$'\t' read -r service _repository expected_image; do
     oci_die "gaming-${service}-depl does not run the authorized deployed generation"
 done <"$OUTPUT_DIR/fenced-expected-current.tsv"
 
-NAMESPACE="$OCI_K8S_NAMESPACE" \
-LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
-OPERATION_ID="live-data-apply-slip-index" \
-SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
-  "$LOCK_SCRIPT" verify >"$OUTPUT_DIR/fenced-lock-verify.txt" 2>&1 ||
-  oci_die "the transferred database lock is not held by the failed deployment"
-
+# The transferred lock must still be ours, or be an expired lease we may
+# reclaim. This mirrors the deployment's own maintenance-rehold contract:
+# `verify`, else `acquire`. Acquire refuses when another operation holds a live
+# lease, and bumps the fencing generation when reclaiming an expired one. The
+# fence and writer quiescence verified above are what actually prevent writes,
+# and both were independently confirmed before this point.
+FENCED_LOCK_ACQUISITION=verified
+if NAMESPACE="$OCI_K8S_NAMESPACE" \
+  LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
+  OPERATION_ID="live-data-apply-slip-index" \
+  SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
+    "$LOCK_SCRIPT" verify >"$OUTPUT_DIR/fenced-lock-verify.txt" 2>&1; then
+  :
+else
+  FENCED_LOCK_ACQUISITION=reclaimed
+  NAMESPACE="$OCI_K8S_NAMESPACE" \
+  LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
+  OPERATION_ID="live-data-apply-slip-index" \
+  LOCK_LEASE_SECONDS="$FENCED_LOCK_LEASE_SECONDS" \
+  SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
+    "$LOCK_SCRIPT" acquire >>"$OUTPUT_DIR/fenced-lock-verify.txt" 2>&1 ||
+    oci_die "the transferred database lock is held by another live operation"
+  NAMESPACE="$OCI_K8S_NAMESPACE" \
+  LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
+  OPERATION_ID="live-data-apply-slip-index" \
+  SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
+    "$LOCK_SCRIPT" verify >>"$OUTPUT_DIR/fenced-lock-verify.txt" 2>&1 ||
+    oci_die "the reclaimed database lock did not verify as held"
+fi
 FENCED_READINESS_DIR="$OUTPUT_DIR/fenced-readiness"
 FENCED_EXPECTED_CURRENT_FILE="$OUTPUT_DIR/fenced-expected-current.tsv"
 if ! TARGET_SHA="$TARGET_SHA" \
@@ -429,6 +454,7 @@ fenced_data_run_id=$FENCED_DATA_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
 maintenance_fence=released
 database_lock=released
+database_lock_acquisition=$FENCED_LOCK_ACQUISITION
 database_restore=disabled
 restored_services=${#RESTORE_ORDER[@]}
 EOF
