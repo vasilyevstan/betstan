@@ -18,6 +18,7 @@ suites=(
   "$TESTS_DIR/test-image-reuse-contract.sh"
   "$TESTS_DIR/test-ghcr-contract.sh"
   "$TESTS_DIR/rollback-contract.sh"
+  "$TESTS_DIR/test-fenced-rollback-recovery-stan.sh"
   "$TESTS_DIR/test-k3s-runtime-contract.sh"
   "$TESTS_DIR/test-registry-prune-contract.sh"
   "$TESTS_DIR/test-migration-recovery-contract.sh"

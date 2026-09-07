@@ -1084,3 +1084,37 @@ validated.
 - Production route probes must use documented endpoints, record restart counts
   before and after any intentional unmatched request, and verify both REST/SSE
   availability and unchanged process continuity.
+
+## Maintenance-aware rollback and the compatibility release incident — 2026-09-07
+
+The second-half result compatibility release deployed all nine images, failed
+protected cluster validation because Moderation crash-looped, and re-entered
+maintenance as designed. Production stayed fenced with six writers quiesced,
+the write fence active, and the transferred database lock retained. Read paths
+kept serving; the fenced application paths returned 503.
+
+The compatibility deployment failed and production was restored to the prior
+known-good generation. That failed generation is not an accepted rollback
+baseline, and neither is the promotion merge that preceded it.
+
+Durable rules:
+
+- Distinguish a failed rollback from a partial rollback. A run that stops at its
+  pre-mutation gate mutated nothing; its artifact has no partial state and no
+  rollout order. Partial-rollback recovery is then both unusable and semantically
+  wrong, because it restores the pre-run generation rather than the target.
+- Do not treat a safety gate that blocks an incident exit as an obstacle to
+  weaken. Ordinary rollback readiness must keep demanding a healthy steady state.
+  Add a separate, narrowly bound mode that asserts the alternative expected state
+  positively rather than adding a skip, force, or bypass flag.
+- Bind incident tooling to exact identities: the incomplete deployment run, its
+  immutable baseline artifact and attempt, the deployed generation, the rollback
+  target, the infrastructure run, and positive evidence that the deployment
+  re-entered maintenance. Verify the baseline belongs to the target, not to the
+  generation being abandoned.
+- Preserve the established exit order. Restore digests and replica counts, prove
+  the previously failing workload is stable across a bounded observation window,
+  release the database lock, remove the write fence, then require ordinary
+  steady-state readiness with 200 responses, SSE, queues, and consumers.
+- Report failure state truthfully. Re-hold maintenance on any failure, and never
+  claim a database lock that the contract already released.

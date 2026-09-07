@@ -239,6 +239,18 @@ until the exact deployment passes protected validation, so dispatch the bound
 deployment immediately; an incomplete deployment re-enters the same
 fail-closed state for a safe retry.
 
+That fenced state also supports an exit that is not a retry.
+`oci-production-rollback` gains a maintenance-aware mode, bound to the exact
+incomplete deployment, its immutable baseline artifact and attempt, the exact
+deployed generation, the exact target, and positive evidence that the
+deployment re-entered maintenance. It asserts the expected fenced state instead
+of waiving readiness, restores baseline digests and replica counts, proves the
+previously failing workload is stable, releases the database lock and then the
+write fence, and finally requires ordinary steady-state readiness. It is never a
+skip, force, or bypass switch, and standard rollback behaviour is unchanged. A
+generation that failed its own deployment is never an accepted rollback
+baseline.
+
 ## Production safety
 
 Merging to `master` runs validation, then queues the first-attempt image build for approval through the master-only `production-emergency` environment. Production never deploys automatically. After the build succeeds, dispatch `production-deploy` from `master` with the exact full SHA and build run ID; the same environment requires a second approval. The workflow validates all nine build artifacts and deploys immutable tag-plus-digest image references. Rerun builds are not deployable, and retired workflow identities remain disabled.

@@ -233,6 +233,23 @@ If a rollback fails after partial mutation, recovery restores the exact
 pre-run images and keeps writes fenced until health is proven. Data restore is
 used only when application rollback is insufficient and separately justified.
 
+An incomplete deployment that re-enters maintenance leaves production
+deliberately fenced: writers are quiesced, mutating requests are refused, and
+the transferred database lock is retained. That state is safe, but ordinary
+rollback readiness requires a healthy steady state, so the last known-good
+generation would otherwise be unreachable exactly when it is needed. A
+maintenance-aware rollback closes that gap. It never waives a check and is not
+a skip or force switch: it asserts the expected fenced state positively, and is
+usable only when bound to the exact incomplete deployment, its immutable
+baseline, the exact deployed generation, and the exact rollback target. It
+restores the baseline digests and replica counts, proves the previously failing
+workload is stable, releases the database lock and then the write fence in that
+order, and finally requires ordinary steady-state readiness. Any failure
+re-holds maintenance and reports the true lock state.
+
+A generation that failed its own deployment is never an accepted rollback
+baseline.
+
 ## Stall and incident handling
 
 The conductor monitors the real blocking object: agent result, process,

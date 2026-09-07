@@ -780,3 +780,42 @@ jobs and zero pending deployments. Promotion-derived builds use the same
 durable approval receipts. This removes personal prompts for CLI-owned work
 without weakening first-attempt, current-master, provenance, expiry,
 exclusivity, rollback, or post-operation gates.
+
+## Maintenance-aware rollback after an incomplete deployment — 2026-09-07
+
+An OCI deployment applied all nine images, failed protected cluster validation
+because one service crash-looped, and correctly re-entered maintenance. That
+left the six live-data writers quiesced to zero, the public write fence active,
+and the transferred database lock retained.
+
+Two ordinary rollbacks then failed. Neither mutated anything: both stopped at
+the pre-mutation readiness gate, which requires a healthy steady state and HTTP
+200. The gate was right. The gap was that no supported path could reach the
+last known-good generation while the maintenance handoff was still open, so the
+incident could not be ended without either continuing the failed release or
+weakening a trusted gate.
+
+Lessons:
+
+- A fenced production state is safe but not self-clearing. Design the exit path
+  at the same time as the fence, or the safest posture becomes a dead end.
+- A failed rollback is not automatically a partial rollback. Partial-rollback
+  recovery consumes `failure-state.env`, `partial-state.tsv`, and a non-empty
+  rollout order. When those are absent the run never mutated, and that recovery
+  path is both unusable and wrong, because it restores the pre-run generation.
+- Recovery must be bound, not permissive. The maintenance-aware mode is keyed to
+  the exact incomplete deployment, its immutable baseline artifact, the exact
+  deployed generation, and the exact target. It asserts the expected fenced
+  state positively -- quiesced writer set and replicas, exact 503 only on fenced
+  paths, unchanged nine live digests, retained lock and fence, bounded backlog
+  with intentionally absent consumers -- instead of skipping checks. A generic
+  skip or force flag would have been far smaller and far worse.
+- Order matters on the way out: restore digests and replicas, prove the
+  previously failing workload is stable, release the database lock, then remove
+  the write fence, then require ordinary steady-state readiness.
+- Failure handling must be honest. Re-hold maintenance on any failure, and
+  report the true lock state rather than assuming it is still held; after the
+  contract releases the lock, claiming otherwise would mislead the next
+  operator.
+- A generation that failed its own deployment is never an accepted rollback
+  baseline.
