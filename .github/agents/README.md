@@ -109,6 +109,20 @@ closes advisory read-only work as unavailable and routes its gate to an
 existing authoritative owner; mandatory evidence blocks only its dependants
 while all dependency-safe work continues.
 
+The same rule binds an owner that is executing rather than investigating. A
+long turn without an externally visible checkpoint is a communication stall
+even while tools remain active, so every owner checkpoints at each safe
+boundary, meaning any point with no mutation in flight. Each checkpoint states
+the branch and SHA, artifacts created, current step, last objectively completed
+milestone with its timestamp, active command or run, blocker, and the exact
+next bounded action. Silence between milestones is bounded, never open-ended.
+A job, status, or command with no objective state change for fifteen minutes is
+inspected once and classified as a queued, provider-bound, approval-bound, or
+locally failed wait, then reported as `BLOCKED` rather than polled
+indefinitely. A command active for thirty minutes without a measurable
+milestone is stopped or safely handed off, and the checkpoint precedes any
+further long operation.
+
 An explicit user request to prioritize production establishes a critical-path
 scope freeze. Continue required safety work, but defer unrelated documentation,
 PR metadata, and advisory expansion until the production gate is terminal.

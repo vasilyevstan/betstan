@@ -868,3 +868,29 @@ The failed rollback attempts remain immutable and are retained as evidence:
 `34070306560` and `34070706815` stopped at the ordinary pre-mutation readiness
 gate, and `34082076542` stopped at the expired-lease check. None of the three
 mutated a workload.
+
+## Bounded reporting during long protected operations — 2026-09-07
+
+OCI recovery work is slow by construction: protected environments wait for
+approval, builds and rollouts take minutes, and health gates retry. Those waits
+are legitimate progress, but they are only progress to the operator who can see
+them.
+
+- Report the exact run ID, current phase, pending environment, and whether the
+  next action is approval-bound, provider-bound, or executing on a bounded
+  cadence, not only when the operation finishes.
+- Checkpoint at each safe boundary, meaning any point with no mutation in
+  flight. Merges, approvals, dispatches, and completed verification sweeps are
+  all safe boundaries.
+- Attach a milestone timestamp to each completed phase, and name the last
+  objectively completed milestone in every checkpoint.
+- A protected run with no objective state change for fifteen minutes is
+  inspected once and classified as queued, provider-bound, approval-bound, or
+  locally failed, then reported as `BLOCKED`. Never poll indefinitely, and
+  never cancel or supersede a production-capable run merely to end a wait.
+- A command that runs thirty minutes without a measurable milestone is stopped
+  or handed off safely, and the checkpoint precedes further work.
+
+Waiting in large silent sleep blocks is the common failure mode here. It turns
+a defensible provider wait into an unobservable one and hides which gate is
+actually blocking.
