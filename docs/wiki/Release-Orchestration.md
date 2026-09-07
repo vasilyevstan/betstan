@@ -198,6 +198,18 @@ kernel-backed claim lock. This closes the distinct-request race that per-file
 atomic creation cannot prevent. A prospective current-master workflow ghost is
 ignored only when refreshed run, workflow, job, pending-deployment, and
 artifact evidence remains pristine and the workflow is manually disabled.
+Active stale data and activation runs always block. The only active-run
+supersession exception is a pristine capacity ghost with no approval history
+and an exact later successful first attempt for the same workflow, source SHA,
+event, and rendered title.
+
+After approval authority is claimed, immutable upstream artifacts are checked
+first, followed by fresh promotion, production-exclusivity, pending-gate, and
+current-control checks. Any failure releases the originally claimed gate
+identity and sends no approval. Infrastructure performs the equivalent
+mutation-boundary check in the active `provision` job: current `master` and
+runtime mode bracket upstream validation immediately before the first OCI API
+call.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a

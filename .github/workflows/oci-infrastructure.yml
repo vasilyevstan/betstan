@@ -483,24 +483,6 @@ jobs:
       - name: Install pinned OCI CLI
         run: ./infra/oci/scripts/install-cli.sh
 
-      - name: Revalidate exact authority before cloud access
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          git fetch --quiet origin master:refs/remotes/origin/master
-          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
-          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
-          observed_runtime_mode="$(
-            gh api \
-              "repos/$REPOSITORY/environments/oci-infrastructure/variables/OCI_RUNTIME_MODE" \
-              --jq '.value'
-          )"
-          [ "$observed_runtime_mode" = "$BOUND_RUNTIME_MODE" ]
-          OCI_RUNTIME_MODE="$observed_runtime_mode" \
-            ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
-
       - name: Verify OCI identity
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
@@ -909,7 +891,32 @@ jobs:
                   )
           PY
 
-      - name: Install pinned OCI CLI and verify identity
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Revalidate exact authority before cloud access
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          revalidate_mutable_authority() {
+            git fetch --quiet origin master:refs/remotes/origin/master
+            [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+            [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+            observed_runtime_mode="$(
+              gh api \
+                "repos/$REPOSITORY/environments/oci-infrastructure/variables/OCI_RUNTIME_MODE" \
+                --jq '.value'
+            )"
+            [ "$observed_runtime_mode" = "$BOUND_RUNTIME_MODE" ]
+          }
+          revalidate_mutable_authority
+          OCI_RUNTIME_MODE="$BOUND_RUNTIME_MODE" \
+            ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
+          revalidate_mutable_authority
+
+      - name: Verify OCI identity
         env:
           OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
           OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
@@ -919,7 +926,6 @@ jobs:
           OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
         run: |
           set -euo pipefail
-          ./infra/oci/scripts/install-cli.sh
           home_region="$(
             oci iam region-subscription list \
               --tenancy-id "$OCI_CLI_TENANCY" \

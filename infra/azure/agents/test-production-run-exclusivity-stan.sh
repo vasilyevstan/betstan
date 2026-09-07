@@ -122,7 +122,8 @@ run_title() {
 
 workflow_state() {
   case "${STUB_MODE:-none}" in
-    active-unmaterialized-data|prospective-active-unmaterialized-data)
+    active-unmaterialized-data|active-unmaterialized-activation|\
+    active-unmaterialized-capacity|prospective-active-unmaterialized-data)
       printf '%s\n' active
       ;;
     inactive-workflow-unmaterialized-data)
@@ -408,9 +409,14 @@ emit_successful_runs() {
   case "${STUB_MODE:-none}" in
     superseded-capacity|current-superseded-capacity|\
     recent-superseded-capacity|pending-superseded-capacity|\
-    jobs-superseded-capacity|wrong-attempt-superseded-capacity)
+    jobs-superseded-capacity|wrong-attempt-superseded-capacity|\
+    approved-superseded-capacity)
       printf '{"total_count":1,"workflow_runs":[{"id":124,"workflow_id":%s,"path":"%s","head_branch":"master","head_sha":"%s","event":"workflow_dispatch","run_attempt":1,"status":"completed","conclusion":"success","created_at":"1970-01-01T00:32:30Z","display_title":"oci-capacity-acquire %s"}]}\n' \
         "$WORKFLOW_ID" "$path" "$OLD_SHA" "$OLD_SHA"
+      ;;
+    wrong-title-superseded-capacity)
+      printf '{"total_count":1,"workflow_runs":[{"id":124,"workflow_id":%s,"path":"%s","head_branch":"master","head_sha":"%s","event":"workflow_dispatch","run_attempt":1,"status":"completed","conclusion":"success","created_at":"1970-01-01T00:32:30Z","display_title":"wrong title"}]}\n' \
+        "$WORKFLOW_ID" "$path" "$OLD_SHA"
       ;;
     rerun-superseded-capacity)
       printf '{"total_count":1,"workflow_runs":[{"id":124,"workflow_id":%s,"path":"%s","head_branch":"master","head_sha":"%s","event":"workflow_dispatch","run_attempt":2,"status":"completed","conclusion":"success","created_at":"1970-01-01T00:32:30Z","display_title":"oci-capacity-acquire %s"}]}\n' \
@@ -644,6 +650,13 @@ gh() {
         printf '%s\n' '[]'
       fi
       ;;
+    "repos/$REPOSITORY/actions/runs/$RUN_ID/approvals")
+      if [[ "$mode" == approved-superseded-capacity || "$mode" == approved-unmaterialized-data ]]; then
+        printf '%s\n' '[{"state":"approved"}]'
+      else
+        printf '%s\n' '[]'
+      fi
+      ;;
     "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=1")
       case "$mode" in
         artifacts-unmaterialized-data)
@@ -771,7 +784,7 @@ run_case stale-disabled >/dev/null
 REPO="$REPOSITORY" NOW_EPOCH=2000 STUB_MODE=active EXCLUDE_RUN_ID="$RUN_ID" \
   "$EXCLUSIVITY" >/dev/null
 
-for mode in superseded-capacity superseded-data superseded-activation; do
+for mode in superseded-capacity; do
   output="$(run_case "$mode")"
   grep -qF 'reason=superseded' <<<"$output" || {
     echo "supersession classifier did not retain reason=superseded mode=$mode" >&2
@@ -782,7 +795,6 @@ done
 for mode in \
   unmaterialized-data \
   paginated-unmaterialized-data \
-  active-unmaterialized-data \
   unmaterialized-activation \
   unmaterialized-capacity; do
   output="$(run_case "$mode")"
@@ -865,9 +877,13 @@ for mode in \
   current-superseded-capacity \
   recent-superseded-capacity pending-superseded-capacity \
   jobs-superseded-capacity wrong-attempt-superseded-capacity \
+  approved-superseded-capacity wrong-title-superseded-capacity \
   superseded-deploy \
+  superseded-data superseded-activation \
   unfenced-superseded-data nonancestor-superseded-data \
   current-unmaterialized-data \
+  active-unmaterialized-data active-unmaterialized-activation \
+  active-unmaterialized-capacity approved-unmaterialized-data \
   rendered-title-unmaterialized-data \
   rendered-title-unmaterialized-activation \
   rendered-title-unmaterialized-capacity \

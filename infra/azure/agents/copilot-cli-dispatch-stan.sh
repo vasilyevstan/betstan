@@ -85,6 +85,7 @@ terminal_rejection_jobs_file="$tmp_dir/terminal-rejection-jobs.json"
 terminal_rejection_pending_file="$tmp_dir/terminal-rejection-pending.json"
 terminal_rejection_approvals_file="$tmp_dir/terminal-rejection-approvals.json"
 materialization_error="$tmp_dir/materialization.err"
+prerequisite_error_file="$tmp_dir/prerequisite.err"
 promotion_file="$tmp_dir/promotion.json"
 authority_lock_run_id=""
 authority_lock_token=""
@@ -114,6 +115,7 @@ cleanup() {
     "$terminal_rejection_pending_file" \
     "$terminal_rejection_approvals_file" \
     "$materialization_error" \
+    "$prerequisite_error_file" \
     "$promotion_file"
   rmdir "$tmp_dir" 2>/dev/null || true
 }
@@ -428,7 +430,8 @@ retire_terminal_claim() {
 materialize_record() {
   local run_id="$1"
   local attempt
-  local summary state version prerequisite_error run_status
+  local summary state version run_status
+  local failure_summary failure_reason failure_evidence_sha256
 
   summary="$(
     "$AUTHORITY_HELPER" verify \
@@ -509,16 +512,22 @@ materialize_record() {
         retire_terminal_claim "$run_id"
         return
       fi
-      if ! prerequisite_error="$(
-        {
+      rm -f "$prerequisite_error_file"
+      if ! (
+        revalidate_control &&
+          validate_protected_prerequisites &&
           revalidate_control
-          validate_protected_prerequisites
-          revalidate_control
-        } 2>&1
-      )"; then
+      ) >"$prerequisite_error_file" 2>&1; then
+        chmod 600 "$prerequisite_error_file"
+        failure_summary="$(
+          summarize_prerequisite_failure "$prerequisite_error_file"
+        )"
+        failure_reason="$(jq -r '.reason' <<<"$failure_summary")"
+        failure_evidence_sha256="$(jq -r '.sha256' <<<"$failure_summary")"
         if [[ "$run_status" = "waiting" ]]; then
           begin_prerequisite_rejection \
-            "$run_id" "$version" "$prerequisite_error"
+            "$run_id" "$version" \
+            "$failure_reason" "$failure_evidence_sha256"
         fi
         release_authority_lock
         if [[ "$run_status" =~ ^(queued|pending|requested)$ ]]; then
@@ -526,9 +535,9 @@ materialize_record() {
             sleep "$MATERIALIZATION_SLEEP_SECONDS"
             continue
           fi
-          fail "$prerequisite_error; exact run $run_id has not reached its protected gate, so claimed authority remains fenced"
+          fail "$failure_reason; exact run $run_id has not reached its protected gate, so claimed authority remains fenced"
         fi
-        fail "$prerequisite_error; exact run $run_id is not provably unstarted at its protected gate, so claimed authority remains fenced"
+        fail "$failure_reason; exact run $run_id is not provably unstarted at its protected gate, so claimed authority remains fenced"
       fi
       if ! gh api \
         "repos/$repository/actions/runs/$run_id" \
@@ -625,11 +634,45 @@ validate_protected_prerequisites() {
   validate_upstream_run_bindings
 }
 
+validate_production_exclusivity() {
+  REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+    "$RUN_EXCLUSIVITY_SCRIPT"
+}
+
+summarize_prerequisite_failure() {
+  local failure_file="$1"
+  python3 - "$failure_file" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+text = raw.decode("utf-8", errors="replace")
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+parts = []
+for line in text.splitlines():
+    line = ansi.sub(" ", line)
+    safe = "".join(character if character.isprintable() else " " for character in line)
+    normalized = " ".join(safe.split())
+    if normalized:
+        parts.append(normalized)
+reason = " | ".join(parts) or "protected prerequisite validation failed"
+while len(reason.encode("utf-8")) > 4096:
+    reason = reason[:-1]
+print(json.dumps({
+    "reason": reason,
+    "sha256": hashlib.sha256(raw).hexdigest(),
+}, separators=(",", ":"), sort_keys=True))
+PY
+}
+
 begin_prerequisite_rejection() {
   local run_id="$1"
   local expected_version="$2"
-  local prerequisite_error="$3"
-  local failure_summary failure_reason failure_evidence_sha256
+  local failure_reason="$3"
+  local failure_evidence_sha256="$4"
   local rejection_summary rejection_version
 
   rm -f \
@@ -656,29 +699,6 @@ begin_prerequisite_rejection() {
     "$pre_rejection_pending_file" \
     "$pre_rejection_approvals_file"
 
-  failure_summary="$(
-    printf '%s' "$prerequisite_error" |
-      python3 -c '
-import hashlib
-import json
-import sys
-
-raw = sys.stdin.buffer.read()
-text = raw.decode("utf-8")
-parts = [" ".join(line.split()) for line in text.splitlines()]
-reason = " | ".join(part for part in parts if part)
-if not reason:
-    reason = "protected prerequisite validation failed"
-while len(reason.encode("utf-8")) > 4096:
-    reason = reason[:-1]
-print(json.dumps({
-    "reason": reason,
-    "sha256": hashlib.sha256(raw).hexdigest(),
-}, separators=(",", ":"), sort_keys=True))
-'
-  )"
-  failure_reason="$(jq -r '.reason' <<<"$failure_summary")"
-  failure_evidence_sha256="$(jq -r '.sha256' <<<"$failure_summary")"
   [[ -n "$failure_reason" ]] ||
     fail "prerequisite rejection failure summary is empty"
   [[ "$failure_evidence_sha256" =~ ^[0-9a-f]{64}$ ]] ||
@@ -703,12 +723,12 @@ print(json.dumps({
       --workflow-id "$workflow_id" \
       --workflow-blob-sha "$workflow_blob_sha"
   )" ||
-    fail "$prerequisite_error; the exact run is not provably unstarted at its protected gate, so claimed authority remains fenced"
+    fail "$failure_reason; the exact run is not provably unstarted at its protected gate, so claimed authority remains fenced"
   rejection_version="$(jq -r '.version' <<<"$rejection_summary")"
   [[ "$(jq -r '.state' <<<"$rejection_summary")" = "rejecting" ]] ||
     fail "prerequisite rejection did not persist its authority state"
   continue_prerequisite_rejection \
-    "$run_id" "$rejection_version" "$prerequisite_error"
+    "$run_id" "$rejection_version" "$failure_reason"
 }
 
 continue_prerequisite_rejection() {
@@ -927,8 +947,7 @@ if [[ -n "$blocking_record" ]]; then
 fi
 
 revalidate_dispatch_target
-REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
-  "$RUN_EXCLUSIVITY_SCRIPT"
+validate_production_exclusivity
 revalidate_dispatch_target
 
 intent_summary="$(
@@ -951,9 +970,11 @@ intent_version="$(jq -r '.version' <<<"$intent_summary")"
 
 if ! dispatch_revalidation_error="$(
   {
-    revalidate_dispatch_target
-    validate_protected_prerequisites
-    revalidate_dispatch_target
+    revalidate_dispatch_target &&
+      validate_protected_prerequisites &&
+      revalidate_dispatch_target &&
+      validate_production_exclusivity &&
+      revalidate_dispatch_target
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" cancel-intent \

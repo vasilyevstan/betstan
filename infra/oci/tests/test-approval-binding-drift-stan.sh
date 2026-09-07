@@ -34,16 +34,37 @@ import sys
 text = open(sys.argv[1], encoding="utf-8").read()
 definition = text.index("revalidate_upstream_bindings() {")
 claim = text.index('"$AUTHORITY_HELPER" claim-approval')
-approve_api = text.index("--method POST")
-release = text.index('"$AUTHORITY_HELPER" release-approval')
 pre = text.index("\nrevalidate_upstream_bindings\n", definition)
-post = text.index("    revalidate_upstream_bindings\n", claim)
+post_start = text.index('if ! approval_revalidation_error="$(', claim)
+post_end = text.index(')"; then', post_start)
+post_body = text[post_start:post_end]
+post_positions = {
+    name: post_body.index(name)
+    for name in (
+        "revalidate_upstream_bindings",
+        "validate_promotion",
+        "validate_exclusivity",
+        "validate_pending_gate",
+        "validate_claimed_gate_identity",
+        "revalidate_control",
+    )
+}
+if list(post_positions.values()) != sorted(post_positions.values()):
+    raise SystemExit("post-claim mutable checks do not end at exact control")
+release = text.index('"$AUTHORITY_HELPER" release-approval', post_end)
+approve_api = text.index("--method POST", release)
 if not definition < pre < claim:
     raise SystemExit("bindings are not revalidated before the inflight claim")
-if not claim < post < approve_api:
+if not claim < post_start < post_end < approve_api:
     raise SystemExit("bindings are not revalidated after the claim")
-if not post < release < approve_api:
+if not post_end < release < approve_api:
     raise SystemExit("post-claim drift does not release the inflight claim")
+release_body = text[release:approve_api]
+if (
+    '--environment-id "$claimed_environment_id"' not in release_body
+    or '--gate-key "$claimed_gate_key"' not in release_body
+):
+    raise SystemExit("post-claim drift does not release the exact claimed gate")
 # The approver must reuse the shared validator and shared policy, never a third
 # implementation that can drift from dispatch-time enforcement.
 if "upstream_run_binding_stan.py" not in text:

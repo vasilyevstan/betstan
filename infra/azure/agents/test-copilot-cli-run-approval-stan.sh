@@ -231,6 +231,11 @@ git() {
   esac
 }
 
+authority_is_inflight() {
+  local record="$authority_dir/${STUB_RUN_ID:-0}.json"
+  [[ -f "$record" ]] && jq -e '.state == "inflight"' "$record" >/dev/null 2>&1
+}
+
 gh() {
   if [[ "$1 $2" = "repo view" ]]; then
     printf '%s\n' "$REPOSITORY"
@@ -289,7 +294,13 @@ gh() {
       printf '%s\n' "${STUB_MASTER_SHA:-$SHA}"
       ;;
     "repos/$REPOSITORY/commits/$SHA/pulls")
-      if [[ "${STUB_HUMAN_PROMOTION:-false}" = "true" ]]; then
+      if [[
+        "${STUB_HUMAN_PROMOTION:-false}" = "true" ||
+          (
+            "${STUB_PROMOTION_FAIL_WHEN_INFLIGHT:-false}" = "true" &&
+              "$(authority_is_inflight && printf true || printf false)" = "true"
+          )
+      ]]; then
         printf '[{"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"%s","base":{"ref":"master"},"head":{"ref":"dev"},"labels":[]}]\n' "$SHA"
       else
         printf '[{"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"%s","base":{"ref":"master"},"head":{"ref":"dev"},"labels":[{"name":"copilot-cli-managed"}]}]\n' "$SHA"
@@ -410,9 +421,16 @@ gh() {
       if [[ "${STUB_NO_PENDING:-false}" = "true" ]]; then
         printf '[]\n'
       else
+        local pending_environment_id="${STUB_ENV_ID:-901}"
+        if [[
+          -n "${STUB_ENV_ID_WHEN_INFLIGHT:-}" &&
+            "$(authority_is_inflight && printf true || printf false)" = "true"
+        ]]; then
+          pending_environment_id="$STUB_ENV_ID_WHEN_INFLIGHT"
+        fi
         jq -cn \
           --arg environment "${STUB_PENDING_ENV:-$STUB_ENV}" \
-          --argjson environment_id "${STUB_ENV_ID:-901}" \
+          --argjson environment_id "$pending_environment_id" \
           --argjson can_approve "${STUB_CAN_APPROVE:-true}" \
           '[{
             environment:{id:$environment_id,name:$environment},
@@ -458,6 +476,13 @@ PY
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
       if [[
+        "${STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT:-false}" = "true" &&
+          "$(authority_is_inflight && printf true || printf false)" = "true"
+      ]]; then
+        printf '%s\n' '{'
+        return
+      fi
+      if [[
         "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" &&
           -n "${PROSPECTIVE_PROMOTION_PR:-}"
       ]]; then
@@ -475,11 +500,12 @@ PY
       ;;
   esac
 }
-export -f git gh workflow_id_for approval_state_for
+export -f git gh authority_is_inflight workflow_id_for approval_state_for
 export -f binding_run_json binding_artifacts_json binding_artifact_zip
 export ROOT_DIR SHA TARGET_SHA BLOB REPOSITORY post_count_file approval_history_file
 export workflow_state_count_file
 export STUB_PACKAGE_CANDIDATE_BUILD_ID
+export authority_dir
 mkdir "$tmp_dir/bin"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -705,6 +731,9 @@ load_record_stub() {
   unset STUB_RUN_STATUS STUB_RUN_CONCLUSION
   unset STUB_API_BLOB STUB_JOB_ID STUB_WORKFLOW_STATE
   unset STUB_CHANGE_STATE_ON_CALL
+  unset STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT
+  unset STUB_PROMOTION_FAIL_WHEN_INFLIGHT
+  unset STUB_ENV_ID_WHEN_INFLIGHT
   unset STUB_OCI_RUNTIME_MODE
   unset STUB_PACKAGE_CREATED_AT
   unset STUB_PACKAGE_CANDIDATE_BUILD_ID
@@ -872,6 +901,51 @@ observed_post_count=0
 [[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
 [[ "$observed_post_count" = "$post_count_before" ]]
 rm -f "$workflow_state_count_file"
+
+load_record_stub production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_PROMOTION_FAIL_WHEN_INFLIGHT=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "post-claim promotion failure unexpectedly approved GitHub" >&2
+  exit 1
+fi
+grep -qF "not bound to exactly one CLI-managed dev promotion" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
+
+load_record_stub production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "post-claim exclusivity failure unexpectedly approved GitHub" >&2
+  exit 1
+fi
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
+
+load_record_stub oci-production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_ENV_ID=901 STUB_ENV_ID_WHEN_INFLIGHT=902 \
+  COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "changed post-claim gate unexpectedly approved GitHub" >&2
+  exit 1
+fi
+grep -qF "pending environment changed after approval authority claim" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
 
 load_record_stub production-deploy
 if STUB_DIRTY_CHECKOUT=true \

@@ -173,6 +173,14 @@ master. Never extend that historical-control exception to dispatch, issue, or
 approval, and ignore a current-master ghost only after refreshed evidence
 proves it is pristine and its workflow is manually disabled.
 
+Do not generalize ghost supersession across mutating workflows. Active stale
+data and activation runs remain fences; only a pristine approval-free capacity
+ghost may be superseded by an exact later successful first attempt. After an
+approval claim, use an explicit short-circuiting check sequence and operate
+only on the originally claimed gate identity. Place final provider-boundary
+checks in the live mutating job and bracket upstream validation with fresh
+`master` and runtime-mode observations.
+
 ## Release and operations
 
 ### Build and deploy exact immutable identities

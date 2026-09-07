@@ -1695,6 +1695,7 @@ def validate_unmaterialized_run_evidence(
     workflow,
     jobs,
     pending,
+    approvals,
     artifacts,
     compare,
     historical_workflow,
@@ -1815,6 +1816,8 @@ def validate_unmaterialized_run_evidence(
             fail(f"{label} are not an exact zero-count list")
     if not isinstance(pending, list) or pending:
         fail("workflow run has pending deployments")
+    if not isinstance(approvals, list) or approvals:
+        fail("workflow run has approval history")
 
     _, historical_blob_sha = decode_historical_workflow(
         historical_workflow,
@@ -1872,6 +1875,11 @@ def load_unmaterialized_evidence(args):
         "artifacts": load_json_file(
             args.artifacts_json,
             "workflow artifacts response",
+            private=True,
+        ),
+        "approvals": load_json_file(
+            args.approvals_json,
+            "workflow approval history",
             private=True,
         ),
         "compare": load_json_file(
@@ -3875,6 +3883,7 @@ def build_parser():
     classify_unmaterialized.add_argument("--workflow-json", required=True)
     classify_unmaterialized.add_argument("--jobs-json", required=True)
     classify_unmaterialized.add_argument("--pending-json", required=True)
+    classify_unmaterialized.add_argument("--approvals-json", required=True)
     classify_unmaterialized.add_argument("--artifacts-json", required=True)
     classify_unmaterialized.add_argument("--compare-json", required=True)
     classify_unmaterialized.add_argument(
@@ -3915,6 +3924,7 @@ def build_parser():
     retire_unmaterialized_claim.add_argument("--workflow-json", required=True)
     retire_unmaterialized_claim.add_argument("--jobs-json", required=True)
     retire_unmaterialized_claim.add_argument("--pending-json", required=True)
+    retire_unmaterialized_claim.add_argument("--approvals-json", required=True)
     retire_unmaterialized_claim.add_argument("--artifacts-json", required=True)
     retire_unmaterialized_claim.add_argument("--compare-json", required=True)
     retire_unmaterialized_claim.add_argument(

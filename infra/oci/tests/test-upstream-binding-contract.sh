@@ -544,6 +544,10 @@ if post_claim_body.rfind("revalidate_dispatch_target") < post_claim_body.index(
     "validate_protected_prerequisites"
 ):
     raise SystemExit("fresh dispatch does not revalidate mutable master after prerequisites")
+if post_claim_body.rfind("validate_production_exclusivity") < post_claim_body.index(
+    "validate_protected_prerequisites"
+):
+    raise SystemExit("fresh dispatch does not revalidate production exclusivity after prerequisites")
 if ".dispatchInputs" not in text:
     raise SystemExit("dispatcher must read the hashed dispatchInputs map")
 if "OCI_RUNTIME_MODE" not in text:
@@ -562,8 +566,14 @@ provision = text.index("\n  provision:")
 gate = text.index("Bind runtime mode and prove upstream prerequisites", provision)
 ghcr = text.index("Verify GHCR build and package evidence content", provision)
 capacity = text.index("Download bound k3s capacity provenance", provision)
+install = text.index("Install pinned OCI CLI", provision)
+refresh = text.index("Revalidate exact authority before cloud access", provision)
+identity = text.index("Verify OCI identity", provision)
+cloud = text.index("Zero-cost preflight and cloud reconciliation", provision)
 for name in (
-    "Install pinned OCI CLI and verify identity",
+    "Install pinned OCI CLI",
+    "Revalidate exact authority before cloud access",
+    "Verify OCI identity",
     "Zero-cost preflight and cloud reconciliation",
     "Reconcile expired GitHub runner rules",
     "Install pinned cluster add-ons",
@@ -571,6 +581,29 @@ for name in (
 ):
     if not gate < ghcr < capacity < text.index(name, provision):
         raise SystemExit(f"binding validation must precede: {name}")
+if not capacity < install < refresh < identity < cloud:
+    raise SystemExit(
+        "exact authority must be refreshed in provision immediately before OCI identity"
+    )
+if text.count("Revalidate exact authority before cloud access") != 1:
+    raise SystemExit("exact cloud-boundary refresh must exist only in provision")
+refresh_body = text[refresh:identity]
+for required in (
+    'git fetch --quiet origin master:refs/remotes/origin/master',
+    '[ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]',
+    'variables/OCI_RUNTIME_MODE',
+    '[ "$observed_runtime_mode" = "$BOUND_RUNTIME_MODE" ]',
+    'bind-infrastructure-prerequisites-stan.sh',
+):
+    if required not in refresh_body:
+        raise SystemExit(f"cloud-boundary refresh omits: {required}")
+if refresh_body.count("revalidate_mutable_authority") != 3:
+    raise SystemExit("cloud-boundary refresh must bracket upstream validation")
+first_refresh = refresh_body.index("revalidate_mutable_authority", refresh_body.index("}") + 1)
+binding_refresh = refresh_body.index("bind-infrastructure-prerequisites-stan.sh")
+last_refresh = refresh_body.rindex("revalidate_mutable_authority")
+if not first_refresh < binding_refresh < last_refresh:
+    raise SystemExit("mutable authority is not rechecked after upstream validation")
 if "--workflow oci-capacity-acquire.yml" in text:
     raise SystemExit("finalize still scans for capacity runs")
 # The gate body lives in an executable script so it can be run under `set -u`
@@ -595,7 +628,7 @@ if "$DISPATCH_INPUTS" not in gate_body:
 # image provenance) keep their own long-standing validate_run helper.
 evidence = text.index("Verify GHCR build and package evidence content", provision)
 after_capacity = text.index(
-    "Install pinned OCI CLI and verify identity", provision
+    "Install pinned OCI CLI", provision
 )
 finalize_region = text[evidence:after_capacity]
 for duplicated in ("head_sha", "run_attempt", "actions/workflows/"):

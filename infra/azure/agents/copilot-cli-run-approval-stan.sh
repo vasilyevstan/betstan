@@ -807,6 +807,13 @@ validate_exclusivity() {
     "$RUN_EXCLUSIVITY_SCRIPT"
 }
 
+validate_claimed_gate_identity() {
+  [[ "$environment_id" = "$claimed_environment_id" ]] ||
+    fail "pending environment changed after approval authority claim"
+  [[ "$gate_key" = "$claimed_gate_key" ]] ||
+    fail "waiting job set changed after approval authority claim"
+}
+
 if [[ "$ACTION" = "--reconcile" ]]; then
   validate_authority_and_run "reconcile" "__ANY__"
   ensure_automatic_authority_record
@@ -969,15 +976,12 @@ claimed_version="$(
 
 if ! approval_revalidation_error="$(
   {
-    validate_pending_gate
-    [[ "$environment_id" = "$claimed_environment_id" ]] ||
-      fail "pending environment changed after approval authority claim"
-    [[ "$gate_key" = "$claimed_gate_key" ]] ||
-      fail "waiting job set changed after approval authority claim"
-    validate_exclusivity
-    revalidate_control
-    validate_promotion
-    revalidate_upstream_bindings
+    revalidate_upstream_bindings &&
+      validate_promotion &&
+      validate_exclusivity &&
+      validate_pending_gate &&
+      validate_claimed_gate_identity &&
+      revalidate_control
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" release-approval \
@@ -987,15 +991,15 @@ if ! approval_revalidation_error="$(
     --token "$lock_token" \
     --approval-run-id "$RUN_ID" \
     --approval-operation "$EXPECTED_OPERATION" \
-    --environment-id "$environment_id" \
-    --gate-key "$gate_key"
+    --environment-id "$claimed_environment_id" \
+    --gate-key "$claimed_gate_key"
   fail "$approval_revalidation_error"
 fi
 
 if ! gh api \
   --method POST \
   "repos/$repository/actions/runs/$RUN_ID/pending_deployments" \
-  -F "environment_ids[]=$environment_id" \
+  -F "environment_ids[]=$claimed_environment_id" \
   -f state=approved \
   -f "comment=$approval_comment" \
   >/dev/null; then
@@ -1010,8 +1014,8 @@ fi
   --expected-version "$claimed_version" \
   --approval-run-id "$RUN_ID" \
   --approval-operation "$EXPECTED_OPERATION" \
-  --environment-id "$environment_id" \
-  --gate-key "$gate_key"
+  --environment-id "$claimed_environment_id" \
+  --gate-key "$claimed_gate_key"
 
 "$AUTHORITY_HELPER" release-lock \
   --authority-dir "$AUTHORITY_DIR" \

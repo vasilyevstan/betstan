@@ -223,6 +223,16 @@ jobs_json() {
 }
 
 runtime_mode() {
+  if [[ "${STUB_RUNTIME_MODE_BINARY_FAIL:-}" = true ]]; then
+    python3 - <<'PY' >&2
+import sys
+
+sys.stderr.buffer.write(
+    b"provider \x1b[31mfailed\x1b[0m\ninvalid:\xff\x00\n\n"
+)
+PY
+    return 1
+  fi
   if [[ "${STUB_RUNTIME_MODE_API_FAIL:-}" = true ]]; then
     echo "provider runtime mode read failed" >&2
     echo "provider diagnostic detail" >&2
@@ -399,7 +409,7 @@ export MASTER_COUNT_FILE STUB_APPROVED_RUN STUB_DELAYED_CANCEL_RUN
 export STUB_MASTER_CHANGE_AT
 export STUB_TERMINAL_API_FAIL_RUN STUB_SUCCESSFUL_STEP_RUN
 export STUB_LIVE_MASTER_SHA
-export STUB_RUNTIME_MODE_API_FAIL
+export STUB_RUNTIME_MODE_API_FAIL STUB_RUNTIME_MODE_BINARY_FAIL
 export STUB_INCOMPLETE_STEP_RUN STUB_MISSING_STEPS_RUN
 
 run_dispatcher() {
@@ -595,6 +605,45 @@ jq -e '
     contains("provider runtime mode read failed | provider diagnostic detail")) and
   (.rejection.failureEvidenceSha256 | test("^[0-9a-f]{64}$"))
 ' "$multiline_authority/711.json" >/dev/null
+
+binary_authority="$WORK/binary-authority"
+binary_request="$WORK/binary-request.json"
+binary_normalized="$WORK/binary-normalized.json"
+make_request oci-infrastructure-prepare-k3s "$binary_request"
+prepare_unresolved \
+  oci-infrastructure-prepare-k3s \
+  713 \
+  claimed \
+  "$binary_authority" \
+  "$binary_request" \
+  "$binary_normalized"
+if STUB_RUNTIME_MODE_BINARY_FAIL=true \
+  run_dispatcher "$binary_authority" \
+    "$binary_request" --resume-run 713 >"$WORK/out" 2>"$WORK/err"; then
+  echo "binary prerequisite failure unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "exact run 713 was cancelled" "$WORK/err"
+expected_binary_digest="$(
+  python3 - <<'PY'
+import hashlib
+
+raw = (
+    b"provider \x1b[31mfailed\x1b[0m\ninvalid:\xff\x00\n\n"
+    b"unable to read the authoritative runtime mode for oci-infrastructure\n"
+)
+print(hashlib.sha256(raw).hexdigest())
+PY
+)"
+jq -e \
+  --arg expected_digest "$expected_binary_digest" '
+    .state == "retired" and
+    (.rejection.failureReason | contains("provider failed")) and
+    (.rejection.failureReason | contains("invalid:")) and
+    ([.rejection.failureReason | explode[] |
+      select(. < 32 or . == 127)] | length) == 0 and
+    .rejection.failureEvidenceSha256 == $expected_digest
+  ' "$binary_authority/713.json" >/dev/null
 
 missing_steps_authority="$WORK/missing-steps-authority"
 missing_steps_request="$WORK/missing-steps-request.json"

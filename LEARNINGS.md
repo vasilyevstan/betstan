@@ -1226,3 +1226,15 @@ Durable rules:
   current-master ghost may be ignored only after refreshing its run, workflow,
   jobs, pending deployments, and artifacts and proving the workflow is
   manually disabled.
+- Active stale data or activation runs always remain production fences. The
+  only active-run supersession exception is a pristine, approval-free capacity
+  ghost with an exact later successful first attempt for the same workflow,
+  SHA, event, and rendered title.
+- Post-claim approval checks must be an explicit short-circuiting chain. After
+  immutable artifact validation, recheck promotion, production exclusivity,
+  the exact pending gate, and finally current control; release or complete only
+  the originally claimed environment and waiting-job fingerprint.
+- Put the final cloud-boundary refresh in the live job that performs the
+  mutation, not a similarly named retired job. Bracket upstream validation
+  with fresh `master` and runtime-mode checks immediately before the first
+  provider API call.

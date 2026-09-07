@@ -198,6 +198,18 @@ gh() {
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
+      if [[
+        "${STUB_EXCLUSIVITY_FAIL_WHEN_INTENT:-false}" == "true" &&
+          -n "${COPILOT_CLI_AUTHORITY_DIR:-}" &&
+          -n "$(
+            find "$COPILOT_CLI_AUTHORITY_DIR" \
+              -maxdepth 1 -type f -name 'request-*.json' -print -quit \
+              2>/dev/null
+          )"
+      ]]; then
+        printf '%s\n' '{'
+        return
+      fi
       if [[ "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" ]]; then
         if [[ -n "${PROSPECTIVE_PROMOTION_PR:-}" ]]; then
           echo "normal dispatcher leaked prospective promotion context" >&2
@@ -337,6 +349,7 @@ jobs = {"total_count": 0, "jobs": []}
 if mode == "jobs":
     jobs = {"total_count": 1, "jobs": [{"id": 1}]}
 pending = [] if mode != "pending" else [{"environment": {"id": 1}}]
+approvals = [] if mode != "approved" else [{"state": "approved"}]
 artifacts = {"total_count": 0, "artifacts": []}
 if mode == "artifacts":
     artifacts = {"total_count": 1, "artifacts": [{"id": 1}]}
@@ -383,6 +396,7 @@ for name, value in {
     },
     "jobs.json": jobs,
     "pending.json": pending,
+    "approvals.json": approvals,
     "artifacts.json": artifacts,
     "compare.json": compare,
     "historical.json": historical,
@@ -464,6 +478,7 @@ retire_unmaterialized_claim() {
     --workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/workflow.json" \
     --jobs-json "$UNMATERIALIZED_EVIDENCE_DIR/jobs.json" \
     --pending-json "$UNMATERIALIZED_EVIDENCE_DIR/pending.json" \
+    --approvals-json "$UNMATERIALIZED_EVIDENCE_DIR/approvals.json" \
     --artifacts-json "$UNMATERIALIZED_EVIDENCE_DIR/artifacts.json" \
     --compare-json "$UNMATERIALIZED_EVIDENCE_DIR/compare.json" \
     --historical-workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/historical.json" \
@@ -708,6 +723,21 @@ grep -qF "must be active immediately before dispatch" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
 [[ -z "$(find "$authority_dir" -maxdepth 1 -type f -print -quit)" ]]
 rm -f "$workflow_state_count_file"
+
+write_request
+final_exclusivity_authority="$tmp_dir/final-exclusivity-authority"
+if TEST_AUTHORITY_DIR="$final_exclusivity_authority" \
+  STUB_EXCLUSIVITY_FAIL_WHEN_INTENT=true \
+  STUB_RUN_ID=7098 \
+  run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+  echo "post-claim production exclusivity failure unexpectedly dispatched" >&2
+  exit 1
+fi
+[[ ! -e "$dispatch_count_file" ]]
+[[ -z "$(
+  find "$final_exclusivity_authority" \
+    -maxdepth 1 -type f -name 'request-*.json' -print -quit
+)" ]]
 
 write_request
 if TEST_AUTHORITY_DIR="$ROOT_DIR/unsafe-authority-test" \
