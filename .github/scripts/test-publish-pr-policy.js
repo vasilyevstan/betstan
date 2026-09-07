@@ -525,12 +525,15 @@ async function execute({
   authorizationStatuses = [],
   transitionStatuses = [qualityTransitionStatus()],
   commitStatusesByRef = {},
+  commitStatusPagesByRef = {},
   comparisonStatus = "identical",
   comparisonsByBasehead = {},
   branchShas = { master: BASE_SHA, dev: HEAD_SHA },
   statusSink,
   policyRunOverrides = {},
   policyRunOverridesById = {},
+  branchWorkflowOverrides = {},
+  qualityWorkflowOverrides = {},
   workflowRunsById = {},
   workflowJobsByRunId = {},
   workflowJobPagesByRunId = {},
@@ -699,6 +702,15 @@ async function execute({
           }
         },
         listCommitStatusesForRef: async ({ ref, page }) => {
+          const explicitPages = commitStatusPagesByRef[ref];
+          if (explicitPages) {
+            return {
+              data:
+                page <= explicitPages.length
+                  ? explicitPages[page - 1]
+                  : [],
+            };
+          }
           const inventory = commitStatusesByRef[ref] ??
             (ref === MERGE_SHA
               ? staleTransitionStatusReads
@@ -745,10 +757,12 @@ async function execute({
               ? {
                   id: 201,
                   path: ".github/workflows/branch-policy.yml",
+                  ...branchWorkflowOverrides,
                 }
               : {
                   id: 202,
                   path: ".github/workflows/production-build.yml",
+                  ...qualityWorkflowOverrides,
                 },
         }),
         getWorkflowRun: async ({ run_id: runId }) => {
@@ -4758,6 +4772,7 @@ async function main() {
     { repository: "other/repo" },
     { headRepository: "other/repo" },
     { pullNumber: 64 },
+    { pullNumber: Number.MAX_SAFE_INTEGER + 1 },
     { headRef: "other-branch" },
     { headSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
     { headRef: "dev" },
@@ -4886,6 +4901,101 @@ async function main() {
         description.includes(`|${promotionFixture.promotionRun.id}|1|`),
     ),
   );
+
+  const oversizedStatusPage = coveragePromotionFixture();
+  const sourceReceiptStatuses =
+    oversizedStatusPage.options.commitStatusesByRef[BASE_SHA];
+  oversizedStatusPage.options.commitStatusPagesByRef = {
+    [BASE_SHA]: [
+      [
+        ...Array.from({ length: 99 }, (_, index) => ({
+          id: 10_000 + index,
+          context: `unrelated-status-${index}`,
+          state: "success",
+          description: null,
+          target_url: null,
+          created_at: "2026-09-02T10:00:00.000Z",
+          creator: ACTIONS_BOT,
+        })),
+        ...sourceReceiptStatuses,
+      ],
+      [],
+    ],
+  };
+  const oversizedStatusResult = await execute(
+    oversizedStatusPage.options,
+  );
+  assertQualityFailure(oversizedStatusResult);
+  assert.equal(oversizedStatusPage.promotionReceipt.length, 0);
+  assert(
+    oversizedStatusResult.messages.some((message) =>
+      message.includes("authorization receipt response is malformed"),
+    ),
+  );
+
+  const unsafeStatusIdentity = coveragePromotionFixture();
+  unsafeStatusIdentity.options.commitStatusesByRef[BASE_SHA][0].id =
+    Number.MAX_SAFE_INTEGER + 1;
+  const unsafeStatusResult = await execute(
+    unsafeStatusIdentity.options,
+  );
+  assertQualityFailure(unsafeStatusResult);
+  assert.equal(unsafeStatusIdentity.promotionReceipt.length, 0);
+  assert(
+    unsafeStatusResult.messages.some((message) =>
+      message.includes("commit status entry is malformed"),
+    ),
+  );
+
+  for (const receiptPolicyRunCase of [
+    {
+      name: "mismatched run response ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].id = 302;
+      },
+    },
+    {
+      name: "Boolean run workflow ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].workflow_id = true;
+      },
+    },
+    {
+      name: "unsafe run workflow ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].workflow_id =
+          Number.MAX_SAFE_INTEGER + 1;
+      },
+    },
+    {
+      name: "Boolean relation PR number",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301]
+          .pull_requests[0].number = true;
+      },
+    },
+    {
+      name: "unsafe relation PR number",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301]
+          .pull_requests[0].number = Number.MAX_SAFE_INTEGER + 1;
+      },
+    },
+  ]) {
+    const invalidReceiptPolicyRun = coveragePromotionFixture();
+    receiptPolicyRunCase.mutate(invalidReceiptPolicyRun);
+    const result = await execute(invalidReceiptPolicyRun.options);
+    assertQualityFailure(result);
+    assert.equal(invalidReceiptPolicyRun.promotionReceipt.length, 0);
+    assert(
+      result.messages.some((message) =>
+        message.includes(
+          "coverage authorization receipt does not originate from trusted branch-policy",
+        ),
+      ),
+      receiptPolicyRunCase.name,
+    );
+  }
 
   const promotionReplay = await execute(promotionFixture.options);
   assertQualityFailure(promotionReplay);

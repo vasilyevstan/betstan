@@ -477,6 +477,16 @@ def github_timestamp(value):
         raise ValueError
     return parsed
 
+def epoch_milliseconds(parsed):
+    delta = parsed - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
+
 if (
     not isinstance(head_repository, str)
     or not repository_pattern.fullmatch(head_repository)
@@ -504,7 +514,7 @@ try:
     parsed_updated_at = github_timestamp(updated_at)
 except (TypeError, ValueError):
     raise SystemExit(1)
-updated_at_ms = int(parsed_updated_at.timestamp() * 1000)
+updated_at_ms = epoch_milliseconds(parsed_updated_at)
 
 label_names = []
 for label in labels:
@@ -605,6 +615,16 @@ def github_timestamp(value):
         raise ValueError
     return parsed
 
+def epoch_milliseconds(parsed):
+    delta = parsed - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
+
 head = pull.get("head")
 base = pull.get("base")
 labels = pull.get("labels")
@@ -637,7 +657,7 @@ try:
     updated = github_timestamp(pull["updated_at"])
 except ValueError:
     raise SystemExit(1)
-if int(updated.timestamp() * 1000) != int(updated_at_ms):
+if epoch_milliseconds(updated) != int(updated_at_ms):
     raise SystemExit(1)
 names = []
 for label in labels:
@@ -984,6 +1004,16 @@ def github_timestamp(value):
         raise ValueError
     return parsed
 
+def epoch_milliseconds(parsed):
+    delta = parsed - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
+
 for status in statuses:
     if (
         not isinstance(status, dict)
@@ -1004,7 +1034,7 @@ for status in statuses:
     created_at = status.get("created_at")
     match = description_pattern.fullmatch(description or "")
     try:
-        created_at_ms = int(github_timestamp(created_at).timestamp() * 1000)
+        created_at_ms = epoch_milliseconds(github_timestamp(created_at))
     except (AttributeError, ValueError):
         raise SystemExit(1)
     if (
@@ -1163,7 +1193,14 @@ try:
     parsed_created_at = github_timestamp(created_at)
 except (AttributeError, ValueError):
     raise SystemExit(1)
-created_at_ms = int(parsed_created_at.timestamp() * 1000)
+delta = parsed_created_at - datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc
+)
+created_at_ms = (
+    delta.days * 86_400_000
+    + delta.seconds * 1000
+    + delta.microseconds // 1000
+)
 if (
     not isinstance(workflow, dict)
     or type(workflow.get("id")) is not int
@@ -1274,9 +1311,15 @@ def github_timestamp(value):
     parsed = datetime.datetime.strptime(value, pattern).replace(
         tzinfo=datetime.timezone.utc
     )
-    if parsed < datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc):
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    if parsed < epoch:
         raise ValueError
-    return int(parsed.timestamp() * 1000)
+    delta = parsed - epoch
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
 
 try:
     created_at = github_timestamp(run.get("created_at"))
@@ -1472,9 +1515,23 @@ def timestamp(value):
         raise ValueError
     parsed = datetime.datetime.fromisoformat(value[:-1] + "+00:00")
     canonical = parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    if canonical != value:
+    if (
+        canonical != value
+        or parsed
+        < datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    ):
         raise ValueError
     return parsed
+
+def epoch_milliseconds(parsed):
+    delta = parsed - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
 
 def fingerprint(authorization):
     values = [
@@ -1646,8 +1703,8 @@ pathlib.Path(destination).write_text(
         f"{selected['receiptSha']}\n"
         f"{selected['adoptionSha']}\n"
         f"{fingerprint(selected)}\n"
-        f"{int(issued_at.timestamp() * 1000)}\n"
-        f"{int(expires_at.timestamp() * 1000)}\n"
+        f"{epoch_milliseconds(issued_at)}\n"
+        f"{epoch_milliseconds(expires_at)}\n"
         f"{selected['pullNumber']}\n"
         f"{selected['headRepository']}\n"
         f"{selected['headRef']}\n"
@@ -1765,6 +1822,16 @@ def github_timestamp(value):
         raise ValueError
     return parsed
 
+def epoch_milliseconds(parsed):
+    delta = parsed - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    return (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
+
 for status in statuses:
     if (
         not isinstance(status, dict)
@@ -1782,7 +1849,7 @@ for status in statuses:
     target_url = status.get("target_url")
     created_at = status.get("created_at")
     try:
-        created_ms = int(github_timestamp(created_at).timestamp() * 1000)
+        created_ms = epoch_milliseconds(github_timestamp(created_at))
     except (AttributeError, ValueError):
         raise SystemExit(1)
     match = description_pattern.fullmatch(description or "")
@@ -1933,7 +2000,14 @@ try:
         1970, 1, 1, tzinfo=datetime.timezone.utc
     ):
         raise ValueError
-    merged_at_ms = int(parsed_merged_at.timestamp() * 1000)
+    delta = parsed_merged_at - datetime.datetime(
+        1970, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    merged_at_ms = (
+        delta.days * 86_400_000
+        + delta.seconds * 1000
+        + delta.microseconds // 1000
+    )
 except ValueError:
     raise SystemExit(1)
 names = []

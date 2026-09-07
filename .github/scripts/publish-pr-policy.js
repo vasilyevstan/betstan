@@ -431,7 +431,7 @@ function validateWorkflowAuthorization(authorization, nowMilliseconds) {
     throw new Error("workflow authorization does not authorize a change");
   }
   if (
-    !Number.isInteger(authorization.pullNumber) ||
+    !Number.isSafeInteger(authorization.pullNumber) ||
     authorization.pullNumber < 1
   ) {
     throw new Error("workflow authorization pullNumber is invalid");
@@ -626,7 +626,7 @@ function validateCoverageAssetAuthorization(
     );
   }
   if (
-    !Number.isInteger(authorization.pullNumber) ||
+    !Number.isSafeInteger(authorization.pullNumber) ||
     authorization.pullNumber < 1
   ) {
     throw new Error("coverage authorization pullNumber is invalid");
@@ -836,7 +836,7 @@ async function listCommitStatuses(github, owner, repo, ref) {
       per_page: 100,
       page,
     });
-    if (!Array.isArray(response.data)) {
+    if (!Array.isArray(response.data) || response.data.length > 100) {
       throw new Error("authorization receipt response is malformed");
     }
     for (const status of response.data) {
@@ -854,7 +854,7 @@ async function listCommitStatuses(github, owner, repo, ref) {
         !status ||
         typeof status !== "object" ||
         Array.isArray(status) ||
-        !Number.isInteger(status.id) ||
+        !Number.isSafeInteger(status.id) ||
         status.id < 1 ||
         typeof status.context !== "string" ||
         status.context.length < 1 ||
@@ -2096,7 +2096,14 @@ async function assertCoverageReceiptPolicyRun({
     "quality workflow run updated_at",
   );
   if (
-    workflowResponse.data?.id !== run?.workflow_id ||
+    !Number.isSafeInteger(workflowResponse.data?.id) ||
+    workflowResponse.data.id < 1 ||
+    !Number.isSafeInteger(run?.id) ||
+    run.id < 1 ||
+    run.id !== policyRunId ||
+    !Number.isSafeInteger(run?.workflow_id) ||
+    run.workflow_id < 1 ||
+    workflowResponse.data.id !== run.workflow_id ||
     workflowResponse.data?.path !== BRANCH_WORKFLOW_PATH ||
     run.path !== BRANCH_WORKFLOW_PATH ||
     run.event !== "workflow_run" ||
@@ -2106,6 +2113,11 @@ async function assertCoverageReceiptPolicyRun({
     run.conclusion !== "success" ||
     runCreatedAt < qualityCompletedAt ||
     relations.length !== 1 ||
+    !relation ||
+    typeof relation !== "object" ||
+    Array.isArray(relation) ||
+    !Number.isSafeInteger(relation.number) ||
+    relation.number < 1 ||
     relation.number !== pull.number ||
     relation.head?.sha !== pull.headSha ||
     relation.base?.sha !== pull.baseSha

@@ -184,7 +184,7 @@ initialize_coverage_review_fixture() {
   git -C "$coverage_review_repo" checkout --quiet \
     -b trusted-base "$coverage_review_root_sha"
   case "$mode" in
-    authorized | base-only-authorization | wrong-base-lineage | \
+    authorized | future-authorized | base-only-authorization | wrong-base-lineage | \
       wrong-adoption-lineage | wrong-receipt-lineage | \
       invalid-tests-1 | invalid-tests-101 | invalid-tests-103 | \
       invalid-tests-10000)
@@ -213,8 +213,12 @@ import sys
     trusted_harness_blob,
     harness_blob,
 ) = sys.argv[1:]
-issued = "2026-09-02T08:00:00.000Z"
-expires = "2026-09-09T08:00:00.000Z"
+if mode == "future-authorized":
+    issued = "2038-12-31T00:00:00.000Z"
+    expires = "2039-01-07T00:00:00.000Z"
+else:
+    issued = "2026-09-02T08:00:00.000Z"
+    expires = "2026-09-09T08:00:00.000Z"
 expected_tests = {
     "invalid-tests-1": 1,
     "invalid-tests-101": 101,
@@ -291,7 +295,8 @@ PY
     "$coverage_review_base_sha" \
     "$coverage_review_merge_sha" \
     "$coverage_review_root_sha" \
-    "$coverage_review_changed_count" <<'PY'
+    "$coverage_review_changed_count" \
+    "$mode" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -307,10 +312,51 @@ import sys
     merge_sha,
     root_sha,
     changed_count,
+    mode,
 ) = sys.argv[1:]
 title = "Bootstrap trusted coverage engine review"
 body = "Exercise the exact authorized coverage engine and harness."
-updated_at = "2026-09-02T09:00:00.000Z"
+future = mode == "future-authorized"
+updated_at = (
+    "2039-01-01T00:00:00.002Z"
+    if future
+    else "2026-09-02T09:00:00.000Z"
+)
+quality_created_at = (
+    "2039-01-01T01:00:00.002Z"
+    if future
+    else "2026-09-02T10:00:00.000Z"
+)
+quality_started_at = (
+    "2039-01-01T01:01:00.002Z"
+    if future
+    else "2026-09-02T10:01:00.000Z"
+)
+quality_updated_at = (
+    "2039-01-01T01:05:00.002Z"
+    if future
+    else "2026-09-02T10:05:00.000Z"
+)
+policy_created_at = (
+    "2039-01-01T01:06:00.002Z"
+    if future
+    else "2026-09-02T10:06:00.000Z"
+)
+receipt_pending_at = (
+    "2039-01-01T01:07:00.002Z"
+    if future
+    else "2026-09-02T10:07:00.000Z"
+)
+receipt_success_at = (
+    "2039-01-01T01:08:00.002Z"
+    if future
+    else "2026-09-02T10:08:00.000Z"
+)
+transition_at = (
+    2177452800002
+    if future
+    else 1788339600000
+)
 payload = {
     "repository": {
         "full_name": "vasilyevstan/betstan",
@@ -379,9 +425,9 @@ relation = {
                 "https://github.com/vasilyevstan/betstan/actions/runs/900"
             ),
             "pull_requests": [relation],
-            "created_at": "2026-09-02T10:00:00.000Z",
-            "run_started_at": "2026-09-02T10:01:00.000Z",
-            "updated_at": "2026-09-02T10:05:00.000Z",
+            "created_at": quality_created_at,
+            "run_started_at": quality_started_at,
+            "updated_at": quality_updated_at,
             "status": "completed",
             "conclusion": "success",
         },
@@ -401,7 +447,7 @@ relation = {
                 "https://github.com/vasilyevstan/betstan/actions/runs/901"
             ),
             "pull_requests": [relation],
-            "created_at": "2026-09-02T10:06:00.000Z",
+            "created_at": policy_created_at,
             "status": "completed",
             "conclusion": "success",
         },
@@ -414,7 +460,6 @@ content_fingerprint = hashlib.sha256(
     f"{title}\0{body}".encode("utf-8")
 ).hexdigest()[:32]
 labels_fingerprint = hashlib.sha256(b"[]").hexdigest()[:32]
-transition_at = 1788339600000
 (api / "transition-statuses.json").write_text(
     json.dumps(
         [
@@ -430,7 +475,7 @@ transition_at = 1788339600000
                     "https://github.com/vasilyevstan/betstan/"
                     "actions/runs/901"
                 ),
-                "created_at": "2026-09-02T10:06:00.000Z",
+                "created_at": policy_created_at,
                 "creator": {
                     "id": 41898282,
                     "login": "github-actions[bot]",
@@ -508,7 +553,7 @@ else:
                     "login": "github-actions[bot]",
                     "type": "Bot",
                 },
-                "created_at": "2026-09-02T10:07:00.000Z",
+                "created_at": receipt_pending_at,
             },
             {
                 "id": 8102,
@@ -527,7 +572,7 @@ else:
                     "login": "github-actions[bot]",
                     "type": "Bot",
                 },
-                "created_at": "2026-09-02T10:08:00.000Z",
+                "created_at": receipt_success_at,
             },
         ],
         separators=(",", ":"),
@@ -619,7 +664,8 @@ SH
 }
 
 initialize_coverage_promotion_fixture() {
-  initialize_coverage_review_fixture authorized
+  local source_mode="${1:-authorized}"
+  initialize_coverage_review_fixture "$source_mode"
 
   git -C "$coverage_review_repo" checkout --quiet \
     -b promotion-head "$coverage_review_source_merge_sha"
@@ -663,7 +709,8 @@ initialize_coverage_promotion_fixture() {
     "$coverage_review_source_merge_sha" \
     "$coverage_review_head_sha" \
     "$coverage_review_merge_sha" \
-    "$coverage_review_changed_count" <<'PY'
+    "$coverage_review_changed_count" \
+    "$source_mode" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -678,8 +725,50 @@ import sys
     promotion_head_sha,
     promotion_merge_sha,
     changed_count,
+    source_mode,
 ) = sys.argv[1:]
 api = pathlib.Path(api_dir)
+future = source_mode == "future-authorized"
+source_merged_at = (
+    "2039-01-01T01:15:00.002Z"
+    if future
+    else "2026-09-02T10:15:00.000Z"
+)
+promotion_updated_at = (
+    "2039-01-01T02:00:00.002Z"
+    if future
+    else "2026-09-02T11:00:00.000Z"
+)
+promotion_quality_created_at = (
+    "2039-01-01T03:00:00.002Z"
+    if future
+    else "2026-09-02T12:00:00.000Z"
+)
+promotion_quality_started_at = (
+    "2039-01-01T03:01:00.002Z"
+    if future
+    else "2026-09-02T12:01:00.000Z"
+)
+promotion_quality_updated_at = (
+    "2039-01-01T03:05:00.002Z"
+    if future
+    else "2026-09-02T12:05:00.000Z"
+)
+promotion_policy_created_at = (
+    "2039-01-01T02:01:00.002Z"
+    if future
+    else "2026-09-02T11:01:00.000Z"
+)
+source_receipt_policy_created_at = (
+    "2039-01-01T01:06:00.002Z"
+    if future
+    else "2026-09-02T10:06:00.000Z"
+)
+promotion_transition_at = (
+    2177460000002
+    if future
+    else 1788346800000
+)
 
 source_pull = json.loads(
     (api / "current-pull.json").read_text(encoding="utf-8")
@@ -688,7 +777,7 @@ source_pull.update(
     {
         "state": "closed",
         "merged": True,
-        "merged_at": "2026-09-02T10:15:00.000Z",
+        "merged_at": source_merged_at,
         "merge_commit_sha": source_merge_sha,
     }
 )
@@ -711,7 +800,7 @@ source_pull.update(
 
 title = "Promote trusted coverage engine review"
 body = "Promote the integrated coverage pair through the canonical dev head."
-updated_at = "2026-09-02T11:00:00.000Z"
+updated_at = promotion_updated_at
 promotion_pull = {
     "number": 64,
     "state": "open",
@@ -769,9 +858,9 @@ relation = {
                 "https://github.com/vasilyevstan/betstan/actions/runs/902"
             ),
             "pull_requests": [relation],
-            "created_at": "2026-09-02T12:00:00.000Z",
-            "run_started_at": "2026-09-02T12:01:00.000Z",
-            "updated_at": "2026-09-02T12:05:00.000Z",
+            "created_at": promotion_quality_created_at,
+            "run_started_at": promotion_quality_started_at,
+            "updated_at": promotion_quality_updated_at,
             "status": "completed",
             "conclusion": "success",
         },
@@ -791,7 +880,7 @@ relation = {
                 "https://github.com/vasilyevstan/betstan/actions/runs/903"
             ),
             "pull_requests": [relation],
-            "created_at": "2026-09-02T11:01:00.000Z",
+            "created_at": promotion_policy_created_at,
             "status": "completed",
             "conclusion": "success",
         },
@@ -803,7 +892,6 @@ content_fingerprint = hashlib.sha256(
     f"{title}\0{body}".encode("utf-8")
 ).hexdigest()[:32]
 labels_fingerprint = hashlib.sha256(b"[]").hexdigest()[:32]
-transition_at = 1788346800000
 (api / "current-transition-statuses.json").write_text(
     json.dumps(
         [
@@ -812,14 +900,14 @@ transition_at = 1788346800000
                 "context": "trusted-quality-transition/master",
                 "state": "pending",
                 "description": (
-                    f"v3|64|edited|{transition_at}|902|"
+                    f"v3|64|edited|{promotion_transition_at}|902|"
                     f"{content_fingerprint}|{labels_fingerprint}"
                 ),
                 "target_url": (
                     "https://github.com/vasilyevstan/betstan/"
                     "actions/runs/903"
                 ),
-                "created_at": "2026-09-02T11:01:00.000Z",
+                "created_at": promotion_policy_created_at,
                 "creator": {
                     "id": 41898282,
                     "login": "github-actions[bot]",
@@ -849,7 +937,7 @@ source_relation = {
                 "https://github.com/vasilyevstan/betstan/actions/runs/904"
             ),
             "pull_requests": [source_relation],
-            "created_at": "2026-09-02T10:06:00.000Z",
+            "created_at": source_receipt_policy_created_at,
             "status": "completed",
             "conclusion": "success",
         },
@@ -1837,6 +1925,14 @@ run_coverage_review_fixture >"$test_output"
 grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
+initialize_coverage_review_fixture "future-authorized"
+write_coverage_review_tap "$coverage_review_docker_stdout" 102
+run_coverage_review_fixture >"$test_output"
+grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
+grep -qF "tests=102" "$test_output"
+[[ -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
 initialize_coverage_review_fixture "authorized"
 write_coverage_review_tap "$coverage_review_docker_stdout" 102
 run_coverage_review_fixture >"$test_output"
@@ -2085,6 +2181,15 @@ grep -qF \
 grep -qF "tests=102" "$test_output"
 [[ ! -e "$coverage_review_node_sentinel" ]]
 
+initialize_coverage_promotion_fixture "future-authorized"
+write_coverage_review_tap "$coverage_review_docker_stdout" 102
+run_coverage_review_fixture >"$test_output"
+grep -qF "coverage_engine_review=PASS mode=promotion" "$test_output"
+grep -qF "tests=102" "$test_output"
+[[ -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+initialize_coverage_promotion_fixture
 python3 - \
   "$coverage_review_api/source-quality-jobs-page-1.json" \
   "$coverage_review_api/source-quality-jobs-page-2.json" \
