@@ -251,6 +251,27 @@ accepted by the next owner.
   deadline, but it still requires a bounded checkpoint. Provider activity,
   reasoning time, or tool growth cannot extend the deadline without a new
   delivered finding or objective phase transition.
+- An owner that is still executing is not thereby reporting. A long turn
+  without an externally visible checkpoint is a communication stall even when
+  tools remain active, so require a checkpoint at each safe boundary rather
+  than only at terminal success. A safe boundary is any point where no
+  mutation is in flight, typically after a merge, an approval, a dispatch, or
+  a completed verification sweep.
+- Every checkpoint carries the current branch and SHA, the artifacts created
+  so far, the current step, the last objectively completed milestone with its
+  timestamp, the active command or run, any blocker, and the exact next
+  bounded action.
+- Record a milestone timestamp for each completed phase. An elapsed interval
+  with no recorded milestone is silence, and silence is bounded, never
+  open-ended.
+- When a registered job, status, or command shows no objective state change
+  for fifteen minutes, inspect it exactly once and classify the wait as a
+  queued or provider wait, a protected approval wait, or a local failure.
+  Report `BLOCKED` with that classification instead of polling indefinitely.
+  Cancel or supersede only when doing so is safe for production.
+- When a command stays active for thirty minutes without producing a
+  measurable milestone, stop it or hand it off safely, then checkpoint. Do not
+  begin another long operation before that checkpoint is delivered.
 
 ## Recovery ladder
 

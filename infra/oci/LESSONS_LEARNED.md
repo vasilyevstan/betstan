@@ -839,3 +839,58 @@ Lesson: a lease is a mutex with a lifetime, not a durable safety barrier. Incide
 tooling that may run long after the originating operation must reclaim an expired
 lease through the established contended-safe path and record whether the lock was
 verified or reclaimed.
+
+### Incident outcome — 2026-09-07
+
+The compatibility release deployment **failed** and production was **restored to
+`4ec0d8d3836c336e437be2129bb9e71f412d2b37`**, the last known-good generation.
+
+Terminal state after recovery run `34089233049`:
+
+- nine application Deployments ready at the exact `4ec0d8d` GHCR digests, 9/9
+  matching that generation's build provenance and 0/9 matching the failed
+  generation;
+- `gaming-moderation` stable at zero restarts across the bounded observation
+  window, after crash-looping through the failed deployment;
+- twenty-two RabbitMQ queues each with one consumer and no backlog;
+- maintenance fence released and the transferred database lock released after
+  being reclaimed from an expired lease;
+- canonical and diagnostic hosts serving the full API route set, SSE streaming,
+  and both `www` schemes permanently redirecting with path and query preserved.
+
+Neither `1e73aebf33eafd6cbd47a327c960679361a336d5` nor the promotion merge
+`e86d…` that carried it is an accepted rollback baseline. Both belong to the
+generation that failed its own deployment. The only accepted baseline for this
+incident was `oci-production-baseline-34068978832-1`, whose recorded
+`baseline_source_sha` is `4ec0d8d…`.
+
+The failed rollback attempts remain immutable and are retained as evidence:
+`34070306560` and `34070706815` stopped at the ordinary pre-mutation readiness
+gate, and `34082076542` stopped at the expired-lease check. None of the three
+mutated a workload.
+
+## Bounded reporting during long protected operations — 2026-09-07
+
+OCI recovery work is slow by construction: protected environments wait for
+approval, builds and rollouts take minutes, and health gates retry. Those waits
+are legitimate progress, but they are only progress to the operator who can see
+them.
+
+- Report the exact run ID, current phase, pending environment, and whether the
+  next action is approval-bound, provider-bound, or executing on a bounded
+  cadence, not only when the operation finishes.
+- Checkpoint at each safe boundary, meaning any point with no mutation in
+  flight. Merges, approvals, dispatches, and completed verification sweeps are
+  all safe boundaries.
+- Attach a milestone timestamp to each completed phase, and name the last
+  objectively completed milestone in every checkpoint.
+- A protected run with no objective state change for fifteen minutes is
+  inspected once and classified as queued, provider-bound, approval-bound, or
+  locally failed, then reported as `BLOCKED`. Never poll indefinitely, and
+  never cancel or supersede a production-capable run merely to end a wait.
+- A command that runs thirty minutes without a measurable milestone is stopped
+  or handed off safely, and the checkpoint precedes further work.
+
+Waiting in large silent sleep blocks is the common failure mode here. It turns
+a defensible provider wait into an unobservable one and hides which gate is
+actually blocking.
