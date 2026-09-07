@@ -48,6 +48,16 @@
   duplicate-safe because rolling pods can still publish the same marker, and
   do not coalesce mutable targets unless their version or exact target is part
   of the key.
+- Broker backpressure is part of the persistence contract. A queue consumer
+  that appends to one aggregate with bounded optimistic-concurrency retries
+  must set a matching prefetch limit; one replica does not prevent one process
+  from handling many unacknowledged messages concurrently. Prove the limit
+  through the real consume/ack path, not only with a `prefetch` spy.
+- A rejected async listener needs an explicit `unhandledRejection` shutdown
+  path so fail-closed redelivery does not depend on the current Node default.
+  For a queue-only singleton whose durable queue can buffer startup, use a
+  non-overlapping Deployment strategy when rolling overlap would create a
+  second writer for the same compare-and-swap aggregate.
 
 ### Singleton publishers — channel-leak fix (PR #29)
 - The original code opened a new AMQP channel on every message by calling `new XPublisher(...); await publisher.init()` inside `onMessage`.

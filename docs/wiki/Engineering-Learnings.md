@@ -21,6 +21,16 @@ At-least-once messaging means duplicates and reordering are normal conditions,
 not edge cases. Stable request IDs, placement attempts, versions, sequences,
 terminal ledgers, and parked updates make replay safe.
 
+### Treat broker backpressure as a consistency boundary
+
+One service replica can still process many unacknowledged messages
+concurrently. When a consumer updates one aggregate through bounded
+compare-and-swap retries, its prefetch limit and rollout strategy must preserve
+that write-concurrency bound. Tests should hold one consumed message open and
+prove the next message does not enter the handler until acknowledgement.
+Rejected async handlers also need an explicit shutdown path so redelivery does
+not depend on a runtime default.
+
 ### Keep projections separate from authority
 
 Fast browser projections and SSE streams improve responsiveness, but they do

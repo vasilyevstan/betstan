@@ -35,6 +35,9 @@ Never rely on a prior conversation, stale plan, or branch name as current truth.
 - Separate product decisions from implementation choices.
 - Identify mixed-version, historical-data, concurrency, ordering, restart, and
   failure-recovery constraints.
+- For queue consumers that update one aggregate with bounded optimistic
+  concurrency, define broker prefetch and rollout overlap together. Replica
+  count alone does not bound concurrent deliveries inside one process.
 - For a shared-contract change, order source, package publication, exact
   consumer repinning, mixed-version validation, deployment, and rollback as
   separate dependencies. Source present in `common/` does not make an

@@ -75,6 +75,11 @@ class ModerationRuntime {
     void this.exitAfterShutdown(1);
   };
 
+  private readonly handleUnhandledRejection = (error: unknown) => {
+    this.dependencies.logger.error("logging general error", error);
+    void this.exitAfterShutdown(1);
+  };
+
   constructor(private readonly dependencies: ModerationRuntimeDependencies) {}
 
   async start(): Promise<void> {
@@ -152,7 +157,6 @@ class ModerationRuntime {
     await this.captureError(errors, () => this.dependencies.closeDatabase());
     await this.captureError(errors, () => this.dependencies.disconnectDatabase());
     this.removeHooks();
-    this.removeHooks();
 
     if (errors.length > 0) {
       throw errors[0] instanceof Error
@@ -170,17 +174,17 @@ class ModerationRuntime {
     }
 
     this.exitPromise = (async () => {
-    if (message) {
-      this.dependencies.logger.log(message);
-    }
+      if (message) {
+        this.dependencies.logger.log(message);
+      }
 
-    try {
-      await this.shutdown();
-      this.dependencies.process.exit(exitCode);
-    } catch (error) {
-      this.dependencies.logger.error("runtime shutdown failed", error);
-      this.dependencies.process.exit(1);
-    }
+      try {
+        await this.shutdown();
+        this.dependencies.process.exit(exitCode);
+      } catch (error) {
+        this.dependencies.logger.error("runtime shutdown failed", error);
+        this.dependencies.process.exit(1);
+      }
     })();
 
     return this.exitPromise;
@@ -207,6 +211,10 @@ class ModerationRuntime {
       "uncaughtException",
       this.handleUncaughtException
     );
+    this.dependencies.process.on(
+      "unhandledRejection",
+      this.handleUnhandledRejection
+    );
     this.hooksInstalled = true;
   }
 
@@ -218,6 +226,7 @@ class ModerationRuntime {
     this.removeHook("SIGINT", this.handleSigint);
     this.removeHook("SIGTERM", this.handleSigterm);
     this.removeHook("uncaughtException", this.handleUncaughtException);
+    this.removeHook("unhandledRejection", this.handleUnhandledRejection);
     this.hooksInstalled = false;
   }
 

@@ -57,6 +57,13 @@ authority-ending `occurredAt`, plus legacy history without the additive end
 field. For SSE, verify intentional backpressure disconnect and monotonic
 REST/reconnect recovery together.
 
+For broker-consumer backpressure, do not stop at asserting that `prefetch` was
+called. Drive a burst through the real consume callback with a channel fake
+that enforces unacknowledged-delivery limits, hold the first handler open, and
+prove the second handler cannot start before the first acknowledgement. Also
+cover prefetch setup failure and explicit shutdown after rejected async
+handlers.
+
 For quote-authority changes, include a stable-odds material transition whose
 validity boundary advances, prove its quote version changes without changing
 market version or prices, and prove a fresh replacement still starts at quote

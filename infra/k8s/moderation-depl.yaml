@@ -4,6 +4,8 @@ metadata:
   name: gaming-moderation-depl
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: gaming-moderation
