@@ -767,6 +767,9 @@ def validate_oci_rollback_workflow!(file, document, content)
       infrastructure_run_id
       partial_rollback_run_id
       pre_recovery_build_run_id
+      fenced_deploy_run_id
+      fenced_data_run_id
+      deployed_source_sha
       allow_legacy_admin_auth
       legacy_admin_auth_reason
       confirmation

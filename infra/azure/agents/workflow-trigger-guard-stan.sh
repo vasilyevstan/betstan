@@ -260,6 +260,11 @@ require_literal "$oci_rollback_workflow" "actions/download-artifact@d3f86a106a0b
 require_literal "$oci_rollback_workflow" "oracle-actions/configure-kubectl-oke@77a733d79446dabe7bf0e58eb56197d33ce4dc58" "reviewed OKE kubectl pin"
 require_literal "$oci_rollback_workflow" "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" "reviewed OCI rollback upload-artifact pin"
 require_literal "$oci_rollback_workflow" "recover-partial-rollback-stan.sh" "reviewed partial rollback recovery operator"
+require_literal "$oci_rollback_workflow" "recover-fenced-rollback-stan.sh" "reviewed fenced rollback recovery operator"
+require_literal "$oci_rollback_workflow" '[ "$CONFIRMATION" = "RECOVER OCI FENCED ROLLBACK" ]' "fenced rollback confirmation guard"
+require_literal "$oci_rollback_workflow" '[ "$fenced_conclusion" = "failure" ]' "fenced rollback incomplete deployment guard"
+require_literal "$oci_rollback_workflow" '[ "$BASELINE_SOURCE_RUN_ID" = "$FENCED_DEPLOY_RUN_ID" ]' "fenced rollback baseline binding"
+require_literal "$oci_rollback_workflow" '[ "$pre_recovery_source_sha" = "$DEPLOYED_SOURCE_SHA" ]' "fenced rollback deployed generation binding"
 
 require_literal "$branch_workflow" "pull_request_target:" "trusted PR metadata event"
 require_literal "$branch_workflow" 'workflows: ["production-build"]' "trusted quality completion event"
