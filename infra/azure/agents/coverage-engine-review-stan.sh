@@ -402,7 +402,11 @@ PY
 
 write_pull_metadata() {
   local destination="$1"
-  python3 - "${GITHUB_EVENT_PATH:-}" "$destination" <<'PY'
+  local authoritative_merge_sha="$2"
+  python3 - \
+    "${GITHUB_EVENT_PATH:-}" \
+    "$destination" \
+    "$authoritative_merge_sha" <<'PY'
 import datetime
 import hashlib
 import json
@@ -410,7 +414,7 @@ import pathlib
 import re
 import sys
 
-event_path, destination = sys.argv[1:]
+event_path, destination, authoritative_merge_sha = sys.argv[1:]
 if not event_path:
     raise SystemExit(1)
 payload = json.loads(pathlib.Path(event_path).read_text(encoding="utf-8"))
@@ -462,6 +466,14 @@ timestamp_pattern = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$"
 )
 
+if not sha_pattern.fullmatch(authoritative_merge_sha):
+    raise SystemExit(1)
+if merge_sha is not None:
+    if not isinstance(merge_sha, str) or not sha_pattern.fullmatch(merge_sha):
+        raise SystemExit(2)
+    if merge_sha != authoritative_merge_sha:
+        raise SystemExit(3)
+
 def github_timestamp(value):
     if not isinstance(value, str) or not timestamp_pattern.fullmatch(value):
         raise ValueError
@@ -505,8 +517,6 @@ if (
     or not sha_pattern.fullmatch(head_sha)
     or not isinstance(base_sha, str)
     or not sha_pattern.fullmatch(base_sha)
-    or not isinstance(merge_sha, str)
-    or not sha_pattern.fullmatch(merge_sha)
 ):
     raise SystemExit(1)
 
@@ -550,7 +560,7 @@ values = [
     head_sha,
     base_ref,
     base_sha,
-    merge_sha,
+    authoritative_merge_sha,
     str(changed_files),
     str(updated_at_ms),
     content_fingerprint,
@@ -559,6 +569,30 @@ values = [
 if any("\t" in value or "\n" in value for value in values):
     raise SystemExit(1)
 pathlib.Path(destination).write_text("\t".join(values) + "\n", encoding="utf-8")
+PY
+}
+
+assert_current_pull_merge_snapshot() {
+  local current_response="$1"
+  local expected_merge_sha="$2"
+
+  python3 - "$current_response" "$expected_merge_sha" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+response_path, expected_merge_sha = sys.argv[1:]
+pull = json.loads(pathlib.Path(response_path).read_text(encoding="utf-8"))
+if not isinstance(pull, dict):
+    raise SystemExit(1)
+merge_sha = pull.get("merge_commit_sha")
+if merge_sha is None:
+    raise SystemExit(2)
+if not isinstance(merge_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
+    raise SystemExit(3)
+if merge_sha != expected_merge_sha:
+    raise SystemExit(4)
 PY
 }
 
@@ -635,7 +669,6 @@ if (
     or pull.get("number") != int(number)
     or pull.get("state") != "open"
     or pull.get("mergeable") is False
-    or pull.get("merge_commit_sha") != merge_sha
     or type(pull.get("changed_files")) is not int
     or pull["changed_files"] < 0
     or pull["changed_files"] > 9007199254740991
@@ -2368,8 +2401,22 @@ case "${GITHUB_EVENT_NAME:-}" in
 esac
 
 metadata_file="$work_dir/pull-metadata"
-write_pull_metadata "$metadata_file" ||
-  fail "invalid-pull-metadata"
+if write_pull_metadata "$metadata_file" "$checkout_sha"; then
+  :
+else
+  metadata_status=$?
+  case "$metadata_status" in
+    2)
+      fail "event-merge-snapshot-is-invalid"
+      ;;
+    3)
+      fail "event-merge-snapshot-mismatch"
+      ;;
+    *)
+      fail "invalid-pull-metadata"
+      ;;
+  esac
+fi
 IFS=$'\t' read -r \
   repository \
   default_branch \
@@ -2399,6 +2446,27 @@ IFS=$'\t' read -r \
 
 current_pull_response="$work_dir/current-pull.json"
 github_api_get "pulls/${pull_number}" "$current_pull_response"
+if assert_current_pull_merge_snapshot \
+  "$current_pull_response" \
+  "$merge_sha"; then
+  :
+else
+  current_merge_status=$?
+  case "$current_merge_status" in
+    2)
+      fail "current-pull-merge-snapshot-unavailable"
+      ;;
+    3)
+      fail "current-pull-merge-snapshot-is-invalid"
+      ;;
+    4)
+      fail "current-pull-merge-snapshot-mismatch"
+      ;;
+    *)
+      fail "current-pull-snapshot-mismatch"
+      ;;
+  esac
+fi
 assert_current_pull_metadata \
   "$metadata_file" \
   "$current_pull_response" ||

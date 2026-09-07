@@ -1623,6 +1623,186 @@ PY
     "$pull_timestamp_case pull timestamp"
 done
 
+for event_merge_case in absent null; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_event" \
+    "$event_merge_case" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+if case == "absent":
+    event["pull_request"].pop("merge_commit_sha")
+elif case == "null":
+    event["pull_request"]["merge_commit_sha"] = None
+else:
+    raise SystemExit(1)
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  write_coverage_review_tap "$coverage_review_docker_stdout" 102
+  run_coverage_review_fixture >"$test_output"
+  grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
+  [[ -e "$coverage_review_docker_args" ]]
+  [[ ! -e "$coverage_review_node_sentinel" ]]
+done
+
+for event_merge_case in malformed stale; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_event" \
+    "$event_merge_case" \
+    "$coverage_review_unrelated_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+unrelated_sha = sys.argv[3]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+event["pull_request"]["merge_commit_sha"] = (
+    "not-a-sha" if case == "malformed" else unrelated_sha
+)
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  expected_reason="event-merge-snapshot-is-invalid"
+  if [[ "$event_merge_case" == "stale" ]]; then
+    expected_reason="event-merge-snapshot-mismatch"
+  fi
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$event_merge_case event merge snapshot"
+done
+
+for current_merge_case in absent null malformed stale; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/current-pull.json" \
+    "$current_merge_case" \
+    "$coverage_review_unrelated_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+current_path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+unrelated_sha = sys.argv[3]
+current = json.loads(current_path.read_text(encoding="utf-8"))
+if case == "absent":
+    current.pop("merge_commit_sha")
+elif case == "null":
+    current["merge_commit_sha"] = None
+elif case == "malformed":
+    current["merge_commit_sha"] = "not-a-sha"
+elif case == "stale":
+    current["merge_commit_sha"] = unrelated_sha
+else:
+    raise SystemExit(1)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  case "$current_merge_case" in
+    absent | null)
+      expected_reason="current-pull-merge-snapshot-unavailable"
+      ;;
+    malformed)
+      expected_reason="current-pull-merge-snapshot-is-invalid"
+      ;;
+    stale)
+      expected_reason="current-pull-merge-snapshot-mismatch"
+      ;;
+  esac
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$current_merge_case current pull merge snapshot"
+done
+
+for current_commit_case in head base; do
+  initialize_coverage_review_fixture "authorized"
+  python3 - \
+    "$coverage_review_api/current-pull.json" \
+    "$current_commit_case" \
+    "$coverage_review_unrelated_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+current_path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+unrelated_sha = sys.argv[3]
+current = json.loads(current_path.read_text(encoding="utf-8"))
+current[case]["sha"] = unrelated_sha
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "current-pull-snapshot-mismatch" \
+    "$current_commit_case current pull commit mismatch"
+done
+
+for snapshot_lineage_case in base head; do
+  initialize_coverage_review_fixture "authorized"
+  coverage_review_merge_tree="$(
+    git -C "$coverage_review_repo" rev-parse HEAD^{tree}
+  )"
+  if [[ "$snapshot_lineage_case" == "base" ]]; then
+    coverage_review_merge_parent="$coverage_review_head_sha"
+    expected_reason="coverage-integration-base-snapshot-lineage-is-invalid"
+  else
+    coverage_review_merge_parent="$coverage_review_base_sha"
+    expected_reason="coverage-integration-head-snapshot-lineage-is-invalid"
+  fi
+  coverage_review_merge_sha="$(
+    printf 'fixture invalid %s snapshot lineage\n' "$snapshot_lineage_case" |
+      git -C "$coverage_review_repo" commit-tree \
+        "$coverage_review_merge_tree" \
+        -p "$coverage_review_merge_parent"
+  )"
+  git -C "$coverage_review_repo" checkout --quiet \
+    --detach "$coverage_review_merge_sha"
+  python3 - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$coverage_review_merge_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+merge_sha = sys.argv[3]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+event["pull_request"]["merge_commit_sha"] = merge_sha
+current["merge_commit_sha"] = merge_sha
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$snapshot_lineage_case snapshot ancestry mismatch"
+done
+
 initialize_coverage_review_fixture "authorized"
 python3 - "$coverage_review_api/transition-statuses.json" <<'PY'
 import json
