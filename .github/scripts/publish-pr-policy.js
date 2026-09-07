@@ -10,6 +10,20 @@ const BRANCH_WORKFLOW_PATH = `.github/workflows/${BRANCH_WORKFLOW}`;
 const QUALITY_JOB = "pr-quality-gates";
 const QUALITY_WORKFLOW = "production-build.yml";
 const QUALITY_WORKFLOW_PATH = `.github/workflows/${QUALITY_WORKFLOW}`;
+const COVERAGE_ENGINE_PATH = ".github/scripts/test-coverage-matrix.js";
+const COVERAGE_HARNESS_PATH =
+  ".github/scripts/test-test-coverage-matrix.js";
+const COVERAGE_REVIEW_PATH =
+  "infra/azure/agents/coverage-engine-review-stan.sh";
+const COVERAGE_INVOCATION_PATH =
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh";
+const COVERAGE_AUTHORIZED_PATHS = Object.freeze([
+  COVERAGE_ENGINE_PATH,
+  COVERAGE_HARNESS_PATH,
+  "LEARNINGS.md",
+  "docs/wiki/Engineering-Learnings.md",
+]);
+const COVERAGE_EXPECTED_TEST_COUNT = 102;
 const GITHUB_ACTIONS_BOT = Object.freeze({
   id: 41898282,
   login: "github-actions[bot]",
@@ -75,10 +89,36 @@ const WORKFLOW_AUTHORIZATION_FIELDS = [
   "trustedBlob",
   "workflowPath",
 ];
+const COVERAGE_AUTHORIZATION_FIELDS = [
+  "adoptionSha",
+  "allowedPaths",
+  "authorizedEngineBlob",
+  "authorizedHarnessBlob",
+  "baseRef",
+  "baseSha",
+  "enginePath",
+  "expectedTests",
+  "expiresAt",
+  "harnessPath",
+  "headRef",
+  "headRepository",
+  "headSha",
+  "id",
+  "issuedAt",
+  "pullNumber",
+  "receiptSha",
+  "repository",
+  "trustedEngineBlob",
+  "trustedHarnessBlob",
+];
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
 const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
+const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
+const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
+  JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),
+);
 
 const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -443,8 +483,221 @@ function findWorkflowAuthorization({
   return matches[0];
 }
 
+function assertExactCoverageAuthorizationFields(authorization) {
+  if (!authorization || typeof authorization !== "object") {
+    throw new Error("coverage authorization must be an object");
+  }
+  const actualFields = Object.keys(authorization).sort();
+  if (
+    actualFields.length !== COVERAGE_AUTHORIZATION_FIELDS.length ||
+    actualFields.some(
+      (field, index) => field !== COVERAGE_AUTHORIZATION_FIELDS[index],
+    )
+  ) {
+    throw new Error("coverage authorization has unexpected fields");
+  }
+}
+
+function assertSafeCoverageString(value, label, pattern) {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new Error(`coverage authorization ${label} is invalid`);
+  }
+}
+
+function parseCoverageAuthorizationTime(value, label) {
+  if (typeof value !== "string") {
+    throw new Error(`coverage authorization ${label} is invalid`);
+  }
+  const milliseconds = Date.parse(value);
+  if (
+    !Number.isFinite(milliseconds) ||
+    new Date(milliseconds).toISOString() !== value
+  ) {
+    throw new Error(`coverage authorization ${label} is invalid`);
+  }
+  return milliseconds;
+}
+
+function validateCoverageAssetAuthorization(
+  authorization,
+  nowMilliseconds,
+) {
+  assertExactCoverageAuthorizationFields(authorization);
+  assertSafeCoverageString(
+    authorization.id,
+    "id",
+    /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/,
+  );
+  for (const field of ["repository", "headRepository"]) {
+    assertSafeCoverageString(
+      authorization[field],
+      field,
+      /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+    );
+  }
+  if (authorization.enginePath !== COVERAGE_ENGINE_PATH) {
+    throw new Error("coverage authorization enginePath is invalid");
+  }
+  if (authorization.harnessPath !== COVERAGE_HARNESS_PATH) {
+    throw new Error("coverage authorization harnessPath is invalid");
+  }
+  if (
+    !Array.isArray(authorization.allowedPaths) ||
+    JSON.stringify(authorization.allowedPaths) !==
+      JSON.stringify(COVERAGE_AUTHORIZED_PATHS)
+  ) {
+    throw new Error("coverage authorization allowedPaths is invalid");
+  }
+  for (const field of [
+    "trustedEngineBlob",
+    "authorizedEngineBlob",
+    "trustedHarnessBlob",
+    "authorizedHarnessBlob",
+    "headSha",
+    "baseSha",
+    "receiptSha",
+    "adoptionSha",
+  ]) {
+    assertSafeCoverageString(
+      authorization[field],
+      field,
+      /^[0-9a-f]{40}$/,
+    );
+  }
+  if (
+    authorization.trustedEngineBlob ===
+      authorization.authorizedEngineBlob ||
+    authorization.trustedHarnessBlob ===
+      authorization.authorizedHarnessBlob
+  ) {
+    throw new Error(
+      "coverage authorization must authorize one complete changed pair",
+    );
+  }
+  if (
+    !Number.isInteger(authorization.pullNumber) ||
+    authorization.pullNumber < 1
+  ) {
+    throw new Error("coverage authorization pullNumber is invalid");
+  }
+  if (
+    !Number.isInteger(authorization.expectedTests) ||
+    authorization.expectedTests !== COVERAGE_EXPECTED_TEST_COUNT
+  ) {
+    throw new Error("coverage authorization expectedTests is invalid");
+  }
+  for (const field of ["headRef", "baseRef"]) {
+    assertSafeCoverageString(
+      authorization[field],
+      field,
+      /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9._-])?$/,
+    );
+    if (
+      authorization[field].includes("..") ||
+      authorization[field].includes("//") ||
+      authorization[field].includes("@{") ||
+      /[*?\[\]\\]/.test(authorization[field])
+    ) {
+      throw new Error(`coverage authorization ${field} is invalid`);
+    }
+  }
+  if (!["dev", "master"].includes(authorization.baseRef)) {
+    throw new Error("coverage authorization baseRef is invalid");
+  }
+
+  const issuedAt = parseCoverageAuthorizationTime(
+    authorization.issuedAt,
+    "issuedAt",
+  );
+  const expiresAt = parseCoverageAuthorizationTime(
+    authorization.expiresAt,
+    "expiresAt",
+  );
+  if (
+    issuedAt > nowMilliseconds ||
+    expiresAt <= nowMilliseconds ||
+    expiresAt <= issuedAt ||
+    expiresAt - issuedAt > MAX_WORKFLOW_AUTHORIZATION_AGE_MS
+  ) {
+    throw new Error("coverage authorization is stale or expired");
+  }
+}
+
+function findCoverageAssetAuthorization({
+  authorizations,
+  repository,
+  trustedEngineBlob,
+  authorizedEngineBlob,
+  trustedHarnessBlob,
+  authorizedHarnessBlob,
+  changedPaths,
+  pull,
+  now,
+}) {
+  if (!Array.isArray(authorizations)) {
+    throw new Error("coverage authorizations must be an array");
+  }
+  const nowMilliseconds =
+    now instanceof Date ? now.getTime() : Date.parse(String(now));
+  if (!Number.isFinite(nowMilliseconds)) {
+    throw new Error("coverage authorization clock is invalid");
+  }
+  if (
+    !Array.isArray(changedPaths) ||
+    changedPaths.some((path) => typeof path !== "string")
+  ) {
+    throw new Error("coverage changed paths are invalid");
+  }
+
+  const seenIds = new Set();
+  for (const authorization of authorizations) {
+    validateCoverageAssetAuthorization(
+      authorization,
+      nowMilliseconds,
+    );
+    if (seenIds.has(authorization.id)) {
+      throw new Error(
+        `duplicate coverage authorization id ${authorization.id}`,
+      );
+    }
+    seenIds.add(authorization.id);
+  }
+
+  const matches = authorizations.filter(
+    (authorization) =>
+      authorization.repository === repository &&
+      authorization.headRepository === repository &&
+      pull.headRepository === repository &&
+      authorization.enginePath === COVERAGE_ENGINE_PATH &&
+      authorization.harnessPath === COVERAGE_HARNESS_PATH &&
+      authorization.trustedEngineBlob === trustedEngineBlob &&
+      authorization.authorizedEngineBlob === authorizedEngineBlob &&
+      authorization.trustedHarnessBlob === trustedHarnessBlob &&
+      authorization.authorizedHarnessBlob === authorizedHarnessBlob &&
+      authorization.pullNumber === pull.number &&
+      authorization.headRef === pull.headRef &&
+      authorization.headSha === pull.headSha &&
+      authorization.baseRef === pull.baseRef &&
+      JSON.stringify(authorization.allowedPaths) ===
+        JSON.stringify(changedPaths),
+  );
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      "multiple coverage authorizations match one pull request",
+    );
+  }
+  return matches[0];
+}
+
 function workflowAuthorizationContext(authorization) {
   return `trusted-workflow-authorization/${authorization.id}`;
+}
+
+function coverageAuthorizationContext(authorization) {
+  return `trusted-coverage-authorization/${authorization.id}`;
 }
 
 async function listCommitStatuses(github, owner, repo, ref) {
@@ -458,7 +711,7 @@ async function listCommitStatuses(github, owner, repo, ref) {
       page,
     });
     if (!Array.isArray(response.data)) {
-      throw new Error("workflow authorization receipt response is malformed");
+      throw new Error("authorization receipt response is malformed");
     }
     for (const status of response.data) {
       if (
@@ -478,7 +731,7 @@ async function listCommitStatuses(github, owner, repo, ref) {
         !(status.target_url === null || typeof status.target_url === "string")
       ) {
         throw new Error(
-          "workflow authorization receipt entry is malformed",
+          "authorization receipt entry is malformed",
         );
       }
     }
@@ -487,7 +740,50 @@ async function listCommitStatuses(github, owner, repo, ref) {
       return statuses;
     }
   }
-  throw new Error("workflow authorization receipt inventory is incomplete");
+  throw new Error("authorization receipt inventory is incomplete");
+}
+
+async function listPullRequestPaths(github, owner, repo, pullNumber) {
+  const paths = [];
+  const seenPaths = new Set();
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await github.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+      page,
+    });
+    if (!Array.isArray(response.data) || response.data.length > 100) {
+      throw new Error("pull request file inventory is malformed");
+    }
+    for (const file of response.data) {
+      const filename = file?.filename;
+      if (
+        !file ||
+        typeof file !== "object" ||
+        !["added", "modified", "removed"].includes(file.status) ||
+        Object.prototype.hasOwnProperty.call(file, "previous_filename") ||
+        typeof filename !== "string" ||
+        filename.length < 1 ||
+        filename.length > 4096 ||
+        filename.startsWith("/") ||
+        filename
+          .split("/")
+          .some((part) => part === "" || part === "." || part === "..") ||
+        /[\u0000-\u001f\u007f]/.test(filename) ||
+        seenPaths.has(filename)
+      ) {
+        throw new Error("pull request file inventory entry is malformed");
+      }
+      seenPaths.add(filename);
+      paths.push(filename);
+    }
+    if (response.data.length < 100) {
+      return paths.sort();
+    }
+  }
+  throw new Error("pull request file inventory exceeds the bounded scan");
 }
 
 async function inspectManagedLabelLedger({
@@ -654,6 +950,67 @@ async function claimWorkflowAuthorization({
   const description =
     `PR #${pull.number} ${authorization.workflowPath} ` +
     `${authorization.authorizedBlob.slice(0, 12)}`;
+  await publishStatus(
+    github,
+    owner,
+    repo,
+    authorization.receiptSha,
+    context,
+    "pending",
+    description,
+    targetUrl,
+  );
+  await publishStatus(
+    github,
+    owner,
+    repo,
+    authorization.receiptSha,
+    context,
+    "success",
+    description,
+    targetUrl,
+  );
+}
+
+async function claimCoverageAssetAuthorization({
+  github,
+  owner,
+  repo,
+  authorization,
+  pull,
+  targetUrl,
+}) {
+  const comparison = await github.rest.repos.compareCommitsWithBasehead({
+    owner,
+    repo,
+    basehead: `${authorization.receiptSha}...${pull.headSha}`,
+  });
+  if (
+    !["ahead", "identical"].includes(comparison.data.status) ||
+    comparison.data.merge_base_commit?.sha !== authorization.receiptSha
+  ) {
+    throw new Error(
+      `coverage authorization ${authorization.id} receipt is not an ancestor`,
+    );
+  }
+
+  const context = coverageAuthorizationContext(authorization);
+  const statuses = await listCommitStatuses(
+    github,
+    owner,
+    repo,
+    authorization.receiptSha,
+  );
+  if (statuses.some((status) => status.context === context)) {
+    throw new Error(
+      `coverage authorization ${authorization.id} was already consumed`,
+    );
+  }
+
+  const description =
+    `PR #${pull.number} coverage pair ` +
+    `${authorization.authorizedEngineBlob.slice(0, 12)}/` +
+    `${authorization.authorizedHarnessBlob.slice(0, 12)}`;
   await publishStatus(
     github,
     owner,
@@ -1094,6 +1451,11 @@ async function getWorkflowBlob(github, repository, path, ref) {
   if (Array.isArray(response.data) || response.data.type !== "file") {
     throw new Error(`Expected ${repository}:${path}@${ref} to be a file`);
   }
+  if (!/^[0-9a-f]{40}$/.test(response.data.sha)) {
+    throw new Error(
+      `Expected ${repository}:${path}@${ref} to have a Git blob SHA`,
+    );
+  }
   return response.data.sha;
 }
 
@@ -1181,6 +1543,285 @@ async function resolveQualityWorkflowTrust({
   }
 
   return { workflowId, authorization, failure: null };
+}
+
+async function assertCoverageAuthorizationLineage({
+  github,
+  owner,
+  repo,
+  authorization,
+  pull,
+}) {
+  const pullComparison =
+    await github.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${pull.headSha}...${pull.baseSha}`,
+    });
+  if (
+    !["ahead", "behind", "diverged", "identical"].includes(
+      pullComparison.data.status,
+    ) ||
+    pullComparison.data.merge_base_commit?.sha !== authorization.baseSha
+  ) {
+    throw new Error(
+      `coverage authorization ${authorization.id} base is not the pull merge base`,
+    );
+  }
+
+  const adoptionComparison =
+    await github.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${authorization.adoptionSha}...${authorization.baseSha}`,
+    });
+  if (
+    !["ahead", "identical"].includes(adoptionComparison.data.status) ||
+    adoptionComparison.data.merge_base_commit?.sha !==
+      authorization.adoptionSha
+  ) {
+    throw new Error(
+      `coverage authorization ${authorization.id} predates trusted adoption`,
+    );
+  }
+}
+
+async function resolveCoverageAssetTrust({
+  github,
+  owner,
+  repo,
+  pull,
+  coverageAuthorizations,
+  authorizationNow,
+  fallbackUrl,
+}) {
+  const repository = `${owner}/${repo}`;
+  const repositoryResponse = await github.rest.repos.get({ owner, repo });
+  const defaultBranch = repositoryResponse.data.default_branch;
+  let trustedEngineBlob;
+  let authorizedEngineBlob;
+  let trustedHarnessBlob;
+  let authorizedHarnessBlob;
+  let trustedReviewBlob;
+  let authorizedReviewBlob;
+  let trustedInvocationBlob;
+  let authorizedInvocationBlob;
+  try {
+    [
+      trustedEngineBlob,
+      authorizedEngineBlob,
+      trustedHarnessBlob,
+      authorizedHarnessBlob,
+      trustedReviewBlob,
+      authorizedReviewBlob,
+      trustedInvocationBlob,
+      authorizedInvocationBlob,
+    ] = await Promise.all([
+      getWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_ENGINE_PATH,
+        defaultBranch,
+      ),
+      getWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_ENGINE_PATH,
+        pull.headSha,
+      ),
+      getWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_HARNESS_PATH,
+        defaultBranch,
+      ),
+      getWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_HARNESS_PATH,
+        pull.headSha,
+      ),
+      getWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_REVIEW_PATH,
+        defaultBranch,
+      ),
+      getWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_REVIEW_PATH,
+        pull.headSha,
+      ),
+      getWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_INVOCATION_PATH,
+        defaultBranch,
+      ),
+      getWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_INVOCATION_PATH,
+        pull.headSha,
+      ),
+    ]);
+  } catch (error) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} cannot verify trusted coverage assets`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      },
+    };
+  }
+
+  if (
+    trustedReviewBlob !== authorizedReviewBlob ||
+    trustedInvocationBlob !== authorizedInvocationBlob
+  ) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} changes trusted coverage review code`,
+        targetUrl: fallbackUrl,
+        reason:
+          "coverage review validator and invocation must match the current default branch",
+      },
+    };
+  }
+
+  const engineChanged = trustedEngineBlob !== authorizedEngineBlob;
+  const harnessChanged = trustedHarnessBlob !== authorizedHarnessBlob;
+  if (!engineChanged && !harnessChanged) {
+    return { authorization: null, failure: null };
+  }
+  if (engineChanged !== harnessChanged) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} changes an incomplete coverage pair`,
+        targetUrl: fallbackUrl,
+        reason:
+          "coverage engine and harness must remain default-equal or change as one authorized pair",
+      },
+    };
+  }
+
+  let changedPaths;
+  let authorization;
+  try {
+    changedPaths = await listPullRequestPaths(
+      github,
+      owner,
+      repo,
+      pull.number,
+    );
+    authorization = findCoverageAssetAuthorization({
+      authorizations: coverageAuthorizations,
+      repository,
+      trustedEngineBlob,
+      authorizedEngineBlob,
+      trustedHarnessBlob,
+      authorizedHarnessBlob,
+      changedPaths,
+      pull,
+      now: authorizationNow,
+    });
+    if (authorization) {
+      await assertCoverageAuthorizationLineage({
+        github,
+        owner,
+        repo,
+        authorization,
+        pull,
+      });
+    }
+  } catch (error) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} has invalid coverage authorization`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      },
+    };
+  }
+  if (!authorization) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} changes trusted coverage assets`,
+        targetUrl: fallbackUrl,
+        reason:
+          "coverage engine and harness differ from the current default branch without an exact PR-bound authorization",
+      },
+    };
+  }
+  return { authorization, failure: null };
+}
+
+async function resolveTrustedQualityAssets({
+  github,
+  owner,
+  repo,
+  pull,
+  workflowAuthorizations,
+  coverageAuthorizations,
+  authorizationNow,
+  fallbackUrl,
+}) {
+  const workflowTrust = await resolveQualityWorkflowTrust({
+    github,
+    owner,
+    repo,
+    pull,
+    workflowAuthorizations,
+    authorizationNow,
+    fallbackUrl,
+  });
+  if (workflowTrust.failure) {
+    return workflowTrust;
+  }
+  const coverageTrust = await resolveCoverageAssetTrust({
+    github,
+    owner,
+    repo,
+    pull,
+    coverageAuthorizations,
+    authorizationNow,
+    fallbackUrl,
+  });
+  if (coverageTrust.failure) {
+    return {
+      workflowId: workflowTrust.workflowId,
+      failure: coverageTrust.failure,
+    };
+  }
+  if (workflowTrust.authorization && coverageTrust.authorization) {
+    return {
+      workflowId: workflowTrust.workflowId,
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} combines trusted authorization scopes`,
+        targetUrl: fallbackUrl,
+        reason:
+          "workflow and coverage asset authorizations must be consumed by separate pull requests",
+      },
+    };
+  }
+
+  const authorization = workflowTrust.authorization
+    ? { kind: "workflow", value: workflowTrust.authorization }
+    : coverageTrust.authorization
+      ? { kind: "coverage", value: coverageTrust.authorization }
+      : null;
+  return {
+    workflowId: workflowTrust.workflowId,
+    authorization,
+    failure: null,
+  };
 }
 
 async function getCurrentPull(
@@ -1517,8 +2158,12 @@ function qualityRunSelectionCutoff(transitionAt, authorization) {
   }
   return Math.max(
     transitionAt,
-    parseAuthorizationTime(authorization.issuedAt, "issuedAt"),
+    Date.parse(authorization.value.issuedAt),
   );
+}
+
+function authorizationLabel(authorization) {
+  return `${authorization.kind} authorization`;
 }
 
 function transitionMatchesPullIdentity(transition, pull) {
@@ -1753,6 +2398,7 @@ async function bindPendingQualityTransition({
   eventLabelName,
   eventPull,
   workflowAuthorizations,
+  coverageAuthorizations,
   authorizationNow,
   fallbackUrl,
 }) {
@@ -1994,12 +2640,13 @@ async function bindPendingQualityTransition({
     return false;
   }
 
-  const trust = await resolveQualityWorkflowTrust({
+  const trust = await resolveTrustedQualityAssets({
     github,
     owner,
     repo,
     pull,
     workflowAuthorizations,
+    coverageAuthorizations,
     authorizationNow,
     fallbackUrl,
   });
@@ -2061,6 +2708,7 @@ async function qualityDecision({
   candidateRun,
   fallbackUrl,
   workflowAuthorizations,
+  coverageAuthorizations,
   authorizationNow,
   requireFreshRun,
   serverUrl,
@@ -2082,12 +2730,13 @@ async function qualityDecision({
       };
     }
   }
-  const trust = await resolveQualityWorkflowTrust({
+  const trust = await resolveTrustedQualityAssets({
     github,
     owner,
     repo,
     pull,
     workflowAuthorizations,
+    coverageAuthorizations,
     authorizationNow,
     fallbackUrl,
   });
@@ -2279,13 +2928,16 @@ async function qualityDecision({
     };
   }
   if (authorization) {
-    const authorizationIssuedAt = Date.parse(authorization.issuedAt);
+    const authorizationIssuedAt = Date.parse(
+      authorization.value.issuedAt,
+    );
+    const label = authorizationLabel(authorization);
     if (runCreatedAt <= authorizationIssuedAt) {
       return {
         state: "pending",
         description: `PR #${pull.number} awaits post-authorization quality gates`,
         targetUrl: fallbackUrl,
-        reason: "matching quality workflow run predates its authorization",
+        reason: `matching quality workflow run predates its ${label}`,
       };
     }
     if (!candidateRun || candidateRun.id !== run.id) {
@@ -2294,7 +2946,7 @@ async function qualityDecision({
         description: `PR #${pull.number} awaits its exact quality completion event`,
         targetUrl: run.html_url || fallbackUrl,
         reason:
-          "workflow authorization may be consumed only by the selected run's workflow_run",
+          `${label} may be consumed only by the selected run's workflow_run`,
       };
     }
   }
@@ -2344,7 +2996,9 @@ async function qualityDecision({
     targetUrl: run.html_url,
     reason:
       "exact trusted quality workflow and aggregate job succeeded" +
-      (authorization ? ` authorization=${authorization.id}` : ""),
+      (authorization
+        ? ` authorization=${authorization.value.id}`
+        : ""),
     authorization,
   };
 }
@@ -2425,6 +3079,7 @@ module.exports = async function publishPrPolicy({
   context,
   core,
   workflowAuthorizations = TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS,
+  coverageAuthorizations = TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS,
   authorizationNow = new Date(),
 }) {
   const { owner, repo } = context.repo;
@@ -2580,6 +3235,7 @@ module.exports = async function publishPrPolicy({
           eventLabelName: item.eventLabelName,
           eventPull: item.eventPull,
           workflowAuthorizations,
+          coverageAuthorizations,
           authorizationNow,
           fallbackUrl: policyRunUrl,
         });
@@ -2595,6 +3251,7 @@ module.exports = async function publishPrPolicy({
       candidateRun: item.candidateRun,
       fallbackUrl: policyRunUrl,
       workflowAuthorizations,
+      coverageAuthorizations,
       authorizationNow,
       requireFreshRun: item.requireFreshRun && createTransition,
       serverUrl: context.serverUrl,
@@ -2701,22 +3358,34 @@ module.exports = async function publishPrPolicy({
         `PR #${pull.number} awaits its exact quality completion event`;
       quality.targetUrl = policyRunUrl;
       quality.reason =
-        "workflow authorization may be consumed only by its exact workflow_run";
+        `${authorizationLabel(quality.authorization)} may be consumed only by its exact workflow_run`;
     }
     if (quality.state === "success" && quality.authorization) {
       try {
-        await claimWorkflowAuthorization({
-          github,
-          owner,
-          repo,
-          authorization: quality.authorization,
-          pull,
-          targetUrl: policyRunUrl,
-        });
+        if (quality.authorization.kind === "workflow") {
+          await claimWorkflowAuthorization({
+            github,
+            owner,
+            repo,
+            authorization: quality.authorization.value,
+            pull,
+            targetUrl: policyRunUrl,
+          });
+        } else {
+          await claimCoverageAssetAuthorization({
+            github,
+            owner,
+            repo,
+            authorization: quality.authorization.value,
+            pull,
+            targetUrl: policyRunUrl,
+          });
+        }
       } catch (error) {
+        const label = authorizationLabel(quality.authorization);
         quality.state = "failure";
         quality.description =
-          `PR #${pull.number} could not consume workflow authorization`;
+          `PR #${pull.number} could not consume ${label}`;
         quality.targetUrl = policyRunUrl;
         quality.reason = error.message;
       }
@@ -2779,7 +3448,11 @@ module.exports = async function publishPrPolicy({
 };
 
 module.exports.branchDecision = branchDecision;
+module.exports.claimCoverageAssetAuthorization =
+  claimCoverageAssetAuthorization;
 module.exports.claimWorkflowAuthorization = claimWorkflowAuthorization;
+module.exports.findCoverageAssetAuthorization =
+  findCoverageAssetAuthorization;
 module.exports.findWorkflowAuthorization = findWorkflowAuthorization;
 module.exports.findQualityTransitionRun = findQualityTransitionRun;
 module.exports.labelsFingerprint = labelsFingerprint;
@@ -2789,3 +3462,5 @@ module.exports.qualityTransitionDescription = qualityTransitionDescription;
 module.exports.runMatchesPull = runMatchesPull;
 module.exports.trustedWorkflowBlobAuthorizations =
   TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS;
+module.exports.trustedCoverageAssetAuthorizations =
+  TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS;

@@ -11,6 +11,35 @@ const BASE_SHA = "0000000000000000000000000000000000000000";
 const MERGE_SHA = "2222222222222222222222222222222222222222";
 const TRUSTED_BLOB = "4444444444444444444444444444444444444444";
 const CHANGED_BLOB = "5555555555555555555555555555555555555555";
+const TRUSTED_ENGINE_BLOB =
+  "6666666666666666666666666666666666666666";
+const CHANGED_ENGINE_BLOB =
+  "7777777777777777777777777777777777777777";
+const TRUSTED_HARNESS_BLOB =
+  "8888888888888888888888888888888888888888";
+const CHANGED_HARNESS_BLOB =
+  "9999999999999999999999999999999999999999";
+const TRUSTED_REVIEW_BLOB =
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const CHANGED_REVIEW_BLOB =
+  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TRUSTED_INVOCATION_BLOB =
+  "cccccccccccccccccccccccccccccccccccccccc";
+const CHANGED_INVOCATION_BLOB =
+  "dddddddddddddddddddddddddddddddddddddddd";
+const COVERAGE_ENGINE_PATH = ".github/scripts/test-coverage-matrix.js";
+const COVERAGE_HARNESS_PATH =
+  ".github/scripts/test-test-coverage-matrix.js";
+const COVERAGE_REVIEW_PATH =
+  "infra/azure/agents/coverage-engine-review-stan.sh";
+const COVERAGE_INVOCATION_PATH =
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh";
+const COVERAGE_ALLOWED_PATHS = [
+  COVERAGE_ENGINE_PATH,
+  COVERAGE_HARNESS_PATH,
+  "LEARNINGS.md",
+  "docs/wiki/Engineering-Learnings.md",
+];
 const NOW = "2026-09-02T12:00:00.000Z";
 const PULL_UPDATED_AT = "2026-09-02T09:00:00.000Z";
 const TRANSITION_STATUS_CREATED_AT = "2026-09-02T09:30:00.000Z";
@@ -150,6 +179,32 @@ function workflowAuthorization(overrides = {}) {
   };
 }
 
+function coverageAuthorization(overrides = {}) {
+  return {
+    id: "coverage-pair-777777777777-pr-63",
+    repository: "example/repo",
+    headRepository: "example/repo",
+    pullNumber: 63,
+    headRef: "dev",
+    headSha: HEAD_SHA,
+    baseRef: "master",
+    baseSha: BASE_SHA,
+    enginePath: COVERAGE_ENGINE_PATH,
+    trustedEngineBlob: TRUSTED_ENGINE_BLOB,
+    authorizedEngineBlob: CHANGED_ENGINE_BLOB,
+    harnessPath: COVERAGE_HARNESS_PATH,
+    trustedHarnessBlob: TRUSTED_HARNESS_BLOB,
+    authorizedHarnessBlob: CHANGED_HARNESS_BLOB,
+    allowedPaths: [...COVERAGE_ALLOWED_PATHS],
+    expectedTests: 102,
+    issuedAt: "2026-09-01T12:00:00.000Z",
+    expiresAt: "2026-09-04T12:00:00.000Z",
+    receiptSha: HEAD_SHA,
+    adoptionSha: BASE_SHA,
+    ...overrides,
+  };
+}
+
 function qualityTransitionStatus(overrides = {}) {
   return {
     id: 900,
@@ -179,11 +234,15 @@ async function execute({
   eventPull = pull(),
   run = workflowRun(),
   headBlob = TRUSTED_BLOB,
+  headAssetBlobs = {},
+  trustedAssetBlobs = {},
+  changedFiles = [],
   eventName = "workflow_dispatch",
   eventAction = "edited",
   listedRuns,
   listedTotalCount,
   workflowAuthorizations,
+  coverageAuthorizations,
   authorizationNow = NOW,
   authorizationStatuses = [],
   transitionStatuses = [qualityTransitionStatus()],
@@ -197,6 +256,7 @@ async function execute({
   issueEventPages,
   issueEventError,
   issueEventListCalls,
+  pullFileListCalls,
   staleTransitionStatusReads = false,
   transitionStatusCreatedAt = NOW,
   workflowRunListCalls,
@@ -241,19 +301,50 @@ async function execute({
           pullGetCount += 1;
           return { data };
         },
+        listFiles: async ({ page, per_page: perPage }) => {
+          pullFileListCalls?.push({ page, perPage });
+          return {
+            data: changedFiles
+              .slice((page - 1) * perPage, page * perPage)
+              .map((filename) => ({
+                filename,
+                status: "modified",
+              })),
+          };
+        },
       },
       repos: {
         get: async () => ({ data: { default_branch: "dev" } }),
-        getContent: async ({ ref }) => ({
-          data: {
-            type: "file",
-            sha: ref === "dev" ? TRUSTED_BLOB : headBlob,
-          },
-        }),
+        getContent: async ({ path: filePath, ref }) => {
+          const trustedBlobs = {
+            ".github/workflows/production-build.yml": TRUSTED_BLOB,
+            [COVERAGE_ENGINE_PATH]: TRUSTED_ENGINE_BLOB,
+            [COVERAGE_HARNESS_PATH]: TRUSTED_HARNESS_BLOB,
+            [COVERAGE_REVIEW_PATH]: TRUSTED_REVIEW_BLOB,
+            [COVERAGE_INVOCATION_PATH]: TRUSTED_INVOCATION_BLOB,
+            ...trustedAssetBlobs,
+          };
+          const headBlobs = {
+            ".github/workflows/production-build.yml": headBlob,
+            ...headAssetBlobs,
+          };
+          const sha =
+            ref === "dev"
+              ? trustedBlobs[filePath]
+              : (headBlobs[filePath] ?? trustedBlobs[filePath]);
+          assert.match(sha, /^[0-9a-f]{40}$/);
+          return {
+            data: {
+              type: "file",
+              sha,
+            },
+          };
+        },
         createCommitStatus: async (status) => {
           statuses.push(status);
           if (
-            status.context.startsWith("trusted-workflow-authorization/")
+            status.context.startsWith("trusted-workflow-authorization/") ||
+            status.context.startsWith("trusted-coverage-authorization/")
           ) {
             const { sha: _sha, ...storedStatus } = status;
             authorizationStatuses.unshift({
@@ -290,11 +381,14 @@ async function execute({
           };
         },
         compareCommitsWithBasehead: async ({ basehead }) => {
-          assert.equal(basehead, `${HEAD_SHA}...${HEAD_SHA}`);
+          const [base] = basehead.split("...");
+          assert.match(base, /^[0-9a-f]{40}$/);
+          const mergeBase =
+            basehead === `${HEAD_SHA}...${BASE_SHA}` ? BASE_SHA : base;
           return {
             data: {
               status: comparisonStatus,
-              merge_base_commit: { sha: HEAD_SHA },
+              merge_base_commit: { sha: mergeBase },
             },
           };
         },
@@ -391,6 +485,9 @@ async function execute({
   };
   if (workflowAuthorizations !== undefined) {
     policyArguments.workflowAuthorizations = workflowAuthorizations;
+  }
+  if (coverageAuthorizations !== undefined) {
+    policyArguments.coverageAuthorizations = coverageAuthorizations;
   }
   await publishPrPolicy(policyArguments);
   return { statuses, messages };
@@ -3849,6 +3946,206 @@ async function main() {
   assert.match(
     publisherSource,
     /const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object\.freeze\(\[\]\);/,
+  );
+  assert.deepEqual(
+    publishPrPolicy.trustedCoverageAssetAuthorizations,
+    [],
+  );
+  assert.equal(
+    Object.isFrozen(publishPrPolicy.trustedCoverageAssetAuthorizations),
+    true,
+  );
+  assert.match(
+    publisherSource,
+    /const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String\.raw`\[\]`;/,
+  );
+
+  const unchangedCoveragePathCalls = [];
+  const unchangedCoverage = await execute({
+    pullFileListCalls: unchangedCoveragePathCalls,
+  });
+  assert.equal(
+    unchangedCoverage.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .every(({ state }) => state === "success"),
+    true,
+  );
+  assert.deepEqual(unchangedCoveragePathCalls, []);
+
+  for (const [filePath, changedBlob] of [
+    [COVERAGE_REVIEW_PATH, CHANGED_REVIEW_BLOB],
+    [COVERAGE_INVOCATION_PATH, CHANGED_INVOCATION_BLOB],
+  ]) {
+    const trustCodeDrift = await execute({
+      headAssetBlobs: { [filePath]: changedBlob },
+    });
+    assertQualityFailure(trustCodeDrift);
+    assert(
+      trustCodeDrift.statuses.some(({ description }) =>
+        description.includes("changes trusted coverage review code"),
+      ),
+    );
+  }
+
+  for (const headAssetBlobs of [
+    { [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB },
+    { [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB },
+  ]) {
+    const mixedCoveragePair = await execute({ headAssetBlobs });
+    assertQualityFailure(mixedCoveragePair);
+    assert(
+      mixedCoveragePair.statuses.some(({ description }) =>
+        description.includes("incomplete coverage pair"),
+      ),
+    );
+  }
+
+  const changedCoveragePair = {
+    [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB,
+    [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB,
+  };
+  const unknownCoveragePair = await execute({
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+  });
+  assertQualityFailure(unknownCoveragePair);
+  assert(
+    unknownCoveragePair.statuses.some(({ description }) =>
+      description.includes("changes trusted coverage assets"),
+    ),
+  );
+
+  const coverageManualRefresh = await execute({
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+  });
+  assert.deepEqual(
+    coverageManualRefresh.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["pending", "pending"],
+  );
+  assert.equal(
+    coverageManualRefresh.statuses.some(({ context }) =>
+      context.startsWith("trusted-coverage-authorization/"),
+    ),
+    false,
+  );
+  assert(
+    coverageManualRefresh.messages.some((message) =>
+      message.includes(
+        "coverage authorization may be consumed only by the selected run's workflow_run",
+      ),
+    ),
+  );
+
+  const coverageAuthorizationStatuses = [];
+  const exactCoverageCompletion = await execute({
+    eventName: "workflow_run",
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationStatuses: coverageAuthorizationStatuses,
+  });
+  assert.deepEqual(
+    exactCoverageCompletion.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success", "success"],
+  );
+  assert.deepEqual(
+    exactCoverageCompletion.statuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-coverage-authorization/"),
+      )
+      .map(({ state }) => state),
+    ["pending", "success"],
+  );
+
+  const repeatedCoverageCompletion = await execute({
+    eventName: "workflow_run",
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationStatuses: coverageAuthorizationStatuses,
+  });
+  assertQualityFailure(repeatedCoverageCompletion);
+  assert(
+    repeatedCoverageCompletion.messages.some((message) =>
+      message.includes("coverage authorization") &&
+      message.includes("already consumed"),
+    ),
+  );
+
+  const extraCoveragePath = await execute({
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: [...COVERAGE_ALLOWED_PATHS, "unexpected.txt"],
+    coverageAuthorizations: [coverageAuthorization()],
+  });
+  assertQualityFailure(extraCoveragePath);
+
+  for (const override of [
+    { repository: "other/repo" },
+    { headRepository: "other/repo" },
+    { pullNumber: 64 },
+    { headRef: "other-branch" },
+    { headSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+    { baseRef: "dev" },
+    { baseSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+    { expectedTests: 0 },
+    { expectedTests: 1 },
+    { expectedTests: 101 },
+    { expectedTests: 103 },
+    { expectedTests: 10_000 },
+    { issuedAt: "2026-09-03T12:00:00.000Z" },
+    { expiresAt: "2026-09-02T12:00:00.000Z" },
+  ]) {
+    const invalidCoverageAuthorization = await execute({
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      coverageAuthorizations: [coverageAuthorization(override)],
+    });
+    assertQualityFailure(invalidCoverageAuthorization);
+  }
+
+  const invalidCoverageAdoption = await execute({
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    comparisonStatus: "diverged",
+  });
+  assertQualityFailure(invalidCoverageAdoption);
+
+  const duplicateCoverageAuthorization = coverageAuthorization();
+  const duplicateCoverageResult = await execute({
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [
+      duplicateCoverageAuthorization,
+      { ...duplicateCoverageAuthorization },
+    ],
+  });
+  assertQualityFailure(duplicateCoverageResult);
+  assert(
+    duplicateCoverageResult.messages.some((message) =>
+      message.includes("duplicate coverage authorization id"),
+    ),
+  );
+
+  const combinedAuthorization = await execute({
+    eventName: "workflow_run",
+    headBlob: CHANGED_BLOB,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    workflowAuthorizations: [workflowAuthorization()],
+    coverageAuthorizations: [coverageAuthorization()],
+  });
+  assertQualityFailure(combinedAuthorization);
+  assert(
+    combinedAuthorization.statuses.some(({ description }) =>
+      description.includes("combines trusted authorization scopes"),
+    ),
   );
 
   const manualAuthorizedRefresh = await execute({
