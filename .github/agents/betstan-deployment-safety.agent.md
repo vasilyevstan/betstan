@@ -68,6 +68,10 @@ inactive. Fail closed when either query is incomplete or fails.
 - Keep development, review, and merges concurrent where ownership is safe;
   retain production-run exclusivity and the shared operation lock for
   dispatches, data mutation, deployment, activation, rollback, and recovery.
+- For a single-replica queue-only worker, review the Deployment strategy
+  together with broker prefetch. When the durable queue safely buffers a short
+  handoff, use a non-overlapping rollout if two simultaneous consumers would
+  violate a single-writer persistence contract.
 - For a PR created and labelled `copilot-cli-managed` by the active Copilot CLI workflow, continue without a separate human prompt only after the exact-SHA automated approval gates pass. Never add that label to an existing human PR.
 - Every other PR requires explicit user approval for its exact current head SHA. A human `master` promotion also requires approval for the complete production-capable workflow set.
 - Automatic approval never waives required checks, trusted workflow provenance, resolved review threads, production-run exclusivity, immutable image identity, rollback readiness, or post-deploy verification.

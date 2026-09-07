@@ -167,6 +167,7 @@ it("starts all resources before any listener begins consuming", async () => {
     "hook:SIGINT",
     "hook:SIGTERM",
     "hook:uncaughtException",
+    "hook:unhandledRejection",
     "connect:messaging",
     "connect:database",
     "replay-publisher:init",
@@ -314,7 +315,7 @@ it("memoizes shutdown and falls back to removeListener when off is unavailable",
   await Promise.all([firstShutdown, secondShutdown]);
 
   expect(getWorker().stop).toHaveBeenCalledTimes(1);
-  expect(removeListener).toHaveBeenCalledTimes(3);
+  expect(removeListener).toHaveBeenCalledTimes(4);
 });
 
 it("reports startup and cleanup failures together", async () => {
@@ -348,6 +349,7 @@ it("does not install duplicate signal hooks", async () => {
   expect(runtimeProcess.listenerCount("SIGINT")).toEqual(1);
   expect(runtimeProcess.listenerCount("SIGTERM")).toEqual(1);
   expect(runtimeProcess.listenerCount("uncaughtException")).toEqual(1);
+  expect(runtimeProcess.listenerCount("unhandledRejection")).toEqual(1);
 
   await runtime.shutdown();
 });
@@ -364,6 +366,25 @@ it("logs uncaught exceptions and exits after shutdown", async () => {
     expect.any(Error)
   );
   expect(getWorker().stop).toHaveBeenCalledTimes(1);
+  expect(runtimeProcess.exit).toHaveBeenCalledWith(1);
+});
+
+it("logs unhandled listener rejections and exits after shutdown", async () => {
+  const { runtime, runtimeProcess, logger, getWorker } = createDependencies();
+
+  await runtime.start();
+  runtimeProcess.emit("unhandledRejection", new Error("listener failed"));
+  runtimeProcess.emit("unhandledRejection", new Error("second listener failed"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  expect(logger.error).toHaveBeenCalledTimes(2);
+  expect(logger.error).toHaveBeenNthCalledWith(
+    1,
+    "logging general error",
+    expect.any(Error)
+  );
+  expect(getWorker().stop).toHaveBeenCalledTimes(1);
+  expect(runtimeProcess.exit).toHaveBeenCalledTimes(1);
   expect(runtimeProcess.exit).toHaveBeenCalledWith(1);
 });
 

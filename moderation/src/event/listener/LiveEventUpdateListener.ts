@@ -12,6 +12,9 @@ class LiveEventUpdateListener extends AListener<ILiveEventUpdateEvent> {
 
   async init() {
     await super.init();
+    // Market-history updates use bounded optimistic concurrency. Broker
+    // backpressure keeps one unacknowledged snapshot per consumer.
+    await this.channel.prefetch(1);
     this.publisher = new BetModerationResultPublisher(this.connection);
     await this.publisher.init();
     await this.publisher.initConfirmChannel();
