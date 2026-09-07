@@ -76,10 +76,18 @@ on:
         default: ""
         type: string
       capacity_acquisition_run_id:
-        description: Successful first-attempt oci-capacity-acquire run for this exact SHA, required before finalization
+        description: Successful first-attempt oci-capacity-acquire run for this exact SHA, required before k3s finalization
         required: false
         default: ""
         type: string
+      runtime_mode:
+        description: Runtime mode this dispatch is bound to; must equal the authoritative environment mode
+        required: true
+        default: k3s
+        type: choice
+        options:
+          - k3s
+          - oke
 
 permissions:
   actions: read
@@ -711,6 +719,8 @@ jobs:
       GHCR_BUILD_RUN_ID: ${{ inputs.ghcr_build_run_id }}
       GHCR_PACKAGE_VALIDATION_RUN_ID: ${{ inputs.ghcr_package_validation_run_id }}
       CAPACITY_ACQUISITION_RUN_ID: ${{ inputs.capacity_acquisition_run_id }}
+      BOUND_RUNTIME_MODE: ${{ inputs.runtime_mode }}
+      PHASE: ${{ inputs.phase }}
       OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
       OCI_WORKER_SUBNET_CIDR: ${{ vars.OCI_WORKER_SUBNET_CIDR || '10.42.16.0/20' }}
       OCI_LB_SUBNET_CIDR: ${{ vars.OCI_LB_SUBNET_CIDR || '10.42.32.0/24' }}
@@ -770,26 +780,48 @@ jobs:
           mkdir -p "$HOME/.kube"
           chmod 700 "$HOME" "$HOME/.kube"
 
-      - name: Install pinned OCI CLI and verify identity
+      - name: Bind runtime mode and prove upstream prerequisites
         env:
-          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
-          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
-          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
-          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
-          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
-          OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          ./infra/oci/scripts/install-cli.sh
-          home_region="$(
-            oci iam region-subscription list \
-              --tenancy-id "$OCI_CLI_TENANCY" \
-              --query "$OCI_HOME_REGION_QUERY" \
-              --raw-output
+          # Everything below runs before any OCI CLI install, cloud identity
+          # check, provisioning, runner-rule change, add-on install or Bastion
+          # access. A wrong, missing, rerun or expired binding must fail here,
+          # so a direct workflow_dispatch cannot reach cloud access or mutation.
+          [ "$BOUND_RUNTIME_MODE" = "$OCI_RUNTIME_MODE" ]
+          case "$BOUND_RUNTIME_MODE" in
+            k3s|oke) ;;
+            *) echo "unsupported bound runtime mode" >&2; exit 1 ;;
+          esac
+          if [ "$PHASE" != "finalize" ]; then
+            exit 0
+          fi
+          if [ "$BOUND_RUNTIME_MODE" = "k3s" ]; then
+            operation=oci-infrastructure-finalize-k3s
+            [ -n "$CAPACITY_ACQUISITION_RUN_ID" ]
+          else
+            operation=oci-infrastructure-finalize-oke
+            # OKE has no Free Tier capacity acquisition; a supplied run is a
+            # binding error, not an ignorable extra.
+            [ -z "$CAPACITY_ACQUISITION_RUN_ID" ]
+          fi
+          # Bindings come from the checked-in manifest that a contract test
+          # proves byte-equal to the protected-operation policy the dispatcher
+          # uses, so the two enforcement paths cannot drift.
+          policy_json="$(
+            jq -c --arg op "$operation" '{upstreamRunBindings: .[$op]}' \
+              infra/oci/policy/upstream-run-bindings.json
           )"
-          [ "$home_region" = "$OCI_CLI_REGION" ]
+          # Same validator, same policy bindings the dispatcher uses.
+          ./infra/oci/scripts/upstream_run_binding_stan.py validate-all \
+            --repository "$REPOSITORY" \
+            --policy-json "$policy_json" \
+            --subject-sha "$SOURCE_SHA" \
+            --dispatch-inputs "$dispatch_inputs"
 
-      - name: Bind finalization to public GHCR build and package validation
+      - name: Verify GHCR build and package evidence content
         if: inputs.phase == 'finalize'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -854,6 +886,56 @@ jobs:
             "build_run_id=$GHCR_BUILD_RUN_ID" \
             "package_validation_run_id=$GHCR_PACKAGE_VALIDATION_RUN_ID" \
             > artifacts/oci-infrastructure/application-registry-evidence.env
+
+      - name: Download bound k3s capacity provenance
+        if: inputs.phase == 'finalize' && inputs.runtime_mode == 'k3s'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/oci-capacity
+          artifact_name="oci-capacity-provenance-${CAPACITY_ACQUISITION_RUN_ID}-1"
+          gh api \
+            "repos/$REPOSITORY/actions/runs/$CAPACITY_ACQUISITION_RUN_ID/artifacts" |
+            jq -e --arg name "$artifact_name" '
+              [.artifacts[] | select(.name == $name)] as $matches |
+              ($matches | length) == 1 and $matches[0].expired == false
+            ' >/dev/null
+          gh run download "$CAPACITY_ACQUISITION_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name "$artifact_name" \
+            --dir artifacts/oci-capacity
+          [ -z "$(find artifacts/oci-capacity -type l -print -quit)" ]
+          test -s artifacts/oci-capacity/provenance.env
+          source artifacts/oci-capacity/provenance.env
+          [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$acquisition_run_id" = "$CAPACITY_ACQUISITION_RUN_ID" ]
+          [ "$runtime_mode" = "k3s" ]
+          [ "$shape" = "VM.Standard.A1.Flex" ]
+          [ "$ocpus" = "2" ]
+          [ "$memory_gb" = "12" ]
+          [ "$boot_volume_gb" = "50" ]
+          [ "$boot_volume_vpus_per_gb" = "10" ]
+
+      - name: Install pinned OCI CLI and verify identity
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
+        run: |
+          set -euo pipefail
+          ./infra/oci/scripts/install-cli.sh
+          home_region="$(
+            oci iam region-subscription list \
+              --tenancy-id "$OCI_CLI_TENANCY" \
+              --query "$OCI_HOME_REGION_QUERY" \
+              --raw-output
+          )"
+          [ "$home_region" = "$OCI_CLI_REGION" ]
 
       - name: Zero-cost preflight and cloud reconciliation
         id: cloud
@@ -926,65 +1008,6 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
           OCI_CLI_REGION: ${{ vars.OCI_REGION }}
         run: ./infra/oci/scripts/provision.sh addons
-
-      - name: Download trusted k3s acquisition provenance
-        if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/oci-capacity
-          # Capacity provenance is bound by an explicit, hash-covered transport
-          # input rather than an implicit scan. An absent or wrong capacity run
-          # must fail here as well as in the dispatcher, so direct workflow
-          # execution cannot bypass the binding.
-          [[ "$CAPACITY_ACQUISITION_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
-            { echo "capacity_acquisition_run_id must be a positive run ID" >&2; exit 1; }
-          capacity_workflow_id="$(
-            gh api "repos/$REPOSITORY/actions/workflows/oci-capacity-acquire.yml" --jq '.id'
-          )"
-          capacity_run="$(
-            gh api "repos/$REPOSITORY/actions/runs/$CAPACITY_ACQUISITION_RUN_ID/attempts/1"
-          )"
-          jq -e \
-            --argjson workflow_id "$capacity_workflow_id" \
-            --arg sha "$SOURCE_SHA" \
-            --arg repo "$REPOSITORY" \
-            --arg title "oci-capacity-acquire $SOURCE_SHA" '
-              .workflow_id == $workflow_id and
-              .path == ".github/workflows/oci-capacity-acquire.yml" and
-              (.event == "schedule" or .event == "workflow_dispatch") and
-              .head_sha == $sha and
-              .head_branch == "master" and
-              .head_repository.full_name == $repo and
-              .status == "completed" and
-              .conclusion == "success" and
-              .run_attempt == 1 and
-              (.event == "schedule" or .display_title == $title)
-            ' <<<"$capacity_run" >/dev/null
-          artifact_name="oci-capacity-provenance-${CAPACITY_ACQUISITION_RUN_ID}-1"
-          gh api \
-            "repos/$REPOSITORY/actions/runs/$CAPACITY_ACQUISITION_RUN_ID/artifacts" |
-            jq -e --arg name "$artifact_name" '
-              [.artifacts[] | select(.name == $name)] as $matches |
-              ($matches | length) == 1 and $matches[0].expired == false
-            ' >/dev/null
-          gh run download "$CAPACITY_ACQUISITION_RUN_ID" \
-            --repo "$REPOSITORY" \
-            --name "$artifact_name" \
-            --dir artifacts/oci-capacity
-          [ -z "$(find artifacts/oci-capacity -type l -print -quit)" ]
-          test -s artifacts/oci-capacity/provenance.env
-          source artifacts/oci-capacity/provenance.env
-          [ "$source_sha" = "$SOURCE_SHA" ]
-          [ "$acquisition_run_id" = "$CAPACITY_ACQUISITION_RUN_ID" ]
-          [ "$runtime_mode" = "k3s" ]
-          [ "$shape" = "VM.Standard.A1.Flex" ]
-          [ "$ocpus" = "2" ]
-          [ "$memory_gb" = "12" ]
-          [ "$boot_volume_gb" = "50" ]
-          [ "$boot_volume_vpus_per_gb" = "10" ]
 
       - name: Open ephemeral OCI Bastion access and finalize k3s
         if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'

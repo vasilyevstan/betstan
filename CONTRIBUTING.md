@@ -229,12 +229,19 @@ previous `issued` or `consumed` state and do not call GitHub.
 Each OCI release runs its protected chain in a fixed order: public GHCR
 package validation, then `oci-capacity-acquire` for that exact SHA, then
 `oci-infrastructure` finalization, then the live-data handoff, then deployment.
-Finalization takes the capacity run as an explicit `capacity_acquisition_run_id`
-transport input covered by the dispatch input hash, never an implicit scan. The
-dispatcher rejects a missing, wrong-SHA, wrong-workflow, failed, rerun, or
-expired-artifact capacity run before it enables a workflow or issues any
-authority, and the workflow revalidates the same binding so direct execution
-cannot bypass it. This ordering is mandatory because protected authority is
+Finalization is split into `oci-infrastructure-finalize-k3s` and
+`oci-infrastructure-finalize-oke`, each pinning an immutable hash-covered
+`runtime_mode` that must equal the authoritative Actions environment mode. The
+k3s operation requires an exact `capacity_acquisition_run_id`; the OKE operation
+forces it empty and rejects a supplied one. Every finalize prerequisite -- GHCR
+build, GHCR package validation and, for k3s, capacity acquisition -- is an
+explicit transport input covered by the dispatch input hash, never an implicit
+scan. One shared validator enforces workflow identity, repository, branch,
+subject SHA, permitted event, exact event-specific title, current run attempt 1,
+successful completion, and a unique unexpired non-empty artifact. The dispatcher
+runs it on fresh dispatch and both resume paths before enabling a workflow or
+issuing authority; the workflow runs it from a checked-in manifest proven
+equivalent to the same policy, before any cloud access or mutation. This ordering is mandatory because protected authority is
 one-use: a prerequisite discovered mid-run would otherwise consume the authority
 for that master SHA permanently, and recovery would require promoting a new
 hardened SHA.

@@ -927,3 +927,14 @@ Lessons:
 - The authoritative OCI release order is: GHCR package validation, capacity
   acquisition for the exact SHA, infrastructure finalization, live-data handoff,
   deployment.
+- Reading only `/attempts/1` is tautological, because a rerun still exposes a
+  first attempt. Fetch the base run, require its current attempt to be 1, then
+  bind attempt 1.
+- Keep the supported fallback runtime alive. Bind runtime mode explicitly and
+  immutably and split the protected operation per mode instead of assuming one
+  runtime; prove the bound mode equals the authoritative environment mode before
+  authority, and again inside the workflow before mutation.
+- An OCI workflow must not reach into the Azure agent tree. Publish the shared
+  binding definitions as a checked-in manifest and prove it equivalent to the
+  protected-operation policy, so one definition governs both enforcement paths
+  without a cross-cloud dependency.

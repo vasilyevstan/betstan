@@ -1,0 +1,47 @@
+{
+  "oci-infrastructure-finalize-k3s": [
+    {
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+      "input": "ghcr_package_validation_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}"
+      },
+      "workflow": "ghcr-package-management.yml"
+    },
+    {
+      "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
+      "input": "capacity_acquisition_run_id",
+      "titleTemplates": {
+        "schedule": "oci-capacity-acquire scheduled-master",
+        "workflow_dispatch": "oci-capacity-acquire {subject_sha}"
+      },
+      "workflow": "oci-capacity-acquire.yml"
+    }
+  ],
+  "oci-infrastructure-finalize-oke": [
+    {
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+      "input": "ghcr_package_validation_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}"
+      },
+      "workflow": "ghcr-package-management.yml"
+    }
+  ]
+}

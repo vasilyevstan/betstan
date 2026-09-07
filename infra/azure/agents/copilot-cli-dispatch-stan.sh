@@ -15,6 +15,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
+UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MATERIALIZATION_ATTEMPTS="${COPILOT_CLI_MATERIALIZATION_ATTEMPTS:-12}"
 MATERIALIZATION_SLEEP_SECONDS="${COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS:-5}"
@@ -334,8 +335,52 @@ if [[ -n "$ACTION" ]]; then
     --repo-root "$ROOT_DIR"
 fi
 
+validate_runtime_mode_binding() {
+  # A finalize dispatch carries an immutable runtime mode. Prove it equals the
+  # authoritative Actions environment mode before any authority exists, so an
+  # OKE fleet cannot be finalized with k3s semantics or vice versa.
+  local declared observed
+  declared="$(jq -r '.fixedInputs.runtime_mode // ""' <<<"$policy_json")"
+  [[ -n "$declared" ]] || return 0
+  observed="$(
+    gh api \
+      "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
+      --jq '.value'
+  )" || fail "unable to read the authoritative runtime mode for $environment"
+  [[ "$declared" = "$observed" ]] ||
+    fail "operation runtime mode '$declared' does not match the authoritative $environment mode '$observed'"
+}
+
+validate_upstream_run_bindings() {
+  # Enforce declared upstream run bindings BEFORE any authority intent or
+  # record exists, so a missing, wrong, rerun or expired upstream cannot
+  # consume a one-use protected authority. The bound workflow calls the same
+  # shared validator with the same policy bindings, so the two paths cannot
+  # drift.
+  local dispatch_inputs
+  [[ -x "$UPSTREAM_BINDING_VALIDATOR" ]] ||
+    fail "upstream run binding validator is unavailable"
+  [[ "$(jq -r '.upstreamRunBindings | length' <<<"$policy_json")" != "0" ]] ||
+    return 0
+  dispatch_inputs="$(jq -c '.dispatchInputs' "$normalized_file")"
+  [[ -n "$dispatch_inputs" && "$dispatch_inputs" != "null" ]] ||
+    fail "normalized request does not expose dispatch inputs"
+  "$UPSTREAM_BINDING_VALIDATOR" validate-all \
+    --repository "$repository" \
+    --policy-json "$policy_json" \
+    --subject-sha "$subject_sha" \
+    --dispatch-inputs "$dispatch_inputs" >/dev/null ||
+    fail "upstream run bindings were rejected before any authority was issued"
+}
+
+validate_protected_prerequisites() {
+  validate_runtime_mode_binding
+  validate_upstream_run_bindings
+}
+
 if [[ "$ACTION" = "--resume-run" ]]; then
   revalidate_control
+  validate_protected_prerequisites
   bound_run_id="$(
     "$AUTHORITY_HELPER" bind-intent \
       --normalized "$normalized_file" \
@@ -357,6 +402,7 @@ fi
 
 if [[ "$ACTION" = "--resume-captured" ]]; then
   revalidate_control
+  validate_protected_prerequisites
   bound_run_id="$(
     "$AUTHORITY_HELPER" bind-intent \
       --normalized "$normalized_file" \
@@ -374,73 +420,7 @@ if [[ "$ACTION" = "--resume-captured" ]]; then
   exit 0
 fi
 
-validate_upstream_run_bindings() {
-  # Enforce declared upstream run bindings BEFORE any authority intent or
-  # record exists, so a missing or wrong upstream cannot consume a one-use
-  # protected authority. The bound workflow also revalidates the same binding
-  # at execution time; this is defence in depth, not the only check.
-  local bindings binding input_name value expected_workflow expected_artifact
-  local run_json workflow_id title_optional events_json title_template
-  local match_subject artifact_json
-  bindings="$(jq -c '.upstreamRunBindings // [] | .[]' <<<"$policy_json")"
-  [[ -n "$bindings" ]] || return 0
-  while IFS= read -r binding; do
-    [[ -n "$binding" ]] || continue
-    input_name="$(jq -r '.input' <<<"$binding")"
-    expected_workflow="$(jq -r '.workflow' <<<"$binding")"
-    title_template="$(jq -r '.titleTemplate // ""' <<<"$binding")"
-    events_json="$(jq -c '.events // []' <<<"$binding")"
-    title_optional="$(jq -c '.titleOptionalEvents // []' <<<"$binding")"
-    match_subject="$(jq -r '.matchSubjectSha // false' <<<"$binding")"
-    expected_artifact="$(jq -r '.artifactTemplate // ""' <<<"$binding")"
-    value="$(jq -r --arg name "$input_name" '.inputs[$name] // ""' "$normalized_file")"
-    [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
-      fail "upstream binding $input_name must be a positive run ID"
-    workflow_id="$(
-      gh api "repos/$repository/actions/workflows/$expected_workflow" --jq '.id'
-    )" || fail "unable to resolve upstream workflow $expected_workflow"
-    run_json="$(
-      gh api "repos/$repository/actions/runs/$value/attempts/1"
-    )" || fail "upstream binding $input_name does not resolve a first attempt"
-    jq -e \
-      --argjson workflow_id "$workflow_id" \
-      --arg path ".github/workflows/$expected_workflow" \
-      --arg repo "$repository" \
-      --arg sha "$subject_sha" \
-      --arg title "${title_template//\{subject_sha\}/$subject_sha}" \
-      --argjson events "$events_json" \
-      --argjson title_optional "$title_optional" \
-      --argjson match_subject "$match_subject" '
-        .workflow_id == $workflow_id and
-        .path == $path and
-        (.event as $e | $events | index($e) != null) and
-        .head_branch == "master" and
-        .head_repository.full_name == $repo and
-        .status == "completed" and
-        .conclusion == "success" and
-        .run_attempt == 1 and
-        (($match_subject | not) or .head_sha == $sha) and
-        ($title == "" or
-          (.event as $e | $title_optional | index($e) != null) or
-          .display_title == $title)
-      ' <<<"$run_json" >/dev/null ||
-      fail "upstream binding $input_name is not an exact first-attempt successful $expected_workflow run for this SHA"
-    if [[ -n "$expected_artifact" ]]; then
-      artifact_json="$(
-        gh api "repos/$repository/actions/runs/$value/artifacts?per_page=100"
-      )" || fail "unable to read upstream artifacts for $input_name"
-      jq -e --arg name "${expected_artifact//\{run_id\}/$value}" '
-        [.artifacts[] | select(.name == $name)] as $matches |
-        ($matches | length) == 1 and
-        $matches[0].expired == false and
-        ($matches[0].size_in_bytes // 0) > 0
-      ' <<<"$artifact_json" >/dev/null ||
-        fail "upstream binding $input_name has no unexpired non-empty ${expected_artifact//\{run_id\}/$value} artifact"
-    fi
-  done <<<"$bindings"
-}
-
-validate_upstream_run_bindings
+validate_protected_prerequisites
 
 printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s input_sha256=%s title_template=%s\n' \
   "$operation" "$workflow" "$environment" "$current_master" "$input_hash" "$title_template"
