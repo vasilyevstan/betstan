@@ -74,13 +74,62 @@ client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
 client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
 moderation_listener="$ROOT_DIR/moderation/src/event/listener/LiveEventUpdateListener.ts"
 moderation_runtime="$ROOT_DIR/moderation/src/runtime/ModerationRuntime.ts"
-moderation_manifest="$ROOT_DIR/infra/k8s/moderation-depl.yaml"
+moderation_consumption_test="$ROOT_DIR/moderation/src/event/listener/__test__/LiveEventUpdateConsumption.test.ts"
+moderation_runtime_test="$ROOT_DIR/moderation/src/runtime/__test__/ModerationRuntime.test.ts"
 grep -Fq 'await this.channel.prefetch(1)' "$moderation_listener" ||
   fail "Moderation live updates are not bounded to one unacknowledged snapshot"
 grep -Fq '"unhandledRejection"' "$moderation_runtime" ||
   fail "Moderation does not explicitly fail closed on rejected async listeners"
-grep -A 2 -F 'strategy:' "$moderation_manifest" | grep -Fq 'type: Recreate' ||
-  fail "Moderation rollout can run concurrent live-update consumers"
+[[ -f "$moderation_consumption_test" ]] ||
+  fail "Moderation consume-path backpressure test is missing"
+[[ -f "$moderation_runtime_test" ]] ||
+  fail "Moderation runtime rejection test is missing"
+python3 - "$moderation_consumption_test" "$moderation_runtime_test" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+
+def require_test(path: str, name: str, required) -> None:
+    text = Path(path).read_text()
+    match = re.search(
+        rf'^it\("{re.escape(name)}", async \(\) => \{{(?P<body>.*?)^\}}\);',
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise SystemExit(f"missing executable regression test: {name}")
+
+    body = match.group("body")
+    for literal in required:
+        if literal not in body:
+            raise SystemExit(
+                f"regression test {name!r} is missing assertion: {literal}"
+            )
+
+
+require_test(
+    sys.argv[1],
+    "keeps a broker burst serial until each live snapshot is acknowledged",
+    [
+        "expect(channel.prefetch).toHaveBeenCalledWith(1);",
+        "expect(upsertLiveEventMirror).toHaveBeenCalledTimes(1);",
+        "expect(channel.acknowledged).toHaveLength(0);",
+        "expect(peakInFlight).toEqual(1);",
+        "expect(channel.acknowledged).toHaveLength(2);",
+    ],
+)
+require_test(
+    sys.argv[2],
+    "logs unhandled listener rejections and exits after shutdown",
+    [
+        'runtimeProcess.emit("unhandledRejection", new Error("listener failed"));',
+        "expect(getWorker().stop).toHaveBeenCalledTimes(1);",
+        "expect(runtimeProcess.exit).toHaveBeenCalledTimes(1);",
+        "expect(runtimeProcess.exit).toHaveBeenCalledWith(1);",
+    ],
+)
+PY
 grep -Fq 'Treat broker backpressure as a consistency boundary' \
   "$ROOT_DIR/docs/wiki/Engineering-Learnings.md" ||
   fail "Engineering wiki omits broker backpressure consistency guidance"
@@ -1000,6 +1049,15 @@ ruby -ryaml - "$WORK_DIR/rendered.yaml" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
 by_kind = documents.group_by { |document| document["kind"] }
 abort "nine application deployments plus RabbitMQ required" unless by_kind.fetch("Deployment").length == 10
+moderation_deployments = by_kind.fetch("Deployment").select {
+  |deployment| deployment.dig("metadata", "name") == "gaming-moderation-depl"
+}
+abort "exactly one Moderation deployment required" unless moderation_deployments.length == 1
+moderation = moderation_deployments.first
+abort "Moderation must remain a single replica" unless moderation.dig("spec", "replicas") == 1
+abort "Moderation rollout must prevent consumer overlap" unless moderation.dig(
+  "spec", "strategy"
+) == { "type" => "Recreate" }
 abort "single Mongo StatefulSet required" unless by_kind.fetch("StatefulSet").map {
   |item| item.dig("metadata", "name")
 } == ["gaming-auth-mongo-depl"]
@@ -1163,6 +1221,18 @@ mongo = documents.find {
   |document| document["kind"] == "StatefulSet" &&
     document.dig("metadata", "name") == "gaming-auth-mongo-depl"
 }
+moderation_deployments = documents.select {
+  |document| document["kind"] == "Deployment" &&
+    document.dig("metadata", "name") == "gaming-moderation-depl"
+}
+abort "exactly one k3s Moderation deployment required" unless moderation_deployments.length == 1
+moderation = moderation_deployments.first
+abort "k3s Moderation must remain a single replica" unless moderation.dig(
+  "spec", "replicas"
+) == 1
+abort "k3s Moderation rollout must prevent consumer overlap" unless moderation.dig(
+  "spec", "strategy"
+) == { "type" => "Recreate" }
 abort "k3s Mongo fsGroup differs" unless mongo.dig(
   "spec", "template", "spec", "securityContext", "fsGroup"
 ) == 999
