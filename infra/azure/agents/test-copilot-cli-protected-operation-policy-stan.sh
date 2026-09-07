@@ -66,6 +66,7 @@ expected_policy_keys = %w[
   upstreamConclusion
   upstreamEvent
   upstreamOperations
+  upstreamRunBindings
   upstreamWorkflow
   workflow
   zeroOrPositiveIntegerInputs

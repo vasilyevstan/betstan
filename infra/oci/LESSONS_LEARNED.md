@@ -894,3 +894,36 @@ them.
 Waiting in large silent sleep blocks is the common failure mode here. It turns
 a defensible provider wait into an unobservable one and hides which gate is
 actually blocking.
+
+## Bind release prerequisites before consuming one-use authority — 2026-09-07
+
+An infrastructure finalization failed because no capacity acquisition existed
+for that exact release SHA. The dependency was real and correct, but it was
+discovered by an implicit scan *inside* the running workflow, after a one-use
+protected authority had already been issued and consumed. The identical request
+could then never be redispatched at that master SHA, and the whole release was
+stranded even though the missing prerequisite was trivially satisfiable.
+
+Lessons:
+
+- A prerequisite that is only checked after authority is consumed converts a
+  recoverable ordering mistake into a permanently blocked release. Validate
+  every upstream dependency before enabling a workflow, before creating a
+  dispatch intent, and before issuing any authority record.
+- Make the dependency an explicit transport input covered by the dispatch input
+  hash rather than an implicit scan over recent runs. An explicit run ID is
+  auditable, appears in immutable evidence, and legitimately changes the input
+  hash, so a corrected request is a genuinely new request rather than a replay.
+- Enforce the identical binding twice: once in the dispatcher and once inside
+  the workflow. A CLI-only convention is bypassable by direct execution, and a
+  workflow-only check is discovered too late.
+- Bind the upstream exactly: same workflow path, same subject SHA, permitted
+  events, exact dispatch title, first attempt, successful conclusion, and an
+  unexpired non-empty provenance artifact. Accept nothing weaker.
+- Do not add a skip, force, or bypass switch to unblock an ordering failure, and
+  never edit or retire the authority store to replay a consumed request. The
+  documented recovery is to preserve the consumed authority as terminal evidence
+  and promote a substantive hardened SHA.
+- The authoritative OCI release order is: GHCR package validation, capacity
+  acquisition for the exact SHA, infrastructure finalization, live-data handoff,
+  deployment.

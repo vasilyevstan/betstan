@@ -510,6 +510,7 @@ def validate_policy(policy):
         "upstreamConclusion",
         "upstreamOperations",
         "requiresConsumedUpstream",
+        "upstreamRunBindings",
         "derivedOperations",
     }
     if set(policy) != required:

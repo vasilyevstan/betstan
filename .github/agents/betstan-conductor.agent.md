@@ -272,6 +272,11 @@ accepted by the next owner.
 - When a command stays active for thirty minutes without producing a
   measurable milestone, stop it or hand it off safely, then checkpoint. Do not
   begin another long operation before that checkpoint is delivered.
+- Register upstream prerequisite validation ahead of any protected dispatch.
+  Protected authority is one-use, so a prerequisite discovered mid-run
+  permanently strands that master SHA. Treat an authority consumed by a
+  pre-mutation failure as terminal evidence requiring a substantive hardened
+  SHA, never a replay, authority-store edit, or placeholder input.
 
 ## Recovery ladder
 

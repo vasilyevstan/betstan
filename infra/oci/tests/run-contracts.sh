@@ -15,6 +15,7 @@ suites=(
   "$TESTS_DIR/test-agent-governance-contract.sh"
   "$TESTS_DIR/test-migration-success-contract.sh"
   "$TESTS_DIR/test-capacity-contract.sh"
+  "$TESTS_DIR/test-capacity-binding-contract.sh"
   "$TESTS_DIR/test-image-reuse-contract.sh"
   "$TESTS_DIR/test-ghcr-contract.sh"
   "$TESTS_DIR/rollback-contract.sh"

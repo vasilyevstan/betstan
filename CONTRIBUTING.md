@@ -226,6 +226,19 @@ Revalidate control, workflow state/blob, and promotion authority after the
 local `inflight` claim. If they changed, release the exact claim back to its
 previous `issued` or `consumed` state and do not call GitHub.
 
+Each OCI release runs its protected chain in a fixed order: public GHCR
+package validation, then `oci-capacity-acquire` for that exact SHA, then
+`oci-infrastructure` finalization, then the live-data handoff, then deployment.
+Finalization takes the capacity run as an explicit `capacity_acquisition_run_id`
+transport input covered by the dispatch input hash, never an implicit scan. The
+dispatcher rejects a missing, wrong-SHA, wrong-workflow, failed, rerun, or
+expired-artifact capacity run before it enables a workflow or issues any
+authority, and the workflow revalidates the same binding so direct execution
+cannot bypass it. This ordering is mandatory because protected authority is
+one-use: a prerequisite discovered mid-run would otherwise consume the authority
+for that master SHA permanently, and recovery would require promoting a new
+hardened SHA.
+
 Every OCI release requires a new exact-SHA final
 `oci-live-data-rollout` handoff before deployment. Application or schema
 changes chain `dry-run` → `apply-backfills` → `apply-slip-index`; only the

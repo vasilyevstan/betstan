@@ -31,6 +31,7 @@ def dispatch(
     subject_relation="none",
     target_input=None,
     target_relation="none",
+    upstream_run_bindings=None,
     derived_operations=None,
 ):
     return {
@@ -61,6 +62,7 @@ def dispatch(
         "upstreamConclusion": None,
         "upstreamOperations": [],
         "requiresConsumedUpstream": False,
+        "upstreamRunBindings": upstream_run_bindings or [],
         "derivedOperations": derived_operations or [],
     }
 
@@ -107,6 +109,7 @@ def automatic(
         "upstreamConclusion": upstream_conclusion,
         "upstreamOperations": upstream_operations or [],
         "requiresConsumedUpstream": requires_consumed_upstream,
+        "upstreamRunBindings": [],
         "derivedOperations": [],
     }
 
@@ -160,6 +163,7 @@ OCI_INFRASTRUCTURE_INPUTS = [
     "validation_run_id",
     "ghcr_build_run_id",
     "ghcr_package_validation_run_id",
+    "capacity_acquisition_run_id",
 ]
 
 GHCR_INPUTS = [
@@ -521,6 +525,7 @@ POLICIES = {
             "validation_run_id": "",
             "ghcr_build_run_id": "",
             "ghcr_package_validation_run_id": "",
+            "capacity_acquisition_run_id": "",
         },
         allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:],
         full_shas=["approved_sha"],
@@ -547,10 +552,25 @@ POLICIES = {
             "validation_run_id": "",
         },
         allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12],
-        positive=["ghcr_build_run_id", "ghcr_package_validation_run_id"],
+        positive=[
+            "ghcr_build_run_id",
+            "ghcr_package_validation_run_id",
+            "capacity_acquisition_run_id",
+        ],
         full_shas=["approved_sha"],
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[
+            {
+                "input": "capacity_acquisition_run_id",
+                "workflow": "oci-capacity-acquire.yml",
+                "events": ["workflow_dispatch", "schedule"],
+                "titleTemplate": "oci-capacity-acquire {subject_sha}",
+                "titleOptionalEvents": ["schedule"],
+                "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
+                "matchSubjectSha": True,
+            },
+        ],
     ),
     "ghcr-package-bootstrap": dispatch(
         "ghcr-package-bootstrap",
@@ -948,6 +968,7 @@ required_fields = {
     "upstreamConclusion",
     "upstreamOperations",
     "requiresConsumedUpstream",
+    "upstreamRunBindings",
     "derivedOperations",
 }
 

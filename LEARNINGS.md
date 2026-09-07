@@ -1160,3 +1160,25 @@ Durable rules:
 - Long polling loops are the usual disguise. Waiting in large sleep blocks
   without surfacing intermediate state converts a legitimate provider wait into
   an invisible one.
+
+## Prerequisites must be proven before one-use authority is spent — 2026-09-07
+
+A protected release chain consumed a one-use authority and only then discovered
+that a required upstream run did not exist for that exact SHA. The guard that
+blocked redispatch was correct; the defect was checking the prerequisite too
+late.
+
+Durable rules:
+
+- Order of checks matters as much as the checks themselves. Anything that can
+  fail a protected operation must be validated before the operation acquires or
+  consumes authority, not during execution.
+- Prefer an explicit, hash-covered transport input over an implicit scan for any
+  cross-run dependency. Implicit discovery hides the dependency from the request,
+  the input hash, and the immutable evidence.
+- Enforce a binding in both the orchestrator and the executed workflow. One
+  layer alone is either bypassable or too late.
+- When a one-use authority is spent on a pre-mutation failure, preserve it as
+  terminal evidence and promote a substantive hardened SHA. Never edit the
+  authority store, retire a run that materialized jobs, or invent a placeholder
+  input purely to change the hash.

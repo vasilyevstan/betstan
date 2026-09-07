@@ -75,6 +75,11 @@ on:
         required: false
         default: ""
         type: string
+      capacity_acquisition_run_id:
+        description: Successful first-attempt oci-capacity-acquire run for this exact SHA, required before finalization
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -705,6 +710,7 @@ jobs:
       APPLICATION_REGISTRY_EVIDENCE_FILE: artifacts/oci-infrastructure/application-registry-evidence.env
       GHCR_BUILD_RUN_ID: ${{ inputs.ghcr_build_run_id }}
       GHCR_PACKAGE_VALIDATION_RUN_ID: ${{ inputs.ghcr_package_validation_run_id }}
+      CAPACITY_ACQUISITION_RUN_ID: ${{ inputs.capacity_acquisition_run_id }}
       OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
       OCI_WORKER_SUBNET_CIDR: ${{ vars.OCI_WORKER_SUBNET_CIDR || '10.42.16.0/20' }}
       OCI_LB_SUBNET_CIDR: ${{ vars.OCI_LB_SUBNET_CIDR || '10.42.32.0/24' }}
@@ -925,47 +931,54 @@ jobs:
         if: inputs.phase == 'finalize' && env.OCI_RUNTIME_MODE == 'k3s'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/oci-capacity
-          found=false
-          while IFS= read -r run_id; do
-            run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
-            jq -e \
-              --arg sha "$SOURCE_SHA" \
-              '.head_sha == $sha and
-               .run_attempt == 1 and
-               .status == "completed" and
-               .conclusion == "success" and
-               (.event == "schedule" or .event == "workflow_dispatch") and
-               .path == ".github/workflows/oci-capacity-acquire.yml"' \
-              <<<"$run_json" >/dev/null || continue
-            artifact_name="oci-capacity-provenance-${run_id}-1"
-            artifact_count="$(
-              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
-                --jq "[.artifacts[] | select(
-                  .name == \"$artifact_name\" and .expired == false
-                )] | length"
-            )"
-            [ "$artifact_count" = "1" ] || continue
-            gh run download "$run_id" \
-              --name "$artifact_name" \
-              --dir artifacts/oci-capacity
-            found=true
-            break
-          done < <(
-            gh run list \
-              --workflow oci-capacity-acquire.yml \
-              --branch master \
-              --status success \
-              --limit 100 \
-              --json databaseId,headSha \
-              --jq ".[] | select(.headSha == \"$SOURCE_SHA\") | .databaseId"
-          )
-          [ "$found" = true ]
+          # Capacity provenance is bound by an explicit, hash-covered transport
+          # input rather than an implicit scan. An absent or wrong capacity run
+          # must fail here as well as in the dispatcher, so direct workflow
+          # execution cannot bypass the binding.
+          [[ "$CAPACITY_ACQUISITION_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+            { echo "capacity_acquisition_run_id must be a positive run ID" >&2; exit 1; }
+          capacity_workflow_id="$(
+            gh api "repos/$REPOSITORY/actions/workflows/oci-capacity-acquire.yml" --jq '.id'
+          )"
+          capacity_run="$(
+            gh api "repos/$REPOSITORY/actions/runs/$CAPACITY_ACQUISITION_RUN_ID/attempts/1"
+          )"
+          jq -e \
+            --argjson workflow_id "$capacity_workflow_id" \
+            --arg sha "$SOURCE_SHA" \
+            --arg repo "$REPOSITORY" \
+            --arg title "oci-capacity-acquire $SOURCE_SHA" '
+              .workflow_id == $workflow_id and
+              .path == ".github/workflows/oci-capacity-acquire.yml" and
+              (.event == "schedule" or .event == "workflow_dispatch") and
+              .head_sha == $sha and
+              .head_branch == "master" and
+              .head_repository.full_name == $repo and
+              .status == "completed" and
+              .conclusion == "success" and
+              .run_attempt == 1 and
+              (.event == "schedule" or .display_title == $title)
+            ' <<<"$capacity_run" >/dev/null
+          artifact_name="oci-capacity-provenance-${CAPACITY_ACQUISITION_RUN_ID}-1"
+          gh api \
+            "repos/$REPOSITORY/actions/runs/$CAPACITY_ACQUISITION_RUN_ID/artifacts" |
+            jq -e --arg name "$artifact_name" '
+              [.artifacts[] | select(.name == $name)] as $matches |
+              ($matches | length) == 1 and $matches[0].expired == false
+            ' >/dev/null
+          gh run download "$CAPACITY_ACQUISITION_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name "$artifact_name" \
+            --dir artifacts/oci-capacity
+          [ -z "$(find artifacts/oci-capacity -type l -print -quit)" ]
           test -s artifacts/oci-capacity/provenance.env
           source artifacts/oci-capacity/provenance.env
           [ "$source_sha" = "$SOURCE_SHA" ]
+          [ "$acquisition_run_id" = "$CAPACITY_ACQUISITION_RUN_ID" ]
           [ "$runtime_mode" = "k3s" ]
           [ "$shape" = "VM.Standard.A1.Flex" ]
           [ "$ocpus" = "2" ]

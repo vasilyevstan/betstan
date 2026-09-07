@@ -374,6 +374,74 @@ if [[ "$ACTION" = "--resume-captured" ]]; then
   exit 0
 fi
 
+validate_upstream_run_bindings() {
+  # Enforce declared upstream run bindings BEFORE any authority intent or
+  # record exists, so a missing or wrong upstream cannot consume a one-use
+  # protected authority. The bound workflow also revalidates the same binding
+  # at execution time; this is defence in depth, not the only check.
+  local bindings binding input_name value expected_workflow expected_artifact
+  local run_json workflow_id title_optional events_json title_template
+  local match_subject artifact_json
+  bindings="$(jq -c '.upstreamRunBindings // [] | .[]' <<<"$policy_json")"
+  [[ -n "$bindings" ]] || return 0
+  while IFS= read -r binding; do
+    [[ -n "$binding" ]] || continue
+    input_name="$(jq -r '.input' <<<"$binding")"
+    expected_workflow="$(jq -r '.workflow' <<<"$binding")"
+    title_template="$(jq -r '.titleTemplate // ""' <<<"$binding")"
+    events_json="$(jq -c '.events // []' <<<"$binding")"
+    title_optional="$(jq -c '.titleOptionalEvents // []' <<<"$binding")"
+    match_subject="$(jq -r '.matchSubjectSha // false' <<<"$binding")"
+    expected_artifact="$(jq -r '.artifactTemplate // ""' <<<"$binding")"
+    value="$(jq -r --arg name "$input_name" '.inputs[$name] // ""' "$normalized_file")"
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
+      fail "upstream binding $input_name must be a positive run ID"
+    workflow_id="$(
+      gh api "repos/$repository/actions/workflows/$expected_workflow" --jq '.id'
+    )" || fail "unable to resolve upstream workflow $expected_workflow"
+    run_json="$(
+      gh api "repos/$repository/actions/runs/$value/attempts/1"
+    )" || fail "upstream binding $input_name does not resolve a first attempt"
+    jq -e \
+      --argjson workflow_id "$workflow_id" \
+      --arg path ".github/workflows/$expected_workflow" \
+      --arg repo "$repository" \
+      --arg sha "$subject_sha" \
+      --arg title "${title_template//\{subject_sha\}/$subject_sha}" \
+      --argjson events "$events_json" \
+      --argjson title_optional "$title_optional" \
+      --argjson match_subject "$match_subject" '
+        .workflow_id == $workflow_id and
+        .path == $path and
+        (.event as $e | $events | index($e) != null) and
+        .head_branch == "master" and
+        .head_repository.full_name == $repo and
+        .status == "completed" and
+        .conclusion == "success" and
+        .run_attempt == 1 and
+        (($match_subject | not) or .head_sha == $sha) and
+        ($title == "" or
+          (.event as $e | $title_optional | index($e) != null) or
+          .display_title == $title)
+      ' <<<"$run_json" >/dev/null ||
+      fail "upstream binding $input_name is not an exact first-attempt successful $expected_workflow run for this SHA"
+    if [[ -n "$expected_artifact" ]]; then
+      artifact_json="$(
+        gh api "repos/$repository/actions/runs/$value/artifacts?per_page=100"
+      )" || fail "unable to read upstream artifacts for $input_name"
+      jq -e --arg name "${expected_artifact//\{run_id\}/$value}" '
+        [.artifacts[] | select(.name == $name)] as $matches |
+        ($matches | length) == 1 and
+        $matches[0].expired == false and
+        ($matches[0].size_in_bytes // 0) > 0
+      ' <<<"$artifact_json" >/dev/null ||
+        fail "upstream binding $input_name has no unexpired non-empty ${expected_artifact//\{run_id\}/$value} artifact"
+    fi
+  done <<<"$bindings"
+}
+
+validate_upstream_run_bindings
+
 printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s input_sha256=%s title_template=%s\n' \
   "$operation" "$workflow" "$environment" "$current_master" "$input_hash" "$title_template"
 

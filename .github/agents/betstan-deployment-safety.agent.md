@@ -549,6 +549,19 @@ A Running broker with missing consumers is not healthy production.
   to make an old queue record disappear.
 - Query exact artifact names from the successful upstream run instead of
   guessing them in a mutation preflight.
+- Validate every upstream release prerequisite before enabling a workflow,
+  creating a dispatch intent, or issuing authority. Protected authority is
+  one-use, so a prerequisite discovered mid-run permanently strands that master
+  SHA. Pass the dependency as an explicit run-ID transport input covered by the
+  dispatch input hash, never an implicit scan, and enforce the same binding
+  inside the workflow so direct execution cannot bypass it.
+- The authoritative OCI release order is GHCR package validation, capacity
+  acquisition for the exact SHA, infrastructure finalization, live-data handoff,
+  then deployment.
+- When a one-use authority is consumed by a pre-mutation failure, preserve it as
+  terminal evidence and promote a substantive hardened SHA. Never edit or retire
+  the authority store, replay the request, or add a placeholder input to change
+  the hash.
 - Freshness-check late advisory evidence against its recorded SHA, the current
   authoritative workflow tree, and the validated shared-Mongo topology before
   allowing it to reopen a release gate.
