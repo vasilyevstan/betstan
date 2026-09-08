@@ -162,6 +162,175 @@ write_coverage_review_tap() {
   } >"$destination"
 }
 
+normalize_coverage_fixture_authorization_inventory() {
+  local fixture_path="$1"
+  python3 -I - "$fixture_path" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+(fixture_path,) = sys.argv[1:]
+
+PATTERN = re.compile(
+    r"const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String\.raw`([^`]*)`;",
+    re.S,
+)
+
+
+def fail(reason):
+    sys.stderr.write(
+        "normalize_coverage_fixture_authorization_inventory: "
+        + reason
+        + "\n"
+    )
+    raise SystemExit(1)
+
+
+def reject_constant(token):
+    raise ValueError("disallowed JSON constant: " + token)
+
+
+path = pathlib.Path(fixture_path)
+try:
+    original = path.read_text(encoding="utf-8")
+except OSError:
+    fail("unable to read fixture authorization inventory source")
+
+matches = list(PATTERN.finditer(original))
+if len(matches) != 1:
+    fail("expected exactly one authorization inventory declaration")
+
+match = matches[0]
+body = match.group(1)
+if "${" in body:
+    fail("authorization inventory body must not contain template interpolation")
+
+try:
+    parsed = json.loads(body, parse_constant=reject_constant)
+except ValueError:
+    fail("authorization inventory body is not valid JSON")
+
+if type(parsed) is not list:
+    fail("authorization inventory body must be a JSON array")
+
+start, end = match.span(1)
+updated = original[:start] + "[]" + original[end:]
+
+try:
+    path.write_text(updated, encoding="utf-8")
+except OSError:
+    fail("unable to write normalized fixture authorization inventory")
+PY
+}
+
+build_coverage_authorization_normalization_fixture() {
+  local body="$1"
+  printf '// prefix marker\nconst TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`%s`;\n// suffix marker\n' \
+    "$body"
+}
+
+assert_coverage_authorization_normalization_success() {
+  local label="$1"
+  local content="$2"
+  local expected_content="$3"
+
+  printf '%s' "$content" >"$coverage_authorization_normalization_target"
+  normalize_coverage_fixture_authorization_inventory \
+    "$coverage_authorization_normalization_target"
+  printf '%s' "$expected_content" >"$coverage_authorization_normalization_expected"
+  if ! cmp -s \
+      "$coverage_authorization_normalization_target" \
+      "$coverage_authorization_normalization_expected"; then
+    echo "ERROR: $label did not normalize to the expected fixture bytes" >&2
+    exit 1
+  fi
+}
+
+assert_coverage_authorization_normalization_failure() {
+  local label="$1"
+  local content="$2"
+
+  printf '%s' "$content" >"$coverage_authorization_normalization_target"
+  cp "$coverage_authorization_normalization_target" \
+    "$coverage_authorization_normalization_before"
+  if normalize_coverage_fixture_authorization_inventory \
+      "$coverage_authorization_normalization_target" >"$test_output" 2>&1; then
+    echo "ERROR: $label unexpectedly succeeded" >&2
+    exit 1
+  fi
+  if ! cmp -s \
+      "$coverage_authorization_normalization_target" \
+      "$coverage_authorization_normalization_before"; then
+    echo "ERROR: $label mutated fixture bytes despite failing" >&2
+    exit 1
+  fi
+}
+
+coverage_authorization_normalization_dir="$permission_fixture_dir/coverage-authorization-normalization"
+mkdir -p "$coverage_authorization_normalization_dir"
+coverage_authorization_normalization_target="$coverage_authorization_normalization_dir/publish-pr-policy.js"
+coverage_authorization_normalization_before="$coverage_authorization_normalization_dir/before.js"
+coverage_authorization_normalization_expected="$coverage_authorization_normalization_dir/expected.js"
+
+coverage_authorization_case_labels=(
+  "valid non-empty array fixture"
+  "NaN JSON constant fixture"
+  "template interpolation fixture"
+  "non-array JSON fixture"
+)
+coverage_authorization_case_bodies=(
+  '[{"id":"fixture-nonempty"}]'
+  '[NaN]'
+  '[{"id":"${fixture}"}]'
+  '{}'
+)
+coverage_authorization_case_expectations=(
+  success
+  failure
+  failure
+  failure
+)
+for coverage_authorization_case_index in \
+  "${!coverage_authorization_case_labels[@]}"; do
+  coverage_authorization_case_label="${coverage_authorization_case_labels[$coverage_authorization_case_index]}"
+  coverage_authorization_case_body="${coverage_authorization_case_bodies[$coverage_authorization_case_index]}"
+  coverage_authorization_case_expectation="${coverage_authorization_case_expectations[$coverage_authorization_case_index]}"
+  coverage_authorization_case_content="$(
+    build_coverage_authorization_normalization_fixture \
+      "$coverage_authorization_case_body"
+  )"
+  if [[ "$coverage_authorization_case_expectation" == "success" ]]; then
+    coverage_authorization_case_expected="$(
+      build_coverage_authorization_normalization_fixture "[]"
+    )"
+    assert_coverage_authorization_normalization_success \
+      "$coverage_authorization_case_label" \
+      "$coverage_authorization_case_content" \
+      "$coverage_authorization_case_expected"
+  else
+    assert_coverage_authorization_normalization_failure \
+      "$coverage_authorization_case_label" \
+      "$coverage_authorization_case_content"
+  fi
+done
+
+coverage_authorization_duplicate_content='// prefix marker
+const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
+const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
+// suffix marker'
+assert_coverage_authorization_normalization_failure \
+  "duplicate authorization inventory declaration fixture" \
+  "$coverage_authorization_duplicate_content"
+
+coverage_authorization_renamed_content='// prefix marker
+const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON_RENAMED = String.raw`[]`;
+// suffix marker'
+assert_coverage_authorization_normalization_failure \
+  "renamed authorization inventory declaration fixture" \
+  "$coverage_authorization_renamed_content"
+echo "coverage_authorization_inventory_normalization_tests=PASS"
+
 initialize_coverage_review_fixture() {
   local mode="$1"
   coverage_review_pull_number=518
@@ -199,6 +368,8 @@ initialize_coverage_review_fixture() {
     "$ROOT_DIR/.github/scripts/test-test-coverage-matrix.js" \
     "$ROOT_DIR/.github/scripts/publish-pr-policy.js" \
     "$coverage_review_repo/.github/scripts/"
+  normalize_coverage_fixture_authorization_inventory \
+    "$coverage_review_repo/.github/scripts/publish-pr-policy.js"
   cp \
     "$COVERAGE_ENGINE_REVIEW" \
     "$ROOT_DIR/infra/azure/agents/test-deployment-safety-ci-stan.sh" \
