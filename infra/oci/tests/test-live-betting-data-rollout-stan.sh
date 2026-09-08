@@ -252,7 +252,7 @@ if [[ "${1:-}" == "logs" ]]; then
           --argjson changed "$changed" '{
             mode:$mode,
             targetEventId:"6a623af592af5a95b1d0bb79",
-            targetKickoff:"2026-09-08T08:05:00.000Z",
+            targetKickoff:"2026-09-09T08:05:00.000Z",
             state:"blocked",
             ready:false,
             scanned:20,
@@ -318,7 +318,7 @@ if [[ "${1:-}" == "logs" ]]; then
       --argjson snapshot_document_count "$snapshot_document_count" '{
         mode:$mode,
         targetEventId:"6a623af592af5a95b1d0bb79",
-        targetKickoff:"2026-09-08T08:05:00.000Z",
+        targetKickoff:"2026-09-09T08:05:00.000Z",
         state:$state,
         ready:true,
         scanned:20,
@@ -597,7 +597,7 @@ jq -e '
   .kind == "fixed-event-reschedule" and
   .stage == "preflight" and
   .mode == "dry-run" and
-  .targetKickoff == "2026-09-08T08:05:00.000Z" and
+  .targetKickoff == "2026-09-09T08:05:00.000Z" and
   .state == "blocked" and
   .ready == false and
   .changed == 0 and
@@ -625,7 +625,7 @@ jq -e \
     .phase == "dry-run" and
     .stage == "preflight" and
     .targetEventId == "6a623af592af5a95b1d0bb79" and
-    .targetKickoff == "2026-09-08T08:05:00.000Z" and
+    .targetKickoff == "2026-09-09T08:05:00.000Z" and
     .mode == "dry-run" and
     .state == "blocked" and
     .ready == false and

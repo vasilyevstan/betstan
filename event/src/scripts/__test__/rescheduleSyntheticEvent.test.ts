@@ -772,7 +772,13 @@ it("detects target tampering for the applying source", async () => {
     await apply(names);
     await database(names, "event").collection("events").updateOne(
       { eventId: RESCHEDULE_EVENT_ID },
-      { $set: { time: new Date("2026-09-08T08:06:00.000Z") } }
+      {
+        $set: {
+          time: new Date(
+            new Date(RESCHEDULE_TARGET_KICKOFF).getTime() + 60 * 1000
+          ),
+        },
+      }
     );
 
     const verified = await runSyntheticEventReschedule({

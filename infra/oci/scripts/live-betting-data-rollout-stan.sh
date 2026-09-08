@@ -208,7 +208,7 @@ create_job() {
             - "--mode"
             - "apply"
             - "--confirmation"
-            - "RESCHEDULE_EVENT:6a623af592af5a95b1d0bb79:2026-09-08T08:05:00.000Z"'
+            - "RESCHEDULE_EVENT:6a623af592af5a95b1d0bb79:2026-09-09T08:05:00.000Z"'
       ;;
     dist/scripts/rescheduleSyntheticEvent.js:verify)
       args='
@@ -777,7 +777,7 @@ project_reschedule_report() {
     --arg stage "$stage" \
     --arg expected_mode "$expected_mode" \
     --arg target_event_id "6a623af592af5a95b1d0bb79" \
-    --arg target_kickoff "2026-09-08T08:05:00.000Z" '
+    --arg target_kickoff "2026-09-09T08:05:00.000Z" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
       def exact_keys($required; $optional):
