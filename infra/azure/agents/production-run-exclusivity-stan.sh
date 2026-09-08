@@ -309,6 +309,7 @@ tmp_run="$(mktemp)"
 tmp_workflow="$(mktemp)"
 tmp_jobs="$(mktemp)"
 tmp_pending="$(mktemp)"
+tmp_approvals="$(mktemp)"
 tmp_artifacts="$(mktemp)"
 tmp_prospective_ancestry="$(mktemp)"
 tmp_compare_pages="$(mktemp)"
@@ -316,8 +317,8 @@ cleanup() {
   rm -f \
     "$tmp_runs" "$tmp_candidates" "$tmp_workflows" "$tmp_successful_runs" \
     "$tmp_ancestry" "$tmp_historical_workflow" "$tmp_run" "$tmp_workflow" \
-    "$tmp_jobs" "$tmp_pending" "$tmp_artifacts" "$tmp_prospective_ancestry" \
-    "$tmp_compare_pages"
+    "$tmp_jobs" "$tmp_pending" "$tmp_approvals" "$tmp_artifacts" \
+    "$tmp_prospective_ancestry" "$tmp_compare_pages"
 }
 trap cleanup EXIT
 
@@ -411,6 +412,7 @@ do
   printf '%s\n' '{}' >"$tmp_ancestry"
   printf '%s\n' '{}' >"$tmp_historical_workflow"
   printf '%s\n' '{}' >"$tmp_run"
+  printf '%s\n' '[]' >"$tmp_approvals"
   printf '%s\n' '{}' >"$tmp_artifacts"
   printf '%s\n' '{}' >"$tmp_prospective_ancestry"
   if [[
@@ -441,6 +443,7 @@ do
       }
     fi
     gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+    gh api "repos/$REPO/actions/runs/$run_id/approvals" >"$tmp_approvals"
     gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
       >"$tmp_artifacts"
     gh api "repos/$REPO/contents/$path?ref=$head_sha" \
@@ -450,6 +453,7 @@ do
       --workflow-json "$tmp_workflow" \
       --jobs-json "$tmp_jobs" \
       --pending-json "$tmp_pending" \
+      --approvals-json "$tmp_approvals" \
       --artifacts-json "$tmp_artifacts" \
       --compare-json "$tmp_ancestry" \
       --historical-workflow-json "$tmp_historical_workflow" \
@@ -459,6 +463,7 @@ do
       --expected-workflow-id "$workflow_id" \
       --expected-path "$path" \
       --expected-head-sha "$head_sha" \
+      --require-disabled-workflow \
       --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
       --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
       unmaterialized="yes"
@@ -489,6 +494,7 @@ do
         --workflow-json "$tmp_workflow" \
         --jobs-json "$tmp_jobs" \
         --pending-json "$tmp_pending" \
+        --approvals-json "$tmp_approvals" \
         --artifacts-json "$tmp_artifacts" \
         --compare-json "$tmp_prospective_ancestry" \
         --historical-workflow-json "$tmp_historical_workflow" \
@@ -498,13 +504,41 @@ do
         --expected-workflow-id "$workflow_id" \
         --expected-path "$path" \
         --expected-head-sha "$head_sha" \
+        --require-disabled-workflow \
         --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
         --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
-        unmaterialized="yes"
-        prospective_annotation=" prospective_unmaterialized=yes"
-        prospective_annotation+=" prospective_promotion_pr=$PROSPECTIVE_PROMOTION_PR"
-        prospective_annotation+=" actual_master_sha=$master_sha"
-        prospective_annotation+=" prospective_master_sha=$prospective_master_sha"
+        gh api "repos/$REPO/actions/workflows/$workflow_id" >"$tmp_workflow"
+        gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+        gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=1" >"$tmp_jobs"
+        gh api "repos/$REPO/actions/runs/$run_id/pending_deployments" \
+          >"$tmp_pending"
+        gh api "repos/$REPO/actions/runs/$run_id/approvals" >"$tmp_approvals"
+        gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
+          >"$tmp_artifacts"
+        if "$AUTHORITY_HELPER" classify-unmaterialized-run \
+          --run-json "$tmp_run" \
+          --workflow-json "$tmp_workflow" \
+          --jobs-json "$tmp_jobs" \
+          --pending-json "$tmp_pending" \
+          --approvals-json "$tmp_approvals" \
+          --artifacts-json "$tmp_artifacts" \
+          --compare-json "$tmp_prospective_ancestry" \
+          --historical-workflow-json "$tmp_historical_workflow" \
+          --repository "$REPO" \
+          --current-master "$prospective_master_sha" \
+          --expected-run-id "$run_id" \
+          --expected-workflow-id "$workflow_id" \
+          --expected-path "$path" \
+          --expected-head-sha "$head_sha" \
+          --require-disabled-workflow \
+          --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
+          --now-epoch "$NOW_EPOCH" >/dev/null 2>&1; then
+          unmaterialized="yes"
+          prospective_annotation=" prospective_unmaterialized=yes"
+          prospective_annotation+=" prospective_promotion_pr=$PROSPECTIVE_PROMOTION_PR"
+          prospective_annotation+=" actual_master_sha=$master_sha"
+          prospective_annotation+=" prospective_master_sha=$prospective_master_sha"
+        fi
       fi
     fi
   fi
@@ -513,8 +547,8 @@ do
       "$tmp_successful_runs" "$tmp_ancestry" "$tmp_historical_workflow" \
       "$run_id" "$workflow_id" "$path" "$status" "$updated_at" "$head_sha" \
       "$event" "$run_attempt" "$master_sha" "$NOW_EPOCH" \
-      "$STALE_DISABLED_MIN_AGE_SECONDS" "$unmaterialized" <<'PY'
-import base64
+      "$STALE_DISABLED_MIN_AGE_SECONDS" "$unmaterialized" \
+      "$tmp_approvals" "$tmp_artifacts" <<'PY'
 import datetime
 import json
 import sys
@@ -527,7 +561,7 @@ with open(sys.argv[4], encoding="utf-8") as successful_file:
 with open(sys.argv[5], encoding="utf-8") as ancestry_file:
     ancestry = json.load(ancestry_file)
 with open(sys.argv[6], encoding="utf-8") as source_file:
-    historical_workflow = json.load(source_file)
+    json.load(source_file)
 run_id = int(sys.argv[7])
 workflow_id = int(sys.argv[8])
 path = sys.argv[9]
@@ -540,6 +574,10 @@ master_sha = sys.argv[15]
 now = datetime.datetime.fromtimestamp(int(sys.argv[16]), datetime.timezone.utc)
 minimum_age = int(sys.argv[17])
 unmaterialized = sys.argv[18]
+with open(sys.argv[19], encoding="utf-8") as approvals_file:
+    approvals = json.load(approvals_file)
+with open(sys.argv[20], encoding="utf-8") as artifacts_file:
+    artifacts = json.load(artifacts_file)
 state = workflow.get("state")
 job_count = jobs.get("total_count")
 job_entries = jobs.get("jobs")
@@ -556,8 +594,16 @@ if (
     or successful_count < 0
     or not isinstance(successful_entries, list)
     or len(successful_entries) != successful_count
+    or not isinstance(approvals, list)
 ):
     raise SystemExit("production run actionability metadata is malformed")
+approval_free = len(approvals) == 0
+artifact_free = (
+    isinstance(artifacts, dict)
+    and type(artifacts.get("total_count")) is int
+    and artifacts["total_count"] == 0
+    and artifacts.get("artifacts") == []
+)
 age_seconds = int((now - updated_at).total_seconds())
 jobless_and_old = (
     job_count == 0
@@ -578,8 +624,6 @@ disabled_inert = (
 
 supersession_kind = {
     ".github/workflows/oci-capacity-acquire.yml": "capacity",
-    ".github/workflows/oci-live-data-rollout.yml": "live-data",
-    ".github/workflows/oci-live-betting-activate.yml": "activation",
 }.get(path)
 
 
@@ -593,46 +637,7 @@ def is_stale_ancestor():
 
 
 def has_historical_mutation_fence():
-    if supersession_kind == "capacity":
-        return True
-    expected = {
-        "live-data": (
-            "name: oci-migration",
-            "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
-        ),
-        "activation": (
-            "name: oci-production",
-            "run: ./infra/oci/scripts/live-betting-control-stan.sh",
-        ),
-    }.get(supersession_kind)
-    if expected is None:
-        return False
-    if (
-        historical_workflow.get("path") != path
-        or historical_workflow.get("encoding") != "base64"
-        or not isinstance(historical_workflow.get("content"), str)
-    ):
-        return False
-    try:
-        source = base64.b64decode(historical_workflow["content"]).decode("utf-8")
-    except (UnicodeDecodeError, ValueError):
-        return False
-    required_before_mutation = (
-        '[ "$SOURCE_SHA" = "$GITHUB_SHA" ]',
-        "git fetch --quiet origin master:refs/remotes/origin/master",
-        '[ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]',
-    )
-    try:
-        mutation_index = source.index(expected[1])
-        guard_indexes = [source.index(token) for token in required_before_mutation]
-    except ValueError:
-        return False
-    return (
-        expected[0] in source
-        and "group: oci-control-plane" in source
-        and "cancel-in-progress: false" in source
-        and max(guard_indexes) < mutation_index
-    )
+    return supersession_kind == "capacity"
 
 
 exact_successes = []
@@ -644,6 +649,8 @@ if (
     and run_attempt == 1
     and head_sha != master_sha
     and jobless_and_old
+    and approval_free
+    and artifact_free
     and is_stale_ancestor()
     and has_historical_mutation_fence()
 ):
@@ -668,32 +675,14 @@ if (
             and successful.get("status") == "completed"
             and successful.get("conclusion") == "success"
             and successful.get("run_attempt") == 1
+            and successful.get("display_title")
+            == f"oci-capacity-acquire {head_sha}"
         ):
             exact_successes.append((successful_id, successful.get("display_title")))
 
 superseded_by = []
 if supersession_kind == "capacity" and exact_successes:
     superseded_by = [min(run[0] for run in exact_successes)]
-elif supersession_kind == "activation":
-    expected_title = f"oci-live-activate {head_sha}"
-    superseded_by = [
-        successful_id
-        for successful_id, title in exact_successes
-        if title == expected_title
-    ][:1]
-elif supersession_kind == "live-data":
-    required_titles = {
-        f"oci-live-data dry-run {head_sha}",
-        f"oci-live-data apply-backfills {head_sha}",
-        f"oci-live-data apply-slip-index {head_sha}",
-    }
-    successors_by_title = {
-        title: successful_id
-        for successful_id, title in exact_successes
-        if title in required_titles
-    }
-    if required_titles.issubset(successors_by_title):
-        superseded_by = sorted(successors_by_title.values())
 
 if unmaterialized not in {"yes", "no"}:
     raise SystemExit("unmaterialized classifier result is malformed")

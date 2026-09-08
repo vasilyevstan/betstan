@@ -13,6 +13,8 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
+BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
+POLICY_HELPER="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MANAGED_LABEL="copilot-cli-managed"
@@ -358,6 +360,51 @@ revalidate_control() {
   )"
   [[ "$observed_workflow_state" = "$expected_approval_workflow_state" ]] ||
     fail "trusted workflow is not in its required approval state"
+}
+
+# Re-prove the authoritative runtime mode and every upstream prerequisite that
+# was validated at dispatch time. Authority is one-use, so a prerequisite that
+# decayed between dispatch and approval (deleted or expired artifact, a rerun of
+# the upstream run, or a runtime-mode change) must stop the approval instead of
+# letting the protected run consume authority against an invalid binding. This
+# reuses the shared validator and the same policy definition the dispatcher
+# uses, so there is no third implementation to drift.
+revalidate_upstream_bindings() {
+  local operation subject_sha dispatch_inputs policy_json bindings
+  local bound_mode authoritative_mode environment
+
+  operation="$(jq -r '.operation // ""' <<<"$record_summary")"
+  [[ -n "$operation" ]] ||
+    fail "authority record has no operation for binding revalidation"
+  policy_json="$("$POLICY_HELPER" get "$operation")"
+  bindings="$(jq -c '.upstreamRunBindings // []' <<<"$policy_json")"
+
+  bound_mode="$(jq -r '.inputs.runtime_mode // ""' <<<"$record_summary")"
+  if [[ -n "$bound_mode" ]]; then
+    environment="$(jq -r '.environment // ""' <<<"$record_summary")"
+    [[ -n "$environment" ]] ||
+      fail "authority record has no environment for runtime mode revalidation"
+    authoritative_mode="$(
+      gh api \
+        "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
+        --jq '.value'
+    )"
+    [[ "$bound_mode" = "$authoritative_mode" ]] ||
+      fail "authoritative runtime mode changed since dispatch; approval refused"
+  fi
+
+  [[ "$bindings" != "[]" ]] || return 0
+  subject_sha="$(jq -r '.subjectSha // ""' <<<"$record_summary")"
+  [[ -n "$subject_sha" ]] ||
+    fail "authority record has no subject SHA for binding revalidation"
+  dispatch_inputs="$(jq -c '.inputs' <<<"$record_summary")"
+
+  "$BINDING_VALIDATOR" validate-all \
+    --repository "$repository" \
+    --policy-json "$policy_json" \
+    --subject-sha "$subject_sha" \
+    --dispatch-inputs "$dispatch_inputs" ||
+    fail "upstream prerequisites are no longer valid; approval refused"
 }
 
 record_summary=""
@@ -760,6 +807,13 @@ validate_exclusivity() {
     "$RUN_EXCLUSIVITY_SCRIPT"
 }
 
+validate_claimed_gate_identity() {
+  [[ "$environment_id" = "$claimed_environment_id" ]] ||
+    fail "pending environment changed after approval authority claim"
+  [[ "$gate_key" = "$claimed_gate_key" ]] ||
+    fail "waiting job set changed after approval authority claim"
+}
+
 if [[ "$ACTION" = "--reconcile" ]]; then
   validate_authority_and_run "reconcile" "__ANY__"
   ensure_automatic_authority_record
@@ -861,6 +915,9 @@ validate_authority_and_run
 ensure_automatic_authority_record
 validate_pending_gate
 validate_exclusivity
+revalidate_control
+validate_promotion
+revalidate_upstream_bindings
 
 printf 'run=%s operation=%s workflow=%s environment=%s control_sha=%s authority=%s status=ELIGIBLE\n' \
   "$RUN_ID" \
@@ -888,6 +945,7 @@ validate_pending_gate
 validate_exclusivity
 revalidate_control
 validate_promotion
+revalidate_upstream_bindings
 approval_comment="Copilot CLI exact-run approval: $EXPECTED_OPERATION"
 approval_count_before="$(
   matching_approval_count \
@@ -897,6 +955,8 @@ approval_count_before="$(
 )"
 [[ "$approval_count_before" =~ ^[0-9]+$ ]] ||
   fail "workflow approval history baseline is invalid"
+claimed_environment_id="$environment_id"
+claimed_gate_key="$gate_key"
 
 claimed_version="$(
   "$AUTHORITY_HELPER" claim-approval \
@@ -916,8 +976,12 @@ claimed_version="$(
 
 if ! approval_revalidation_error="$(
   {
-    revalidate_control
-    validate_promotion
+    revalidate_upstream_bindings &&
+      validate_promotion &&
+      validate_exclusivity &&
+      validate_pending_gate &&
+      validate_claimed_gate_identity &&
+      revalidate_control
   } 2>&1
 )"; then
   "$AUTHORITY_HELPER" release-approval \
@@ -927,15 +991,15 @@ if ! approval_revalidation_error="$(
     --token "$lock_token" \
     --approval-run-id "$RUN_ID" \
     --approval-operation "$EXPECTED_OPERATION" \
-    --environment-id "$environment_id" \
-    --gate-key "$gate_key"
+    --environment-id "$claimed_environment_id" \
+    --gate-key "$claimed_gate_key"
   fail "$approval_revalidation_error"
 fi
 
 if ! gh api \
   --method POST \
   "repos/$repository/actions/runs/$RUN_ID/pending_deployments" \
-  -F "environment_ids[]=$environment_id" \
+  -F "environment_ids[]=$claimed_environment_id" \
   -f state=approved \
   -f "comment=$approval_comment" \
   >/dev/null; then
@@ -950,8 +1014,8 @@ fi
   --expected-version "$claimed_version" \
   --approval-run-id "$RUN_ID" \
   --approval-operation "$EXPECTED_OPERATION" \
-  --environment-id "$environment_id" \
-  --gate-key "$gate_key"
+  --environment-id "$claimed_environment_id" \
+  --gate-key "$claimed_gate_key"
 
 "$AUTHORITY_HELPER" release-lock \
   --authority-dir "$AUTHORITY_DIR" \

@@ -226,6 +226,34 @@ Revalidate control, workflow state/blob, and promotion authority after the
 local `inflight` claim. If they changed, release the exact claim back to its
 previous `issued` or `consumed` state and do not call GitHub.
 
+Each OCI release runs its protected chain in a fixed order: public GHCR
+package validation, then, on k3s only, `oci-capacity-acquire` for that exact
+SHA, then `oci-infrastructure` finalization, then the live-data handoff, then
+deployment. Capacity acquisition is a k3s Free Tier concern: it is never
+required on OKE and is never a prepare prerequisite in either runtime mode.
+Preparation is likewise split into `oci-infrastructure-prepare-k3s` and
+`oci-infrastructure-prepare-oke` so every run maps one-to-one to its operation
+and mode through a distinct title and run name.
+Finalization is split into `oci-infrastructure-finalize-k3s` and
+`oci-infrastructure-finalize-oke`, each pinning an immutable hash-covered
+`runtime_mode` that must equal the authoritative Actions environment mode. The
+k3s operation requires an exact `capacity_acquisition_run_id`; the OKE operation
+forces it empty and rejects a supplied one. Every finalize prerequisite -- GHCR
+build, GHCR package validation and, for k3s, capacity acquisition -- is an
+explicit transport input covered by the dispatch input hash, never an implicit
+scan. One shared validator enforces workflow identity, repository, branch,
+subject SHA, permitted event, exact event-specific title, current run attempt 1,
+successful completion, and a unique unexpired non-empty artifact. The dispatcher
+runs it on fresh dispatch and both resume paths before enabling a workflow or
+issuing authority; the workflow runs it from a checked-in manifest proven
+equivalent to the same policy, before any cloud access or mutation; and the
+approver runs it again immediately before the inflight claim and once more
+after the claim but before the GitHub approval call, releasing the claim and
+leaving issued authority intact if any binding drifted. This ordering is mandatory because protected authority is
+one-use: a prerequisite discovered mid-run would otherwise consume the authority
+for that master SHA permanently, and recovery would require promoting a new
+hardened SHA.
+
 Every OCI release requires a new exact-SHA final
 `oci-live-data-rollout` handoff before deployment. Application or schema
 changes chain `dry-run` → `apply-backfills` → `apply-slip-index`; only the

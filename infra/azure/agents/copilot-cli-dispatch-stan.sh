@@ -15,6 +15,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
+UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MATERIALIZATION_ATTEMPTS="${COPILOT_CLI_MATERIALIZATION_ATTEMPTS:-12}"
 MATERIALIZATION_SLEEP_SECONDS="${COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS:-5}"
@@ -55,6 +56,8 @@ esac
   fail "COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS must be a non-negative integer"
 ((MATERIALIZATION_ATTEMPTS <= 60)) ||
   fail "COPILOT_CLI_MATERIALIZATION_ATTEMPTS must not exceed 60"
+((MATERIALIZATION_ATTEMPTS >= 2)) ||
+  fail "COPILOT_CLI_MATERIALIZATION_ATTEMPTS must be at least 2"
 ((MATERIALIZATION_SLEEP_SECONDS <= 30)) ||
   fail "COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS must not exceed 30"
 
@@ -73,16 +76,46 @@ inputs_file="$tmp_dir/inputs.json"
 run_file="$tmp_dir/run.json"
 jobs_file="$tmp_dir/jobs.json"
 pending_file="$tmp_dir/pending.json"
+pre_rejection_run_file="$tmp_dir/pre-rejection-run.json"
+pre_rejection_jobs_file="$tmp_dir/pre-rejection-jobs.json"
+pre_rejection_pending_file="$tmp_dir/pre-rejection-pending.json"
+pre_rejection_approvals_file="$tmp_dir/pre-rejection-approvals.json"
+terminal_rejection_run_file="$tmp_dir/terminal-rejection-run.json"
+terminal_rejection_jobs_file="$tmp_dir/terminal-rejection-jobs.json"
+terminal_rejection_pending_file="$tmp_dir/terminal-rejection-pending.json"
+terminal_rejection_approvals_file="$tmp_dir/terminal-rejection-approvals.json"
 materialization_error="$tmp_dir/materialization.err"
+prerequisite_error_file="$tmp_dir/prerequisite.err"
 promotion_file="$tmp_dir/promotion.json"
+authority_lock_run_id=""
+authority_lock_token=""
 cleanup() {
+  if [[ -n "$authority_lock_token" && -n "$authority_lock_run_id" ]]; then
+    "$AUTHORITY_HELPER" release-lock \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$authority_lock_run_id" \
+      --token "$authority_lock_token" \
+      >/dev/null 2>&1 || true
+    authority_lock_run_id=""
+    authority_lock_token=""
+  fi
   rm -f \
     "$normalized_file" \
     "$inputs_file" \
     "$run_file" \
     "$jobs_file" \
     "$pending_file" \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file" \
+    "$terminal_rejection_run_file" \
+    "$terminal_rejection_jobs_file" \
+    "$terminal_rejection_pending_file" \
+    "$terminal_rejection_approvals_file" \
     "$materialization_error" \
+    "$prerequisite_error_file" \
     "$promotion_file"
   rmdir "$tmp_dir" 2>/dev/null || true
 }
@@ -91,16 +124,17 @@ trap cleanup EXIT
 repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
   fail "unable to resolve a safe GitHub repository name"
-current_master="$(
+live_master="$(
   gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
 )"
-[[ "$current_master" =~ ^[0-9a-f]{40}$ ]] ||
+[[ "$live_master" =~ ^[0-9a-f]{40}$ ]] ||
   fail "current master is not a complete lowercase SHA"
+current_master="$live_master"
 
 local_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)"
 [[ "$local_root" = "$ROOT_DIR" ]] || fail "script is not running from its repository root"
 local_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-[[ "$local_head" = "$current_master" ]] ||
+[[ "$local_head" = "$live_master" ]] ||
   fail "dispatch must run from a checkout at exact current master"
 [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
   fail "dispatch checkout is not clean"
@@ -110,47 +144,113 @@ operation="$(
     --request "$REQUEST_FILE" \
     --repo-root "$ROOT_DIR"
 )"
-policy_json="$("$POLICY_SCRIPT" get "$operation")"
-workflow="$(jq -r '.workflow' <<<"$policy_json")"
-environment="$(jq -r '.environment' <<<"$policy_json")"
-authority_mode="$(jq -r '.authority' <<<"$policy_json")"
-[[ "$authority_mode" = "dispatch-record" ]] ||
-  fail "operation is automatic and cannot be manually dispatched"
+cross_master_rejection=false
+rejection_context=""
+rejection_state=""
+if [[ "$ACTION" = "--resume-run" ]] &&
+  [[ -e "$AUTHORITY_DIR/$RESUME_RUN_ID.json" ||
+    -L "$AUTHORITY_DIR/$RESUME_RUN_ID.json" ]]; then
+  rejection_context="$(
+    "$AUTHORITY_HELPER" read-resume-context \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$RESUME_RUN_ID" \
+      --request "$REQUEST_FILE"
+  )"
+  current_master="$(jq -r '.controlSha' <<<"$rejection_context")"
+  rejection_state="$(jq -r '.state' <<<"$rejection_context")"
+  if [[ "$current_master" != "$live_master" ]]; then
+    if [[ "$rejection_state" != "rejecting" &&
+      "$rejection_state" != "retired" ]] ||
+      [[ "$(jq -r '.prerequisiteRejection' <<<"$rejection_context")" != true ]]; then
+      fail "only a persisted prerequisite rejection can resume across master advancement"
+    fi
+    cross_master_rejection=true
+  fi
+fi
 
-read -r workflow_id workflow_path workflow_state <<<"$(
-  gh api "repos/$repository/actions/workflows/$workflow" \
-    --jq '[.id,.path,.state] | @tsv'
-)"
-[[ "$workflow_id" =~ ^[1-9][0-9]*$ ]] || fail "trusted workflow ID is invalid"
-[[ "$workflow_path" = ".github/workflows/$workflow" ]] ||
-  fail "trusted workflow path does not match policy"
-[[ "$workflow_state" = "active" || "$workflow_state" = "disabled_manually" ]] ||
-  fail "trusted workflow has an unsupported state: $workflow_state"
+if [[ "$cross_master_rejection" = true ]]; then
+  workflow="$(jq -r '.workflow' <<<"$rejection_context")"
+  environment="$(jq -r '.environment' <<<"$rejection_context")"
+  workflow_id="$(jq -r '.workflowId' <<<"$rejection_context")"
+  workflow_blob_sha="$(jq -r '.workflowBlobSha' <<<"$rejection_context")"
+  subject_sha="$(jq -r '.subjectSha // ""' <<<"$rejection_context")"
+  target_sha="$(jq -r '.targetSha // ""' <<<"$rejection_context")"
+  input_hash="$(jq -r '.inputHash' <<<"$rejection_context")"
+  policy_json=""
 
-workflow_blob_sha="$(
-  gh api \
-    "repos/$repository/contents/.github/workflows/$workflow?ref=$current_master" \
-    --jq '.sha'
-)"
-[[ "$workflow_blob_sha" =~ ^[0-9a-f]{40}$ ]] ||
-  fail "trusted workflow blob SHA is invalid"
-local_workflow_blob="$(
-  git -C "$ROOT_DIR" rev-parse "$current_master:.github/workflows/$workflow"
-)"
-[[ "$local_workflow_blob" = "$workflow_blob_sha" ]] ||
-  fail "local and GitHub trusted workflow blobs differ"
+  [[ "$workflow" =~ ^[A-Za-z0-9_.-]+\.yml$ ]] ||
+    fail "recorded workflow name is invalid"
+  [[ "$workflow_id" =~ ^[1-9][0-9]*$ ]] ||
+    fail "recorded workflow ID is invalid"
+  [[ "$workflow_blob_sha" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "recorded workflow blob SHA is invalid"
+  [[ "$current_master" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "recorded control SHA is invalid"
+  if ! git -C "$ROOT_DIR" cat-file -e "${current_master}^{commit}" 2>/dev/null; then
+    git -C "$ROOT_DIR" fetch --quiet origin "$current_master" ||
+      fail "unable to fetch recorded control SHA"
+  fi
+  git -C "$ROOT_DIR" merge-base --is-ancestor "$current_master" "$live_master" ||
+    fail "recorded rejecting control SHA is not an ancestor of current master"
+  local_workflow_blob="$(
+    git -C "$ROOT_DIR" rev-parse \
+      "$current_master:.github/workflows/$workflow"
+  )"
+  [[ "$local_workflow_blob" = "$workflow_blob_sha" ]] ||
+    fail "recorded workflow blob differs from the historical control commit"
+  historical_workflow_blob="$(
+    gh api \
+      "repos/$repository/contents/.github/workflows/$workflow?ref=$current_master" \
+      --jq '.sha'
+  )"
+  [[ "$historical_workflow_blob" = "$workflow_blob_sha" ]] ||
+    fail "GitHub no longer confirms the recorded workflow blob"
+else
+  policy_json="$("$POLICY_SCRIPT" get "$operation")"
+  workflow="$(jq -r '.workflow' <<<"$policy_json")"
+  environment="$(jq -r '.environment' <<<"$policy_json")"
+  authority_mode="$(jq -r '.authority' <<<"$policy_json")"
+  [[ "$authority_mode" = "dispatch-record" ]] ||
+    fail "operation is automatic and cannot be manually dispatched"
 
-"$AUTHORITY_HELPER" validate-request \
-  --request "$REQUEST_FILE" \
-  --policy-json "$policy_json" \
-  --repository "$repository" \
-  --current-master "$current_master" \
-  --repo-root "$ROOT_DIR" \
-  --output "$normalized_file"
-"$AUTHORITY_HELPER" write-inputs \
-  --normalized "$normalized_file" \
-  --output "$inputs_file" \
-  --repo-root "$ROOT_DIR"
+  read -r workflow_id workflow_path workflow_state <<<"$(
+    gh api "repos/$repository/actions/workflows/$workflow" \
+      --jq '[.id,.path,.state] | @tsv'
+  )"
+  [[ "$workflow_id" =~ ^[1-9][0-9]*$ ]] ||
+    fail "trusted workflow ID is invalid"
+  [[ "$workflow_path" = ".github/workflows/$workflow" ]] ||
+    fail "trusted workflow path does not match policy"
+  [[ "$workflow_state" = "active" || "$workflow_state" = "disabled_manually" ]] ||
+    fail "trusted workflow has an unsupported state: $workflow_state"
+
+  workflow_blob_sha="$(
+    gh api \
+      "repos/$repository/contents/.github/workflows/$workflow?ref=$current_master" \
+      --jq '.sha'
+  )"
+  [[ "$workflow_blob_sha" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "trusted workflow blob SHA is invalid"
+  local_workflow_blob="$(
+    git -C "$ROOT_DIR" rev-parse \
+      "$current_master:.github/workflows/$workflow"
+  )"
+  [[ "$local_workflow_blob" = "$workflow_blob_sha" ]] ||
+    fail "local and GitHub trusted workflow blobs differ"
+
+  "$AUTHORITY_HELPER" validate-request \
+    --request "$REQUEST_FILE" \
+    --policy-json "$policy_json" \
+    --repository "$repository" \
+    --current-master "$current_master" \
+    --repo-root "$ROOT_DIR" \
+    --output "$normalized_file"
+  "$AUTHORITY_HELPER" write-inputs \
+    --normalized "$normalized_file" \
+    --output "$inputs_file" \
+    --repo-root "$ROOT_DIR"
+fi
 
 validate_ancestor_relation() {
   local relation="$1"
@@ -178,14 +278,16 @@ validate_ancestor_relation() {
   esac
 }
 
-subject_relation="$(jq -r '.subjectRelation' "$normalized_file")"
-target_relation="$(jq -r '.targetRelation' "$normalized_file")"
-subject_sha="$(jq -r '.subjectSha // ""' "$normalized_file")"
-target_sha="$(jq -r '.targetSha // ""' "$normalized_file")"
-input_hash="$(jq -r '.inputHash' "$normalized_file")"
-title_template="$(jq -r '.displayTitleTemplate' "$normalized_file")"
-validate_ancestor_relation "$subject_relation" "$subject_sha" "subject"
-validate_ancestor_relation "$target_relation" "$target_sha" "target"
+if [[ "$cross_master_rejection" != true ]]; then
+  subject_relation="$(jq -r '.subjectRelation' "$normalized_file")"
+  target_relation="$(jq -r '.targetRelation' "$normalized_file")"
+  subject_sha="$(jq -r '.subjectSha // ""' "$normalized_file")"
+  target_sha="$(jq -r '.targetSha // ""' "$normalized_file")"
+  input_hash="$(jq -r '.inputHash' "$normalized_file")"
+  title_template="$(jq -r '.displayTitleTemplate' "$normalized_file")"
+  validate_ancestor_relation "$subject_relation" "$subject_sha" "subject"
+  validate_ancestor_relation "$target_relation" "$target_sha" "target"
+fi
 
 gh api "repos/$repository/commits/$current_master/pulls" \
   -H "Accept: application/vnd.github+json" >"$promotion_file"
@@ -240,10 +342,96 @@ revalidate_dispatch_target() {
     fail "trusted workflow must be active immediately before dispatch"
 }
 
+revalidate_rejection_continuation() {
+  local observed_master observed_blob
+  observed_master="$(
+    gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
+  )"
+  [[ "$observed_master" = "$live_master" ]] ||
+    fail "master changed during prerequisite rejection continuation"
+  git -C "$ROOT_DIR" merge-base --is-ancestor \
+    "$current_master" "$observed_master" ||
+    fail "rejecting authority control SHA is no longer an ancestor of master"
+  observed_blob="$(
+    gh api \
+      "repos/$repository/contents/.github/workflows/$workflow?ref=$current_master" \
+      --jq '.sha'
+  )"
+  [[ "$observed_blob" = "$workflow_blob_sha" ]] ||
+    fail "recorded workflow blob changed during rejection continuation"
+}
+
+acquire_authority_lock() {
+  local run_id="$1"
+  [[ -z "$authority_lock_token" ]] ||
+    fail "authority lock is already held for run $authority_lock_run_id"
+  authority_lock_token="$(
+    "$AUTHORITY_HELPER" acquire-lock \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --owner-pid "$$"
+  )"
+  [[ "$authority_lock_token" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "authority lock returned an invalid token"
+  authority_lock_run_id="$run_id"
+}
+
+release_authority_lock() {
+  [[ -n "$authority_lock_token" && -n "$authority_lock_run_id" ]] || return 0
+  "$AUTHORITY_HELPER" release-lock \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$authority_lock_run_id" \
+    --token "$authority_lock_token" \
+    >/dev/null
+  authority_lock_run_id=""
+  authority_lock_token=""
+}
+
+assert_resume_identity() {
+  local summary="$1"
+  [[ "$(jq -r '.inputHash' <<<"$summary")" = "$input_hash" ]] ||
+    fail "resume request does not match the authority record input hash"
+  [[ "$(jq -r '.subjectSha // ""' <<<"$summary")" = "$subject_sha" ]] ||
+    fail "resume request does not match the authority record subject SHA"
+  [[ "$(jq -r '.targetSha // ""' <<<"$summary")" = "$target_sha" ]] ||
+    fail "resume request does not match the authority record target SHA"
+}
+
+retire_terminal_claim() {
+  local run_id="$1"
+  gh api \
+    "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
+    >"$jobs_file"
+  gh api \
+    "repos/$repository/actions/runs/$run_id/pending_deployments" \
+    >"$pending_file"
+  chmod 600 "$jobs_file" "$pending_file"
+  if "$AUTHORITY_HELPER" retire-inert-claim \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$run_id" \
+    --run-json "$run_file" \
+    --jobs-json "$jobs_file" \
+    --pending-json "$pending_file" \
+    --policy-json "$policy_json" \
+    --repository "$repository" \
+    --current-master "$current_master" \
+    --workflow-id "$workflow_id" \
+    --workflow-blob-sha "$workflow_blob_sha" \
+    2>"$materialization_error"; then
+    printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' "$run_id"
+    return
+  fi
+  fail "dispatch run $run_id is terminal but not inert; do not redispatch or retire its authority"
+}
+
 materialize_record() {
   local run_id="$1"
   local attempt
-  local summary state
+  local summary state version run_status
+  local failure_summary failure_reason failure_evidence_sha256
 
   summary="$(
     "$AUTHORITY_HELPER" verify \
@@ -256,13 +444,15 @@ materialize_record() {
       --workflow-id "$workflow_id" \
       --workflow-blob-sha "$workflow_blob_sha"
   )"
-  [[ "$(jq -r '.inputHash' <<<"$summary")" = "$input_hash" ]] ||
-    fail "resume request does not match the authority record input hash"
-  [[ "$(jq -r '.subjectSha // ""' <<<"$summary")" = "$subject_sha" ]] ||
-    fail "resume request does not match the authority record subject SHA"
-  [[ "$(jq -r '.targetSha // ""' <<<"$summary")" = "$target_sha" ]] ||
-    fail "resume request does not match the authority record target SHA"
+  assert_resume_identity "$summary"
   state="$(jq -r '.state' <<<"$summary")"
+  version="$(jq -r '.version' <<<"$summary")"
+  if [[ "$state" = "rejecting" ]]; then
+    acquire_authority_lock "$run_id"
+    continue_prerequisite_rejection \
+      "$run_id" "$version" \
+      "protected prerequisites previously decayed"
+  fi
   if [[ "$state" != "claimed" ]]; then
     if [[ "$state" = "retired" ]]; then
       printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' "$run_id"
@@ -278,36 +468,101 @@ materialize_record() {
       "repos/$repository/actions/runs/$run_id" \
       >"$run_file" 2>"$materialization_error"; then
       chmod 600 "$run_file"
-      if [[ "$(jq -r '.status // ""' "$run_file")" = "completed" ]]; then
-        gh api \
-          "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
-          >"$jobs_file"
-        gh api \
-          "repos/$repository/actions/runs/$run_id/pending_deployments" \
-          >"$pending_file"
-        chmod 600 "$jobs_file" "$pending_file"
-        if "$AUTHORITY_HELPER" retire-inert-claim \
+      run_status="$(jq -r '.status // ""' "$run_file")"
+      if [[ "$run_status" = "completed" ]]; then
+        retire_terminal_claim "$run_id"
+        return
+      fi
+      acquire_authority_lock "$run_id"
+      summary="$(
+        "$AUTHORITY_HELPER" verify \
           --authority-dir "$AUTHORITY_DIR" \
           --repo-root "$ROOT_DIR" \
           --run-id "$run_id" \
-          --run-json "$run_file" \
-          --jobs-json "$jobs_file" \
-          --pending-json "$pending_file" \
           --policy-json "$policy_json" \
           --repository "$repository" \
           --current-master "$current_master" \
           --workflow-id "$workflow_id" \
-          --workflow-blob-sha "$workflow_blob_sha" \
-          2>"$materialization_error"; then
-          printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' "$run_id"
-          return
-        fi
-        fail "dispatch run $run_id is terminal but not inert; do not redispatch or retire its authority"
+          --workflow-blob-sha "$workflow_blob_sha"
+      )"
+      assert_resume_identity "$summary"
+      state="$(jq -r '.state' <<<"$summary")"
+      version="$(jq -r '.version' <<<"$summary")"
+      if [[ "$state" = "rejecting" ]]; then
+        continue_prerequisite_rejection \
+          "$run_id" "$version" \
+          "protected prerequisites previously decayed"
       fi
+      [[ "$state" = "claimed" ]] ||
+        fail "authority changed from claimed before materialization"
+      if ! gh api \
+        "repos/$repository/actions/runs/$run_id" \
+        >"$run_file" 2>>"$materialization_error"; then
+        release_authority_lock
+        if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+          sleep "$MATERIALIZATION_SLEEP_SECONDS"
+          continue
+        fi
+        break
+      fi
+      chmod 600 "$run_file"
+      run_status="$(jq -r '.status // ""' "$run_file")"
+      if [[ "$run_status" = "completed" ]]; then
+        release_authority_lock
+        retire_terminal_claim "$run_id"
+        return
+      fi
+      rm -f "$prerequisite_error_file"
+      if ! (
+        revalidate_control &&
+          validate_protected_prerequisites &&
+          revalidate_control
+      ) >"$prerequisite_error_file" 2>&1; then
+        chmod 600 "$prerequisite_error_file"
+        failure_summary="$(
+          summarize_prerequisite_failure "$prerequisite_error_file"
+        )"
+        failure_reason="$(jq -r '.reason' <<<"$failure_summary")"
+        failure_evidence_sha256="$(jq -r '.sha256' <<<"$failure_summary")"
+        if [[ "$run_status" = "waiting" ]]; then
+          begin_prerequisite_rejection \
+            "$run_id" "$version" \
+            "$failure_reason" "$failure_evidence_sha256"
+        fi
+        release_authority_lock
+        if [[ "$run_status" =~ ^(queued|pending|requested)$ ]]; then
+          if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+            sleep "$MATERIALIZATION_SLEEP_SECONDS"
+            continue
+          fi
+          fail "$failure_reason; exact run $run_id has not reached its protected gate, so claimed authority remains fenced"
+        fi
+        fail "$failure_reason; exact run $run_id is not provably unstarted at its protected gate, so claimed authority remains fenced"
+      fi
+      if ! gh api \
+        "repos/$repository/actions/runs/$run_id" \
+        >"$run_file" 2>>"$materialization_error"; then
+        release_authority_lock
+        if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+          sleep "$MATERIALIZATION_SLEEP_SECONDS"
+          continue
+        fi
+        break
+      fi
+      chmod 600 "$run_file"
+      run_status="$(jq -r '.status // ""' "$run_file")"
+      if [[ "$run_status" = "completed" ]]; then
+        release_authority_lock
+        retire_terminal_claim "$run_id"
+        return
+      fi
+      revalidate_control
       if "$AUTHORITY_HELPER" issue \
         --authority-dir "$AUTHORITY_DIR" \
         --repo-root "$ROOT_DIR" \
         --run-id "$run_id" \
+        --token "$authority_lock_token" \
+        --expected-version "$version" \
         --run-json "$run_file" \
         --policy-json "$policy_json" \
         --repository "$repository" \
@@ -315,10 +570,12 @@ materialize_record() {
         --workflow-id "$workflow_id" \
         --workflow-blob-sha "$workflow_blob_sha" \
         2>"$materialization_error"; then
+        release_authority_lock
         printf 'dispatch=ACCEPTED run_id=%s run_url=https://github.com/%s/actions/runs/%s authority_state=issued\n' \
           "$run_id" "$repository" "$run_id"
         return
       fi
+      release_authority_lock
     fi
     if ((attempt < MATERIALIZATION_ATTEMPTS)); then
       sleep "$MATERIALIZATION_SLEEP_SECONDS"
@@ -332,6 +589,303 @@ if [[ -n "$ACTION" ]]; then
   "$AUTHORITY_HELPER" preflight-root \
     --authority-dir "$AUTHORITY_DIR" \
     --repo-root "$ROOT_DIR"
+fi
+
+validate_runtime_mode_binding() {
+  # A finalize dispatch carries an immutable runtime mode. Prove it equals the
+  # authoritative Actions environment mode before any authority exists, so an
+  # OKE fleet cannot be finalized with k3s semantics or vice versa.
+  local declared observed
+  declared="$(jq -r '.fixedInputs.runtime_mode // ""' <<<"$policy_json")"
+  [[ -n "$declared" ]] || return 0
+  observed="$(
+    gh api \
+      "repos/$repository/environments/$environment/variables/OCI_RUNTIME_MODE" \
+      --jq '.value'
+  )" || fail "unable to read the authoritative runtime mode for $environment"
+  [[ "$declared" = "$observed" ]] ||
+    fail "operation runtime mode '$declared' does not match the authoritative $environment mode '$observed'"
+}
+
+validate_upstream_run_bindings() {
+  # Enforce declared upstream run bindings BEFORE any authority intent or
+  # record exists, so a missing, wrong, rerun or expired upstream cannot
+  # consume a one-use protected authority. The bound workflow calls the same
+  # shared validator with the same policy bindings, so the two paths cannot
+  # drift.
+  local dispatch_inputs
+  [[ -x "$UPSTREAM_BINDING_VALIDATOR" ]] ||
+    fail "upstream run binding validator is unavailable"
+  [[ "$(jq -r '.upstreamRunBindings | length' <<<"$policy_json")" != "0" ]] ||
+    return 0
+  dispatch_inputs="$(jq -c '.dispatchInputs' "$normalized_file")"
+  [[ -n "$dispatch_inputs" && "$dispatch_inputs" != "null" ]] ||
+    fail "normalized request does not expose dispatch inputs"
+  "$UPSTREAM_BINDING_VALIDATOR" validate-all \
+    --repository "$repository" \
+    --policy-json "$policy_json" \
+    --subject-sha "$subject_sha" \
+    --dispatch-inputs "$dispatch_inputs" >/dev/null ||
+    fail "upstream run bindings were rejected before any authority was issued"
+}
+
+validate_protected_prerequisites() {
+  validate_runtime_mode_binding
+  validate_upstream_run_bindings
+}
+
+validate_production_exclusivity() {
+  REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+    "$RUN_EXCLUSIVITY_SCRIPT"
+}
+
+summarize_prerequisite_failure() {
+  local failure_file="$1"
+  python3 - "$failure_file" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+text = raw.decode("utf-8", errors="replace")
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+parts = []
+for line in text.splitlines():
+    line = ansi.sub(" ", line)
+    safe = "".join(character if character.isprintable() else " " for character in line)
+    normalized = " ".join(safe.split())
+    if normalized:
+        parts.append(normalized)
+reason = " | ".join(parts) or "protected prerequisite validation failed"
+while len(reason.encode("utf-8")) > 4096:
+    reason = reason[:-1]
+print(json.dumps({
+    "reason": reason,
+    "sha256": hashlib.sha256(raw).hexdigest(),
+}, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+begin_prerequisite_rejection() {
+  local run_id="$1"
+  local expected_version="$2"
+  local failure_reason="$3"
+  local failure_evidence_sha256="$4"
+  local rejection_summary rejection_version
+
+  rm -f \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file" \
+    "$terminal_rejection_run_file" \
+    "$terminal_rejection_jobs_file" \
+    "$terminal_rejection_pending_file" \
+    "$terminal_rejection_approvals_file" \
+    "$materialization_error"
+  gh api "repos/$repository/actions/runs/$run_id" \
+    >"$pre_rejection_run_file"
+  gh api "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
+    >"$pre_rejection_jobs_file"
+  gh api "repos/$repository/actions/runs/$run_id/pending_deployments" \
+    >"$pre_rejection_pending_file"
+  gh api "repos/$repository/actions/runs/$run_id/approvals" \
+    >"$pre_rejection_approvals_file"
+  chmod 600 \
+    "$pre_rejection_run_file" \
+    "$pre_rejection_jobs_file" \
+    "$pre_rejection_pending_file" \
+    "$pre_rejection_approvals_file"
+
+  [[ -n "$failure_reason" ]] ||
+    fail "prerequisite rejection failure summary is empty"
+  [[ "$failure_evidence_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "prerequisite rejection failure digest is invalid"
+
+  rejection_summary="$(
+    "$AUTHORITY_HELPER" begin-prerequisite-rejection \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --token "$authority_lock_token" \
+      --failure-reason "$failure_reason" \
+      --failure-evidence-sha256 "$failure_evidence_sha256" \
+      --expected-version "$expected_version" \
+      --pre-run-json "$pre_rejection_run_file" \
+      --pre-jobs-json "$pre_rejection_jobs_file" \
+      --pre-pending-json "$pre_rejection_pending_file" \
+      --pre-approvals-json "$pre_rejection_approvals_file" \
+      --policy-json "$policy_json" \
+      --repository "$repository" \
+      --current-master "$current_master" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$workflow_blob_sha"
+  )" ||
+    fail "$failure_reason; the exact run is not provably unstarted at its protected gate, so claimed authority remains fenced"
+  rejection_version="$(jq -r '.version' <<<"$rejection_summary")"
+  [[ "$(jq -r '.state' <<<"$rejection_summary")" = "rejecting" ]] ||
+    fail "prerequisite rejection did not persist its authority state"
+  continue_prerequisite_rejection \
+    "$run_id" "$rejection_version" "$failure_reason"
+}
+
+continue_prerequisite_rejection() {
+  local run_id="$1"
+  local expected_version="$2"
+  local prerequisite_error="$3"
+  local attempt cancel_status=0 summary
+  local terminal_observation="" previous_terminal_observation=""
+
+  summary="$(
+    "$AUTHORITY_HELPER" read-resume-context \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --request "$REQUEST_FILE"
+  )"
+  assert_resume_identity "$summary"
+  [[ "$(jq -r '.state' <<<"$summary")" = "rejecting" ]] ||
+    fail "only a rejecting authority can continue prerequisite cancellation"
+  [[ "$(jq -r '.version' <<<"$summary")" = "$expected_version" ]] ||
+    fail "rejecting authority changed before cancellation resumed"
+  revalidate_rejection_continuation
+
+  rm -f \
+    "$terminal_rejection_run_file" \
+    "$terminal_rejection_jobs_file" \
+    "$terminal_rejection_pending_file" \
+    "$terminal_rejection_approvals_file" \
+    "$materialization_error"
+  set +e
+  gh api --method POST \
+    "repos/$repository/actions/runs/$run_id/cancel" \
+    >/dev/null 2>"$materialization_error"
+  cancel_status=$?
+  set -e
+
+  for ((attempt = 1; attempt <= MATERIALIZATION_ATTEMPTS; attempt += 1)); do
+    rm -f \
+      "$terminal_rejection_run_file" \
+      "$terminal_rejection_jobs_file" \
+      "$terminal_rejection_pending_file" \
+      "$terminal_rejection_approvals_file"
+    if gh api "repos/$repository/actions/runs/$run_id" \
+        >"$terminal_rejection_run_file" 2>>"$materialization_error" &&
+      [[ "$(jq -r '.status // ""' "$terminal_rejection_run_file")" = "completed" ]] &&
+      gh api "repos/$repository/actions/runs/$run_id/jobs?per_page=100" \
+        >"$terminal_rejection_jobs_file" 2>>"$materialization_error" &&
+      gh api "repos/$repository/actions/runs/$run_id/pending_deployments" \
+        >"$terminal_rejection_pending_file" 2>>"$materialization_error" &&
+      gh api "repos/$repository/actions/runs/$run_id/approvals" \
+        >"$terminal_rejection_approvals_file" 2>>"$materialization_error"; then
+      chmod 600 \
+        "$terminal_rejection_run_file" \
+        "$terminal_rejection_jobs_file" \
+        "$terminal_rejection_pending_file" \
+        "$terminal_rejection_approvals_file"
+      terminal_observation="$(
+        python3 - \
+          "$terminal_rejection_run_file" \
+          "$terminal_rejection_jobs_file" \
+          "$terminal_rejection_pending_file" \
+          "$terminal_rejection_approvals_file" <<'PY'
+import hashlib
+import json
+import sys
+
+payload = []
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        payload.append(json.load(handle))
+encoded = json.dumps(
+    payload,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+print(hashlib.sha256(encoded).hexdigest())
+PY
+      )"
+      if [[ "$terminal_observation" != "$previous_terminal_observation" ]]; then
+        previous_terminal_observation="$terminal_observation"
+        if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+          sleep "$MATERIALIZATION_SLEEP_SECONDS"
+        fi
+        continue
+      fi
+      revalidate_rejection_continuation
+      if "$AUTHORITY_HELPER" retire-prerequisite-rejected-claim \
+        --authority-dir "$AUTHORITY_DIR" \
+        --repo-root "$ROOT_DIR" \
+        --run-id "$run_id" \
+        --token "$authority_lock_token" \
+        --expected-version "$expected_version" \
+        --terminal-run-json "$terminal_rejection_run_file" \
+        --terminal-jobs-json "$terminal_rejection_jobs_file" \
+        --terminal-pending-json "$terminal_rejection_pending_file" \
+        --terminal-approvals-json "$terminal_rejection_approvals_file" \
+        --request "$REQUEST_FILE" \
+        --repository "$repository" \
+        --control-sha "$current_master" \
+        --live-master-sha "$live_master" \
+        --workflow-id "$workflow_id" \
+        --workflow-blob-sha "$workflow_blob_sha" \
+        2>>"$materialization_error"; then
+        release_authority_lock
+        fail "$prerequisite_error; exact run $run_id was cancelled and its rejecting authority retired, submit a corrected request"
+      fi
+    fi
+    if ((attempt < MATERIALIZATION_ATTEMPTS)); then
+      sleep "$MATERIALIZATION_SLEEP_SECONDS"
+    fi
+  done
+
+  release_authority_lock
+  fail "$prerequisite_error; exact run $run_id has persisted rejecting authority but terminal cancellation is not yet proven (cancel status $cancel_status), resume this exact run"
+}
+
+resume_with_prerequisite_validation() {
+  local run_id="$1"
+  local summary state version
+
+  summary="$(
+    "$AUTHORITY_HELPER" verify \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --policy-json "$policy_json" \
+      --repository "$repository" \
+      --current-master "$current_master" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$workflow_blob_sha"
+  )"
+  assert_resume_identity "$summary"
+  state="$(jq -r '.state' <<<"$summary")"
+  version="$(jq -r '.version' <<<"$summary")"
+  if [[ "$state" = "rejecting" ]]; then
+    acquire_authority_lock "$run_id"
+    continue_prerequisite_rejection \
+      "$run_id" "$version" \
+      "protected prerequisites previously decayed"
+  fi
+  materialize_record "$run_id"
+}
+
+if [[ "$cross_master_rejection" = true ]]; then
+  if [[ "$rejection_state" = "retired" ]]; then
+    printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' \
+      "$RESUME_RUN_ID"
+    exit 0
+  fi
+  rejection_version="$(jq -r '.version' <<<"$rejection_context")"
+  acquire_authority_lock "$RESUME_RUN_ID"
+  continue_prerequisite_rejection \
+    "$RESUME_RUN_ID" \
+    "$rejection_version" \
+    "protected prerequisites previously decayed"
+  fail "prerequisite rejection continuation returned unexpectedly"
 fi
 
 if [[ "$ACTION" = "--resume-run" ]]; then
@@ -351,7 +905,7 @@ if [[ "$ACTION" = "--resume-run" ]]; then
   )"
   [[ -z "$bound_run_id" || "$bound_run_id" = "$RESUME_RUN_ID" ]] ||
     fail "resumed dispatch intent returned a different run ID"
-  materialize_record "$RESUME_RUN_ID"
+  resume_with_prerequisite_validation "$RESUME_RUN_ID"
   exit 0
 fi
 
@@ -370,9 +924,11 @@ if [[ "$ACTION" = "--resume-captured" ]]; then
   )"
   [[ "$bound_run_id" =~ ^[1-9][0-9]*$ ]] ||
     fail "captured dispatch intent did not identify one exact run"
-  materialize_record "$bound_run_id"
+  resume_with_prerequisite_validation "$bound_run_id"
   exit 0
 fi
+
+validate_protected_prerequisites
 
 printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s input_sha256=%s title_template=%s\n' \
   "$operation" "$workflow" "$environment" "$current_master" "$input_hash" "$title_template"
@@ -391,8 +947,7 @@ if [[ -n "$blocking_record" ]]; then
 fi
 
 revalidate_dispatch_target
-REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
-  "$RUN_EXCLUSIVITY_SCRIPT"
+validate_production_exclusivity
 revalidate_dispatch_target
 
 intent_summary="$(
@@ -414,7 +969,13 @@ capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
 intent_version="$(jq -r '.version' <<<"$intent_summary")"
 
 if ! dispatch_revalidation_error="$(
-  revalidate_dispatch_target 2>&1
+  {
+    revalidate_dispatch_target &&
+      validate_protected_prerequisites &&
+      revalidate_dispatch_target &&
+      validate_production_exclusivity &&
+      revalidate_dispatch_target
+  } 2>&1
 )"; then
   "$AUTHORITY_HELPER" cancel-intent \
     --normalized "$normalized_file" \

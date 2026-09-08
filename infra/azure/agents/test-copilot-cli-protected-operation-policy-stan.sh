@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "33" ]] || {
-  echo "expected 33 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "35" ]] || {
+  echo "expected 35 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -66,6 +66,7 @@ expected_policy_keys = %w[
   upstreamConclusion
   upstreamEvent
   upstreamOperations
+  upstreamRunBindings
   upstreamWorkflow
   workflow
   zeroOrPositiveIntegerInputs

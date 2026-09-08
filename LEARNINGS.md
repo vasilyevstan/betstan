@@ -750,15 +750,16 @@ cd resulting && npm ci && npm run test:ci
   phase, and pending environment instead of presenting a silent wait.
 - A jobless stale GitHub queue record can be an inert provider artifact, but
   age and an empty job list are not enough. The bounded classifier requires an
-  old first-attempt manual dispatch for a non-current ancestor SHA, no jobs or
-  approvals, and exact successful successor work. Capacity needs one exact
-  later success; live data needs the complete later dry-run, backfill, and
-  slip-index chain; activation needs one exact later activation. Data and
-  activation additionally require their historical workflow revision to use
-  the protected environment, shared control-plane concurrency, and a
-  current-master check before mutation. Never extend this to deployment,
-  disable, rollback, infrastructure, package, cache-recovery, or build work,
-  and never treat an ignored artifact as approval or recovery authority.
+  old first-attempt manual dispatch for a non-current ancestor SHA, no jobs,
+  approvals, pending deployment, or artifacts, and exact successful successor
+  work. Active supersession is limited to capacity and requires one exact later
+  first-attempt success for the same workflow, SHA, event, and title. Active
+  live-data and activation records always remain fences. Their manually
+  disabled, never-transitioned generic-title ghosts may use only the separate
+  evidence-complete unmaterialized classifier. Never extend either path to
+  deployment, disable, rollback, infrastructure, package, cache-recovery, or
+  build work, and never treat an ignored artifact as approval or recovery
+  authority.
 - Deleted Entra service principals require a successful list-all,
   client-side exact-ID absence probe; a server-filter 404 is not usable
   evidence. Role-assignment IDs must also bind to their declared parent scope.
@@ -931,15 +932,17 @@ validated.
   crash and `--resume-run` after delayed materialization. Never infer identity
   from title or timing, and never redispatch a URL-less unresolved intent.
 - Treat unresolved authority as repository-global, not request-local. Any
-  `dispatching`/`bound` intent or `claimed`/`inflight` record blocks every
-  protected request for that repository even after control SHA advances.
+  `dispatching`/`bound` intent or `claimed`/`inflight`/`rejecting` record
+  blocks every protected request for that repository even after control SHA
+  advances.
   Promotion cannot silently clear the fence. `issued` and `consumed` remain
   one-use for the same operation and exact transport input hash; changed
   inputs form a new request but do not bypass policy, lineage, recovery, or
   exclusivity. `retired` is the only inert replacement exception.
 - Persisting an intent is not the last dispatch check. Revalidate current
-  master, workflow blob, and active state after creating it, and cancel only a
-  pristine untouched intent if authority drifted before the GitHub call.
+  master, workflow blob, active state, and prerequisites after creating it,
+  then recheck the mutable dispatch target immediately before the GitHub call.
+  Cancel only a pristine untouched intent if authority drifted.
 - Approval needs a two-phase local state change. Claim the exact
   run/environment/waiting-job-set fingerprint as `inflight` before the GitHub
   POST, then append a consumed receipt only after acceptance. An ambiguous
@@ -964,6 +967,24 @@ validated.
   and receipt lifecycle as directly dispatched runs. A captured terminal run
   is safe to mark `retired` only with zero jobs and zero pending deployments;
   that proof, not age or a generic conclusion, permits a replacement dispatch.
+- A captured or claimed run whose upstream prerequisite decays during resume
+  must match its exact request and run before the fence can be resolved. Under
+  the authority lock, persist a `rejecting` record with the failure reason,
+  exact waiting gate, request identity, exact pre-cancel snapshots, and
+  canonical evidence hashes before sending cancellation. Keep that lock
+  through terminalization. If GitHub
+  cancellation or evidence reads are delayed, resume from the persisted
+  rejection instead of replacing its pre-cancel snapshot. Retire only after
+  two stable terminal observations prove cancellation, no approval, no
+  successful job step, and no pending deployment; otherwise keep the global
+  rejecting fence.
+- A persisted `rejecting` fence must remain recoverable after a normal
+  descendant `master` promotion. Permit only the exact old request to continue
+  cancellation from a clean checkout at current `master`, prove the recorded
+  control SHA is still an ancestor, and re-prove its historical workflow blob
+  before cancellation and retirement. This historical-control path must never
+  dispatch, issue, or approve. If mutable `master` changes during the attempt,
+  fail closed and retry from the new exact checkout.
 - A claimed accepted-but-unmaterialized run is not a terminal claim. Keep its
   affected workflow disabled while its generic-title ghost SHA is current,
   and never grant it human or CLI environment approval. Promote the
@@ -971,16 +992,24 @@ validated.
   After that SHA is a strict ancestor, only
   `retire-unmaterialized-claim` may migrate the exact v1 claim to a retired
   record, with optimistic version locking and a digest of complete run,
-  jobs, pending-deployment, artifact, compare, and historical-workflow
-  evidence. The path is restricted to data rollout, live activation, and
-  capacity acquisition; it requires queued/null first-attempt manual identity,
-  equal untouched timestamps, zero exact count/list jobs and artifacts,
-  zero pending deployments, a generic workflow-name title that cannot match
-  a legitimate rendered title, and a one-job historical protected workflow
-  whose `oci-control-plane` non-cancelling guards precede every mutation.
+  jobs, pending-deployment, approval, artifact, compare, and
+  historical-workflow evidence. The path is restricted to data rollout, live
+  activation, and capacity acquisition; it requires queued/null first-attempt
+  manual identity and equal untouched timestamps.
+  It requires zero exact count/list jobs and artifacts.
+  It also requires zero approvals and pending deployments, a generic workflow-name
+  title that cannot match a legitimate rendered title, and a one-job historical
+  protected workflow whose `oci-control-plane` non-cancelling guards precede
+  every mutation.
   Then rebuild the complete exact-SHA chain; retirement never authorizes an
   automatic redispatch or approval. A cancellation `409` is journal
   corroboration only, never classifier or retirement evidence.
+- A protected job's injected environment variable is the runtime authority
+  available to its shell. Bind it to the dispatch-approved value and compare
+  the two immediately before cloud access, bracket upstream validation with
+  current-`master` checks, and fail closed on drift. Do not assume the
+  workflow `GITHUB_TOKEN` can re-read protected environment variables through
+  repository REST endpoints.
 - A current-master ghost can block the guard promotion that would make it
   safely historical. The merge-safety path may pass only its exact promotion
   PR number; exclusivity must independently prove an OPEN CLI-managed
@@ -1003,12 +1032,12 @@ validated.
   exact acceptance-slip cleanup mutation tokens. Its cryptographically
   verified blob identity selects that reviewed reduced profile; every other
   historical source requires the full current token profile.
-- Keep workflow-specific supersession successor chains: capacity needs one
-  later exact success; live data needs later dry-run, backfill, and slip-index
-  successes; activation needs a later exact activation success. A recovered
-  ghost is not completion—reconcile the entire nonterminal run inventory
-  until no unexplained blocker remains. Reject removing live-data or activation
-  supersession as a substitute for their successor chains.
+- Keep active supersession capacity-only and require one exact later successful
+  first attempt plus pristine job, pending, approval, and artifact evidence.
+  Active live-data and activation records remain blockers regardless of later
+  successes. A recovered disabled unmaterialized ghost is not completion:
+  reconcile the entire nonterminal run inventory until no unexplained blocker
+  remains.
 - A critical path blocked by a repository-introduced rule, policy, or guard is
   not automatically an external safety wait. The conductor must prove the
   exact self-imposed cause and the intended invariant; if real production
@@ -1160,3 +1189,61 @@ Durable rules:
 - Long polling loops are the usual disguise. Waiting in large sleep blocks
   without surfacing intermediate state converts a legitimate provider wait into
   an invisible one.
+
+## Prerequisites must be proven before one-use authority is spent — 2026-09-07
+
+A protected release chain consumed a one-use authority and only then discovered
+that a required upstream run did not exist for that exact SHA. The guard that
+blocked redispatch was correct; the defect was checking the prerequisite too
+late.
+
+Durable rules:
+
+- Order of checks matters as much as the checks themselves. Anything that can
+  fail a protected operation must be validated before the operation acquires or
+  consumes authority, not during execution.
+- Prefer an explicit, hash-covered transport input over an implicit scan for any
+  cross-run dependency. Implicit discovery hides the dependency from the request,
+  the input hash, and the immutable evidence.
+- Enforce a binding in both the orchestrator and the executed workflow. One
+  layer alone is either bypassable or too late.
+- Cross-run prerequisites are a lineage, not a bag of successes. Enumerate the
+  complete paginated artifact inventory, reject current reruns, require build
+  completion before package validation and validation completion before k3s
+  capacity acquisition, and make the validation artifact name the exact build
+  run it inspected.
+- Revalidate the immutable request identity before any resume cancellation,
+  revalidate prerequisites under the authority lock immediately before every
+  `claimed -> issued` transition, and recheck mutable `master` after
+  network-bound prerequisite validation immediately before dispatch.
+- Serialize the repository-global blocker scan and intent creation with one
+  kernel-backed claim lock. Atomic creation of each request file alone cannot
+  prevent two distinct requests from both observing an empty authority store.
+- Preserve exact multiline prerequisite diagnostics by hashing the raw bytes,
+  but put only a bounded one-line summary in durable state and logs. Control
+  characters or line breaks must not make persistence itself fail.
+- Validate the contents of the exact selected artifact, not only its name or
+  source SHA. Package validation must name the exact build run it inspected,
+  and capacity evidence must carry the expected candidate and upstream run
+  identities.
+- When a one-use authority is spent on a pre-mutation failure, preserve it as
+  terminal evidence and promote a substantive hardened SHA. Never edit the
+  authority store, retire a run that materialized jobs, or invent a placeholder
+  input purely to change the hash.
+- Cross-master rejection retirement records both the historical control SHA
+  and the actual live `master` that completed retirement. A prospective
+  current-master ghost may be ignored only after refreshing its run, workflow,
+  jobs, pending deployments, and artifacts and proving the workflow is
+  manually disabled.
+- Active stale data or activation runs always remain production fences. The
+  only active-run supersession exception is a pristine, approval-free capacity
+  ghost with an exact later successful first attempt for the same workflow,
+  SHA, event, and rendered title.
+- Post-claim approval checks must be an explicit short-circuiting chain. After
+  immutable artifact validation, recheck promotion, production exclusivity,
+  the exact pending gate, and finally current control; release or complete only
+  the originally claimed environment and waiting-job fingerprint.
+- Put the final cloud-boundary refresh in the live job that performs the
+  mutation, not a similarly named retired job. Bracket upstream validation
+  with fresh `master` and runtime-mode checks immediately before the first
+  provider API call.

@@ -198,6 +198,18 @@ gh() {
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
+      if [[
+        "${STUB_EXCLUSIVITY_FAIL_WHEN_INTENT:-false}" == "true" &&
+          -n "${COPILOT_CLI_AUTHORITY_DIR:-}" &&
+          -n "$(
+            find "$COPILOT_CLI_AUTHORITY_DIR" \
+              -maxdepth 1 -type f -name 'request-*.json' -print -quit \
+              2>/dev/null
+          )"
+      ]]; then
+        printf '%s\n' '{'
+        return
+      fi
       if [[ "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" ]]; then
         if [[ -n "${PROSPECTIVE_PROMOTION_PR:-}" ]]; then
           echo "normal dispatcher leaked prospective promotion context" >&2
@@ -337,6 +349,7 @@ jobs = {"total_count": 0, "jobs": []}
 if mode == "jobs":
     jobs = {"total_count": 1, "jobs": [{"id": 1}]}
 pending = [] if mode != "pending" else [{"environment": {"id": 1}}]
+approvals = [] if mode != "approved" else [{"state": "approved"}]
 artifacts = {"total_count": 0, "artifacts": []}
 if mode == "artifacts":
     artifacts = {"total_count": 1, "artifacts": [{"id": 1}]}
@@ -383,6 +396,7 @@ for name, value in {
     },
     "jobs.json": jobs,
     "pending.json": pending,
+    "approvals.json": approvals,
     "artifacts.json": artifacts,
     "compare.json": compare,
     "historical.json": historical,
@@ -464,6 +478,7 @@ retire_unmaterialized_claim() {
     --workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/workflow.json" \
     --jobs-json "$UNMATERIALIZED_EVIDENCE_DIR/jobs.json" \
     --pending-json "$UNMATERIALIZED_EVIDENCE_DIR/pending.json" \
+    --approvals-json "$UNMATERIALIZED_EVIDENCE_DIR/approvals.json" \
     --artifacts-json "$UNMATERIALIZED_EVIDENCE_DIR/artifacts.json" \
     --compare-json "$UNMATERIALIZED_EVIDENCE_DIR/compare.json" \
     --historical-workflow-json "$UNMATERIALIZED_EVIDENCE_DIR/historical.json" \
@@ -535,6 +550,155 @@ if len(module.HISTORICAL_MUTATION_PROFILES) != 1:
     raise SystemExit("unexpected historical mutation profile was allowlisted")
 PY
 
+concurrent_authority_dir="$tmp_dir/concurrent-authority"
+concurrent_policy="$tmp_dir/concurrent-policy.json"
+concurrent_request_a="$tmp_dir/concurrent-request-a.json"
+concurrent_request_b="$tmp_dir/concurrent-request-b.json"
+concurrent_normalized_a="$tmp_dir/concurrent-normalized-a.json"
+concurrent_normalized_b="$tmp_dir/concurrent-normalized-b.json"
+"$POLICY" get production-deploy >"$concurrent_policy"
+chmod 600 "$concurrent_policy"
+python3 - \
+  "$concurrent_request_a" \
+  "$concurrent_request_b" \
+  "$SHA" \
+  "$REPOSITORY" <<'PY'
+import json
+import os
+import sys
+
+request_a, request_b, sha, repository = sys.argv[1:]
+for path, build_run_id in (
+    (request_a, "9101"),
+    (request_b, "9102"),
+):
+    request = {
+        "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+        "repository": repository,
+        "operation": "production-deploy",
+        "controlSha": sha,
+        "subjectSha": sha,
+        "targetSha": None,
+        "inputs": {
+            "approved_sha": sha,
+            "build_run_id": build_run_id,
+        },
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle)
+        handle.write("\n")
+    os.chmod(path, 0o600)
+PY
+for request_and_normalized in \
+  "$concurrent_request_a:$concurrent_normalized_a" \
+  "$concurrent_request_b:$concurrent_normalized_b"; do
+  concurrent_request="${request_and_normalized%%:*}"
+  concurrent_normalized="${request_and_normalized#*:}"
+  "$HELPER" validate-request \
+    --request "$concurrent_request" \
+    --policy-json "$(cat "$concurrent_policy")" \
+    --repository "$REPOSITORY" \
+    --current-master "$SHA" \
+    --repo-root "$ROOT_DIR" \
+    --output "$concurrent_normalized"
+done
+python3 - \
+  "$HELPER" \
+  "$concurrent_policy" \
+  "$concurrent_normalized_a" \
+  "$concurrent_normalized_b" \
+  "$concurrent_authority_dir" \
+  "$ROOT_DIR" \
+  "$REPOSITORY" \
+  "$SHA" \
+  "$WORKFLOW_ID" \
+  "$BLOB" <<'PY'
+import fcntl
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+(
+    helper,
+    policy_path,
+    normalized_a,
+    normalized_b,
+    authority_dir_text,
+    repo_root,
+    repository,
+    current_master,
+    workflow_id,
+    workflow_blob_sha,
+) = sys.argv[1:]
+authority_dir = pathlib.Path(authority_dir_text)
+authority_dir.mkdir(mode=0o700)
+lock_path = authority_dir / ".repository-claim.lock"
+lock_descriptor = os.open(
+    lock_path,
+    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+    0o600,
+)
+policy_json = pathlib.Path(policy_path).read_text(encoding="utf-8")
+
+def command(normalized):
+    return [
+        helper,
+        "claim-request",
+        "--normalized",
+        normalized,
+        "--policy-json",
+        policy_json,
+        "--repository",
+        repository,
+        "--current-master",
+        current_master,
+        "--workflow-id",
+        workflow_id,
+        "--workflow-blob-sha",
+        workflow_blob_sha,
+        "--owner-pid",
+        str(os.getpid()),
+        "--authority-dir",
+        str(authority_dir),
+        "--repo-root",
+        repo_root,
+    ]
+
+try:
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    processes = [
+        subprocess.Popen(
+            command(normalized),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for normalized in (normalized_a, normalized_b)
+    ]
+    time.sleep(0.1)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+    results = [
+        (*process.communicate(timeout=10), process.returncode)
+        for process in processes
+    ]
+finally:
+    os.close(lock_descriptor)
+
+if sorted(result[2] for result in results) != [0, 1]:
+    raise SystemExit(f"concurrent claim results were not one success and one rejection: {results!r}")
+failure = next(result for result in results if result[2] != 0)
+if "blocked by dispatching authority intent:" not in failure[1]:
+    raise SystemExit(f"concurrent claim rejection was not repository-global: {failure!r}")
+intent_files = list(authority_dir.glob("request-*.json"))
+capture_files = list(authority_dir.glob("dispatch-*.log"))
+if len(intent_files) != 1 or len(capture_files) != 1:
+    raise SystemExit(
+        "concurrent distinct requests created more than one repository claim"
+    )
+PY
+
 write_request
 if STUB_DIRTY_CHECKOUT=true \
   run_dispatcher "$request_file" >"$output_file" 2>"$error_file"; then
@@ -557,8 +721,26 @@ if STUB_DISABLE_ON_STATE_CALL=3 \
 fi
 grep -qF "must be active immediately before dispatch" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
-[[ -z "$(find "$authority_dir" -maxdepth 1 -type f -print -quit)" ]]
+[[ -z "$(
+  find "$authority_dir" \
+    -maxdepth 1 -type f ! -name '.repository-claim.lock' -print -quit
+)" ]]
 rm -f "$workflow_state_count_file"
+
+write_request
+final_exclusivity_authority="$tmp_dir/final-exclusivity-authority"
+if TEST_AUTHORITY_DIR="$final_exclusivity_authority" \
+  STUB_EXCLUSIVITY_FAIL_WHEN_INTENT=true \
+  STUB_RUN_ID=7098 \
+  run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+  echo "post-claim production exclusivity failure unexpectedly dispatched" >&2
+  exit 1
+fi
+[[ ! -e "$dispatch_count_file" ]]
+[[ -z "$(
+  find "$final_exclusivity_authority" \
+    -maxdepth 1 -type f -name 'request-*.json' -print -quit
+)" ]]
 
 write_request
 if TEST_AUTHORITY_DIR="$ROOT_DIR/unsafe-authority-test" \
@@ -799,13 +981,84 @@ jq -e '.state == "issued" and .runId == 7011' \
 
 prepare_unmaterialized_claim 7300
 unmaterialized_record="$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json"
+unmaterialized_record_before="$tmp_dir/unmaterialized-record-before.json"
 jq -e '
   .schemaVersion == "betstan.copilot-cli-authority.v1" and
   .state == "claimed" and
   .version == 1 and
   (has("retirement") | not)
 ' "$unmaterialized_record" >/dev/null
+cp "$unmaterialized_record" "$unmaterialized_record_before"
 retire_unmaterialized_claim >"$output_file"
+unmaterialized_digests="$(
+  PYTHONDONTWRITEBYTECODE=1 python3 - \
+    "$unmaterialized_record_before" \
+    "$UNMATERIALIZED_EVIDENCE_DIR" \
+    "$REPOSITORY" \
+    "$ADVANCED_SHA" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+record_path, evidence_dir, repository, current_master = sys.argv[1:]
+directory = pathlib.Path(evidence_dir)
+record = json.loads(pathlib.Path(record_path).read_text(encoding="utf-8"))
+payload = {
+    "schemaVersion": "betstan.copilot-cli-unmaterialized-evidence.v2",
+    "repository": repository,
+    "currentMaster": current_master,
+    "minimumAgeSeconds": 600,
+    "nowEpoch": 2000,
+    "authorityRecord": {
+        "controlSha": record["controlSha"],
+        "displayTitle": record["displayTitle"],
+        "inputHash": record["inputHash"],
+        "runId": record["runId"],
+        "version": record["version"],
+        "workflowBlobSha": record["workflowBlobSha"],
+        "workflowId": record["workflowId"],
+    },
+    "run": json.loads((directory / "run.json").read_text(encoding="utf-8")),
+    "workflow": json.loads(
+        (directory / "workflow.json").read_text(encoding="utf-8")
+    ),
+    "jobs": json.loads((directory / "jobs.json").read_text(encoding="utf-8")),
+    "pending": json.loads(
+        (directory / "pending.json").read_text(encoding="utf-8")
+    ),
+    "approvals": json.loads(
+        (directory / "approvals.json").read_text(encoding="utf-8")
+    ),
+    "artifacts": json.loads(
+        (directory / "artifacts.json").read_text(encoding="utf-8")
+    ),
+    "compare": json.loads(
+        (directory / "compare.json").read_text(encoding="utf-8")
+    ),
+    "historicalWorkflow": json.loads(
+        (directory / "historical.json").read_text(encoding="utf-8")
+    ),
+}
+
+def digest(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+expected = digest(payload)
+payload["approvals"] = [{"reviewer": "tampered"}]
+print(expected, digest(payload))
+PY
+)"
+expected_unmaterialized_digest="${unmaterialized_digests%% *}"
+tampered_unmaterialized_digest="${unmaterialized_digests#* }"
+[ "$expected_unmaterialized_digest" != "$tampered_unmaterialized_digest" ]
 jq -e '
   .runId == 7300 and
   .state == "retired" and
@@ -813,8 +1066,11 @@ jq -e '
   .retirement.reason == "unmaterialized" and
   (.retirement.evidenceDigest | test("^[0-9a-f]{64}$")) and
   .retirement.masterShaAtRetirement == $master and
+  .retirement.evidenceDigest == $digest and
   (.retirement.retiredAt | type == "string")
-' --arg master "$ADVANCED_SHA" "$output_file" >/dev/null
+' --arg master "$ADVANCED_SHA" \
+  --arg digest "$expected_unmaterialized_digest" \
+  "$output_file" >/dev/null
 jq -e '
   .schemaVersion == "betstan.copilot-cli-authority.v2" and
   .state == "retired" and
@@ -827,7 +1083,7 @@ retire_test_run_id=7310
 for rejection in \
   nonancestor rendered-title wrong-identity wrong-run-id wrong-path wrong-event \
   wrong-head wrong-branch wrong-attempt wrong-repository jobs pending artifacts \
-  malformed wrong-final head-present-not-final \
+  approved malformed wrong-final head-present-not-final \
   changed-blob-missing-current-tokens; do
   prepare_unmaterialized_claim "$retire_test_run_id" "$rejection"
   if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then

@@ -334,14 +334,42 @@ blocks replacement dispatch; do not infer identity from timestamps, titles,
 or nearby runs. A captured terminal run is automatically marked `retired`
 only after GitHub proves it has zero jobs and zero pending deployments, at
 which point a replacement request may proceed.
-Any unresolved intent or `claimed`/`inflight` record blocks every protected
-dispatch for the same repository and control SHA, including requests with a
-different operation or inputs. An `issued` or `consumed` record blocks the
+For a captured or claimed run with decay-prone prerequisites, resume first
+binds the exact already-dispatched run and matches the request input hash plus
+subject/target identity before reading prerequisites or considering
+cancellation. The dispatcher acquires the run's authority lock, refreshes the
+run, and revalidates current control and every prerequisite immediately before
+the locked `issue` transition. If a prerequisite has decayed, cancellation is
+allowed only for exactly one waiting job at exactly one matching pending
+environment. Before sending cancellation, the dispatcher persists a v3
+`rejecting` record containing the failure reason, immutable request identity,
+waiting gate identity, exact pre-cancel run/job/pending/approval snapshots, and
+their canonical hashes. It holds the same authority lock through cancellation
+and retirement.
+
+If GitHub cancellation or terminal reads are delayed, rerun the same
+`--resume-run`; it continues from the persisted `rejecting` record rather than
+taking a new pre-cancel snapshot. Retirement requires two stable terminal
+observations proving exact cancellation, no environment approval, no successful
+job step, and no pending deployment. Ambiguous, approved, started, or
+partially-executed runs remain `rejecting` and globally fenced.
+If `master` advances before terminalization, the exact old request may continue
+only from a clean checkout at the new current `master`, only while the recorded
+control SHA remains its ancestor, and only after the historical workflow blob
+still matches the rejecting record. This exception can cancel and retire that
+one persisted rejection; it cannot dispatch, issue, or approve from historical
+control. A further `master` change during continuation fails closed and must be
+retried from the new exact checkout.
+Any unresolved intent or `claimed`/`inflight`/`rejecting` record blocks every
+protected dispatch for the same repository regardless of control SHA,
+including requests with a different operation or inputs. An `issued` or
+`consumed` record blocks the
 same operation and exact transport input hash; a changed request is distinct
 but still passes the full policy, lineage, recovery, and exclusivity checks.
 After creating a pristine intent, the dispatcher revalidates current master,
-workflow blob, and active state. Authority drift cancels only that untouched
-intent and no GitHub dispatch occurs.
+workflow blob, active state, and all prerequisites, then rechecks the mutable
+master/workflow target immediately before `gh workflow run`. Authority drift
+cancels only that untouched intent and no GitHub dispatch occurs.
 
 The shared policy declares the required workflow state at approval.
 `oci-capacity-acquire.yml`, `oci-infrastructure.yml`,
@@ -371,7 +399,11 @@ recovery and capacity runs have no record and cannot enter automatic approval.
 The approver rechecks current master, promotion authority, workflow ID/path
 and Git blob, first attempt, exact title/event/environment, pending job,
 current-user approval capability, record input hash, historical ancestry, and
-production exclusivity. One record can acknowledge multiple sequential gates
+production exclusivity before it reports `ELIGIBLE`. For infrastructure
+finalization it also revalidates the complete paginated artifact inventory,
+current first-attempt identity, exact GHCR build-to-package-validation binding,
+and chronological build -> validation -> k3s capacity chain both before and
+after the local approval claim. One record can acknowledge multiple sequential gates
 on the same exact run and explicitly allowed downstream recovery. Each exact
 run/environment/waiting-job-set fingerprint is receipted once, so a later job
 may reuse the same environment without replaying an earlier gate. An ambiguous
