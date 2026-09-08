@@ -71,15 +71,15 @@ state="${STUB_STATE_DIR:?}"
 scenario="${STUB_SCENARIO:?}"
 mkdir -p "$state/jobs" "$state/applied"
 
-is_blocked_cleanup_job() {
+is_blocked_reschedule_job() {
   local job="$1"
   local manifest="$state/jobs/$job.yaml"
   [[ -f "$manifest" ]] || return 1
-  grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$manifest" || return 1
-  if [[ "$scenario" == "cleanup-blocked-apply" ]]; then
+  grep -Fq 'rescheduleSyntheticEvent.js' "$manifest" || return 1
+  if [[ "$scenario" == "reschedule-blocked-apply" ]]; then
     grep -Fq -- '- "apply"' "$manifest"
   else
-    [[ "$scenario" == cleanup-blocked* ]]
+    [[ "$scenario" == reschedule-blocked* ]]
   fi
 }
 
@@ -115,25 +115,25 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     job)
-      if is_blocked_cleanup_job "${3:-}"; then
-        if [[ "$scenario" == "cleanup-blocked-status-retry" &&
+      if is_blocked_reschedule_job "${3:-}"; then
+        if [[ "$scenario" == "reschedule-blocked-status-retry" &&
           ! -e "$state/job-status-read-failed" ]]; then
           touch "$state/job-status-read-failed"
           exit 9
         fi
-        if [[ "$scenario" == "cleanup-blocked-succeeded-deadline" ]]; then
+        if [[ "$scenario" == "reschedule-blocked-succeeded-deadline" ]]; then
           printf '%s\n' \
             '{"status":{"succeeded":1,"conditions":[{"type":"Failed","status":"True","reason":"DeadlineExceeded"}]}}'
-        elif [[ ("$scenario" == "cleanup-blocked-pod-phase-race" ||
-              "$scenario" == "cleanup-blocked-contradictory-success") &&
+        elif [[ ("$scenario" == "reschedule-blocked-pod-phase-race" ||
+              "$scenario" == "reschedule-blocked-contradictory-success") &&
           ! -e "$state/pod-phase-race-observed" ]]; then
           printf '{"status":{}}\n'
-        elif [[ "$scenario" == "cleanup-blocked-contradictory-success" ]]; then
+        elif [[ "$scenario" == "reschedule-blocked-contradictory-success" ]]; then
           printf '%s\n' \
             '{"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True","reason":"CompletionsReached"}]}}'
         else
           failure_reason=BackoffLimitExceeded
-          [[ "$scenario" != "cleanup-blocked-deadline" ]] ||
+          [[ "$scenario" != "reschedule-blocked-deadline" ]] ||
             failure_reason=DeadlineExceeded
           jq -n --arg reason "$failure_reason" '{
             status:{
@@ -166,24 +166,24 @@ if [[ "${1:-}" == "get" ]]; then
         fi
       done
       if [[ -n "$selected_job" ]] &&
-        is_blocked_cleanup_job "$selected_job"; then
-        [[ "$scenario" != "cleanup-blocked-status-error" ]] || exit 9
-        if [[ "$scenario" == "cleanup-blocked-status-retry" &&
+        is_blocked_reschedule_job "$selected_job"; then
+        [[ "$scenario" != "reschedule-blocked-status-error" ]] || exit 9
+        if [[ "$scenario" == "reschedule-blocked-status-retry" &&
           ! -e "$state/pod-status-read-failed" ]]; then
           touch "$state/pod-status-read-failed"
           exit 9
         fi
         pod_phase=Failed
-        if [[ ("$scenario" == "cleanup-blocked-pod-phase-race" ||
-              "$scenario" == "cleanup-blocked-contradictory-success") &&
+        if [[ ("$scenario" == "reschedule-blocked-pod-phase-race" ||
+              "$scenario" == "reschedule-blocked-contradictory-success") &&
           ! -e "$state/pod-phase-race-observed" ]]; then
           pod_phase=Running
           touch "$state/pod-phase-race-observed"
-        elif [[ "$scenario" == "cleanup-blocked-never-converges" ]]; then
+        elif [[ "$scenario" == "reschedule-blocked-never-converges" ]]; then
           pod_phase=Running
         fi
         container_signal=0
-        [[ "$scenario" != "cleanup-blocked-signaled" ]] || container_signal=15
+        [[ "$scenario" != "reschedule-blocked-signaled" ]] || container_signal=15
         jq -n \
           --arg pod_phase "$pod_phase" \
           --argjson container_signal "$container_signal" '{
@@ -230,20 +230,21 @@ if [[ "${1:-}" == "logs" ]]; then
   is_apply=false
   grep -Fq -- '- "--apply"' "$manifest" && is_apply=true
 
-  if grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$manifest"; then
-    if is_blocked_cleanup_job "$job" &&
-      [[ "$scenario" == "cleanup-blocked-exception" ]]; then
+  if grep -Fq 'rescheduleSyntheticEvent.js' "$manifest"; then
+    if is_blocked_reschedule_job "$job" &&
+      [[ "$scenario" == "reschedule-blocked-exception" ]]; then
       printf 'database exception for secret-user\n'
       exit 0
     fi
-    if is_blocked_cleanup_job "$job"; then
+    if is_blocked_reschedule_job "$job"; then
       changed=0
-      reason="event reference"
+      reason="event or Slip dependency"
       mode=dry-run
       grep -Fq -- '- "apply"' "$manifest" && mode=apply
-      [[ "$scenario" != "cleanup-blocked-changed" ]] || changed=1
-      [[ "$scenario" != "cleanup-blocked-unknown-reason" ]] ||
-        reason="event reference for secret-user"
+      grep -Fq -- '- "verify"' "$manifest" && mode=verify
+      [[ "$scenario" != "reschedule-blocked-changed" ]] || changed=1
+      [[ "$scenario" != "reschedule-blocked-unknown-reason" ]] ||
+        reason="event or Slip dependency for secret-user"
       blocked_report="$(
         jq -n \
           --arg mode "$mode" \
@@ -251,14 +252,16 @@ if [[ "${1:-}" == "logs" ]]; then
           --argjson changed "$changed" '{
             mode:$mode,
             targetEventId:"6a623af592af5a95b1d0bb79",
+            targetKickoff:"2026-09-08T08:05:00.000Z",
             state:"blocked",
             ready:false,
-            scanned:18,
+            scanned:20,
             matched:1,
             changed:$changed,
             errorCount:1,
-            tombstoneVerified:false,
+            journalVerified:false,
             snapshotDocumentCount:0,
+            targetDocumentCount:0,
             blockers:[{
               database:"gaming_bet",
               collection:"bets",
@@ -268,62 +271,71 @@ if [[ "${1:-}" == "logs" ]]; then
           }'
       )"
       printf '%s\n' "$blocked_report"
-      if [[ "$scenario" == "cleanup-blocked-multiple" ]]; then
+      if [[ "$scenario" == "reschedule-blocked-multiple" ]]; then
         printf '%s\n' "$blocked_report"
       fi
-      if [[ "$scenario" == "cleanup-blocked-log-retry" &&
+      if [[ "$scenario" == "reschedule-blocked-log-retry" &&
         ! -e "$state/log-read-failed" ]]; then
         touch "$state/log-read-failed"
         exit 9
       fi
-      [[ "$scenario" != "cleanup-blocked-log-error" ]] || exit 9
+      [[ "$scenario" != "reschedule-blocked-log-error" ]] || exit 9
       exit 0
     fi
     mode=dry-run
-    cleanup_state=candidate
-    matched=2
+    reschedule_state=candidate
+    matched=1
     changed=0
-    tombstone_verified=false
-    snapshot_document_count=2
+    journal_verified=false
+    snapshot_document_count=1
+    target_document_count=3
     if [[ "$scenario" == "final" ]]; then
-      cleanup_state=removed
-      matched=0
-      tombstone_verified=true
+      reschedule_state=completed
+      matched=1
+      journal_verified=true
     fi
     if grep -Fq -- '- "apply"' "$manifest"; then
       mode=apply
-      cleanup_state=removed
-      changed=2
-      tombstone_verified=true
-      touch "$state/applied/obsolete-event"
-    elif [[ -f "$state/applied/obsolete-event" ]]; then
-      cleanup_state=removed
-      matched=0
-      tombstone_verified=true
+      reschedule_state=applied
+      changed=4
+      journal_verified=true
+      touch "$state/applied/event-reschedule"
+    elif grep -Fq -- '- "verify"' "$manifest"; then
+      mode=verify
+      reschedule_state=verified
+      journal_verified=true
+    elif [[ -f "$state/applied/event-reschedule" ]]; then
+      reschedule_state=applied
+      matched=3
+      journal_verified=true
     fi
     jq -n \
       --arg mode "$mode" \
-      --arg state "$cleanup_state" \
+      --arg state "$reschedule_state" \
       --argjson matched "$matched" \
       --argjson changed "$changed" \
-      --argjson tombstone_verified "$tombstone_verified" \
+      --argjson journal_verified "$journal_verified" \
       --argjson snapshot_document_count "$snapshot_document_count" '{
         mode:$mode,
         targetEventId:"6a623af592af5a95b1d0bb79",
+        targetKickoff:"2026-09-08T08:05:00.000Z",
         state:$state,
         ready:true,
-        scanned:18,
+        scanned:20,
         matched:$matched,
         changed:$changed,
         errorCount:0,
-        tombstoneVerified:$tombstone_verified,
+        journalVerified:$journal_verified,
         snapshotDocumentCount:$snapshot_document_count,
+        targetDocumentCount:3,
         blockers:[]
       } + (
-        if $tombstone_verified
+        if $journal_verified
         then {
           snapshotSha256:
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          targetSha256:
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         }
         else {}
         end
@@ -435,7 +447,7 @@ if [[ "${1:-}" == "logs" ]]; then
 fi
 
 if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
-  [[ "$scenario" != "cleanup-blocked-delete-error" ]] || exit 9
+  [[ "$scenario" != "reschedule-blocked-delete-error" ]] || exit 9
   mkdir -p "$state/deleted"
   touch "$state/deleted/${3:-unknown}"
   exit 0
@@ -551,7 +563,7 @@ run_phase dry-run pending 4001 "$pending_output"
 grep -Fxq 'phase=dry-run' "$pending_output/provenance.env"
 grep -Fxq 'backfill_complete=false' "$pending_output/provenance.env"
 grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
-grep -Fxq 'obsolete_event_cleanup_complete=false' "$pending_output/provenance.env"
+grep -Fxq 'event_reschedule_complete=false' "$pending_output/provenance.env"
 [[ ! -e "$pending_output/schema.env" ]] ||
   fail "dry-run emitted final schema evidence"
 if grep -R -E 'secret-user|secret-slip|mongodb://' "$pending_output" >/dev/null; then
@@ -566,25 +578,26 @@ grep -Fxq \
   "baseline_recovery_source_sha=$recovery_source_sha" \
   "$recovery_output/provenance.env"
 
-blocked_output="$work_dir/cleanup-blocked"
-blocked_log="$work_dir/cleanup-blocked.out"
-if run_phase dry-run cleanup-blocked 4009 "$blocked_output" \
+blocked_output="$work_dir/reschedule-blocked"
+blocked_log="$work_dir/reschedule-blocked.out"
+if run_phase dry-run reschedule-blocked 4009 "$blocked_output" \
     >"$blocked_log" 2>&1; then
-  fail "structured blocked cleanup report was accepted as rollout readiness"
+  fail "structured blocked reschedule report was accepted as rollout readiness"
 fi
 grep -Fq \
-  'obsolete event cleanup is blocked; sanitized failure evidence recorded' \
+  'event reschedule is blocked; sanitized failure evidence recorded' \
   "$blocked_log" ||
-  fail "structured blocked cleanup did not report retained sanitized evidence"
-blocked_report="$blocked_output/reports/preflight-obsolete-event.json"
-blocked_failure="$blocked_output/cleanup-blocker-failure.json"
+  fail "structured blocked reschedule did not report retained sanitized evidence"
+blocked_report="$blocked_output/reports/preflight-event-reschedule.json"
+blocked_failure="$blocked_output/reschedule-blocker-failure.json"
 [[ -f "$blocked_report" && -f "$blocked_failure" &&
    -f "$blocked_output/SHA256SUMS" ]] ||
-  fail "structured blocked cleanup did not retain checksummed evidence"
+  fail "structured blocked reschedule did not retain checksummed evidence"
 jq -e '
-  .kind == "obsolete-event-cleanup" and
+  .kind == "fixed-event-reschedule" and
   .stage == "preflight" and
   .mode == "dry-run" and
+  .targetKickoff == "2026-09-08T08:05:00.000Z" and
   .state == "blocked" and
   .ready == false and
   .changed == 0 and
@@ -594,15 +607,15 @@ jq -e '
     service:"bet",
     collection:"bets",
     count:1,
-    reasonCode:"event_reference"
+    reasonCode:"event_or_slip_dependency"
   }]
 ' "$blocked_report" >/dev/null ||
-  fail "structured blocked cleanup report was not normalized"
+  fail "structured blocked reschedule report was not normalized"
 jq -e \
   --arg source_sha "$SOURCE_SHA" \
   --arg build_run_id "$BUILD_RUN_ID" \
   --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" '
-    .schemaVersion == "live-betting-cleanup-blocker-v1" and
+    .schemaVersion == "live-betting-reschedule-blocker-v1" and
     .status == "FAIL" and
     .sourceSha == $source_sha and
     .buildRunId == $build_run_id and
@@ -612,6 +625,7 @@ jq -e \
     .phase == "dry-run" and
     .stage == "preflight" and
     .targetEventId == "6a623af592af5a95b1d0bb79" and
+    .targetKickoff == "2026-09-08T08:05:00.000Z" and
     .mode == "dry-run" and
     .state == "blocked" and
     .ready == false and
@@ -632,14 +646,14 @@ jq -e \
       "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     ))
   ' "$blocked_failure" >/dev/null ||
-  fail "cleanup blocker failure envelope is incomplete"
+  fail "reschedule blocker failure envelope is incomplete"
 expected_report_sha="$(shasum -a 256 "$blocked_report" | awk '{print $1}')"
 [[ "$(jq -r '.reportSha256' "$blocked_failure")" == "$expected_report_sha" ]] ||
-  fail "cleanup blocker failure envelope does not bind the sanitized report"
+  fail "reschedule blocker failure envelope does not bind the sanitized report"
 (
   cd "$blocked_output"
   shasum -a 256 -c SHA256SUMS >/dev/null
-) || fail "cleanup blocker failure evidence checksum is invalid"
+) || fail "reschedule blocker failure evidence checksum is invalid"
 if EVIDENCE_DIR="$blocked_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
   EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
@@ -648,33 +662,33 @@ if EVIDENCE_DIR="$blocked_output" \
   EXPECTED_RUN_ID=4009 \
   EXPECTED_RUN_ATTEMPT=1 \
     "$VERIFIER" >/dev/null 2>&1; then
-  fail "cleanup blocker diagnostics were accepted as successful data evidence"
+  fail "reschedule blocker diagnostics were accepted as successful data evidence"
 fi
 [[ ! -e "$blocked_output/provenance.env" &&
    ! -e "$blocked_output/journal.json" &&
    ! -e "$blocked_output/schema.env" ]] ||
-  fail "blocked cleanup emitted success-shaped rollout evidence"
+  fail "blocked reschedule emitted success-shaped rollout evidence"
 if grep -R -E \
-    'gaming_bet|event reference|secret-user|mongodb://|private runtime detail' \
+    'gaming_bet|event or Slip dependency|secret-user|mongodb://|private runtime detail' \
     "$blocked_output" >/dev/null; then
-  fail "cleanup blocker evidence retained raw or sensitive diagnostics"
+  fail "reschedule blocker evidence retained raw or sensitive diagnostics"
 fi
 [[ -e "$stub_state/deleted/live-data-event-4009-1" ]] ||
-  fail "blocked cleanup did not delete its Kubernetes Job"
+  fail "blocked reschedule did not delete its Kubernetes Job"
 
-race_output="$work_dir/cleanup-blocked-pod-phase-race"
-race_log="$work_dir/cleanup-blocked-pod-phase-race.out"
+race_output="$work_dir/reschedule-blocked-pod-phase-race"
+race_log="$work_dir/reschedule-blocked-pod-phase-race.out"
 if JOB_TIMEOUT_OVERRIDE_SECONDS=1 \
-  run_phase dry-run cleanup-blocked-pod-phase-race 4012 "$race_output" \
+  run_phase dry-run reschedule-blocked-pod-phase-race 4012 "$race_output" \
       >"$race_log" 2>&1; then
   fail "pod-phase race blocker was accepted as rollout readiness"
 fi
 [[ -e "$stub_state/pod-phase-race-observed" ]] ||
   fail "pod-phase race scenario did not expose the transient Running phase"
-[[ -f "$race_output/reports/preflight-obsolete-event.json" &&
-   -f "$race_output/cleanup-blocker-failure.json" &&
+[[ -f "$race_output/reports/preflight-event-reschedule.json" &&
+   -f "$race_output/reschedule-blocker-failure.json" &&
    -f "$race_output/SHA256SUMS" ]] ||
-  fail "pod-phase race discarded structured cleanup evidence"
+  fail "pod-phase race discarded structured reschedule evidence"
 jq -e '
   .status == "FAIL" and
   .workflowRunId == "4012" and
@@ -687,25 +701,25 @@ jq -e '
     exitCode:1,
     signal:0
   }
-' "$race_output/cleanup-blocker-failure.json" >/dev/null ||
+' "$race_output/reschedule-blocker-failure.json" >/dev/null ||
   fail "pod-phase race did not retain converged failed-job evidence"
 (
   cd "$race_output"
   shasum -a 256 -c SHA256SUMS >/dev/null
 ) || fail "pod-phase race evidence checksum is invalid"
 if grep -R -E \
-    'gaming_bet|event reference|secret-user|mongodb://|private runtime detail' \
+    'gaming_bet|event or Slip dependency|secret-user|mongodb://|private runtime detail' \
     "$race_output" "$race_log" 2>/dev/null | grep -q .; then
   fail "pod-phase race evidence leaked raw diagnostics"
 fi
 [[ -e "$stub_state/deleted/live-data-event-4012-1" ]] ||
   fail "pod-phase race did not delete its Kubernetes Job"
 
-nonconverging_output="$work_dir/cleanup-blocked-never-converges"
-nonconverging_log="$work_dir/cleanup-blocked-never-converges.out"
+nonconverging_output="$work_dir/reschedule-blocked-never-converges"
+nonconverging_log="$work_dir/reschedule-blocked-never-converges.out"
 nonconverging_started="$SECONDS"
 if JOB_TERMINAL_GRACE_OVERRIDE_SECONDS=1 \
-  run_phase dry-run cleanup-blocked-never-converges 4013 \
+  run_phase dry-run reschedule-blocked-never-converges 4013 \
       "$nonconverging_output" >"$nonconverging_log" 2>&1; then
   fail "non-converging failed Job was accepted as rollout readiness"
 fi
@@ -717,14 +731,14 @@ if [[ -d "$nonconverging_output" ]] &&
   fail "non-converging failed Job persisted diagnostic evidence"
 fi
 
-delete_error_output="$work_dir/cleanup-blocked-delete-error"
-delete_error_log="$work_dir/cleanup-blocked-delete-error.out"
-if run_phase dry-run cleanup-blocked-delete-error 4014 \
+delete_error_output="$work_dir/reschedule-blocked-delete-error"
+delete_error_log="$work_dir/reschedule-blocked-delete-error.out"
+if run_phase dry-run reschedule-blocked-delete-error 4014 \
     "$delete_error_output" >"$delete_error_log" 2>&1; then
   fail "delete-error blocker was accepted as rollout readiness"
 fi
-[[ -f "$delete_error_output/reports/preflight-obsolete-event.json" &&
-   -f "$delete_error_output/cleanup-blocker-failure.json" &&
+[[ -f "$delete_error_output/reports/preflight-event-reschedule.json" &&
+   -f "$delete_error_output/reschedule-blocker-failure.json" &&
    -f "$delete_error_output/SHA256SUMS" ]] ||
   fail "Kubernetes Job deletion failure discarded blocker evidence"
 (
@@ -734,17 +748,17 @@ fi
 [[ ! -e "$stub_state/deleted/live-data-event-4014-1" ]] ||
   fail "delete-error scenario unexpectedly reported successful Job deletion"
 
-status_retry_output="$work_dir/cleanup-blocked-status-retry"
-status_retry_log="$work_dir/cleanup-blocked-status-retry.out"
-if run_phase dry-run cleanup-blocked-status-retry 4015 \
+status_retry_output="$work_dir/reschedule-blocked-status-retry"
+status_retry_log="$work_dir/reschedule-blocked-status-retry.out"
+if run_phase dry-run reschedule-blocked-status-retry 4015 \
     "$status_retry_output" >"$status_retry_log" 2>&1; then
   fail "status-retry blocker was accepted as rollout readiness"
 fi
 [[ -e "$stub_state/pod-status-read-failed" &&
    -e "$stub_state/job-status-read-failed" ]] ||
   fail "status-retry scenario did not exercise both transient status failures"
-[[ -f "$status_retry_output/reports/preflight-obsolete-event.json" &&
-   -f "$status_retry_output/cleanup-blocker-failure.json" &&
+[[ -f "$status_retry_output/reports/preflight-event-reschedule.json" &&
+   -f "$status_retry_output/reschedule-blocker-failure.json" &&
    -f "$status_retry_output/SHA256SUMS" ]] ||
   fail "transient Kubernetes status failures discarded blocker evidence"
 (
@@ -752,16 +766,16 @@ fi
   shasum -a 256 -c SHA256SUMS >/dev/null
 ) || fail "status-retry blocker evidence checksum is invalid"
 
-log_retry_output="$work_dir/cleanup-blocked-log-retry"
-log_retry_log="$work_dir/cleanup-blocked-log-retry.out"
-if run_phase dry-run cleanup-blocked-log-retry 4016 \
+log_retry_output="$work_dir/reschedule-blocked-log-retry"
+log_retry_log="$work_dir/reschedule-blocked-log-retry.out"
+if run_phase dry-run reschedule-blocked-log-retry 4016 \
     "$log_retry_output" >"$log_retry_log" 2>&1; then
   fail "log-retry blocker was accepted as rollout readiness"
 fi
 [[ -e "$stub_state/log-read-failed" ]] ||
   fail "log-retry scenario did not exercise a transient partial log read"
-[[ -f "$log_retry_output/reports/preflight-obsolete-event.json" &&
-   -f "$log_retry_output/cleanup-blocker-failure.json" &&
+[[ -f "$log_retry_output/reports/preflight-event-reschedule.json" &&
+   -f "$log_retry_output/reschedule-blocker-failure.json" &&
    -f "$log_retry_output/SHA256SUMS" ]] ||
   fail "transient partial log failure discarded blocker evidence"
 (
@@ -770,63 +784,63 @@ fi
 ) || fail "log-retry blocker evidence checksum is invalid"
 
 for blocked_scenario in \
-  cleanup-blocked-changed \
-  cleanup-blocked-multiple \
-  cleanup-blocked-exception \
-  cleanup-blocked-unknown-reason \
-  cleanup-blocked-deadline \
-  cleanup-blocked-signaled \
-  cleanup-blocked-succeeded-deadline \
-  cleanup-blocked-status-error \
-  cleanup-blocked-log-error \
-  cleanup-blocked-contradictory-success; do
+  reschedule-blocked-changed \
+  reschedule-blocked-multiple \
+  reschedule-blocked-exception \
+  reschedule-blocked-unknown-reason \
+  reschedule-blocked-deadline \
+  reschedule-blocked-signaled \
+  reschedule-blocked-succeeded-deadline \
+  reschedule-blocked-status-error \
+  reschedule-blocked-log-error \
+  reschedule-blocked-contradictory-success; do
   invalid_output="$work_dir/$blocked_scenario"
   invalid_log="$work_dir/$blocked_scenario.out"
   invalid_job_timeout=10
-  [[ "$blocked_scenario" != "cleanup-blocked-status-error" ]] ||
+  [[ "$blocked_scenario" != "reschedule-blocked-status-error" ]] ||
     invalid_job_timeout=1
   invalid_terminal_grace=30
-  [[ "$blocked_scenario" != "cleanup-blocked-log-error" ]] ||
+  [[ "$blocked_scenario" != "reschedule-blocked-log-error" ]] ||
     invalid_terminal_grace=1
   if JOB_TIMEOUT_OVERRIDE_SECONDS="$invalid_job_timeout" \
     JOB_TERMINAL_GRACE_OVERRIDE_SECONDS="$invalid_terminal_grace" \
     run_phase dry-run "$blocked_scenario" 4010 "$invalid_output" \
       >"$invalid_log" 2>&1; then
-    fail "invalid blocked cleanup output was accepted: $blocked_scenario"
+    fail "invalid blocked reschedule output was accepted: $blocked_scenario"
   fi
   if [[ -d "$invalid_output" ]] &&
     find "$invalid_output" -type f -print -quit | grep -q .; then
-    fail "invalid blocked cleanup output persisted evidence: $blocked_scenario"
+    fail "invalid blocked reschedule output persisted evidence: $blocked_scenario"
   fi
   if grep -R -E \
       'secret-user|mongodb://|private runtime detail' \
       "$invalid_output" "$invalid_log" 2>/dev/null | grep -q .; then
-    fail "invalid blocked cleanup output leaked raw diagnostics: $blocked_scenario"
+    fail "invalid blocked reschedule output leaked raw diagnostics: $blocked_scenario"
   fi
   [[ -e "$stub_state/deleted/live-data-event-4010-1" ]] ||
-    fail "invalid blocked cleanup did not delete its Kubernetes Job: $blocked_scenario"
+    fail "invalid blocked reschedule did not delete its Kubernetes Job: $blocked_scenario"
 done
 
-apply_blocked_output="$work_dir/cleanup-blocked-apply"
-apply_blocked_log="$work_dir/cleanup-blocked-apply.out"
-if run_phase apply-backfills cleanup-blocked-apply 4011 \
+apply_blocked_output="$work_dir/reschedule-blocked-apply"
+apply_blocked_log="$work_dir/reschedule-blocked-apply.out"
+if run_phase apply-backfills reschedule-blocked-apply 4011 \
     "$apply_blocked_output" >"$apply_blocked_log" 2>&1; then
-  fail "structured blocked cleanup apply was accepted as rollout readiness"
+  fail "structured blocked reschedule apply was accepted as rollout readiness"
 fi
-apply_blocked_report="$apply_blocked_output/reports/apply-obsolete-event.json"
+apply_blocked_report="$apply_blocked_output/reports/apply-event-reschedule.json"
 [[ -f "$apply_blocked_report" &&
-   -f "$apply_blocked_output/cleanup-blocker-failure.json" &&
+   -f "$apply_blocked_output/reschedule-blocker-failure.json" &&
    -f "$apply_blocked_output/SHA256SUMS" ]] ||
-  fail "blocked cleanup apply did not retain checksummed evidence"
+  fail "blocked reschedule apply did not retain checksummed evidence"
 jq -e '
   .mode == "apply" and
   .stage == "apply" and
   .state == "blocked" and
   .ready == false and
   .changed == 0 and
-  .blockers[0].reasonCode == "event_reference"
+  .blockers[0].reasonCode == "event_or_slip_dependency"
 ' "$apply_blocked_report" >/dev/null ||
-  fail "blocked cleanup apply evidence is invalid"
+  fail "blocked reschedule apply evidence is invalid"
 jq -e '
   .status == "FAIL" and
   .phase == "apply-backfills" and
@@ -834,24 +848,24 @@ jq -e '
   .mode == "apply" and
   .changed == 0 and
   .job.exitCode == 1
-' "$apply_blocked_output/cleanup-blocker-failure.json" >/dev/null ||
-  fail "blocked cleanup apply failure envelope is invalid"
+' "$apply_blocked_output/reschedule-blocker-failure.json" >/dev/null ||
+  fail "blocked reschedule apply failure envelope is invalid"
 (
   cd "$apply_blocked_output"
   shasum -a 256 -c SHA256SUMS >/dev/null
-) || fail "blocked cleanup apply evidence checksum is invalid"
+) || fail "blocked reschedule apply evidence checksum is invalid"
 [[ ! -e "$apply_blocked_output/provenance.env" &&
    ! -e "$apply_blocked_output/journal.json" &&
    ! -e "$apply_blocked_output/schema.env" ]] ||
-  fail "blocked cleanup apply emitted success-shaped evidence"
+  fail "blocked reschedule apply emitted success-shaped evidence"
 [[ -e "$stub_state/deleted/live-data-event-4011-21" ]] ||
-  fail "blocked cleanup apply did not delete its Kubernetes Job"
+  fail "blocked reschedule apply did not delete its Kubernetes Job"
 
 backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
 grep -Fxq 'phase=apply-backfills' "$backfill_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
-grep -Fxq 'obsolete_event_cleanup_complete=true' "$backfill_output/provenance.env"
+grep -Fxq 'event_reschedule_complete=true' "$backfill_output/provenance.env"
 [[ ! -e "$backfill_output/schema.env" ]] ||
   fail "backfill phase emitted final schema evidence"
 
@@ -862,7 +876,7 @@ run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_s
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
-grep -Fxq 'obsolete_event_cleanup_complete=true' "$final_output/schema.env"
+grep -Fxq 'event_reschedule_complete=true' "$final_output/schema.env"
 grep -Fxq 'runtime_held_for_deploy=true' "$final_output/schema.env"
 grep -Fxq 'operation_lock_handoff=true' "$final_output/schema.env"
 grep -Fxq 'baseline_recovery_source_sha=none' "$final_output/schema.env"
@@ -889,6 +903,73 @@ grep -Fxq \
 grep -Fxq 'prerequisite_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq 'applied_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq "applied_source_sha=$SOURCE_SHA" <<<"$normal_resolution"
+
+legacy_output="$work_dir/legacy-v1"
+cp -R "$final_output" "$legacy_output"
+rm -f "$legacy_output/SHA256SUMS"
+mv \
+  "$legacy_output/reports/preflight-event-reschedule.json" \
+  "$legacy_output/reports/preflight-obsolete-event.json"
+jq '
+  {
+    kind:"obsolete-event-cleanup",
+    stage,
+    mode:"dry-run",
+    targetEventId,
+    state:"removed",
+    ready:true,
+    scanned,
+    matched:0,
+    changed:0,
+    errorCount:0,
+    tombstoneVerified:true,
+    snapshotDocumentCount,
+    snapshotSha256,
+    blockerCount:0,
+    blockers:[]
+  }
+' "$legacy_output/reports/preflight-obsolete-event.json" \
+  >"$legacy_output/reports/preflight-obsolete-event.json.tmp"
+mv \
+  "$legacy_output/reports/preflight-obsolete-event.json.tmp" \
+  "$legacy_output/reports/preflight-obsolete-event.json"
+python3 - "$legacy_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("schema_version=live-betting-v2", "schema_version=live-betting-v1")
+    text = text.replace(
+        "event_reschedule_complete=true",
+        "obsolete_event_cleanup_complete=true",
+    )
+    path.write_text(text, encoding="utf-8")
+
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v1"
+journal["obsolete_event_cleanup_complete"] = journal.pop(
+    "event_reschedule_complete"
+)
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$legacy_output"
+EVIDENCE_DIR="$legacy_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_PHASE=apply-slip-index \
+EXPECTED_RUN_ID=4003 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "v2 verifier rejected a valid historical v1 data artifact"
 
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"
@@ -1061,13 +1142,13 @@ grep -Fq 'could not determine whether the legacy OCIR pull secret exists' \
   fail "secret API failure reached live data job creation"
 
 for literal in \
-  'validate_blocked_cleanup_report' \
-  'write_cleanup_blocker_evidence' \
-  'live-betting-cleanup-blocker-v1' \
+  'validate_blocked_reschedule_report' \
+  'write_reschedule_blocker_evidence' \
+  'live-betting-reschedule-blocker-v1' \
   'structured-blocked' \
   'sanitized failure evidence recorded'; do
   grep -Fq "$literal" "$RUNNER" ||
-    fail "data runner is missing structured cleanup failure contract: $literal"
+    fail "data runner is missing structured reschedule failure contract: $literal"
 done
 
 for literal in \

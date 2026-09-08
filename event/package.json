@@ -9,7 +9,8 @@
     "test": "jest --watchAll --no-cache",
     "test:ci": "jest",
     "data:compat:backfill": "node -r ts-node/register/transpile-only src/scripts/backfillDataCompatibility.ts",
-    "data:cleanup:obsolete-event": "node -r ts-node/register/transpile-only src/scripts/cleanupObsoleteSyntheticEvent.ts"
+    "data:cleanup:obsolete-event": "node -r ts-node/register/transpile-only src/scripts/cleanupObsoleteSyntheticEvent.ts",
+    "data:reschedule:synthetic-event": "node -r ts-node/register/transpile-only src/scripts/rescheduleSyntheticEvent.ts"
   },
   "jest": {
     "preset": "ts-jest",
