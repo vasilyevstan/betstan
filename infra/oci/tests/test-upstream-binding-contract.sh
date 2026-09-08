@@ -591,12 +591,13 @@ refresh_body = text[refresh:identity]
 for required in (
     'git fetch --quiet origin master:refs/remotes/origin/master',
     '[ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]',
-    'variables/OCI_RUNTIME_MODE',
-    '[ "$observed_runtime_mode" = "$BOUND_RUNTIME_MODE" ]',
+    '[ "$OCI_RUNTIME_MODE" = "$BOUND_RUNTIME_MODE" ]',
     'bind-infrastructure-prerequisites-stan.sh',
 ):
     if required not in refresh_body:
         raise SystemExit(f"cloud-boundary refresh omits: {required}")
+if "environments/oci-infrastructure/variables/OCI_RUNTIME_MODE" in refresh_body:
+    raise SystemExit("workflow GITHUB_TOKEN cannot query environment variables")
 if refresh_body.count("revalidate_mutable_authority") != 3:
     raise SystemExit("cloud-boundary refresh must bracket upstream validation")
 first_refresh = refresh_body.index("revalidate_mutable_authority", refresh_body.index("}") + 1)

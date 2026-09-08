@@ -750,15 +750,16 @@ cd resulting && npm ci && npm run test:ci
   phase, and pending environment instead of presenting a silent wait.
 - A jobless stale GitHub queue record can be an inert provider artifact, but
   age and an empty job list are not enough. The bounded classifier requires an
-  old first-attempt manual dispatch for a non-current ancestor SHA, no jobs or
-  approvals, and exact successful successor work. Capacity needs one exact
-  later success; live data needs the complete later dry-run, backfill, and
-  slip-index chain; activation needs one exact later activation. Data and
-  activation additionally require their historical workflow revision to use
-  the protected environment, shared control-plane concurrency, and a
-  current-master check before mutation. Never extend this to deployment,
-  disable, rollback, infrastructure, package, cache-recovery, or build work,
-  and never treat an ignored artifact as approval or recovery authority.
+  old first-attempt manual dispatch for a non-current ancestor SHA, no jobs,
+  approvals, pending deployment, or artifacts, and exact successful successor
+  work. Active supersession is limited to capacity and requires one exact later
+  first-attempt success for the same workflow, SHA, event, and title. Active
+  live-data and activation records always remain fences. Their manually
+  disabled, never-transitioned generic-title ghosts may use only the separate
+  evidence-complete unmaterialized classifier. Never extend either path to
+  deployment, disable, rollback, infrastructure, package, cache-recovery, or
+  build work, and never treat an ignored artifact as approval or recovery
+  authority.
 - Deleted Entra service principals require a successful list-all,
   client-side exact-ID absence probe; a server-filter 404 is not usable
   evidence. Role-assignment IDs must also bind to their declared parent scope.
@@ -991,16 +992,24 @@ validated.
   After that SHA is a strict ancestor, only
   `retire-unmaterialized-claim` may migrate the exact v1 claim to a retired
   record, with optimistic version locking and a digest of complete run,
-  jobs, pending-deployment, artifact, compare, and historical-workflow
-  evidence. The path is restricted to data rollout, live activation, and
-  capacity acquisition; it requires queued/null first-attempt manual identity,
-  equal untouched timestamps, zero exact count/list jobs and artifacts,
-  zero pending deployments, a generic workflow-name title that cannot match
-  a legitimate rendered title, and a one-job historical protected workflow
-  whose `oci-control-plane` non-cancelling guards precede every mutation.
+  jobs, pending-deployment, approval, artifact, compare, and
+  historical-workflow evidence. The path is restricted to data rollout, live
+  activation, and capacity acquisition; it requires queued/null first-attempt
+  manual identity and equal untouched timestamps.
+  It requires zero exact count/list jobs and artifacts.
+  It also requires zero approvals and pending deployments, a generic workflow-name
+  title that cannot match a legitimate rendered title, and a one-job historical
+  protected workflow whose `oci-control-plane` non-cancelling guards precede
+  every mutation.
   Then rebuild the complete exact-SHA chain; retirement never authorizes an
   automatic redispatch or approval. A cancellation `409` is journal
   corroboration only, never classifier or retirement evidence.
+- A protected job's injected environment variable is the runtime authority
+  available to its shell. Bind it to the dispatch-approved value and compare
+  the two immediately before cloud access, bracket upstream validation with
+  current-`master` checks, and fail closed on drift. Do not assume the
+  workflow `GITHUB_TOKEN` can re-read protected environment variables through
+  repository REST endpoints.
 - A current-master ghost can block the guard promotion that would make it
   safely historical. The merge-safety path may pass only its exact promotion
   PR number; exclusivity must independently prove an OPEN CLI-managed
@@ -1023,12 +1032,12 @@ validated.
   exact acceptance-slip cleanup mutation tokens. Its cryptographically
   verified blob identity selects that reviewed reduced profile; every other
   historical source requires the full current token profile.
-- Keep workflow-specific supersession successor chains: capacity needs one
-  later exact success; live data needs later dry-run, backfill, and slip-index
-  successes; activation needs a later exact activation success. A recovered
-  ghost is not completion—reconcile the entire nonterminal run inventory
-  until no unexplained blocker remains. Reject removing live-data or activation
-  supersession as a substitute for their successor chains.
+- Keep active supersession capacity-only and require one exact later successful
+  first attempt plus pristine job, pending, approval, and artifact evidence.
+  Active live-data and activation records remain blockers regardless of later
+  successes. A recovered disabled unmaterialized ghost is not completion:
+  reconcile the entire nonterminal run inventory until no unexplained blocker
+  remains.
 - A critical path blocked by a repository-introduced rule, policy, or guard is
   not automatically an external safety wait. The conductor must prove the
   exact self-imposed cause and the intended invariant; if real production

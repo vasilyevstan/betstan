@@ -25,7 +25,7 @@ RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
 # evidence-bound stale-claim retirement migrates a record to v2.
 RECORD_SCHEMA = RECORD_SCHEMA_V1
 UNMATERIALIZED_EVIDENCE_SCHEMA = (
-    "betstan.copilot-cli-unmaterialized-evidence.v1"
+    "betstan.copilot-cli-unmaterialized-evidence.v2"
 )
 PREREQUISITE_REJECTION_EVIDENCE_SCHEMA = (
     "betstan.copilot-cli-prerequisite-rejection-evidence.v1"
@@ -2082,6 +2082,7 @@ def command_retire_unmaterialized_claim(args):
                         "workflow": evidence["workflow"],
                         "jobs": evidence["jobs"],
                         "pending": evidence["pending"],
+                        "approvals": evidence["approvals"],
                         "artifacts": evidence["artifacts"],
                         "compare": evidence["compare"],
                         "historicalWorkflow": evidence["historical_workflow"],

@@ -158,6 +158,8 @@ Before deployment, the release chain verifies:
 - current infrastructure provenance and capacity;
 - explicit, hash-covered upstream run and artifact identities before one-use
   authority, immediately before approval, and before workflow cloud access;
+- the protected job's injected runtime mode still equals the dispatch-bound
+  mode, with current-`master` checks before and after upstream validation;
 - complete paginated artifact inventories, current first-attempt identity, and
   chronological GHCR build -> package validation -> k3s capacity lineage;
 - exact bounded artifact contents, including package-validation evidence naming
@@ -197,7 +199,8 @@ The repository-global blocker scan and dispatch-intent creation run under one
 kernel-backed claim lock. This closes the distinct-request race that per-file
 atomic creation cannot prevent. A prospective current-master workflow ghost is
 ignored only when refreshed run, workflow, job, pending-deployment, and
-artifact evidence remains pristine and the workflow is manually disabled.
+approval/artifact evidence remains pristine and the workflow is manually
+disabled.
 Active stale data and activation runs always block. The only active-run
 supersession exception is a pristine capacity ghost with no approval history
 and an exact later successful first attempt for the same workflow, source SHA,

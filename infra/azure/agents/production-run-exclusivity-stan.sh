@@ -548,7 +548,7 @@ do
       "$run_id" "$workflow_id" "$path" "$status" "$updated_at" "$head_sha" \
       "$event" "$run_attempt" "$master_sha" "$NOW_EPOCH" \
       "$STALE_DISABLED_MIN_AGE_SECONDS" "$unmaterialized" \
-      "$tmp_approvals" <<'PY'
+      "$tmp_approvals" "$tmp_artifacts" <<'PY'
 import datetime
 import json
 import sys
@@ -576,6 +576,8 @@ minimum_age = int(sys.argv[17])
 unmaterialized = sys.argv[18]
 with open(sys.argv[19], encoding="utf-8") as approvals_file:
     approvals = json.load(approvals_file)
+with open(sys.argv[20], encoding="utf-8") as artifacts_file:
+    artifacts = json.load(artifacts_file)
 state = workflow.get("state")
 job_count = jobs.get("total_count")
 job_entries = jobs.get("jobs")
@@ -596,6 +598,12 @@ if (
 ):
     raise SystemExit("production run actionability metadata is malformed")
 approval_free = len(approvals) == 0
+artifact_free = (
+    isinstance(artifacts, dict)
+    and type(artifacts.get("total_count")) is int
+    and artifacts["total_count"] == 0
+    and artifacts.get("artifacts") == []
+)
 age_seconds = int((now - updated_at).total_seconds())
 jobless_and_old = (
     job_count == 0
@@ -642,6 +650,7 @@ if (
     and head_sha != master_sha
     and jobless_and_old
     and approval_free
+    and artifact_free
     and is_stale_ancestor()
     and has_historical_mutation_fence()
 ):

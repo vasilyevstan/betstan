@@ -978,13 +978,84 @@ jq -e '.state == "issued" and .runId == 7011' \
 
 prepare_unmaterialized_claim 7300
 unmaterialized_record="$UNMATERIALIZED_AUTHORITY_DIR/$UNMATERIALIZED_RUN_ID.json"
+unmaterialized_record_before="$tmp_dir/unmaterialized-record-before.json"
 jq -e '
   .schemaVersion == "betstan.copilot-cli-authority.v1" and
   .state == "claimed" and
   .version == 1 and
   (has("retirement") | not)
 ' "$unmaterialized_record" >/dev/null
+cp "$unmaterialized_record" "$unmaterialized_record_before"
 retire_unmaterialized_claim >"$output_file"
+unmaterialized_digests="$(
+  PYTHONDONTWRITEBYTECODE=1 python3 - \
+    "$unmaterialized_record_before" \
+    "$UNMATERIALIZED_EVIDENCE_DIR" \
+    "$REPOSITORY" \
+    "$ADVANCED_SHA" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+record_path, evidence_dir, repository, current_master = sys.argv[1:]
+directory = pathlib.Path(evidence_dir)
+record = json.loads(pathlib.Path(record_path).read_text(encoding="utf-8"))
+payload = {
+    "schemaVersion": "betstan.copilot-cli-unmaterialized-evidence.v2",
+    "repository": repository,
+    "currentMaster": current_master,
+    "minimumAgeSeconds": 600,
+    "nowEpoch": 2000,
+    "authorityRecord": {
+        "controlSha": record["controlSha"],
+        "displayTitle": record["displayTitle"],
+        "inputHash": record["inputHash"],
+        "runId": record["runId"],
+        "version": record["version"],
+        "workflowBlobSha": record["workflowBlobSha"],
+        "workflowId": record["workflowId"],
+    },
+    "run": json.loads((directory / "run.json").read_text(encoding="utf-8")),
+    "workflow": json.loads(
+        (directory / "workflow.json").read_text(encoding="utf-8")
+    ),
+    "jobs": json.loads((directory / "jobs.json").read_text(encoding="utf-8")),
+    "pending": json.loads(
+        (directory / "pending.json").read_text(encoding="utf-8")
+    ),
+    "approvals": json.loads(
+        (directory / "approvals.json").read_text(encoding="utf-8")
+    ),
+    "artifacts": json.loads(
+        (directory / "artifacts.json").read_text(encoding="utf-8")
+    ),
+    "compare": json.loads(
+        (directory / "compare.json").read_text(encoding="utf-8")
+    ),
+    "historicalWorkflow": json.loads(
+        (directory / "historical.json").read_text(encoding="utf-8")
+    ),
+}
+
+def digest(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+expected = digest(payload)
+payload["approvals"] = [{"reviewer": "tampered"}]
+print(expected, digest(payload))
+PY
+)"
+expected_unmaterialized_digest="${unmaterialized_digests%% *}"
+tampered_unmaterialized_digest="${unmaterialized_digests#* }"
+[ "$expected_unmaterialized_digest" != "$tampered_unmaterialized_digest" ]
 jq -e '
   .runId == 7300 and
   .state == "retired" and
@@ -992,8 +1063,11 @@ jq -e '
   .retirement.reason == "unmaterialized" and
   (.retirement.evidenceDigest | test("^[0-9a-f]{64}$")) and
   .retirement.masterShaAtRetirement == $master and
+  .retirement.evidenceDigest == $digest and
   (.retirement.retiredAt | type == "string")
-' --arg master "$ADVANCED_SHA" "$output_file" >/dev/null
+' --arg master "$ADVANCED_SHA" \
+  --arg digest "$expected_unmaterialized_digest" \
+  "$output_file" >/dev/null
 jq -e '
   .schemaVersion == "betstan.copilot-cli-authority.v2" and
   .state == "retired" and
@@ -1006,7 +1080,7 @@ retire_test_run_id=7310
 for rejection in \
   nonancestor rendered-title wrong-identity wrong-run-id wrong-path wrong-event \
   wrong-head wrong-branch wrong-attempt wrong-repository jobs pending artifacts \
-  malformed wrong-final head-present-not-final \
+  approved malformed wrong-final head-present-not-final \
   changed-blob-missing-current-tokens; do
   prepare_unmaterialized_claim "$retire_test_run_id" "$rejection"
   if retire_unmaterialized_claim >"$output_file" 2>"$error_file"; then

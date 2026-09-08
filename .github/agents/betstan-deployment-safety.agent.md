@@ -78,12 +78,12 @@ inactive. Fail closed when either query is incomplete or fails.
 - Production-run exclusivity may ignore an active stale queue artifact only
   through the checked-in bounded supersession or unmaterialized classifier.
   Supersession requires an old jobless and approval-free first-attempt manual
-  dispatch for a non-current ancestor SHA plus the exact workflow-specific
-  successful successor chain: capacity requires one later exact success,
-  live data requires later dry-run, backfill, and slip-index successes, and
-  activation requires one later exact activation success. Do not remove or
-  substitute those successor chains; reject any proposal to remove live-data
-  or activation supersession. The separate `reason=unmaterialized` path is
+  dispatch for a non-current ancestor SHA, no artifacts, and the exact later
+  successful first-attempt capacity run for the same workflow, SHA, event, and
+  rendered title. Capacity is the only active supersession exception. Active
+  stale live-data and activation runs always remain production fences; never
+  infer that later successful mutation work made an earlier active record
+  inert. The separate `reason=unmaterialized` path is
   limited exactly to `oci-live-data-rollout.yml`,
   `oci-live-betting-activate.yml`, and `oci-capacity-acquire.yml`: it requires
   a queued/null first attempt whose created, started, and updated timestamps
@@ -157,7 +157,7 @@ inactive. Fail closed when either query is incomplete or fails.
   A claimed never-transitioned generic-title ghost is different:
   keep it fenced and unapproved until master advances; only the explicit
   evidence-bound `retire-unmaterialized-claim` transition may retire it after
-  strict-ancestor, historical-blob, zero-job/pending/artifact, and
+  strict-ancestor, historical-blob, zero-job/pending/approval/artifact, and
   stale-before-mutation proof.
 - Keep a persisted prerequisite rejection recoverable after a descendant
   `master` promotion, but only for the exact old request and only from a clean

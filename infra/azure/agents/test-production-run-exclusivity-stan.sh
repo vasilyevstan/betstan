@@ -410,7 +410,9 @@ emit_successful_runs() {
     superseded-capacity|current-superseded-capacity|\
     recent-superseded-capacity|pending-superseded-capacity|\
     jobs-superseded-capacity|wrong-attempt-superseded-capacity|\
-    approved-superseded-capacity)
+    approved-superseded-capacity|artifacts-superseded-capacity|\
+    artifacts-count-mismatch-superseded-capacity|\
+    malformed-artifacts-superseded-capacity)
       printf '{"total_count":1,"workflow_runs":[{"id":124,"workflow_id":%s,"path":"%s","head_branch":"master","head_sha":"%s","event":"workflow_dispatch","run_attempt":1,"status":"completed","conclusion":"success","created_at":"1970-01-01T00:32:30Z","display_title":"oci-capacity-acquire %s"}]}\n' \
         "$WORKFLOW_ID" "$path" "$OLD_SHA" "$OLD_SHA"
       ;;
@@ -659,11 +661,15 @@ gh() {
       ;;
     "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=1")
       case "$mode" in
-        artifacts-unmaterialized-data)
+        artifacts-unmaterialized-data|artifacts-superseded-capacity)
           printf '%s\n' '{"total_count":1,"artifacts":[{"id":1}]}'
           ;;
-        artifacts-count-mismatch-unmaterialized-data)
+        artifacts-count-mismatch-unmaterialized-data|\
+        artifacts-count-mismatch-superseded-capacity)
           printf '%s\n' '{"total_count":0,"artifacts":[{"id":1}]}'
+          ;;
+        malformed-artifacts-superseded-capacity)
+          printf '%s\n' '{"artifacts":[]}'
           ;;
         *)
           printf '%s\n' '{"total_count":0,"artifacts":[]}'
@@ -878,6 +884,9 @@ for mode in \
   recent-superseded-capacity pending-superseded-capacity \
   jobs-superseded-capacity wrong-attempt-superseded-capacity \
   approved-superseded-capacity wrong-title-superseded-capacity \
+  artifacts-superseded-capacity \
+  artifacts-count-mismatch-superseded-capacity \
+  malformed-artifacts-superseded-capacity \
   superseded-deploy \
   superseded-data superseded-activation \
   unfenced-superseded-data nonancestor-superseded-data \
