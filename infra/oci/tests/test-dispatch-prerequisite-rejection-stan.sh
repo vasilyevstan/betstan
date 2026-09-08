@@ -726,7 +726,10 @@ if STUB_MODE_SEQUENCE=1 \
 fi
 grep -qF "does not match the authoritative" "$WORK/err"
 [[ ! -e "$DISPATCH_COUNT_FILE" ]]
-[[ -z "$(find "$fresh_authority" -maxdepth 1 -type f -print -quit)" ]]
+[[ -z "$(
+  find "$fresh_authority" \
+    -maxdepth 1 -type f ! -name '.repository-claim.lock' -print -quit
+)" ]]
 
 master_race_authority="$WORK/master-race-authority"
 master_race_request="$WORK/master-race-request.json"
@@ -741,7 +744,10 @@ if STUB_MASTER_CHANGE_AT=5 \
 fi
 grep -qF "master changed during dispatch validation" "$WORK/err"
 [[ ! -e "$DISPATCH_COUNT_FILE" ]]
-[[ -z "$(find "$master_race_authority" -maxdepth 1 -type f -print -quit)" ]]
+[[ -z "$(
+  find "$master_race_authority" \
+    -maxdepth 1 -type f ! -name '.repository-claim.lock' -print -quit
+)" ]]
 
 unsafe_authority="$WORK/unsafe-authority"
 unsafe_request="$WORK/unsafe-request.json"

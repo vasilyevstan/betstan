@@ -721,7 +721,10 @@ if STUB_DISABLE_ON_STATE_CALL=3 \
 fi
 grep -qF "must be active immediately before dispatch" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
-[[ -z "$(find "$authority_dir" -maxdepth 1 -type f -print -quit)" ]]
+[[ -z "$(
+  find "$authority_dir" \
+    -maxdepth 1 -type f ! -name '.repository-claim.lock' -print -quit
+)" ]]
 rm -f "$workflow_state_count_file"
 
 write_request
