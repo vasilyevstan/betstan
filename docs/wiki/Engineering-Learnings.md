@@ -145,41 +145,21 @@ the failed authority.
 
 ### Prove prerequisites before spending one-use authority
 
-A protected operation should carry explicit, hash-covered identities for every
-upstream run it depends on. Validate the exact workflow, source revision,
-current first-attempt status, title, complete paginated artifact inventory, and
-chronological lineage before authority is issued, again immediately before
-approval, and inside the workflow before cloud access. Bind package validation
-to the exact build run it inspected rather than only to a shared source SHA,
-and validate the bounded contents of the exact selected artifacts rather than
-trusting names alone. Serialize the global blocker scan and intent creation
-with a repository claim lock; atomic per-request files do not prevent two
-different requests from claiming an empty store concurrently.
+A protected operation should bind every prerequisite to explicit, hash-covered
+run, source, artifact, and lineage evidence, then revalidate that evidence at
+each trust boundary before authority or mutation. Package validation must name
+the exact build run it inspected, and bounded artifact contents must be
+validated rather than trusted by name. Repository-wide blocker evaluation and
+authority creation remain serialized so concurrent requests cannot both claim
+an apparently empty authority set.
 If a previously dispatched but unissued run loses a prerequisite, match its
-exact request, hold its authority lock, and persist pre-cancel evidence in a
-`rejecting` state before cancellation. Resume delayed terminalization from
-that persisted state. Release the serialization fence only after two stable
-observations prove exact cancellation, no approval, no successful job step,
-and no pending deployment; otherwise preserve the rejecting fence for explicit
-recovery.
-Persist the exact pre-cancel and terminal snapshots as well as canonical
-hashes. Hash exact multiline diagnostics while storing only a bounded one-line
-summary so diagnostic formatting cannot block durable recovery. If `master`
-advances while the fence is unresolved, allow only the matching old request to
-continue cancellation from a clean current-master checkout after proving the
-recorded control remains an ancestor and its historical workflow blob is
-unchanged. Record both the historical control and the actual live retirement
-master. Never extend that historical-control exception to dispatch, issue, or
-approval, and ignore a current-master ghost only after refreshed evidence
-proves it is pristine and its workflow is manually disabled.
-
-Do not generalize ghost supersession across mutating workflows. Active stale
-data and activation runs remain fences; only a pristine approval-free capacity
-ghost may be superseded by an exact later successful first attempt. After an
-approval claim, use an explicit short-circuiting check sequence and operate
-only on the originally claimed gate identity. Place final provider-boundary
-checks in the live mutating job and bracket upstream validation with fresh
-`master` and runtime-mode observations.
+exact request and keep the operation serialized until bounded, reviewed
+recovery proves that exact run and source identity safe to retire. Recovery
+must preserve one-use authority evidence, treat ambiguity or partial execution
+as a blocker, and never create dispatch, approval, or mutation authority.
+Active mutating work remains a fence. Provider-boundary revalidation preserves
+the exact source, runtime mode, protected approval, and provenance before any
+mutation.
 
 ## Release and operations
 

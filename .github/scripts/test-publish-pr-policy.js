@@ -8,9 +8,45 @@ const publishPrPolicy = require("./publish-pr-policy.js");
 
 const HEAD_SHA = "1111111111111111111111111111111111111111";
 const BASE_SHA = "0000000000000000000000000000000000000000";
+const ADVANCED_BASE_SHA = "0101010101010101010101010101010101010101";
 const MERGE_SHA = "2222222222222222222222222222222222222222";
 const TRUSTED_BLOB = "4444444444444444444444444444444444444444";
 const CHANGED_BLOB = "5555555555555555555555555555555555555555";
+const TRUSTED_ENGINE_BLOB =
+  "6666666666666666666666666666666666666666";
+const CHANGED_ENGINE_BLOB =
+  "7777777777777777777777777777777777777777";
+const TRUSTED_HARNESS_BLOB =
+  "8888888888888888888888888888888888888888";
+const CHANGED_HARNESS_BLOB =
+  "9999999999999999999999999999999999999999";
+const TRUSTED_REVIEW_BLOB =
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const CHANGED_REVIEW_BLOB =
+  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TRUSTED_INVOCATION_BLOB =
+  "cccccccccccccccccccccccccccccccccccccccc";
+const CHANGED_INVOCATION_BLOB =
+  "dddddddddddddddddddddddddddddddddddddddd";
+const SOURCE_MERGE_COMMIT_SHA =
+  "abababababababababababababababababababab";
+const PROMOTION_HEAD_SHA =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const PROMOTION_MERGE_SHA =
+  "ffffffffffffffffffffffffffffffffffffffff";
+const COVERAGE_ENGINE_PATH = ".github/scripts/test-coverage-matrix.js";
+const COVERAGE_HARNESS_PATH =
+  ".github/scripts/test-test-coverage-matrix.js";
+const COVERAGE_REVIEW_PATH =
+  "infra/azure/agents/coverage-engine-review-stan.sh";
+const COVERAGE_INVOCATION_PATH =
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh";
+const COVERAGE_ALLOWED_PATHS = [
+  COVERAGE_ENGINE_PATH,
+  COVERAGE_HARNESS_PATH,
+  "LEARNINGS.md",
+  "docs/wiki/Engineering-Learnings.md",
+];
 const NOW = "2026-09-02T12:00:00.000Z";
 const PULL_UPDATED_AT = "2026-09-02T09:00:00.000Z";
 const TRANSITION_STATUS_CREATED_AT = "2026-09-02T09:30:00.000Z";
@@ -93,6 +129,7 @@ function pull(overrides = {}) {
     state: "open",
     mergeable: true,
     merge_commit_sha: MERGE_SHA,
+    changed_files: 0,
     updated_at: PULL_UPDATED_AT,
     title: PULL_TITLE,
     body: PULL_BODY,
@@ -109,6 +146,19 @@ function pull(overrides = {}) {
 
 function workflowRun(overrides = {}) {
   const id = overrides.id ?? 102;
+  const createdAt =
+    overrides.created_at ?? "2026-09-02T10:00:00.000Z";
+  const validCreatedAt = Number.isFinite(Date.parse(createdAt));
+  const runStartedAt =
+    overrides.run_started_at ??
+    (validCreatedAt
+      ? timestampAfter(createdAt, 1_000)
+      : "2026-09-02T10:00:01.000Z");
+  const updatedAt =
+    overrides.updated_at ??
+    (validCreatedAt
+      ? timestampAfter(createdAt, 300_000)
+      : "2026-09-02T10:05:00.000Z");
   return {
     id,
     run_attempt: 1,
@@ -117,9 +167,12 @@ function workflowRun(overrides = {}) {
     event: "pull_request",
     head_sha: HEAD_SHA,
     head_repository: { full_name: "example/repo" },
+    repository: { full_name: "example/repo" },
     status: "completed",
     conclusion: "success",
-    created_at: "2026-09-02T10:00:00.000Z",
+    created_at: createdAt,
+    run_started_at: runStartedAt,
+    updated_at: updatedAt,
     html_url: workflowRunUrl(id),
     pull_requests: [
       {
@@ -128,6 +181,19 @@ function workflowRun(overrides = {}) {
         base: { sha: BASE_SHA },
       },
     ],
+    ...overrides,
+  };
+}
+
+function workflowJob(overrides = {}) {
+  return {
+    id: 1,
+    run_id: 102,
+    run_attempt: 1,
+    head_sha: HEAD_SHA,
+    name: "pr-quality-gates",
+    status: "completed",
+    conclusion: "success",
     ...overrides,
   };
 }
@@ -147,6 +213,268 @@ function workflowAuthorization(overrides = {}) {
     issuedAt: "2026-09-01T12:00:00.000Z",
     expiresAt: "2026-09-04T12:00:00.000Z",
     ...overrides,
+  };
+}
+
+function coverageAuthorization(overrides = {}) {
+  return {
+    id: "coverage-pair-777777777777-pr-63",
+    repository: "example/repo",
+    headRepository: "example/repo",
+    pullNumber: 63,
+    headRef: "feature/coverage-engine",
+    headSha: HEAD_SHA,
+    baseRef: "dev",
+    baseSha: BASE_SHA,
+    enginePath: COVERAGE_ENGINE_PATH,
+    trustedEngineBlob: TRUSTED_ENGINE_BLOB,
+    authorizedEngineBlob: CHANGED_ENGINE_BLOB,
+    harnessPath: COVERAGE_HARNESS_PATH,
+    trustedHarnessBlob: TRUSTED_HARNESS_BLOB,
+    authorizedHarnessBlob: CHANGED_HARNESS_BLOB,
+    allowedPaths: [...COVERAGE_ALLOWED_PATHS],
+    expectedTests: 102,
+    issuedAt: "2026-09-02T08:00:00.000Z",
+    expiresAt: "2026-09-02T11:00:00.000Z",
+    receiptSha: BASE_SHA,
+    adoptionSha: BASE_SHA,
+    ...overrides,
+  };
+}
+
+function coverageSourcePull(overrides = {}) {
+  return pull({
+    changed_files: COVERAGE_ALLOWED_PATHS.length,
+    head: {
+      ref: "feature/coverage-engine",
+      sha: HEAD_SHA,
+      repo: { full_name: "example/repo" },
+    },
+    base: { ref: "dev", sha: BASE_SHA },
+    ...overrides,
+  });
+}
+
+function receiptStatus({
+  id,
+  context,
+  state,
+  description,
+  targetUrl,
+  createdAt,
+}) {
+  return {
+    id,
+    context,
+    state,
+    description,
+    target_url: targetUrl,
+    created_at: createdAt,
+    creator: ACTIONS_BOT,
+  };
+}
+
+function policyRun({ id, pull: relatedPull, event, createdAt }) {
+  return {
+    id,
+    workflow_id: 201,
+    path: ".github/workflows/branch-policy.yml",
+    event,
+    repository: { full_name: "example/repo" },
+    pull_requests: [
+      {
+        number: relatedPull.number,
+        head: { sha: relatedPull.head.sha },
+        base: { sha: relatedPull.base.sha },
+      },
+    ],
+    html_url: workflowRunUrl(id),
+    created_at: createdAt,
+    status: "completed",
+    conclusion: "success",
+  };
+}
+
+function coveragePromotionFixture({
+  promotionFiles = [
+    COVERAGE_ENGINE_PATH,
+    COVERAGE_HARNESS_PATH,
+    "moderation/src/index.ts",
+  ],
+  authorizationOverrides = {},
+  sourcePullOverrides = {},
+  promotionPullOverrides = {},
+  branchShaOverrides = {},
+  openPulls,
+  integrationReceiptStatuses,
+  sourceMergeStatuses = [],
+  comparisonsByBasehead = {},
+} = {}) {
+  const authorization = coverageAuthorization(authorizationOverrides);
+  const sourcePull = coverageSourcePull({
+    state: "closed",
+    merged: true,
+    merged_at: "2026-09-02T10:15:00.000Z",
+    merge_commit_sha: SOURCE_MERGE_COMMIT_SHA,
+    ...sourcePullOverrides,
+  });
+  const promotionPull = pull({
+    number: 64,
+    changed_files: promotionFiles.length,
+    head: {
+      ref: "dev",
+      sha: PROMOTION_HEAD_SHA,
+      repo: { full_name: "example/repo" },
+    },
+    base: { ref: "master", sha: BASE_SHA },
+    merge_commit_sha: PROMOTION_MERGE_SHA,
+    ...promotionPullOverrides,
+  });
+  const sourceRun = workflowRun();
+  const promotionRun = workflowRun({
+    id: 202,
+    head_sha: PROMOTION_HEAD_SHA,
+    created_at: "2026-09-02T10:20:00.000Z",
+    pull_requests: [
+      {
+        number: promotionPull.number,
+        head: { sha: PROMOTION_HEAD_SHA },
+        base: { sha: BASE_SHA },
+      },
+    ],
+  });
+  const sourceReceiptDescription =
+    publishPrPolicy.coverageReceiptDescription({
+      authorization,
+      leg: "integration",
+      mergeSha: MERGE_SHA,
+      run: sourceRun,
+      transition: { transitionAt: Date.parse(PULL_UPDATED_AT) },
+    });
+  const sourceReceiptTarget = workflowRunUrl(301);
+  const sourceReceipt =
+    integrationReceiptStatuses ??
+    [
+      receiptStatus({
+        id: 501,
+        context:
+          publishPrPolicy.coverageAuthorizationContext(
+            authorization,
+            "integration",
+          ),
+        state: "success",
+        description: sourceReceiptDescription,
+        targetUrl: sourceReceiptTarget,
+        createdAt: "2026-09-02T10:07:00.000Z",
+      }),
+      receiptStatus({
+        id: 500,
+        context:
+          publishPrPolicy.coverageAuthorizationContext(
+            authorization,
+            "integration",
+          ),
+        state: "pending",
+        description: sourceReceiptDescription,
+        targetUrl: sourceReceiptTarget,
+        createdAt: "2026-09-02T10:06:00.000Z",
+      }),
+    ];
+  const promotionReceipt = sourceMergeStatuses;
+  return {
+    authorization,
+    sourcePull,
+    promotionPull,
+    promotionRun,
+    promotionReceipt,
+    options: {
+      eventName: "workflow_run",
+      currentPull: promotionPull,
+      run: promotionRun,
+      listedRuns: [promotionRun],
+      headAssetBlobs: {
+        [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB,
+        [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB,
+      },
+      assetBlobsByRef: {
+        [SOURCE_MERGE_COMMIT_SHA]: {
+          [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB,
+          [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB,
+        },
+      },
+      changedFiles: promotionFiles,
+      pullFilesByNumber: {
+        63: COVERAGE_ALLOWED_PATHS,
+        64: promotionFiles,
+      },
+      pullsByNumber: { 63: sourcePull },
+      openPulls: openPulls ?? [promotionPull],
+      coverageAuthorizations: [authorization],
+      commitStatusesByRef: {
+        [BASE_SHA]: sourceReceipt,
+        [MERGE_SHA]: [
+          qualityTransitionStatus({
+            context: "trusted-quality-transition/dev",
+          }),
+        ],
+        [PROMOTION_MERGE_SHA]: [
+          qualityTransitionStatus({
+            id: 910,
+            description: transitionDescription({
+              number: promotionPull.number,
+              binding: promotionRun.id,
+            }),
+            target_url: workflowRunUrl(400),
+          }),
+        ],
+        [SOURCE_MERGE_COMMIT_SHA]: promotionReceipt,
+      },
+      branchShas: {
+        master: BASE_SHA,
+        dev: PROMOTION_HEAD_SHA,
+        ...branchShaOverrides,
+      },
+      workflowRunsById: {
+        100: policyRun({
+          id: 100,
+          pull: sourcePull,
+          event: "pull_request_target",
+          createdAt: "2026-09-02T09:00:00.000Z",
+        }),
+        102: sourceRun,
+        301: policyRun({
+          id: 301,
+          pull: sourcePull,
+          event: "workflow_run",
+          createdAt: "2026-09-02T10:06:00.000Z",
+        }),
+        400: policyRun({
+          id: 400,
+          pull: promotionPull,
+          event: "pull_request_target",
+          createdAt: "2026-09-02T09:00:00.000Z",
+        }),
+      },
+      comparisonsByBasehead: {
+        [`${BASE_SHA}...${MERGE_SHA}`]: {
+          status: "ahead",
+          mergeBase: BASE_SHA,
+        },
+        [`${HEAD_SHA}...${MERGE_SHA}`]: {
+          status: "ahead",
+          mergeBase: HEAD_SHA,
+        },
+        [`${BASE_SHA}...${PROMOTION_HEAD_SHA}`]: {
+          status: "ahead",
+          mergeBase: BASE_SHA,
+        },
+        [`${SOURCE_MERGE_COMMIT_SHA}...${PROMOTION_HEAD_SHA}`]: {
+          status: "ahead",
+          mergeBase: SOURCE_MERGE_COMMIT_SHA,
+        },
+        ...comparisonsByBasehead,
+      },
+    },
   };
 }
 
@@ -179,24 +507,46 @@ async function execute({
   eventPull = pull(),
   run = workflowRun(),
   headBlob = TRUSTED_BLOB,
+  headAssetBlobs = {},
+  trustedAssetBlobs = {},
+  assetBlobsByRef = {},
+  missingAssetPathsByRef = {},
+  changedFiles = [],
+  pullFilesByNumber = {},
+  pullsByNumber = {},
+  openPullPages,
+  openPulls,
   eventName = "workflow_dispatch",
   eventAction = "edited",
   listedRuns,
   listedTotalCount,
   workflowAuthorizations,
+  coverageAuthorizations,
   authorizationNow = NOW,
   authorizationStatuses = [],
   transitionStatuses = [qualityTransitionStatus()],
+  commitStatusesByRef = {},
+  commitStatusPagesByRef = {},
   comparisonStatus = "identical",
+  comparisonsByBasehead = {},
+  branchShas = { master: BASE_SHA, dev: HEAD_SHA },
   statusSink,
   policyRunOverrides = {},
   policyRunOverridesById = {},
+  branchWorkflowOverrides = {},
+  qualityWorkflowOverrides = {},
+  workflowRunsById = {},
+  workflowJobsByRunId = {},
+  workflowJobPagesByRunId = {},
+  workflowJobListCalls,
   eventLabelName,
   contextRunId = 101,
   issueEvents = [issueEvent()],
   issueEventPages,
   issueEventError,
   issueEventListCalls,
+  pullFileListCalls,
+  assetReadCalls,
   staleTransitionStatusReads = false,
   transitionStatusCreatedAt = NOW,
   workflowRunListCalls,
@@ -205,6 +555,15 @@ async function execute({
   const messages = [];
   const transitionStatusReadSnapshot = transitionStatuses.slice();
   let pullGetCount = 0;
+  let createdStatusId = Math.max(
+    10_000,
+    ...authorizationStatuses.map(({ id }) => id || 0),
+    ...transitionStatuses.map(({ id }) => id || 0),
+    ...Object.values(commitStatusesByRef)
+      .flat()
+      .map(({ id }) => id || 0),
+  );
+  let createdStatusSecond = 0;
   const github = {
     rest: {
       issues: {
@@ -232,7 +591,10 @@ async function execute({
         },
       },
       pulls: {
-        get: async () => {
+        get: async ({ pull_number: pullNumber }) => {
+          if (pullsByNumber[pullNumber]) {
+            return { data: pullsByNumber[pullNumber] };
+          }
           const data = currentPulls
             ? currentPulls[
                 Math.min(pullGetCount, currentPulls.length - 1)
@@ -241,60 +603,157 @@ async function execute({
           pullGetCount += 1;
           return { data };
         },
+        list: async ({ page, per_page: perPage }) => {
+          const values = openPullPages
+            ? page <= openPullPages.length
+              ? openPullPages[page - 1]
+              : []
+            : (openPulls ?? [currentPull]).slice(
+                (page - 1) * perPage,
+                page * perPage,
+              );
+          return { data: values };
+        },
+        listFiles: async ({
+          pull_number: pullNumber,
+          page,
+          per_page: perPage,
+        }) => {
+          pullFileListCalls?.push({ page, perPage });
+          const inventory =
+            pullFilesByNumber[pullNumber] ?? changedFiles;
+          return {
+            data: inventory
+              .slice((page - 1) * perPage, page * perPage)
+              .map((file) =>
+                typeof file === "string"
+                  ? { filename: file, status: "modified" }
+                  : file,
+              ),
+          };
+        },
       },
       repos: {
-        get: async () => ({ data: { default_branch: "dev" } }),
-        getContent: async ({ ref }) => ({
-          data: {
-            type: "file",
-            sha: ref === "dev" ? TRUSTED_BLOB : headBlob,
-          },
+        get: async () => ({ data: { default_branch: "master" } }),
+        getCommit: async ({ ref }) => ({
+          data: { sha: branchShas[ref] },
         }),
+        getContent: async ({ path: filePath, ref }) => {
+          assetReadCalls?.push({ path: filePath, ref });
+          if (missingAssetPathsByRef[ref]?.includes(filePath)) {
+            const error = new Error("Not Found");
+            error.status = 404;
+            throw error;
+          }
+          const trustedBlobs = {
+            ".github/workflows/production-build.yml": TRUSTED_BLOB,
+            [COVERAGE_ENGINE_PATH]: TRUSTED_ENGINE_BLOB,
+            [COVERAGE_HARNESS_PATH]: TRUSTED_HARNESS_BLOB,
+            [COVERAGE_REVIEW_PATH]: TRUSTED_REVIEW_BLOB,
+            [COVERAGE_INVOCATION_PATH]: TRUSTED_INVOCATION_BLOB,
+            ...trustedAssetBlobs,
+          };
+          const headBlobs = {
+            ".github/workflows/production-build.yml": headBlob,
+            ...headAssetBlobs,
+          };
+          const explicit = assetBlobsByRef[ref]?.[filePath];
+          const sha =
+            explicit ??
+            ([BASE_SHA, "master"].includes(ref)
+              ? trustedBlobs[filePath]
+              : (headBlobs[filePath] ?? trustedBlobs[filePath]));
+          assert.match(sha, /^[0-9a-f]{40}$/);
+          return {
+            data: {
+              type: "file",
+              sha,
+            },
+          };
+        },
         createCommitStatus: async (status) => {
           statuses.push(status);
+          createdStatusId += 1;
+          createdStatusSecond += 1;
+          const storedStatus = {
+            ...status,
+            id: createdStatusId,
+            description: status.description ?? null,
+            target_url: status.target_url ?? null,
+            created_at:
+              `2026-09-02T11:00:${String(createdStatusSecond).padStart(2, "0")}.000Z`,
+            creator: ACTIONS_BOT,
+          };
           if (
-            status.context.startsWith("trusted-workflow-authorization/")
+            Object.prototype.hasOwnProperty.call(
+              commitStatusesByRef,
+              status.sha,
+            )
           ) {
-            const { sha: _sha, ...storedStatus } = status;
-            authorizationStatuses.unshift({
-              ...storedStatus,
-              id: authorizationStatuses.length + 1,
-              description: status.description ?? null,
-              target_url: status.target_url ?? null,
-            });
+            commitStatusesByRef[status.sha].unshift(storedStatus);
+          }
+          if (
+            status.context.startsWith("trusted-workflow-authorization/") ||
+            status.context.startsWith("trusted-coverage-integration/") ||
+            status.context.startsWith("trusted-coverage-promotion/")
+          ) {
+            authorizationStatuses.unshift(storedStatus);
           }
           if (
             status.sha === MERGE_SHA &&
             status.context.startsWith("trusted-quality-transition/")
           ) {
-            const { sha: _sha, ...storedStatus } = status;
             transitionStatuses.unshift({
               ...storedStatus,
-              id: 1000 + transitionStatuses.length,
-              description: status.description ?? null,
-              target_url: status.target_url ?? null,
               created_at: transitionStatusCreatedAt,
-              creator: ACTIONS_BOT,
             });
           }
         },
         listCommitStatusesForRef: async ({ ref, page }) => {
-          const inventory =
-            ref === MERGE_SHA
+          const explicitPages = commitStatusPagesByRef[ref];
+          if (explicitPages) {
+            return {
+              data:
+                page <= explicitPages.length
+                  ? explicitPages[page - 1]
+                  : [],
+            };
+          }
+          const inventory = commitStatusesByRef[ref] ??
+            (ref === MERGE_SHA
               ? staleTransitionStatusReads
                 ? transitionStatusReadSnapshot
                 : transitionStatuses
-              : authorizationStatuses;
+              : authorizationStatuses);
           return {
             data: inventory.slice((page - 1) * 100, page * 100),
           };
         },
         compareCommitsWithBasehead: async ({ basehead }) => {
-          assert.equal(basehead, `${HEAD_SHA}...${HEAD_SHA}`);
+          const [base] = basehead.split("...");
+          assert.match(base, /^[0-9a-f]{40}$/);
+          const explicit = comparisonsByBasehead[basehead];
+          if (explicit) {
+            return {
+              data: {
+                status: explicit.status,
+                merge_base_commit: { sha: explicit.mergeBase },
+              },
+            };
+          }
+          const isMergeSnapshotLineage =
+            basehead === `${BASE_SHA}...${MERGE_SHA}` ||
+            basehead === `${HEAD_SHA}...${MERGE_SHA}`;
+          const mergeBase =
+            basehead === `${HEAD_SHA}...${BASE_SHA}`
+              ? BASE_SHA
+              : base;
           return {
             data: {
-              status: comparisonStatus,
-              merge_base_commit: { sha: HEAD_SHA },
+              status: isMergeSnapshotLineage
+                ? "ahead"
+                : comparisonStatus,
+              merge_base_commit: { sha: mergeBase },
             },
           };
         },
@@ -306,14 +765,25 @@ async function execute({
               ? {
                   id: 201,
                   path: ".github/workflows/branch-policy.yml",
+                  ...branchWorkflowOverrides,
                 }
               : {
                   id: 202,
                   path: ".github/workflows/production-build.yml",
+                  ...qualityWorkflowOverrides,
                 },
         }),
-        getWorkflowRun: async ({ run_id: runId }) => ({
-          data: {
+        getWorkflowRun: async ({ run_id: runId }) => {
+          const relatedTransition = transitionStatuses.find(
+            ({ target_url: targetUrl }) =>
+              targetUrl === workflowRunUrl(runId),
+          );
+          const transitionAt = relatedTransition
+            ? Number(relatedTransition.description?.split("|")[3])
+            : Number.NaN;
+          return {
+            data:
+              workflowRunsById[runId] ?? {
             id: runId,
             workflow_id: 201,
             path: ".github/workflows/branch-policy.yml",
@@ -328,10 +798,16 @@ async function execute({
             ],
             html_url:
               `https://example.invalid/example/repo/actions/runs/${runId}`,
+            created_at: Number.isSafeInteger(transitionAt)
+              ? new Date(transitionAt).toISOString()
+              : "2026-09-02T09:00:00.000Z",
+            status: "completed",
+            conclusion: "success",
             ...policyRunOverrides,
             ...(policyRunOverridesById[runId] || {}),
           },
-        }),
+          };
+        },
         listWorkflowRuns: async ({ page, per_page: perPage }) => {
           workflowRunListCalls?.push({ page, perPage });
           const runs = listedRuns ?? [run];
@@ -345,17 +821,46 @@ async function execute({
             },
           };
         },
-        listJobsForWorkflowRun: async () => ({
-          data: {
-            jobs: [
-              {
-                name: "pr-quality-gates",
-                status: "completed",
-                conclusion: "success",
-              },
-            ],
-          },
-        }),
+        listJobsForWorkflowRunAttempt: async ({
+          run_id: runId,
+          attempt_number: attemptNumber,
+          page,
+          per_page: perPage,
+        }) => {
+          workflowJobListCalls?.push({
+            runId,
+            attemptNumber,
+            page,
+            perPage,
+          });
+          const explicitPages = workflowJobPagesByRunId[runId];
+          if (explicitPages) {
+            return {
+              data:
+                page <= explicitPages.length
+                  ? explicitPages[page - 1]
+                  : explicitPages[explicitPages.length - 1],
+            };
+          }
+          const jobs = workflowJobsByRunId[runId] ?? [
+            workflowJob({
+              run_id: runId,
+              run_attempt: attemptNumber,
+              head_sha:
+                workflowRunsById[runId]?.head_sha ??
+                (runId === run.id ? run.head_sha : HEAD_SHA),
+            }),
+          ];
+          return {
+            data: {
+              total_count: jobs.length,
+              jobs: jobs.slice(
+                (page - 1) * perPage,
+                page * perPage,
+              ),
+            },
+          };
+        },
       },
     },
   };
@@ -391,6 +896,9 @@ async function execute({
   };
   if (workflowAuthorizations !== undefined) {
     policyArguments.workflowAuthorizations = workflowAuthorizations;
+  }
+  if (coverageAuthorizations !== undefined) {
+    policyArguments.coverageAuthorizations = coverageAuthorizations;
   }
   await publishPrPolicy(policyArguments);
   return { statuses, messages };
@@ -1330,7 +1838,7 @@ async function main() {
     const boundaryTransitions = [
       qualityTransitionStatus({
         context: "trusted-quality-transition/dev",
-        created_at: "2026-09-02T08:59:00.000Z",
+        created_at: "2026-09-02T09:00:01.000Z",
         description: transitionDescription({
           action: "opened",
           binding: 102,
@@ -1609,7 +2117,7 @@ async function main() {
       qualityTransitionStatus({
         id: 900,
         context: "trusted-quality-transition/dev",
-        created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+        created_at: wholeSecondTimestamp,
         description: transitionDescription({
           action: "opened",
           timestamp: wholeSecondTimestamp,
@@ -1751,7 +2259,7 @@ async function main() {
         : qualityTransitionStatus({
             id: 900,
             context: "trusted-quality-transition/dev",
-            created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+            created_at: wholeSecondTimestamp,
             description: transitionDescription({
               action: "opened",
               timestamp: wholeSecondTimestamp,
@@ -1790,7 +2298,7 @@ async function main() {
         : [
             qualityTransitionStatus({
               context: "trusted-quality-transition/dev",
-              created_at: timestampAfter(wholeSecondTimestamp, -1_000),
+              created_at: wholeSecondTimestamp,
               description: transitionDescription({
                 action: "opened",
                 timestamp: wholeSecondTimestamp,
@@ -2508,7 +3016,7 @@ async function main() {
 
   for (const { markerCreatedAt, authorizationNow } of [
     {
-      markerCreatedAt: "2026-09-02T08:59:00.000Z",
+      markerCreatedAt: "2026-09-02T09:00:00.000Z",
       authorizationNow: NOW,
     },
     {
@@ -3007,6 +3515,7 @@ async function main() {
 
   const laterLineageTransitions = [
     qualityTransitionStatus({
+      created_at: "2026-09-02T11:00:00.000Z",
       description: transitionDescription({
         action: "edited",
         timestamp: "2026-09-02T11:00:00.000Z",
@@ -3850,6 +4359,958 @@ async function main() {
     publisherSource,
     /const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object\.freeze\(\[\]\);/,
   );
+  assert.deepEqual(
+    publishPrPolicy.trustedCoverageAssetAuthorizations,
+    [],
+  );
+  assert.equal(
+    Object.isFrozen(publishPrPolicy.trustedCoverageAssetAuthorizations),
+    true,
+  );
+  assert.match(
+    publisherSource,
+    /const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String\.raw`\[\]`;/,
+  );
+
+  const unchangedCoveragePathCalls = [];
+  const unchangedCoverageAssetReads = [];
+  const unchangedCoverage = await execute({
+    pullFileListCalls: unchangedCoveragePathCalls,
+    assetReadCalls: unchangedCoverageAssetReads,
+  });
+  assert.equal(
+    unchangedCoverage.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .every(({ state }) => state === "success"),
+    true,
+  );
+  assert.deepEqual(unchangedCoveragePathCalls, []);
+  assert.equal(
+    unchangedCoverageAssetReads.some(({ path: filePath }) =>
+      [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+        filePath,
+      ),
+    ),
+    false,
+  );
+
+  for (const [filePath, changedBlob] of [
+    [COVERAGE_REVIEW_PATH, CHANGED_REVIEW_BLOB],
+    [COVERAGE_INVOCATION_PATH, CHANGED_INVOCATION_BLOB],
+  ]) {
+    const validatorOnlyAssetReads = [];
+    const validatorOnlyCorrection = await execute({
+      headAssetBlobs: { [filePath]: changedBlob },
+      assetReadCalls: validatorOnlyAssetReads,
+    });
+    assert.equal(
+      validatorOnlyCorrection.statuses
+        .filter(({ context }) =>
+          context.startsWith("pr-quality-gates/"),
+        )
+        .every(({ state }) => state === "success"),
+      true,
+    );
+    assert.equal(
+      validatorOnlyAssetReads.some(({ path: readPath }) =>
+        [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+          readPath,
+        ),
+      ),
+      false,
+    );
+  }
+
+  const oldHeadAssetReads = [];
+  const oldHeadWithoutValidators = await execute({
+    assetReadCalls: oldHeadAssetReads,
+    missingAssetPathsByRef: {
+      [HEAD_SHA]: [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH],
+    },
+  });
+  assert.equal(
+    oldHeadWithoutValidators.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .every(({ state }) => state === "success"),
+    true,
+  );
+  assert.equal(
+    oldHeadAssetReads.some(({ path: filePath }) =>
+      [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+        filePath,
+      ),
+    ),
+    false,
+  );
+
+  for (const headAssetBlobs of [
+    { [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB },
+    { [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB },
+  ]) {
+    const mixedCoveragePair = await execute({ headAssetBlobs });
+    assertQualityFailure(mixedCoveragePair);
+    assert(
+      mixedCoveragePair.statuses.some(({ description }) =>
+        description.includes("incomplete coverage pair"),
+      ),
+    );
+  }
+
+  const changedCoveragePair = {
+    [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB,
+    [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB,
+  };
+  const sourcePull = coverageSourcePull();
+  const sourceTransitionStatuses = [
+    qualityTransitionStatus({
+      context: "trusted-quality-transition/dev",
+    }),
+  ];
+  for (const [
+    ref,
+    filePath,
+    expectedReason,
+  ] of [
+    [
+      "master",
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-base",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-head",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-merge-snapshot",
+    ],
+    [
+      "master",
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-base",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-head",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-merge-snapshot",
+    ],
+  ]) {
+    const pullFileReads = [];
+    const missingValidator = await execute({
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      missingAssetPathsByRef: { [ref]: [filePath] },
+      pullFileListCalls: pullFileReads,
+      transitionStatuses: sourceTransitionStatuses,
+    });
+    assertQualityFailure(missingValidator);
+    assert(
+      missingValidator.messages.some((message) =>
+        message.includes(`reason=${expectedReason}`),
+      ),
+    );
+    assert.deepEqual(pullFileReads, []);
+  }
+
+  for (const [
+    ref,
+    filePath,
+    changedBlob,
+    expectedReason,
+  ] of [
+    [
+      BASE_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-base-differs-from-default",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-head-differs-from-default",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-differs-from-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-base-differs-from-default",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-head-differs-from-default",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-differs-from-default",
+    ],
+  ]) {
+    const pullFileReads = [];
+    const validatorDrift = await execute({
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      assetBlobsByRef: {
+        [ref]: { [filePath]: changedBlob },
+      },
+      pullFileListCalls: pullFileReads,
+      transitionStatuses: sourceTransitionStatuses,
+    });
+    assertQualityFailure(validatorDrift);
+    assert(
+      validatorDrift.messages.some((message) =>
+        message.includes(`reason=${expectedReason}`),
+      ),
+    );
+    assert.deepEqual(pullFileReads, []);
+  }
+
+  const activationAssetReads = [];
+  const unknownCoveragePair = await execute({
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    transitionStatuses: sourceTransitionStatuses,
+    assetReadCalls: activationAssetReads,
+  });
+  assertQualityFailure(unknownCoveragePair);
+  for (const filePath of [
+    COVERAGE_REVIEW_PATH,
+    COVERAGE_INVOCATION_PATH,
+  ]) {
+    assert.deepEqual(
+      activationAssetReads
+        .filter(({ path: readPath }) => readPath === filePath)
+        .map(({ ref }) => ref)
+        .sort(),
+      ["master", BASE_SHA, HEAD_SHA, MERGE_SHA].sort(),
+    );
+  }
+
+  const coverageManualRefresh = await execute({
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assert.deepEqual(
+    coverageManualRefresh.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["pending"],
+  );
+  assert.equal(
+    coverageManualRefresh.statuses.some(({ context }) =>
+      context.startsWith("trusted-coverage-integration/"),
+    ),
+    false,
+  );
+  assert(
+    coverageManualRefresh.messages.some((message) =>
+      message.includes(
+        "coverage integration authorization may be consumed only by the selected run's workflow_run",
+      ),
+    ),
+  );
+
+  const coverageAuthorizationStatuses = [];
+  const exactCoverageCompletion = await execute({
+    eventName: "workflow_run",
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationStatuses: coverageAuthorizationStatuses,
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assert.deepEqual(
+    exactCoverageCompletion.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .map(({ state }) => state),
+    ["success"],
+  );
+  assert.deepEqual(
+    exactCoverageCompletion.statuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-coverage-integration/"),
+      )
+      .map(({ state }) => state),
+    ["pending", "success"],
+  );
+
+  const advancedBasePull = coverageSourcePull({
+    base: { ref: "dev", sha: ADVANCED_BASE_SHA },
+  });
+  const advancedBaseRun = workflowRun({
+    pull_requests: [
+      {
+        number: advancedBasePull.number,
+        head: { sha: HEAD_SHA },
+        base: { sha: ADVANCED_BASE_SHA },
+      },
+    ],
+  });
+  const advancedBaseCompletion = await execute({
+    eventName: "workflow_run",
+    currentPull: advancedBasePull,
+    run: advancedBaseRun,
+    listedRuns: [advancedBaseRun],
+    headAssetBlobs: changedCoveragePair,
+    assetBlobsByRef: {
+      [ADVANCED_BASE_SHA]: {
+        [COVERAGE_ENGINE_PATH]: TRUSTED_ENGINE_BLOB,
+        [COVERAGE_HARNESS_PATH]: TRUSTED_HARNESS_BLOB,
+        [COVERAGE_REVIEW_PATH]: TRUSTED_REVIEW_BLOB,
+        [COVERAGE_INVOCATION_PATH]: TRUSTED_INVOCATION_BLOB,
+      },
+    },
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    transitionStatuses: sourceTransitionStatuses,
+    policyRunOverrides: {
+      pull_requests: [
+        {
+          number: advancedBasePull.number,
+          head: { sha: HEAD_SHA },
+          base: { sha: ADVANCED_BASE_SHA },
+        },
+      ],
+    },
+    comparisonsByBasehead: {
+      [`${HEAD_SHA}...${ADVANCED_BASE_SHA}`]: {
+        status: "diverged",
+        mergeBase: BASE_SHA,
+      },
+      [`${ADVANCED_BASE_SHA}...${MERGE_SHA}`]: {
+        status: "ahead",
+        mergeBase: ADVANCED_BASE_SHA,
+      },
+      [`${HEAD_SHA}...${MERGE_SHA}`]: {
+        status: "ahead",
+        mergeBase: HEAD_SHA,
+      },
+    },
+  });
+  assert.deepEqual(
+    advancedBaseCompletion.statuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-coverage-integration/"),
+      )
+      .map(({ state }) => state),
+    ["pending", "success"],
+  );
+
+  const paginatedJobs = [
+    ...Array.from({ length: 100 }, (_, index) =>
+      workflowJob({
+        id: index + 1,
+        name: `fixture-job-${index + 1}`,
+      }),
+    ),
+    workflowJob({ id: 101 }),
+  ];
+  const paginatedJobCalls = [];
+  const paginatedJobReceipts = [];
+  const paginatedJobCompletion = await execute({
+    eventName: "workflow_run",
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationStatuses: paginatedJobReceipts,
+    transitionStatuses: sourceTransitionStatuses,
+    workflowJobsByRunId: { 102: paginatedJobs },
+    workflowJobListCalls: paginatedJobCalls,
+  });
+  assert(
+    paginatedJobCompletion.statuses.some(
+      ({ context, state }) =>
+        context.startsWith("trusted-coverage-integration/") &&
+        state === "success",
+    ),
+  );
+  assert.equal(paginatedJobReceipts.length, 2);
+  assert(
+    paginatedJobCalls.some(
+      ({ page, perPage }) => page === 2 && perPage === 100,
+    ),
+  );
+
+  const jobInventoryFailures = [
+    {
+      workflowJobsByRunId: {
+        102: [
+          workflowJob({ id: 1 }),
+          workflowJob({
+            id: 2,
+            status: "completed",
+            conclusion: "failure",
+          }),
+        ],
+      },
+    },
+    {
+      workflowJobsByRunId: {
+        102: [
+          workflowJob({ id: 1 }),
+          workflowJob({ id: 1, name: "duplicate-id" }),
+        ],
+      },
+    },
+    {
+      workflowJobsByRunId: {
+        102: [workflowJob({ run_id: 999 })],
+      },
+    },
+    {
+      workflowJobsByRunId: {
+        102: [workflowJob({ run_attempt: 2 })],
+      },
+    },
+    {
+      workflowJobsByRunId: {
+        102: [workflowJob({ id: null })],
+      },
+    },
+    {
+      workflowJobPagesByRunId: {
+        102: [
+          {
+            total_count: 101,
+            jobs: paginatedJobs.slice(0, 99),
+          },
+        ],
+      },
+    },
+    {
+      workflowJobPagesByRunId: {
+        102: [
+          {
+            total_count: 101,
+            jobs: paginatedJobs.slice(0, 100),
+          },
+          {
+            total_count: 102,
+            jobs: paginatedJobs.slice(100),
+          },
+        ],
+      },
+    },
+  ];
+  for (const jobInventoryFailure of jobInventoryFailures) {
+    const failedReceipts = [];
+    const result = await execute({
+      eventName: "workflow_run",
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      coverageAuthorizations: [coverageAuthorization()],
+      authorizationStatuses: failedReceipts,
+      transitionStatuses: sourceTransitionStatuses,
+      ...jobInventoryFailure,
+    });
+    assertQualityFailure(result);
+    assert.equal(failedReceipts.length, 0);
+  }
+
+  const provenanceFailures = [
+    {
+      transitionStatuses: [
+        qualityTransitionStatus({
+          context: "trusted-quality-transition/dev",
+          created_at: "2026-02-30T09:30:00.000Z",
+        }),
+      ],
+    },
+    {
+      transitionStatuses: [
+        qualityTransitionStatus({
+          context: "trusted-quality-transition/dev",
+          created_at: "2026-09-02T08:59:59.000Z",
+        }),
+      ],
+    },
+    {
+      policyRunOverrides: {
+        created_at: "2026-09-02T08:59:59.000Z",
+      },
+    },
+    {
+      transitionStatuses: [
+        qualityTransitionStatus({
+          context: "trusted-quality-transition/dev",
+          created_at: "2026-09-02T09:00:00.000Z",
+        }),
+      ],
+      policyRunOverrides: {
+        created_at: "2026-09-02T09:00:01.000Z",
+      },
+    },
+    {
+      transitionStatuses: [
+        qualityTransitionStatus({
+          context: "trusted-quality-transition/dev",
+        }),
+        {
+          id: 999,
+          context: "unrelated-status",
+          state: "success",
+          description: null,
+          target_url: null,
+          created_at: "not-a-timestamp",
+          creator: ACTIONS_BOT,
+        },
+      ],
+    },
+  ];
+  for (const provenanceFailure of provenanceFailures) {
+    const failedReceipts = [];
+    const result = await execute({
+      eventName: "workflow_run",
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      coverageAuthorizations: [coverageAuthorization()],
+      authorizationStatuses: failedReceipts,
+      transitionStatuses: sourceTransitionStatuses,
+      ...provenanceFailure,
+    });
+    assertQualityFailure(result);
+    assert.equal(failedReceipts.length, 0);
+  }
+  const wrongRepositoryStatuses = [];
+  const wrongRepositoryReceipts = [];
+  await assert.rejects(
+    execute({
+      eventName: "workflow_run",
+      currentPull: sourcePull,
+      run: workflowRun({
+        repository: { full_name: "other/repo" },
+      }),
+      listedRuns: [
+        workflowRun({
+          repository: { full_name: "other/repo" },
+        }),
+      ],
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      coverageAuthorizations: [coverageAuthorization()],
+      authorizationStatuses: wrongRepositoryReceipts,
+      transitionStatuses: sourceTransitionStatuses,
+      statusSink: wrongRepositoryStatuses,
+    }),
+    /quality workflow run inventory entry is malformed/,
+  );
+  assert.equal(wrongRepositoryStatuses.length, 0);
+  assert.equal(wrongRepositoryReceipts.length, 0);
+
+  const repeatedCoverageCompletion = await execute({
+    eventName: "workflow_run",
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationStatuses: coverageAuthorizationStatuses,
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assertQualityFailure(repeatedCoverageCompletion);
+  assert(
+    repeatedCoverageCompletion.messages.some((message) =>
+      message.includes("coverage integration authorization receipt") &&
+      message.includes("already started"),
+    ),
+  );
+
+  const extraCoveragePath = await execute({
+    currentPull: coverageSourcePull({
+      changed_files: COVERAGE_ALLOWED_PATHS.length + 1,
+    }),
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: [...COVERAGE_ALLOWED_PATHS, "unexpected.txt"],
+    coverageAuthorizations: [coverageAuthorization()],
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assertQualityFailure(extraCoveragePath);
+
+  for (const override of [
+    { repository: "other/repo" },
+    { headRepository: "other/repo" },
+    { pullNumber: 64 },
+    { pullNumber: Number.MAX_SAFE_INTEGER + 1 },
+    { headRef: "other-branch" },
+    { headSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+    { headRef: "dev" },
+    { baseRef: "master" },
+    { baseSha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+    { id: `a${"b".repeat(64)}` },
+    { expectedTests: 0 },
+    { expectedTests: 1 },
+    { expectedTests: 101 },
+    { expectedTests: 103 },
+    { expectedTests: 10_000 },
+    { issuedAt: "2026-09-02T08:00:00Z" },
+    { expiresAt: "2026-09-02T08:00:00.000Z" },
+    {
+      expiresAt: "2026-09-09T08:00:00.001Z",
+    },
+  ]) {
+    const invalidCoverageAuthorization = await execute({
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      coverageAuthorizations: [coverageAuthorization(override)],
+      transitionStatuses: sourceTransitionStatuses,
+    });
+    assertQualityFailure(invalidCoverageAuthorization);
+  }
+
+  const invalidCoverageAdoption = await execute({
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    comparisonStatus: "diverged",
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assertQualityFailure(invalidCoverageAdoption);
+
+  const duplicateCoverageAuthorization = coverageAuthorization();
+  const duplicateCoverageResult = await execute({
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [
+      duplicateCoverageAuthorization,
+      { ...duplicateCoverageAuthorization },
+    ],
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assertQualityFailure(duplicateCoverageResult);
+  assert(
+    duplicateCoverageResult.messages.some((message) =>
+      message.includes("duplicate coverage authorization id"),
+    ),
+  );
+
+  const afterExpiryCompletion = await execute({
+    eventName: "workflow_run",
+    currentPull: sourcePull,
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    authorizationNow: "2026-09-04T12:00:00.000Z",
+    transitionStatuses: sourceTransitionStatuses,
+  });
+  assert.deepEqual(
+    afterExpiryCompletion.statuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-coverage-integration/"),
+      )
+      .map(({ state }) => state),
+    ["pending", "success"],
+  );
+
+  const runAtExpiry = workflowRun({
+    created_at: coverageAuthorization().expiresAt,
+  });
+  const expiryBoundary = await execute({
+    eventName: "workflow_run",
+    currentPull: sourcePull,
+    run: runAtExpiry,
+    listedRuns: [runAtExpiry],
+    headAssetBlobs: changedCoveragePair,
+    changedFiles: COVERAGE_ALLOWED_PATHS,
+    coverageAuthorizations: [coverageAuthorization()],
+    transitionStatuses: [
+      qualityTransitionStatus({
+        context: "trusted-quality-transition/dev",
+        description: transitionDescription({ binding: runAtExpiry.id }),
+      }),
+    ],
+  });
+  assertQualityFailure(expiryBoundary);
+
+  const fingerprint = publishPrPolicy.coverageAuthorizationFingerprint(
+    coverageAuthorization(),
+  );
+  assert.match(fingerprint, /^[0-9a-f]{40}$/);
+  assert.equal(
+    publishPrPolicy.coverageAuthorizationFingerprint({
+      ...coverageAuthorization(),
+    }),
+    fingerprint,
+  );
+  assert.notEqual(
+    publishPrPolicy.coverageAuthorizationFingerprint(
+      coverageAuthorization({ receiptSha: HEAD_SHA }),
+    ),
+    fingerprint,
+  );
+
+  const promotionFixture = coveragePromotionFixture();
+  const exactPromotion = await execute(promotionFixture.options);
+  assert.deepEqual(
+    exactPromotion.statuses
+      .filter(({ context }) =>
+        context.startsWith("trusted-coverage-promotion/"),
+      )
+      .map(({ state }) => state),
+    ["pending", "success"],
+  );
+  assert.equal(promotionFixture.promotionReceipt.length, 2);
+  assert(
+    promotionFixture.promotionReceipt.every(
+      ({ description }) =>
+        description.startsWith(`v1|p|${fingerprint}|`) &&
+        description.includes(`|${promotionFixture.promotionRun.id}|1|`),
+    ),
+  );
+
+  const oversizedStatusPage = coveragePromotionFixture();
+  const sourceReceiptStatuses =
+    oversizedStatusPage.options.commitStatusesByRef[BASE_SHA];
+  oversizedStatusPage.options.commitStatusPagesByRef = {
+    [BASE_SHA]: [
+      [
+        ...Array.from({ length: 99 }, (_, index) => ({
+          id: 10_000 + index,
+          context: `unrelated-status-${index}`,
+          state: "success",
+          description: null,
+          target_url: null,
+          created_at: "2026-09-02T10:00:00.000Z",
+          creator: ACTIONS_BOT,
+        })),
+        ...sourceReceiptStatuses,
+      ],
+      [],
+    ],
+  };
+  const oversizedStatusResult = await execute(
+    oversizedStatusPage.options,
+  );
+  assertQualityFailure(oversizedStatusResult);
+  assert.equal(oversizedStatusPage.promotionReceipt.length, 0);
+  assert(
+    oversizedStatusResult.messages.some((message) =>
+      message.includes("authorization receipt response is malformed"),
+    ),
+  );
+
+  const unsafeStatusIdentity = coveragePromotionFixture();
+  unsafeStatusIdentity.options.commitStatusesByRef[BASE_SHA][0].id =
+    Number.MAX_SAFE_INTEGER + 1;
+  const unsafeStatusResult = await execute(
+    unsafeStatusIdentity.options,
+  );
+  assertQualityFailure(unsafeStatusResult);
+  assert.equal(unsafeStatusIdentity.promotionReceipt.length, 0);
+  assert(
+    unsafeStatusResult.messages.some((message) =>
+      message.includes("commit status entry is malformed"),
+    ),
+  );
+
+  for (const receiptPolicyRunCase of [
+    {
+      name: "mismatched run response ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].id = 302;
+      },
+    },
+    {
+      name: "Boolean run workflow ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].workflow_id = true;
+      },
+    },
+    {
+      name: "unsafe run workflow ID",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301].workflow_id =
+          Number.MAX_SAFE_INTEGER + 1;
+      },
+    },
+    {
+      name: "Boolean relation PR number",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301]
+          .pull_requests[0].number = true;
+      },
+    },
+    {
+      name: "unsafe relation PR number",
+      mutate: (fixture) => {
+        fixture.options.workflowRunsById[301]
+          .pull_requests[0].number = Number.MAX_SAFE_INTEGER + 1;
+      },
+    },
+  ]) {
+    const invalidReceiptPolicyRun = coveragePromotionFixture();
+    receiptPolicyRunCase.mutate(invalidReceiptPolicyRun);
+    const result = await execute(invalidReceiptPolicyRun.options);
+    assertQualityFailure(result);
+    assert.equal(invalidReceiptPolicyRun.promotionReceipt.length, 0);
+    assert(
+      result.messages.some((message) =>
+        message.includes(
+          "coverage authorization receipt does not originate from trusted branch-policy",
+        ),
+      ),
+      receiptPolicyRunCase.name,
+    );
+  }
+
+  const promotionReplay = await execute(promotionFixture.options);
+  assertQualityFailure(promotionReplay);
+  assert(
+    promotionReplay.messages.some((message) =>
+      message.includes(
+        "coverage promotion authorization receipt was already started",
+      ),
+    ),
+  );
+
+  for (const promotionFiles of [
+    [
+      COVERAGE_ENGINE_PATH,
+      COVERAGE_HARNESS_PATH,
+      ".github/workflows/branch-policy.yml",
+    ],
+    [
+      COVERAGE_ENGINE_PATH,
+      {
+        filename: COVERAGE_HARNESS_PATH,
+        previous_filename: "moderation/src/legacy.ts",
+        status: "renamed",
+      },
+    ],
+  ]) {
+    const restrictedDrift = coveragePromotionFixture({
+      promotionFiles,
+    });
+    const result = await execute(restrictedDrift.options);
+    assertQualityFailure(result);
+    assert.equal(restrictedDrift.promotionReceipt.length, 0);
+  }
+
+  const staleLiveTip = coveragePromotionFixture({
+    branchShaOverrides: { dev: HEAD_SHA },
+  });
+  assertQualityFailure(await execute(staleLiveTip.options));
+  assert.equal(staleLiveTip.promotionReceipt.length, 0);
+
+  const earlierPromotion = pull({
+    number: 62,
+    head: {
+      ref: "dev",
+      sha: PROMOTION_HEAD_SHA,
+      repo: { full_name: "example/repo" },
+    },
+    base: { ref: "master", sha: BASE_SHA },
+  });
+  const serializedPromotion = coveragePromotionFixture({
+    openPulls: [earlierPromotion],
+  });
+  assertQualityFailure(await execute(serializedPromotion.options));
+  assert.equal(serializedPromotion.promotionReceipt.length, 0);
+
+  const unmergedSource = coveragePromotionFixture({
+    sourcePullOverrides: {
+      state: "open",
+      merged: false,
+      merged_at: null,
+    },
+  });
+  assertQualityFailure(await execute(unmergedSource.options));
+  assert.equal(unmergedSource.promotionReceipt.length, 0);
+
+  const pendingOnlyIntegration = coveragePromotionFixture();
+  pendingOnlyIntegration.options.commitStatusesByRef[BASE_SHA].splice(1);
+  assertQualityFailure(await execute(pendingOnlyIntegration.options));
+  assert.equal(pendingOnlyIntegration.promotionReceipt.length, 0);
+
+  const wrongSourceAncestry = coveragePromotionFixture({
+    comparisonsByBasehead: {
+      [`${SOURCE_MERGE_COMMIT_SHA}...${PROMOTION_HEAD_SHA}`]: {
+        status: "diverged",
+        mergeBase: BASE_SHA,
+      },
+    },
+  });
+  assertQualityFailure(await execute(wrongSourceAncestry.options));
+  assert.equal(wrongSourceAncestry.promotionReceipt.length, 0);
+
+  const aggregatePromotionFiles = [
+    COVERAGE_ENGINE_PATH,
+    COVERAGE_HARNESS_PATH,
+    ...Array.from(
+      { length: 205 },
+      (_, index) => `moderation/src/aggregate-${index}.ts`,
+    ),
+  ];
+  const aggregatePromotion = coveragePromotionFixture({
+    promotionFiles: aggregatePromotionFiles,
+  });
+  const aggregatePromotionCalls = [];
+  const aggregatePromotionJobCalls = [];
+  aggregatePromotion.options.pullFileListCalls =
+    aggregatePromotionCalls;
+  aggregatePromotion.options.workflowJobsByRunId = {
+    102: paginatedJobs,
+  };
+  aggregatePromotion.options.workflowJobListCalls =
+    aggregatePromotionJobCalls;
+  const aggregatePromotionResult = await execute(
+    aggregatePromotion.options,
+  );
+  assert(
+    aggregatePromotionResult.statuses.some(
+      ({ context, state }) =>
+        context.startsWith("trusted-coverage-promotion/") &&
+        state === "success",
+    ),
+  );
+  assert(
+    aggregatePromotionCalls.some(
+      ({ page, perPage }) => page === 3 && perPage === 100,
+    ),
+  );
+  assert(
+    aggregatePromotionJobCalls.some(
+      ({ runId, page, perPage }) =>
+        runId === 102 && page === 2 && perPage === 100,
+    ),
+  );
 
   const manualAuthorizedRefresh = await execute({
     headBlob: CHANGED_BLOB,
@@ -4145,7 +5606,7 @@ async function main() {
   );
   assert(
     secondConsumption.messages.some((message) =>
-      message.includes("already consumed"),
+      message.includes("already started"),
     ),
   );
 
@@ -4260,6 +5721,8 @@ async function main() {
     state: "success",
     description: null,
     target_url: null,
+    created_at: "2026-09-02T10:00:00.000Z",
+    creator: ACTIONS_BOT,
   });
   const unrelatedStatuses = [validUnrelatedStatus(1)];
   const unrelatedStatusConsumption = await execute({
@@ -4313,7 +5776,7 @@ async function main() {
     );
     assert(
       malformedInventory.messages.some((message) =>
-        message.includes("receipt entry is malformed"),
+        message.includes("commit status entry is malformed"),
       ),
     );
   }
@@ -4591,9 +6054,45 @@ async function main() {
   assertNoQualitySuccess(malformedTransitionCreatedAt);
   assert(
     malformedTransitionCreatedAt.messages.some((message) =>
-      message.includes("quality transition marker timestamp is malformed"),
+      message.includes("commit status entry is malformed"),
     ),
   );
+
+  for (const invalidPullUpdatedAt of [
+    "2026-02-30T09:00:00.000Z",
+    "2026-09-02T09:00:00.000+00:00",
+    "2026-09-02T09:00:00.0000Z",
+  ]) {
+    const malformedPull = pull({ updated_at: invalidPullUpdatedAt });
+    const producingStatuses = [];
+    const producingReceipts = [];
+    await assert.rejects(
+      execute({
+        eventName: "pull_request_target",
+        currentPull: malformedPull,
+        eventPull: malformedPull,
+        statusSink: producingStatuses,
+        authorizationStatuses: producingReceipts,
+      }),
+      /pull request updated_at timestamp is malformed/,
+    );
+    assert.equal(producingStatuses.length, 0);
+    assert.equal(producingReceipts.length, 0);
+
+    const recoveryStatuses = [];
+    const recoveryReceipts = [];
+    await assert.rejects(
+      execute({
+        eventName: "workflow_run",
+        currentPull: malformedPull,
+        statusSink: recoveryStatuses,
+        authorizationStatuses: recoveryReceipts,
+      }),
+      /pull request updated_at timestamp is malformed/,
+    );
+    assert.equal(recoveryStatuses.length, 0);
+    assert.equal(recoveryReceipts.length, 0);
+  }
 
   const wrongTransitionWorkflow = await execute({
     policyRunOverrides: {
