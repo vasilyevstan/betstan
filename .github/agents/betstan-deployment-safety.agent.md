@@ -78,12 +78,12 @@ inactive. Fail closed when either query is incomplete or fails.
 - Production-run exclusivity may ignore an active stale queue artifact only
   through the checked-in bounded supersession or unmaterialized classifier.
   Supersession requires an old jobless and approval-free first-attempt manual
-  dispatch for a non-current ancestor SHA plus the exact workflow-specific
-  successful successor chain: capacity requires one later exact success,
-  live data requires later dry-run, backfill, and slip-index successes, and
-  activation requires one later exact activation success. Do not remove or
-  substitute those successor chains; reject any proposal to remove live-data
-  or activation supersession. The separate `reason=unmaterialized` path is
+  dispatch for a non-current ancestor SHA, no artifacts, and the exact later
+  successful first-attempt capacity run for the same workflow, SHA, event, and
+  rendered title. Capacity is the only active supersession exception. Active
+  stale live-data and activation runs always remain production fences; never
+  infer that later successful mutation work made an earlier active record
+  inert. The separate `reason=unmaterialized` path is
   limited exactly to `oci-live-data-rollout.yml`,
   `oci-live-betting-activate.yml`, and `oci-capacity-acquire.yml`: it requires
   a queued/null first attempt whose created, started, and updated timestamps
@@ -136,17 +136,36 @@ inactive. Fail closed when either query is incomplete or fails.
   exist before direct dispatch mutation; use `--resume-captured` or
   `--resume-run` for their exact recovery. Promotion-derived builds require
   durable automatic records. An ambiguous approval POST leaves an `inflight`
-  record and must use `--reconcile`, never direct replay. Require a new exact
+  record and must use `--reconcile`, never direct replay. Before a resumed
+  claimed record becomes issued, match its exact input hash and subject/target
+  identity, acquire its authority lock, refresh the run, and re-prove current
+  control plus every decay-prone prerequisite immediately before the locked
+  issue transition. If that proof fails, require exactly one waiting job and
+  one matching pending environment, persist an evidence-bound `rejecting`
+  transition before cancellation, and hold the same lock through cancellation
+  and retirement. A retry must continue that exact `rejecting` record from its
+  persisted exact pre-cancel snapshots and canonical hashes; it must never take
+  a new pre-cancel snapshot.
+  Retire only after two stable terminal observations prove cancellation, no
+  environment review, no successful job step, and no remaining pending gate.
+  Otherwise preserve the `rejecting` fence. Require a new exact
   approved GitHub review for the same downstream run and operation relative to
   the recorded pre-POST reviewer/comment/environment baseline before consuming
-  it; gate disappearance or terminal status alone stays unresolved. Accept
-  `retired` only for an exact terminal run with zero jobs and zero pending
-  deployments. A claimed never-transitioned generic-title ghost is different:
+  it; gate disappearance or terminal status alone stays unresolved. Ordinary
+  terminal claims may become `retired` only with zero jobs and zero pending
+  deployments.
+  A claimed never-transitioned generic-title ghost is different:
   keep it fenced and unapproved until master advances; only the explicit
   evidence-bound `retire-unmaterialized-claim` transition may retire it after
-  strict-ancestor, historical-blob, zero-job/pending/artifact, and
+  strict-ancestor, historical-blob, zero-job/pending/approval/artifact, and
   stale-before-mutation proof.
-- Treat any unresolved intent or `claimed`/`inflight` record as a global
+- Keep a persisted prerequisite rejection recoverable after a descendant
+  `master` promotion, but only for the exact old request and only from a clean
+  checkout at current `master`. Re-prove that the recorded control SHA remains
+  an ancestor and that its historical workflow blob matches before cancellation
+  and retirement, then recheck mutable `master` during the attempt. This narrow
+  path may not dispatch, issue, or approve from historical control.
+- Treat any unresolved intent or `claimed`/`inflight`/`rejecting` record as a global
   protected-dispatch fence for the same repository regardless of control SHA;
   promotion must not silently clear it. `issued`/`consumed` authority keeps
   its normal one-use scope for the same operation and exact transport input
@@ -217,8 +236,11 @@ inactive. Fail closed when either query is incomplete or fails.
   and compare every existing exact tag's ARM64 platform digest while
   preserving its verified manifest identity. Require commit-derived
   `SOURCE_DATE_EPOCH` and pinned digest-affecting BuildKit exporter settings
-  before treating rebuild equality as authoritative. Package validation must bind
-  normal generations to exact build and successful deployment artifacts and
+  before treating rebuild equality as authoritative. Package validation must
+  record the exact candidate build run it inspected. Infrastructure must reject
+  a validation artifact for a different build run even when the source SHA
+  matches. Package validation must bind normal generations to exact build and
+  successful deployment artifacts and
   recovered generations to exact terminal cache-recovery artifacts; never
   substitute historical OCIR build lineage for GHCR recovery lineage. Bind
   every obsolete generation to its exact build artifact before pruning.
@@ -549,6 +571,21 @@ A Running broker with missing consumers is not healthy production.
   to make an old queue record disappear.
 - Query exact artifact names from the successful upstream run instead of
   guessing them in a mutation preflight.
+- Validate every upstream release prerequisite before enabling a workflow,
+  creating a dispatch intent, or issuing authority. Protected authority is
+  one-use, so a prerequisite discovered mid-run permanently strands that master
+  SHA. Pass the dependency as an explicit run-ID transport input covered by the
+  dispatch input hash, never an implicit scan, and enforce the same binding
+  inside the workflow so direct execution cannot bypass it.
+- Enumerate the complete paginated artifact inventory, reject rerun current
+  attempts, and require chronological lineage rather than three unrelated
+  successful runs. The authoritative OCI release order is exact GHCR build,
+  package validation bound to that build, capacity acquisition after validation
+  for k3s, infrastructure finalization, live-data handoff, then deployment.
+- When a one-use authority is consumed by a pre-mutation failure, preserve it as
+  terminal evidence and promote a substantive hardened SHA. Never edit or retire
+  the authority store, replay the request, or add a placeholder input to change
+  the hash.
 - Freshness-check late advisory evidence against its recorded SHA, the current
   authoritative workflow tree, and the validated shared-Mongo topology before
   allowing it to reopen a release gate.

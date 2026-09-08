@@ -272,6 +272,11 @@ accepted by the next owner.
 - When a command stays active for thirty minutes without producing a
   measurable milestone, stop it or hand it off safely, then checkpoint. Do not
   begin another long operation before that checkpoint is delivered.
+- Register upstream prerequisite validation ahead of any protected dispatch.
+  Protected authority is one-use, so a prerequisite discovered mid-run
+  permanently strands that master SHA. Treat an authority consumed by a
+  pre-mutation failure as terminal evidence requiring a substantive hardened
+  SHA, never a replay, authority-store edit, or placeholder input.
 
 ## Recovery ladder
 
@@ -418,16 +423,25 @@ its owner. It is never healthy by default.
   the mutation owner. If the dispatching command exits after returning a URL,
   inspect that run before permitting another dispatch.
 - Track CLI authority as part of the run identity: operation, request key or
-  authority run ID, `dispatching|claimed|issued|inflight|consumed|retired`
+  authority run ID,
+  `dispatching|claimed|issued|inflight|consumed|rejecting|retired`
   state, control/subject/target SHA, and expiry. A surviving intent whose
   durable capture contains one exact URL triggers `--resume-captured`; a
   delayed `claimed` record triggers exact `--resume-run`; neither permits a
-  replacement dispatch. Treat any unresolved intent or `claimed`/`inflight`
-  record as a global fence on every protected request for the same repository
-  regardless of control SHA; promotion does not clear it, and changing
+  replacement dispatch. Treat any unresolved intent or
+  `claimed`/`inflight`/`rejecting` record as a global fence on every protected
+  request for the same repository regardless of control SHA; promotion does
+  not clear it, and changing
   operation or inputs is not recovery. An exact `issued`/`consumed` operation
-  and transport-input request is one-use. A terminal claimed run may be
-  retired only after exact zero-job and zero-pending evidence. An `inflight`
+  and transport-input request is one-use. An ordinary terminal claimed run may
+  be retired only after exact zero-job and zero-pending evidence. A claim whose
+  prerequisite decayed during resume first becomes `rejecting` under the
+  authority lock, with exact request identity and pre-cancel gate evidence
+  persisted before cancellation. Keep the lock through cancellation and
+  retirement; if terminal evidence is delayed, resume that same rejecting
+  record instead of taking a new snapshot. Retire only after two stable
+  observations prove exact cancellation, no environment review, no successful
+  job step, and no pending gate. An `inflight`
   record triggers
   explicit `--reconcile`, never a direct replay. Reconciliation consumes only
   for the recorded downstream run and operation, with a new exact GitHub
