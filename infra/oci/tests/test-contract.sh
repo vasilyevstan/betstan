@@ -2142,6 +2142,52 @@ obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
   fail "fixed event-reschedule tool is missing"
 [[ -f "$obsolete_cleanup" ]] ||
   fail "historical obsolete-event cleanup tool is missing"
+python3 - "$event_reschedule" "$data_runner" \
+  "$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh" <<'PY' || fail "fixed reschedule target consumers drift from the Event source"
+import re
+import sys
+
+event_source_path, rollout_path, verifier_path = sys.argv[1:]
+event_source = open(event_source_path, encoding="utf-8").read()
+rollout = open(rollout_path, encoding="utf-8").read()
+verifier = open(verifier_path, encoding="utf-8").read()
+iso_kickoff = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+
+def fixed_literal(name, shape):
+    definitions = re.findall(
+        rf'^export const {re.escape(name)} = (.+);$',
+        event_source,
+        re.MULTILINE,
+    )
+    if len(definitions) != 1:
+        raise SystemExit(f"{name} must have exactly one literal definition")
+    literal = re.fullmatch(rf'"({shape})"', definitions[0])
+    if literal is None:
+        raise SystemExit(f"{name} literal has an unsafe shape")
+    return literal.group(1)
+
+event_id = fixed_literal("RESCHEDULE_EVENT_ID", r"[0-9a-f]{24}")
+kickoff = fixed_literal("RESCHEDULE_TARGET_KICKOFF", iso_kickoff)
+confirmation = f"RESCHEDULE_EVENT:{event_id}:{kickoff}"
+
+if rollout.count(confirmation) != 1:
+    raise SystemExit("rollout confirmation does not have exactly one source-bound target")
+if re.findall(
+    rf'RESCHEDULE_EVENT:[0-9a-f]{{24}}:({iso_kickoff})',
+    rollout,
+) != [kickoff]:
+    raise SystemExit("rollout contains another fixed-target confirmation kickoff")
+if re.findall(
+    rf'--arg target_kickoff "({iso_kickoff})"',
+    rollout,
+) != [kickoff]:
+    raise SystemExit("rollout target_kickoff binding drifts from the Event source")
+if re.findall(
+    rf'operation\.get\("targetKickoff"\) != "({iso_kickoff})"',
+    verifier,
+) != [kickoff]:
+    raise SystemExit("evidence verifier targetKickoff check drifts from the Event source")
+PY
 for reschedule_contract in \
     'export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
     'export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \

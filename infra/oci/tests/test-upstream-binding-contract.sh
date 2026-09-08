@@ -587,6 +587,13 @@ if not capacity < install < refresh < identity < cloud:
     )
 if text.count("Revalidate exact authority before cloud access") != 1:
     raise SystemExit("exact cloud-boundary refresh must exist only in provision")
+gate_step_body = text[gate:ghcr]
+for required in (
+    'GH_TOKEN: ${{ github.token }}',
+    'REPOSITORY: ${{ github.repository }}',
+):
+    if required not in gate_step_body:
+        raise SystemExit(f"upstream prerequisite gate omits: {required}")
 refresh_body = text[refresh:identity]
 for required in (
     'GH_TOKEN: ${{ github.token }}',
