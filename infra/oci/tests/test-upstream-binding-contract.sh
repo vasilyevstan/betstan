@@ -589,6 +589,8 @@ if text.count("Revalidate exact authority before cloud access") != 1:
     raise SystemExit("exact cloud-boundary refresh must exist only in provision")
 refresh_body = text[refresh:identity]
 for required in (
+    'GH_TOKEN: ${{ github.token }}',
+    'REPOSITORY: ${{ github.repository }}',
     'git fetch --quiet origin master:refs/remotes/origin/master',
     '[ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]',
     '[ "$OCI_RUNTIME_MODE" = "$BOUND_RUNTIME_MODE" ]',
@@ -596,7 +598,7 @@ for required in (
 ):
     if required not in refresh_body:
         raise SystemExit(f"cloud-boundary refresh omits: {required}")
-if "environments/oci-infrastructure/variables/OCI_RUNTIME_MODE" in refresh_body:
+if "/environments/" in refresh_body:
     raise SystemExit("workflow GITHUB_TOKEN cannot query environment variables")
 if refresh_body.count("revalidate_mutable_authority") != 3:
     raise SystemExit("cloud-boundary refresh must bracket upstream validation")

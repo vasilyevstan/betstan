@@ -1017,6 +1017,12 @@ validated.
   current-`master` checks, and fail closed on drift. Do not assume the
   workflow `GITHUB_TOKEN` can re-read protected environment variables through
   repository REST endpoints.
+- Before deleting a step-level environment block after one consumer moves to
+  job scope, enumerate every remaining consumer and bind the required mappings
+  in the same executable contract. If that failure leaves too little time for
+  a fixed-target operation's lead-time gate, advance the reviewed target
+  consistently through source, evidence, contracts, and documentation, and
+  derive relative test offsets from the target.
 - A current-master ghost can block the guard promotion that would make it
   safely historical. The merge-safety path may pass only its exact promotion
   PR number; exclusivity must independently prove an OPEN CLI-managed

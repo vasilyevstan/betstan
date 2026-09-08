@@ -895,6 +895,9 @@ jobs:
         run: ./infra/oci/scripts/install-cli.sh
 
       - name: Revalidate exact authority before cloud access
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           revalidate_mutable_authority() {

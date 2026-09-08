@@ -456,7 +456,7 @@ else:
             fail(f"{relative} has an invalid reschedule kind")
         if operation.get("targetEventId") != "6a623af592af5a95b1d0bb79":
             fail(f"{relative} targets an unexpected event")
-        if operation.get("targetKickoff") != "2026-09-08T08:05:00.000Z":
+        if operation.get("targetKickoff") != "2026-09-09T08:05:00.000Z":
             fail(f"{relative} targets an unexpected kickoff")
         if operation.get("ready") is not True or operation.get("blockerCount") != 0:
             fail(f"{relative} did not prove a safe reschedule state")
