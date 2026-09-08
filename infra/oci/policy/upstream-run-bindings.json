@@ -1,0 +1,118 @@
+{
+  "oci-infrastructure-finalize-k3s": [
+    {
+      "artifactContent": {
+        "equals": {
+          "anonymous_pull": "pass",
+          "build_run_attempt": "1",
+          "build_run_id": "{run_id}",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "registry_public": "true",
+          "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "build-chain.txt",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "candidate_build_run_id": "{input:ghcr_build_run_id}",
+          "package_visibility": "public",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "repository": "ghcr.io/vasilyevstan/betstan-images",
+          "repository_linked": true,
+          "terminal_status": "VALIDATED"
+        },
+        "fileName": "validation-summary.json",
+        "format": "json"
+      },
+      "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+      "input": "ghcr_package_validation_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}"
+      },
+      "workflow": "ghcr-package-management.yml"
+    },
+    {
+      "afterInput": "ghcr_package_validation_run_id",
+      "artifactContent": {
+        "equals": {
+          "acquisition_run_id": "{run_id}",
+          "boot_volume_gb": "50",
+          "boot_volume_vpus_per_gb": "10",
+          "memory_gb": "12",
+          "ocpus": "2",
+          "runtime_mode": "k3s",
+          "shape": "VM.Standard.A1.Flex",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "provenance.env",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
+      "input": "capacity_acquisition_run_id",
+      "titleTemplates": {
+        "schedule": "oci-capacity-acquire scheduled-master",
+        "workflow_dispatch": "oci-capacity-acquire {subject_sha}"
+      },
+      "workflow": "oci-capacity-acquire.yml"
+    }
+  ],
+  "oci-infrastructure-finalize-oke": [
+    {
+      "artifactContent": {
+        "equals": {
+          "anonymous_pull": "pass",
+          "build_run_attempt": "1",
+          "build_run_id": "{run_id}",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "registry_public": "true",
+          "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "build-chain.txt",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "candidate_build_run_id": "{input:ghcr_build_run_id}",
+          "package_visibility": "public",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "repository": "ghcr.io/vasilyevstan/betstan-images",
+          "repository_linked": true,
+          "terminal_status": "VALIDATED"
+        },
+        "fileName": "validation-summary.json",
+        "format": "json"
+      },
+      "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+      "input": "ghcr_package_validation_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}"
+      },
+      "workflow": "ghcr-package-management.yml"
+    }
+  ]
+}

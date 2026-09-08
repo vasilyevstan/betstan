@@ -645,6 +645,7 @@ jobs:
           fi
           jq -e \
             --arg sha "$SOURCE_SHA" \
+            --arg candidate "$CANDIDATE_BUILD_RUN_ID" \
             --arg deployed "$DEPLOYED_SHA" \
             --arg lkg "$LAST_KNOWN_GOOD_SHA" \
             --slurpfile obsolete "$RUNNER_TEMP/requested-obsolete-origins.json" '
@@ -652,6 +653,7 @@ jobs:
               .registry_provider == "ghcr" and
               .registry_host == "ghcr.io" and
               .repository == "ghcr.io/vasilyevstan/betstan-images" and
+              .candidate_build_run_id == $candidate and
               .package_repository == "vasilyevstan/betstan" and
               .package_name == "betstan-images" and
               .package_visibility == "public" and

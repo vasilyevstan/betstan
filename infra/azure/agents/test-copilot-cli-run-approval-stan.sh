@@ -63,6 +63,143 @@ approval_state_for() {
   esac
 }
 
+binding_run_json() {
+  local run_id="$1"
+  local workflow workflow_id event title created_at updated_at
+  case "$run_id" in
+    41)
+      workflow=oci-production-build.yml
+      event=workflow_run
+      title="oci-build $SHA upstream-40"
+      created_at=2026-01-01T00:00:00Z
+      updated_at=2026-01-01T00:01:00Z
+      ;;
+    42)
+      workflow=ghcr-package-management.yml
+      event=workflow_dispatch
+      title="ghcr-package validate $SHA"
+      created_at="${STUB_PACKAGE_CREATED_AT:-2026-01-01T00:02:00Z}"
+      updated_at=2026-01-01T00:03:00Z
+      ;;
+    43)
+      workflow=oci-capacity-acquire.yml
+      event=workflow_dispatch
+      title="oci-capacity-acquire $SHA"
+      created_at=2026-01-01T00:04:00Z
+      updated_at=2026-01-01T00:05:00Z
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  workflow_id="$(workflow_id_for "$workflow")"
+  jq -cn \
+    --argjson id "$run_id" \
+    --argjson workflow_id "$workflow_id" \
+    --arg path ".github/workflows/$workflow" \
+    --arg title "$title" \
+    --arg event "$event" \
+    --arg sha "$SHA" \
+    --arg repo "$REPOSITORY" \
+    --arg created_at "$created_at" \
+    --arg updated_at "$updated_at" \
+    '{
+      id:$id,
+      workflow_id:$workflow_id,
+      path:$path,
+      display_title:$title,
+      event:$event,
+      head_sha:$sha,
+      head_branch:"master",
+      head_repository:{full_name:$repo},
+      run_attempt:1,
+      status:"completed",
+      conclusion:"success",
+      created_at:$created_at,
+      updated_at:$updated_at
+    }'
+}
+
+binding_artifacts_json() {
+  local run_id="$1"
+  local artifact artifact_id
+  case "$run_id" in
+    41) artifact="oci-image-provenance-$SHA-41-1"; artifact_id=9041 ;;
+    42) artifact="ghcr-package-management-validate-42-1"; artifact_id=9042 ;;
+    43) artifact="oci-capacity-provenance-43-1"; artifact_id=9043 ;;
+    *) return 1 ;;
+  esac
+  jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
+    total_count:1,
+    artifacts:[{
+      id:$artifact_id,
+      name:$artifact,
+      expired:false,
+      size_in_bytes:4096
+    }]
+  }'
+}
+
+binding_artifact_zip() {
+  local artifact_id="$1"
+  local file_name content
+  case "$artifact_id" in
+    9041)
+      file_name=build-chain.txt
+      content="source_sha=$SHA
+build_run_id=41
+build_run_attempt=1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public=true
+anonymous_pull=pass
+"
+      ;;
+    9042)
+      file_name=validation-summary.json
+      content="$(jq -cn \
+        --arg candidate_build_run_id \
+          "${STUB_PACKAGE_CANDIDATE_BUILD_ID:-41}" \
+        '{
+          terminal_status:"VALIDATED",
+          registry_provider:"ghcr",
+          registry_host:"ghcr.io",
+          repository:"ghcr.io/vasilyevstan/betstan-images",
+          package_visibility:"public",
+          repository_linked:true,
+          candidate_build_run_id:$candidate_build_run_id
+        }')"
+      ;;
+    9043)
+      file_name=provenance.env
+      content="source_sha=$SHA
+acquisition_run_id=43
+runtime_mode=k3s
+shape=VM.Standard.A1.Flex
+ocpus=2
+memory_gb=12
+boot_volume_gb=50
+boot_volume_vpus_per_gb=10
+"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  python3 - "$file_name" "$content" <<'PY'
+import io
+import sys
+import zipfile
+
+file_name, content = sys.argv[1:]
+archive = io.BytesIO()
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+    bundle.writestr(file_name, content)
+sys.stdout.buffer.write(archive.getvalue())
+PY
+}
+
 git() {
   if [[ "$1" = "-C" ]]; then
     shift 2
@@ -92,6 +229,11 @@ git() {
       fi
       ;;
   esac
+}
+
+authority_is_inflight() {
+  local record="$authority_dir/${STUB_RUN_ID:-0}.json"
+  [[ -f "$record" ]] && jq -e '.state == "inflight"' "$record" >/dev/null 2>&1
 }
 
 gh() {
@@ -152,7 +294,13 @@ gh() {
       printf '%s\n' "${STUB_MASTER_SHA:-$SHA}"
       ;;
     "repos/$REPOSITORY/commits/$SHA/pulls")
-      if [[ "${STUB_HUMAN_PROMOTION:-false}" = "true" ]]; then
+      if [[
+        "${STUB_HUMAN_PROMOTION:-false}" = "true" ||
+          (
+            "${STUB_PROMOTION_FAIL_WHEN_INFLIGHT:-false}" = "true" &&
+              "$(authority_is_inflight && printf true || printf false)" = "true"
+          )
+      ]]; then
         printf '[{"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"%s","base":{"ref":"master"},"head":{"ref":"dev"},"labels":[]}]\n' "$SHA"
       else
         printf '[{"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"%s","base":{"ref":"master"},"head":{"ref":"dev"},"labels":[{"name":"copilot-cli-managed"}]}]\n' "$SHA"
@@ -188,6 +336,35 @@ gh() {
       ;;
     "repos/$REPOSITORY/contents/.github/workflows/"*"?ref=$SHA")
       printf '%s\n' "${STUB_API_BLOB:-$BLOB}"
+      ;;
+    "repos/$REPOSITORY/environments/"*"/variables/OCI_RUNTIME_MODE")
+      printf '%s\n' "${STUB_OCI_RUNTIME_MODE:-k3s}"
+      ;;
+    "repos/$REPOSITORY/actions/runs/41"|\
+    "repos/$REPOSITORY/actions/runs/42"|\
+    "repos/$REPOSITORY/actions/runs/43"|\
+    "repos/$REPOSITORY/actions/runs/41/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/42/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/43/attempts/1")
+      local binding_run_id
+      binding_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
+      binding_run_id="${binding_run_id%%/*}"
+      binding_run_json "$binding_run_id"
+      ;;
+    "repos/$REPOSITORY/actions/runs/41/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/42/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/43/artifacts?per_page=100")
+      local binding_artifact_run_id
+      binding_artifact_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
+      binding_artifact_run_id="${binding_artifact_run_id%%/*}"
+      binding_artifacts_json "$binding_artifact_run_id"
+      ;;
+    "repos/$REPOSITORY/actions/artifacts/9041/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9042/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9043/zip")
+      local binding_artifact_id
+      binding_artifact_id="${endpoint%/zip}"
+      binding_artifact_zip "${binding_artifact_id##*/}"
       ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID")
       local status="${STUB_RUN_STATUS:-waiting}"
@@ -244,9 +421,16 @@ gh() {
       if [[ "${STUB_NO_PENDING:-false}" = "true" ]]; then
         printf '[]\n'
       else
+        local pending_environment_id="${STUB_ENV_ID:-901}"
+        if [[
+          -n "${STUB_ENV_ID_WHEN_INFLIGHT:-}" &&
+            "$(authority_is_inflight && printf true || printf false)" = "true"
+        ]]; then
+          pending_environment_id="$STUB_ENV_ID_WHEN_INFLIGHT"
+        fi
         jq -cn \
           --arg environment "${STUB_PENDING_ENV:-$STUB_ENV}" \
-          --argjson environment_id "${STUB_ENV_ID:-901}" \
+          --argjson environment_id "$pending_environment_id" \
           --argjson can_approve "${STUB_CAN_APPROVE:-true}" \
           '[{
             environment:{id:$environment_id,name:$environment},
@@ -292,6 +476,13 @@ PY
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
       if [[
+        "${STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT:-false}" = "true" &&
+          "$(authority_is_inflight && printf true || printf false)" = "true"
+      ]]; then
+        printf '%s\n' '{'
+        return
+      fi
+      if [[
         "${STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY:-false}" == "true" &&
           -n "${PROSPECTIVE_PROMOTION_PR:-}"
       ]]; then
@@ -309,9 +500,19 @@ PY
       ;;
   esac
 }
-export -f git gh workflow_id_for approval_state_for
+export -f git gh authority_is_inflight workflow_id_for approval_state_for
+export -f binding_run_json binding_artifacts_json binding_artifact_zip
 export ROOT_DIR SHA TARGET_SHA BLOB REPOSITORY post_count_file approval_history_file
 export workflow_state_count_file
+export STUB_PACKAGE_CANDIDATE_BUILD_ID
+export authority_dir
+mkdir "$tmp_dir/bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'gh "$@"' \
+  >"$tmp_dir/bin/gh"
+chmod 755 "$tmp_dir/bin/gh"
+export PATH="$tmp_dir/bin:$PATH"
 
 make_request() {
   local operation="$1"
@@ -335,6 +536,13 @@ inputs = {
 inputs.update(policy["fixedInputs"])
 for name in policy["positiveIntegerInputs"]:
     inputs[name] = "42"
+for name, value in {
+    "ghcr_build_run_id": "41",
+    "ghcr_package_validation_run_id": "42",
+    "capacity_acquisition_run_id": "43",
+}.items():
+    if name in inputs and inputs[name] != "":
+        inputs[name] = value
 for name in policy["zeroOrPositiveIntegerInputs"]:
     inputs[name] = "0"
 for name in policy["fullShaInputs"]:
@@ -397,6 +605,7 @@ make_record() {
   local operation="$1"
   local run_id="$2"
   local policy_json workflow workflow_id environment request normalized record title run_json
+  local verified_summary
   local intent_summary capture_path intent_version
   policy_json="$("$POLICY" get "$operation")"
   workflow="$(jq -r '.workflow' <<<"$policy_json")"
@@ -483,6 +692,22 @@ make_record() {
     --current-master "$SHA" \
     --workflow-id "$workflow_id" \
     --workflow-blob-sha "$BLOB"
+  verified_summary="$(
+    "$HELPER" verify \
+      --authority-dir "$authority_dir" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --policy-json "$policy_json" \
+      --repository "$REPOSITORY" \
+      --current-master "$SHA" \
+      --workflow-id "$workflow_id" \
+      --workflow-blob-sha "$BLOB"
+  )"
+  jq -e \
+    --arg environment "$environment" \
+    --slurpfile request "$request" \
+    '.environment == $environment and .inputs == $request[0].inputs' \
+    <<<"$verified_summary" >/dev/null
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$operation" "$run_id" "$workflow" "$workflow_id" "$title" "$environment" \
     >>"$records_file"
@@ -490,7 +715,7 @@ make_record() {
 
 load_record_stub() {
   local operation="$1"
-  local row
+  local row runtime_mode
   row="$(awk -F '\t' -v operation="$operation" '$1 == operation { print; exit }' "$records_file")"
   [[ -n "$row" ]] || {
     echo "missing test record for $operation" >&2
@@ -506,8 +731,21 @@ load_record_stub() {
   unset STUB_RUN_STATUS STUB_RUN_CONCLUSION
   unset STUB_API_BLOB STUB_JOB_ID STUB_WORKFLOW_STATE
   unset STUB_CHANGE_STATE_ON_CALL
+  unset STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT
+  unset STUB_PROMOTION_FAIL_WHEN_INFLIGHT
+  unset STUB_ENV_ID_WHEN_INFLIGHT
+  unset STUB_OCI_RUNTIME_MODE
+  unset STUB_PACKAGE_CREATED_AT
+  unset STUB_PACKAGE_CANDIDATE_BUILD_ID
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
+  runtime_mode="$(
+    "$POLICY" get "$operation" | jq -r '.fixedInputs.runtime_mode // ""'
+  )"
+  if [[ -n "$runtime_mode" ]]; then
+    STUB_OCI_RUNTIME_MODE="$runtime_mode"
+    export STUB_OCI_RUNTIME_MODE
+  fi
 }
 
 run_approver() {
@@ -589,6 +827,42 @@ done < <(
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
 
+load_record_stub oci-infrastructure-finalize-k3s
+if STUB_OCI_RUNTIME_MODE=k3s \
+  STUB_PACKAGE_CREATED_AT=2025-12-31T23:59:00Z \
+  run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "package validation predating its build unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "began before ghcr_build_run_id completed" "$error_file"
+if STUB_OCI_RUNTIME_MODE=k3s \
+  STUB_PACKAGE_CANDIDATE_BUILD_ID=999 \
+  run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
+  echo "package validation for a different build unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "candidate_build_run_id" "$error_file"
+STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file"
+grep -qF "status=APPROVED" "$output_file"
+jq -e '.state == "consumed"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
+load_record_stub oci-infrastructure-prepare-oke
+if STUB_OCI_RUNTIME_MODE=k3s COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "prepare-mode drift unexpectedly passed approval" >&2
+  exit 1
+fi
+grep -qF "authoritative runtime mode changed" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
+load_record_stub oci-infrastructure-finalize-oke
+STUB_OCI_RUNTIME_MODE=oke COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file"
+grep -qF "status=APPROVED" "$output_file"
+jq -e '.state == "consumed"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+
 load_record_stub production-deploy
 PROSPECTIVE_PROMOTION_PR=224 STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
   run_approver "$STUB_RUN_ID" >"$output_file"
@@ -627,6 +901,51 @@ observed_post_count=0
 [[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
 [[ "$observed_post_count" = "$post_count_before" ]]
 rm -f "$workflow_state_count_file"
+
+load_record_stub production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_PROMOTION_FAIL_WHEN_INFLIGHT=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "post-claim promotion failure unexpectedly approved GitHub" >&2
+  exit 1
+fi
+grep -qF "not bound to exactly one CLI-managed dev promotion" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
+
+load_record_stub production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "post-claim exclusivity failure unexpectedly approved GitHub" >&2
+  exit 1
+fi
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
+
+load_record_stub oci-production-deploy
+post_count_before=0
+[[ -f "$post_count_file" ]] && post_count_before="$(cat "$post_count_file")"
+if STUB_ENV_ID=901 STUB_ENV_ID_WHEN_INFLIGHT=902 \
+  COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "changed post-claim gate unexpectedly approved GitHub" >&2
+  exit 1
+fi
+grep -qF "pending environment changed after approval authority claim" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+observed_post_count=0
+[[ -f "$post_count_file" ]] && observed_post_count="$(cat "$post_count_file")"
+[[ "$observed_post_count" = "$post_count_before" ]]
 
 load_record_stub production-deploy
 if STUB_DIRTY_CHECKOUT=true \

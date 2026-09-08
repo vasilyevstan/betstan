@@ -1637,10 +1637,9 @@ for prospective_contract in \
     fail "deployment safety omits prospective-master bootstrap contract: $prospective_contract"
 done
 for compare_contract in \
-    'capacity requires one later exact success' \
-    'live data requires later dry-run, backfill, and slip-index successes' \
-    'activation requires one later exact activation success' \
-    'reject any proposal to remove live-data' \
+    'Capacity is the only active supersession exception' \
+    'stale live-data and activation runs always remain production fences' \
+    'no artifacts, and the exact later' \
     'Fetch Compare evidence with `--paginate` and a compact SHA-only projection' \
     'complete unique ordered commit list to end at the requested head' \
     'c6c113b49a36518b7b106aa1406998a4abca10a0' \
@@ -1676,7 +1675,8 @@ for recovery_contract in \
     'Promotion cannot silently clear the fence' \
     'retire-unmaterialized-claim' \
     'never reset master to the poisoned SHA' \
-    'zero exact count/list jobs and artifacts'; do
+    'zero exact count/list jobs and artifacts' \
+    'zero approvals and pending deployments'; do
   grep -Fq "$recovery_contract" "$ROOT_DIR/LEARNINGS.md" ||
     fail "learnings omit unmaterialized recovery contract: $recovery_contract"
 done
@@ -1705,8 +1705,8 @@ for compare_learning in \
     'Raw paginated Compare responses can exceed the private evidence-size bound' \
     'SHA-only projection' \
     'c6c113b49a36518b7b106aa1406998a4abca10a0' \
-    'Keep workflow-specific supersession successor chains' \
-    'supersession as a substitute for their successor chains' \
+    'Keep active supersession capacity-only' \
+    'Active live-data and activation records remain blockers' \
     'reconcile the entire nonterminal run inventory'; do
   grep -Fq "$compare_learning" "$ROOT_DIR/LEARNINGS.md" ||
     fail "learnings omit compact Compare recovery guidance: $compare_learning"

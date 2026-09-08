@@ -31,6 +31,7 @@ def dispatch(
     subject_relation="none",
     target_input=None,
     target_relation="none",
+    upstream_run_bindings=None,
     derived_operations=None,
 ):
     return {
@@ -61,6 +62,7 @@ def dispatch(
         "upstreamConclusion": None,
         "upstreamOperations": [],
         "requiresConsumedUpstream": False,
+        "upstreamRunBindings": upstream_run_bindings or [],
         "derivedOperations": derived_operations or [],
     }
 
@@ -107,6 +109,7 @@ def automatic(
         "upstreamConclusion": upstream_conclusion,
         "upstreamOperations": upstream_operations or [],
         "requiresConsumedUpstream": requires_consumed_upstream,
+        "upstreamRunBindings": [],
         "derivedOperations": [],
     }
 
@@ -160,7 +163,80 @@ OCI_INFRASTRUCTURE_INPUTS = [
     "validation_run_id",
     "ghcr_build_run_id",
     "ghcr_package_validation_run_id",
+    "capacity_acquisition_run_id",
+    "runtime_mode",
 ]
+
+CAPACITY_BINDING = {
+    "input": "capacity_acquisition_run_id",
+    "afterInput": "ghcr_package_validation_run_id",
+    "workflow": "oci-capacity-acquire.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "oci-capacity-acquire {subject_sha}",
+        "schedule": "oci-capacity-acquire scheduled-master",
+    },
+    "artifactTemplate": "oci-capacity-provenance-{run_id}-1",
+    "artifactContent": {
+        "fileName": "provenance.env",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "acquisition_run_id": "{run_id}",
+            "runtime_mode": "k3s",
+            "shape": "VM.Standard.A1.Flex",
+            "ocpus": "2",
+            "memory_gb": "12",
+            "boot_volume_gb": "50",
+            "boot_volume_vpus_per_gb": "10",
+        },
+    },
+}
+
+GHCR_BUILD_BINDING = {
+    "input": "ghcr_build_run_id",
+    "workflow": "oci-production-build.yml",
+    # The build title embeds an unpredictable upstream run ID, so identity is
+    # bound by an artifact naming both the subject SHA and the exact run.
+    "titleTemplates": {"workflow_run": None},
+    "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+    "artifactContent": {
+        "fileName": "build-chain.txt",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "build_run_id": "{run_id}",
+            "build_run_attempt": "1",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+            "registry_public": "true",
+            "anonymous_pull": "pass",
+        },
+    },
+}
+
+GHCR_PACKAGE_BINDING = {
+    "input": "ghcr_package_validation_run_id",
+    "afterInput": "ghcr_build_run_id",
+    "workflow": "ghcr-package-management.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}",
+    },
+    "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+    "artifactContent": {
+        "fileName": "validation-summary.json",
+        "format": "json",
+        "equals": {
+            "terminal_status": "VALIDATED",
+            "registry_provider": "ghcr",
+            "registry_host": "ghcr.io",
+            "repository": "ghcr.io/vasilyevstan/betstan-images",
+            "package_visibility": "public",
+            "repository_linked": True,
+            "candidate_build_run_id": "{input:ghcr_build_run_id}",
+        },
+    },
+}
 
 GHCR_INPUTS = [
     "approved_sha",
@@ -501,11 +577,11 @@ POLICIES = {
         subject_input="approved_sha",
         subject_relation="current",
     ),
-    "oci-infrastructure-prepare": dispatch(
-        "oci-infrastructure-prepare",
+    "oci-infrastructure-prepare-k3s": dispatch(
+        "oci-infrastructure-prepare-k3s",
         "oci-infrastructure.yml",
         "oci-infrastructure",
-        "oci-infrastructure prepare {subject_sha}",
+        "oci-infrastructure prepare k3s {subject_sha}",
         OCI_INFRASTRUCTURE_INPUTS,
         fixed={
             "confirmation": "PROVISION OCI ZERO COST",
@@ -521,17 +597,51 @@ POLICIES = {
             "validation_run_id": "",
             "ghcr_build_run_id": "",
             "ghcr_package_validation_run_id": "",
+            # Capacity acquisition is a k3s-only Free Tier concern and is never
+            # a prepare prerequisite in either runtime mode.
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "k3s",
         },
-        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:],
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:15],
         full_shas=["approved_sha"],
         subject_input="approved_sha",
         subject_relation="current",
     ),
-    "oci-infrastructure-finalize": dispatch(
-        "oci-infrastructure-finalize",
+    "oci-infrastructure-prepare-oke": dispatch(
+        "oci-infrastructure-prepare-oke",
         "oci-infrastructure.yml",
         "oci-infrastructure",
-        "oci-infrastructure finalize {subject_sha}",
+        "oci-infrastructure prepare oke {subject_sha}",
+        OCI_INFRASTRUCTURE_INPUTS,
+        fixed={
+            "confirmation": "PROVISION OCI ZERO COST",
+            "phase": "prepare",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            "ghcr_build_run_id": "",
+            "ghcr_package_validation_run_id": "",
+            # Capacity acquisition is a k3s-only Free Tier concern and is never
+            # a prepare prerequisite in either runtime mode.
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "oke",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:15],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+    ),
+    "oci-infrastructure-finalize-k3s": dispatch(
+        "oci-infrastructure-finalize-k3s",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure finalize k3s {subject_sha}",
         OCI_INFRASTRUCTURE_INPUTS,
         fixed={
             "confirmation": "PROVISION OCI ZERO COST",
@@ -545,12 +655,52 @@ POLICIES = {
             "fallback_sha": "",
             "fallback_build_run_id": "",
             "validation_run_id": "",
+            "runtime_mode": "k3s",
         },
         allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12],
+        positive=[
+            "ghcr_build_run_id",
+            "ghcr_package_validation_run_id",
+            "capacity_acquisition_run_id",
+        ],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+        upstream_run_bindings=[
+            GHCR_BUILD_BINDING,
+            GHCR_PACKAGE_BINDING,
+            CAPACITY_BINDING,
+        ],
+    ),
+    "oci-infrastructure-finalize-oke": dispatch(
+        "oci-infrastructure-finalize-oke",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure finalize oke {subject_sha}",
+        OCI_INFRASTRUCTURE_INPUTS,
+        fixed={
+            "confirmation": "PROVISION OCI ZERO COST",
+            "phase": "finalize",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            # OKE has no Free Tier capacity acquisition; a supplied capacity run
+            # is rejected because this fixed value forces the empty string.
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "oke",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12] + ["capacity_acquisition_run_id"],
         positive=["ghcr_build_run_id", "ghcr_package_validation_run_id"],
         full_shas=["approved_sha"],
         subject_input="approved_sha",
         subject_relation="current",
+        upstream_run_bindings=[GHCR_BUILD_BINDING, GHCR_PACKAGE_BINDING],
     ),
     "ghcr-package-bootstrap": dispatch(
         "ghcr-package-bootstrap",
@@ -948,6 +1098,7 @@ required_fields = {
     "upstreamConclusion",
     "upstreamOperations",
     "requiresConsumedUpstream",
+    "upstreamRunBindings",
     "derivedOperations",
 }
 

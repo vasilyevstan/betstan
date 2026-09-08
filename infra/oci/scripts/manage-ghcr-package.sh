@@ -13,6 +13,7 @@ PACKAGE_OWNER="${REPO%%/*}"
 PACKAGE_API="users/$PACKAGE_OWNER/packages/container/$PACKAGE_NAME"
 PRUNE_MODE="${PRUNE_MODE:-validate}"
 CURRENT_SOURCE_SHA="${CURRENT_SOURCE_SHA:-}"
+CANDIDATE_BUILD_RUN_ID="${CANDIDATE_BUILD_RUN_ID:-}"
 DEPLOYED_SOURCE_SHA="${DEPLOYED_SOURCE_SHA:-}"
 LAST_KNOWN_GOOD_SOURCE_SHA="${LAST_KNOWN_GOOD_SOURCE_SHA:-}"
 OBSOLETE_GENERATIONS="${OBSOLETE_GENERATIONS:-}"
@@ -39,6 +40,8 @@ for source_sha in "$CURRENT_SOURCE_SHA" "$DEPLOYED_SOURCE_SHA" "$LAST_KNOWN_GOOD
   [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] ||
     oci_die "candidate, deployed, and last-known-good SHAs must be full lowercase SHAs"
 done
+[[ "$CANDIDATE_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+  oci_die "candidate build run ID must be a positive integer"
 
 oci_prepare_safe_private_dir "$OUTPUT_DIR"
 WORK_DIR="$OUTPUT_DIR/.work"
@@ -301,6 +304,7 @@ if [[ "$PRUNE_MODE" == "validate" ]]; then
     --arg registry_provider "ghcr" \
     --arg registry_host "ghcr.io" \
     --arg repository "ghcr.io/vasilyevstan/betstan-images" \
+    --arg candidate_build_run_id "$CANDIDATE_BUILD_RUN_ID" \
     --arg package_repository "$REPO" \
     --arg package_name "$PACKAGE_NAME" \
     --arg sentinel_tag "$SENTINEL_TAG" \
@@ -323,6 +327,7 @@ if [[ "$PRUNE_MODE" == "validate" ]]; then
       registry_provider: $registry_provider,
       registry_host: $registry_host,
       repository: $repository,
+      candidate_build_run_id: $candidate_build_run_id,
       package_repository: $package_repository,
       package_name: $package_name,
       package_visibility: "public",
@@ -364,6 +369,7 @@ validated_sha256="$(oci_sha256 < "$VALIDATED_BEFORE_SUMMARY_FILE")"
 delete_count="$(awk 'END { print NR+0 }' "$VALIDATED_DELETE_IDS_FILE")"
 jq -e \
   --arg current "$CURRENT_SOURCE_SHA" \
+  --arg candidate "$CANDIDATE_BUILD_RUN_ID" \
   --arg deployed "$DEPLOYED_SOURCE_SHA" \
   --arg lkg "$LAST_KNOWN_GOOD_SOURCE_SHA" \
   --argjson sentinel_version_id "$sentinel_version_id" \
@@ -372,6 +378,7 @@ jq -e \
     .schema == "betstan.ghcr-package-management.v1" and
     .registry_provider == "ghcr" and .registry_host == "ghcr.io" and
     .repository == "ghcr.io/vasilyevstan/betstan-images" and
+    .candidate_build_run_id == $candidate and
     .package_repository == "vasilyevstan/betstan" and
     .package_name == "betstan-images" and .package_visibility == "public" and
     .repository_linked == true and .sentinel_tag == "bootstrap-sentinel-v1" and
