@@ -1741,7 +1741,6 @@ fi
 grep -qF "every workflow job must declare effective permissions" "$test_output"
 assert_node_not_invoked
 echo "coverage_node_non_invocation=PASS"
-"$COVERAGE_ENGINE_REVIEW"
 
 coverage_review_poison="$permission_fixture_dir/coverage-review-poison"
 coverage_review_node_poison="$permission_fixture_dir/coverage-review-node-invoked"
