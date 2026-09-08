@@ -1941,6 +1941,23 @@ async function getWorkflowBlob(github, repository, path, ref) {
   return response.data.sha;
 }
 
+async function getRequiredWorkflowBlob(
+  github,
+  repository,
+  path,
+  ref,
+  missingReason,
+) {
+  try {
+    return await getWorkflowBlob(github, repository, path, ref);
+  } catch (error) {
+    if (error?.status === 404) {
+      throw new Error(missingReason);
+    }
+    throw error;
+  }
+}
+
 async function getBranchSha(github, owner, repo, branch) {
   const response = await github.rest.repos.getCommit({
     owner,
@@ -2510,65 +2527,17 @@ async function resolveCoverageAssetTrust({
   let basePair;
   let authorizedPair;
   let snapshotPair;
-  let trustedReviewBlob;
-  let authorizedReviewBlob;
-  let snapshotReviewBlob;
-  let trustedInvocationBlob;
-  let authorizedInvocationBlob;
-  let snapshotInvocationBlob;
   try {
     [
       trustedPair,
       basePair,
       authorizedPair,
       snapshotPair,
-      trustedReviewBlob,
-      authorizedReviewBlob,
-      snapshotReviewBlob,
-      trustedInvocationBlob,
-      authorizedInvocationBlob,
-      snapshotInvocationBlob,
     ] = await Promise.all([
       getCoveragePair(github, repository, defaultBranch),
       getCoveragePair(github, repository, pull.baseSha),
       getCoveragePair(github, pull.headRepository, pull.headSha),
       getCoveragePair(github, repository, pull.mergeSha),
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_REVIEW_PATH,
-        defaultBranch,
-      ),
-      getWorkflowBlob(
-        github,
-        pull.headRepository,
-        COVERAGE_REVIEW_PATH,
-        pull.headSha,
-      ),
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_REVIEW_PATH,
-        pull.mergeSha,
-      ),
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_INVOCATION_PATH,
-        defaultBranch,
-      ),
-      getWorkflowBlob(
-        github,
-        pull.headRepository,
-        COVERAGE_INVOCATION_PATH,
-        pull.headSha,
-      ),
-      getWorkflowBlob(
-        github,
-        repository,
-        COVERAGE_INVOCATION_PATH,
-        pull.mergeSha,
-      ),
     ]);
   } catch (error) {
     return {
@@ -2577,23 +2546,6 @@ async function resolveCoverageAssetTrust({
         description: `PR #${pull.number} cannot verify trusted coverage assets`,
         targetUrl: fallbackUrl,
         reason: error.message,
-      },
-    };
-  }
-
-  if (
-    trustedReviewBlob !== authorizedReviewBlob ||
-    trustedReviewBlob !== snapshotReviewBlob ||
-    trustedInvocationBlob !== authorizedInvocationBlob ||
-    trustedInvocationBlob !== snapshotInvocationBlob
-  ) {
-    return {
-      failure: {
-        state: "failure",
-        description: `PR #${pull.number} changes trusted coverage review code`,
-        targetUrl: fallbackUrl,
-        reason:
-          "coverage review validator and invocation must match the current default branch",
       },
     };
   }
@@ -2637,6 +2589,136 @@ async function resolveCoverageAssetTrust({
         targetUrl: fallbackUrl,
         reason:
           "coverage engine and harness must remain default-equal or change as one authorized pair",
+      },
+    };
+  }
+
+  let trustedReviewBlob;
+  let baseReviewBlob;
+  let authorizedReviewBlob;
+  let snapshotReviewBlob;
+  let trustedInvocationBlob;
+  let baseInvocationBlob;
+  let authorizedInvocationBlob;
+  let snapshotInvocationBlob;
+  try {
+    [
+      trustedReviewBlob,
+      baseReviewBlob,
+      authorizedReviewBlob,
+      snapshotReviewBlob,
+      trustedInvocationBlob,
+      baseInvocationBlob,
+      authorizedInvocationBlob,
+      snapshotInvocationBlob,
+    ] = await Promise.all([
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_REVIEW_PATH,
+        defaultBranch,
+        "coverage-review-is-not-in-default",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_REVIEW_PATH,
+        pull.baseSha,
+        "coverage-review-is-not-in-base",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_REVIEW_PATH,
+        pull.headSha,
+        "coverage-review-is-not-in-head",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_REVIEW_PATH,
+        pull.mergeSha,
+        "coverage-review-is-not-in-merge-snapshot",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_INVOCATION_PATH,
+        defaultBranch,
+        "coverage-invocation-is-not-in-default",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_INVOCATION_PATH,
+        pull.baseSha,
+        "coverage-invocation-is-not-in-base",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        pull.headRepository,
+        COVERAGE_INVOCATION_PATH,
+        pull.headSha,
+        "coverage-invocation-is-not-in-head",
+      ),
+      getRequiredWorkflowBlob(
+        github,
+        repository,
+        COVERAGE_INVOCATION_PATH,
+        pull.mergeSha,
+        "coverage-invocation-is-not-in-merge-snapshot",
+      ),
+    ]);
+  } catch (error) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} cannot verify trusted coverage assets`,
+        targetUrl: fallbackUrl,
+        reason: error.message,
+      },
+    };
+  }
+
+  const validatorDriftReason = [
+    [
+      baseReviewBlob,
+      trustedReviewBlob,
+      "coverage-review-base-differs-from-default",
+    ],
+    [
+      authorizedReviewBlob,
+      trustedReviewBlob,
+      "coverage-review-head-differs-from-default",
+    ],
+    [
+      snapshotReviewBlob,
+      trustedReviewBlob,
+      "coverage-review-differs-from-default",
+    ],
+    [
+      baseInvocationBlob,
+      trustedInvocationBlob,
+      "coverage-invocation-base-differs-from-default",
+    ],
+    [
+      authorizedInvocationBlob,
+      trustedInvocationBlob,
+      "coverage-invocation-head-differs-from-default",
+    ],
+    [
+      snapshotInvocationBlob,
+      trustedInvocationBlob,
+      "coverage-invocation-differs-from-default",
+    ],
+  ].find(([actual, expected]) => actual !== expected)?.[2];
+  if (validatorDriftReason) {
+    return {
+      failure: {
+        state: "failure",
+        description: `PR #${pull.number} changes trusted coverage review code`,
+        targetUrl: fallbackUrl,
+        reason: validatorDriftReason,
       },
     };
   }

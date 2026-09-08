@@ -32,6 +32,28 @@ fail() {
   exit 1
 }
 
+selected_authorization_boundary_reason() {
+  local mode="$1"
+  local base_ref="$2"
+  local head_ref="$3"
+
+  case "$mode" in
+    integration)
+      if [[ "$base_ref" != "dev" || "$head_ref" == "dev" || "$head_ref" == "master" ]]; then
+        printf '%s\n' "coverage-integration-branch-is-invalid"
+      fi
+      ;;
+    promotion)
+      if [[ "$base_ref" != "master" || "$head_ref" != "dev" ]]; then
+        printf '%s\n' "coverage-promotion-branch-is-invalid"
+      fi
+      ;;
+    *)
+      printf '%s\n' "selected-authorization-mode-is-invalid"
+      ;;
+  esac
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 ||
     fail "missing-$1"
@@ -51,8 +73,14 @@ load_repository_file() {
   local ref="$1"
   local relative_path="$2"
   local destination="$3"
+  local missing_reason="${4:-}"
 
-  if git cat-file -e "${ref}:${relative_path}" 2>/dev/null; then
+  if git cat-file -e "${ref}^{commit}" 2>/dev/null; then
+    if ! git cat-file -e "${ref}:${relative_path}" 2>/dev/null; then
+      [[ -z "$missing_reason" ]] ||
+        fail "$missing_reason"
+      fail "cannot-read-trusted-coverage-asset"
+    fi
     git show "${ref}:${relative_path}" >"$destination" 2>/dev/null ||
       fail "cannot-read-trusted-coverage-asset"
   else
@@ -434,8 +462,10 @@ title = pull.get("title")
 body = pull.get("body")
 labels = pull.get("labels")
 if (
-    repository_name != "vasilyevstan/betstan"
-    or default_branch != "master"
+    not isinstance(repository_name, str)
+    or not repository_name
+    or not isinstance(default_branch, str)
+    or not default_branch
     or type(number) is not int
     or number < 1
     or number > 9007199254740991
@@ -2513,46 +2543,70 @@ load_repository_file "$head_sha" "$HARNESS_PATH" "$head_harness_file"
 publisher_source="$work_dir/trusted-publisher.js"
 trusted_review_file="$work_dir/trusted-review.sh"
 trusted_invocation_file="$work_dir/trusted-invocation.sh"
+base_review_file="$work_dir/base-review.sh"
+base_invocation_file="$work_dir/base-invocation.sh"
 head_review_file="$work_dir/head-review.sh"
 head_invocation_file="$work_dir/head-invocation.sh"
 changed_paths="$work_dir/changed-paths"
 authorization_selection="$work_dir/authorization-selection"
-require_regular_file "$REVIEW_PATH"
-require_regular_file "$INVOCATION_PATH"
+[[ -f "$REVIEW_PATH" && ! -L "$REVIEW_PATH" ]] ||
+  fail "coverage-review-is-not-in-merge-snapshot"
+[[ -f "$INVOCATION_PATH" && ! -L "$INVOCATION_PATH" ]] ||
+  fail "coverage-invocation-is-not-in-merge-snapshot"
 current_review_blob="$(hash_file "$REVIEW_PATH")"
 current_invocation_blob="$(hash_file "$INVOCATION_PATH")"
-head_review_blob="$(git rev-parse "HEAD:${REVIEW_PATH}" 2>/dev/null)" ||
-  fail "coverage-review-is-not-in-head"
-head_invocation_blob="$(git rev-parse "HEAD:${INVOCATION_PATH}" 2>/dev/null)" ||
-  fail "coverage-invocation-is-not-in-head"
-[[ "$current_review_blob" == "$head_review_blob" ]] ||
-  fail "coverage-review-differs-from-head"
-[[ "$current_invocation_blob" == "$head_invocation_blob" ]] ||
-  fail "coverage-invocation-differs-from-head"
+merge_review_blob="$(git rev-parse "HEAD:${REVIEW_PATH}" 2>/dev/null)" ||
+  fail "coverage-review-is-not-in-merge-snapshot"
+merge_invocation_blob="$(git rev-parse "HEAD:${INVOCATION_PATH}" 2>/dev/null)" ||
+  fail "coverage-invocation-is-not-in-merge-snapshot"
+[[ "$current_review_blob" == "$merge_review_blob" ]] ||
+  fail "coverage-review-differs-from-merge-snapshot"
+[[ "$current_invocation_blob" == "$merge_invocation_blob" ]] ||
+  fail "coverage-invocation-differs-from-merge-snapshot"
 load_repository_file \
   "$default_branch_sha" \
   "$REVIEW_PATH" \
-  "$trusted_review_file"
+  "$trusted_review_file" \
+  "coverage-review-is-not-in-default"
 load_repository_file \
   "$default_branch_sha" \
   "$INVOCATION_PATH" \
-  "$trusted_invocation_file"
+  "$trusted_invocation_file" \
+  "coverage-invocation-is-not-in-default"
+load_repository_file \
+  "$base_sha" \
+  "$REVIEW_PATH" \
+  "$base_review_file" \
+  "coverage-review-is-not-in-base"
+load_repository_file \
+  "$base_sha" \
+  "$INVOCATION_PATH" \
+  "$base_invocation_file" \
+  "coverage-invocation-is-not-in-base"
 load_repository_file \
   "$head_sha" \
   "$REVIEW_PATH" \
-  "$head_review_file"
+  "$head_review_file" \
+  "coverage-review-is-not-in-head"
 load_repository_file \
   "$head_sha" \
   "$INVOCATION_PATH" \
-  "$head_invocation_file"
-[[ "$(hash_file "$trusted_review_file")" == "$current_review_blob" ]] ||
+  "$head_invocation_file" \
+  "coverage-invocation-is-not-in-head"
+trusted_review_blob="$(hash_file "$trusted_review_file")"
+trusted_invocation_blob="$(hash_file "$trusted_invocation_file")"
+[[ "$(hash_file "$base_review_file")" == "$trusted_review_blob" ]] ||
+  fail "coverage-review-base-differs-from-default"
+[[ "$(hash_file "$base_invocation_file")" == "$trusted_invocation_blob" ]] ||
+  fail "coverage-invocation-base-differs-from-default"
+[[ "$(hash_file "$head_review_file")" == "$trusted_review_blob" ]] ||
+  fail "coverage-review-head-differs-from-default"
+[[ "$(hash_file "$head_invocation_file")" == "$trusted_invocation_blob" ]] ||
+  fail "coverage-invocation-head-differs-from-default"
+[[ "$current_review_blob" == "$trusted_review_blob" ]] ||
   fail "coverage-review-differs-from-default"
-[[ "$(hash_file "$trusted_invocation_file")" == "$current_invocation_blob" ]] ||
+[[ "$current_invocation_blob" == "$trusted_invocation_blob" ]] ||
   fail "coverage-invocation-differs-from-default"
-[[ "$(hash_file "$head_review_file")" == "$current_review_blob" ]] ||
-  fail "coverage-review-differs-from-head"
-[[ "$(hash_file "$head_invocation_file")" == "$current_invocation_blob" ]] ||
-  fail "coverage-invocation-differs-from-head"
 load_repository_file \
   "$default_branch_sha" \
   "$PUBLISHER_PATH" \
@@ -2598,8 +2652,14 @@ authorization_head_repository="$(sed -n '11p' "$authorization_selection")"
 authorization_head_ref="$(sed -n '12p' "$authorization_selection")"
 authorization_head_sha="$(sed -n '13p' "$authorization_selection")"
 authorization_base_ref="$(sed -n '14p' "$authorization_selection")"
-[[ "$authorization_mode" =~ ^(integration|promotion)$ ]] ||
-  fail "selected-authorization-mode-is-invalid"
+authorization_boundary_reason="$(
+  selected_authorization_boundary_reason \
+    "$authorization_mode" \
+    "$base_ref" \
+    "$head_ref"
+)"
+[[ -z "$authorization_boundary_reason" ]] ||
+  fail "$authorization_boundary_reason"
 [[ "$authorization_id" =~ ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ ]] ||
   fail "selected-authorization-id-is-invalid"
 [[ "$authorization_fingerprint" =~ ^[0-9a-f]{40}$ ]] ||
@@ -2691,8 +2751,6 @@ validate_quality_run \
   fail "current-quality-run-is-invalid"
 
 if [[ "$authorization_mode" == "integration" ]]; then
-  [[ "$base_ref" == "dev" && "$head_ref" != "dev" && "$head_ref" != "master" ]] ||
-    fail "coverage-integration-branch-is-invalid"
   if ! assert_commit_relationship \
     "$head_sha" \
     "$base_sha" \
@@ -2740,8 +2798,6 @@ if [[ "$authorization_mode" == "integration" ]]; then
     "integration" ||
     fail "coverage-integration-receipt-is-not-empty"
 elif [[ "$authorization_mode" == "promotion" ]]; then
-  [[ "$base_ref" == "master" && "$head_ref" == "dev" ]] ||
-    fail "coverage-promotion-branch-is-invalid"
   live_master_file="$work_dir/live-master-sha"
   live_dev_file="$work_dir/live-dev-sha"
   resolve_repository_ref_sha "master" "$live_master_file" ||

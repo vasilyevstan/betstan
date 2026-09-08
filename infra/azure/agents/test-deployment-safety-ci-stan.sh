@@ -14,6 +14,7 @@ RUN_APPROVAL_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-run-approval-st
 RUN_EXCLUSIVITY_TEST="$ROOT_DIR/infra/azure/agents/test-production-run-exclusivity-stan.sh"
 WORKFLOW_TRIGGER_GUARD="$ROOT_DIR/infra/azure/agents/workflow-trigger-guard-stan.sh"
 COVERAGE_ENGINE_REVIEW="$ROOT_DIR/infra/azure/agents/coverage-engine-review-stan.sh"
+QUALITY_GATES_DOC="$ROOT_DIR/docs/wiki/Quality-Gates.md"
 LIVE_DATA_ROLLOUT_TEST="$ROOT_DIR/infra/oci/tests/test-live-betting-data-rollout-stan.sh"
 GHCR_CONTRACT_TEST="$ROOT_DIR/infra/oci/tests/test-ghcr-contract.sh"
 
@@ -64,6 +65,15 @@ assert_isolated_python_invocations \
   "$COVERAGE_ENGINE_REVIEW" \
   "${BASH_SOURCE[0]}"
 echo "coverage_python_isolation=PASS"
+
+[[ -f "$QUALITY_GATES_DOC" && ! -L "$QUALITY_GATES_DOC" ]]
+grep -qF "policy evaluation returns before" "$QUALITY_GATES_DOC"
+grep -qF "\`production-build.yml\` does not yet" "$QUALITY_GATES_DOC"
+grep -qF "aggregate exercises its offline contract fixtures" \
+  "$QUALITY_GATES_DOC"
+grep -qF "normal default-equal pull request" "$QUALITY_GATES_DOC"
+grep -qF "Stage 2A activation also requires" "$QUALITY_GATES_DOC"
+echo "coverage_quality_gates_contract=PASS"
 
 python_isolation_fixture_dir="$permission_fixture_dir/python-isolation"
 mkdir -p "$python_isolation_fixture_dir"
@@ -170,6 +180,13 @@ initialize_coverage_review_fixture() {
   coverage_review_docker_exit="$coverage_review_fixture_root/docker.exit"
   coverage_review_node_sentinel="$coverage_review_fixture_root/node-invoked"
   coverage_review_api="$coverage_review_fixture_root/api"
+  unset \
+    coverage_review_sha_override \
+    coverage_review_repository_override \
+    coverage_review_event_name_override \
+    coverage_review_ref_override \
+    coverage_review_head_ref_override \
+    coverage_review_base_ref_override
   rm -rf "$coverage_review_fixture_root"
   mkdir -p \
     "$coverage_review_repo/.github/scripts" \
@@ -1146,19 +1163,21 @@ SH
 }
 
 run_coverage_review_fixture() {
+  local coverage_review_redaction_marker="coverage-review-sensitive-sentinel"
   (
     cd "$coverage_review_repo"
     PATH="$coverage_review_bin:$PATH" \
       GITHUB_ACTIONS=true \
-      GITHUB_REPOSITORY=vasilyevstan/betstan \
-      GITHUB_EVENT_NAME=pull_request \
+      GITHUB_REPOSITORY="${coverage_review_repository_override:-vasilyevstan/betstan}" \
+      GITHUB_EVENT_NAME="${coverage_review_event_name_override:-pull_request}" \
       GITHUB_EVENT_PATH="$coverage_review_event" \
-      GITHUB_SHA="$coverage_review_merge_sha" \
-      GITHUB_REF="refs/pull/${coverage_review_pull_number}/merge" \
-      GITHUB_HEAD_REF="$coverage_review_head_ref" \
-      GITHUB_BASE_REF="$coverage_review_base_ref" \
+      GITHUB_SHA="${coverage_review_sha_override:-$coverage_review_merge_sha}" \
+      GITHUB_REF="${coverage_review_ref_override:-refs/pull/${coverage_review_pull_number}/merge}" \
+      GITHUB_HEAD_REF="${coverage_review_head_ref_override:-$coverage_review_head_ref}" \
+      GITHUB_BASE_REF="${coverage_review_base_ref_override:-$coverage_review_base_ref}" \
       GITHUB_RUN_ID="$coverage_review_run_id" \
       GITHUB_RUN_ATTEMPT="$coverage_review_run_attempt" \
+      GITHUB_TOKEN="$coverage_review_redaction_marker" \
       BETSTAN_COVERAGE_REVIEW_DEFAULT_SHA="$coverage_review_default_sha" \
       BETSTAN_COVERAGE_REVIEW_API_DIR="$coverage_review_api" \
       BETSTAN_COVERAGE_REVIEW_ENGINE_PATH="$coverage_review_repo/.github/scripts/test-coverage-matrix.js" \
@@ -1180,9 +1199,214 @@ assert_coverage_review_pre_execution_failure() {
     echo "ERROR: $description unexpectedly passed" >&2
     exit 1
   fi
-  grep -qF "reason=$expected_reason" "$test_output"
+  grep -qxF "coverage_engine_review=FAIL reason=$expected_reason" "$test_output"
+  if grep -qF "coverage_engine_review=PASS" "$test_output"; then
+    echo "ERROR: $description emitted a success marker" >&2
+    exit 1
+  fi
+  if grep -qF "coverage-review-sensitive-sentinel" "$test_output"; then
+    echo "ERROR: $description exposed the fixture token" >&2
+    exit 1
+  fi
   [[ ! -e "$coverage_review_docker_args" ]]
   [[ ! -e "$coverage_review_node_sentinel" ]]
+}
+
+assert_selected_authorization_boundary_failure() {
+  local mode="$1"
+  local base_ref="$2"
+  local head_ref="$3"
+  local expected_reason="$4"
+  local description="$5"
+  local boundary_source="$permission_fixture_dir/selected-authorization-boundary.sh"
+
+  sed -n \
+    '/^selected_authorization_boundary_reason() {$/,/^}$/p' \
+    "$COVERAGE_ENGINE_REVIEW" >"$boundary_source"
+  rm -f "$coverage_review_node_poison" "$coverage_review_docker_poison"
+  if (
+    PATH="$coverage_review_poison:$PATH"
+    source "$boundary_source"
+    reason="$(
+      selected_authorization_boundary_reason \
+        "$mode" \
+        "$base_ref" \
+        "$head_ref"
+    )"
+    [[ -z "$reason" ]] || {
+      printf 'coverage_engine_review=FAIL reason=%s\n' "$reason" >&2
+      exit 1
+    }
+  ) >"$test_output" 2>&1; then
+    echo "ERROR: $description unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qxF "coverage_engine_review=FAIL reason=$expected_reason" \
+    "$test_output"
+  if grep -qF "coverage_engine_review=PASS" "$test_output"; then
+    echo "ERROR: $description emitted a success marker" >&2
+    exit 1
+  fi
+  [[ ! -e "$coverage_review_node_poison" ]]
+  [[ ! -e "$coverage_review_docker_poison" ]]
+}
+
+add_coverage_review_merge_asset_drift() {
+  local relative_path="$1"
+  local marker="$2"
+
+  git -C "$coverage_review_repo" checkout --quiet \
+    --detach "$coverage_review_merge_sha"
+  printf '\n# %s\n' "$marker" \
+    >>"$coverage_review_repo/$relative_path"
+  git -C "$coverage_review_repo" add "$relative_path"
+  git -C "$coverage_review_repo" commit --quiet \
+    -m "fixture merge asset drift"
+  coverage_review_merge_sha="$(
+    git -C "$coverage_review_repo" rev-parse HEAD
+  )"
+  python3 -I - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$coverage_review_merge_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+merge_sha = sys.argv[3]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+event["pull_request"]["merge_commit_sha"] = merge_sha
+current["merge_commit_sha"] = merge_sha
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+}
+
+set_coverage_review_ref_asset_state() {
+  local location="$1"
+  local relative_path="$2"
+  local state="$3"
+  local source_sha
+  local updated_sha
+
+  case "$location" in
+    base)
+      source_sha="$coverage_review_base_sha"
+      ;;
+    head)
+      source_sha="$coverage_review_head_sha"
+      ;;
+    *)
+      echo "ERROR: unsupported coverage asset ref location" >&2
+      exit 1
+      ;;
+  esac
+  git -C "$coverage_review_repo" checkout --quiet --detach "$source_sha"
+  case "$state" in
+    missing)
+      git -C "$coverage_review_repo" rm --quiet "$relative_path"
+      ;;
+    drift)
+      printf '\n# fixture %s %s drift\n' "$location" "$relative_path" \
+        >>"$coverage_review_repo/$relative_path"
+      git -C "$coverage_review_repo" add "$relative_path"
+      ;;
+    *)
+      echo "ERROR: unsupported coverage asset ref state" >&2
+      exit 1
+      ;;
+  esac
+  git -C "$coverage_review_repo" commit --quiet \
+    -m "fixture $location coverage asset $state"
+  updated_sha="$(git -C "$coverage_review_repo" rev-parse HEAD)"
+  git -C "$coverage_review_repo" checkout --quiet \
+    --detach "$coverage_review_merge_sha"
+  if [[ "$location" == "base" ]]; then
+    coverage_review_base_sha="$updated_sha"
+  else
+    coverage_review_head_sha="$updated_sha"
+  fi
+  python3 -I - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$location" \
+    "$updated_sha" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+location = sys.argv[3]
+updated_sha = sys.argv[4]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+event["pull_request"][location]["sha"] = updated_sha
+current[location]["sha"] = updated_sha
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+}
+
+set_coverage_review_inert_asset_correction() {
+  local relative_path="$1"
+  local marker="$2"
+
+  git -C "$coverage_review_repo" checkout --quiet \
+    --detach "$coverage_review_head_sha"
+  printf '\n# %s\n' "$marker" \
+    >>"$coverage_review_repo/$relative_path"
+  git -C "$coverage_review_repo" add "$relative_path"
+  git -C "$coverage_review_repo" commit --quiet \
+    -m "fixture inert coverage asset correction"
+  coverage_review_head_sha="$(
+    git -C "$coverage_review_repo" rev-parse HEAD
+  )"
+  coverage_review_merge_sha="$coverage_review_head_sha"
+  coverage_review_changed_count=1
+  python3 -I - \
+    "$coverage_review_event" \
+    "$coverage_review_api/current-pull.json" \
+    "$coverage_review_head_sha" \
+    "$coverage_review_changed_count" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+current_path = pathlib.Path(sys.argv[2])
+head_sha = sys.argv[3]
+changed_count = int(sys.argv[4])
+event = json.loads(event_path.read_text(encoding="utf-8"))
+current = json.loads(current_path.read_text(encoding="utf-8"))
+for pull in [event["pull_request"], current]:
+    pull["head"]["sha"] = head_sha
+    pull["merge_commit_sha"] = head_sha
+    pull["changed_files"] = changed_count
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+current_path.write_text(
+    json.dumps(current, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
 }
 
 prepare_coverage_guard_fixture() {
@@ -1562,6 +1786,192 @@ if [[ -e "$coverage_review_node_poison" || -e "$coverage_review_docker_poison" ]
   echo "ERROR: trusted default coverage review invoked Node or Docker" >&2
   exit 1
 fi
+
+assert_selected_authorization_boundary_failure \
+  "invalid" \
+  "dev" \
+  "feature/coverage-engine" \
+  "selected-authorization-mode-is-invalid" \
+  "invalid selected coverage authorization mode"
+assert_selected_authorization_boundary_failure \
+  "integration" \
+  "master" \
+  "feature/coverage-engine" \
+  "coverage-integration-branch-is-invalid" \
+  "invalid integration coverage authorization branch"
+assert_selected_authorization_boundary_failure \
+  "promotion" \
+  "dev" \
+  "dev" \
+  "coverage-promotion-branch-is-invalid" \
+  "invalid promotion coverage authorization branch"
+
+initialize_coverage_review_fixture "default-equal"
+set_coverage_review_ref_asset_state \
+  "head" \
+  "infra/azure/agents/coverage-engine-review-stan.sh" \
+  "missing"
+set_coverage_review_ref_asset_state \
+  "head" \
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh" \
+  "missing"
+run_coverage_review_fixture >"$test_output"
+grep -qF "mode=default-equal execution=skipped" "$test_output"
+[[ ! -e "$coverage_review_docker_args" ]]
+[[ ! -e "$coverage_review_node_sentinel" ]]
+
+for inert_asset_case in review invocation; do
+  initialize_coverage_review_fixture "default-equal"
+  if [[ "$inert_asset_case" == "review" ]]; then
+    inert_asset_path="infra/azure/agents/coverage-engine-review-stan.sh"
+  else
+    inert_asset_path="infra/azure/agents/test-deployment-safety-ci-stan.sh"
+  fi
+  set_coverage_review_inert_asset_correction \
+    "$inert_asset_path" \
+    "fixture inert $inert_asset_case correction"
+  run_coverage_review_fixture >"$test_output"
+  grep -qF "mode=default-equal execution=skipped" "$test_output"
+  [[ ! -e "$coverage_review_docker_args" ]]
+  [[ ! -e "$coverage_review_node_sentinel" ]]
+done
+
+while IFS='|' read -r \
+  activated_location \
+  activated_path \
+  activated_state \
+  activated_reason \
+  activated_description; do
+  initialize_coverage_review_fixture "authorized"
+  set_coverage_review_ref_asset_state \
+    "$activated_location" \
+    "$activated_path" \
+    "$activated_state"
+  assert_coverage_review_pre_execution_failure \
+    "$activated_reason" \
+    "$activated_description"
+done <<'CASES'
+head|infra/azure/agents/coverage-engine-review-stan.sh|missing|coverage-review-is-not-in-head|missing head coverage reviewer
+head|infra/azure/agents/test-deployment-safety-ci-stan.sh|missing|coverage-invocation-is-not-in-head|missing head coverage invocation
+base|infra/azure/agents/coverage-engine-review-stan.sh|drift|coverage-review-base-differs-from-default|base coverage reviewer drift
+base|infra/azure/agents/test-deployment-safety-ci-stan.sh|drift|coverage-invocation-base-differs-from-default|base coverage invocation drift
+head|infra/azure/agents/coverage-engine-review-stan.sh|drift|coverage-review-head-differs-from-default|head coverage reviewer drift
+head|infra/azure/agents/test-deployment-safety-ci-stan.sh|drift|coverage-invocation-head-differs-from-default|head coverage invocation drift
+CASES
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_sha_override="$coverage_review_unrelated_sha"
+assert_coverage_review_pre_execution_failure \
+  "checkout-sha-mismatch" \
+  "coverage review checkout SHA mismatch"
+
+initialize_coverage_review_fixture "authorized"
+printf 'dirty fixture\n' >"$coverage_review_repo/untracked-fixture"
+assert_coverage_review_pre_execution_failure \
+  "checkout-is-not-clean" \
+  "dirty coverage review checkout"
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_repository_override="other/repository"
+assert_coverage_review_pre_execution_failure \
+  "unexpected-repository" \
+  "unexpected coverage review repository"
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_event_name_override="schedule"
+assert_coverage_review_pre_execution_failure \
+  "unsupported-event" \
+  "unsupported coverage review event"
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_event_name_override="push"
+coverage_review_ref_override="refs/heads/dev"
+assert_coverage_review_pre_execution_failure \
+  "unexpected-push-ref" \
+  "unexpected coverage review push ref"
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_head_ref_override="feature/other"
+assert_coverage_review_pre_execution_failure \
+  "head-ref-mismatch" \
+  "coverage review head ref mismatch"
+
+initialize_coverage_review_fixture "authorized"
+coverage_review_base_ref_override="master"
+assert_coverage_review_pre_execution_failure \
+  "base-ref-mismatch" \
+  "coverage review base ref mismatch"
+
+for repository_metadata_case in default-branch repository; do
+  initialize_coverage_review_fixture "authorized"
+  python3 -I - \
+    "$coverage_review_event" \
+    "$repository_metadata_case" <<'PY'
+import json
+import pathlib
+import sys
+
+event_path = pathlib.Path(sys.argv[1])
+case = sys.argv[2]
+event = json.loads(event_path.read_text(encoding="utf-8"))
+if case == "default-branch":
+    event["repository"]["default_branch"] = "dev"
+else:
+    event["repository"]["full_name"] = "other/repository"
+event_path.write_text(
+    json.dumps(event, separators=(",", ":")),
+    encoding="utf-8",
+)
+PY
+  if [[ "$repository_metadata_case" == "default-branch" ]]; then
+    expected_reason="default-branch-mismatch"
+  else
+    expected_reason="pull-repository-mismatch"
+  fi
+  assert_coverage_review_pre_execution_failure \
+    "$expected_reason" \
+    "$repository_metadata_case coverage review metadata"
+done
+
+initialize_coverage_review_fixture "authorized"
+cp \
+  "$coverage_review_api/completed-integration-receipt.json" \
+  "$coverage_review_api/empty-statuses.json"
+assert_coverage_review_pre_execution_failure \
+  "coverage-integration-receipt-is-not-empty" \
+  "nonempty coverage integration receipt"
+
+initialize_coverage_review_fixture "authorized"
+printf '[]\n' >"$coverage_review_api/transition-statuses.json"
+assert_coverage_review_pre_execution_failure \
+  "quality-transition-is-not-bound" \
+  "unbound coverage quality transition"
+
+initialize_coverage_promotion_fixture "authorized"
+coverage_review_default_sha="$(
+  printf 'fixture master drift\n' |
+    git -C "$coverage_review_repo" commit-tree \
+      "${coverage_review_default_sha}^{tree}"
+)"
+assert_coverage_review_pre_execution_failure \
+  "coverage-promotion-master-tip-drift" \
+  "coverage promotion master tip drift"
+
+initialize_coverage_review_fixture "authorized"
+add_coverage_review_merge_asset_drift \
+  "infra/azure/agents/coverage-engine-review-stan.sh" \
+  "fixture coverage review drift"
+assert_coverage_review_pre_execution_failure \
+  "coverage-review-differs-from-default" \
+  "coverage review merge snapshot drift"
+
+initialize_coverage_review_fixture "authorized"
+add_coverage_review_merge_asset_drift \
+  "infra/azure/agents/test-deployment-safety-ci-stan.sh" \
+  "fixture coverage invocation drift"
+assert_coverage_review_pre_execution_failure \
+  "coverage-invocation-differs-from-default" \
+  "coverage invocation merge snapshot drift"
 
 initialize_coverage_review_fixture "engine-only"
 if run_coverage_review_fixture >"$test_output" 2>&1; then

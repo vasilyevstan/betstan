@@ -510,6 +510,7 @@ async function execute({
   headAssetBlobs = {},
   trustedAssetBlobs = {},
   assetBlobsByRef = {},
+  missingAssetPathsByRef = {},
   changedFiles = [],
   pullFilesByNumber = {},
   pullsByNumber = {},
@@ -545,6 +546,7 @@ async function execute({
   issueEventError,
   issueEventListCalls,
   pullFileListCalls,
+  assetReadCalls,
   staleTransitionStatusReads = false,
   transitionStatusCreatedAt = NOW,
   workflowRunListCalls,
@@ -637,6 +639,12 @@ async function execute({
           data: { sha: branchShas[ref] },
         }),
         getContent: async ({ path: filePath, ref }) => {
+          assetReadCalls?.push({ path: filePath, ref });
+          if (missingAssetPathsByRef[ref]?.includes(filePath)) {
+            const error = new Error("Not Found");
+            error.status = 404;
+            throw error;
+          }
           const trustedBlobs = {
             ".github/workflows/production-build.yml": TRUSTED_BLOB,
             [COVERAGE_ENGINE_PATH]: TRUSTED_ENGINE_BLOB,
@@ -4365,8 +4373,10 @@ async function main() {
   );
 
   const unchangedCoveragePathCalls = [];
+  const unchangedCoverageAssetReads = [];
   const unchangedCoverage = await execute({
     pullFileListCalls: unchangedCoveragePathCalls,
+    assetReadCalls: unchangedCoverageAssetReads,
   });
   assert.equal(
     unchangedCoverage.statuses
@@ -4375,21 +4385,63 @@ async function main() {
     true,
   );
   assert.deepEqual(unchangedCoveragePathCalls, []);
+  assert.equal(
+    unchangedCoverageAssetReads.some(({ path: filePath }) =>
+      [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+        filePath,
+      ),
+    ),
+    false,
+  );
 
   for (const [filePath, changedBlob] of [
     [COVERAGE_REVIEW_PATH, CHANGED_REVIEW_BLOB],
     [COVERAGE_INVOCATION_PATH, CHANGED_INVOCATION_BLOB],
   ]) {
-    const trustCodeDrift = await execute({
+    const validatorOnlyAssetReads = [];
+    const validatorOnlyCorrection = await execute({
       headAssetBlobs: { [filePath]: changedBlob },
+      assetReadCalls: validatorOnlyAssetReads,
     });
-    assertQualityFailure(trustCodeDrift);
-    assert(
-      trustCodeDrift.statuses.some(({ description }) =>
-        description.includes("changes trusted coverage review code"),
+    assert.equal(
+      validatorOnlyCorrection.statuses
+        .filter(({ context }) =>
+          context.startsWith("pr-quality-gates/"),
+        )
+        .every(({ state }) => state === "success"),
+      true,
+    );
+    assert.equal(
+      validatorOnlyAssetReads.some(({ path: readPath }) =>
+        [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+          readPath,
+        ),
       ),
+      false,
     );
   }
+
+  const oldHeadAssetReads = [];
+  const oldHeadWithoutValidators = await execute({
+    assetReadCalls: oldHeadAssetReads,
+    missingAssetPathsByRef: {
+      [HEAD_SHA]: [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH],
+    },
+  });
+  assert.equal(
+    oldHeadWithoutValidators.statuses
+      .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+      .every(({ state }) => state === "success"),
+    true,
+  );
+  assert.equal(
+    oldHeadAssetReads.some(({ path: filePath }) =>
+      [COVERAGE_REVIEW_PATH, COVERAGE_INVOCATION_PATH].includes(
+        filePath,
+      ),
+    ),
+    false,
+  );
 
   for (const headAssetBlobs of [
     { [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB },
@@ -4414,13 +4466,154 @@ async function main() {
       context: "trusted-quality-transition/dev",
     }),
   ];
+  for (const [
+    ref,
+    filePath,
+    expectedReason,
+  ] of [
+    [
+      "master",
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-base",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-head",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_REVIEW_PATH,
+      "coverage-review-is-not-in-merge-snapshot",
+    ],
+    [
+      "master",
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-base",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-head",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      "coverage-invocation-is-not-in-merge-snapshot",
+    ],
+  ]) {
+    const pullFileReads = [];
+    const missingValidator = await execute({
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      missingAssetPathsByRef: { [ref]: [filePath] },
+      pullFileListCalls: pullFileReads,
+      transitionStatuses: sourceTransitionStatuses,
+    });
+    assertQualityFailure(missingValidator);
+    assert(
+      missingValidator.messages.some((message) =>
+        message.includes(`reason=${expectedReason}`),
+      ),
+    );
+    assert.deepEqual(pullFileReads, []);
+  }
+
+  for (const [
+    ref,
+    filePath,
+    changedBlob,
+    expectedReason,
+  ] of [
+    [
+      BASE_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-base-differs-from-default",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-head-differs-from-default",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_REVIEW_PATH,
+      CHANGED_REVIEW_BLOB,
+      "coverage-review-differs-from-default",
+    ],
+    [
+      BASE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-base-differs-from-default",
+    ],
+    [
+      HEAD_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-head-differs-from-default",
+    ],
+    [
+      MERGE_SHA,
+      COVERAGE_INVOCATION_PATH,
+      CHANGED_INVOCATION_BLOB,
+      "coverage-invocation-differs-from-default",
+    ],
+  ]) {
+    const pullFileReads = [];
+    const validatorDrift = await execute({
+      currentPull: sourcePull,
+      headAssetBlobs: changedCoveragePair,
+      changedFiles: COVERAGE_ALLOWED_PATHS,
+      assetBlobsByRef: {
+        [ref]: { [filePath]: changedBlob },
+      },
+      pullFileListCalls: pullFileReads,
+      transitionStatuses: sourceTransitionStatuses,
+    });
+    assertQualityFailure(validatorDrift);
+    assert(
+      validatorDrift.messages.some((message) =>
+        message.includes(`reason=${expectedReason}`),
+      ),
+    );
+    assert.deepEqual(pullFileReads, []);
+  }
+
+  const activationAssetReads = [];
   const unknownCoveragePair = await execute({
     currentPull: sourcePull,
     headAssetBlobs: changedCoveragePair,
     changedFiles: COVERAGE_ALLOWED_PATHS,
     transitionStatuses: sourceTransitionStatuses,
+    assetReadCalls: activationAssetReads,
   });
   assertQualityFailure(unknownCoveragePair);
+  for (const filePath of [
+    COVERAGE_REVIEW_PATH,
+    COVERAGE_INVOCATION_PATH,
+  ]) {
+    assert.deepEqual(
+      activationAssetReads
+        .filter(({ path: readPath }) => readPath === filePath)
+        .map(({ ref }) => ref)
+        .sort(),
+      ["master", BASE_SHA, HEAD_SHA, MERGE_SHA].sort(),
+    );
+  }
 
   const coverageManualRefresh = await execute({
     currentPull: sourcePull,

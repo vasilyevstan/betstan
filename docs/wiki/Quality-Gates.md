@@ -105,17 +105,42 @@ the foundation remains inert: the coverage engine is not an active required
 check, and coverage continues to be enforced by the existing per-package
 coverage gate. The unchanged production validation workflow remains the
 execution boundary; in the ordinary default-equal state, where the engine and
-its harness match the trusted default branch, the bootstrap performs no
-candidate execution.
+its harness match the trusted default branch, policy evaluation returns before
+reading the coverage review wrapper or its invocation contract, listing pull
+request files, selecting an authorization, or executing Node or Docker.
+
+The review wrapper
+`infra/azure/agents/coverage-engine-review-stan.sh` and its invocation contract
+are checked-in, trust-pinned assets only. `production-build.yml` does not yet
+invoke the wrapper as an active coverage-review job. The deployment-safety
+aggregate exercises its offline contract fixtures, but that test coverage must
+not be represented as activated candidate review.
 
 Any future engine and harness revision must be reviewed as one exact pair and
 receive a separate authorization bound to its immutable source and evidence.
+When that pair is activated, the review wrapper and invocation contract must
+each match the trusted default at the pull base, pull head, and merge snapshot.
+They therefore cannot be corrected or introduced in the activation pull
+request. Any required wrapper or invocation correction is first promoted as a
+normal default-equal pull request, synchronized into the trusted default, and
+only then may a separate authorized pull request activate the engine-and-harness
+pair.
+
 That authority has two distinct, one-use proof legs: source integration into
 `dev`, followed by canonical `dev`-to-`master` promotion. A successful source
 integration receipt does not authorize promotion by itself. Promotion must
 separately prove the exact authorized source merge, current branch lineage,
 trusted workflow run and aggregate job, and unchanged engine-and-harness
 content before candidate execution is allowed.
+
+Stage 2A activation also requires a separately authorized workflow change that
+invokes the wrapper with an explicitly mapped least-privilege GitHub read
+token. Activated CI must reject a missing token, attach it only to GitHub API
+requests, and keep it out of Docker arguments and environment, the candidate
+environment, logs, diagnostics, and artifacts. API failures remain
+fail-closed, with rate-limit and permission failures distinguishable from
+malformed repository evidence. This inert foundation neither adds that token
+wiring nor changes `production-build.yml`.
 
 After promotion and branch synchronization, the promoted pair becomes the
 ordinary trusted default and validation returns to the inert default-equal
