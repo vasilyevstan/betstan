@@ -13,6 +13,22 @@ STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 PROSPECTIVE_PROMOTION_PR="${PROSPECTIVE_PROMOTION_PR:-}"
 COMPARE_JQ='{status,ahead_by,behind_by,total_commits,base_commit:{sha:.base_commit.sha},merge_base_commit:{sha:.merge_base_commit.sha},commits:[.commits[]|{sha:.sha}]}'
+OBSERVE_TRANSITION=false
+if [[ "$#" != 0 ]]; then
+  [[ "$#" = 1 && "$1" = "--observe-live-data-transition" ]] || {
+    echo "usage: $0 [--observe-live-data-transition]" >&2
+    exit 1
+  }
+  [[ -z "$EXCLUDE_RUN_ID" && -z "$PROSPECTIVE_PROMOTION_PR" ]] || {
+    echo "transition observation accepts no exclusions or prospective context" >&2
+    exit 1
+  }
+  OBSERVE_TRANSITION=true
+  # The special observation uses the production clock and fixed lower bound;
+  # environment overrides remain available only to the ordinary guard.
+  STALE_DISABLED_MIN_AGE_SECONDS=600
+  NOW_EPOCH="$(date +%s)"
+fi
 
 [[ -z "$EXCLUDE_RUN_ID" || "$EXCLUDE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
   echo "EXCLUDE_RUN_ID must be empty or a positive integer" >&2
@@ -313,25 +329,138 @@ tmp_approvals="$(mktemp)"
 tmp_artifacts="$(mktemp)"
 tmp_prospective_ancestry="$(mktemp)"
 tmp_compare_pages="$(mktemp)"
+tmp_observations="$(mktemp)"
+tmp_inventory_dir="$(mktemp -d)"
 cleanup() {
   rm -f \
     "$tmp_runs" "$tmp_candidates" "$tmp_workflows" "$tmp_successful_runs" \
     "$tmp_ancestry" "$tmp_historical_workflow" "$tmp_run" "$tmp_workflow" \
     "$tmp_jobs" "$tmp_pending" "$tmp_approvals" "$tmp_artifacts" \
-    "$tmp_prospective_ancestry" "$tmp_compare_pages"
+    "$tmp_prospective_ancestry" "$tmp_compare_pages" "$tmp_observations"
+  rm -rf "$tmp_inventory_dir"
 }
 trap cleanup EXIT
+
+rebind_observed_run() {
+  local observed_run_id="$1"
+  # Current detail, not a historical attempt endpoint that could hide a rerun.
+  # Cache it in tmp_run for subsequent semantic/capacity classification.
+  gh api "repos/$REPO/actions/runs/$observed_run_id" >"$tmp_run" || return 1
+  python3 - "$tmp_inventory_dir/$observed_run_id.json" "$tmp_run" \
+    "$tmp_workflows" "$REPO" "$observed_run_id" <<'PY'
+import datetime
+import json
+import re
+import sys
+
+inventory_path, detail_path, workflows_path, repository, requested_id = sys.argv[1:]
+def fail(message):
+    raise SystemExit(f"observation run detail rejected: {message}")
+def pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            fail(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+def read(path):
+    with open(path, "rb") as source:
+        payload = source.read(1024 * 1024 + 1)
+    if len(payload) > 1024 * 1024:
+        fail("run response exceeds the private evidence bound")
+    return json.loads(payload, object_pairs_hook=pairs)
+def integer(value, label):
+    if type(value) is not int or value < 1:
+        fail(f"{label} is not a positive integer")
+    return value
+def text(value, label):
+    if not isinstance(value, str) or not value or any(c in value for c in "\t\r\n"):
+        fail(f"{label} is missing or malformed")
+    return value
+def project(run):
+    if not isinstance(run, dict):
+        fail("run is not an object")
+    result = {}
+    for key in ("id", "workflow_id", "run_attempt"):
+        result[key] = integer(run.get(key), key)
+    if result["id"] != int(requested_id) or result["run_attempt"] != 1:
+        fail("run is not the exact current first attempt")
+    for key in ("path", "status", "event", "head_sha", "head_branch", "display_title",
+                "html_url", "url", "created_at", "run_started_at", "updated_at"):
+        result[key] = text(run.get(key), key)
+    if result["status"] not in {"queued", "in_progress", "waiting", "requested", "pending"}:
+        fail("run is not nonterminal")
+    # Null is the required nonterminal conclusion, never a missing identity.
+    if "conclusion" not in run or run["conclusion"] is not None:
+        fail("nonterminal conclusion is missing or ambiguous")
+    result["conclusion"] = None
+    if re.fullmatch(r"[0-9a-f]{40}", result["head_sha"]) is None:
+        fail("head SHA is malformed")
+    for key, host in (("html_url", "https://github.com"), ("url", "https://api.github.com/repos")):
+        if result[key] != f"{host}/{repository}/actions/runs/{requested_id}":
+            fail(f"{key} does not identify the exact repository run")
+    for key in ("repository", "head_repository"):
+        identity = run.get(key)
+        if not isinstance(identity, dict):
+            fail(f"{key} identity is missing or malformed")
+        name = text(identity.get("full_name"), f"{key}.full_name")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) is None:
+            fail(f"{key} name is malformed")
+        result[key] = {"id": integer(identity.get("id"), f"{key}.id"), "full_name": name}
+    if result["repository"]["full_name"] != repository:
+        fail("repository identity does not match the queried repository")
+    if (result["repository"]["full_name"] == result["head_repository"]["full_name"]) != (
+        result["repository"]["id"] == result["head_repository"]["id"]
+    ):
+        fail("repository identities are contradictory")
+    timestamps = []
+    for key in ("created_at", "run_started_at", "updated_at"):
+        try:
+            stamp = datetime.datetime.fromisoformat(result[key].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise ValueError("missing timezone")
+        except ValueError:
+            fail(f"{key} is malformed")
+        timestamps.append(stamp)
+    if not timestamps[0] <= timestamps[1] <= timestamps[2]:
+        fail("run timestamps are contradictory")
+    # These identity fields are not supplied by every provider representation.
+    # If supplied by either response they must be valid and agree on both.
+    for key in ("run_number", "check_suite_id", "node_id", "check_suite_node_id"):
+        if key in run:
+            result[key] = (integer if key in {"run_number", "check_suite_id"} else text)(run[key], key)
+    return result
+
+listed = project(read(inventory_path))
+detail = project(read(detail_path))
+if listed != detail:
+    fail("inventory/detail identity or state mismatch")
+paths = set(open(workflows_path, encoding="utf-8").read().splitlines())
+# No path/branch filter or inert decision precedes the authoritative rebound.
+if detail["path"] in paths and detail["head_branch"] == "master":
+    print("\t".join(str(detail[key]) for key in (
+        "id", "workflow_id", "path", "status", "updated_at", "head_sha", "event", "run_attempt",
+    )))
+PY
+}
 
 "$POLICY_SCRIPT" workflows |
   sed 's#^#.github/workflows/#' >"$tmp_workflows"
 
+observation_master=""
+if [[ "$OBSERVE_TRANSITION" = true ]]; then
+  observation_master="$(read_current_master)"
+fi
 for status in queued in_progress waiting requested pending; do
   gh api "repos/$REPO/actions/runs?status=$status&per_page=100" >>"$tmp_runs"
   printf '\n' >>"$tmp_runs"
 done
 
-python3 - "$tmp_runs" "$tmp_workflows" >"$tmp_candidates" <<'PY'
+python3 - "$tmp_runs" "$tmp_workflows" "$OBSERVE_TRANSITION" "$tmp_inventory_dir" >"$tmp_candidates" <<'PY'
+import datetime
 import json
+import os
+import re
 import sys
 
 paths = {
@@ -341,16 +470,26 @@ paths = {
 }
 if len(paths) != 16:
     raise SystemExit("protected-operation policy must enumerate exactly 16 workflows")
-decoder = json.JSONDecoder()
+strict = sys.argv[3] == "true"
+def object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if strict and key in result:
+            raise SystemExit("duplicate active inventory JSON key")
+        result[key] = value
+    return result
+decoder = json.JSONDecoder(object_pairs_hook=object_pairs)
 payload = open(sys.argv[1], encoding="utf-8").read()
 index = 0
 seen = set()
+pages = 0
 while index < len(payload):
     while index < len(payload) and payload[index].isspace():
         index += 1
     if index >= len(payload):
         break
     response, index = decoder.raw_decode(payload, index)
+    pages += 1
     if not isinstance(response, dict):
         raise SystemExit("active run inventory response is malformed")
     total_count = response.get("total_count")
@@ -362,9 +501,43 @@ while index < len(payload):
     if not isinstance(runs, list) or len(runs) != total_count:
         raise SystemExit("active run inventory is incomplete")
     for run in runs:
+        if not isinstance(run, dict):
+            raise SystemExit("active run inventory entry is malformed")
         run_id = run.get("id")
+        if strict:
+            if type(run_id) is not int or run_id < 1 or run_id in seen:
+                raise SystemExit("duplicate or malformed active run identity")
+            # Validate before filtering. Missing filter fields are not evidence
+            # that an otherwise protected row belongs outside this inventory.
+            for name in ("workflow_id", "run_attempt"):
+                if type(run.get(name)) is not int or run[name] < 1:
+                    raise SystemExit(f"active run inventory {name} is malformed")
+            for name in ("path", "head_branch", "head_sha", "status", "updated_at", "event"):
+                value = run.get(name)
+                if not isinstance(value, str) or not value or any(c in value for c in "\t\r\n"):
+                    raise SystemExit(f"active run inventory {name} is malformed")
+            if (
+                re.fullmatch(r"[0-9a-f]{40}", run["head_sha"]) is None
+                or run["status"] not in {"queued", "in_progress", "waiting", "requested", "pending"}
+            ):
+                raise SystemExit("active run inventory SHA/status is malformed")
+            try:
+                updated = datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    raise ValueError("missing timezone")
+            except ValueError:
+                raise SystemExit("active run inventory timestamp is malformed")
+            seen.add(run_id)
+            # Keep every row until its exact detail has been rebound, including
+            # rows whose list metadata claims a non-production path or branch.
+            path = os.path.join(sys.argv[4], f"{run_id}.json")
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(run, output, separators=(",", ":"), sort_keys=True)
+            print(run_id)
+            continue
         if (
-            run_id in seen
+            (not strict and run_id in seen)
             or run.get("path") not in paths
             or run.get("head_branch") != "master"
         ):
@@ -389,12 +562,20 @@ while index < len(payload):
         ):
             raise SystemExit("active run metadata is malformed")
         print("\t".join(str(value) for value in values))
+if strict and pages != 5:
+    raise SystemExit("active run status inventory is incomplete")
 PY
 
 while IFS=$'\t' read -r \
   run_id workflow_id path status updated_at head_sha event run_attempt
 do
   [[ -n "${run_id:-}" ]] || continue
+  if [[ "$OBSERVE_TRANSITION" = true ]]; then
+    rebound="$(rebind_observed_run "$run_id")"
+    [[ -n "$rebound" ]] || continue
+    IFS=$'\t' read -r \
+      run_id workflow_id path status updated_at head_sha event run_attempt <<<"$rebound"
+  fi
   if [[ "$run_id" == "$EXCLUDE_RUN_ID" ]]; then
     continue
   fi
@@ -411,29 +592,44 @@ do
   printf '%s\n' '{"total_count":0,"workflow_runs":[]}' >"$tmp_successful_runs"
   printf '%s\n' '{}' >"$tmp_ancestry"
   printf '%s\n' '{}' >"$tmp_historical_workflow"
-  printf '%s\n' '{}' >"$tmp_run"
+  if [[ "$OBSERVE_TRANSITION" != true ]]; then
+    printf '%s\n' '{}' >"$tmp_run"
+  fi
   printf '%s\n' '[]' >"$tmp_approvals"
   printf '%s\n' '{}' >"$tmp_artifacts"
   printf '%s\n' '{}' >"$tmp_prospective_ancestry"
+  observe_live_data=false
+  if [[ "$OBSERVE_TRANSITION" = true && "$path" = ".github/workflows/oci-live-data-rollout.yml" ]]; then
+    observe_live_data=true
+  fi
   if [[
+    "$observe_live_data" = true ||
     (
-      "$path" == ".github/workflows/oci-capacity-acquire.yml" ||
-      "$path" == ".github/workflows/oci-live-data-rollout.yml" ||
-      "$path" == ".github/workflows/oci-live-betting-activate.yml"
-    ) &&
-      "$status" == "queued"
+      (
+        "$path" == ".github/workflows/oci-capacity-acquire.yml" ||
+        "$path" == ".github/workflows/oci-live-data-rollout.yml" ||
+        "$path" == ".github/workflows/oci-live-betting-activate.yml"
+      ) &&
+        "$status" == "queued"
+    )
   ]]; then
     if ! master_sha="$(read_current_master)"; then
       echo "Current master SHA is unavailable or malformed" >&2
+      exit 1
+    fi
+    if [[ "$OBSERVE_TRANSITION" = true && "$master_sha" != "$observation_master" ]]; then
+      echo "master changed during transition observation" >&2
       exit 1
     fi
     [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
       echo "Run $run_id has a malformed head SHA" >&2
       exit 1
     }
-    gh api \
-      "repos/$REPO/actions/workflows/$workflow_id/runs?head_sha=$head_sha&event=workflow_dispatch&status=success&per_page=100" \
-      >"$tmp_successful_runs"
+    if [[ "$observe_live_data" != true ]]; then
+      gh api \
+        "repos/$REPO/actions/workflows/$workflow_id/runs?head_sha=$head_sha&event=workflow_dispatch&status=success&per_page=100" \
+        >"$tmp_successful_runs"
+    fi
     if [[ "$head_sha" != "$master_sha" ]]; then
       fetch_complete_compare \
         "repos/$REPO/compare/$head_sha...$master_sha" \
@@ -442,12 +638,31 @@ do
         exit 1
       }
     fi
-    gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+    if [[ "$OBSERVE_TRANSITION" != true ]]; then
+      gh api "repos/$REPO/actions/runs/$run_id" >"$tmp_run"
+    fi
     gh api "repos/$REPO/actions/runs/$run_id/approvals" >"$tmp_approvals"
     gh api "repos/$REPO/actions/runs/$run_id/artifacts?per_page=1" \
       >"$tmp_artifacts"
     gh api "repos/$REPO/contents/$path?ref=$head_sha" \
       >"$tmp_historical_workflow"
+    if [[ "$observe_live_data" = true ]]; then
+      # This observation is not supersession. Validate the shared semantic
+      # evidence once, without unrelated successful-run history or a generic
+      # classifier. Default/capacity classification below remains unchanged.
+      "$AUTHORITY_HELPER" classify-unmaterialized-run \
+        --run-json "$tmp_run" --workflow-json "$tmp_workflow" \
+        --jobs-json "$tmp_jobs" --pending-json "$tmp_pending" \
+        --approvals-json "$tmp_approvals" --artifacts-json "$tmp_artifacts" \
+        --compare-json "$tmp_ancestry" \
+        --historical-workflow-json "$tmp_historical_workflow" \
+        --repository "$REPO" --current-master "$observation_master" \
+        --expected-run-id "$run_id" --expected-workflow-id "$workflow_id" \
+        --expected-path "$path" --expected-head-sha "$head_sha" \
+        --minimum-age-seconds "$STALE_DISABLED_MIN_AGE_SECONDS" \
+        --now-epoch "$NOW_EPOCH" --semantic-evidence >>"$tmp_observations"
+      continue
+    fi
     if "$AUTHORITY_HELPER" classify-unmaterialized-run \
       --run-json "$tmp_run" \
       --workflow-json "$tmp_workflow" \
@@ -707,6 +922,12 @@ print(
 )
 PY
   )"
+  if [[ "$OBSERVE_TRANSITION" = true ]]; then
+    if [[ "$classification" != inert=yes* ]]; then
+      printf '{"blocker":%s}\n' "$run_id" >>"$tmp_observations"
+    fi
+    continue
+  fi
   if [[ "$classification" == inert=yes* ]]; then
     echo "ignored_inert_run=$run_id path=$path status=$status $classification$prospective_annotation"
     continue
@@ -716,4 +937,28 @@ PY
   exit 1
 done <"$tmp_candidates"
 
+if [[ "$OBSERVE_TRANSITION" = true ]]; then
+  [[ "$(read_current_master)" = "$observation_master" ]] || {
+    echo "master changed during transition observation" >&2
+    exit 1
+  }
+  python3 - "$tmp_observations" "$tmp_workflows" "$REPO" "$observation_master" <<'PY'
+import hashlib
+import json
+import sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+paths = sorted(line.strip() for line in open(sys.argv[2], encoding="utf-8"))
+inventory = {"paths": paths, "statuses": ["queued", "in_progress", "waiting", "requested", "pending"], "limitPerStatus": 100}
+print(json.dumps({
+    "schemaVersion": "betstan.live-data-transition-observation.v1",
+    "repository": sys.argv[3],
+    "controlSha": sys.argv[4],
+    "inventorySha256": hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    "candidates": sorted((row["candidate"] for row in rows if "candidate" in row), key=lambda row: row["runId"]),
+    "workflows": [row["workflow"] for row in rows if "workflow" in row],
+    "blockers": [row["blocker"] for row in rows if "blocker" in row],
+}, sort_keys=True, separators=(",", ":")))
+PY
+  exit 0
+fi
 echo "production_run_exclusivity=PASS"

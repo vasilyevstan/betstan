@@ -18,6 +18,10 @@ from pathlib import Path
 REQUEST_SCHEMA = "betstan.copilot-cli-dispatch-request.v1"
 NORMALIZED_SCHEMA = "betstan.copilot-cli-dispatch-normalized.v1"
 INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v1"
+PREPARED_INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v2"
+TRANSITION_OBSERVATION_SCHEMA = "betstan.live-data-transition-observation.v1"
+LIVE_DATA_PATH = ".github/workflows/oci-live-data-rollout.yml"
+PREPARED_TTL_SECONDS = 15 * 60
 RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
 RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
@@ -82,6 +86,12 @@ INTENT_KEYS = {
     "dispatchStatus",
     "runId",
     "runUrl",
+}
+PREPARED_SEAL_KEYS = {
+    "requestKey", "requestSha256", "requestFile", "inputHash", "controlSha",
+    "workflowId", "workflowPath", "workflowBlobSha", "policySha256",
+    "inventorySha256", "captureFile", "captureIdentity", "createdAt", "expiresAt",
+    "candidates", "candidateSetSha256", "sealSha256", "ownerPid", "intentIdentitySha256",
 }
 RECORD_V1_KEYS = {
     "schemaVersion",
@@ -491,7 +501,7 @@ def ensure_authority_dir(path, repo_root, *, create):
 
 
 @contextlib.contextmanager
-def repository_claim_lock(directory):
+def repository_claim_lock(directory, *, nonblocking=False):
     path = directory / ".repository-claim.lock"
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -508,7 +518,10 @@ def repository_claim_lock(directory):
             or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             fail("repository claim lock has unsafe metadata")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
+        except BlockingIOError:
+            fail("repository claim lock is busy; recollect fresh transition evidence")
         yield
     finally:
         try:
@@ -908,23 +921,132 @@ def fsync_private_capture(path):
         os.close(descriptor)
 
 
+def file_identity(path):
+    metadata = require_private_capture(path)
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtimeNs": metadata.st_mtime_ns,
+        "ctimeNs": metadata.st_ctime_ns,
+    }
+
+
+def validate_candidates(candidates):
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 100:
+        fail("prepared candidates must be a nonempty bounded set")
+    ids = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or set(candidate) != {
+            "runId", "headSha", "historicalWorkflowBlobSha", "evidenceSha256",
+        }:
+            fail("prepared candidate schema is invalid")
+        ids.append(require_exact_integer(candidate["runId"], "candidate ID", minimum=1))
+        for name in ("headSha", "historicalWorkflowBlobSha"):
+            if not isinstance(candidate[name], str) or not FULL_SHA.fullmatch(candidate[name]):
+                fail(f"prepared candidate {name} is invalid")
+        require_digest(candidate["evidenceSha256"], "candidate evidence")
+    if ids != sorted(set(ids)):
+        fail("prepared candidates are not sorted and unique")
+
+
+def require_digest(value, label):
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        fail(f"{label} digest is invalid")
+
+
+def immutable_intent_digest(intent):
+    return evidence_digest({
+        name: intent[name] for name in INTENT_KEYS - {
+            "state", "version", "ownerPid", "dispatchStatus", "runId", "runUrl",
+        }
+    })
+
+
+def validate_prepared_seal(intent):
+    seal = intent["preparedSeal"]
+    if not isinstance(seal, dict) or set(seal) != PREPARED_SEAL_KEYS:
+        fail("prepared seal schema is invalid")
+    if intent["workflow"] != "oci-live-data-rollout.yml":
+        fail("prepared intent is not a live-data operation")
+    require_exact_integer(intent["version"], "prepared version", minimum=1)
+    require_exact_integer(intent["ownerPid"], "prepared owner PID", minimum=1)
+    require_exact_integer(seal["ownerPid"], "sealed owner PID", minimum=1)
+    if intent["state"] == "prepared":
+        if intent["version"] != 1 or intent["ownerPid"] != seal["ownerPid"]:
+            fail("prepared version/owner changed without dispatch CAS")
+    elif intent["version"] < 2:
+        fail("v2 intent has no dispatch CAS version")
+    for name in (
+        "requestKey", "inputHash", "controlSha", "workflowId", "workflowBlobSha",
+        "captureFile", "createdAt", "expiresAt",
+    ):
+        if seal[name] != intent[name]:
+            fail(f"prepared seal {name} mismatch")
+    if seal["workflowPath"] != LIVE_DATA_PATH:
+        fail("prepared seal workflow path mismatch")
+    require_exact_integer(seal["workflowId"], "prepared workflow ID", minimum=1)
+    for name in ("controlSha", "workflowBlobSha"):
+        if not isinstance(seal[name], str) or not FULL_SHA.fullmatch(seal[name]):
+            fail(f"prepared seal {name} is invalid")
+    if intent["inputHash"] != canonical_input_hash(workflow_dispatch_inputs(intent["inputs"])):
+        fail("prepared input hash mismatch")
+    if intent["requestKey"] != request_key(intent):
+        fail("prepared request key mismatch")
+    if seal["intentIdentitySha256"] != immutable_intent_digest(intent):
+        fail("prepared immutable intent metadata changed")
+    validate_candidates(seal["candidates"])
+    if seal["candidateSetSha256"] != evidence_digest(seal["candidates"]):
+        fail("prepared candidate set digest mismatch")
+    for name in ("requestSha256", "policySha256", "inventorySha256", "sealSha256"):
+        require_digest(seal[name], name)
+    if seal["sealSha256"] != evidence_digest({
+        name: value for name, value in seal.items() if name != "sealSha256"
+    }):
+        fail("prepared seal digest mismatch")
+    for name in ("requestFile", "captureIdentity"):
+        identity = seal[name]
+        if not isinstance(identity, dict) or set(identity) != {
+            "device", "inode", "size", "mtimeNs", "ctimeNs",
+        }:
+            fail(f"prepared {name} metadata is invalid")
+        for value in identity.values():
+            require_exact_integer(value, f"prepared {name} metadata")
+    if seal["captureIdentity"]["size"] != 0:
+        fail("prepared capture was not empty")
+    created = parse_utc(seal["createdAt"], "prepared creation")
+    expires = parse_utc(seal["expiresAt"], "prepared expiry")
+    if (expires - created).total_seconds() != PREPARED_TTL_SECONDS:
+        fail("prepared lifetime is invalid")
+
+
 def load_intent(directory, key):
-    path = intent_path(directory, key)
+    return load_intent_file(intent_path(directory, key), key)
+
+
+def load_intent_file(path, key):
     intent = load_json_file(
         path,
         "dispatch intent",
         exact_mode=0o600,
         recover_atomic_link=True,
     )
-    if not isinstance(intent, dict) or set(intent) != INTENT_KEYS:
+    if not isinstance(intent, dict):
         fail("dispatch intent has an unexpected schema")
-    if intent["schemaVersion"] != INTENT_SCHEMA:
+    schema = intent.get("schemaVersion")
+    expected_keys = (
+        INTENT_KEYS | {"preparedSeal"} if schema == PREPARED_INTENT_SCHEMA else INTENT_KEYS
+    )
+    if set(intent) != expected_keys:
+        fail("dispatch intent has an unexpected schema")
+    if schema not in {INTENT_SCHEMA, PREPARED_INTENT_SCHEMA}:
         fail("dispatch intent schema version is unsupported")
     if intent["requestKey"] != key:
         fail("dispatch intent request key mismatch")
     if intent["authorityOwner"] != AUTHORITY_OWNER:
         fail("dispatch intent owner is invalid")
-    if intent["state"] not in {"dispatching", "bound"}:
+    states = {"prepared", "dispatching", "bound"} if schema == PREPARED_INTENT_SCHEMA else {"dispatching", "bound"}
+    if intent["state"] not in states:
         fail("dispatch intent state is invalid")
     if not isinstance(intent["version"], int) or intent["version"] < 1:
         fail("dispatch intent version is invalid")
@@ -942,9 +1064,11 @@ def load_intent(directory, key):
         or intent["dispatchStatus"] > 255
     ):
         fail("dispatch intent status is invalid")
-    if intent["state"] == "dispatching":
+    if intent["state"] in {"prepared", "dispatching"}:
         if intent["runId"] is not None or intent["runUrl"] is not None:
             fail("dispatching intent unexpectedly identifies a run")
+        if intent["state"] == "prepared" and intent["dispatchStatus"] is not None:
+            fail("prepared intent unexpectedly has dispatch status")
     else:
         if not POSITIVE_INTEGER.fullmatch(str(intent["runId"])):
             fail("bound dispatch intent run ID is invalid")
@@ -961,6 +1085,8 @@ def load_intent(directory, key):
         or (expires_at - created_at).total_seconds() > AUTHORITY_TTL_SECONDS
     ):
         fail("dispatch intent expiry is invalid")
+    if schema == PREPARED_INTENT_SCHEMA:
+        validate_prepared_seal(intent)
     return intent
 
 
@@ -2024,11 +2150,53 @@ def command_classify_unmaterialized_run(args):
         expected_head_sha=args.expected_head_sha,
         require_disabled_workflow=args.require_disabled_workflow,
     )
+    if args.semantic_evidence:
+        if args.expected_path != LIVE_DATA_PATH:
+            fail("semantic transition evidence is live-data only")
+        print(canonical_json(semantic_ghost_evidence(evidence, facts)))
+        return
     print(
         "reason=unmaterialized "
         f"run_id={facts['runId']} path={facts['path']} "
         f"age_seconds={facts['ageSeconds']}"
     )
+
+
+def semantic_ghost_evidence(evidence, facts):
+    # Only validated semantic fields are sealed. In particular the workflow's
+    # mutable enabled state and elapsed age are NOT ghost identity. State is
+    # checked independently by each transition checkpoint.
+    run = evidence["run"]
+    source, blob = decode_historical_workflow(evidence["historical_workflow"], LIVE_DATA_PATH)
+    semantic = {
+        "run": {name: run[name] for name in (
+            "id", "workflow_id", "path", "head_sha", "head_branch",
+            "event", "run_attempt", "status", "conclusion", "display_title",
+            "created_at", "run_started_at", "updated_at", "html_url",
+        )},
+        "repository": run["head_repository"]["full_name"],
+        "workflow": {name: evidence["workflow"][name] for name in ("id", "path")},
+        "jobs": {"total_count": 0, "jobs": []},
+        "pending": evidence["pending"],
+        "approvals": evidence["approvals"],
+        "artifacts": {"total_count": 0, "artifacts": []},
+        "compare": evidence["compare"],
+        "historical": {
+            "blobSha": blob,
+            "sourceSha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "guards": CURRENT_MASTER_GUARD_LINES,
+            "mutationTokens": historical_mutation_tokens(LIVE_DATA_PATH, blob),
+        },
+    }
+    return {
+        "candidate": {
+            "runId": facts["runId"],
+            "headSha": run["head_sha"],
+            "historicalWorkflowBlobSha": blob,
+            "evidenceSha256": evidence_digest(semantic),
+        },
+        "workflow": {name: evidence["workflow"][name] for name in ("id", "path", "state")},
+    }
 
 
 def command_retire_unmaterialized_claim(args):
@@ -2322,7 +2490,9 @@ def claim_request_under_lock(
     workflow_id,
     key,
     path,
+    prepared=None,
 ):
+    replace_retired = False
     if path.exists() or path.is_symlink():
         intent = verify_intent(
             load_intent(directory, key),
@@ -2333,18 +2503,21 @@ def claim_request_under_lock(
             workflow_id,
             args.workflow_blob_sha,
         )
-        print(
-            canonical_json(
-                {
-                    "capturePath": str(directory / intent["captureFile"]),
-                    "created": False,
-                    "requestKey": key,
-                    "state": intent["state"],
-                    "version": intent["version"],
-                }
+        replace_retired = prepared is not None and retired_bound_intent(directory, intent)
+        if not replace_retired:
+            print(
+                canonical_json(
+                    {
+                        "capturePath": str(directory / intent["captureFile"]),
+                        "created": False,
+                        "requestKey": key,
+                        "state": intent["state"],
+                        "version": intent["version"],
+                    }
+                )
             )
-        )
-        return
+            return
+        spent_intent = intent
     blocking_matches = find_blocking_authorities(directory, normalized)
     if blocking_matches:
         authority, state = blocking_matches[0]
@@ -2357,7 +2530,7 @@ def claim_request_under_lock(
     create_private_file(capture_path)
     created_at = utc_now()
     intent = {
-        "schemaVersion": INTENT_SCHEMA,
+        "schemaVersion": PREPARED_INTENT_SCHEMA if prepared is not None else INTENT_SCHEMA,
         "requestKey": key,
         "repository": args.repository,
         "operation": policy["operation"],
@@ -2375,9 +2548,11 @@ def claim_request_under_lock(
         "authorityOwner": AUTHORITY_OWNER,
         "createdAt": utc_text(created_at),
         "expiresAt": utc_text(
-            created_at + dt.timedelta(seconds=AUTHORITY_TTL_SECONDS)
+            created_at + dt.timedelta(seconds=(
+                PREPARED_TTL_SECONDS if prepared is not None else AUTHORITY_TTL_SECONDS
+            ))
         ),
-        "state": "dispatching",
+        "state": "prepared" if prepared is not None else "dispatching",
         "version": 1,
         "ownerPid": args.owner_pid,
         "captureFile": capture_name,
@@ -2385,8 +2560,26 @@ def claim_request_under_lock(
         "runId": None,
         "runUrl": None,
     }
+    if prepared is not None:
+        seal = {
+            **prepared,
+            **{name: intent[name] for name in (
+                "requestKey", "inputHash", "controlSha", "workflowId",
+                "workflowBlobSha", "captureFile", "createdAt", "expiresAt", "ownerPid",
+            )},
+            "workflowPath": LIVE_DATA_PATH,
+            "captureIdentity": file_identity(capture_path),
+            "intentIdentitySha256": immutable_intent_digest(intent),
+        }
+        seal["sealSha256"] = evidence_digest(seal)
+        intent["preparedSeal"] = seal
+        validate_prepared_seal(intent)
     try:
-        atomic_create(path, intent)
+        if replace_retired:
+            preserve_spent_intent(directory, spent_intent)
+            atomic_replace(path, intent)
+        else:
+            atomic_create(path, intent)
     except BaseException:
         try:
             durable_unlink(capture_path)
@@ -2440,6 +2633,214 @@ def command_claim_request(args):
         )
 
 
+def special_request(args, policy, normalized):
+    require_outside_repo(args.request, args.repo_root, "request file")
+    request = load_json_file(args.request, "request file", exact_mode=0o600)
+    if validate_request_data(request, policy, args.repository, args.current_master) != normalized:
+        fail("prepared request changed after normalization")
+    # Recheck the exact transport file, not just the request it was derived from.
+    inputs = load_json_file(args.inputs_file, "dispatch inputs", exact_mode=0o600)
+    if inputs != normalized["dispatchInputs"]:
+        fail("prepared dispatch inputs changed")
+    return request
+
+
+def special_context(args):
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    if policy["workflow"] != "oci-live-data-rollout.yml":
+        fail("prepared lifecycle is restricted to policy-resolved live-data operations")
+    if not POSITIVE_INTEGER.fullmatch(str(args.workflow_id)) or not FULL_SHA.fullmatch(args.workflow_blob_sha):
+        fail("prepared workflow identity is malformed")
+    normalized = load_normalized(
+        args.normalized, policy, args.repository, args.current_master,
+    )
+    request = special_request(args, policy, normalized)
+    return policy, normalized, request
+
+
+def read_transition_observation(args, state):
+    observation = load_json_file(args.observation_json, "transition observation", exact_mode=0o600)
+    if not isinstance(observation, dict) or set(observation) != {
+        "schemaVersion", "repository", "controlSha", "inventorySha256",
+        "candidates", "workflows", "blockers",
+    }:
+        fail("transition observation schema is invalid")
+    if (
+        observation["schemaVersion"] != TRANSITION_OBSERVATION_SCHEMA
+        or observation["repository"] != args.repository
+        or observation["controlSha"] != args.current_master
+        or observation["blockers"] != []
+    ):
+        fail("transition observation does not prove exclusive current control")
+    validate_candidates(observation["candidates"])
+    require_digest(observation["inventorySha256"], "inventory policy")
+    expected_workflow = {"id": int(args.workflow_id), "path": LIVE_DATA_PATH, "state": state}
+    if observation["workflows"] != [expected_workflow] * len(observation["candidates"]):
+        fail("transition observed workflow identity/state mismatch")
+    return observation
+
+
+def command_prepare_disabled_ghosts(args):
+    policy, normalized, request = special_context(args)
+    observation = read_transition_observation(args, "disabled_manually")
+    require_exact_integer(args.owner_pid, "prepared owner PID", minimum=1)
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=True)
+    key = request_key(normalized)
+    with repository_claim_lock(directory, nonblocking=True):
+        # Includes every repository intent, including stale/expired prepares.
+        # A repeated prepare must never renew a prepared generation. Only an
+        # exact retired bound record can admit a distinct, newly sealed one.
+        if find_blocking_authorities(directory, normalized):
+            fail("prepared request is blocked by existing repository authority")
+        special_request(args, policy, normalized)
+        prepared = {
+            "requestSha256": evidence_digest(request),
+            "requestFile": file_identity(args.request),
+            "policySha256": evidence_digest(policy),
+            "inventorySha256": observation["inventorySha256"],
+            "candidates": observation["candidates"],
+            "candidateSetSha256": evidence_digest(observation["candidates"]),
+        }
+        claim_request_under_lock(
+            args, policy, normalized, directory, args.workflow_id,
+            key, intent_path(directory, key), prepared=prepared,
+        )
+
+
+def prepared_snapshot(directory, key, intent):
+    # File identity closes replacement/ABA races even if the JSON is identical.
+    return evidence_digest({"intent": intent, "file": file_identity(intent_path(directory, key))})
+
+
+def require_prepared_capture(directory, intent):
+    if intent["schemaVersion"] != PREPARED_INTENT_SCHEMA or intent["state"] != "prepared":
+        fail("only a prepared v2 intent is eligible")
+    if intent["dispatchStatus"] is not None or intent["runId"] is not None or intent["runUrl"] is not None:
+        fail("prepared intent has ambiguous dispatch metadata")
+    if file_identity(directory / intent["captureFile"]) != intent["preparedSeal"]["captureIdentity"]:
+        fail("prepared capture generation changed or is not pristine")
+
+
+def require_prepared_lifetime(intent):
+    now = utc_now()
+    if not parse_utc(intent["createdAt"], "prepared creation") <= now < parse_utc(intent["expiresAt"], "prepared expiry"):
+        fail("prepared intent is expired or not yet valid; disable and discard explicitly")
+
+
+def verify_prepared_checkpoint(args, *, dispatch):
+    policy, normalized, request = special_context(args)
+    observation = read_transition_observation(args, "active")
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    key = request_key(normalized)
+    # Never wait behind another operation with already-collected POST evidence.
+    # Contention is a pre-CAS failure and requires a fresh whole checkpoint.
+    with repository_claim_lock(directory, nonblocking=True):
+        intent = verify_intent(
+            load_intent(directory, key), normalized, policy, args.repository,
+            args.current_master, args.workflow_id, args.workflow_blob_sha,
+        )
+        require_prepared_capture(directory, intent)
+        seal = intent["preparedSeal"]
+        require_prepared_lifetime(intent)
+        special_request(args, policy, normalized)
+        if (
+            seal["requestSha256"] != evidence_digest(request)
+            or seal["requestFile"] != file_identity(args.request)
+            or seal["policySha256"] != evidence_digest(policy)
+            or seal["inventorySha256"] != observation["inventorySha256"]
+            or seal["candidates"] != observation["candidates"]
+        ):
+            fail("prepared sealed request/policy/inventory/evidence drift")
+        blockers = find_blocking_authorities(directory, normalized)
+        if blockers != [(f"intent:{key}", "prepared")]:
+            fail("prepared intent no longer owns repository exclusivity")
+        snapshot = prepared_snapshot(directory, key, intent)
+        if dispatch:
+            if snapshot != args.expected_snapshot:
+                fail("prepared intent generation/version changed between checkpoints")
+            require_exact_integer(args.owner_pid, "dispatch owner PID", minimum=1)
+            # Request and repository scans can be slow. Their entry-time clock
+            # cannot authorize a CAS at or after the exact expiry boundary.
+            require_prepared_lifetime(intent)
+            intent["state"] = "dispatching"
+            intent["ownerPid"] = args.owner_pid
+            intent["version"] += 1
+            atomic_replace(intent_path(directory, key), intent)
+        print(canonical_json({
+            "snapshot": snapshot,
+            "state": intent["state"],
+            "version": intent["version"],
+            "capturePath": str(directory / intent["captureFile"]),
+        }))
+
+
+def command_verify_prepared(args):
+    verify_prepared_checkpoint(args, dispatch=False)
+
+
+def command_dispatch_prepared(args):
+    verify_prepared_checkpoint(args, dispatch=True)
+
+
+def matching_prepared_request(args, directory):
+    require_outside_repo(args.request, args.repo_root, "request file")
+    request = load_json_file(args.request, "request file", exact_mode=0o600)
+    if not isinstance(request, dict) or set(request) != REQUEST_KEYS or request["schemaVersion"] != REQUEST_SCHEMA:
+        fail("discard request schema is invalid")
+    if request["repository"] != args.repository:
+        fail("discard repository mismatch")
+    key = request_key({**request, "inputHash": canonical_input_hash(workflow_dispatch_inputs(request["inputs"]))})
+    intent = load_intent(directory, key)
+    require_prepared_capture(directory, intent)
+    if (
+        intent["workflowId"] != int(args.workflow_id)
+        or intent["workflow"] != "oci-live-data-rollout.yml"
+        or args.workflow_path != LIVE_DATA_PATH
+        or any(request[name] != intent[name] for name in REQUEST_KEYS - {"schemaVersion"})
+        or intent["preparedSeal"]["requestSha256"] != evidence_digest(request)
+        or intent["preparedSeal"]["requestFile"] != file_identity(args.request)
+    ):
+        fail("discard request/intent identity or safe metadata mismatch")
+    return key, intent
+
+
+def command_prepared_context(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    with repository_claim_lock(directory, nonblocking=True):
+        key, intent = matching_prepared_request(args, directory)
+        print(prepared_snapshot(directory, key, intent))
+
+
+def command_discard_prepared(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    with repository_claim_lock(directory, nonblocking=True):
+        key, intent = matching_prepared_request(args, directory)
+        if prepared_snapshot(directory, key, intent) != args.expected_snapshot:
+            fail("prepared generation/version changed before discard")
+        # No provider mutation. Age and old control SHA do not release authority
+        # implicitly, but also cannot prevent this explicit, disabled cleanup.
+        durable_unlink(intent_path(directory, key))
+        durable_unlink(directory / intent["captureFile"])
+    print("dispatch=DISCARDED authority_state=absent")
+
+
+@contextlib.contextmanager
+def intent_mutation_guard(directory, key, expected_capture_file, *, require_capture=False):
+    original = load_intent(directory, key)
+    if original["schemaVersion"] == INTENT_SCHEMA:
+        yield
+        return
+    if require_capture and expected_capture_file is None:
+        fail("v2 dispatch status requires the captured generation")
+    capture = expected_capture_file or original["captureFile"]
+    # Serialize v2 bind/status with replacement. A delayed old process must not
+    # write through a same-request, same-version ABA into the new generation.
+    with repository_claim_lock(directory):
+        if load_intent(directory, key)["captureFile"] != capture:
+            fail("dispatch capture generation changed before intent mutation")
+        yield
+
+
 def command_record_dispatch_status(args):
     policy = validate_policy(load_json_text(args.policy_json, "policy"))
     normalized = load_normalized(
@@ -2459,6 +2860,13 @@ def command_record_dispatch_status(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.workflow_blob_sha):
         fail("workflow blob SHA must be a full lowercase Git object ID")
     key = request_key(normalized)
+    with intent_mutation_guard(
+        directory, key, args.expected_capture_file, require_capture=True,
+    ):
+        record_dispatch_status_under_lock(args, policy, normalized, directory, workflow_id, key)
+
+
+def record_dispatch_status_under_lock(args, policy, normalized, directory, workflow_id, key):
     intent = verify_intent(
         load_intent(directory, key),
         normalized,
@@ -2474,6 +2882,11 @@ def command_record_dispatch_status(args):
         fail("dispatch intent changed before command status was recorded")
     if args.dispatch_status < 0 or args.dispatch_status > 255:
         fail("dispatch command status is invalid")
+    if intent["schemaVersion"] == PREPARED_INTENT_SCHEMA:
+        identity = file_identity(directory / intent["captureFile"])
+        if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
+               for name in ("device", "inode")):
+            fail("dispatch capture generation was replaced")
     fsync_private_capture(directory / intent["captureFile"])
     intent["dispatchStatus"] = args.dispatch_status
     intent["version"] += 1
@@ -2510,7 +2923,8 @@ def command_cancel_intent(args):
         args.workflow_blob_sha,
     )
     if (
-        intent["state"] != "dispatching"
+        intent["schemaVersion"] != INTENT_SCHEMA
+        or intent["state"] != "dispatching"
         or intent["version"] != args.expected_version
         or intent["ownerPid"] != args.owner_pid
         or intent["dispatchStatus"] is not None
@@ -2555,6 +2969,11 @@ def command_bind_intent(args):
         if args.allow_missing:
             return
         fail("dispatch intent does not exist")
+    with intent_mutation_guard(directory, key, args.expected_capture_file):
+        bind_intent_under_lock(args, policy, normalized, directory, workflow_id, key, path)
+
+
+def bind_intent_under_lock(args, policy, normalized, directory, workflow_id, key, path):
     intent = verify_intent(
         load_intent(directory, key),
         normalized,
@@ -2564,8 +2983,15 @@ def command_bind_intent(args):
         workflow_id,
         args.workflow_blob_sha,
     )
+    if intent["state"] == "prepared":
+        fail("prepared authority cannot bind or resume a run")
     capture_path = directory / intent["captureFile"]
     require_private_capture(capture_path)
+    if intent["schemaVersion"] == PREPARED_INTENT_SCHEMA:
+        identity = file_identity(capture_path)
+        original = intent["preparedSeal"]["captureIdentity"]
+        if any(identity[name] != original[name] for name in ("device", "inode")):
+            fail("dispatch capture generation was replaced")
     text = capture_path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
         rf"https://github\.com/{re.escape(args.repository)}/actions/runs/"
@@ -2614,11 +3040,12 @@ def command_bind_intent(args):
             fail("existing authority record does not match dispatch intent")
     else:
         atomic_create(record_file, record)
-    durable_unlink(path)
-    try:
-        durable_unlink(capture_path)
-    except FileNotFoundError:
-        pass
+    if intent["schemaVersion"] == INTENT_SCHEMA:
+        durable_unlink(path)
+        try:
+            durable_unlink(capture_path)
+        except FileNotFoundError:
+            pass
     print(run_id)
 
 
@@ -2714,16 +3141,72 @@ def command_ensure_automatic_record(args):
     }))
 
 
+def bound_intent_record(directory, intent):
+    record = load_record(directory, intent["runId"])
+    if any(record[name] != intent[name] for name in (
+        "repository", "operation", "workflow", "event", "environment", "controlSha",
+        "subjectSha", "targetSha", "inputs", "inputHash", "workflowId",
+        "workflowBlobSha", "runId", "runUrl", "authorityOwner",
+    )) or record["runAttempt"] != 1 or record["displayTitle"] != render_template(
+        intent["displayTitleTemplate"], intent, run_id=intent["runId"],
+    ):
+        fail("bound prepared intent/record mismatch")
+    return record
+
+
+def retired_bound_intent(directory, intent):
+    if intent["schemaVersion"] != PREPARED_INTENT_SCHEMA or intent["state"] != "bound":
+        return False
+    record = bound_intent_record(directory, intent)
+    return (
+        record["state"] == "retired"
+        and record["approvals"] == []
+        and record["inflightApproval"] is None
+    )
+
+
+def preserve_spent_intent(directory, intent):
+    if not retired_bound_intent(directory, intent):
+        fail("only an exact retired bound generation may be preserved for replacement")
+    identity = file_identity(directory / intent["captureFile"])
+    if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
+           for name in ("device", "inode")):
+        fail("spent capture generation was replaced")
+    archive = directory / f"spent-{intent['requestKey']}-{Path(intent['captureFile']).stem}.json"
+    if archive.exists() or archive.is_symlink():
+        if load_intent_file(archive, intent["requestKey"]) != intent:
+            fail("spent generation archive does not match the exact retired intent")
+    else:
+        # Persist BEFORE replacing the current slot. A crash leaves either the
+        # old bound slot or the new prepared slot, never reopens the spent one.
+        atomic_create(archive, intent)
+
+
 def find_blocking_authorities(directory, normalized):
     matches = []
     for candidate in sorted(directory.glob("request-*.json")):
         key = candidate.stem.removeprefix("request-")
         intent = load_intent(directory, key)
         if intent["repository"] == normalized["repository"]:
+            if intent["schemaVersion"] == PREPARED_INTENT_SCHEMA and intent["state"] == "bound":
+                # Retain this one-use generation, without globally fencing later
+                # operations after the bound record is resolved. The record scan
+                # below still fences claimed/inflight/rejecting runs.
+                if retired_bound_intent(directory, intent) or key != request_key(normalized):
+                    continue
             matches.append((f"intent:{key}", intent["state"]))
     for candidate in sorted(directory.glob("*.json")):
         run_id = candidate.stem
         if run_id.startswith("request-"):
+            continue
+        spent = re.fullmatch(r"spent-([0-9a-f]{64})-(dispatch-[0-9a-f]{32})", run_id)
+        if spent:
+            intent = load_intent_file(candidate, spent[1])
+            if (
+                Path(intent["captureFile"]).stem != spent[2]
+                or not retired_bound_intent(directory, intent)
+            ):
+                fail("spent generation lacks exact retired bound authority")
             continue
         if not POSITIVE_INTEGER.fullmatch(run_id):
             fail("authority directory contains an unexpected JSON file")
@@ -3712,6 +4195,36 @@ def build_parser():
     common_authority_arguments(claim_request)
     claim_request.set_defaults(function=command_claim_request)
 
+    for name, function in (
+        ("prepare-disabled-ghosts", command_prepare_disabled_ghosts),
+        ("verify-prepared", command_verify_prepared),
+        ("dispatch-prepared", command_dispatch_prepared),
+    ):
+        special = subparsers.add_parser(name)
+        common_authority_arguments(special)
+        for argument in (
+            "request", "normalized", "inputs-file", "policy-json", "repository",
+            "current-master", "workflow-id", "workflow-blob-sha", "observation-json",
+        ):
+            special.add_argument(f"--{argument}", required=True)
+        if name != "verify-prepared":
+            special.add_argument("--owner-pid", required=True, type=int)
+        if name == "dispatch-prepared":
+            special.add_argument("--expected-snapshot", required=True)
+        special.set_defaults(function=function)
+
+    for name, function in (
+        ("prepared-context", command_prepared_context),
+        ("discard-prepared", command_discard_prepared),
+    ):
+        special = subparsers.add_parser(name)
+        common_authority_arguments(special)
+        for argument in ("request", "repository", "workflow-id", "workflow-path"):
+            special.add_argument(f"--{argument}", required=True)
+        if name == "discard-prepared":
+            special.add_argument("--expected-snapshot", required=True)
+        special.set_defaults(function=function)
+
     record_dispatch_status = subparsers.add_parser(
         "record-dispatch-status"
     )
@@ -3734,6 +4247,7 @@ def build_parser():
         required=True,
         type=int,
     )
+    record_dispatch_status.add_argument("--expected-capture-file")
     common_authority_arguments(record_dispatch_status)
     record_dispatch_status.set_defaults(
         function=command_record_dispatch_status
@@ -3759,6 +4273,7 @@ def build_parser():
     bind_intent.add_argument("--workflow-id", required=True)
     bind_intent.add_argument("--workflow-blob-sha", required=True)
     bind_intent.add_argument("--expected-run-id")
+    bind_intent.add_argument("--expected-capture-file")
     bind_intent.add_argument("--allow-missing", action="store_true")
     common_authority_arguments(bind_intent)
     bind_intent.set_defaults(function=command_bind_intent)
@@ -3913,6 +4428,7 @@ def build_parser():
         type=int,
     )
     classify_unmaterialized.add_argument("--now-epoch", type=int)
+    classify_unmaterialized.add_argument("--semantic-evidence", action="store_true")
     classify_unmaterialized.set_defaults(
         function=command_classify_unmaterialized_run
     )
