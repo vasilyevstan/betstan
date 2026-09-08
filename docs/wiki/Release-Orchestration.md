@@ -175,44 +175,17 @@ Before deployment, the release chain verifies:
 - absence of competing production operations.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
-request identity is checked before any cancellation path. The dispatcher holds
-the authority lock, refreshes the run, and persists an evidence-bound
-`rejecting` state before cancelling exactly one job waiting at exactly one
-matching protected environment. Delayed cancellation resumes from that
-persisted state. The serialization fence is released only after two stable
-terminal observations prove exact cancellation, no approval, no successful
-job step, and no pending deployment. Ambiguous, started, or partially executed
-runs remain globally fenced rather than being replayed or silently replaced.
-The record retains exact pre-cancel and terminal snapshots plus canonical
-hashes. Raw multiline prerequisite diagnostics are retained by digest while a
-bounded one-line summary is used in state and logs, so hostile formatting
-cannot prevent the rejection record from becoming durable. If a descendant
-`master` is promoted before cancellation completes, the matching old request
-can continue only from a clean checkout at current `master`, after proving the
-recorded control SHA remains an ancestor and its historical workflow blob
-still matches. Retirement records both that historical control and the actual
-live `master` that completed recovery. This narrow recovery path cannot
-dispatch, issue, or approve historical control, and it fails closed if
-`master` moves again during the attempt.
+exact request and run remain serialized until bounded, reviewed recovery proves
+the exact source identity safe to retire. Ambiguity, partial execution, or
+provenance drift remains a blocker. Recovery preserves one-use authority
+evidence and cannot grant new dispatch, approval, or mutation authority or
+bypass protected approval.
 
-The repository-global blocker scan and dispatch-intent creation run under one
-kernel-backed claim lock. This closes the distinct-request race that per-file
-atomic creation cannot prevent. A prospective current-master workflow ghost is
-ignored only when refreshed run, workflow, job, pending-deployment, and
-approval/artifact evidence remains pristine and the workflow is manually
-disabled.
-Active stale data and activation runs always block. The only active-run
-supersession exception is a pristine capacity ghost with no approval history
-and an exact later successful first attempt for the same workflow, source SHA,
-event, and rendered title.
-
-After approval authority is claimed, immutable upstream artifacts are checked
-first, followed by fresh promotion, production-exclusivity, pending-gate, and
-current-control checks. Any failure releases the originally claimed gate
-identity and sends no approval. Infrastructure performs the equivalent
-mutation-boundary check in the active `provision` job: current `master` and
-runtime mode bracket upstream validation immediately before the first OCI API
-call.
+Repository-global exclusivity prevents incomplete evidence from being silently
+replaced while active production work remains fenced. Before provider mutation,
+the active job revalidates the exact source, runtime mode, upstream provenance,
+approval authority, and exclusivity. Any failure stops before mutation without
+weakening the protected evidence.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a
