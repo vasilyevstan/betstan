@@ -143,7 +143,7 @@ for path in root.rglob("*"):
 if actual_files != set(manifest_entries):
     fail("SHA256SUMS does not cover the exact evidence file set")
 
-provenance_keys = {
+common_provenance_keys = {
     "schema_version",
     "source_sha",
     "build_run_id",
@@ -157,7 +157,6 @@ provenance_keys = {
     "status",
     "backfill_complete",
     "index_ready",
-    "obsolete_event_cleanup_complete",
     "maintenance_fence_enforced",
     "writers_quiesced",
     "runtime_held_for_deploy",
@@ -165,20 +164,27 @@ provenance_keys = {
     "operation_lock_handoff",
     "completed_at",
 }
-provenance = read_env(root / "provenance.env", provenance_keys)
+provenance = read_env(root / "provenance.env")
+schema_version = provenance.get("schema_version")
+if schema_version == "live-betting-v1":
+    operation_complete_key = "obsolete_event_cleanup_complete"
+elif schema_version == "live-betting-v2":
+    operation_complete_key = "event_reschedule_complete"
+else:
+    fail("unexpected schema evidence version")
+if set(provenance) != common_provenance_keys | {operation_complete_key}:
+    fail("provenance.env does not contain the exact reviewed key set")
 for key, value in expected.items():
     if provenance.get(key) != value:
         fail(f"provenance mismatch for {key}")
-if provenance["schema_version"] != "live-betting-v1":
-    fail("unexpected schema evidence version")
 if provenance["status"] != "PASS":
     fail("data rollout did not complete successfully")
 if provenance["backfill_complete"] not in {"true", "false"}:
     fail("backfill_complete is not boolean")
 if provenance["index_ready"] not in {"true", "false"}:
     fail("index_ready is not boolean")
-if provenance["obsolete_event_cleanup_complete"] not in {"true", "false"}:
-    fail("obsolete_event_cleanup_complete is not boolean")
+if provenance[operation_complete_key] not in {"true", "false"}:
+    fail(f"{operation_complete_key} is not boolean")
 if not re.fullmatch(r"[0-9a-f]{64}", provenance["baseline_sha256"]):
     fail("baseline_sha256 is not a SHA-256 digest")
 for key in (
@@ -301,8 +307,8 @@ if resume_baseline_dir:
 if phase in {"apply-backfills", "apply-slip-index"}:
     if provenance["backfill_complete"] != "true":
         fail("mutating phase did not prove completed backfills")
-    if provenance["obsolete_event_cleanup_complete"] != "true":
-        fail("mutating phase did not prove obsolete event cleanup")
+    if provenance[operation_complete_key] != "true":
+        fail("mutating phase did not prove the fixed event operation")
 if phase == "apply-slip-index" and provenance["index_ready"] != "true":
     fail("final phase did not prove the Slip index")
 if phase == "dry-run":
@@ -336,7 +342,6 @@ required_reports = {
             "event", "gamemaster", "moderation", "resulting", "bet", "slip"
         )),
         "reports/preflight-slip-index.json",
-        "reports/preflight-obsolete-event.json",
     },
     "apply-backfills": {
         *(f"reports/preflight-{service}.json" for service in (
@@ -350,9 +355,6 @@ required_reports = {
         )),
         "reports/preflight-slip-index.json",
         "reports/final-slip-index.json",
-        "reports/preflight-obsolete-event.json",
-        "reports/apply-obsolete-event.json",
-        "reports/verify-obsolete-event.json",
     },
     "apply-slip-index": {
         *(f"reports/preflight-{service}.json" for service in (
@@ -368,9 +370,22 @@ required_reports = {
         "reports/final-slip-index.json",
         "reports/apply-slip-index.json",
         "reports/verify-slip-index.json",
-        "reports/preflight-obsolete-event.json",
     },
 }[phase]
+if schema_version == "live-betting-v1":
+    required_reports.add("reports/preflight-obsolete-event.json")
+    if phase == "apply-backfills":
+        required_reports.update({
+            "reports/apply-obsolete-event.json",
+            "reports/verify-obsolete-event.json",
+        })
+else:
+    required_reports.add("reports/preflight-event-reschedule.json")
+    if phase == "apply-backfills":
+        required_reports.update({
+            "reports/apply-event-reschedule.json",
+            "reports/verify-event-reschedule.json",
+        })
 if not required_reports.issubset(actual_files):
     fail("phase evidence is missing required sanitized reports")
 
@@ -399,37 +414,73 @@ for relative in sorted(actual_files):
         fail(f"{relative} is not valid JSON: {exc}")
     inspect_json(payload)
 
-cleanup_reports = sorted(
-    relative
-    for relative in actual_files
-    if relative.endswith("-obsolete-event.json")
-)
-for relative in cleanup_reports:
-    cleanup = json.loads((root / relative).read_text(encoding="utf-8"))
-    if cleanup.get("kind") != "obsolete-event-cleanup":
-        fail(f"{relative} has an invalid cleanup kind")
-    if cleanup.get("targetEventId") != "6a623af592af5a95b1d0bb79":
-        fail(f"{relative} targets an unexpected event")
-    if cleanup.get("ready") is not True or cleanup.get("blockerCount") != 0:
-        fail(f"{relative} did not prove safe cleanup state")
-if phase == "apply-backfills":
-    for relative in (
-        "reports/apply-obsolete-event.json",
-        "reports/verify-obsolete-event.json",
-    ):
-        cleanup = json.loads((root / relative).read_text(encoding="utf-8"))
-        if cleanup.get("state") not in {"absent", "removed"}:
-            fail(f"{relative} did not prove completed cleanup")
-if phase == "apply-slip-index":
-    cleanup = json.loads(
-        (root / "reports/preflight-obsolete-event.json").read_text(
-            encoding="utf-8"
-        )
+if schema_version == "live-betting-v1":
+    operation_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith("-obsolete-event.json")
     )
-    if cleanup.get("state") not in {"absent", "removed"}:
-        fail("final phase did not inherit completed obsolete event cleanup")
+    for relative in operation_reports:
+        operation = json.loads((root / relative).read_text(encoding="utf-8"))
+        if operation.get("kind") != "obsolete-event-cleanup":
+            fail(f"{relative} has an invalid cleanup kind")
+        if operation.get("targetEventId") != "6a623af592af5a95b1d0bb79":
+            fail(f"{relative} targets an unexpected event")
+        if operation.get("ready") is not True or operation.get("blockerCount") != 0:
+            fail(f"{relative} did not prove safe cleanup state")
+    if phase == "apply-backfills":
+        for relative in (
+            "reports/apply-obsolete-event.json",
+            "reports/verify-obsolete-event.json",
+        ):
+            operation = json.loads((root / relative).read_text(encoding="utf-8"))
+            if operation.get("state") not in {"absent", "removed"}:
+                fail(f"{relative} did not prove completed cleanup")
+    if phase == "apply-slip-index":
+        operation = json.loads(
+            (root / "reports/preflight-obsolete-event.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if operation.get("state") not in {"absent", "removed"}:
+            fail("final phase did not inherit completed obsolete event cleanup")
+else:
+    operation_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith("-event-reschedule.json")
+    )
+    for relative in operation_reports:
+        operation = json.loads((root / relative).read_text(encoding="utf-8"))
+        if operation.get("kind") != "fixed-event-reschedule":
+            fail(f"{relative} has an invalid reschedule kind")
+        if operation.get("targetEventId") != "6a623af592af5a95b1d0bb79":
+            fail(f"{relative} targets an unexpected event")
+        if operation.get("targetKickoff") != "2026-09-08T08:05:00.000Z":
+            fail(f"{relative} targets an unexpected kickoff")
+        if operation.get("ready") is not True or operation.get("blockerCount") != 0:
+            fail(f"{relative} did not prove a safe reschedule state")
+    if phase == "apply-backfills":
+        expected_states = {
+            "reports/apply-event-reschedule.json": {"applied", "completed"},
+            "reports/verify-event-reschedule.json": {"verified", "completed"},
+        }
+        for relative, states in expected_states.items():
+            operation = json.loads((root / relative).read_text(encoding="utf-8"))
+            if operation.get("state") not in states:
+                fail(f"{relative} did not prove completed reschedule")
+    if phase == "apply-slip-index":
+        operation = json.loads(
+            (root / "reports/preflight-event-reschedule.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if operation.get("state") not in {"verified", "completed"}:
+            fail("final phase did not inherit completed event reschedule")
 
 journal = json.loads((root / "journal.json").read_text(encoding="utf-8"))
+if journal.get("schema_version") != schema_version:
+    fail("journal schema version differs from provenance")
 for key, value in expected.items():
     if str(journal.get(key, "")) != value:
         fail(f"journal mismatch for {key}")
@@ -438,7 +489,7 @@ if journal.get("status") != "PASS":
 if journal.get("baseline_sha256") != provenance["baseline_sha256"]:
     fail("journal baseline digest differs from provenance")
 for key in (
-    "obsolete_event_cleanup_complete",
+    operation_complete_key,
     "maintenance_fence_enforced",
     "writers_quiesced",
     "runtime_held_for_deploy",
@@ -449,7 +500,7 @@ for key in (
         fail(f"journal maintenance state differs from provenance for {key}")
 
 if phase == "apply-slip-index":
-    schema_keys = {
+    common_schema_keys = {
         "schema_version",
         "source_sha",
         "build_run_id",
@@ -461,16 +512,17 @@ if phase == "apply-slip-index":
         "data_run_attempt",
         "backfill_complete",
         "index_ready",
-        "obsolete_event_cleanup_complete",
         "maintenance_fence_enforced",
         "writers_quiesced",
         "runtime_held_for_deploy",
         "operation_lock_enforced",
         "operation_lock_handoff",
     }
-    schema = read_env(root / "schema.env", schema_keys)
+    schema = read_env(root / "schema.env")
+    if set(schema) != common_schema_keys | {operation_complete_key}:
+        fail("schema.env does not contain the exact reviewed key set")
     required_schema = {
-        "schema_version": "live-betting-v1",
+        "schema_version": schema_version,
         "source_sha": expected["source_sha"],
         "build_run_id": expected["build_run_id"],
         "infrastructure_run_id": expected["infrastructure_run_id"],
@@ -481,7 +533,7 @@ if phase == "apply-slip-index":
         "data_run_attempt": expected["workflow_run_attempt"],
         "backfill_complete": "true",
         "index_ready": "true",
-        "obsolete_event_cleanup_complete": "true",
+        operation_complete_key: "true",
         "maintenance_fence_enforced": "true",
         "writers_quiesced": "true",
         "runtime_held_for_deploy": "true",

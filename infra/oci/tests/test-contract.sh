@@ -2092,10 +2092,10 @@ grep -Fq 'shared-mongo-operation-lock-stan.sh acquire' "$data_workflow"
 grep -Fq 'shared-mongo-operation-lock-stan.sh release' "$data_workflow"
 grep -Fq 'verify-live-betting-data-evidence-stan.sh' "$data_workflow"
 data_runner="$OCI_DIR/scripts/live-betting-data-rollout-stan.sh"
-for cleanup_failure_contract in \
-    'validate_blocked_cleanup_report' \
-    'write_cleanup_blocker_evidence' \
-    'live-betting-cleanup-blocker-v1' \
+for reschedule_failure_contract in \
+    'validate_blocked_reschedule_report' \
+    'write_reschedule_blocker_evidence' \
+    'live-betting-reschedule-blocker-v1' \
     'structured-blocked' \
     'terminal_state_observed_at' \
     'JOB_TERMINAL_STATE_GRACE_SECONDS' \
@@ -2107,8 +2107,8 @@ for cleanup_failure_contract in \
     'collect_complete_job_report' \
     'unable to collect complete failed job report' \
     'sanitized failure evidence recorded'; do
-  grep -Fq "$cleanup_failure_contract" "$data_runner" ||
-    fail "live-data rollout omits cleanup failure contract: $cleanup_failure_contract"
+  grep -Fq "$reschedule_failure_contract" "$data_runner" ||
+    fail "live-data rollout omits reschedule failure contract: $reschedule_failure_contract"
 done
 grep -Fq \
   'when a protected Job intentionally exits nonzero after emitting a structured' \
@@ -2136,33 +2136,60 @@ data_evidence_upload="$(
 grep -Fq 'if: always()' <<<"$data_evidence_upload" &&
   grep -Fq 'if-no-files-found: ignore' <<<"$data_evidence_upload" ||
   fail "live-data workflow does not preserve available pre-data evidence"
+event_reschedule="$ROOT_DIR/event/src/scripts/rescheduleSyntheticEvent.ts"
 obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
+[[ -f "$event_reschedule" ]] ||
+  fail "fixed event-reschedule tool is missing"
 [[ -f "$obsolete_cleanup" ]] ||
-  fail "fixed obsolete-event cleanup tool is missing"
-for cleanup_contract in \
-    'export const OBSOLETE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
-    'REMOVE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
-    'RESTORE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}' \
+  fail "historical obsolete-event cleanup tool is missing"
+for reschedule_contract in \
+    'export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
+    'export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
+    'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
+    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-08T08:05:00.000Z";' \
+    'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
+    'ROLLBACK_EVENT_RESCHEDULE:${RESCHEDULE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \
-    'const ABSENT_TARGET_BLOCKING_DEPENDENCY_LOCATIONS:' \
     'const MAX_REFERENCED_SLIP_IDS = 128;' \
     'const dependencyReferenceFilter' \
-    'const dependencyLocationsForCleanupState' \
-    'const assertRollbackHasNoConflicts' \
-    'cleanupReportExitCode' \
-    'snapshotSha256'; do
-  grep -Fq "$cleanup_contract" "$obsolete_cleanup" ||
-    fail "obsolete-event cleanup omits safety contract: $cleanup_contract"
+    'const scanArchiveAndMirror' \
+    'const exactSourceFilter' \
+    'const updateJournalState' \
+    'rescheduleReportExitCode' \
+    'snapshotSha256' \
+    'targetSha256'; do
+  grep -Fq "$reschedule_contract" "$event_reschedule" ||
+    fail "event reschedule omits safety contract: $reschedule_contract"
 done
-! grep -Eq -- '--(event|event-id|target)(=|[[:space:]])' "$obsolete_cleanup" ||
-  fail "obsolete-event cleanup accepts a caller-selected target"
-grep -Fq 'run_obsolete_event_cleanup dry-run preflight' \
+! grep -Eq -- '--(event|event-id|target|kickoff)(=|[[:space:]])' \
+  "$event_reschedule" ||
+  fail "event reschedule accepts a caller-selected target"
+grep -Fq \
+  '"data:reschedule:synthetic-event": "node -r ts-node/register/transpile-only src/scripts/rescheduleSyntheticEvent.ts"' \
+  "$ROOT_DIR/event/package.json" ||
+  fail "Event package does not expose the fixed reschedule operator"
+grep -Fq 'run_event_reschedule dry-run preflight' \
   "$data_runner" &&
-  grep -Fq 'run_obsolete_event_cleanup apply apply' \
+  grep -Fq 'run_event_reschedule apply apply' \
     "$data_runner" &&
-  grep -Fq 'obsolete_event_cleanup_complete=true' \
+  grep -Fq 'run_event_reschedule verify verify' \
+    "$data_runner" &&
+  grep -Fq 'event_reschedule_complete=true' \
     "$data_runner" ||
-  fail "protected live-data rollout does not apply and verify the fixed cleanup"
+  fail "protected live-data rollout does not apply and verify the fixed reschedule"
+! grep -Fq 'cleanupObsoleteSyntheticEvent.js' "$data_runner" ||
+  fail "protected live-data rollout still invokes destructive fixture cleanup"
+grep -Fq \
+  'export const OBSOLETE_EVENT_KICKOFF = "2026-07-23T16:31:57.215Z";' \
+  "$obsolete_cleanup" &&
+  grep -Fq '!matchesObsoleteKickoff(eventDocument.time)' \
+    "$obsolete_cleanup" &&
+  grep -Fq '!matchesObsoleteKickoff(gamemasterDocument.time)' \
+    "$obsolete_cleanup" ||
+  fail "historical fixture cleanup is not bound to the original kickoff"
+grep -Fq 'The former automatic destructive' \
+  "$ROOT_DIR/docs/wiki/Live-Betting-Production.md" ||
+  fail "live-betting documentation does not retire automatic fixture cleanup"
 grep -Fq 'name: oci-production' "$deploy_workflow"
 grep -Fq 'DEPLOY OCI EXACT SHA' "$deploy_workflow"
 grep -Fq "steps.oci_cli.outcome == 'success'" "$deploy_workflow" ||

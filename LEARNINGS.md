@@ -621,6 +621,13 @@ cd resulting && npm ci && npm run test:ci
   selects the prior failed/cancelled first attempt, verifies immutable source,
   image, infrastructure, plan, and baseline hashes, and rewrites only carrier
   lineage. Never recapture a post-mutation state as the rollback baseline.
+- A one-time production correction is safer as a fixed-target journaled
+  operator than as a reusable delete/update command. Bind the exact identity,
+  old value, target value, source SHA, canonical preimage and target digests;
+  write the journal before targets; accept only snapshot-or-target partial
+  states; and block an unstarted operation once its lead-time boundary is
+  crossed. Preserve exact rollback plus the protected pre-mutation baseline,
+  and keep historical evidence schemas readable after the operator evolves.
 - Registry retention must bind each protected source to its truthful origin
   artifact. A normal deployed generation requires both build and deployment
   evidence. A recovered baseline is authorized by its successful terminal
