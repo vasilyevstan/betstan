@@ -1702,37 +1702,18 @@ PY
     "$pull_timestamp_case pull timestamp"
 done
 
-for event_merge_case in absent null; do
-  initialize_coverage_review_fixture "authorized"
-  python3 -I - \
-    "$coverage_review_event" \
-    "$event_merge_case" <<'PY'
-import json
-import pathlib
-import sys
-
-event_path = pathlib.Path(sys.argv[1])
-case = sys.argv[2]
-event = json.loads(event_path.read_text(encoding="utf-8"))
-if case == "absent":
-    event["pull_request"].pop("merge_commit_sha")
-elif case == "null":
-    event["pull_request"]["merge_commit_sha"] = None
-else:
-    raise SystemExit(1)
-event_path.write_text(
-    json.dumps(event, separators=(",", ":")),
-    encoding="utf-8",
-)
-PY
-  write_coverage_review_tap "$coverage_review_docker_stdout" 102
-  run_coverage_review_fixture >"$test_output"
-  grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
-  [[ -e "$coverage_review_docker_args" ]]
-  [[ ! -e "$coverage_review_node_sentinel" ]]
-done
-
-for event_merge_case in malformed stale; do
+for event_merge_case in \
+  absent \
+  null \
+  matching \
+  stale \
+  malformed-short \
+  malformed-nonhex \
+  malformed-long \
+  integer \
+  boolean \
+  array \
+  object; do
   initialize_coverage_review_fixture "authorized"
   python3 -I - \
     "$coverage_review_event" \
@@ -1746,21 +1727,40 @@ event_path = pathlib.Path(sys.argv[1])
 case = sys.argv[2]
 unrelated_sha = sys.argv[3]
 event = json.loads(event_path.read_text(encoding="utf-8"))
-event["pull_request"]["merge_commit_sha"] = (
-    "not-a-sha" if case == "malformed" else unrelated_sha
-)
+if case == "absent":
+    event["pull_request"].pop("merge_commit_sha")
+elif case == "null":
+    event["pull_request"]["merge_commit_sha"] = None
+elif case == "matching":
+    pass
+elif case == "stale":
+    event["pull_request"]["merge_commit_sha"] = unrelated_sha
+elif case == "malformed-short":
+    event["pull_request"]["merge_commit_sha"] = "not-a-sha"
+elif case == "malformed-nonhex":
+    event["pull_request"]["merge_commit_sha"] = "g" * 40
+elif case == "malformed-long":
+    event["pull_request"]["merge_commit_sha"] = "a" * 41
+elif case == "integer":
+    event["pull_request"]["merge_commit_sha"] = 1
+elif case == "boolean":
+    event["pull_request"]["merge_commit_sha"] = True
+elif case == "array":
+    event["pull_request"]["merge_commit_sha"] = [unrelated_sha]
+elif case == "object":
+    event["pull_request"]["merge_commit_sha"] = {"sha": unrelated_sha}
+else:
+    raise SystemExit(1)
 event_path.write_text(
     json.dumps(event, separators=(",", ":")),
     encoding="utf-8",
 )
 PY
-  expected_reason="event-merge-snapshot-is-invalid"
-  if [[ "$event_merge_case" == "stale" ]]; then
-    expected_reason="event-merge-snapshot-mismatch"
-  fi
-  assert_coverage_review_pre_execution_failure \
-    "$expected_reason" \
-    "$event_merge_case event merge snapshot"
+  write_coverage_review_tap "$coverage_review_docker_stdout" 102
+  run_coverage_review_fixture >"$test_output"
+  grep -qF "coverage_engine_review=PASS mode=integration" "$test_output"
+  [[ -e "$coverage_review_docker_args" ]]
+  [[ ! -e "$coverage_review_node_sentinel" ]]
 done
 
 for current_merge_case in absent null malformed stale; do

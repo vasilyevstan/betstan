@@ -428,7 +428,6 @@ default_branch = repository.get("default_branch")
 number = pull.get("number")
 head = pull.get("head")
 base = pull.get("base")
-merge_sha = pull.get("merge_commit_sha")
 changed_files = pull.get("changed_files")
 updated_at = pull.get("updated_at")
 title = pull.get("title")
@@ -468,11 +467,6 @@ timestamp_pattern = re.compile(
 
 if not sha_pattern.fullmatch(authoritative_merge_sha):
     raise SystemExit(1)
-if merge_sha is not None:
-    if not isinstance(merge_sha, str) or not sha_pattern.fullmatch(merge_sha):
-        raise SystemExit(2)
-    if merge_sha != authoritative_merge_sha:
-        raise SystemExit(3)
 
 def github_timestamp(value):
     if not isinstance(value, str) or not timestamp_pattern.fullmatch(value):
@@ -2404,18 +2398,7 @@ metadata_file="$work_dir/pull-metadata"
 if write_pull_metadata "$metadata_file" "$checkout_sha"; then
   :
 else
-  metadata_status=$?
-  case "$metadata_status" in
-    2)
-      fail "event-merge-snapshot-is-invalid"
-      ;;
-    3)
-      fail "event-merge-snapshot-mismatch"
-      ;;
-    *)
-      fail "invalid-pull-metadata"
-      ;;
-  esac
+  fail "invalid-pull-metadata"
 fi
 IFS=$'\t' read -r \
   repository \
