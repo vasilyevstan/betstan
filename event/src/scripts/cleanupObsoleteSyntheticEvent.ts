@@ -5,6 +5,7 @@ export const OBSOLETE_EVENT_ID = "6a623af592af5a95b1d0bb79";
 export const OBSOLETE_EVENT_NAME = "Home 1 - Away 1";
 export const OBSOLETE_EVENT_HOME = "Home 1";
 export const OBSOLETE_EVENT_AWAY = "Away 1";
+export const OBSOLETE_EVENT_KICKOFF = "2026-07-23T16:31:57.215Z";
 export const APPLY_CONFIRMATION =
   `REMOVE_OBSOLETE_EVENT:${OBSOLETE_EVENT_ID}`;
 export const ROLLBACK_CONFIRMATION =
@@ -230,6 +231,9 @@ const normalizedSlipId = (value: unknown): string | undefined => {
   return undefined;
 };
 
+const matchesObsoleteKickoff = (value: unknown): boolean =>
+  value instanceof Date && value.toISOString() === OBSOLETE_EVENT_KICKOFF;
+
 const database = (
   connection: Connection,
   names: DatabaseNames,
@@ -287,6 +291,7 @@ const identityErrors = (documents: SnapshotDocument[]): string[] => {
       || eventDocument.name !== OBSOLETE_EVENT_NAME
       || eventDocument.home !== OBSOLETE_EVENT_HOME
       || eventDocument.away !== OBSOLETE_EVENT_AWAY
+      || !matchesObsoleteKickoff(eventDocument.time)
       || eventDocument.visibility !== "OFFLINE"
       || eventDocument.status !== "NO_RESULT"
       || eventDocument.homeResult != null
@@ -302,6 +307,7 @@ const identityErrors = (documents: SnapshotDocument[]): string[] => {
       || gamemasterDocument.name !== OBSOLETE_EVENT_NAME
       || gamemasterDocument.home !== OBSOLETE_EVENT_HOME
       || gamemasterDocument.away !== OBSOLETE_EVENT_AWAY
+      || !matchesObsoleteKickoff(gamemasterDocument.time)
       || gamemasterDocument.status !== "NO_RESULT"
       || gamemasterDocument.homeResult != null
       || gamemasterDocument.awayResult != null

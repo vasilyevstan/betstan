@@ -172,6 +172,8 @@ Before deployment, the release chain verifies:
 - required backfills and indexes;
 - public-write fencing and writer quiescence when data mutation requires it;
 - a matching pre-mutation rollback baseline;
+- fixed-target data operators whose journal binds the exact preimage, target,
+  source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
 
 If an already-dispatched but unissued operation loses a prerequisite, its

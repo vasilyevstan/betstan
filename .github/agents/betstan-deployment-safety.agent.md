@@ -282,6 +282,13 @@ inactive. Fail closed when either query is incomplete or fails.
   database lock, fence, scaling, or data mutation. Zero-recovery capture is
   allowed only for nine matching public-GHCR live references and exact GHCR
   deploy provenance; OCIR or mixed state requires completed recovery authority.
+- For a one-time fixed-record correction, bind identity, old and target values,
+  source SHA, canonical preimage and target digests, and journal state in code.
+  Reject caller-selected targets, stale prepared journals, unstarted writes
+  inside the reviewed lead-time boundary, dependencies, live state, and
+  unknown partial states. Resume only snapshot-or-target partial writes; keep
+  exact rollback and the protected pre-mutation baseline until new activity
+  makes rollback unsafe.
 - Treat a manual dispatch or rerun of the central workflows as a production action. Require a full master SHA and approval through `production-emergency`.
 - For a manually disabled workflow, keep it enabled until the exact returned
   run ID has at least one job and the expected protected environment. The

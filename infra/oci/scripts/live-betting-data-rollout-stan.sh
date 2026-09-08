@@ -196,19 +196,25 @@ create_job() {
           args:
             - "--apply"'
       ;;
-    dist/scripts/cleanupObsoleteSyntheticEvent.js:dry-run)
+    dist/scripts/rescheduleSyntheticEvent.js:dry-run)
       args='
           args:
             - "--mode"
             - "dry-run"'
       ;;
-    dist/scripts/cleanupObsoleteSyntheticEvent.js:apply)
+    dist/scripts/rescheduleSyntheticEvent.js:apply)
       args='
           args:
             - "--mode"
             - "apply"
             - "--confirmation"
-            - "REMOVE_OBSOLETE_EVENT:6a623af592af5a95b1d0bb79"'
+            - "RESCHEDULE_EVENT:6a623af592af5a95b1d0bb79:2026-09-08T08:05:00.000Z"'
+      ;;
+    dist/scripts/rescheduleSyntheticEvent.js:verify)
+      args='
+          args:
+            - "--mode"
+            - "verify"'
       ;;
     *)
       fail "unsupported data job command or mode: $command_path/$mode"
@@ -313,7 +319,7 @@ collect_complete_job_report() {
 wait_for_job_report() {
   local job_name="$1"
   local raw_file="$2"
-  local allow_blocked_cleanup="${3:-false}"
+  local allow_blocked_reschedule="${3:-false}"
   local expected_mode="${4:-}"
   local deadline=$(( $(date +%s) + JOB_TIMEOUT_SECONDS ))
   local job_json="" pod_state="" pod_count="unknown" pod_phase="Unknown"
@@ -325,12 +331,14 @@ wait_for_job_report() {
   local terminal_state_observed_at=0 terminal_state_deadline=0
   local status_deadline request_timeout sleep_seconds now
 
-  [[ "$allow_blocked_cleanup" == "true" ||
-     "$allow_blocked_cleanup" == "false" ]] ||
-    fail "blocked cleanup report policy is invalid"
-  if [[ "$allow_blocked_cleanup" == "true" ]]; then
-    [[ "$expected_mode" == "dry-run" || "$expected_mode" == "apply" ]] ||
-      fail "blocked cleanup report mode is invalid"
+  [[ "$allow_blocked_reschedule" == "true" ||
+     "$allow_blocked_reschedule" == "false" ]] ||
+    fail "blocked reschedule report policy is invalid"
+  if [[ "$allow_blocked_reschedule" == "true" ]]; then
+    [[ "$expected_mode" == "dry-run" ||
+       "$expected_mode" == "apply" ||
+       "$expected_mode" == "verify" ]] ||
+      fail "blocked reschedule report mode is invalid"
   fi
 
   while true; do
@@ -578,14 +586,14 @@ wait_for_job_report() {
           "$job_name" "$raw_file" "$terminal_state_deadline"; then
         fail "unable to collect complete failed job report for $job_name"
       fi
-      if [[ "$allow_blocked_cleanup" == "true" &&
+      if [[ "$allow_blocked_reschedule" == "true" &&
         "$pod_count" == "1" &&
         "$pod_phase" == "Failed" &&
         "$container_state" == "terminated" &&
         "$container_reason" == "Error" &&
         "$container_exit_code" == "1" &&
         "$container_signal" == "0" ]] &&
-        validate_blocked_cleanup_report "$raw_file" "$expected_mode"; then
+        validate_blocked_reschedule_report "$raw_file" "$expected_mode"; then
         LAST_JOB_OUTCOME="structured-blocked"
         LAST_JOB_POD_COUNT="$pod_count"
         LAST_JOB_POD_PHASE="$pod_phase"
@@ -618,7 +626,7 @@ run_job() {
   local raw_file
   local image_ref
   local job_name
-  local allow_blocked_cleanup="${4:-false}"
+  local allow_blocked_reschedule="${4:-false}"
 
   job_sequence=$((job_sequence + 1))
   job_name="live-data-${service}-${RUN_ID}-${job_sequence}"
@@ -628,7 +636,7 @@ run_job() {
   created_jobs+=("$job_name")
   create_job "$service" "$command_path" "$mode" "$image_ref" "$job_name"
   wait_for_job_report \
-    "$job_name" "$raw_file" "$allow_blocked_cleanup" "$mode"
+    "$job_name" "$raw_file" "$allow_blocked_reschedule" "$mode"
   LAST_RAW_FILE="$raw_file"
   kubectl delete job "$job_name" \
     -n "$OCI_K8S_NAMESPACE" \
@@ -758,7 +766,7 @@ sanitize_index_report() {
   LAST_REPORT="$output"
 }
 
-project_cleanup_report() {
+project_reschedule_report() {
   local raw_file="$1"
   local stage="$2"
   local expected_mode="$3"
@@ -768,7 +776,8 @@ project_cleanup_report() {
     -s \
     --arg stage "$stage" \
     --arg expected_mode "$expected_mode" \
-    --arg target_event_id "6a623af592af5a95b1d0bb79" '
+    --arg target_event_id "6a623af592af5a95b1d0bb79" \
+    --arg target_kickoff "2026-09-08T08:05:00.000Z" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
       def exact_keys($required; $optional):
@@ -776,7 +785,8 @@ project_cleanup_report() {
         (($required - $actual) | length) == 0 and
         (($actual - ($required + $optional)) | length) == 0;
       def service:
-        if . == "gaming_event" then "event"
+        if . == "gaming_backoffice" then "backoffice"
+        elif . == "gaming_event" then "event"
         elif . == "gaming_gamemaster" then "gamemaster"
         elif . == "gaming_moderation" then "moderation"
         elif . == "gaming_resulting" then "resulting"
@@ -785,12 +795,16 @@ project_cleanup_report() {
         else null
         end;
       def allowed_collection($service; $collection):
-        if $service == "event" then
+        if $service == "backoffice" then
           $collection == "events"
+        elif $service == "event" then
+          ["events", "eventrescheduleoperations"] |
+            index($collection) != null
         elif $service == "gamemaster" then
-          $collection == "eventarchives"
+          ["events", "eventarchives"] | index($collection) != null
         elif $service == "moderation" then
-          ["bets", "resulteds", "parkedplacebets"] | index($collection) != null
+          ["liveeventmirrors", "bets", "resulteds", "parkedplacebets"] |
+            index($collection) != null
         elif $service == "resulting" then
           [
             "bets",
@@ -808,16 +822,28 @@ project_cleanup_report() {
         else false
         end;
       def reason_code:
-        if . == "event reference" then "event_reference"
-        elif . == "event source identity does not match the reviewed fixture" or
-             . == "Gamemaster identity does not match the reviewed fixture"
+        if . == "event or Slip dependency" then "event_or_slip_dependency"
+        elif . == "Backoffice source identity does not match the reviewed fixture" or
+             . == "Event projection is not an idle reviewed fixture" or
+             . == "Gamemaster projection is not an idle reviewed fixture"
         then "identity_mismatch"
-        elif . == "duplicate Gamemaster archive records"
-        then "duplicate_tombstone"
-        elif . == "Gamemaster archive contains an unrelated or invalid record" or
-             . == "Gamemaster tombstone snapshot is invalid" or
-             . == "invalid tombstone"
-        then "invalid_tombstone"
+        elif . == "duplicate target documents" then "duplicate_target"
+        elif . == "Gamemaster archive or cleanup tombstone exists"
+        then "archive_exists"
+        elif . == "live moderation state exists" then "live_mirror_exists"
+        elif . == "target kickoff is inside the protected lead-time window"
+        then "lead_time"
+        elif . == "event reschedule journal is missing" then "journal_missing"
+        elif . == "event reschedule was explicitly rolled back"
+        then "rolled_back"
+        elif . == "rescheduled projection does not match the journal target"
+        then "target_mismatch"
+        elif . == "partial reschedule contains an unknown projection state"
+        then "partial_unknown"
+        elif . == "prepared event reschedule belongs to a different source SHA"
+        then "source_mismatch"
+        elif . == "event reschedule is prepared but not applied"
+        then "not_applied"
         else null
         end;
       select(length == 1) |
@@ -828,35 +854,51 @@ project_cleanup_report() {
           [
             "mode",
             "targetEventId",
+            "targetKickoff",
             "state",
             "ready",
             "scanned",
             "matched",
             "changed",
             "errorCount",
-            "tombstoneVerified",
+            "journalVerified",
             "snapshotDocumentCount",
+            "targetDocumentCount",
             "blockers"
           ];
-          ["snapshotSha256"]
+          ["snapshotSha256", "targetSha256"]
         )) and
         ($report.mode == $expected_mode) and
         ($report.targetEventId == $target_event_id) and
-        ($report.state == "absent" or
-         $report.state == "candidate" or
-         $report.state == "partial" or
-         $report.state == "removed" or
-         $report.state == "restored" or
+        ($report.targetKickoff == $target_kickoff) and
+        ($report.state == "candidate" or
+         $report.state == "prepared" or
+         $report.state == "applied" or
+         $report.state == "verified" or
+         $report.state == "completed" or
+         $report.state == "rolled-back" or
          $report.state == "blocked") and
         ($report.ready | type == "boolean") and
         ($report.scanned | nonnegative_integer) and
         ($report.matched | nonnegative_integer) and
         ($report.changed | nonnegative_integer) and
         ($report.errorCount | nonnegative_integer) and
-        ($report.tombstoneVerified | type == "boolean") and
+        ($report.journalVerified | type == "boolean") and
         ($report.snapshotDocumentCount | nonnegative_integer) and
+        ($report.targetDocumentCount | nonnegative_integer) and
         (($report | has("snapshotSha256") | not) or
          ($report.snapshotSha256 | test("^[0-9a-f]{64}$"))) and
+        (($report | has("targetSha256") | not) or
+         ($report.targetSha256 | test("^[0-9a-f]{64}$"))) and
+        (
+          if $report.journalVerified then
+            ($report.snapshotSha256 | test("^[0-9a-f]{64}$")) and
+            ($report.targetSha256 | test("^[0-9a-f]{64}$"))
+          else
+            ($report | has("snapshotSha256") | not) and
+            ($report | has("targetSha256") | not)
+          end
+        ) and
         ($report.blockers | type == "array") and
         ([$report.blockers[] |
           . as $blocker |
@@ -888,23 +930,27 @@ project_cleanup_report() {
             $report.errorCount == ($report.blockers | length)
           )
         ) and
-        (($expected_mode != "dry-run") or $report.changed == 0)
+        (
+          ($expected_mode != "dry-run" and $expected_mode != "verify")
+          or $report.changed == 0
+        )
       ) |
       $report |
       {
-        kind: "obsolete-event-cleanup",
+        kind: "fixed-event-reschedule",
         stage: $stage,
         mode,
         targetEventId,
+        targetKickoff,
         state,
         ready,
         scanned,
         matched,
         changed,
         errorCount,
-        tombstoneVerified,
+        journalVerified,
         snapshotDocumentCount,
-        snapshotSha256,
+        targetDocumentCount,
         blockerCount: (.blockers | length),
         blockers: [
           .blockers[] |
@@ -916,16 +962,24 @@ project_cleanup_report() {
             reasonCode: (.reason | reason_code)
           }
         ]
-      }
+      } + (
+        if .journalVerified
+        then {
+          snapshotSha256,
+          targetSha256
+        }
+        else {}
+        end
+      )
     ' "$raw_file" >"$output"
 }
 
-validate_blocked_cleanup_report() {
+validate_blocked_reschedule_report() {
   local raw_file="$1"
   local expected_mode="$2"
   local temporary="${raw_file}.sanitized"
 
-  if project_cleanup_report \
+  if project_reschedule_report \
       "$raw_file" job-failure-validation "$expected_mode" "$temporary" &&
     jq -e '
       .state == "blocked" and
@@ -941,15 +995,15 @@ validate_blocked_cleanup_report() {
   return 1
 }
 
-sanitize_cleanup_report() {
+sanitize_reschedule_report() {
   local raw_file="$1"
   local stage="$2"
   local expected_mode="$3"
-  local output="$OUTPUT_DIR/reports/${stage}-obsolete-event.json"
+  local output="$OUTPUT_DIR/reports/${stage}-event-reschedule.json"
   local temporary="${output}.tmp"
 
-  project_cleanup_report "$raw_file" "$stage" "$expected_mode" "$temporary" ||
-    fail "obsolete event cleanup report contract failed for $stage"
+  project_reschedule_report "$raw_file" "$stage" "$expected_mode" "$temporary" ||
+    fail "event reschedule report contract failed for $stage"
   mv "$temporary" "$output"
   rm -f -- "$raw_file"
   LAST_REPORT="$output"
@@ -974,11 +1028,11 @@ run_index() {
   sanitize_index_report "$LAST_RAW_FILE" "$stage" "$expected_mode"
 }
 
-run_obsolete_event_cleanup() {
+run_event_reschedule() {
   local mode="$1"
   local stage="$2"
-  run_job event "dist/scripts/cleanupObsoleteSyntheticEvent.js" "$mode" true
-  sanitize_cleanup_report "$LAST_RAW_FILE" "$stage" "$mode"
+  run_job event "dist/scripts/rescheduleSyntheticEvent.js" "$mode" true
+  sanitize_reschedule_report "$LAST_RAW_FILE" "$stage" "$mode"
 }
 
 write_evidence_manifest() {
@@ -999,7 +1053,7 @@ manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
 PY
 }
 
-write_cleanup_blocker_evidence() {
+write_reschedule_blocker_evidence() {
   local report="$1"
   local completed_at report_sha256 output temporary
 
@@ -1010,7 +1064,7 @@ write_cleanup_blocker_evidence() {
      "$LAST_JOB_CONTAINER_REASON" == "Error" &&
      "$LAST_JOB_EXIT_CODE" == "1" &&
      "$LAST_JOB_SIGNAL" == "0" ]] ||
-    fail "blocked cleanup report is missing its exact failed-job evidence"
+    fail "blocked reschedule report is missing its exact failed-job evidence"
   jq -e '
     .state == "blocked" and
     .ready == false and
@@ -1018,7 +1072,7 @@ write_cleanup_blocker_evidence() {
     .errorCount > 0 and
     .blockerCount > 0
   ' "$report" >/dev/null ||
-    fail "blocked cleanup report cannot produce failure evidence"
+    fail "blocked reschedule report cannot produce failure evidence"
 
   completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   report_sha256="$(
@@ -1030,10 +1084,10 @@ from pathlib import Path
 print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
   )"
-  output="$OUTPUT_DIR/cleanup-blocker-failure.json"
+  output="$OUTPUT_DIR/reschedule-blocker-failure.json"
   temporary="${output}.tmp"
   jq -n \
-    --slurpfile cleanup "$report" \
+    --slurpfile reschedule "$report" \
     --arg source_sha "$SOURCE_SHA" \
     --arg build_run_id "$BUILD_RUN_ID" \
     --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" \
@@ -1049,7 +1103,7 @@ PY
     --argjson container_signal "$LAST_JOB_SIGNAL" \
     --arg completed_at "$completed_at" '
       {
-        schemaVersion: "live-betting-cleanup-blocker-v1",
+        schemaVersion: "live-betting-reschedule-blocker-v1",
         status: "FAIL",
         sourceSha: $source_sha,
         buildRunId: $build_run_id,
@@ -1057,14 +1111,15 @@ PY
         workflowRunId: $workflow_run_id,
         workflowRunAttempt: $workflow_run_attempt,
         phase: $phase,
-        stage: $cleanup[0].stage,
-        targetEventId: $cleanup[0].targetEventId,
-        mode: $cleanup[0].mode,
-        state: $cleanup[0].state,
-        ready: $cleanup[0].ready,
-        changed: $cleanup[0].changed,
-        errorCount: $cleanup[0].errorCount,
-        blockerCount: $cleanup[0].blockerCount,
+        stage: $reschedule[0].stage,
+        targetEventId: $reschedule[0].targetEventId,
+        targetKickoff: $reschedule[0].targetKickoff,
+        mode: $reschedule[0].mode,
+        state: $reschedule[0].state,
+        ready: $reschedule[0].ready,
+        changed: $reschedule[0].changed,
+        errorCount: $reschedule[0].errorCount,
+        blockerCount: $reschedule[0].blockerCount,
         reportSha256: $report_sha256,
         job: {
           outcome: "failed",
@@ -1082,20 +1137,23 @@ PY
   write_evidence_manifest
 }
 
-require_cleanup_ready() {
+require_reschedule_ready() {
   local report="$1"
   if [[ "$(jq -r '.ready' "$report")" != "true" ]]; then
-    write_cleanup_blocker_evidence "$report"
-    fail "obsolete event cleanup is blocked; sanitized failure evidence recorded"
+    write_reschedule_blocker_evidence "$report"
+    fail "event reschedule is blocked; sanitized failure evidence recorded"
   fi
 }
 
-require_cleanup_complete() {
+require_reschedule_complete() {
   local report="$1"
+  local expected_mode="$2"
   local state
   state="$(jq -r '.state' "$report")"
-  [[ "$state" == "absent" || "$state" == "removed" ]] ||
-    fail "obsolete event cleanup is incomplete: $state"
+  case "$expected_mode:$state" in
+    apply:applied|apply:completed|verify:verified|verify:completed) ;;
+    *) fail "event reschedule is incomplete for $expected_mode: $state" ;;
+  esac
 }
 
 require_safe_slip_report() {
@@ -1189,17 +1247,17 @@ run_all_dry() {
 
 backfill_complete=false
 index_ready=false
-obsolete_event_cleanup_complete=false
+event_reschedule_complete=false
 
 case "$PHASE" in
   dry-run)
-    run_obsolete_event_cleanup dry-run preflight
-    require_cleanup_ready "$LAST_REPORT"
-    cleanup_state="$(jq -r '.state' "$LAST_REPORT")"
-    [[ "$cleanup_state" != "partial" ]] ||
-      fail "obsolete event cleanup is partially applied"
-    if [[ "$cleanup_state" == "absent" || "$cleanup_state" == "removed" ]]; then
-      obsolete_event_cleanup_complete=true
+    run_event_reschedule dry-run preflight
+    require_reschedule_ready "$LAST_REPORT"
+    reschedule_state="$(jq -r '.state' "$LAST_REPORT")"
+    if [[ "$reschedule_state" == "applied" ||
+      "$reschedule_state" == "verified" ||
+      "$reschedule_state" == "completed" ]]; then
+      event_reschedule_complete=true
     fi
     run_all_dry preflight false
     run_index dry-run preflight
@@ -1214,8 +1272,8 @@ case "$PHASE" in
     fi
     ;;
   apply-backfills)
-    run_obsolete_event_cleanup dry-run preflight
-    require_cleanup_ready "$LAST_REPORT"
+    run_event_reschedule dry-run preflight
+    require_reschedule_ready "$LAST_REPORT"
     run_all_dry preflight false
     run_index dry-run preflight
     require_non_conflicting_index "$LAST_REPORT"
@@ -1227,14 +1285,14 @@ case "$PHASE" in
       [[ "$service" != "slip" ]] || require_safe_slip_report "$LAST_REPORT"
       require_empty_backfill_report "$LAST_REPORT"
     done
-    run_obsolete_event_cleanup apply apply
-    require_cleanup_ready "$LAST_REPORT"
-    require_cleanup_complete "$LAST_REPORT"
+    run_event_reschedule apply apply
+    require_reschedule_ready "$LAST_REPORT"
+    require_reschedule_complete "$LAST_REPORT" apply
     verify_cluster_runtime
-    run_obsolete_event_cleanup dry-run verify
-    require_cleanup_ready "$LAST_REPORT"
-    require_cleanup_complete "$LAST_REPORT"
-    obsolete_event_cleanup_complete=true
+    run_event_reschedule verify verify
+    require_reschedule_ready "$LAST_REPORT"
+    require_reschedule_complete "$LAST_REPORT" verify
+    event_reschedule_complete=true
     run_index dry-run final
     require_non_conflicting_index "$LAST_REPORT"
     [[ "$(jq -r '.ready' "$LAST_REPORT")" == "true" ]] ||
@@ -1244,10 +1302,10 @@ case "$PHASE" in
       index_ready=true
     ;;
   apply-slip-index)
-    run_obsolete_event_cleanup dry-run preflight
-    require_cleanup_ready "$LAST_REPORT"
-    require_cleanup_complete "$LAST_REPORT"
-    obsolete_event_cleanup_complete=true
+    run_event_reschedule verify preflight
+    require_reschedule_ready "$LAST_REPORT"
+    require_reschedule_complete "$LAST_REPORT" verify
+    event_reschedule_complete=true
     run_all_dry preflight false
     run_index dry-run preflight
     require_non_conflicting_index "$LAST_REPORT"
@@ -1282,7 +1340,7 @@ esac
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$OUTPUT_DIR/provenance.env" <<EOF
-schema_version=live-betting-v1
+schema_version=live-betting-v2
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
@@ -1295,7 +1353,7 @@ phase=$PHASE
 status=PASS
 backfill_complete=$backfill_complete
 index_ready=$index_ready
-obsolete_event_cleanup_complete=$obsolete_event_cleanup_complete
+event_reschedule_complete=$event_reschedule_complete
 maintenance_fence_enforced=$MAINTENANCE_FENCE_ENFORCED
 writers_quiesced=$WRITERS_QUIESCED
 runtime_held_for_deploy=$RUNTIME_HELD_FOR_DEPLOY
@@ -1317,14 +1375,14 @@ jq -s \
   --arg completed_at "$completed_at" \
   --argjson backfill_complete "$backfill_complete" \
   --argjson index_ready "$index_ready" \
-  --argjson obsolete_event_cleanup_complete "$obsolete_event_cleanup_complete" \
+  --argjson event_reschedule_complete "$event_reschedule_complete" \
   --argjson maintenance_fence_enforced "$MAINTENANCE_FENCE_ENFORCED" \
   --argjson writers_quiesced "$WRITERS_QUIESCED" \
   --argjson runtime_held_for_deploy "$RUNTIME_HELD_FOR_DEPLOY" \
   --argjson operation_lock_enforced "$OPERATION_LOCK_ENFORCED" \
   --argjson operation_lock_handoff "$OPERATION_LOCK_HANDOFF" '
     {
-      schema_version: "live-betting-v1",
+      schema_version: "live-betting-v2",
       source_sha: $source_sha,
       build_run_id: $build_run_id,
       infrastructure_run_id: $infrastructure_run_id,
@@ -1337,7 +1395,7 @@ jq -s \
       status: "PASS",
       backfill_complete: $backfill_complete,
       index_ready: $index_ready,
-      obsolete_event_cleanup_complete: $obsolete_event_cleanup_complete,
+      event_reschedule_complete: $event_reschedule_complete,
       maintenance_fence_enforced: $maintenance_fence_enforced,
       writers_quiesced: $writers_quiesced,
       runtime_held_for_deploy: $runtime_held_for_deploy,
@@ -1350,7 +1408,7 @@ jq -s \
 
 if [[ "$PHASE" == "apply-slip-index" ]]; then
   cat >"$OUTPUT_DIR/schema.env" <<EOF
-schema_version=live-betting-v1
+schema_version=live-betting-v2
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
@@ -1361,7 +1419,7 @@ data_run_id=$RUN_ID
 data_run_attempt=$RUN_ATTEMPT
 backfill_complete=true
 index_ready=true
-obsolete_event_cleanup_complete=true
+event_reschedule_complete=true
 maintenance_fence_enforced=true
 writers_quiesced=true
 runtime_held_for_deploy=true
