@@ -279,29 +279,43 @@ selection, label, and price. A Correct Score selection ID is retained only when
 the repaired board keeps the same label; replacement outcomes receive stable
 new IDs so an old draft cannot be visually reinterpreted as a different score.
 
-A one-time obsolete synthetic-event cleanup is part of the protected
-live-data rollout. It is not exposed as an HTTP endpoint. The operation is
-fixed to one reviewed identity, scans betting, moderation, settlement, and
-archive stores for dependencies, and refuses mutation on any mismatch. Apply
-runs only while writers are quiesced and the shared database operation lock is
-held. It records a canonical Extended JSON snapshot and checksum inside a
-Gamemaster archive tombstone before exact optimistic deletes, verifies that
-the active projections are gone, and supports a separately confirmed rollback
-that restores the exact snapshot and removes the tombstone.
+A one-time fixed event reschedule is part of the protected live-data rollout.
+It is not exposed as an HTTP endpoint and accepts no caller-selected identity
+or kickoff. The reviewed operation moves only Backoffice record
+`6a623af592af5a95b1d0bb7a` / event
+`6a623af592af5a95b1d0bb79` from
+`2026-07-23T16:31:57.215Z` to `2026-09-08T08:05:00.000Z`. It preserves the
+fixture's name, teams, `NO_RESULT` status, and `OFFLINE` visibility.
 
-When every target projection and cleanup tombstone is already absent,
-`dry-run` and `apply` treat the cleanup as an idempotent zero-write `absent`
-result. Durable bet, settlement, and archive references remain untouched;
-they cannot justify deleting user history or blocking an unrelated release
-after there is no target left to remove. Replayable operational records still
-fail closed in this state, including parked placements, pending updates or
-moderation results, retry records, and active slips. If any target projection
-or tombstone exists, the complete dependency scan remains mandatory before
-mutation. Slip-keyed replay stores are checked through a bounded in-memory
-join from the fixed event's preserved records; those identifiers are never
-written to release evidence.
+Before mutation, the operator proves the exact Backoffice identity and old
+kickoff, rejects duplicate projections, pending publication, live state,
+Gamemaster archives or cleanup tombstones, Moderation mirrors, and every
+known betting, settlement, retry, pending-update, or Slip dependency. Existing
+safe Event products are preserved. Missing Event and Gamemaster projections
+are rebuilt with deterministic IDs, coherent 1X2 and Correct Score pricing,
+and a deterministic live seed. Apply starts no later than twenty minutes
+before kickoff and runs only while writers are quiesced and the shared
+database operation lock is held.
 
-A blocked cleanup remains a failed data phase even though the cleanup CLI
+The operator writes a fixed-ID journal before target writes. That journal
+stores canonical Extended JSON and SHA-256 digests for both the exact preimage
+and deterministic target. Apply uses compare-and-set writes in Event,
+Gamemaster, then Backoffice order; a prepared partial operation can resume
+only from snapshot-or-target states and only for the source SHA that prepared
+it. Verification for that source remains exact. After the journal is applied,
+a later release SHA receives a completed one-time result so natural match
+progression does not block unrelated releases.
+
+Rollback remains available before new dependencies or live state appear. It
+restores Backoffice, Gamemaster, then Event from the exact journal snapshot,
+or deletes projections that were absent in the preimage, and records a
+terminal rolled-back state. The protected pre-mutation database baseline is
+also retained by the normal release chain. The former automatic destructive
+fixture cleanup is no longer invoked by the rollout, and the retained
+historical utility is bound to the exact original kickoff, so the rescheduled
+event cannot satisfy its deletion identity guard later.
+
+A blocked reschedule remains a failed data phase even though the operator CLI
 emits a structured report before exiting nonzero. The rollout wrapper accepts
 that failed Job only long enough to validate one exact report, normalize its
 allowlisted service, collection, count, and reason code, and write checksummed
@@ -316,7 +330,7 @@ applying those strict terminal checks; a transient `Running` phase alone must
 not discard an otherwise valid blocker report. Once observed, that failure is
 latched so a contradictory later success cannot authorize readiness. Status
 requests are independently bounded, and diagnostic acceptance requires the
-cleanup CLI's exact intentional exit code with no signal or active-deadline
+operator CLI's exact intentional exit code with no signal or active-deadline
 failure. Completion and failure authority comes from terminal Kubernetes Job
 conditions rather than intermediate counters. Once failure is latched, only
 the short convergence deadline remains active, and bounded best-effort Job
@@ -325,6 +339,11 @@ or timed-out log read is never interpreted as evidence; any partial bytes are
 discarded before sanitization. Transient status and complete-log transport
 failures are retried only within the active execution or terminal deadline;
 persistent failures still stop the phase without success-shaped evidence.
+
+New rollout artifacts use `live-betting-v2` evidence with
+`event_reschedule_complete`. The verifier still accepts exact historical
+`live-betting-v1` cleanup evidence so retained rollback and resume artifacts
+remain usable.
 
 The immediate pre-deploy rollback baseline captured former production source
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment

@@ -4,6 +4,7 @@ import {
   OBSOLETE_EVENT_AWAY,
   OBSOLETE_EVENT_HOME,
   OBSOLETE_EVENT_ID,
+  OBSOLETE_EVENT_KICKOFF,
   OBSOLETE_EVENT_NAME,
   ROLLBACK_CONFIRMATION,
   cleanupReportExitCode,
@@ -29,7 +30,7 @@ const targetEvent = () => ({
   name: OBSOLETE_EVENT_NAME,
   home: OBSOLETE_EVENT_HOME,
   away: OBSOLETE_EVENT_AWAY,
-  time: new Date("2030-01-01T12:00:00.000Z"),
+  time: new Date(OBSOLETE_EVENT_KICKOFF),
   status: "NO_RESULT",
   visibility: "OFFLINE",
   products: [],
@@ -42,7 +43,7 @@ const targetGamemasterEvent = () => ({
   name: OBSOLETE_EVENT_NAME,
   home: OBSOLETE_EVENT_HOME,
   away: OBSOLETE_EVENT_AWAY,
-  time: new Date("2030-01-01T12:00:00.000Z"),
+  time: new Date(OBSOLETE_EVENT_KICKOFF),
   status: "NO_RESULT",
   phase: "PRE_MATCH",
   __v: 0,
@@ -196,6 +197,57 @@ it("dry-runs, removes, verifies, and rolls back only the fixed synthetic event",
         eventId: OBSOLETE_EVENT_ID,
       })
     ).toBe(0);
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
+it("cannot match the fixture after its kickoff is rescheduled", async () => {
+  const names = databaseNames();
+  const eventDb = mongoose.connection.useDb(names.event, { useCache: true }).db!;
+  const gamemasterDb = mongoose.connection.useDb(
+    names.gamemaster,
+    { useCache: true }
+  ).db!;
+  const rescheduledKickoff = new Date("2026-09-08T08:05:00.000Z");
+
+  try {
+    await eventDb.collection("events").insertOne({
+      ...targetEvent(),
+      time: rescheduledKickoff,
+    });
+    await gamemasterDb.collection("events").insertOne({
+      ...targetGamemasterEvent(),
+      time: rescheduledKickoff,
+    });
+
+    const cleanup = await runObsoleteSyntheticEventCleanup({
+      mode: "dry-run",
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(cleanup).toMatchObject({
+      state: "blocked",
+      ready: false,
+      matched: 2,
+      changed: 0,
+    });
+    expect(cleanup.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reason: "event source identity does not match the reviewed fixture",
+      }),
+      expect.objectContaining({
+        reason: "Gamemaster identity does not match the reviewed fixture",
+      }),
+    ]));
+    expect(
+      await eventDb.collection("events")
+        .countDocuments({ eventId: OBSOLETE_EVENT_ID })
+    ).toBe(1);
+    expect(
+      await gamemasterDb.collection("events")
+        .countDocuments({ eventId: OBSOLETE_EVENT_ID })
+    ).toBe(1);
   } finally {
     await dropDatabases(names);
   }
