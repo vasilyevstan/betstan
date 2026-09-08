@@ -11,6 +11,35 @@ BLOB="2222222222222222222222222222222222222222"
 WORKFLOW_ID="301"
 REPOSITORY="example/repo"
 
+# Required CI uses a depth-one checkout. Reject fixed historical object reads
+# in this supported test path, including Python argv that bypass shell stubs.
+python3 -I - "$ROOT_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+historical_read = re.compile(
+    r"\b[0-9a-fA-F]{40}:[A-Za-z_.]"
+    r"|\bshow[\s'\",\[\]]+[0-9a-fA-F]{40}\b"
+)
+for sample in (
+    "git show " + "a" * 40 + ":infra/reader.py",
+    '["git", "-C", str(root), "show",\n"' + "b" * 40 + ':infra/reader.py"]',
+    "git show " + "c" * 40 + " -- infra/reader.py",
+):
+    assert historical_read.search(sample), "historical-read guard missed a regression"
+assert not historical_read.search("git show HEAD:infra/reader.py")
+for relative in (
+    "infra/azure/agents/test-copilot-cli-dispatch-stan.sh",
+    "infra/azure/agents/test-deployment-safety-ci-stan.sh",
+    "infra/azure/agents/fixtures/copilot-cli-intent-v1-reader.py",
+):
+    assert not historical_read.search((root / relative).read_text()), \
+        f"hardcoded historical Git object in shallow-supported test: {relative}"
+print("dispatch_test_history_independence_contract=PASS")
+PY
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-dispatch-test.XXXXXX")"
 chmod 700 "$tmp_dir"
 request_file="$tmp_dir/request.json"
@@ -1836,19 +1865,85 @@ for mutation in ("request-mode", "request-hardlink", "request-symlink", "intent-
         if mutation.endswith("-metadata"):
             invoke("prepared-context", cleanup_options(d), ok=False)
 
-# The old reader must reject v2, never reinterpret prepared as v1 dispatching.
+# The frozen old payload reader must accept v1 and reject actual generated v2,
+# never reinterpret prepared as dispatching. No Git history is needed in CI.
 d = setup(); options = local_prepare(d)
-old_source = subprocess.check_output(
-    ["git", "-C", str(root), "show", "2168e2b0a80703c860ba3ba8a328756b057e1cd8:infra/azure/agents/copilot_cli_authority_stan.py"],
-    text=True,
-)
+old_reader_path = root / "infra/azure/agents/fixtures/copilot-cli-intent-v1-reader.py"
+old_source = old_reader_path.read_bytes()
+assert hashlib.sha256(old_source).hexdigest() == "d5a876f447030b0720afd3fc1f33f6ed8d512a220b3f7fbd7f465fddbec9e2d7", \
+    "historical v1 reader fixture integrity changed"
 namespace = {"__name__": "old_authority"}
-exec(compile(old_source, "old-authority", "exec"), namespace)
-try:
-    namespace["load_intent"](d / "authority", intent(d)["requestKey"])
-    raise AssertionError("old code accepted v2")
-except SystemExit:
-    pass
+exec(compile(old_source, str(old_reader_path), "exec"), namespace)
+legacy_read = namespace["validate_intent"]
+# Independent v1 payload, not derived from the current helper or the v2 intent.
+v1 = {
+    "schemaVersion": "betstan.copilot-cli-dispatch-intent.v1",
+    "requestKey": "f" * 64,
+    "repository": "example/repo",
+    "operation": "production-deploy",
+    "workflow": ".github/workflows/production-deploy.yml",
+    "workflowId": 301,
+    "workflowBlobSha": "2" * 40,
+    "event": "workflow_dispatch",
+    "environment": "production-emergency",
+    "controlSha": "1" * 40,
+    "subjectSha": "1" * 40,
+    "targetSha": None,
+    "inputs": {"approved_sha": "1" * 40, "build_run_id": "42"},
+    "inputHash": hashlib.sha256(json.dumps(
+        {"approved_sha": "1" * 40, "build_run_id": "42"},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest(),
+    "displayTitleTemplate": "deploy {subject_sha}",
+    "authorityOwner": "github-copilot-cli",
+    "createdAt": "2026-01-01T00:00:00Z",
+    "expiresAt": "2026-01-02T00:00:00Z",
+    "state": "dispatching",
+    "version": 1,
+    "ownerPid": 123,
+    "captureFile": "dispatch-" + "0" * 32 + ".log",
+    "dispatchStatus": None,
+    "runId": None,
+    "runUrl": None,
+}
+assert legacy_read(copy.deepcopy(v1), v1["requestKey"]) == v1
+bound_v1 = {**v1, "state": "bound", "runId": 7001,
+            "runUrl": "https://github.com/example/repo/actions/runs/7001",
+            "dispatchStatus": 0, "version": 2}
+assert legacy_read(copy.deepcopy(bound_v1), v1["requestKey"]) == bound_v1
+
+def legacy_rejects(value, key, message):
+    before = copy.deepcopy(value)
+    try:
+        legacy_read(value, key)
+    except SystemExit as error:
+        assert str(error) == message, str(error)
+    else:
+        raise AssertionError("legacy reader accepted an incompatible intent")
+    assert value == before, "legacy rejection mutated the input"
+
+for missing in v1:
+    legacy_rejects({k: v for k, v in v1.items() if k != missing}, v1["requestKey"],
+                   "dispatch intent has an unexpected schema")
+legacy_rejects({**v1, "extra": None}, v1["requestKey"],
+               "dispatch intent has an unexpected schema")
+legacy_rejects([], v1["requestKey"], "dispatch intent has an unexpected schema")
+for state in ("prepared", "issued", "retired", "", None):
+    legacy_rejects({**v1, "state": state}, v1["requestKey"],
+                   "dispatch intent state is invalid")
+prepared_v2 = intent(d)
+assert prepared_v2["schemaVersion"] == "betstan.copilot-cli-dispatch-intent.v2"
+assert prepared_v2["state"] == "prepared"
+assert prepared_v2["preparedSeal"], "probe did not generate a sealed prepare"
+legacy_rejects(prepared_v2, prepared_v2["requestKey"],
+               "dispatch intent has an unexpected schema")
+# Independently exercise the version and state barriers even without v2's keys.
+legacy_rejects({**v1, "schemaVersion": prepared_v2["schemaVersion"]}, v1["requestKey"],
+               "dispatch intent schema version is unsupported")
+legacy_rejects({**v1, "state": prepared_v2["state"]}, v1["requestKey"],
+               "dispatch intent state is invalid")
+assert intent(d) == prepared_v2, "old-reader probe changed prepared authority"
+print("offline_v1_reader_compatibility=PASS", flush=True)
 
 # Discard-versus-CAS and ABA use exact internal snapshot tokens, not run IDs.
 snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
