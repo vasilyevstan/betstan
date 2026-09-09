@@ -298,6 +298,33 @@ EXPECTED_OPERATION=oci-production-deploy \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
+If disabled live-data workflow history contains evidence-complete
+unmaterialized queue records, enabling the workflow intentionally makes the
+ordinary exclusivity check block. Seal that complete derived set before the
+external enablement instead of naming or excluding historical run IDs:
+
+```bash
+./infra/azure/agents/copilot-cli-dispatch-stan.sh \
+  "$request" \
+  --prepare-disabled-ghosts
+gh workflow enable oci-live-data-rollout.yml
+./infra/azure/agents/copilot-cli-dispatch-stan.sh \
+  "$request" \
+  --dispatch-prepared
+```
+
+The prepared dispatch re-collects the complete production inventory twice
+after enablement and accepts no candidate or evidence drift. After its exact
+run has a real job and the expected pending environment, disable the workflow
+before approval as usual. If the provider-call boundary was not crossed,
+disable the workflow before using `--discard-prepared`; a `dispatching` or
+`bound` intent is never discardable and must use the existing exact-capture
+recovery. Once that exact bound numeric authority is validly retired as
+terminal and jobless, a fresh disabled preparation may create a distinct
+generation for the same request. The old bound seal and capture stay preserved
+as spent evidence; old snapshots and delayed transport writes cannot consume
+the replacement. Issued or consumed authority does not qualify for replacement.
+
 The request schema is:
 
 ```json
@@ -378,7 +405,9 @@ The shared policy declares the required workflow state at approval.
 `disabled_manually`; every other protected workflow must be `active`. For a
 normally disabled workflow, enable it before dispatch, keep it enabled until
 the returned run has a real job and expected pending environment, then disable
-it before approval.
+it before approval. The prepared live-data lifecycle above is required when
+disabled-only unmaterialized history would otherwise make the ordinary
+enable-before-dispatch transition fail closed.
 
 Automatic `production-build` approval requires the exact labelled promotion
 and creates a private automatic authority record before its first approval:

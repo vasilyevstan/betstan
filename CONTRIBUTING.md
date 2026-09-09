@@ -207,6 +207,22 @@ comment, environment, downstream run, and operation. Otherwise it restores
 retry authority only while the same active gate remains, or stays unresolved
 and fail-closed.
 
+When disabled live-data history contains only evidence-complete
+unmaterialized queue records, use the dispatcher's explicit prepared
+lifecycle before external workflow enablement. The prepared intent seals the
+complete derived set and blocks every competing protected request; the
+dispatcher then revalidates it twice after enablement before atomically moving
+to the existing ambiguous `dispatching` state. Never substitute run-ID
+exclusions, reseal while active, or discard after that provider-call boundary.
+
+Dispatch authority is forward-only while any v2 request, bound intent, or
+spent-generation artifact exists in the private authority directory. Rolling
+the authority helper or dispatcher back below v2 parsing is prohibited: old
+readers intentionally fail closed. Retain the exact recovery and audit
+evidence, including captures and spent seals. Never delete spent archives or
+manually edit private authority state to make an older reader work; use exact
+recovery or a reviewed forward correction instead.
+
 Any unresolved `dispatching` or `bound` intent, or `claimed` or `inflight`
 record, blocks every protected dispatch for the same repository and control
 SHA even when the requested operation or inputs differ. An `issued` or

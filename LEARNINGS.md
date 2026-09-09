@@ -1252,6 +1252,15 @@ Durable rules:
   only active-run supersession exception is a pristine, approval-free capacity
   ghost with an exact later successful first attempt for the same workflow,
   SHA, event, and rendered title.
+- A disabled-only unmaterialized classifier can otherwise deadlock a required
+  enable-before-dispatch transition. Do not weaken the default active-run rule
+  or introduce run-ID exclusions. Seal the complete evidence-derived
+  live-data candidate set in a repository-global `prepared` intent while the
+  workflow is disabled, re-collect and compare it after external enablement
+  and immediately before dispatch, then atomically cross to `dispatching`.
+  `prepared` remains safely discardable only after the workflow is disabled;
+  `dispatching` remains an ambiguous provider-call boundary and is never made
+  reusable.
 - Post-claim approval checks must be an explicit short-circuiting chain. After
   immutable artifact validation, recheck promotion, production exclusivity,
   the exact pending gate, and finally current control; release or complete only

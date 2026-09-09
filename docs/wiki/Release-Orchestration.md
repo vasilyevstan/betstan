@@ -189,6 +189,21 @@ the active job revalidates the exact source, runtime mode, upstream provenance,
 approval authority, and exclusivity. Any failure stops before mutation without
 weakening the protected evidence.
 
+Live-data transport has one narrower transition proof for disabled history
+that is fully unmaterialized. Before external enablement, the dispatcher seals
+the complete evidence-derived candidate set in a repository-global prepared
+intent. After enablement it re-collects the complete production inventory
+twice, requires the same identities and evidence with no other active work,
+and atomically crosses into the existing ambiguous dispatch state immediately
+before the provider call. The transition never names, excludes, cancels, or
+deletes historical runs, and it does not weaken the default rule that active
+live-data work blocks. A prepared intent may be discarded only after the
+workflow is disabled; after the dispatch boundary, exact capture recovery is
+required. If the exact bound run is subsequently validated as terminal and
+jobless and its authority is retired, a fresh preparation may create a new
+generation for the same request. The spent generation remains preserved and
+cannot be reopened or replayed; issued or consumed authority remains one-use.
+
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a
 schema, index, rollback, or recovery operation.

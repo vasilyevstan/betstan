@@ -294,7 +294,7 @@ PY
 }
 
 emit_inventory() {
-  local path status event attempt head branch updated
+  local path status event attempt head branch updated payload
   path="$(run_path)"
   status="$(run_status)"
   event="$(run_event)"
@@ -309,9 +309,29 @@ emit_inventory() {
   elif [[ "${STUB_MODE:-none}" == touched-timestamps-unmaterialized-data ]]; then
     updated=1970-01-01T00:00:01Z
   fi
-  printf '{"total_count":1,"workflow_runs":[{"id":%s,"workflow_id":%s,"path":"%s","head_branch":"%s","head_sha":"%s","event":"%s","run_attempt":%s,"status":"%s","updated_at":"%s"}]}\n' \
+  payload="$(printf '{"total_count":1,"workflow_runs":[{"id":%s,"workflow_id":%s,"path":"%s","head_branch":"%s","head_sha":"%s","event":"%s","run_attempt":%s,"status":"%s","updated_at":"%s"}]}\n' \
     "$RUN_ID" "$WORKFLOW_ID" "$path" "$branch" "$head" "$event" \
-    "$attempt" "$status" "$updated"
+    "$attempt" "$status" "$updated")"
+  payload="$(complete_fixture_identity inventory <<<"$payload")"
+  if [[ "${STUB_MODE:-}" = duplicate-unmaterialized-data ]]; then
+    python3 -c 'import json,sys; v=json.load(sys.stdin); v["workflow_runs"] *= 2; v["total_count"]=2; print(json.dumps(v))' <<<"$payload"
+  elif [[ "${STUB_MODE:-}" = *-filter-unmaterialized-data ]]; then
+    python3 -c '
+import json,sys
+value = json.load(sys.stdin)
+kind, field = sys.argv[1].split("-")[:2]
+row = {**value["workflow_runs"][0], "id": value["workflow_runs"][0]["id"] + 1}
+if kind == "missing":
+    row.pop(field)
+else:
+    row[field] = None
+value["workflow_runs"].append(row)
+value["total_count"] += 1
+print(json.dumps(value))
+' "$STUB_MODE" <<<"$payload"
+  else
+    printf '%s\n' "$payload"
+  fi
 }
 
 emit_other_active_inventory() {
@@ -365,7 +385,33 @@ emit_prospective_promotion() {
     "$base_ref" "$base_sha" "$labels"
 }
 
+complete_fixture_identity() {
+  python3 -c '
+import json,sys
+form, repository, title, mode = sys.argv[1:]
+payload = json.load(sys.stdin)
+runs = payload["workflow_runs"] if form == "inventory" else [payload]
+for run in runs:
+    run["repository"] = {"id": 101, "full_name": repository}
+    run.setdefault("head_repository", {"full_name": repository})["id"] = 101
+    run["url"] = f"https://api.github.com/repos/{repository}/actions/runs/{run['"'"'id'"'"']}"
+    run.setdefault("html_url", f"https://github.com/{repository}/actions/runs/{run['"'"'id'"'"']}")
+    if form == "inventory":
+        run["display_title"] = title
+        run["conclusion"] = None
+        run["created_at"] = run["updated_at"] if mode.startswith("recent-") else "1970-01-01T00:00:00Z"
+        run["run_started_at"] = run["created_at"]
+    if mode == "pr-validation":
+        run["head_branch"] = "dev"
+print(json.dumps(payload, separators=(",", ":")))
+' "$1" "$REPOSITORY" "$(run_title)" "${STUB_MODE:-none}"
+}
+
 emit_full_run() {
+  emit_run_detail_payload | complete_fixture_identity detail
+}
+
+emit_run_detail_payload() {
   local path status event attempt head title created updated response_run_id
   path="$(run_path)"
   status="$(run_status)"
@@ -403,10 +449,55 @@ emit_full_run() {
   fi
 }
 
+mutate_run_detail() {
+  python3 -c '
+import json,sys
+mode, master = sys.argv[1:]
+run = json.load(sys.stdin)
+if mode == "relabeled":
+    run.update(workflow_id=run["workflow_id"] + 1, path=".github/workflows/oci-production-deploy.yml",
+               status="queued", event="workflow_dispatch", head_sha=master)
+elif mode == "outside-relabel":
+    run["head_branch"] = "master"
+elif mode == "non-first-attempt":
+    run["run_attempt"] = 2
+elif mode == "ambiguous":
+    print(json.dumps(run), json.dumps(run)); sys.exit()
+elif mode == "duplicate":
+    print("{\"id\":" + str(run["id"]) + "," + json.dumps(run)[1:]); sys.exit()
+elif mode == "null-body":
+    run = None
+elif mode == "non-object":
+    run = [run]
+elif mode.startswith(("missing:", "null:", "mismatch:")):
+    kind, key = mode.split(":", 1)
+    if kind == "missing":
+        run.pop(key)
+    elif kind == "null":
+        run[key] = None
+    elif type(run[key]) is int:
+        run[key] += 1
+    elif isinstance(run[key], dict):
+        run[key] = {"id": 102, "full_name": "another/repo"}
+    elif key in ("created_at", "run_started_at", "updated_at"):
+        run[key] = "1970-01-01T00:00:01Z"
+    elif key == "head_sha":
+        run[key] = master
+    elif key == "status":
+        run[key] = "queued"
+    else:
+        run[key] = "different"
+print(json.dumps(run, separators=(",", ":")))
+' "${STUB_DETAIL_DRIFT:-}" "$MASTER_SHA"
+}
+
 emit_successful_runs() {
   local path
   path="$(run_path)"
   case "${STUB_MODE:-none}" in
+    large-success-history-unmaterialized-data)
+      python3 -c 'import json; print(json.dumps({"total_count":101,"workflow_runs":[{}]*100}))'
+      ;;
     superseded-capacity|current-superseded-capacity|\
     recent-superseded-capacity|pending-superseded-capacity|\
     jobs-superseded-capacity|wrong-attempt-superseded-capacity|\
@@ -677,7 +768,12 @@ gh() {
       esac
       ;;
     "repos/$REPOSITORY/actions/runs/$RUN_ID")
-      emit_full_run
+      if [[ -n "${STUB_DETAIL_TRACE:-}" ]]; then
+        printf '%s\n' "$RUN_ID" >>"$STUB_DETAIL_TRACE"
+      fi
+      [[ "${STUB_DETAIL_DRIFT:-}" != api-failure ]] || return 1
+      emit_full_run | mutate_run_detail || return 1
+      [[ "${STUB_DETAIL_DRIFT:-}" != api-failure-after-body ]] || return 1
       ;;
     "repos/$REPOSITORY/git/ref/heads/master")
       printf '{"object":{"sha":"%s"}}\n' "$MASTER_SHA"
@@ -750,6 +846,7 @@ gh() {
 export -f \
   gh run_path run_status run_event run_attempt run_head run_title workflow_state \
   historical_source emit_historical_workflow emit_inventory emit_full_run \
+  emit_run_detail_payload complete_fixture_identity mutate_run_detail \
   emit_successful_runs emit_other_active_inventory emit_prospective_promotion \
   emit_complete_compare_pages emit_inconsistent_compare_pages \
   require_compact_compare_query
@@ -799,6 +896,8 @@ for mode in superseded-capacity; do
 done
 
 for mode in \
+  missing-path-filter-unmaterialized-data null-path-filter-unmaterialized-data \
+  missing-head_branch-filter-unmaterialized-data null-head_branch-filter-unmaterialized-data \
   unmaterialized-data \
   paginated-unmaterialized-data \
   unmaterialized-activation \
@@ -932,4 +1031,118 @@ do
   expect_rejected "$mode"
 done
 
+observe_case() {
+  REPO="$REPOSITORY" STUB_MODE="$1" PROSPECTIVE_PROMOTION_PR="" \
+    EXCLUDE_RUN_ID="" "$EXCLUSIVITY" --observe-live-data-transition
+}
+disabled_observation="$(observe_case unmaterialized-data)"
+active_observation="$(observe_case active-unmaterialized-data)"
+python3 - "$disabled_observation" "$active_observation" "$RUN_ID" <<'PY'
+import json
+import sys
+disabled, active = map(json.loads, sys.argv[1:3])
+assert disabled["schemaVersion"] == "betstan.live-data-transition-observation.v1"
+assert disabled["candidates"] == active["candidates"]
+assert disabled["inventorySha256"] == active["inventorySha256"]
+assert disabled["blockers"] == active["blockers"] == []
+assert disabled["workflows"][0]["state"] == "disabled_manually"
+assert active["workflows"][0]["state"] == "active"
+assert disabled["candidates"][0]["runId"] == int(sys.argv[3])
+serialized = json.dumps(disabled)
+for prohibited in ("PASS", "ageSeconds", "age_seconds", "now_epoch", "content", "created_at"):
+    assert prohibited not in serialized, prohibited
+PY
+for mode in \
+  duplicate-unmaterialized-data overflow count-mismatch missing-runs non-array-runs \
+  jobs-unmaterialized-data pending-deployment-unmaterialized-data \
+  approved-unmaterialized-data artifacts-unmaterialized-data \
+  touched-timestamps-unmaterialized-data wrong-attempt-unmaterialized-data \
+  missing-guards-unmaterialized-data incomplete-compare-unmaterialized-data \
+  duplicate-commits-unmaterialized-data; do
+  if observe_case "$mode" >/dev/null 2>&1; then
+    echo "transition observation accepted unsafe evidence: $mode" >&2
+    exit 1
+  fi
+done
+# Observation success is NOT exclusivity: it reports a blocker without PASS.
+other_observation="$(observe_case ghcr-package-active)"
+python3 - "$other_observation" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["candidates"] == [] and len(value["blockers"]) == 1
+PY
+if REPO="$REPOSITORY" EXCLUDE_RUN_ID="$RUN_ID" \
+  "$EXCLUSIVITY" --observe-live-data-transition >/dev/null 2>&1; then
+  echo "transition observation accepted an exclusion" >&2
+  exit 1
+fi
+if REPO="$REPOSITORY" "$EXCLUSIVITY" --observe-live-data-transition "$RUN_ID" >/dev/null 2>&1; then
+  echo "transition observation accepted caller candidate IDs" >&2
+  exit 1
+fi
+expect_rejected active-unmaterialized-data
+# Observation does not need successful-run history. The ordinary path retains
+# its prior fail-closed treatment of that incomplete, bounded history response.
+large_history_observation="$(observe_case large-success-history-unmaterialized-data)"
+[[ "$large_history_observation" = "$disabled_observation" ]]
+expect_rejected large-success-history-unmaterialized-data
+for field in path head_branch; do
+  for kind in missing null; do
+    # Deliberately preserve the ordinary pre-filter semantics.
+    run_case "$kind-$field-filter-unmaterialized-data" >/dev/null
+    if observe_case "$kind-$field-filter-unmaterialized-data" >/dev/null 2>&1; then
+      echo "observation silently skipped malformed protected filter: $kind $field" >&2
+      exit 1
+    fi
+  done
+done
+# A real protected queued dispatch is relabeled in inventory as an old disabled
+# non-queued push. The ordinary path intentionally retains its exact legacy
+# bytes and makes no detail call; observation must never inherit that shortcut.
+detail_trace="$(mktemp)"
+trap 'rm -f "$detail_trace"' EXIT
+default_output="$(STUB_DETAIL_DRIFT=relabeled STUB_DETAIL_TRACE="$detail_trace" run_case stale-disabled)"
+expected_default="$(printf '%s\n' \
+  "ignored_inert_run=$RUN_ID path=.github/workflows/production-build.yml status=in_progress inert=yes state=disabled_manually jobs=0 pending=0 age_seconds=2000 reason=disabled" \
+  "production_run_exclusivity=PASS")"
+[[ "$default_output" = "$expected_default" && ! -s "$detail_trace" ]]
+if STUB_DETAIL_DRIFT=relabeled STUB_DETAIL_TRACE="$detail_trace" \
+  observe_case stale-disabled >/dev/null 2>&1; then
+  echo "observation accepted relabeled protected run detail" >&2
+  exit 1
+fi
+[[ "$(cat "$detail_trace")" = "$RUN_ID" ]]
+for mode in api-failure api-failure-after-body duplicate ambiguous null-body non-object non-first-attempt; do
+  if STUB_DETAIL_DRIFT="$mode" observe_case stale-disabled >/dev/null 2>&1; then
+    echo "observation accepted invalid authoritative detail: $mode" >&2
+    exit 1
+  fi
+done
+for field in id workflow_id path status event head_sha head_branch run_attempt \
+  repository head_repository html_url url created_at run_started_at updated_at display_title; do
+  for kind in missing null mismatch; do
+    if STUB_DETAIL_DRIFT="$kind:$field" observe_case stale-disabled >/dev/null 2>&1; then
+      echo "observation accepted detail drift: $kind $field" >&2
+      exit 1
+    fi
+  done
+done
+if STUB_DETAIL_DRIFT=missing:conclusion observe_case stale-disabled >/dev/null 2>&1; then
+  echo "observation accepted an ambiguous missing conclusion" >&2
+  exit 1
+fi
+if STUB_DETAIL_DRIFT=outside-relabel observe_case pr-validation >/dev/null 2>&1; then
+  echo "observation filtered a forged branch before fetching detail" >&2
+  exit 1
+fi
+for mode in unmaterialized-data superseded-capacity pr-validation; do
+  : >"$detail_trace"
+  STUB_DETAIL_TRACE="$detail_trace" observe_case "$mode" >/dev/null
+  [[ "$(cat "$detail_trace")" = "$RUN_ID" ]] || {
+    echo "observation did not fetch/cache exactly one detail for $mode" >&2
+    exit 1
+  }
+done
+echo "observation_authoritative_rebound_tests=PASS"
 echo "production_run_exclusivity_tests=PASS"

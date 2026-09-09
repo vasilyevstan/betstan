@@ -8,6 +8,9 @@ set -euo pipefail
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --dispatch
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --resume-captured
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --resume-run 123
+#   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --prepare-disabled-ghosts
+#   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --dispatch-prepared
+#   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --discard-prepared
 
 umask 077
 
@@ -30,7 +33,7 @@ fail() {
 }
 
 usage() {
-  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id>]"
+  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id> | --prepare-disabled-ghosts | --dispatch-prepared | --discard-prepared]"
 }
 
 [[ -n "$REQUEST_FILE" ]] || usage
@@ -39,6 +42,9 @@ case "$ACTION" in
     ;;
   --dispatch)
     [[ -z "$RESUME_RUN_ID" ]] || usage
+    ;;
+  --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared)
+    [[ "$#" = 2 ]] || usage
     ;;
   --resume-captured)
     [[ -z "$RESUME_RUN_ID" ]] || usage
@@ -87,6 +93,7 @@ terminal_rejection_approvals_file="$tmp_dir/terminal-rejection-approvals.json"
 materialization_error="$tmp_dir/materialization.err"
 prerequisite_error_file="$tmp_dir/prerequisite.err"
 promotion_file="$tmp_dir/promotion.json"
+observation_file="$tmp_dir/transition-observation.json"
 authority_lock_run_id=""
 authority_lock_token=""
 cleanup() {
@@ -116,7 +123,8 @@ cleanup() {
     "$terminal_rejection_approvals_file" \
     "$materialization_error" \
     "$prerequisite_error_file" \
-    "$promotion_file"
+    "$promotion_file" \
+    "$observation_file"
   rmdir "$tmp_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -213,6 +221,12 @@ else
   authority_mode="$(jq -r '.authority' <<<"$policy_json")"
   [[ "$authority_mode" = "dispatch-record" ]] ||
     fail "operation is automatic and cannot be manually dispatched"
+  case "$ACTION" in
+    --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared)
+      [[ "$workflow" = "oci-live-data-rollout.yml" ]] ||
+        fail "prepared lifecycle is restricted to policy-resolved live-data operations"
+      ;;
+  esac
 
   read -r workflow_id workflow_path workflow_state <<<"$(
     gh api "repos/$repository/actions/workflows/$workflow" \
@@ -224,6 +238,34 @@ else
     fail "trusted workflow path does not match policy"
   [[ "$workflow_state" = "active" || "$workflow_state" = "disabled_manually" ]] ||
     fail "trusted workflow has an unsupported state: $workflow_state"
+
+  if [[ "$ACTION" = "--discard-prepared" ]]; then
+    # Cleanup needs actual-current-master cleanliness, not the old prepared
+    # control's promotion/prerequisites or unexpired release authority.
+    discard_snapshot="$(
+      "$AUTHORITY_HELPER" prepared-context \
+        --request "$REQUEST_FILE" --repository "$repository" \
+        --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+        --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR"
+    )"
+    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" = "$live_master" &&
+      -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
+      fail "discard checkout changed or is not clean"
+    [[ "$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')" = "$live_master" ]] ||
+      fail "master changed before prepared discard"
+    observed_workflow="$(
+      gh api "repos/$repository/actions/workflows/$workflow" \
+        --jq '[.id,.path,.state] | @tsv'
+    )"
+    [[ "$observed_workflow" = "$(printf '%s\t%s\tdisabled_manually' "$workflow_id" "$workflow_path")" ]] ||
+      fail "discard requires the exact freshly disabled workflow"
+    "$AUTHORITY_HELPER" discard-prepared \
+      --request "$REQUEST_FILE" --repository "$repository" \
+      --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+      --expected-snapshot "$discard_snapshot" \
+      --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR"
+    exit 0
+  fi
 
   workflow_blob_sha="$(
     gh api \
@@ -639,6 +681,40 @@ validate_production_exclusivity() {
     "$RUN_EXCLUSIVITY_SCRIPT"
 }
 
+revalidate_transition_target() {
+  local required_state="$1" observed_workflow
+  [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" = "$current_master" &&
+    -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
+    fail "prepared transition checkout changed or is not clean"
+  revalidate_control
+  observed_workflow="$(
+    gh api "repos/$repository/actions/workflows/$workflow" \
+      --jq '[.id,.path,.state] | @tsv'
+  )"
+  [[ "$observed_workflow" = "$(printf '%s\t%s\t%s' "$workflow_id" ".github/workflows/$workflow" "$required_state")" ]] ||
+    fail "prepared transition workflow identity/state changed"
+}
+
+prepared_checkpoint() {
+  local command="$1" required_state="$2"
+  shift 2
+  revalidate_transition_target "$required_state"
+  # Observation is explicit, has no run-ID inputs/exclusions, and never grants
+  # ordinary exclusivity PASS. The helper compares the whole sealed set.
+  REPO="$repository" "$RUN_EXCLUSIVITY_SCRIPT" --observe-live-data-transition \
+    >"$observation_file"
+  chmod 600 "$observation_file"
+  revalidate_transition_target "$required_state"
+  "$AUTHORITY_HELPER" "$command" \
+    --request "$REQUEST_FILE" --normalized "$normalized_file" \
+    --inputs-file "$inputs_file" \
+    --policy-json "$("$POLICY_SCRIPT" get "$operation")" \
+    --repository "$repository" --current-master "$current_master" \
+    --workflow-id "$workflow_id" --workflow-blob-sha "$workflow_blob_sha" \
+    --observation-json "$observation_file" \
+    --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR" "$@"
+}
+
 summarize_prerequisite_failure() {
   local failure_file="$1"
   python3 - "$failure_file" <<'PY'
@@ -928,13 +1004,31 @@ if [[ "$ACTION" = "--resume-captured" ]]; then
   exit 0
 fi
 
-validate_protected_prerequisites
+if [[ "$ACTION" = "--dispatch-prepared" ]]; then
+  # POST-A and POST-B are the same verifier around mutable prerequisite/control
+  # revalidation. Only the locked POST-B CAS winner can reach the captured call.
+  post_a="$(prepared_checkpoint verify-prepared active)"
+  validate_protected_prerequisites
+  revalidate_transition_target active
+  intent_summary="$(
+    prepared_checkpoint dispatch-prepared active \
+      --expected-snapshot "$(jq -r '.snapshot' <<<"$post_a")" --owner-pid "$$"
+  )"
+elif [[ "$ACTION" = "--prepare-disabled-ghosts" ]]; then
+  validate_protected_prerequisites
+  prepared_checkpoint prepare-disabled-ghosts disabled_manually --owner-pid "$$"
+  printf 'dispatch=PREPARED authority_state=prepared next_action=external-enable\n'
+  exit 0
+else
+  validate_protected_prerequisites
+fi
 
 printf 'dispatch=READY operation=%s workflow=%s environment=%s control_sha=%s input_sha256=%s title_template=%s\n' \
   "$operation" "$workflow" "$environment" "$current_master" "$input_hash" "$title_template"
 
-[[ "$ACTION" = "--dispatch" ]] || exit 0
+[[ "$ACTION" = "--dispatch" || "$ACTION" = "--dispatch-prepared" ]] || exit 0
 
+if [[ "$ACTION" = "--dispatch" ]]; then
 blocking_record="$(
   "$AUTHORITY_HELPER" blocking-record \
     --normalized "$normalized_file" \
@@ -990,6 +1084,14 @@ if ! dispatch_revalidation_error="$(
     --repo-root "$ROOT_DIR"
   fail "$dispatch_revalidation_error"
 fi
+else
+  # After this CAS there is deliberately no pre-dispatch cancellation/release.
+  # A crash is ambiguous even with an empty capture; only exact resume applies.
+  [[ "$(jq -r '.state' <<<"$intent_summary")" = dispatching ]] ||
+    fail "prepared CAS did not claim dispatch authority"
+  capture_path="$(jq -r '.capturePath' <<<"$intent_summary")"
+  intent_version="$(jq -r '.version' <<<"$intent_summary")"
+fi
 
 set +e
 gh workflow run "$workflow" \
@@ -1010,6 +1112,7 @@ set -e
   --workflow-id "$workflow_id" \
   --workflow-blob-sha "$workflow_blob_sha" \
   --expected-version "$intent_version" \
+  --expected-capture-file "${capture_path##*/}" \
   --dispatch-status "$dispatch_status" \
   --authority-dir "$AUTHORITY_DIR" \
   --repo-root "$ROOT_DIR" \
@@ -1024,6 +1127,7 @@ if ! run_id="$(
     --current-master "$current_master" \
     --workflow-id "$workflow_id" \
     --workflow-blob-sha "$workflow_blob_sha" \
+    --expected-capture-file "${capture_path##*/}" \
     --authority-dir "$AUTHORITY_DIR" \
     --repo-root "$ROOT_DIR" \
     2>"$materialization_error"
