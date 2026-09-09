@@ -209,7 +209,7 @@ it("cannot match the fixture after its kickoff is rescheduled", async () => {
     names.gamemaster,
     { useCache: true }
   ).db!;
-  const rescheduledKickoff = new Date("2026-09-10T08:05:00.000Z");
+  const rescheduledKickoff = new Date("2026-09-11T08:05:00.000Z");
 
   try {
     await eventDb.collection("events").insertOne({
