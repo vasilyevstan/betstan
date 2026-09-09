@@ -8,6 +8,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
 
     const links = [
        { label: 'Backoffice', href: '/backoffice', icon: '/icons/backoffice.svg' },
+       { label: 'Telemetry', href: '/telemetry', icon: '/icons/telemetry.svg' },
        !currentUser && { label: 'Create account', href: '/signup', icon: '/icons/signup.svg' },
        !currentUser && { label: 'Log in', href: '/login', icon: '/icons/login.svg', kind: 'login' },
        currentUser && { label: 'My bets', href: '/bets', icon: '/icons/bets.svg' },
@@ -82,9 +83,14 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                    </div>
                    <ul className="navbar-nav align-items-lg-center gap-lg-1">
                        {links.map(({ label, href, icon, kind }) => {
-                           const isLabelledIconLink = !isV2 && label === 'Backoffice';
+                           const isLabelledIconLink = !isV2 && (label === 'Backoffice' || label === 'Telemetry');
                            return <li key={href} className="nav-item">
-                               <Link className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : `nav-icon-link${isLabelledIconLink ? ' nav-icon-link--labelled' : ''}`} to={linkTo(href)} title={label}>
+                               <Link
+                                   aria-current={location.pathname === href ? 'page' : undefined}
+                                   className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : `nav-icon-link${isLabelledIconLink ? ' nav-icon-link--labelled' : ''}`}
+                                   to={linkTo(href)}
+                                   title={label}
+                               >
                                    {isV2 ? (
                                        <>
                                            <span className="nav-picture-button__icon-wrap">
