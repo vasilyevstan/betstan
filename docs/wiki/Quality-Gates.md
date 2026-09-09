@@ -11,8 +11,7 @@ flowchart LR
     Request["Accepted requirement"] --> Architect["Architecture gate"]
     Architect --> Simplifier["Three-model simplifier"]
     Simplifier --> Developer["Implementation owner"]
-    Developer --> Wiki["Public-wiki editor"]
-    Wiki --> Critic["Validation critic"]
+    Developer --> Critic["Validation critic"]
     Critic --> Tests["Test engineer"]
     Tests --> Final["Final validator"]
     Final --> PR["PR and branch checks"]
@@ -20,6 +19,8 @@ flowchart LR
     Build --> Deploy["Protected deployment"]
     Deploy --> Accept["Production acceptance"]
 
+    Developer -. documentation impact .-> Wiki["Public-wiki editor"]
+    Wiki -. documentation evidence .-> Critic
     UX["UX/UI specialist"] -. user-facing evidence .-> Developer
     Contract["Contract specialist"] -. boundary evidence .-> Critic
     Security["Auth/security specialist"] -. security evidence .-> Final
@@ -37,13 +38,15 @@ grant release authority.
 | Architect | Define service boundaries, compatibility, dependencies, risks, and acceptance criteria | Bounded implementation contract |
 | Simplifier | Challenge unnecessary scope and conflicting abstractions with three independent model families and one synthesis | Smallest complete design |
 | Developer | Implement one owned slice with focused tests | Immutable candidate |
-| Public-wiki editor | Assess every change and update relevant canonical public documentation | Public-safe documentation included in the candidate |
 | Validation critic | Search for concrete correctness, concurrency, compatibility, and regression failures | No unresolved required finding |
 | Test engineer | Run the smallest targeted suite, then required regression tiers | Reproducible passing evidence |
 | Final validator | Reconcile all requirements, specialist findings, tests, and exact-head evidence | Ready for release review |
 
 ## Conditional specialist gates
 
+- Public documentation impact is assessed for every change. Invoke
+  `betstan-public-wiki-editor` when impact is plausible or ambiguous; otherwise
+  retain exact-diff, path-specific no-public-change evidence.
 - `betstan-ux-ui-expert` is mandatory for every user-facing visual or
   interaction change.
 - Shared HTTP, message, package, or persistence boundaries require the service
@@ -274,13 +277,14 @@ After deployment:
 
 ## Documentation quality
 
-The public-wiki gate is mandatory for every change. Canonical wiki pages are
-reviewed source files and relevant changes land in the same pull request as
-the behavior they describe. Their tests require the expected handbook pages
-and navigation, and reject known classes of sensitive public content such as
-private authority mechanics, user-specific paths, and globally routable
-infrastructure addresses. After merge, publication must be byte-identical to
-the canonical repository files.
+Documentation-impact evidence is mandatory for every change; a separate
+public-wiki supporting unit is not. Canonical wiki pages are reviewed source
+files, and relevant changes land in the same pull request as the behavior they
+describe. Their tests require the expected handbook pages and navigation, and
+reject known classes of sensitive public content such as private authority
+mechanics, user-specific paths, and globally routable infrastructure
+addresses. After merge, changed pages are published byte-identically from the
+canonical repository files.
 
 ## Related pages
 

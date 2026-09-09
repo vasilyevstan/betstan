@@ -468,7 +468,8 @@ for conductor_contract in \
     'Never bypass a trusted publisher that rejects changes to its own' \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
-    'public-wiki gate and a terminal publication' \
+    'public-wiki supporting unit only for plausible or ambiguous impact' \
+    'publication unit only when canonical pages changed' \
     'one two-phase specialist work unit for' \
     'duration for the same workflow and job on a comparable runner' \
     'Never use name-based process discovery or termination' \
@@ -529,9 +530,9 @@ grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
 grep -Fq 'Pull-request metadata edits are workflow-producing' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow ignores pull-request edit triggers"
-grep -Fq 'Every change includes the public-wiki gate before immutable review' \
+grep -Fq 'Every change includes documentation-impact evidence before immutable review' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow can complete before mandatory public-wiki review"
+  fail "agent workflow can complete without documentation-impact evidence"
 grep -Fq 'byte-identically and verifies the public pages' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow omits post-merge wiki publication"
@@ -737,9 +738,9 @@ grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
     "$ux_release_wiki" ||
   fail "release orchestration omits the mandatory UX handoff"
 backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
     <<<"$backend_agent_flat" ||
-  fail "backend developer does not carry applicable UX evidence into the wiki handoff"
+  fail "backend developer does not carry applicable UX evidence into the next handoff"
 grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
     <<<"$backend_agent_flat" ||
   fail "backend developer omits durable mutation publication"
@@ -747,9 +748,9 @@ grep -Fq 'A quote identity owns exactly one validity window' \
     "$ux_backend_agent" ||
   fail "backend developer permits quote expiry mutation under one identity"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
     <<<"$frontend_agent_flat" ||
-  fail "frontend developer does not carry UX evidence into the wiki handoff"
+  fail "frontend developer does not carry UX evidence into the next handoff"
 grep -Fq 'Missing or stale UX evidence is an acceptance' \
     "$ux_critic_agent" ||
   fail "validation critic does not identify missing UX evidence"

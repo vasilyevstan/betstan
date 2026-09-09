@@ -201,9 +201,10 @@ For `BLOCKED`, use one reason: `out_of_scope_path`, `contract_unstable`,
 
 Include exact files changed, contract/database effects, any public-ordering
 or exact-ID-preservation impact, any final-history completeness/attestation
-semantics, tests and exit codes, known risks, and unresolved findings. For
-user-visible read-model, formatter, ordering, or contract work, return the
-immutable exact-head result to the same registered `betstan-ux-ui-expert` work
-unit and include its `UX_REVIEW_PASSED` result when handing off to
-`betstan-public-wiki-editor`.
+semantics, the documentation-impact classification, inspected exact-diff
+paths, justification, tests and exit codes, known risks, and unresolved
+findings. For user-visible read-model, formatter, ordering, or contract work,
+return the immutable exact-head result to the same registered
+`betstan-ux-ui-expert` work unit and include its `UX_REVIEW_PASSED` result in
+the handoff to the next gate.
 Do not approve your own work.

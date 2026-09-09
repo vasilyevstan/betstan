@@ -17,12 +17,13 @@ flowchart LR
     Request --> Architect["Architect"]
     Architect --> Simplifier["Simplifier<br/>3 independent passes + synthesis"]
     Simplifier --> Developer["Backend and/or<br/>Frontend developer"]
-    Developer --> Wiki["Public-wiki editor"]
-    Wiki --> Critic["Validation critic"]
+    Developer --> Critic["Validation critic"]
     Critic --> Tester["Test engineer"]
     Tester --> Final["Final validator"]
     Final --> Release["Deployment safety"]
 
+    Developer -. documentation impact .-> Wiki["Public-wiki editor"]
+    Wiki -. affected pages .-> Critic
     Conductor["Conductor"] -. monitors progress,<br/>gates, and handoffs .-> Architect
     Conductor -.-> Release
     Specialist["Conditional specialists"] -. focused evidence .-> Developer
@@ -37,7 +38,6 @@ flowchart LR
 | `betstan-simplifier` | Challenges overengineering through three independent model-family passes and one bounded synthesis | Read-only |
 | `betstan-backend-developer` | Implements bounded TypeScript service, shared-contract, RabbitMQ, MongoDB, migration, and backend-test changes | Repository editor |
 | `betstan-frontend-developer` | Implements bounded React, SSE, responsive, accessible, and client-test changes | Repository editor |
-| `betstan-public-wiki-editor` | Assesses every exact diff, updates relevant canonical public pages, and prepares byte-identical publication | Documentation editor |
 | `betstan-validation-critic` | Adversarially reviews the immutable candidate for concrete bugs, races, regressions, and missing acceptance evidence | Read-only |
 | `betstan-test-engineer` | Selects and runs focused, integration, regression, browser, and contract tests | Read-only |
 | `betstan-final-validator` | Reconciles requirements and all independent evidence before release review | Read-only |
@@ -70,6 +70,7 @@ production mutations serialized.
 
 | Agent | Trigger | Role |
 |---|---|---|
+| `betstan-public-wiki-editor` | Public documentation impact is plausible or ambiguous | Updates the smallest relevant canonical page set and prepares byte-identical publication |
 | `betstan-ux-ui-expert` | Any user-visible or interactive change | Defines the product-wide consistency baseline, accessibility and responsive criteria, then audits the immutable result |
 | `betstan-service-contract-reviewer` | HTTP, JWT, message, persistence, or shared-package boundary change | Traces producer, consumer, data, compatibility, and affected-test impact |
 | `betstan-quality-gate-reviewer` | CI, coverage, branch protection, or false-green risk | Verifies gates are reproducible, complete, and attached to the intended change |
@@ -132,8 +133,8 @@ decision.
 1. Start with the architect for a material feature or cross-service change.
 2. Run the simplifier before implementation.
 3. Select backend and/or frontend ownership from the affected paths.
-4. Run the mandatory public-wiki assessment and update relevant canonical
-   pages.
+4. Record documentation impact; invoke the public-wiki editor only when impact
+   is plausible or ambiguous.
 5. Add only specialists whose documented trigger applies.
 6. Keep the conductor active for blocking work and protected operations.
 7. Run critic, tests, and final validation on the immutable result.

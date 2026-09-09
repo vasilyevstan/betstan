@@ -93,15 +93,18 @@ understand without opening the diff, such as `Add second-half score betting` or
 `chore`, `misc`, or `wip`. Merge safety rejects those prefixes, single-word
 titles, and titles longer than 72 characters.
 
-## Public wiki gate
+## Public documentation impact
 
-Every change receives a `betstan-public-wiki-editor` assessment after
-implementation and before immutable review. Changes to product behavior,
-architecture, contracts, data lifecycle, security, infrastructure, quality
-gates, release behavior, UI/UX, or agent responsibilities update the relevant
-canonical `docs/wiki/` pages in the same pull request. A no-change result is
-valid only when the exact diff has no public documentation impact and the
-assessment explains why.
+Every change records a documentation-impact assessment after implementation
+and before immutable review. Register `betstan-public-wiki-editor` when public
+impact is plausible or ambiguous. When the exact diff clearly has no public
+documentation impact, the implementation handoff instead names the inspected
+paths and explains why no canonical page changes are needed.
+
+Changes to product behavior, architecture, contracts, data lifecycle,
+security, infrastructure, quality gates, release behavior, UI/UX, or agent
+responsibilities update the relevant canonical `docs/wiki/` pages in the same
+pull request.
 
 The repository files are the reviewed source of truth. After the exact commit
 is merged, publish `docs/wiki/*.md` byte-for-byte to the GitHub wiki and verify
