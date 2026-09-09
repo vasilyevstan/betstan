@@ -1125,6 +1125,32 @@ value = json.loads(sys.argv[1])
 assert value["candidates"] == [] and value["workflows"] == []
 assert value["blockers"] == [int(sys.argv[2])]
 PY
+# Reciprocal direction: a proven-disabled ghost of the ACTIVATION workflow is
+# exactly as default-inert when DATA is the requested target as the reverse
+# (asserted above) was for activation. Without this, a regression that only
+# special-cases live-data-as-observer (rather than the requested target,
+# whichever it is) would go undetected.
+reciprocal_ghost_observation="$(observe_case unmaterialized-activation oci-live-data-rollout.yml)"
+python3 - "$reciprocal_ghost_observation" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+}
+assert value["candidates"] == [] and value["workflows"] == [] and value["blockers"] == []
+PY
+# Reciprocal direction: unproven/active work on the ACTIVATION workflow still
+# blocks a DATA-target observation, mirroring the data-active case above.
+reciprocal_active_observation="$(observe_case activation-active oci-live-data-rollout.yml)"
+python3 - "$reciprocal_active_observation" "$RUN_ID" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["candidates"] == [] and value["workflows"] == []
+assert value["blockers"] == [int(sys.argv[2])]
+PY
 # The frozen map is exactly two entries; capacity/path/run-ID/unknown targets
 # are rejected at argv parsing, and the retired flag has no alias.
 for bad_argv in \
