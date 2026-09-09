@@ -34,6 +34,7 @@ for relative in (
     "infra/azure/agents/test-copilot-cli-dispatch-stan.sh",
     "infra/azure/agents/test-deployment-safety-ci-stan.sh",
     "infra/azure/agents/fixtures/copilot-cli-intent-v1-reader.py",
+    "infra/azure/agents/fixtures/copilot-cli-observation-v1-reader.py",
 ):
     assert not historical_read.search((root / relative).read_text()), \
         f"hardcoded historical Git object in shallow-supported test: {relative}"
@@ -1945,6 +1946,149 @@ legacy_rejects({**v1, "state": prepared_v2["state"]}, v1["requestKey"],
                "dispatch intent state is invalid")
 assert intent(d) == prepared_v2, "old-reader probe changed prepared authority"
 print("offline_v1_reader_compatibility=PASS", flush=True)
+
+# The frozen v1 observation reader must accept a real v1-shaped projection and
+# reject the generated v2 target-bound projection. The current reader must
+# independently reject the old version and the missing target at both POST
+# checkpoints without consuming or changing the prepared authority.
+old_observation_reader_path = (
+    root / "infra/azure/agents/fixtures/copilot-cli-observation-v1-reader.py"
+)
+old_observation_source = old_observation_reader_path.read_bytes()
+assert hashlib.sha256(old_observation_source).hexdigest() == \
+    "dde0ad0c1809825785670214b95a5e249ec375ba0c572534103a23869cc3bd7a", \
+    "historical v1 observation reader fixture integrity changed"
+old_observation_namespace = {"__name__": "old_observation_authority"}
+exec(
+    compile(
+        old_observation_source,
+        str(old_observation_reader_path),
+        "exec",
+    ),
+    old_observation_namespace,
+)
+legacy_observation_read = old_observation_namespace["validate_observation"]
+v2_observation = json.loads((d / "observation.json").read_text())
+assert v2_observation["schemaVersion"] == a.TRANSITION_OBSERVATION_SCHEMA
+assert v2_observation["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": workflow,
+}
+v1_observation = {
+    name: copy.deepcopy(value)
+    for name, value in v2_observation.items()
+    if name != "target"
+}
+v1_observation["schemaVersion"] = \
+    "betstan.live-data-transition-observation.v1"
+assert legacy_observation_read(
+    copy.deepcopy(v1_observation),
+    repository,
+    master,
+    313,
+    "active",
+) == v1_observation
+
+def legacy_observation_rejects(value, message):
+    before = copy.deepcopy(value)
+    try:
+        legacy_observation_read(value, repository, master, 313, "active")
+    except SystemExit as error:
+        assert str(error) == message, str(error)
+    else:
+        raise AssertionError("legacy reader accepted an incompatible observation")
+    assert value == before, "legacy observation rejection mutated the input"
+
+legacy_observation_rejects(
+    copy.deepcopy(v2_observation),
+    "transition observation schema is invalid",
+)
+legacy_observation_rejects(
+    {
+        **copy.deepcopy(v1_observation),
+        "schemaVersion": a.TRANSITION_OBSERVATION_SCHEMA,
+    },
+    "transition observation does not prove exclusive current control",
+)
+
+valid_observation_snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+prepared_observation_intent_path = next(
+    (d / "authority").glob("request-*.json")
+)
+prepared_observation_intent_before = prepared_observation_intent_path.read_bytes()
+prepared_observation_intent = json.loads(prepared_observation_intent_before)
+prepared_observation_capture = (
+    d / "authority" / prepared_observation_intent["captureFile"]
+)
+
+def observation_capture_identity():
+    metadata = prepared_observation_capture.stat()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+prepared_observation_capture_before = prepared_observation_capture.read_bytes()
+prepared_observation_capture_identity = observation_capture_identity()
+assert prepared_observation_capture_before == b""
+assert (d / "dispatches").read_text() == "0"
+
+def current_observation_reader_rejects(value, message):
+    write(d / "observation.json", value)
+    verify_error = invoke("verify-prepared", options, ok=False)
+    assert verify_error == message, verify_error
+    dispatch_error = invoke(
+        "dispatch-prepared",
+        {
+            **options,
+            "expected_snapshot": valid_observation_snapshot,
+            "owner_pid": os.getpid(),
+        },
+        ok=False,
+    )
+    assert dispatch_error == message, dispatch_error
+    assert (
+        prepared_observation_intent_path.read_bytes()
+        == prepared_observation_intent_before
+    )
+    assert json.loads(prepared_observation_intent_path.read_text())["state"] == \
+        "prepared"
+    assert list((d / "authority").glob("dispatch-*.log")) == [
+        prepared_observation_capture
+    ]
+    assert prepared_observation_capture.read_bytes() == \
+        prepared_observation_capture_before
+    assert observation_capture_identity() == \
+        prepared_observation_capture_identity
+    assert (d / "dispatches").read_text() == "0"
+
+schema_v1_with_target = copy.deepcopy(v2_observation)
+schema_v1_with_target["schemaVersion"] = \
+    "betstan.live-data-transition-observation.v1"
+current_observation_reader_rejects(
+    schema_v1_with_target,
+    "transition observation does not prove exclusive current control",
+)
+v2_without_target = {
+    name: copy.deepcopy(value)
+    for name, value in v2_observation.items()
+    if name != "target"
+}
+current_observation_reader_rejects(
+    v2_without_target,
+    "transition observation schema is invalid",
+)
+current_observation_reader_rejects(
+    copy.deepcopy(v1_observation),
+    "transition observation schema is invalid",
+)
+write(d / "observation.json", v2_observation)
+assert json.loads(invoke("verify-prepared", options))["snapshot"] == \
+    valid_observation_snapshot
+print("offline_observation_v1_v2_incompatibility=PASS", flush=True)
 
 # Discard-versus-CAS and ABA use exact internal snapshot tokens, not run IDs.
 snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
