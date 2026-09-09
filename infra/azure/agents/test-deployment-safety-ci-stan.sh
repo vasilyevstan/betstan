@@ -30,13 +30,397 @@ coverage_guard_fixture="$permission_fixture_dir/workflow-trigger-guard-stan.sh"
 inventory_source_fixture="$permission_fixture_dir/production-workflow-inventory-stan.rb"
 inventory_test_source_fixture="$permission_fixture_dir/test-production-workflow-inventory-stan.sh"
 deployment_safety_source_fixture="$permission_fixture_dir/test-deployment-safety-ci-stan.sh"
+# Test seam only: this plan is a plain internal shell variable that is set
+# exclusively by the in-file regressions below. It is deliberately never
+# read from the environment, so no ambient or exported value can steer
+# fixture teardown. An empty plan is the normal/production case and makes
+# the simulator a harmless no-op. The only other accepted values are the
+# exact literal "persistent" (the target reappears on every attempt) and a
+# positive decimal count N (the target reappears for the first N attempts
+# and then settles), so the regressions never depend on timing flakiness.
+fixture_cleanup_contention_plan=""
+
+# Fails closed on any plan value that is not empty, not exactly
+# "persistent", and not a positive decimal count. This must run before the
+# count ever reaches an arithmetic context, because bash evaluates
+# arithmetic operands recursively and would otherwise execute command
+# substitutions embedded in the value. The reason is fixed and sanitized:
+# the rejected value is never echoed.
+validate_fixture_cleanup_contention_plan() {
+  local plan="${fixture_cleanup_contention_plan:-}"
+
+  if [[ -z "$plan" || "$plan" == "persistent" ]]; then
+    return 0
+  fi
+  if [[ "$plan" =~ ^[1-9][0-9]*$ ]]; then
+    return 0
+  fi
+  echo "test-deployment-safety-ci-stan: internal fixture cleanup contention plan is not empty, \"persistent\", or a positive count; reason=fixture-cleanup-plan-invalid" >&2
+  return 1
+}
+
+# Forces remove_fixture_tree_with_bounded_retry below to observe
+# deterministic simulated removal contention instead of a real filesystem
+# race.
+simulate_fixture_cleanup_contention_for_test() {
+  local target="$1"
+  local attempt="$2"
+  local plan="${fixture_cleanup_contention_plan:-}"
+
+  [[ -n "$plan" ]] || return 0
+  validate_fixture_cleanup_contention_plan || return 1
+  # "$plan" is validated digits here, and is expanded rather than named so
+  # the arithmetic operand is a literal count.
+  if [[ "$plan" == "persistent" ]] || (( attempt <= $plan )); then
+    mkdir -p "$target"
+    : >"$target/.cleanup-contention-marker"
+  fi
+}
+
+# Emits bounded, deterministic evidence about what is still blocking the
+# removal of a fixture tree. Entries are printed relative to the target, so
+# the absolute private fixture parent/target prefix never reaches a log.
+report_fixture_cleanup_blocking_entries() {
+  local target="$1"
+  local entry
+  local printed=0
+
+  echo "test-deployment-safety-ci-stan: fixture cleanup did not settle within its fixed bound; reason=fixture-cleanup-race" >&2
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    echo "test-deployment-safety-ci-stan: fixture-cleanup-blocking-entry=${entry#./}" >&2
+    printed=$(( printed + 1 ))
+  done < <(
+    cd "$target" 2>/dev/null &&
+      find . -mindepth 1 -maxdepth 2 2>/dev/null | LC_ALL=C sort | head -n 10
+  )
+  if (( printed == 0 )); then
+    echo "test-deployment-safety-ci-stan: fixture-cleanup-blocking-entry=<unreadable>" >&2
+  fi
+}
+
+# Removes a fixture directory tree, tolerating only brief, bounded
+# transient filesystem contention (for example residual activity from a
+# fixture-local synthetic git repository) instead of looping indefinitely
+# or letting a stray "Directory not empty" failure abort teardown. Returns
+# 0 once the target is verified absent, 1 if contention persists through
+# every attempt in the small fixed bound below, and 2 for misuse (an empty
+# target or an invalid internal plan) so caller misuse can never be
+# mistaken for real filesystem contention.
+remove_fixture_tree_with_bounded_retry() {
+  local target="${1:-}"
+  local max_attempts=5
+  local retry_delay="0.2"
+  local attempt
+
+  if [[ -z "$target" ]]; then
+    echo "test-deployment-safety-ci-stan: refusing to remove an empty fixture target; reason=fixture-cleanup-target-empty" >&2
+    return 2
+  fi
+  validate_fixture_cleanup_contention_plan || return 2
+
+  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+    rm -rf "$target" 2>/dev/null || true
+    simulate_fixture_cleanup_contention_for_test "$target" "$attempt" || return 2
+    if [[ ! -e "$target" ]]; then
+      return 0
+    fi
+    if (( attempt < max_attempts )); then
+      sleep "$retry_delay"
+    fi
+  done
+  report_fixture_cleanup_blocking_entries "$target"
+  return 1
+}
+
+# Runs the bounded cleanup helper under an explicit internal contention
+# plan and always restores the empty production plan, so no regression can
+# leave a plan behind that would steer the single EXIT teardown.
+run_bounded_fixture_cleanup_with_plan() {
+  local plan="$1"
+  local target="$2"
+  local status=0
+
+  fixture_cleanup_contention_plan="$plan"
+  remove_fixture_tree_with_bounded_retry "$target" || status=$?
+  fixture_cleanup_contention_plan=""
+  return "$status"
+}
+
 cleanup() {
-  rm -f "$test_output"
-  rm -f "$secret_fixture_dir/safe.yml" "$secret_fixture_dir/unsafe.yml" "$secret_guard"
+  local primary_status=$?
+  local final_status="$primary_status"
+
+  rm -f "$test_output" 2>/dev/null || true
+  rm -f "$secret_fixture_dir/safe.yml" "$secret_fixture_dir/unsafe.yml" "$secret_guard" \
+    2>/dev/null || true
   rmdir "$secret_fixture_dir" 2>/dev/null || true
-  rm -rf "$permission_fixture_dir"
+
+  if ! remove_fixture_tree_with_bounded_retry "$permission_fixture_dir"; then
+    echo "test-deployment-safety-ci-stan: fixture cleanup contention persisted; reason=fixture-cleanup-race" >&2
+    if [[ "$final_status" -eq 0 ]]; then
+      final_status=1
+    fi
+  fi
+
+  exit "$final_status"
 }
 trap cleanup EXIT
+
+coverage_fixture_cleanup_transient_dir="$permission_fixture_dir/fixture-cleanup-transient"
+
+# Transient contention settles inside the fixed bound. These scratch trees
+# are deliberately not synthetic git repositories; the helper under test is
+# the only thing that removes them.
+mkdir -p "$coverage_fixture_cleanup_transient_dir/repository/nested"
+if ! run_bounded_fixture_cleanup_with_plan 2 "$coverage_fixture_cleanup_transient_dir"; then
+  echo "ERROR: transient fixture cleanup contention did not settle within the fixed bound" >&2
+  exit 1
+fi
+if [[ -e "$coverage_fixture_cleanup_transient_dir" ]]; then
+  echo "ERROR: transient fixture cleanup contention left the fixture tree behind" >&2
+  exit 1
+fi
+mkdir -p "$coverage_fixture_cleanup_transient_dir/repository/nested"
+if [[ -e "$coverage_fixture_cleanup_transient_dir/.cleanup-contention-marker" ]]; then
+  echo "ERROR: settled fixture cleanup contention contaminated the next fixture" >&2
+  exit 1
+fi
+
+# Persistent contention stays inside the fixed bound, reports the stable
+# race reason, and emits relative-only blocking evidence.
+coverage_fixture_cleanup_persistent_dir="$permission_fixture_dir/fixture-cleanup-persistent"
+coverage_fixture_cleanup_persistent_stderr="$permission_fixture_dir/fixture-cleanup-persistent.stderr"
+mkdir -p "$coverage_fixture_cleanup_persistent_dir/repository/nested"
+coverage_fixture_cleanup_persistent_start="$SECONDS"
+coverage_fixture_cleanup_persistent_status=0
+run_bounded_fixture_cleanup_with_plan persistent \
+  "$coverage_fixture_cleanup_persistent_dir" \
+  2>"$coverage_fixture_cleanup_persistent_stderr" ||
+  coverage_fixture_cleanup_persistent_status=$?
+coverage_fixture_cleanup_persistent_elapsed=$(( SECONDS - coverage_fixture_cleanup_persistent_start ))
+if [[ "$coverage_fixture_cleanup_persistent_status" -ne 1 ]]; then
+  echo "ERROR: persistent fixture cleanup contention did not report bounded contention failure (got $coverage_fixture_cleanup_persistent_status, expected 1)" >&2
+  exit 1
+fi
+if [[ "$coverage_fixture_cleanup_persistent_elapsed" -ge 5 ]]; then
+  echo "ERROR: persistent fixture cleanup contention exceeded its fixed bound" >&2
+  exit 1
+fi
+if [[ ! -e "$coverage_fixture_cleanup_persistent_dir" ]]; then
+  echo "ERROR: persistent fixture cleanup contention unexpectedly cleared" >&2
+  exit 1
+fi
+if ! grep -qF "reason=fixture-cleanup-race" \
+    "$coverage_fixture_cleanup_persistent_stderr"; then
+  echo "ERROR: bounded fixture cleanup failure did not report its sanitized reason" >&2
+  exit 1
+fi
+if ! grep -qxF \
+    "test-deployment-safety-ci-stan: fixture-cleanup-blocking-entry=.cleanup-contention-marker" \
+    "$coverage_fixture_cleanup_persistent_stderr"; then
+  echo "ERROR: bounded fixture cleanup failure did not report relative blocking evidence" >&2
+  exit 1
+fi
+if grep -qF "$permission_fixture_dir" \
+    "$coverage_fixture_cleanup_persistent_stderr"; then
+  echo "ERROR: bounded fixture cleanup diagnostics leaked an absolute fixture path" >&2
+  exit 1
+fi
+
+# Every non-conforming internal plan is rejected before any removal and
+# before any arithmetic, with a reason that cannot be confused with real
+# filesystem contention and without executing anything embedded in it.
+coverage_fixture_cleanup_invalid_plan_sentinel="$permission_fixture_dir/fixture-cleanup-invalid-plan-sentinel"
+coverage_fixture_cleanup_invalid_plans=(
+  "0"
+  "01"
+  "-1"
+  "1.5"
+  "abc"
+  "persistent extra"
+  " persistent"
+  "2; touch $coverage_fixture_cleanup_invalid_plan_sentinel"
+  "a[\$(touch $coverage_fixture_cleanup_invalid_plan_sentinel)]"
+)
+coverage_fixture_cleanup_invalid_plan_index=0
+for coverage_fixture_cleanup_invalid_plan in \
+    "${coverage_fixture_cleanup_invalid_plans[@]}"; do
+  coverage_fixture_cleanup_invalid_plan_index=$(( coverage_fixture_cleanup_invalid_plan_index + 1 ))
+  coverage_fixture_cleanup_invalid_plan_target="$permission_fixture_dir/fixture-cleanup-invalid-plan-$coverage_fixture_cleanup_invalid_plan_index"
+  mkdir -p "$coverage_fixture_cleanup_invalid_plan_target/repository/nested"
+  coverage_fixture_cleanup_invalid_plan_status=0
+  run_bounded_fixture_cleanup_with_plan \
+    "$coverage_fixture_cleanup_invalid_plan" \
+    "$coverage_fixture_cleanup_invalid_plan_target" \
+    >"$test_output" 2>&1 || coverage_fixture_cleanup_invalid_plan_status=$?
+  if [[ "$coverage_fixture_cleanup_invalid_plan_status" -ne 2 ]]; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index was not rejected" >&2
+    exit 1
+  fi
+  if ! grep -qF "reason=fixture-cleanup-plan-invalid" "$test_output"; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index did not report its sanitized reason" >&2
+    exit 1
+  fi
+  if grep -qF "reason=fixture-cleanup-race" "$test_output"; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index was reported as filesystem contention" >&2
+    exit 1
+  fi
+  if grep -qF "$permission_fixture_dir" "$test_output"; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index leaked an absolute fixture path" >&2
+    exit 1
+  fi
+  if [[ ! -d "$coverage_fixture_cleanup_invalid_plan_target/repository/nested" ]]; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index removed fixture content before validation" >&2
+    exit 1
+  fi
+  if [[ -e "$coverage_fixture_cleanup_invalid_plan_sentinel" ]]; then
+    echo "ERROR: invalid internal fixture cleanup plan #$coverage_fixture_cleanup_invalid_plan_index executed an embedded command" >&2
+    exit 1
+  fi
+done
+
+# The destructive target itself is guarded before any rm, for both an empty
+# argument and a missing argument.
+for coverage_fixture_cleanup_empty_target_case in explicit-empty missing; do
+  coverage_fixture_cleanup_empty_target_status=0
+  if [[ "$coverage_fixture_cleanup_empty_target_case" == "explicit-empty" ]]; then
+    remove_fixture_tree_with_bounded_retry "" >"$test_output" 2>&1 ||
+      coverage_fixture_cleanup_empty_target_status=$?
+  else
+    remove_fixture_tree_with_bounded_retry >"$test_output" 2>&1 ||
+      coverage_fixture_cleanup_empty_target_status=$?
+  fi
+  if [[ "$coverage_fixture_cleanup_empty_target_status" -ne 2 ]]; then
+    echo "ERROR: bounded fixture cleanup accepted an empty target ($coverage_fixture_cleanup_empty_target_case)" >&2
+    exit 1
+  fi
+  if ! grep -qF "reason=fixture-cleanup-target-empty" "$test_output"; then
+    echo "ERROR: empty bounded fixture cleanup target did not report its sanitized reason ($coverage_fixture_cleanup_empty_target_case)" >&2
+    exit 1
+  fi
+  if grep -qF "reason=fixture-cleanup-race" "$test_output"; then
+    echo "ERROR: empty bounded fixture cleanup target was reported as filesystem contention ($coverage_fixture_cleanup_empty_target_case)" >&2
+    exit 1
+  fi
+done
+
+# The retired environment name is inert. It is referenced here only to
+# prove ambient neutrality and never appears in runtime control flow: a
+# hostile exported value must not execute a command, change the status,
+# add delay, or create a contention sentinel.
+coverage_fixture_cleanup_ambient_sentinel="$permission_fixture_dir/fixture-cleanup-ambient-sentinel"
+coverage_fixture_cleanup_ambient_values=(
+  "persistent"
+  "a[\$(touch $coverage_fixture_cleanup_ambient_sentinel)]"
+)
+coverage_fixture_cleanup_ambient_index=0
+for coverage_fixture_cleanup_ambient_value in \
+    "${coverage_fixture_cleanup_ambient_values[@]}"; do
+  coverage_fixture_cleanup_ambient_index=$(( coverage_fixture_cleanup_ambient_index + 1 ))
+  coverage_fixture_cleanup_ambient_target="$permission_fixture_dir/fixture-cleanup-ambient-$coverage_fixture_cleanup_ambient_index"
+  mkdir -p "$coverage_fixture_cleanup_ambient_target/repository/nested"
+  coverage_fixture_cleanup_ambient_start="$SECONDS"
+  coverage_fixture_cleanup_ambient_status=0
+  (
+    export BETSTAN_TEST_FIXTURE_CLEANUP_CONTENTION="$coverage_fixture_cleanup_ambient_value"
+    remove_fixture_tree_with_bounded_retry "$coverage_fixture_cleanup_ambient_target"
+  ) >"$test_output" 2>&1 || coverage_fixture_cleanup_ambient_status=$?
+  coverage_fixture_cleanup_ambient_elapsed=$(( SECONDS - coverage_fixture_cleanup_ambient_start ))
+  if [[ "$coverage_fixture_cleanup_ambient_status" -ne 0 ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index changed the bounded cleanup status" >&2
+    exit 1
+  fi
+  # The target being absent after a status-0 return proves the simulator
+  # never ran, so no retry sleep was executed either. The coarse elapsed
+  # bound below is defence in depth only.
+  if [[ -e "$coverage_fixture_cleanup_ambient_target" ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index simulated contention" >&2
+    exit 1
+  fi
+  if [[ "$coverage_fixture_cleanup_ambient_elapsed" -ge 2 ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index added retry delay" >&2
+    exit 1
+  fi
+  if [[ -e "$coverage_fixture_cleanup_ambient_sentinel" ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index executed an embedded command" >&2
+    exit 1
+  fi
+  if [[ -s "$test_output" ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index produced output" >&2
+    exit 1
+  fi
+  if [[ -n "${fixture_cleanup_contention_plan:-}" ]]; then
+    echo "ERROR: a hostile ambient fixture cleanup value #$coverage_fixture_cleanup_ambient_index reached the internal plan" >&2
+    exit 1
+  fi
+done
+
+# Actual cleanup exit semantics: a bounded cleanup failure upgrades a
+# successful primary status to 1 and preserves any nonzero primary status,
+# and both paths carry the stable race marker without leaking private
+# absolute paths.
+coverage_fixture_cleanup_child_script="$(
+  declare -f validate_fixture_cleanup_contention_plan
+  declare -f simulate_fixture_cleanup_contention_for_test
+  declare -f report_fixture_cleanup_blocking_entries
+  declare -f remove_fixture_tree_with_bounded_retry
+  declare -f cleanup
+  cat <<'CHILD'
+set -euo pipefail
+permission_fixture_dir="$1"
+fixture_cleanup_contention_plan="$2"
+child_primary_status="$3"
+test_output="$permission_fixture_dir/.unused-test-output"
+secret_fixture_dir="$permission_fixture_dir/.unused-secret-dir"
+secret_guard="$secret_fixture_dir/.unused-guard"
+mkdir -p "$permission_fixture_dir/coverage-review-fixture-1/repository/.git"
+trap cleanup EXIT
+(exit "$child_primary_status")
+CHILD
+)"
+
+assert_fixture_cleanup_child_case() {
+  local label="$1"
+  local target="$2"
+  local plan="$3"
+  local child_primary_status="$4"
+  local expected_status="$5"
+  local observed=0
+
+  bash -c "$coverage_fixture_cleanup_child_script" _ \
+    "$target" "$plan" "$child_primary_status" \
+    >"$test_output" 2>&1 || observed=$?
+  if [[ "$observed" -ne "$expected_status" ]]; then
+    echo "ERROR: $label exited $observed (expected $expected_status)" >&2
+    exit 1
+  fi
+  if ! grep -qF "reason=fixture-cleanup-race" "$test_output"; then
+    echo "ERROR: $label did not report the bounded fixture cleanup race marker" >&2
+    exit 1
+  fi
+  if grep -qF "$target" "$test_output"; then
+    echo "ERROR: $label leaked its absolute fixture target into diagnostics" >&2
+    exit 1
+  fi
+  if grep -qF "$permission_fixture_dir" "$test_output"; then
+    echo "ERROR: $label leaked the absolute fixture parent into diagnostics" >&2
+    exit 1
+  fi
+}
+
+assert_fixture_cleanup_child_case \
+  "cleanup with a successful body and persistent contention" \
+  "$permission_fixture_dir/cleanup-upgrades-success-test" persistent 0 1
+assert_fixture_cleanup_child_case \
+  "cleanup with a pre-existing primary failure and persistent contention" \
+  "$permission_fixture_dir/cleanup-preserves-primary-failure-test" persistent 42 42
+
+if [[ -n "${fixture_cleanup_contention_plan:-}" ]]; then
+  echo "ERROR: an internal fixture cleanup contention plan leaked past its regressions" >&2
+  exit 1
+fi
+echo "coverage_fixture_cleanup_race_tests=PASS"
 
 assert_isolated_python_invocations() {
   local script
@@ -339,7 +723,8 @@ initialize_coverage_review_fixture() {
   coverage_review_run_id=900
   coverage_review_run_attempt=1
   unset coverage_review_live_dev_sha
-  coverage_review_fixture_root="$permission_fixture_dir/coverage-review-fixture"
+  coverage_review_fixture_sequence=$(( ${coverage_review_fixture_sequence:-0} + 1 ))
+  coverage_review_fixture_root="$permission_fixture_dir/coverage-review-fixture-$coverage_review_fixture_sequence"
   coverage_review_repo="$coverage_review_fixture_root/repository"
   coverage_review_bin="$coverage_review_fixture_root/bin"
   coverage_review_event="$coverage_review_fixture_root/event.json"
@@ -356,7 +741,10 @@ initialize_coverage_review_fixture() {
     coverage_review_ref_override \
     coverage_review_head_ref_override \
     coverage_review_base_ref_override
-  rm -rf "$coverage_review_fixture_root"
+  if [[ -e "$coverage_review_fixture_root" ]]; then
+    echo "ERROR: coverage review fixture root sequence $coverage_review_fixture_sequence is already allocated; reason=fixture-root-collision" >&2
+    exit 1
+  fi
   mkdir -p \
     "$coverage_review_repo/.github/scripts" \
     "$coverage_review_repo/infra/azure/agents" \
@@ -381,6 +769,10 @@ initialize_coverage_review_fixture() {
     "$coverage_review_repo/infra/azure/agents/coverage-engine-review-stan.sh"
 
   git -C "$coverage_review_repo" init --quiet
+  git -C "$coverage_review_repo" config gc.auto 0
+  git -C "$coverage_review_repo" config gc.autoDetach false
+  git -C "$coverage_review_repo" config maintenance.auto false
+  git -C "$coverage_review_repo" config core.fsmonitor false
   git -C "$coverage_review_repo" config user.name "Coverage Review Fixture"
   git -C "$coverage_review_repo" config user.email \
     "coverage-review@example.invalid"
@@ -923,6 +1315,64 @@ SH
   : >"$coverage_review_docker_stderr"
   printf '0\n' >"$coverage_review_docker_exit"
 }
+
+initialize_coverage_review_fixture "default-equal"
+coverage_review_fixture_unique_roots_first="$coverage_review_fixture_root"
+coverage_review_fixture_unique_roots_first_repo="$coverage_review_repo"
+initialize_coverage_review_fixture "default-equal"
+if [[ "$coverage_review_fixture_unique_roots_first" == "$coverage_review_fixture_root" ]]; then
+  echo "ERROR: successive coverage review fixture initializations reused the same root" >&2
+  exit 1
+fi
+if [[ ! -d "$coverage_review_fixture_unique_roots_first_repo" ]]; then
+  echo "ERROR: an earlier coverage review fixture repository was removed by a later initialization" >&2
+  exit 1
+fi
+if [[ ! -d "$coverage_review_repo" ]]; then
+  echo "ERROR: the current coverage review fixture repository is missing after initialization" >&2
+  exit 1
+fi
+
+# A pre-existing root must fail initialization closed instead of being
+# deleted or reused. The probe directory below is deliberately empty and is
+# not a synthetic git repository, so rmdir can retire it afterwards without
+# ever being able to remove a live fixture root.
+coverage_review_fixture_collision_root="$permission_fixture_dir/coverage-review-fixture-$(( coverage_review_fixture_sequence + 1 ))"
+mkdir -p "$coverage_review_fixture_collision_root"
+coverage_review_fixture_collision_status=0
+(
+  initialize_coverage_review_fixture "default-equal"
+) >"$test_output" 2>&1 || coverage_review_fixture_collision_status=$?
+if [[ "$coverage_review_fixture_collision_status" -eq 0 ]]; then
+  echo "ERROR: coverage review fixture initialization reused a pre-existing root" >&2
+  exit 1
+fi
+if ! grep -qF "reason=fixture-root-collision" "$test_output"; then
+  echo "ERROR: coverage review fixture root collision did not report its sanitized reason" >&2
+  exit 1
+fi
+if grep -qF "$permission_fixture_dir" "$test_output"; then
+  echo "ERROR: coverage review fixture root collision leaked an absolute fixture path" >&2
+  exit 1
+fi
+if [[ ! -d "$coverage_review_fixture_collision_root" ]]; then
+  echo "ERROR: coverage review fixture root collision deleted the pre-existing root" >&2
+  exit 1
+fi
+if [[ -e "$coverage_review_fixture_collision_root/repository" ]]; then
+  echo "ERROR: coverage review fixture root collision populated the pre-existing root" >&2
+  exit 1
+fi
+rmdir "$coverage_review_fixture_collision_root"
+if [[ ! -d "$coverage_review_fixture_unique_roots_first_repo" ]]; then
+  echo "ERROR: the coverage review fixture root collision regression disturbed an earlier fixture repository" >&2
+  exit 1
+fi
+if [[ ! -d "$coverage_review_repo" ]]; then
+  echo "ERROR: the coverage review fixture root collision regression disturbed the current fixture repository" >&2
+  exit 1
+fi
+echo "coverage_review_fixture_unique_roots_tests=PASS"
 
 initialize_coverage_promotion_fixture() {
   local source_mode="${1:-authorized}"
