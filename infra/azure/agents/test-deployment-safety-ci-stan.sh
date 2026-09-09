@@ -134,16 +134,25 @@ remove_fixture_tree_with_bounded_retry() {
 }
 
 # Runs the bounded cleanup helper under an explicit internal contention
-# plan and always restores the empty production plan, so no regression can
-# leave a plan behind that would steer the single EXIT teardown.
+# plan. The plan is assigned only inside an isolated subshell, which bash
+# both discards on return and enters with the parent's traps reset, so the
+# main shell never holds a simulated plan at any instant. A post-call
+# restore is deliberately not relied upon: a pending SIGTERM (or any other
+# interruption) is serviced at a command boundary, which for the previous
+# main-shell form could fire after the removal returned but before the
+# restore assignment and hand the single production EXIT teardown a
+# "persistent" or invalid plan for the whole fixture root. With the plan
+# confined here, every exit and cancellation path reaches cleanup with the
+# empty production plan.
 run_bounded_fixture_cleanup_with_plan() {
   local plan="$1"
   local target="$2"
   local status=0
 
-  fixture_cleanup_contention_plan="$plan"
-  remove_fixture_tree_with_bounded_retry "$target" || status=$?
-  fixture_cleanup_contention_plan=""
+  (
+    fixture_cleanup_contention_plan="$plan"
+    remove_fixture_tree_with_bounded_retry "$target"
+  ) || status=$?
   return "$status"
 }
 
@@ -415,6 +424,98 @@ assert_fixture_cleanup_child_case \
 assert_fixture_cleanup_child_case \
   "cleanup with a pre-existing primary failure and persistent contention" \
   "$permission_fixture_dir/cleanup-preserves-primary-failure-test" persistent 42 42
+
+# Cancellation while a simulated contention plan is driving a bounded
+# cleanup must never reach the real EXIT teardown. The child below is
+# interrupted from inside that window, so its EXIT cleanup runs against
+# the whole fixture root: with the plan confined to the helper subshell it
+# must remove that root completely, report no simulated contention, and
+# still surrender a nonzero termination status.
+coverage_fixture_cleanup_cancellation_child_script="$(
+  declare -f validate_fixture_cleanup_contention_plan
+  declare -f simulate_fixture_cleanup_contention_for_test
+  declare -f report_fixture_cleanup_blocking_entries
+  declare -f remove_fixture_tree_with_bounded_retry
+  declare -f run_bounded_fixture_cleanup_with_plan
+  declare -f cleanup
+  cat <<'CHILD'
+set -euo pipefail
+permission_fixture_dir="$1"
+child_interrupted_marker="$2"
+test_output="$permission_fixture_dir/.unused-test-output"
+secret_fixture_dir="$permission_fixture_dir/.unused-secret-dir"
+secret_guard="$secret_fixture_dir/.unused-guard"
+fixture_cleanup_contention_plan=""
+child_plan_target="$permission_fixture_dir/cancellation-plan-target"
+mkdir -p "$child_plan_target/repository/nested"
+mkdir -p "$permission_fixture_dir/coverage-review-fixture-1/repository/.git"
+trap cleanup EXIT
+trap 'exit 143' TERM
+child_shell_pid=$$
+(
+  # Narrow internal synchronization instead of a fixed sleep: the
+  # simulated contention marker exists only once the persistent plan is
+  # actually driving the bounded cleanup, so the interruption always lands
+  # inside that window. The wait is bounded so a missing window fails the
+  # assertions below instead of hanging.
+  child_wait=0
+  while [[ ! -e "$child_plan_target/.cleanup-contention-marker" ]]; do
+    child_wait=$(( child_wait + 1 ))
+    if [[ "$child_wait" -ge 400 ]]; then
+      exit 0
+    fi
+    sleep 0.05
+  done
+  : >"$child_interrupted_marker"
+  kill -TERM "$child_shell_pid" 2>/dev/null || true
+) &
+# The plan-driven call legitimately reports its own simulated contention,
+# so its stderr is captured inside the doomed fixture root. Anything left
+# on the child streams therefore comes from the real EXIT teardown.
+run_bounded_fixture_cleanup_with_plan persistent "$child_plan_target" \
+  2>"$permission_fixture_dir/cancellation-plan-call.stderr" || true
+echo "child-reached-normal-return"
+exit 7
+CHILD
+)"
+
+coverage_fixture_cleanup_cancellation_root="$permission_fixture_dir/fixture-cleanup-cancellation"
+coverage_fixture_cleanup_cancellation_marker="$permission_fixture_dir/fixture-cleanup-cancellation.interrupted"
+mkdir -p "$coverage_fixture_cleanup_cancellation_root"
+coverage_fixture_cleanup_cancellation_status=0
+bash -c "$coverage_fixture_cleanup_cancellation_child_script" _ \
+  "$coverage_fixture_cleanup_cancellation_root" \
+  "$coverage_fixture_cleanup_cancellation_marker" \
+  >"$test_output" 2>&1 || coverage_fixture_cleanup_cancellation_status=$?
+if [[ ! -e "$coverage_fixture_cleanup_cancellation_marker" ]]; then
+  echo "ERROR: the fixture cleanup cancellation regression never reached an active contention plan" >&2
+  exit 1
+fi
+if grep -qF "child-reached-normal-return" "$test_output"; then
+  echo "ERROR: the fixture cleanup cancellation regression was interrupted only after a normal return" >&2
+  exit 1
+fi
+if [[ "$coverage_fixture_cleanup_cancellation_status" -ne 143 ]]; then
+  echo "ERROR: cancellation during an active fixture cleanup plan did not preserve its termination status (got $coverage_fixture_cleanup_cancellation_status, expected 143)" >&2
+  exit 1
+fi
+if [[ -e "$coverage_fixture_cleanup_cancellation_root" ]]; then
+  echo "ERROR: cancellation during an active fixture cleanup plan left the fixture root behind" >&2
+  exit 1
+fi
+if grep -qF "reason=fixture-cleanup-race" "$test_output"; then
+  echo "ERROR: cancellation during an active fixture cleanup plan let real teardown simulate contention" >&2
+  exit 1
+fi
+if grep -qF "reason=fixture-cleanup-plan-invalid" "$test_output"; then
+  echo "ERROR: cancellation during an active fixture cleanup plan let real teardown observe an invalid plan" >&2
+  exit 1
+fi
+if grep -qF "$permission_fixture_dir" "$test_output"; then
+  echo "ERROR: the fixture cleanup cancellation regression leaked an absolute fixture path" >&2
+  exit 1
+fi
+rm -f "$coverage_fixture_cleanup_cancellation_marker"
 
 if [[ -n "${fixture_cleanup_contention_plan:-}" ]]; then
   echo "ERROR: an internal fixture cleanup contention plan leaked past its regressions" >&2
@@ -715,6 +816,30 @@ assert_coverage_authorization_normalization_failure \
   "$coverage_authorization_renamed_content"
 echo "coverage_authorization_inventory_normalization_tests=PASS"
 
+# Establishes the fixture-root sequence from a literal, trusted internal
+# value. It is called at top level below before the first fixture
+# initialization and before the counter ever reaches an arithmetic
+# context, so an inherited or exported "coverage_review_fixture_sequence"
+# is overwritten rather than parsed: neither an arithmetic payload such as
+# "4+5" nor an array-subscript command substitution can steer or execute
+# during root selection.
+reset_coverage_review_fixture_sequence() {
+  coverage_review_fixture_sequence=0
+}
+reset_coverage_review_fixture_sequence
+
+# Allocates the next unique synthetic fixture root by incrementing only
+# the trusted internal counter above. A pre-existing root fails closed
+# with a sanitized reason and without deleting, reusing, or populating it.
+allocate_coverage_review_fixture_root() {
+  coverage_review_fixture_sequence=$(( coverage_review_fixture_sequence + 1 ))
+  coverage_review_fixture_root="$permission_fixture_dir/coverage-review-fixture-$coverage_review_fixture_sequence"
+  if [[ -e "$coverage_review_fixture_root" ]]; then
+    echo "ERROR: coverage review fixture root sequence $coverage_review_fixture_sequence is already allocated; reason=fixture-root-collision" >&2
+    exit 1
+  fi
+}
+
 initialize_coverage_review_fixture() {
   local mode="$1"
   coverage_review_pull_number=518
@@ -723,8 +848,7 @@ initialize_coverage_review_fixture() {
   coverage_review_run_id=900
   coverage_review_run_attempt=1
   unset coverage_review_live_dev_sha
-  coverage_review_fixture_sequence=$(( ${coverage_review_fixture_sequence:-0} + 1 ))
-  coverage_review_fixture_root="$permission_fixture_dir/coverage-review-fixture-$coverage_review_fixture_sequence"
+  allocate_coverage_review_fixture_root
   coverage_review_repo="$coverage_review_fixture_root/repository"
   coverage_review_bin="$coverage_review_fixture_root/bin"
   coverage_review_event="$coverage_review_fixture_root/event.json"
@@ -741,10 +865,6 @@ initialize_coverage_review_fixture() {
     coverage_review_ref_override \
     coverage_review_head_ref_override \
     coverage_review_base_ref_override
-  if [[ -e "$coverage_review_fixture_root" ]]; then
-    echo "ERROR: coverage review fixture root sequence $coverage_review_fixture_sequence is already allocated; reason=fixture-root-collision" >&2
-    exit 1
-  fi
   mkdir -p \
     "$coverage_review_repo/.github/scripts" \
     "$coverage_review_repo/infra/azure/agents" \
@@ -1373,6 +1493,196 @@ if [[ ! -d "$coverage_review_repo" ]]; then
   exit 1
 fi
 echo "coverage_review_fixture_unique_roots_tests=PASS"
+
+# Root selection must depend only on the trusted internal counter, and this
+# regression binds the real production bootstrap instead of a test-local
+# paraphrase of it. The region extracted below begins at the reset helper
+# definition and ends at the closing brace of the allocator, so it carries
+# verbatim the load-bearing top-level
+# "reset_coverage_review_fixture_sequence" call that sits between them.
+# Every probe here executes that production region and only then allocates;
+# no probe body resets immediately before allocating. Deleting the
+# top-level reset call, or letting the allocator default an untrusted
+# counter instead of depending on that reset, therefore changes what these
+# children print.
+coverage_review_fixture_sequence_bootstrap_region="$(
+  awk '
+    /^reset_coverage_review_fixture_sequence\(\) \{$/ { region = 1 }
+    region { print }
+    /^allocate_coverage_review_fixture_root\(\) \{$/ { allocator = 1 }
+    allocator && /^\}$/ { exit }
+  ' "${BASH_SOURCE[0]}"
+)"
+for coverage_review_fixture_sequence_required_definition in \
+    'reset_coverage_review_fixture_sequence() {' \
+    'allocate_coverage_review_fixture_root() {'; do
+  if ! printf '%s\n' "$coverage_review_fixture_sequence_bootstrap_region" |
+      grep -qxF "$coverage_review_fixture_sequence_required_definition"; then
+    echo "ERROR: the production fixture sequence bootstrap region did not capture the real helper definitions" >&2
+    exit 1
+  fi
+done
+
+coverage_review_fixture_sequence_child_script="$(
+  cat <<'CHILD_PROLOGUE'
+set -euo pipefail
+permission_fixture_dir="$1"
+mkdir -p "$permission_fixture_dir"
+CHILD_PROLOGUE
+  printf '%s\n' "$coverage_review_fixture_sequence_bootstrap_region"
+  cat <<'CHILD_ALLOCATION'
+allocate_coverage_review_fixture_root
+printf 'first-root=%s\n' "${coverage_review_fixture_root##*/}"
+printf 'first-sequence=%s\n' "$coverage_review_fixture_sequence"
+allocate_coverage_review_fixture_root
+printf 'second-root=%s\n' "${coverage_review_fixture_root##*/}"
+CHILD_ALLOCATION
+)"
+
+# Exported payloads that Bash really acts on when a counter is trusted from
+# the environment: "4+5", "0x10" and "99" steer arithmetic to 10, 17 and
+# 100, and the array-subscript form is the one payload Bash actually
+# executes while evaluating an arithmetic operand. A bare "$(...)" operand
+# is deliberately not listed: Bash never substitutes it in an arithmetic
+# context, it is only ever a syntax error, so asserting on it proves
+# nothing about root selection.
+coverage_review_fixture_sequence_sentinel="$permission_fixture_dir/fixture-sequence-injection-sentinel"
+coverage_review_fixture_sequence_hostile_values=(
+  "4+5"
+  "a[\$(touch $coverage_review_fixture_sequence_sentinel)]"
+  "0x10"
+  "99"
+)
+coverage_review_fixture_sequence_main_before="$coverage_review_fixture_sequence"
+coverage_review_fixture_sequence_index=0
+for coverage_review_fixture_sequence_hostile_value in \
+    "${coverage_review_fixture_sequence_hostile_values[@]}"; do
+  coverage_review_fixture_sequence_index=$(( coverage_review_fixture_sequence_index + 1 ))
+  coverage_review_fixture_sequence_child_parent="$permission_fixture_dir/fixture-sequence-injection-$coverage_review_fixture_sequence_index"
+  coverage_review_fixture_sequence_status=0
+  coverage_review_fixture_sequence="$coverage_review_fixture_sequence_hostile_value" \
+    bash -c "$coverage_review_fixture_sequence_child_script" _ \
+      "$coverage_review_fixture_sequence_child_parent" \
+      >"$test_output" 2>&1 || coverage_review_fixture_sequence_status=$?
+  if [[ "$coverage_review_fixture_sequence_status" -ne 0 ]]; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index broke isolated root allocation" >&2
+    exit 1
+  fi
+  if ! grep -qxF "first-root=coverage-review-fixture-1" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index changed the first fixture root suffix" >&2
+    exit 1
+  fi
+  if ! grep -qxF "first-sequence=1" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index seeded the trusted counter" >&2
+    exit 1
+  fi
+  if ! grep -qxF "second-root=coverage-review-fixture-2" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index broke trusted counter succession" >&2
+    exit 1
+  fi
+  if grep -qF "$permission_fixture_dir" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index leaked an absolute fixture path" >&2
+    exit 1
+  fi
+
+  # The same hostile value must not be able to slip past the collision
+  # guard for the root the trusted counter is about to select.
+  mkdir -p "$coverage_review_fixture_sequence_child_parent/coverage-review-fixture-1"
+  coverage_review_fixture_sequence_collision_status=0
+  coverage_review_fixture_sequence="$coverage_review_fixture_sequence_hostile_value" \
+    bash -c "$coverage_review_fixture_sequence_child_script" _ \
+      "$coverage_review_fixture_sequence_child_parent" \
+      >"$test_output" 2>&1 || coverage_review_fixture_sequence_collision_status=$?
+  if [[ "$coverage_review_fixture_sequence_collision_status" -eq 0 ]]; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index bypassed the fixture root collision guard" >&2
+    exit 1
+  fi
+  if ! grep -qF "reason=fixture-root-collision" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index did not report the sanitized collision reason" >&2
+    exit 1
+  fi
+  if grep -qF "$permission_fixture_dir" "$test_output"; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index leaked an absolute fixture path on collision" >&2
+    exit 1
+  fi
+  if [[ ! -d "$coverage_review_fixture_sequence_child_parent/coverage-review-fixture-1" ]]; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index deleted a pre-existing root" >&2
+    exit 1
+  fi
+  if [[ -e "$coverage_review_fixture_sequence_child_parent/coverage-review-fixture-1/repository" ]]; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index populated a pre-existing root" >&2
+    exit 1
+  fi
+  # The sentinel is never cleared inside this loop, so this single check
+  # covers both the allocation run and the collision run above.
+  if [[ -e "$coverage_review_fixture_sequence_sentinel" ]]; then
+    echo "ERROR: hostile exported fixture sequence #$coverage_review_fixture_sequence_index executed an embedded command during arithmetic evaluation" >&2
+    exit 1
+  fi
+done
+
+# Fail-closed probe for the allocator itself. The bootstrap reset carried in
+# the production region above is the only thing allowed to establish the
+# counter, so allocating without it must abort instead of manufacturing a
+# starting value. An allocator that defaulted an untrusted counter -- for
+# example "$(( ${coverage_review_fixture_sequence:-0} + 1 ))" -- would
+# silently hand back suffix 1 here and would no longer need the bootstrap
+# at all. Bash 3.2 and Bash 5 both abort the trusted form under "set -u".
+coverage_review_fixture_sequence_unset_probe_script="$(
+  cat <<'PROBE_PROLOGUE'
+set -euo pipefail
+permission_fixture_dir="$1"
+mkdir -p "$permission_fixture_dir"
+PROBE_PROLOGUE
+  printf '%s\n' "$coverage_review_fixture_sequence_bootstrap_region"
+  cat <<'PROBE_ALLOCATION'
+unset coverage_review_fixture_sequence
+allocate_coverage_review_fixture_root
+printf 'unguarded-root=%s\n' "${coverage_review_fixture_root##*/}"
+PROBE_ALLOCATION
+)"
+coverage_review_fixture_sequence_unset_parent="$permission_fixture_dir/fixture-sequence-unset-probe"
+coverage_review_fixture_sequence_unset_status=0
+bash -c "$coverage_review_fixture_sequence_unset_probe_script" _ \
+  "$coverage_review_fixture_sequence_unset_parent" \
+  >"$test_output" 2>&1 || coverage_review_fixture_sequence_unset_status=$?
+if [[ "$coverage_review_fixture_sequence_unset_status" -eq 0 ]]; then
+  echo "ERROR: fixture root allocation accepted an untrusted unset sequence instead of failing closed" >&2
+  exit 1
+fi
+if grep -q '^unguarded-root=' "$test_output"; then
+  echo "ERROR: fixture root allocation manufactured a root suffix without the trusted bootstrap reset" >&2
+  exit 1
+fi
+if ! grep -qF "unbound variable" "$test_output"; then
+  echo "ERROR: fixture root allocation did not fail closed on the untrusted unset sequence" >&2
+  exit 1
+fi
+if grep -qF "$permission_fixture_dir" "$test_output"; then
+  echo "ERROR: the untrusted unset fixture sequence probe leaked an absolute fixture path" >&2
+  exit 1
+fi
+
+# No hostile or untrusted value reached production root selection: the
+# main-shell counter is still the trusted number it was before these
+# regressions, and it still names the live fixture root.
+if [[ ! "${coverage_review_fixture_sequence:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: the production coverage review fixture sequence is no longer trusted numeric state" >&2
+  exit 1
+fi
+if [[ "$coverage_review_fixture_sequence" != "$coverage_review_fixture_sequence_main_before" ]]; then
+  echo "ERROR: the fixture sequence injection regressions moved the production counter" >&2
+  exit 1
+fi
+if [[ "${coverage_review_fixture_root##*/}" != "coverage-review-fixture-$coverage_review_fixture_sequence" ]]; then
+  echo "ERROR: the production coverage review fixture root no longer matches its trusted sequence" >&2
+  exit 1
+fi
+if [[ ! -d "$coverage_review_repo" ]]; then
+  echo "ERROR: the fixture sequence injection regressions disturbed the current fixture repository" >&2
+  exit 1
+fi
+echo "coverage_review_fixture_sequence_injection_tests=PASS"
 
 initialize_coverage_promotion_fixture() {
   local source_mode="${1:-authorized}"
