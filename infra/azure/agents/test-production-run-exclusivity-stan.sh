@@ -1032,8 +1032,10 @@ do
 done
 
 observe_case() {
-  REPO="$REPOSITORY" STUB_MODE="$1" PROSPECTIVE_PROMOTION_PR="" \
-    EXCLUDE_RUN_ID="" "$EXCLUSIVITY" --observe-live-data-transition
+  local mode="$1"
+  local target="${2:-oci-live-data-rollout.yml}"
+  REPO="$REPOSITORY" STUB_MODE="$mode" PROSPECTIVE_PROMOTION_PR="" \
+    EXCLUDE_RUN_ID="" "$EXCLUSIVITY" --observe-disabled-transition "$target"
 }
 disabled_observation="$(observe_case unmaterialized-data)"
 active_observation="$(observe_case active-unmaterialized-data)"
@@ -1041,7 +1043,11 @@ python3 - "$disabled_observation" "$active_observation" "$RUN_ID" <<'PY'
 import json
 import sys
 disabled, active = map(json.loads, sys.argv[1:3])
-assert disabled["schemaVersion"] == "betstan.live-data-transition-observation.v1"
+assert disabled["schemaVersion"] == "betstan.disabled-transition-observation.v2"
+assert disabled["target"] == active["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+}
 assert disabled["candidates"] == active["candidates"]
 assert disabled["inventorySha256"] == active["inventorySha256"]
 assert disabled["blockers"] == active["blockers"] == []
@@ -1071,13 +1077,103 @@ import json
 import sys
 value = json.loads(sys.argv[1])
 assert value["candidates"] == [] and len(value["blockers"]) == 1
+assert value["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+}
 PY
+# The second frozen target behaves identically for its own ghost evidence.
+data_disabled_observation="$disabled_observation"
+activation_disabled_observation="$(observe_case unmaterialized-activation oci-live-betting-activate.yml)"
+activation_active_observation="$(observe_case active-unmaterialized-activation oci-live-betting-activate.yml)"
+python3 - "$activation_disabled_observation" "$activation_active_observation" "$RUN_ID" <<'PY'
+import json
+import sys
+disabled, active = map(json.loads, sys.argv[1:3])
+assert disabled["schemaVersion"] == "betstan.disabled-transition-observation.v2"
+assert disabled["target"] == active["target"] == {
+    "workflow": "oci-live-betting-activate.yml",
+    "path": ".github/workflows/oci-live-betting-activate.yml",
+}
+assert disabled["candidates"] == active["candidates"]
+assert disabled["blockers"] == active["blockers"] == []
+assert disabled["workflows"][0]["state"] == "disabled_manually"
+assert active["workflows"][0]["state"] == "active"
+assert disabled["candidates"][0]["runId"] == int(sys.argv[3])
+PY
+# Only the requested target's ghost history becomes a candidate. A proven
+# disabled ghost of the OTHER allowlisted workflow stays default-inert: no
+# candidate, no workflow row, no blocker.
+cross_target_observation="$(observe_case unmaterialized-data oci-live-betting-activate.yml)"
+python3 - "$cross_target_observation" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["target"] == {
+    "workflow": "oci-live-betting-activate.yml",
+    "path": ".github/workflows/oci-live-betting-activate.yml",
+}
+assert value["candidates"] == [] and value["workflows"] == [] and value["blockers"] == []
+PY
+# Unproven/active work on the OTHER allowlisted workflow still blocks, exactly
+# like any other unresolved protected run.
+other_target_active_observation="$(observe_case data-active oci-live-betting-activate.yml)"
+python3 - "$other_target_active_observation" "$RUN_ID" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["candidates"] == [] and value["workflows"] == []
+assert value["blockers"] == [int(sys.argv[2])]
+PY
+# Reciprocal direction: a proven-disabled ghost of the ACTIVATION workflow is
+# exactly as default-inert when DATA is the requested target as the reverse
+# (asserted above) was for activation. Without this, a regression that only
+# special-cases live-data-as-observer (rather than the requested target,
+# whichever it is) would go undetected.
+reciprocal_ghost_observation="$(observe_case unmaterialized-activation oci-live-data-rollout.yml)"
+python3 - "$reciprocal_ghost_observation" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": ".github/workflows/oci-live-data-rollout.yml",
+}
+assert value["candidates"] == [] and value["workflows"] == [] and value["blockers"] == []
+PY
+# Reciprocal direction: unproven/active work on the ACTIVATION workflow still
+# blocks a DATA-target observation, mirroring the data-active case above.
+reciprocal_active_observation="$(observe_case activation-active oci-live-data-rollout.yml)"
+python3 - "$reciprocal_active_observation" "$RUN_ID" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["candidates"] == [] and value["workflows"] == []
+assert value["blockers"] == [int(sys.argv[2])]
+PY
+# The frozen map is exactly two entries; capacity/path/run-ID/unknown targets
+# are rejected at argv parsing, and the retired flag has no alias.
+for bad_argv in \
+  "--observe-disabled-transition" \
+  "--observe-disabled-transition oci-live-data-rollout.yml extra" \
+  "--observe-live-data-transition" \
+  "--observe-live-data-transition oci-live-data-rollout.yml" \
+  "--observe-disabled-transition oci-capacity-acquire.yml" \
+  "--observe-disabled-transition .github/workflows/oci-live-data-rollout.yml" \
+  "--observe-disabled-transition $RUN_ID" \
+  "--observe-disabled-transition oci-production-deploy.yml"; do
+  # shellcheck disable=SC2086
+  if REPO="$REPOSITORY" "$EXCLUSIVITY" $bad_argv >/dev/null 2>&1; then
+    echo "transition observation accepted invalid argv: $bad_argv" >&2
+    exit 1
+  fi
+done
 if REPO="$REPOSITORY" EXCLUDE_RUN_ID="$RUN_ID" \
-  "$EXCLUSIVITY" --observe-live-data-transition >/dev/null 2>&1; then
+  "$EXCLUSIVITY" --observe-disabled-transition oci-live-data-rollout.yml >/dev/null 2>&1; then
   echo "transition observation accepted an exclusion" >&2
   exit 1
 fi
-if REPO="$REPOSITORY" "$EXCLUSIVITY" --observe-live-data-transition "$RUN_ID" >/dev/null 2>&1; then
+if REPO="$REPOSITORY" "$EXCLUSIVITY" --observe-disabled-transition oci-live-data-rollout.yml "$RUN_ID" >/dev/null 2>&1; then
   echo "transition observation accepted caller candidate IDs" >&2
   exit 1
 fi

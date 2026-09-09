@@ -19,8 +19,18 @@ REQUEST_SCHEMA = "betstan.copilot-cli-dispatch-request.v1"
 NORMALIZED_SCHEMA = "betstan.copilot-cli-dispatch-normalized.v1"
 INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v1"
 PREPARED_INTENT_SCHEMA = "betstan.copilot-cli-dispatch-intent.v2"
-TRANSITION_OBSERVATION_SCHEMA = "betstan.live-data-transition-observation.v1"
-LIVE_DATA_PATH = ".github/workflows/oci-live-data-rollout.yml"
+TRANSITION_OBSERVATION_SCHEMA = "betstan.disabled-transition-observation.v2"
+# Workflows admitted to the prepared disabled-workflow transition lifecycle
+# (dispatcher admission, authority context/seal/discard, observer argv, and
+# the semantic-evidence gate). This is a separate, frozen, exact two-entry
+# map -- not UNMATERIALIZED_WORKFLOWS (which also allow-lists
+# oci-capacity-acquire.yml for unrelated supersession evidence) and not the
+# broader protected-operation policy inventory. Adding an entry here is a
+# distinct, separately reviewed safety-policy change.
+PREPARED_TRANSITION_WORKFLOWS = {
+    "oci-live-data-rollout.yml": ".github/workflows/oci-live-data-rollout.yml",
+    "oci-live-betting-activate.yml": ".github/workflows/oci-live-betting-activate.yml",
+}
 PREPARED_TTL_SECONDS = 15 * 60
 RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
@@ -967,8 +977,8 @@ def validate_prepared_seal(intent):
     seal = intent["preparedSeal"]
     if not isinstance(seal, dict) or set(seal) != PREPARED_SEAL_KEYS:
         fail("prepared seal schema is invalid")
-    if intent["workflow"] != "oci-live-data-rollout.yml":
-        fail("prepared intent is not a live-data operation")
+    if intent["workflow"] not in PREPARED_TRANSITION_WORKFLOWS:
+        fail("prepared intent is not a frozen disabled-transition operation")
     require_exact_integer(intent["version"], "prepared version", minimum=1)
     require_exact_integer(intent["ownerPid"], "prepared owner PID", minimum=1)
     require_exact_integer(seal["ownerPid"], "sealed owner PID", minimum=1)
@@ -983,7 +993,7 @@ def validate_prepared_seal(intent):
     ):
         if seal[name] != intent[name]:
             fail(f"prepared seal {name} mismatch")
-    if seal["workflowPath"] != LIVE_DATA_PATH:
+    if seal["workflowPath"] != PREPARED_TRANSITION_WORKFLOWS[intent["workflow"]]:
         fail("prepared seal workflow path mismatch")
     require_exact_integer(seal["workflowId"], "prepared workflow ID", minimum=1)
     for name in ("controlSha", "workflowBlobSha"):
@@ -2151,8 +2161,11 @@ def command_classify_unmaterialized_run(args):
         require_disabled_workflow=args.require_disabled_workflow,
     )
     if args.semantic_evidence:
-        if args.expected_path != LIVE_DATA_PATH:
-            fail("semantic transition evidence is live-data only")
+        if args.expected_path not in PREPARED_TRANSITION_WORKFLOWS.values():
+            fail(
+                "semantic transition evidence is restricted to the frozen "
+                "prepared-transition workflows"
+            )
         print(canonical_json(semantic_ghost_evidence(evidence, facts)))
         return
     print(
@@ -2167,7 +2180,8 @@ def semantic_ghost_evidence(evidence, facts):
     # mutable enabled state and elapsed age are NOT ghost identity. State is
     # checked independently by each transition checkpoint.
     run = evidence["run"]
-    source, blob = decode_historical_workflow(evidence["historical_workflow"], LIVE_DATA_PATH)
+    path = facts["path"]
+    source, blob = decode_historical_workflow(evidence["historical_workflow"], path)
     semantic = {
         "run": {name: run[name] for name in (
             "id", "workflow_id", "path", "head_sha", "head_branch",
@@ -2185,7 +2199,7 @@ def semantic_ghost_evidence(evidence, facts):
             "blobSha": blob,
             "sourceSha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
             "guards": CURRENT_MASTER_GUARD_LINES,
-            "mutationTokens": historical_mutation_tokens(LIVE_DATA_PATH, blob),
+            "mutationTokens": historical_mutation_tokens(path, blob),
         },
     }
     return {
@@ -2567,7 +2581,7 @@ def claim_request_under_lock(
                 "requestKey", "inputHash", "controlSha", "workflowId",
                 "workflowBlobSha", "captureFile", "createdAt", "expiresAt", "ownerPid",
             )},
-            "workflowPath": LIVE_DATA_PATH,
+            "workflowPath": PREPARED_TRANSITION_WORKFLOWS[policy["workflow"]],
             "captureIdentity": file_identity(capture_path),
             "intentIdentitySha256": immutable_intent_digest(intent),
         }
@@ -2647,8 +2661,11 @@ def special_request(args, policy, normalized):
 
 def special_context(args):
     policy = validate_policy(load_json_text(args.policy_json, "policy"))
-    if policy["workflow"] != "oci-live-data-rollout.yml":
-        fail("prepared lifecycle is restricted to policy-resolved live-data operations")
+    if policy["workflow"] not in PREPARED_TRANSITION_WORKFLOWS:
+        fail(
+            "prepared lifecycle is restricted to policy-resolved frozen "
+            "disabled-transition operations"
+        )
     if not POSITIVE_INTEGER.fullmatch(str(args.workflow_id)) or not FULL_SHA.fullmatch(args.workflow_blob_sha):
         fail("prepared workflow identity is malformed")
     normalized = load_normalized(
@@ -2658,11 +2675,14 @@ def special_context(args):
     return policy, normalized, request
 
 
-def read_transition_observation(args, state):
+def read_transition_observation(args, state, workflow):
+    if workflow not in PREPARED_TRANSITION_WORKFLOWS:
+        fail("transition observation target is not a frozen disabled-transition workflow")
+    expected_path = PREPARED_TRANSITION_WORKFLOWS[workflow]
     observation = load_json_file(args.observation_json, "transition observation", exact_mode=0o600)
     if not isinstance(observation, dict) or set(observation) != {
         "schemaVersion", "repository", "controlSha", "inventorySha256",
-        "candidates", "workflows", "blockers",
+        "target", "candidates", "workflows", "blockers",
     }:
         fail("transition observation schema is invalid")
     if (
@@ -2672,9 +2692,11 @@ def read_transition_observation(args, state):
         or observation["blockers"] != []
     ):
         fail("transition observation does not prove exclusive current control")
+    if observation["target"] != {"workflow": workflow, "path": expected_path}:
+        fail("transition observation target does not match the requested operation")
     validate_candidates(observation["candidates"])
     require_digest(observation["inventorySha256"], "inventory policy")
-    expected_workflow = {"id": int(args.workflow_id), "path": LIVE_DATA_PATH, "state": state}
+    expected_workflow = {"id": int(args.workflow_id), "path": expected_path, "state": state}
     if observation["workflows"] != [expected_workflow] * len(observation["candidates"]):
         fail("transition observed workflow identity/state mismatch")
     return observation
@@ -2682,7 +2704,7 @@ def read_transition_observation(args, state):
 
 def command_prepare_disabled_ghosts(args):
     policy, normalized, request = special_context(args)
-    observation = read_transition_observation(args, "disabled_manually")
+    observation = read_transition_observation(args, "disabled_manually", policy["workflow"])
     require_exact_integer(args.owner_pid, "prepared owner PID", minimum=1)
     directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=True)
     key = request_key(normalized)
@@ -2729,7 +2751,7 @@ def require_prepared_lifetime(intent):
 
 def verify_prepared_checkpoint(args, *, dispatch):
     policy, normalized, request = special_context(args)
-    observation = read_transition_observation(args, "active")
+    observation = read_transition_observation(args, "active", policy["workflow"])
     directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
     key = request_key(normalized)
     # Never wait behind another operation with already-collected POST evidence.
@@ -2794,8 +2816,8 @@ def matching_prepared_request(args, directory):
     require_prepared_capture(directory, intent)
     if (
         intent["workflowId"] != int(args.workflow_id)
-        or intent["workflow"] != "oci-live-data-rollout.yml"
-        or args.workflow_path != LIVE_DATA_PATH
+        or intent["workflow"] not in PREPARED_TRANSITION_WORKFLOWS
+        or args.workflow_path != PREPARED_TRANSITION_WORKFLOWS[intent["workflow"]]
         or any(request[name] != intent[name] for name in REQUEST_KEYS - {"schemaVersion"})
         or intent["preparedSeal"]["requestSha256"] != evidence_digest(request)
         or intent["preparedSeal"]["requestFile"] != file_identity(args.request)

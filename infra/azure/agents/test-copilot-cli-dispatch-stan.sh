@@ -34,6 +34,7 @@ for relative in (
     "infra/azure/agents/test-copilot-cli-dispatch-stan.sh",
     "infra/azure/agents/test-deployment-safety-ci-stan.sh",
     "infra/azure/agents/fixtures/copilot-cli-intent-v1-reader.py",
+    "infra/azure/agents/fixtures/copilot-cli-observation-v1-reader.py",
 ):
     assert not historical_read.search((root / relative).read_text()), \
         f"hardcoded historical Git object in shallow-supported test: {relative}"
@@ -1355,7 +1356,7 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 master, old = "b" * 40, "a" * 40
 repository = "example/repo"
-workflow = a.LIVE_DATA_PATH
+workflow = a.PREPARED_TRANSITION_WORKFLOWS["oci-live-data-rollout.yml"]
 source = (root / workflow).read_bytes()
 blob = hashlib.sha1(f"blob {len(source)}\0".encode() + source).hexdigest()
 policy = json.loads(subprocess.check_output([policy_script, "get", "oci-live-data-dry-run"]))
@@ -1687,6 +1688,7 @@ def local_prepare(d):
     observation = {"schemaVersion": a.TRANSITION_OBSERVATION_SCHEMA,
                    "repository": repository, "controlSha": master,
                    "inventorySha256": a.evidence_digest(inventory), "blockers": [],
+                   "target": {"workflow": "oci-live-data-rollout.yml", "path": workflow},
                    "candidates": candidates,
                    "workflows": [{"id": 313, "path": workflow, "state": "disabled_manually"}] * len(candidates)}
     write(d / "observation.json", observation)
@@ -1945,6 +1947,149 @@ legacy_rejects({**v1, "state": prepared_v2["state"]}, v1["requestKey"],
 assert intent(d) == prepared_v2, "old-reader probe changed prepared authority"
 print("offline_v1_reader_compatibility=PASS", flush=True)
 
+# The frozen v1 observation reader must accept a real v1-shaped projection and
+# reject the generated v2 target-bound projection. The current reader must
+# independently reject the old version and the missing target at both POST
+# checkpoints without consuming or changing the prepared authority.
+old_observation_reader_path = (
+    root / "infra/azure/agents/fixtures/copilot-cli-observation-v1-reader.py"
+)
+old_observation_source = old_observation_reader_path.read_bytes()
+assert hashlib.sha256(old_observation_source).hexdigest() == \
+    "dde0ad0c1809825785670214b95a5e249ec375ba0c572534103a23869cc3bd7a", \
+    "historical v1 observation reader fixture integrity changed"
+old_observation_namespace = {"__name__": "old_observation_authority"}
+exec(
+    compile(
+        old_observation_source,
+        str(old_observation_reader_path),
+        "exec",
+    ),
+    old_observation_namespace,
+)
+legacy_observation_read = old_observation_namespace["validate_observation"]
+v2_observation = json.loads((d / "observation.json").read_text())
+assert v2_observation["schemaVersion"] == a.TRANSITION_OBSERVATION_SCHEMA
+assert v2_observation["target"] == {
+    "workflow": "oci-live-data-rollout.yml",
+    "path": workflow,
+}
+v1_observation = {
+    name: copy.deepcopy(value)
+    for name, value in v2_observation.items()
+    if name != "target"
+}
+v1_observation["schemaVersion"] = \
+    "betstan.live-data-transition-observation.v1"
+assert legacy_observation_read(
+    copy.deepcopy(v1_observation),
+    repository,
+    master,
+    313,
+    "active",
+) == v1_observation
+
+def legacy_observation_rejects(value, message):
+    before = copy.deepcopy(value)
+    try:
+        legacy_observation_read(value, repository, master, 313, "active")
+    except SystemExit as error:
+        assert str(error) == message, str(error)
+    else:
+        raise AssertionError("legacy reader accepted an incompatible observation")
+    assert value == before, "legacy observation rejection mutated the input"
+
+legacy_observation_rejects(
+    copy.deepcopy(v2_observation),
+    "transition observation schema is invalid",
+)
+legacy_observation_rejects(
+    {
+        **copy.deepcopy(v1_observation),
+        "schemaVersion": a.TRANSITION_OBSERVATION_SCHEMA,
+    },
+    "transition observation does not prove exclusive current control",
+)
+
+valid_observation_snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+prepared_observation_intent_path = next(
+    (d / "authority").glob("request-*.json")
+)
+prepared_observation_intent_before = prepared_observation_intent_path.read_bytes()
+prepared_observation_intent = json.loads(prepared_observation_intent_before)
+prepared_observation_capture = (
+    d / "authority" / prepared_observation_intent["captureFile"]
+)
+
+def observation_capture_identity():
+    metadata = prepared_observation_capture.stat()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+prepared_observation_capture_before = prepared_observation_capture.read_bytes()
+prepared_observation_capture_identity = observation_capture_identity()
+assert prepared_observation_capture_before == b""
+assert (d / "dispatches").read_text() == "0"
+
+def current_observation_reader_rejects(value, message):
+    write(d / "observation.json", value)
+    verify_error = invoke("verify-prepared", options, ok=False)
+    assert verify_error == message, verify_error
+    dispatch_error = invoke(
+        "dispatch-prepared",
+        {
+            **options,
+            "expected_snapshot": valid_observation_snapshot,
+            "owner_pid": os.getpid(),
+        },
+        ok=False,
+    )
+    assert dispatch_error == message, dispatch_error
+    assert (
+        prepared_observation_intent_path.read_bytes()
+        == prepared_observation_intent_before
+    )
+    assert json.loads(prepared_observation_intent_path.read_text())["state"] == \
+        "prepared"
+    assert list((d / "authority").glob("dispatch-*.log")) == [
+        prepared_observation_capture
+    ]
+    assert prepared_observation_capture.read_bytes() == \
+        prepared_observation_capture_before
+    assert observation_capture_identity() == \
+        prepared_observation_capture_identity
+    assert (d / "dispatches").read_text() == "0"
+
+schema_v1_with_target = copy.deepcopy(v2_observation)
+schema_v1_with_target["schemaVersion"] = \
+    "betstan.live-data-transition-observation.v1"
+current_observation_reader_rejects(
+    schema_v1_with_target,
+    "transition observation does not prove exclusive current control",
+)
+v2_without_target = {
+    name: copy.deepcopy(value)
+    for name, value in v2_observation.items()
+    if name != "target"
+}
+current_observation_reader_rejects(
+    v2_without_target,
+    "transition observation schema is invalid",
+)
+current_observation_reader_rejects(
+    copy.deepcopy(v1_observation),
+    "transition observation schema is invalid",
+)
+write(d / "observation.json", v2_observation)
+assert json.loads(invoke("verify-prepared", options))["snapshot"] == \
+    valid_observation_snapshot
+print("offline_observation_v1_v2_incompatibility=PASS", flush=True)
+
 # Discard-versus-CAS and ABA use exact internal snapshot tokens, not run IDs.
 snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
 discard_snapshot = invoke("prepared-context", cleanup_options(d))
@@ -2097,5 +2242,888 @@ assert json.loads(archives[0].read_text()) == spent
 print("prepared_retirement_replacement_expiry_tests=PASS", flush=True)
 print("prepared_dispatch_integration_tests=PASS")
 PY
+
+# Frozen two-entry disabled-transition map: both targets get a real
+# prepare/happy-path/discard cycle, cross-target request/observation/seal/
+# prepared-context/dispatch/discard are rejected in both directions, and the
+# repository-global prepare fence spans both targets. This exercises the
+# generalized functions directly rather than re-running the whole single-
+# target mutation/race/CAS/expiry/capture/retirement/v1-reader matrix twice.
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT_DIR" "$tmp_dir" <<'PY'
+import base64
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+helper = root / "infra/azure/agents/copilot_cli_authority_stan.py"
+policy_script = root / "infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+spec = importlib.util.spec_from_file_location("authority_frozen", helper)
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+
+repository = "example/repo"
+master = "b" * 40
+old = "a" * 40
+
+assert a.PREPARED_TRANSITION_WORKFLOWS == {
+    "oci-live-data-rollout.yml": ".github/workflows/oci-live-data-rollout.yml",
+    "oci-live-betting-activate.yml": ".github/workflows/oci-live-betting-activate.yml",
+}, "frozen prepared-transition map drifted"
+assert "oci-capacity-acquire.yml" not in a.PREPARED_TRANSITION_WORKFLOWS
+assert set(a.PREPARED_TRANSITION_WORKFLOWS.values()) <= set(a.UNMATERIALIZED_WORKFLOWS)
+
+def invoke(command, options, *, ok=True):
+    argv = [command]
+    for name, value in options.items():
+        argv.extend(["--" + name.replace("_", "-"), str(value)])
+    parsed = a.build_parser().parse_args(argv)
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            parsed.function(parsed)
+    except SystemExit as error:
+        assert not ok, (command, error)
+        return str(error)
+    assert ok, f"{command} unexpectedly passed"
+    return out.getvalue().strip()
+
+def write(path, value):
+    path.write_text(json.dumps(value))
+    path.chmod(0o600)
+
+TARGETS = {
+    "data": {
+        "operation": "oci-live-data-dry-run",
+        "workflow": "oci-live-data-rollout.yml",
+        "workflow_id": 313,
+        "extra_inputs": {
+            "approved_sha": master, "build_run_id": "42",
+            "infrastructure_run_id": "43", "baseline_recovery_run_id": "0",
+        },
+    },
+    "activate": {
+        "operation": "oci-live-betting-activate",
+        "workflow": "oci-live-betting-activate.yml",
+        "workflow_id": 415,
+        "extra_inputs": {
+            "approved_sha": master, "build_run_id": "42",
+            "infrastructure_run_id": "43", "deployment_run_id": "44",
+        },
+    },
+}
+
+policy_paths = subprocess.check_output([policy_script, "workflows"], text=True).splitlines()
+inventory = {"paths": sorted(".github/workflows/" + p for p in policy_paths),
+             "statuses": ["queued", "in_progress", "waiting", "requested", "pending"],
+             "limitPerStatus": 100}
+inventory_sha256 = a.evidence_digest(inventory)
+
+def build_context(key, run_id):
+    info = TARGETS[key]
+    path = f".github/workflows/{info['workflow']}"
+    policy = json.loads(subprocess.check_output([policy_script, "get", info["operation"]]))
+    request = {
+        "schemaVersion": a.REQUEST_SCHEMA, "repository": repository,
+        "operation": policy["operation"], "controlSha": master,
+        "subjectSha": master, "targetSha": None,
+        "inputs": {**policy["fixedInputs"], **info["extra_inputs"]},
+    }
+    normalized = a.validate_request_data(request, policy, repository, master)
+    source = (root / path).read_bytes()
+    blob = hashlib.sha1(f"blob {len(source)}\0".encode() + source).hexdigest()
+    run = {
+        "id": run_id, "workflow_id": info["workflow_id"], "path": path,
+        "head_sha": old, "head_branch": "master",
+        "head_repository": {"full_name": repository},
+        "event": "workflow_dispatch", "run_attempt": 1, "status": "queued",
+        "conclusion": None, "display_title": a.UNMATERIALIZED_WORKFLOWS[path]["name"],
+        "created_at": "1970-01-01T00:00:00Z", "run_started_at": "1970-01-01T00:00:00Z",
+        "updated_at": "1970-01-01T00:00:00Z",
+        "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+    }
+    compare = {"status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+               "base_commit": {"sha": old}, "merge_base_commit": {"sha": old},
+               "commits": [{"sha": master}]}
+    historical = {"type": "file", "path": path, "encoding": "base64", "sha": blob,
+                  "size": len(source), "content": base64.b64encode(source).decode()}
+    evidence = {
+        "run": run, "workflow": {"id": info["workflow_id"], "path": path, "state": "disabled_manually"},
+        "jobs": {"total_count": 0, "jobs": []}, "pending": [], "approvals": [],
+        "artifacts": {"total_count": 0, "artifacts": []}, "compare": compare,
+        "historical_workflow": historical, "now_epoch": 10 ** 9, "minimum_age_seconds": 600,
+    }
+    facts = a.validate_unmaterialized_run_evidence(
+        **evidence, repository=repository, current_master=master,
+        require_disabled_workflow=False,
+    )
+    candidate = a.semantic_ghost_evidence(evidence, facts)["candidate"]
+
+    def observation_for(state):
+        return {
+            "schemaVersion": a.TRANSITION_OBSERVATION_SCHEMA,
+            "repository": repository, "controlSha": master,
+            "inventorySha256": inventory_sha256,
+            "target": {"workflow": info["workflow"], "path": path},
+            "candidates": [candidate],
+            "workflows": [{"id": info["workflow_id"], "path": path, "state": state}],
+            "blockers": [],
+        }
+
+    return {
+        "key": key, "info": info, "path": path, "policy": policy, "request": request,
+        "normalized": normalized, "blob": blob, "observation_for": observation_for,
+    }
+
+def write_options(context, directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write(directory / "request.json", context["request"])
+    write(directory / "normalized.json", context["normalized"])
+    write(directory / "inputs.json", context["normalized"]["dispatchInputs"])
+    write(directory / "observation.json", context["observation_for"]("disabled_manually"))
+    authority_dir = directory / "authority"
+    authority_dir.mkdir(mode=0o700, exist_ok=True)
+    return {
+        "request": directory / "request.json", "normalized": directory / "normalized.json",
+        "inputs_file": directory / "inputs.json",
+        "policy_json": json.dumps(context["policy"]),
+        "repository": repository, "current_master": master,
+        "workflow_id": context["info"]["workflow_id"],
+        "workflow_blob_sha": context["blob"],
+        "observation_json": directory / "observation.json",
+        "authority_dir": authority_dir, "repo_root": root,
+    }
+
+# --- Both-target happy path: prepare -> dispatch, and prepare -> discard. ---
+for key in ("data", "activate"):
+    run_id = 900001 if key == "data" else 900002
+    context = build_context(key, run_id)
+
+    dispatch_dir = temporary / f"frozen-{key}-dispatch"
+    options = write_options(context, dispatch_dir)
+    invoke("prepare-disabled-ghosts", {**options, "owner_pid": 4242})
+    intent_path = next((options["authority_dir"]).glob("request-*.json"))
+    intent = json.loads(intent_path.read_text())
+    assert intent["schemaVersion"] == a.PREPARED_INTENT_SCHEMA and intent["state"] == "prepared"
+    assert intent["workflow"] == context["info"]["workflow"]
+    write(dispatch_dir / "observation.json", context["observation_for"]("active"))
+    snapshot = json.loads(invoke("verify-prepared", options))["snapshot"]
+    invoke("dispatch-prepared", {**options, "expected_snapshot": snapshot, "owner_pid": 4242})
+    assert json.loads(intent_path.read_text())["state"] == "dispatching"
+
+    discard_dir = temporary / f"frozen-{key}-discard"
+    options = write_options(context, discard_dir)
+    invoke("prepare-disabled-ghosts", {**options, "owner_pid": 4242})
+    cleanup_options = {
+        "request": options["request"], "repository": repository,
+        "workflow_id": options["workflow_id"], "workflow_path": context["path"],
+        "authority_dir": options["authority_dir"], "repo_root": root,
+    }
+    discard_snapshot = invoke("prepared-context", cleanup_options)
+    invoke("discard-prepared", {**cleanup_options, "expected_snapshot": discard_snapshot})
+    assert not list(options["authority_dir"].glob("request-*.json"))
+
+print("frozen_transition_both_targets_tests=PASS", flush=True)
+
+# --- Repository-global prepare fence spans both targets. ---
+fence_dir = temporary / "frozen-fence"
+data_context = build_context("data", 900101)
+activate_context = build_context("activate", 900102)
+data_options = write_options(data_context, fence_dir / "data")
+data_options["authority_dir"] = fence_dir / "shared-authority"
+data_options["authority_dir"].mkdir(mode=0o700, exist_ok=True)
+activate_options = write_options(activate_context, fence_dir / "activate")
+activate_options["authority_dir"] = data_options["authority_dir"]
+invoke("prepare-disabled-ghosts", {**data_options, "owner_pid": 4242})
+invoke("prepare-disabled-ghosts", {**activate_options, "owner_pid": 4242}, ok=False)
+data_cleanup = {
+    "request": data_options["request"], "repository": repository,
+    "workflow_id": data_options["workflow_id"], "workflow_path": data_context["path"],
+    "authority_dir": data_options["authority_dir"], "repo_root": root,
+}
+data_snapshot = invoke("prepared-context", data_cleanup)
+invoke("discard-prepared", {**data_cleanup, "expected_snapshot": data_snapshot})
+invoke("prepare-disabled-ghosts", {**activate_options, "owner_pid": 4242})
+activate_cleanup = {
+    "request": activate_options["request"], "repository": repository,
+    "workflow_id": activate_options["workflow_id"], "workflow_path": activate_context["path"],
+    "authority_dir": activate_options["authority_dir"], "repo_root": root,
+}
+activate_snapshot = invoke("prepared-context", activate_cleanup)
+invoke("discard-prepared", {**activate_cleanup, "expected_snapshot": activate_snapshot})
+print("frozen_transition_repository_global_fence_tests=PASS", flush=True)
+
+# --- Cross-target rejection, both directions. ---
+# (1) special_context's authority-helper gate rejects a non-frozen workflow
+#     (the near-miss oci-capacity-acquire.yml, not an arbitrary workflow)
+#     before touching any normalized/request evidence.
+capacity_policy = json.loads(subprocess.check_output([policy_script, "get", "oci-capacity-acquire"]))
+assert capacity_policy["workflow"] == "oci-capacity-acquire.yml"
+gate_error = invoke("prepare-disabled-ghosts", {
+    "request": "/nonexistent/request.json", "normalized": "/nonexistent/normalized.json",
+    "inputs_file": "/nonexistent/inputs.json", "policy_json": json.dumps(capacity_policy),
+    "repository": repository, "current_master": master, "workflow_id": 1,
+    "workflow_blob_sha": "0" * 40, "observation_json": "/nonexistent/observation.json",
+    "owner_pid": 4242, "authority_dir": temporary / "frozen-capacity-gate",
+    "repo_root": root,
+}, ok=False)
+assert "frozen" in gate_error, gate_error
+
+# (2) prepared-context/discard-prepared reject a workflow-path that does not
+#     match the frozen entry of the intent's own operation, in both
+#     directions.
+cross_dir = temporary / "frozen-cross"
+data_context2 = build_context("data", 900201)
+options = write_options(data_context2, cross_dir)
+invoke("prepare-disabled-ghosts", {**options, "owner_pid": 4242})
+wrong_path_cleanup = {
+    "request": options["request"], "repository": repository,
+    "workflow_id": options["workflow_id"],
+    "workflow_path": ".github/workflows/oci-live-betting-activate.yml",
+    "authority_dir": options["authority_dir"], "repo_root": root,
+}
+invoke("prepared-context", wrong_path_cleanup, ok=False)
+invoke("discard-prepared", {**wrong_path_cleanup, "expected_snapshot": "0" * 64}, ok=False)
+right_path_cleanup = {**wrong_path_cleanup, "workflow_path": data_context2["path"]}
+right_snapshot = invoke("prepared-context", right_path_cleanup)
+invoke("discard-prepared", {**right_path_cleanup, "expected_snapshot": right_snapshot})
+
+# (3) validate_prepared_seal rejects a seal whose workflowPath was rebound to
+#     the OTHER frozen entry (simulated tamper/cross-target confusion).
+activate_context2 = build_context("activate", 900202)
+options2 = write_options(activate_context2, temporary / "frozen-cross-seal")
+invoke("prepare-disabled-ghosts", {**options2, "owner_pid": 4242})
+tampered_path = next(options2["authority_dir"].glob("request-*.json"))
+tampered = json.loads(tampered_path.read_text())
+tampered["preparedSeal"]["workflowPath"] = ".github/workflows/oci-live-data-rollout.yml"
+try:
+    a.validate_prepared_seal(tampered)
+    raise AssertionError("tampered seal workflow path was accepted")
+except SystemExit as error:
+    assert "workflow path" in str(error)
+
+# (4) read_transition_observation rejects an observation whose target does
+#     not match the requested operation's own frozen workflow, in both
+#     directions, and still requires a nonempty candidate set even when the
+#     target is named correctly.
+class Args:
+    pass
+
+mismatch_args = Args()
+mismatch_args.observation_json = str(temporary / "mismatch-observation.json")
+mismatch_args.repository = repository
+mismatch_args.current_master = master
+mismatch_args.workflow_id = data_context2["info"]["workflow_id"]
+write(Path(mismatch_args.observation_json), data_context2["observation_for"]("disabled_manually"))
+try:
+    a.read_transition_observation(mismatch_args, "disabled_manually", "oci-live-betting-activate.yml")
+    raise AssertionError("cross-target observation target was accepted")
+except SystemExit as error:
+    assert "target" in str(error)
+
+empty_args = Args()
+empty_args.observation_json = str(temporary / "empty-observation.json")
+empty_args.repository = repository
+empty_args.current_master = master
+empty_args.workflow_id = data_context2["info"]["workflow_id"]
+empty_observation = {
+    "schemaVersion": a.TRANSITION_OBSERVATION_SCHEMA, "repository": repository,
+    "controlSha": master, "inventorySha256": inventory_sha256,
+    "target": {"workflow": "oci-live-data-rollout.yml", "path": data_context2["path"]},
+    "candidates": [], "workflows": [], "blockers": [],
+}
+write(Path(empty_args.observation_json), empty_observation)
+try:
+    a.read_transition_observation(empty_args, "disabled_manually", "oci-live-data-rollout.yml")
+    raise AssertionError("empty-candidate observation was accepted")
+except SystemExit as error:
+    assert "nonempty" in str(error)
+
+print("frozen_transition_cross_target_rejection_tests=PASS", flush=True)
+
+# --- Reverse-direction cross-target rejection (activation presented to
+# data). Every check above used a live-data intent/seal/observation presented
+# where activation was expected. Prove the mirror image too: an activation
+# intent/seal/observation presented where data is expected must be rejected
+# by the exact same generic checks, not by a live-data-specific special case.
+reverse_cross_dir = temporary / "frozen-cross-reverse"
+activate_context3 = build_context("activate", 900301)
+options = write_options(activate_context3, reverse_cross_dir)
+invoke("prepare-disabled-ghosts", {**options, "owner_pid": 4242})
+wrong_path_cleanup_reverse = {
+    "request": options["request"], "repository": repository,
+    "workflow_id": options["workflow_id"],
+    "workflow_path": ".github/workflows/oci-live-data-rollout.yml",
+    "authority_dir": options["authority_dir"], "repo_root": root,
+}
+invoke("prepared-context", wrong_path_cleanup_reverse, ok=False)
+invoke("discard-prepared", {**wrong_path_cleanup_reverse, "expected_snapshot": "0" * 64}, ok=False)
+right_path_cleanup_reverse = {**wrong_path_cleanup_reverse, "workflow_path": activate_context3["path"]}
+right_snapshot_reverse = invoke("prepared-context", right_path_cleanup_reverse)
+invoke("discard-prepared", {**right_path_cleanup_reverse, "expected_snapshot": right_snapshot_reverse})
+
+# validate_prepared_seal rejects a DATA seal rebound to the ACTIVATION frozen
+# entry (mirror of the earlier activation-seal-rebound-to-data check).
+data_context3 = build_context("data", 900302)
+options3 = write_options(data_context3, temporary / "frozen-cross-seal-reverse")
+invoke("prepare-disabled-ghosts", {**options3, "owner_pid": 4242})
+tampered_path_reverse = next(options3["authority_dir"].glob("request-*.json"))
+tampered_reverse = json.loads(tampered_path_reverse.read_text())
+tampered_reverse["preparedSeal"]["workflowPath"] = ".github/workflows/oci-live-betting-activate.yml"
+try:
+    a.validate_prepared_seal(tampered_reverse)
+    raise AssertionError("tampered seal workflow path was accepted (reverse direction)")
+except SystemExit as error:
+    assert "workflow path" in str(error)
+
+# read_transition_observation rejects an ACTIVATION-shaped observation
+# presented where DATA is the requested operation (mirror of the earlier
+# data-shaped-observation-presented-to-activation check).
+reverse_mismatch_args = Args()
+reverse_mismatch_args.observation_json = str(temporary / "reverse-mismatch-observation.json")
+reverse_mismatch_args.repository = repository
+reverse_mismatch_args.current_master = master
+reverse_mismatch_args.workflow_id = data_context3["info"]["workflow_id"]
+write(Path(reverse_mismatch_args.observation_json), activate_context3["observation_for"]("disabled_manually"))
+try:
+    a.read_transition_observation(reverse_mismatch_args, "disabled_manually", "oci-live-data-rollout.yml")
+    raise AssertionError("cross-target observation target was accepted (reverse direction)")
+except SystemExit as error:
+    assert "target" in str(error)
+
+print("frozen_transition_cross_target_reverse_rejection_tests=PASS", flush=True)
+
+# Exercise the actual POST-A/POST-B authority commands with a valid
+# preparation from the other frozen target. Copying that self-bound authority
+# under the destination lookup key makes the command inspect and reject the
+# foreign identity instead of passing only because no destination file exists.
+def assert_cross_target_checkpoint_rejection(source_key, destination_key, source_run, destination_run):
+    case_dir = temporary / f"frozen-command-{source_key}-to-{destination_key}"
+    source_context = build_context(source_key, source_run)
+    destination_context = build_context(destination_key, destination_run)
+    source_options = write_options(source_context, case_dir / "source")
+    destination_options = write_options(destination_context, case_dir / "destination")
+
+    invoke("prepare-disabled-ghosts", {**source_options, "owner_pid": 4242})
+    write(
+        Path(source_options["observation_json"]),
+        source_context["observation_for"]("active"),
+    )
+    source_snapshot = json.loads(invoke("verify-prepared", source_options))["snapshot"]
+
+    authority_dir = source_options["authority_dir"]
+    source_intent_path = next(authority_dir.glob("request-*.json"))
+    source_intent_before = source_intent_path.read_bytes()
+    source_intent = json.loads(source_intent_before)
+    capture_path = authority_dir / source_intent["captureFile"]
+    capture_before = capture_path.read_bytes()
+    capture_stat_before = (
+        capture_path.stat().st_dev,
+        capture_path.stat().st_ino,
+        capture_path.stat().st_size,
+        capture_path.stat().st_mtime_ns,
+        capture_path.stat().st_ctime_ns,
+    )
+    assert source_intent["state"] == "prepared"
+    assert capture_before == b""
+
+    write(
+        Path(destination_options["observation_json"]),
+        destination_context["observation_for"]("active"),
+    )
+    destination_options = {
+        **destination_options,
+        "authority_dir": authority_dir,
+    }
+    destination_key_hash = a.request_key(destination_context["normalized"])
+    foreign_intent_path = a.intent_path(authority_dir, destination_key_hash)
+    assert foreign_intent_path != source_intent_path
+    foreign_intent_path.write_bytes(source_intent_before)
+    foreign_intent_path.chmod(0o600)
+    foreign_intent_before = foreign_intent_path.read_bytes()
+
+    verify_error = invoke("verify-prepared", destination_options, ok=False)
+    assert verify_error == "dispatch intent request key mismatch", verify_error
+    dispatch_error = invoke(
+        "dispatch-prepared",
+        {
+            **destination_options,
+            "expected_snapshot": source_snapshot,
+            "owner_pid": 4242,
+        },
+        ok=False,
+    )
+    assert dispatch_error == "dispatch intent request key mismatch", dispatch_error
+
+    assert source_intent_path.read_bytes() == source_intent_before
+    assert foreign_intent_path.read_bytes() == foreign_intent_before
+    assert json.loads(source_intent_path.read_text())["state"] == "prepared"
+    capture_files = list(authority_dir.glob("dispatch-*.log"))
+    assert capture_files == [capture_path], capture_files
+    assert capture_path.read_bytes() == capture_before == b""
+    assert (
+        capture_path.stat().st_dev,
+        capture_path.stat().st_ino,
+        capture_path.stat().st_size,
+        capture_path.stat().st_mtime_ns,
+        capture_path.stat().st_ctime_ns,
+    ) == capture_stat_before
+
+    foreign_intent_path.unlink()
+    cleanup_options = {
+        "request": source_options["request"],
+        "repository": repository,
+        "workflow_id": source_options["workflow_id"],
+        "workflow_path": source_context["path"],
+        "authority_dir": authority_dir,
+        "repo_root": root,
+    }
+    cleanup_snapshot = invoke("prepared-context", cleanup_options)
+    invoke(
+        "discard-prepared",
+        {**cleanup_options, "expected_snapshot": cleanup_snapshot},
+    )
+    assert not list(authority_dir.glob("request-*.json"))
+    assert not list(authority_dir.glob("dispatch-*.log"))
+    print(
+        f"frozen_transition_{source_key}_to_{destination_key}_"
+        "checkpoint_rejection_tests=PASS",
+        flush=True,
+    )
+
+
+assert_cross_target_checkpoint_rejection("activate", "data", 900401, 900402)
+assert_cross_target_checkpoint_rejection("data", "activate", 900403, 900404)
+print("frozen_transition_cross_target_checkpoint_rejection_tests=PASS", flush=True)
+PY
+
+# ============================================================================
+# Real-dispatcher activation acceptance (validation-critic remediation).
+#
+# Every prepared-lifecycle assertion above invokes the Python authority
+# helper directly. That proves the authority module's own admission/target
+# logic, but never proves the actual bash entrypoint
+# (copilot-cli-dispatch-stan.sh) routes a real oci-live-betting-activate.yml
+# request through it, or that the real production-run-exclusivity-stan.sh
+# observer is actually invoked with the activation target. This section
+# drives the real dispatcher end to end -- stubbing only the gh/git process
+# boundary, never network -- for both the disabled-only discard path and the
+# prepare-then-active-dispatch path, then proves two concrete regressions
+# (dispatcher admission reverted to live-data-only; observer call target
+# hardcoded to live-data) would make this exact test fail.
+# ============================================================================
+(
+set -euo pipefail
+
+ACT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/betstan-activation-dispatch-test.XXXXXX")"
+chmod 700 "$ACT_TMP"
+trap 'rm -rf "$ACT_TMP"' EXIT
+
+ACT_REPO="example/repo"
+ACT_MASTER="1010101010101010101010101010101010101010"
+ACT_OLD_SHA="2020202020202020202020202020202020202020"
+ACT_WORKFLOW="oci-live-betting-activate.yml"
+ACT_WORKFLOW_PATH=".github/workflows/oci-live-betting-activate.yml"
+ACT_WORKFLOW_ID=415
+ACT_GHOST_RUN_ID=951001
+ACT_NEW_RUN_ID=951101
+ACT_CURRENT_BLOB="3030303030303030303030303030303030303030"
+
+ACT_STATE_FILE="$ACT_TMP/workflow-state"
+ACT_OBSERVE_LOG="$ACT_TMP/observe-calls.log"
+ACT_DISPATCH_COUNT="$ACT_TMP/dispatch-count"
+ACT_CAPTURED_INPUTS="$ACT_TMP/captured-inputs.json"
+
+# Exact historical activation source already proven valid (job/environment/
+# guard/mutation-token shape required by UNMATERIALIZED_WORKFLOWS) by
+# test-production-run-exclusivity-stan.sh's own oci-live-betting-activate.yml
+# fixture. Reused verbatim so this section does not silently drift from that
+# proof.
+read -r -d '' ACT_HISTORICAL_SOURCE <<'EOF' || true
+name: oci-live-betting-activate
+run-name: oci-live-activate ${{ inputs.approved_sha }}
+concurrency:
+  group: oci-control-plane
+  cancel-in-progress: false
+jobs:
+  activate-and-validate:
+    environment:
+      name: oci-production
+    steps:
+      - run: |
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          ./infra/oci/scripts/authorize-github-runner.sh cleanup-stale
+          ./infra/oci/scripts/authorize-github-runner.sh authorize
+          ./infra/oci/scripts/configure-k3s-access.sh open
+          kubectl exec -n "$OCI_K8S_NAMESPACE"
+          node dist/scripts/SetUserRole.js
+          curl --fail-with-body
+          ./client/node_modules/.bin/playwright test
+      - run: ./infra/oci/scripts/live-betting-control-stan.sh
+          ./infra/oci/scripts/cleanup-live-acceptance-slips-stan.sh
+          ./infra/oci/scripts/revoke-github-runner.sh
+          ./infra/oci/scripts/configure-k3s-access.sh cleanup
+EOF
+
+emit_historical_content() {
+  python3 - <<PYEOF
+import base64, hashlib, json
+source = """$ACT_HISTORICAL_SOURCE""".encode("utf-8")
+print(json.dumps({
+    "type": "file", "path": "$ACT_WORKFLOW_PATH", "encoding": "base64",
+    "size": len(source),
+    "sha": hashlib.sha1(f"blob {len(source)}\\0".encode() + source).hexdigest(),
+    "content": base64.b64encode(source).decode("ascii"),
+}, separators=(",", ":")))
+PYEOF
+}
+
+emit_run_json() {
+  local run_id="$1" head_sha="$2" status="$3" title="$4"
+  python3 - "$run_id" "$head_sha" "$status" "$title" \
+    "$ACT_WORKFLOW_ID" "$ACT_WORKFLOW_PATH" "$ACT_REPO" <<'PYEOF'
+import json, sys
+run_id, head_sha, status, title, workflow_id, path, repository = sys.argv[1:]
+print(json.dumps({
+    "id": int(run_id), "workflow_id": int(workflow_id), "path": path,
+    "display_title": title, "event": "workflow_dispatch",
+    "head_sha": head_sha, "head_branch": "master",
+    "head_repository": {"id": 101, "full_name": repository},
+    "repository": {"id": 101, "full_name": repository},
+    "run_attempt": 1, "status": status, "conclusion": None,
+    "created_at": "1970-01-01T00:00:00Z", "run_started_at": "1970-01-01T00:00:00Z",
+    "updated_at": "1970-01-01T00:00:00Z",
+    "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+    "url": f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
+}, separators=(",", ":")))
+PYEOF
+}
+
+ACT_GHOST_RUN_JSON="$(emit_run_json "$ACT_GHOST_RUN_ID" "$ACT_OLD_SHA" queued oci-live-betting-activate)"
+ACT_NEW_RUN_JSON="$(emit_run_json "$ACT_NEW_RUN_ID" "$ACT_MASTER" waiting "oci-live-activate $ACT_MASTER")"
+export ACT_GHOST_RUN_JSON ACT_NEW_RUN_JSON
+
+write_activation_request() {
+  local path="$1"
+  python3 - "$path" "$ACT_MASTER" "$ACT_REPO" <<'PYEOF'
+import json, os, sys
+path, sha, repository = sys.argv[1:]
+request = {
+    "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+    "repository": repository, "operation": "oci-live-betting-activate",
+    "controlSha": sha, "subjectSha": sha, "targetSha": None,
+    "inputs": {
+        "approved_sha": sha, "build_run_id": "42",
+        "infrastructure_run_id": "43", "deployment_run_id": "44",
+        "confirmation": "ACTIVATE OCI LIVE BETTING",
+    },
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(request, handle)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PYEOF
+}
+
+# Real dispatcher/exclusivity gh(1)/git(1) process-boundary stub. Every
+# response is a fixed, deterministic shape for the one activation candidate;
+# no STUB_MODE matrix is needed because this section proves one concrete
+# real-dispatcher acceptance path, not the full malformed-evidence matrix
+# (already covered elsewhere for the shared authority/exclusivity code).
+git() {
+  if [[ "$1" = "-C" ]]; then shift 2; fi
+  case "$1" in
+    rev-parse)
+      case "$2" in
+        --show-toplevel) printf '%s\n' "$ROOT_DIR" ;;
+        HEAD) printf '%s\n' "$ACT_MASTER" ;;
+        "$ACT_MASTER:$ACT_WORKFLOW_PATH") printf '%s\n' "$ACT_CURRENT_BLOB" ;;
+        *) echo "unexpected git rev-parse: $*" >&2; return 1 ;;
+      esac
+      ;;
+    status) return 0 ;;
+    *) echo "unexpected git call: $*" >&2; return 1 ;;
+  esac
+}
+
+gh() {
+  if [[ "$1 $2" = "repo view" ]]; then
+    printf '%s\n' "$ACT_REPO"
+    return 0
+  fi
+  if [[ "$1" = "workflow" && "$2" = "run" ]]; then
+    [[ "$3" = "$ACT_WORKFLOW" ]] ||
+      { echo "unexpected workflow run target: $3" >&2; return 1; }
+    local count=0
+    [[ -f "$ACT_DISPATCH_COUNT" ]] && count="$(cat "$ACT_DISPATCH_COUNT")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$ACT_DISPATCH_COUNT"
+    cat >"$ACT_CAPTURED_INPUTS"
+    printf 'https://github.com/%s/actions/runs/%s\n' "$ACT_REPO" "$ACT_NEW_RUN_ID"
+    return 0
+  fi
+  [[ "$1" = "api" ]] || { echo "unexpected gh invocation: $*" >&2; return 1; }
+  local endpoint="$2"
+  shift 2
+  local jq_filter=""
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --jq) jq_filter="$2"; shift 2 ;;
+      --paginate) shift ;;
+      -H) shift 2 ;;
+      *) echo "unexpected gh api flag: $1" >&2; return 1 ;;
+    esac
+  done
+  local body=""
+  case "$endpoint" in
+    "repos/$ACT_REPO/git/ref/heads/master")
+      body="$(printf '{"object":{"sha":"%s"}}' "$ACT_MASTER")"
+      ;;
+    "repos/$ACT_REPO/actions/workflows/$ACT_WORKFLOW")
+      body="$(printf '{"id":%s,"path":"%s","state":"%s"}' \
+        "$ACT_WORKFLOW_ID" "$ACT_WORKFLOW_PATH" "$(cat "$ACT_STATE_FILE")")"
+      ;;
+    "repos/$ACT_REPO/actions/workflows/$ACT_WORKFLOW_ID")
+      # Only production-run-exclusivity-stan.sh's per-candidate evidence
+      # gathering ever queries the numeric workflow ID form (the dispatcher
+      # itself always uses the basename form above). Logging every call here
+      # is therefore an exact, unambiguous PRE/POST-A/POST-B observer-
+      # invocation trace: one line per real observe-mode subprocess run, in
+      # order, carrying the workflow state that run actually observed.
+      cat "$ACT_STATE_FILE" >>"$ACT_OBSERVE_LOG"
+      body="$(printf '{"id":%s,"path":"%s","state":"%s"}' \
+        "$ACT_WORKFLOW_ID" "$ACT_WORKFLOW_PATH" "$(cat "$ACT_STATE_FILE")")"
+      ;;
+    "repos/$ACT_REPO/contents/$ACT_WORKFLOW_PATH?ref=$ACT_MASTER")
+      body="$(printf '{"sha":"%s"}' "$ACT_CURRENT_BLOB")"
+      ;;
+    "repos/$ACT_REPO/contents/$ACT_WORKFLOW_PATH?ref=$ACT_OLD_SHA")
+      body="$(emit_historical_content)"
+      ;;
+    "repos/$ACT_REPO/commits/$ACT_MASTER/pulls")
+      body="$(printf '[{"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"%s","base":{"ref":"master"},"head":{"ref":"dev"},"labels":[{"name":"copilot-cli-managed"}]}]' "$ACT_MASTER")"
+      ;;
+    "repos/$ACT_REPO/actions/runs?status="*)
+      if [[ "$endpoint" == *"status=queued"* ]]; then
+        body="$(printf '{"total_count":1,"workflow_runs":[%s]}' "$ACT_GHOST_RUN_JSON")"
+      else
+        body='{"total_count":0,"workflow_runs":[]}'
+      fi
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_GHOST_RUN_ID")
+      body="$ACT_GHOST_RUN_JSON"
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_GHOST_RUN_ID/jobs?per_page=1")
+      body='{"total_count":0,"jobs":[]}'
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_GHOST_RUN_ID/pending_deployments")
+      body='[]'
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_GHOST_RUN_ID/approvals")
+      body='[]'
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_GHOST_RUN_ID/artifacts?per_page=1")
+      body='{"total_count":0,"artifacts":[]}'
+      ;;
+    "repos/$ACT_REPO/compare/$ACT_OLD_SHA...$ACT_MASTER")
+      body="$(printf '{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,"base_commit":{"sha":"%s"},"merge_base_commit":{"sha":"%s"},"commits":[{"sha":"%s"}]}' \
+        "$ACT_OLD_SHA" "$ACT_OLD_SHA" "$ACT_MASTER")"
+      ;;
+    "repos/$ACT_REPO/actions/runs/$ACT_NEW_RUN_ID")
+      body="$ACT_NEW_RUN_JSON"
+      ;;
+    # Only reached if a regression makes the observer fall through to the
+    # generic (non-semantic) classifier for this candidate -- e.g. because
+    # its target was hardcoded away from the requested activation path. A
+    # real environment would answer this too; answering it here lets the
+    # mutation-guard scenario below fail on the *intended* target-mismatch
+    # check rather than on an incidental "unexpected endpoint" error.
+    "repos/$ACT_REPO/actions/workflows/$ACT_WORKFLOW_ID/runs?head_sha="*)
+      body='{"total_count":0,"workflow_runs":[]}'
+      ;;
+    *)
+      echo "unexpected gh api endpoint: $endpoint" >&2
+      return 1
+      ;;
+  esac
+  if [[ -n "$jq_filter" ]]; then
+    jq -r "$jq_filter" <<<"$body"
+  else
+    printf '%s\n' "$body"
+  fi
+}
+export -f git gh emit_historical_content
+export ROOT_DIR ACT_REPO ACT_MASTER ACT_OLD_SHA ACT_WORKFLOW ACT_WORKFLOW_PATH \
+  ACT_WORKFLOW_ID ACT_GHOST_RUN_ID ACT_NEW_RUN_ID ACT_CURRENT_BLOB \
+  ACT_STATE_FILE ACT_OBSERVE_LOG ACT_DISPATCH_COUNT ACT_CAPTURED_INPUTS \
+  ACT_HISTORICAL_SOURCE
+
+run_activation_dispatcher() {
+  local authority_dir="$1"
+  shift
+  TMPDIR="$ACT_TMP" \
+  COPILOT_CLI_AUTHORITY_DIR="$authority_dir" \
+  COPILOT_CLI_MATERIALIZATION_ATTEMPTS=2 \
+  COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS=0 \
+    "$DISPATCHER" "$@"
+}
+
+# --- Scenario 1: real disabled-prepare + disabled-only discard. No provider
+# call, and exactly one real observer invocation (PRE), ever occurs. ---
+discard_authority="$ACT_TMP/authority-discard"
+discard_request="$ACT_TMP/discard-request.json"
+write_activation_request "$discard_request"
+printf 'disabled_manually\n' >"$ACT_STATE_FILE"
+: >"$ACT_OBSERVE_LOG"
+: >"$ACT_DISPATCH_COUNT"
+run_activation_dispatcher "$discard_authority" "$discard_request" \
+  --prepare-disabled-ghosts >"$ACT_TMP/discard-prepare.out"
+grep -qF "dispatch=PREPARED" "$ACT_TMP/discard-prepare.out"
+# Attempting to discard while active is rejected: discard is disabled-only.
+printf 'active\n' >"$ACT_STATE_FILE"
+if run_activation_dispatcher "$discard_authority" "$discard_request" \
+  --discard-prepared >"$ACT_TMP/discard-active.out" 2>"$ACT_TMP/discard-active.err"; then
+  echo "discard unexpectedly accepted an active (non-disabled) workflow" >&2
+  exit 1
+fi
+grep -qF "exact freshly disabled workflow" "$ACT_TMP/discard-active.err"
+printf 'disabled_manually\n' >"$ACT_STATE_FILE"
+run_activation_dispatcher "$discard_authority" "$discard_request" \
+  --discard-prepared >"$ACT_TMP/discard.out"
+grep -qF "dispatch=DISCARDED" "$ACT_TMP/discard.out"
+[[ "$(cat "$ACT_OBSERVE_LOG")" = "disabled_manually" ]] ||
+  { echo "discard scenario: expected exactly one PRE observer invocation" >&2; exit 1; }
+[[ ! -s "$ACT_DISPATCH_COUNT" ]] ||
+  { echo "discard scenario: a provider dispatch call was made" >&2; exit 1; }
+[[ -z "$(find "$discard_authority" -maxdepth 1 -type f -name 'request-*.json')" ]] ||
+  { echo "discard scenario: prepared intent was not removed" >&2; exit 1; }
+echo "activation_real_dispatcher_discard_tests=PASS"
+
+# --- Scenario 2: real disabled-prepare, then real active dispatch, with two
+# fresh POST observations (POST-A verify-prepared, POST-B dispatch-prepared),
+# exactly one captured provider call, then exact capture recovery with no
+# redispatch. ---
+dispatch_authority="$ACT_TMP/authority-dispatch"
+dispatch_request="$ACT_TMP/dispatch-request.json"
+write_activation_request "$dispatch_request"
+printf 'disabled_manually\n' >"$ACT_STATE_FILE"
+: >"$ACT_OBSERVE_LOG"
+: >"$ACT_DISPATCH_COUNT"
+run_activation_dispatcher "$dispatch_authority" "$dispatch_request" \
+  --prepare-disabled-ghosts >"$ACT_TMP/dispatch-prepare.out"
+grep -qF "dispatch=PREPARED" "$ACT_TMP/dispatch-prepare.out"
+printf 'active\n' >"$ACT_STATE_FILE"
+run_activation_dispatcher "$dispatch_authority" "$dispatch_request" \
+  --dispatch-prepared >"$ACT_TMP/dispatch.out"
+grep -qF "dispatch=ACCEPTED run_id=$ACT_NEW_RUN_ID" "$ACT_TMP/dispatch.out"
+grep -qF "authority_state=issued" "$ACT_TMP/dispatch.out"
+[[ "$(cat "$ACT_OBSERVE_LOG")" = "$(printf 'disabled_manually\nactive\nactive')" ]] ||
+  {
+    echo "dispatch scenario: expected exactly PRE=disabled_manually," \
+      "POST-A=active, POST-B=active observer invocations, got:" >&2
+    cat "$ACT_OBSERVE_LOG" >&2
+    exit 1
+  }
+[[ "$(cat "$ACT_DISPATCH_COUNT")" = "1" ]] ||
+  { echo "dispatch scenario: expected exactly one captured provider call" >&2; exit 1; }
+python3 - "$ACT_CAPTURED_INPUTS" "$ACT_MASTER" <<'PYEOF'
+import json, sys
+path, master = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    captured = json.load(handle)
+assert captured == {
+    "approved_sha": master, "build_run_id": "42",
+    "infrastructure_run_id": "43", "deployment_run_id": "44",
+    "confirmation": "ACTIVATE OCI LIVE BETTING",
+}, captured
+PYEOF
+# Exact capture recovery: resuming from the persisted capture must not
+# redispatch the provider.
+run_activation_dispatcher "$dispatch_authority" "$dispatch_request" \
+  --resume-captured >"$ACT_TMP/resume.out"
+grep -qF "run_id=$ACT_NEW_RUN_ID" "$ACT_TMP/resume.out"
+[[ "$(cat "$ACT_DISPATCH_COUNT")" = "1" ]] ||
+  { echo "resume-captured redispatched the provider" >&2; exit 1; }
+echo "activation_real_dispatcher_dispatch_tests=PASS"
+
+# --- Mutation guards: prove this exact scenario fails if either safety
+# property regresses. Each guard runs the real (unmodified) dispatcher logic
+# from a shadow root that is entirely symlinks except for one sed-mutated
+# copy of copilot-cli-dispatch-stan.sh, so ROOT_DIR-relative sibling script
+# resolution stays correct while only the mutated behavior changes. ---
+build_shadow_root() {
+  local shadow="$1"
+  mkdir -p "$shadow/infra/azure/agents" "$shadow/infra/oci/scripts"
+  ln -s "$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py" \
+    "$shadow/infra/azure/agents/copilot_cli_authority_stan.py"
+  ln -s "$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh" \
+    "$shadow/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
+  ln -s "$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh" \
+    "$shadow/infra/azure/agents/production-run-exclusivity-stan.sh"
+  ln -s "$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py" \
+    "$shadow/infra/oci/scripts/upstream_run_binding_stan.py"
+}
+
+gate_shadow_root="$ACT_TMP/mutant-admission-gate"
+build_shadow_root "$gate_shadow_root"
+gate_mutant="$gate_shadow_root/infra/azure/agents/copilot-cli-dispatch-stan.sh"
+sed -e 's/is_disabled_transition_workflow "\$workflow" ||/[[ "$workflow" = "oci-live-data-rollout.yml" ]] ||/' \
+  "$DISPATCHER" >"$gate_mutant"
+chmod +x "$gate_mutant"
+diff -q "$DISPATCHER" "$gate_mutant" >/dev/null &&
+  { echo "admission-gate mutation did not change the dispatcher source" >&2; exit 1; }
+gate_authority="$ACT_TMP/authority-gate-mutant"
+gate_request="$ACT_TMP/gate-mutant-request.json"
+write_activation_request "$gate_request"
+printf 'disabled_manually\n' >"$ACT_STATE_FILE"
+: >"$ACT_OBSERVE_LOG"
+: >"$ACT_DISPATCH_COUNT"
+if TMPDIR="$ACT_TMP" COPILOT_CLI_AUTHORITY_DIR="$gate_authority" \
+  COPILOT_CLI_MATERIALIZATION_ATTEMPTS=2 COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS=0 \
+  "$gate_mutant" "$gate_request" --prepare-disabled-ghosts \
+  >"$ACT_TMP/gate-mutant.out" 2>"$ACT_TMP/gate-mutant.err"; then
+  echo "mutation guard failed: admission reverted to live-data-only still accepted activation" >&2
+  cat "$ACT_TMP/gate-mutant.out" "$ACT_TMP/gate-mutant.err" >&2
+  exit 1
+fi
+grep -qF "restricted to the frozen" "$ACT_TMP/gate-mutant.err"
+echo "activation_real_dispatcher_admission_mutation_guard=PASS"
+
+observer_shadow_root="$ACT_TMP/mutant-observer-target"
+build_shadow_root "$observer_shadow_root"
+observer_mutant="$observer_shadow_root/infra/azure/agents/copilot-cli-dispatch-stan.sh"
+sed -e 's/--observe-disabled-transition "\$workflow" \\/--observe-disabled-transition "oci-live-data-rollout.yml" \\/' \
+  "$DISPATCHER" >"$observer_mutant"
+chmod +x "$observer_mutant"
+diff -q "$DISPATCHER" "$observer_mutant" >/dev/null &&
+  { echo "observer-target mutation did not change the dispatcher source" >&2; exit 1; }
+grep -qF 'observe-disabled-transition "oci-live-data-rollout.yml"' "$observer_mutant"
+observer_authority="$ACT_TMP/authority-observer-mutant"
+observer_request="$ACT_TMP/observer-mutant-request.json"
+write_activation_request "$observer_request"
+printf 'disabled_manually\n' >"$ACT_STATE_FILE"
+: >"$ACT_OBSERVE_LOG"
+: >"$ACT_DISPATCH_COUNT"
+if TMPDIR="$ACT_TMP" COPILOT_CLI_AUTHORITY_DIR="$observer_authority" \
+  COPILOT_CLI_MATERIALIZATION_ATTEMPTS=2 COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS=0 \
+  "$observer_mutant" "$observer_request" --prepare-disabled-ghosts \
+  >"$ACT_TMP/observer-mutant.out" 2>"$ACT_TMP/observer-mutant.err"; then
+  echo "mutation guard failed: observer hardcoded to live-data still accepted activation" >&2
+  cat "$ACT_TMP/observer-mutant.out" "$ACT_TMP/observer-mutant.err" >&2
+  exit 1
+fi
+grep -qF "transition observation target does not match the requested operation" \
+  "$ACT_TMP/observer-mutant.err"
+echo "activation_real_dispatcher_observer_mutation_guard=PASS"
+
+echo "activation_real_dispatcher_tests=PASS"
+)
 
 echo "copilot_cli_dispatch_tests=PASS"
