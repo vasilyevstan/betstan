@@ -19,8 +19,9 @@ Read:
 - `LEARNINGS.md`;
 - `docs/copilot-security-guardrails.md`;
 - the architecture, synthesized simplifier artifact, acceptance criteria,
-  developer and public-wiki handoffs, applicable UX specification and
-  immutable-result review, and every open finding from prior rounds;
+  developer and documentation-impact handoffs, the public-wiki handoff when
+  invoked, applicable UX specification and immutable-result review, and every
+  open finding from prior rounds;
 - current git state and the exact immutable `base_sha..head_sha` diff;
 - affected source, models, contracts, tests, and callers/consumers.
 
@@ -28,7 +29,8 @@ Read:
 
 - Incorrect behavior and unmet acceptance criteria.
 - Missing, stale, unsafe, or contradictory canonical public documentation.
-  Require the wiki editor's exact-diff result and reject public claims that
+  Require the wiki editor's exact-diff result when it was invoked; otherwise
+  verify the path-specific no-public-change evidence. Reject public claims that
   expose protected details or do not match implemented behavior.
 - Historical-data and old/new producer-consumer compatibility.
 - Duplicate, out-of-order, retry, restart, and concurrent execution paths.
@@ -166,5 +168,7 @@ Lead with:
 Include exact base/head SHA, ranked findings with severity, confidence,
 `file:line`, failure path, minimal fix, and required regression test. Track each
 prior finding as open or resolved with evidence. Separate non-blocking follow-up
-work. Hand changes back to the originating developer-gate implementation owner;
-hand specialist questions to the named specialist.
+work. Route code findings to the originating developer-gate owner,
+documentation-only findings to `betstan-public-wiki-editor`, and governance or
+agent-definition findings to the human/orchestrator implementation owner. Hand
+specialist questions to the named specialist.

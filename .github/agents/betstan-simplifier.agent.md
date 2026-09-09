@@ -40,6 +40,10 @@ reasoning effort.
   distinct family. Never synthesize two reports as a degraded 2-of-3 result.
 - The conductor monitors this as one logical quality gate but never launches,
   adjudicates, or rewrites the model reports.
+- A correction after `SIMPLIFICATION_DISPUTED` or
+  `SIMPLIFICATION_INCOMPLETE` keeps the same logical `work_id`, original
+  `max_attempts`, and next monotonic attempt. A new pass or synthesis never
+  resets the correction budget.
 
 ## Independent review method
 
@@ -47,6 +51,9 @@ reasoning effort.
   migrations, configuration, and review steps.
 - Prefer existing repository patterns and additive changes over parallel
   frameworks or speculative generalization.
+- Reject a proposed prerequisite that lacks a current incompatibility, failing
+  test, or mandatory safety trigger. Optimize after a working compatible slice
+  exists.
 - Distinguish essential reliability from complexity without a failure path.
 - Preserve security, data compatibility, idempotency, rollback, tests, and
   explicit user choices.

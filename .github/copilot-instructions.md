@@ -17,10 +17,12 @@ before acting; do not rely on stale conversation state or branch names.
 
 - Never commit or push directly to protected `dev` or `master`.
 - Use the fixed quality chain: architect, three-model simplifier synthesis,
-  developer, public-wiki editor, critic, test engineer, then final validator.
-- Treat the public-wiki assessment as mandatory. Relevant product,
-  architecture, operations, UI, quality, release, or agent changes update
-  canonical `docs/wiki/` sources before final validation.
+  developer, critic, test engineer, then final validator.
+- Record a documentation-impact assessment for every change. Register the
+  public-wiki editor only when public impact is plausible or ambiguous;
+  otherwise retain exact-diff, path-specific no-public-change evidence.
+  Relevant product, architecture, operations, UI, quality, release, or agent
+  changes update canonical `docs/wiki/` sources before final validation.
 - Keep corrections in the originating agent context; do not create duplicate
   agents or status-only handoffs.
 - Preserve unrelated tracked, staged, and untracked work.

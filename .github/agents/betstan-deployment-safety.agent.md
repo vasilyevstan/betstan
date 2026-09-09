@@ -207,9 +207,10 @@ inactive. Fail closed when either query is incomplete or fails.
   and prove the run terminal before dispatching rollback; never bypass the
   exclusivity check or mutate a published version or dist-tag as a shortcut.
 - Before promotion, evaluate workflow branch and path filters against the exact diff and list every production-capable workflow that will run. If approval does not cover that complete trigger set, return `NO_GO`.
-- Before promotion, require the public-wiki editor's exact-diff result and all
-  relevant canonical wiki updates. After merge, publication must be
-  byte-identical and public-safe before the release is reported complete.
+- Before promotion, require exact-diff documentation-impact evidence, the
+  public-wiki editor's result when invoked, and all relevant canonical wiki
+  updates. After merge, changed pages must be published byte-identically and
+  remain public-safe before the release is reported complete.
 - A successful `production-build` run must produce immutable images tagged with its exact commit SHA.
 - OCI application images are public GHCR only:
   `ghcr.io/vasilyevstan/betstan-images@sha256:...`. Require provider, host,

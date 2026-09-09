@@ -178,12 +178,27 @@ candidate. If `master` advances, supersede the stale chain instead of blocking
 on unrelated protected commits, resetting shared history, or deploying an
 older SHA. Keep deployment, data changes, activation, and rollback serialized.
 
+### Implement the smallest compatible slice before optimizing
+
+Quality does not require front-loading every possible improvement. Start with
+the smallest end-to-end behavior that satisfies the accepted outcome and reuse
+existing patterns. Add a prerequisite only when a current incompatibility,
+failing test, or mandatory safety gate proves it is needed. Repeated
+governance work that never reaches product implementation triggers a scope
+reset rather than another hardening layer.
+
+After implementation, review the result, record applicable learning, and
+optimize where evidence shows concrete value. Security, compatibility, data,
+branch, test, and production safeguards remain unchanged.
+
 ### Make public documentation part of the change
 
 Documentation should not be a best-effort cleanup after release. Every change
-gets a public-wiki impact assessment, relevant canonical pages change in the
-same pull request, and merged pages are published byte-identically. Public
-documentation explains behavior and safety invariants without exposing
+records documentation impact. When public impact is plausible or ambiguous,
+the relevant canonical pages change in the same pull request and merged pages
+are published byte-identically. A clearly internal change may retain
+path-specific no-public-change evidence without creating another handoff.
+Public documentation explains behavior and safety invariants without exposing
 credentials, private approval state, live records, or actionable bypass
 procedures.
 

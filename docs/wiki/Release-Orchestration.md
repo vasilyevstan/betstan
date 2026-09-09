@@ -51,8 +51,10 @@ flowchart LR
     Branch["Focused branch"] --> DevPR["PR to dev"]
     DevPR --> DevChecks["Architecture, review,<br/>tests, and trusted CI"]
     DevChecks --> Dev["dev"]
-    Dev --> Wiki["Canonical public wiki<br/>updated in the PR"]
-    Wiki --> Promote["dev to master PR"]
+    Dev --> Docs["Documentation-impact evidence"]
+    Docs --> Promote["dev to master PR"]
+    Docs -. affected pages .-> Wiki["Canonical public wiki<br/>updated in the PR"]
+    Wiki -. included before review .-> Promote
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
     MergeChecks --> Master["master"]
     Master --> Build["Exact-SHA builds"]
@@ -107,15 +109,18 @@ The universal quality gates are:
 1. architect;
 2. three-model simplifier synthesis;
 3. registered implementation owner;
-4. public-wiki editor;
-5. validation critic;
-6. test engineer;
-7. final validator.
+4. validation critic;
+5. test engineer;
+6. final validator.
 
 The conductor spans the chain but is not a quality gate.
 `betstan-ux-ui-expert` is mandatory for every user-facing visual or
 interaction change. Other specialists join when their explicit trigger
 applies.
+
+Every change records documentation impact. The public-wiki editor is a
+supporting unit when public impact is plausible or ambiguous, not a universal
+quality gate.
 
 No agent may approve its own implementation, and no agent verdict replaces
 GitHub branch protection or protected-environment approval.
@@ -316,18 +321,20 @@ GitHub job, protected approval, handoff, or runtime health signal.
 - A proven repository-policy false block is corrected narrowly, with focused
   regression coverage, through the normal branch path.
 
-## Mandatory public-wiki handoff
+## Documentation impact and public-wiki support
 
-Every change receives a documentation-impact assessment. Product behavior,
-architecture, contracts, data lifecycle, security, infrastructure, quality
-gates, release behavior, UI/UX, and agent-role changes update their canonical
-`docs/wiki/` pages in the same pull request before final validation.
+Every change records a documentation-impact assessment. Register the
+public-wiki editor when impact is plausible or ambiguous. A clearly no-impact
+change instead records the inspected exact-diff paths and its justification.
+Product behavior, architecture, contracts, data lifecycle, security,
+infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
+update their canonical `docs/wiki/` pages in the same pull request before
+final validation.
 
-After merge, the repository pages are published byte-for-byte to the GitHub
-wiki and their links are verified. A no-change result is acceptable only when
-the exact diff has no public documentation impact. Matching reusable-agent
-guidance, PR/release evidence, and explicit accepted exceptions remain part of
-the handoff.
+After merge, changed repository pages are published byte-for-byte to the
+GitHub wiki and their links are verified. Matching reusable-agent guidance,
+PR/release evidence, and explicit accepted exceptions remain part of the
+handoff when applicable.
 
 Private runtime identifiers, credentials, approval records, and emergency
 procedures remain outside the public wiki.

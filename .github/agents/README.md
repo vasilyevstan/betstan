@@ -14,12 +14,16 @@ The fixed quality gates are:
 3. **Developer gate**: `betstan-backend-developer` and/or
    `betstan-frontend-developer` for application code, or the authorized
    infrastructure/governance implementation owner for its owned paths
-4. `betstan-public-wiki-editor`
-5. `betstan-validation-critic`
-6. `betstan-test-engineer`
-7. `betstan-final-validator`
+4. `betstan-validation-critic`
+5. `betstan-test-engineer`
+6. `betstan-final-validator`
 
 The conductor spans the workflow but is not a quality gate.
+Every change records a documentation-impact assessment. Register
+`betstan-public-wiki-editor` as a supporting unit only when public impact is
+plausible or ambiguous; otherwise the implementation handoff records the
+inspected exact-diff paths and a justified no-public-change conclusion.
+Relevant canonical pages are updated before critic review.
 `betstan-ux-ui-expert` is mandatory for every user-facing visual or interaction
 change and remains a conditional specialist rather than a universal quality
 gate. Register one two-phase specialist work unit: establish the named
@@ -54,14 +58,16 @@ as `chore`, `misc`, or `wip` are not accepted.
 - A **registered supporting unit** is an agent, local process, GitHub run,
   protected approval, external wait, or post-merge publication task monitored
   by the conductor.
-- The **public-wiki gate** assesses every change. It updates the canonical
-  public documentation whenever behavior, architecture, operations, UI,
-  quality, release, or agent responsibilities change; a no-change result
-  requires exact-diff evidence.
+- A **documentation supporting unit** updates canonical public documentation
+  when impact is plausible or ambiguous. A clearly no-impact change records
+  exact-diff evidence without creating another agent handoff.
 
 Only a completed logical quality gate hands work to the exact next gate.
 Corrections return to the same agent conversation unless that owner has failed
-or become unavailable.
+or become unavailable. A correction keeps its logical `work_id`, original
+`max_attempts`, and a monotonic attempt count; re-registration or a reissued
+handoff never resets the budget. Route each correction to the owner of the
+affected artifact rather than to a default application developer.
 
 ## Canonical policy sources
 
@@ -193,11 +199,13 @@ treats that state as an active production incident and routes the exact runtime
 owner to restore service or complete the verified handoff before starting a
 replacement candidate.
 
-Every change includes the public-wiki gate before immutable review. After
-merge, a registered publication handoff publishes the canonical
-`docs/wiki/*.md` files byte-identically and verifies the public pages.
-Orchestration is incomplete until relevant Markdown, reusable agents,
-PR/release evidence, wiki publication, and todos are updated and validated.
+Every change includes documentation-impact evidence before immutable review.
+Register the public-wiki editor only for plausible or ambiguous impact. After
+merge, a publication handoff publishes changed canonical `docs/wiki/*.md`
+files byte-identically and verifies the public pages. Orchestration is
+incomplete until applicable Markdown, reusable-agent guidance, PR/release
+evidence, publication, and todo reconciliation are complete; unaffected
+surfaces require only a justified no-change note.
 
 ## Three-model simplifier gate
 
@@ -240,6 +248,11 @@ Only `SIMPLIFICATION_READY` produces the single artifact handed to the
 developer. The three pass reports remain auditable evidence for final
 validation.
 
+An architecture or simplifier correction remains inside the same logical
+`work_id` and original correction budget. `SIMPLIFICATION_DISPUTED`,
+`SIMPLIFICATION_INCOMPLETE`, a reissued architecture, or a new synthesis never
+resets that budget.
+
 ## Ownership
 
 | Area | Editor |
@@ -247,7 +260,7 @@ validation.
 | `common/**` and backend service source/tests/manifests | `betstan-backend-developer` |
 | `client/src/**`, `client/public/**`, and client tests/config | `betstan-frontend-developer` |
 | `infra/**`, workflows, Dockerfiles, runtime proxy config | Existing deployment/runtime specialists |
-| `README.md`, `docs/wiki/**`, and public-documentation contract tests | `betstan-public-wiki-editor` |
+| Repository-root `README.md`, `docs/wiki/**`, and assigned public-documentation contract tests | `betstan-public-wiki-editor` |
 | `.github/agents/**`, skills, governance docs | Human/orchestrator acting as the developer-gate implementation owner; agents never edit their own definitions |
 
 Developers are file editors, not git actors. They never stage, commit, switch,
@@ -285,7 +298,7 @@ paths, credentials, private identifiers, or production records in a handoff.
 handoff_id: <slice>-<from-agent>-<utc>
 slice_id: <stable-kebab-id>
 from_agent: betstan-backend-developer
-to_agent: betstan-public-wiki-editor
+to_agent: betstan-validation-critic
 status: IMPLEMENTED_LOCAL
 blocked_reason: null
 
@@ -313,6 +326,11 @@ effects:
   message_changes: []
   feature_flags: []
 
+documentation:
+  public_impact: <plausible|ambiguous|none>
+  inspected_paths: []
+  justification: <exact-diff-rationale-or-null>
+
 validation:
   commands: []
   not_run: []
@@ -327,7 +345,7 @@ approvals: []
 orchestration:
   root_task_authority_id: <stable-root-authority-id>
   work_id: <stable-kebab-id>
-  logical_gate: <architect|simplifier|developer|public-wiki|critic|test|final-validator>
+  logical_gate: <architect|simplifier|developer|critic|test|final-validator|null>
   unit_class: <quality-gate|intra-gate|specialist|supporting>
   parent_work_id: <stable-kebab-id-or-null>
   owner: <single-owner>
@@ -364,9 +382,9 @@ Required invariants:
 - Every user-facing change has one exact-head `UX_REVIEW_PASSED` result whose
   consistency matrix names its stable references, required fixes, and accepted
   intentional exceptions.
-- Every change has `WIKI_UPDATE_READY` or a justified
-  `WIKI_NO_PUBLIC_CHANGE`; relevant canonical pages are included before the
-  critic reviews the immutable candidate.
+- Every change has exact-diff documentation-impact evidence. When the public
+  wiki editor is invoked, its applicable `WIKI_*` result and relevant canonical
+  pages are included before critic review.
 - `from_agent` never appears in `approvals`.
 - Feature flags remain dark until the approved activation gate.
 - Draft writes/deletes require owner, kind, status, and board-identity CAS;
