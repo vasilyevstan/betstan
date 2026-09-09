@@ -10,6 +10,7 @@ import {
   toPublicUser,
   usernamePattern,
 } from "../service/Identifier";
+import { authTelemetryReporter } from "../service/TelemetryReporter";
 
 const router = express.Router();
 
@@ -93,6 +94,7 @@ router.post(
     });
     await existingUser.save();
 
+    authTelemetryReporter.report("USER_LOGGED_IN");
     res.status(200).send(toPublicUser(existingUser));
   }
 );

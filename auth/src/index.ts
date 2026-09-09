@@ -1,8 +1,26 @@
 import mongoose from "mongoose";
 import { app } from "./app";
 import { User } from "./model/User";
+import { authTelemetryReporter } from "./service/TelemetryReporter";
+import { Server } from "http";
 
-const startUp = async () => {
+export const listenWithOptionalTelemetry = (
+  listen: (callback: () => void) => Server = (callback) =>
+    app.listen(3000, callback),
+  reporter: Pick<typeof authTelemetryReporter, "initialize"> =
+    authTelemetryReporter,
+  rabbitmqUri: string | undefined = process.env.RABBITMQ_URI
+): Server =>
+  listen(() => {
+    console.log("Listening on 3000");
+    void Promise.resolve()
+      .then(() => reporter.initialize(rabbitmqUri))
+      .catch(() => {
+        console.error("auth_telemetry_disabled");
+      });
+  });
+
+export const startUp = async () => {
   if (!process.env.JWT_KEY) {
     throw new Error("JWT_KEY must be defined");
   }
@@ -19,9 +37,7 @@ const startUp = async () => {
     throw new Error();
   }
 
-  const server = app.listen(3000, () => {
-    console.log("Listening on 3000");
-  });
+  const server = listenWithOptionalTelemetry();
 
   process.on("uncaughtException", async function (err) {
     console.log("logging general error", err);
@@ -62,4 +78,9 @@ const startUp = async () => {
   });
 };
 
-startUp();
+if (require.main === module) {
+  void startUp().catch(() => {
+    console.error("auth_startup_failed");
+    process.exit(1);
+  });
+}

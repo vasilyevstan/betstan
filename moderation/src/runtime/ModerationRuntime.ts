@@ -40,6 +40,10 @@ export interface ManagedWorker {
   stop(): Promise<void>;
 }
 
+export interface ManagedProbeListener {
+  close(): Promise<void>;
+}
+
 export interface ModerationRuntimeDependencies {
   env: NodeJS.ProcessEnv;
   process: ModerationRuntimeProcess;
@@ -52,12 +56,14 @@ export interface ModerationRuntimeDependencies {
   createReplayPublisher(): ManagedPublisher;
   createWorker(replayPublisher: ManagedPublisher): ManagedWorker;
   createListeners(): ManagedListener[];
+  startProbeListener?: () => Promise<ManagedProbeListener>;
 }
 
 class ModerationRuntime {
   private replayPublisher: ManagedPublisher | null = null;
   private worker: ManagedWorker | null = null;
   private listeners: ManagedListener[] = [];
+  private probeListener: ManagedProbeListener | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private hooksInstalled = false;
   private exitPromise: Promise<void> | null = null;
@@ -106,6 +112,10 @@ class ModerationRuntime {
       this.worker = this.dependencies.createWorker(this.replayPublisher);
       await this.worker.start();
 
+      if (this.dependencies.startProbeListener) {
+        this.probeListener = await this.dependencies.startProbeListener();
+      }
+
       for (const listener of this.listeners) {
         listener.listen();
       }
@@ -134,6 +144,11 @@ class ModerationRuntime {
 
   private async performShutdown(): Promise<void> {
     const errors: unknown[] = [];
+
+    if (this.probeListener) {
+      await this.captureError(errors, () => this.probeListener!.close());
+      this.probeListener = null;
+    }
 
     if (this.worker) {
       await this.captureError(errors, () => this.worker!.stop());
@@ -263,7 +278,8 @@ class ModerationRuntime {
 export const createDefaultModerationRuntime = (
   env: NodeJS.ProcessEnv = process.env,
   runtimeProcess: ModerationRuntimeProcess = process,
-  logger: ModerationRuntimeLogger = console
+  logger: ModerationRuntimeLogger = console,
+  startProbeListener?: () => Promise<ManagedProbeListener>
 ): ModerationRuntime => {
   const closeMessaging = async () => {
     const connection = Reflect.get(messengerWrapper, "_connection") as
@@ -313,6 +329,7 @@ export const createDefaultModerationRuntime = (
       new LiveEventUpdateListener(messengerWrapper.connection),
       new EventResultListener(messengerWrapper.connection),
     ],
+    startProbeListener,
   });
 };
 
