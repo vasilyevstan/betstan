@@ -13,10 +13,36 @@ STALE_DISABLED_MIN_AGE_SECONDS="${STALE_DISABLED_MIN_AGE_SECONDS:-600}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 PROSPECTIVE_PROMOTION_PR="${PROSPECTIVE_PROMOTION_PR:-}"
 COMPARE_JQ='{status,ahead_by,behind_by,total_commits,base_commit:{sha:.base_commit.sha},merge_base_commit:{sha:.merge_base_commit.sha},commits:[.commits[]|{sha:.sha}]}'
+# Frozen prepared disabled-workflow transition targets. Separate from both
+# UNMATERIALIZED_WORKFLOWS and the broader protected-operation policy
+# inventory; enforced identically (and independently) in
+# copilot_cli_authority_stan.py. Adding an entry here is a distinct,
+# separately reviewed safety-policy change. A plain case statement (rather
+# than an associative array) keeps this portable to bash 3.2.
+disabled_transition_path() {
+  case "$1" in
+    oci-live-data-rollout.yml)
+      printf '%s\n' ".github/workflows/oci-live-data-rollout.yml"
+      ;;
+    oci-live-betting-activate.yml)
+      printf '%s\n' ".github/workflows/oci-live-betting-activate.yml"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 OBSERVE_TRANSITION=false
+OBSERVE_TARGET_WORKFLOW=""
+OBSERVE_TARGET_PATH=""
 if [[ "$#" != 0 ]]; then
-  [[ "$#" = 1 && "$1" = "--observe-live-data-transition" ]] || {
-    echo "usage: $0 [--observe-live-data-transition]" >&2
+  [[ "$#" = 2 && "$1" = "--observe-disabled-transition" ]] || {
+    echo "usage: $0 [--observe-disabled-transition <workflow-basename>]" >&2
+    exit 1
+  }
+  OBSERVE_TARGET_WORKFLOW="$2"
+  OBSERVE_TARGET_PATH="$(disabled_transition_path "$OBSERVE_TARGET_WORKFLOW")" || {
+    echo "unsupported disabled-transition target: $OBSERVE_TARGET_WORKFLOW" >&2
     exit 1
   }
   [[ -z "$EXCLUDE_RUN_ID" && -z "$PROSPECTIVE_PROMOTION_PR" ]] || {
@@ -599,7 +625,7 @@ do
   printf '%s\n' '{}' >"$tmp_artifacts"
   printf '%s\n' '{}' >"$tmp_prospective_ancestry"
   observe_live_data=false
-  if [[ "$OBSERVE_TRANSITION" = true && "$path" = ".github/workflows/oci-live-data-rollout.yml" ]]; then
+  if [[ "$OBSERVE_TRANSITION" = true && "$path" = "$OBSERVE_TARGET_PATH" ]]; then
     observe_live_data=true
   fi
   if [[
@@ -942,7 +968,8 @@ if [[ "$OBSERVE_TRANSITION" = true ]]; then
     echo "master changed during transition observation" >&2
     exit 1
   }
-  python3 - "$tmp_observations" "$tmp_workflows" "$REPO" "$observation_master" <<'PY'
+  python3 - "$tmp_observations" "$tmp_workflows" "$REPO" "$observation_master" \
+    "$OBSERVE_TARGET_WORKFLOW" "$OBSERVE_TARGET_PATH" <<'PY'
 import hashlib
 import json
 import sys
@@ -950,10 +977,11 @@ rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 paths = sorted(line.strip() for line in open(sys.argv[2], encoding="utf-8"))
 inventory = {"paths": paths, "statuses": ["queued", "in_progress", "waiting", "requested", "pending"], "limitPerStatus": 100}
 print(json.dumps({
-    "schemaVersion": "betstan.live-data-transition-observation.v1",
+    "schemaVersion": "betstan.disabled-transition-observation.v2",
     "repository": sys.argv[3],
     "controlSha": sys.argv[4],
     "inventorySha256": hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    "target": {"workflow": sys.argv[5], "path": sys.argv[6]},
     "candidates": sorted((row["candidate"] for row in rows if "candidate" in row), key=lambda row: row["runId"]),
     "workflows": [row["workflow"] for row in rows if "workflow" in row],
     "blockers": [row["blocker"] for row in rows if "blocker" in row],

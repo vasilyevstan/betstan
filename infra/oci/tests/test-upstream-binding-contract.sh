@@ -584,8 +584,9 @@ ordered(prepared_fallthrough, '= dispatching ]] ||',
 checkpoint = text[text.index("prepared_checkpoint() {"):
                   text.index("summarize_prerequisite_failure() {")]
 ordered(checkpoint, 'revalidate_transition_target "$required_state"',
-        '"$RUN_EXCLUSIVITY_SCRIPT" --observe-live-data-transition',
+        '"$RUN_EXCLUSIVITY_SCRIPT" \\\n    --observe-disabled-transition "$workflow"',
         'revalidate_transition_target "$required_state"', '"$AUTHORITY_HELPER" "$command"')
+assert '--observe-live-data-transition' not in text, "retired observation flag has no alias"
 target = text[text.index("revalidate_transition_target() {"):text.index("prepared_checkpoint() {")]
 ordered(target, "rev-parse HEAD", "status --porcelain", "revalidate_control",
         'actions/workflows/$workflow',

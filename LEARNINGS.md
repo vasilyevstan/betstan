@@ -1254,10 +1254,15 @@ Durable rules:
   SHA, event, and rendered title.
 - A disabled-only unmaterialized classifier can otherwise deadlock a required
   enable-before-dispatch transition. Do not weaken the default active-run rule
-  or introduce run-ID exclusions. Seal the complete evidence-derived
-  live-data candidate set in a repository-global `prepared` intent while the
-  workflow is disabled, re-collect and compare it after external enablement
-  and immediately before dispatch, then atomically cross to `dispatching`.
+  or introduce run-ID exclusions. Seal the complete evidence-derived candidate
+  set for the request's own policy-resolved workflow in a repository-global
+  `prepared` intent while that workflow is disabled, re-collect and compare it
+  after external enablement and immediately before dispatch, then atomically
+  cross to `dispatching`. This frozen prepared-transition workflow set is
+  exactly the two policy-resolved disabled-workflow operations -- never the
+  broader unmaterialized-evidence or protected-operation-policy inventories,
+  and never capacity acquisition -- and the two targets can never cross-consume
+  each other's requests, observations, seals, or prepared context.
   `prepared` remains safely discardable only after the workflow is disabled;
   `dispatching` remains an ambiguous provider-call boundary and is never made
   reusable.

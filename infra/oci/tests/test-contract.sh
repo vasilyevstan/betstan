@@ -24,8 +24,9 @@ observer = (agents / "production-run-exclusivity-stan.sh").read_text()
 authority = (agents / "copilot_cli_authority_stan.py").read_text()
 for action in ("--prepare-disabled-ghosts", "--dispatch-prepared", "--discard-prepared"):
     assert action in dispatcher, f"missing explicit lifecycle action: {action}"
-assert '--observe-live-data-transition' in observer
-assert '"$#" = 1' in observer, "observation must not accept candidate arguments"
+assert '--observe-live-data-transition' not in observer, "retired flag must have no alias"
+assert '--observe-disabled-transition' in observer
+assert '"$#" = 2' in observer, "observation must accept exactly one bounded target argument"
 assert '[[ -z "$EXCLUDE_RUN_ID" && -z "$PROSPECTIVE_PROMOTION_PR" ]]' in observer
 assert '--require-disabled-workflow' in observer, "default disabled-only classifier is required"
 assert '--semantic-evidence' in observer, "observation must reuse shared semantic validation"
@@ -34,6 +35,36 @@ assert "exit 0" in observation_tail
 assert "production_run_exclusivity=PASS" not in observation_tail.split("exit 0", 1)[0], (
     "observation is not exclusivity or approval authority"
 )
+assert '"target":' in observation_tail, "observation must name its frozen target"
+
+# The frozen prepared-transition map is exactly two entries -- the two
+# policy-resolved disabled-workflow targets -- and is distinct from both
+# UNMATERIALIZED_WORKFLOWS (which also allow-lists capacity supersession
+# evidence) and the broader protected-operation policy inventory.
+frozen_map_pattern = re.compile(
+    r"PREPARED_TRANSITION_WORKFLOWS\s*=\s*\{([^}]*)\}", re.DOTALL
+)
+frozen_match = frozen_map_pattern.search(authority)
+assert frozen_match, "frozen prepared-transition map is missing"
+frozen_body = frozen_match.group(1)
+assert frozen_body.count(".github/workflows/oci-live-data-rollout.yml") == 1
+assert frozen_body.count(".github/workflows/oci-live-betting-activate.yml") == 1
+assert "oci-capacity-acquire.yml" not in frozen_body, (
+    "frozen prepared-transition map must not admit the capacity supersession workflow"
+)
+for script_name, script in (("dispatcher", dispatcher), ("observer", observer)):
+    assert script.count("oci-live-data-rollout.yml") >= 1
+    assert script.count("oci-live-betting-activate.yml") >= 1
+assert "oci-capacity-acquire.yml" in observer, (
+    "observer must still classify capacity supersession as a distinct, non-target workflow"
+)
+assert "oci-capacity-acquire.yml" not in dispatcher, (
+    "dispatcher admission must stay policy-resolved, not name capacity explicitly"
+)
+assert "betstan.disabled-transition-observation.v2" in observer
+assert "betstan.disabled-transition-observation.v2" in authority
+assert "betstan.live-data-transition-observation.v1" not in observer
+assert "betstan.live-data-transition-observation.v1" not in authority
 
 provider_calls = list(re.finditer(r"(?m)^gh workflow run\b", dispatcher))
 assert len(provider_calls) == 1, "retain one captured provider dispatch boundary"
