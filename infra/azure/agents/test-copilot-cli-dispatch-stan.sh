@@ -2453,6 +2453,109 @@ except SystemExit as error:
     assert "target" in str(error)
 
 print("frozen_transition_cross_target_reverse_rejection_tests=PASS", flush=True)
+
+# Exercise the actual POST-A/POST-B authority commands with a valid
+# preparation from the other frozen target. Copying that self-bound authority
+# under the destination lookup key makes the command inspect and reject the
+# foreign identity instead of passing only because no destination file exists.
+def assert_cross_target_checkpoint_rejection(source_key, destination_key, source_run, destination_run):
+    case_dir = temporary / f"frozen-command-{source_key}-to-{destination_key}"
+    source_context = build_context(source_key, source_run)
+    destination_context = build_context(destination_key, destination_run)
+    source_options = write_options(source_context, case_dir / "source")
+    destination_options = write_options(destination_context, case_dir / "destination")
+
+    invoke("prepare-disabled-ghosts", {**source_options, "owner_pid": 4242})
+    write(
+        Path(source_options["observation_json"]),
+        source_context["observation_for"]("active"),
+    )
+    source_snapshot = json.loads(invoke("verify-prepared", source_options))["snapshot"]
+
+    authority_dir = source_options["authority_dir"]
+    source_intent_path = next(authority_dir.glob("request-*.json"))
+    source_intent_before = source_intent_path.read_bytes()
+    source_intent = json.loads(source_intent_before)
+    capture_path = authority_dir / source_intent["captureFile"]
+    capture_before = capture_path.read_bytes()
+    capture_stat_before = (
+        capture_path.stat().st_dev,
+        capture_path.stat().st_ino,
+        capture_path.stat().st_size,
+        capture_path.stat().st_mtime_ns,
+        capture_path.stat().st_ctime_ns,
+    )
+    assert source_intent["state"] == "prepared"
+    assert capture_before == b""
+
+    write(
+        Path(destination_options["observation_json"]),
+        destination_context["observation_for"]("active"),
+    )
+    destination_options = {
+        **destination_options,
+        "authority_dir": authority_dir,
+    }
+    destination_key_hash = a.request_key(destination_context["normalized"])
+    foreign_intent_path = a.intent_path(authority_dir, destination_key_hash)
+    assert foreign_intent_path != source_intent_path
+    foreign_intent_path.write_bytes(source_intent_before)
+    foreign_intent_path.chmod(0o600)
+    foreign_intent_before = foreign_intent_path.read_bytes()
+
+    verify_error = invoke("verify-prepared", destination_options, ok=False)
+    assert verify_error == "dispatch intent request key mismatch", verify_error
+    dispatch_error = invoke(
+        "dispatch-prepared",
+        {
+            **destination_options,
+            "expected_snapshot": source_snapshot,
+            "owner_pid": 4242,
+        },
+        ok=False,
+    )
+    assert dispatch_error == "dispatch intent request key mismatch", dispatch_error
+
+    assert source_intent_path.read_bytes() == source_intent_before
+    assert foreign_intent_path.read_bytes() == foreign_intent_before
+    assert json.loads(source_intent_path.read_text())["state"] == "prepared"
+    capture_files = list(authority_dir.glob("dispatch-*.log"))
+    assert capture_files == [capture_path], capture_files
+    assert capture_path.read_bytes() == capture_before == b""
+    assert (
+        capture_path.stat().st_dev,
+        capture_path.stat().st_ino,
+        capture_path.stat().st_size,
+        capture_path.stat().st_mtime_ns,
+        capture_path.stat().st_ctime_ns,
+    ) == capture_stat_before
+
+    foreign_intent_path.unlink()
+    cleanup_options = {
+        "request": source_options["request"],
+        "repository": repository,
+        "workflow_id": source_options["workflow_id"],
+        "workflow_path": source_context["path"],
+        "authority_dir": authority_dir,
+        "repo_root": root,
+    }
+    cleanup_snapshot = invoke("prepared-context", cleanup_options)
+    invoke(
+        "discard-prepared",
+        {**cleanup_options, "expected_snapshot": cleanup_snapshot},
+    )
+    assert not list(authority_dir.glob("request-*.json"))
+    assert not list(authority_dir.glob("dispatch-*.log"))
+    print(
+        f"frozen_transition_{source_key}_to_{destination_key}_"
+        "checkpoint_rejection_tests=PASS",
+        flush=True,
+    )
+
+
+assert_cross_target_checkpoint_rejection("activate", "data", 900401, 900402)
+assert_cross_target_checkpoint_rejection("data", "activate", 900403, 900404)
+print("frozen_transition_cross_target_checkpoint_rejection_tests=PASS", flush=True)
 PY
 
 # ============================================================================
