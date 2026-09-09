@@ -10,6 +10,78 @@ fail() {
   exit 1
 }
 
+check_prepared_transition_contract() {
+  python3 - "$ROOT_DIR" <<'PY'
+import ast
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+agents = root / "infra/azure/agents"
+dispatcher = (agents / "copilot-cli-dispatch-stan.sh").read_text()
+observer = (agents / "production-run-exclusivity-stan.sh").read_text()
+authority = (agents / "copilot_cli_authority_stan.py").read_text()
+for action in ("--prepare-disabled-ghosts", "--dispatch-prepared", "--discard-prepared"):
+    assert action in dispatcher, f"missing explicit lifecycle action: {action}"
+assert '--observe-live-data-transition' in observer
+assert '"$#" = 1' in observer, "observation must not accept candidate arguments"
+assert '[[ -z "$EXCLUDE_RUN_ID" && -z "$PROSPECTIVE_PROMOTION_PR" ]]' in observer
+assert '--require-disabled-workflow' in observer, "default disabled-only classifier is required"
+assert '--semantic-evidence' in observer, "observation must reuse shared semantic validation"
+observation_tail = observer[observer.rindex('if [[ "$OBSERVE_TRANSITION" = true ]]'):]
+assert "exit 0" in observation_tail
+assert "production_run_exclusivity=PASS" not in observation_tail.split("exit 0", 1)[0], (
+    "observation is not exclusivity or approval authority"
+)
+
+provider_calls = list(re.finditer(r"(?m)^gh workflow run\b", dispatcher))
+assert len(provider_calls) == 1, "retain one captured provider dispatch boundary"
+provider = provider_calls[0].start()
+pre = dispatcher.index("prepared_checkpoint verify-prepared active")
+post = dispatcher.index("prepared_checkpoint dispatch-prepared active")
+assert pre < dispatcher.index("validate_protected_prerequisites", pre) < post < provider
+assert '>"$capture_path"' in dispatcher[provider:], "provider output must remain durably captured"
+transition = dispatcher.split("prepared_checkpoint() {", 1)[1].split("summarize_prerequisite_failure()", 1)[0]
+for shortcut in ("EXCLUDE_RUN_ID", "/cancel", "/rerun", "/approvals", "workflow enable", "workflow disable"):
+    assert shortcut not in transition, f"prohibited transition shortcut: {shortcut}"
+
+tree = ast.parse(authority)
+functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+def calls(node, name):
+    return [item for item in ast.walk(node) if isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Name) and item.func.id == name]
+entry = functions["command_dispatch_prepared"]
+delegations = calls(entry, "verify_prepared_checkpoint")
+assert len(delegations) == 1 and any(
+    key.arg == "dispatch" and isinstance(key.value, ast.Constant) and key.value.value is True
+    for key in delegations[0].keywords
+), "dispatch must use the cohesive POST verifier"
+verifier = functions["verify_prepared_checkpoint"]
+locks = [node for node in ast.walk(verifier) if isinstance(node, ast.With)
+         and any(calls(item.context_expr, "repository_claim_lock") for item in node.items)]
+assert len(locks) == 1
+cas = next(node for node in ast.walk(locks[0]) if isinstance(node, ast.If)
+           and isinstance(node.test, ast.Name) and node.test.id == "dispatch")
+assert calls(cas, "atomic_replace"), "prepared dispatch must CAS under the repository claim lock"
+assert calls(cas, "require_prepared_lifetime"), "expiry must be fresh at CAS, after slow scans"
+cas_source = ast.get_source_segment(authority, cas)
+assert "expected_snapshot" in cas_source and '"dispatching"' in cas_source
+assert "betstan.copilot-cli-dispatch-intent.v1" in authority
+assert "betstan.copilot-cli-dispatch-intent.v2" in authority
+print("prepared_transition_contract=PASS")
+PY
+}
+
+# A bounded source-contract check; no runtime/provider access or full OCI suite.
+if [[ "$#" != 0 ]]; then
+  [[ "$#" = 1 && "$1" = "--prepared-transition-only" ]] ||
+    fail "usage: $0 [--prepared-transition-only]"
+  check_prepared_transition_contract
+  exit 0
+fi
+check_prepared_transition_contract
+
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/provenance"
 cleanup() {
@@ -2192,7 +2264,7 @@ for reschedule_contract in \
     'export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
     'export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
     'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
-    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-09T08:05:00.000Z";' \
+    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-10T08:05:00.000Z";' \
     'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
     'ROLLBACK_EVENT_RESCHEDULE:${RESCHEDULE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \

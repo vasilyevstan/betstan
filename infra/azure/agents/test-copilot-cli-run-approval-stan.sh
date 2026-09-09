@@ -289,9 +289,39 @@ gh() {
     return
   fi
 
+  if [[ -n "${STUB_GHOST_DIR:-}" ]]; then
+    local ghost_fixture="$STUB_GHOST_DIR/ghost.json"
+    case "$endpoint" in
+      "repos/$REPOSITORY/actions/workflows/313")
+        jq -c --arg state "${STUB_WORKFLOW_STATE:-disabled_manually}" \
+          '.workflow + {state:$state}' "$ghost_fixture"
+        return ;;
+      "repos/$REPOSITORY/actions/workflows/313/runs?"*)
+        printf '{"total_count":0,"workflow_runs":[]}\n'
+        return ;;
+      "repos/$REPOSITORY/actions/runs/$STUB_GHOST_ID")
+        jq -c '.run' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/actions/runs/$STUB_GHOST_ID/jobs?per_page=1")
+        jq -c '.jobs' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/actions/runs/$STUB_GHOST_ID/pending_deployments")
+        jq -c '.pending' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/actions/runs/$STUB_GHOST_ID/approvals")
+        jq -c '.approvals' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/actions/runs/$STUB_GHOST_ID/artifacts?per_page=1")
+        jq -c '.artifacts' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/compare/$STUB_GHOST_SHA...$SHA")
+        jq -c '.compare' "$ghost_fixture"; return ;;
+      "repos/$REPOSITORY/contents/.github/workflows/oci-live-data-rollout.yml?ref=$STUB_GHOST_SHA")
+        jq -c '.historical_workflow' "$ghost_fixture"; return ;;
+    esac
+  fi
   case "$endpoint" in
     "repos/$REPOSITORY/git/ref/heads/master")
-      printf '%s\n' "${STUB_MASTER_SHA:-$SHA}"
+      if [[ -n "${STUB_GHOST_DIR:-}" && " $* " != *" --jq "* ]]; then
+        printf '{"object":{"sha":"%s"}}\n' "${STUB_MASTER_SHA:-$SHA}"
+      else
+        printf '%s\n' "${STUB_MASTER_SHA:-$SHA}"
+      fi
       ;;
     "repos/$REPOSITORY/commits/$SHA/pulls")
       if [[
@@ -475,6 +505,10 @@ PY
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
+      if [[ -n "${STUB_GHOST_DIR:-}" && "$endpoint" == *"status=queued&"* ]]; then
+        jq -c '{total_count:1,workflow_runs:[.run]}' "$STUB_GHOST_DIR/ghost.json"
+        return
+      fi
       if [[
         "${STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT:-false}" = "true" &&
           "$(authority_is_inflight && printf true || printf false)" = "true"
@@ -1464,4 +1498,148 @@ grep -qF "held by a live process" "$error_file"
   --run-id "$stale_lock_run_id" \
   --token "$fresh_lock_token"
 
+# Explicit v2 consumer evidence, isolated from the preceding ordinary v1 matrix.
+load_record_stub oci-live-data-dry-run
+STUB_RUN_ID=$((STUB_RUN_ID + 500000))
+STUB_GHOST_ID=$((STUB_RUN_ID - 1))
+STUB_GHOST_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+STUB_GHOST_DIR="$tmp_dir/prepared-consumer"
+authority_dir="$STUB_GHOST_DIR/authority"
+mkdir -m 700 "$STUB_GHOST_DIR"
+export STUB_RUN_ID STUB_GHOST_ID STUB_GHOST_SHA STUB_GHOST_DIR authority_dir
+prepared_request="$STUB_GHOST_DIR/request.json"
+prepared_normalized="$STUB_GHOST_DIR/normalized.json"
+prepared_inputs="$STUB_GHOST_DIR/inputs.json"
+prepared_observation="$STUB_GHOST_DIR/observation.json"
+prepared_policy="$("$POLICY" get "$STUB_OPERATION")"
+make_request "$STUB_OPERATION" "$prepared_request"
+PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT_DIR" "$STUB_GHOST_DIR" "$REPOSITORY" \
+  "$SHA" "$STUB_GHOST_SHA" "$STUB_GHOST_ID" <<'PY'
+import base64
+import hashlib
+import json
+from pathlib import Path
+import sys
+root, directory, repository, master, old, run_id = sys.argv[1:]
+path = ".github/workflows/oci-live-data-rollout.yml"
+source = (Path(root) / path).read_bytes()
+blob = hashlib.sha1(f"blob {len(source)}\0".encode() + source).hexdigest()
+run_id = int(run_id)
+evidence = {
+    "run": {
+        "id": run_id, "workflow_id": 313, "path": path, "head_sha": old,
+        "head_branch": "master", "head_repository": {"id": 101, "full_name": repository},
+        "repository": {"id": 101, "full_name": repository},
+        "event": "workflow_dispatch", "run_attempt": 1, "status": "queued", "conclusion": None,
+        "display_title": "oci-live-data-rollout", "created_at": "2000-01-01T00:00:00Z",
+        "updated_at": "2000-01-01T00:00:00Z", "run_started_at": "2000-01-01T00:00:00Z",
+        "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+        "url": f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
+    },
+    "workflow": {"id": 313, "path": path, "state": "disabled_manually"},
+    "jobs": {"total_count": 0, "jobs": []}, "pending": [], "approvals": [],
+    "artifacts": {"total_count": 0, "artifacts": []},
+    "compare": {
+        "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+        "base_commit": {"sha": old}, "merge_base_commit": {"sha": old}, "commits": [{"sha": master}],
+    },
+    "historical_workflow": {
+        "path": path, "type": "file", "encoding": "base64", "sha": blob,
+        "size": len(source), "content": base64.b64encode(source).decode(),
+    },
+}
+output = Path(directory) / "ghost.json"
+output.write_text(json.dumps(evidence))
+output.chmod(0o600)
+PY
+"$HELPER" validate-request \
+  --request "$prepared_request" --policy-json "$prepared_policy" \
+  --repository "$REPOSITORY" --current-master "$SHA" \
+  --repo-root "$ROOT_DIR" --output "$prepared_normalized"
+"$HELPER" write-inputs --normalized "$prepared_normalized" \
+  --repo-root "$ROOT_DIR" --output "$prepared_inputs"
+exclusivity="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
+collect_consumer_observation() {
+  REPO="$REPOSITORY" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+    "$exclusivity" --observe-live-data-transition >"$prepared_observation"
+  chmod 600 "$prepared_observation"
+}
+prepared_args=(
+  --request "$prepared_request" --normalized "$prepared_normalized"
+  --inputs-file "$prepared_inputs" --policy-json "$prepared_policy"
+  --repository "$REPOSITORY" --current-master "$SHA" --workflow-id 313
+  --workflow-blob-sha "$BLOB" --observation-json "$prepared_observation"
+  --authority-dir "$authority_dir" --repo-root "$ROOT_DIR"
+)
+collect_consumer_observation
+"$HELPER" prepare-disabled-ghosts "${prepared_args[@]}" --owner-pid "$$" >"$output_file"
+post_count_before="$(cat "$post_count_file")"
+if COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "prepared-only v2 intent unexpectedly approved" >&2
+  exit 1
+fi
+grep -qF 'authority record does not exist' "$error_file"
+[[ ! -e "$authority_dir/$STUB_RUN_ID.json" ]]
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+
+export STUB_WORKFLOW_STATE=active
+collect_consumer_observation
+if REPO="$REPOSITORY" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+  "$exclusivity" >"$output_file" 2>"$error_file"; then
+  echo "successful observation incorrectly granted ordinary exclusivity" >&2
+  exit 1
+fi
+grep -qF 'active production run' "$error_file"
+if COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "observation unexpectedly became approval authority" >&2
+  exit 1
+fi
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+post_a="$("$HELPER" verify-prepared "${prepared_args[@]}")"
+collect_consumer_observation
+dispatch_claim="$("$HELPER" dispatch-prepared "${prepared_args[@]}" \
+  --expected-snapshot "$(jq -r '.snapshot' <<<"$post_a")" --owner-pid "$$")"
+capture_path="$(jq -r '.capturePath' <<<"$dispatch_claim")"
+capture_file="${capture_path##*/}"
+transport_args=(
+  --normalized "$prepared_normalized" --policy-json "$prepared_policy"
+  --repository "$REPOSITORY" --current-master "$SHA" --workflow-id 313
+  --workflow-blob-sha "$BLOB" --authority-dir "$authority_dir" --repo-root "$ROOT_DIR"
+)
+printf 'https://github.com/%s/actions/runs/%s\n' "$REPOSITORY" "$STUB_RUN_ID" >"$capture_path"
+"$HELPER" record-dispatch-status "${transport_args[@]}" \
+  --expected-version "$(jq -r '.version' <<<"$dispatch_claim")" \
+  --expected-capture-file "$capture_file" --dispatch-status 0 >"$output_file"
+"$HELPER" bind-intent "${transport_args[@]}" --expected-capture-file "$capture_file" >"$output_file"
+consumer_run="$STUB_GHOST_DIR/current-run.json"
+gh api "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID" >"$consumer_run"
+chmod 600 "$consumer_run"
+"$HELPER" issue --authority-dir "$authority_dir" --repo-root "$ROOT_DIR" \
+  --run-id "$STUB_RUN_ID" --run-json "$consumer_run" --policy-json "$prepared_policy" \
+  --repository "$REPOSITORY" --current-master "$SHA" --workflow-id 313 --workflow-blob-sha "$BLOB"
+if COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "v2-issued run approved before required workflow disablement" >&2
+  exit 1
+fi
+grep -qF 'required approval state' "$error_file"
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+export STUB_WORKFLOW_STATE=disabled_manually
+COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve >"$output_file"
+grep -qF 'status=APPROVED' "$output_file"
+[[ "$(cat "$post_count_file")" = "$((post_count_before + 1))" ]]
+jq -e '.state == "consumed" and (.approvals | length) == 1' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+if COPILOT_CLI_AUTO_APPROVE=true run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "consumed v2 authority approved twice" >&2
+  exit 1
+fi
+[[ "$(cat "$post_count_file")" = "$((post_count_before + 1))" ]]
+collect_consumer_observation
+if "$HELPER" prepare-disabled-ghosts "${prepared_args[@]}" --owner-pid "$$" >"$output_file" 2>"$error_file"; then
+  echo "consumed v2 authority admitted a same-request replacement" >&2
+  exit 1
+fi
+jq -e --argjson run_id "$STUB_RUN_ID" \
+  '.schemaVersion == "betstan.copilot-cli-dispatch-intent.v2" and .state == "bound" and .runId == $run_id' \
+  "$authority_dir"/request-*.json >/dev/null
+echo "prepared_v2_approval_consumer_tests=PASS"
 echo "copilot_cli_run_approval_tests=PASS"

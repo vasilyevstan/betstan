@@ -493,10 +493,23 @@ hash_b="$(emit_hash 5555)" || fail "normalization failed for capacity run 5555"
 ok "capacity run ID is covered by the dispatch input hash"
 
 # ----------------------------- validation precedes authority and cloud use ---
-python3 - "$DISPATCHER" <<'PY' || fail "prerequisites are not proven before authority"
+# Reuse the canonical lifecycle/locked-CAS assertions; below, bind their
+# ordering to the ordinary upstream checks and the one shared provider call.
+"$ROOT_DIR/infra/oci/tests/test-contract.sh" --prepared-transition-only ||
+  fail "prepared transition contract failed"
+python3 - "$DISPATCHER" "$AUTHORITY_HELPER" <<'PY' || fail "prerequisites are not proven before authority"
+import ast
+import re
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
+authority = open(sys.argv[2], encoding="utf-8").read()
+
+def ordered(source, *needles):
+    cursor = 0
+    for needle in needles:
+        cursor = source.index(needle, cursor) + len(needle)
+
 definition = text.index("validate_protected_prerequisites() {")
 materialization = text.index("materialize_record() {")
 resume_validation = text.index("resume_with_prerequisite_validation() {")
@@ -529,32 +542,122 @@ for required in (
 ):
     if required not in retirement:
         raise SystemExit(f"resume rejection omits safe terminalization: {required}")
-guard = text.index('[[ "$ACTION" = "--dispatch" ]] || exit 0')
-ready = text.index("dispatch=READY operation=")
-call = text.rindex("\nvalidate_protected_prerequisites\n")
-if not call < ready < guard < text.index("blocking-record", guard):
-    raise SystemExit("fresh dispatch must prove prerequisites before READY and blocking")
+ready = text.rfind("\n", 0, text.index("dispatch=READY operation=")) + 1
+# Parse the two-action allowlist, not a spelling/order of the old single-action
+# guard. A third action, wildcard, or arbitrary nonempty ACTION is not allowed.
+guards = list(re.finditer(
+    r'(?m)^\[\[\s+"\$ACTION"\s*=\s*"([^"]+)"\s*\|\|\s*'
+    r'"\$ACTION"\s*=\s*"([^"]+)"\s*\]\]\s*\|\|\s*exit 0$',
+    text[ready:],
+))
+assert len(guards) == 1 and set(guards[0].groups()) == {"--dispatch", "--dispatch-prepared"}
+guard = ready + guards[0].start()
+selection = text[text.index('if [[ "$ACTION" = "--dispatch-prepared" ]]; then'):ready]
+prepared = selection[:selection.index('\nelif [[ "$ACTION" = "--prepare-disabled-ghosts" ]]; then')]
+ordinary = selection[selection.rindex("\nelse\n") + len("\nelse\n"):]
+assert [line.strip() for line in ordinary.splitlines() if line.strip()] == [
+    "validate_protected_prerequisites", "fi",
+], "ordinary validation must remain unconditional before READY"
+ordered(prepared, 'post_a="$(prepared_checkpoint verify-prepared active)"',
+        "validate_protected_prerequisites", "revalidate_transition_target active",
+        'intent_summary="$(', "prepared_checkpoint dispatch-prepared active",
+        '--expected-snapshot "$(jq -r \'.snapshot\' <<<"$post_a")"')
+ordinary_start = text.index('if [[ "$ACTION" = "--dispatch" ]]; then', guard)
 claim = text.index('"$AUTHORITY_HELPER" claim-request', guard)
 post_claim = text.index("dispatch_revalidation_error=", claim)
 dispatch = text.index("gh workflow run", post_claim)
-if "validate_protected_prerequisites" not in text[post_claim:dispatch]:
-    raise SystemExit("fresh dispatch does not revalidate prerequisites after its claim")
+assert ready < guard < ordinary_start < claim < post_claim < dispatch
+ordered(text[ordinary_start:claim], "blocking-record",
+        "revalidate_dispatch_target", "validate_production_exclusivity",
+        "revalidate_dispatch_target")
 post_claim_body = text[post_claim:dispatch]
-if post_claim_body.rfind("revalidate_dispatch_target") < post_claim_body.index(
-    "validate_protected_prerequisites"
-):
-    raise SystemExit("fresh dispatch does not revalidate mutable master after prerequisites")
-if post_claim_body.rfind("validate_production_exclusivity") < post_claim_body.index(
-    "validate_protected_prerequisites"
-):
-    raise SystemExit("fresh dispatch does not revalidate production exclusivity after prerequisites")
+ordered(post_claim_body, "revalidate_dispatch_target",
+        "validate_protected_prerequisites", "revalidate_dispatch_target",
+        "validate_production_exclusivity", "revalidate_dispatch_target")
+prepared_fallthrough = text[text.rindex("\nelse\n", post_claim, dispatch):dispatch]
+ordered(prepared_fallthrough, '= dispatching ]] ||',
+        'fail "prepared CAS did not claim dispatch authority"',
+        'capture_path="$(jq -r \'.capturePath\' <<<"$intent_summary")"', "set +e")
+
+# Both POST checkpoints freshly collect evidence between exact active-target
+# checks; only then may the same verifier inspect the sealed authority.
+checkpoint = text[text.index("prepared_checkpoint() {"):
+                  text.index("summarize_prerequisite_failure() {")]
+ordered(checkpoint, 'revalidate_transition_target "$required_state"',
+        '"$RUN_EXCLUSIVITY_SCRIPT" --observe-live-data-transition',
+        'revalidate_transition_target "$required_state"', '"$AUTHORITY_HELPER" "$command"')
+target = text[text.index("revalidate_transition_target() {"):text.index("prepared_checkpoint() {")]
+ordered(target, "rev-parse HEAD", "status --porcelain", "revalidate_control",
+        'actions/workflows/$workflow',
+        '[[ "$observed_workflow" = "$(printf',
+        '"$workflow_id" ".github/workflows/$workflow" "$required_state")" ]] ||')
+
+# The shared contract proves lock containment and cohesive verifier delegation.
+# Add ordering, rather than a second policy: slow repository scans and the
+# snapshot rejection must precede the final lifetime check and state write.
+functions = {node.name: node for node in ast.parse(authority).body
+             if isinstance(node, ast.FunctionDef)}
+verifier = functions["verify_prepared_checkpoint"]
+def call(node, name):
+    matches = [item for item in ast.walk(node) if isinstance(item, ast.Call)
+               and isinstance(item.func, ast.Name) and item.func.id == name]
+    assert len(matches) == 1, f"expected one {name} call in bounded scope"
+    return matches[0]
+cas = next(node for node in ast.walk(verifier) if isinstance(node, ast.If)
+           and isinstance(node.test, ast.Name) and node.test.id == "dispatch")
+def rejection(left):
+    node = next(node for node in ast.walk(verifier) if isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == left)
+    assert len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.NotEq)
+    call(node, "fail")
+    return node
+blockers = rejection("blockers")
+snapshot = rejection("snapshot")
+assert ast.dump(blockers.test.comparators[0]) == ast.dump(ast.parse(
+    '[(f"intent:{key}", "prepared")]', mode="eval").body)
+assert ast.dump(snapshot.test.comparators[0]) == ast.dump(ast.parse(
+    "args.expected_snapshot", mode="eval").body)
+lock = next(node for node in ast.walk(verifier) if isinstance(node, ast.With)
+            and any(isinstance(item.context_expr, ast.Call)
+                    and isinstance(item.context_expr.func, ast.Name)
+                    and item.context_expr.func.id == "repository_claim_lock"
+                    for item in node.items))
+locked = {node for statement in lock.body for node in ast.walk(statement)}
+assert {cas, blockers, snapshot, call(verifier, "find_blocking_authorities"),
+        call(verifier, "prepared_snapshot")} <= locked, (
+    "repository scan, snapshot checks and CAS must share the claim lock"
+)
+state_write = next(node for node in cas.body if isinstance(node, ast.Assign)
+                   and ast.dump(node.targets[0]) == ast.dump(ast.parse(
+                       'intent["state"] = "dispatching"').body[0].targets[0]))
+assert isinstance(state_write.value, ast.Constant) and state_write.value.value == "dispatching"
+assert (call(verifier, "find_blocking_authorities").lineno < blockers.lineno
+        < call(verifier, "prepared_snapshot").lineno < snapshot.lineno
+        < call(cas, "require_prepared_lifetime").lineno < state_write.lineno
+        < call(cas, "atomic_replace").lineno)
 if ".dispatchInputs" not in text:
     raise SystemExit("dispatcher must read the hashed dispatchInputs map")
 if "OCI_RUNTIME_MODE" not in text:
     raise SystemExit("dispatcher must prove the authoritative runtime mode")
 print("ordering ok")
 PY
-ok "fresh dispatch and bound resume paths prove prerequisites before issuance"
+ok "ordinary/prepared dispatch and bound resume preserve prerequisite and CAS ordering"
+
+expect_dispatch_usage() {
+  if PATH="$WORK/bin:$PATH" COPILOT_CLI_AUTHORITY_DIR="$WORK/rejected-authority" \
+    "$DISPATCHER" "$WORK/request.json" "$@" >"$WORK/action-error" 2>&1; then
+    fail "invalid dispatcher actions were accepted: $*"
+  fi
+  grep -q '^usage:' "$WORK/action-error" ||
+    fail "invalid dispatcher actions reached validation instead of usage: $*"
+}
+expect_dispatch_usage --unknown-action
+expect_dispatch_usage --dispatch --dispatch-prepared
+expect_dispatch_usage --dispatch-prepared --dispatch
+expect_dispatch_usage --resume-captured --dispatch
+expect_dispatch_usage --resume-run 0
+ok "unknown, conflicting and malformed normal actions are rejected"
 
 python3 - "$WORKFLOW" "$ROOT_DIR/infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh" \
   <<'PY' || fail "workflow validates bindings after cloud access"
