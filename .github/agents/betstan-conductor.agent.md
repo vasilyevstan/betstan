@@ -23,8 +23,8 @@ Read:
 - current git branch/status and exact base/head SHA;
 - every active-work registration supplied by the orchestrator;
 - the relevant specialist definition before interpreting its status;
-- `.github/agents/betstan-public-wiki-editor.agent.md` for every repository
-  change;
+- `.github/agents/betstan-public-wiki-editor.agent.md` when documentation
+  impact is plausible or ambiguous;
 - `.github/agents/betstan-deployment-safety.agent.md` for any release-capable
   workflow or production operation.
 
@@ -41,7 +41,7 @@ regardless of synchronous/background execution or expected duration:
 work_id: <stable-kebab-id>
 kind: agent|local-process|github-run|external-wait|documentation
 unit_class: quality-gate|intra-gate|specialist|supporting
-logical_gate: <architect|simplifier|developer|public-wiki|critic|test|final-validator-or-null>
+logical_gate: <architect|simplifier|developer|critic|test|final-validator-or-null>
 parent_work_id: <stable-kebab-id-or-null>
 owner: <single-agent-or-orchestrator>
 objective: <bounded-result>
@@ -231,11 +231,12 @@ accepted by the next owner.
   universal handoffs. Route the developer gate to the registered owner with
   edit authority for the affected paths; do not require an application
   developer to cross its ownership boundary for infrastructure or governance.
-- Register `betstan-public-wiki-editor` after implementation for every change.
-  Relevant canonical pages must be updated before the critic receives the
-  immutable candidate; a no-change result must be justified from the exact
-  diff. Register byte-identical GitHub wiki publication as a post-merge
-  supporting unit.
+- Require documentation-impact evidence after implementation. Register
+  `betstan-public-wiki-editor` as a supporting unit only when impact is
+  plausible or ambiguous; otherwise require exact-diff paths and a justified
+  no-public-change conclusion. Relevant canonical pages must be updated before
+  critic review, and changed pages receive a post-merge byte-identical
+  publication unit.
 - Register `betstan-ux-ui-expert` as one two-phase specialist work unit for
   every user-facing visual or interaction change. Its first phase establishes
   the named consistency baseline before implementation; its second phase
@@ -247,6 +248,9 @@ accepted by the next owner.
   requires bounded distinct-family substitution and never counts as a completed
   family. Require three eligible distinct-family reports and the single
   synthesized artifact before handing work to development.
+- Keep architect and simplifier corrections inside their original logical
+  `work_id`, `max_attempts`, and monotonic attempt sequence. A reissued
+  architecture, replacement pass, or new synthesis cannot reset the budget.
 - A high/xhigh model request may receive a realistic longer first-response
   deadline, but it still requires a bounded checkpoint. Provider activity,
   reasoning time, or tool growth cannot extend the deadline without a new
@@ -378,6 +382,18 @@ its owner. It is never healthy by default.
 
 - Maintain the registry across turns until every work unit is terminal or has
   an accepted handoff.
+- For a product-scoped root request, three consecutive completed discretionary
+  units trigger `ATTENTION_REQUIRED` when no product-code developer gate has
+  completed. Count governance, CI, or test-infrastructure work and repeated
+  architect/simplifier cycles beyond the first mandatory pass; intra-gate
+  simplifier passes count once. Route a scope reset through the existing
+  architect work unit and do not register another discretionary hardening unit
+  until every prerequisite is tied to a current failure path. Mandatory
+  triggered specialists and safety gates are always registered, and
+  governance-only root tasks do not count.
+- Before adding a durable governance clause, find the existing rule for the
+  same failure mode and extend or replace it instead of creating a parallel
+  rule.
 - Follow the dependency graph. Do not start downstream review, mutation, or
   promotion while its evidence-producing dependency is incomplete.
 - Monitor event-first: completion notifications, job transitions, delivered
@@ -559,11 +575,12 @@ its owner. It is never healthy by default.
   health recovery precedes candidate replacement or repository-bound repair.
 - When a unit completes, validate that its output satisfies its stop condition,
   record the handoff, unblock dependants, and identify the next owner.
-- For every change, require the public-wiki gate and a terminal publication
-  unit. Successful deployment or activation alone cannot produce
-  `ORCHESTRATION_COMPLETE`; relevant Markdown, wiki, reusable-agent guidance,
-  PR/release evidence, publication verification, and todo reconciliation must
-  reach their accepted handoff.
+- For every change, require documentation-impact evidence. Register a
+  public-wiki supporting unit only for plausible or ambiguous impact, and a
+  publication unit only when canonical pages changed. Successful deployment or
+  activation alone cannot produce `ORCHESTRATION_COMPLETE`; applicable
+  Markdown, wiki, reusable-agent guidance, PR/release evidence, publication
+  verification, and todo reconciliation must reach their accepted handoff.
 - Surface a blocker immediately when it affects the critical path. Keep
   unrelated ready work moving only when ownership and side effects are
   disjoint.

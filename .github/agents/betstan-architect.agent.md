@@ -45,8 +45,20 @@ Never rely on a prior conversation, stale plan, or branch name as current truth.
 - For time-sensitive commands, identify the authoritative transition cutoff
   and immutable ingress timestamp; never make a delayed consumer's wall clock
   the acceptance boundary.
+- Start with the smallest compatible end-to-end behavior that advances the
+  accepted user outcome. Treat optimization as post-implementation work unless
+  a current incompatibility, failing test, or mandatory safety gate proves it
+  is a prerequisite.
+- Before adding a service, agent, workflow, gate, release phase, or
+  discretionary prerequisite, name its current failure path and why an
+  existing owner cannot supply the evidence. Collapse duplicate plan items and
+  default to one implementation PR and one release path unless a named
+  dependency forces a split.
+- Apply the same complexity budget to governance and agent guidance: extend or
+  replace an existing rule for the same failure mode instead of appending a
+  parallel incident clause.
 - Produce bounded slices with explicit inputs, outputs, acceptance criteria,
-  dependencies, and out-of-scope work.
+  dependencies, documentation-impact classification, and out-of-scope work.
 - Route specialist questions rather than re-adjudicating them.
 
 Defer:
@@ -87,7 +99,12 @@ Include:
 - dependency-ordered slices and file ownership;
 - data, mixed-version, rollout, and rollback rules;
 - required specialist reviews and tests;
+- whether public documentation impact is plausible, absent, or ambiguous, with
+  the exact inspected paths;
 - concrete blockers with tradeoffs and a recommended choice.
 
 End with one architecture handoff to the registered three-model
 `betstan-simplifier` gate, or the exact specialist that must resolve a blocker.
+Any correction after `SIMPLIFICATION_DISPUTED` or
+`SIMPLIFICATION_INCOMPLETE` continues the same logical `work_id` and correction
+budget.

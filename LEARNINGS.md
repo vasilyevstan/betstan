@@ -412,11 +412,12 @@ cd resulting && npm ci && npm run test:ci
   Additional protected commits are not blockers; if `master` advances,
   supersede the stale release chain instead of resetting shared history or
   deploying an older SHA. Keep production mutations serialized.
-- Every change receives a `betstan-public-wiki-editor` assessment. Relevant
-  canonical `docs/wiki/` pages change in the same PR, and merged pages are
-  published byte-identically after merge. Public content describes behavior
-  and safety invariants without private authority, infrastructure, user, or
-  recovery details.
+- Every change records documentation impact; `betstan-public-wiki-editor` is
+  registered when public impact is plausible or ambiguous. Relevant canonical
+  `docs/wiki/` pages change in the same PR, and changed pages are published
+  byte-identically after merge. Public content describes behavior and safety
+  invariants without private authority, infrastructure, user, or recovery
+  details.
 - PR titles are short plain-language outcomes, not ambiguous work buckets.
   Merge safety rejects single-word or overlong titles and prefixes such as
   `chore`, `misc`, and `wip`.
@@ -1254,10 +1255,15 @@ Durable rules:
   SHA, event, and rendered title.
 - A disabled-only unmaterialized classifier can otherwise deadlock a required
   enable-before-dispatch transition. Do not weaken the default active-run rule
-  or introduce run-ID exclusions. Seal the complete evidence-derived
-  live-data candidate set in a repository-global `prepared` intent while the
-  workflow is disabled, re-collect and compare it after external enablement
-  and immediately before dispatch, then atomically cross to `dispatching`.
+  or introduce run-ID exclusions. Seal the complete evidence-derived candidate
+  set for the request's own policy-resolved workflow in a repository-global
+  `prepared` intent while that workflow is disabled, re-collect and compare it
+  after external enablement and immediately before dispatch, then atomically
+  cross to `dispatching`. This frozen prepared-transition workflow set is
+  exactly the two policy-resolved disabled-workflow operations -- never the
+  broader unmaterialized-evidence or protected-operation-policy inventories,
+  and never capacity acquisition -- and the two targets can never cross-consume
+  each other's requests, observations, seals, or prepared context.
   `prepared` remains safely discardable only after the workflow is disabled;
   `dispatching` remains an ambiguous provider-call boundary and is never made
   reusable.
@@ -1269,3 +1275,37 @@ Durable rules:
   mutation, not a similarly named retired job. Bracket upstream validation
   with fresh `master` and runtime-mode checks immediately before the first
   provider API call.
+
+## Implement before optimizing the process — 2026-09-09
+
+Telemetry work spent more than a week expanding coverage, authorization, and
+release prerequisites while no Telemetry service directory existed. The
+quality requirements were valid; the sequencing was not. Governance work had
+become the deliverable instead of enabling the smallest compatible product
+slice.
+
+Durable rules:
+
+- Challenge intent and scope in the existing architect; do not add another
+  intent-review agent.
+- Start with the smallest compatible end-to-end behavior. Optimize after it
+  works unless a current incompatibility, failing test, or mandatory safety
+  gate proves a prerequisite is necessary.
+- Default to one implementation path. Collapse duplicate plan items and do not
+  add a service, agent, workflow, gate, or release phase without a concrete
+  failure path that the existing owner cannot resolve.
+- Preserve security, compatibility, data, branch, test, and production safety.
+  Simplicity changes sequencing and ownership, not the required quality bar.
+- Keep architect and simplifier corrections in the same logical work unit and
+  correction budget. Reissuing a plan or synthesis never resets the loop.
+- For product work, three consecutive discretionary governance, CI,
+  test-infrastructure, architect, or simplifier completions without a
+  product-code developer completion trigger a scope reset before another
+  hardening unit is registered. Established mandatory gates and
+  governance-only tasks are excluded.
+- Every change records documentation impact, but the public-wiki editor is a
+  supporting unit only when impact is plausible or ambiguous. Ordinary product
+  work does not require an artificial agent-definition or wiki edit.
+- After implementation, review the result, capture applicable learning in
+  existing agents and documentation, and optimize only where evidence shows
+  concrete value.

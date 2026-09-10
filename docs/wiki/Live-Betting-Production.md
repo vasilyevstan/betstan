@@ -284,7 +284,7 @@ It is not exposed as an HTTP endpoint and accepts no caller-selected identity
 or kickoff. The reviewed operation moves only Backoffice record
 `6a623af592af5a95b1d0bb7a` / event
 `6a623af592af5a95b1d0bb79` from
-`2026-07-23T16:31:57.215Z` to `2026-09-10T08:05:00.000Z`. It preserves the
+`2026-07-23T16:31:57.215Z` to `2026-09-11T08:05:00.000Z`. It preserves the
 fixture's name, teams, `NO_RESULT` status, and `OFFLINE` visibility.
 
 Before mutation, the operator proves the exact Backoffice identity and old

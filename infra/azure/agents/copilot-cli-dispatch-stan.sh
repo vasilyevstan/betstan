@@ -22,6 +22,23 @@ UPSTREAM_BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_sta
 AUTHORITY_DIR="${COPILOT_CLI_AUTHORITY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/betstan/copilot-cli-authority}"
 MATERIALIZATION_ATTEMPTS="${COPILOT_CLI_MATERIALIZATION_ATTEMPTS:-12}"
 MATERIALIZATION_SLEEP_SECONDS="${COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS:-5}"
+# Frozen prepared disabled-workflow transition targets. Separate from the
+# broader protected-operation policy inventory; the dispatcher passes only
+# the already policy-resolved workflow into this allowlist, and the same
+# frozen set is enforced independently by production-run-exclusivity-stan.sh
+# and copilot_cli_authority_stan.py. Adding an entry here is a distinct,
+# separately reviewed safety-policy change. A plain case statement (rather
+# than an associative array) keeps this portable to bash 3.2.
+is_disabled_transition_workflow() {
+  case "$1" in
+    oci-live-data-rollout.yml|oci-live-betting-activate.yml)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 REQUEST_FILE="${1:-}"
 ACTION="${2:-}"
@@ -223,8 +240,8 @@ else
     fail "operation is automatic and cannot be manually dispatched"
   case "$ACTION" in
     --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared)
-      [[ "$workflow" = "oci-live-data-rollout.yml" ]] ||
-        fail "prepared lifecycle is restricted to policy-resolved live-data operations"
+      is_disabled_transition_workflow "$workflow" ||
+        fail "prepared lifecycle is restricted to the frozen policy-resolved disabled-transition workflows"
       ;;
   esac
 
@@ -701,7 +718,10 @@ prepared_checkpoint() {
   revalidate_transition_target "$required_state"
   # Observation is explicit, has no run-ID inputs/exclusions, and never grants
   # ordinary exclusivity PASS. The helper compares the whole sealed set.
-  REPO="$repository" "$RUN_EXCLUSIVITY_SCRIPT" --observe-live-data-transition \
+  # The target is passed only from the already validated protected-operation
+  # policy resolution above ($workflow), never named or chosen independently.
+  REPO="$repository" "$RUN_EXCLUSIVITY_SCRIPT" \
+    --observe-disabled-transition "$workflow" \
     >"$observation_file"
   chmod 600 "$observation_file"
   revalidate_transition_target "$required_state"

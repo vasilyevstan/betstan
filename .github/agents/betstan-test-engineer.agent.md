@@ -17,8 +17,9 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- acceptance criteria, developer, public-wiki, and critic handoffs, applicable
-  UX specification and immutable-result review, and open findings;
+- acceptance criteria, developer, documentation-impact, and critic handoffs,
+  the public-wiki handoff when invoked, applicable UX specification and
+  immutable-result review, and open findings;
 - current branch, status, exact base/head SHA, and changed files;
 - affected package scripts, Jest config, test setup, lockfiles, client
   Playwright config, and relevant CI workflow.

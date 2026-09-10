@@ -24,8 +24,9 @@ observer = (agents / "production-run-exclusivity-stan.sh").read_text()
 authority = (agents / "copilot_cli_authority_stan.py").read_text()
 for action in ("--prepare-disabled-ghosts", "--dispatch-prepared", "--discard-prepared"):
     assert action in dispatcher, f"missing explicit lifecycle action: {action}"
-assert '--observe-live-data-transition' in observer
-assert '"$#" = 1' in observer, "observation must not accept candidate arguments"
+assert '--observe-live-data-transition' not in observer, "retired flag must have no alias"
+assert '--observe-disabled-transition' in observer
+assert '"$#" = 2' in observer, "observation must accept exactly one bounded target argument"
 assert '[[ -z "$EXCLUDE_RUN_ID" && -z "$PROSPECTIVE_PROMOTION_PR" ]]' in observer
 assert '--require-disabled-workflow' in observer, "default disabled-only classifier is required"
 assert '--semantic-evidence' in observer, "observation must reuse shared semantic validation"
@@ -34,6 +35,36 @@ assert "exit 0" in observation_tail
 assert "production_run_exclusivity=PASS" not in observation_tail.split("exit 0", 1)[0], (
     "observation is not exclusivity or approval authority"
 )
+assert '"target":' in observation_tail, "observation must name its frozen target"
+
+# The frozen prepared-transition map is exactly two entries -- the two
+# policy-resolved disabled-workflow targets -- and is distinct from both
+# UNMATERIALIZED_WORKFLOWS (which also allow-lists capacity supersession
+# evidence) and the broader protected-operation policy inventory.
+frozen_map_pattern = re.compile(
+    r"PREPARED_TRANSITION_WORKFLOWS\s*=\s*\{([^}]*)\}", re.DOTALL
+)
+frozen_match = frozen_map_pattern.search(authority)
+assert frozen_match, "frozen prepared-transition map is missing"
+frozen_body = frozen_match.group(1)
+assert frozen_body.count(".github/workflows/oci-live-data-rollout.yml") == 1
+assert frozen_body.count(".github/workflows/oci-live-betting-activate.yml") == 1
+assert "oci-capacity-acquire.yml" not in frozen_body, (
+    "frozen prepared-transition map must not admit the capacity supersession workflow"
+)
+for script_name, script in (("dispatcher", dispatcher), ("observer", observer)):
+    assert script.count("oci-live-data-rollout.yml") >= 1
+    assert script.count("oci-live-betting-activate.yml") >= 1
+assert "oci-capacity-acquire.yml" in observer, (
+    "observer must still classify capacity supersession as a distinct, non-target workflow"
+)
+assert "oci-capacity-acquire.yml" not in dispatcher, (
+    "dispatcher admission must stay policy-resolved, not name capacity explicitly"
+)
+assert "betstan.disabled-transition-observation.v2" in observer
+assert "betstan.disabled-transition-observation.v2" in authority
+assert "betstan.live-data-transition-observation.v1" not in observer
+assert "betstan.live-data-transition-observation.v1" not in authority
 
 provider_calls = list(re.finditer(r"(?m)^gh workflow run\b", dispatcher))
 assert len(provider_calls) == 1, "retain one captured provider dispatch boundary"
@@ -437,7 +468,8 @@ for conductor_contract in \
     'Never bypass a trusted publisher that rejects changes to its own' \
     'leaves a production maintenance fence, operation' \
     'health recovery precedes candidate replacement' \
-    'public-wiki gate and a terminal publication' \
+    'public-wiki supporting unit only for plausible or ambiguous impact' \
+    'publication unit only when canonical pages changed' \
     'one two-phase specialist work unit for' \
     'duration for the same workflow and job on a comparable runner' \
     'Never use name-based process discovery or termination' \
@@ -498,9 +530,9 @@ grep -Fq 'workflow dispatch URL is acceptance, not materialization' \
 grep -Fq 'Pull-request metadata edits are workflow-producing' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow ignores pull-request edit triggers"
-grep -Fq 'Every change includes the public-wiki gate before immutable review' \
+grep -Fq 'Every change includes documentation-impact evidence before immutable review' \
     <<<"$agent_readme_flat" ||
-  fail "agent workflow can complete before mandatory public-wiki review"
+  fail "agent workflow can complete without documentation-impact evidence"
 grep -Fq 'byte-identically and verifies the public pages' \
     <<<"$agent_readme_flat" ||
   fail "agent workflow omits post-merge wiki publication"
@@ -706,9 +738,9 @@ grep -Fq '`betstan-ux-ui-expert` is mandatory for every user-facing visual or' \
     "$ux_release_wiki" ||
   fail "release orchestration omits the mandatory UX handoff"
 backend_agent_flat="$(tr '\n' ' ' <"$ux_backend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
     <<<"$backend_agent_flat" ||
-  fail "backend developer does not carry applicable UX evidence into the wiki handoff"
+  fail "backend developer does not carry applicable UX evidence into the next handoff"
 grep -Eq 'persist a retry marker[[:space:]]+in the same atomic write' \
     <<<"$backend_agent_flat" ||
   fail "backend developer omits durable mutation publication"
@@ -716,9 +748,9 @@ grep -Fq 'A quote identity owns exactly one validity window' \
     "$ux_backend_agent" ||
   fail "backend developer permits quote expiry mutation under one identity"
 frontend_agent_flat="$(tr '\n' ' ' <"$ux_frontend_agent")"
-grep -Fq 'include its `UX_REVIEW_PASSED` result when handing off to `betstan-public-wiki-editor`' \
+grep -Fq 'include its `UX_REVIEW_PASSED` result in the handoff to the next gate' \
     <<<"$frontend_agent_flat" ||
-  fail "frontend developer does not carry UX evidence into the wiki handoff"
+  fail "frontend developer does not carry UX evidence into the next handoff"
 grep -Fq 'Missing or stale UX evidence is an acceptance' \
     "$ux_critic_agent" ||
   fail "validation critic does not identify missing UX evidence"
@@ -2264,7 +2296,7 @@ for reschedule_contract in \
     'export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
     'export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
     'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
-    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-10T08:05:00.000Z";' \
+    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-11T08:05:00.000Z";' \
     'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
     'ROLLBACK_EVENT_RESCHEDULE:${RESCHEDULE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \

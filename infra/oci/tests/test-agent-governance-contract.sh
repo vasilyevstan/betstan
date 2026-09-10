@@ -12,7 +12,9 @@ FINAL_VALIDATOR="$AGENT_DIR/betstan-final-validator.agent.md"
 BRANCH_REVIEWER="$AGENT_DIR/betstan-branch-governance-reviewer.agent.md"
 ARCHITECT="$AGENT_DIR/betstan-architect.agent.md"
 BACKEND_DEVELOPER="$AGENT_DIR/betstan-backend-developer.agent.md"
+FRONTEND_DEVELOPER="$AGENT_DIR/betstan-frontend-developer.agent.md"
 SERVICE_CONTRACT_REVIEWER="$AGENT_DIR/betstan-service-contract-reviewer.agent.md"
+QUALITY_GATE_REVIEWER="$AGENT_DIR/betstan-quality-gate-reviewer.agent.md"
 TEST_ENGINEER="$AGENT_DIR/betstan-test-engineer.agent.md"
 PR_TEMPLATE="$ROOT_DIR/.github/pull_request_template.md"
 CONTRIBUTING="$ROOT_DIR/CONTRIBUTING.md"
@@ -113,10 +115,9 @@ tokens = [
     "1. `betstan-architect`",
     "2. `betstan-simplifier`",
     "3. **Developer gate**",
-    "4. `betstan-public-wiki-editor`",
-    "5. `betstan-validation-critic`",
-    "6. `betstan-test-engineer`",
-    "7. `betstan-final-validator`",
+    "4. `betstan-validation-critic`",
+    "5. `betstan-test-engineer`",
+    "6. `betstan-final-validator`",
 ]
 positions = [text.find(token) for token in tokens]
 if any(position < 0 for position in positions) or positions != sorted(positions):
@@ -147,7 +148,33 @@ require_flat_literal "$README" \
 require_flat_literal "$README" \
   'Every handoff preserves the original `root_task_authority_id`'
 require_flat_literal "$README" \
-  'Every change has `WIKI_UPDATE_READY` or a justified `WIKI_NO_PUBLIC_CHANGE`'
+  'Every change has exact-diff documentation-impact evidence'
+require_flat_literal "$README" \
+  'to_agent: betstan-validation-critic'
+require_literal "$README" \
+  'public_impact: <plausible|ambiguous|none>'
+require_flat_literal "$README" \
+  'original `max_attempts`, and a monotonic attempt count; re-registration or a reissued handoff never resets the budget'
+require_flat_literal "$README" \
+  'Register `betstan-public-wiki-editor` as a supporting unit only when public impact is plausible or ambiguous'
+require_flat_literal "$CONTRIBUTING" \
+  'Register `betstan-public-wiki-editor` when public impact is plausible or ambiguous'
+require_literal "$README" \
+  '| Repository-root `README.md`, `docs/wiki/**`'
+require_flat_literal "$ARCHITECT" \
+  'Start with the smallest compatible end-to-end behavior that advances the accepted user outcome'
+require_flat_literal "$CONDUCTOR" \
+  'three consecutive completed discretionary units trigger `ATTENTION_REQUIRED` when no product-code developer gate has completed'
+require_flat_literal "$CONDUCTOR" \
+  'Count governance, CI, or test-infrastructure work and repeated architect/simplifier cycles beyond the first mandatory pass'
+require_flat_literal "$CONDUCTOR" \
+  'intra-gate simplifier passes count once'
+require_flat_literal "$CONDUCTOR" \
+  'Route a scope reset through the existing architect work unit'
+require_flat_literal "$CONDUCTOR" \
+  'Mandatory triggered specialists and safety gates are always registered'
+require_flat_literal "$CONDUCTOR" \
+  'governance-only root tasks do not count'
 [[ -f "$PUBLIC_WIKI_EDITOR" ]] || fail "public wiki editor agent is missing"
 for marker in \
   'name: betstan-public-wiki-editor' \
@@ -158,16 +185,26 @@ for marker in \
   'Never publish credentials'; do
   require_flat_literal "$PUBLIC_WIKI_EDITOR" "$marker"
 done
+require_flat_literal "$PUBLIC_WIKI_EDITOR" \
+  '`WIKI_NO_PUBLIC_CHANGE` is valid only when this agent was invoked and the exact diff changes no public'
 require_flat_literal "$ARCHITECT" \
   'Source present in `common/` does not make an unpublished contract available to service images'
 require_flat_literal "$BACKEND_DEVELOPER" \
   'source for the next package candidate while each service compiles against its exact published `@betstan/common` pin'
 require_flat_literal "$BACKEND_DEVELOPER" \
   '`gamemaster`, `moderation`, `resulting`, `slip`, and `telemetry`'
+require_flat_literal "$BACKEND_DEVELOPER" \
+  'documentation-impact classification, inspected exact-diff paths'
+require_flat_literal "$FRONTEND_DEVELOPER" \
+  'documentation-impact classification, inspected exact-diff paths'
+require_flat_literal "$QUALITY_GATE_REVIEWER" \
+  'Require exact-diff documentation-impact evidence'
 require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
   'state both versions and never substitute one for the other'
 require_flat_literal "$TEST_ENGINEER" \
   'Never use `npm install --no-save <tarball>` as evidence'
+require_flat_literal "$LEARNINGS" \
+  'Every change records documentation impact; `betstan-public-wiki-editor` is registered when public impact is plausible or ambiguous'
 
 simplifier_flat="$(tr '\n' ' ' <"$SIMPLIFIER" | tr -s '[:space:]' ' ')"
 for marker in \

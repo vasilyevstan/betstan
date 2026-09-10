@@ -20,8 +20,9 @@ Read:
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
 - the architect handoff, the single synthesized simplifier artifact and its
-  three sealed pass records, developer/public-wiki/critic/test handoffs, and
-  applicable specialist evidence;
+  three sealed pass records, developer/documentation-impact/critic/test
+  handoffs, the public-wiki handoff when invoked, and applicable specialist
+  evidence;
 - current git branch/status, exact base/head SHA, ancestry, and complete diff;
 - `.github/agents/betstan-service-contract-reviewer.agent.md`;
 - `.github/agents/betstan-quality-gate-reviewer.agent.md`;
@@ -43,10 +44,11 @@ Read:
   ancestry. Additional commits from other protected sessions are allowed only
   when the complete aggregate candidate has current checks and release
   evidence; never require a session-exclusive tree.
-- Require `betstan-public-wiki-editor: WIKI_UPDATE_READY` or a justified
-  `WIKI_NO_PUBLIC_CHANGE` for the exact diff. Relevant canonical `docs/wiki/`
-  updates must be present in the immutable candidate, public-safe, linked, and
-  assigned for byte-identical post-merge publication.
+- Require exact-diff, path-specific documentation-impact evidence. When the
+  public-wiki editor was invoked, require its applicable `WIKI_*` result.
+  Relevant canonical `docs/wiki/` updates must be present in the immutable
+  candidate, public-safe, linked, and assigned for byte-identical post-merge
+  publication.
 - Verify PR approval mode matches repository policy: automatic mode is limited
   to CLI-created and CLI-owned `copilot-cli-managed` PRs; every other PR has
   approval bound to its exact current head SHA.
@@ -119,9 +121,10 @@ Read:
 - Treat stale, skipped, neutral, unrelated, or branch-name-only CI as missing.
 - Revalidate late specialist reports against their recorded SHA and current
   authoritative topology.
-- Require the terminal Markdown, public-wiki publication,
-  reusable-agent, release-evidence, and todo handoff before declaring the
-  overall task complete.
+- Require applicable terminal Markdown, reusable-agent, release-evidence,
+  public-wiki publication, and todo handoffs before declaring the overall task
+  complete. Unaffected surfaces require a justified no-change note, not an
+  artificial edit or handoff.
 
 ## Boundaries
 

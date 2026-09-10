@@ -298,16 +298,23 @@ EXPECTED_OPERATION=oci-production-deploy \
 ./infra/azure/agents/copilot-cli-run-approval-stan.sh <run-id> --approve
 ```
 
-If disabled live-data workflow history contains evidence-complete
-unmaterialized queue records, enabling the workflow intentionally makes the
-ordinary exclusivity check block. Seal that complete derived set before the
-external enablement instead of naming or excluding historical run IDs:
+If disabled history for a frozen prepared-transition workflow contains
+evidence-complete unmaterialized queue records, enabling the workflow
+intentionally makes the ordinary exclusivity check block. Seal that complete
+derived set before the external enablement instead of naming or excluding
+historical run IDs. The frozen prepared-transition set is exactly the two
+policy-resolved disabled-workflow operations (never the broader
+unmaterialized-evidence or protected-operation-policy inventories, and never
+capacity acquisition); the dispatcher, observer, and authority helper each
+resolve the one workflow named by the request's own validated policy and
+reject every other candidate, so the same lifecycle below applies unchanged
+to either target:
 
 ```bash
 ./infra/azure/agents/copilot-cli-dispatch-stan.sh \
   "$request" \
   --prepare-disabled-ghosts
-gh workflow enable oci-live-data-rollout.yml
+gh workflow enable <the-request's-own-policy-resolved-workflow>
 ./infra/azure/agents/copilot-cli-dispatch-stan.sh \
   "$request" \
   --dispatch-prepared
