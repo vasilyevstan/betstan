@@ -34,6 +34,8 @@ const NavigationControls = () => {
     <button type="button" onClick={() => navigate('/other')}>Other route</button>
     <button type="button" onClick={() => navigate('/telemetry')}>Telemetry route</button>
     <button type="button" onClick={() => navigate('/backoffice')}>Backoffice route</button>
+    <button type="button" onClick={() => navigate('/BACKOFFICE')}>Backoffice case alias</button>
+    <button type="button" onClick={() => navigate('/backoffice/')}>Backoffice slash alias</button>
   </div>;
 };
 
@@ -63,6 +65,55 @@ describe('App telemetry routing and page-view reporting', () => {
     expect(screen.queryByTestId('slip')).not.toBeInTheDocument();
     expect(screen.getByRole('main').parentElement).toHaveClass('col-12', 'order-1');
     expect(screen.getByRole('main').parentElement).not.toHaveClass('col-xl-8');
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it.each(['/telemetry/', '/Telemetry'])(
+    'renders direct Telemetry alias %s full width',
+    async (pathname) => {
+      await act(async () => {
+        renderApp(pathname);
+      });
+
+      expect(screen.getByRole('heading', {
+        name: 'Telemetry and service health',
+        level: 1,
+      })).toBeInTheDocument();
+      expect(screen.queryByTestId('leaderboard')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('slip')).not.toBeInTheDocument();
+      expect(screen.getByRole('main').parentElement).not.toHaveClass('col-xl-8');
+      expect(axios.post).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/backoffice/', '/BACKOFFICE'])(
+    'renders direct Backoffice alias %s and reports one admin page view',
+    async (pathname) => {
+      await act(async () => {
+        renderApp(pathname);
+      });
+
+      expect(screen.getByText('Backoffice page')).toBeInTheDocument();
+      expect(screen.getByTestId('leaderboard')).toBeInTheDocument();
+      expect(screen.getByTestId('slip')).toBeInTheDocument();
+      await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
+      expect(axios.post).toHaveBeenCalledWith(
+        '/api/telemetry/page-view',
+        { page: 'admin' }
+      );
+    },
+  );
+
+  it('keeps an unknown deeper Telemetry path on the wildcard layout', async () => {
+    await act(async () => {
+      renderApp('/telemetry/details');
+    });
+
+    expect(screen.getByTestId('events')).toBeInTheDocument();
+    expect(screen.getByTestId('leaderboard')).toBeInTheDocument();
+    expect(screen.getByTestId('slip')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Telemetry and service health' }))
+      .not.toBeInTheDocument();
     expect(axios.post).not.toHaveBeenCalled();
   });
 
@@ -101,5 +152,17 @@ describe('App telemetry routing and page-view reporting', () => {
     expect(screen.getByTestId('events')).toBeInTheDocument();
     await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
     expect(screen.getByRole('main')).toBeInTheDocument();
+  });
+
+  it('does not double-count transitions between Backoffice route aliases', async () => {
+    await act(async () => {
+      renderApp('/backoffice/', true);
+    });
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Backoffice case alias' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Backoffice slash alias' }));
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('Backoffice page')).toBeInTheDocument();
   });
 });

@@ -62,3 +62,31 @@ it('marks Telemetry as the current page without losing valid navigation query pa
   expect(screen.getByRole('link', { name: 'Backoffice' }))
     .not.toHaveAttribute('aria-current');
 });
+
+it.each(['/telemetry/', '/Telemetry', '/TELEMETRY///'])(
+  'marks the Telemetry route alias %s as current',
+  (pathname) => {
+    renderHeader(undefined, 'v2', pathname);
+
+    expect(screen.getByRole('link', { name: 'Telemetry' }))
+      .toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Backoffice' }))
+      .not.toHaveAttribute('aria-current');
+  },
+);
+
+it('does not mark Telemetry current for an unknown deeper path', () => {
+  renderHeader(undefined, 'v2', '/telemetry/details');
+
+  expect(screen.getByRole('link', { name: 'Telemetry' }))
+    .not.toHaveAttribute('aria-current');
+});
+
+it('marks a trailing-slash Backoffice alias current without marking Telemetry', () => {
+  renderHeader(undefined, 'v1', '/backoffice/');
+
+  expect(screen.getByRole('link', { name: 'Backoffice' }))
+    .toHaveAttribute('aria-current', 'page');
+  expect(screen.getByRole('link', { name: 'Telemetry' }))
+    .not.toHaveAttribute('aria-current');
+});

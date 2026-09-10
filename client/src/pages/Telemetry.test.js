@@ -61,6 +61,40 @@ const DATES = [
   '2026-09-10',
 ];
 
+const DATE_CONTRACT_FAILURES = [
+  ['reversed dates', (summary) => ({ ...summary, dates: [...summary.dates].reverse() })],
+  ['duplicate dates', (summary) => ({
+    ...summary,
+    dates: [...summary.dates.slice(0, 13), summary.dates[12]],
+  })],
+  ['non-consecutive dates', (summary) => ({
+    ...summary,
+    dates: summary.dates.map((date, index) => (
+      index === 6 ? '2026-09-20' : date
+    )),
+  })],
+  ['impossible date', (summary) => ({
+    ...summary,
+    dates: summary.dates.map((date, index) => (
+      index === 6 ? '2026-02-30' : date
+    )),
+  })],
+  ['noncanonical date', (summary) => ({
+    ...summary,
+    dates: summary.dates.map((date, index) => (
+      index === 6 ? '2026-9-03' : date
+    )),
+  })],
+  ['parseable noncanonical generatedAt', (summary) => ({
+    ...summary,
+    generatedAt: '2026-09-10T00:15:00Z',
+  })],
+  ['final date differs from generatedAt UTC date', (summary) => ({
+    ...summary,
+    generatedAt: '2026-09-11T00:15:00.000Z',
+  })],
+];
+
 const createSummary = ({
   generatedAt = '2026-09-10T00:15:00.000Z',
   valueFor = () => 0,
@@ -315,4 +349,39 @@ describe('Telemetry', () => {
     expect(screen.queryByRole('heading', { name: 'Service health' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Invalid telemetry summary/)).not.toBeInTheDocument();
   });
+
+  it.each(DATE_CONTRACT_FAILURES)(
+    'rejects malformed date inventory initially: %s',
+    async (name, mutate) => {
+      axios.get.mockResolvedValueOnce({ data: mutate(createSummary()) });
+      renderTelemetry();
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Telemetry is unavailable. Try again.'
+      );
+      expect(screen.queryByRole('heading', { name: 'Service health' }))
+        .not.toBeInTheDocument();
+    },
+  );
+
+  it.each(DATE_CONTRACT_FAILURES)(
+    'retains the prior snapshot after malformed refresh dates: %s',
+    async (name, mutate) => {
+      const initial = createSummary();
+      axios.get
+        .mockResolvedValueOnce({ data: initial })
+        .mockResolvedValueOnce({ data: mutate(createSummary()) });
+      renderTelemetry();
+      await screen.findByText(initial.generatedAt);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        `Refresh failed. Showing data generated at ${initial.generatedAt}.`
+      );
+      expect(screen.getByText(initial.generatedAt)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Service health' })).toBeInTheDocument();
+      expect(document.querySelectorAll('.telemetry-metric__pair')).toHaveLength(112);
+    },
+  );
 });

@@ -450,3 +450,61 @@ test('authenticated expanded navbar fits at 1000px', async ({ page }) => {
   await expectRequiredLabelsNotClipped(page);
   await expectNoScrollOverflow(page.locator('html'), 'authenticated 1000px document');
 });
+
+test('static route aliases share layout, navigation, and page-view identity', async ({ page }) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 1600, height: 1000 });
+
+  await page.goto('/telemetry/?ui=v1&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', {
+    name: 'Telemetry and service health',
+    level: 1,
+  })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Telemetry', exact: true }))
+    .toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('.scoreboard')).toHaveCount(0);
+  await expect(page.locator('.slip-boards')).toHaveCount(0);
+  expect(state.requestCount('GET /api/telemetry/summary')).toBe(1);
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(0);
+
+  await page.getByRole('link', { name: 'Telemetry', exact: true }).click();
+  await expect(page).toHaveURL(/\/telemetry\?ui=v1&theme=dark$/);
+  expect(state.requestCount('GET /api/telemetry/summary')).toBe(1);
+
+  await page.goto('/Telemetry?ui=v1&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', {
+    name: 'Telemetry and service health',
+    level: 1,
+  })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Telemetry', exact: true }))
+    .toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('.scoreboard')).toHaveCount(0);
+  await expect(page.locator('.slip-boards')).toHaveCount(0);
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(0);
+
+  await page.goto('/backoffice/?ui=v1&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: 'Backoffice', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Backoffice', exact: true }))
+    .toHaveAttribute('aria-current', 'page');
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(1);
+  expect(state.requests.filter(({ key }) => key === 'POST /api/telemetry/page-view'))
+    .toEqual([{
+      key: 'POST /api/telemetry/page-view',
+      body: { page: 'admin' },
+    }]);
+
+  await page.getByRole('link', { name: 'Backoffice', exact: true }).click();
+  await expect(page).toHaveURL(/\/backoffice\?ui=v1&theme=dark$/);
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(1);
+
+  await page.goto('/telemetry/details?ui=v1&theme=dark', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: 'Telemetry and service health' }))
+    .toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Telemetry', exact: true }))
+    .not.toHaveAttribute('aria-current');
+  await expect(page.locator('.scoreboard')).toHaveCount(1);
+  await expect(page.locator('.slip-boards')).toHaveCount(1);
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(1);
+});

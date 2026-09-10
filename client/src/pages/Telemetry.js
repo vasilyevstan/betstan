@@ -39,18 +39,55 @@ const hasExactKeys = (value, expectedKeys) => (
   && expectedKeys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
 );
 
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+const CANONICAL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const isCanonicalIsoInstant = (value) => {
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+};
+
+const isValidDateInventory = (dates, generatedAt) => {
+  if (!Array.isArray(dates) || dates.length !== 14) {
+    return false;
+  }
+
+  const dateTimes = dates.map((date) => {
+    if (typeof date !== 'string' || !CANONICAL_DATE_PATTERN.test(date)) {
+      return null;
+    }
+
+    const parsed = new Date(`${date}T00:00:00.000Z`);
+    return (
+      !Number.isNaN(parsed.getTime())
+      && parsed.toISOString().slice(0, 10) === date
+    ) ? parsed.getTime() : null;
+  });
+  if (
+    dateTimes.some((dateTime) => dateTime === null)
+    || new Set(dates).size !== dates.length
+    || dateTimes.some((dateTime, index) => (
+      index > 0 && dateTime !== dateTimes[index - 1] + DAY_IN_MILLISECONDS
+    ))
+  ) {
+    return false;
+  }
+
+  return dates[dates.length - 1] === new Date(generatedAt).toISOString().slice(0, 10);
+};
+
 const isValidSummary = (value) => {
   if (!hasExactKeys(value, ['generatedAt', 'dates', 'metrics', 'health'])) {
     return false;
   }
 
   if (
-    typeof value.generatedAt !== 'string'
-    || value.generatedAt.trim() === ''
-    || !Number.isFinite(Date.parse(value.generatedAt))
-    || !Array.isArray(value.dates)
-    || value.dates.length !== 14
-    || !value.dates.every((date) => typeof date === 'string')
+    !isCanonicalIsoInstant(value.generatedAt)
+    || !isValidDateInventory(value.dates, value.generatedAt)
   ) {
     return false;
   }

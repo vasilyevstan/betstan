@@ -11,6 +11,7 @@ import MyBets from './pages/account/MyBets';
 import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
 import Telemetry from './pages/Telemetry';
+import getRouteIdentity from './routeIdentity';
 
 const allowedVariants = new Set(['v1', 'v2', 'v3']);
 const allowedThemes = new Set(['dark', 'light']);
@@ -26,9 +27,10 @@ const getTheme = (search) => getParam(search, 'theme', 'dark', allowedThemes);
 const App = () => {
   const location = useLocation();
   const lastReportedPath = useRef(null);
+  const routeIdentity = getRouteIdentity(location.pathname);
   const uiVariant = useMemo(() => getUiVariant(location.search), [location.search]);
   const theme = useMemo(() => getTheme(location.search), [location.search]);
-  const isTelemetryRoute = location.pathname === '/telemetry';
+  const isTelemetryRoute = routeIdentity === '/telemetry';
 
   const [currentUser, setCurrentUser] = useState();
   const [isCurrentUserResolved, setIsCurrentUserResolved] = useState(false);
@@ -86,20 +88,20 @@ const App = () => {
   }, [fetchData]);
 
   useEffect(() => {
-    if (lastReportedPath.current === location.pathname) {
+    if (lastReportedPath.current === routeIdentity) {
       return;
     }
-    lastReportedPath.current = location.pathname;
+    lastReportedPath.current = routeIdentity;
 
-    const page = location.pathname === '/'
+    const page = routeIdentity === '/'
       ? 'main'
-      : location.pathname === '/backoffice'
+      : routeIdentity === '/backoffice'
         ? 'admin'
         : null;
     if (page) {
       axios.post('/api/telemetry/page-view', { page }).catch(() => undefined);
     }
-  }, [location.pathname]);
+  }, [routeIdentity]);
 
   return <div className={`app-shell ui-variant-${uiVariant} ui-theme-${theme}`}>
     <Header currentUser={currentUser} uiVariant={uiVariant} theme={theme} />

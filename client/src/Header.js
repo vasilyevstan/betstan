@@ -1,8 +1,10 @@
 import React  from "react";
 import { Link, useLocation } from 'react-router-dom';
+import getRouteIdentity from './routeIdentity';
 
 const Header = ({ currentUser, uiVariant, theme }) => {
     const location = useLocation();
+    const routeIdentity = getRouteIdentity(location.pathname);
     const themeOptions = ['dark', 'light'];
     const isV2 = uiVariant === 'v2';
 
@@ -86,7 +88,7 @@ const Header = ({ currentUser, uiVariant, theme }) => {
                            const isLabelledIconLink = !isV2 && (label === 'Backoffice' || label === 'Telemetry');
                            return <li key={href} className="nav-item">
                                <Link
-                                   aria-current={location.pathname === href ? 'page' : undefined}
+                                   aria-current={routeIdentity === getRouteIdentity(href) ? 'page' : undefined}
                                    className={isV2 ? `nav-picture-button${kind === 'login' ? ' nav-picture-button--login' : ''}` : `nav-icon-link${isLabelledIconLink ? ' nav-icon-link--labelled' : ''}`}
                                    to={linkTo(href)}
                                    title={label}
