@@ -16,6 +16,8 @@ import {
 
 const SOURCE_SHA = "a".repeat(40);
 const LATER_SOURCE_SHA = "b".repeat(40);
+const OLD_EVENT_ID = "6a623af592af5a95b1d0bb79";
+const OLD_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
 const JOURNAL_ID =
   `event-reschedule:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}`;
 const safeApplyTime = new Date(
@@ -44,20 +46,25 @@ interface JournalDocument extends mongoose.mongo.Document {
   _id: string;
   state?: string;
   snapshotSha256?: string;
+  snapshotEjson?: string;
+  targetEjson?: string;
 }
 
 const database = (names: DatabaseNames, name: keyof DatabaseNames) =>
   mongoose.connection.useDb(names[name], { useCache: true }).db!;
 
+const canonicalEjson = (value: unknown) =>
+  mongoose.mongo.BSON.EJSON.stringify(value, { relaxed: false });
+
 const journalCollection = (names: DatabaseNames) =>
   database(names, "event")
     .collection<JournalDocument>("eventrescheduleoperations");
 
-const backofficeEvent = (
+const oldBackofficeEvent = (
   overrides: Record<string, unknown> = {}
 ): Record<string, unknown> => ({
-  _id: new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID),
-  eventId: RESCHEDULE_EVENT_ID,
+  _id: new mongoose.Types.ObjectId(OLD_BACKOFFICE_ID),
+  eventId: OLD_EVENT_ID,
   name: RESCHEDULE_EVENT_NAME,
   home: RESCHEDULE_EVENT_HOME,
   away: RESCHEDULE_EVENT_AWAY,
@@ -73,11 +80,11 @@ const backofficeEvent = (
   ...overrides,
 });
 
-const eventProjection = (
+const oldEventProjection = (
   overrides: Record<string, unknown> = {}
 ): Record<string, unknown> => ({
   _id: new mongoose.Types.ObjectId(),
-  eventId: RESCHEDULE_EVENT_ID,
+  eventId: OLD_EVENT_ID,
   name: RESCHEDULE_EVENT_NAME,
   home: RESCHEDULE_EVENT_HOME,
   away: RESCHEDULE_EVENT_AWAY,
@@ -111,11 +118,11 @@ const eventProjection = (
   ...overrides,
 });
 
-const gamemasterProjection = (
+const oldGamemasterProjection = (
   overrides: Record<string, unknown> = {}
 ): Record<string, unknown> => ({
   _id: new mongoose.Types.ObjectId(),
-  eventId: RESCHEDULE_EVENT_ID,
+  eventId: OLD_EVENT_ID,
   name: RESCHEDULE_EVENT_NAME,
   home: RESCHEDULE_EVENT_HOME,
   away: RESCHEDULE_EVENT_AWAY,
@@ -142,7 +149,7 @@ const gamemasterProjection = (
 
 const insertBackofficeEvent = async (
   names: DatabaseNames,
-  document = backofficeEvent()
+  document = oldBackofficeEvent()
 ) => {
   await database(names, "backoffice").collection("events").insertOne(document);
 };
@@ -201,10 +208,10 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
     expect(dryRun).toMatchObject({
       state: "candidate",
       ready: true,
-      matched: 1,
+      matched: 0,
       changed: 0,
       journalVerified: false,
-      snapshotDocumentCount: 1,
+      snapshotDocumentCount: 0,
       targetDocumentCount: 3,
     });
 
@@ -216,7 +223,7 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
       matched: 3,
       changed: 4,
       journalVerified: true,
-      snapshotDocumentCount: 1,
+      snapshotDocumentCount: 0,
       targetDocumentCount: 3,
     });
     expect(firstApply.snapshotSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -233,8 +240,14 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
       .collection("events").findOne({ eventId: RESCHEDULE_EVENT_ID });
     const backoffice = await database(firstNames, "backoffice")
       .collection("events").findOne({ eventId: RESCHEDULE_EVENT_ID });
+    const secondBackoffice = await database(secondNames, "backoffice")
+      .collection("events").findOne({ eventId: RESCHEDULE_EVENT_ID });
+    expect(backoffice).toEqual(secondBackoffice);
     expect(firstEvent).toEqual(secondEvent);
     expect(firstGamemaster).toEqual(secondGamemaster);
+    expect(backoffice?._id).toEqual(
+      new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID)
+    );
     expect(firstEvent).toMatchObject({
       eventId: RESCHEDULE_EVENT_ID,
       time: new Date(RESCHEDULE_TARGET_KICKOFF),
@@ -273,7 +286,34 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
       liveMarkets: [],
     });
     expect(firstGamemaster?.liveSeed).toMatch(/^[0-9a-f]{64}$/);
+    expect(firstGamemaster?.liveSeed).not.toBe(RESCHEDULE_EVENT_ID);
     expect(backoffice?.time).toBe(RESCHEDULE_TARGET_KICKOFF);
+    expect(typeof backoffice?.time).toBe("string");
+    expect(firstEvent?.time).toBeInstanceOf(Date);
+    expect(firstGamemaster?.time).toBeInstanceOf(Date);
+    for (const target of [backoffice, firstEvent, firstGamemaster]) {
+      for (const field of [
+        "creationRequestId",
+        "creationRequestFingerprint",
+        "newEventPublicationPending",
+        "resultPublicationPending",
+        "visibilityPublicationPending",
+        "visibilityPublicationTarget",
+      ]) {
+        expect(Object.prototype.hasOwnProperty.call(target, field)).toBe(false);
+      }
+    }
+
+    const journal = await journalCollection(firstNames).findOne({
+      _id: JOURNAL_ID,
+    });
+    const snapshot = mongoose.mongo.BSON.EJSON.parse(
+      journal!.snapshotEjson!,
+      { relaxed: false }
+    ) as { documents: Array<{ document: unknown }> };
+    expect(snapshot.documents).toHaveLength(3);
+    expect(snapshot.documents.every(({ document }) => document === null))
+      .toBe(true);
 
     const verified = await runSyntheticEventReschedule({
       mode: "verify",
@@ -319,37 +359,110 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
   }
 });
 
-it("preserves safe existing projections and restores their exact preimages", async () => {
+it("leaves the old fixture and its archived Slip mirrors byte-identical", async () => {
   const names = databaseNames();
-  const originalBackoffice = backofficeEvent();
-  const originalEvent = eventProjection();
-  const originalGamemaster = gamemasterProjection();
+  const oldDocuments = [
+    {
+      database: "backoffice" as const,
+      collection: "events",
+      document: oldBackofficeEvent(),
+    },
+    {
+      database: "event" as const,
+      collection: "events",
+      document: oldEventProjection({ live: { phase: "FULL_TIME" } }),
+    },
+    {
+      database: "gamemaster" as const,
+      collection: "events",
+      document: oldGamemasterProjection({
+        phase: "FULL_TIME",
+        liveSequence: 42,
+      }),
+    },
+    {
+      database: "gamemaster" as const,
+      collection: "eventarchives",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        eventId: OLD_EVENT_ID,
+        reason: "historical-old-fixture",
+      },
+    },
+    {
+      database: "moderation" as const,
+      collection: "liveeventmirrors",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        eventId: OLD_EVENT_ID,
+        phase: "FULL_TIME",
+      },
+    },
+    {
+      database: "slip" as const,
+      collection: "sliparchives",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "archived-old-slip",
+        rows: [{ eventId: OLD_EVENT_ID, status: "WIN" }],
+      },
+    },
+    {
+      database: "bet" as const,
+      collection: "bets",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "archived-old-slip",
+        rows: [{ eventId: OLD_EVENT_ID, status: "WIN" }],
+      },
+    },
+    {
+      database: "moderation" as const,
+      collection: "bets",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "archived-old-slip",
+        rows: [{ eventId: OLD_EVENT_ID, status: "WIN" }],
+      },
+    },
+    {
+      database: "resulting" as const,
+      collection: "betarchives",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "archived-old-slip",
+        rows: [{ eventId: OLD_EVENT_ID, status: "WIN" }],
+      },
+    },
+  ];
   try {
-    await database(names, "backoffice").collection("events")
-      .insertOne(originalBackoffice);
-    await database(names, "event").collection("events")
-      .insertOne(originalEvent);
-    await database(names, "gamemaster").collection("events")
-      .insertOne(originalGamemaster);
+    for (const fixture of oldDocuments) {
+      await database(names, fixture.database)
+        .collection(fixture.collection)
+        .insertOne(fixture.document);
+    }
+    const before = await Promise.all(oldDocuments.map(async (fixture) =>
+      canonicalEjson(await database(names, fixture.database)
+        .collection(fixture.collection)
+        .findOne({
+          _id: fixture.document._id as mongoose.Types.ObjectId,
+        }))));
 
     const applied = await apply(names);
     expect(applied).toMatchObject({
       state: "applied",
       ready: true,
-      snapshotDocumentCount: 3,
+      snapshotDocumentCount: 0,
       changed: 4,
     });
-    const rescheduledEvent = await database(names, "event")
-      .collection("events").findOne({ eventId: RESCHEDULE_EVENT_ID });
-    const rescheduledGamemaster = await database(names, "gamemaster")
-      .collection("events").findOne({ eventId: RESCHEDULE_EVENT_ID });
-    expect(rescheduledEvent?._id).toEqual(originalEvent._id);
-    expect(rescheduledEvent?.products).toEqual(originalEvent.products);
-    expect(rescheduledEvent?.time).toEqual(
-      new Date(RESCHEDULE_TARGET_KICKOFF)
-    );
-    expect(rescheduledGamemaster?._id).toEqual(originalGamemaster._id);
-    expect(rescheduledGamemaster?.liveSeed).toBe(originalGamemaster.liveSeed);
+    for (let index = 0; index < oldDocuments.length; index += 1) {
+      const fixture = oldDocuments[index];
+      expect(canonicalEjson(await database(names, fixture.database)
+        .collection(fixture.collection)
+        .findOne({
+          _id: fixture.document._id as mongoose.Types.ObjectId,
+        }))).toBe(before[index]);
+    }
 
     const rolledBack = await runSyntheticEventReschedule({
       mode: "rollback",
@@ -364,18 +477,18 @@ it("preserves safe existing projections and restores their exact preimages", asy
       changed: 4,
       journalVerified: true,
     });
-    expect(
-      await database(names, "backoffice").collection("events")
-        .findOne({ eventId: RESCHEDULE_EVENT_ID })
-    ).toEqual(originalBackoffice);
-    expect(
-      await database(names, "event").collection("events")
-        .findOne({ eventId: RESCHEDULE_EVENT_ID })
-    ).toEqual(originalEvent);
-    expect(
-      await database(names, "gamemaster").collection("events")
-        .findOne({ eventId: RESCHEDULE_EVENT_ID })
-    ).toEqual(originalGamemaster);
+    for (let index = 0; index < oldDocuments.length; index += 1) {
+      const fixture = oldDocuments[index];
+      expect(canonicalEjson(await database(names, fixture.database)
+        .collection(fixture.collection)
+        .findOne({
+          _id: fixture.document._id as mongoose.Types.ObjectId,
+        }))).toBe(before[index]);
+    }
+    for (const databaseName of ["backoffice", "event", "gamemaster"] as const) {
+      expect(await database(names, databaseName).collection("events")
+        .countDocuments({ eventId: RESCHEDULE_EVENT_ID })).toBe(0);
+    }
 
     const repeatedRollback = await runSyntheticEventReschedule({
       mode: "rollback",
@@ -404,16 +517,15 @@ it("preserves safe existing projections and restores their exact preimages", asy
 
 it("rolls back a prepared partial operation without invalidating the journal", async () => {
   const names = databaseNames();
-  const originalBackoffice = backofficeEvent();
+  const originalBackoffice = oldBackofficeEvent();
   try {
     await insertBackofficeEvent(names, originalBackoffice);
     await apply(names);
     await setJournalPrepared(names);
     await database(names, "gamemaster").collection("events")
       .deleteOne({ eventId: RESCHEDULE_EVENT_ID });
-    await database(names, "backoffice").collection("events").updateOne(
+    await database(names, "backoffice").collection("events").deleteOne(
       { eventId: RESCHEDULE_EVENT_ID },
-      { $set: { time: RESCHEDULE_OLD_KICKOFF } }
     );
 
     const rolledBack = await runSyntheticEventReschedule({
@@ -439,7 +551,7 @@ it("rolls back a prepared partial operation without invalidating the journal", a
     ).toBe(0);
     expect(
       await database(names, "backoffice").collection("events")
-        .findOne({ eventId: RESCHEDULE_EVENT_ID })
+        .findOne({ eventId: OLD_EVENT_ID })
     ).toEqual(originalBackoffice);
     const journal = await journalCollection(names).findOne({ _id: JOURNAL_ID });
     expect(journal).toMatchObject({
@@ -467,6 +579,70 @@ it("rolls back a prepared partial operation without invalidating the journal", a
   }
 });
 
+it.each([
+  {
+    name: "partially deleted targets",
+    removed: ["backoffice", "gamemaster"] as const,
+    expectedChanged: 2,
+  },
+  {
+    name: "all deleted targets",
+    removed: ["backoffice", "gamemaster", "event"] as const,
+    expectedChanged: 1,
+  },
+])("resumes an interrupted applied rollback with $name", async ({
+  removed,
+  expectedChanged,
+}) => {
+  const names = databaseNames();
+  try {
+    await insertBackofficeEvent(names);
+    await apply(names);
+    for (const databaseName of removed) {
+      await database(names, databaseName).collection("events")
+        .deleteOne({ eventId: RESCHEDULE_EVENT_ID });
+    }
+
+    const rolledBack = await runSyntheticEventReschedule({
+      mode: "rollback",
+      confirmation: ROLLBACK_CONFIRMATION,
+      sourceSha: LATER_SOURCE_SHA,
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(rolledBack).toMatchObject({
+      state: "rolled-back",
+      ready: true,
+      changed: expectedChanged,
+      journalVerified: true,
+    });
+    for (const databaseName of ["backoffice", "event", "gamemaster"] as const) {
+      expect(await database(names, databaseName).collection("events")
+        .countDocuments({ eventId: RESCHEDULE_EVENT_ID })).toBe(0);
+    }
+    expect(await journalCollection(names).findOne({ _id: JOURNAL_ID }))
+      .toMatchObject({
+        state: "rolled-back",
+        rollbackSourceSha: LATER_SOURCE_SHA,
+      });
+
+    const repeatedRollback = await runSyntheticEventReschedule({
+      mode: "rollback",
+      confirmation: ROLLBACK_CONFIRMATION,
+      sourceSha: LATER_SOURCE_SHA,
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(repeatedRollback).toMatchObject({
+      state: "rolled-back",
+      ready: true,
+      changed: 0,
+    });
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
 it("resumes a prepared partial write, including inside the lead-time window", async () => {
   const names = databaseNames();
   try {
@@ -475,9 +651,8 @@ it("resumes a prepared partial write, including inside the lead-time window", as
     await setJournalPrepared(names);
     await database(names, "gamemaster").collection("events")
       .deleteOne({ eventId: RESCHEDULE_EVENT_ID });
-    await database(names, "backoffice").collection("events").updateOne(
+    await database(names, "backoffice").collection("events").deleteOne(
       { eventId: RESCHEDULE_EVENT_ID },
-      { $set: { time: RESCHEDULE_OLD_KICKOFF } }
     );
 
     const prepared = await runSyntheticEventReschedule({
@@ -546,9 +721,8 @@ it("blocks a prepared but unstarted apply inside the lead-time window", async ()
       .deleteOne({ eventId: RESCHEDULE_EVENT_ID });
     await database(names, "gamemaster").collection("events")
       .deleteOne({ eventId: RESCHEDULE_EVENT_ID });
-    await database(names, "backoffice").collection("events").updateOne(
+    await database(names, "backoffice").collection("events").deleteOne(
       { eventId: RESCHEDULE_EVENT_ID },
-      { $set: { time: RESCHEDULE_OLD_KICKOFF } }
     );
 
     const blocked = await apply(names, { now: unsafeApplyTime });
@@ -679,10 +853,15 @@ it("blocks Gamemaster archives and Moderation live mirrors", async () => {
 
 it.each([
   {
+    name: "missing Backoffice row",
+    documents: async (_names: DatabaseNames) => undefined,
+    reason: "Backoffice source identity does not match the reviewed fixture",
+  },
+  {
     name: "wrong Backoffice id",
     documents: (names: DatabaseNames) => insertBackofficeEvent(
       names,
-      backofficeEvent({ _id: new mongoose.Types.ObjectId() })
+      oldBackofficeEvent({ _id: new mongoose.Types.ObjectId() })
     ),
     reason: "Backoffice source identity does not match the reviewed fixture",
   },
@@ -690,7 +869,7 @@ it.each([
     name: "stale Backoffice kickoff",
     documents: (names: DatabaseNames) => insertBackofficeEvent(
       names,
-      backofficeEvent({ time: "2026-07-23T16:32:00.000Z" })
+      oldBackofficeEvent({ time: "2026-07-23T16:32:00.000Z" })
     ),
     reason: "Backoffice source identity does not match the reviewed fixture",
   },
@@ -698,31 +877,14 @@ it.each([
     name: "pending Backoffice publication",
     documents: (names: DatabaseNames) => insertBackofficeEvent(
       names,
-      backofficeEvent({ newEventPublicationPending: true })
+      oldBackofficeEvent({ newEventPublicationPending: true })
     ),
     reason: "Backoffice source identity does not match the reviewed fixture",
   },
-  {
-    name: "active Event projection",
-    documents: async (names: DatabaseNames) => {
-      await insertBackofficeEvent(names);
-      await database(names, "event").collection("events").insertOne(
-        eventProjection({ live: { phase: "FIRST_HALF" } })
-      );
-    },
-    reason: "Event projection is not an idle reviewed fixture",
-  },
-  {
-    name: "leased Gamemaster projection",
-    documents: async (names: DatabaseNames) => {
-      await insertBackofficeEvent(names);
-      await database(names, "gamemaster").collection("events").insertOne(
-        gamemasterProjection({ processingLease: { token: "active" } })
-      );
-    },
-    reason: "Gamemaster projection is not an idle reviewed fixture",
-  },
-])("blocks $name", async ({ documents, reason }) => {
+])("enforces the bounded old Backoffice prerequisite: $name", async ({
+  documents,
+  reason,
+}) => {
   const names = databaseNames();
   try {
     await documents(names);
@@ -732,32 +894,64 @@ it.each([
       connection: mongoose.connection,
       databaseNames: names,
     });
-    expect(blocked).toMatchObject({ state: "blocked", ready: false });
+    expect(blocked).toMatchObject({
+      state: "blocked",
+      ready: false,
+      journalVerified: false,
+      snapshotDocumentCount: 0,
+      targetDocumentCount: 0,
+    });
     expect(blocked.blockers).toEqual(
-      expect.arrayContaining([expect.objectContaining({ reason })])
+      expect.arrayContaining([expect.objectContaining({ count: 1, reason })])
     );
   } finally {
     await dropDatabases(names);
   }
 });
 
-it("blocks duplicate target documents", async () => {
+it.each([
+  {
+    name: "fixed target _id",
+    databaseName: "backoffice" as const,
+    document: {
+      _id: new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID),
+      eventId: "unrelated-event",
+    },
+  },
+  {
+    name: "shared new eventId",
+    databaseName: "event" as const,
+    document: {
+      _id: new mongoose.Types.ObjectId(),
+      eventId: RESCHEDULE_EVENT_ID,
+    },
+  },
+])("blocks an unjournaled collision by $name", async ({
+  databaseName,
+  document,
+}) => {
   const names = databaseNames();
   try {
-    await database(names, "backoffice").collection("events").insertMany([
-      backofficeEvent(),
-      backofficeEvent({ _id: new mongoose.Types.ObjectId() }),
-    ]);
+    await insertBackofficeEvent(names);
+    await database(names, databaseName).collection("events")
+      .insertOne(document);
     const blocked = await runSyntheticEventReschedule({
       mode: "dry-run",
       sourceSha: SOURCE_SHA,
       connection: mongoose.connection,
       databaseNames: names,
     });
+    expect(blocked).toMatchObject({
+      state: "blocked",
+      ready: false,
+      journalVerified: false,
+      snapshotDocumentCount: 0,
+      targetDocumentCount: 0,
+    });
     expect(blocked.blockers).toContainEqual({
-      database: names.backoffice,
+      database: names[databaseName],
       collection: "events",
-      count: 2,
+      count: 1,
       reason: "duplicate target documents",
     });
   } finally {
@@ -798,6 +992,46 @@ it("detects target tampering for the applying source", async () => {
       count: 1,
       reason: "rescheduled projection does not match the journal target",
     });
+  } finally {
+    await dropDatabases(names);
+  }
+});
+
+it("blocks rollback before writes when new-target visibility drifts", async () => {
+  const names = databaseNames();
+  try {
+    await insertBackofficeEvent(names);
+    await apply(names);
+    await database(names, "backoffice").collection("events").updateOne(
+      { eventId: RESCHEDULE_EVENT_ID },
+      { $set: { visibility: "ONLINE" } }
+    );
+
+    const rollback = await runSyntheticEventReschedule({
+      mode: "rollback",
+      confirmation: ROLLBACK_CONFIRMATION,
+      sourceSha: LATER_SOURCE_SHA,
+      connection: mongoose.connection,
+      databaseNames: names,
+    });
+    expect(rollback).toMatchObject({
+      state: "blocked",
+      ready: false,
+      changed: 0,
+      journalVerified: true,
+    });
+    expect(rollback.blockers).toContainEqual({
+      database: names.backoffice,
+      collection: "events",
+      count: 1,
+      reason: "partial reschedule contains an unknown projection state",
+    });
+    expect(await database(names, "event").collection("events")
+      .countDocuments({ eventId: RESCHEDULE_EVENT_ID })).toBe(1);
+    expect(await database(names, "gamemaster").collection("events")
+      .countDocuments({ eventId: RESCHEDULE_EVENT_ID })).toBe(1);
+    expect(await journalCollection(names).findOne({ _id: JOURNAL_ID }))
+      .toMatchObject({ state: "applied" });
   } finally {
     await dropDatabases(names);
   }
@@ -858,6 +1092,10 @@ it("blocks rollback after a new betting dependency appears", async () => {
     expect(
       await journalCollection(names).findOne({ _id: JOURNAL_ID })
     ).toMatchObject({ state: "applied" });
+    for (const databaseName of ["backoffice", "event", "gamemaster"] as const) {
+      expect(await database(names, databaseName).collection("events")
+        .countDocuments({ eventId: RESCHEDULE_EVENT_ID })).toBe(1);
+    }
   } finally {
     await dropDatabases(names);
   }
