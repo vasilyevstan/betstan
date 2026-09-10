@@ -129,7 +129,7 @@ jobs:
             "$RUNNER_TEMP/oci-home/.kube"
 
       - name: Checkout approved current master commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
@@ -208,7 +208,7 @@ jobs:
             oci-production-deploy.yml "$DEPLOY_RUN_ID" workflow_dispatch "$DEPLOY_SOURCE_SHA"
 
       - name: Download exact build provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
           path: artifacts/build
@@ -217,7 +217,7 @@ jobs:
           run-id: ${{ inputs.build_run_id }}
 
       - name: Download exact deployment provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-deploy-provenance-${{ inputs.deploy_run_id }}-1
           path: artifacts/deploy
@@ -226,7 +226,7 @@ jobs:
           run-id: ${{ inputs.deploy_run_id }}
 
       - name: Download exact infrastructure provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
           path: artifacts/infrastructure
@@ -671,7 +671,7 @@ jobs:
       - name: Upload sanitized migration phase and provenance
         id: phase_artifact
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-migration-phase-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -870,7 +870,7 @@ jobs:
       name: oci-migration
     steps:
       - name: Checkout exact migrated commit without credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 1
@@ -956,7 +956,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/azure-finalize" "$RUNNER_TEMP/oci-finalize"
 
       - name: Checkout exact current master
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
@@ -990,7 +990,7 @@ jobs:
           esac
 
       - name: Download exact deployment provenance for finalization
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-deploy-provenance-${{ inputs.deploy_run_id }}-1
           path: artifacts/deploy
@@ -999,7 +999,7 @@ jobs:
           run-id: ${{ inputs.deploy_run_id }}
 
       - name: Download exact infrastructure provenance for finalization
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
           path: artifacts/infrastructure
@@ -1283,7 +1283,7 @@ jobs:
       - name: Upload sanitized final phase and Azure stop evidence
         id: final_artifact
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-migration-final-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1491,7 +1491,7 @@ jobs:
       AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256: ${{ vars.AZURE_EXPECTED_CLUSTER_RESOURCE_ID_SHA256 }}
     steps:
       - name: Checkout exact committed migration without credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 1
@@ -1512,7 +1512,7 @@ jobs:
           [[ "$OCI_DIAGNOSTIC_URL" =~ ^https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.nip\.io$ ]]
 
       - name: Download exact completed phase and Azure stop evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-migration-final-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-migration-final
@@ -1666,7 +1666,7 @@ jobs:
 
       - name: Upload successful migration retirement provenance
         if: steps.success_summary.outcome == 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-migration-success-provenance-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-migration-success/migration-summary.env

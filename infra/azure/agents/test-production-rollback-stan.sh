@@ -1303,8 +1303,8 @@ fi
 bash -n "$CAPTURE_SCRIPT" "$SCRIPT"
 
 action_lines=(
-  'uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2'
-  'uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2'
+  'uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0'
+  'uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0'
   'uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0'
   'uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3'
 )

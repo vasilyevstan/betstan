@@ -823,7 +823,7 @@ assert_fail "wrong Common publisher environment" \
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
-  's#actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020#actions/setup-node@v4#' \
+  's#actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444#actions/setup-node@v4#' \
   "$tmp_dir/common-package-publish.yml"
 rm "$tmp_dir/common-package-publish.yml.bak"
 assert_fail "mutable Common publisher action" \
@@ -1338,7 +1338,7 @@ assert_fail "production rollback with write permissions" \
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
-  's#actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683#actions/checkout@v4#' \
+  's#actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09#actions/checkout@v4#' \
   "$tmp_dir/production-rollback.yml"
 rm "$tmp_dir/production-rollback.yml.bak"
 assert_fail "floating production rollback action ref" \
@@ -1371,7 +1371,7 @@ assert_fail "automatic OCI rollback" "oci-production-rollback must be workflow_d
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
-  's#actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093#actions/download-artifact@v4#' \
+  's#actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131#actions/download-artifact@v4#' \
   "$tmp_dir/oci-production-rollback.yml"
 rm "$tmp_dir/oci-production-rollback.yml.bak"
 assert_fail "floating OCI rollback action ref" \
@@ -1689,7 +1689,7 @@ assert_fail \
 reset_fixtures
 write_complete_oci_set
 sed -i.bak \
-  's#actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020#actions/setup-node@v4#' \
+  's#actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444#actions/setup-node@v4#' \
   "$tmp_dir/oci-live-betting-activate.yml"
 rm "$tmp_dir/oci-live-betting-activate.yml.bak"
 assert_fail \
@@ -1925,7 +1925,7 @@ assert_pr_fail "PR automatic production rollback" \
 
 prepare_pr_remote
 sed -i.bak \
-  's#actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093#actions/download-artifact@v4#' \
+  's#actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131#actions/download-artifact@v4#' \
   "$pr_remote_root/.github/workflows/oci-production-rollback.yml"
 rm "$pr_remote_root/.github/workflows/oci-production-rollback.yml.bak"
 assert_pr_fail "PR floating OCI rollback action ref" \
