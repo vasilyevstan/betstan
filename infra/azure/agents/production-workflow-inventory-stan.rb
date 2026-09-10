@@ -46,39 +46,39 @@ PROTECTED_ENVIRONMENTS = {
 }.freeze
 ROLLBACK_ACTION_PINS = {
   "common-package-publish" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02"
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/setup-node" => "a0853c24544627f65ddf259abe73b1d18a591444",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
   },
   "production-rollback" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "azure/login" => "a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
     "azure/aks-set-context" => "c7eb093e5a5d47caa333f64974d5fd1cd4bf069d"
   },
   "oci-production-rollback" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact" => "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
   },
   "oci-live-data-rollout" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact" => "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
   },
   "oci-live-betting-activate" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
-    "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact" => "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/setup-node" => "a0853c24544627f65ddf259abe73b1d18a591444",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
   },
   "oci-live-betting-disable" => {
-    "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/download-artifact" => "d3f86a106a0bac45b974a628896c90dbdf5c8093",
-    "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/download-artifact" => "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "oracle-actions/configure-kubectl-oke" => "77a733d79446dabe7bf0e58eb56197d33ce4dc58"
   }
 }.freeze
