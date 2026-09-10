@@ -224,12 +224,15 @@ schema, index, rollback, or recovery operation.
 
 Deployment proceeds in dependency-safe order:
 
-1. roll out services sequentially in the checked-in deployment order;
-2. verify each live workload is ready and running its expected digest before
+1. make shared data services ready, then roll out Telemetry before
+   instrumented application traffic;
+2. roll out the remaining services sequentially in the checked-in deployment
+   order;
+3. verify each live workload is ready and running its expected digest before
    continuing;
-3. deploy Gamemaster last so event production starts only after its consumers
+4. deploy Gamemaster last so event production starts only after its consumers
    are healthy;
-4. validate routes, TLS, response shapes, SSE, storage, queues, consumers, and
+5. validate routes, TLS, response shapes, SSE, storage, queues, consumers, and
    restart state.
 
 A successful deployment command is not the release conclusion. Protected and
@@ -279,6 +282,11 @@ A rollback requires:
 - a defined write-fence or drain when the old version cannot process new
   pending work;
 - post-rollback digest and application validation.
+
+Historical pre-Telemetry rollback restores only the nine historical
+application images. When the current observer existed before that operation,
+recovery retains and validates its exact image, queue consumer, and public
+summary rather than inventing a historical Telemetry image.
 
 If a rollback fails after partial mutation, recovery restores the exact
 pre-run images and keeps writes fenced until health is proven. Data restore is

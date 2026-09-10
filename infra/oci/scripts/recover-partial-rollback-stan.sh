@@ -24,6 +24,7 @@ OCI_INFRASTRUCTURE_PROVENANCE_SHA256="${OCI_INFRASTRUCTURE_PROVENANCE_SHA256:-}"
 ROLLBACK_READINESS_SCRIPT="${ROLLBACK_READINESS_SCRIPT:-$SCRIPT_DIR/rollback-readiness-stan.sh}"
 SERVICE_OPS_SCRIPT="${SERVICE_OPS_SCRIPT:-$OCI_ROOT_DIR/infra/oci/agents/service-ops-stan.sh}"
 ROLLBACK_MUTATION_FENCE_SCRIPT="${ROLLBACK_MUTATION_FENCE_SCRIPT:-$SCRIPT_DIR/live-data-maintenance-stan.sh}"
+TELEMETRY_RECOVERY_SCRIPT="${TELEMETRY_RECOVERY_SCRIPT:-$SCRIPT_DIR/verify-telemetry-recovery-state-stan.sh}"
 CONFIRMATION="${CONFIRMATION:-}"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
 
@@ -329,6 +330,7 @@ required = {
     "partial-state.tsv",
     "rollout-order.tsv",
     "baseline/baseline-provenance.env",
+    "telemetry-pre-run.env",
 }
 
 if not root.is_dir() or root.is_symlink():
@@ -458,17 +460,22 @@ chmod 600 "$OUTPUT_DIR/recovery-plan.tsv"
 python3 - \
   "$PARTIAL_RECOVERY_BUILD_DIR/images.tsv" \
   "$PARTIAL_ROLLBACK_SOURCE_DIR/pre-rollback-state.tsv" \
-  "$WORK_DIR/images.tsv" <<'PY'
+  "$PARTIAL_ROLLBACK_SOURCE_DIR/telemetry-pre-run.env" \
+  "$WORK_DIR/images.tsv" \
+  "$OUTPUT_DIR/telemetry-recovery.env" <<'PY'
 import csv
 import re
 import sys
 from pathlib import Path
 
-build_path, pre_path, output_path = map(Path, sys.argv[1:4])
-services = {
+build_path, pre_path, telemetry_path, output_path, telemetry_output_path = map(
+    Path, sys.argv[1:6]
+)
+historical_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+current_services = historical_services | {"telemetry"}
 repository = "ghcr.io/vasilyevstan/betstan-images"
 digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -487,7 +494,7 @@ pre_rows = rows(pre_path, 5)
 build = {}
 for row in build_rows:
     service, row_repository, image_ref, manifest_digest, platform_digest = row
-    if service in build or service not in services:
+    if service in build or service not in current_services:
         raise SystemExit("partial recovery build service set is invalid")
     if (
         row_repository != repository
@@ -497,13 +504,13 @@ for row in build_rows:
     ):
         raise SystemExit(f"{service}: partial recovery build image is invalid")
     build[service] = row
-if set(build) != services:
-    raise SystemExit("partial recovery build does not contain exactly nine services")
+if set(build) != current_services:
+    raise SystemExit("partial recovery build does not contain exactly ten services")
 
 pre = {}
 for row in pre_rows:
     service, deployment, image_ref, _revision, readiness = row
-    if service in pre or service not in services:
+    if service in pre or service not in historical_services:
         raise SystemExit("partial recovery pre-run service set is invalid")
     if (
         deployment != f"gaming-{service}-depl"
@@ -512,12 +519,33 @@ for row in pre_rows:
     ):
         raise SystemExit(f"{service}: pre-run image does not match the selected build")
     pre[service] = row
-if set(pre) != services:
+if set(pre) != historical_services:
     raise SystemExit("partial recovery pre-run state does not contain nine services")
+
+telemetry = {}
+for raw in telemetry_path.read_text(encoding="utf-8").splitlines():
+    if not raw or "=" not in raw:
+        raise SystemExit("Telemetry pre-run evidence is malformed")
+    key, value = raw.split("=", 1)
+    if key in telemetry:
+        raise SystemExit("Telemetry pre-run evidence contains duplicate keys")
+    telemetry[key] = value
+if set(telemetry) != {"mode", "image", "database_initialized", "queue_present"}:
+    raise SystemExit("Telemetry pre-run evidence key set is invalid")
+if (
+    telemetry["mode"] != "retained"
+    or telemetry["image"] != build["telemetry"][2]
+    or telemetry["database_initialized"] not in {"true", "false"}
+    or telemetry["queue_present"] != "true"
+):
+    raise SystemExit("Telemetry pre-run evidence does not match the selected build")
+telemetry_output_path.write_text(
+    telemetry_path.read_text(encoding="utf-8"), encoding="utf-8"
+)
 
 with output_path.open("w", encoding="utf-8", newline="") as handle:
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-    for service in sorted(build):
+    for service in sorted(historical_services):
         writer.writerow(build[service])
 PY
 
@@ -579,6 +607,21 @@ capture_runtime_state "$OUTPUT_DIR/final-state.tsv"
 validate_final_state "$OUTPUT_DIR/final-state.tsv" ||
   oci_die "partial rollback recovery did not restore the exact pre-run state"
 
+telemetry_image="$(awk -F '=' '$1 == "image" {print $2}' \
+  "$OUTPUT_DIR/telemetry-recovery.env")"
+telemetry_database_initialized="$(awk -F '=' \
+  '$1 == "database_initialized" {print $2}' \
+  "$OUTPUT_DIR/telemetry-recovery.env")"
+MODE=retained \
+EXPECTED_IMAGE="$telemetry_image" \
+EXPECTED_DATABASE_INITIALIZED="$telemetry_database_initialized" \
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
+OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
+OUTPUT_DIR="$OUTPUT_DIR/telemetry-validation" \
+  "$TELEMETRY_RECOVERY_SCRIPT" >"$OUTPUT_DIR/telemetry-validation.txt" 2>&1 ||
+  oci_die "retained Telemetry state failed partial rollback recovery validation"
+
 if ! TARGET_SHA="$TARGET_SHA" \
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
@@ -607,6 +650,7 @@ mode=abort-partial-rollback
 target_sha=$TARGET_SHA
 source_rollback_run_id=$PARTIAL_ROLLBACK_RUN_ID
 recovered_services=$recovered_services
+telemetry_state=retained
 rollback_http_mutation_fence=$PARTIAL_RECOVERY_WRITE_FENCE_STATUS
 database_restore=disabled
 EOF
@@ -646,6 +690,7 @@ recovery_summary_sha256=$(sha256_file "$OUTPUT_DIR/partial-recovery-summary.env"
 rollback_readiness_summary_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/summary.env")
 rollback_readiness_workload_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/workload-state.tsv")
 rollback_readiness_failures_sha256=$(sha256_file "$OUTPUT_DIR/rollback-readiness/failures.txt")
+telemetry_state_sha256=$(sha256_file "$OUTPUT_DIR/telemetry-recovery.env")
 database_restore=disabled
 status=PASS
 EOF
@@ -660,6 +705,7 @@ authority_files=(
   rollback-readiness/summary.env
   rollback-readiness/workload-state.tsv
   rollback-readiness/failures.txt
+  telemetry-recovery.env
 )
 : >"$OUTPUT_DIR/partial-recovery-SHA256SUMS"
 for file in "${authority_files[@]}"; do

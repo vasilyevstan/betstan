@@ -50,6 +50,14 @@ jobs:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
 
+      - name: Reject Telemetry-era sources on the dormant Azure path
+        run: |
+          set -euo pipefail
+          if [ -e telemetry/package.json ]; then
+            echo "Telemetry-era releases use the active OCI deployment path; dormant Azure deployment is unavailable." >&2
+            exit 1
+          fi
+
       - name: Validate exact SHA and trusted build run
         env:
           GH_TOKEN: ${{ github.token }}

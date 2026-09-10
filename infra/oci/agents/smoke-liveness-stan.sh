@@ -138,6 +138,7 @@ require_telemetry_summary() {
   python3 - "$body" <<'PY' ||
 import datetime
 import json
+import re
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -168,15 +169,21 @@ if not isinstance(payload, dict) or set(payload) != {
 }:
     raise SystemExit(1)
 generated_at = payload["generatedAt"]
-try:
-    generated = datetime.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-except (AttributeError, ValueError):
-    raise SystemExit(1)
-if (
-    not isinstance(generated_at, str)
-    or not generated_at.endswith("Z")
-    or generated.tzinfo != datetime.timezone.utc
+if not isinstance(generated_at, str) or not re.fullmatch(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+    generated_at,
 ):
+    raise SystemExit(1)
+try:
+    generated = datetime.datetime.strptime(
+        generated_at, "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=datetime.timezone.utc)
+except ValueError:
+    raise SystemExit(1)
+canonical_generated_at = (
+    generated.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+)
+if canonical_generated_at != generated_at:
     raise SystemExit(1)
 dates = payload["dates"]
 if not isinstance(dates, list) or len(dates) != 14:
@@ -219,7 +226,7 @@ for expected, row in zip(services, health):
         not isinstance(row, dict)
         or set(row) != {"service", "status"}
         or row["service"] != expected
-        or row["status"] not in {"green", "yellow", "red"}
+        or row["status"] != "green"
     ):
         raise SystemExit(1)
 PY

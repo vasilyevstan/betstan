@@ -57,6 +57,13 @@ The separate administrator role is retained for narrow production-acceptance
 access to explicitly scoped offline synthetic events. That path is
 server-verified against current Auth state.
 
+## Public Telemetry boundary
+
+Telemetry exposes only aggregate operational counts and coarse service states.
+It does not expose user records or identifiers, private endpoints, logs, or
+internal errors. These observations support presentation and operations; they
+are not authority for accounts, bets, moderation, or settlement.
+
 ## Betting integrity
 
 - Live and pre-match rows cannot be mixed in one submitted slip.

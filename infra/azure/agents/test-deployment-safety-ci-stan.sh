@@ -4235,6 +4235,7 @@ expected_azure_order = [
     "gamemaster",
 ]
 expected_oci_order = [
+    "telemetry",
     "auth",
     "bet",
     "event",
@@ -4340,6 +4341,29 @@ def mutate_once(text: str, needle: str, replacement: str) -> str:
 
 if parse_rollouts(azure_workflow) != expected_azure_order:
     fail("Azure deploy workflow rollout order changed")
+guard_marker = "- name: Reject Telemetry-era sources on the dormant Azure path"
+provider_markers = (
+    "- name: Azure login",
+    "az aks get-credentials",
+    "baseline-capture-stan.sh",
+    "shared-mongo-operation-lock-stan.sh",
+    "kubectl ",
+)
+if guard_marker not in azure_workflow:
+    fail("Azure deploy workflow is missing the Telemetry-era fail-closed guard")
+guard_index = azure_workflow.index(guard_marker)
+if any(
+    marker in azure_workflow and azure_workflow.index(marker) < guard_index
+    for marker in provider_markers
+):
+    fail("Azure Telemetry-era guard does not precede every provider or mutation boundary")
+for fragment in (
+    '[ -e telemetry/package.json ]',
+    "Telemetry-era releases use the active OCI deployment path",
+    "exit 1",
+):
+    if fragment not in azure_workflow[guard_index:]:
+        fail(f"Azure Telemetry-era guard is missing {fragment!r}")
 if parse_services(oci_deploy_script) != expected_oci_order:
     fail("OCI deploy script rollout order changed")
 
@@ -4447,3 +4471,25 @@ for required_test in (
 print(f"production_build_action_pins=PASS cases={len(negative_cases) + 1}")
 print("deployment_safety_ci_tests=PASS")
 PY
+
+azure_telemetry_guard="$(
+  awk '
+    /- name: Reject Telemetry-era sources on the dormant Azure path/ {found=1; next}
+    found && /^[[:space:]]+run: \|/ {in_run=1; next}
+    in_run && /^[[:space:]]+- name:/ {exit}
+    in_run {sub(/^          /, ""); print}
+  ' "$AZURE_WORKFLOW"
+)"
+if (
+  cd "$ROOT_DIR"
+  bash -c "$azure_telemetry_guard"
+) >"$test_output" 2>&1; then
+  echo "Telemetry-era dormant Azure source guard unexpectedly passed" >&2
+  exit 1
+fi
+grep -Fq \
+  "Telemetry-era releases use the active OCI deployment path; dormant Azure deployment is unavailable." \
+  "$test_output" || {
+    echo "Telemetry-era dormant Azure source guard emitted the wrong diagnostic" >&2
+    exit 1
+  }

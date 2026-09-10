@@ -737,6 +737,7 @@ PY
       shape="$(python3 - "$body_file" <<'PY'
 import datetime
 import json
+import re
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -754,11 +755,21 @@ if not isinstance(payload, dict) or set(payload) != {
 }:
     raise SystemExit(1)
 generated_at = payload["generatedAt"]
-try:
-    generated = datetime.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-except (AttributeError, ValueError):
+if not isinstance(generated_at, str) or not re.fullmatch(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+    generated_at,
+):
     raise SystemExit(1)
-if not generated_at.endswith("Z") or generated.tzinfo != datetime.timezone.utc:
+try:
+    generated = datetime.datetime.strptime(
+        generated_at, "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=datetime.timezone.utc)
+except ValueError:
+    raise SystemExit(1)
+canonical_generated_at = (
+    generated.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+)
+if canonical_generated_at != generated_at:
     raise SystemExit(1)
 dates = payload["dates"]
 if not isinstance(dates, list) or len(dates) != 14:
@@ -801,7 +812,7 @@ for expected, row in zip(services, health):
         not isinstance(row, dict)
         or set(row) != {"service", "status"}
         or row["service"] != expected
-        or row["status"] not in {"green", "yellow", "red"}
+        or row["status"] != "green"
     ):
         raise SystemExit(1)
 print("telemetry-summary")
@@ -974,6 +985,77 @@ print(service, image, doc.get('metadata', {}).get('annotations', {}).get('deploy
 PY
   done
   mv "$temp_state_file" "$state_file"
+}
+
+capture_telemetry_pre_run_state() {
+  local output_file="$1"
+  local deployment_json="$WORK_DIR/telemetry-pre-run-deployment.json"
+  local queue_output queue_rows mongo_pod database_initialized
+  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    -o json >"$deployment_json"
+  queue_output="$(
+    kubectl exec -n "$OCI_K8S_NAMESPACE" deployment/gaming-rabbitmq-depl -- \
+      rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers
+  )"
+  queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_output")" ||
+    oci_die "RabbitMQ queue output is malformed while binding Telemetry"
+  [[ "$(awk '$1 == "telemetry:events:v1" && $4 > 0 {count++} END {print count+0}' \
+    <<<"$queue_rows")" == "1" ]] ||
+    oci_die "Telemetry pre-run queue is missing or has no consumer"
+  mongo_pod="$(
+    kubectl get pod -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+      -o jsonpath='{.items[0].metadata.name}'
+  )"
+  [[ -n "$mongo_pod" ]] || oci_die "Mongo pod is missing while binding Telemetry"
+  database_initialized="$(
+    kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
+      mongosh --quiet --eval \
+      'print(db.adminCommand({listDatabases:1,nameOnly:true}).databases.some(d=>d.name==="gaming_telemetry"))'
+  )"
+  [[ "$database_initialized" == "true" || "$database_initialized" == "false" ]] ||
+    oci_die "Telemetry database presence evidence is invalid"
+  python3 - "$deployment_json" "$database_initialized" "$output_file" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+database_initialized = sys.argv[2]
+output = Path(sys.argv[3])
+containers = [
+    item
+    for item in document.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    if item.get("name") == "gaming-telemetry"
+]
+desired = document.get("spec", {}).get("replicas", 0)
+status = document.get("status", {})
+if (
+    len(containers) != 1
+    or not re.fullmatch(
+        r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}",
+        containers[0].get("image", ""),
+    )
+    or desired < 1
+    or any(
+        status.get(field, 0) != desired
+        for field in ("updatedReplicas", "readyReplicas", "availableReplicas")
+    )
+):
+    raise SystemExit("Telemetry pre-run deployment is not exact and ready")
+output.write_text(
+    "\n".join(
+        [
+            "mode=retained",
+            f"image={containers[0]['image']}",
+            f"database_initialized={database_initialized}",
+            "queue_present=true",
+            "",
+        ]
+    ),
+    encoding="utf-8",
+)
+PY
 }
 
 record_partial_failure() {
@@ -1786,6 +1868,7 @@ max_post_rollback_queue_unack_growth=$MAX_POST_ROLLBACK_QUEUE_UNACK_GROWTH
 EOF2
 CURRENT_STEP_LABEL=precheck
 capture_pre_rollback_state "$OUTPUT_DIR/pre-rollback-state.tsv" "$OUTPUT_DIR/current-images.tsv"
+capture_telemetry_pre_run_state "$OUTPUT_DIR/telemetry-pre-run.env"
 
 ROLLBACK_READINESS_OUTPUT_DIR="$OUTPUT_DIR/rollback-readiness"
 [[ -x "$ROLLBACK_READINESS_SCRIPT" ]] || oci_die "rollback readiness script is not executable: $ROLLBACK_READINESS_SCRIPT"
@@ -1853,8 +1936,7 @@ fi
 
 CURRENT_STEP_LABEL=post-apply
 telemetry_original_ref="$(
-  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}'
+  awk -F '=' '$1 == "image" {print $2}' "$OUTPUT_DIR/telemetry-pre-run.env"
 )"
 [[ "$telemetry_original_ref" =~ ^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$ ]] ||
   oci_die "current Telemetry deployment is missing immutable GHCR provenance"

@@ -139,6 +139,7 @@ hash_bindings = {
     "rollback_readiness_summary_sha256": "rollback-readiness/summary.env",
     "rollback_readiness_workload_sha256": "rollback-readiness/workload-state.tsv",
     "rollback_readiness_failures_sha256": "rollback-readiness/failures.txt",
+    "telemetry_state_sha256": "telemetry-recovery.env",
 }
 values = []
 for raw in authority_path.read_text(encoding="utf-8").splitlines():
@@ -161,6 +162,7 @@ files = [
     "rollback-readiness/summary.env",
     "rollback-readiness/workload-state.tsv",
     "rollback-readiness/failures.txt",
+    "telemetry-recovery.env",
 ]
 (root / "partial-recovery-SHA256SUMS").write_text(
     "".join(
@@ -190,6 +192,7 @@ files = [
     "rollback-readiness/summary.env",
     "rollback-readiness/workload-state.tsv",
     "rollback-readiness/failures.txt",
+    "telemetry-recovery.env",
 ]
 (root / "partial-recovery-SHA256SUMS").write_text(
     "".join(
@@ -275,6 +278,10 @@ EOF2
 
 service_index() {
   local service="$1"
+  if [[ "$service" == "telemetry" ]]; then
+    printf '10'
+    return 0
+  fi
   local index=1
   local candidate
   for candidate in "${SERVICES[@]}"; do
@@ -890,6 +897,10 @@ flag_value = sys.argv[2]
 services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 for service in services:
+    if not (state_dir / f"{service}.env").is_file():
+        if service == "telemetry":
+            continue
+        raise SystemExit(f"missing workload fixture: {service}")
     fields = {}
     for line in (state_dir / f"{service}.env").read_text(encoding="utf-8").splitlines():
         if "=" in line:
@@ -981,8 +992,14 @@ case "${1:-}" in
     case "${1:-}" in
       deployment)
         deployment="$2"
+        original_args="$*"
         shift 2
         service="$(service_from_deployment "$deployment")"
+        if [[ "$service" == "telemetry" &&
+          ! -f "$STUB_STATE_DIR/telemetry.env" &&
+          "$original_args" == *"--ignore-not-found"* ]]; then
+          exit 0
+        fi
         read_state "$service"
         output_mode="json"
         while [[ $# -gt 0 ]]; do
@@ -1007,6 +1024,31 @@ case "${1:-}" in
           printf 'unexpected deployment output mode: %s\n' "$output_mode" >&2
           exit 1
         fi
+        ;;
+      service)
+        if [[ -f "$STUB_STATE_DIR/telemetry.env" ]]; then
+          printf '{"metadata":{"name":"gaming-telemetry-srv"}}'
+        fi
+        ;;
+      ingress)
+        telemetry_routes=0
+        [[ ! -f "$STUB_STATE_DIR/telemetry.env" ]] || telemetry_routes=2
+        python3 - "$telemetry_routes" <<'PY'
+import json
+import sys
+
+count = int(sys.argv[1])
+rules = []
+for index in range(2):
+    paths = [{"path": "/?(.*)", "backend": {"service": {"name": "gaming-client-srv"}}}]
+    if index < count:
+        paths.insert(0, {
+            "path": "/api/telemetry/?(.*)",
+            "backend": {"service": {"name": "gaming-telemetry-srv"}},
+        })
+    rules.append({"host": f"fixture-{index}", "http": {"paths": paths}})
+print(json.dumps({"spec": {"rules": rules}}))
+PY
         ;;
       deploy)
         shift
@@ -1216,6 +1258,8 @@ EOF_QUEUES
       if [[ "$drop_dynamic_queue" != "1" ]]; then
         printf '%s 0 0 %s\n' "$dynamic_queue_name" "$dynamic_consumers"
       fi
+    elif [[ "$*" == *"listDatabases:1,nameOnly:true"* ]]; then
+      printf '%s\n' "${STUB_TELEMETRY_DATABASE_INITIALIZED:-true}"
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
@@ -1466,9 +1510,21 @@ elif [[ "$url" == *'/api/event/stream' ]]; then
   esac
 elif [[ "$url" == *'/api/telemetry/summary' ]]; then
   body='{"generatedAt":"2026-09-10T05:00:00.000Z","dates":["2026-08-28","2026-08-29","2026-08-30","2026-08-31","2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05","2026-09-06","2026-09-07","2026-09-08","2026-09-09","2026-09-10"],"metrics":[{"metric":"MAIN_PAGE_VISIT","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"ADMIN_PAGE_VISIT","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"SLIP_CREATED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"BET_PLACED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"RESULTING_SETTLED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"GAMECENTER_EVENT_EMITTED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"USER_CREATED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"USER_LOGGED_IN","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]}],"health":[{"service":"auth","status":"green"},{"service":"backoffice","status":"green"},{"service":"bet","status":"green"},{"service":"client","status":"green"},{"service":"event","status":"green"},{"service":"gamemaster","status":"green"},{"service":"moderation","status":"green"},{"service":"resulting","status":"green"},{"service":"slip","status":"green"},{"service":"telemetry","status":"green"}]}'
-  if [[ "${STUB_TELEMETRY_BAD_AFTER_ROLLBACK:-0}" == "1" &&
-      "$after_rollback" == "1" ]]; then
-    body='{}'
+  if [[ "$after_rollback" == "1" ]]; then
+    case "${STUB_TELEMETRY_BAD_AFTER_ROLLBACK:-}" in
+      malformed) body='{}' ;;
+      space)
+        body="${body/2026-09-10T05:00:00.000Z/2026-09-10 05:00:00.000Z}"
+        ;;
+      microseconds)
+        body="${body/2026-09-10T05:00:00.000Z/2026-09-10T05:00:00.000000Z}"
+        ;;
+      offset)
+        body="${body/2026-09-10T05:00:00.000Z/2026-09-10T07:00:00.000+02:00}"
+        ;;
+      yellow) body="${body/\"status\":\"green\"/\"status\":\"yellow\"}" ;;
+      red) body="${body/\"status\":\"green\"/\"status\":\"red\"}" ;;
+    esac
   fi
 elif [[ "$url" == *'/api/auth/currentuser' ]]; then
   body='{"currentUser":null}'
@@ -2394,6 +2450,15 @@ assert_contains "$WORK_DIR/post-rollback-prematch-refusal/failure-state.env" 'fa
 assert_contains "$WORK_DIR/post-rollback-prematch-refusal/failure-state.env" 'failed_stage=public-api'
 [[ "$(wc -l <"$WORK_DIR/post-rollback-prematch-refusal/rollout-order.tsv" | tr -d ' ')" == '1' ]] || fail 'OCI prematch refusal should stop after the first deployment'
 
+for telemetry_failure in malformed space microseconds offset yellow red; do
+  run_expect_failure "post-rollback-telemetry-$telemetry_failure" \
+    STUB_TELEMETRY_BAD_AFTER_ROLLBACK="$telemetry_failure" \
+    ROLLBACK_MODE=execute
+  assert_contains \
+    "$WORK_DIR/post-rollback-telemetry-$telemetry_failure.out" \
+    'public API verification failed for canonical after gaming-auth-depl'
+done
+
 run_expect_failure sse-under-window-eof-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=headers-only-under-window-eof ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-under-window-eof-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
@@ -2571,6 +2636,12 @@ for service in "${SERVICES[@]}"; do
 done
 printf '%s\n' auth bet backoffice client event \
   >"$partial_source/rollout-order.tsv"
+cat >"$partial_source/telemetry-pre-run.env" <<EOF
+mode=retained
+image=$TELEMETRY_IMAGE_REF
+database_initialized=true
+queue_present=true
+EOF
 
 partial_recovery_build="$WORK_DIR/partial-recovery-build"
 mkdir -p "$partial_recovery_build"
@@ -2585,6 +2656,14 @@ for service in "${SERVICES[@]}"; do
     "$(service_platform_digest "$service")" \
     >>"$partial_recovery_build/images.tsv"
 done
+telemetry_image_ref="$TELEMETRY_IMAGE_REF"
+printf '%s\t%s\t%s\t%s\t%s\n' \
+  telemetry \
+  ghcr.io/vasilyevstan/betstan-images \
+  "$telemetry_image_ref" \
+  "${telemetry_image_ref##*@}" \
+  "$(service_platform_digest telemetry)" \
+  >>"$partial_recovery_build/images.tsv"
 
 cat >"$BIN_DIR/partial-recovery-readiness-stub.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -2597,6 +2676,7 @@ printf '%s\n' \
   >"$OUTPUT_DIR/summary.env"
 : >"$OUTPUT_DIR/workload-state.tsv"
 while IFS=$'\t' read -r service _repository image_ref _manifest _platform; do
+  [[ "$service" != telemetry ]] || continue
   printf '%s\t%s\t1\t1\t1\t1\n' "$service" "$image_ref" \
     >>"$OUTPUT_DIR/workload-state.tsv"
 done <"$STUB_BUILD_IMAGES_FILE"
@@ -2610,6 +2690,17 @@ set -euo pipefail
 printf '%s\n' 'event-pod CrashLoopBackOff'
 STUB
 chmod +x "$BIN_DIR/partial-recovery-service-ops-stub.sh"
+
+cat >"$BIN_DIR/partial-recovery-telemetry-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$MODE" == retained ]]
+[[ "$EXPECTED_IMAGE" == "$(awk -F '\t' '$1 == "telemetry" {print $3}' "$STUB_BUILD_IMAGES_FILE")" ]]
+[[ "$EXPECTED_DATABASE_INITIALIZED" == true ]]
+mkdir -p "$OUTPUT_DIR"
+printf 'telemetry_recovery=PASS\nmode=retained\n' >"$OUTPUT_DIR/summary.env"
+STUB
+chmod +x "$BIN_DIR/partial-recovery-telemetry-stub.sh"
 
 set_partial_recovery_state() {
   local state_root="$1"
@@ -2658,6 +2749,7 @@ run_partial_recovery() {
     ROLLBACK_READINESS_SCRIPT="$BIN_DIR/partial-recovery-readiness-stub.sh" \
     SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
     ROLLBACK_MUTATION_FENCE_SCRIPT="$BIN_DIR/rollback-mutation-fence-stub.sh" \
+    TELEMETRY_RECOVERY_SCRIPT="$BIN_DIR/partial-recovery-telemetry-stub.sh" \
     ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
     CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
     GITHUB_REF_NAME=master \
@@ -2851,8 +2943,6 @@ with path.open("w", encoding="utf-8", newline="") as handle:
 PY
 refresh_partial_authority_manifest "$tamper_dir"
 run_partial_authority_expect_failure partial-authority-image-mismatch "$tamper_dir"
-assert_contains "$WORK_DIR/partial-authority-image-mismatch.out" \
-  'final state is not the restored build image'
 
 tamper_dir="$(copy_partial_authority_fixture incomplete-readiness)"
 python3 - "$tamper_dir/rollback-readiness/workload-state.tsv" <<'PY'

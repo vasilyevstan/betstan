@@ -290,6 +290,46 @@ if PATH="$WORK_DIR/bin:$PATH" \
   fail "GHCR package accepted a partial generation"
 fi
 
+jq --arg obsolete "$OBSOLETE_SHA" '
+  . + [
+    .[]
+    | select(any(.metadata.container.tags[]?; endswith("'"$CURRENT_SHA"'")))
+    | .id += 1000
+    | .metadata.container.tags |= map(sub("'"$CURRENT_SHA"'$"; $obsolete))
+  ]
+  | del(.[] | select(.metadata.container.tags[0] == ("arm64-slip-" + $obsolete)))
+' "$WORK_DIR/versions.json" >"$WORK_DIR/unprotected-incomplete.json"
+if PATH="$WORK_DIR/bin:$PATH" \
+  GHCR_PACKAGE_METADATA_FILE="$WORK_DIR/metadata.json" \
+  GHCR_VERSIONS_FILE="$WORK_DIR/unprotected-incomplete.json" \
+  CURRENT_SOURCE_SHA="$CURRENT_SHA" DEPLOYED_SOURCE_SHA="$DEPLOYED_SHA" \
+  LAST_KNOWN_GOOD_SOURCE_SHA="$LKG_SHA" PRUNE_MODE=validate \
+  OUTPUT_DIR="$OUTPUT_ROOT/package-unprotected-incomplete" \
+  "$OCI_DIR/scripts/manage-ghcr-package.sh" >/dev/null 2>&1; then
+  fail "GHCR validation accepted an unprotected incomplete generation"
+fi
+
+jq --arg malformed "$OBSOLETE_SHA" '
+  . + [
+    .[]
+    | select(any(.metadata.container.tags[]?; endswith("'"$CURRENT_SHA"'")))
+    | select(
+        (.metadata.container.tags[0] | startswith("arm64-slip-")) | not
+      )
+    | .id += 2000
+    | .metadata.container.tags |= map(sub("'"$CURRENT_SHA"'$"; $malformed))
+  ]
+' "$WORK_DIR/versions.json" >"$WORK_DIR/nine-with-telemetry.json"
+if PATH="$WORK_DIR/bin:$PATH" \
+  GHCR_PACKAGE_METADATA_FILE="$WORK_DIR/metadata.json" \
+  GHCR_VERSIONS_FILE="$WORK_DIR/nine-with-telemetry.json" \
+  CURRENT_SOURCE_SHA="$CURRENT_SHA" DEPLOYED_SOURCE_SHA="$DEPLOYED_SHA" \
+  LAST_KNOWN_GOOD_SOURCE_SHA="$LKG_SHA" PRUNE_MODE=validate \
+  OUTPUT_DIR="$OUTPUT_ROOT/package-nine-with-telemetry" \
+  "$OCI_DIR/scripts/manage-ghcr-package.sh" >/dev/null 2>&1; then
+  fail "GHCR validation accepted nine rows with Telemetry but without slip"
+fi
+
 jq --arg current "$CURRENT_SHA" --arg obsolete "$OBSOLETE_SHA" '
   map(
     if any(.metadata.container.tags[]?; endswith($current)) then

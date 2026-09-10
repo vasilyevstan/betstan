@@ -97,6 +97,26 @@ new_case() {
       printf '1\n' >"$STATE_DIR/replicas-$service"
     fi
   done
+  printf '%s\n' "$(image_for deployed telemetry)" >"$STATE_DIR/image-telemetry"
+  printf '1\n' >"$STATE_DIR/replicas-telemetry"
+  printf '1\n' >"$STATE_DIR/ready-telemetry"
+  : >"$STATE_DIR/service-telemetry"
+  printf '2\n' >"$STATE_DIR/telemetry-routes"
+  cat >"$BASELINE_DIR/telemetry-pre-run.env" <<EOF
+mode=retained
+image=$(image_for target telemetry)
+database_initialized=true
+queue_present=true
+EOF
+  printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
+    telemetry "$(image_for deployed telemetry)" "$(digest_for deployed telemetry)" \
+    >>"$BUILD_DIR/images.tsv"
+  (
+    cd "$BASELINE_DIR"
+    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
+      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
+    done
+  ) >"$BASELINE_DIR/SHA256SUMS"
 
   write_fakes
 }
@@ -113,17 +133,41 @@ case "$1" in
     case "$2" in
       deployment)
         depl="$3"; svc="$(svc_from_depl "$depl")"
+        if [[ "$svc" == "telemetry" && ! -f "$STATE_DIR/image-telemetry" ]]; then
+          exit 0
+        fi
         image="$(cat "$STATE_DIR/image-$svc")"
         replicas="$(cat "$STATE_DIR/replicas-$svc")"
         if [[ "$*" == *"readyReplicas"* ]]; then printf '%s' "$replicas"; exit 0; fi
         if [[ "$*" == *"-o json"* ]]; then
+          ready="$replicas"
+          [[ -f "$STATE_DIR/ready-$svc" ]] && ready="$(cat "$STATE_DIR/ready-$svc")"
           cat <<JSON
 {"spec":{"replicas":$replicas,"template":{"spec":{"containers":[{"name":"gaming-$svc","image":"$image"}]}}},
- "status":{"readyReplicas":$replicas,"updatedReplicas":$replicas,"availableReplicas":$replicas}}
+ "status":{"readyReplicas":$ready,"updatedReplicas":$ready,"availableReplicas":$ready}}
 JSON
           exit 0
         fi
         printf '%s' "$image"; exit 0
+        ;;
+      service)
+        [[ -f "$STATE_DIR/service-telemetry" ]] && printf '{"metadata":{"name":"gaming-telemetry-srv"}}'
+        exit 0
+        ;;
+      ingress)
+        routes="$(cat "$STATE_DIR/telemetry-routes")"
+        python3 - "$routes" <<'PY'
+import json, sys
+count = int(sys.argv[1])
+rules = []
+for index in range(2):
+    paths = [{"path": "/?(.*)", "backend": {"service": {"name": "gaming-client-srv"}}}]
+    if index < count:
+        paths.insert(0, {"path": "/api/telemetry/?(.*)", "backend": {"service": {"name": "gaming-telemetry-srv"}}})
+    rules.append({"host": f"host-{index}", "http": {"paths": paths}})
+json.dump({"spec": {"rules": rules}}, sys.stdout)
+PY
+        exit 0
         ;;
       deployment/*|pod|pods)
         if [[ "$2" == deployment/* ]]; then
@@ -146,6 +190,17 @@ JSON
     for arg in "$@"; do
       [[ "$arg" == *=ghcr.io/* ]] && printf '%s\n' "${arg#*=}" >"$STATE_DIR/image-$svc"
     done
+    exit 0
+    ;;
+  delete)
+    case "$2" in
+      deployment) rm -f "$STATE_DIR/image-telemetry" "$STATE_DIR/replicas-telemetry" "$STATE_DIR/ready-telemetry" ;;
+      service) rm -f "$STATE_DIR/service-telemetry" ;;
+    esac
+    exit 0
+    ;;
+  patch)
+    printf '0\n' >"$STATE_DIR/telemetry-routes"
     exit 0
     ;;
   scale)
@@ -226,6 +281,31 @@ printf 'rollback_readiness=%s\nmode=application-rollback\nphase=%s\n' \
 [[ "$status" == "GO" ]] || exit 1
 EOF
   chmod 755 "$BIN_DIR"/*
+
+  cat >"$BIN_DIR/telemetry-verifier" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="${FAKE_STATE_DIR}"
+mkdir -p "$OUTPUT_DIR"
+case "$MODE" in
+  retained)
+    [[ -f "$STATE_DIR/image-telemetry" ]]
+    [[ "$(cat "$STATE_DIR/image-telemetry")" == "$EXPECTED_IMAGE" ]]
+    [[ "$(cat "$STATE_DIR/ready-telemetry")" == "1" ]]
+    [[ -f "$STATE_DIR/service-telemetry" ]]
+    [[ "$(cat "$STATE_DIR/telemetry-routes")" == "2" ]]
+    [[ "$EXPECTED_DATABASE_INITIALIZED" == "true" || "$EXPECTED_DATABASE_INITIALIZED" == "false" ]]
+    ;;
+  absent)
+    [[ ! -f "$STATE_DIR/image-telemetry" ]]
+    [[ ! -f "$STATE_DIR/service-telemetry" ]]
+    [[ "$(cat "$STATE_DIR/telemetry-routes")" == "0" ]]
+    ;;
+  *) exit 1 ;;
+esac
+printf 'telemetry_recovery=PASS\nmode=%s\n' "$MODE" >"$OUTPUT_DIR/summary.env"
+EOF
+  chmod 755 "$BIN_DIR/telemetry-verifier"
 }
 
 run_operator() {
@@ -245,6 +325,7 @@ run_operator() {
   READINESS_SCRIPT="$BIN_DIR/readiness" \
   MAINTENANCE_SCRIPT="$BIN_DIR/maintenance" \
   LOCK_SCRIPT="$BIN_DIR/lock" \
+  TELEMETRY_RECOVERY_SCRIPT="$BIN_DIR/telemetry-verifier" \
   MODERATION_OBSERVATION_ATTEMPTS=2 \
   MODERATION_OBSERVATION_SLEEP_SECONDS=0 \
   "$@" \
@@ -270,6 +351,8 @@ for service in "${SERVICES[@]}"; do
   [[ "$(cat "$STATE_DIR/replicas-$service")" == "1" ]] ||
     fail "accepted fenced recovery did not restore $service replicas"
 done
+[[ "$(cat "$STATE_DIR/image-telemetry")" == "$(image_for target telemetry)" ]] ||
+  fail "accepted fenced recovery did not restore exact pre-run Telemetry digest"
 # Established safe order: lock released before the public fence.
 lock_line="$(grep -n 'shared_mongo_lock=release ' "$OUT_DIR/fenced-lock-release.txt" | head -1 | cut -d: -f1)"
 [[ -n "$lock_line" ]] || fail 'lock release evidence missing'
@@ -279,6 +362,70 @@ lock_line="$(grep -n 'shared_mongo_lock=release ' "$OUT_DIR/fenced-lock-release.
   fail 'fenced restore order did not start with auth'
 [[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "gamemaster" ]] ||
   fail 'fenced restore order did not end with gamemaster'
+
+configure_first_activation() {
+  local stage="$1" service
+  cat >"$BASELINE_DIR/telemetry-pre-run.env" <<EOF
+mode=absent
+image=none
+database_initialized=false
+queue_present=false
+EOF
+  for service in "${SERVICES[@]}"; do
+    printf '%s\n' "$(image_for target "$service")" >"$STATE_DIR/image-$service"
+  done
+  rm -f "$STATE_DIR/image-telemetry" "$STATE_DIR/replicas-telemetry" \
+    "$STATE_DIR/ready-telemetry" "$STATE_DIR/service-telemetry"
+  printf '0\n' >"$STATE_DIR/telemetry-routes"
+  case "$stage" in
+    absent) ;;
+    service)
+      : >"$STATE_DIR/service-telemetry"
+      printf '2\n' >"$STATE_DIR/telemetry-routes"
+      ;;
+    deployment-unready)
+      : >"$STATE_DIR/service-telemetry"
+      printf '%s\n' "$(image_for deployed telemetry)" >"$STATE_DIR/image-telemetry"
+      printf '1\n' >"$STATE_DIR/replicas-telemetry"
+      printf '0\n' >"$STATE_DIR/ready-telemetry"
+      printf '2\n' >"$STATE_DIR/telemetry-routes"
+      ;;
+    *) fail "unknown first-activation fixture stage: $stage" ;;
+  esac
+  (
+    cd "$BASELINE_DIR"
+    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
+      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
+    done
+  ) >"$BASELINE_DIR/SHA256SUMS"
+}
+
+for stage in absent service deployment-unready; do
+  new_case "first-activation-$stage"
+  configure_first_activation "$stage"
+  run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+    fail "first-activation $stage recovery was rejected: $(cat "$CASE_DIR/out.txt")"
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'telemetry_state=absent'
+  [[ ! -f "$STATE_DIR/image-telemetry" ]] ||
+    fail "first-activation $stage retained a new Telemetry deployment"
+  [[ ! -f "$STATE_DIR/service-telemetry" ]] ||
+    fail "first-activation $stage retained a new Telemetry service"
+  [[ "$(cat "$STATE_DIR/telemetry-routes")" == "0" ]] ||
+    fail "first-activation $stage retained a new Telemetry ingress path"
+done
+
+new_case first-activation-unchanged-legacy
+configure_first_activation absent
+for service in "${SERVICES[@]}"; do
+  awk -F '\t' -v OFS='\t' -v selected="$service" \
+    -v image="$(image_for target "$service")" \
+    '$1 == selected {$3 = image} {print}' \
+    "$BUILD_DIR/images.tsv" >"$BUILD_DIR/images.tsv.next"
+  mv "$BUILD_DIR/images.tsv.next" "$BUILD_DIR/images.tsv"
+done
+run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+  fail "first activation with unchanged legacy images was rejected: $(cat "$CASE_DIR/out.txt")"
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'telemetry_state=absent'
 
 # ---------------------------------------------------------- fail-closed set ---
 expect_reject() {
@@ -294,6 +441,12 @@ expect_reject() {
 mutate_baseline_target() {
   sed -i.bak "s/baseline_source_sha=$TARGET_SHA/baseline_source_sha=6666666666666666666666666666666666666666/" \
     "$BASELINE_DIR/baseline-provenance.env"
+  (
+    cd "$BASELINE_DIR"
+    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
+      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
+    done
+  ) >"$BASELINE_DIR/SHA256SUMS"
 }
 break_fence() { printf 'released\n' >"$STATE_DIR/maintenance"; }
 break_lock() { printf 'expired\n' >"$STATE_DIR/lock"; }
@@ -307,6 +460,24 @@ expect_reject missing-fence \
   'maintenance fence and writer quiescence are not intact' break_fence
 expect_reject contended-lock \
   'the transferred database lock is held by another live operation' contend_lock
+
+new_case missing-telemetry-evidence
+rm "$BASELINE_DIR/telemetry-pre-run.env"
+if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted missing Telemetry pre-run evidence'
+fi
+
+new_case duplicate-telemetry-evidence
+printf 'mode=retained\n' >>"$BASELINE_DIR/telemetry-pre-run.env"
+(
+  cd "$BASELINE_DIR"
+  for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
+    printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
+  done
+) >"$BASELINE_DIR/SHA256SUMS"
+if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted repeated Telemetry pre-run evidence'
+fi
 
 # An expired lease with the fence and quiescence still intact is the documented
 # rehold state: reclaim it (fencing generation bumped) rather than fail.

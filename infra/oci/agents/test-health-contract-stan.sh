@@ -154,11 +154,15 @@ services = [
     "moderation", "resulting", "slip", "telemetry",
 ]
 payload = {
-    "generatedAt": "2026-09-10T05:00:00.000Z",
+    "generatedAt": os.environ.get(
+        "STUB_TELEMETRY_TIMESTAMP", "2026-09-10T05:00:00.000Z"
+    ),
     "dates": dates,
     "metrics": [{"metric": metric, "values": [0] * 14} for metric in metrics],
     "health": [{"service": service, "status": "green"} for service in services],
 }
+if os.environ.get("STUB_TELEMETRY_STATUS"):
+    payload["health"][0]["status"] = os.environ["STUB_TELEMETRY_STATUS"]
 if os.environ.get("STUB_BAD_TELEMETRY") == "1":
     payload["metrics"] = []
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
@@ -352,6 +356,31 @@ if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_TELEMETRY=1 \
   echo "invalid Telemetry summary unexpectedly passed" >&2
   exit 1
 fi
+for timestamp in \
+  '2026-09-10 05:00:00.000Z' \
+  '2026-09-10T05:00:00.000000Z' \
+  '2026-09-10T07:00:00.000+02:00'; do
+  if PATH="$WORK_DIR/bin:$PATH" STUB_TELEMETRY_TIMESTAMP="$timestamp" \
+      OCI_PUBLIC_URL=https://betstan.xyz \
+      OCI_REDIRECT_URL=https://www.betstan.xyz \
+      OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+      OUTPUT_DIR="$WORK_DIR/smoke-bad-telemetry-timestamp" \
+      "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null 2>&1; then
+    echo "noncanonical Telemetry timestamp unexpectedly passed: $timestamp" >&2
+    exit 1
+  fi
+done
+for status in yellow red; do
+  if PATH="$WORK_DIR/bin:$PATH" STUB_TELEMETRY_STATUS="$status" \
+      OCI_PUBLIC_URL=https://betstan.xyz \
+      OCI_REDIRECT_URL=https://www.betstan.xyz \
+      OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+      OUTPUT_DIR="$WORK_DIR/smoke-unhealthy-telemetry-$status" \
+      "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null 2>&1; then
+    echo "$status Telemetry health unexpectedly passed release smoke" >&2
+    exit 1
+  fi
+done
 for failure_mode in \
   STUB_BAD_DNS STUB_AAAA STUB_BAD_REDIRECT STUB_UNTRUSTED_CERT \
   STUB_WRONG_ISSUER STUB_WRONG_SAN STUB_EXPIRING_CERT; do

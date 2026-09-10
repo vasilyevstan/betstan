@@ -145,7 +145,7 @@ awk -F '\t' -v sentinel="$SENTINEL_TAG" '
 ! awk -F '\t' -v sentinel_id="$sentinel_version_id" '$1 == sentinel_id { found=1 } END { exit(found ? 0 : 1) }' \
   "$application_tags" ||
   oci_die "bootstrap sentinel version must not alias an application image"
-awk -F '\t' -v mode="$PRUNE_MODE" '
+awk -F '\t' '
   $3 !~ /^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)-[0-9a-f]{40}$/ {
     exit 1
   }
@@ -161,7 +161,7 @@ awk -F '\t' '
     print source "\t" service "\t" $1 "\t" $2
   }
 ' "$application_tags" | LC_ALL=C sort > "$generations_file"
-awk -F '\t' '
+awk -F '\t' -v mode="$PRUNE_MODE" '
   BEGIN {
     split("auth bet backoffice client event gamemaster moderation resulting slip", historical, " ")
     split("auth bet backoffice client event gamemaster moderation resulting slip telemetry", current, " ")

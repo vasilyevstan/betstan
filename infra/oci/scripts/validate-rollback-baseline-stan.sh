@@ -89,6 +89,33 @@ def env_file(name):
         values[key] = value
     return values
 
+if "telemetry-pre-run.env" in manifest:
+    telemetry = env_file("telemetry-pre-run.env")
+    if set(telemetry) != {
+        "mode", "image", "database_initialized", "queue_present"
+    }:
+        raise SystemExit("Telemetry baseline evidence key set is invalid")
+    if (
+        telemetry["mode"] not in {"retained", "absent"}
+        or telemetry["database_initialized"] not in {"true", "false"}
+        or telemetry["queue_present"] not in {"true", "false"}
+        or (
+            telemetry["mode"] == "retained"
+            and (
+                not re.fullmatch(
+                    rf"{re.escape(repository)}@sha256:[0-9a-f]{{64}}",
+                    telemetry["image"],
+                )
+                or telemetry["queue_present"] != "true"
+            )
+        )
+        or (
+            telemetry["mode"] == "absent"
+            and telemetry["image"] != "none"
+        )
+    ):
+        raise SystemExit("Telemetry baseline evidence is invalid")
+
 
 baseline = env_file("baseline-provenance.env")
 for key in (

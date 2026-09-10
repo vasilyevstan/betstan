@@ -30,6 +30,7 @@ flowchart TB
         Ingress --> Slip["slip"]
         Ingress --> Bet["bet"]
         Ingress --> Backoffice["backoffice"]
+        Ingress --> Telemetry["telemetry"]
 
         Gamemaster["gamemaster"]
         Moderation["moderation"]
@@ -45,6 +46,7 @@ flowchart TB
         Gamemaster <--> Broker
         Moderation <--> Broker
         Resulting <--> Broker
+        Broker --> Telemetry
 
         Auth --> Database
         Event --> Database
@@ -54,6 +56,7 @@ flowchart TB
         Gamemaster --> Database
         Moderation --> Database
         Resulting --> Database
+        Telemetry --> Database
     end
 ```
 
@@ -66,7 +69,7 @@ flowchart TB
 | Ingress | Routes the SPA and `/api/*` paths; disables buffering for SSE |
 | k3s | Runs the ten application workloads plus MongoDB and RabbitMQ |
 | MongoDB | Persistent state for nine service-owned logical databases |
-| RabbitMQ | Internal fanout broker for domain events |
+| RabbitMQ | Internal fanout broker with 23 current application queues |
 | GHCR | Public application image registry; runtime pulls without a long-lived registry secret |
 | GitHub Actions | Builds, validates, deploys, activates, rolls back, and records provenance |
 
@@ -106,8 +109,9 @@ every application rollback.
 - `www` redirects to the canonical host while preserving the request path.
 - A diagnostic hostname is used for infrastructure validation, not product
   identity.
-- Ingress routes Auth, Event, Slip, Bet, and Backoffice APIs separately from
-  the client.
+- Ingress routes Auth, Event, Slip, Bet, Backoffice, and the public
+  `/api/telemetry` summary separately from the client on canonical and
+  diagnostic hosts.
 - SSE buffering is disabled so live-event updates reach browsers promptly.
 - Database, broker, and cluster-control endpoints are not exposed as public
   application routes.

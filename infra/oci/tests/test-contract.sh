@@ -123,6 +123,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
+local_ingress="$ROOT_DIR/infra/k8s-dev/ingress-srv.yaml"
+ingress_guard="$ROOT_DIR/infra/azure/agents/ingress-routing-guard-stan.sh"
+INGRESS_PROFILE=local-dev \
+INGRESS_FILE="$local_ingress" \
+LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+  "$ingress_guard" >/dev/null ||
+  fail "active local-development ingress failed its route guard"
+grep -v '/api/telemetry/?(.*)' "$local_ingress" \
+  >"$WORK_DIR/local-ingress-missing-telemetry.yaml"
+if INGRESS_PROFILE=local-dev \
+    INGRESS_FILE="$WORK_DIR/local-ingress-missing-telemetry.yaml" \
+    LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+    "$ingress_guard" >/dev/null 2>&1; then
+  fail "local-development ingress without Telemetry unexpectedly passed"
+fi
+python3 - "$local_ingress" "$WORK_DIR/local-ingress-after-catch-all.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(keepends=True)
+start = next(i for i, line in enumerate(source) if "- path: /api/telemetry/?(.*)" in line)
+block = source[start:start + 7]
+del source[start:start + 7]
+source.extend(block)
+Path(sys.argv[2]).write_text("".join(source), encoding="utf-8")
+PY
+if INGRESS_PROFILE=local-dev \
+    INGRESS_FILE="$WORK_DIR/local-ingress-after-catch-all.yaml" \
+    LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+    "$ingress_guard" >/dev/null 2>&1; then
+  fail "local Telemetry route after the client catch-all unexpectedly passed"
+fi
+
 command -v ruby >/dev/null 2>&1 || fail "ruby is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"

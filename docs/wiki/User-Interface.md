@@ -81,8 +81,8 @@ needed. Theme changes preserve the active route and the selected UI variant.
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
-between Events, My Bets, Backoffice, login, and signup therefore preserves
-valid `ui` and `theme` values. The switchers update one choice without
+between Events, My Bets, Backoffice, Telemetry, login, and signup therefore
+preserves valid `ui` and `theme` values. The switchers update one choice without
 discarding the other or unrelated accepted query state.
 
 Examples:
@@ -116,6 +116,10 @@ The page fetches once when entered and again only when the user activates
 visible; a failed refresh keeps that snapshot and reports the failure without
 exposing internal error details. The generated timestamp identifies the
 snapshot currently displayed.
+
+The displayed counts are observed operational counts, not accounting-grade
+records. Health is a coarse point-in-time snapshot, not deep readiness or an
+authority for product decisions.
 
 Activity graphs use two columns on wide desktop layouts and one column on
 tablet and mobile layouts. Service health uses five, two, then one column over

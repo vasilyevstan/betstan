@@ -45,6 +45,7 @@ FENCED_LOCK_LEASE_SECONDS="${FENCED_LOCK_LEASE_SECONDS:-5400}"
 READINESS_SCRIPT="${READINESS_SCRIPT:-$SCRIPT_DIR/rollback-readiness-stan.sh}"
 MAINTENANCE_SCRIPT="${MAINTENANCE_SCRIPT:-$SCRIPT_DIR/live-data-maintenance-stan.sh}"
 LOCK_SCRIPT="${LOCK_SCRIPT:-$SCRIPT_DIR/shared-mongo-operation-lock-stan.sh}"
+TELEMETRY_RECOVERY_SCRIPT="${TELEMETRY_RECOVERY_SCRIPT:-$SCRIPT_DIR/verify-telemetry-recovery-state-stan.sh}"
 
 # Restore order mirrors the reviewed OCI deployment order: API dependencies
 # first, Client after them, Gamemaster last.
@@ -135,13 +136,26 @@ done
 [[ -x "$READINESS_SCRIPT" ]] || oci_die "rollback readiness script is not executable"
 [[ -x "$MAINTENANCE_SCRIPT" ]] || oci_die "maintenance script is not executable"
 [[ -x "$LOCK_SCRIPT" ]] || oci_die "shared Mongo lock script is not executable"
+[[ -x "$TELEMETRY_RECOVERY_SCRIPT" ]] ||
+  oci_die "Telemetry recovery verification script is not executable"
 
 oci_prepare_safe_private_dir "$OUTPUT_DIR"
 
 require_regular_file "$BASELINE_DIR/baseline-provenance.env"
 require_regular_file "$BASELINE_DIR/deployments.tsv"
 require_regular_file "$BASELINE_DIR/images.tsv"
+require_regular_file "$BASELINE_DIR/telemetry-pre-run.env"
 require_regular_file "$PRE_RECOVERY_BUILD_DIR/images.tsv"
+grep -Eq "^[0-9a-f]{64}  telemetry-pre-run\\.env$" "$BASELINE_DIR/SHA256SUMS" ||
+  oci_die "baseline does not checksum-bind the pre-run Telemetry state"
+(
+  cd "$BASELINE_DIR"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c SHA256SUMS >/dev/null
+  else
+    shasum -a 256 -c SHA256SUMS >/dev/null
+  fi
+) || oci_die "baseline checksum evidence is invalid"
 
 # The infrastructure provenance the workflow verified must be the same bytes the
 # operator acts on.
@@ -193,8 +207,10 @@ python3 - \
   "$BASELINE_DIR/deployments.tsv" \
   "$BASELINE_DIR/images.tsv" \
   "$PRE_RECOVERY_BUILD_DIR/images.tsv" \
+  "$BASELINE_DIR/telemetry-pre-run.env" \
   "$OUTPUT_DIR/fenced-restore-plan.tsv" \
-  "$OUTPUT_DIR/fenced-expected-current.tsv" <<'PY' || oci_die "fenced recovery could not build an exact restore plan"
+  "$OUTPUT_DIR/fenced-expected-current.tsv" \
+  "$OUTPUT_DIR/fenced-telemetry.env" <<'PY' || oci_die "fenced recovery could not build an exact restore plan"
 import csv
 import re
 import sys
@@ -203,14 +219,17 @@ import sys
     deployments_path,
     baseline_images_path,
     current_images_path,
+    telemetry_path,
     plan_path,
     expected_current_path,
-) = sys.argv[1:6]
+    telemetry_output_path,
+) = sys.argv[1:8]
 
 services = [
     "auth", "bet", "backoffice", "client", "event",
     "moderation", "resulting", "slip", "gamemaster",
 ]
+current_services = set(services) | {"telemetry"}
 image_pattern = re.compile(
     r"^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$"
 )
@@ -251,16 +270,40 @@ if sorted(deployments) != sorted(services):
     raise SystemExit("baseline deployments do not cover the nine services")
 if sorted(baseline_images) != sorted(services):
     raise SystemExit("baseline images do not cover the nine services")
-if sorted(current_images) != sorted(services):
-    raise SystemExit("deployed images do not cover the nine services")
+if set(current_images) != current_services:
+    raise SystemExit("deployed images do not cover the current ten services")
+
+telemetry = {}
+for raw in open(telemetry_path, encoding="utf-8").read().splitlines():
+    if not raw or "=" not in raw:
+        raise SystemExit("pre-run Telemetry evidence is malformed")
+    key, value = raw.split("=", 1)
+    if key in telemetry:
+        raise SystemExit("pre-run Telemetry evidence contains duplicate keys")
+    telemetry[key] = value
+if set(telemetry) != {"mode", "image", "database_initialized", "queue_present"}:
+    raise SystemExit("pre-run Telemetry evidence key set is invalid")
+if (
+    telemetry["mode"] not in {"retained", "absent"}
+    or telemetry["database_initialized"] not in {"true", "false"}
+    or telemetry["queue_present"] not in {"true", "false"}
+    or (
+        telemetry["mode"] == "retained"
+        and (
+            not image_pattern.fullmatch(telemetry["image"])
+            or telemetry["queue_present"] != "true"
+        )
+    )
+    or (
+        telemetry["mode"] == "absent"
+        and telemetry["image"] != "none"
+    )
+):
+    raise SystemExit("pre-run Telemetry evidence is invalid")
 
 for service in services:
     if deployments[service][0] != baseline_images[service]:
         raise SystemExit(f"{service}: baseline image evidence is inconsistent")
-    if baseline_images[service] == current_images[service]:
-        raise SystemExit(
-            f"{service}: rollback target already equals the deployed generation"
-        )
 
 with open(plan_path, "w", encoding="utf-8", newline="") as handle:
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
@@ -278,6 +321,10 @@ with open(expected_current_path, "w", encoding="utf-8", newline="") as handle:
                 current_images[service],
             ]
         )
+with open(telemetry_output_path, "w", encoding="utf-8") as handle:
+    for key in ("mode", "image", "database_initialized", "queue_present"):
+        handle.write(f"{key}={telemetry[key]}\n")
+    handle.write(f"candidate_image={current_images['telemetry']}\n")
 PY
 
 plan_value() {
@@ -290,10 +337,8 @@ oci_log "oci_fenced_recovery=preflight target_sha=$TARGET_SHA deployed_sha=$DEPL
 "$MAINTENANCE_SCRIPT" verify-held >"$OUTPUT_DIR/fenced-verify-held.txt" 2>&1 ||
   oci_die "maintenance fence and writer quiescence are not intact"
 
-# Independently confirm the live generation is exactly the authorized deployed
-# generation before anything is mutated. Readiness asserts this too; keeping the
-# check local to the operator means a stubbed or reordered gate cannot silently
-# widen what this operator will act on.
+# Independently confirm that the live legacy generation is an exact rollout
+# prefix between the checksum-bound baseline and the selected current build.
 : >"$OUTPUT_DIR/fenced-observed-current.tsv"
 while IFS=$'\t' read -r service _repository expected_image; do
   [[ -n "$service" ]] || continue
@@ -301,11 +346,111 @@ while IFS=$'\t' read -r service _repository expected_image; do
     kubectl get "deployment/gaming-${service}-depl" -n "$OCI_K8S_NAMESPACE" \
       -o jsonpath="{.spec.template.spec.containers[?(@.name=='gaming-${service}')].image}"
   )" || oci_die "unable to read the live image for gaming-${service}-depl"
-  printf '%s\t%s\n' "$service" "$observed_image" \
+  printf '%s\t%s\t%s\n' "$service" \
+    "ghcr.io/vasilyevstan/betstan-images" "$observed_image" \
     >>"$OUTPUT_DIR/fenced-observed-current.tsv"
-  [[ "$observed_image" == "$expected_image" ]] ||
-    oci_die "gaming-${service}-depl does not run the authorized deployed generation"
 done <"$OUTPUT_DIR/fenced-expected-current.tsv"
+kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$OUTPUT_DIR/fenced-observed-telemetry-deployment.json" ||
+  oci_die "unable to inspect the live Telemetry deployment"
+kubectl get service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$OUTPUT_DIR/fenced-observed-telemetry-service.json" ||
+  oci_die "unable to inspect the live Telemetry service"
+python3 - \
+  "$OUTPUT_DIR/fenced-restore-plan.tsv" \
+  "$OUTPUT_DIR/fenced-expected-current.tsv" \
+  "$OUTPUT_DIR/fenced-observed-current.tsv" \
+  "$OUTPUT_DIR/fenced-telemetry.env" \
+  "$OUTPUT_DIR/fenced-observed-telemetry-deployment.json" \
+  "$OUTPUT_DIR/fenced-observed-telemetry-service.json" <<'PY' ||
+import csv
+import json
+import sys
+
+(
+    baseline_path,
+    candidate_path,
+    observed_path,
+    telemetry_path,
+    telemetry_deployment_path,
+    telemetry_service_path,
+) = sys.argv[1:7]
+rollout_order = [
+    "auth", "bet", "event", "moderation", "resulting",
+    "slip", "backoffice", "client", "gamemaster",
+]
+
+def read(path, image_column):
+    result = {}
+    with open(path, encoding="utf-8", newline="") as handle:
+        for row in csv.reader(handle, delimiter="\t"):
+            if not row or row[0] in result or len(row) <= image_column:
+                raise SystemExit("legacy rollout evidence is malformed")
+            result[row[0]] = row[image_column]
+    return result
+
+baseline = read(baseline_path, 2)
+candidate = read(candidate_path, 2)
+observed = read(observed_path, 2)
+if set(baseline) != set(rollout_order) or set(candidate) != set(rollout_order):
+    raise SystemExit("legacy rollout evidence does not contain nine services")
+if set(observed) != set(rollout_order):
+    raise SystemExit("observed legacy rollout does not contain nine services")
+telemetry = {}
+for raw in open(telemetry_path, encoding="utf-8").read().splitlines():
+    key, value = raw.split("=", 1)
+    telemetry[key] = value
+deployment_content = open(telemetry_deployment_path, encoding="utf-8").read()
+service_content = open(telemetry_service_path, encoding="utf-8").read()
+deployment = json.loads(deployment_content) if deployment_content else None
+service = json.loads(service_content) if service_content else None
+telemetry_ready = False
+if deployment:
+    containers = [
+        item
+        for item in deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        if item.get("name") == "gaming-telemetry"
+    ]
+    desired = deployment.get("spec", {}).get("replicas", 0)
+    status = deployment.get("status", {})
+    if len(containers) != 1 or containers[0].get("image") not in {
+        telemetry["candidate_image"], telemetry["image"]
+    }:
+        raise SystemExit("live Telemetry image is not baseline or candidate")
+    telemetry_ready = (
+        desired > 0
+        and status.get("updatedReplicas", 0) == desired
+        and status.get("readyReplicas", 0) == desired
+        and status.get("availableReplicas", 0) == desired
+    )
+if telemetry["mode"] == "retained" and (deployment is None or service is None):
+    raise SystemExit("pre-existing Telemetry resources are missing")
+if deployment is None and service is None:
+    telemetry_stage = "absent"
+elif deployment is None and service is not None:
+    telemetry_stage = "service"
+elif deployment is not None and not telemetry_ready:
+    telemetry_stage = "deployment-unready"
+else:
+    telemetry_stage = "ready"
+
+seen_baseline = False
+changed = []
+for service in rollout_order:
+    image = observed[service]
+    if baseline[service] == candidate[service]:
+        if image != baseline[service]:
+            raise SystemExit("unchanged legacy workload has an unknown image")
+    elif image == baseline[service]:
+        seen_baseline = True
+    elif image == candidate[service] and not seen_baseline:
+        changed.append(service)
+    else:
+        raise SystemExit("legacy workload state is not an exact rollout prefix")
+if telemetry_stage != "ready" and changed:
+    raise SystemExit("legacy images changed before Telemetry became ready")
+PY
+  oci_die "live legacy workloads are not an authorized rollout prefix"
 
 # The transferred lock must still be ours, or be an expired lease we may
 # reclaim. This mirrors the deployment's own maintenance-rehold contract:
@@ -337,7 +482,7 @@ else
     oci_die "the reclaimed database lock did not verify as held"
 fi
 FENCED_READINESS_DIR="$OUTPUT_DIR/fenced-readiness"
-FENCED_EXPECTED_CURRENT_FILE="$OUTPUT_DIR/fenced-expected-current.tsv"
+FENCED_EXPECTED_CURRENT_FILE="$OUTPUT_DIR/fenced-observed-current.tsv"
 if ! TARGET_SHA="$TARGET_SHA" \
     ROLLBACK_READINESS_PHASE=maintenance-fenced \
     MAINTENANCE_DEPLOYED_SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
@@ -358,6 +503,67 @@ fi
   oci_die "readiness summary phase is not maintenance-fenced"
 
 # Mutation begins here. Every later failure re-holds maintenance.
+telemetry_mode="$(awk -F '=' '$1 == "mode" {print $2}' \
+  "$OUTPUT_DIR/fenced-telemetry.env")"
+telemetry_pre_run_image="$(awk -F '=' '$1 == "image" {print $2}' \
+  "$OUTPUT_DIR/fenced-telemetry.env")"
+telemetry_database_initialized="$(awk -F '=' \
+  '$1 == "database_initialized" {print $2}' \
+  "$OUTPUT_DIR/fenced-telemetry.env")"
+if [[ "$telemetry_mode" == "retained" ]]; then
+  kubectl set image deployment/gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    "gaming-telemetry=${telemetry_pre_run_image}" >/dev/null ||
+    fenced_die "failed to restore Telemetry to its exact pre-run digest"
+  kubectl rollout status deployment/gaming-telemetry-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout="$ROLLOUT_TIMEOUT" >/dev/null ||
+    fenced_die "Telemetry did not become ready at its pre-run digest"
+else
+  [[ "$telemetry_mode" == "absent" ]] ||
+    fenced_die "pre-run Telemetry recovery mode is invalid"
+  kubectl delete deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found >/dev/null ||
+    fenced_die "failed to remove the newly created Telemetry deployment"
+  kubectl delete service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found >/dev/null ||
+    fenced_die "failed to remove the newly created Telemetry service"
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" -o json \
+    >"$OUTPUT_DIR/fenced-ingress-before.json" ||
+    fenced_die "failed to inspect the OCI ingress before Telemetry cleanup"
+  python3 - "$OUTPUT_DIR/fenced-ingress-before.json" \
+    "$OUTPUT_DIR/fenced-telemetry-ingress-patch.json" <<'PY' ||
+import json
+import sys
+from pathlib import Path
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+removals = []
+for rule_index, rule in enumerate(document.get("spec", {}).get("rules", [])):
+    for path_index, path in enumerate(rule.get("http", {}).get("paths", [])):
+        backend = path.get("backend", {}).get("service", {}).get("name")
+        if path.get("path") == "/api/telemetry/?(.*)":
+            if backend != "gaming-telemetry-srv":
+                raise SystemExit("Telemetry ingress path has an unexpected backend")
+            removals.append((rule_index, path_index))
+for rule_index, path_index in sorted(removals, reverse=True):
+    removals_path = f"/spec/rules/{rule_index}/http/paths/{path_index}"
+    document.setdefault("_patch", []).append(
+        {"op": "remove", "path": removals_path}
+    )
+patch = document.get("_patch", [])
+Path(sys.argv[2]).write_text(
+    json.dumps(patch, separators=(",", ":")), encoding="utf-8"
+)
+PY
+    fenced_die "failed to construct the bounded Telemetry ingress cleanup"
+  if [[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
+    "$OUTPUT_DIR/fenced-telemetry-ingress-patch.json")" -gt 0 ]]; then
+    kubectl patch ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+      --type=json \
+      --patch-file "$OUTPUT_DIR/fenced-telemetry-ingress-patch.json" >/dev/null ||
+      fenced_die "failed to remove newly created Telemetry ingress paths"
+  fi
+fi
+
 : >"$OUTPUT_DIR/fenced-restore-order.tsv"
 for service in "${RESTORE_ORDER[@]}"; do
   deployment="gaming-${service}-depl"
@@ -410,6 +616,26 @@ ready_moderation="$(
 [[ "${ready_moderation:-0}" -ge 1 ]] ||
   fenced_die "gaming-moderation did not become ready after the restore"
 
+if [[ "$telemetry_mode" == "retained" ]]; then
+  MODE=retained \
+  EXPECTED_IMAGE="$telemetry_pre_run_image" \
+  EXPECTED_DATABASE_INITIALIZED="$telemetry_database_initialized" \
+  OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+  OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
+  OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
+  OUTPUT_DIR="$OUTPUT_DIR/telemetry-validation" \
+    "$TELEMETRY_RECOVERY_SCRIPT" \
+      >"$OUTPUT_DIR/telemetry-validation.txt" 2>&1 ||
+    fenced_die "retained Telemetry state failed terminal recovery validation"
+else
+  MODE=absent \
+  OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+  OUTPUT_DIR="$OUTPUT_DIR/telemetry-validation" \
+    "$TELEMETRY_RECOVERY_SCRIPT" \
+      >"$OUTPUT_DIR/telemetry-validation.txt" 2>&1 ||
+    fenced_die "first-activation Telemetry resources were not cleanly removed"
+fi
+
 # Safe established order: release the transferred database lock only after the
 # restored workloads are healthy, then remove the public write fence.
 NAMESPACE="$OCI_K8S_NAMESPACE" \
@@ -457,5 +683,6 @@ database_lock=released
 database_lock_acquisition=$FENCED_LOCK_ACQUISITION
 database_restore=disabled
 restored_services=${#RESTORE_ORDER[@]}
+telemetry_state=$telemetry_mode
 EOF
 oci_log "oci_fenced_rollback_recovery=PASS target_sha=$TARGET_SHA services=${#RESTORE_ORDER[@]}"

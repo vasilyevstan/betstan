@@ -3,14 +3,16 @@
 BetStan is a real-time sports-betting simulation platform. It supports
 scheduled pre-match betting, accelerated live football, independent live and
 pre-match slips, moderation, settlement, bet history, and operational event
-management.
+management. Its public Telemetry view adds bounded activity trends and coarse
+point-in-time service health.
 
 ## Product and system design
 
 - [[Product Overview]] - capabilities, users, lifecycle, and product
   boundaries.
 - [[Application Processes]] - account and session behavior, event and odds
-  generation, slips, moderation, settlement, and Backoffice workflows.
+  generation, slips, moderation, settlement, Backoffice workflows, and public
+  Telemetry summaries.
 - [[Architecture]] - service responsibilities, data ownership, and the
   high-level component diagram.
 - [[Message Flows]] - event publication, wager placement, live updates, and

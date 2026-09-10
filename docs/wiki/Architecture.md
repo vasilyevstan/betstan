@@ -45,7 +45,7 @@ flowchart TB
     Gamemaster["gamemaster"] <--> Broker
     Moderation["moderation"] <--> Broker
     Resulting["resulting"] <--> Broker
-    Telemetry <--> Broker
+    Broker --> Telemetry
 
     Auth --> Mongo
     Event --> Mongo
@@ -68,7 +68,7 @@ flowchart TB
 | `slip` | HTTP, AMQP | Independent live/pre-match draft boards, placement concurrency, and reliable submission publication | Draft/submitted slips and publication state |
 | `bet` | HTTP, AMQP | User-visible bet ledger, moderation state, row/final result, payout data, and statistics | Bets, conflicts, and pending updates |
 | `backoffice` | HTTP, AMQP | Public event creation, visibility, manual result controls, and durable publication replay | Operational event records and publication markers |
-| `telemetry` | HTTP, AMQP | Bounded operational summaries and application service health snapshots | Telemetry metric records |
+| `telemetry` | HTTP, inbound AMQP | Best-effort bounded operational summaries and application service health snapshots | Telemetry metric records |
 | `gamemaster` | AMQP worker | Deterministic accelerated football simulation, incidents, score, quotes, market versions, and final result | Simulation state and completed archives |
 | `moderation` | AMQP worker | Slip, phase, market, quote, and mixed-kind validation | Mirrored authority, parked requests, and moderation records |
 | `resulting` | AMQP worker | Pre-match and live row settlement, final slip result, retries, and replay | Settlement ledgers, archives, and retry state |
@@ -128,6 +128,10 @@ RabbitMQ carries domain facts such as:
 - a live match advanced;
 - an event reached a final result;
 - a row or complete slip was settled.
+
+Telemetry is a best-effort observer of these facts. It is never the authority
+for betting, accounts, or settlement, and reporter failure cannot block
+signup, login, or slip workflows.
 
 Delivery is treated as at-least-once. Consumers therefore use idempotent
 writes, monotonic versions or sequences, durable pending records, and replay
