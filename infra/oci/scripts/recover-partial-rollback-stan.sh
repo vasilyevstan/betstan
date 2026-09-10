@@ -213,11 +213,11 @@ validate_telemetry_progress() {
   local service_json="$WORK_DIR/telemetry-progress-service.json"
   local ingress_json="$WORK_DIR/telemetry-progress-ingress.json"
   kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
-    --ignore-not-found -o json >"$deployment_json"
+    --ignore-not-found -o json >"$deployment_json" || return 1
   kubectl get service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
-    --ignore-not-found -o json >"$service_json"
+    --ignore-not-found -o json >"$service_json" || return 1
   kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
-    -o json >"$ingress_json"
+    -o json >"$ingress_json" || return 1
   python3 - "$deployment_json" "$service_json" "$ingress_json" \
     "$expected_image" "$public_host" "$diagnostic_host" <<'PY'
 import json

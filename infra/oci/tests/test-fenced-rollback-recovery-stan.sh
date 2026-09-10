@@ -157,15 +157,23 @@ JSON
         ;;
       ingress)
         routes="$(cat "$STATE_DIR/telemetry-routes")"
-        python3 - "$routes" <<'PY'
+        python3 - "$routes" "${FAKE_TELEMETRY_ROUTE_HOST_MODE:-expected}" <<'PY'
 import json, sys
 count = int(sys.argv[1])
+mode = sys.argv[2]
+hosts = ["host-0", "host-1"]
+if mode == "same-host":
+    hosts = ["host-0", "host-0"]
+elif mode == "unexpected":
+    hosts = ["host-0", "host-other"]
+elif mode != "expected":
+    raise SystemExit("unsupported route-host fixture mode")
 rules = []
-for index in range(2):
+for index, host in enumerate(hosts):
     paths = [{"path": "/?(.*)", "backend": {"service": {"name": "gaming-client-srv"}}}]
     if index < count:
         paths.insert(0, {"path": "/api/telemetry/?(.*)", "backend": {"service": {"name": "gaming-telemetry-srv"}}})
-    rules.append({"host": f"host-{index}", "http": {"paths": paths}})
+    rules.append({"host": host, "http": {"paths": paths}})
 json.dump({"spec": {"rules": rules}}, sys.stdout)
 PY
         exit 0
@@ -340,6 +348,8 @@ run_operator() {
   BASELINE_DIR="$BASELINE_DIR" \
   PRE_RECOVERY_BUILD_DIR="$BUILD_DIR" \
   OUTPUT_DIR="$OUT_DIR" \
+  OCI_PUBLIC_URL=https://host-0 \
+  OCI_DIAGNOSTIC_URL=https://host-1 \
   READINESS_SCRIPT="$BIN_DIR/readiness" \
   MAINTENANCE_SCRIPT="$BIN_DIR/maintenance" \
   LOCK_SCRIPT="$BIN_DIR/lock" \
@@ -381,6 +391,18 @@ done
   fail 'fenced restore order did not start with auth'
 [[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "gamemaster" ]] ||
   fail 'fenced restore order did not end with gamemaster'
+
+for route_host_mode in same-host unexpected; do
+  new_case "invalid-route-hosts-$route_host_mode"
+  if run_operator FAKE_TELEMETRY_ROUTE_HOST_MODE="$route_host_mode" \
+      >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery accepted $route_host_mode Telemetry routes"
+  fi
+  assert_contains "$CASE_DIR/out.txt" \
+    'live legacy workloads are not an authorized rollout prefix'
+  grep -Fq 'set image' "$STATE_DIR/kubectl.log" &&
+    fail "fenced recovery mutated a workload for $route_host_mode Telemetry routes"
+done
 
 # Every recovery checkpoint is replayable: a second invocation may observe an
 # exact baseline prefix and candidate suffix in the reviewed restore order.

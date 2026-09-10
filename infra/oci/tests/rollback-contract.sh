@@ -1048,6 +1048,10 @@ EOF_STATE
         shift 2
         service="$(service_from_deployment "$deployment")"
         if [[ "$service" == "telemetry" &&
+          "${STUB_FAIL_PARTIAL_TELEMETRY_DEPLOYMENT_READ:-0}" == "1" ]]; then
+          exit 1
+        fi
+        if [[ "$service" == "telemetry" &&
           ! -f "$STUB_STATE_DIR/telemetry.env" &&
           "$original_args" == *"--ignore-not-found"* ]]; then
           [[ "${STUB_FAIL_TELEMETRY_ABSENT_READ:-0}" != "1" ]] || exit 1
@@ -1089,11 +1093,13 @@ EOF_STATE
         fi
         ;;
       service)
+        [[ "${STUB_FAIL_PARTIAL_TELEMETRY_SERVICE_READ:-0}" != "1" ]] || exit 1
         if [[ -f "$STUB_STATE_DIR/telemetry-service" ]]; then
           printf '{"metadata":{"name":"gaming-telemetry-srv"},"spec":{"selector":{"app":"gaming-telemetry"},"ports":[{"port":3000,"targetPort":3000}]}}'
         fi
         ;;
       ingress)
+        [[ "${STUB_FAIL_PARTIAL_TELEMETRY_INGRESS_READ:-0}" != "1" ]] || exit 1
         canonical_route="$(cat "$STUB_STATE_DIR/telemetry-route-canonical" 2>/dev/null || printf 0)"
         diagnostic_route="$(cat "$STUB_STATE_DIR/telemetry-route-diagnostic" 2>/dev/null || printf 0)"
         python3 - "$canonical_route" "$diagnostic_route" <<'PY'
@@ -3069,6 +3075,32 @@ for telemetry_checkpoint in absent deployment-only service-no-routes; do
     cat "$WORK_DIR/$label.out" >&2
     fail "partial recovery did not resume Telemetry checkpoint $telemetry_checkpoint"
   fi
+done
+
+for telemetry_read_target in deployment service ingress; do
+  label="partial-recovery-telemetry-${telemetry_read_target}-read-failure"
+  state_root="$STATE_DIR/$label/current"
+  reset_live_state "$state_root"
+  case "$telemetry_read_target" in
+    deployment)
+      read_failure_env=(STUB_FAIL_PARTIAL_TELEMETRY_DEPLOYMENT_READ=1)
+      ;;
+    service)
+      read_failure_env=(STUB_FAIL_PARTIAL_TELEMETRY_SERVICE_READ=1)
+      ;;
+    ingress)
+      read_failure_env=(STUB_FAIL_PARTIAL_TELEMETRY_INGRESS_READ=1)
+      ;;
+  esac
+  if PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+      run_partial_recovery "$label" "${read_failure_env[@]}" \
+      >"$WORK_DIR/$label.out" 2>&1; then
+    fail "partial recovery accepted failed Telemetry $telemetry_read_target read"
+  fi
+  assert_contains "$WORK_DIR/$label.out" \
+    'Telemetry resources are not at an authorized cleanup or restoration prefix'
+  [[ ! -s "$STATE_DIR/$label/kubectl.log" ]] ||
+    fail "partial recovery mutated a legacy workload after failed Telemetry $telemetry_read_target read"
 done
 
 for invalid_checkpoint in service-without-deployment routes-without-deployment asymmetric-routes routes-without-service; do

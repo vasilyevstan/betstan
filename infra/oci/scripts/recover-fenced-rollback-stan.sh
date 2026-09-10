@@ -481,10 +481,12 @@ python3 - \
   "$OUTPUT_DIR/fenced-telemetry.env" \
   "$WORK_DIR/fenced-observed-telemetry-deployment.json" \
   "$WORK_DIR/fenced-observed-telemetry-service.json" \
-  "$WORK_DIR/fenced-observed-ingress.json" <<'PY' ||
+  "$WORK_DIR/fenced-observed-ingress.json" \
+  "$OCI_PUBLIC_URL" "$OCI_DIAGNOSTIC_URL" <<'PY' ||
 import csv
 import json
 import sys
+from urllib.parse import urlsplit
 
 (
     baseline_path,
@@ -494,7 +496,9 @@ import sys
     telemetry_deployment_path,
     telemetry_service_path,
     ingress_path,
-) = sys.argv[1:8]
+    public_url,
+    diagnostic_url,
+) = sys.argv[1:10]
 forward_order = [
     "auth", "bet", "event", "moderation", "resulting",
     "slip", "backoffice", "client", "gamemaster",
@@ -529,8 +533,14 @@ service_content = open(telemetry_service_path, encoding="utf-8").read()
 ingress = json.load(open(ingress_path, encoding="utf-8"))
 deployment = json.loads(deployment_content) if deployment_content else None
 service = json.loads(service_content) if service_content else None
+expected_route_hosts = {
+    urlsplit(public_url).hostname,
+    urlsplit(diagnostic_url).hostname,
+}
+if None in expected_route_hosts or len(expected_route_hosts) != 2:
+    raise SystemExit("expected Telemetry ingress hosts are invalid")
 routes = [
-    path
+    (rule.get("host"), path)
     for rule in ingress.get("spec", {}).get("rules", [])
     for path in rule.get("http", {}).get("paths", [])
     if path.get("path") == "/api/telemetry/?(.*)"
@@ -538,8 +548,10 @@ routes = [
 if any(
     path.get("backend", {}).get("service", {}).get("name")
     != "gaming-telemetry-srv"
-    for path in routes
-) or len(routes) not in {0, 1, 2}:
+    for _, path in routes
+) or len(routes) not in {0, 2} or (
+    routes and {host for host, _ in routes} != expected_route_hosts
+):
     raise SystemExit("live Telemetry ingress progress is invalid")
 telemetry_ready = False
 if deployment:
