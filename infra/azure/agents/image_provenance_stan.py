@@ -27,10 +27,16 @@ EXPECTED_KEYS = {
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_ID_PATTERN = re.compile(r"^[1-9][0-9]*$")
+TELEMETRY_ERA_AZURE_DIAGNOSTIC = "Telemetry-era releases use the active OCI deployment path; dormant Azure deployment is unavailable."
 
 
 class ProvenanceError(ValueError):
     pass
+
+
+def reject_telemetry_era_source(source_root: Path) -> None:
+    if (source_root / "telemetry" / "package.json").exists():
+        raise ProvenanceError(TELEMETRY_ERA_AZURE_DIAGNOSTIC)
 
 
 def parse_record(path: Path) -> dict[str, str]:
@@ -113,6 +119,10 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    try:
+        reject_telemetry_era_source(Path.cwd())
+    except ProvenanceError as error:
+        parser.exit(1, f"{error}\n")
     rows = validate_records(
         args.directory,
         args.image_sha,

@@ -41,7 +41,6 @@ const CURRENT_PROFILE_REQUIREMENTS = Object.freeze({
   moderation: "jest-typescript",
   resulting: "jest-typescript",
   slip: "jest-typescript",
-  telemetry: "jest-typescript",
 });
 const LIMITS = Object.freeze({
   descriptorBytes: 64 * 1024,

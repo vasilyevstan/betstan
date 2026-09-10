@@ -458,6 +458,9 @@ EOF2
 image=$TELEMETRY_IMAGE_REF
 revision=1
 EOF2
+  : >"$state_root/telemetry-service"
+  printf '1\n' >"$state_root/telemetry-route-canonical"
+  printf '1\n' >"$state_root/telemetry-route-diagnostic"
 }
 
 set_target_state() {
@@ -987,6 +990,55 @@ if [[ "${1:-}" == --request-timeout=* ]]; then
 fi
 
 case "${1:-}" in
+  kustomize)
+    cat <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-telemetry-depl
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: gaming-telemetry
+    spec:
+      containers:
+        - name: gaming-telemetry
+          image: stanvasilyev/gaming_telemetry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-telemetry-srv
+spec:
+  selector:
+    app: gaming-telemetry
+  ports:
+    - port: 3000
+      targetPort: 3000
+YAML
+    ;;
+  apply)
+    file=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -f) file="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if grep -q '^kind: Deployment$' "$file"; then
+      image="$(awk '$1 == "image:" {print $2; exit}' "$file")"
+      atomic_write "$STUB_STATE_DIR/telemetry.env" <<EOF_STATE
+image=$image
+revision=8
+EOF_STATE
+    elif grep -q '^kind: Service$' "$file"; then
+      : >"$STUB_STATE_DIR/telemetry-service"
+    else
+      exit 1
+    fi
+    ;;
   get)
     shift
     case "${1:-}" in
@@ -1026,27 +1078,28 @@ case "${1:-}" in
         fi
         ;;
       service)
-        if [[ -f "$STUB_STATE_DIR/telemetry.env" ]]; then
-          printf '{"metadata":{"name":"gaming-telemetry-srv"}}'
+        if [[ -f "$STUB_STATE_DIR/telemetry-service" ]]; then
+          printf '{"metadata":{"name":"gaming-telemetry-srv"},"spec":{"selector":{"app":"gaming-telemetry"},"ports":[{"port":3000,"targetPort":3000}]}}'
         fi
         ;;
       ingress)
-        telemetry_routes=0
-        [[ ! -f "$STUB_STATE_DIR/telemetry.env" ]] || telemetry_routes=2
-        python3 - "$telemetry_routes" <<'PY'
+        canonical_route="$(cat "$STUB_STATE_DIR/telemetry-route-canonical" 2>/dev/null || printf 0)"
+        diagnostic_route="$(cat "$STUB_STATE_DIR/telemetry-route-diagnostic" 2>/dev/null || printf 0)"
+        python3 - "$canonical_route" "$diagnostic_route" <<'PY'
 import json
 import sys
 
-count = int(sys.argv[1])
+route_states = [int(value) for value in sys.argv[1:3]]
+hosts = ["betstan.xyz", "203.0.113.10.nip.io"]
 rules = []
-for index in range(2):
+for host, present in zip(hosts, route_states):
     paths = [{"path": "/?(.*)", "backend": {"service": {"name": "gaming-client-srv"}}}]
-    if index < count:
+    if present:
         paths.insert(0, {
             "path": "/api/telemetry/?(.*)",
             "backend": {"service": {"name": "gaming-telemetry-srv"}},
         })
-    rules.append({"host": f"fixture-{index}", "http": {"paths": paths}})
+    rules.append({"host": host, "http": {"paths": paths}})
 print(json.dumps({"spec": {"rules": rules}}))
 PY
         ;;
@@ -1259,7 +1312,11 @@ EOF_QUEUES
         printf '%s 0 0 %s\n' "$dynamic_queue_name" "$dynamic_consumers"
       fi
     elif [[ "$*" == *"listDatabases:1,nameOnly:true"* ]]; then
-      printf '%s\n' "${STUB_TELEMETRY_DATABASE_INITIALIZED:-true}"
+      initialized="${STUB_TELEMETRY_DATABASE_INITIALIZED:-true}"
+      if [[ -n "${STUB_KUBECTL_LOG:-}" && -f "${STUB_KUBECTL_LOG:-}" && -s "${STUB_KUBECTL_LOG:-}" ]]; then
+        initialized="${STUB_TELEMETRY_DATABASE_INITIALIZED_AFTER_ROLLBACK:-$initialized}"
+      fi
+      printf '%s\n' "$initialized"
     elif [[ "$*" == *"mongosh --quiet --norc --eval"* ]]; then
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
@@ -1301,6 +1358,10 @@ EOF_STATE
       status)
         deployment="$2"
         service="$(service_from_deployment "$deployment")"
+        if [[ "${STUB_FAIL_FINAL_READINESS:-0}" == "1" &&
+          ! -f "$STUB_STATE_DIR/telemetry.env" && "$service" == "auth" ]]; then
+          exit 1
+        fi
         if [[ "${STUB_FAIL_SERVICE:-}" == "$service" ]]; then
           exit 1
         fi
@@ -1319,6 +1380,61 @@ EOF_STATE
         printf 'unexpected kubectl rollout: %s\n' "$*" >&2
         exit 1
         ;;
+    esac
+    ;;
+  patch)
+    [[ "${2:-}" == "ingress" && "${3:-}" == "gaming-oci-ingress" ]] || exit 1
+    patch_file=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --patch-file) patch_file="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    python3 - "$patch_file" "$STUB_STATE_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+patch = json.load(open(sys.argv[1], encoding="utf-8"))
+state = Path(sys.argv[2])
+for operation in patch:
+    path = operation.get("path", "")
+    action = operation.get("op")
+    if path.startswith("/spec/rules/0/"):
+        target = state / "telemetry-route-canonical"
+        stage = "canonical-route"
+    elif path.startswith("/spec/rules/1/"):
+        target = state / "telemetry-route-diagnostic"
+        stage = "diagnostic-route"
+    else:
+        raise SystemExit("unexpected ingress patch path")
+    if action == "remove":
+        if stage == __import__("os").environ.get("STUB_FAIL_TELEMETRY_CLEANUP_STAGE"):
+            raise SystemExit("fixture Telemetry route removal failure")
+        if stage == "diagnostic-route" and __import__("os").environ.get("STUB_KEEP_DIAGNOSTIC_ROUTE") == "1":
+            continue
+        target.write_text("0\n", encoding="utf-8")
+    elif action == "add":
+        target.write_text("1\n", encoding="utf-8")
+    else:
+        raise SystemExit("unexpected ingress patch operation")
+PY
+    ;;
+  delete)
+    resource="$2"
+    case "$resource" in
+      service)
+        [[ "$3" == "gaming-telemetry-srv" ]] || exit 1
+        [[ "${STUB_FAIL_TELEMETRY_CLEANUP_STAGE:-}" != "service" ]] || exit 1
+        rm -f "$STUB_STATE_DIR/telemetry-service"
+        ;;
+      deployment)
+        [[ "$3" == "gaming-telemetry-depl" ]] || exit 1
+        [[ "${STUB_FAIL_TELEMETRY_CLEANUP_STAGE:-}" != "deployment" ]] || exit 1
+        rm -f "$STUB_STATE_DIR/telemetry.env"
+        ;;
+      *) exit 1 ;;
     esac
     ;;
   *)
@@ -1688,14 +1804,15 @@ run_script() {
   scenario_kubectl_log="$STATE_DIR/$scenario_name/kubectl.log"
   reset_live_state "$scenario_state_dir"
   rm -f "$scenario_kubectl_log"
+  mkdir -p "$STATE_DIR/$scenario_name/traces"
   env -i HOME="$HOME" "${common_env[@]}" \
     STUB_STATE_DIR="$scenario_state_dir" \
     STUB_KUBECTL_LOG="$scenario_kubectl_log" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-good" \
-    STUB_CURL_TRACE_FILE="$output_dir/curl-trace.tsv" \
-    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
-    LIVE_BETTING_SSE_PROBE_TRACE_FILE="$output_dir/sse-probe-trace.tsv" \
-    LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$output_dir/sse-validation-trace.tsv" \
+    STUB_CURL_TRACE_FILE="$STATE_DIR/$scenario_name/traces/curl-trace.tsv" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$STATE_DIR/$scenario_name/traces/write-fence-trace.tsv" \
+    LIVE_BETTING_SSE_PROBE_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-probe-trace.tsv" \
+    LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-validation-trace.tsv" \
     OUTPUT_DIR="$output_dir" TARGET_SHA="$TARGET_SHA" \
     BASELINE_SOURCE_RUN_ID="$SOURCE_RUN_ID" BASELINE_SOURCE_RUN_ATTEMPT=1 \
     BASELINE_ARTIFACT_NAME="$ARTIFACT_NAME" \
@@ -1735,13 +1852,15 @@ EOF2
     fi
   done
   rm -f "$capture_kubectl_log"
+  rm -rf "$STATE_DIR/$scenario_name/traces"
+  mkdir -p "$STATE_DIR/$scenario_name/traces"
   env -i HOME="$HOME" "${common_env[@]}" \
     STUB_STATE_DIR="$capture_state_dir" \
     STUB_KUBECTL_LOG="$capture_kubectl_log" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-good" \
-    STUB_CURL_TRACE_FILE="$output_dir/curl-trace.tsv" \
-    LIVE_BETTING_SSE_PROBE_TRACE_FILE="$output_dir/sse-probe-trace.tsv" \
-    LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$output_dir/sse-validation-trace.tsv" \
+    STUB_CURL_TRACE_FILE="$STATE_DIR/$scenario_name/traces/curl-trace.tsv" \
+    LIVE_BETTING_SSE_PROBE_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-probe-trace.tsv" \
+    LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-validation-trace.tsv" \
     OUTPUT_DIR="$output_dir" \
     REPO=example/repo \
     OCI_PUBLIC_URL='https://betstan.xyz' OCI_REDIRECT_URL='https://www.betstan.xyz' \
@@ -1932,9 +2051,9 @@ if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK
 fi
 assert_contains "$WORK_DIR/capture-repeat-safe-2.out" 'oci_baseline_capture=PASS'
 assert_contains "$repeat_capture_dir/sse.tsv" $'canonical\t200\thttps://betstan.xyz/api/event/stream\ttext/event-stream'
-assert_line "$repeat_capture_dir/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\tquiet-timeout\t28\t200\t5.000000'
-assert_line "$repeat_capture_dir/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
-assert_line "$repeat_capture_dir/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/capture-repeat-safe/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\tquiet-timeout\t28\t200\t5.000000'
+assert_line "$STATE_DIR/capture-repeat-safe/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
+assert_line "$STATE_DIR/capture-repeat-safe/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 [[ ! -d "$repeat_capture_dir/.workdirs" ]] || fail 'OCI repeat-safe capture left workdirs behind'
 
 protected_capture_dir="$WORK_DIR/capture-protected-backoffice"
@@ -1960,57 +2079,57 @@ if ! run_capture "$WORK_DIR/capture-exact-window-eof" STUB_SHORT_SSE_MODE=header
   fail 'OCI exact-window EOF SSE capture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/capture-exact-window-eof.out" 'oci_baseline_capture=PASS'
-assert_line "$WORK_DIR/capture-exact-window-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-eof\t0\t200\t5'
-assert_line "$WORK_DIR/capture-exact-window-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5'
-assert_line "$WORK_DIR/capture-exact-window-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/capture-exact-window-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-eof\t0\t200\t5'
+assert_line "$STATE_DIR/capture-exact-window-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5'
+assert_line "$STATE_DIR/capture-exact-window-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5000\t5\t5000\t1\t0\ttrue'
 
 if ! run_capture "$WORK_DIR/capture-exact-window-decimal-eof" STUB_SHORT_SSE_MODE=headers-only-exact-window-decimal-eof >"$WORK_DIR/capture-exact-window-decimal-eof.out" 2>&1; then
   cat "$WORK_DIR/capture-exact-window-decimal-eof.out" >&2
   fail 'OCI exact-window decimal EOF SSE capture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/capture-exact-window-decimal-eof.out" 'oci_baseline_capture=PASS'
-assert_line "$WORK_DIR/capture-exact-window-decimal-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-decimal-eof\t0\t200\t5.000000'
-assert_line "$WORK_DIR/capture-exact-window-decimal-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5'
-assert_line "$WORK_DIR/capture-exact-window-decimal-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/capture-exact-window-decimal-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-decimal-eof\t0\t200\t5.000000'
+assert_line "$STATE_DIR/capture-exact-window-decimal-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5'
+assert_line "$STATE_DIR/capture-exact-window-decimal-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 
 if ! run_capture "$WORK_DIR/capture-plus-window-eof" STUB_SHORT_SSE_MODE=headers-only-plus-window-eof >"$WORK_DIR/capture-plus-window-eof.out" 2>&1; then
   cat "$WORK_DIR/capture-plus-window-eof.out" >&2
   fail 'OCI plus-window EOF SSE capture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/capture-plus-window-eof.out" 'oci_baseline_capture=PASS'
-assert_line "$WORK_DIR/capture-plus-window-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-plus-window-eof\t0\t200\t5.002000'
-assert_line "$WORK_DIR/capture-plus-window-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.002000\t5'
-assert_line "$WORK_DIR/capture-plus-window-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.002000\t5002\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/capture-plus-window-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-plus-window-eof\t0\t200\t5.002000'
+assert_line "$STATE_DIR/capture-plus-window-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.002000\t5'
+assert_line "$STATE_DIR/capture-plus-window-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.002000\t5002\t5\t5000\t1\t0\ttrue'
 
 if ! run_capture "$WORK_DIR/capture-heartbeat-timeout" STUB_SHORT_SSE_MODE=heartbeat-timeout >"$WORK_DIR/capture-heartbeat-timeout.out" 2>&1; then
   cat "$WORK_DIR/capture-heartbeat-timeout.out" >&2
   fail 'OCI heartbeat-timeout SSE capture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/capture-heartbeat-timeout.out" 'oci_baseline_capture=PASS'
-assert_line "$WORK_DIR/capture-heartbeat-timeout/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-timeout\t28\t200\t5.000000'
-assert_line "$WORK_DIR/capture-heartbeat-timeout/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
-assert_line "$WORK_DIR/capture-heartbeat-timeout/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t1\ttrue'
+assert_line "$STATE_DIR/capture-heartbeat-timeout/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-timeout\t28\t200\t5.000000'
+assert_line "$STATE_DIR/capture-heartbeat-timeout/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
+assert_line "$STATE_DIR/capture-heartbeat-timeout/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t1\ttrue'
 
 run_capture_expect_failure capture-sse-under-window-eof \
   STUB_SHORT_SSE_MODE=headers-only-under-window-eof
 assert_contains "$WORK_DIR/capture-sse-under-window-eof.out" 'SSE connectivity contract failed for https://betstan.xyz/api/event/stream'
-assert_line "$WORK_DIR/capture-sse-under-window-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-under-window-eof\t0\t200\t4.998000'
-assert_line "$WORK_DIR/capture-sse-under-window-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
-assert_line "$WORK_DIR/capture-sse-under-window-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t0\tfalse'
+assert_line "$STATE_DIR/capture-sse-under-window-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-under-window-eof\t0\t200\t4.998000'
+assert_line "$STATE_DIR/capture-sse-under-window-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
+assert_line "$STATE_DIR/capture-sse-under-window-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t0\tfalse'
 
 run_capture_expect_failure capture-sse-headers-only-eof \
   STUB_SHORT_SSE_MODE=headers-only-eof
 assert_contains "$WORK_DIR/capture-sse-headers-only-eof.out" 'SSE connectivity contract failed for https://betstan.xyz/api/event/stream'
-assert_line "$WORK_DIR/capture-sse-headers-only-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-eof\t0\t200\t0'
-assert_line "$WORK_DIR/capture-sse-headers-only-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t5'
-assert_line "$WORK_DIR/capture-sse-headers-only-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t0\t5\t5000\t1\t0\tfalse'
+assert_line "$STATE_DIR/capture-sse-headers-only-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-eof\t0\t200\t0'
+assert_line "$STATE_DIR/capture-sse-headers-only-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t5'
+assert_line "$STATE_DIR/capture-sse-headers-only-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t0\t5\t5000\t1\t0\tfalse'
 
 run_capture_expect_failure capture-sse-heartbeat-under-window-eof \
   STUB_SHORT_SSE_MODE=heartbeat-under-window-eof
 assert_contains "$WORK_DIR/capture-sse-heartbeat-under-window-eof.out" 'SSE connectivity contract failed for https://betstan.xyz/api/event/stream'
-assert_line "$WORK_DIR/capture-sse-heartbeat-under-window-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-under-window-eof\t0\t200\t4.998000'
-assert_line "$WORK_DIR/capture-sse-heartbeat-under-window-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
-assert_line "$WORK_DIR/capture-sse-heartbeat-under-window-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t1\tfalse'
+assert_line "$STATE_DIR/capture-sse-heartbeat-under-window-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-under-window-eof\t0\t200\t4.998000'
+assert_line "$STATE_DIR/capture-sse-heartbeat-under-window-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
+assert_line "$STATE_DIR/capture-sse-heartbeat-under-window-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t1\tfalse'
 
 run_capture_expect_failure capture-sse-heartbeat-eof \
   STUB_SHORT_SSE_MODE=heartbeat-eof
@@ -2233,7 +2352,7 @@ assert_contains "$protected_backoffice_output/rollback-summary.env" \
   'backoffice_access_mode=public'
 assert_contains "$protected_backoffice_output/rollback-summary.env" \
   'rollback_http_mutation_fence=not-required'
-[[ ! -s "$protected_backoffice_output/write-fence-trace.tsv" ]] ||
+[[ ! -s "$STATE_DIR/protected-backoffice-transition/traces/write-fence-trace.tsv" ]] ||
   fail 'replay-compatible Backoffice rollback unexpectedly fenced mutations'
 
 run_expect_failure malformed-protected-backoffice \
@@ -2387,8 +2506,8 @@ assert_contains "$WORK_DIR/migration-transition-block.out" 'do not roll applicat
 assert_contains "$WORK_DIR/migration-transition-block.out" 'infra/oci/scripts/reviewed-topology-rollback-stan.sh'
 assert_contains "$WORK_DIR/migration-transition-block/rollback-readiness/summary.env" 'mode=migration-transition'
 [[ ! -s "$STATE_DIR/migration-transition-block/kubectl.log" ]] || fail 'OCI migration-transition guard should prevent image mutation'
-assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'fence-writes'
-assert_line "$WORK_DIR/migration-transition-block/write-fence-trace.tsv" 'release'
+assert_line "$STATE_DIR/migration-transition-block/traces/write-fence-trace.tsv" 'fence-writes'
+assert_line "$STATE_DIR/migration-transition-block/traces/write-fence-trace.tsv" 'release'
 
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
@@ -2425,8 +2544,8 @@ assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'failed_stage=roll
 assert_contains "$WORK_DIR/partial-failure/failure-state.env" 'rollback_http_mutation_fence=active'
 [[ "$(wc -l <"$WORK_DIR/partial-failure/rollout-order.tsv" | tr -d ' ')" == '5' ]] || fail 'OCI partial failure should stop after event rollout'
 ! grep -Fxq 'moderation' "$WORK_DIR/partial-failure/rollout-order.tsv" || fail 'OCI partial failure should not continue after event'
-assert_line "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'fence-writes'
-assert_not_contains "$WORK_DIR/partial-failure/write-fence-trace.tsv" 'release'
+assert_line "$STATE_DIR/partial-failure/traces/write-fence-trace.tsv" 'fence-writes'
+assert_not_contains "$STATE_DIR/partial-failure/traces/write-fence-trace.tsv" 'release'
 
 run_expect_failure rollback-fence-release-failure \
   STUB_MUTATION_FENCE_FAIL_ACTION=release ROLLBACK_MODE=execute
@@ -2438,9 +2557,9 @@ assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
   'failed_stage=write-fence-release'
 assert_contains "$WORK_DIR/rollback-fence-release-failure/failure-state.env" \
   'rollback_http_mutation_fence=active'
-assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+assert_line "$STATE_DIR/rollback-fence-release-failure/traces/write-fence-trace.tsv" \
   'fence-writes'
-assert_line "$WORK_DIR/rollback-fence-release-failure/write-fence-trace.tsv" \
+assert_line "$STATE_DIR/rollback-fence-release-failure/traces/write-fence-trace.tsv" \
   'release'
 
 run_expect_failure post-rollback-prematch-refusal \
@@ -2450,7 +2569,7 @@ assert_contains "$WORK_DIR/post-rollback-prematch-refusal/failure-state.env" 'fa
 assert_contains "$WORK_DIR/post-rollback-prematch-refusal/failure-state.env" 'failed_stage=public-api'
 [[ "$(wc -l <"$WORK_DIR/post-rollback-prematch-refusal/rollout-order.tsv" | tr -d ' ')" == '1' ]] || fail 'OCI prematch refusal should stop after the first deployment'
 
-for telemetry_failure in malformed space microseconds offset yellow red; do
+for telemetry_failure in malformed space microseconds offset; do
   run_expect_failure "post-rollback-telemetry-$telemetry_failure" \
     STUB_TELEMETRY_BAD_AFTER_ROLLBACK="$telemetry_failure" \
     ROLLBACK_MODE=execute
@@ -2459,26 +2578,65 @@ for telemetry_failure in malformed space microseconds offset yellow red; do
     'public API verification failed for canonical after gaming-auth-depl'
 done
 
+for telemetry_transition_status in yellow red; do
+  if ! run_script "$WORK_DIR/post-rollback-telemetry-$telemetry_transition_status" \
+      STUB_TELEMETRY_BAD_AFTER_ROLLBACK="$telemetry_transition_status" \
+      ROLLBACK_MODE=execute \
+      >"$WORK_DIR/post-rollback-telemetry-$telemetry_transition_status.out" 2>&1; then
+    cat "$WORK_DIR/post-rollback-telemetry-$telemetry_transition_status.out" >&2
+    fail "historical rollback rejected a valid coarse Telemetry transition status"
+  fi
+  assert_contains \
+    "$WORK_DIR/post-rollback-telemetry-$telemetry_transition_status/rollback-summary.env" \
+    'telemetry_state=absent'
+done
+
+for cleanup_stage in canonical-route diagnostic-route service deployment; do
+  run_expect_failure "telemetry-cleanup-$cleanup_stage" \
+    STUB_FAIL_TELEMETRY_CLEANUP_STAGE="$cleanup_stage" \
+    ROLLBACK_MODE=execute
+  assert_contains "$WORK_DIR/telemetry-cleanup-$cleanup_stage/failure-state.env" \
+    'failed_service=post-rollback'
+  assert_contains "$WORK_DIR/telemetry-cleanup-$cleanup_stage/failure-state.env" \
+    "failed_stage=telemetry-$cleanup_stage"
+done
+
+run_expect_failure telemetry-absent-verification \
+  STUB_KEEP_DIAGNOSTIC_ROUTE=1 ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/telemetry-absent-verification/failure-state.env" \
+  'failed_stage=telemetry-absent'
+
+run_expect_failure telemetry-durable-state \
+  STUB_TELEMETRY_DATABASE_INITIALIZED_AFTER_ROLLBACK=false \
+  ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/telemetry-durable-state/failure-state.env" \
+  'failed_stage=telemetry-durable-state'
+
+run_expect_failure historical-final-readiness \
+  STUB_FAIL_FINAL_READINESS=1 ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/historical-final-readiness/failure-state.env" \
+  'failed_stage=post-rollback-readiness'
+
 run_expect_failure sse-under-window-eof-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=headers-only-under-window-eof ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-under-window-eof-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
-assert_line "$WORK_DIR/sse-under-window-eof-refusal/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-under-window-eof\t0\t200\t4.998000'
-assert_line "$WORK_DIR/sse-under-window-eof-refusal/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
-assert_line "$WORK_DIR/sse-under-window-eof-refusal/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t0\tfalse'
+assert_line "$STATE_DIR/sse-under-window-eof-refusal/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-under-window-eof\t0\t200\t4.998000'
+assert_line "$STATE_DIR/sse-under-window-eof-refusal/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
+assert_line "$STATE_DIR/sse-under-window-eof-refusal/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t0\tfalse'
 
 run_expect_failure sse-headers-only-eof-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=headers-only-eof ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-headers-only-eof-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
-assert_line "$WORK_DIR/sse-headers-only-eof-refusal/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-eof\t0\t200\t0'
-assert_line "$WORK_DIR/sse-headers-only-eof-refusal/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t5'
-assert_line "$WORK_DIR/sse-headers-only-eof-refusal/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t0\t5\t5000\t1\t0\tfalse'
+assert_line "$STATE_DIR/sse-headers-only-eof-refusal/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-eof\t0\t200\t0'
+assert_line "$STATE_DIR/sse-headers-only-eof-refusal/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t5'
+assert_line "$STATE_DIR/sse-headers-only-eof-refusal/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t0\t0\t5\t5000\t1\t0\tfalse'
 
 run_expect_failure sse-heartbeat-under-window-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=heartbeat-under-window-eof ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/sse-heartbeat-under-window-refusal.out" 'SSE verification failed for canonical after gaming-auth-depl'
-assert_line "$WORK_DIR/sse-heartbeat-under-window-refusal/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-under-window-eof\t0\t200\t4.998000'
-assert_line "$WORK_DIR/sse-heartbeat-under-window-refusal/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
-assert_line "$WORK_DIR/sse-heartbeat-under-window-refusal/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t1\tfalse'
+assert_line "$STATE_DIR/sse-heartbeat-under-window-refusal/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-under-window-eof\t0\t200\t4.998000'
+assert_line "$STATE_DIR/sse-heartbeat-under-window-refusal/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t5'
+assert_line "$STATE_DIR/sse-heartbeat-under-window-refusal/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t4.998000\t4998\t5\t5000\t1\t1\tfalse'
 
 run_expect_failure sse-heartbeat-eof-refusal \
   STUB_SHORT_SSE_MODE_AFTER_ROLLBACK=heartbeat-eof ROLLBACK_MODE=execute
@@ -2508,9 +2666,7 @@ assert_contains "$WORK_DIR/legacy-sse-rollback-success.out" 'oci_rollback_status
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_required=false'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/preflight-live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
-assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_required=false'
-assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_primary_status=legacy-absent:502'
-assert_contains "$WORK_DIR/legacy-sse-rollback-success/live-readiness/summary.env" 'sse_diagnostic_status=legacy-absent:502'
+assert_contains "$WORK_DIR/legacy-sse-rollback-success/rollback-summary.env" 'telemetry_state=absent'
 assert_contains "$WORK_DIR/legacy-sse-rollback-success/sse-verification.tsv" $'\t502\t'
 assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/baseline/queues.tsv" 'event_live_update.'
 assert_not_contains "$WORK_DIR/legacy-sse-rollback-success/queue-verification.tsv" 'dynamic:event_live_update.'
@@ -2539,9 +2695,9 @@ if ! run_script "$WORK_DIR/success-exact-window-eof" \
   fail 'OCI exact-window EOF SSE success fixture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/success-exact-window-eof.out" 'oci_rollback_status=PASS'
-assert_line "$WORK_DIR/success-exact-window-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-eof\t0\t200\t5'
-assert_line "$WORK_DIR/success-exact-window-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5'
-assert_line "$WORK_DIR/success-exact-window-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/success-exact-window-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-eof\t0\t200\t5'
+assert_line "$STATE_DIR/success-exact-window-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5'
+assert_line "$STATE_DIR/success-exact-window-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5\t5000\t5\t5000\t1\t0\ttrue'
 
 if ! run_script "$WORK_DIR/success-exact-window-decimal-eof" \
     STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \
@@ -2551,9 +2707,9 @@ if ! run_script "$WORK_DIR/success-exact-window-decimal-eof" \
   fail 'OCI exact-window decimal EOF SSE success fixture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/success-exact-window-decimal-eof.out" 'oci_rollback_status=PASS'
-assert_line "$WORK_DIR/success-exact-window-decimal-eof/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-decimal-eof\t0\t200\t5.000000'
-assert_line "$WORK_DIR/success-exact-window-decimal-eof/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5'
-assert_line "$WORK_DIR/success-exact-window-decimal-eof/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/success-exact-window-decimal-eof/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theaders-only-exact-window-decimal-eof\t0\t200\t5.000000'
+assert_line "$STATE_DIR/success-exact-window-decimal-eof/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5'
+assert_line "$STATE_DIR/success-exact-window-decimal-eof/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t0\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 
 if ! run_script "$WORK_DIR/success-quiet-sse" \
     STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \
@@ -2563,9 +2719,9 @@ if ! run_script "$WORK_DIR/success-quiet-sse" \
   fail 'OCI quiet-timeout SSE success fixture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/success-quiet-sse.out" 'oci_rollback_status=PASS'
-assert_line "$WORK_DIR/success-quiet-sse/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\tquiet-timeout\t28\t200\t5.000000'
-assert_line "$WORK_DIR/success-quiet-sse/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
-assert_line "$WORK_DIR/success-quiet-sse/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
+assert_line "$STATE_DIR/success-quiet-sse/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\tquiet-timeout\t28\t200\t5.000000'
+assert_line "$STATE_DIR/success-quiet-sse/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
+assert_line "$STATE_DIR/success-quiet-sse/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t0\ttrue'
 
 if ! run_script "$WORK_DIR/success" \
     STUB_DYNAMIC_QUEUE_NAME_AFTER_ROLLBACK=event_live_update.rolled-pod \
@@ -2575,9 +2731,9 @@ if ! run_script "$WORK_DIR/success" \
   fail 'OCI success fixture unexpectedly failed'
 fi
 assert_contains "$WORK_DIR/success.out" 'oci_rollback_status=PASS'
-assert_line "$WORK_DIR/success/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-timeout\t28\t200\t5.000000'
-assert_line "$WORK_DIR/success/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
-assert_line "$WORK_DIR/success/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t1\ttrue'
+assert_line "$STATE_DIR/success/traces/curl-trace.tsv" $'https://betstan.xyz/api/event/stream\t5\theartbeat-timeout\t28\t200\t5.000000'
+assert_line "$STATE_DIR/success/traces/sse-probe-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5'
+assert_line "$STATE_DIR/success/traces/sse-validation-trace.tsv" $'https://betstan.xyz/api/event/stream\t28\t200\t5.000000\t5000\t5\t5000\t1\t1\ttrue'
 [[ "$(wc -l <"$WORK_DIR/success/rollout-order.tsv" | tr -d ' ')" == '9' ]] || fail 'OCI success rollout did not process every service'
 [[ "$(tail -n 1 "$WORK_DIR/success/rollout-order.tsv")" == 'gamemaster' ]] || fail 'OCI gamemaster was not rolled back last'
 assert_contains "$WORK_DIR/success/rollback-summary.env" 'status=PASS'
@@ -2586,13 +2742,33 @@ assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'auth_identif
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
 assert_contains "$WORK_DIR/success/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
 assert_contains "$WORK_DIR/success/rollback-summary.env" 'rollback_http_mutation_fence=used-and-released'
-assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'fence-writes'
-assert_line "$WORK_DIR/success/write-fence-trace.tsv" 'release'
+assert_line "$STATE_DIR/success/traces/write-fence-trace.tsv" 'fence-writes'
+assert_line "$STATE_DIR/success/traces/write-fence-trace.tsv" 'release'
 assert_contains "$WORK_DIR/success/preflight-live-readiness/summary.env" 'mode=rollback-drain'
-assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'mode=rollback-drain'
-assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'secondary_redirect_status=308'
-assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'diagnostic_event_status=200'
-assert_contains "$WORK_DIR/success/live-readiness/summary.env" 'legacy_prematch_events=1'
+assert_contains "$WORK_DIR/success/rollback-summary.env" 'telemetry_state=absent'
+assert_contains "$WORK_DIR/success/telemetry-durable-state.env" 'queue_present=true'
+assert_contains "$WORK_DIR/success/telemetry-durable-state.env" 'database_present=true'
+[[ ! -f "$STATE_DIR/success/current/telemetry.env" &&
+   ! -f "$STATE_DIR/success/current/telemetry-service" &&
+   "$(cat "$STATE_DIR/success/current/telemetry-route-canonical")" == "0" &&
+   "$(cat "$STATE_DIR/success/current/telemetry-route-diagnostic")" == "0" ]] ||
+  fail 'terminal historical rollback did not leave exact nine-application topology'
+if find "$WORK_DIR/success" -path "$WORK_DIR/success/baseline" -prune -o \
+    -type f \( -name '*.json' -o -name '*.headers' -o -name '*-trace.tsv' \) \
+    -print -quit | grep -q .; then
+  fail 'raw private captures leaked into uploaded rollback evidence'
+fi
+if ! env -i HOME="$HOME" PATH="$BIN_DIR:$PATH" \
+    STUB_STATE_DIR="$STATE_DIR/success/current" \
+    MODE=absent EXPECTED_IMAGE=none EXPECTED_DATABASE_INITIALIZED=true \
+    OCI_K8S_NAMESPACE=betstan-oci \
+    OCI_PUBLIC_URL= OCI_DIAGNOSTIC_URL= \
+    OUTPUT_DIR="$WORK_DIR/absent-verifier-no-http" \
+    "$ROOT_DIR/infra/oci/scripts/verify-telemetry-recovery-state-stan.sh" \
+    >"$WORK_DIR/absent-verifier-no-http.out" 2>&1; then
+  cat "$WORK_DIR/absent-verifier-no-http.out" >&2
+  fail 'MODE=absent incorrectly required public URLs or HTTP'
+fi
 assert_contains "$WORK_DIR/success/queue-thresholds.env" 'max_post_rollback_queue_ready=5'
 assert_contains "$WORK_DIR/success/queue-thresholds.env" 'max_post_rollback_queue_unack=5'
 assert_contains "$WORK_DIR/success/queue-verification.tsv" 'dynamic:event_live_update.'
@@ -2750,7 +2926,7 @@ run_partial_recovery() {
     SERVICE_OPS_SCRIPT="$BIN_DIR/partial-recovery-service-ops-stub.sh" \
     ROLLBACK_MUTATION_FENCE_SCRIPT="$BIN_DIR/rollback-mutation-fence-stub.sh" \
     TELEMETRY_RECOVERY_SCRIPT="$BIN_DIR/partial-recovery-telemetry-stub.sh" \
-    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$output_dir/write-fence-trace.tsv" \
+    ROLLBACK_MUTATION_FENCE_TRACE_FILE="$STATE_DIR/$label/write-fence-trace.tsv" \
     CONFIRMATION='RECOVER OCI PARTIAL ROLLBACK' \
     GITHUB_REF_NAME=master \
     GITHUB_RUN_ID="$PARTIAL_RECOVERY_RUN_ID" \
@@ -2800,16 +2976,90 @@ assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.e
   "restored_build_run_id=$BUILD_RUN_ID"
 assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-authority.env" \
   "restored_source_sha=$PARTIAL_RECOVERY_SOURCE_SHA"
-assert_contains "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" \
-  'CrashLoopBackOff'
+[[ ! -e "$WORK_DIR/partial-recovery-success/pre-recovery-service-ops.txt" ]] ||
+  fail 'raw service diagnostics leaked into partial recovery evidence'
 assert_contains "$WORK_DIR/partial-recovery-success/partial-recovery-summary.env" \
   'rollback_http_mutation_fence=released'
-assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'fence-writes'
-assert_line "$WORK_DIR/partial-recovery-success/write-fence-trace.tsv" 'release'
+assert_line "$STATE_DIR/partial-recovery-success/write-fence-trace.tsv" 'fence-writes'
+assert_line "$STATE_DIR/partial-recovery-success/write-fence-trace.tsv" 'release'
+[[ -f "$STATE_DIR/partial-recovery-success/current/telemetry.env" &&
+   -f "$STATE_DIR/partial-recovery-success/current/telemetry-service" &&
+   "$(cat "$STATE_DIR/partial-recovery-success/current/telemetry-route-canonical")" == "1" &&
+   "$(cat "$STATE_DIR/partial-recovery-success/current/telemetry-route-diagnostic")" == "1" ]] ||
+  fail 'partial recovery did not restore the exact pre-run Telemetry resources'
 run_partial_authority_validation "$WORK_DIR/partial-recovery-success" \
   >"$WORK_DIR/partial-recovery-authority-success.out"
 assert_contains "$WORK_DIR/partial-recovery-authority-success.out" \
   'partial_recovery_authority_validation=PASS'
+
+partial_plan_order=(event client backoffice bet)
+for checkpoint in 0 1 2 3 4; do
+  label="partial-recovery-legacy-checkpoint-$checkpoint"
+  state_root="$STATE_DIR/$label/current"
+  set_partial_recovery_state "$state_root"
+  for ((index = 0; index < checkpoint; index++)); do
+    service="${partial_plan_order[$index]}"
+    write_text_atomic "$state_root/${service}.env" <<EOF
+image=$(current_image_ref "$service")
+revision=9
+EOF
+  done
+  if ! PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+      run_partial_recovery "$label" >"$WORK_DIR/$label.out" 2>&1; then
+    cat "$WORK_DIR/$label.out" >&2
+    fail "partial recovery did not resume legacy checkpoint $checkpoint"
+  fi
+done
+
+for telemetry_checkpoint in absent deployment-only service-no-routes canonical-route; do
+  label="partial-recovery-telemetry-$telemetry_checkpoint"
+  state_root="$STATE_DIR/$label/current"
+  reset_live_state "$state_root"
+  case "$telemetry_checkpoint" in
+    absent)
+      rm -f "$state_root/telemetry.env" "$state_root/telemetry-service"
+      printf '0\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+    deployment-only)
+      rm -f "$state_root/telemetry-service"
+      printf '0\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+    service-no-routes)
+      printf '0\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+    canonical-route)
+      printf '1\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+  esac
+  if ! PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+      run_partial_recovery "$label" >"$WORK_DIR/$label.out" 2>&1; then
+    cat "$WORK_DIR/$label.out" >&2
+    fail "partial recovery did not resume Telemetry checkpoint $telemetry_checkpoint"
+  fi
+done
+
+for failed_cleanup in \
+  telemetry-cleanup-canonical-route \
+  telemetry-cleanup-diagnostic-route \
+  telemetry-cleanup-service \
+  telemetry-cleanup-deployment \
+  telemetry-absent-verification \
+  telemetry-durable-state \
+  historical-final-readiness; do
+  label="recover-$failed_cleanup"
+  mkdir -p "$STATE_DIR/$label"
+  cp -R "$STATE_DIR/$failed_cleanup/current" "$STATE_DIR/$label/current"
+  if ! PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE="$WORK_DIR/$failed_cleanup" \
+      PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+      run_partial_recovery "$label" >"$WORK_DIR/$label.out" 2>&1; then
+    cat "$WORK_DIR/$label.out" >&2
+    fail "partial recovery could not restore final-checkpoint failure $failed_cleanup"
+  fi
+done
 
 if ! PARTIAL_ROLLBACK_SOURCE_DIR_OVERRIDE="$WORK_DIR/rollback-fence-release-failure" \
     run_partial_recovery partial-recovery-after-fence-release-failure \
@@ -2824,10 +3074,10 @@ assert_contains \
   "$WORK_DIR/partial-recovery-after-fence-release-failure/partial-recovery-summary.env" \
   'recovered_services=gamemaster slip resulting moderation event client backoffice bet auth'
 assert_line \
-  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  "$STATE_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
   'fence-writes'
 assert_line \
-  "$WORK_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
+  "$STATE_DIR/partial-recovery-after-fence-release-failure/write-fence-trace.tsv" \
   'release'
 
 if run_partial_recovery partial-recovery-fence-release-failure \
@@ -2837,9 +3087,9 @@ if run_partial_recovery partial-recovery-fence-release-failure \
 fi
 assert_contains "$WORK_DIR/partial-recovery-fence-release-failure.out" \
   'HTTP mutation fence could not be released safely'
-assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+assert_line "$STATE_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
   'fence-writes'
-assert_line "$WORK_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
+assert_line "$STATE_DIR/partial-recovery-fence-release-failure/write-fence-trace.tsv" \
   'release'
 
 partial_capture_dir="$WORK_DIR/partial-recovery-baseline-capture"

@@ -228,7 +228,9 @@ case "$1" in
   verify-held)
     [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] || { echo "not held" >&2; exit 1; }
     echo "live_data_maintenance=verify-held status=PASS" ;;
-  hold) printf 'held\n' >"$STATE_DIR/maintenance"; echo "held" ;;
+  hold)
+    if [[ "${FAKE_REHOLD_FAILS:-0}" == "1" ]]; then echo "hold failed" >&2; exit 1; fi
+    printf 'held\n' >"$STATE_DIR/maintenance"; echo "held" ;;
   release)
     if [[ "${FAKE_FENCE_RELEASE_FAILS:-0}" == "1" ]]; then echo "release failed" >&2; exit 1; fi
     printf 'released\n' >"$STATE_DIR/maintenance"; echo "released" ;;
@@ -248,6 +250,11 @@ case "$1" in
       exit 1
     } ;;
   acquire)
+    if [[ "${FAKE_REACQUIRE_FAILS:-0}" == "1" &&
+      "$(cat "$STATE_DIR/lock")" == "released" ]]; then
+      echo "reacquire failed" >&2
+      exit 1
+    fi
     [[ "$(cat "$STATE_DIR/lock")" != "contended" ]] || {
       echo "another database operation holds the lock" >&2; exit 1
     }
@@ -353,15 +360,29 @@ for service in "${SERVICES[@]}"; do
 done
 [[ "$(cat "$STATE_DIR/image-telemetry")" == "$(image_for target telemetry)" ]] ||
   fail "accepted fenced recovery did not restore exact pre-run Telemetry digest"
-# Established safe order: lock released before the public fence.
-lock_line="$(grep -n 'shared_mongo_lock=release ' "$OUT_DIR/fenced-lock-release.txt" | head -1 | cut -d: -f1)"
-[[ -n "$lock_line" ]] || fail 'lock release evidence missing'
-[[ -f "$OUT_DIR/fenced-fence-release.txt" ]] || fail 'fence release evidence missing'
+# Raw lock/fence command output stays outside uploaded evidence.
+[[ ! -e "$OUT_DIR/fenced-lock-release.txt" ]] ||
+  fail 'raw lock release output leaked into fenced recovery evidence'
+[[ ! -e "$OUT_DIR/fenced-fence-release.txt" ]] ||
+  fail 'raw fence release output leaked into fenced recovery evidence'
 # Restore order must lead with API dependencies and end with Gamemaster.
 [[ "$(head -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "auth" ]] ||
   fail 'fenced restore order did not start with auth'
 [[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "gamemaster" ]] ||
   fail 'fenced restore order did not end with gamemaster'
+
+# Every recovery checkpoint is replayable: a second invocation may observe an
+# exact baseline prefix and candidate suffix in the reviewed restore order.
+RECOVERY_ORDER=(auth bet backoffice event moderation resulting slip client gamemaster)
+for checkpoint in "${!RECOVERY_ORDER[@]}"; do
+  new_case "recovery-checkpoint-$checkpoint"
+  for ((index = 0; index <= checkpoint; index++)); do
+    service="${RECOVERY_ORDER[$index]}"
+    printf '%s\n' "$(image_for target "$service")" >"$STATE_DIR/image-$service"
+  done
+  run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+    fail "fenced recovery checkpoint $checkpoint was not resumable: $(cat "$CASE_DIR/out.txt")"
+done
 
 configure_first_activation() {
   local stage="$1" service
@@ -390,6 +411,19 @@ EOF
       printf '0\n' >"$STATE_DIR/ready-telemetry"
       printf '2\n' >"$STATE_DIR/telemetry-routes"
       ;;
+    route-one|no-routes|deployment-only)
+      printf '%s\n' "$(image_for deployed telemetry)" >"$STATE_DIR/image-telemetry"
+      printf '1\n' >"$STATE_DIR/replicas-telemetry"
+      printf '1\n' >"$STATE_DIR/ready-telemetry"
+      if [[ "$stage" != "deployment-only" ]]; then
+        : >"$STATE_DIR/service-telemetry"
+      fi
+      if [[ "$stage" == "route-one" ]]; then
+        printf '1\n' >"$STATE_DIR/telemetry-routes"
+      else
+        printf '0\n' >"$STATE_DIR/telemetry-routes"
+      fi
+      ;;
     *) fail "unknown first-activation fixture stage: $stage" ;;
   esac
   (
@@ -400,7 +434,7 @@ EOF
   ) >"$BASELINE_DIR/SHA256SUMS"
 }
 
-for stage in absent service deployment-unready; do
+for stage in absent service deployment-unready route-one no-routes deployment-only; do
   new_case "first-activation-$stage"
   configure_first_activation "$stage"
   run_operator >"$CASE_DIR/out.txt" 2>&1 ||
@@ -519,11 +553,12 @@ assert_contains "$CASE_DIR/out.txt" \
   'restored generation failed ordinary steady-state readiness'
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=FAIL'
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'maintenance_fence=re-held'
-# By this point the lock was already legitimately released in the contract
-# order, so the summary must say so rather than claim a lock it does not hold.
-assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=released'
+# By this point the released lock must be reacquired with the original identity.
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquired'
 [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
   fail 'failed fenced recovery did not re-hold maintenance'
+[[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+  fail 'failed fenced recovery did not reacquire the original database lock'
 
 # A failure during the restore itself, before the contract releases anything,
 # must re-hold maintenance AND preserve the transferred database lock.
@@ -560,8 +595,24 @@ assert_contains "$CASE_DIR/out.txt" \
   'the maintenance fence could not be released safely'
 [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
   fail 'fence release failure did not re-hold maintenance'
-# The summary must honestly report that the lock was already released.
-assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=released'
+# The summary must report successful re-hold and reacquisition.
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquired'
+
+new_case rehold-failure
+if run_operator FAKE_STEADY_READINESS=NO_GO FAKE_REHOLD_FAILS=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted a failed maintenance re-hold'
+fi
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'maintenance_fence=rehold-failed'
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquire-failed'
+
+new_case reacquire-failure
+if run_operator FAKE_STEADY_READINESS=NO_GO FAKE_REACQUIRE_FAILS=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted a failed original-lock reacquisition'
+fi
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'maintenance_fence=re-held'
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquire-failed'
 
 # Identity guards.
 new_case same-generation

@@ -50,30 +50,6 @@ prepare_private_dir() {
   oci_prepare_safe_private_dir "$directory"
 }
 
-create_unique_private_dir() {
-  local parent="$1"
-  local prefix="$2"
-  python3 - "$parent" "$prefix" <<'PY'
-import os
-import sys
-import uuid
-from pathlib import Path
-
-parent = Path(sys.argv[1])
-prefix = sys.argv[2]
-parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-for _ in range(64):
-    candidate = parent / f"{prefix}-{uuid.uuid4().hex}"
-    try:
-        candidate.mkdir(mode=0o700)
-    except FileExistsError:
-        continue
-    print(candidate)
-    raise SystemExit(0)
-raise SystemExit("unable to allocate unique private directory")
-PY
-}
-
 write_text_atomic() {
   local target="$1"
   local temp_file="${target}.tmp.$$.$RANDOM"
@@ -812,7 +788,7 @@ for expected, row in zip(services, health):
         not isinstance(row, dict)
         or set(row) != {"service", "status"}
         or row["service"] != expected
-        or row["status"] != "green"
+        or row["status"] not in {"green", "yellow", "red"}
     ):
         raise SystemExit(1)
 print("telemetry-summary")
@@ -827,8 +803,8 @@ PY
       return 1
       ;;
   esac
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$CURRENT_STEP_LABEL" "$label" "$path" "$status" "$effective_url" "$shape:$(sha256_file "$body_file")" \
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$CURRENT_STEP_LABEL" "$label" "$path" "$status" "$shape:$(sha256_file "$body_file")" \
     >>"$OUTPUT_DIR/public-verification.tsv"
 }
 
@@ -838,6 +814,17 @@ capture_api_contracts() {
   local contract path expected_kind
   for contract in "${API_CONTRACTS[@]}"; do
     IFS='|' read -r path expected_kind <<<"$contract"
+    capture_http "$base_url" "$path" "$expected_kind" "$label" || return 1
+  done
+}
+
+capture_historical_api_contracts() {
+  local base_url="$1"
+  local label="$2"
+  local contract path expected_kind
+  for contract in "${API_CONTRACTS[@]}"; do
+    IFS='|' read -r path expected_kind <<<"$contract"
+    [[ "$expected_kind" == "telemetry" ]] && continue
     capture_http "$base_url" "$path" "$expected_kind" "$label" || return 1
   done
 }
@@ -890,8 +877,8 @@ capture_sse() {
       return 1
     }
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' \
-    "$CURRENT_STEP_LABEL" "$label" "$status" "$effective_url" "$(sha256_file "$body_file")" \
+  printf '%s\t%s\t%s\t%s\n' \
+    "$CURRENT_STEP_LABEL" "$label" "$status" "$(sha256_file "$body_file")" \
     >>"$OUTPUT_DIR/sse-verification.tsv"
 }
 
@@ -948,7 +935,7 @@ run_live_betting_readiness() {
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     NAMESPACE="$OCI_K8S_NAMESPACE" \
     SSE_REQUIRED="$SSE_REQUIRED" \
-    "$LIVE_BETTING_READINESS_SCRIPT" >"$OUTPUT_DIR/${label}.txt" 2>&1
+    "$LIVE_BETTING_READINESS_SCRIPT" >"$WORK_DIR/${label}.txt" 2>&1
 }
 
 capture_summary_state() {
@@ -1058,6 +1045,95 @@ output.write_text(
 PY
 }
 
+remove_telemetry_ingress_path() {
+  local host="$1"
+  local label="$2"
+  local ingress_json="$WORK_DIR/telemetry-ingress-${label}.json"
+  local patch_json="$WORK_DIR/telemetry-ingress-${label}-patch.json"
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" -o json \
+    >"$ingress_json" || return 1
+  python3 - "$ingress_json" "$patch_json" "$host" <<'PY' || return 1
+import json
+import sys
+from pathlib import Path
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+host = sys.argv[3]
+rules = document.get("spec", {}).get("rules", [])
+matching_rules = [
+    (index, rule)
+    for index, rule in enumerate(rules)
+    if rule.get("host") == host
+]
+if len(matching_rules) != 1:
+    raise SystemExit("Telemetry ingress host is missing or duplicated")
+rule_index, rule = matching_rules[0]
+paths = rule.get("http", {}).get("paths", [])
+matching_paths = [
+    index
+    for index, path in enumerate(paths)
+    if path.get("path") == "/api/telemetry/?(.*)"
+    and path.get("backend", {}).get("service", {}).get("name")
+    == "gaming-telemetry-srv"
+]
+if len(matching_paths) != 1:
+    raise SystemExit("Telemetry ingress path is missing, duplicated, or misrouted")
+patch = [{
+    "op": "remove",
+    "path": f"/spec/rules/{rule_index}/http/paths/{matching_paths[0]}",
+}]
+Path(sys.argv[2]).write_text(
+    json.dumps(patch, separators=(",", ":")), encoding="utf-8"
+)
+PY
+  kubectl patch ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+    --type=json --patch-file "$patch_json" >/dev/null
+}
+
+verify_telemetry_durable_state() {
+  local database_initialized="$1"
+  local queue_output queue_rows mongo_pod database_present
+  queue_output="$(
+    kubectl exec -n "$OCI_K8S_NAMESPACE" deployment/gaming-rabbitmq-depl -- \
+      rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers
+  )" || return 1
+  queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_output")" || return 1
+  [[ "$(awk '$1 == "telemetry:events:v1" {count++} END {print count+0}' \
+    <<<"$queue_rows")" == "1" ]] || return 1
+  if [[ "$database_initialized" == "true" ]]; then
+    mongo_pod="$(
+      kubectl get pod -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+        -o jsonpath='{.items[0].metadata.name}'
+    )" || return 1
+    [[ -n "$mongo_pod" ]] || return 1
+    database_present="$(
+      kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
+        mongosh --quiet --eval \
+        'print(db.adminCommand({listDatabases:1,nameOnly:true}).databases.some(d=>d.name==="gaming_telemetry"))'
+    )" || return 1
+    [[ "$database_present" == "true" ]] || return 1
+  fi
+  write_text_atomic "$OUTPUT_DIR/telemetry-durable-state.env" <<EOF
+queue_present=true
+database_expected=$database_initialized
+database_present=$database_initialized
+EOF
+}
+
+verify_historical_final_readiness() {
+  local service entry label base_url
+  for service in "${ROLLBACK_ORDER[@]}"; do
+    kubectl rollout status "deployment/gaming-${service}-depl" \
+      -n "$OCI_K8S_NAMESPACE" --timeout=10m >/dev/null || return 1
+    verify_exact_digest "$service" || return 1
+  done
+  for entry in "${url_entries[@]}"; do
+    IFS='|' read -r label base_url <<<"$entry"
+    capture_historical_api_contracts "$base_url" "$label" || return 1
+    capture_sse "$base_url" "$label" || return 1
+  done
+}
+
 record_partial_failure() {
   local service="$1"
   local deployment="$2"
@@ -1077,27 +1153,182 @@ EOF
 }
 
 cleanup_work_dir() {
-  rm -rf "$WORK_DIR"
-  rmdir "$WORK_PARENT_DIR" 2>/dev/null || true
+  rm -rf -- "$WORK_DIR"
+}
+
+summarize_and_remove_readiness_dir() {
+  local label="$1"
+  local directory="$2"
+  local summary="$directory/summary.env"
+  [[ -d "$directory" ]] || return 0
+  if [[ -f "$summary" && ! -L "$summary" ]]; then
+    write_text_atomic "$OUTPUT_DIR/${label}-evidence.env" <<EOF
+status=$(awk -F '=' '$1 == "rollback_readiness" || $1 == "status" {print $2; exit}' "$summary")
+summary_sha256=$(sha256_file "$summary")
+EOF
+  fi
+  if [[ "$label" == "rollback-readiness" ]]; then
+    python3 - "$summary" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.is_file() and not path.is_symlink():
+    excluded = {"public_url", "redirect_url", "diagnostic_url"}
+    lines = [
+        raw
+        for raw in path.read_text(encoding="utf-8").splitlines()
+        if raw.partition("=")[0] not in excluded
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+    if [[ -f "$directory/current-http.tsv" ]]; then
+      python3 - "$directory/current-http.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = []
+with path.open(encoding="utf-8", newline="") as handle:
+    for row in csv.reader(handle, delimiter="\t"):
+        if len(row) != 6:
+            raise SystemExit("rollback readiness HTTP evidence is malformed")
+        rows.append(row[:3] + row[4:])
+with path.open("w", encoding="utf-8", newline="") as handle:
+    csv.writer(handle, delimiter="\t", lineterminator="\n").writerows(rows)
+PY
+    fi
+    return 0
+  fi
+  if [[ "$label" == "preflight-live-readiness" && -f "$summary" ]]; then
+    local sanitized_summary="$WORK_DIR/preflight-live-readiness-summary.env"
+    awk -F '=' '
+      $1 == "mode" ||
+      $1 == "status" ||
+      $1 == "sse_required" ||
+      $1 == "sse_primary_status" ||
+      $1 == "sse_diagnostic_status" {
+        print
+      }
+    ' "$summary" >"$sanitized_summary"
+    rm -rf -- "$directory"
+    mkdir -p "$directory"
+    chmod 700 "$directory"
+    mv "$sanitized_summary" "$directory/summary.env"
+    chmod 600 "$directory/summary.env"
+    return 0
+  fi
+  rm -rf -- "$directory"
+}
+
+enforce_rollback_output_allowlist() {
+  python3 - "$OUTPUT_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+allowed = {
+    "current-images.tsv",
+    "deploy-provenance-binding.env",
+    "exact-digest-verification.tsv",
+    "failure-state.env",
+    "final-state.tsv",
+    "live-readiness-evidence.env",
+    "output-policy-failure.env",
+    "partial-state.tsv",
+    "planned-rollout-order.txt",
+    "pre-rollback-state.tsv",
+    "preflight-live-readiness-evidence.env",
+    "preflight-live-readiness/summary.env",
+    "public-verification.tsv",
+    "queue-thresholds.env",
+    "queue-verification.tsv",
+    "rollback-readiness-evidence.env",
+    "rollback-readiness/failures.txt",
+    "rollback-readiness/current-http.tsv",
+    "rollback-readiness/maintenance-live-digests.tsv",
+    "rollback-readiness/queue-state.tsv",
+    "rollback-readiness/rollout-history.tsv",
+    "rollback-readiness/summary.env",
+    "rollback-readiness/workload-state.tsv",
+    "rollback-summary.env",
+    "rollout-order.tsv",
+    "sse-verification.tsv",
+    "telemetry-durable-state.env",
+    "telemetry-pre-run.env",
+    "trusted-deploy-provenance.txt",
+}
+baseline = root / "baseline"
+if baseline.is_dir() and not baseline.is_symlink():
+    manifest = baseline / "SHA256SUMS"
+    if manifest.is_file() and not manifest.is_symlink():
+        allowed.add("baseline/SHA256SUMS")
+        for raw in manifest.read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(
+                r"[0-9a-f]{64}  ((?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+)",
+                raw,
+            )
+            if not match:
+                raise SystemExit("baseline checksum manifest is malformed")
+            allowed.add(f"baseline/{match.group(1)}")
+violations = []
+for path in sorted(root.rglob("*")):
+    if path.is_dir() and not path.is_symlink():
+        continue
+    relative = path.relative_to(root).as_posix()
+    if relative not in allowed or path.is_symlink():
+        violations.append(relative)
+        path.unlink(missing_ok=True)
+for directory in sorted(
+    (path for path in root.rglob("*") if path.is_dir()),
+    key=lambda value: len(value.parts),
+    reverse=True,
+):
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+if violations:
+    print("output_allowlist_violation=" + ",".join(violations))
+    raise SystemExit(1)
+PY
 }
 
 cleanup_rollback() {
   local exit_status=$?
+  local output_policy_status=0
   if [[ "${ROLLBACK_WRITE_FENCE_ACTIVE:-false}" == "true" &&
     "${ROLLBACK_MUTATION_STARTED:-false}" != "true" ]]; then
     if "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
-      >"$OUTPUT_DIR/write-fence-release-on-exit.txt" 2>&1; then
+      >"$WORK_DIR/write-fence-release-on-exit.txt" 2>&1; then
       ROLLBACK_WRITE_FENCE_ACTIVE=false
     fi
   fi
+  summarize_and_remove_readiness_dir rollback-readiness \
+    "$OUTPUT_DIR/rollback-readiness" || output_policy_status=1
+  summarize_and_remove_readiness_dir preflight-live-readiness \
+    "$OUTPUT_DIR/preflight-live-readiness" || output_policy_status=1
+  summarize_and_remove_readiness_dir live-readiness \
+    "$OUTPUT_DIR/live-readiness" || output_policy_status=1
   cleanup_work_dir
+  if ! enforce_rollback_output_allowlist; then
+    write_text_atomic "$OUTPUT_DIR/output-policy-failure.env" <<EOF
+status=FAIL
+failure_code=output-allowlist-violation
+EOF
+    output_policy_status=1
+  fi
+  if [[ "$exit_status" == "0" && "$output_policy_status" != "0" ]]; then
+    return 1
+  fi
   return "$exit_status"
 }
 
 prepare_private_dir "$OUTPUT_DIR"
-WORK_PARENT_DIR="$OUTPUT_DIR/.workdirs"
-prepare_private_dir "$WORK_PARENT_DIR"
-WORK_DIR="$(create_unique_private_dir "$WORK_PARENT_DIR" rollback)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/betstan-oci-rollback.XXXXXX")"
+chmod 700 "$WORK_DIR"
 ROLLBACK_WRITE_FENCE_ACTIVE=false
 ROLLBACK_MUTATION_STARTED=false
 ROLLBACK_WRITE_FENCE_STATUS=not-required
@@ -1643,7 +1874,8 @@ else
     "$deploy_artifact_name" \
     "deploy provenance"
   DEPLOY_PROVENANCE_DIR="$WORK_DIR/deploy-provenance"
-  prepare_private_dir "$DEPLOY_PROVENANCE_DIR"
+  mkdir -p "$DEPLOY_PROVENANCE_DIR"
+  chmod 700 "$DEPLOY_PROVENANCE_DIR"
   gh run download "$baseline_deploy_run_id" --repo "$REPO" \
     --name "$deploy_artifact_name" --dir "$DEPLOY_PROVENANCE_DIR" >/dev/null
   [[ -z "$(find "$DEPLOY_PROVENANCE_DIR" -type l -print -quit)" ]] ||
@@ -1877,7 +2109,7 @@ if [[ "$ROLLBACK_MODE" == "execute" &&
   [[ -x "$ROLLBACK_MUTATION_FENCE_SCRIPT" ]] ||
     oci_die "rollback mutation fence script is not executable: $ROLLBACK_MUTATION_FENCE_SCRIPT"
   if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" fence-writes \
-    >"$OUTPUT_DIR/write-fence.txt" 2>&1; then
+    >"$WORK_DIR/write-fence.txt" 2>&1; then
     oci_die "unable to establish the rollback HTTP mutation fence"
   fi
   ROLLBACK_WRITE_FENCE_ACTIVE=true
@@ -1889,7 +2121,7 @@ if ! TARGET_SHA="$TARGET_SHA" \
     OCI_REDIRECT_URL="$OCI_REDIRECT_URL" \
     OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
     OUTPUT_DIR="$ROLLBACK_READINESS_OUTPUT_DIR" \
-    "$ROLLBACK_READINESS_SCRIPT" >"$OUTPUT_DIR/rollback-readiness.txt" 2>&1; then
+    "$ROLLBACK_READINESS_SCRIPT" >"$WORK_DIR/rollback-readiness.txt" 2>&1; then
   oci_die "OCI rollback readiness rejected the rollback"
 fi
 enforce_rollback_readiness_contract "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env"
@@ -1994,14 +2226,63 @@ CURRENT_STEP_LABEL=post-rollback-telemetry
 for entry in "${url_entries[@]}"; do
   IFS='|' read -r label base_url <<<"$entry"
   capture_http "$base_url" "/api/telemetry/summary" telemetry "$label" ||
-    oci_die "Telemetry public summary is invalid after historical rollback"
+    {
+      record_partial_failure post-rollback gaming-telemetry-depl \
+        telemetry-summary "Telemetry public summary is invalid after historical rollback"
+      oci_die "Telemetry public summary is invalid after historical rollback"
+    }
 done
 
+canonical_host="${OCI_PUBLIC_URL#https://}"
+diagnostic_host="${OCI_DIAGNOSTIC_URL#https://}"
+CURRENT_STEP_LABEL=remove-telemetry-canonical-route
+if ! remove_telemetry_ingress_path "$canonical_host" canonical; then
+  record_partial_failure post-rollback gaming-oci-ingress \
+    telemetry-canonical-route "failed to remove the canonical Telemetry ingress path"
+  oci_die "failed to remove the canonical Telemetry ingress path"
+fi
+CURRENT_STEP_LABEL=remove-telemetry-diagnostic-route
+if ! remove_telemetry_ingress_path "$diagnostic_host" diagnostic; then
+  record_partial_failure post-rollback gaming-oci-ingress \
+    telemetry-diagnostic-route "failed to remove the diagnostic Telemetry ingress path"
+  oci_die "failed to remove the diagnostic Telemetry ingress path"
+fi
+CURRENT_STEP_LABEL=remove-telemetry-service
+if ! kubectl delete service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found >/dev/null; then
+  record_partial_failure post-rollback gaming-telemetry-srv \
+    telemetry-service "failed to remove the Telemetry service"
+  oci_die "failed to remove the Telemetry service"
+fi
+CURRENT_STEP_LABEL=remove-telemetry-deployment
+if ! kubectl delete deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found >/dev/null; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-deployment "failed to remove the Telemetry deployment"
+  oci_die "failed to remove the Telemetry deployment"
+fi
+CURRENT_STEP_LABEL=verify-telemetry-absent
+if ! MODE=absent \
+    OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+    OUTPUT_DIR="$WORK_DIR/telemetry-absent-validation" \
+    "$SCRIPT_DIR/verify-telemetry-recovery-state-stan.sh" \
+      >"$WORK_DIR/telemetry-absent-validation.txt" 2>&1; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-absent "Telemetry workload or public route remains after historical rollback"
+  oci_die "Telemetry workload or public route remains after historical rollback"
+fi
+telemetry_database_initialized="$(
+  awk -F '=' '$1 == "database_initialized" {print $2}' \
+    "$OUTPUT_DIR/telemetry-pre-run.env"
+)"
+if ! verify_telemetry_durable_state "$telemetry_database_initialized"; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-durable-state "Telemetry durable queue or database state was not preserved"
+  oci_die "Telemetry durable queue or database state was not preserved"
+fi
+
 CURRENT_STEP_LABEL=post-rollback-readiness
-if ! run_live_betting_readiness \
-    post-rollback-live-gate \
-    "$BASELINE_DIR/images.tsv" \
-    "$OUTPUT_DIR/live-readiness"; then
+if ! verify_historical_final_readiness; then
   CURRENT_STEP_LABEL=failed-live-readiness
   capture_summary_state "$OUTPUT_DIR/partial-state.tsv"
   write_text_atomic "$OUTPUT_DIR/failure-state.env" <<EOF
@@ -2019,7 +2300,7 @@ fi
 if [[ "$ROLLBACK_WRITE_FENCE_ACTIVE" == "true" ]]; then
   CURRENT_STEP_LABEL=release-write-fence
   if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
-    >"$OUTPUT_DIR/write-fence-release.txt" 2>&1; then
+    >"$WORK_DIR/write-fence-release.txt" 2>&1; then
     capture_summary_state "$OUTPUT_DIR/partial-state.tsv"
     write_text_atomic "$OUTPUT_DIR/failure-state.env" <<EOF
 status=FAIL
@@ -2053,6 +2334,7 @@ backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
 target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
 rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 completed_services=${completed_services[*]}
+telemetry_state=absent
 database_restore=disabled
 EOF2
 oci_log "oci_rollback_status=PASS target_sha=$TARGET_SHA services=${#completed_services[@]}"

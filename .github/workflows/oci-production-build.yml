@@ -155,10 +155,10 @@ jobs:
                   raise SystemExit("build-repair run lineage is invalid")
           tags = tags_path.read_bytes()
           lines = tags.decode("utf-8").splitlines()
-          if len(lines) > 10 or len(lines) != len(set(lines)):
+          if len(lines) > 9 or len(lines) != len(set(lines)):
               raise SystemExit("build-repair exact tag set is invalid")
           expected = re.compile(
-              rf"arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)-{source_sha}"
+              rf"arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-{source_sha}"
           )
           if any(not expected.fullmatch(line) for line in lines):
               raise SystemExit("build-repair exact tag identity is invalid")

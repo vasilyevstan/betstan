@@ -22,7 +22,7 @@ For the service map and message catalog, see [[Architecture]] and
 | Placement and moderation | Slip, Moderation | Bet, Resulting |
 | Settlement and payout | Resulting | Bet, Event, Gamemaster |
 | Public event projection | Event | Client |
-| Public operational summaries | Telemetry | Auth, Slip, Resulting, Gamemaster |
+| Public operational summaries | Telemetry | Client, Auth, Slip, Resulting, Gamemaster |
 
 ## User creation and login sessions
 

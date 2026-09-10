@@ -27,6 +27,8 @@ ROLLBACK_MUTATION_FENCE_SCRIPT="${ROLLBACK_MUTATION_FENCE_SCRIPT:-$SCRIPT_DIR/li
 TELEMETRY_RECOVERY_SCRIPT="${TELEMETRY_RECOVERY_SCRIPT:-$SCRIPT_DIR/verify-telemetry-recovery-state-stan.sh}"
 CONFIRMATION="${CONFIRMATION:-}"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
+PARTIAL_RECOVERY_MUTATION_STARTED=false
+PARTIAL_RECOVERY_STAGE=preflight
 
 write_text_atomic() {
   local target="$1"
@@ -205,8 +207,199 @@ for service, row in runtime.items():
 PY
 }
 
+validate_telemetry_progress() {
+  local expected_image="$1"
+  local deployment_json="$WORK_DIR/telemetry-progress-deployment.json"
+  local service_json="$WORK_DIR/telemetry-progress-service.json"
+  local ingress_json="$WORK_DIR/telemetry-progress-ingress.json"
+  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found -o json >"$deployment_json"
+  kubectl get service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
+    --ignore-not-found -o json >"$service_json"
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+    -o json >"$ingress_json"
+  python3 - "$deployment_json" "$service_json" "$ingress_json" \
+    "$expected_image" "$public_host" "$diagnostic_host" <<'PY'
+import json
+import sys
+
+deployment_path, service_path, ingress_path, expected_image, canonical, diagnostic = sys.argv[1:7]
+
+def optional_json(path):
+    content = open(path, encoding="utf-8").read()
+    return json.loads(content) if content else None
+
+deployment = optional_json(deployment_path)
+service = optional_json(service_path)
+ingress = json.load(open(ingress_path, encoding="utf-8"))
+if deployment is not None:
+    containers = [
+        item
+        for item in deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        if item.get("name") == "gaming-telemetry"
+    ]
+    if len(containers) != 1 or containers[0].get("image") != expected_image:
+        raise SystemExit("Telemetry deployment differs from the exact pre-run image")
+if service is not None:
+    ports = service.get("spec", {}).get("ports", [])
+    if (
+        service.get("spec", {}).get("selector") != {"app": "gaming-telemetry"}
+        or len(ports) != 1
+        or ports[0].get("port") != 3000
+        or ports[0].get("targetPort") != 3000
+    ):
+        raise SystemExit("Telemetry service differs from the reviewed contract")
+route_hosts = []
+for rule in ingress.get("spec", {}).get("rules", []):
+    for path in rule.get("http", {}).get("paths", []):
+        if path.get("path") != "/api/telemetry/?(.*)":
+            continue
+        if path.get("backend", {}).get("service", {}).get("name") != "gaming-telemetry-srv":
+            raise SystemExit("Telemetry ingress path has an unexpected backend")
+        route_hosts.append(rule.get("host"))
+if len(route_hosts) != len(set(route_hosts)) or not set(route_hosts) <= {canonical, diagnostic}:
+    raise SystemExit("Telemetry ingress routes are duplicated or unexpected")
+state = (
+    deployment is not None,
+    service is not None,
+    canonical in route_hosts,
+    diagnostic in route_hosts,
+)
+allowed = {
+    (True, True, True, True),
+    (True, True, False, True),
+    (True, True, False, False),
+    (True, False, False, False),
+    (False, False, False, False),
+    (True, True, True, False),
+    (False, True, True, True),
+    (False, True, False, True),
+    (False, True, False, False),
+    (False, False, True, True),
+    (False, False, False, True),
+    (False, False, True, False),
+}
+if state not in allowed:
+    raise SystemExit("Telemetry cleanup or restoration is not an authorized prefix")
+PY
+}
+
+prepare_telemetry_manifests() {
+  local expected_image="$1"
+  local kustomize_root="$OCI_ROOT_DIR/infra/oci/k8s"
+  if [[ "$OCI_RUNTIME_MODE" == "k3s" ]]; then
+    kustomize_root="$OCI_ROOT_DIR/infra/oci/k8s/overlays/k3s"
+  fi
+  kubectl kustomize --load-restrictor=LoadRestrictionsNone "$kustomize_root" \
+    >"$WORK_DIR/telemetry-kustomize.yaml"
+  ruby -ryaml - "$WORK_DIR/telemetry-kustomize.yaml" \
+    "$WORK_DIR/telemetry-deployment.yaml" "$WORK_DIR/telemetry-service.yaml" \
+    "$expected_image" <<'RUBY'
+source, deployment_path, service_path, expected_image = ARGV
+documents = YAML.load_stream(File.read(source)).compact
+deployment = documents.find do |document|
+  document["kind"] == "Deployment" &&
+    document.dig("metadata", "name") == "gaming-telemetry-depl"
+end
+service = documents.find do |document|
+  document["kind"] == "Service" &&
+    document.dig("metadata", "name") == "gaming-telemetry-srv"
+end
+abort "reviewed Telemetry resources are missing" unless deployment && service
+containers = deployment.dig("spec", "template", "spec", "containers") || []
+container = containers.find { |item| item["name"] == "gaming-telemetry" }
+abort "reviewed Telemetry container is missing" unless container
+container["image"] = expected_image
+File.write(deployment_path, YAML.dump(deployment))
+File.write(service_path, YAML.dump(service))
+RUBY
+}
+
+ensure_telemetry_ingress_route() {
+  local host="$1"
+  local label="$2"
+  local ingress_json="$WORK_DIR/telemetry-${label}-ingress.json"
+  local patch_json="$WORK_DIR/telemetry-${label}-ingress-patch.json"
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+    -o json >"$ingress_json"
+  python3 - "$ingress_json" "$patch_json" "$host" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+host = sys.argv[3]
+rules = [
+    (index, rule)
+    for index, rule in enumerate(document.get("spec", {}).get("rules", []))
+    if rule.get("host") == host
+]
+if len(rules) != 1:
+    raise SystemExit("Telemetry ingress host is missing or duplicated")
+rule_index, rule = rules[0]
+paths = rule.get("http", {}).get("paths", [])
+telemetry = [
+    index for index, path in enumerate(paths)
+    if path.get("path") == "/api/telemetry/?(.*)"
+]
+if telemetry:
+    if (
+        len(telemetry) != 1
+        or paths[telemetry[0]].get("backend", {}).get("service", {}).get("name")
+        != "gaming-telemetry-srv"
+    ):
+        raise SystemExit("Telemetry ingress route is duplicated or misrouted")
+    patch = []
+else:
+    catch_all = [
+        index for index, path in enumerate(paths)
+        if path.get("path") == "/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-client-srv"
+    ]
+    if len(catch_all) != 1:
+        raise SystemExit("SPA catch-all is missing or duplicated")
+    patch = [{
+        "op": "add",
+        "path": f"/spec/rules/{rule_index}/http/paths/{catch_all[0]}",
+        "value": {
+            "path": "/api/telemetry/?(.*)",
+            "pathType": "ImplementationSpecific",
+            "backend": {
+                "service": {
+                    "name": "gaming-telemetry-srv",
+                    "port": {"number": 3000},
+                }
+            },
+        },
+    }]
+Path(sys.argv[2]).write_text(
+    json.dumps(patch, separators=(",", ":")), encoding="utf-8"
+)
+PY
+  if [[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
+    "$patch_json")" -gt 0 ]]; then
+    kubectl patch ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+      --type=json --patch-file "$patch_json" >/dev/null
+  fi
+}
+
+restore_telemetry_resources() {
+  local expected_image="$1"
+  prepare_telemetry_manifests "$expected_image"
+  kubectl apply -n "$OCI_K8S_NAMESPACE" \
+    -f "$WORK_DIR/telemetry-deployment.yaml" >/dev/null
+  kubectl rollout status deployment/gaming-telemetry-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=10m >/dev/null
+  kubectl apply -n "$OCI_K8S_NAMESPACE" \
+    -f "$WORK_DIR/telemetry-service.yaml" >/dev/null
+  ensure_telemetry_ingress_route "$public_host" canonical
+  ensure_telemetry_ingress_route "$diagnostic_host" diagnostic
+}
+
 oci_require_command kubectl
 oci_require_command python3
+oci_require_command ruby
 oci_require_vars \
   TARGET_SHA \
   PARTIAL_ROLLBACK_RUN_ID \
@@ -308,6 +501,27 @@ for index, left in enumerate(paths):
             raise SystemExit("partial recovery input and output directories must not overlap")
 PY
 oci_prepare_safe_private_dir "$OUTPUT_DIR"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/betstan-partial-recovery.XXXXXX")"
+chmod 700 "$WORK_DIR"
+cleanup_private_work() {
+  local exit_status=$?
+  if [[ "$exit_status" != "0" &&
+    "$PARTIAL_RECOVERY_MUTATION_STARTED" == "true" ]]; then
+    write_text_atomic "$OUTPUT_DIR/partial-recovery-failure.env" <<EOF
+status=FAIL
+failure_code=partial-recovery-interrupted
+stage=$PARTIAL_RECOVERY_STAGE
+source_rollback_run_id=$PARTIAL_ROLLBACK_RUN_ID
+target_sha=$TARGET_SHA
+telemetry_state=retained
+EOF
+    rm -rf -- "$OUTPUT_DIR/rollback-readiness"
+  fi
+  rm -rf -- "$OUTPUT_DIR/telemetry-validation"
+  rm -rf -- "$WORK_DIR"
+  return "$exit_status"
+}
+trap cleanup_private_work EXIT
 
 PARTIAL_ROLLBACK_WRITE_FENCE="$(
 python3 - \
@@ -384,6 +598,13 @@ elif post_rollback_failure:
             "write-fence-release",
             "release-write-fence",
         ),
+        ("gaming-telemetry-depl", "telemetry-summary", "failed-post-rollback"),
+        ("gaming-oci-ingress", "telemetry-canonical-route", "failed-post-rollback"),
+        ("gaming-oci-ingress", "telemetry-diagnostic-route", "failed-post-rollback"),
+        ("gaming-telemetry-srv", "telemetry-service", "failed-post-rollback"),
+        ("gaming-telemetry-depl", "telemetry-deployment", "failed-post-rollback"),
+        ("gaming-telemetry-depl", "telemetry-absent", "failed-post-rollback"),
+        ("gaming-telemetry-depl", "telemetry-durable-state", "failed-post-rollback"),
     }:
         raise SystemExit("partial rollback post-rollback failure is invalid")
 else:
@@ -445,15 +666,10 @@ if [[ "$PARTIAL_ROLLBACK_WRITE_FENCE" == "active" ]]; then
   [[ -x "$ROLLBACK_MUTATION_FENCE_SCRIPT" ]] ||
     oci_die "rollback mutation fence script is not executable"
   if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" fence-writes \
-    >"$OUTPUT_DIR/write-fence.txt" 2>&1; then
+    >"$WORK_DIR/write-fence.txt" 2>&1; then
     oci_die "unable to re-establish the partial rollback HTTP mutation fence"
   fi
 fi
-
-WORK_PARENT_DIR="$OUTPUT_DIR/.workdirs"
-oci_prepare_private_dir "$WORK_PARENT_DIR"
-WORK_DIR="$(mktemp -d "$WORK_PARENT_DIR/recovery.XXXXXX")"
-trap 'rm -rf -- "$WORK_DIR"' EXIT
 
 chmod 600 "$OUTPUT_DIR/recovery-plan.tsv"
 
@@ -549,14 +765,21 @@ with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer.writerow(build[service])
 PY
 
+telemetry_image="$(awk -F '=' '$1 == "image" {print $2}' \
+  "$OUTPUT_DIR/telemetry-recovery.env")"
+telemetry_database_initialized="$(awk -F '=' \
+  '$1 == "database_initialized" {print $2}' \
+  "$OUTPUT_DIR/telemetry-recovery.env")"
 capture_runtime_state "$OUTPUT_DIR/observed-pre-recovery-state.tsv"
 validate_runtime_progress "$OUTPUT_DIR/observed-pre-recovery-state.tsv" ||
   oci_die "runtime does not match an authorized partial recovery state"
+validate_telemetry_progress "$telemetry_image" ||
+  oci_die "Telemetry resources are not at an authorized cleanup or restoration prefix"
 
 if ! NAMESPACE="$OCI_K8S_NAMESPACE" \
     OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
     INFRA_PROVENANCE_FILE="$OCI_INFRASTRUCTURE_PROVENANCE_FILE" \
-    "$SERVICE_OPS_SCRIPT" >"$OUTPUT_DIR/pre-recovery-service-ops.txt" 2>&1; then
+    "$SERVICE_OPS_SCRIPT" >"$WORK_DIR/pre-recovery-service-ops.txt" 2>&1; then
   printf '%s\n' "diagnostic_status=unavailable" \
     >"$OUTPUT_DIR/pre-recovery-diagnostics.env"
 else
@@ -565,7 +788,9 @@ else
 fi
 
 : >"$OUTPUT_DIR/recovery-rollout-order.tsv"
+PARTIAL_RECOVERY_MUTATION_STARTED=true
 while IFS=$'\t' read -r service deployment pre_image partial_image; do
+  PARTIAL_RECOVERY_STAGE="restore-${service}"
   current_file="$WORK_DIR/${service}-current.json"
   kubectl get deployment "$deployment" \
     -n "$OCI_K8S_NAMESPACE" -o json >"$current_file"
@@ -603,23 +828,23 @@ PY
     >>"$OUTPUT_DIR/recovery-rollout-order.tsv"
 done <"$OUTPUT_DIR/recovery-plan.tsv"
 
+# Public routes are restored only after all nine legacy workloads are exact.
+PARTIAL_RECOVERY_STAGE=restore-telemetry
+restore_telemetry_resources "$telemetry_image" ||
+  oci_die "failed to restore the exact pre-run Telemetry resources"
+
 capture_runtime_state "$OUTPUT_DIR/final-state.tsv"
 validate_final_state "$OUTPUT_DIR/final-state.tsv" ||
   oci_die "partial rollback recovery did not restore the exact pre-run state"
 
-telemetry_image="$(awk -F '=' '$1 == "image" {print $2}' \
-  "$OUTPUT_DIR/telemetry-recovery.env")"
-telemetry_database_initialized="$(awk -F '=' \
-  '$1 == "database_initialized" {print $2}' \
-  "$OUTPUT_DIR/telemetry-recovery.env")"
 MODE=retained \
 EXPECTED_IMAGE="$telemetry_image" \
 EXPECTED_DATABASE_INITIALIZED="$telemetry_database_initialized" \
 OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
 OCI_PUBLIC_URL="$OCI_PUBLIC_URL" \
 OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
-OUTPUT_DIR="$OUTPUT_DIR/telemetry-validation" \
-  "$TELEMETRY_RECOVERY_SCRIPT" >"$OUTPUT_DIR/telemetry-validation.txt" 2>&1 ||
+OUTPUT_DIR="$WORK_DIR/telemetry-validation" \
+  "$TELEMETRY_RECOVERY_SCRIPT" >"$WORK_DIR/telemetry-validation.txt" 2>&1 ||
   oci_die "retained Telemetry state failed partial rollback recovery validation"
 
 if ! TARGET_SHA="$TARGET_SHA" \
@@ -628,17 +853,24 @@ if ! TARGET_SHA="$TARGET_SHA" \
     OCI_REDIRECT_URL="$OCI_REDIRECT_URL" \
     OCI_DIAGNOSTIC_URL="$OCI_DIAGNOSTIC_URL" \
     OUTPUT_DIR="$OUTPUT_DIR/rollback-readiness" \
-    "$ROLLBACK_READINESS_SCRIPT" >"$OUTPUT_DIR/rollback-readiness.txt" 2>&1; then
+    "$ROLLBACK_READINESS_SCRIPT" >"$WORK_DIR/rollback-readiness.txt" 2>&1; then
   oci_die "recovered pre-run state failed rollback readiness"
 fi
 
 if [[ "$PARTIAL_ROLLBACK_WRITE_FENCE" == "active" ]]; then
+  PARTIAL_RECOVERY_STAGE=release-write-fence
   if ! "$ROLLBACK_MUTATION_FENCE_SCRIPT" release \
-    >"$OUTPUT_DIR/write-fence-release.txt" 2>&1; then
+    >"$WORK_DIR/write-fence-release.txt" 2>&1; then
     oci_die "partial rollback recovery completed but the HTTP mutation fence could not be released safely"
   fi
   PARTIAL_RECOVERY_WRITE_FENCE_STATUS="released"
 fi
+
+rm -f -- "$OUTPUT_DIR/observed-pre-recovery-state.tsv" \
+  "$OUTPUT_DIR/pre-recovery-diagnostics.env"
+find "$OUTPUT_DIR/rollback-readiness" -type f \
+  ! -name summary.env ! -name workload-state.tsv ! -name failures.txt \
+  -delete
 
 recovered_services="$(
   awk -F '\t' '{ values = values (values ? " " : "") $1 } END { print values }' \
@@ -723,5 +955,44 @@ EXPECTED_SOURCE_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
 EXPECTED_BUILD_RUN_ID="$PARTIAL_RECOVERY_BUILD_RUN_ID" \
 EXPECTED_SOURCE_ROLLBACK_RUN_ID="$PARTIAL_ROLLBACK_RUN_ID" \
   "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null
+
+python3 - "$OUTPUT_DIR" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+allowed = {
+    "images.tsv",
+    "partial-recovery-SHA256SUMS",
+    "partial-recovery-authority.env",
+    "partial-recovery-summary.env",
+    "recovery-plan.tsv",
+    "recovery-rollout-order.tsv",
+    "final-state.tsv",
+    "rollback-readiness/summary.env",
+    "rollback-readiness/workload-state.tsv",
+    "rollback-readiness/failures.txt",
+    "telemetry-recovery.env",
+}
+violations = []
+for path in sorted(root.rglob("*")):
+    if path.is_dir() and not path.is_symlink():
+        continue
+    relative = path.relative_to(root).as_posix()
+    if relative not in allowed or path.is_symlink():
+        violations.append(relative)
+        path.unlink(missing_ok=True)
+for directory in sorted(
+    (path for path in root.rglob("*") if path.is_dir()),
+    key=lambda value: len(value.parts),
+    reverse=True,
+):
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+if violations:
+    raise SystemExit("partial recovery output violated the exact allowlist")
+PY
 
 oci_log "oci_partial_rollback_recovery=PASS source_run=$PARTIAL_ROLLBACK_RUN_ID services=$recovered_services"

@@ -730,29 +730,6 @@ assert_pass "$full_set"
 
 reset_fixtures
 write_complete_oci_set
-python3 - "$tmp_dir/common-package-publish.yml" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-old = 'process.exit(manifest.dependencies?.["@betstan/common"] ? 0 : 1);'
-if old not in text:
-    raise SystemExit("Telemetry dependency classifier fixture not found")
-path.write_text(text.replace(old, "process.exit(0);", 1), encoding="utf-8")
-PY
-assert_fail "dependency-free Telemetry treated as a Common consumer" \
-  "common-package-publish must include Telemetry only when it declares a Common dependency"
-
-reset_fixtures
-write_complete_oci_set
-sed -i.bak '/services+=(telemetry)/d' "$tmp_dir/common-package-publish.yml"
-rm "$tmp_dir/common-package-publish.yml.bak"
-assert_fail "Common-dependent Telemetry omitted from candidate validation" \
-  "common-package-publish must include Telemetry only when it declares a Common dependency"
-
-reset_fixtures
-write_complete_oci_set
 write_rogue_npm_publisher "$tmp_dir"
 assert_fail "second local npm publisher" \
   "rogue-npm-publisher (rogue-npm-publisher.yml) must not use npm publication commands or NPM_TOKEN"

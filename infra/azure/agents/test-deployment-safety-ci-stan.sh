@@ -6,6 +6,7 @@ AZURE_WORKFLOW="$ROOT_DIR/.github/workflows/production-deploy.yml"
 OCI_WORKFLOW="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 BUILD_WORKFLOW="$ROOT_DIR/.github/workflows/production-build.yml"
 OCI_DEPLOY_SCRIPT="$ROOT_DIR/infra/oci/scripts/deploy.sh"
+AZURE_IMAGE_PROVENANCE="$ROOT_DIR/infra/azure/agents/image_provenance_stan.py"
 PRE_COMMIT_CHECK="$ROOT_DIR/infra/azure/agents/pre-commit-infra-check-stan.sh"
 PR_MERGE_SAFETY_TEST="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
 PROTECTED_OPERATION_POLICY_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-protected-operation-policy-stan.sh"
@@ -4341,7 +4342,7 @@ def mutate_once(text: str, needle: str, replacement: str) -> str:
 
 if parse_rollouts(azure_workflow) != expected_azure_order:
     fail("Azure deploy workflow rollout order changed")
-guard_marker = "- name: Reject Telemetry-era sources on the dormant Azure path"
+provenance_marker = "python3 infra/azure/agents/image_provenance_stan.py"
 provider_markers = (
     "- name: Azure login",
     "az aks get-credentials",
@@ -4349,21 +4350,14 @@ provider_markers = (
     "shared-mongo-operation-lock-stan.sh",
     "kubectl ",
 )
-if guard_marker not in azure_workflow:
-    fail("Azure deploy workflow is missing the Telemetry-era fail-closed guard")
-guard_index = azure_workflow.index(guard_marker)
+if provenance_marker not in azure_workflow:
+    fail("Azure deploy workflow is missing immutable provenance validation")
+provenance_index = azure_workflow.index(provenance_marker)
 if any(
-    marker in azure_workflow and azure_workflow.index(marker) < guard_index
+    marker in azure_workflow and azure_workflow.index(marker) < provenance_index
     for marker in provider_markers
 ):
-    fail("Azure Telemetry-era guard does not precede every provider or mutation boundary")
-for fragment in (
-    '[ -e telemetry/package.json ]',
-    "Telemetry-era releases use the active OCI deployment path",
-    "exit 1",
-):
-    if fragment not in azure_workflow[guard_index:]:
-        fail(f"Azure Telemetry-era guard is missing {fragment!r}")
+    fail("Azure provenance validation does not precede every provider or mutation boundary")
 if parse_services(oci_deploy_script) != expected_oci_order:
     fail("OCI deploy script rollout order changed")
 
@@ -4472,24 +4466,14 @@ print(f"production_build_action_pins=PASS cases={len(negative_cases) + 1}")
 print("deployment_safety_ci_tests=PASS")
 PY
 
-azure_telemetry_guard="$(
-  awk '
-    /- name: Reject Telemetry-era sources on the dormant Azure path/ {found=1; next}
-    found && /^[[:space:]]+run: \|/ {in_run=1; next}
-    in_run && /^[[:space:]]+- name:/ {exit}
-    in_run {sub(/^          /, ""); print}
-  ' "$AZURE_WORKFLOW"
-)"
-if (
-  cd "$ROOT_DIR"
-  bash -c "$azure_telemetry_guard"
-) >"$test_output" 2>&1; then
-  echo "Telemetry-era dormant Azure source guard unexpectedly passed" >&2
-  exit 1
-fi
+grep -Fq 'reject_telemetry_era_source(Path.cwd())' \
+  "$AZURE_IMAGE_PROVENANCE" || {
+    echo "Azure provenance validator is missing the Telemetry-era source guard" >&2
+    exit 1
+  }
 grep -Fq \
   "Telemetry-era releases use the active OCI deployment path; dormant Azure deployment is unavailable." \
-  "$test_output" || {
-    echo "Telemetry-era dormant Azure source guard emitted the wrong diagnostic" >&2
+  "$AZURE_IMAGE_PROVENANCE" || {
+    echo "Azure provenance validator emitted the wrong Telemetry-era diagnostic" >&2
     exit 1
   }

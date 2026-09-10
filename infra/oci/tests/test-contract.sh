@@ -1318,6 +1318,34 @@ grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
 grep -Fq 'services=(telemetry auth bet event moderation resulting slip backoffice client gamemaster)' \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment must roll out API dependencies before Client and Gamemaster"
+python3 - "$OCI_DIR/scripts/deploy.sh" <<'PY' ||
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+telemetry_rollout = text.index('if [[ "$service" == "telemetry" ]]')
+early_ingress = text.index(
+    "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'",
+    telemetry_rollout,
+)
+client_rollout_guard = text.index('((telemetry_index >= 0 && client_index > telemetry_index))')
+if client_rollout_guard >= telemetry_rollout:
+    raise SystemExit("rollout ordering guard must precede the rollout loop")
+if early_ingress <= telemetry_rollout:
+    raise SystemExit("Telemetry ingress must follow Telemetry readiness")
+for fragment in (
+    "verify_telemetry_ingress_routes",
+    '"/api/telemetry/?(.*)"',
+    '"gaming-telemetry-srv"',
+    '"/?(.*)"',
+    '"gaming-client-srv"',
+    "telemetry[0] >= client[0]",
+):
+    if fragment not in text:
+        raise SystemExit(f"early Telemetry ingress verification is missing {fragment}")
+print("oci_telemetry_early_ingress_order=PASS")
+PY
+  fail "OCI deployment does not establish Telemetry ingress before Client"
 grep -Fq 'certificate was not issued by Let' \
   "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
   fail "OCI public smoke does not verify the served certificate issuer"

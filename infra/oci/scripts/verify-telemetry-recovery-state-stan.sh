@@ -25,16 +25,31 @@ else
   [[ "$EXPECTED_IMAGE" == "none" ]] ||
     oci_die "absent Telemetry recovery cannot carry an image"
 fi
-[[ "$OCI_PUBLIC_URL" == https://* && "$OCI_DIAGNOSTIC_URL" == https://* ]] ||
-  oci_die "Telemetry recovery URLs must use HTTPS"
-for command_name in kubectl curl python3 awk; do
+if [[ "$MODE" == "retained" ]]; then
+  [[ "$OCI_PUBLIC_URL" == https://* && "$OCI_DIAGNOSTIC_URL" == https://* ]] ||
+    oci_die "Telemetry recovery URLs must use HTTPS"
+fi
+for command_name in kubectl python3 awk; do
   oci_require_command "$command_name"
 done
-oci_prepare_safe_private_dir "$OUTPUT_DIR"
+[[ "$MODE" == "absent" ]] || oci_require_command curl
+[[ "$OUTPUT_DIR" == /* ]] ||
+  oci_die "Telemetry recovery output directory must be absolute"
+mkdir -p "$OUTPUT_DIR"
+[[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] ||
+  oci_die "Telemetry recovery output directory is invalid"
+chmod 700 "$OUTPUT_DIR"
 
-deployment_json="$OUTPUT_DIR/deployment.json"
-service_json="$OUTPUT_DIR/service.json"
-ingress_json="$OUTPUT_DIR/ingress.json"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/betstan-telemetry-recovery.XXXXXX")"
+chmod 700 "$WORK_DIR"
+cleanup_private_work() {
+  rm -rf -- "$WORK_DIR"
+}
+trap cleanup_private_work EXIT
+
+deployment_json="$WORK_DIR/deployment.json"
+service_json="$WORK_DIR/service.json"
+ingress_json="$WORK_DIR/ingress.json"
 kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
   --ignore-not-found -o json >"$deployment_json" ||
   oci_die "unable to inspect the Telemetry deployment"
@@ -142,8 +157,8 @@ fi
 validate_summary() {
   local base_url="$1"
   local label="$2"
-  local body="$OUTPUT_DIR/${label}-summary.json"
-  local headers="$OUTPUT_DIR/${label}-summary.headers"
+  local body="$WORK_DIR/${label}-summary.json"
+  local headers="$WORK_DIR/${label}-summary.headers"
   local status
   status="$(
     curl --silent --show-error --fail-with-body --max-time 25 \

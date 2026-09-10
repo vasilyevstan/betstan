@@ -224,8 +224,8 @@ schema, index, rollback, or recovery operation.
 
 Deployment proceeds in dependency-safe order:
 
-1. make shared data services ready, then roll out Telemetry before
-   instrumented application traffic;
+1. make shared data services ready, roll out Telemetry, and apply its canonical
+   and diagnostic API routes before instrumented Client traffic;
 2. roll out the remaining services sequentially in the checked-in deployment
    order;
 3. verify each live workload is ready and running its expected digest before
@@ -284,13 +284,17 @@ A rollback requires:
 - post-rollback digest and application validation.
 
 Historical pre-Telemetry rollback restores only the nine historical
-application images. When the current observer existed before that operation,
-recovery retains and validates its exact image, queue consumer, and public
-summary rather than inventing a historical Telemetry image.
+application images. During that transition, the retained observer must keep
+serving a well-formed summary, while its intentionally coarse service states
+may be green, yellow, or red as older workloads start. Once all nine historical
+applications are exact and ready, terminal rollback removes the Telemetry API
+routes, Service, and Deployment. Its durable queue, logical database, and
+records remain; no historical Telemetry image is invented.
 
 If a rollback fails after partial mutation, recovery restores the exact
-pre-run images and keeps writes fenced until health is proven. Data restore is
-used only when application rollback is insufficient and separately justified.
+pre-run ten-application state, including the Telemetry image and public routes,
+and keeps writes fenced until health is proven. Data restore is used only when
+application rollback is insufficient and separately justified.
 
 An incomplete deployment that re-enters maintenance leaves production
 deliberately fenced: writers are quiesced, mutating requests are refused, and

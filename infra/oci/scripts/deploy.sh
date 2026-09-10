@@ -158,6 +158,44 @@ apply_cleanup_documents() {
   printf '%s' "$rendered" | kubectl apply -f -
 }
 
+verify_telemetry_ingress_routes() {
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" -o json |
+    python3 /dev/fd/3 "$canonical_host" "$diagnostic_host" 3<<'PY'
+import json
+import sys
+
+document = json.load(sys.stdin)
+expected_hosts = sys.argv[1:3]
+rules = document.get("spec", {}).get("rules", [])
+by_host = {}
+for rule in rules:
+    host = rule.get("host")
+    if host in by_host:
+        raise SystemExit(f"duplicate ingress rule for {host}")
+    by_host[host] = rule.get("http", {}).get("paths", [])
+if any(host not in by_host for host in expected_hosts):
+    raise SystemExit("canonical or diagnostic ingress rule is missing")
+for host in expected_hosts:
+    paths = by_host[host]
+    telemetry = [
+        index
+        for index, path in enumerate(paths)
+        if path.get("path") == "/api/telemetry/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-telemetry-srv"
+    ]
+    client = [
+        index
+        for index, path in enumerate(paths)
+        if path.get("path") == "/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-client-srv"
+    ]
+    if len(telemetry) != 1 or len(client) != 1 or telemetry[0] >= client[0]:
+        raise SystemExit(f"Telemetry route is incomplete or follows the SPA catch-all for {host}")
+PY
+}
+
 mongo_upgrade_recovery_required=false
 restore_deploy_access_on_exit() {
   local rc="$1"
@@ -295,6 +333,12 @@ for service in "${services[@]}"; do
   apply_documents "Deployment:^gaming-${service}-depl$"
   kubectl rollout status "deployment/gaming-${service}-depl" \
     -n "$OCI_K8S_NAMESPACE" --timeout=10m
+  if [[ "$service" == "telemetry" ]]; then
+    apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'
+    apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'
+    verify_telemetry_ingress_routes ||
+      oci_die "Telemetry ingress is not exact before instrumented application rollout"
+  fi
 done
 
 rabbit_pod="$(

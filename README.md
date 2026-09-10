@@ -31,7 +31,8 @@ bets or consume real match feeds.
 
 ```mermaid
 flowchart LR
-    Client[React client] -->|HTTP / SSE| APIs[Auth, Event, Slip, Bet, Backoffice, Telemetry]
+    Client[React client] -->|HTTP / SSE| APIs[Auth, Event, Slip, Bet, Backoffice]
+    Client -->|HTTP| Telemetry[Telemetry]
     APIs --> DB[(Service-owned MongoDB databases)]
     APIs --> Bus[(RabbitMQ)]
     Bus --> GM[Gamemaster]
@@ -40,7 +41,8 @@ flowchart LR
     GM -->|Live updates and results| Bus
     Mod -->|Accept / reject| Bus
     Resulting -->|Row and slip settlement| Bus
-    Bus --> Telemetry[Telemetry]
+    Bus --> Telemetry
+    Telemetry --> TelemetryDB[(Telemetry logical database)]
 ```
 
 BetStan uses ten deployable applications. HTTP APIs own browser-facing commands
@@ -81,6 +83,7 @@ snapshots without becoming an authority for accounts, betting, or settlement.
 | `gamemaster/` | Deterministic match simulation and live markets |
 | `moderation/` | Placement acceptance authority |
 | `resulting/` | Row, slip, and payout settlement |
+| `telemetry/` | Public bounded activity summaries and coarse service-health observations |
 | `common/src/` | Canonical shared contracts and messaging source |
 | `infra/` | Kubernetes, deployment, validation, and operational contracts |
 | `docs/wiki/` | Canonical source for the published GitHub wiki |

@@ -64,6 +64,17 @@ It does not expose user records or identifiers, private endpoints, logs, or
 internal errors. These observations support presentation and operations; they
 are not authority for accounts, bets, moderation, or settlement.
 
+Public Telemetry POST and GET traffic is bounded by global, non-identifying,
+process-local limits. Rejected requests return a fixed sanitized `429`
+response. The summary uses a five-second cache with singleflight refresh, and
+stored observations expire after 30 days. Telemetry does not derive or retain
+IP- or session-based identity.
+
+Release recovery keeps raw Kubernetes objects, ingress patches, HTTP
+headers/bodies, command output, and requested URLs in private temporary
+storage. Those captures are removed after the operation and never enter
+uploaded recovery evidence.
+
 ## Betting integrity
 
 - Live and pre-match rows cannot be mixed in one submitted slip.

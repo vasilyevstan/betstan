@@ -244,7 +244,6 @@ jobs:
           - service: moderation
           - service: resulting
           - service: slip
-          - service: telemetry
           - service: client
 
     steps:
