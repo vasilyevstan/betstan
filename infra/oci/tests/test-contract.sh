@@ -2247,20 +2247,25 @@ obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
 [[ -f "$obsolete_cleanup" ]] ||
   fail "historical obsolete-event cleanup tool is missing"
 python3 - "$event_reschedule" "$data_runner" \
-  "$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh" <<'PY' || fail "fixed reschedule target consumers drift from the Event source"
+  "$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh" \
+  "$obsolete_cleanup" <<'PY' || fail "fixed reschedule target consumers drift from the Event source"
 import re
 import sys
 
-event_source_path, rollout_path, verifier_path = sys.argv[1:]
+event_source_path, rollout_path, verifier_path, cleanup_path = sys.argv[1:]
 event_source = open(event_source_path, encoding="utf-8").read()
 rollout = open(rollout_path, encoding="utf-8").read()
 verifier = open(verifier_path, encoding="utf-8").read()
+cleanup_source = open(cleanup_path, encoding="utf-8").read()
 iso_kickoff = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+object_id = r"[0-9a-f]{24}"
+target_event_check = r'operation\.get\("targetEventId"\) != "([0-9a-f]{24})"'
 
-def fixed_literal(name, shape):
+def fixed_literal(source, name, shape, exported=True):
+    prefix = "export const" if exported else "const"
     definitions = re.findall(
-        rf'^export const {re.escape(name)} = (.+);$',
-        event_source,
+        rf'^{prefix} {re.escape(name)} = (.+);$',
+        source,
         re.MULTILINE,
     )
     if len(definitions) != 1:
@@ -2270,31 +2275,114 @@ def fixed_literal(name, shape):
         raise SystemExit(f"{name} literal has an unsafe shape")
     return literal.group(1)
 
-event_id = fixed_literal("RESCHEDULE_EVENT_ID", r"[0-9a-f]{24}")
-kickoff = fixed_literal("RESCHEDULE_TARGET_KICKOFF", iso_kickoff)
+event_id = fixed_literal(event_source, "RESCHEDULE_EVENT_ID", object_id)
+backoffice_id = fixed_literal(event_source, "RESCHEDULE_BACKOFFICE_ID", object_id)
+kickoff = fixed_literal(event_source, "RESCHEDULE_TARGET_KICKOFF", iso_kickoff)
+old_kickoff = fixed_literal(event_source, "RESCHEDULE_OLD_KICKOFF", iso_kickoff)
+old_event_id = fixed_literal(
+    event_source, "RESCHEDULE_SOURCE_EVENT_ID", object_id, exported=False
+)
+old_backoffice_id = fixed_literal(
+    event_source, "RESCHEDULE_SOURCE_BACKOFFICE_ID", object_id, exported=False
+)
+cleanup_event_id = fixed_literal(cleanup_source, "OBSOLETE_EVENT_ID", object_id)
+cleanup_kickoff = fixed_literal(cleanup_source, "OBSOLETE_EVENT_KICKOFF", iso_kickoff)
 confirmation = f"RESCHEDULE_EVENT:{event_id}:{kickoff}"
+
+# The accepted identity contract: the current fixture is a new, distinct
+# lowercase 24-hex identity pair, and the historical fixture identities stay
+# reserved for live-betting-v1 cleanup evidence.
+for label, value in (
+    ("current event", event_id),
+    ("current Backoffice", backoffice_id),
+    ("historical event", old_event_id),
+    ("historical Backoffice", old_backoffice_id),
+):
+    if re.fullmatch(object_id, value) is None:
+        raise SystemExit(f"{label} identity is not a lowercase 24-hex ObjectId")
+if len({event_id, backoffice_id, old_event_id, old_backoffice_id}) != 4:
+    raise SystemExit("fixture identities are not four distinct values")
+if cleanup_event_id != old_event_id:
+    raise SystemExit("historical cleanup source drifts from the historical event identity")
+if cleanup_kickoff != old_kickoff:
+    raise SystemExit("historical cleanup source drifts from the historical kickoff")
+if kickoff == old_kickoff:
+    raise SystemExit("current and historical kickoffs must differ")
+for label, value in (("current event", event_id), ("current Backoffice", backoffice_id)):
+    if value in cleanup_source:
+        raise SystemExit(f"historical cleanup source references the {label} identity")
 
 if rollout.count(confirmation) != 1:
     raise SystemExit("rollout confirmation does not have exactly one source-bound target")
 if re.findall(
-    rf'RESCHEDULE_EVENT:[0-9a-f]{{24}}:({iso_kickoff})',
+    rf'RESCHEDULE_EVENT:({object_id}):({iso_kickoff})',
     rollout,
-) != [kickoff]:
-    raise SystemExit("rollout contains another fixed-target confirmation kickoff")
+) != [(event_id, kickoff)]:
+    raise SystemExit("rollout contains another fixed-target confirmation identity")
 if re.findall(
     rf'--arg target_kickoff "({iso_kickoff})"',
     rollout,
 ) != [kickoff]:
     raise SystemExit("rollout target_kickoff binding drifts from the Event source")
 if re.findall(
+    rf'--arg target_event_id "({object_id})"',
+    rollout,
+) != [event_id]:
+    raise SystemExit("rollout target_event_id binding drifts from the Event source")
+if rollout.count(event_id) != 2:
+    raise SystemExit("rollout does not bind the current event identity exactly twice")
+for label, value in (
+    ("historical event", old_event_id),
+    ("historical Backoffice", old_backoffice_id),
+):
+    if value in rollout:
+        raise SystemExit(f"rollout still references the {label} identity")
+
+if re.findall(
     rf'operation\.get\("targetKickoff"\) != "({iso_kickoff})"',
     verifier,
 ) != [kickoff]:
     raise SystemExit("evidence verifier targetKickoff check drifts from the Event source")
+
+# Bind each verifier schema branch structurally: a positional grep cannot tell
+# the historical live-betting-v1 cleanup pin apart from the current v2
+# reschedule pin.
+def kind_branch_position(kind, label):
+    anchor = f'operation.get("kind") != "{kind}":'
+    if verifier.count(anchor) != 1:
+        raise SystemExit(f"evidence verifier has no single {label} kind branch")
+    return verifier.index(anchor)
+
+cleanup_branch = kind_branch_position("obsolete-event-cleanup", "v1 cleanup")
+reschedule_branch = kind_branch_position("fixed-event-reschedule", "v2 reschedule")
+if not cleanup_branch < reschedule_branch:
+    raise SystemExit("evidence verifier schema branches are not in v1/v2 order")
+pins = [
+    (match.start(), match.group(1))
+    for match in re.finditer(target_event_check, verifier)
+]
+if len(pins) != 2:
+    raise SystemExit("evidence verifier does not pin exactly two target identities")
+v1_pins = [
+    value for start, value in pins if cleanup_branch < start < reschedule_branch
+]
+v2_pins = [value for start, value in pins if start > reschedule_branch]
+if len(v1_pins) != 1 or len(v2_pins) != 1:
+    raise SystemExit("evidence verifier schema branches do not pin one identity each")
+if v1_pins[0] != old_event_id:
+    raise SystemExit("evidence verifier v1 branch no longer pins the historical event")
+if v2_pins[0] != event_id:
+    raise SystemExit("evidence verifier v2 branch drifts from the Event source")
+if verifier.count(event_id) != 1 or verifier.count(old_event_id) != 1:
+    raise SystemExit("evidence verifier accepts more than one identity per schema branch")
+if backoffice_id in verifier or old_backoffice_id in verifier:
+    raise SystemExit("evidence verifier binds a Backoffice identity it must not know")
 PY
 for reschedule_contract in \
-    'export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
-    'export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
+    'const RESCHEDULE_SOURCE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
+    'const RESCHEDULE_SOURCE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
+    'export const RESCHEDULE_EVENT_ID = "42643b4c173d1c7b8eeed765";' \
+    'export const RESCHEDULE_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";' \
     'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
     'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-11T08:05:00.000Z";' \
     'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
@@ -2337,7 +2425,7 @@ grep -Fq \
   grep -Fq '!matchesObsoleteKickoff(gamemasterDocument.time)' \
     "$obsolete_cleanup" ||
   fail "historical fixture cleanup is not bound to the original kickoff"
-grep -Fq 'The former automatic destructive' \
+grep -Fq 'The historical destructive fixture cleanup remains' \
   "$ROOT_DIR/docs/wiki/Live-Betting-Production.md" ||
   fail "live-betting documentation does not retire automatic fixture cleanup"
 grep -Fq 'name: oci-production' "$deploy_workflow"

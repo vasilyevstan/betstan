@@ -6,8 +6,10 @@ import {
   expectedGoalsFromSeed,
 } from "../data/product/preMatchPricing";
 
-export const RESCHEDULE_EVENT_ID = "6a623af592af5a95b1d0bb79";
-export const RESCHEDULE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
+const RESCHEDULE_SOURCE_EVENT_ID = "6a623af592af5a95b1d0bb79";
+const RESCHEDULE_SOURCE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
+export const RESCHEDULE_EVENT_ID = "42643b4c173d1c7b8eeed765";
+export const RESCHEDULE_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";
 export const RESCHEDULE_EVENT_NAME = "Home 1 - Away 1";
 export const RESCHEDULE_EVENT_HOME = "Home 1";
 export const RESCHEDULE_EVENT_AWAY = "Away 1";
@@ -23,6 +25,11 @@ const JOURNAL_ID =
   `event-reschedule:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}`;
 const MAX_SNAPSHOT_BYTES = 6 * 1024 * 1024;
 const MINIMUM_APPLY_LEAD_MS = 20 * 60 * 1000;
+// Generated once independently of every public/document identity. Keeping the
+// reviewed value fixed makes journal targets reproducible without deriving
+// private simulation randomness from a public event ID.
+const RESCHEDULE_LIVE_SEED =
+  "6dcab4b9e6d3df5ff48ddd5f864b2b40c7480d90c41a697c8344455768f4d922";
 
 type RescheduleMode = "dry-run" | "apply" | "verify" | "rollback";
 type JournalState = "prepared" | "applied" | "rolled-back";
@@ -128,6 +135,17 @@ const TARGET_LOCATIONS: DocumentLocation[] = [
   { database: "gamemaster", collection: "events" },
 ];
 
+const targetDocumentId = (
+  location: DocumentLocation
+): mongoose.Types.ObjectId => {
+  if (location.database === "backoffice") {
+    return new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID);
+  }
+  return deterministicObjectId(
+    `${RESCHEDULE_EVENT_ID}:${location.database}-document`
+  );
+};
+
 const DEPENDENCY_LOCATIONS: DocumentLocation[] = [
   { database: "moderation", collection: "bets" },
   { database: "moderation", collection: "resulteds" },
@@ -228,8 +246,6 @@ const deterministicUuid = (seed: string): string => {
   ].join("-");
 };
 
-const cloneDocument = <T>(value: T): T => parseEjson<T>(canonicalEjson(value));
-
 const targetFingerprint = (): string =>
   digest([
     RESCHEDULE_BACKOFFICE_ID,
@@ -237,8 +253,8 @@ const targetFingerprint = (): string =>
     RESCHEDULE_EVENT_NAME,
     RESCHEDULE_EVENT_HOME,
     RESCHEDULE_EVENT_AWAY,
-    RESCHEDULE_OLD_KICKOFF,
     RESCHEDULE_TARGET_KICKOFF,
+    RESCHEDULE_LIVE_SEED,
     "OFFLINE",
     "NO_RESULT",
   ].join("\n"));
@@ -396,15 +412,12 @@ const findLocationDocuments = async (
     names,
     location.database
   ).collection(location.collection);
-  const query = location.database === "backoffice"
-    ? {
-        $or: [
-          { _id: new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID) },
-          { eventId: RESCHEDULE_EVENT_ID },
-        ],
-      }
-    : { eventId: RESCHEDULE_EVENT_ID };
-  return collection.find(query).limit(3).toArray() as Promise<RawDocument[]>;
+  return collection.find({
+    $or: [
+      { _id: targetDocumentId(location) },
+      { eventId: RESCHEDULE_EVENT_ID },
+    ],
+  }).limit(3).toArray() as Promise<RawDocument[]>;
 };
 
 const findTargetDocuments = async (
@@ -416,161 +429,63 @@ const findTargetDocuments = async (
 
   for (const location of TARGET_LOCATIONS) {
     const rows = await findLocationDocuments(connection, names, location);
-    if (rows.length > 1) {
+    if (rows.length > 0) {
       blockers.push({
         database: names[location.database],
         collection: location.collection,
         count: rows.length,
         reason: "duplicate target documents",
       });
-      documents.push({ ...location, document: null });
-      continue;
     }
-    documents.push({ ...location, document: rows[0] ?? null });
+    documents.push({ ...location, document: null });
   }
 
   return { documents, blockers };
 };
 
-const documentAt = (
-  documents: SnapshotDocument[],
-  databaseName: keyof DatabaseNames
-): RawDocument | null =>
-  documents.find(
-    ({ database: name, collection }) =>
-      name === databaseName && collection === "events"
-  )?.document ?? null;
-
-const isDateAt = (value: unknown, expected: string): boolean =>
-  value instanceof Date && value.toISOString() === expected;
-
 const isNullish = (value: unknown): boolean =>
   value === undefined || value === null;
 
-const isBsonNumericZero = (value: unknown): boolean =>
-  value instanceof mongoose.mongo.Int32
-  || value instanceof mongoose.mongo.Long
-  || value instanceof mongoose.mongo.Double
-  || value instanceof mongoose.mongo.Decimal128
-    ? Number(value.toString()) === 0
-    : false;
+const sourceBackofficeIdentityMatches = (
+  backoffice: RawDocument
+): boolean =>
+  backoffice._id instanceof mongoose.Types.ObjectId
+  && backoffice._id.toHexString() === RESCHEDULE_SOURCE_BACKOFFICE_ID
+  && backoffice.eventId === RESCHEDULE_SOURCE_EVENT_ID
+  && backoffice.name === RESCHEDULE_EVENT_NAME
+  && backoffice.home === RESCHEDULE_EVENT_HOME
+  && backoffice.away === RESCHEDULE_EVENT_AWAY
+  && backoffice.time === RESCHEDULE_OLD_KICKOFF
+  && backoffice.status === "NO_RESULT"
+  && backoffice.visibility === "OFFLINE"
+  && isNullish(backoffice.homeResult)
+  && isNullish(backoffice.awayResult)
+  && backoffice.newEventPublicationPending !== true
+  && backoffice.resultPublicationPending !== true
+  && backoffice.visibilityPublicationPending !== true
+  && isNullish(backoffice.visibilityPublicationTarget);
 
-const isZeroOrMissing = (value: unknown): boolean =>
-  value === undefined || value === 0 || isBsonNumericZero(value);
-
-const isEmptyOrMissing = (value: unknown): boolean =>
-  value === undefined || (Array.isArray(value) && value.length === 0);
-
-const candidateIdentityErrors = (
-  documents: SnapshotDocument[]
-): Array<{ database: keyof DatabaseNames; reason: string }> => {
-  const errors: Array<{ database: keyof DatabaseNames; reason: string }> = [];
-  const backoffice = documentAt(documents, "backoffice");
-  const event = documentAt(documents, "event");
-  const gamemaster = documentAt(documents, "gamemaster");
-
+const validateSourceBackoffice = async (
+  connection: Connection,
+  names: DatabaseNames
+): Promise<RescheduleBlocker[]> => {
+  const rows = await database(connection, names, "backoffice")
+    .collection("events")
+    .find({ _id: new mongoose.Types.ObjectId(RESCHEDULE_SOURCE_BACKOFFICE_ID) })
+    .limit(2)
+    .toArray() as RawDocument[];
   if (
-    !backoffice
-    || !(backoffice._id instanceof mongoose.Types.ObjectId)
-    || backoffice._id.toHexString() !== RESCHEDULE_BACKOFFICE_ID
-    || backoffice.eventId !== RESCHEDULE_EVENT_ID
-    || backoffice.name !== RESCHEDULE_EVENT_NAME
-    || backoffice.home !== RESCHEDULE_EVENT_HOME
-    || backoffice.away !== RESCHEDULE_EVENT_AWAY
-    || backoffice.time !== RESCHEDULE_OLD_KICKOFF
-    || backoffice.status !== "NO_RESULT"
-    || backoffice.visibility !== "OFFLINE"
-    || !isNullish(backoffice.homeResult)
-    || !isNullish(backoffice.awayResult)
-    || backoffice.newEventPublicationPending === true
-    || backoffice.resultPublicationPending === true
-    || backoffice.visibilityPublicationPending === true
-    || !isNullish(backoffice.visibilityPublicationTarget)
+    rows.length !== 1
+    || !sourceBackofficeIdentityMatches(rows[0])
   ) {
-    errors.push({
-      database: "backoffice",
+    return [{
+      database: names.backoffice,
+      collection: "events",
+      count: Math.max(rows.length, 1),
       reason: "Backoffice source identity does not match the reviewed fixture",
-    });
+    }];
   }
-
-  if (
-    event
-    && (
-      event.eventId !== RESCHEDULE_EVENT_ID
-      || event.name !== RESCHEDULE_EVENT_NAME
-      || event.home !== RESCHEDULE_EVENT_HOME
-      || event.away !== RESCHEDULE_EVENT_AWAY
-      || !isDateAt(event.time, RESCHEDULE_OLD_KICKOFF)
-      || event.status !== "NO_RESULT"
-      || event.visibility !== "OFFLINE"
-      || event.source !== "EXTERNAL"
-      || !isNullish(event.slotKey)
-      || !isNullish(event.homeResult)
-      || !isNullish(event.awayResult)
-      || !isNullish(event.live)
-      || !isNullish(event.liveRaceResultedAt)
-      || !isNullish(event.liveRetiredAt)
-      || !isNullish(event.pendingVisibility)
-      || (
-        !isNullish(event.visibilityDecision)
-        && event.visibilityDecision !== "OFFLINE"
-      )
-      || !Array.isArray(event.products)
-      || event.products.length === 0
-    )
-  ) {
-    errors.push({
-      database: "event",
-      reason: "Event projection is not an idle reviewed fixture",
-    });
-  }
-
-  if (
-    gamemaster
-    && (
-      gamemaster.eventId !== RESCHEDULE_EVENT_ID
-      || gamemaster.name !== RESCHEDULE_EVENT_NAME
-      || gamemaster.home !== RESCHEDULE_EVENT_HOME
-      || gamemaster.away !== RESCHEDULE_EVENT_AWAY
-      || !isDateAt(gamemaster.time, RESCHEDULE_OLD_KICKOFF)
-      || gamemaster.status !== "NO_RESULT"
-      || !isNullish(gamemaster.homeResult)
-      || !isNullish(gamemaster.awayResult)
-      || (
-        !isNullish(gamemaster.phase)
-        && gamemaster.phase !== "PRE_MATCH"
-      )
-      || !isZeroOrMissing(gamemaster.liveSequence)
-      || !isZeroOrMissing(gamemaster.liveConfirmedReplayCursor)
-      || !isZeroOrMissing(gamemaster.liveHomeScore)
-      || !isZeroOrMissing(gamemaster.liveAwayScore)
-      || !isNullish(gamemaster.liveStartedAt)
-      || !isNullish(gamemaster.liveEndedAt)
-      || !isNullish(gamemaster.liveNextTransitionAt)
-      || !isNullish(gamemaster.liveTimeline)
-      || !isEmptyOrMissing(gamemaster.liveTransitions)
-      || !isEmptyOrMissing(gamemaster.liveMarkets)
-      || !isNullish(gamemaster.livePreKickoffPublishedAt)
-      || !isNullish(gamemaster.processingLease)
-      || !isNullish(gamemaster.pendingResult)
-      || !isNullish(gamemaster.simulationFailure)
-      || !isNullish(gamemaster.resultPublishedAt)
-      || (
-        !isNullish(gamemaster.liveSeed)
-        && (
-          typeof gamemaster.liveSeed !== "string"
-          || !/^[0-9a-f]{64}$/.test(gamemaster.liveSeed)
-        )
-      )
-    )
-  ) {
-    errors.push({
-      database: "gamemaster",
-      reason: "Gamemaster projection is not an idle reviewed fixture",
-    });
-  }
-
-  return errors;
+  return [];
 };
 
 const deterministicProducts = (): RawDocument[] => {
@@ -614,131 +529,79 @@ const deterministicProducts = (): RawDocument[] => {
   ];
 };
 
-const buildTargetDocuments = (
-  snapshotDocuments: SnapshotDocument[]
-): SnapshotDocument[] => {
-  const backofficeSource = documentAt(snapshotDocuments, "backoffice");
-  if (!backofficeSource) {
-    throw new Error("reschedule snapshot is missing the Backoffice record");
-  }
-  const eventSource = documentAt(snapshotDocuments, "event");
-  const gamemasterSource = documentAt(snapshotDocuments, "gamemaster");
-
-  const backofficeTarget = cloneDocument(backofficeSource);
-  backofficeTarget.time = RESCHEDULE_TARGET_KICKOFF;
-
-  const eventTarget = eventSource
-    ? cloneDocument(eventSource)
-    : {
-        _id: deterministicObjectId(`${RESCHEDULE_EVENT_ID}:event-document`),
-        eventId: RESCHEDULE_EVENT_ID,
-        home: RESCHEDULE_EVENT_HOME,
-        away: RESCHEDULE_EVENT_AWAY,
-        source: "EXTERNAL",
-        newEventPublishedAt: null,
-        newEventPublishAttempts: 0,
-        newEventPublishClaimedAt: null,
-        newEventPublishClaimToken: null,
-        name: RESCHEDULE_EVENT_NAME,
-        time: new Date(RESCHEDULE_TARGET_KICKOFF),
-        status: "NO_RESULT",
-        visibility: "OFFLINE",
-        visibilityInitialized: true,
-        eventMetadataInitialized: true,
-        visibilityDecision: "OFFLINE",
-        liveRaceResultedAt: null,
-        liveRetiredAt: null,
-        products: deterministicProducts(),
-        live: null,
-        __v: 0,
-      };
-  eventTarget.time = new Date(RESCHEDULE_TARGET_KICKOFF);
-  eventTarget.status = "NO_RESULT";
-  eventTarget.visibility = "OFFLINE";
-  eventTarget.visibilityInitialized = true;
-  eventTarget.eventMetadataInitialized = true;
-  eventTarget.visibilityDecision = "OFFLINE";
-  eventTarget.live = null;
-  eventTarget.liveRaceResultedAt = null;
-  eventTarget.liveRetiredAt = null;
-  eventTarget.newEventPublishedAt = null;
-  eventTarget.newEventPublishAttempts = 0;
-  eventTarget.newEventPublishClaimedAt = null;
-  eventTarget.newEventPublishClaimToken = null;
-  delete eventTarget.pendingVisibility;
-
-  const gamemasterTarget = gamemasterSource
-    ? cloneDocument(gamemasterSource)
-    : {
-        _id: deterministicObjectId(
-          `${RESCHEDULE_EVENT_ID}:gamemaster-document`
-        ),
-        eventId: RESCHEDULE_EVENT_ID,
-        name: RESCHEDULE_EVENT_NAME,
-        time: new Date(RESCHEDULE_TARGET_KICKOFF),
-        home: RESCHEDULE_EVENT_HOME,
-        away: RESCHEDULE_EVENT_AWAY,
-        status: "NO_RESULT",
-        phase: "PRE_MATCH",
-        liveSeed: digest(
-          `${RESCHEDULE_EVENT_ID}:live-seed:${RESCHEDULE_TARGET_KICKOFF}`
-        ),
-        liveEngineVersion: null,
-        liveStartedAt: null,
-        liveEndedAt: null,
-        liveSequence: 0,
-        liveConfirmedReplayCursor: 0,
-        liveNextTransitionAt: null,
-        liveHomeScore: 0,
-        liveAwayScore: 0,
-        liveTimeline: null,
-        liveTransitions: [],
-        liveMarkets: [],
-        livePreKickoffPublishedAt: null,
-        resultPublishedAt: null,
-        __v: 0,
-      };
-  gamemasterTarget.time = new Date(RESCHEDULE_TARGET_KICKOFF);
-  gamemasterTarget.status = "NO_RESULT";
-  gamemasterTarget.phase = "PRE_MATCH";
-  gamemasterTarget.liveSeed =
-    typeof gamemasterTarget.liveSeed === "string"
-    && /^[0-9a-f]{64}$/.test(gamemasterTarget.liveSeed)
-      ? gamemasterTarget.liveSeed
-      : digest(`${RESCHEDULE_EVENT_ID}:live-seed:${RESCHEDULE_TARGET_KICKOFF}`);
-  gamemasterTarget.liveEngineVersion = null;
-  gamemasterTarget.liveStartedAt = null;
-  gamemasterTarget.liveEndedAt = null;
-  gamemasterTarget.liveSequence = 0;
-  gamemasterTarget.liveConfirmedReplayCursor = 0;
-  gamemasterTarget.liveNextTransitionAt = null;
-  gamemasterTarget.liveHomeScore = 0;
-  gamemasterTarget.liveAwayScore = 0;
-  gamemasterTarget.liveTimeline = null;
-  gamemasterTarget.liveTransitions = [];
-  gamemasterTarget.liveMarkets = [];
-  gamemasterTarget.livePreKickoffPublishedAt = null;
-  gamemasterTarget.resultPublishedAt = null;
-  delete gamemasterTarget.homeResult;
-  delete gamemasterTarget.awayResult;
-  delete gamemasterTarget.processingLease;
-  delete gamemasterTarget.pendingResult;
-  delete gamemasterTarget.simulationFailure;
-
-  return [
-    {
-      database: "backoffice",
-      collection: "events",
-      document: backofficeTarget,
+const buildTargetDocuments = (): SnapshotDocument[] => [
+  {
+    database: "backoffice",
+    collection: "events",
+    document: {
+      _id: targetDocumentId(TARGET_LOCATIONS[0]),
+      eventId: RESCHEDULE_EVENT_ID,
+      name: RESCHEDULE_EVENT_NAME,
+      time: RESCHEDULE_TARGET_KICKOFF,
+      home: RESCHEDULE_EVENT_HOME,
+      away: RESCHEDULE_EVENT_AWAY,
+      status: "NO_RESULT",
+      visibility: "OFFLINE",
+      __v: 0,
     },
-    { database: "event", collection: "events", document: eventTarget },
-    {
-      database: "gamemaster",
-      collection: "events",
-      document: gamemasterTarget,
+  },
+  {
+    database: "event",
+    collection: "events",
+    document: {
+      _id: targetDocumentId(TARGET_LOCATIONS[1]),
+      eventId: RESCHEDULE_EVENT_ID,
+      home: RESCHEDULE_EVENT_HOME,
+      away: RESCHEDULE_EVENT_AWAY,
+      source: "EXTERNAL",
+      newEventPublishedAt: null,
+      newEventPublishAttempts: 0,
+      newEventPublishClaimedAt: null,
+      newEventPublishClaimToken: null,
+      name: RESCHEDULE_EVENT_NAME,
+      time: new Date(RESCHEDULE_TARGET_KICKOFF),
+      status: "NO_RESULT",
+      visibility: "OFFLINE",
+      visibilityInitialized: true,
+      eventMetadataInitialized: true,
+      visibilityDecision: "OFFLINE",
+      liveRaceResultedAt: null,
+      liveRetiredAt: null,
+      products: deterministicProducts(),
+      live: null,
+      __v: 0,
     },
-  ];
-};
+  },
+  {
+    database: "gamemaster",
+    collection: "events",
+    document: {
+      _id: targetDocumentId(TARGET_LOCATIONS[2]),
+      eventId: RESCHEDULE_EVENT_ID,
+      name: RESCHEDULE_EVENT_NAME,
+      time: new Date(RESCHEDULE_TARGET_KICKOFF),
+      home: RESCHEDULE_EVENT_HOME,
+      away: RESCHEDULE_EVENT_AWAY,
+      status: "NO_RESULT",
+      phase: "PRE_MATCH",
+      liveSeed: RESCHEDULE_LIVE_SEED,
+      liveEngineVersion: null,
+      liveStartedAt: null,
+      liveEndedAt: null,
+      liveSequence: 0,
+      liveConfirmedReplayCursor: 0,
+      liveNextTransitionAt: null,
+      liveHomeScore: 0,
+      liveAwayScore: 0,
+      liveTimeline: null,
+      liveTransitions: [],
+      liveMarkets: [],
+      livePreKickoffPublishedAt: null,
+      resultPublishedAt: null,
+      __v: 0,
+    },
+  },
+];
 
 const buildBundle = (documents: SnapshotDocument[]): {
   bundle: RescheduleBundle;
@@ -759,7 +622,7 @@ const buildBundle = (documents: SnapshotDocument[]): {
 
 const validateBundle = (
   bundle: RescheduleBundle,
-  allowMissingProjections: boolean
+  targetBundle: boolean
 ): void => {
   const keys = bundle.documents.map(locationKey);
   if (
@@ -772,14 +635,14 @@ const validateBundle = (
       document !== null
       && document.eventId !== RESCHEDULE_EVENT_ID
     )
-    || !documentAt(bundle.documents, "backoffice")
-    || (
-      !allowMissingProjections
-      && (
-        !documentAt(bundle.documents, "event")
-        || !documentAt(bundle.documents, "gamemaster")
-      )
-    )
+    || bundle.documents.some((entry) => targetBundle
+      ? (
+          !entry.document
+          || !(entry.document._id instanceof mongoose.Types.ObjectId)
+          || entry.document._id.toHexString()
+            !== targetDocumentId(entry).toHexString()
+        )
+      : entry.document !== null)
   ) {
     throw new Error("reschedule journal contains an invalid document bundle");
   }
@@ -849,17 +712,13 @@ const parseJournal = (
   }
   const snapshot = parseEjson<RescheduleBundle>(journal.snapshotEjson);
   const target = parseEjson<RescheduleBundle>(journal.targetEjson);
-  validateBundle(snapshot, true);
-  validateBundle(target, false);
+  validateBundle(snapshot, false);
+  validateBundle(target, true);
   const rebuiltTargetEjson = canonicalEjson(
-    buildTargetDocuments(snapshot.documents)
+    buildTargetDocuments()
   );
   const storedTargetEjson = canonicalEjson(target.documents);
-  const identityErrors = candidateIdentityErrors(snapshot.documents);
-  if (
-    identityErrors.length > 0
-    || rebuiltTargetEjson !== storedTargetEjson
-  ) {
+  if (rebuiltTargetEjson !== storedTargetEjson) {
     throw new Error("event reschedule journal target is not reproducible");
   }
   return { journal, snapshot, target };
@@ -1174,16 +1033,7 @@ const scanCandidate = async (
 }> => {
   const targetScan = await findTargetDocuments(connection, names);
   const blockers = [...targetScan.blockers];
-  blockers.push(
-    ...candidateIdentityErrors(targetScan.documents).map(
-      ({ database: databaseName, reason }) => ({
-        database: names[databaseName],
-        collection: "events",
-        count: 1,
-        reason,
-      })
-    )
-  );
+  blockers.push(...await validateSourceBackoffice(connection, names));
   blockers.push(...await scanArchiveAndMirror(connection, names));
   blockers.unshift(...await scanDependencies(connection, names));
   return { documents: targetScan.documents, blockers };
@@ -1259,7 +1109,7 @@ const prepareJournal = async (
   documents: SnapshotDocument[]
 ): Promise<ReturnType<typeof parseJournal>> => {
   const snapshot = buildBundle(documents);
-  const target = buildBundle(buildTargetDocuments(documents));
+  const target = buildBundle(buildTargetDocuments());
   const marker: RescheduleJournal = {
     _id: JOURNAL_ID,
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,

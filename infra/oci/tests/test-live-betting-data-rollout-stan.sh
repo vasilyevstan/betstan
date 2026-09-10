@@ -239,32 +239,41 @@ if [[ "${1:-}" == "logs" ]]; then
     if is_blocked_reschedule_job "$job"; then
       changed=0
       reason="event or Slip dependency"
+      blocker_database="gaming_bet"
+      blocker_collection="bets"
       mode=dry-run
       grep -Fq -- '- "apply"' "$manifest" && mode=apply
       grep -Fq -- '- "verify"' "$manifest" && mode=verify
       [[ "$scenario" != "reschedule-blocked-changed" ]] || changed=1
       [[ "$scenario" != "reschedule-blocked-unknown-reason" ]] ||
         reason="event or Slip dependency for secret-user"
+      if [[ "$scenario" == "reschedule-blocked-source-missing" ]]; then
+        reason="Backoffice source identity does not match the reviewed fixture"
+        blocker_database="gaming_backoffice"
+        blocker_collection="events"
+      fi
       blocked_report="$(
         jq -n \
           --arg mode "$mode" \
           --arg reason "$reason" \
+          --arg blocker_database "$blocker_database" \
+          --arg blocker_collection "$blocker_collection" \
           --argjson changed "$changed" '{
             mode:$mode,
-            targetEventId:"6a623af592af5a95b1d0bb79",
+            targetEventId:"42643b4c173d1c7b8eeed765",
             targetKickoff:"2026-09-11T08:05:00.000Z",
             state:"blocked",
             ready:false,
             scanned:20,
-            matched:1,
+            matched:0,
             changed:$changed,
             errorCount:1,
             journalVerified:false,
             snapshotDocumentCount:0,
             targetDocumentCount:0,
             blockers:[{
-              database:"gaming_bet",
-              collection:"bets",
+              database:$blocker_database,
+              collection:$blocker_collection,
               count:1,
               reason:$reason
             }]
@@ -284,10 +293,10 @@ if [[ "${1:-}" == "logs" ]]; then
     fi
     mode=dry-run
     reschedule_state=candidate
-    matched=1
+    matched=0
     changed=0
     journal_verified=false
-    snapshot_document_count=1
+    snapshot_document_count=0
     target_document_count=3
     if [[ "$scenario" == "final" ]]; then
       reschedule_state=completed
@@ -317,7 +326,7 @@ if [[ "${1:-}" == "logs" ]]; then
       --argjson journal_verified "$journal_verified" \
       --argjson snapshot_document_count "$snapshot_document_count" '{
         mode:$mode,
-        targetEventId:"6a623af592af5a95b1d0bb79",
+        targetEventId:"42643b4c173d1c7b8eeed765",
         targetKickoff:"2026-09-11T08:05:00.000Z",
         state:$state,
         ready:true,
@@ -624,7 +633,7 @@ jq -e \
     .workflowRunAttempt == "1" and
     .phase == "dry-run" and
     .stage == "preflight" and
-    .targetEventId == "6a623af592af5a95b1d0bb79" and
+    .targetEventId == "42643b4c173d1c7b8eeed765" and
     .targetKickoff == "2026-09-11T08:05:00.000Z" and
     .mode == "dry-run" and
     .state == "blocked" and
@@ -675,6 +684,52 @@ if grep -R -E \
 fi
 [[ -e "$stub_state/deleted/live-data-event-4009-1" ]] ||
   fail "blocked reschedule did not delete its Kubernetes Job"
+
+missing_source_output="$work_dir/reschedule-blocked-source-missing"
+missing_source_log="$work_dir/reschedule-blocked-source-missing.out"
+if run_phase dry-run reschedule-blocked-source-missing 4017 \
+    "$missing_source_output" >"$missing_source_log" 2>&1; then
+  fail "missing source fixture was accepted as rollout readiness"
+fi
+missing_source_report="$missing_source_output/reports/preflight-event-reschedule.json"
+missing_source_failure="$missing_source_output/reschedule-blocker-failure.json"
+[[ -f "$missing_source_report" && -f "$missing_source_failure" &&
+   -f "$missing_source_output/SHA256SUMS" ]] ||
+  fail "missing source fixture did not retain checksummed blocker evidence"
+jq -e '
+  .state == "blocked" and
+  .ready == false and
+  .journalVerified == false and
+  .snapshotDocumentCount == 0 and
+  .targetDocumentCount == 0 and
+  .blockers == [{
+    service:"backoffice",
+    collection:"events",
+    count:1,
+    reasonCode:"identity_mismatch"
+  }]
+' "$missing_source_report" >/dev/null ||
+  fail "missing source fixture blocker was not normalized"
+jq -e '
+  .schemaVersion == "live-betting-reschedule-blocker-v1" and
+  .status == "FAIL" and
+  .workflowRunId == "4017" and
+  .phase == "dry-run" and
+  .state == "blocked" and
+  .blockerCount == 1 and
+  .job.exitCode == 1
+' "$missing_source_failure" >/dev/null ||
+  fail "missing source fixture failure envelope is incomplete"
+(
+  cd "$missing_source_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "missing source fixture blocker checksums are invalid"
+[[ ! -e "$missing_source_output/provenance.env" &&
+   ! -e "$missing_source_output/journal.json" &&
+   ! -e "$missing_source_output/schema.env" ]] ||
+  fail "missing source fixture emitted success-shaped rollout evidence"
+[[ -e "$stub_state/deleted/live-data-event-4017-1" ]] ||
+  fail "missing source fixture did not delete its Kubernetes Job"
 
 race_output="$work_dir/reschedule-blocked-pod-phase-race"
 race_log="$work_dir/reschedule-blocked-pod-phase-race.out"
@@ -910,12 +965,14 @@ rm -f "$legacy_output/SHA256SUMS"
 mv \
   "$legacy_output/reports/preflight-event-reschedule.json" \
   "$legacy_output/reports/preflight-obsolete-event.json"
+# Historical live-betting-v1 cleanup evidence stays pinned to the original
+# obsolete event identity; it must not inherit the current v2 reschedule ID.
 jq '
   {
     kind:"obsolete-event-cleanup",
     stage,
     mode:"dry-run",
-    targetEventId,
+    targetEventId:"6a623af592af5a95b1d0bb79",
     state:"removed",
     ready:true,
     scanned,

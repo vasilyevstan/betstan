@@ -454,7 +454,7 @@ else:
         operation = json.loads((root / relative).read_text(encoding="utf-8"))
         if operation.get("kind") != "fixed-event-reschedule":
             fail(f"{relative} has an invalid reschedule kind")
-        if operation.get("targetEventId") != "6a623af592af5a95b1d0bb79":
+        if operation.get("targetEventId") != "42643b4c173d1c7b8eeed765":
             fail(f"{relative} targets an unexpected event")
         if operation.get("targetKickoff") != "2026-09-11T08:05:00.000Z":
             fail(f"{relative} targets an unexpected kickoff")
