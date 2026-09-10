@@ -267,17 +267,9 @@ state = (
 )
 allowed = {
     (True, True, True, True),
-    (True, True, False, True),
     (True, True, False, False),
     (True, False, False, False),
     (False, False, False, False),
-    (True, True, True, False),
-    (False, True, True, True),
-    (False, True, False, True),
-    (False, True, False, False),
-    (False, False, True, True),
-    (False, False, False, True),
-    (False, False, True, False),
 }
 if state not in allowed:
     raise SystemExit("Telemetry cleanup or restoration is not an authorized prefix")
@@ -315,42 +307,48 @@ File.write(service_path, YAML.dump(service))
 RUBY
 }
 
-ensure_telemetry_ingress_route() {
-  local host="$1"
-  local label="$2"
-  local ingress_json="$WORK_DIR/telemetry-${label}-ingress.json"
-  local patch_json="$WORK_DIR/telemetry-${label}-ingress-patch.json"
+ensure_telemetry_ingress_routes() {
+  local canonical_host="$1"
+  local diagnostic_host="$2"
+  local ingress_json="$WORK_DIR/telemetry-ingress.json"
+  local patch_json="$WORK_DIR/telemetry-ingress-patch.json"
   kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
     -o json >"$ingress_json"
-  python3 - "$ingress_json" "$patch_json" "$host" <<'PY'
+  python3 - "$ingress_json" "$patch_json" \
+    "$canonical_host" "$diagnostic_host" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
-host = sys.argv[3]
-rules = [
-    (index, rule)
-    for index, rule in enumerate(document.get("spec", {}).get("rules", []))
-    if rule.get("host") == host
-]
-if len(rules) != 1:
-    raise SystemExit("Telemetry ingress host is missing or duplicated")
-rule_index, rule = rules[0]
-paths = rule.get("http", {}).get("paths", [])
-telemetry = [
-    index for index, path in enumerate(paths)
-    if path.get("path") == "/api/telemetry/?(.*)"
-]
-if telemetry:
-    if (
-        len(telemetry) != 1
-        or paths[telemetry[0]].get("backend", {}).get("service", {}).get("name")
-        != "gaming-telemetry-srv"
-    ):
-        raise SystemExit("Telemetry ingress route is duplicated or misrouted")
-    patch = []
-else:
+expected_hosts = sys.argv[3:5]
+if len(set(expected_hosts)) != 2:
+    raise SystemExit("Telemetry ingress hosts are missing or duplicated")
+patch = []
+present = 0
+for host in expected_hosts:
+    rules = [
+        (index, rule)
+        for index, rule in enumerate(document.get("spec", {}).get("rules", []))
+        if rule.get("host") == host
+    ]
+    if len(rules) != 1:
+        raise SystemExit("Telemetry ingress host is missing or duplicated")
+    rule_index, rule = rules[0]
+    paths = rule.get("http", {}).get("paths", [])
+    telemetry = [
+        index for index, path in enumerate(paths)
+        if path.get("path") == "/api/telemetry/?(.*)"
+    ]
+    if telemetry:
+        if (
+            len(telemetry) != 1
+            or paths[telemetry[0]].get("backend", {}).get("service", {}).get("name")
+            != "gaming-telemetry-srv"
+        ):
+            raise SystemExit("Telemetry ingress route is duplicated or misrouted")
+        present += 1
+        continue
     catch_all = [
         index for index, path in enumerate(paths)
         if path.get("path") == "/?(.*)"
@@ -359,7 +357,7 @@ else:
     ]
     if len(catch_all) != 1:
         raise SystemExit("SPA catch-all is missing or duplicated")
-    patch = [{
+    patch.append({
         "op": "add",
         "path": f"/spec/rules/{rule_index}/http/paths/{catch_all[0]}",
         "value": {
@@ -372,7 +370,11 @@ else:
                 }
             },
         },
-    }]
+    })
+if present not in {0, 2}:
+    raise SystemExit("Telemetry ingress restoration is not at an atomic prefix")
+if present == 2:
+    patch = []
 Path(sys.argv[2]).write_text(
     json.dumps(patch, separators=(",", ":")), encoding="utf-8"
 )
@@ -393,8 +395,7 @@ restore_telemetry_resources() {
     -n "$OCI_K8S_NAMESPACE" --timeout=10m >/dev/null
   kubectl apply -n "$OCI_K8S_NAMESPACE" \
     -f "$WORK_DIR/telemetry-service.yaml" >/dev/null
-  ensure_telemetry_ingress_route "$public_host" canonical
-  ensure_telemetry_ingress_route "$diagnostic_host" diagnostic
+  ensure_telemetry_ingress_routes "$public_host" "$diagnostic_host"
 }
 
 oci_require_command kubectl
@@ -598,9 +599,11 @@ elif post_rollback_failure:
             "write-fence-release",
             "release-write-fence",
         ),
+        ("gaming-telemetry-depl", "telemetry-rollout", "failed-post-rollback"),
+        ("gaming-telemetry-depl", "telemetry-read", "failed-post-rollback"),
+        ("gaming-telemetry-depl", "telemetry-digest", "failed-post-rollback"),
         ("gaming-telemetry-depl", "telemetry-summary", "failed-post-rollback"),
-        ("gaming-oci-ingress", "telemetry-canonical-route", "failed-post-rollback"),
-        ("gaming-oci-ingress", "telemetry-diagnostic-route", "failed-post-rollback"),
+        ("gaming-oci-ingress", "telemetry-routes", "failed-post-rollback"),
         ("gaming-telemetry-srv", "telemetry-service", "failed-post-rollback"),
         ("gaming-telemetry-depl", "telemetry-deployment", "failed-post-rollback"),
         ("gaming-telemetry-depl", "telemetry-absent", "failed-post-rollback"),

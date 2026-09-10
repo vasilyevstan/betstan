@@ -62,6 +62,7 @@ new_case() {
   mkdir -p "$BIN_DIR" "$STATE_DIR" "$BASELINE_DIR" "$BUILD_DIR" "$OUT_DIR"
 
   : >"$STATE_DIR/kubectl.log"
+  : >"$STATE_DIR/lock.log"
   printf 'held\n' >"$STATE_DIR/maintenance"
   printf 'held\n' >"$STATE_DIR/lock"
   printf '0\n' >"$STATE_DIR/moderation-restarts"
@@ -243,6 +244,7 @@ set -euo pipefail
 STATE_DIR="${FAKE_STATE_DIR}"
 [[ "$LOCK_TOKEN" == "live-data-${FAKE_EXPECTED_DATA_RUN}-1" ]] || { echo "wrong lock token" >&2; exit 1; }
 [[ "$SOURCE_SHA" == "$FAKE_EXPECTED_SOURCE_SHA" ]] || { echo "wrong lock source sha" >&2; exit 1; }
+printf '%s\n' "$1" >>"$STATE_DIR/lock.log"
 case "$1" in
   verify)
     [[ "$(cat "$STATE_DIR/lock")" == "held" ]] || {
@@ -260,7 +262,16 @@ case "$1" in
     }
     [[ -n "${LOCK_LEASE_SECONDS:-}" ]] || { echo "acquire requires a lease" >&2; exit 1; }
     printf 'held\n' >"$STATE_DIR/lock" ;;
-  release) printf 'released\n' >"$STATE_DIR/lock" ;;
+  release)
+    case "${FAKE_LOCK_RELEASE_MODE:-released}" in
+      released) printf 'released\n' >"$STATE_DIR/lock" ;;
+      ambiguous-held) exit 1 ;;
+      ambiguous-absent) printf 'released\n' >"$STATE_DIR/lock"; exit 1 ;;
+      ambiguous-expired) printf 'expired\n' >"$STATE_DIR/lock"; exit 1 ;;
+      ambiguous-conflict) printf 'contended\n' >"$STATE_DIR/lock"; exit 1 ;;
+      *) echo "invalid release mode" >&2; exit 1 ;;
+    esac
+    ;;
   verify-released)
     [[ "$(cat "$STATE_DIR/lock")" == "released" ]] || { echo "lock still held" >&2; exit 1; } ;;
 esac
@@ -402,7 +413,6 @@ EOF
     absent) ;;
     service)
       : >"$STATE_DIR/service-telemetry"
-      printf '2\n' >"$STATE_DIR/telemetry-routes"
       ;;
     deployment-unready)
       : >"$STATE_DIR/service-telemetry"
@@ -411,18 +421,23 @@ EOF
       printf '0\n' >"$STATE_DIR/ready-telemetry"
       printf '2\n' >"$STATE_DIR/telemetry-routes"
       ;;
-    route-one|no-routes|deployment-only)
+    route-one|no-routes|deployment-only|ready|routes-without-service)
       printf '%s\n' "$(image_for deployed telemetry)" >"$STATE_DIR/image-telemetry"
       printf '1\n' >"$STATE_DIR/replicas-telemetry"
       printf '1\n' >"$STATE_DIR/ready-telemetry"
-      if [[ "$stage" != "deployment-only" ]]; then
+      if [[ "$stage" != "deployment-only" && "$stage" != "routes-without-service" ]]; then
         : >"$STATE_DIR/service-telemetry"
       fi
       if [[ "$stage" == "route-one" ]]; then
         printf '1\n' >"$STATE_DIR/telemetry-routes"
+      elif [[ "$stage" == "ready" || "$stage" == "routes-without-service" ]]; then
+        printf '2\n' >"$STATE_DIR/telemetry-routes"
       else
         printf '0\n' >"$STATE_DIR/telemetry-routes"
       fi
+      ;;
+    route-only)
+      printf '2\n' >"$STATE_DIR/telemetry-routes"
       ;;
     *) fail "unknown first-activation fixture stage: $stage" ;;
   esac
@@ -434,7 +449,7 @@ EOF
   ) >"$BASELINE_DIR/SHA256SUMS"
 }
 
-for stage in absent service deployment-unready route-one no-routes deployment-only; do
+for stage in absent deployment-unready no-routes deployment-only ready; do
   new_case "first-activation-$stage"
   configure_first_activation "$stage"
   run_operator >"$CASE_DIR/out.txt" 2>&1 ||
@@ -446,6 +461,18 @@ for stage in absent service deployment-unready route-one no-routes deployment-on
     fail "first-activation $stage retained a new Telemetry service"
   [[ "$(cat "$STATE_DIR/telemetry-routes")" == "0" ]] ||
     fail "first-activation $stage retained a new Telemetry ingress path"
+done
+
+for stage in service route-one route-only routes-without-service; do
+  new_case "first-activation-impossible-$stage"
+  configure_first_activation "$stage"
+  if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+    fail "first-activation impossible state $stage was accepted"
+  fi
+  assert_contains "$CASE_DIR/out.txt" \
+    'live legacy workloads are not an authorized rollout prefix'
+  grep -Fq 'set image' "$STATE_DIR/kubectl.log" &&
+    fail "first-activation impossible state $stage mutated a workload"
 done
 
 new_case first-activation-unchanged-legacy
@@ -559,6 +586,32 @@ assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquired
   fail 'failed fenced recovery did not re-hold maintenance'
 [[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
   fail 'failed fenced recovery did not reacquire the original database lock'
+
+new_case ambiguous-release-lock-retained
+if run_operator FAKE_LOCK_RELEASE_MODE=ambiguous-held >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted an ambiguous lock release'
+fi
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=retained'
+[[ "$(grep -c '^acquire$' "$STATE_DIR/lock.log")" == "0" ]] ||
+  fail 'ambiguous release reacquired a lock whose exact identity remained active'
+
+for release_state in ambiguous-absent ambiguous-expired; do
+  new_case "ambiguous-release-${release_state#ambiguous-}"
+  if run_operator FAKE_LOCK_RELEASE_MODE="$release_state" >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery accepted $release_state"
+  fi
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquired'
+  [[ "$(grep -c '^acquire$' "$STATE_DIR/lock.log")" == "1" ]] ||
+    fail "$release_state did not reacquire the original lock exactly once"
+done
+
+new_case ambiguous-release-conflicting-owner
+if run_operator FAKE_LOCK_RELEASE_MODE=ambiguous-conflict >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted an ambiguous release with a conflicting owner'
+fi
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=reacquire-failed'
+[[ "$(cat "$STATE_DIR/lock")" == "contended" ]] ||
+  fail 'conflicting lock owner was overwritten'
 
 # A failure during the restore itself, before the contract releases anything,
 # must re-hold maintenance AND preserve the transferred database lock.

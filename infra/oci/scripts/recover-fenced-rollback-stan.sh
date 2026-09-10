@@ -103,6 +103,16 @@ reacquire_original_lock() {
     DATABASE_LOCK_STATE=reacquire-failed
     return 1
   fi
+  if [[ "$DATABASE_LOCK_STATE" == "release-ambiguous" ]]; then
+    if NAMESPACE="$OCI_K8S_NAMESPACE" \
+        LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
+        OPERATION_ID="live-data-apply-slip-index" \
+        SOURCE_SHA="$DEPLOYED_SOURCE_SHA" \
+        "$LOCK_SCRIPT" verify >"$WORK_DIR/fenced-lock-reacquire.txt" 2>&1; then
+      DATABASE_LOCK_STATE=retained
+      return 0
+    fi
+  fi
   if NAMESPACE="$OCI_K8S_NAMESPACE" \
       LOCK_TOKEN="live-data-${FENCED_DATA_RUN_ID}-1" \
       OPERATION_ID="live-data-apply-slip-index" \
@@ -550,18 +560,10 @@ if deployment:
         and status.get("readyReplicas", 0) == desired
         and status.get("availableReplicas", 0) == desired
     )
-if telemetry["mode"] == "retained" and (deployment is None or service is None):
+if telemetry["mode"] == "retained" and (
+    deployment is None or service is None or len(routes) != 2
+):
     raise SystemExit("pre-existing Telemetry resources are missing")
-if telemetry["mode"] == "retained" and len(routes) != 2:
-    raise SystemExit("pre-existing Telemetry ingress routes are missing")
-if deployment is None and service is None:
-    telemetry_stage = "absent"
-elif deployment is None and service is not None:
-    telemetry_stage = "service"
-elif deployment is not None and not telemetry_ready:
-    telemetry_stage = "deployment-unready"
-else:
-    telemetry_stage = "ready"
 
 def matches_family(order, left, right):
     for split in range(len(order) + 1):
@@ -574,16 +576,16 @@ def matches_family(order, left, right):
             return True
     return False
 
-for service in forward_order:
-    if observed[service] not in {baseline[service], candidate[service]}:
+for legacy_service in forward_order:
+    if observed[legacy_service] not in {
+        baseline[legacy_service], candidate[legacy_service]
+    }:
         raise SystemExit("legacy workload has an unknown image")
 if not (
     matches_family(forward_order, candidate, baseline)
     or matches_family(recovery_order, baseline, candidate)
 ):
     raise SystemExit("legacy workload state is not an authorized forward or recovery prefix")
-if telemetry_stage not in {"absent", "service", "deployment-unready", "ready"}:
-    raise SystemExit("Telemetry resource progress is not recognized")
 resource_progress = (
     deployment is not None,
     service is not None,
@@ -591,14 +593,8 @@ resource_progress = (
 )
 allowed_progress = {
     (True, True, 2),
-    (True, True, 1),
     (True, True, 0),
     (True, False, 0),
-    (False, True, 2),
-    (False, True, 1),
-    (False, True, 0),
-    (False, False, 2),
-    (False, False, 1),
     (False, False, 0),
 }
 if telemetry["mode"] == "absent" and resource_progress not in allowed_progress:

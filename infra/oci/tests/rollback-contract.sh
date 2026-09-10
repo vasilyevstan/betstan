@@ -1050,7 +1050,13 @@ EOF_STATE
         if [[ "$service" == "telemetry" &&
           ! -f "$STUB_STATE_DIR/telemetry.env" &&
           "$original_args" == *"--ignore-not-found"* ]]; then
+          [[ "${STUB_FAIL_TELEMETRY_ABSENT_READ:-0}" != "1" ]] || exit 1
           exit 0
+        fi
+        if [[ "$service" == "telemetry" &&
+          "${STUB_FAIL_TELEMETRY_FINAL_READ:-0}" == "1" &&
+          "$(wc -l <"$STUB_KUBECTL_LOG" | tr -d ' ')" -ge 9 ]]; then
+          exit 1
         fi
         read_state "$service"
         output_mode="json"
@@ -1071,7 +1077,12 @@ EOF_STATE
           printf '8|8|1|1|1|1'
         elif [[ "$output_mode" == 'jsonpath={.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}' &&
                 "$service" == "telemetry" ]]; then
-          printf '%s' "$image"
+          if [[ "${STUB_TELEMETRY_WRONG_FINAL_DIGEST:-0}" == "1" &&
+            "$(wc -l <"$STUB_KUBECTL_LOG" | tr -d ' ')" -ge 9 ]]; then
+            printf 'ghcr.io/vasilyevstan/betstan-images@sha256:%064d' 999
+          else
+            printf '%s' "$image"
+          fi
         else
           printf 'unexpected deployment output mode: %s\n' "$output_mode" >&2
           exit 1
@@ -1362,6 +1373,11 @@ EOF_STATE
           ! -f "$STUB_STATE_DIR/telemetry.env" && "$service" == "auth" ]]; then
           exit 1
         fi
+        if [[ "$service" == "telemetry" &&
+          "${STUB_FAIL_TELEMETRY_FINAL_ROLLOUT:-0}" == "1" &&
+          "$(wc -l <"$STUB_KUBECTL_LOG" | tr -d ' ')" -ge 9 ]]; then
+          exit 1
+        fi
         if [[ "${STUB_FAIL_SERVICE:-}" == "$service" ]]; then
           exit 1
         fi
@@ -1384,6 +1400,7 @@ EOF_STATE
     ;;
   patch)
     [[ "${2:-}" == "ingress" && "${3:-}" == "gaming-oci-ingress" ]] || exit 1
+    [[ "${STUB_FAIL_TELEMETRY_CLEANUP_STAGE:-}" != "routes" ]] || exit 1
     patch_file=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -1410,10 +1427,6 @@ for operation in patch:
     else:
         raise SystemExit("unexpected ingress patch path")
     if action == "remove":
-        if stage == __import__("os").environ.get("STUB_FAIL_TELEMETRY_CLEANUP_STAGE"):
-            raise SystemExit("fixture Telemetry route removal failure")
-        if stage == "diagnostic-route" and __import__("os").environ.get("STUB_KEEP_DIAGNOSTIC_ROUTE") == "1":
-            continue
         target.write_text("0\n", encoding="utf-8")
     elif action == "add":
         target.write_text("1\n", encoding="utf-8")
@@ -1427,7 +1440,9 @@ PY
       service)
         [[ "$3" == "gaming-telemetry-srv" ]] || exit 1
         [[ "${STUB_FAIL_TELEMETRY_CLEANUP_STAGE:-}" != "service" ]] || exit 1
-        rm -f "$STUB_STATE_DIR/telemetry-service"
+        if [[ "${STUB_KEEP_TELEMETRY_SERVICE:-0}" != "1" ]]; then
+          rm -f "$STUB_STATE_DIR/telemetry-service"
+        fi
         ;;
       deployment)
         [[ "$3" == "gaming-telemetry-depl" ]] || exit 1
@@ -2591,7 +2606,25 @@ for telemetry_transition_status in yellow red; do
     'telemetry_state=absent'
 done
 
-for cleanup_stage in canonical-route diagnostic-route service deployment; do
+for telemetry_terminal_failure in rollout read digest; do
+  case "$telemetry_terminal_failure" in
+    rollout) failure_env=(STUB_FAIL_TELEMETRY_FINAL_ROLLOUT=1) ;;
+    read) failure_env=(STUB_FAIL_TELEMETRY_FINAL_READ=1) ;;
+    digest) failure_env=(STUB_TELEMETRY_WRONG_FINAL_DIGEST=1) ;;
+  esac
+  run_expect_failure "telemetry-terminal-$telemetry_terminal_failure" \
+    "${failure_env[@]}" ROLLBACK_MODE=execute
+  assert_contains \
+    "$WORK_DIR/telemetry-terminal-$telemetry_terminal_failure/failure-state.env" \
+    'failed_service=post-rollback'
+  assert_contains \
+    "$WORK_DIR/telemetry-terminal-$telemetry_terminal_failure/failure-state.env" \
+    "failed_stage=telemetry-$telemetry_terminal_failure"
+  [[ "$(wc -l <"$WORK_DIR/telemetry-terminal-$telemetry_terminal_failure/partial-state.tsv" | tr -d ' ')" == "9" ]] ||
+    fail "Telemetry terminal $telemetry_terminal_failure failure did not retain complete partial evidence"
+done
+
+for cleanup_stage in routes service deployment; do
   run_expect_failure "telemetry-cleanup-$cleanup_stage" \
     STUB_FAIL_TELEMETRY_CLEANUP_STAGE="$cleanup_stage" \
     ROLLBACK_MODE=execute
@@ -2602,7 +2635,7 @@ for cleanup_stage in canonical-route diagnostic-route service deployment; do
 done
 
 run_expect_failure telemetry-absent-verification \
-  STUB_KEEP_DIAGNOSTIC_ROUTE=1 ROLLBACK_MODE=execute
+  STUB_FAIL_TELEMETRY_ABSENT_READ=1 ROLLBACK_MODE=execute
 assert_contains "$WORK_DIR/telemetry-absent-verification/failure-state.env" \
   'failed_stage=telemetry-absent'
 
@@ -3011,7 +3044,7 @@ EOF
   fi
 done
 
-for telemetry_checkpoint in absent deployment-only service-no-routes canonical-route; do
+for telemetry_checkpoint in absent deployment-only service-no-routes; do
   label="partial-recovery-telemetry-$telemetry_checkpoint"
   state_root="$STATE_DIR/$label/current"
   reset_live_state "$state_root"
@@ -3030,10 +3063,6 @@ for telemetry_checkpoint in absent deployment-only service-no-routes canonical-r
       printf '0\n' >"$state_root/telemetry-route-canonical"
       printf '0\n' >"$state_root/telemetry-route-diagnostic"
       ;;
-    canonical-route)
-      printf '1\n' >"$state_root/telemetry-route-canonical"
-      printf '0\n' >"$state_root/telemetry-route-diagnostic"
-      ;;
   esac
   if ! PRESERVE_PARTIAL_RECOVERY_STATE=1 \
       run_partial_recovery "$label" >"$WORK_DIR/$label.out" 2>&1; then
@@ -3042,9 +3071,46 @@ for telemetry_checkpoint in absent deployment-only service-no-routes canonical-r
   fi
 done
 
+for invalid_checkpoint in service-without-deployment routes-without-deployment asymmetric-routes routes-without-service; do
+  label="partial-recovery-invalid-telemetry-$invalid_checkpoint"
+  state_root="$STATE_DIR/$label/current"
+  reset_live_state "$state_root"
+  for service in "${partial_plan_order[@]}"; do
+    write_text_atomic "$state_root/${service}.env" <<EOF
+image=$(current_image_ref "$service")
+revision=9
+EOF
+  done
+  case "$invalid_checkpoint" in
+    service-without-deployment)
+      rm -f "$state_root/telemetry.env"
+      printf '0\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+    routes-without-deployment)
+      rm -f "$state_root/telemetry.env" "$state_root/telemetry-service"
+      ;;
+    asymmetric-routes)
+      printf '1\n' >"$state_root/telemetry-route-canonical"
+      printf '0\n' >"$state_root/telemetry-route-diagnostic"
+      ;;
+    routes-without-service)
+      rm -f "$state_root/telemetry-service"
+      ;;
+  esac
+  if PRESERVE_PARTIAL_RECOVERY_STATE=1 \
+      run_partial_recovery "$label" >"$WORK_DIR/$label.out" 2>&1; then
+    fail "partial recovery accepted impossible Telemetry state $invalid_checkpoint"
+  fi
+  [[ ! -s "$STATE_DIR/$label/kubectl.log" ]] ||
+    fail "partial recovery mutated a legacy workload for impossible Telemetry state $invalid_checkpoint"
+done
+
 for failed_cleanup in \
-  telemetry-cleanup-canonical-route \
-  telemetry-cleanup-diagnostic-route \
+  telemetry-terminal-rollout \
+  telemetry-terminal-read \
+  telemetry-terminal-digest \
+  telemetry-cleanup-routes \
   telemetry-cleanup-service \
   telemetry-cleanup-deployment \
   telemetry-absent-verification \

@@ -1045,43 +1045,49 @@ output.write_text(
 PY
 }
 
-remove_telemetry_ingress_path() {
-  local host="$1"
-  local label="$2"
-  local ingress_json="$WORK_DIR/telemetry-ingress-${label}.json"
-  local patch_json="$WORK_DIR/telemetry-ingress-${label}-patch.json"
+remove_telemetry_ingress_paths() {
+  local canonical_host="$1"
+  local diagnostic_host="$2"
+  local ingress_json="$WORK_DIR/telemetry-ingress.json"
+  local patch_json="$WORK_DIR/telemetry-ingress-patch.json"
   kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" -o json \
     >"$ingress_json" || return 1
-  python3 - "$ingress_json" "$patch_json" "$host" <<'PY' || return 1
+  python3 - "$ingress_json" "$patch_json" \
+    "$canonical_host" "$diagnostic_host" <<'PY' || return 1
 import json
 import sys
 from pathlib import Path
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
-host = sys.argv[3]
+expected_hosts = set(sys.argv[3:5])
 rules = document.get("spec", {}).get("rules", [])
-matching_rules = [
-    (index, rule)
-    for index, rule in enumerate(rules)
-    if rule.get("host") == host
+if len(expected_hosts) != 2:
+    raise SystemExit("Telemetry ingress hosts are missing or duplicated")
+removals = []
+found_hosts = set()
+for rule_index, rule in enumerate(rules):
+    host = rule.get("host")
+    paths = rule.get("http", {}).get("paths", [])
+    telemetry_paths = [
+        (path_index, path)
+        for path_index, path in enumerate(paths)
+        if path.get("path") == "/api/telemetry/?(.*)"
+    ]
+    if not telemetry_paths:
+        continue
+    if host not in expected_hosts or host in found_hosts or len(telemetry_paths) != 1:
+        raise SystemExit("Telemetry ingress path is duplicated or on an unexpected host")
+    path_index, path = telemetry_paths[0]
+    if path.get("backend", {}).get("service", {}).get("name") != "gaming-telemetry-srv":
+        raise SystemExit("Telemetry ingress path is misrouted")
+    found_hosts.add(host)
+    removals.append((rule_index, path_index))
+if found_hosts != expected_hosts:
+    raise SystemExit("Telemetry ingress paths are incomplete")
+patch = [
+    {"op": "remove", "path": f"/spec/rules/{rule_index}/http/paths/{path_index}"}
+    for rule_index, path_index in sorted(removals, reverse=True)
 ]
-if len(matching_rules) != 1:
-    raise SystemExit("Telemetry ingress host is missing or duplicated")
-rule_index, rule = matching_rules[0]
-paths = rule.get("http", {}).get("paths", [])
-matching_paths = [
-    index
-    for index, path in enumerate(paths)
-    if path.get("path") == "/api/telemetry/?(.*)"
-    and path.get("backend", {}).get("service", {}).get("name")
-    == "gaming-telemetry-srv"
-]
-if len(matching_paths) != 1:
-    raise SystemExit("Telemetry ingress path is missing, duplicated, or misrouted")
-patch = [{
-    "op": "remove",
-    "path": f"/spec/rules/{rule_index}/http/paths/{matching_paths[0]}",
-}]
 Path(sys.argv[2]).write_text(
     json.dumps(patch, separators=(",", ":")), encoding="utf-8"
 )
@@ -2213,15 +2219,25 @@ for service in "${ROLLBACK_ORDER[@]}"; do
   completed_services+=("$service")
 done
 
-kubectl rollout status deployment/gaming-telemetry-depl \
-  -n "$OCI_K8S_NAMESPACE" --timeout=10m ||
+if ! kubectl rollout status deployment/gaming-telemetry-depl \
+    -n "$OCI_K8S_NAMESPACE" --timeout=10m; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-rollout "current Telemetry deployment is not ready after historical rollback"
   oci_die "current Telemetry deployment is not ready after historical rollback"
-telemetry_final_ref="$(
-  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}'
-)"
-[[ "$telemetry_final_ref" == "$telemetry_original_ref" ]] ||
+fi
+if ! telemetry_final_ref="$(
+    kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+      -o jsonpath='{.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}'
+  )"; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-read "current Telemetry deployment could not be read after historical rollback"
+  oci_die "current Telemetry deployment could not be read after historical rollback"
+fi
+if [[ "$telemetry_final_ref" != "$telemetry_original_ref" ]]; then
+  record_partial_failure post-rollback gaming-telemetry-depl \
+    telemetry-digest "historical rollback changed the current Telemetry image"
   oci_die "historical rollback changed the current Telemetry image"
+fi
 CURRENT_STEP_LABEL=post-rollback-telemetry
 for entry in "${url_entries[@]}"; do
   IFS='|' read -r label base_url <<<"$entry"
@@ -2235,17 +2251,11 @@ done
 
 canonical_host="${OCI_PUBLIC_URL#https://}"
 diagnostic_host="${OCI_DIAGNOSTIC_URL#https://}"
-CURRENT_STEP_LABEL=remove-telemetry-canonical-route
-if ! remove_telemetry_ingress_path "$canonical_host" canonical; then
+CURRENT_STEP_LABEL=remove-telemetry-routes
+if ! remove_telemetry_ingress_paths "$canonical_host" "$diagnostic_host"; then
   record_partial_failure post-rollback gaming-oci-ingress \
-    telemetry-canonical-route "failed to remove the canonical Telemetry ingress path"
-  oci_die "failed to remove the canonical Telemetry ingress path"
-fi
-CURRENT_STEP_LABEL=remove-telemetry-diagnostic-route
-if ! remove_telemetry_ingress_path "$diagnostic_host" diagnostic; then
-  record_partial_failure post-rollback gaming-oci-ingress \
-    telemetry-diagnostic-route "failed to remove the diagnostic Telemetry ingress path"
-  oci_die "failed to remove the diagnostic Telemetry ingress path"
+    telemetry-routes "failed to remove the Telemetry ingress paths"
+  oci_die "failed to remove the Telemetry ingress paths"
 fi
 CURRENT_STEP_LABEL=remove-telemetry-service
 if ! kubectl delete service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
