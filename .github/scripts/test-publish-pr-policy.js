@@ -4343,9 +4343,23 @@ async function main() {
   assert.equal(changedWorkflow.statuses[2].state, "failure");
   assert.equal(changedWorkflow.statuses[3].state, "failure");
 
+  const expectedWorkflowAuthorization = {
+    id: "telemetry-production-build-pr-560-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "6f5dfc20e9d44d27a3d3d4f9d5f5628686391111",
+    authorizedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    pullNumber: 560,
+    headRef: "feat/telemetry",
+    baseRef: "dev",
+    issuedAt: "2026-09-10T20:45:39.000Z",
+    expiresAt: "2026-09-11T19:45:39.000Z",
+    receiptSha: "614bcb3ac24830b8af082d078ac5efe378b3b6ef",
+  };
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
+    [expectedWorkflowAuthorization],
   );
   assert.equal(
     Object.isFrozen(publishPrPolicy.trustedWorkflowBlobAuthorizations),
@@ -4355,9 +4369,24 @@ async function main() {
     path.join(__dirname, "publish-pr-policy.js"),
     "utf8",
   );
-  assert.match(
-    publisherSource,
-    /const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object\.freeze\(\[\]\);/,
+  assert.equal(
+    publisherSource.includes(`const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "telemetry-production-build-pr-560-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "6f5dfc20e9d44d27a3d3d4f9d5f5628686391111",
+    authorizedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    pullNumber: 560,
+    headRef: "feat/telemetry",
+    baseRef: "dev",
+    issuedAt: "2026-09-10T20:45:39.000Z",
+    expiresAt: "2026-09-11T19:45:39.000Z",
+    receiptSha: "614bcb3ac24830b8af082d078ac5efe378b3b6ef",
+  },
+]);`),
+    true,
   );
   assert.deepEqual(
     publishPrPolicy.trustedCoverageAssetAuthorizations,
