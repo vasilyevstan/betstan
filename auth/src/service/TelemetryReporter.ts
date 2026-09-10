@@ -58,6 +58,7 @@ export class AuthTelemetryReporter {
       return;
     }
 
+    let pendingChannel: Channel | undefined;
     try {
       const connectionOperation = this.dependencies
         .connect(uri, {
@@ -91,6 +92,7 @@ export class AuthTelemetryReporter {
         channelOperation,
         this.dependencies.timeoutMs
       );
+      pendingChannel = channel;
       if (this.disabled) {
         await channel.close().catch(() => undefined);
         return;
@@ -106,6 +108,7 @@ export class AuthTelemetryReporter {
       this.channel = channel;
     } catch {
       this.disable();
+      await pendingChannel?.close().catch(() => undefined);
       await this.connection?.close().catch(() => undefined);
       this.connection = undefined;
     }

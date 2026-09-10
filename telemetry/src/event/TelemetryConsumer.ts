@@ -12,16 +12,24 @@ export interface SafeLogger {
 
 export class TelemetryConsumer {
   private channel?: Channel;
+  private closing = false;
+  private closePromise?: Promise<void>;
+  private fatalTriggered = false;
 
   constructor(
     private readonly connection: ChannelModel,
     private readonly recorder: MetricRecorder,
+    private readonly onFatal: () => void,
     private readonly logger: SafeLogger = console
   ) {}
 
   async start(): Promise<void> {
+    this.connection.on("error", this.handleLifecycleFailure);
+    this.connection.on("close", this.handleLifecycleFailure);
     const channel = await this.connection.createChannel();
     this.channel = channel;
+    channel.on("error", this.handleLifecycleFailure);
+    channel.on("close", this.handleLifecycleFailure);
 
     for (const exchange of EXCHANGES) {
       await channel.assertExchange(exchange, "fanout", { durable: true });
@@ -34,17 +42,27 @@ export class TelemetryConsumer {
     await channel.consume(
       "telemetry:events:v1",
       (message) => {
-        if (message) {
-          void this.handle(message);
+        if (!message) {
+          this.triggerFatal();
+          return;
         }
+        void this.handle(message).catch(() => {
+          this.triggerFatal();
+        });
       },
       { noAck: false }
     );
   }
 
   async close(): Promise<void> {
-    await this.channel?.close();
-    this.channel = undefined;
+    if (!this.closePromise) {
+      this.closing = true;
+      this.closePromise = (async () => {
+        await this.channel?.close();
+        this.channel = undefined;
+      })();
+    }
+    await this.closePromise;
   }
 
   async handle(message: ConsumeMessage): Promise<void> {
@@ -71,10 +89,27 @@ export class TelemetryConsumer {
 
     try {
       await this.recorder.record(record);
-      channel.ack(message);
     } catch {
       this.logger.error("telemetry_record_failed");
       channel.nack(message, false, false);
+      return;
+    }
+    channel.ack(message);
+  }
+
+  private readonly handleLifecycleFailure = () => {
+    this.triggerFatal();
+  };
+
+  private triggerFatal(): void {
+    if (this.closing || this.fatalTriggered) {
+      return;
+    }
+    this.fatalTriggered = true;
+    try {
+      this.onFatal();
+    } catch {
+      this.logger.error("telemetry_fatal_callback_failed");
     }
   }
 }

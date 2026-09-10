@@ -100,3 +100,87 @@ it("contains synchronous publish failures and permanently disables on close", as
   harness.reporter.report("USER_LOGGED_IN");
   expect(harness.channel.publish).toHaveBeenCalledTimes(1);
 });
+
+describe("bounded initialization timeouts", () => {
+  const flushMicrotasks = async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await Promise.resolve();
+    }
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("settles a never-resolving connect, never retries, and closes a late connection", async () => {
+    const harness = createHarness();
+    let resolveConnection!: (connection: ChannelModel) => void;
+    harness.connect.mockReturnValueOnce(
+      new Promise<ChannelModel>((resolve) => {
+        resolveConnection = resolve;
+      })
+    );
+
+    const initializing = harness.reporter.initialize("amqp://rabbit");
+    await jest.advanceTimersByTimeAsync(20);
+    await expect(initializing).resolves.toBeUndefined();
+    await harness.reporter.initialize("amqp://rabbit");
+    harness.reporter.report("USER_CREATED");
+
+    expect(harness.connect).toHaveBeenCalledTimes(1);
+    expect(harness.channel.publish).not.toHaveBeenCalled();
+
+    resolveConnection(harness.connection);
+    await flushMicrotasks();
+    expect(harness.connection.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles a never-resolving channel creation and closes a late channel", async () => {
+    const harness = createHarness();
+    let resolveChannel!: (channel: Channel) => void;
+    harness.connection.createChannel.mockReturnValueOnce(
+      new Promise<Channel>((resolve) => {
+        resolveChannel = resolve;
+      })
+    );
+
+    const initializing = harness.reporter.initialize("amqp://rabbit");
+    await flushMicrotasks();
+    await jest.advanceTimersByTimeAsync(20);
+    await expect(initializing).resolves.toBeUndefined();
+    await harness.reporter.initialize("amqp://rabbit");
+    harness.reporter.report("USER_CREATED");
+    expect(harness.channel.publish).not.toHaveBeenCalled();
+    expect(harness.connect).toHaveBeenCalledTimes(1);
+    expect(harness.connection.createChannel).toHaveBeenCalledTimes(1);
+    expect(harness.connection.close).toHaveBeenCalledTimes(1);
+
+    resolveChannel(harness.channel);
+    await flushMicrotasks();
+    expect(harness.channel.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles a never-resolving exchange assertion and closes created resources", async () => {
+    const harness = createHarness();
+    harness.channel.assertExchange.mockReturnValueOnce(
+      new Promise(() => undefined)
+    );
+
+    const initializing = harness.reporter.initialize("amqp://rabbit");
+    await flushMicrotasks();
+    await jest.advanceTimersByTimeAsync(20);
+    await expect(initializing).resolves.toBeUndefined();
+    await harness.reporter.initialize("amqp://rabbit");
+    harness.reporter.report("USER_CREATED");
+
+    expect(harness.connect).toHaveBeenCalledTimes(1);
+    expect(harness.channel.assertExchange).toHaveBeenCalledTimes(1);
+    expect(harness.channel.publish).not.toHaveBeenCalled();
+    expect(harness.channel.close).toHaveBeenCalledTimes(1);
+    expect(harness.connection.close).toHaveBeenCalledTimes(1);
+  });
+});

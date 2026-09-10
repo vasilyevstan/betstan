@@ -77,6 +77,51 @@ describe("POST /api/telemetry/page-view", () => {
 
     expect(response.body).toEqual({ error: "Invalid request" });
   });
+
+  it.each([
+    {
+      name: "unsupported charset",
+      headers: { "Content-Type": "application/json; charset=iso-8859-1" },
+      body: '{"page":"main"}',
+    },
+    {
+      name: "unsupported encoding",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Encoding": "compress",
+      },
+      body: '{"page":"main"}',
+    },
+    {
+      name: "oversized JSON",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: "main", padding: "x".repeat(101 * 1024) }),
+    },
+    {
+      name: "primitive JSON",
+      headers: { "Content-Type": "application/json" },
+      body: "true",
+    },
+  ])("returns sanitized 400 for $name without recording", async ({ headers, body }) => {
+    const deps = dependencies();
+    const unexpected = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const operation = request(createApp(deps)).post(
+      "/api/telemetry/page-view"
+    );
+    for (const [name, value] of Object.entries(headers)) {
+      operation.set(name, value);
+    }
+
+    const response = await operation.send(body).expect(400);
+
+    expect(response.body).toEqual({ error: "Invalid request" });
+    expect(deps.recorder.record).not.toHaveBeenCalled();
+    expect(unexpected).not.toHaveBeenCalledWith(
+      "telemetry_http_unexpected_error"
+    );
+  });
 });
 
 it("returns sanitized 500 and fixed diagnostics for unexpected middleware errors", () => {

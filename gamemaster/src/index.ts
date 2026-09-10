@@ -27,6 +27,42 @@ const closeServer = (server: Server | undefined): Promise<void> =>
     server.close((error) => (error ? reject(error) : resolve()));
   });
 
+export interface GamemasterProcess {
+  exit(code?: number): unknown;
+  on(event: string, listener: (...args: any[]) => void): unknown;
+}
+
+export const installGamemasterProcessHandlers = (
+  closeResources: () => Promise<void>,
+  runtimeProcess: GamemasterProcess = process
+) => {
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (exitCode: number, code: string): Promise<void> => {
+    if (!shutdownPromise) {
+      console.log(code);
+      shutdownPromise = closeResources().then(
+        () => {
+          runtimeProcess.exit(exitCode);
+        },
+        () => {
+          console.error("gamemaster_shutdown_failed");
+          runtimeProcess.exit(1);
+        }
+      );
+    }
+    return shutdownPromise;
+  };
+  runtimeProcess.on("uncaughtException", () => {
+    void shutdown(1, "gamemaster_uncaught_exception");
+  });
+  const handleSignal = () => {
+    void shutdown(0, "gamemaster_signal");
+  };
+  runtimeProcess.on("SIGINT", handleSignal);
+  runtimeProcess.on("SIGTERM", handleSignal);
+  return { shutdown };
+};
+
 export const startUp = async (listenForProbes = false) => {
   console.log("Starting up...");
   if (!process.env.RABBITMQ_URI) {
@@ -58,34 +94,14 @@ export const startUp = async (listenForProbes = false) => {
     probeServer = await startWorkerProbeServer();
   }
 
-  let shuttingDown = false;
-  const shutdown = async (exitCode: number, code: string) => {
-    if (shuttingDown) {
-      return;
-    }
-    shuttingDown = true;
-    console.log(code);
+  const closeResources = async () => {
     gameMaster.stop();
-    try {
-      await closeServer(probeServer);
-      await mongoose.connection.close();
-      await mongoose.disconnect();
-      process.exit(exitCode);
-    } catch {
-      console.error("gamemaster_shutdown_failed");
-      process.exit(1);
-    }
+    await closeServer(probeServer);
+    await mongoose.connection.close();
+    await mongoose.disconnect();
   };
 
-  process.once("uncaughtException", () => {
-    void shutdown(1, "gamemaster_uncaught_exception");
-  });
-  process.once("SIGINT", () => {
-    void shutdown(0, "gamemaster_sigint");
-  });
-  process.once("SIGTERM", () => {
-    void shutdown(0, "gamemaster_sigterm");
-  });
+  installGamemasterProcessHandlers(closeResources);
 
   return { gameMaster, probeServer };
 };

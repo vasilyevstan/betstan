@@ -70,13 +70,46 @@ const classifyElapsed = (elapsed: number): HealthStatus => {
 };
 
 export class HealthService {
+  private cached?: {
+    expiresAt: number;
+    health: ServiceHealth[];
+  };
+  private inFlight?: Promise<ServiceHealth[]>;
+
   constructor(
     private readonly targets: ProbeTarget[] = defaultTargets(),
     private readonly probe: TcpProbe = createTcpProbe(),
-    private readonly clock: HealthClock = { nowMs: () => Date.now() }
+    private readonly clock: HealthClock = { nowMs: () => Date.now() },
+    private readonly cacheDurationMs = 5000
   ) {}
 
   async check(): Promise<ServiceHealth[]> {
+    const now = this.clock.nowMs();
+    if (this.cached && now < this.cached.expiresAt) {
+      return this.cached.health;
+    }
+    if (this.inFlight) {
+      return this.inFlight;
+    }
+
+    const refresh = this.probeAll().then((health) => {
+      this.cached = {
+        expiresAt: this.clock.nowMs() + this.cacheDurationMs,
+        health,
+      };
+      return health;
+    });
+    this.inFlight = refresh;
+    const clearInFlight = () => {
+      if (this.inFlight === refresh) {
+        this.inFlight = undefined;
+      }
+    };
+    void refresh.then(clearInFlight, clearInFlight);
+    return refresh;
+  }
+
+  private async probeAll(): Promise<ServiceHealth[]> {
     const remote = await Promise.all(
       this.targets.map(async (target): Promise<ServiceHealth> => {
         const startedAt = this.clock.nowMs();

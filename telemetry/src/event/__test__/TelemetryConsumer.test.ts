@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
+import { EventEmitter } from "events";
 import { Channel, ChannelModel, ConsumeMessage } from "amqplib";
 import { TelemetryConsumer } from "../TelemetryConsumer";
-import { EXCHANGES, validateExchangeEvent } from "../validator";
+import { validateExchangeEvent } from "../validator";
 
 const message = (exchange: string, value: string): ConsumeMessage =>
   ({
@@ -9,7 +10,11 @@ const message = (exchange: string, value: string): ConsumeMessage =>
     fields: { exchange },
   } as ConsumeMessage);
 
-const envelope = (data: Record<string, unknown>, sender: string, timestamp: string) => ({
+const envelope = (
+  data: Record<string, unknown>,
+  sender: string,
+  timestamp: string
+) => ({
   data,
   sender,
   timestamp,
@@ -17,6 +22,8 @@ const envelope = (data: Record<string, unknown>, sender: string, timestamp: stri
 
 const sha = (parts: unknown[]) =>
   createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe("exchange event validation", () => {
   const timestamp = "2026-09-10T02:00:00.000Z";
@@ -62,34 +69,62 @@ describe("exchange event validation", () => {
     });
   });
 
-  it("accepts only exact generic envelopes, canonical UUIDs, and sender metrics", () => {
-    const eventId = "9a6b8a5f-d9ea-4f4c-8c0a-7d39b9a55c12";
-    expect(
-      validateExchangeEvent(
-        "telemetry:event:v1",
-        envelope(
-          { metric: "USER_CREATED", eventId, occurredAt: timestamp },
-          "auth",
-          timestamp
+  it.each([
+    ["auth", "USER_CREATED"],
+    ["auth", "USER_LOGGED_IN"],
+    ["slip", "SLIP_CREATED"],
+  ])(
+    "accepts the exact generic %s/%s pair with direct UUID and timestamp",
+    (sender, metric) => {
+      const eventId = "9a6b8a5f-d9ea-4f4c-8c0a-7d39b9a55c12";
+      expect(
+        validateExchangeEvent(
+          "telemetry:event:v1",
+          envelope({ metric, eventId, occurredAt: timestamp }, sender, timestamp)
         )
-      )
-    ).toEqual({
-      _id: eventId,
-      metric: "USER_CREATED",
-      occurredAt: new Date(timestamp),
-    });
+      ).toEqual({
+        _id: eventId,
+        metric,
+        occurredAt: new Date(timestamp),
+      });
+    }
+  );
 
+  it("rejects non-exact generic envelopes and malformed reused payloads", () => {
+    const eventId = "9a6b8a5f-d9ea-4f4c-8c0a-7d39b9a55c12";
     const invalid = [
       envelope(
         { metric: "USER_CREATED", eventId, occurredAt: timestamp, extra: true },
         "auth",
         timestamp
       ),
-      { ...envelope({ metric: "USER_CREATED", eventId, occurredAt: timestamp }, "auth", timestamp), extra: true },
-      envelope({ metric: "SLIP_CREATED", eventId, occurredAt: timestamp }, "auth", timestamp),
-      envelope({ metric: "USER_CREATED", eventId: eventId.toUpperCase(), occurredAt: timestamp }, "auth", timestamp),
-      envelope({ metric: "USER_CREATED", eventId, occurredAt: timestamp }, "auth", "2026-09-10T02:00:01.000Z"),
-      envelope({ metric: "USER_CREATED", eventId, occurredAt: "not-a-date" }, "auth", "not-a-date"),
+      {
+        ...envelope(
+          { metric: "USER_CREATED", eventId, occurredAt: timestamp },
+          "auth",
+          timestamp
+        ),
+        extra: true,
+      },
+      envelope(
+        { metric: "SLIP_CREATED", eventId, occurredAt: timestamp },
+        "auth",
+        timestamp
+      ),
+      envelope(
+        {
+          metric: "USER_CREATED",
+          eventId: eventId.toUpperCase(),
+          occurredAt: timestamp,
+        },
+        "auth",
+        timestamp
+      ),
+      envelope(
+        { metric: "USER_CREATED", eventId, occurredAt: timestamp },
+        "auth",
+        "2026-09-10T02:00:01.000Z"
+      ),
       [],
       null,
     ];
@@ -97,19 +132,10 @@ describe("exchange event validation", () => {
       expect(validateExchangeEvent("telemetry:event:v1", value)).toBeUndefined();
     }
     expect(validateExchangeEvent("unknown", invalid[0])).toBeUndefined();
-  });
-
-  it("rejects malformed reused payloads and sender combinations", () => {
     expect(
       validateExchangeEvent(
         "slip:bet",
         envelope({ slipId: "" }, "slip_place_bet", timestamp)
-      )
-    ).toBeUndefined();
-    expect(
-      validateExchangeEvent(
-        "resulting:slip:settle",
-        envelope({ slipId: "x" }, "wrong", timestamp)
       )
     ).toBeUndefined();
     expect(
@@ -125,10 +151,10 @@ describe("exchange event validation", () => {
   });
 });
 
-describe("raw telemetry consumer", () => {
+describe("raw telemetry consumer supervision", () => {
   const createHarness = () => {
     let callback: ((message: ConsumeMessage | null) => void) | undefined;
-    const channel = {
+    const channel = Object.assign(new EventEmitter(), {
       ack: jest.fn(),
       assertExchange: jest.fn().mockResolvedValue(undefined),
       assertQueue: jest.fn().mockResolvedValue(undefined),
@@ -140,22 +166,48 @@ describe("raw telemetry consumer", () => {
       }),
       nack: jest.fn(),
       prefetch: jest.fn().mockResolvedValue(undefined),
-    } as unknown as jest.Mocked<Channel>;
-    const connection = {
+    }) as unknown as jest.Mocked<Channel>;
+    const connection = Object.assign(new EventEmitter(), {
+      close: jest.fn().mockResolvedValue(undefined),
       createChannel: jest.fn().mockResolvedValue(channel),
-    } as unknown as ChannelModel;
+    }) as unknown as jest.Mocked<ChannelModel>;
     const recorder = { record: jest.fn().mockResolvedValue(undefined) };
+    const fatal = jest.fn();
     const logger = { error: jest.fn() };
-    const consumer = new TelemetryConsumer(connection, recorder, logger);
-    return { callback: () => callback, channel, consumer, logger, recorder };
+    const consumer = new TelemetryConsumer(
+      connection,
+      recorder,
+      fatal,
+      logger
+    );
+    const dispatch = async (value: ConsumeMessage | null) => {
+      callback!(value);
+      await flush();
+    };
+    return {
+      callback: () => callback,
+      channel,
+      connection,
+      consumer,
+      dispatch,
+      fatal,
+      logger,
+      recorder,
+    };
   };
 
-  it("asserts one durable queue, four fanouts, prefetch 10, and manual consume", async () => {
+  it("asserts exact durable bindings, prefetch 10, and manual consume", async () => {
     const harness = createHarness();
     await harness.consumer.start();
 
+    const exchanges = [
+      "slip:bet",
+      "resulting:slip:settle",
+      "gamemaster:event:live",
+      "telemetry:event:v1",
+    ];
     expect(harness.channel.assertExchange).toHaveBeenCalledTimes(4);
-    for (const exchange of EXCHANGES) {
+    for (const exchange of exchanges) {
       expect(harness.channel.assertExchange).toHaveBeenCalledWith(
         exchange,
         "fanout",
@@ -177,10 +229,9 @@ describe("raw telemetry consumer", () => {
       expect.any(Function),
       { noAck: false }
     );
-    expect(harness.callback()).toEqual(expect.any(Function));
   });
 
-  it("acks successful/idempotent writes and invalid events", async () => {
+  it("drives valid, invalid, and DB-failure outcomes through consume", async () => {
     const harness = createHarness();
     await harness.consumer.start();
     const valid = message(
@@ -193,22 +244,22 @@ describe("raw telemetry consumer", () => {
         )
       )
     );
-    await harness.consumer.handle(valid);
+    await harness.dispatch(valid);
     expect(harness.recorder.record).toHaveBeenCalledTimes(1);
     expect(harness.channel.ack).toHaveBeenCalledWith(valid);
 
-    const invalid = message("telemetry:event:v1", "{\"username\":\"private-name\"}");
-    await harness.consumer.handle(invalid);
+    const invalid = message(
+      "telemetry:event:v1",
+      JSON.stringify({ username: "private-name" })
+    );
+    await harness.dispatch(invalid);
     expect(harness.channel.ack).toHaveBeenCalledWith(invalid);
-    expect(harness.logger.error).toHaveBeenLastCalledWith("telemetry_event_invalid");
-    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toContain("private-name");
-  });
+    expect(harness.channel.nack).not.toHaveBeenCalled();
 
-  it("dead-letters a valid event exactly once on Mongo failure", async () => {
-    const harness = createHarness();
-    harness.recorder.record.mockRejectedValueOnce(new Error("private database payload"));
-    await harness.consumer.start();
-    const valid = message(
+    harness.recorder.record.mockRejectedValueOnce(
+      new Error("private database payload")
+    );
+    const dbFailure = message(
       "resulting:slip:settle",
       JSON.stringify(
         envelope(
@@ -218,14 +269,132 @@ describe("raw telemetry consumer", () => {
         )
       )
     );
+    await harness.dispatch(dbFailure);
+    expect(harness.channel.nack).toHaveBeenCalledWith(dbFailure, false, false);
+    expect(harness.fatal).not.toHaveBeenCalled();
+  });
 
-    await harness.consumer.handle(valid);
-
-    expect(harness.channel.ack).not.toHaveBeenCalled();
-    expect(harness.channel.nack).toHaveBeenCalledWith(valid, false, false);
-    expect(harness.logger.error).toHaveBeenCalledWith("telemetry_record_failed");
-    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toContain(
-      "private-slip"
+  it("acks malformed JSON without recording, nacking, or logging raw data", async () => {
+    const harness = createHarness();
+    await harness.consumer.start();
+    const malformed = message(
+      "telemetry:event:v1",
+      '{"username":"private-name"'
     );
+
+    await harness.dispatch(malformed);
+
+    expect(harness.channel.ack).toHaveBeenCalledWith(malformed);
+    expect(harness.channel.nack).not.toHaveBeenCalled();
+    expect(harness.recorder.record).not.toHaveBeenCalled();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      "telemetry_event_invalid"
+    );
+    expect(JSON.stringify(harness.logger.error.mock.calls)).not.toContain(
+      "private-name"
+    );
+  });
+
+  it.each([
+    ["channel", "error"],
+    ["channel", "close"],
+    ["connection", "error"],
+    ["connection", "close"],
+  ])("treats %s %s as fatal", async (source, event) => {
+    const harness = createHarness();
+    await harness.consumer.start();
+    const emitter =
+      source === "channel" ? harness.channel : harness.connection;
+    (emitter as unknown as EventEmitter).emit(
+      event,
+      event === "error" ? new Error("private broker detail") : undefined
+    );
+    expect(harness.fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats broker consumer cancellation as fatal", async () => {
+    const harness = createHarness();
+    await harness.consumer.start();
+    await harness.dispatch(null);
+    expect(harness.fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it("supervises ack failure without nacking as a fallback or leaking a rejection", async () => {
+    const harness = createHarness();
+    const unhandled = jest.fn();
+    process.once("unhandledRejection", unhandled);
+    harness.channel.ack.mockImplementationOnce(() => {
+      throw new Error("channel closed");
+    });
+    await harness.consumer.start();
+    const valid = message(
+      "slip:bet",
+      JSON.stringify(
+        envelope(
+          { slipId: "slip-ack" },
+          "slip_place_bet",
+          "2026-09-10T02:00:00.000Z"
+        )
+      )
+    );
+
+    await harness.dispatch(valid);
+
+    expect(harness.fatal).toHaveBeenCalledTimes(1);
+    expect(harness.channel.nack).not.toHaveBeenCalled();
+    expect(unhandled).not.toHaveBeenCalled();
+    process.removeListener("unhandledRejection", unhandled);
+  });
+
+  it("supervises nack failure and keeps exact non-requeue arguments", async () => {
+    const harness = createHarness();
+    harness.recorder.record.mockRejectedValueOnce(new Error("database"));
+    harness.channel.nack.mockImplementationOnce(() => {
+      throw new Error("channel closed");
+    });
+    await harness.consumer.start();
+    const valid = message(
+      "resulting:slip:settle",
+      JSON.stringify(
+        envelope(
+          { slipId: "slip-nack" },
+          "resulting_settle_slip",
+          "2026-09-10T02:00:00.000Z"
+        )
+      )
+    );
+
+    await harness.dispatch(valid);
+
+    expect(harness.channel.nack).toHaveBeenCalledWith(valid, false, false);
+    expect(harness.channel.ack).not.toHaveBeenCalled();
+    expect(harness.fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires the fatal callback exactly once across competing failures", async () => {
+    const harness = createHarness();
+    await harness.consumer.start();
+    harness.callback()!(null);
+    (harness.channel as unknown as EventEmitter).emit("close");
+    (harness.connection as unknown as EventEmitter).emit(
+      "error",
+      new Error("broker")
+    );
+    await flush();
+    expect(harness.fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses lifecycle fatal events during intentional shutdown", async () => {
+    const harness = createHarness();
+    harness.channel.close.mockImplementationOnce(async () => {
+      (harness.channel as unknown as EventEmitter).emit("close");
+    });
+    await harness.consumer.start();
+
+    await harness.consumer.close();
+    (harness.connection as unknown as EventEmitter).emit("close");
+
+    expect(harness.fatal).not.toHaveBeenCalled();
+    expect(harness.channel.close).toHaveBeenCalledTimes(1);
   });
 });

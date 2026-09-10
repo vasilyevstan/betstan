@@ -29,11 +29,18 @@ const defaultDependencies = (): AppDependencies => ({
 const invalidRequest = (res: Response) =>
   res.status(400).send({ error: "Invalid request" });
 
-const isMalformedJson = (error: unknown): boolean =>
-  typeof error === "object"
-  && error !== null
-  && Reflect.get(error, "status") === 400
-  && Reflect.get(error, "type") === "entity.parse.failed";
+const isBoundedClientBodyError = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const status = Reflect.get(error, "status");
+  const type = Reflect.get(error, "type");
+  return Number.isInteger(status)
+    && status >= 400
+    && status < 500
+    && typeof type === "string"
+    && /^(charset|encoding|entity|request)\./.test(type);
+};
 
 export const telemetryErrorHandler = (
   error: unknown,
@@ -41,7 +48,7 @@ export const telemetryErrorHandler = (
   res: Response,
   _next: NextFunction
 ) => {
-  if (isMalformedJson(error)) {
+  if (isBoundedClientBodyError(error)) {
     return invalidRequest(res);
   }
 
