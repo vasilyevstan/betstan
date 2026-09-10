@@ -1897,7 +1897,7 @@ body {
 }
 
 .telemetry-refresh:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 55%, white);
+  outline: 3px solid var(--text-main);
   outline-offset: 2px;
   box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent) 26%, transparent);
 }
@@ -1962,6 +1962,7 @@ body {
   align-items: center;
   gap: 0.4rem;
   min-width: 0;
+  color: var(--text-main);
   font-size: 0.85rem;
   font-weight: 700;
 }
@@ -1974,15 +1975,15 @@ body {
   background: currentColor;
 }
 
-.telemetry-health__status--healthy {
+.telemetry-health__status--healthy .telemetry-health__indicator {
   color: var(--positive);
 }
 
-.telemetry-health__status--degraded {
+.telemetry-health__status--degraded .telemetry-health__indicator {
   color: var(--warning);
 }
 
-.telemetry-health__status--unavailable {
+.telemetry-health__status--unavailable .telemetry-health__indicator {
   color: var(--danger);
 }
 
@@ -2017,7 +2018,7 @@ body {
   height: 8rem;
   max-width: 100%;
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--accent);
+  color: var(--text-main);
 }
 
 .telemetry-metric__bar {
