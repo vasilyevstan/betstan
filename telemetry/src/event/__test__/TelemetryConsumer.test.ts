@@ -3,6 +3,12 @@ import { EventEmitter } from "events";
 import { Channel, ChannelModel, ConsumeMessage } from "amqplib";
 import { TelemetryConsumer } from "../TelemetryConsumer";
 import { validateExchangeEvent } from "../validator";
+import { TelemetryRecordModel } from "../../model/TelemetryRecord";
+import { MongoMetricRecorder } from "../../service/Recorder";
+import {
+  buildMetricSummary,
+  MongoSummaryStore,
+} from "../../service/Summary";
 
 const message = (exchange: string, value: string): ConsumeMessage =>
   ({
@@ -68,6 +74,153 @@ describe("exchange event validation", () => {
       occurredAt: new Date("2026-09-09T23:59:58.000Z"),
     });
   });
+
+  it.each([
+    {
+      exchange: "slip:bet",
+      sender: "slip_place_bet",
+      immutableField: "submittedAt",
+      metric: "BET_PLACED",
+    },
+    {
+      exchange: "resulting:slip:settle",
+      sender: "resulting_settle_slip",
+      immutableField: "occurredAt",
+      metric: "RESULTING_SETTLED",
+    },
+  ])(
+    "uses immutable $immutableField for $metric across transport retries",
+    ({ exchange, sender, immutableField, metric }) => {
+      const immutableTime = "2026-09-10T23:59:58.000Z";
+      const data = {
+        slipId: "slip-midnight",
+        [immutableField]: immutableTime,
+      };
+      const beforeMidnight = validateExchangeEvent(
+        exchange,
+        envelope(data, sender, "2026-09-10T23:59:59.999Z")
+      );
+      const afterMidnight = validateExchangeEvent(
+        exchange,
+        envelope(data, sender, "2026-09-11T00:00:00.001Z")
+      );
+
+      expect(beforeMidnight).toEqual({
+        _id: sha([metric, "slip-midnight"]),
+        metric,
+        occurredAt: new Date(immutableTime),
+      });
+      expect(afterMidnight).toEqual(beforeMidnight);
+    }
+  );
+
+  it.each([
+    {
+      exchange: "slip:bet",
+      sender: "slip_place_bet",
+      immutableField: "submittedAt",
+    },
+    {
+      exchange: "resulting:slip:settle",
+      sender: "resulting_settle_slip",
+      immutableField: "occurredAt",
+    },
+  ])(
+    "uses the legacy envelope timestamp for $exchange only when "
+      + "$immutableField is absent",
+    ({ exchange, sender, immutableField }) => {
+      const legacy = validateExchangeEvent(
+        exchange,
+        envelope({ slipId: "legacy-slip" }, sender, timestamp)
+      );
+      expect(legacy?.occurredAt).toEqual(new Date(timestamp));
+
+      for (const malformed of [
+        "",
+        "2026-09-10",
+        "2026-09-10T02:00:00Z",
+        null,
+        7,
+      ]) {
+        expect(
+          validateExchangeEvent(
+            exchange,
+            envelope(
+              { slipId: "malformed-slip", [immutableField]: malformed },
+              sender,
+              timestamp
+            )
+          )
+        ).toBeUndefined();
+      }
+    }
+  );
+
+  it.each([
+    {
+      exchange: "slip:bet",
+      sender: "slip_place_bet",
+      immutableField: "submittedAt",
+      metric: "BET_PLACED",
+    },
+    {
+      exchange: "resulting:slip:settle",
+      sender: "resulting_settle_slip",
+      immutableField: "occurredAt",
+      metric: "RESULTING_SETTLED",
+    },
+  ])(
+    "persists one $metric at immutable time in either retry order",
+    async ({ exchange, sender, immutableField, metric }) => {
+      const immutableTime = "2026-09-10T23:59:58.000Z";
+      const transportTimes = [
+        "2026-09-10T23:59:59.999Z",
+        "2026-09-11T00:00:00.001Z",
+      ];
+      const recorder = new MongoMetricRecorder();
+
+      for (const order of [transportTimes, [...transportTimes].reverse()]) {
+        await TelemetryRecordModel.deleteMany({});
+        for (const transportTime of order) {
+          const record = validateExchangeEvent(
+            exchange,
+            envelope(
+              {
+                slipId: `persisted-${metric}`,
+                [immutableField]: immutableTime,
+              },
+              sender,
+              transportTime
+            )
+          );
+          expect(record).toBeDefined();
+          await recorder.record(record!);
+        }
+
+        expect(
+          await TelemetryRecordModel.find({
+            metric,
+          }).lean()
+        ).toEqual([
+          {
+            _id: sha([metric, `persisted-${metric}`]),
+            metric,
+            occurredAt: new Date(immutableTime),
+          },
+        ]);
+
+        const summary = await buildMetricSummary(
+          new Date("2026-09-11T12:00:00.000Z"),
+          new MongoSummaryStore()
+        );
+        const values = summary.metrics.find(
+          (metricValues) => metricValues.metric === metric
+        )?.values;
+        expect(values?.[summary.dates.indexOf("2026-09-10")]).toBe(1);
+        expect(values?.[summary.dates.indexOf("2026-09-11")]).toBe(0);
+      }
+    }
+  );
 
   it.each([
     ["auth", "USER_CREATED"],
@@ -292,6 +445,30 @@ describe("raw telemetry consumer supervision", () => {
     );
     expect(JSON.stringify(harness.logger.error.mock.calls)).not.toContain(
       "private-name"
+    );
+  });
+
+  it("acks a present malformed immutable timestamp without recording", async () => {
+    const harness = createHarness();
+    await harness.consumer.start();
+    const malformed = message(
+      "slip:bet",
+      JSON.stringify(
+        envelope(
+          { slipId: "slip-invalid-time", submittedAt: "not-a-time" },
+          "slip_place_bet",
+          "2026-09-10T02:00:00.000Z"
+        )
+      )
+    );
+
+    await harness.dispatch(malformed);
+
+    expect(harness.recorder.record).not.toHaveBeenCalled();
+    expect(harness.channel.ack).toHaveBeenCalledWith(malformed);
+    expect(harness.channel.nack).not.toHaveBeenCalled();
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      "telemetry_event_invalid"
     );
   });
 

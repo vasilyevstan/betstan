@@ -14,7 +14,9 @@ import {
   LiveSettlementReason,
   TeamSide,
 } from "../compat/LiveContract";
-import SettleSlipPublisher from "../event/publisher/SettleSlipPublisher";
+import SettleSlipPublisher, {
+  ResultingSettleSlipEvent,
+} from "../event/publisher/SettleSlipPublisher";
 import SettleSlipRowPublisher from "../event/publisher/SettleSlipRowPublisher";
 import { Bet, BetArchive } from "../model/Bet";
 import FinalScoreLedger from "../model/FinalScoreLedger";
@@ -753,12 +755,20 @@ async function confirmTerminalSettlement(
     return false;
   }
 
+  const data: ResultingSettleSlipEvent["data"] = {
+    slipId: claimedBet.slipId,
+    result: claimedBet.status,
+  };
+  if (
+    typeof claimedBet.resultingTimestamp === "string"
+    && claimedBet.resultingTimestamp
+  ) {
+    data.occurredAt = claimedBet.resultingTimestamp;
+  }
+
   try {
     await publishers.settleSlipPublisher.publishWithConfirm({
-      data: {
-        slipId: bet.slipId,
-        result: bet.status,
-      },
+      data,
     });
   } catch (error) {
     // The publish definitely failed, so it is safe to release the claim

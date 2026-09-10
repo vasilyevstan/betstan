@@ -90,6 +90,15 @@ const validateEnvelopeTimestamp = (
   return parseIsoDate(root.timestamp);
 };
 
+const validateOccurrenceTime = (
+  data: JsonObject,
+  field: string,
+  legacyEnvelopeTimestamp: Date
+): Date | undefined =>
+  Object.prototype.hasOwnProperty.call(data, field)
+    ? parseIsoDate(data[field])
+    : legacyEnvelopeTimestamp;
+
 export const validateExchangeEvent = (
   exchange: string,
   value: unknown
@@ -104,8 +113,23 @@ export const validateExchangeEvent = (
   }
 
   if (exchange === "slip:bet") {
-    const occurredAt = validateEnvelopeTimestamp(value, "slip_place_bet");
-    if (!occurredAt || typeof data.slipId !== "string" || !data.slipId) {
+    const envelopeTimestamp = validateEnvelopeTimestamp(
+      value,
+      "slip_place_bet"
+    );
+    if (
+      !envelopeTimestamp
+      || typeof data.slipId !== "string"
+      || !data.slipId
+    ) {
+      return undefined;
+    }
+    const occurredAt = validateOccurrenceTime(
+      data,
+      "submittedAt",
+      envelopeTimestamp
+    );
+    if (!occurredAt) {
       return undefined;
     }
     return {
@@ -116,8 +140,23 @@ export const validateExchangeEvent = (
   }
 
   if (exchange === "resulting:slip:settle") {
-    const occurredAt = validateEnvelopeTimestamp(value, "resulting_settle_slip");
-    if (!occurredAt || typeof data.slipId !== "string" || !data.slipId) {
+    const envelopeTimestamp = validateEnvelopeTimestamp(
+      value,
+      "resulting_settle_slip"
+    );
+    if (
+      !envelopeTimestamp
+      || typeof data.slipId !== "string"
+      || !data.slipId
+    ) {
+      return undefined;
+    }
+    const occurredAt = validateOccurrenceTime(
+      data,
+      "occurredAt",
+      envelopeTimestamp
+    );
+    if (!occurredAt) {
       return undefined;
     }
     return {

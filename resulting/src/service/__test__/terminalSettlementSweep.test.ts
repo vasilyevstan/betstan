@@ -112,6 +112,17 @@ it(
     expect(stuckBet!.terminalPublicationState).toEqual("PENDING");
     expect(stuckBet!.rows).toHaveLength(0);
     expect(await BetArchive.findOne({ slipId: bet.slipId })).toBeNull();
+    expect(stuckBet!.resultingTimestamp).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+    );
+    const occurredAt = stuckBet!.resultingTimestamp;
+    expect(publishWithConfirm).toHaveBeenNthCalledWith(1, {
+      data: {
+        slipId: bet.slipId,
+        result: ResultingStatus.BET_VOID,
+        occurredAt,
+      },
+    });
 
     // Nothing will ever touch this slipId again through the normal live
     // update path (its rows were already removed), so only the independent
@@ -121,6 +132,13 @@ it(
 
     expect(processedOnRecovery).toEqual(1);
     expect(publishWithConfirm).toHaveBeenCalledTimes(2);
+    expect(publishWithConfirm).toHaveBeenNthCalledWith(2, {
+      data: {
+        slipId: bet.slipId,
+        result: ResultingStatus.BET_VOID,
+        occurredAt,
+      },
+    });
 
     const archivedBet = await BetArchive.findOne({ slipId: bet.slipId });
     expect(archivedBet).not.toBeNull();
@@ -205,6 +223,40 @@ it("archives a published terminal bet left active by a crash", async () => {
   ).toEqual("PUBLISHED");
 });
 
+it("publishes the exact persisted immutable terminal occurrence time", async () => {
+  const occurredAt = "2026-09-10T23:59:58.000Z";
+  const bet = await createBet({
+    betKind: BetKind.PRE_MATCH,
+    rows: [],
+    status: ResultingStatus.BET_WIN,
+  });
+  await Bet.updateOne(
+    { _id: bet._id },
+    {
+      $set: {
+        resultingTimestamp: occurredAt,
+        terminalPublicationState: "PENDING",
+      },
+    }
+  );
+  const publishWithConfirm =
+    SettleSlipPublisher.prototype.publishWithConfirm as jest.Mock;
+
+  const sweepWorker = await createSweepWorker();
+  await sweepWorker.runOnce();
+
+  expect(publishWithConfirm).toHaveBeenCalledWith({
+    data: {
+      slipId: bet.slipId,
+      result: ResultingStatus.BET_WIN,
+      occurredAt,
+    },
+  });
+  expect(
+    (await BetArchive.findOne({ slipId: bet.slipId }))?.resultingTimestamp
+  ).toBe(occurredAt);
+});
+
 it("claims and publishes a legacy terminal bet with no publication state", async () => {
   const bet = await createBet({
     betKind: BetKind.PRE_MATCH,
@@ -234,6 +286,12 @@ it("claims and publishes a legacy terminal bet with no publication state", async
 
   expect(processed).toEqual(1);
   expect(publishWithConfirm).toHaveBeenCalledTimes(1);
+  expect(publishWithConfirm).toHaveBeenCalledWith({
+    data: {
+      slipId: bet.slipId,
+      result: ResultingStatus.BET_WIN,
+    },
+  });
   expect(await Bet.findOne({ slipId: bet.slipId })).toBeNull();
   expect(
     (await BetArchive.findOne({ slipId: bet.slipId }))
