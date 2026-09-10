@@ -23,6 +23,7 @@ const CURRENT_ENTRIES = [
   ["moderation", "jest-typescript"],
   ["resulting", "jest-typescript"],
   ["slip", "jest-typescript"],
+  ["telemetry", "jest-typescript"],
 ];
 const temporaryDirectories = new Set();
 
@@ -264,10 +265,6 @@ function createFixture(options = {}) {
   const root = temporaryDirectory();
   command(root, "git", ["init", "--quiet"]);
   const entries = [...CURRENT_ENTRIES];
-  if (options.telemetry) {
-    entries.push(["telemetry", "jest-typescript"]);
-    entries.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-  }
   for (const [id, profile] of entries) {
     writePackage(root, id, profile);
   }
@@ -1984,12 +1981,12 @@ test("derives add, copy, modify, rename, and delete source changes from Git obje
 test("handles a future package added after the base without weakening inventory", () => {
   const fixture = createFixture();
   const baseSha = fixture.headSha;
-  writePackage(fixture.root, "telemetry", "jest-typescript");
+  writePackage(fixture.root, "zfuture-service", "jest-typescript");
   mutateDescriptor(fixture.root, (value) => {
-    value.entries.push({ id: "telemetry", profile: "jest-typescript" });
+    value.entries.push({ id: "zfuture-service", profile: "jest-typescript" });
   });
-  const headSha = commitAll(fixture.root, "add telemetry package");
-  const entry = { id: "telemetry", profile: "jest-typescript" };
+  const headSha = commitAll(fixture.root, "add future package");
+  const entry = { id: "zfuture-service", profile: "jest-typescript" };
   const eligible = engine.deriveEligibleSources(fixture.root, headSha, entry);
   const changes = engine.deriveChangedSources(
     fixture.root,
@@ -1998,10 +1995,10 @@ test("handles a future package added after the base without weakening inventory"
     entry,
     eligible,
   );
-  assert.deepEqual(changes.changedEligible, ["telemetry/src/index.ts"]);
+  assert.deepEqual(changes.changedEligible, ["zfuture-service/src/index.ts"]);
   assert.deepEqual(changes.deletedEligible, []);
   assert.equal(
-    engine.validateRepository(fixture.root).inventory.includes("telemetry"),
+    engine.validateRepository(fixture.root).inventory.includes("zfuture-service"),
     true,
   );
 });
@@ -2009,11 +2006,11 @@ test("handles a future package added after the base without weakening inventory"
 test("authoritative preparation accepts one-entry future package registration", () => {
   const fixture = createFixture();
   const pullBaseSha = fixture.headSha;
-  writePackage(fixture.root, "telemetry", "jest-typescript");
+  writePackage(fixture.root, "zfuture-service", "jest-typescript");
   mutateDescriptor(fixture.root, (value) => {
-    value.entries.push({ id: "telemetry", profile: "jest-typescript" });
+    value.entries.push({ id: "zfuture-service", profile: "jest-typescript" });
   });
-  const headSha = commitAll(fixture.root, "register telemetry");
+  const headSha = commitAll(fixture.root, "register future package");
   const tree = git(fixture.root, "rev-parse", `${headSha}^{tree}`);
   const mergeSnapshotSha = git(
     fixture.root,
@@ -2024,7 +2021,7 @@ test("authoritative preparation accepts one-entry future package registration", 
     "-p",
     headSha,
     "-m",
-    "telemetry registration merge",
+    "future package registration merge",
   );
   const context = structuredClone(fixture.context);
   context.repository.baseSha = pullBaseSha;
@@ -2042,12 +2039,12 @@ test("authoritative preparation accepts one-entry future package registration", 
     fixture.root,
     fixture.root,
     context,
-    "telemetry",
+    "zfuture-service",
   );
   assert.equal(prepared.entry.profile, "jest-typescript");
-  assert.deepEqual(prepared.changedEligible, ["telemetry/src/index.ts"]);
+  assert.deepEqual(prepared.changedEligible, ["zfuture-service/src/index.ts"]);
   assert.equal(
-    assertRepositoryRegistration(fixture.root).inventory.includes("telemetry"),
+    assertRepositoryRegistration(fixture.root).inventory.includes("zfuture-service"),
     true,
   );
 });

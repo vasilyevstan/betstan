@@ -30,7 +30,7 @@ application_registry_require_ghcr() {
 application_registry_tag() {
   local service="$1"
   local source_sha="$2"
-  [[ "$service" =~ ^(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)$ ]] ||
+  [[ "$service" =~ ^(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)$ ]] ||
     oci_die "unknown application service: $service"
   [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] ||
     oci_die "application image source SHA must be a full lowercase SHA"

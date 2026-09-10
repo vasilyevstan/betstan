@@ -858,7 +858,7 @@ for required in (
         raise SystemExit(f"pre-lock auth startup is missing: {required}")
 if not (
     auth_entrypoint.index("await User.init()")
-    < auth_entrypoint.index("app.listen(3000")
+    < auth_entrypoint.index("listenWithOptionalTelemetry();")
 ):
     raise SystemExit("auth no longer requires index initialization before readiness")
 

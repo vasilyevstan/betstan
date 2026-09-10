@@ -16,6 +16,7 @@ EXPECTED_BUILD_RUN_ID="${EXPECTED_BUILD_RUN_ID:-}"
 EXPECTED_BUILD_RUN_ATTEMPT="${EXPECTED_BUILD_RUN_ATTEMPT:-}"
 EXPECTED_UPSTREAM_RUN_ID="${EXPECTED_UPSTREAM_RUN_ID:-}"
 PROVENANCE_MODE="${PROVENANCE_MODE:-build}"
+GENERATION_PROFILE="${GENERATION_PROFILE:-}"
 EXPECTED_RECOVERY_RUN_ID="${EXPECTED_RECOVERY_RUN_ID:-}"
 EXPECTED_RECOVERY_RUN_ATTEMPT="${EXPECTED_RECOVERY_RUN_ATTEMPT:-}"
 ANONYMOUS_PULL="${ANONYMOUS_PULL:-0}"
@@ -30,7 +31,20 @@ fi
   oci_die "ANONYMOUS_PULL must be 0 or 1"
 [[ "$PROVENANCE_MODE" == "build" || "$PROVENANCE_MODE" == "recovery" ]] ||
   oci_die "PROVENANCE_MODE must be build or recovery"
+if [[ -z "$GENERATION_PROFILE" ]]; then
+  if [[ "$PROVENANCE_MODE" == "recovery" ]]; then
+    GENERATION_PROFILE=historical
+  else
+    GENERATION_PROFILE=current
+  fi
+fi
+[[ "$GENERATION_PROFILE" == "current" ||
+   "$GENERATION_PROFILE" == "historical" ||
+   "$GENERATION_PROFILE" == "compatible" ]] ||
+  oci_die "GENERATION_PROFILE must be current, historical, or compatible"
 if [[ "$PROVENANCE_MODE" == "recovery" ]]; then
+  [[ "$GENERATION_PROFILE" == "historical" ]] ||
+    oci_die "cache recovery provenance must use the historical service profile"
   [[ "$EXPECTED_RECOVERY_RUN_ID" =~ ^([1-9][0-9]*|local)$ &&
      "$EXPECTED_RECOVERY_RUN_ATTEMPT" == "1" ]] ||
     oci_die "recovery provenance requires an explicit first-attempt recovery run"
@@ -56,7 +70,43 @@ cleanup_anonymous_docker_config() {
   fi
 }
 
-expected=(auth bet backoffice client event gamemaster moderation resulting slip)
+historical_expected=(auth bet backoffice client event gamemaster moderation resulting slip)
+current_expected=("${historical_expected[@]}" telemetry)
+case "$GENERATION_PROFILE" in
+  current)
+    expected=("${current_expected[@]}")
+    ;;
+  historical)
+    expected=("${historical_expected[@]}")
+    ;;
+  compatible)
+    if [[ -e "$PROVENANCE_DIR/telemetry.env" ]]; then
+      expected=("${current_expected[@]}")
+    else
+      expected=("${historical_expected[@]}")
+    fi
+    ;;
+esac
+shopt -s nullglob
+provenance_files=("$PROVENANCE_DIR"/*.env)
+shopt -u nullglob
+metadata_env_files=(
+  recovery-evidence.env transition-plan-evidence.env
+  rebind-provenance.env transition-provenance.env
+)
+application_provenance_count=0
+for provenance_file in "${provenance_files[@]}"; do
+  [[ -f "$provenance_file" && ! -L "$provenance_file" ]] ||
+    oci_die "application image provenance must contain only regular files"
+  provenance_name="$(basename "$provenance_file" .env)"
+  if [[ " ${expected[*]} " == *" $provenance_name "* ]]; then
+    application_provenance_count=$((application_provenance_count + 1))
+  elif [[ " ${metadata_env_files[*]} " != *" $(basename "$provenance_file") "* ]]; then
+    oci_die "application image provenance contains an unknown service"
+  fi
+done
+[[ "$application_provenance_count" == "${#expected[@]}" ]] ||
+  oci_die "application image provenance contains an unknown or partial service set"
 seen_services=" "
 rows=()
 application_registry_require_ghcr
@@ -314,4 +364,4 @@ if [[ "$BOOT_IMAGES" == "1" ]]; then
 fi
 
 cleanup_anonymous_docker_config
-oci_log "application_image_verification=PASS provider=ghcr services=${#expected[@]} platform=linux/arm64 anonymous_pull=$ANONYMOUS_PULL provenance_mode=$PROVENANCE_MODE"
+oci_log "application_image_verification=PASS provider=ghcr services=${#expected[@]} platform=linux/arm64 anonymous_pull=$ANONYMOUS_PULL provenance_mode=$PROVENANCE_MODE generation_profile=$GENERATION_PROFILE"

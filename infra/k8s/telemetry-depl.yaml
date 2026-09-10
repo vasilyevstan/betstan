@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaming-telemetry-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaming-telemetry
+  template:
+    metadata:
+      labels:
+        app: gaming-telemetry
+    spec:
+      containers:
+        - name: gaming-telemetry
+          image: stanvasilyev/gaming_telemetry
+          startupProbe:
+            failureThreshold: 60
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            tcpSocket:
+              port: 3000
+          livenessProbe:
+            failureThreshold: 3
+            periodSeconds: 20
+            timeoutSeconds: 3
+            tcpSocket:
+              port: 3000
+          readinessProbe:
+            failureThreshold: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            tcpSocket:
+              port: 3000
+          env:
+            - name: MONGO_URI
+              value: "mongodb://gaming-shared-mongo-srv:27017/gaming_telemetry"
+            - name: RABBITMQ_URI
+              value: "amqp://gaming-rabbitmq-srv"
+            - name: AUTH_HOST
+              value: "gaming-auth-srv"
+            - name: BACKOFFICE_HOST
+              value: "gaming-backoffice-srv"
+            - name: BET_HOST
+              value: "gaming-bet-srv"
+            - name: CLIENT_HOST
+              value: "gaming-client-srv"
+            - name: EVENT_HOST
+              value: "gaming-event-srv"
+            - name: GAMEMASTER_HOST
+              value: "gaming-gamemaster-srv"
+            - name: MODERATION_HOST
+              value: "gaming-moderation-srv"
+            - name: RESULTING_HOST
+              value: "gaming-resulting-srv"
+            - name: SLIP_HOST
+              value: "gaming-slip-srv"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaming-telemetry-srv
+spec:
+  type: ClusterIP
+  selector:
+    app: gaming-telemetry
+  ports:
+    - name: gaming-telemetry
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

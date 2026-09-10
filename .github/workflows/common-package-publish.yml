@@ -230,7 +230,10 @@ jobs:
           services=(
             auth backoffice bet event gamemaster moderation resulting slip
           )
-          if [ -f telemetry/package.json ]; then
+          if node -e '
+            const manifest = require("./telemetry/package.json");
+            process.exit(manifest.dependencies?.["@betstan/common"] ? 0 : 1);
+          '; then
             services+=(telemetry)
           fi
           expected_current_version="$(

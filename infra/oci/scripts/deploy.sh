@@ -277,9 +277,19 @@ kubectl rollout status deployment/gaming-rabbitmq-depl \
   -n "$OCI_K8S_NAMESPACE" --timeout=10m
 
 # Roll out API dependencies before Client; Gamemaster remains the final producer.
-services=(auth bet event moderation resulting slip backoffice client gamemaster)
+services=(telemetry auth bet event moderation resulting slip backoffice client gamemaster)
 [[ "${services[$(( ${#services[@]} - 1 ))]}" == "gamemaster" ]] ||
   oci_die "gamemaster must rollout last"
+[[ "${services[0]}" == "telemetry" ]] ||
+  oci_die "telemetry must rollout first after shared data services"
+client_index=-1
+telemetry_index=-1
+for index in "${!services[@]}"; do
+  [[ "${services[$index]}" == "client" ]] && client_index="$index"
+  [[ "${services[$index]}" == "telemetry" ]] && telemetry_index="$index"
+done
+((telemetry_index >= 0 && client_index > telemetry_index)) ||
+  oci_die "client must rollout after telemetry"
 for service in "${services[@]}"; do
   apply_documents "Service:^gaming-${service}-srv$"
   apply_documents "Deployment:^gaming-${service}-depl$"
@@ -313,6 +323,7 @@ for _ in $(seq 1 60); do
     [[ -n "$queue_names" ]] || queue_names=none
     [[ -n "$zero_consumer_queues" ]] || zero_consumer_queues=none
     if [[ "$queue_count" == "$expected_queue_count" ]] &&
+        [[ "$(awk '$1 == "telemetry:events:v1" {count++} END {print count+0}' <<<"$queue_rows")" == "1" ]] &&
         awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows"; then
       rabbit_baseline_ready=1
       break

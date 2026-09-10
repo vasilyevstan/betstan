@@ -64,8 +64,8 @@ flowchart TB
 | DNS and certificates | Canonical hostname, permanent redirect from `www`, TLS trust, and a separate diagnostic host |
 | Load balancer | Public HTTP/HTTPS entry point |
 | Ingress | Routes the SPA and `/api/*` paths; disables buffering for SSE |
-| k3s | Runs the nine application workloads plus MongoDB and RabbitMQ |
-| MongoDB | Persistent state for eight service-owned logical databases |
+| k3s | Runs the ten application workloads plus MongoDB and RabbitMQ |
+| MongoDB | Persistent state for nine service-owned logical databases |
 | RabbitMQ | Internal fanout broker for domain events |
 | GHCR | Public application image registry; runtime pulls without a long-lived registry secret |
 | GitHub Actions | Builds, validates, deploys, activates, rolls back, and records provenance |

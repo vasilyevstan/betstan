@@ -9,7 +9,8 @@ CURRENT_SHA=1111111111111111111111111111111111111111
 DEPLOYED_SHA=2222222222222222222222222222222222222222
 LKG_SHA=3333333333333333333333333333333333333333
 OBSOLETE_SHA=4444444444444444444444444444444444444444
-SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+HISTORICAL_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+SERVICES=("${HISTORICAL_SERVICES[@]}" telemetry)
 export CANDIDATE_BUILD_RUN_ID=900
 
 fail() {
@@ -133,7 +134,8 @@ PROVENANCE_DIR="$WORK_DIR/provenance" SOURCE_SHA="$CURRENT_SHA" \
 OUTPUT_FILE="$WORK_DIR/images.tsv" VERIFY_REMOTE=0 BOOT_IMAGES=0 \
   "$OCI_DIR/scripts/verify-images.sh" >/dev/null
 
-for service in "${SERVICES[@]}"; do
+rm "$WORK_DIR/provenance/telemetry.env"
+for service in "${HISTORICAL_SERVICES[@]}"; do
   cat >>"$WORK_DIR/provenance/$service.env" <<EOF
 recovery_workflow=oci-ghcr-cache-recovery
 recovery_run_id=777
@@ -173,12 +175,13 @@ fi
 mv "$WORK_DIR/provenance/auth.env.good" "$WORK_DIR/provenance/auth.env"
 
 jq -n --arg current "$CURRENT_SHA" --arg deployed "$DEPLOYED_SHA" --arg lkg "$LKG_SHA" '
-  def services: ["auth","bet","backoffice","client","event","gamemaster","moderation","resulting","slip"];
-  def generation($sha; $start):
-    [range(0; 9) | {
+  def historical_services: ["auth","bet","backoffice","client","event","gamemaster","moderation","resulting","slip"];
+  def current_services: historical_services + ["telemetry"];
+  def generation($sha; $start; $services):
+    [range(0; ($services | length)) | {
       id: ($start + .),
       name: ("sha256:" + ("0" * 64)),
-      metadata: {container: {tags: [("arm64-" + services[.] + "-" + $sha)]}}
+      metadata: {container: {tags: [("arm64-" + $services[.] + "-" + $sha)]}}
     }];
   [{
     id: 1,
@@ -188,7 +191,9 @@ jq -n --arg current "$CURRENT_SHA" --arg deployed "$DEPLOYED_SHA" --arg lkg "$LK
     id: 2,
     name: ("sha256:" + ("e" * 64)),
     metadata: {container: {tags: []}}
-  }] + generation($current; 10) + generation($deployed; 20) + generation($lkg; 30)
+  }] + generation($current; 10; current_services) +
+    generation($deployed; 30; historical_services) +
+    generation($lkg; 50; historical_services)
 ' > "$WORK_DIR/versions.json"
 jq -n '{
   package_type:"container", name:"betstan-images", visibility:"public",
@@ -308,7 +313,7 @@ PRUNE_MODE=validate OUTPUT_DIR="$OUTPUT_ROOT/package-alias-valid" \
 jq -e '
   .terminal_status == "VALIDATED" and
   .planned_deletions == 0 and
-  .retained_alias_versions == 9 and
+  .retained_alias_versions == 10 and
   .obsolete_origins == [{
     build_run_id: "904",
     sha: "'"$OBSOLETE_SHA"'"
@@ -379,7 +384,7 @@ if PATH="$WORK_DIR/bin:$PATH" \
     "$OCI_DIR/scripts/manage-ghcr-package.sh" >/dev/null 2>&1; then
   fail "interrupted GHCR prune falsely reported terminal success"
 fi
-[[ "$(jq 'length' "$WORK_DIR/prunable-versions.json")" == "35" ]] ||
+[[ "$(jq 'length' "$WORK_DIR/prunable-versions.json")" == "36" ]] ||
   fail "interrupted GHCR prune fixture did not preserve a three-deletion prefix"
 PATH="$WORK_DIR/bin:$PATH" \
 MOCK_DELETE_COUNT_FILE="$WORK_DIR/delete-count" \
@@ -399,7 +404,7 @@ jq -e '
   .terminal_status == "PRUNED" and
   .already_absent_planned_versions == 3 and
   .deleted_in_run == 6 and
-  .terminal_total_versions == 29
+  .terminal_total_versions == 30
 ' "$ROOT_DIR/$OUTPUT_ROOT/package-prune-resumed/after-summary.json" >/dev/null ||
   fail "resumed GHCR prune did not prove its terminal package state"
 if jq -e --arg obsolete "$OBSOLETE_SHA" '
@@ -458,6 +463,7 @@ if [[ "$1" == "buildx" && "$2" == "build" ]]; then
     moderation) index=7 ;;
     resulting) index=8 ;;
     slip) index=9 ;;
+    telemetry) index=10 ;;
     *) exit 1 ;;
   esac
   digest="sha256:$(printf '%064d' "$index")"
@@ -553,9 +559,9 @@ printf 'ghcr.io/vasilyevstan/betstan-images:arm64-auth-%s\tsha256:%064d\tsha256:
 env "${build_env[@]}" SOURCE_SHA="$CURRENT_SHA" PUSH_IMAGES=1 \
   OUTPUT_DIR="$WORK_DIR/repaired-build" \
   "$OCI_DIR/scripts/build-images.sh" >/dev/null
-[[ "$(awk 'END { print NR }' "$WORK_DIR/docker-state/tags.tsv")" == "9" ]] ||
-  fail "partial GHCR repair did not complete the nine exact tags"
-[[ "$(find "$WORK_DIR/repaired-build" -name '*.env' | wc -l | tr -d ' ')" == "9" ]] ||
+[[ "$(awk 'END { print NR }' "$WORK_DIR/docker-state/tags.tsv")" == "10" ]] ||
+  fail "partial GHCR repair did not complete the ten exact tags"
+[[ "$(find "$WORK_DIR/repaired-build" -name '*.env' | wc -l | tr -d ' ')" == "10" ]] ||
   fail "partial GHCR repair did not emit complete first-attempt provenance"
 grep -Fq 'digest=sha256:0000000000000000000000000000000000000000000000000000000000000099' \
   "$WORK_DIR/repaired-build/auth.env" ||

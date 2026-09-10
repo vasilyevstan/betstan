@@ -42,6 +42,7 @@ API_CONTRACTS=(
   "/api/bet|object"
   "/api/bet/stats|array"
   "/api/backoffice|backoffice"
+  "/api/telemetry/summary|telemetry"
 )
 
 prepare_private_dir() {
@@ -728,6 +729,88 @@ PY
         return 1
       }
       ;;
+    telemetry)
+      [[ "$content_type" == application/json* ]] || {
+        printf 'ERROR: expected JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      shape="$(python3 - "$body_file" <<'PY'
+import datetime
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+metrics = [
+    "MAIN_PAGE_VISIT", "ADMIN_PAGE_VISIT", "SLIP_CREATED", "BET_PLACED",
+    "RESULTING_SETTLED", "GAMECENTER_EVENT_EMITTED", "USER_CREATED",
+    "USER_LOGGED_IN",
+]
+services = [
+    "auth", "backoffice", "bet", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry",
+]
+if not isinstance(payload, dict) or set(payload) != {
+    "generatedAt", "dates", "metrics", "health"
+}:
+    raise SystemExit(1)
+generated_at = payload["generatedAt"]
+try:
+    generated = datetime.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+except (AttributeError, ValueError):
+    raise SystemExit(1)
+if not generated_at.endswith("Z") or generated.tzinfo != datetime.timezone.utc:
+    raise SystemExit(1)
+dates = payload["dates"]
+if not isinstance(dates, list) or len(dates) != 14:
+    raise SystemExit(1)
+try:
+    parsed_dates = [datetime.date.fromisoformat(value) for value in dates]
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if any(value.isoformat() != raw for value, raw in zip(parsed_dates, dates)):
+    raise SystemExit(1)
+if any(
+    parsed_dates[index] != parsed_dates[index - 1] + datetime.timedelta(days=1)
+    for index in range(1, len(parsed_dates))
+) or parsed_dates[-1] != generated.date():
+    raise SystemExit(1)
+rows = payload["metrics"]
+if not isinstance(rows, list) or len(rows) != len(metrics):
+    raise SystemExit(1)
+for expected, row in zip(metrics, rows):
+    values = row.get("values") if isinstance(row, dict) else None
+    if (
+        set(row) != {"metric", "values"}
+        or row["metric"] != expected
+        or not isinstance(values, list)
+        or len(values) != 14
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 9007199254740991
+            for value in values
+        )
+    ):
+        raise SystemExit(1)
+health = payload["health"]
+if not isinstance(health, list) or len(health) != len(services):
+    raise SystemExit(1)
+for expected, row in zip(services, health):
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"service", "status"}
+        or row["service"] != expected
+        or row["status"] not in {"green", "yellow", "red"}
+    ):
+        raise SystemExit(1)
+print("telemetry-summary")
+PY
+)" || {
+        printf 'ERROR: invalid Telemetry summary JSON for %s%s\n' "$base_url" "$path" >&2
+        return 1
+      }
+      ;;
     *)
       printf 'ERROR: unsupported HTTP verification kind %s\n' "$expected_kind" >&2
       return 1
@@ -818,6 +901,10 @@ verify_queue_state() {
     rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers >"$WORK_DIR/current-queues.raw"
   oci_rabbitmq_queue_rows <"$WORK_DIR/current-queues.raw" >"$current_queue_file" || {
     printf 'ERROR: unable to normalize RabbitMQ queue state\n' >&2
+    return 1
+  }
+  [[ "$(awk -F '\t' '$1 == "telemetry:events:v1" && $4 > 0 {count++} END {print count+0}' "$current_queue_file")" == "1" ]] || {
+    printf 'ERROR: retained Telemetry queue is missing or has no consumer\n' >&2
     return 1
   }
   live_betting_compare_queue_snapshots \
@@ -1765,6 +1852,12 @@ EOF2
 fi
 
 CURRENT_STEP_LABEL=post-apply
+telemetry_original_ref="$(
+  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}'
+)"
+[[ "$telemetry_original_ref" =~ ^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$ ]] ||
+  oci_die "current Telemetry deployment is missing immutable GHCR provenance"
 url_entries=("canonical|$OCI_PUBLIC_URL" "redirect|$OCI_REDIRECT_URL")
 if [[ -n "$OCI_DIAGNOSTIC_URL" ]]; then
   url_entries+=("diagnostic|$OCI_DIAGNOSTIC_URL")
@@ -1804,6 +1897,22 @@ for service in "${ROLLBACK_ORDER[@]}"; do
     oci_die "RabbitMQ verification failed after ${deployment}"
   fi
   completed_services+=("$service")
+done
+
+kubectl rollout status deployment/gaming-telemetry-depl \
+  -n "$OCI_K8S_NAMESPACE" --timeout=10m ||
+  oci_die "current Telemetry deployment is not ready after historical rollback"
+telemetry_final_ref="$(
+  kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}'
+)"
+[[ "$telemetry_final_ref" == "$telemetry_original_ref" ]] ||
+  oci_die "historical rollback changed the current Telemetry image"
+CURRENT_STEP_LABEL=post-rollback-telemetry
+for entry in "${url_entries[@]}"; do
+  IFS='|' read -r label base_url <<<"$entry"
+  capture_http "$base_url" "/api/telemetry/summary" telemetry "$label" ||
+    oci_die "Telemetry public summary is invalid after historical rollback"
 done
 
 CURRENT_STEP_LABEL=post-rollback-readiness

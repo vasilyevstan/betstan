@@ -575,8 +575,8 @@ def validate_common_package_publish_workflow!(file, document, content)
   end
   require_content(
     consumer_section,
-    /if \[ -f telemetry\/package\.json \]; then\s+services\+=\(telemetry\)/m,
-    "#{name} must include Telemetry when it becomes a Common consumer"
+    /require\("\.\/telemetry\/package\.json"\).*dependencies\?\.\["@betstan\/common"\].*services\+=\(telemetry\)/m,
+    "#{name} must include Telemetry only when it declares a Common dependency"
   )
   require_content(
     consumer_section,

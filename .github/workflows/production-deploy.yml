@@ -181,6 +181,7 @@ jobs:
               ! -name 'moderation-depl.yaml' \
               ! -name 'resulting-depl.yaml' \
               ! -name 'slip-depl.yaml' \
+              ! -name 'telemetry-depl.yaml' \
               -print0
           )
 

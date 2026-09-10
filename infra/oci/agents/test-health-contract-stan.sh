@@ -74,7 +74,8 @@ run_failure cluster-issuer-failure '.ingress.cluster_issuer_ready=false' cluster
 run_failure www-redirect-failure '.ingress.www_redirect=false' www-redirect
 run_failure diagnostic-https-failure '.ingress.diagnostic_https_trusted=false' diagnostic-https
 run_failure canonical-dns-failure '.ingress.dns_match=false' canonical-dns
-run_failure queue-loss '.rabbitmq.queue_count=21' queue-count
+run_failure queue-loss '.rabbitmq.queue_count=22' queue-count
+run_failure telemetry-queue-loss '.rabbitmq.telemetry_queue_present=false' telemetry-queue
 run_failure consumer-loss '.rabbitmq.all_consumers=false' queue-consumers
 run_failure resource-breach '.node.memory_percent=71' memory-threshold
 run_failure wrong-lb-shape '.inventory.lb_shape="100Mbps"' lb-shape
@@ -133,6 +134,37 @@ elif [[ "$url" == http://203.0.113.10.nip.io/* ]]; then
   printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: %s\r\n\r\n' "$location" > "$headers"
   : > "$output"
   printf '308'
+elif [[ "$url" == */api/telemetry/summary ]]; then
+  printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+  python3 - "$output" <<'PY'
+import datetime
+import json
+import os
+import sys
+
+end = datetime.date(2026, 9, 10)
+dates = [(end - datetime.timedelta(days=offset)).isoformat() for offset in range(13, -1, -1)]
+metrics = [
+    "MAIN_PAGE_VISIT", "ADMIN_PAGE_VISIT", "SLIP_CREATED", "BET_PLACED",
+    "RESULTING_SETTLED", "GAMECENTER_EVENT_EMITTED", "USER_CREATED",
+    "USER_LOGGED_IN",
+]
+services = [
+    "auth", "backoffice", "bet", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry",
+]
+payload = {
+    "generatedAt": "2026-09-10T05:00:00.000Z",
+    "dates": dates,
+    "metrics": [{"metric": metric, "values": [0] * 14} for metric in metrics],
+    "health": [{"service": service, "status": "green"} for service in services],
+}
+if os.environ.get("STUB_BAD_TELEMETRY") == "1":
+    payload["metrics"] = []
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+  printf '200'
 elif [[ "$url" == */api/backoffice ]]; then
   if [[ "${STUB_PROTECTED_BACKOFFICE:-0}" == "1" ]]; then
     printf 'HTTP/2 401\r\ncontent-type: application/json\r\n\r\n' > "$headers"
@@ -311,6 +343,15 @@ if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_API=1 \
   exit 1
 fi
 grep -Eq 'API returned (non-JSON content|invalid JSON)' "$WORK_DIR/smoke-bad.out"
+if PATH="$WORK_DIR/bin:$PATH" STUB_BAD_TELEMETRY=1 \
+    OCI_PUBLIC_URL=https://betstan.xyz \
+    OCI_REDIRECT_URL=https://www.betstan.xyz \
+    OCI_DIAGNOSTIC_URL=https://203.0.113.10.nip.io \
+    OUTPUT_DIR="$WORK_DIR/smoke-bad-telemetry" \
+    "$OCI_DIR/agents/smoke-liveness-stan.sh" >/dev/null 2>&1; then
+  echo "invalid Telemetry summary unexpectedly passed" >&2
+  exit 1
+fi
 for failure_mode in \
   STUB_BAD_DNS STUB_AAAA STUB_BAD_REDIRECT STUB_UNTRUSTED_CERT \
   STUB_WRONG_ISSUER STUB_WRONG_SAN STUB_EXPIRING_CERT; do

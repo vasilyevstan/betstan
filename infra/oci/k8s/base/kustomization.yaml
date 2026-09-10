@@ -10,6 +10,7 @@ resources:
   - ../../../../infra/k8s/moderation-depl.yaml
   - ../../../../infra/k8s/resulting-depl.yaml
   - ../../../../infra/k8s/slip-depl.yaml
+  - ../../../../infra/k8s/telemetry-depl.yaml
   - ../../../../infra/k8s/rabbitmq-depl.yaml
   - ../../../../infra/k8s/auth-mongo-depl.yaml
   - ../mongo-storage.yaml
@@ -34,7 +35,7 @@ patches:
       group: apps
       version: v1
       kind: Deployment
-      name: gaming-(auth|bet|backoffice|event|gamemaster|moderation|resulting|slip)-depl
+      name: gaming-(auth|bet|backoffice|event|gamemaster|moderation|resulting|slip|telemetry)-depl
   - target:
       group: apps
       version: v1

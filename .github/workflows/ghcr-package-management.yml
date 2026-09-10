@@ -403,6 +403,7 @@ jobs:
               --name "$artifact_name" --dir "$artifact_dir"
             [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
             PROVENANCE_DIR="$artifact_dir" SOURCE_SHA="$source_sha" \
+            GENERATION_PROFILE="$([ "$role" = candidate ] && printf current || printf compatible)" \
             EXPECTED_BUILD_RUN_ID="$run_id" EXPECTED_BUILD_RUN_ATTEMPT=1 \
             OUTPUT_FILE="$artifact_dir/verified-images.tsv" \
             VERIFY_REMOTE=1 BOOT_IMAGES=0 ANONYMOUS_PULL=1 \
@@ -579,11 +580,11 @@ jobs:
             [
               .[].metadata.container.tags[]? |
               select(test(
-                "^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-" +
+                "^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)-" +
                 $sha + "$"
               ))
             ] |
-            if length > 9 or length != (unique | length) then
+            if length > 10 or length != (unique | length) then
               error("current source has duplicate or excessive exact tags")
             else
               sort[]

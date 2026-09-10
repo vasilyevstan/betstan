@@ -50,6 +50,7 @@ INFRASTRUCTURE_PROVENANCE_SHA256=""
 RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34"
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
+TELEMETRY_IMAGE_REF="ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 mkdir -p "$BIN_DIR" "$FIXTURE_DIR" "$STATE_DIR"
 cleanup() {
@@ -446,6 +447,10 @@ image=$(current_image_ref "$service")
 revision=7
 EOF2
   done
+  write_text_atomic "$state_root/telemetry.env" <<EOF2
+image=$TELEMETRY_IMAGE_REF
+revision=1
+EOF2
 }
 
 set_target_state() {
@@ -831,7 +836,7 @@ cat >"$BIN_DIR/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 
-services=(auth bet backoffice client event moderation resulting slip gamemaster)
+services=(auth bet backoffice client event moderation resulting slip gamemaster telemetry)
 
 atomic_write() {
   local target="$1"
@@ -882,7 +887,7 @@ from pathlib import Path
 
 state_dir = Path(sys.argv[1])
 flag_value = sys.argv[2]
-services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip"]
+services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 for service in services:
     fields = {}
@@ -927,7 +932,7 @@ from pathlib import Path
 state_dir = Path(sys.argv[1])
 bad_service = sys.argv[2]
 mode = sys.argv[3]
-services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip"]
+services = ["auth", "bet", "backoffice", "client", "event", "gamemaster", "moderation", "resulting", "slip", "telemetry"]
 items = []
 platform_map = {
     "auth": 31,
@@ -939,6 +944,7 @@ platform_map = {
     "moderation": 37,
     "resulting": 38,
     "slip": 39,
+    "telemetry": 40,
 }
 for service in services:
     fields = {}
@@ -994,6 +1000,9 @@ case "${1:-}" in
           }'
         elif [[ "$output_mode" == "jsonpath={.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.updatedReplicas}|{.status.readyReplicas}|{.status.availableReplicas}" ]]; then
           printf '8|8|1|1|1|1'
+        elif [[ "$output_mode" == 'jsonpath={.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}' &&
+                "$service" == "telemetry" ]]; then
+          printf '%s' "$image"
         else
           printf 'unexpected deployment output mode: %s\n' "$output_mode" >&2
           exit 1
@@ -1198,6 +1207,7 @@ PY
 name messages_ready messages_unacknowledged consumers
 event_new_event ${baseline_ready} ${baseline_unack} 1
 gamemaster_new_event ${baseline_ready} ${baseline_unack} 1
+telemetry:events:v1 0 0 1
 bet_place_bet ${baseline_ready} ${baseline_unack} 1
 event_live_projection ${live_ready} ${live_unack} 1
 moderation_live_event_update ${live_ready} ${live_unack} 1
@@ -1454,6 +1464,12 @@ elif [[ "$url" == *'/api/event/stream' ]]; then
       time_total="$(format_shifted_window_duration "${max_time:-1}" 0)"
       ;;
   esac
+elif [[ "$url" == *'/api/telemetry/summary' ]]; then
+  body='{"generatedAt":"2026-09-10T05:00:00.000Z","dates":["2026-08-28","2026-08-29","2026-08-30","2026-08-31","2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05","2026-09-06","2026-09-07","2026-09-08","2026-09-09","2026-09-10"],"metrics":[{"metric":"MAIN_PAGE_VISIT","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"ADMIN_PAGE_VISIT","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"SLIP_CREATED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"BET_PLACED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"RESULTING_SETTLED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"GAMECENTER_EVENT_EMITTED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"USER_CREATED","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"metric":"USER_LOGGED_IN","values":[0,0,0,0,0,0,0,0,0,0,0,0,0,0]}],"health":[{"service":"auth","status":"green"},{"service":"backoffice","status":"green"},{"service":"bet","status":"green"},{"service":"client","status":"green"},{"service":"event","status":"green"},{"service":"gamemaster","status":"green"},{"service":"moderation","status":"green"},{"service":"resulting","status":"green"},{"service":"slip","status":"green"},{"service":"telemetry","status":"green"}]}'
+  if [[ "${STUB_TELEMETRY_BAD_AFTER_ROLLBACK:-0}" == "1" &&
+      "$after_rollback" == "1" ]]; then
+    body='{}'
+  fi
 elif [[ "$url" == *'/api/auth/currentuser' ]]; then
   body='{"currentUser":null}'
 elif [[ "$url" == *'/api/event' ]]; then

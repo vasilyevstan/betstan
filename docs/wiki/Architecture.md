@@ -5,7 +5,7 @@
 BetStan is a TypeScript and JavaScript microservice system with:
 
 - a React single-page application;
-- six HTTP-facing application services;
+- seven HTTP-facing application services;
 - three internal event-driven workers;
 - RabbitMQ fanout messaging;
 - one persistent MongoDB runtime with a separate logical database per backend
@@ -32,6 +32,7 @@ flowchart TB
     Edge --> Slip["slip"]
     Edge --> Bet["bet"]
     Edge --> Backoffice["backoffice"]
+    Edge --> Telemetry["telemetry"]
     Event -->|SSE live stream| Browser
 
     Broker[("RabbitMQ<br/>fanout events")]
@@ -44,6 +45,7 @@ flowchart TB
     Gamemaster["gamemaster"] <--> Broker
     Moderation["moderation"] <--> Broker
     Resulting["resulting"] <--> Broker
+    Telemetry <--> Broker
 
     Auth --> Mongo
     Event --> Mongo
@@ -53,6 +55,7 @@ flowchart TB
     Gamemaster --> Mongo
     Moderation --> Mongo
     Resulting --> Mongo
+    Telemetry --> Mongo
 ```
 
 ## Service catalog
@@ -65,6 +68,7 @@ flowchart TB
 | `slip` | HTTP, AMQP | Independent live/pre-match draft boards, placement concurrency, and reliable submission publication | Draft/submitted slips and publication state |
 | `bet` | HTTP, AMQP | User-visible bet ledger, moderation state, row/final result, payout data, and statistics | Bets, conflicts, and pending updates |
 | `backoffice` | HTTP, AMQP | Public event creation, visibility, manual result controls, and durable publication replay | Operational event records and publication markers |
+| `telemetry` | HTTP, AMQP | Bounded operational summaries and application service health snapshots | Telemetry metric records |
 | `gamemaster` | AMQP worker | Deterministic accelerated football simulation, incidents, score, quotes, market versions, and final result | Simulation state and completed archives |
 | `moderation` | AMQP worker | Slip, phase, market, quote, and mixed-kind validation | Mirrored authority, parked requests, and moderation records |
 | `resulting` | AMQP worker | Pre-match and live row settlement, final slip result, retries, and replay | Settlement ledgers, archives, and retry state |
@@ -86,6 +90,7 @@ flowchart LR
     Mongo --> GameDB["gamemaster database"]
     Mongo --> ModerationDB["moderation database"]
     Mongo --> ResultingDB["resulting database"]
+    Mongo --> TelemetryDB["telemetry database"]
 ```
 
 This boundary supports:
@@ -107,6 +112,7 @@ HTTP is used for browser-facing commands and queries:
 - slip query and submission;
 - bet history and statistics;
 - public Backoffice commands.
+- bounded Telemetry summaries and service-health snapshots.
 
 The Event service also performs a bounded internal Auth verification when an
 administrator requests access to explicitly scoped offline acceptance data.
