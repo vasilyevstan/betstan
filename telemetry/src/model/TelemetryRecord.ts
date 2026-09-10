@@ -29,7 +29,10 @@ const telemetryRecordSchema = new mongoose.Schema<TelemetryRecord>(
   }
 );
 
-telemetryRecordSchema.index({ occurredAt: 1 });
+telemetryRecordSchema.index(
+  { occurredAt: 1 },
+  { expireAfterSeconds: 2592000 }
+);
 
 export const TelemetryRecordModel = mongoose.model<TelemetryRecord>(
   "TelemetryRecord",

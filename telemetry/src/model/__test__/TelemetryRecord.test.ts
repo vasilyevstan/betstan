@@ -1,7 +1,7 @@
 import { TelemetryRecordModel } from "../TelemetryRecord";
 import { MongoMetricRecorder } from "../../service/Recorder";
 
-it("has only the exact persisted fields and occurredAt index", () => {
+it("has only the exact persisted fields and 30-day occurredAt TTL index", () => {
   expect(Object.keys(TelemetryRecordModel.schema.paths).sort()).toEqual([
     "_id",
     "metric",
@@ -10,7 +10,10 @@ it("has only the exact persisted fields and occurredAt index", () => {
   expect(TelemetryRecordModel.schema.get("strict")).toBe("throw");
   expect(TelemetryRecordModel.schema.get("versionKey")).toBe(false);
   expect(TelemetryRecordModel.schema.indexes()).toEqual([
-    [{ occurredAt: 1 }, { background: true }],
+    [
+      { occurredAt: 1 },
+      { expireAfterSeconds: 2592000, background: true },
+    ],
   ]);
 });
 
