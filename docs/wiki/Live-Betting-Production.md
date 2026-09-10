@@ -279,41 +279,60 @@ selection, label, and price. A Correct Score selection ID is retained only when
 the repaired board keeps the same label; replacement outcomes receive stable
 new IDs so an old draft cannot be visually reinterpreted as a different score.
 
-A one-time fixed event reschedule is part of the protected live-data rollout.
-It is not exposed as an HTTP endpoint and accepts no caller-selected identity
-or kickoff. The reviewed operation moves only Backoffice record
-`6a623af592af5a95b1d0bb7a` / event
-`6a623af592af5a95b1d0bb79` from
-`2026-07-23T16:31:57.215Z` to `2026-09-11T08:05:00.000Z`. It preserves the
-fixture's name, teams, `NO_RESULT` status, and `OFFLINE` visibility.
+A one-time fixed event provisioning step is part of the protected live-data
+rollout. It is not exposed as an HTTP endpoint, accepts no caller-selected
+identity or kickoff, and ships through the normal release path rather than any
+bypass.
 
-Before mutation, the operator proves the exact Backoffice identity and old
-kickoff, rejects duplicate projections, pending publication, live state,
-Gamemaster archives or cleanup tombstones, Moderation mirrors, and every
-known betting, settlement, retry, pending-update, or Slip dependency. Existing
-safe Event products are preserved. Missing Event and Gamemaster projections
-are rebuilt with deterministic IDs, coherent 1X2 and Correct Score pricing,
-and a deterministic live seed. Apply starts no later than twenty minutes
-before kickoff and runs only while writers are quiesced and the shared
-database operation lock is held.
+The original fixture — Backoffice record `6a623af592af5a95b1d0bb7a` / event
+`6a623af592af5a95b1d0bb79` at `2026-07-23T16:31:57.215Z` — is no longer
+rescheduled in place. Its protected dry run found existing dependencies and
+changed zero records, so that identity and its historical Slip, Bet,
+Moderation, and Resulting rows remain untouched.
+
+The corrected operator instead provisions a new offline fixture identity:
+Backoffice record `7420bc3b71340b4468c206e4` with Event and Gamemaster event
+`42643b4c173d1c7b8eeed765`, for target kickoff `2026-09-11T08:05:00.000Z`. All
+three documents are built from reviewed constants rather than cloned from
+mutable source state, so the target is reproducible from the source revision
+alone: the same fixture name and teams, `NO_RESULT` status, `OFFLINE`
+visibility, deterministic 1X2 and Correct Score products, and a fixed reviewed
+live seed. Backoffice stores the kickoff as a string while Event and
+Gamemaster store it as a date, and creation-request and publication-pending
+fields are absent rather than set.
+
+Before writing, the operator performs one bounded read-only check that the
+original Backoffice record still matches its reviewed identity, and reads no
+other historical data. Every collision, dependency, archive, and mirror guard
+keys to the new event ID, so none of them traverses or mutates old history. An
+existing document under the new identity, a Gamemaster archive or cleanup
+tombstone, a Moderation live mirror, or any known betting, settlement, retry,
+pending-update, or Slip reference to the new event blocks the run. Apply still
+starts no later than twenty minutes before the target kickoff and runs only
+while writers are quiesced and the shared database operation lock is held.
 
 The operator writes a fixed-ID journal before target writes. That journal
-stores canonical Extended JSON and SHA-256 digests for both the exact preimage
-and deterministic target. Apply uses compare-and-set writes in Event,
-Gamemaster, then Backoffice order; a prepared partial operation can resume
-only from snapshot-or-target states and only for the source SHA that prepared
-it. Verification for that source remains exact. After the journal is applied,
-a later release SHA receives a completed one-time result so natural match
-progression does not block unrelated releases.
+stores canonical Extended JSON and SHA-256 digests for both the recorded
+preimage — three absent targets — and the deterministic target. Apply uses
+compare-and-set writes in Event, Gamemaster, then Backoffice order; a prepared
+partial operation can resume only from snapshot-or-target states and only for
+the source SHA that prepared it. Verification for that source remains exact.
+After the journal is applied, a later release SHA receives a completed
+one-time result so natural match progression does not block unrelated
+releases.
 
-Rollback remains available before new dependencies or live state appear. It
-restores Backoffice, Gamemaster, then Event from the exact journal snapshot,
-or deletes projections that were absent in the preimage, and records a
-terminal rolled-back state. The protected pre-mutation database baseline is
-also retained by the normal release chain. The former automatic destructive
-fixture cleanup is no longer invoked by the rollout, and the retained
-historical utility is bound to the exact original kickoff, so the rescheduled
-event cannot satisfy its deletion identity guard later.
+Rollback runs in the inverse Backoffice, Gamemaster, then Event order, deletes
+exactly the three inserted documents, and records a terminal rolled-back
+state. Because the preimage is empty, rollback never deletes or restores a
+historical record. It resumes safely when a prior rollback attempt already
+deleted one or more exact targets. Otherwise it is available only while each
+document still matches either the journal target or its absent preimage and no
+new live, visibility, betting, or dependency state has appeared; any unknown
+state fails closed instead of proceeding. The protected pre-mutation database
+baseline is still retained by the normal release chain.
+The historical destructive fixture cleanup remains uninvoked by the rollout
+and stays bound to the original fixture identity and kickoff, so it cannot
+match the new event.
 
 A blocked reschedule remains a failed data phase even though the operator CLI
 emits a structured report before exiting nonzero. The rollout wrapper accepts
