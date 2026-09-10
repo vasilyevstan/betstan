@@ -84,7 +84,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
 
       - name: Checkout current master safety implementation
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
@@ -169,7 +169,7 @@ jobs:
           fi
 
       - name: Download immutable historical image and deployment provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-image-provenance-${{ inputs.baseline_source_sha }}-${{ inputs.trusted_build_run_id }}-1
           path: artifacts/historical-build
@@ -178,7 +178,7 @@ jobs:
           run-id: ${{ inputs.trusted_build_run_id }}
 
       - name: Download exact historical deployment provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-deploy-provenance-${{ inputs.trusted_deploy_run_id }}-1
           path: artifacts/historical-deploy
@@ -203,7 +203,7 @@ jobs:
           cat "$RUNNER_TEMP/trusted-upstream.env" >> "$GITHUB_ENV"
 
       - name: Download exact current infrastructure provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
           path: artifacts/infrastructure
@@ -213,7 +213,7 @@ jobs:
 
       - name: Download immutable pre-rebind plan selected for resume
         if: inputs.resume_recovery_run_id != '0'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ghcr-cache-recovery-plan-${{ inputs.baseline_source_sha }}-${{ inputs.resume_recovery_run_id }}-1
           path: artifacts/prior-transition-plan
@@ -329,13 +329,13 @@ jobs:
           done > "$input_dir/trusted-legacy-images.tsv"
 
       - name: Set up ARM64 verification
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
         with:
           image: tonistiigi/binfmt@sha256:8db0f28060565399642110b798c6c35efcac7c5b3b48c56d36503d3b4d8f93c8
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Promote exact containerd cache bytes to public GHCR
         env:
@@ -397,7 +397,7 @@ jobs:
         run: ./infra/oci/scripts/transition-k3s-cached-images.sh
 
       - name: Upload immutable pre-rebind plan before rollout
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ghcr-cache-recovery-plan-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -432,7 +432,7 @@ jobs:
 
       - name: Upload verified recovery stage
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ghcr-cache-recovery-stage-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ghcr-cache-recovery
@@ -441,7 +441,7 @@ jobs:
 
       - name: Upload recovery readiness diagnostics
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ghcr-cache-recovery-readiness-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ghcr-cache-recovery-readiness
@@ -469,7 +469,7 @@ jobs:
       name: oci-production
     steps:
       - name: Checkout exact recovery control commit without credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -511,7 +511,7 @@ jobs:
 
       - name: Upload public recovery validation diagnostics
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-ghcr-recovery-public-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-ghcr-recovery-public-validation
@@ -559,7 +559,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
 
       - name: Checkout exact recovery control commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -575,13 +575,13 @@ jobs:
           [ "$OCI_RUNTIME_MODE" = "k3s" ]
 
       - name: Download verified recovery stage
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ghcr-cache-recovery-stage-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ghcr-cache-recovery
 
       - name: Download exact historical infrastructure provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
           path: artifacts/infrastructure
@@ -639,7 +639,7 @@ jobs:
         run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
 
       - name: Upload first-attempt recovery provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ghcr-cache-recovery-${{ inputs.baseline_source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
