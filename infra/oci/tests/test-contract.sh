@@ -2303,25 +2303,44 @@ grep -Fq 'if: always()' <<<"$data_evidence_upload" &&
   grep -Fq 'if-no-files-found: ignore' <<<"$data_evidence_upload" ||
   fail "live-data workflow does not preserve available pre-data evidence"
 event_reschedule="$ROOT_DIR/event/src/scripts/rescheduleSyntheticEvent.ts"
+event_reschedule_test="$ROOT_DIR/event/src/scripts/__test__/rescheduleSyntheticEvent.test.ts"
 obsolete_cleanup="$ROOT_DIR/event/src/scripts/cleanupObsoleteSyntheticEvent.ts"
 [[ -f "$event_reschedule" ]] ||
   fail "fixed event-reschedule tool is missing"
+[[ -f "$event_reschedule_test" ]] ||
+  fail "fixed event-reschedule test is missing"
 [[ -f "$obsolete_cleanup" ]] ||
   fail "historical obsolete-event cleanup tool is missing"
-python3 - "$event_reschedule" "$data_runner" \
-  "$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh" \
-  "$obsolete_cleanup" <<'PY' || fail "fixed reschedule target consumers drift from the Event source"
+if ! python3 - "$event_reschedule" "$data_runner" \
+    "$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh" \
+    "$obsolete_cleanup" "$event_reschedule_test" <<'PY'
 import re
 import sys
 
-event_source_path, rollout_path, verifier_path, cleanup_path = sys.argv[1:]
+(
+    event_source_path,
+    rollout_path,
+    verifier_path,
+    cleanup_path,
+    event_test_path,
+) = sys.argv[1:]
 event_source = open(event_source_path, encoding="utf-8").read()
 rollout = open(rollout_path, encoding="utf-8").read()
 verifier = open(verifier_path, encoding="utf-8").read()
 cleanup_source = open(cleanup_path, encoding="utf-8").read()
+event_test = open(event_test_path, encoding="utf-8").read()
 iso_kickoff = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
 object_id = r"[0-9a-f]{24}"
 target_event_check = r'operation\.get\("targetEventId"\) != "([0-9a-f]{24})"'
+target_kickoff_check = (
+    r'operation\.get\("targetKickoff"\) != '
+    r'"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)"'
+)
+retained_v2_event_id = "42643b4c173d1c7b8eeed765"
+retained_v2_backoffice_id = "7420bc3b71340b4468c206e4"
+retained_v2_kickoff = "2026-09-11T08:05:00.000Z"
+event_projection_id = "a3c69f33302db13963b4524e"
+gamemaster_projection_id = "54e4a0020e2e9301de494852"
 
 def fixed_literal(source, name, shape, exported=True):
     prefix = "export const" if exported else "const"
@@ -2351,26 +2370,51 @@ cleanup_event_id = fixed_literal(cleanup_source, "OBSOLETE_EVENT_ID", object_id)
 cleanup_kickoff = fixed_literal(cleanup_source, "OBSOLETE_EVENT_KICKOFF", iso_kickoff)
 confirmation = f"RESCHEDULE_EVENT:{event_id}:{kickoff}"
 
-# The accepted identity contract: the current fixture is a new, distinct
-# lowercase 24-hex identity pair, and the historical fixture identities stay
-# reserved for live-betting-v1 cleanup evidence.
+# The accepted identity contract has three exact, distinct generations:
+# July cleanup v1, retained Sep11 reschedule v2, and current Sep12 v3.
+if (old_event_id, old_backoffice_id, old_kickoff) != (
+    "6a623af592af5a95b1d0bb79",
+    "6a623af592af5a95b1d0bb7a",
+    "2026-07-23T16:31:57.215Z",
+):
+    raise SystemExit("historical v1 identity drifted")
+if (event_id, backoffice_id, kickoff) != (
+    "eb4608ac531f5d9578113167",
+    "dc32b275f1514a495f56bc0a",
+    "2026-09-12T08:05:00.000Z",
+):
+    raise SystemExit("current v3 identity drifted")
 for label, value in (
-    ("current event", event_id),
-    ("current Backoffice", backoffice_id),
-    ("historical event", old_event_id),
-    ("historical Backoffice", old_backoffice_id),
+    ("v3 event", event_id),
+    ("v3 Backoffice", backoffice_id),
+    ("v2 event", retained_v2_event_id),
+    ("v2 Backoffice", retained_v2_backoffice_id),
+    ("v1 event", old_event_id),
+    ("v1 Backoffice", old_backoffice_id),
 ):
     if re.fullmatch(object_id, value) is None:
         raise SystemExit(f"{label} identity is not a lowercase 24-hex ObjectId")
-if len({event_id, backoffice_id, old_event_id, old_backoffice_id}) != 4:
-    raise SystemExit("fixture identities are not four distinct values")
+if len({
+    event_id,
+    backoffice_id,
+    retained_v2_event_id,
+    retained_v2_backoffice_id,
+    old_event_id,
+    old_backoffice_id,
+}) != 6:
+    raise SystemExit("v1, v2, and v3 fixture identities are not distinct")
+if len({kickoff, retained_v2_kickoff, old_kickoff}) != 3:
+    raise SystemExit("v1, v2, and v3 fixture kickoffs are not distinct")
 if cleanup_event_id != old_event_id:
     raise SystemExit("historical cleanup source drifts from the historical event identity")
 if cleanup_kickoff != old_kickoff:
     raise SystemExit("historical cleanup source drifts from the historical kickoff")
-if kickoff == old_kickoff:
-    raise SystemExit("current and historical kickoffs must differ")
-for label, value in (("current event", event_id), ("current Backoffice", backoffice_id)):
+for label, value in (
+    ("v3 event", event_id),
+    ("v3 Backoffice", backoffice_id),
+    ("v2 event", retained_v2_event_id),
+    ("v2 Backoffice", retained_v2_backoffice_id),
+):
     if value in cleanup_source:
         raise SystemExit(f"historical cleanup source references the {label} identity")
 
@@ -2394,59 +2438,97 @@ if re.findall(
 if rollout.count(event_id) != 2:
     raise SystemExit("rollout does not bind the current event identity exactly twice")
 for label, value in (
-    ("historical event", old_event_id),
-    ("historical Backoffice", old_backoffice_id),
+    ("v2 event", retained_v2_event_id),
+    ("v2 Backoffice", retained_v2_backoffice_id),
+    ("v1 event", old_event_id),
+    ("v1 Backoffice", old_backoffice_id),
 ):
     if value in rollout:
         raise SystemExit(f"rollout still references the {label} identity")
 
 if re.findall(
-    rf'operation\.get\("targetKickoff"\) != "({iso_kickoff})"',
+    target_kickoff_check,
     verifier,
-) != [kickoff]:
-    raise SystemExit("evidence verifier targetKickoff check drifts from the Event source")
+) != [retained_v2_kickoff, kickoff]:
+    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3 values")
 
-# Bind each verifier schema branch structurally: a positional grep cannot tell
-# the historical live-betting-v1 cleanup pin apart from the current v2
-# reschedule pin.
-def kind_branch_position(kind, label):
-    anchor = f'operation.get("kind") != "{kind}":'
-    if verifier.count(anchor) != 1:
-        raise SystemExit(f"evidence verifier has no single {label} kind branch")
-    return verifier.index(anchor)
-
-cleanup_branch = kind_branch_position("obsolete-event-cleanup", "v1 cleanup")
-reschedule_branch = kind_branch_position("fixed-event-reschedule", "v2 reschedule")
-if not cleanup_branch < reschedule_branch:
-    raise SystemExit("evidence verifier schema branches are not in v1/v2 order")
+# Bind every verifier branch structurally rather than accepting an unordered
+# set of identities that could be substituted across schema generations.
+kind_checks = [
+    (match.start(), match.group(1))
+    for match in re.finditer(
+        r'operation\.get\("kind"\) != "([^"]+)":',
+        verifier,
+    )
+]
+if [kind for _, kind in kind_checks] != [
+    "obsolete-event-cleanup",
+    "fixed-event-reschedule",
+    "fixed-event-reschedule",
+]:
+    raise SystemExit("evidence verifier does not expose exact v1/v2/v3 branches")
 pins = [
     (match.start(), match.group(1))
     for match in re.finditer(target_event_check, verifier)
 ]
-if len(pins) != 2:
-    raise SystemExit("evidence verifier does not pin exactly two target identities")
-v1_pins = [
-    value for start, value in pins if cleanup_branch < start < reschedule_branch
+kickoff_pins = [
+    (match.start(), match.group(1))
+    for match in re.finditer(target_kickoff_check, verifier)
 ]
-v2_pins = [value for start, value in pins if start > reschedule_branch]
-if len(v1_pins) != 1 or len(v2_pins) != 1:
-    raise SystemExit("evidence verifier schema branches do not pin one identity each")
-if v1_pins[0] != old_event_id:
-    raise SystemExit("evidence verifier v1 branch no longer pins the historical event")
-if v2_pins[0] != event_id:
-    raise SystemExit("evidence verifier v2 branch drifts from the Event source")
-if verifier.count(event_id) != 1 or verifier.count(old_event_id) != 1:
-    raise SystemExit("evidence verifier accepts more than one identity per schema branch")
-if backoffice_id in verifier or old_backoffice_id in verifier:
-    raise SystemExit("evidence verifier binds a Backoffice identity it must not know")
+if [value for _, value in pins] != [
+    old_event_id,
+    retained_v2_event_id,
+    event_id,
+]:
+    raise SystemExit("evidence verifier target pins are not exact v1/v2/v3 values")
+if [value for _, value in kickoff_pins] != [retained_v2_kickoff, kickoff]:
+    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3 values")
+positions = [
+    kind_checks[0][0],
+    pins[0][0],
+    kind_checks[1][0],
+    pins[1][0],
+    kickoff_pins[0][0],
+    kind_checks[2][0],
+    pins[2][0],
+    kickoff_pins[1][0],
+]
+if positions != sorted(positions):
+    raise SystemExit("evidence verifier v1/v2/v3 branch pins are out of order")
+for value in (old_event_id, retained_v2_event_id, event_id):
+    if verifier.count(value) != 1:
+        raise SystemExit("evidence verifier accepts more than one identity per schema branch")
+for value in (old_backoffice_id, retained_v2_backoffice_id, backoffice_id):
+    if value in verifier:
+        raise SystemExit("evidence verifier binds a Backoffice identity it must not know")
+
+for literal in (
+    f'const EXPECTED_EVENT_PROJECTION_ID = "{event_projection_id}";',
+    "new mongoose.Types.ObjectId(EXPECTED_EVENT_PROJECTION_ID)",
+    f'const EXPECTED_GAMEMASTER_PROJECTION_ID = "{gamemaster_projection_id}";',
+    "new mongoose.Types.ObjectId(EXPECTED_GAMEMASTER_PROJECTION_ID)",
+):
+    if literal not in event_test:
+        raise SystemExit(f"event test omits derived projection assertion: {literal}")
+for value in (event_projection_id, gamemaster_projection_id):
+    if any(value in source for source in (
+        event_source,
+        rollout,
+        verifier,
+        cleanup_source,
+    )):
+        raise SystemExit("derived projection identity escaped test-only coverage")
 PY
+then
+  fail "fixed reschedule target consumers drift from the Event source"
+fi
 for reschedule_contract in \
     'const RESCHEDULE_SOURCE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
     'const RESCHEDULE_SOURCE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
-    'export const RESCHEDULE_EVENT_ID = "42643b4c173d1c7b8eeed765";' \
-    'export const RESCHEDULE_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";' \
+    'export const RESCHEDULE_EVENT_ID = "eb4608ac531f5d9578113167";' \
+    'export const RESCHEDULE_BACKOFFICE_ID = "dc32b275f1514a495f56bc0a";' \
     'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
-    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-11T08:05:00.000Z";' \
+    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-12T08:05:00.000Z";' \
     'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
     'ROLLBACK_EVENT_RESCHEDULE:${RESCHEDULE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \

@@ -18,14 +18,19 @@ const SOURCE_SHA = "a".repeat(40);
 const LATER_SOURCE_SHA = "b".repeat(40);
 const OLD_EVENT_ID = "6a623af592af5a95b1d0bb79";
 const OLD_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
+const RETAINED_SEP11_EVENT_ID = "42643b4c173d1c7b8eeed765";
+const RETAINED_SEP11_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";
+const RETAINED_SEP11_KICKOFF = "2026-09-11T08:05:00.000Z";
+const EXPECTED_EVENT_PROJECTION_ID = "a3c69f33302db13963b4524e";
+const EXPECTED_GAMEMASTER_PROJECTION_ID = "54e4a0020e2e9301de494852";
+const EXPECTED_LIVE_SEED =
+  "40e2fd54b742be56dc1b503de1cc3102a97642196a21ee0ca6226fa33e46b496";
 const JOURNAL_ID =
   `event-reschedule:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}`;
-const safeApplyTime = new Date(
-  new Date(RESCHEDULE_TARGET_KICKOFF).getTime() - 60 * 60 * 1000
+const applyCutoffTime = new Date(
+  new Date(RESCHEDULE_TARGET_KICKOFF).getTime() - 20 * 60 * 1000
 );
-const unsafeApplyTime = new Date(
-  new Date(RESCHEDULE_TARGET_KICKOFF).getTime() - 10 * 60 * 1000
-);
+const eligibleApplyTime = new Date(applyCutoffTime.getTime() - 1);
 
 const databaseNames = () => {
   const prefix = `reschedule_${new mongoose.Types.ObjectId().toHexString()}`;
@@ -170,7 +175,7 @@ const apply = (
   mode: "apply",
   confirmation: APPLY_CONFIRMATION,
   sourceSha: SOURCE_SHA,
-  now: safeApplyTime,
+  now: eligibleApplyTime,
   connection: mongoose.connection,
   databaseNames: names,
   ...overrides,
@@ -194,6 +199,12 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
   const firstNames = databaseNames();
   const secondNames = databaseNames();
   try {
+    expect(RESCHEDULE_EVENT_ID).toBe("eb4608ac531f5d9578113167");
+    expect(RESCHEDULE_BACKOFFICE_ID).toBe("dc32b275f1514a495f56bc0a");
+    expect(RESCHEDULE_TARGET_KICKOFF).toBe("2026-09-12T08:05:00.000Z");
+    expect(applyCutoffTime.toISOString()).toBe("2026-09-12T07:45:00.000Z");
+    expect(eligibleApplyTime.toISOString()).toBe("2026-09-12T07:44:59.999Z");
+
     await Promise.all([
       insertBackofficeEvent(firstNames),
       insertBackofficeEvent(secondNames),
@@ -248,6 +259,12 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
     expect(backoffice?._id).toEqual(
       new mongoose.Types.ObjectId(RESCHEDULE_BACKOFFICE_ID)
     );
+    expect(firstEvent?._id).toEqual(
+      new mongoose.Types.ObjectId(EXPECTED_EVENT_PROJECTION_ID)
+    );
+    expect(firstGamemaster?._id).toEqual(
+      new mongoose.Types.ObjectId(EXPECTED_GAMEMASTER_PROJECTION_ID)
+    );
     expect(firstEvent).toMatchObject({
       eventId: RESCHEDULE_EVENT_ID,
       time: new Date(RESCHEDULE_TARGET_KICKOFF),
@@ -285,7 +302,7 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
       liveTransitions: [],
       liveMarkets: [],
     });
-    expect(firstGamemaster?.liveSeed).toMatch(/^[0-9a-f]{64}$/);
+    expect(firstGamemaster?.liveSeed).toBe(EXPECTED_LIVE_SEED);
     expect(firstGamemaster?.liveSeed).not.toBe(RESCHEDULE_EVENT_ID);
     expect(backoffice?.time).toBe(RESCHEDULE_TARGET_KICKOFF);
     expect(typeof backoffice?.time).toBe("string");
@@ -359,9 +376,9 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
   }
 });
 
-it("leaves the old fixture and its archived Slip mirrors byte-identical", async () => {
+it("leaves July and Sep11 fixture history byte-identical", async () => {
   const names = databaseNames();
-  const oldDocuments = [
+  const preservedDocuments = [
     {
       database: "backoffice" as const,
       collection: "events",
@@ -434,14 +451,52 @@ it("leaves the old fixture and its archived Slip mirrors byte-identical", async 
         rows: [{ eventId: OLD_EVENT_ID, status: "WIN" }],
       },
     },
+    {
+      database: "backoffice" as const,
+      collection: "events",
+      document: {
+        _id: new mongoose.Types.ObjectId(RETAINED_SEP11_BACKOFFICE_ID),
+        eventId: RETAINED_SEP11_EVENT_ID,
+        name: RESCHEDULE_EVENT_NAME,
+        home: RESCHEDULE_EVENT_HOME,
+        away: RESCHEDULE_EVENT_AWAY,
+        time: RETAINED_SEP11_KICKOFF,
+        status: "NO_RESULT",
+        visibility: "OFFLINE",
+        retainedEvidence: "sep11",
+      },
+    },
+    {
+      database: "event" as const,
+      collection: "events",
+      document: oldEventProjection({
+        eventId: RETAINED_SEP11_EVENT_ID,
+        time: new Date(RETAINED_SEP11_KICKOFF),
+        live: { phase: "FULL_TIME", sequence: 84 },
+        retainedEvidence: "sep11",
+      }),
+    },
+    {
+      database: "slip" as const,
+      collection: "sliparchives",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "retained-sep11-slip",
+        rows: [{
+          eventId: RETAINED_SEP11_EVENT_ID,
+          status: "WIN",
+          snapshotKickoff: RETAINED_SEP11_KICKOFF,
+        }],
+      },
+    },
   ];
   try {
-    for (const fixture of oldDocuments) {
+    for (const fixture of preservedDocuments) {
       await database(names, fixture.database)
         .collection(fixture.collection)
         .insertOne(fixture.document);
     }
-    const before = await Promise.all(oldDocuments.map(async (fixture) =>
+    const before = await Promise.all(preservedDocuments.map(async (fixture) =>
       canonicalEjson(await database(names, fixture.database)
         .collection(fixture.collection)
         .findOne({
@@ -455,8 +510,8 @@ it("leaves the old fixture and its archived Slip mirrors byte-identical", async 
       snapshotDocumentCount: 0,
       changed: 4,
     });
-    for (let index = 0; index < oldDocuments.length; index += 1) {
-      const fixture = oldDocuments[index];
+    for (let index = 0; index < preservedDocuments.length; index += 1) {
+      const fixture = preservedDocuments[index];
       expect(canonicalEjson(await database(names, fixture.database)
         .collection(fixture.collection)
         .findOne({
@@ -477,8 +532,8 @@ it("leaves the old fixture and its archived Slip mirrors byte-identical", async 
       changed: 4,
       journalVerified: true,
     });
-    for (let index = 0; index < oldDocuments.length; index += 1) {
-      const fixture = oldDocuments[index];
+    for (let index = 0; index < preservedDocuments.length; index += 1) {
+      const fixture = preservedDocuments[index];
       expect(canonicalEjson(await database(names, fixture.database)
         .collection(fixture.collection)
         .findOne({
@@ -643,7 +698,7 @@ it.each([
   }
 });
 
-it("resumes a prepared partial write, including inside the lead-time window", async () => {
+it("resumes a prepared partial write at the apply cutoff", async () => {
   const names = databaseNames();
   try {
     await insertBackofficeEvent(names);
@@ -667,7 +722,7 @@ it("resumes a prepared partial write, including inside the lead-time window", as
       journalVerified: true,
     });
 
-    const resumed = await apply(names, { now: unsafeApplyTime });
+    const resumed = await apply(names, { now: applyCutoffTime });
     expect(resumed).toMatchObject({
       state: "applied",
       ready: true,
@@ -687,11 +742,11 @@ it("resumes a prepared partial write, including inside the lead-time window", as
   }
 });
 
-it("blocks an unstarted apply inside the lead-time window without creating a journal", async () => {
+it("blocks an unstarted apply exactly at the cutoff before journal creation", async () => {
   const names = databaseNames();
   try {
     await insertBackofficeEvent(names);
-    const blocked = await apply(names, { now: unsafeApplyTime });
+    const blocked = await apply(names, { now: applyCutoffTime });
     expect(blocked).toMatchObject({
       state: "blocked",
       ready: false,
@@ -711,7 +766,7 @@ it("blocks an unstarted apply inside the lead-time window without creating a jou
   }
 });
 
-it("blocks a prepared but unstarted apply inside the lead-time window", async () => {
+it("blocks a prepared but unstarted apply at the cutoff", async () => {
   const names = databaseNames();
   try {
     await insertBackofficeEvent(names);
@@ -725,7 +780,7 @@ it("blocks a prepared but unstarted apply inside the lead-time window", async ()
       { eventId: RESCHEDULE_EVENT_ID },
     );
 
-    const blocked = await apply(names, { now: unsafeApplyTime });
+    const blocked = await apply(names, { now: applyCutoffTime });
     expect(blocked).toMatchObject({
       state: "blocked",
       ready: false,
@@ -752,7 +807,7 @@ it("binds a prepared journal to the source SHA that created it", async () => {
         mode,
         confirmation: mode === "apply" ? APPLY_CONFIRMATION : undefined,
         sourceSha: LATER_SOURCE_SHA,
-        now: safeApplyTime,
+        now: eligibleApplyTime,
         connection: mongoose.connection,
         databaseNames: names,
       });
@@ -1156,7 +1211,7 @@ it("rejects missing confirmations, invalid source SHAs, and invalid modes", asyn
     await expect(runSyntheticEventReschedule({
       mode: "apply",
       sourceSha: SOURCE_SHA,
-      now: safeApplyTime,
+      now: eligibleApplyTime,
       connection: mongoose.connection,
       databaseNames: names,
     })).rejects.toThrow(`apply requires confirmation ${APPLY_CONFIRMATION}`);
