@@ -162,6 +162,16 @@ EXPECTED_UPSTREAM_RUN_ID=99 PROVENANCE_MODE=recovery \
 EXPECTED_RECOVERY_RUN_ID=777 EXPECTED_RECOVERY_RUN_ATTEMPT=1 \
 OUTPUT_FILE="$WORK_DIR/recovery-images.tsv" VERIFY_REMOTE=0 BOOT_IMAGES=0 \
   "$OCI_DIR/scripts/verify-images.sh" >/dev/null
+for generation_profile in current compatible; do
+  if PROVENANCE_DIR="$WORK_DIR/provenance" SOURCE_SHA="$CURRENT_SHA" \
+      PROVENANCE_MODE=recovery GENERATION_PROFILE="$generation_profile" \
+      EXPECTED_RECOVERY_RUN_ID=777 EXPECTED_RECOVERY_RUN_ATTEMPT=1 \
+      OUTPUT_FILE="$WORK_DIR/rejected-recovery-$generation_profile.tsv" \
+      VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+      "$OCI_DIR/scripts/verify-images.sh" >/dev/null 2>&1; then
+    fail "recovery provenance accepted $generation_profile generation profile"
+  fi
+done
 sed -i.bak 's/^build_run_id=101$/build_run_id=777/' "$WORK_DIR/provenance/auth.env"
 if PROVENANCE_DIR="$WORK_DIR/provenance" SOURCE_SHA="$CURRENT_SHA" \
     EXPECTED_BUILD_RUN_ID=101 EXPECTED_BUILD_RUN_ATTEMPT=1 \
