@@ -74,7 +74,7 @@ required aggregate gate includes:
 | Workflow trigger guard | Production-capable workflows keep their intended triggers and trust boundaries |
 | Deployment safety contracts | Readiness, activation, rollback, migration, and recovery invariants remain intact |
 | Auth container smoke | A production-built Auth container typechecks, starts, and serves the expected API shape |
-| Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
+| Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, Telemetry, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
 | Client production build | The React application builds successfully in CI |
 
 The OCI-specific validation workflow also checks workflow syntax and runs the
