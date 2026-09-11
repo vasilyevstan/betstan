@@ -128,7 +128,7 @@ jobs:
 
     steps:
       - name: Checkout exact current master
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
@@ -329,7 +329,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: inputs.phase == 'bootstrap' || inputs.phase == 'validate' || inputs.phase == 'prune' || inputs.phase == 'repair-build'
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Bootstrap repository-linked sentinel without claiming visibility
         if: inputs.phase == 'bootstrap'
@@ -603,7 +603,7 @@ jobs:
 
       - name: Download exact read-only package validation
         if: inputs.phase == 'prune'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ghcr-package-management-validate-${{ inputs.validation_run_id }}-1
           path: artifacts/validated-ghcr-package-management
@@ -716,7 +716,7 @@ jobs:
 
       - name: Upload immutable package-management evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ghcr-package-management-${{ inputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/ghcr-package-management

@@ -111,7 +111,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/oci-home" "$RUNNER_TEMP/oci-home/.kube"
 
       - name: Checkout approved master commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 0
@@ -239,7 +239,7 @@ jobs:
           chmod 700 "$HOME" "$HOME/.kube"
 
       - name: Download exact OCI image provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-image-provenance-${{ inputs.approved_sha }}-${{ inputs.build_run_id }}-1
           path: artifacts/build
@@ -248,7 +248,7 @@ jobs:
           run-id: ${{ inputs.build_run_id }}
 
       - name: Download exact OCI infrastructure provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-infrastructure-provenance-${{ inputs.infrastructure_run_id }}-1
           path: artifacts/infrastructure
@@ -257,7 +257,7 @@ jobs:
           run-id: ${{ inputs.infrastructure_run_id }}
 
       - name: Download exact live data readiness evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-live-data-rollout-${{ inputs.data_run_id }}-1
           path: artifacts/data
@@ -266,7 +266,7 @@ jobs:
           run-id: ${{ inputs.data_run_id }}
 
       - name: Download exact pre-mutation rollback baseline
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: oci-live-data-baselines-${{ inputs.data_run_id }}-1
           path: artifacts/data-baselines
@@ -473,7 +473,7 @@ jobs:
             ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
       - name: Upload protected OCI rollback baseline
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-production-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-baseline
@@ -593,7 +593,7 @@ jobs:
 
       - name: Upload sanitized live readiness evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-live-readiness-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-deploy-validation/live-readiness
@@ -632,7 +632,7 @@ jobs:
             steps.health.outcome == 'failure' ||
             steps.release_runtime.outcome == 'failure' ||
             steps.rehold.outcome == 'failure')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-deploy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-deploy-validation
@@ -640,7 +640,7 @@ jobs:
           retention-days: 14
 
       - name: Upload exact deployment provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-deploy-provenance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -695,7 +695,7 @@ jobs:
       name: oci-production
     steps:
       - name: Checkout exact deployed commit without credentials
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.approved_sha }}
           fetch-depth: 1
@@ -736,7 +736,7 @@ jobs:
 
       - name: Upload public validation diagnostics
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: oci-public-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/oci-public-validation
