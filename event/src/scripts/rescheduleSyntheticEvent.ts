@@ -8,13 +8,13 @@ import {
 
 const RESCHEDULE_SOURCE_EVENT_ID = "6a623af592af5a95b1d0bb79";
 const RESCHEDULE_SOURCE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
-export const RESCHEDULE_EVENT_ID = "42643b4c173d1c7b8eeed765";
-export const RESCHEDULE_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";
+export const RESCHEDULE_EVENT_ID = "eb4608ac531f5d9578113167";
+export const RESCHEDULE_BACKOFFICE_ID = "dc32b275f1514a495f56bc0a";
 export const RESCHEDULE_EVENT_NAME = "Home 1 - Away 1";
 export const RESCHEDULE_EVENT_HOME = "Home 1";
 export const RESCHEDULE_EVENT_AWAY = "Away 1";
 export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";
-export const RESCHEDULE_TARGET_KICKOFF = "2026-09-11T08:05:00.000Z";
+export const RESCHEDULE_TARGET_KICKOFF = "2026-09-12T08:05:00.000Z";
 export const APPLY_CONFIRMATION =
   `RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}`;
 export const ROLLBACK_CONFIRMATION =
@@ -29,7 +29,7 @@ const MINIMUM_APPLY_LEAD_MS = 20 * 60 * 1000;
 // reviewed value fixed makes journal targets reproducible without deriving
 // private simulation randomness from a public event ID.
 const RESCHEDULE_LIVE_SEED =
-  "6dcab4b9e6d3df5ff48ddd5f864b2b40c7480d90c41a697c8344455768f4d922";
+  "40e2fd54b742be56dc1b503de1cc3102a97642196a21ee0ca6226fa33e46b496";
 
 type RescheduleMode = "dry-run" | "apply" | "verify" | "rollback";
 type JournalState = "prepared" | "applied" | "rolled-back";

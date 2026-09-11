@@ -260,8 +260,8 @@ if [[ "${1:-}" == "logs" ]]; then
           --arg blocker_collection "$blocker_collection" \
           --argjson changed "$changed" '{
             mode:$mode,
-            targetEventId:"42643b4c173d1c7b8eeed765",
-            targetKickoff:"2026-09-11T08:05:00.000Z",
+            targetEventId:"eb4608ac531f5d9578113167",
+            targetKickoff:"2026-09-12T08:05:00.000Z",
             state:"blocked",
             ready:false,
             scanned:20,
@@ -326,8 +326,8 @@ if [[ "${1:-}" == "logs" ]]; then
       --argjson journal_verified "$journal_verified" \
       --argjson snapshot_document_count "$snapshot_document_count" '{
         mode:$mode,
-        targetEventId:"42643b4c173d1c7b8eeed765",
-        targetKickoff:"2026-09-11T08:05:00.000Z",
+        targetEventId:"eb4608ac531f5d9578113167",
+        targetKickoff:"2026-09-12T08:05:00.000Z",
         state:$state,
         ready:true,
         scanned:20,
@@ -569,6 +569,7 @@ run_phase() {
 
 pending_output="$work_dir/pending"
 run_phase dry-run pending 4001 "$pending_output"
+grep -Fxq 'schema_version=live-betting-v3' "$pending_output/provenance.env"
 grep -Fxq 'phase=dry-run' "$pending_output/provenance.env"
 grep -Fxq 'backfill_complete=false' "$pending_output/provenance.env"
 grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
@@ -606,7 +607,7 @@ jq -e '
   .kind == "fixed-event-reschedule" and
   .stage == "preflight" and
   .mode == "dry-run" and
-  .targetKickoff == "2026-09-11T08:05:00.000Z" and
+  .targetKickoff == "2026-09-12T08:05:00.000Z" and
   .state == "blocked" and
   .ready == false and
   .changed == 0 and
@@ -633,8 +634,8 @@ jq -e \
     .workflowRunAttempt == "1" and
     .phase == "dry-run" and
     .stage == "preflight" and
-    .targetEventId == "42643b4c173d1c7b8eeed765" and
-    .targetKickoff == "2026-09-11T08:05:00.000Z" and
+    .targetEventId == "eb4608ac531f5d9578113167" and
+    .targetKickoff == "2026-09-12T08:05:00.000Z" and
     .mode == "dry-run" and
     .state == "blocked" and
     .ready == false and
@@ -918,6 +919,7 @@ jq -e '
 
 backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
+grep -Fxq 'schema_version=live-betting-v3' "$backfill_output/provenance.env"
 grep -Fxq 'phase=apply-backfills' "$backfill_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
 grep -Fxq 'event_reschedule_complete=true' "$backfill_output/provenance.env"
@@ -928,6 +930,8 @@ normal_baseline="$work_dir/normal-baseline"
 normal_baseline_sha="$(make_resume_baseline "$normal_baseline" 4003 0)"
 final_output="$work_dir/final"
 run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_sha"
+grep -Fxq 'schema_version=live-betting-v3' "$final_output/provenance.env"
+grep -Fxq 'schema_version=live-betting-v3' "$final_output/schema.env"
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
@@ -966,7 +970,7 @@ mv \
   "$legacy_output/reports/preflight-event-reschedule.json" \
   "$legacy_output/reports/preflight-obsolete-event.json"
 # Historical live-betting-v1 cleanup evidence stays pinned to the original
-# obsolete event identity; it must not inherit the current v2 reschedule ID.
+# obsolete event identity; it must not inherit a reschedule identity.
 jq '
   {
     kind:"obsolete-event-cleanup",
@@ -999,7 +1003,7 @@ root = Path(sys.argv[1])
 for name in ("provenance.env", "schema.env"):
     path = root / name
     text = path.read_text(encoding="utf-8")
-    text = text.replace("schema_version=live-betting-v2", "schema_version=live-betting-v1")
+    text = text.replace("schema_version=live-betting-v3", "schema_version=live-betting-v1")
     text = text.replace(
         "event_reschedule_complete=true",
         "obsolete_event_cleanup_complete=true",
@@ -1012,6 +1016,10 @@ journal["schema_version"] = "live-betting-v1"
 journal["obsolete_event_cleanup_complete"] = journal.pop(
     "event_reschedule_complete"
 )
+journal["reports"] = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((root / "reports").glob("*.json"))
+]
 journal_path.write_text(
     json.dumps(journal, separators=(",", ":")) + "\n",
     encoding="utf-8",
@@ -1026,7 +1034,187 @@ EXPECTED_PHASE=apply-slip-index \
 EXPECTED_RUN_ID=4003 \
 EXPECTED_RUN_ATTEMPT=1 \
   "$VERIFIER" >/dev/null ||
-  fail "v2 verifier rejected a valid historical v1 data artifact"
+  fail "v3 verifier rejected a valid historical v1 data artifact"
+
+retained_v2_output="$work_dir/retained-v2"
+cp -R "$final_output" "$retained_v2_output"
+rm -f "$retained_v2_output/SHA256SUMS"
+python3 - "$retained_v2_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "schema_version=live-betting-v3",
+        "schema_version=live-betting-v2",
+    )
+    path.write_text(text, encoding="utf-8")
+
+for path in sorted((root / "reports").glob("*-event-reschedule.json")):
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["targetEventId"] = "42643b4c173d1c7b8eeed765"
+    report["targetKickoff"] = "2026-09-11T08:05:00.000Z"
+    path.write_text(
+        json.dumps(report, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v2"
+journal["reports"] = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((root / "reports").glob("*.json"))
+]
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$retained_v2_output"
+EVIDENCE_DIR="$retained_v2_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_PHASE=apply-slip-index \
+EXPECTED_RUN_ID=4003 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "v3 verifier rejected a valid retained v2 data artifact"
+
+v1_as_v2_output="$work_dir/v1-as-v2"
+cp -R "$legacy_output" "$v1_as_v2_output"
+rm -f "$v1_as_v2_output/SHA256SUMS"
+python3 - "$v1_as_v2_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "schema_version=live-betting-v1",
+            "schema_version=live-betting-v2",
+        ),
+        encoding="utf-8",
+    )
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v2"
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$v1_as_v2_output"
+if EVIDENCE_DIR="$v1_as_v2_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "v1 cleanup evidence was accepted after v2 schema substitution"
+fi
+
+v2_as_v3_output="$work_dir/v2-as-v3"
+cp -R "$retained_v2_output" "$v2_as_v3_output"
+rm -f "$v2_as_v3_output/SHA256SUMS"
+python3 - "$v2_as_v3_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "schema_version=live-betting-v2",
+            "schema_version=live-betting-v3",
+        ),
+        encoding="utf-8",
+    )
+for path in sorted((root / "reports").glob("*-event-reschedule.json")):
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["targetEventId"] = "eb4608ac531f5d9578113167"
+    report["targetKickoff"] = "2026-09-12T08:05:00.000Z"
+    path.write_text(
+        json.dumps(report, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v3"
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$v2_as_v3_output"
+if EVIDENCE_DIR="$v2_as_v3_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "v2 Sep11 evidence was accepted after v3 schema substitution"
+fi
+
+v3_as_v2_output="$work_dir/v3-as-v2"
+cp -R "$final_output" "$v3_as_v2_output"
+rm -f "$v3_as_v2_output/SHA256SUMS"
+python3 - "$v3_as_v2_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "schema_version=live-betting-v3",
+            "schema_version=live-betting-v2",
+        ),
+        encoding="utf-8",
+    )
+for path in sorted((root / "reports").glob("*-event-reschedule.json")):
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["targetEventId"] = "42643b4c173d1c7b8eeed765"
+    report["targetKickoff"] = "2026-09-11T08:05:00.000Z"
+    path.write_text(
+        json.dumps(report, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v2"
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$v3_as_v2_output"
+if EVIDENCE_DIR="$v3_as_v2_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "v3 Sep12 evidence was accepted after v2 schema substitution"
+fi
 
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"

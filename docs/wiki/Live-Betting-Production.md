@@ -279,37 +279,45 @@ selection, label, and price. A Correct Score selection ID is retained only when
 the repaired board keeps the same label; replacement outcomes receive stable
 new IDs so an old draft cannot be visually reinterpreted as a different score.
 
-A one-time fixed event provisioning step is part of the protected live-data
-rollout. It is not exposed as an HTTP endpoint, accepts no caller-selected
-identity or kickoff, and ships through the normal release path rather than any
-bypass.
+A one-time fixed event provisioning correction is part of the protected
+live-data rollout. It uses the existing operator, is not exposed as an HTTP
+endpoint, accepts no caller-selected identity or kickoff, and ships through
+the normal release path rather than any bypass. It is not a generic scheduler
+or configuration feature, and it never reschedules a fixture in place.
 
-The original fixture — Backoffice record `6a623af592af5a95b1d0bb7a` / event
-`6a623af592af5a95b1d0bb79` at `2026-07-23T16:31:57.215Z` — is no longer
-rescheduled in place. Its protected dry run found existing dependencies and
-changed zero records, so that identity and its historical Slip, Bet,
-Moderation, and Resulting rows remain untouched.
+The original July fixture, public Event ID `6a623af592af5a95b1d0bb79` at
+`2026-07-23T16:31:57.215Z`, remains the exact read-only template prerequisite.
+The operator performs one bounded check that its reviewed offline Backoffice
+record still matches, but does not mutate it or traverse its historical Slip,
+Bet, Moderation, or Resulting rows. The earlier protected dry run found
+dependencies and changed zero records, so the July fixture and its history
+remain untouched.
 
-The corrected operator instead provisions a new offline fixture identity:
-Backoffice record `7420bc3b71340b4468c206e4` with Event and Gamemaster event
-`42643b4c173d1c7b8eeed765`, for target kickoff `2026-09-11T08:05:00.000Z`. All
-three documents are built from reviewed constants rather than cloned from
-mutable source state, so the target is reproducible from the source revision
-alone: the same fixture name and teams, `NO_RESULT` status, `OFFLINE`
-visibility, deterministic 1X2 and Correct Score products, and a fixed reviewed
-live seed. Backoffice stores the kickoff as a string while Event and
-Gamemaster store it as a date, and creation-request and publication-pending
-fields are absent rather than set.
+The September 11 fixed fixture, public Event ID
+`42643b4c173d1c7b8eeed765` at `2026-09-11T08:05:00.000Z`, was applied
+offline. Its activation request was superseded before authority or dispatch
+when protected `master` advanced. It was never activated, remains offline and
+untouched, and requires no cleanup.
 
-Before writing, the operator performs one bounded read-only check that the
-original Backoffice record still matches its reviewed identity, and reads no
-other historical data. Every collision, dependency, archive, and mirror guard
-keys to the new event ID, so none of them traverses or mutates old history. An
-existing document under the new identity, a Gamemaster archive or cleanup
-tombstone, a Moderation live mirror, or any known betting, settlement, retry,
-pending-update, or Slip reference to the new event blocks the run. Apply still
-starts no later than twenty minutes before the target kickoff and runs only
-while writers are quiesced and the shared database operation lock is held.
+The pending correction fixes the current acceptance target to public Event ID
+`eb4608ac531f5d9578113167`, with kickoff
+`2026-09-12T08:05:00.000Z`. It has not yet been applied, deployed, or
+activated. Its initial apply must begin strictly before
+`2026-09-12T07:45:00.000Z`, the existing twenty-minute lead boundary; starting
+at exactly that time is rejected.
+
+The September 12 target records are built from reviewed constants rather than
+cloned from mutable production state. They retain the reviewed fixture name
+and teams, `NO_RESULT` status, `OFFLINE` visibility, and deterministic 1X2 and
+Correct Score products. The deterministic live input remains private.
+Creation-request and publication-pending fields are absent rather than set.
+
+Before writing, the operator reads only the exact July template prerequisite
+and checks only September 12 target collisions and dependencies. September 11
+is neither read nor mutated. An existing September 12 target, archive or
+cleanup tombstone, live mirror, or known betting, settlement, retry,
+pending-update, or Slip reference blocks the run. Apply runs only while writers
+are quiesced and the shared database operation lock is held.
 
 The operator writes a fixed-ID journal before target writes. That journal
 stores canonical Extended JSON and SHA-256 digests for both the recorded
@@ -321,18 +329,19 @@ After the journal is applied, a later release SHA receives a completed
 one-time result so natural match progression does not block unrelated
 releases.
 
-Rollback runs in the inverse Backoffice, Gamemaster, then Event order, deletes
-exactly the three inserted documents, and records a terminal rolled-back
-state. Because the preimage is empty, rollback never deletes or restores a
-historical record. It resumes safely when a prior rollback attempt already
-deleted one or more exact targets. Otherwise it is available only while each
-document still matches either the journal target or its absent preimage and no
-new live, visibility, betting, or dependency state has appeared; any unknown
-state fails closed instead of proceeding. The protected pre-mutation database
-baseline is still retained by the normal release chain.
+Apply creates only the journal-bound September 12 targets. Rollback runs in the
+inverse Backoffice, Gamemaster, then Event order, removes only those exact
+targets, and records a terminal rolled-back state. Because the preimage is
+empty, rollback never deletes or restores a historical record and performs no
+July or September 11 cleanup. It resumes safely when a prior rollback attempt
+already removed one or more exact targets. Otherwise it is available only
+while each document still matches either the journal target or its absent
+preimage and no new live, visibility, betting, or dependency state has
+appeared; any unknown state fails closed instead of proceeding. The protected
+pre-mutation database baseline is still retained by the normal release chain.
 The historical destructive fixture cleanup remains uninvoked by the rollout
-and stays bound to the original fixture identity and kickoff, so it cannot
-match the new event.
+and stays bound to the original July fixture identity and kickoff, so it
+cannot match either September event.
 
 A blocked reschedule remains a failed data phase even though the operator CLI
 emits a structured report before exiting nonzero. The rollout wrapper accepts
@@ -359,10 +368,12 @@ discarded before sanitization. Transient status and complete-log transport
 failures are retried only within the active execution or terminal deadline;
 persistent failures still stop the phase without success-shaped evidence.
 
-New rollout artifacts use `live-betting-v2` evidence with
-`event_reschedule_complete`. The verifier still accepts exact historical
-`live-betting-v1` cleanup evidence so retained rollback and resume artifacts
-remain usable.
+New September 12 rollout and evidence artifacts use `live-betting-v3` with
+`event_reschedule_complete`. Compatibility is exact rather than
+schema-label-only: the verifier continues to accept the original July
+`live-betting-v1` cleanup evidence and the September 11 `live-betting-v2`
+reschedule evidence, so both historical generations remain verifiable. Their
+identities and meanings cannot be substituted across evidence versions.
 
 The immediate pre-deploy rollback baseline captured former production source
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment
