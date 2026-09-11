@@ -1,11 +1,17 @@
 import {
   APublisher,
-  IPlaceBetEvent,
   ISettleSlipEvent,
   QueueNames,
 } from "@betstan/common";
 
-class SettleSlipPublisher extends APublisher<ISettleSlipEvent> {
+export interface ResultingSettleSlipEvent
+  extends Omit<ISettleSlipEvent, "data"> {
+  data: ISettleSlipEvent["data"] & {
+    occurredAt?: string;
+  };
+}
+
+class SettleSlipPublisher extends APublisher<ResultingSettleSlipEvent> {
   serviceName: string = "resulting_settle_slip";
   queue: QueueNames.SETTLE_SLIP = QueueNames.SETTLE_SLIP;
 }

@@ -239,6 +239,31 @@ it("shuts down idempotently", async () => {
   expect(processLike.exit).toHaveBeenCalledTimes(1);
 });
 
+it("starts and closes the injected probe listener with the runtime", async () => {
+  const connection = createConnection();
+  const { processLike } = createProcessLike();
+  const close = jest.fn().mockResolvedValue(undefined);
+  const startProbeListener = jest.fn().mockResolvedValue({ close });
+
+  const runtime = await startResultingService(config, {
+    closeBroker: jest.fn().mockResolvedValue(undefined),
+    closeDb: jest.fn().mockResolvedValue(undefined),
+    connectBroker: jest.fn().mockResolvedValue(undefined),
+    connectDb: jest.fn().mockResolvedValue(undefined),
+    createListeners: jest.fn().mockReturnValue([]),
+    createWorkers: jest.fn().mockReturnValue([]),
+    disconnectDb: jest.fn().mockResolvedValue(undefined),
+    getBrokerConnection: jest.fn().mockReturnValue(connection),
+    logger: { error: jest.fn(), log: jest.fn() },
+    processLike,
+    startProbeListener,
+  });
+
+  expect(startProbeListener).toHaveBeenCalledTimes(1);
+  await runtime.shutdown(0);
+  expect(close).toHaveBeenCalledTimes(1);
+});
+
 it("uses removeListener fallback and shuts down on signal handlers", async () => {
   const connection = createConnection();
   const { handlers, processLike } = createProcessLike();

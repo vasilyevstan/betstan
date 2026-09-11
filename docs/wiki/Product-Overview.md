@@ -23,6 +23,7 @@ contain a deposit, withdrawal, card-payment, or external-wallet integration.
 | Settlement | Pre-match and live rows are settled from authoritative match and market outcomes, then rolled up into the final bet result. |
 | Bet history | My Bets distinguishes live from pre-match bets and shows moderation and settlement outcomes without exposing internal identifiers. |
 | Statistics | Public aggregate statistics provide a privacy-limited leaderboard view. |
+| Telemetry | A public dashboard shows bounded fourteen-day operational counts and coarse point-in-time application health. |
 | Backoffice | The event catalog and bounded create, visibility, and result controls are intentionally public in the current product. |
 | Responsive UI | The client supports three layout variants, light/dark themes, keyboard access, and desktop/tablet/mobile layouts. |
 

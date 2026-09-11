@@ -81,7 +81,7 @@ esac
 MOCK
 chmod +x "$WORK_DIR/bin/docker"
 
-services=(auth bet backoffice client event gamemaster moderation resulting slip)
+services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
 index=1
 repository=ghcr.io/vasilyevstan/betstan-images
 for service in "${services[@]}"; do
@@ -130,8 +130,8 @@ GITHUB_RUN_ID="$NEW_RUN_ID" \
 GITHUB_RUN_ATTEMPT=1 \
   "$OCI_DIR/scripts/reuse-images.sh" >/dev/null
 
-[[ "$(grep -c '^buildx imagetools create --prefer-index=false --tag ' "$WORK_DIR/docker.log")" == "9" ]] ||
-  fail "reuse did not create exactly nine immutable tags"
+[[ "$(grep -c '^buildx imagetools create --prefer-index=false --tag ' "$WORK_DIR/docker.log")" == "10" ]] ||
+  fail "reuse did not create exactly ten immutable tags"
 for service in "${services[@]}"; do
   provenance="$WORK_DIR/output/${service}.env"
   [[ -s "$provenance" ]] || fail "reuse provenance is missing for $service"

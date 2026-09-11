@@ -79,8 +79,8 @@ File.readlines(images_file, chomp: true).reject(&:empty?).each do |line|
   abort "duplicate image provenance for #{service}" if images.key?(service)
   images[service] = image_ref
 end
-expected = %w[auth bet backoffice client event gamemaster moderation resulting slip]
-abort "image provenance must contain exactly nine services" unless images.keys.sort == expected.sort
+expected = %w[auth bet backoffice client event gamemaster moderation resulting slip telemetry]
+abort "image provenance must contain exactly ten services" unless images.keys.sort == expected.sort
 
 documents = YAML.load_stream(File.read(raw_file)).compact
 namespaced_kinds = documents.map { |document| document["kind"] }.uniq -
@@ -154,7 +154,7 @@ abort "expected exactly one Mongo PV" unless documents.count { |document|
   document["kind"] == "PersistentVolume" &&
     document.dig("spec", "capacity", "storage") == "50Gi"
 } == 1
-abort "expected ten deployments" unless count.call("Deployment") == 10
+abort "expected eleven deployments" unless count.call("Deployment") == 11
 abort "expected canonical and redirect ingresses" unless count.call("Ingress") == 2
 abort "expected canonical and diagnostic certificates" unless count.call("Certificate") == 2
 ingress_hosts = documents.select { |document| document["kind"] == "Ingress" }.flat_map {

@@ -74,7 +74,7 @@ required aggregate gate includes:
 | Workflow trigger guard | Production-capable workflows keep their intended triggers and trust boundaries |
 | Deployment safety contracts | Readiness, activation, rollback, migration, and recovery invariants remain intact |
 | Auth container smoke | A production-built Auth container typechecks, starts, and serves the expected API shape |
-| Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
+| Service coverage | Auth, Backoffice, Bet, Event, Gamemaster, Moderation, Resulting, Slip, Telemetry, and Client meet at least 80% line coverage and 80% branch coverage where branches exist |
 | Client production build | The React application builds successfully in CI |
 
 The OCI-specific validation workflow also checks workflow syntax and runs the
@@ -100,9 +100,9 @@ sentinel. Focused negative tests fail closed when inert files are missing or
 symlinked, or when those pins are removed.
 
 Alongside the reservation the repository carries an inert coverage descriptor
-and its supporting tooling. The descriptor records ten packages - Auth,
+and its supporting tooling. The descriptor records eleven packages - Auth,
 Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
-Slip - a pinned Node runtime, and the same 80% line and 80% branch thresholds
+Slip, plus Telemetry - a pinned Node runtime, and the same 80% line and 80% branch thresholds
 the current gate applies. The checked-in authorization inventory is empty, so
 the foundation remains inert: the coverage engine is not an active required
 check, and coverage continues to be enforced by the existing per-package

@@ -123,6 +123,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
+local_ingress="$ROOT_DIR/infra/k8s-dev/ingress-srv.yaml"
+ingress_guard="$ROOT_DIR/infra/azure/agents/ingress-routing-guard-stan.sh"
+INGRESS_PROFILE=local-dev \
+INGRESS_FILE="$local_ingress" \
+LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+  "$ingress_guard" >/dev/null ||
+  fail "active local-development ingress failed its route guard"
+grep -v '/api/telemetry/?(.*)' "$local_ingress" \
+  >"$WORK_DIR/local-ingress-missing-telemetry.yaml"
+if INGRESS_PROFILE=local-dev \
+    INGRESS_FILE="$WORK_DIR/local-ingress-missing-telemetry.yaml" \
+    LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+    "$ingress_guard" >/dev/null 2>&1; then
+  fail "local-development ingress without Telemetry unexpectedly passed"
+fi
+python3 - "$local_ingress" "$WORK_DIR/local-ingress-after-catch-all.yaml" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(keepends=True)
+start = next(i for i, line in enumerate(source) if "- path: /api/telemetry/?(.*)" in line)
+block = source[start:start + 7]
+del source[start:start + 7]
+source.extend(block)
+Path(sys.argv[2]).write_text("".join(source), encoding="utf-8")
+PY
+if INGRESS_PROFILE=local-dev \
+    INGRESS_FILE="$WORK_DIR/local-ingress-after-catch-all.yaml" \
+    LEGACY_INGRESS_FILE="$WORK_DIR/no-legacy-ingress.yaml" \
+    "$ingress_guard" >/dev/null 2>&1; then
+  fail "local Telemetry route after the client catch-all unexpectedly passed"
+fi
+
 command -v ruby >/dev/null 2>&1 || fail "ruby is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
@@ -948,7 +981,7 @@ fi
 if oci_rabbitmq_queue_rows <<<$'name messages_ready messages_unacknowledged consumers\nname messages_ready messages_unacknowledged consumers' >/dev/null; then
   fail "duplicate RabbitMQ queue headers were accepted"
 fi
-[[ "$(oci_application_rabbitmq_queue_count)" == "22" ]] ||
+[[ "$(oci_application_rabbitmq_queue_count)" == "23" ]] ||
   fail "current RabbitMQ application queue count omits live consumers"
 grep -Fq 'zero_consumer_queues=' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment queue failure omits zero-consumer diagnostics"
@@ -1094,7 +1127,7 @@ OCI_MEMORY_MAX_PERCENT=70 \
 OCI_DISK_MAX_PERCENT=70 \
   "$OCI_DIR/scripts/preflight.sh" --offline >/dev/null
 
-services=(auth bet backoffice client event gamemaster moderation resulting slip)
+services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
 index=1
 for service in "${services[@]}"; do
   digit="$index"
@@ -1152,7 +1185,7 @@ OCI_CERT_EMAIL=fixture@example.invalid \
 ruby -ryaml - "$WORK_DIR/rendered.yaml" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
 by_kind = documents.group_by { |document| document["kind"] }
-abort "nine application deployments plus RabbitMQ required" unless by_kind.fetch("Deployment").length == 10
+abort "ten application deployments plus RabbitMQ required" unless by_kind.fetch("Deployment").length == 11
 moderation_deployments = by_kind.fetch("Deployment").select {
   |deployment| deployment.dig("metadata", "name") == "gaming-moderation-depl"
 }
@@ -1190,12 +1223,12 @@ abort "resource requests/limits missing" unless workloads.all? {
 backend_names = %w[
   gaming-auth-depl gaming-bet-depl gaming-backoffice-depl gaming-event-depl
   gaming-gamemaster-depl gaming-moderation-depl gaming-resulting-depl
-  gaming-slip-depl
+  gaming-slip-depl gaming-telemetry-depl
 ]
 backends = by_kind.fetch("Deployment").select {
   |deployment| backend_names.include?(deployment.dig("metadata", "name"))
 }
-abort "eight backend deployments required" unless backends.length == 8
+abort "nine backend deployments required" unless backends.length == 9
 abort "backend numeric non-root identity differs" unless backends.all? {
   |deployment| deployment.dig(
     "spec", "template", "spec", "containers", 0, "securityContext"
@@ -1282,9 +1315,37 @@ grep -Fq "apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'" \
 grep -Fq "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'" \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not apply canonical/diagnostic and www redirect ingresses"
-grep -Fq 'services=(auth bet event moderation resulting slip backoffice client gamemaster)' \
+grep -Fq 'services=(telemetry auth bet event moderation resulting slip backoffice client gamemaster)' \
   "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment must roll out API dependencies before Client and Gamemaster"
+python3 - "$OCI_DIR/scripts/deploy.sh" <<'PY' ||
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+telemetry_rollout = text.index('if [[ "$service" == "telemetry" ]]')
+early_ingress = text.index(
+    "apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'",
+    telemetry_rollout,
+)
+client_rollout_guard = text.index('((telemetry_index >= 0 && client_index > telemetry_index))')
+if client_rollout_guard >= telemetry_rollout:
+    raise SystemExit("rollout ordering guard must precede the rollout loop")
+if early_ingress <= telemetry_rollout:
+    raise SystemExit("Telemetry ingress must follow Telemetry readiness")
+for fragment in (
+    "verify_telemetry_ingress_routes",
+    '"/api/telemetry/?(.*)"',
+    '"gaming-telemetry-srv"',
+    '"/?(.*)"',
+    '"gaming-client-srv"',
+    "telemetry[0] >= client[0]",
+):
+    if fragment not in text:
+        raise SystemExit(f"early Telemetry ingress verification is missing {fragment}")
+print("oci_telemetry_early_ingress_order=PASS")
+PY
+  fail "OCI deployment does not establish Telemetry ingress before Client"
 grep -Fq 'certificate was not issued by Let' \
   "$OCI_DIR/agents/smoke-liveness-stan.sh" ||
   fail "OCI public smoke does not verify the served certificate issuer"
@@ -1498,8 +1559,9 @@ grep -Fq 'ocir_application_repository_absent' "$inventory" ||
   fail "GHCR inventory does not require former OCIR application repository absence"
 grep -Fq 'validated_build_evidence' "$inventory" ||
   fail "GHCR inventory does not require public build validation evidence"
-grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=9' "$inventory" ||
-  fail "OCI inventory must require complete nine-image generations"
+grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=10' "$inventory" &&
+  grep -Fq 'REGISTRY_IMAGES_PER_GENERATION=9' "$inventory" ||
+  fail "OCI inventory must distinguish current GHCR and historical OCIR generation sizes"
 grep -Fq 'REGISTRY_MAX_GENERATIONS=3' "$inventory" ||
   fail "OCI inventory must retain at most two rollback generations"
 grep -Fq '(.image_count % $registry_images_per_generation) != 0' "$inventory" ||

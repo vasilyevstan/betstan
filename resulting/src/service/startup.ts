@@ -26,6 +26,10 @@ export interface ManagedBackgroundWorker {
   stop(): Promise<void>;
 }
 
+export interface ManagedProbeListener {
+  close(): Promise<void>;
+}
+
 export interface ProcessLike {
   exit(code?: number): void;
   on(event: string, listener: (...args: any[]) => void): ProcessLike;
@@ -49,6 +53,7 @@ export interface StartupDependencies {
   getBrokerConnection?: () => IAmqpConnection;
   logger?: Pick<Console, "error" | "log">;
   processLike?: ProcessLike;
+  startProbeListener?: () => Promise<ManagedProbeListener>;
 }
 
 const REGISTERED_SIGNALS = ["SIGINT", "SIGTERM"] as const;
@@ -107,6 +112,9 @@ function createDefaultDependencies(): Required<StartupDependencies> {
     getBrokerConnection: () => messengerWrapper.connection,
     logger: console,
     processLike: process,
+    startProbeListener: async () => ({
+      close: async () => undefined,
+    }),
   };
 }
 
@@ -116,6 +124,7 @@ export class ResultingServiceRuntime {
   private handlersRegistered = false;
   private listeners: ManagedResultingListener[] = [];
   private workers: ManagedBackgroundWorker[] = [];
+  private probeListener?: ManagedProbeListener;
   private shutdownPromise?: Promise<void>;
 
   private readonly handleSigint = async () => {
@@ -167,6 +176,8 @@ export class ResultingServiceRuntime {
       for (const worker of this.workers) {
         await worker.start();
       }
+
+      this.probeListener = await this.dependencies.startProbeListener();
 
       for (const listener of this.listeners) {
         listener.listen();
@@ -223,6 +234,15 @@ export class ResultingServiceRuntime {
     if (!this.shutdownPromise) {
       this.shutdownPromise = (async () => {
         this.unregisterShutdownHandlers();
+
+        if (this.probeListener) {
+          try {
+            await this.probeListener.close();
+          } catch (error) {
+            this.dependencies.logger.log("error closing probe listener", error);
+          }
+          this.probeListener = undefined;
+        }
 
         for (const worker of this.workers) {
           try {

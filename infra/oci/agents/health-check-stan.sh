@@ -417,6 +417,10 @@ queue_output="$(
 queue_rows="$(oci_rabbitmq_queue_rows <<<"$queue_output")" ||
   oci_die "RabbitMQ queue output is malformed"
 queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$queue_rows")"
+telemetry_queue_present="$(
+  awk '$1 == "telemetry:events:v1" {count++} END {print count == 1 ? "true" : "false"}' \
+    <<<"$queue_rows"
+)"
 queue_backlog="$(awk '{sum += $2 + $3} END {print sum+0}' <<<"$queue_rows")"
 all_consumers=true
 awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows" || all_consumers=false
@@ -530,6 +534,7 @@ jq -n \
   --argjson databases "$database_json" \
   --argjson services "$service_health" \
   --argjson queue_count "$queue_count" \
+  --argjson telemetry_queue_present "$telemetry_queue_present" \
   --argjson queue_baseline_match "$queue_baseline_match" \
   --argjson all_consumers "$all_consumers" \
   --argjson queue_backlog "$queue_backlog" \
@@ -584,6 +589,7 @@ jq -n \
     services: $services,
     rabbitmq: {
       queue_count: $queue_count,
+      telemetry_queue_present: $telemetry_queue_present,
       baseline_match: $queue_baseline_match,
       all_consumers: $all_consumers,
       backlog: $queue_backlog

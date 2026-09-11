@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Route, Routes, useLocation } from 'react-router-dom';
 import EventList from './pages/event/EventList';
@@ -10,6 +10,8 @@ import Backoffice from './pages/account/Backoffice';
 import MyBets from './pages/account/MyBets';
 import Slip from './pages/Slip';
 import Statistics from './pages/account/Statistics';
+import Telemetry from './pages/Telemetry';
+import getRouteIdentity from './routeIdentity';
 
 const allowedVariants = new Set(['v1', 'v2', 'v3']);
 const allowedThemes = new Set(['dark', 'light']);
@@ -24,8 +26,11 @@ const getTheme = (search) => getParam(search, 'theme', 'dark', allowedThemes);
 
 const App = () => {
   const location = useLocation();
+  const lastReportedPath = useRef(null);
+  const routeIdentity = getRouteIdentity(location.pathname);
   const uiVariant = useMemo(() => getUiVariant(location.search), [location.search]);
   const theme = useMemo(() => getTheme(location.search), [location.search]);
+  const isTelemetryRoute = routeIdentity === '/telemetry';
 
   const [currentUser, setCurrentUser] = useState();
   const [isCurrentUserResolved, setIsCurrentUserResolved] = useState(false);
@@ -50,7 +55,7 @@ const App = () => {
     try {
       const response = await axios.get('/api/auth/currentuser');
       setCurrentUser(response.data.currentUser);
-    } catch (error) {
+    } catch {
       setCurrentUser();
     } finally {
       setIsCurrentUserResolved(true);
@@ -82,17 +87,35 @@ const App = () => {
     fetchData();
   }, [fetchData]);
 
+  useEffect(() => {
+    if (lastReportedPath.current === routeIdentity) {
+      return;
+    }
+    lastReportedPath.current = routeIdentity;
+
+    const page = routeIdentity === '/'
+      ? 'main'
+      : routeIdentity === '/backoffice'
+        ? 'admin'
+        : null;
+    if (page) {
+      axios.post('/api/telemetry/page-view', { page }).catch(() => undefined);
+    }
+  }, [routeIdentity]);
+
   return <div className={`app-shell ui-variant-${uiVariant} ui-theme-${theme}`}>
     <Header currentUser={currentUser} uiVariant={uiVariant} theme={theme} />
 
     <div className={`container-fluid app-shell__content app-shell__content--${uiVariant}`}>
       <div className="row g-3 justify-content-center">
-        <div className="col-12 col-xl-2 order-2 order-xl-1">
-          <section className="section-panel app-shell__sidebar">
-            <Statistics refreshToken={statsRefreshToken} uiVariant={uiVariant} />
-          </section>
-        </div>
-        <div className="col-12 col-xl-8 order-1 order-xl-2">
+        {!isTelemetryRoute ? (
+          <div className="col-12 col-xl-2 order-2 order-xl-1">
+            <section className="section-panel app-shell__sidebar">
+              <Statistics refreshToken={statsRefreshToken} uiVariant={uiVariant} />
+            </section>
+          </div>
+        ) : null}
+        <div className={isTelemetryRoute ? 'col-12 order-1' : 'col-12 col-xl-8 order-1 order-xl-2'}>
           <main className="app-shell__main">
             <Routes>
               <Route
@@ -117,6 +140,7 @@ const App = () => {
                 />}
               />
               <Route path="/bets" element={<MyBets />} />
+              <Route path="/telemetry" element={<Telemetry />} />
               <Route
                 path="*"
                 element={<EventList
@@ -131,17 +155,19 @@ const App = () => {
             </Routes>
           </main>
         </div>
-        <div className="col-12 col-xl-2 order-3">
-          <section className="section-panel app-shell__sidebar">
-            <Slip
-              currentUser={currentUser}
-              onBoardSubmitted={refreshStats}
-              onSelectionKeysChange={setSelectedSelectionKeys}
-              refreshSignal={slipRefreshSignal}
-              uiVariant={uiVariant}
-            />
-          </section>
-        </div>
+        {!isTelemetryRoute ? (
+          <div className="col-12 col-xl-2 order-3">
+            <section className="section-panel app-shell__sidebar">
+              <Slip
+                currentUser={currentUser}
+                onBoardSubmitted={refreshStats}
+                onSelectionKeysChange={setSelectedSelectionKeys}
+                refreshSignal={slipRefreshSignal}
+                uiVariant={uiVariant}
+              />
+            </section>
+          </div>
+        ) : null}
       </div>
     </div>
   </div>;

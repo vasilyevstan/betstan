@@ -87,6 +87,13 @@ spec:
                 name: gaming-backoffice-srv
                 port:
                   number: 3000
+          - path: /api/telemetry/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-telemetry-srv
+                port:
+                  number: 3000
           - path: /?(.*)
             pathType: ImplementationSpecific
             backend:
@@ -130,6 +137,13 @@ spec:
             backend:
               service:
                 name: gaming-backoffice-srv
+                port:
+                  number: 3000
+          - path: /api/telemetry/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: gaming-telemetry-srv
                 port:
                   number: 3000
           - path: /?(.*)

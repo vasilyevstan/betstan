@@ -63,6 +63,7 @@ authority_files = {
         root / "rollback-readiness/workload-state.tsv"
     ),
     "rollback-readiness/failures.txt": root / "rollback-readiness/failures.txt",
+    "telemetry-recovery.env": root / "telemetry-recovery.env",
 }
 manifest_path = root / "partial-recovery-SHA256SUMS"
 
@@ -148,6 +149,7 @@ authority = exact_env(
         "rollback_readiness_summary_sha256",
         "rollback_readiness_workload_sha256",
         "rollback_readiness_failures_sha256",
+        "telemetry_state_sha256",
         "database_restore",
         "status",
     },
@@ -198,6 +200,7 @@ for key in (
     "rollback_readiness_summary_sha256",
     "rollback_readiness_workload_sha256",
     "rollback_readiness_failures_sha256",
+    "telemetry_state_sha256",
 ):
     if not re.fullmatch(r"[0-9a-f]{64}", authority[key]):
         raise SystemExit(f"partial recovery authority {key} is invalid")
@@ -231,6 +234,7 @@ hash_bindings = {
         "rollback-readiness/workload-state.tsv"
     ),
     "rollback_readiness_failures_sha256": "rollback-readiness/failures.txt",
+    "telemetry_state_sha256": "telemetry-recovery.env",
 }
 for key, name in hash_bindings.items():
     if authority[key] != sha256(authority_files[name]):
@@ -245,6 +249,7 @@ summary = exact_env(
         "source_rollback_run_id",
         "recovered_services",
         "database_restore",
+        "telemetry_state",
     },
     {"rollback_http_mutation_fence"},
 )
@@ -258,9 +263,22 @@ if (
     or summary["target_sha"] != authority["target_sha"]
     or summary["source_rollback_run_id"] != authority["source_rollback_run_id"]
     or summary["database_restore"] != "disabled"
+    or summary["telemetry_state"] != "retained"
     or summary_fence not in {"released", "not-required", "legacy-not-recorded"}
 ):
     raise SystemExit("partial recovery summary is invalid")
+
+telemetry = exact_env(
+    authority_files["telemetry-recovery.env"],
+    {"mode", "image", "database_initialized", "queue_present"},
+)
+if (
+    telemetry["mode"] != "retained"
+    or not image_pattern.fullmatch(telemetry["image"])
+    or telemetry["database_initialized"] not in {"true", "false"}
+    or telemetry["queue_present"] != "true"
+):
+    raise SystemExit("partial recovery Telemetry evidence is invalid")
 
 
 def tsv(path, width, allow_empty=False):
@@ -286,6 +304,8 @@ for row in tsv(images_path, 5):
     images[service] = image_ref
 if set(images) != services:
     raise SystemExit("partial recovery image provenance does not contain nine services")
+if telemetry["image"] in images.values():
+    raise SystemExit("Telemetry image was treated as a historical rollback target")
 
 final = {}
 for row in tsv(authority_files["final-state.tsv"], 7):

@@ -25,7 +25,7 @@ GHCR_PACKAGE_METADATA_FILE="${GHCR_PACKAGE_METADATA_FILE:-}"
 GHCR_VERSIONS_FILE="${GHCR_VERSIONS_FILE:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-artifacts/ghcr-package-management}"
 SENTINEL_TAG="bootstrap-sentinel-v1"
-SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
 
 oci_require_command gh
 oci_require_command jq
@@ -146,7 +146,7 @@ awk -F '\t' -v sentinel="$SENTINEL_TAG" '
   "$application_tags" ||
   oci_die "bootstrap sentinel version must not alias an application image"
 awk -F '\t' '
-  $3 !~ /^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip)-[0-9a-f]{40}$/ {
+  $3 !~ /^arm64-(auth|bet|backoffice|client|event|gamemaster|moderation|resulting|slip|telemetry)-[0-9a-f]{40}$/ {
     exit 1
   }
 ' "$application_tags" ||
@@ -161,10 +161,11 @@ awk -F '\t' '
     print source "\t" service "\t" $1 "\t" $2
   }
 ' "$application_tags" | LC_ALL=C sort > "$generations_file"
-awk -F '\t' '
+awk -F '\t' -v mode="$PRUNE_MODE" '
   BEGIN {
-    split("auth bet backoffice client event gamemaster moderation resulting slip", wanted, " ")
-    for (i in wanted) allowed[wanted[i]] = 1
+    split("auth bet backoffice client event gamemaster moderation resulting slip", historical, " ")
+    split("auth bet backoffice client event gamemaster moderation resulting slip telemetry", current, " ")
+    for (i in current) allowed[current[i]] = 1
   }
   NF != 4 || !allowed[$2] || seen[$1 SUBSEP $2]++ {
     exit 1
@@ -175,18 +176,20 @@ awk -F '\t' '
   }
   END {
     for (source in count) {
-      if (count[source] > 9) exit 1
+      complete_historical = count[source] == 9
+      for (i in historical) {
+        if (!service[source SUBSEP historical[i]]) complete_historical = 0
+      }
+      complete_current = count[source] == 10 && service[source SUBSEP "telemetry"]
+      for (i in historical) {
+        if (!service[source SUBSEP historical[i]]) complete_current = 0
+      }
+      if (mode == "validate" && !complete_historical && !complete_current) exit 1
+      if (mode == "apply" && (count[source] < 1 || count[source] > 10)) exit 1
     }
   }
 ' "$generations_file" ||
   oci_die "GHCR package contains malformed application generation aliases"
-if [[ "$PRUNE_MODE" == "validate" ]]; then
-  awk -F '\t' '
-    { count[$1]++ }
-    END { for (source in count) if (count[source] != 9) exit 1 }
-  ' "$generations_file" ||
-    oci_die "GHCR package contains a partial application generation"
-fi
 
 protected_sources_file="$WORK_DIR/protected-sources.txt"
 printf '%s\n' \
@@ -194,7 +197,13 @@ printf '%s\n' \
   LC_ALL=C sort -u > "$protected_sources_file"
 while IFS= read -r source_sha; do
   [[ -n "$source_sha" ]] || continue
-  awk -F '\t' -v source="$source_sha" '$1 == source { count++ } END { exit(count == 9 ? 0 : 1) }' \
+  awk -F '\t' -v source="$source_sha" -v current="$CURRENT_SOURCE_SHA" '
+    $1 == source { count++ }
+    END {
+      if (source == current) exit(count == 10 ? 0 : 1)
+      exit(count == 9 || count == 10 ? 0 : 1)
+    }
+  ' \
     "$generations_file" ||
     oci_die "protected GHCR generation is absent or incomplete: $source_sha"
 done < "$protected_sources_file"
@@ -225,13 +234,42 @@ else
   : > "$obsolete_file"
 fi
 
+if [[ "$PRUNE_MODE" == "apply" ]]; then
+  obsolete_sources="$(paste -sd' ' "$obsolete_file")"
+  awk -F '\t' -v obsolete="$obsolete_sources" '
+    BEGIN {
+      split(obsolete, requested, " ")
+      for (i in requested) if (requested[i] != "") wanted[requested[i]] = 1
+      split("auth bet backoffice client event gamemaster moderation resulting slip", historical, " ")
+    }
+    {
+      count[$1]++
+      service[$1 SUBSEP $2] = 1
+    }
+    END {
+      for (source in count) {
+        complete_historical = count[source] == 9
+        complete_current = count[source] == 10 && service[source SUBSEP "telemetry"]
+        for (i in historical) {
+          if (!service[source SUBSEP historical[i]]) {
+            complete_historical = 0
+            complete_current = 0
+          }
+        }
+        if (!complete_historical && !complete_current && !wanted[source]) exit 1
+      }
+    }
+  ' "$generations_file" ||
+    oci_die "unplanned partial GHCR generation is not resumable"
+fi
+
 while IFS= read -r source_sha; do
   [[ -n "$source_sha" ]] || continue
   ! grep -Fxq "$source_sha" "$protected_sources_file" ||
     oci_die "a protected generation was requested for pruning"
   if [[ "$PRUNE_MODE" == "validate" ]]; then
     awk -F '\t' -v source="$source_sha" \
-      '$1 == source { count++ } END { exit(count == 9 ? 0 : 1) }' \
+      '$1 == source { count++ } END { exit(count == 9 || count == 10 ? 0 : 1) }' \
       "$generations_file" ||
       oci_die "obsolete GHCR generation is absent or incomplete: $source_sha"
   fi

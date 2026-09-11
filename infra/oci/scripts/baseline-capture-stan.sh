@@ -773,6 +773,7 @@ if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
       partial-recovery/rollback-readiness/summary.env
       partial-recovery/rollback-readiness/workload-state.tsv
       partial-recovery/rollback-readiness/failures.txt
+      partial-recovery/telemetry-recovery.env
     )
     mkdir -p "$OUTPUT_DIR/partial-recovery/rollback-readiness"
     cp "$BASELINE_RECOVERY_DIR/images.tsv" "$OUTPUT_DIR/images.tsv"
@@ -794,6 +795,8 @@ if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
       "$OUTPUT_DIR/partial-recovery/rollback-readiness/workload-state.tsv"
     cp "$BASELINE_RECOVERY_DIR/rollback-readiness/failures.txt" \
       "$OUTPUT_DIR/partial-recovery/rollback-readiness/failures.txt"
+    cp "$BASELINE_RECOVERY_DIR/telemetry-recovery.env" \
+      "$OUTPUT_DIR/partial-recovery/telemetry-recovery.env"
   else
     validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
       oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
@@ -973,6 +976,108 @@ oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queues.tsv" ||
   oci_die "unable to normalize RabbitMQ queue state"
 [[ -s "$OUTPUT_DIR/queues.tsv" ]] || oci_die "queue snapshot is empty"
 
+telemetry_deployment_json="$WORK_DIR/telemetry-deployment.json"
+telemetry_service_json="$WORK_DIR/telemetry-service.json"
+telemetry_ingress_json="$WORK_DIR/telemetry-ingress.json"
+kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$telemetry_deployment_json" ||
+  oci_die "unable to inspect the pre-run Telemetry deployment"
+kubectl get service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$telemetry_service_json" ||
+  oci_die "unable to inspect the pre-run Telemetry service"
+kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$telemetry_ingress_json" ||
+  oci_die "unable to inspect the pre-run OCI ingress"
+mongo_pod="$(
+  kubectl get pod -n "$OCI_K8S_NAMESPACE" -l app=gaming-auth-mongo \
+    -o jsonpath='{.items[0].metadata.name}'
+)"
+[[ -n "$mongo_pod" ]] || oci_die "Mongo pod is missing during Telemetry baseline capture"
+telemetry_database_initialized="$(
+  kubectl exec -n "$OCI_K8S_NAMESPACE" "$mongo_pod" -- \
+    mongosh --quiet --eval \
+    'print(db.adminCommand({listDatabases:1,nameOnly:true}).databases.some(d=>d.name==="gaming_telemetry"))'
+)"
+[[ "$telemetry_database_initialized" == "true" ||
+   "$telemetry_database_initialized" == "false" ]] ||
+  oci_die "Telemetry database presence evidence is invalid"
+telemetry_queue_present="$(
+  awk '$1 == "telemetry:events:v1" {count++} END {print (count == 1 ? "true" : "false")}' \
+    "$OUTPUT_DIR/queues.tsv"
+)"
+python3 - \
+  "$telemetry_deployment_json" "$telemetry_service_json" \
+  "$telemetry_ingress_json" "$telemetry_database_initialized" \
+  "$telemetry_queue_present" "$OUTPUT_DIR/telemetry-pre-run.env" <<'PY' ||
+import json
+import re
+import sys
+from pathlib import Path
+
+deployment_path, service_path, ingress_path, database_initialized, queue_present, output_path = sys.argv[1:7]
+
+def optional_json(path):
+    content = Path(path).read_text(encoding="utf-8")
+    return json.loads(content) if content else None
+
+deployment = optional_json(deployment_path)
+service = optional_json(service_path)
+ingress = optional_json(ingress_path)
+route_count = 0
+if ingress:
+    route_count = sum(
+        1
+        for rule in ingress.get("spec", {}).get("rules", [])
+        for path in rule.get("http", {}).get("paths", [])
+        if path.get("path") == "/api/telemetry/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-telemetry-srv"
+    )
+if deployment is None:
+    if service is not None or route_count:
+        raise SystemExit("pre-run Telemetry resources are partially present")
+    values = {
+        "mode": "absent",
+        "image": "none",
+        "database_initialized": database_initialized,
+        "queue_present": queue_present,
+    }
+else:
+    containers = [
+        item
+        for item in deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        if item.get("name") == "gaming-telemetry"
+    ]
+    desired = deployment.get("spec", {}).get("replicas", 0)
+    status = deployment.get("status", {})
+    if (
+        len(containers) != 1
+        or not re.fullmatch(
+            r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}",
+            containers[0].get("image", ""),
+        )
+        or desired < 1
+        or any(status.get(field, 0) != desired for field in (
+            "updatedReplicas", "readyReplicas", "availableReplicas"
+        ))
+        or service is None
+        or route_count != 2
+        or queue_present != "true"
+    ):
+        raise SystemExit("pre-run Telemetry topology is not exact and healthy")
+    values = {
+        "mode": "retained",
+        "image": containers[0]["image"],
+        "database_initialized": database_initialized,
+        "queue_present": queue_present,
+    }
+Path(output_path).write_text(
+    "".join(f"{key}={value}\n" for key, value in values.items()),
+    encoding="utf-8",
+)
+PY
+  oci_die "unable to bind the pre-run Telemetry topology"
+
 : >"$OUTPUT_DIR/public-http.tsv"
 : >"$OUTPUT_DIR/sse.tsv"
 if [[ "$SSE_REQUIREMENT" == "deployed-source" && "$SSE_REQUIRED" == "false" ]]; then
@@ -1045,6 +1150,7 @@ required_files=(
   migration-journal.json
   migration-lock.json
   migration-backup-references.tsv
+  telemetry-pre-run.env
   "$trusted_provenance_file"
 )
 if ((${#partial_recovery_files[@]} > 0)); then

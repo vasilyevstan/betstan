@@ -181,6 +181,17 @@ it("starts all resources before any listener begins consuming", async () => {
   expect(runtimeProcess.exit).not.toHaveBeenCalled();
 });
 
+it("starts and closes the injected probe listener with the runtime", async () => {
+  const close = jest.fn().mockResolvedValue(undefined);
+  const startProbeListener = jest.fn().mockResolvedValue({ close });
+  const { runtime } = createDependencies({ startProbeListener });
+
+  await runtime.start();
+  expect(startProbeListener).toHaveBeenCalledTimes(1);
+  await runtime.shutdown();
+  expect(close).toHaveBeenCalledTimes(1);
+});
+
 it("fails closed on partial startup and never calls listen", async () => {
   const { runtime, events, listeners, replayPublisher, getWorker } = createDependencies(
     {},

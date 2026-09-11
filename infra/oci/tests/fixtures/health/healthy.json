@@ -36,6 +36,7 @@
     {"kind": "Deployment", "name": "gaming-moderation-depl", "desired": 1, "ready": 1},
     {"kind": "Deployment", "name": "gaming-resulting-depl", "desired": 1, "ready": 1},
     {"kind": "Deployment", "name": "gaming-slip-depl", "desired": 1, "ready": 1},
+    {"kind": "Deployment", "name": "gaming-telemetry-depl", "desired": 1, "ready": 1},
     {"kind": "Deployment", "name": "gaming-rabbitmq-depl", "desired": 1, "ready": 1},
     {"kind": "StatefulSet", "name": "gaming-auth-mongo-depl", "desired": 1, "ready": 1}
   ],
@@ -79,6 +80,7 @@
     {"name": "moderation", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
     {"name": "resulting", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
     {"name": "slip", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
+    {"name": "telemetry", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
     {"name": "rabbitmq", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""},
     {"name": "mongo", "ready": true, "architecture": "arm64", "digest_match": true, "restarts": 0, "last_reason": ""}
   ],
@@ -104,7 +106,8 @@
       "gaming_gamemaster",
       "gaming_moderation",
       "gaming_resulting",
-      "gaming_slip"
+      "gaming_slip",
+      "gaming_telemetry"
     ]
   },
   "services": [
@@ -117,12 +120,14 @@
     {"name": "gaming-moderation-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-resulting-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-slip-srv", "type": "ClusterIP", "ready_endpoints": true},
+    {"name": "gaming-telemetry-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-rabbitmq-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-auth-mongo-srv", "type": "ClusterIP", "ready_endpoints": true},
     {"name": "gaming-shared-mongo-srv", "type": "ClusterIP", "ready_endpoints": true}
   ],
   "rabbitmq": {
-    "queue_count": 22,
+    "queue_count": 23,
+    "telemetry_queue_present": true,
     "baseline_match": true,
     "all_consumers": true,
     "backlog": 0

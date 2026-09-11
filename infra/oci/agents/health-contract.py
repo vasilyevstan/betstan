@@ -13,6 +13,7 @@ EXPECTED_DEPLOYMENTS = {
     "gaming-moderation-depl",
     "gaming-resulting-depl",
     "gaming-slip-depl",
+    "gaming-telemetry-depl",
     "gaming-rabbitmq-depl",
 }
 EXPECTED_SERVICES = {
@@ -25,6 +26,7 @@ EXPECTED_SERVICES = {
     "gaming-moderation-srv",
     "gaming-resulting-srv",
     "gaming-slip-srv",
+    "gaming-telemetry-srv",
     "gaming-rabbitmq-srv",
     "gaming-auth-mongo-srv",
     "gaming-shared-mongo-srv",
@@ -38,6 +40,7 @@ EXPECTED_DATABASES = {
     "gaming_moderation",
     "gaming_resulting",
     "gaming_slip",
+    "gaming_telemetry",
 }
 EXPECTED_MONGO_PVC_INVENTORY = [
     {
@@ -51,7 +54,7 @@ EXPECTED_PLATFORM_DIGESTS = {
     "cert-manager/cert-manager-webhook": "sha256:d8b3961b51c8c7320633f8208dc46bf88aa13804d0f7cbe48a096b2c523cee42",
     "cert-manager/cert-manager-cainjector": "sha256:ccf6b919ec0500745a47a910118f834f9636d0aac1ff221245cd2557ed8c7c98",
 }
-EXPECTED_RABBITMQ_QUEUE_COUNT = 22
+EXPECTED_RABBITMQ_QUEUE_COUNT = 23
 
 
 class ContractFailure(Exception):
@@ -192,7 +195,7 @@ def validate(snapshot):
     require(
         set(mongo.get("logical_databases", [])) == EXPECTED_DATABASES,
         "mongo-databases",
-        "Mongo does not contain exactly the eight logical database names",
+        "Mongo does not contain exactly the nine logical database names",
     )
 
     services = snapshot.get("services", [])
@@ -211,6 +214,11 @@ def validate(snapshot):
         rabbit.get("queue_count") == EXPECTED_RABBITMQ_QUEUE_COUNT,
         "queue-count",
         f"RabbitMQ does not expose the expected {EXPECTED_RABBITMQ_QUEUE_COUNT} queues",
+    )
+    require(
+        rabbit.get("telemetry_queue_present") is True,
+        "telemetry-queue",
+        "RabbitMQ does not expose exactly one telemetry:events:v1 queue",
     )
     require(rabbit.get("baseline_match") is True, "queue-baseline", "RabbitMQ queue set differs from baseline")
     require(rabbit.get("all_consumers") is True, "queue-consumers", "RabbitMQ queue consumer is missing")

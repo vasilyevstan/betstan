@@ -80,7 +80,7 @@ if compgen -G "$OUTPUT_DIR/*.env" >/dev/null; then
 fi
 
 repository="$(application_registry_repository)"
-services=(auth bet backoffice client event gamemaster moderation resulting slip)
+services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
 plan_file="$OUTPUT_DIR/reuse-plan.tsv"
 artifact_service=""
 artifact_schema=""
