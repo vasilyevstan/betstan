@@ -20,9 +20,13 @@ sessions and odds calculation, see [[Application Processes]].
 | Live state advanced | `gamemaster:event:live` | Gamemaster | Event, Moderation, Resulting |
 | Bet row settled | `resulting:sliprow:settle` | Resulting | Bet |
 | Bet settled | `resulting:slip:settle` | Resulting | Bet |
+| Operational activity observed | `telemetry:event:v1` | Auth or Slip | Telemetry |
 
 The topic names are stable contracts. Consumer queue names and runtime
 instances are implementation details and may evolve independently.
+Telemetry also observes `slip:bet`, `resulting:slip:settle`, and
+`gamemaster:event:live`; these stable topics are distinct from its
+`telemetry:events:v1` consumer queue name.
 
 ## Event creation and publication
 

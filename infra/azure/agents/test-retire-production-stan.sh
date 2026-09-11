@@ -368,6 +368,36 @@ elif [[ "$url" == */api/backoffice ]]; then
   printf 'HTTP/2 200\r\ncontent-type: application/json\r\ncache-control: no-store\r\nx-backoffice-access: public\r\n\r\n' > "$headers"
   printf '%s\n' '[]' > "$output"
   printf 200
+elif [[ "$url" == */api/telemetry/summary ]]; then
+  printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
+  python3 - "$output" <<'PY'
+import json
+import sys
+
+metrics = [
+    "MAIN_PAGE_VISIT", "ADMIN_PAGE_VISIT", "SLIP_CREATED", "BET_PLACED",
+    "RESULTING_SETTLED", "GAMECENTER_EVENT_EMITTED", "USER_CREATED",
+    "USER_LOGGED_IN",
+]
+services = [
+    "auth", "backoffice", "bet", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry",
+]
+summary = {
+    "generatedAt": "2026-09-10T05:00:00.000Z",
+    "dates": [
+        "2026-08-28", "2026-08-29", "2026-08-30", "2026-08-31",
+        "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04",
+        "2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08",
+        "2026-09-09", "2026-09-10",
+    ],
+    "metrics": [{"metric": metric, "values": [0] * 14} for metric in metrics],
+    "health": [{"service": service, "status": "green"} for service in services],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(summary, stream, separators=(",", ":"))
+PY
+  printf 200
 elif [[ "$url" == */api/* ]]; then
   printf 'HTTP/2 200\r\ncontent-type: application/json\r\n\r\n' > "$headers"
   if [[ "$url" == */api/auth/currentuser* ]]; then

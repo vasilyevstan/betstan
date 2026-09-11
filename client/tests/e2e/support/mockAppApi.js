@@ -16,6 +16,60 @@ const MARKET_LABELS = Object.freeze({
 
 const deepClone = (value) => JSON.parse(JSON.stringify(value));
 
+const createTelemetrySummary = () => {
+  const dates = [
+    '2026-08-28',
+    '2026-08-29',
+    '2026-08-30',
+    '2026-08-31',
+    '2026-09-01',
+    '2026-09-02',
+    '2026-09-03',
+    '2026-09-04',
+    '2026-09-05',
+    '2026-09-06',
+    '2026-09-07',
+    '2026-09-08',
+    '2026-09-09',
+    '2026-09-10',
+  ];
+  const metrics = [
+    'MAIN_PAGE_VISIT',
+    'ADMIN_PAGE_VISIT',
+    'SLIP_CREATED',
+    'BET_PLACED',
+    'RESULTING_SETTLED',
+    'GAMECENTER_EVENT_EMITTED',
+    'USER_CREATED',
+    'USER_LOGGED_IN',
+  ];
+  const services = [
+    'auth',
+    'backoffice',
+    'bet',
+    'client',
+    'event',
+    'gamemaster',
+    'moderation',
+    'resulting',
+    'slip',
+    'telemetry',
+  ];
+
+  return {
+    generatedAt: '2026-09-10T00:15:00.000Z',
+    dates,
+    metrics: metrics.map((metric, metricIndex) => ({
+      metric,
+      values: dates.map((date, dateIndex) => (metricIndex + 1) * (dateIndex + 1)),
+    })),
+    health: services.map((service, index) => ({
+      service,
+      status: ['green', 'yellow', 'red'][index % 3],
+    })),
+  };
+};
+
 const getSelectionName = (side, event) => {
   if (side === 'HOME') {
     return event.home;
@@ -272,6 +326,7 @@ const createShellMockState = ({ loginError = null, signupError = null } = {}) =>
     },
     bets: [],
     stats: [],
+    telemetrySummary: createTelemetrySummary(),
     auth: {
       loginError,
       signupError,
@@ -691,6 +746,16 @@ const installAppApiMocks = async (page, state) => {
       return;
     }
 
+    if (key === 'GET /api/telemetry/summary') {
+      await fulfillJson(route, deepClone(state.telemetrySummary));
+      return;
+    }
+
+    if (key === 'POST /api/telemetry/page-view') {
+      await fulfillJson(route, {});
+      return;
+    }
+
     if (key === 'POST /api/event/odds') {
       state.selectSelection(body || {});
       await fulfillJson(route, {});
@@ -760,5 +825,6 @@ module.exports = {
   BET_KIND,
   createLiveBettingMockState,
   createShellMockState,
+  createTelemetrySummary,
   installAppApiMocks,
 };

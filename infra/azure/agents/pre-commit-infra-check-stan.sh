@@ -194,6 +194,10 @@ echo ""
 echo "=== running ingress routing guard ==="
 if [[ -x "$INGRESS_GUARD" ]]; then
   "$INGRESS_GUARD"
+  INGRESS_PROFILE=local-dev \
+  INGRESS_FILE=infra/k8s-dev/ingress-srv.yaml \
+  LEGACY_INGRESS_FILE=infra/k8s-dev/ingress-srv-nip.yaml \
+    "$INGRESS_GUARD"
 else
   warn "ingress guard not found or not executable: $INGRESS_GUARD"
 fi

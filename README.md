@@ -32,6 +32,7 @@ bets or consume real match feeds.
 ```mermaid
 flowchart LR
     Client[React client] -->|HTTP / SSE| APIs[Auth, Event, Slip, Bet, Backoffice]
+    Client -->|HTTP| Telemetry[Telemetry]
     APIs --> DB[(Service-owned MongoDB databases)]
     APIs --> Bus[(RabbitMQ)]
     Bus --> GM[Gamemaster]
@@ -40,20 +41,24 @@ flowchart LR
     GM -->|Live updates and results| Bus
     Mod -->|Accept / reject| Bus
     Resulting -->|Row and slip settlement| Bus
+    Bus --> Telemetry
+    Telemetry --> TelemetryDB[(Telemetry logical database)]
 ```
 
-BetStan uses nine deployable services. HTTP APIs own browser-facing commands
+BetStan uses ten deployable applications. HTTP APIs own browser-facing commands
 and projections; internal workers generate matches, moderate placements, and
 settle outcomes. Services own their data and exchange durable facts through
 RabbitMQ. The Event service streams the current public projection to browsers
 over SSE, while persisted state and replay remain the recovery authority.
+Public Telemetry provides bounded activity trends and coarse service-health
+snapshots without becoming an authority for accounts, betting, or settlement.
 
 ## Wiki guide
 
 | Topic | What it covers |
 | --- | --- |
 | [Product overview](https://github.com/vasilyevstan/betstan/wiki/Product-Overview) | Capabilities, journeys, terminology, and product invariants |
-| [Application processes](https://github.com/vasilyevstan/betstan/wiki/Application-Processes) | Accounts, sessions, event generation, odds, slips, moderation, settlement, and Backoffice |
+| [Application processes](https://github.com/vasilyevstan/betstan/wiki/Application-Processes) | Accounts, sessions, event generation, odds, slips, moderation, settlement, Backoffice, and Telemetry |
 | [Architecture](https://github.com/vasilyevstan/betstan/wiki/Architecture) | Service map, ownership, communication, and reliability patterns |
 | [Message flows](https://github.com/vasilyevstan/betstan/wiki/Message-Flows) | RabbitMQ topics and end-to-end sequence diagrams |
 | [User interface](https://github.com/vasilyevstan/betstan/wiki/User-Interface) | UI variants, light/dark themes, layouts, states, and design principles |
@@ -78,6 +83,7 @@ over SSE, while persisted state and replay remain the recovery authority.
 | `gamemaster/` | Deterministic match simulation and live markets |
 | `moderation/` | Placement acceptance authority |
 | `resulting/` | Row, slip, and payout settlement |
+| `telemetry/` | Public bounded activity summaries and coarse service-health observations |
 | `common/src/` | Canonical shared contracts and messaging source |
 | `infra/` | Kubernetes, deployment, validation, and operational contracts |
 | `docs/wiki/` | Canonical source for the published GitHub wiki |

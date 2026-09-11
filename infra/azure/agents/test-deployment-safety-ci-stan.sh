@@ -6,6 +6,7 @@ AZURE_WORKFLOW="$ROOT_DIR/.github/workflows/production-deploy.yml"
 OCI_WORKFLOW="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 BUILD_WORKFLOW="$ROOT_DIR/.github/workflows/production-build.yml"
 OCI_DEPLOY_SCRIPT="$ROOT_DIR/infra/oci/scripts/deploy.sh"
+AZURE_IMAGE_PROVENANCE="$ROOT_DIR/infra/azure/agents/image_provenance_stan.py"
 PRE_COMMIT_CHECK="$ROOT_DIR/infra/azure/agents/pre-commit-infra-check-stan.sh"
 PR_MERGE_SAFETY_TEST="$ROOT_DIR/infra/azure/agents/test-pr-merge-safety-stan.sh"
 PROTECTED_OPERATION_POLICY_TEST="$ROOT_DIR/infra/azure/agents/test-copilot-cli-protected-operation-policy-stan.sh"
@@ -4235,6 +4236,7 @@ expected_azure_order = [
     "gamemaster",
 ]
 expected_oci_order = [
+    "telemetry",
     "auth",
     "bet",
     "event",
@@ -4340,6 +4342,22 @@ def mutate_once(text: str, needle: str, replacement: str) -> str:
 
 if parse_rollouts(azure_workflow) != expected_azure_order:
     fail("Azure deploy workflow rollout order changed")
+provenance_marker = "python3 infra/azure/agents/image_provenance_stan.py"
+provider_markers = (
+    "- name: Azure login",
+    "az aks get-credentials",
+    "baseline-capture-stan.sh",
+    "shared-mongo-operation-lock-stan.sh",
+    "kubectl ",
+)
+if provenance_marker not in azure_workflow:
+    fail("Azure deploy workflow is missing immutable provenance validation")
+provenance_index = azure_workflow.index(provenance_marker)
+if any(
+    marker in azure_workflow and azure_workflow.index(marker) < provenance_index
+    for marker in provider_markers
+):
+    fail("Azure provenance validation does not precede every provider or mutation boundary")
 if parse_services(oci_deploy_script) != expected_oci_order:
     fail("OCI deploy script rollout order changed")
 
@@ -4447,3 +4465,15 @@ for required_test in (
 print(f"production_build_action_pins=PASS cases={len(negative_cases) + 1}")
 print("deployment_safety_ci_tests=PASS")
 PY
+
+grep -Fq 'reject_telemetry_era_source(Path.cwd())' \
+  "$AZURE_IMAGE_PROVENANCE" || {
+    echo "Azure provenance validator is missing the Telemetry-era source guard" >&2
+    exit 1
+  }
+grep -Fq \
+  "Telemetry-era releases use the active OCI deployment path; dormant Azure deployment is unavailable." \
+  "$AZURE_IMAGE_PROVENANCE" || {
+    echo "Azure provenance validator emitted the wrong Telemetry-era diagnostic" >&2
+    exit 1
+  }

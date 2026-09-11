@@ -47,6 +47,10 @@
     {
       "id": "slip",
       "profile": "jest-typescript"
+    },
+    {
+      "id": "telemetry",
+      "profile": "jest-typescript"
     }
   ]
 }

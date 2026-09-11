@@ -2,6 +2,7 @@ import { ConsumeMessage } from "amqplib";
 import {
   AListener,
   BetKind,
+  IAmqpConnection,
   IEventOddsSelectedEvent,
   QueueNames,
 } from "@betstan/common";
@@ -11,6 +12,10 @@ import {
   upsertDraftSlipRow,
   normalizeBetKind,
 } from "../../model/slipSupport";
+import {
+  DraftTelemetryReporter,
+  SlipTelemetryReporter,
+} from "../../service/TelemetryReporter";
 
 const buildSlipRow = (
   event: IEventOddsSelectedEvent,
@@ -46,6 +51,23 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
   serviceName: string = "slip_odds_clicked";
   queue: QueueNames.EVENT_ODDS_SELECTED = QueueNames.EVENT_ODDS_SELECTED;
 
+  constructor(
+    connection: IAmqpConnection,
+    private readonly telemetry: DraftTelemetryReporter =
+      new SlipTelemetryReporter(connection)
+  ) {
+    super(connection);
+  }
+
+  async init(): Promise<void> {
+    await super.init();
+    void Promise.resolve()
+      .then(() => this.telemetry.initialize())
+      .catch(() => {
+        console.error("slip_telemetry_disabled");
+      });
+  }
+
   async onMessage(event: IEventOddsSelectedEvent, msg: ConsumeMessage) {
     const userId = event.data.userId;
     const betKind = normalizeBetKind(event.data.betKind);
@@ -55,7 +77,18 @@ class OddsClickedListener extends AListener<IEventOddsSelectedEvent> {
       return;
     }
 
-    await upsertDraftSlipRow(userId, betKind, buildSlipRow(event, betKind));
+    const { wasInserted } = await upsertDraftSlipRow(
+      userId,
+      betKind,
+      buildSlipRow(event, betKind)
+    );
+    if (wasInserted) {
+      try {
+        this.telemetry.reportSlipCreated();
+      } catch {
+        console.error("slip_telemetry_publish_failed");
+      }
+    }
     this.ack(msg);
   }
 }

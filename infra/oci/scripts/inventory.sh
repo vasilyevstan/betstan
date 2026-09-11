@@ -18,12 +18,20 @@ fi
 INVENTORY_MODE="${INVENTORY_MODE:-${1:-preflight}}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
 OCI_RUNTIME_MODE="$(oci_runtime_mode)"
-REGISTRY_IMAGES_PER_GENERATION=9
 REGISTRY_MAX_GENERATIONS=3
-REGISTRY_SERVICES_JSON='[
-  "auth", "bet", "backoffice", "client", "event", "gamemaster",
-  "moderation", "resulting", "slip"
-]'
+if [[ "$APPLICATION_REGISTRY_PROVIDER" == "ghcr" ]]; then
+  REGISTRY_IMAGES_PER_GENERATION=10
+  REGISTRY_SERVICES_JSON='[
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip", "telemetry"
+  ]'
+else
+  REGISTRY_IMAGES_PER_GENERATION=9
+  REGISTRY_SERVICES_JSON='[
+    "auth", "bet", "backoffice", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip"
+  ]'
+fi
 [[ "$INVENTORY_MODE" == "preflight" || "$INVENTORY_MODE" == "complete" ]] ||
   oci_die "INVENTORY_MODE must be preflight or complete"
 oci_require_cli_version

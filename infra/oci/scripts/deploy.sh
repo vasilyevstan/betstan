@@ -158,6 +158,44 @@ apply_cleanup_documents() {
   printf '%s' "$rendered" | kubectl apply -f -
 }
 
+verify_telemetry_ingress_routes() {
+  kubectl get ingress gaming-oci-ingress -n "$OCI_K8S_NAMESPACE" -o json |
+    python3 /dev/fd/3 "$canonical_host" "$diagnostic_host" 3<<'PY'
+import json
+import sys
+
+document = json.load(sys.stdin)
+expected_hosts = sys.argv[1:3]
+rules = document.get("spec", {}).get("rules", [])
+by_host = {}
+for rule in rules:
+    host = rule.get("host")
+    if host in by_host:
+        raise SystemExit(f"duplicate ingress rule for {host}")
+    by_host[host] = rule.get("http", {}).get("paths", [])
+if any(host not in by_host for host in expected_hosts):
+    raise SystemExit("canonical or diagnostic ingress rule is missing")
+for host in expected_hosts:
+    paths = by_host[host]
+    telemetry = [
+        index
+        for index, path in enumerate(paths)
+        if path.get("path") == "/api/telemetry/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-telemetry-srv"
+    ]
+    client = [
+        index
+        for index, path in enumerate(paths)
+        if path.get("path") == "/?(.*)"
+        and path.get("backend", {}).get("service", {}).get("name")
+        == "gaming-client-srv"
+    ]
+    if len(telemetry) != 1 or len(client) != 1 or telemetry[0] >= client[0]:
+        raise SystemExit(f"Telemetry route is incomplete or follows the SPA catch-all for {host}")
+PY
+}
+
 mongo_upgrade_recovery_required=false
 restore_deploy_access_on_exit() {
   local rc="$1"
@@ -277,14 +315,30 @@ kubectl rollout status deployment/gaming-rabbitmq-depl \
   -n "$OCI_K8S_NAMESPACE" --timeout=10m
 
 # Roll out API dependencies before Client; Gamemaster remains the final producer.
-services=(auth bet event moderation resulting slip backoffice client gamemaster)
+services=(telemetry auth bet event moderation resulting slip backoffice client gamemaster)
 [[ "${services[$(( ${#services[@]} - 1 ))]}" == "gamemaster" ]] ||
   oci_die "gamemaster must rollout last"
+[[ "${services[0]}" == "telemetry" ]] ||
+  oci_die "telemetry must rollout first after shared data services"
+client_index=-1
+telemetry_index=-1
+for index in "${!services[@]}"; do
+  [[ "${services[$index]}" == "client" ]] && client_index="$index"
+  [[ "${services[$index]}" == "telemetry" ]] && telemetry_index="$index"
+done
+((telemetry_index >= 0 && client_index > telemetry_index)) ||
+  oci_die "client must rollout after telemetry"
 for service in "${services[@]}"; do
   apply_documents "Service:^gaming-${service}-srv$"
   apply_documents "Deployment:^gaming-${service}-depl$"
   kubectl rollout status "deployment/gaming-${service}-depl" \
     -n "$OCI_K8S_NAMESPACE" --timeout=10m
+  if [[ "$service" == "telemetry" ]]; then
+    apply_documents 'Certificate:^betstan-oci-(canonical-)?tls$'
+    apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'
+    verify_telemetry_ingress_routes ||
+      oci_die "Telemetry ingress is not exact before instrumented application rollout"
+  fi
 done
 
 rabbit_pod="$(
@@ -313,6 +367,7 @@ for _ in $(seq 1 60); do
     [[ -n "$queue_names" ]] || queue_names=none
     [[ -n "$zero_consumer_queues" ]] || zero_consumer_queues=none
     if [[ "$queue_count" == "$expected_queue_count" ]] &&
+        [[ "$(awk '$1 == "telemetry:events:v1" {count++} END {print count+0}' <<<"$queue_rows")" == "1" ]] &&
         awk '$4 < 1 {bad=1} END {exit bad}' <<<"$queue_rows"; then
       rabbit_baseline_ready=1
       break

@@ -80,7 +80,7 @@ remains an explicit fallback selected with `OCI_RUNTIME_MODE=oke`.
   must not have a conflicting AAAA record. Canonical and diagnostic
   certificates must be trusted and Ready before migration or deployment is
   healthy.
-- The Kustomize overlay explicitly lists nine application manifests,
+- The Kustomize overlay explicitly lists ten application manifests,
   RabbitMQ, and `auth-mongo-depl.yaml`. It never traverses
   `infra/k8s/legacy-mongo`.
 - Application images use immutable public GHCR digests. The upstream Node, nginx,
@@ -401,7 +401,7 @@ concurrent retirement fixture isolation without masking failed suites.
 The protected `oci-build` environment can define `OCI_REUSE_SOURCE_SHA` and
 `OCI_REUSE_BUILD_RUN_ID` for a prior successful first-attempt OCI build.
 `oci-production-build` reuses those verified immutable ARM64 digests only when
-the prior commit is an ancestor and `.dockerignore`, all nine service trees,
+the prior commit is an ancestor and `.dockerignore`, all ten service trees,
 `infra/oci/build`, and `scripts/build-images.sh` are unchanged. Any changed
 image input uses the normal build path only after the reuse variables are
 cleared and a fresh environment approval is obtained. Reuse creates new

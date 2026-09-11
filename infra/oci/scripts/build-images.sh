@@ -41,7 +41,7 @@ if [[ "$PUSH_IMAGES" == "1" ]]; then
 fi
 
 oci_prepare_private_dir "$OUTPUT_DIR"
-services=(auth bet backoffice client event gamemaster moderation resulting slip)
+services=(auth bet backoffice client event gamemaster moderation resulting slip telemetry)
 repository="$(application_registry_repository)"
 
 for service in "${services[@]}"; do

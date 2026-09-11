@@ -14,13 +14,17 @@ At wide desktop sizes the shell has three regions:
 | Region | Purpose |
 | --- | --- |
 | Left sidebar | Statistics and leaderboard |
-| Center stage | Events, authentication, My Bets, or Backoffice route |
+| Center stage | Events, authentication, My Bets, Backoffice, or Telemetry route |
 | Right sidebar | Independent live and pre-match slips |
 
 The sidebars are sticky when space permits. On smaller screens the center
 content appears first and the supporting panels stack below it. This preserves
 the primary task while keeping statistics and both slips available without
 creating separate mobile-only behavior.
+
+The public Telemetry route is intentionally full width. It does not mount the
+leaderboard or slip sidebars, so those supporting surfaces do not issue hidden
+requests or add keyboard stops while the operational dashboard is open.
 
 Primary routes are:
 
@@ -29,13 +33,15 @@ Primary routes are:
 | `/` | Upcoming, countdown, live, and recently finished events |
 | `/bets` | User betting history and settlement state |
 | `/backoffice` | Public event simulation controls |
+| `/telemetry` | Fourteen-day activity graphs and current service health |
 | `/signup` | Account creation |
 | `/login` | Login |
 | `/logout` | Session logout |
 
-The header keeps **Events**, **My Bets**, **Backoffice**, authentication, UI
-variant, and theme controls discoverable. Backoffice remains visibly labelled
-and usable for anonymous visitors as well as signed-in users.
+The header keeps **Events**, **My Bets**, **Backoffice**, **Telemetry**,
+authentication, UI variant, and theme controls discoverable. Backoffice and
+Telemetry remain visibly labelled and usable for anonymous visitors as well as
+signed-in users.
 
 My Bets provides independent status and bet-type filters. **All types**,
 **Pre-match**, and **Live** can be combined with status, date, text search, and
@@ -75,8 +81,8 @@ needed. Theme changes preserve the active route and the selected UI variant.
 ## Preserving presentation choices
 
 Header links rebuild their query strings from the current location. Moving
-between Events, My Bets, Backoffice, login, and signup therefore preserves
-valid `ui` and `theme` values. The switchers update one choice without
+between Events, My Bets, Backoffice, Telemetry, login, and signup therefore
+preserves valid `ui` and `theme` values. The switchers update one choice without
 discarding the other or unrelated accepted query state.
 
 Examples:
@@ -85,10 +91,40 @@ Examples:
 /?ui=v1&theme=dark
 /bets?ui=v2&theme=light
 /backoffice?ui=v3&theme=dark
+/telemetry?ui=v1&theme=light
 ```
 
 The URL makes a visual state reproducible for testing and review without
 creating separate deployments.
+
+## Telemetry dashboard
+
+The public `/telemetry` page is headed **Telemetry and service health**. It
+shows the current UTC day and previous 13 UTC days for main-page visits,
+Backoffice-page visits, slips created, bets placed, results settled,
+Gamecenter events emitted, users created, and user logins.
+
+Each activity card contains a dependency-free graph and all fourteen exact
+date/value pairs. An all-zero response remains a successful snapshot rather
+than becoming an empty state. The service-health section lists Authentication,
+Backoffice, Betting, Client, Events, Game master, Moderation, Resulting, Slip,
+and Telemetry in a fixed order. Health is expressed with both text and color:
+**Healthy**, **Degraded**, or **Unavailable**.
+
+The page fetches once when entered and again only when the user activates
+**Refresh**. It does not poll. During refresh the previous snapshot stays
+visible; a failed refresh keeps that snapshot and reports the failure without
+exposing internal error details. The generated timestamp identifies the
+snapshot currently displayed.
+
+The displayed counts are observed operational counts, not accounting-grade
+records. Health is a coarse point-in-time snapshot, not deep readiness or an
+authority for product decisions.
+
+Activity graphs use two columns on wide desktop layouts and one column on
+tablet and mobile layouts. Service health uses five, two, then one column over
+the same ranges. All dates, values, labels, and statuses remain visible and
+wrap without horizontal page or card scrolling.
 
 ## Event-page hierarchy
 

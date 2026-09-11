@@ -29,6 +29,7 @@ paths=(
   moderation
   resulting
   slip
+  telemetry
   infra/oci/build
   infra/oci/scripts/build-images.sh
 )

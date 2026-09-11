@@ -458,3 +458,83 @@ it("acks message without creating slip when userId is missing", async () => {
 
   expect(await Slip.find({})).toHaveLength(0);
 });
+
+it("reports exactly once for the first draft insert and not for ordinary updates", async () => {
+  const telemetry = {
+    initialize: jest.fn().mockResolvedValue(undefined),
+    reportSlipCreated: jest.fn(),
+  };
+  const listener = new OddsClickedListener(
+    messengerWrapper.connection,
+    telemetry
+  );
+  const userId = new mongoose.Types.ObjectId().toHexString();
+  await listener.init();
+
+  await listener.onMessage(buildEvent(userId), buildMessage());
+  await listener.onMessage(buildEvent(userId), buildMessage());
+
+  expect(telemetry.initialize).toHaveBeenCalledTimes(1);
+  expect(telemetry.reportSlipCreated).toHaveBeenCalledTimes(1);
+});
+
+it("still acknowledges the source event when telemetry publishing fails", async () => {
+  const telemetry = {
+    initialize: jest.fn().mockResolvedValue(undefined),
+    reportSlipCreated: jest.fn(() => {
+      throw new Error("telemetry unavailable");
+    }),
+  };
+  const listener = new OddsClickedListener(
+    messengerWrapper.connection,
+    telemetry
+  );
+  const ack = jest.spyOn(listener, "ack");
+  const error = jest.spyOn(console, "error").mockImplementation(() => {});
+  const msg = buildMessage();
+  await listener.init();
+
+  await expect(
+    listener.onMessage(
+      buildEvent(new mongoose.Types.ObjectId().toHexString()),
+      msg
+    )
+  ).resolves.toBeUndefined();
+
+  expect(telemetry.reportSlipCreated).toHaveBeenCalledTimes(1);
+  expect(ack).toHaveBeenCalledWith(msg);
+  expect(error).toHaveBeenCalledWith("slip_telemetry_publish_failed");
+});
+
+it("does not await optional telemetry initialization and contains its rejection", async () => {
+  let rejectInitialization!: (error: Error) => void;
+  const initialization = new Promise<void>((_resolve, reject) => {
+    rejectInitialization = reject;
+  });
+  const telemetry = {
+    initialize: jest.fn(() => initialization),
+    reportSlipCreated: jest.fn(),
+  };
+  const listener = new OddsClickedListener(
+    messengerWrapper.connection,
+    telemetry
+  );
+  const error = jest.spyOn(console, "error").mockImplementation(() => {});
+
+  const outcome = await Promise.race([
+    listener.init().then(() => "ready"),
+    new Promise<"blocked">((resolve) =>
+      setTimeout(() => resolve("blocked"), 100)
+    ),
+  ]);
+
+  expect(outcome).toBe("ready");
+  expect(telemetry.initialize).toHaveBeenCalledTimes(1);
+
+  rejectInitialization(new Error("private telemetry failure"));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(error).toHaveBeenCalledWith("slip_telemetry_disabled");
+  expect(JSON.stringify(error.mock.calls)).not.toContain(
+    "private telemetry failure"
+  );
+});

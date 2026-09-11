@@ -271,7 +271,7 @@ oci_rabbitmq_queue_rows() {
 }
 
 oci_application_rabbitmq_queue_count() {
-  printf '22\n'
+  printf '23\n'
 }
 
 oci_assert_repository_root() {

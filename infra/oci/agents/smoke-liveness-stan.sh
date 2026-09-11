@@ -115,6 +115,124 @@ require_http_mutation_fence() {
     fail "$label mutating request bypassed the HTTP maintenance fence"
 }
 
+require_telemetry_summary() {
+  local base_url="$1"
+  local label="$2"
+  local body="$WORK_DIR/${label}-telemetry.body"
+  local headers="$WORK_DIR/${label}-telemetry.headers"
+  local status content_type
+  status="$(
+    curl --silent --show-error --max-time "$REQUEST_TIMEOUT" \
+      --max-filesize 262144 \
+      --output "$body" --dump-header "$headers" \
+      --write-out '%{http_code}' "${base_url}/api/telemetry/summary"
+  )" || fail "$label Telemetry summary request failed"
+  [[ "$status" == "200" ]] ||
+    fail "$label Telemetry summary did not return HTTP 200"
+  content_type="$(
+    awk 'tolower($1)=="content-type:" {$1=""; sub(/^ /,""); sub(/\r$/,""); print}' \
+      "$headers" | tail -n 1
+  )"
+  [[ "$content_type" == application/json* ]] ||
+    fail "$label Telemetry summary returned non-JSON content"
+  python3 - "$body" <<'PY' ||
+import datetime
+import json
+import re
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+metrics = [
+    "MAIN_PAGE_VISIT",
+    "ADMIN_PAGE_VISIT",
+    "SLIP_CREATED",
+    "BET_PLACED",
+    "RESULTING_SETTLED",
+    "GAMECENTER_EVENT_EMITTED",
+    "USER_CREATED",
+    "USER_LOGGED_IN",
+]
+services = [
+    "auth",
+    "backoffice",
+    "bet",
+    "client",
+    "event",
+    "gamemaster",
+    "moderation",
+    "resulting",
+    "slip",
+    "telemetry",
+]
+if not isinstance(payload, dict) or set(payload) != {
+    "generatedAt", "dates", "metrics", "health"
+}:
+    raise SystemExit(1)
+generated_at = payload["generatedAt"]
+if not isinstance(generated_at, str) or not re.fullmatch(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+    generated_at,
+):
+    raise SystemExit(1)
+try:
+    generated = datetime.datetime.strptime(
+        generated_at, "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=datetime.timezone.utc)
+except ValueError:
+    raise SystemExit(1)
+canonical_generated_at = (
+    generated.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+)
+if canonical_generated_at != generated_at:
+    raise SystemExit(1)
+dates = payload["dates"]
+if not isinstance(dates, list) or len(dates) != 14:
+    raise SystemExit(1)
+try:
+    parsed_dates = [datetime.date.fromisoformat(value) for value in dates]
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if any(value.isoformat() != raw for value, raw in zip(parsed_dates, dates)):
+    raise SystemExit(1)
+if any(
+    parsed_dates[index] != parsed_dates[index - 1] + datetime.timedelta(days=1)
+    for index in range(1, len(parsed_dates))
+):
+    raise SystemExit(1)
+if parsed_dates[-1] != generated.date():
+    raise SystemExit(1)
+metric_rows = payload["metrics"]
+if not isinstance(metric_rows, list) or len(metric_rows) != len(metrics):
+    raise SystemExit(1)
+for expected, row in zip(metrics, metric_rows):
+    if not isinstance(row, dict) or set(row) != {"metric", "values"}:
+        raise SystemExit(1)
+    values = row["values"]
+    if row["metric"] != expected or not isinstance(values, list) or len(values) != 14:
+        raise SystemExit(1)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > 9007199254740991
+        for value in values
+    ):
+        raise SystemExit(1)
+health = payload["health"]
+if not isinstance(health, list) or len(health) != len(services):
+    raise SystemExit(1)
+for expected, row in zip(services, health):
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"service", "status"}
+        or row["service"] != expected
+        or row["status"] != "green"
+    ):
+        raise SystemExit(1)
+PY
+    fail "$label Telemetry summary JSON shape is invalid"
+}
+
 require_exact_dns "$canonical_host" canonical
 require_exact_dns "$redirect_host" redirect
 
@@ -195,6 +313,8 @@ for api_path in "${api_paths[@]}"; do
   fi
 done
 
+require_telemetry_summary "$PUBLIC_URL" canonical
+
 diagnostic_body="$WORK_DIR/diagnostic.body"
 diagnostic_headers="$WORK_DIR/diagnostic.headers"
 diagnostic_status="$(
@@ -243,6 +363,7 @@ diagnostic_backoffice_access_mode="$(
 )"
 [[ "$diagnostic_backoffice_access_mode" == "public" ]] ||
   fail "diagnostic Backoffice API is missing X-Backoffice-Access: public"
+require_telemetry_summary "$DIAGNOSTIC_URL" diagnostic
 
 if [[ "$EXPECT_HTTP_MUTATION_FENCE" == "1" ]]; then
   require_http_mutation_fence "$PUBLIC_URL" canonical

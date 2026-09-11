@@ -838,7 +838,7 @@ export const upsertDraftSlipRow = async (
   userId: string,
   betKind: BetKind,
   row: PlainSlipRow
-) => {
+): Promise<{ wasInserted: boolean }> => {
   const activeScope = {
     userId,
     status: {
@@ -1025,8 +1025,9 @@ export const upsertDraftSlipRow = async (
   ];
 
   try {
-    await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
+    const result = await Slip.collection.findOneAndUpdate(activeScope, updatePipeline, {
       upsert: true,
+      includeResultMetadata: true,
       sort: {
         status: 1,
         timestamp: -1,
@@ -1034,7 +1035,9 @@ export const upsertDraftSlipRow = async (
       },
       returnDocument: "after",
     });
-    return;
+    return {
+      wasInserted: Boolean(result?.lastErrorObject?.upserted),
+    };
   } catch (error) {
     if (!isDuplicateKeyError(error)) {
       throw error;
@@ -1050,6 +1053,7 @@ export const upsertDraftSlipRow = async (
     },
     returnDocument: "after",
   });
+  return { wasInserted: false };
 };
 
 export const toPlaceBetRows = (

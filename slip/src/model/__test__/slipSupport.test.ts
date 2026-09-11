@@ -7,7 +7,13 @@ import {
   SlipStatus,
   TeamSide,
 } from "@betstan/common";
-import { Slip, SlipArchive } from "../Slip";
+import {
+  Slip,
+  SlipArchive,
+  SLIP_DRAFT_UNIQUE_INDEX_KEYS,
+  SLIP_DRAFT_UNIQUE_INDEX_NAME,
+  SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+} from "../Slip";
 import { SlipPublicationState } from "../SlipPublicationState";
 import {
   applyAffectedRows,
@@ -417,7 +423,12 @@ describe("slipSupport", () => {
       .spyOn(Slip.collection, "findOneAndUpdate")
       .mockRejectedValueOnce({ code: 11000 } as any)
       .mockResolvedValueOnce({ ok: 1 } as any);
-    await upsertDraftSlipRow("retry-user", BetKind.PRE_MATCH, buildRow());
+    const retryResult = await upsertDraftSlipRow(
+      "retry-user",
+      BetKind.PRE_MATCH,
+      buildRow()
+    );
+    expect(retryResult).toEqual({ wasInserted: false });
     expect(duplicateSpy).toHaveBeenNthCalledWith(
       2,
       expect.any(Object),
@@ -435,6 +446,52 @@ describe("slipSupport", () => {
       upsertDraftSlipRow("error-user", BetKind.PRE_MATCH, buildRow())
     ).rejects.toThrow("update failed");
     errorSpy.mockRestore();
+  });
+
+  it("returns insertion metadata atomically under concurrent first-draft creation", async () => {
+    await Slip.collection.createIndex(SLIP_DRAFT_UNIQUE_INDEX_KEYS, {
+      name: SLIP_DRAFT_UNIQUE_INDEX_NAME,
+      unique: true,
+      partialFilterExpression: SLIP_DRAFT_UNIQUE_INDEX_PARTIAL_FILTER,
+    });
+
+    const results = await Promise.all([
+      upsertDraftSlipRow(
+        "metadata-user",
+        BetKind.PRE_MATCH,
+        buildRow({ id: "metadata-row-1" })
+      ),
+      upsertDraftSlipRow(
+        "metadata-user",
+        BetKind.PRE_MATCH,
+        {
+          ...buildRow({ id: "metadata-row-2" }),
+          oddsId: "metadata-odds-2",
+        }
+      ),
+    ]);
+
+    expect(results.map(({ wasInserted }) => wasInserted).sort()).toEqual([
+      false,
+      true,
+    ]);
+    expect(
+      await Slip.countDocuments({
+        userId: "metadata-user",
+        status: SlipStatus.DRAFT,
+      })
+    ).toBe(1);
+
+    await expect(
+      upsertDraftSlipRow(
+        "metadata-user",
+        BetKind.PRE_MATCH,
+        {
+          ...buildRow({ id: "metadata-row-3" }),
+          oddsId: "metadata-odds-3",
+        }
+      )
+    ).resolves.toEqual({ wasInserted: false });
   });
 
   it("serializes place-bet rows, wagers, placement attempts, and published events", () => {

@@ -9,6 +9,7 @@ import {
   toPublicUser,
   usernamePattern,
 } from "../service/Identifier";
+import { authTelemetryReporter } from "../service/TelemetryReporter";
 
 const router = express.Router();
 
@@ -67,6 +68,7 @@ router.post(
         lastLogin: new Date().toISOString(),
       });
 
+      authTelemetryReporter.report("USER_CREATED");
       const userJwt = jwt.sign(
         {
           id: user.id,
