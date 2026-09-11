@@ -170,6 +170,8 @@ if schema_version == "live-betting-v1":
     operation_complete_key = "obsolete_event_cleanup_complete"
 elif schema_version == "live-betting-v2":
     operation_complete_key = "event_reschedule_complete"
+elif schema_version == "live-betting-v3":
+    operation_complete_key = "event_reschedule_complete"
 else:
     fail("unexpected schema evidence version")
 if set(provenance) != common_provenance_keys | {operation_complete_key}:
@@ -444,7 +446,7 @@ if schema_version == "live-betting-v1":
         )
         if operation.get("state") not in {"absent", "removed"}:
             fail("final phase did not inherit completed obsolete event cleanup")
-else:
+elif schema_version == "live-betting-v2":
     operation_reports = sorted(
         relative
         for relative in actual_files
@@ -477,6 +479,41 @@ else:
         )
         if operation.get("state") not in {"verified", "completed"}:
             fail("final phase did not inherit completed event reschedule")
+elif schema_version == "live-betting-v3":
+    operation_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith("-event-reschedule.json")
+    )
+    for relative in operation_reports:
+        operation = json.loads((root / relative).read_text(encoding="utf-8"))
+        if operation.get("kind") != "fixed-event-reschedule":
+            fail(f"{relative} has an invalid reschedule kind")
+        if operation.get("targetEventId") != "eb4608ac531f5d9578113167":
+            fail(f"{relative} targets an unexpected event")
+        if operation.get("targetKickoff") != "2026-09-12T08:05:00.000Z":
+            fail(f"{relative} targets an unexpected kickoff")
+        if operation.get("ready") is not True or operation.get("blockerCount") != 0:
+            fail(f"{relative} did not prove a safe reschedule state")
+    if phase == "apply-backfills":
+        expected_states = {
+            "reports/apply-event-reschedule.json": {"applied", "completed"},
+            "reports/verify-event-reschedule.json": {"verified", "completed"},
+        }
+        for relative, states in expected_states.items():
+            operation = json.loads((root / relative).read_text(encoding="utf-8"))
+            if operation.get("state") not in states:
+                fail(f"{relative} did not prove completed reschedule")
+    if phase == "apply-slip-index":
+        operation = json.loads(
+            (root / "reports/preflight-event-reschedule.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if operation.get("state") not in {"verified", "completed"}:
+            fail("final phase did not inherit completed event reschedule")
+else:
+    fail("unexpected schema evidence version")
 
 journal = json.loads((root / "journal.json").read_text(encoding="utf-8"))
 if journal.get("schema_version") != schema_version:
@@ -488,6 +525,16 @@ if journal.get("status") != "PASS":
     fail("journal does not record a successful phase")
 if journal.get("baseline_sha256") != provenance["baseline_sha256"]:
     fail("journal baseline digest differs from provenance")
+standalone_reports = [
+    json.loads((root / relative).read_text(encoding="utf-8"))
+    for relative in sorted(
+        relative
+        for relative in actual_files
+        if relative.startswith("reports/") and relative.endswith(".json")
+    )
+]
+if journal.get("reports") != standalone_reports:
+    fail("journal reports differ from the standalone sanitized evidence")
 for key in (
     operation_complete_key,
     "maintenance_fence_enforced",
