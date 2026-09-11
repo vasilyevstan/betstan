@@ -135,6 +135,16 @@ OUTPUT_FILE="$WORK_DIR/images.tsv" VERIFY_REMOTE=0 BOOT_IMAGES=0 \
   "$OCI_DIR/scripts/verify-images.sh" >/dev/null
 
 rm "$WORK_DIR/provenance/telemetry.env"
+PROVENANCE_DIR="$WORK_DIR/provenance" SOURCE_SHA="$CURRENT_SHA" \
+GENERATION_PROFILE=compatible \
+OUTPUT_FILE="$WORK_DIR/compatible-images.tsv" VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+  "$OCI_DIR/scripts/verify-images.sh" >/dev/null
+if PROVENANCE_DIR="$WORK_DIR/provenance" SOURCE_SHA="$CURRENT_SHA" \
+    GENERATION_PROFILE=current \
+    OUTPUT_FILE="$WORK_DIR/current-images.tsv" VERIFY_REMOTE=0 BOOT_IMAGES=0 \
+    "$OCI_DIR/scripts/verify-images.sh" >/dev/null 2>&1; then
+  fail "current generation profile accepted exact historical normal-build evidence"
+fi
 for service in "${HISTORICAL_SERVICES[@]}"; do
   cat >>"$WORK_DIR/provenance/$service.env" <<EOF
 recovery_workflow=oci-ghcr-cache-recovery
@@ -730,6 +740,12 @@ for literal in \
   'deployed_deploy_run_id:' \
   'last_known_good_recovery_run_id:' \
   'last_known_good_deploy_run_id:' \
+  'local source_sha="$1" run_id="$2" role="$3" generation_profile="$4"' \
+  '[[ "$generation_profile" == "current" || "$generation_profile" == "compatible" ]]' \
+  'GENERATION_PROFILE="$generation_profile"' \
+  'validate_build "$SOURCE_SHA" "$CANDIDATE_BUILD_RUN_ID" candidate current' \
+  'validate_build "$source_sha" "$build_run_id" "$role" compatible' \
+  '"$obsolete_sha" "$obsolete_build_run_id" "obsolete-$obsolete_sha" compatible' \
   'require_one_generation_origin' \
   'validate_recovery()' \
   'validate_deploy()' \
