@@ -168,9 +168,11 @@ provenance = read_env(root / "provenance.env")
 schema_version = provenance.get("schema_version")
 if schema_version == "live-betting-v1":
     operation_complete_key = "obsolete_event_cleanup_complete"
-elif schema_version == "live-betting-v2":
-    operation_complete_key = "event_reschedule_complete"
-elif schema_version == "live-betting-v3":
+elif schema_version in {
+    "live-betting-v2",
+    "live-betting-v3",
+    "live-betting-v4",
+}:
     operation_complete_key = "event_reschedule_complete"
 else:
     fail("unexpected schema evidence version")
@@ -492,6 +494,39 @@ elif schema_version == "live-betting-v3":
         if operation.get("targetEventId") != "eb4608ac531f5d9578113167":
             fail(f"{relative} targets an unexpected event")
         if operation.get("targetKickoff") != "2026-09-12T08:05:00.000Z":
+            fail(f"{relative} targets an unexpected kickoff")
+        if operation.get("ready") is not True or operation.get("blockerCount") != 0:
+            fail(f"{relative} did not prove a safe reschedule state")
+    if phase == "apply-backfills":
+        expected_states = {
+            "reports/apply-event-reschedule.json": {"applied", "completed"},
+            "reports/verify-event-reschedule.json": {"verified", "completed"},
+        }
+        for relative, states in expected_states.items():
+            operation = json.loads((root / relative).read_text(encoding="utf-8"))
+            if operation.get("state") not in states:
+                fail(f"{relative} did not prove completed reschedule")
+    if phase == "apply-slip-index":
+        operation = json.loads(
+            (root / "reports/preflight-event-reschedule.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if operation.get("state") not in {"verified", "completed"}:
+            fail("final phase did not inherit completed event reschedule")
+elif schema_version == "live-betting-v4":
+    operation_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith("-event-reschedule.json")
+    )
+    for relative in operation_reports:
+        operation = json.loads((root / relative).read_text(encoding="utf-8"))
+        if operation.get("kind") != "fixed-event-reschedule":
+            fail(f"{relative} has an invalid reschedule kind")
+        if operation.get("targetEventId") != "0fd6a3633bf1fcf09d95c17d":
+            fail(f"{relative} targets an unexpected event")
+        if operation.get("targetKickoff") != "2026-09-13T08:05:00.000Z":
             fail(f"{relative} targets an unexpected kickoff")
         if operation.get("ready") is not True or operation.get("blockerCount") != 0:
             fail(f"{relative} did not prove a safe reschedule state")

@@ -21,10 +21,16 @@ const OLD_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";
 const RETAINED_SEP11_EVENT_ID = "42643b4c173d1c7b8eeed765";
 const RETAINED_SEP11_BACKOFFICE_ID = "7420bc3b71340b4468c206e4";
 const RETAINED_SEP11_KICKOFF = "2026-09-11T08:05:00.000Z";
-const EXPECTED_EVENT_PROJECTION_ID = "a3c69f33302db13963b4524e";
-const EXPECTED_GAMEMASTER_PROJECTION_ID = "54e4a0020e2e9301de494852";
+const RETAINED_SEP12_EVENT_ID = "eb4608ac531f5d9578113167";
+const RETAINED_SEP12_BACKOFFICE_ID = "dc32b275f1514a495f56bc0a";
+const RETAINED_SEP12_KICKOFF = "2026-09-12T08:05:00.000Z";
+const RETAINED_SEP12_EVENT_PROJECTION_ID = "a3c69f33302db13963b4524e";
+const RETAINED_SEP12_GAMEMASTER_PROJECTION_ID =
+  "54e4a0020e2e9301de494852";
+const EXPECTED_EVENT_PROJECTION_ID = "d3254636c3125c17669c950e";
+const EXPECTED_GAMEMASTER_PROJECTION_ID = "6b69d03803681f8c9642b94e";
 const EXPECTED_LIVE_SEED =
-  "40e2fd54b742be56dc1b503de1cc3102a97642196a21ee0ca6226fa33e46b496";
+  "1c258e02d62843ee98df86373b6c247c8a609e29b9a011ea99510ef318eacb83";
 const JOURNAL_ID =
   `event-reschedule:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}`;
 const applyCutoffTime = new Date(
@@ -199,11 +205,11 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
   const firstNames = databaseNames();
   const secondNames = databaseNames();
   try {
-    expect(RESCHEDULE_EVENT_ID).toBe("eb4608ac531f5d9578113167");
-    expect(RESCHEDULE_BACKOFFICE_ID).toBe("dc32b275f1514a495f56bc0a");
-    expect(RESCHEDULE_TARGET_KICKOFF).toBe("2026-09-12T08:05:00.000Z");
-    expect(applyCutoffTime.toISOString()).toBe("2026-09-12T07:45:00.000Z");
-    expect(eligibleApplyTime.toISOString()).toBe("2026-09-12T07:44:59.999Z");
+    expect(RESCHEDULE_EVENT_ID).toBe("0fd6a3633bf1fcf09d95c17d");
+    expect(RESCHEDULE_BACKOFFICE_ID).toBe("9f90c9747315ec79f4e296f6");
+    expect(RESCHEDULE_TARGET_KICKOFF).toBe("2026-09-13T08:05:00.000Z");
+    expect(applyCutoffTime.toISOString()).toBe("2026-09-13T07:45:00.000Z");
+    expect(eligibleApplyTime.toISOString()).toBe("2026-09-13T07:44:59.999Z");
 
     await Promise.all([
       insertBackofficeEvent(firstNames),
@@ -376,7 +382,7 @@ it("dry-runs, deterministically creates projections, verifies, and completes for
   }
 });
 
-it("leaves July and Sep11 fixture history byte-identical", async () => {
+it("leaves July, Sep11, and Sep12 fixture history byte-identical", async () => {
   const names = databaseNames();
   const preservedDocuments = [
     {
@@ -486,6 +492,66 @@ it("leaves July and Sep11 fixture history byte-identical", async () => {
           eventId: RETAINED_SEP11_EVENT_ID,
           status: "WIN",
           snapshotKickoff: RETAINED_SEP11_KICKOFF,
+        }],
+      },
+    },
+    {
+      database: "backoffice" as const,
+      collection: "events",
+      document: {
+        _id: new mongoose.Types.ObjectId(RETAINED_SEP12_BACKOFFICE_ID),
+        eventId: RETAINED_SEP12_EVENT_ID,
+        name: RESCHEDULE_EVENT_NAME,
+        home: RESCHEDULE_EVENT_HOME,
+        away: RESCHEDULE_EVENT_AWAY,
+        time: RETAINED_SEP12_KICKOFF,
+        status: "NO_RESULT",
+        visibility: "OFFLINE",
+        retainedEvidence: "sep12",
+      },
+    },
+    {
+      database: "event" as const,
+      collection: "events",
+      document: oldEventProjection({
+        _id: new mongoose.Types.ObjectId(RETAINED_SEP12_EVENT_PROJECTION_ID),
+        eventId: RETAINED_SEP12_EVENT_ID,
+        time: new Date(RETAINED_SEP12_KICKOFF),
+        live: {
+          phase: "FULL_TIME",
+          sequence: 96,
+          incidentHistory: [{ id: "sep12-final-whistle", minute: 90 }],
+        },
+        retainedEvidence: "sep12",
+      }),
+    },
+    {
+      database: "gamemaster" as const,
+      collection: "events",
+      document: oldGamemasterProjection({
+        _id: new mongoose.Types.ObjectId(
+          RETAINED_SEP12_GAMEMASTER_PROJECTION_ID
+        ),
+        eventId: RETAINED_SEP12_EVENT_ID,
+        time: new Date(RETAINED_SEP12_KICKOFF),
+        phase: "FULL_TIME",
+        liveSequence: 96,
+        liveTimeline: {
+          transitions: [{ sequence: 96, type: "FULL_TIME" }],
+        },
+        retainedEvidence: "sep12",
+      }),
+    },
+    {
+      database: "slip" as const,
+      collection: "sliparchives",
+      document: {
+        _id: new mongoose.Types.ObjectId(),
+        slipId: "retained-sep12-slip",
+        rows: [{
+          eventId: RETAINED_SEP12_EVENT_ID,
+          status: "WIN",
+          snapshotKickoff: RETAINED_SEP12_KICKOFF,
         }],
       },
     },
