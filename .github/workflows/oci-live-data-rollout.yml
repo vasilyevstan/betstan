@@ -842,23 +842,38 @@ jobs:
           prior_evidence=artifacts/prerequisite/provenance.env
           baseline_dir=artifacts/oci-data-baseline-before
           [ -f "$resume_images" ] && [ -f "$prior_evidence" ]
-          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
-            expected_ref="$(
-              awk -F '\t' -v service="$service" '
-                $1 == service { count++; value=$3 }
-                END { if (count != 1) exit 1; print value }
-              ' "$resume_images"
-            )"
-            deployment="gaming-${service}-depl"
-            actual_ref="$(
-              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
-                -o jsonpath='{.spec.template.spec.containers[0].image}'
-            )"
-            if [ "$actual_ref" != "$expected_ref" ]; then
-              echo "::error::Resume deployment image mismatch for ${service}: expected ${expected_ref}, observed ${actual_ref}"
-              exit 1
-            fi
-          done
+          expected_baseline_sha="$(
+            awk -F= '$1 == "baseline_sha256" {
+              if (found++) exit 1
+              value=$2
+            } END {
+              if (found != 1) exit 1
+              print value
+            }' "$prior_evidence"
+          )"
+          observed_baseline_sha="$(
+            sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}'
+          )"
+          if [ "$observed_baseline_sha" != "$expected_baseline_sha" ]; then
+            echo "::error::Resume rollback baseline digest differs from the prerequisite data evidence"
+            exit 1
+          fi
+          [[ "$RESOLVED_APPLIED_DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RESOLVED_APPLIED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor \
+            "$RESOLVED_APPLIED_SOURCE_SHA" "$RESUME_SOURCE_SHA"
+          expected_baseline_source_sha=
+          expected_recovery_run_id=
+          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
+            expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
+            expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+          fi
+          BASELINE_DIR="$baseline_dir" \
+          EXPECTED_SOURCE_SHA="$expected_baseline_source_sha" \
+          EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+          EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
+          REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
           case "$RESUME_MAINTENANCE_MODE" in
             released-runtime)
@@ -871,6 +886,57 @@ jobs:
               exit 1
               ;;
           esac
+
+          for service in auth bet backoffice client event gamemaster moderation resulting slip; do
+            expected_ref="$(
+              awk -F '\t' -v service="$service" '
+                $1 == service { count++; value=$3 }
+                END { if (count != 1) exit 1; print value }
+              ' "$resume_images"
+            )"
+            deployment="gaming-${service}-depl"
+            actual_ref="$(
+              kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" \
+                -o jsonpath='{.spec.template.spec.containers[0].image}'
+            )"
+            case "$service" in
+              auth|backoffice|client)
+                if [ "$actual_ref" != "$expected_ref" ]; then
+                  echo "::error::Resume candidate-only deployment image mismatch for ${service}"
+                  exit 1
+                fi
+                ;;
+              bet|event|gamemaster|moderation|resulting|slip)
+                if [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
+                  if [ "$actual_ref" != "$expected_ref" ]; then
+                    echo "::error::Resume candidate-only deployment image mismatch for ${service}"
+                    exit 1
+                  fi
+                elif [ "$actual_ref" != "$expected_ref" ]; then
+                  if ! baseline_ref="$(
+                    awk -F '\t' -v service="$service" '
+                      $1 == service {
+                        count++
+                        if (NF != 2) invalid=1
+                        value=$2
+                      }
+                      END {
+                        if (count != 1 || invalid) exit 1
+                        print value
+                      }
+                    ' "$baseline_dir/live-images.tsv"
+                  )" || [[ ! "$baseline_ref" =~ ^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$ ]]; then
+                    echo "::error::Resume baseline image evidence is invalid for writer ${service}"
+                    exit 1
+                  fi
+                  if [ "$actual_ref" != "$baseline_ref" ]; then
+                    echo "::error::Retained-hold writer image mismatch for ${service}: expected its candidate or validated own baseline image"
+                    exit 1
+                  fi
+                fi
+                ;;
+            esac
+          done
 
           for service in auth backoffice client; do
             expected_manifest="$(
@@ -928,39 +994,6 @@ jobs:
               exit 1
             fi
           done
-
-          expected_baseline_sha="$(
-            awk -F= '$1 == "baseline_sha256" {
-              if (found++) exit 1
-              value=$2
-            } END {
-              if (found != 1) exit 1
-              print value
-            }' "$prior_evidence"
-          )"
-          observed_baseline_sha="$(
-            sha256sum "$baseline_dir/SHA256SUMS" | awk '{print $1}'
-          )"
-          if [ "$observed_baseline_sha" != "$expected_baseline_sha" ]; then
-            echo "::error::Resume rollback baseline digest differs from the prerequisite data evidence"
-            exit 1
-          fi
-          [[ "$RESOLVED_APPLIED_DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$RESOLVED_APPLIED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          git merge-base --is-ancestor \
-            "$RESOLVED_APPLIED_SOURCE_SHA" "$RESUME_SOURCE_SHA"
-          expected_baseline_source_sha=
-          expected_recovery_run_id=
-          if [ "$BASELINE_RECOVERY_RUN_ID" != "0" ]; then
-            expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
-            expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
-          fi
-          BASELINE_DIR="$baseline_dir" \
-          EXPECTED_SOURCE_SHA="$expected_baseline_source_sha" \
-          EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
-          EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
-          REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
-            ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
           mkdir -p artifacts/oci-live-data-rollout/evidence
           cat >artifacts/oci-live-data-rollout/evidence/resume-authority.env <<EOF

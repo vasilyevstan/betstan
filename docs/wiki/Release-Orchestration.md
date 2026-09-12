@@ -310,6 +310,14 @@ workload is stable, releases the database lock and then the write fence in that
 order, and finally requires ordinary steady-state readiness. Any failure
 re-holds maintenance and reports the true lock state.
 
+When applied-data recovery resumes from that retained hold, each quiesced
+writer may use either its exact failed-deployment candidate image or its own
+checksum-bound pre-deployment baseline image, allowing a partially completed
+sequential rollout to continue safely. Auth, Backoffice, and Client remain on
+their exact candidate images, while released-runtime recovery requires all
+nine candidate images. Baseline provenance, ancestry, quiescence, readiness,
+locks, fences, and every pre-mutation check remain fail-closed.
+
 A generation that failed its own deployment is never an accepted rollback
 baseline.
 

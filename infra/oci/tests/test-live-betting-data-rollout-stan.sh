@@ -1556,6 +1556,294 @@ grep -Fq 'could not determine whether the legacy OCIR pull secret exists' \
 [[ ! -d "$stub_state/jobs" || -z "$(find "$stub_state/jobs" -type f -print -quit)" ]] ||
   fail "secret API failure reached live data job creation"
 
+resume_fixture="$work_dir/resume-policy"
+resume_script="$resume_fixture/resume-step.sh"
+resume_log="$resume_fixture/order.log"
+resume_repository=ghcr.io/vasilyevstan/betstan-images
+mkdir -p \
+  "$resume_fixture/bin" \
+  "$resume_fixture/artifacts/oci-live-data-rollout" \
+  "$resume_fixture/artifacts/prerequisite" \
+  "$resume_fixture/artifacts/oci-data-baseline-before" \
+  "$resume_fixture/infra/oci/scripts"
+
+python3 - "$WORKFLOW" "$resume_script" <<'PY'
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+step = workflow[
+    workflow.index("- name: Verify exact failed-deploy resume state"):
+    workflow.index("- name: Capture and validate pre-mutation rollback baseline")
+]
+body = step.split("        run: |\n", 1)[1]
+body = body[:body.index("          mkdir -p artifacts/oci-live-data-rollout/evidence")]
+lines = []
+for line in body.splitlines():
+    if line:
+        if not line.startswith("          "):
+            raise SystemExit("resume workflow shell indentation is invalid")
+        lines.append(line[10:])
+    else:
+        lines.append("")
+Path(sys.argv[2]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+chmod +x "$resume_script"
+
+cat >"$resume_fixture/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "merge-base --is-ancestor "* ]]
+printf 'ancestry\n' >>"${RESUME_TEST_LOG:?}"
+SH
+
+cat >"$resume_fixture/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "get" && "${2:-}" == "deployment" ]]; then
+  service="${3#gaming-}"
+  service="${service%-depl}"
+  printf 'deployment:%s\n' "$service" >>"${RESUME_TEST_LOG:?}"
+  awk -F '\t' -v service="$service" '
+    $1 == service { count++; value=$2 }
+    END { if (count != 1) exit 1; print value }
+  ' "${RESUME_ACTUAL_IMAGES:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "rollout" && "${2:-}" == "status" ]]; then
+  service="${3#deployment/gaming-}"
+  service="${service%-depl}"
+  printf 'rollout:%s\n' "$service" >>"${RESUME_TEST_LOG:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "get" && "${2:-}" == "pods" ]]; then
+  service=
+  for argument in "$@"; do
+    if [[ "$argument" == app=gaming-* ]]; then
+      service="${argument#app=gaming-}"
+    fi
+  done
+  [[ -n "$service" ]]
+  manifest="$(
+    awk -F '\t' -v service="$service" '
+      $1 == service { count++; value=$4 }
+      END { if (count != 1) exit 1; print value }
+    ' "${RESUME_IMAGES:?}"
+  )"
+  printf '{"items":[{"metadata":{},"status":{"containerStatuses":[{"name":"gaming-%s","ready":true,"imageID":"fixture@%s"}]}}]}\n' \
+    "$service" "$manifest"
+  exit 0
+fi
+exit 1
+SH
+
+cat >"$resume_fixture/infra/oci/scripts/live-data-maintenance-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "verify-quiesced" ]]
+printf 'maintenance:verify-quiesced\n' >>"${RESUME_TEST_LOG:?}"
+SH
+
+cat >"$resume_fixture/infra/oci/scripts/validate-rollback-baseline-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'validate-baseline\n' >>"${RESUME_TEST_LOG:?}"
+cp \
+  "${BASELINE_DIR:?}/live-images-template.tsv" \
+  "$BASELINE_DIR/live-images.tsv"
+SH
+chmod +x \
+  "$resume_fixture/bin/git" \
+  "$resume_fixture/bin/kubectl" \
+  "$resume_fixture/infra/oci/scripts/live-data-maintenance-stan.sh" \
+  "$resume_fixture/infra/oci/scripts/validate-rollback-baseline-stan.sh"
+
+: >"$resume_fixture/artifacts/oci-live-data-rollout/resume-images.tsv"
+: >"$resume_fixture/candidate-images.tsv"
+: >"$resume_fixture/baseline-images.tsv"
+: >"$resume_fixture/baseline-good.tsv"
+resume_services=(auth bet backoffice client event gamemaster moderation resulting slip)
+resume_index=1
+for service in "${resume_services[@]}"; do
+  candidate_digest="$(printf '%064x' "$resume_index")"
+  baseline_digest="$(printf '%064x' "$((resume_index + 100))")"
+  candidate_ref="$resume_repository@sha256:$candidate_digest"
+  baseline_ref="$resume_repository@sha256:$baseline_digest"
+  printf '%s\t%s\t%s\tsha256:%s\tsha256:%s\n' \
+    "$service" "$resume_repository" "$candidate_ref" \
+    "$candidate_digest" "$candidate_digest" \
+    >>"$resume_fixture/artifacts/oci-live-data-rollout/resume-images.tsv"
+  printf '%s\t%s\n' "$service" "$candidate_ref" \
+    >>"$resume_fixture/candidate-images.tsv"
+  printf '%s\t%s\n' "$service" "$baseline_ref" \
+    >>"$resume_fixture/baseline-images.tsv"
+  printf '%s\t%s\n' \
+    "$service" "$baseline_ref" \
+    >>"$resume_fixture/baseline-good.tsv"
+  resume_index=$((resume_index + 1))
+done
+printf 'fixture baseline manifest\n' \
+  >"$resume_fixture/artifacts/oci-data-baseline-before/SHA256SUMS"
+resume_baseline_sha="$(
+  sha256sum \
+    "$resume_fixture/artifacts/oci-data-baseline-before/SHA256SUMS" |
+    awk '{print $1}'
+)"
+printf 'baseline_sha256=%s\n' "$resume_baseline_sha" \
+  >"$resume_fixture/artifacts/prerequisite/provenance.env"
+
+reset_resume_fixture() {
+  rm -f \
+    "$resume_fixture/artifacts/oci-data-baseline-before/live-images.tsv" \
+    "$resume_log"
+  cp "$resume_fixture/candidate-images.tsv" "$resume_fixture/actual-images.tsv"
+  cp \
+    "$resume_fixture/baseline-good.tsv" \
+    "$resume_fixture/artifacts/oci-data-baseline-before/live-images-template.tsv"
+}
+
+set_resume_image() {
+  local service="$1"
+  local source_file="$2"
+  local image temporary
+  image="$(
+    awk -F '\t' -v service="$service" '
+      $1 == service { count++; value=$2 }
+      END { if (count != 1) exit 1; print value }
+    ' "$source_file"
+  )"
+  temporary="$resume_fixture/actual-images.next"
+  awk -F '\t' -v OFS='\t' -v service="$service" -v image="$image" '
+    $1 == service { $2=image }
+    { print }
+  ' "$resume_fixture/actual-images.tsv" >"$temporary"
+  mv "$temporary" "$resume_fixture/actual-images.tsv"
+}
+
+run_resume_fixture() {
+  local mode="$1"
+  (
+    cd "$resume_fixture"
+    PATH="$resume_fixture/bin:$PATH" \
+    RESUME_TEST_LOG="$resume_log" \
+    RESUME_ACTUAL_IMAGES="$resume_fixture/actual-images.tsv" \
+    RESUME_IMAGES="$resume_fixture/artifacts/oci-live-data-rollout/resume-images.tsv" \
+    RESUME_SOURCE_SHA=2222222222222222222222222222222222222222 \
+    RESUME_MAINTENANCE_MODE="$mode" \
+    BASELINE_RECOVERY_SOURCE_SHA=none \
+    RESOLVED_APPLIED_DATA_RUN_ID=4007 \
+    RESOLVED_APPLIED_SOURCE_SHA=1111111111111111111111111111111111111111 \
+    BASELINE_RECOVERY_RUN_ID=0 \
+    OCI_K8S_NAMESPACE=betstan-oci \
+      bash "$resume_script"
+  )
+}
+
+reset_resume_fixture
+for service in bet gamemaster resulting; do
+  set_resume_image "$service" "$resume_fixture/baseline-images.tsv"
+done
+run_resume_fixture retained-hold >/dev/null ||
+  fail "retained-hold resume rejected candidate-or-own-baseline writer images"
+python3 - "$resume_log" <<'PY'
+import sys
+from pathlib import Path
+
+events = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+required = [
+    "validate-baseline",
+    "maintenance:verify-quiesced",
+    "deployment:auth",
+    "deployment:slip",
+    "rollout:auth",
+    "rollout:backoffice",
+    "rollout:client",
+]
+positions = []
+for event in required:
+    if events.count(event) != 1:
+        raise SystemExit(f"resume fixture expected exactly one event: {event}")
+    positions.append(events.index(event))
+if positions != sorted(positions):
+    raise SystemExit("resume validation, quiescence, image, and readiness order changed")
+PY
+
+reset_resume_fixture
+run_resume_fixture released-runtime >/dev/null ||
+  fail "released-runtime resume rejected all candidate images"
+
+reset_resume_fixture
+set_resume_image bet "$resume_fixture/baseline-images.tsv"
+released_output="$resume_fixture/released-baseline.out"
+if run_resume_fixture released-runtime >"$released_output" 2>&1; then
+  fail "released-runtime resume accepted a writer baseline image"
+fi
+grep -Fq 'Resume candidate-only deployment image mismatch for bet' \
+  "$released_output" ||
+  fail "released-runtime mismatch did not report candidate-only policy"
+
+reset_resume_fixture
+set_resume_image bet "$resume_fixture/baseline-images.tsv"
+set_resume_image event "$resume_fixture/baseline-images.tsv"
+event_baseline="$(
+  awk -F '\t' '$1 == "event" { print $2 }' "$resume_fixture/baseline-images.tsv"
+)"
+awk -F '\t' -v OFS='\t' -v image="$event_baseline" '
+  $1 == "bet" { $2=image }
+  { print }
+' "$resume_fixture/actual-images.tsv" >"$resume_fixture/actual-images.next"
+mv "$resume_fixture/actual-images.next" "$resume_fixture/actual-images.tsv"
+retained_output="$resume_fixture/retained-third-image.out"
+if run_resume_fixture retained-hold >"$retained_output" 2>&1; then
+  fail "retained-hold resume accepted another writer's baseline image"
+fi
+grep -Fq 'Retained-hold writer image mismatch for bet' "$retained_output" ||
+  fail "retained-hold mismatch did not report writer fallback policy"
+
+reset_resume_fixture
+set_resume_image auth "$resume_fixture/baseline-images.tsv"
+reader_output="$resume_fixture/reader-baseline.out"
+if run_resume_fixture retained-hold >"$reader_output" 2>&1; then
+  fail "retained-hold resume accepted a reader baseline image"
+fi
+grep -Fq 'Resume candidate-only deployment image mismatch for auth' \
+  "$reader_output" ||
+  fail "reader mismatch did not report candidate-only policy"
+
+for baseline_case in malformed duplicate missing; do
+  reset_resume_fixture
+  set_resume_image bet "$resume_fixture/baseline-images.tsv"
+  baseline_template="$resume_fixture/artifacts/oci-data-baseline-before/live-images-template.tsv"
+  case "$baseline_case" in
+    malformed)
+      awk -F '\t' -v OFS='\t' '
+        $1 == "bet" { print $1; next }
+        { print }
+      ' "$baseline_template" >"$resume_fixture/baseline-case.tsv"
+      mv "$resume_fixture/baseline-case.tsv" "$baseline_template"
+      ;;
+    duplicate)
+      awk -F '\t' '$1 == "bet" { print; exit }' "$baseline_template" \
+        >"$resume_fixture/baseline-case.tsv"
+      cat "$resume_fixture/baseline-case.tsv" >>"$baseline_template"
+      rm "$resume_fixture/baseline-case.tsv"
+      ;;
+    missing)
+      awk -F '\t' '$1 != "bet"' "$baseline_template" \
+        >"$resume_fixture/baseline-case.tsv"
+      mv "$resume_fixture/baseline-case.tsv" "$baseline_template"
+      ;;
+  esac
+  baseline_output="$resume_fixture/baseline-$baseline_case.out"
+  if run_resume_fixture retained-hold >"$baseline_output" 2>&1; then
+    fail "retained-hold resume accepted a $baseline_case writer baseline row"
+  fi
+  grep -Fq 'Resume baseline image evidence is invalid for writer bet' \
+    "$baseline_output" ||
+    fail "$baseline_case writer baseline row did not fail with bounded diagnostics"
+done
+
 for literal in \
   'validate_blocked_reschedule_report' \
   'write_reschedule_blocker_evidence' \
@@ -1616,6 +1904,11 @@ for literal in \
   'Application path changed after applied data' \
   'EXPECTED_PHASE=apply-slip-index' \
   'OUTPUT_FILE=artifacts/oci-live-data-rollout/resume-images.tsv' \
+  'Resume candidate-only deployment image mismatch' \
+  'Retained-hold writer image mismatch' \
+  'Resume baseline image evidence is invalid' \
+  'bet|event|gamemaster|moderation|resulting|slip)' \
+  '"$baseline_dir/live-images.tsv"' \
   'expected_manifest=' \
   'endswith("@" + $manifest)' \
   'for service in auth backoffice client; do' \
@@ -1750,12 +2043,19 @@ resume = data[
 require_order(
     resume,
     [
-        "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
-        "Resume deployment image mismatch",
+        'expected_baseline_sha="$(',
+        'observed_baseline_sha="$(',
+        "validate-rollback-baseline-stan.sh",
         'case "$RESUME_MAINTENANCE_MODE" in',
         "released-runtime)",
         "retained-hold)",
         "live-data-maintenance-stan.sh verify-quiesced",
+        "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
+        'case "$service" in',
+        "auth|backoffice|client)",
+        "bet|event|gamemaster|moderation|resulting|slip)",
+        '"$baseline_dir/live-images.tsv"',
+        "Retained-hold writer image mismatch",
         "for service in auth backoffice client; do",
         "kubectl rollout status",
         "Resume supporting pod image mismatch",
@@ -1764,6 +2064,22 @@ require_order(
 )
 if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
+if resume.count("bet|event|gamemaster|moderation|resulting|slip)") != 1:
+    raise SystemExit("failed-deploy resume writer allowance is not the exact six services")
+for literal in (
+    'if (NF != 2) invalid=1',
+    'if (count != 1 || invalid) exit 1',
+    r'^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$',
+    'if [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then',
+):
+    if literal not in resume:
+        raise SystemExit(
+            f"failed-deploy resume is missing baseline image safety: {literal}"
+        )
+if resume.index("validate-rollback-baseline-stan.sh") > resume.index(
+    '"$baseline_dir/live-images.tsv"'
+):
+    raise SystemExit("failed-deploy resume reads baseline images before validation")
 if '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' in resume:
     raise SystemExit(
         "failed-deploy resume still rejects a checksum-bound chained authority"
