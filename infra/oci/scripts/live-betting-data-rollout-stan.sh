@@ -208,7 +208,7 @@ create_job() {
             - "--mode"
             - "apply"
             - "--confirmation"
-            - "RESCHEDULE_EVENT:eb4608ac531f5d9578113167:2026-09-12T08:05:00.000Z"'
+            - "RESCHEDULE_EVENT:0fd6a3633bf1fcf09d95c17d:2026-09-13T08:05:00.000Z"'
       ;;
     dist/scripts/rescheduleSyntheticEvent.js:verify)
       args='
@@ -776,8 +776,8 @@ project_reschedule_report() {
     -s \
     --arg stage "$stage" \
     --arg expected_mode "$expected_mode" \
-    --arg target_event_id "eb4608ac531f5d9578113167" \
-    --arg target_kickoff "2026-09-12T08:05:00.000Z" '
+    --arg target_event_id "0fd6a3633bf1fcf09d95c17d" \
+    --arg target_kickoff "2026-09-13T08:05:00.000Z" '
       def nonnegative_integer:
         type == "number" and . >= 0 and . == floor;
       def exact_keys($required; $optional):
@@ -1340,7 +1340,7 @@ esac
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$OUTPUT_DIR/provenance.env" <<EOF
-schema_version=live-betting-v3
+schema_version=live-betting-v4
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
@@ -1382,7 +1382,7 @@ jq -s \
   --argjson operation_lock_enforced "$OPERATION_LOCK_ENFORCED" \
   --argjson operation_lock_handoff "$OPERATION_LOCK_HANDOFF" '
     {
-      schema_version: "live-betting-v3",
+      schema_version: "live-betting-v4",
       source_sha: $source_sha,
       build_run_id: $build_run_id,
       infrastructure_run_id: $infrastructure_run_id,
@@ -1408,7 +1408,7 @@ jq -s \
 
 if [[ "$PHASE" == "apply-slip-index" ]]; then
   cat >"$OUTPUT_DIR/schema.env" <<EOF
-schema_version=live-betting-v3
+schema_version=live-betting-v4
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
