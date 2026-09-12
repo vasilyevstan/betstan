@@ -374,7 +374,8 @@ jobs:
         run: |
           set -euo pipefail
           validate_build() {
-            local source_sha="$1" run_id="$2" role="$3"
+            local source_sha="$1" run_id="$2" role="$3" generation_profile="$4"
+            [[ "$generation_profile" == "current" || "$generation_profile" == "compatible" ]]
             local workflow_id run artifact_name artifact_count artifact_dir
             workflow_id="$(gh api "repos/$REPO/actions/workflows/oci-production-build.yml" --jq '.id')"
             run="$(gh api "repos/$REPO/actions/runs/$run_id/attempts/1")"
@@ -404,6 +405,7 @@ jobs:
             [ -z "$(find "$artifact_dir" -type l -print -quit)" ]
             PROVENANCE_DIR="$artifact_dir" SOURCE_SHA="$source_sha" \
             EXPECTED_BUILD_RUN_ID="$run_id" EXPECTED_BUILD_RUN_ATTEMPT=1 \
+            GENERATION_PROFILE="$generation_profile" \
             OUTPUT_FILE="$artifact_dir/verified-images.tsv" \
             VERIFY_REMOTE=1 BOOT_IMAGES=0 ANONYMOUS_PULL=1 \
               ./infra/oci/scripts/verify-images.sh
@@ -507,13 +509,13 @@ jobs:
             local source_sha="$1" build_run_id="$2" recovery_run_id="$3"
             local deploy_run_id="$4" role="$5"
             if [ -n "$build_run_id" ]; then
-              validate_build "$source_sha" "$build_run_id" "$role"
+              validate_build "$source_sha" "$build_run_id" "$role" compatible
               validate_deploy "$source_sha" "$build_run_id" "$deploy_run_id" "$role"
             else
               validate_recovery "$source_sha" "$recovery_run_id" "$role"
             fi
           }
-          validate_build "$SOURCE_SHA" "$CANDIDATE_BUILD_RUN_ID" candidate
+          validate_build "$SOURCE_SHA" "$CANDIDATE_BUILD_RUN_ID" candidate current
           validate_origin "$DEPLOYED_SHA" "$DEPLOYED_BUILD_RUN_ID" \
             "$DEPLOYED_RECOVERY_RUN_ID" "$DEPLOYED_DEPLOY_RUN_ID" deployed
           validate_origin "$LAST_KNOWN_GOOD_SHA" "$LAST_KNOWN_GOOD_BUILD_RUN_ID" \
@@ -522,7 +524,7 @@ jobs:
           if [ "$PHASE" = validate ] && [ -n "$OBSOLETE_GENERATIONS" ]; then
             while IFS=$'\t' read -r obsolete_sha obsolete_build_run_id; do
               validate_build \
-                "$obsolete_sha" "$obsolete_build_run_id" "obsolete-$obsolete_sha"
+                "$obsolete_sha" "$obsolete_build_run_id" "obsolete-$obsolete_sha" compatible
             done < <(
               jq -r 'sort_by(.sha)[] | [.sha, .build_run_id] | @tsv' \
                 <<<"$OBSOLETE_GENERATIONS"
