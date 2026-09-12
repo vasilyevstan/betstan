@@ -1322,14 +1322,6 @@ for name in ("provenance.env", "schema.env"):
         ),
         encoding="utf-8",
     )
-for path in sorted((root / "reports").glob("*-event-reschedule.json")):
-    report = json.loads(path.read_text(encoding="utf-8"))
-    report["targetEventId"] = "0fd6a3633bf1fcf09d95c17d"
-    report["targetKickoff"] = "2026-09-13T08:05:00.000Z"
-    path.write_text(
-        json.dumps(report, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
 journal_path = root / "journal.json"
 journal = json.loads(journal_path.read_text(encoding="utf-8"))
 journal["schema_version"] = "live-betting-v4"
@@ -1339,6 +1331,7 @@ journal_path.write_text(
 )
 PY
 write_manifest "$v3_as_v4_output"
+v3_as_v4_error="$work_dir/v3-as-v4.err"
 if EVIDENCE_DIR="$v3_as_v4_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
   EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
@@ -1346,9 +1339,11 @@ if EVIDENCE_DIR="$v3_as_v4_output" \
   EXPECTED_PHASE=apply-slip-index \
   EXPECTED_RUN_ID=4003 \
   EXPECTED_RUN_ATTEMPT=1 \
-    "$VERIFIER" >/dev/null 2>&1; then
+    "$VERIFIER" >/dev/null 2>"$v3_as_v4_error"; then
   fail "v3 Sep12 evidence was accepted after v4 schema substitution"
 fi
+grep -Fq 'targets an unexpected event' "$v3_as_v4_error" ||
+  fail "v3-to-v4 substitution did not fail on the generation identity"
 
 v4_as_v3_output="$work_dir/v4-as-v3"
 cp -R "$final_output" "$v4_as_v3_output"
@@ -1368,14 +1363,6 @@ for name in ("provenance.env", "schema.env"):
         ),
         encoding="utf-8",
     )
-for path in sorted((root / "reports").glob("*-event-reschedule.json")):
-    report = json.loads(path.read_text(encoding="utf-8"))
-    report["targetEventId"] = "eb4608ac531f5d9578113167"
-    report["targetKickoff"] = "2026-09-12T08:05:00.000Z"
-    path.write_text(
-        json.dumps(report, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
 journal_path = root / "journal.json"
 journal = json.loads(journal_path.read_text(encoding="utf-8"))
 journal["schema_version"] = "live-betting-v3"
@@ -1385,6 +1372,7 @@ journal_path.write_text(
 )
 PY
 write_manifest "$v4_as_v3_output"
+v4_as_v3_error="$work_dir/v4-as-v3.err"
 if EVIDENCE_DIR="$v4_as_v3_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
   EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
@@ -1392,9 +1380,11 @@ if EVIDENCE_DIR="$v4_as_v3_output" \
   EXPECTED_PHASE=apply-slip-index \
   EXPECTED_RUN_ID=4003 \
   EXPECTED_RUN_ATTEMPT=1 \
-    "$VERIFIER" >/dev/null 2>&1; then
+    "$VERIFIER" >/dev/null 2>"$v4_as_v3_error"; then
   fail "v4 Sep13 evidence was accepted after v3 schema substitution"
 fi
+grep -Fq 'targets an unexpected event' "$v4_as_v3_error" ||
+  fail "v4-to-v3 substitution did not fail on the generation identity"
 
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"
