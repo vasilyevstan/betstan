@@ -2339,8 +2339,14 @@ target_kickoff_check = (
 retained_v2_event_id = "42643b4c173d1c7b8eeed765"
 retained_v2_backoffice_id = "7420bc3b71340b4468c206e4"
 retained_v2_kickoff = "2026-09-11T08:05:00.000Z"
-event_projection_id = "a3c69f33302db13963b4524e"
-gamemaster_projection_id = "54e4a0020e2e9301de494852"
+retained_v3_event_id = "eb4608ac531f5d9578113167"
+retained_v3_backoffice_id = "dc32b275f1514a495f56bc0a"
+retained_v3_kickoff = "2026-09-12T08:05:00.000Z"
+retained_v1_event_id = "6a623af592af5a95b1d0bb79"
+retained_v1_backoffice_id = "6a623af592af5a95b1d0bb7a"
+retained_v1_kickoff = "2026-07-23T16:31:57.215Z"
+event_projection_id = "d3254636c3125c17669c950e"
+gamemaster_projection_id = "6b69d03803681f8c9642b94e"
 
 def fixed_literal(source, name, shape, exported=True):
     prefix = "export const" if exported else "const"
@@ -2370,48 +2376,59 @@ cleanup_event_id = fixed_literal(cleanup_source, "OBSOLETE_EVENT_ID", object_id)
 cleanup_kickoff = fixed_literal(cleanup_source, "OBSOLETE_EVENT_KICKOFF", iso_kickoff)
 confirmation = f"RESCHEDULE_EVENT:{event_id}:{kickoff}"
 
-# The accepted identity contract has three exact, distinct generations:
-# July cleanup v1, retained Sep11 reschedule v2, and current Sep12 v3.
+# The accepted identity contract has four exact, distinct generations:
+# July cleanup v1, Sep11 v2, Sep12 v3, and current Sep13 v4.
 if (old_event_id, old_backoffice_id, old_kickoff) != (
-    "6a623af592af5a95b1d0bb79",
-    "6a623af592af5a95b1d0bb7a",
-    "2026-07-23T16:31:57.215Z",
+    retained_v1_event_id,
+    retained_v1_backoffice_id,
+    retained_v1_kickoff,
 ):
-    raise SystemExit("historical v1 identity drifted")
+    raise SystemExit("historical v1 source identity drifted")
 if (event_id, backoffice_id, kickoff) != (
-    "eb4608ac531f5d9578113167",
-    "dc32b275f1514a495f56bc0a",
-    "2026-09-12T08:05:00.000Z",
+    "0fd6a3633bf1fcf09d95c17d",
+    "9f90c9747315ec79f4e296f6",
+    "2026-09-13T08:05:00.000Z",
 ):
-    raise SystemExit("current v3 identity drifted")
+    raise SystemExit("current v4 identity drifted")
 for label, value in (
-    ("v3 event", event_id),
-    ("v3 Backoffice", backoffice_id),
+    ("v4 event", event_id),
+    ("v4 Backoffice", backoffice_id),
+    ("v3 event", retained_v3_event_id),
+    ("v3 Backoffice", retained_v3_backoffice_id),
     ("v2 event", retained_v2_event_id),
     ("v2 Backoffice", retained_v2_backoffice_id),
-    ("v1 event", old_event_id),
-    ("v1 Backoffice", old_backoffice_id),
+    ("v1 event", retained_v1_event_id),
+    ("v1 Backoffice", retained_v1_backoffice_id),
 ):
     if re.fullmatch(object_id, value) is None:
         raise SystemExit(f"{label} identity is not a lowercase 24-hex ObjectId")
 if len({
     event_id,
     backoffice_id,
+    retained_v3_event_id,
+    retained_v3_backoffice_id,
     retained_v2_event_id,
     retained_v2_backoffice_id,
-    old_event_id,
-    old_backoffice_id,
-}) != 6:
-    raise SystemExit("v1, v2, and v3 fixture identities are not distinct")
-if len({kickoff, retained_v2_kickoff, old_kickoff}) != 3:
-    raise SystemExit("v1, v2, and v3 fixture kickoffs are not distinct")
-if cleanup_event_id != old_event_id:
+    retained_v1_event_id,
+    retained_v1_backoffice_id,
+}) != 8:
+    raise SystemExit("v1, v2, v3, and v4 fixture identities are not distinct")
+if len({
+    kickoff,
+    retained_v3_kickoff,
+    retained_v2_kickoff,
+    retained_v1_kickoff,
+}) != 4:
+    raise SystemExit("v1, v2, v3, and v4 fixture kickoffs are not distinct")
+if cleanup_event_id != retained_v1_event_id:
     raise SystemExit("historical cleanup source drifts from the historical event identity")
-if cleanup_kickoff != old_kickoff:
+if cleanup_kickoff != retained_v1_kickoff:
     raise SystemExit("historical cleanup source drifts from the historical kickoff")
 for label, value in (
-    ("v3 event", event_id),
-    ("v3 Backoffice", backoffice_id),
+    ("v4 event", event_id),
+    ("v4 Backoffice", backoffice_id),
+    ("v3 event", retained_v3_event_id),
+    ("v3 Backoffice", retained_v3_backoffice_id),
     ("v2 event", retained_v2_event_id),
     ("v2 Backoffice", retained_v2_backoffice_id),
 ):
@@ -2438,10 +2455,12 @@ if re.findall(
 if rollout.count(event_id) != 2:
     raise SystemExit("rollout does not bind the current event identity exactly twice")
 for label, value in (
+    ("v3 event", retained_v3_event_id),
+    ("v3 Backoffice", retained_v3_backoffice_id),
     ("v2 event", retained_v2_event_id),
     ("v2 Backoffice", retained_v2_backoffice_id),
-    ("v1 event", old_event_id),
-    ("v1 Backoffice", old_backoffice_id),
+    ("v1 event", retained_v1_event_id),
+    ("v1 Backoffice", retained_v1_backoffice_id),
 ):
     if value in rollout:
         raise SystemExit(f"rollout still references the {label} identity")
@@ -2449,8 +2468,8 @@ for label, value in (
 if re.findall(
     target_kickoff_check,
     verifier,
-) != [retained_v2_kickoff, kickoff]:
-    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3 values")
+) != [retained_v2_kickoff, retained_v3_kickoff, kickoff]:
+    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3/v4 values")
 
 # Bind every verifier branch structurally rather than accepting an unordered
 # set of identities that could be substituted across schema generations.
@@ -2465,8 +2484,9 @@ if [kind for _, kind in kind_checks] != [
     "obsolete-event-cleanup",
     "fixed-event-reschedule",
     "fixed-event-reschedule",
+    "fixed-event-reschedule",
 ]:
-    raise SystemExit("evidence verifier does not expose exact v1/v2/v3 branches")
+    raise SystemExit("evidence verifier does not expose exact v1/v2/v3/v4 branches")
 pins = [
     (match.start(), match.group(1))
     for match in re.finditer(target_event_check, verifier)
@@ -2476,13 +2496,18 @@ kickoff_pins = [
     for match in re.finditer(target_kickoff_check, verifier)
 ]
 if [value for _, value in pins] != [
-    old_event_id,
+    retained_v1_event_id,
     retained_v2_event_id,
+    retained_v3_event_id,
     event_id,
 ]:
-    raise SystemExit("evidence verifier target pins are not exact v1/v2/v3 values")
-if [value for _, value in kickoff_pins] != [retained_v2_kickoff, kickoff]:
-    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3 values")
+    raise SystemExit("evidence verifier target pins are not exact v1/v2/v3/v4 values")
+if [value for _, value in kickoff_pins] != [
+    retained_v2_kickoff,
+    retained_v3_kickoff,
+    kickoff,
+]:
+    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3/v4 values")
 positions = [
     kind_checks[0][0],
     pins[0][0],
@@ -2492,13 +2517,26 @@ positions = [
     kind_checks[2][0],
     pins[2][0],
     kickoff_pins[1][0],
+    kind_checks[3][0],
+    pins[3][0],
+    kickoff_pins[2][0],
 ]
 if positions != sorted(positions):
-    raise SystemExit("evidence verifier v1/v2/v3 branch pins are out of order")
-for value in (old_event_id, retained_v2_event_id, event_id):
+    raise SystemExit("evidence verifier v1/v2/v3/v4 branch pins are out of order")
+for value in (
+    retained_v1_event_id,
+    retained_v2_event_id,
+    retained_v3_event_id,
+    event_id,
+):
     if verifier.count(value) != 1:
         raise SystemExit("evidence verifier accepts more than one identity per schema branch")
-for value in (old_backoffice_id, retained_v2_backoffice_id, backoffice_id):
+for value in (
+    retained_v1_backoffice_id,
+    retained_v2_backoffice_id,
+    retained_v3_backoffice_id,
+    backoffice_id,
+):
     if value in verifier:
         raise SystemExit("evidence verifier binds a Backoffice identity it must not know")
 
@@ -2525,10 +2563,10 @@ fi
 for reschedule_contract in \
     'const RESCHEDULE_SOURCE_EVENT_ID = "6a623af592af5a95b1d0bb79";' \
     'const RESCHEDULE_SOURCE_BACKOFFICE_ID = "6a623af592af5a95b1d0bb7a";' \
-    'export const RESCHEDULE_EVENT_ID = "eb4608ac531f5d9578113167";' \
-    'export const RESCHEDULE_BACKOFFICE_ID = "dc32b275f1514a495f56bc0a";' \
+    'export const RESCHEDULE_EVENT_ID = "0fd6a3633bf1fcf09d95c17d";' \
+    'export const RESCHEDULE_BACKOFFICE_ID = "9f90c9747315ec79f4e296f6";' \
     'export const RESCHEDULE_OLD_KICKOFF = "2026-07-23T16:31:57.215Z";' \
-    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-12T08:05:00.000Z";' \
+    'export const RESCHEDULE_TARGET_KICKOFF = "2026-09-13T08:05:00.000Z";' \
     'RESCHEDULE_EVENT:${RESCHEDULE_EVENT_ID}:${RESCHEDULE_TARGET_KICKOFF}' \
     'ROLLBACK_EVENT_RESCHEDULE:${RESCHEDULE_EVENT_ID}' \
     'const DEPENDENCY_LOCATIONS:' \

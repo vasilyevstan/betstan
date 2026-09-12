@@ -299,25 +299,32 @@ offline. Its activation request was superseded before authority or dispatch
 when protected `master` advanced. It was never activated, remains offline and
 untouched, and requires no cleanup.
 
-The pending correction fixes the current acceptance target to public Event ID
-`eb4608ac531f5d9578113167`, with kickoff
-`2026-09-12T08:05:00.000Z`. It has not yet been applied, deployed, or
-activated. Its initial apply must begin strictly before
-`2026-09-12T07:45:00.000Z`, the existing twenty-minute lead boundary; starting
-at exactly that time is rejected.
+The September 12 fixed fixture, public Event ID
+`eb4608ac531f5d9578113167` at `2026-09-12T08:05:00.000Z`, was applied
+offline. It was not activated before its window elapsed, remains offline and
+untouched, and requires no cleanup.
 
-The September 12 target records are built from reviewed constants rather than
-cloned from mutable production state. They retain the reviewed fixture name
-and teams, `NO_RESULT` status, `OFFLINE` visibility, and deterministic 1X2 and
-Correct Score products. The deterministic live input remains private.
-Creation-request and publication-pending fields are absent rather than set.
+The current pending correction fixes the September 13 acceptance target to
+public Event ID `0fd6a3633bf1fcf09d95c17d`, with kickoff
+`2026-09-13T08:05:00.000Z`. It has not been applied, deployed, or activated.
+Its initial apply must begin strictly before `2026-09-13T07:45:00.000Z`, the
+existing twenty-minute lead boundary; starting at exactly that time is
+rejected.
+
+The September 13 target records use a new fixed identity set and are built
+from reviewed constants rather than cloned from mutable production state.
+They retain the reviewed fixture name and teams, `NO_RESULT` status, `OFFLINE`
+visibility, and deterministic 1X2 and Correct Score products. The non-public
+identities and deterministic live input remain private. Creation-request and
+publication-pending fields are absent rather than set.
 
 Before writing, the operator reads only the exact July template prerequisite
-and checks only September 12 target collisions and dependencies. September 11
-is neither read nor mutated. An existing September 12 target, archive or
-cleanup tombstone, live mirror, or known betting, settlement, retry,
-pending-update, or Slip reference blocks the run. Apply runs only while writers
-are quiesced and the shared database operation lock is held.
+and checks only September 13 target collisions and dependencies. September 11
+and September 12 are neither read nor mutated. An existing September 13
+target, archive or cleanup tombstone, live mirror, or known betting,
+settlement, retry, pending-update, or Slip reference blocks the run. Apply runs
+only while writers are quiesced and the shared database operation lock is
+held.
 
 The operator writes a fixed-ID journal before target writes. That journal
 stores canonical Extended JSON and SHA-256 digests for both the recorded
@@ -329,19 +336,19 @@ After the journal is applied, a later release SHA receives a completed
 one-time result so natural match progression does not block unrelated
 releases.
 
-Apply creates only the journal-bound September 12 targets. Rollback runs in the
+Apply creates only the journal-bound September 13 targets. Rollback runs in the
 inverse Backoffice, Gamemaster, then Event order, removes only those exact
 targets, and records a terminal rolled-back state. Because the preimage is
 empty, rollback never deletes or restores a historical record and performs no
-July or September 11 cleanup. It resumes safely when a prior rollback attempt
-already removed one or more exact targets. Otherwise it is available only
-while each document still matches either the journal target or its absent
-preimage and no new live, visibility, betting, or dependency state has
-appeared; any unknown state fails closed instead of proceeding. The protected
-pre-mutation database baseline is still retained by the normal release chain.
-The historical destructive fixture cleanup remains uninvoked by the rollout
-and stays bound to the original July fixture identity and kickoff, so it
-cannot match either September event.
+July, September 11, or September 12 cleanup. It resumes safely when a prior
+rollback attempt already removed one or more exact targets. Otherwise it is
+available only while each document still matches either the journal target or
+its absent preimage and no new live, visibility, betting, or dependency state
+has appeared; any unknown state fails closed instead of proceeding. The
+protected pre-mutation database baseline is still retained by the normal
+release chain. The historical destructive fixture cleanup remains uninvoked
+by the rollout and stays bound to the original July fixture identity and
+kickoff, so it cannot match any September event.
 
 A blocked reschedule remains a failed data phase even though the operator CLI
 emits a structured report before exiting nonzero. The rollout wrapper accepts
@@ -368,12 +375,14 @@ discarded before sanitization. Transient status and complete-log transport
 failures are retried only within the active execution or terminal deadline;
 persistent failures still stop the phase without success-shaped evidence.
 
-New September 12 rollout and evidence artifacts use `live-betting-v3` with
+New September 13 rollout and evidence artifacts use `live-betting-v4` with
 `event_reschedule_complete`. Compatibility is exact rather than
 schema-label-only: the verifier continues to accept the original July
-`live-betting-v1` cleanup evidence and the September 11 `live-betting-v2`
-reschedule evidence, so both historical generations remain verifiable. Their
-identities and meanings cannot be substituted across evidence versions.
+`live-betting-v1` cleanup evidence, the September 11 `live-betting-v2`
+reschedule evidence, and the September 12 `live-betting-v3` reschedule
+evidence. All historical generations remain verifiable, and their identities
+and meanings cannot be substituted or cross-labelled across evidence
+versions.
 
 The immediate pre-deploy rollback baseline captured former production source
 `e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment
