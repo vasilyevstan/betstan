@@ -1036,6 +1036,15 @@ jobs:
             "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
             >> "$GITHUB_ENV"
 
+      - name: Reject an already over-limit k3s root filesystem
+        if: env.OCI_RUNTIME_MODE == 'k3s' && inputs.phase != 'dry-run'
+        env:
+          OUTPUT_FILE: artifacts/oci-live-data-rollout/evidence/pre-maintenance-node-filesystem.json
+        run: |
+          OCI_K3S_NODE_NAME="${OCI_K3S_NODE_NAME:-betstan-k3s}" \
+          OCI_DISK_MAX_PERCENT=70 \
+            ./infra/oci/scripts/k3s-node-filesystem-capacity-stan.sh require-at-most
+
       - name: Acquire database operation lock
         id: operation_lock
         run: |

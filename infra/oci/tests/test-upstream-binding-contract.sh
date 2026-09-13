@@ -360,6 +360,72 @@ if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
 fi
 ok "reject package artifact for a different candidate build"
 
+write_disk_infrastructure_fixture() {
+  local bound_build="$1" bound_package="$2"
+  fixture "repos/$REPO/actions/workflows/oci-infrastructure.yml" <<EOF2
+{"id":403}
+EOF2
+  local endpoint
+  for endpoint in "runs/303" "runs/303/attempts/1"; do
+    fixture "repos/$REPO/actions/$endpoint" <<EOF2
+{"id":303,"run_attempt":1,"workflow_id":403,
+ "path":".github/workflows/oci-infrastructure.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$SUBJECT_SHA","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-infrastructure finalize k3s $SUBJECT_SHA"}
+EOF2
+  done
+  fixture "repos/$REPO/actions/runs/303/artifacts?per_page=100" <<EOF2
+{"total_count":1,"artifacts":[{"id":9103,
+ "name":"oci-infrastructure-provenance-303-1",
+ "expired":false,"size_in_bytes":1024}]}
+EOF2
+  artifact_zip_fixture 9103 provenance.env \
+    "source_sha=$SUBJECT_SHA
+infrastructure_run_id=303
+infrastructure_run_attempt=1
+infrastructure_finalized=true
+runtime_mode=k3s
+ghcr_build_run_id=$bound_build
+ghcr_package_validation_run_id=$bound_package
+capacity_acquisition_run_id=250
+"
+}
+
+validate_disk_infrastructure() {
+  local binding
+  binding="$("$POLICY" get "$1" |
+    jq -c '.upstreamRunBindings[] | select(.input == "infrastructure_run_id")')"
+  PATH="$WORK/bin:$PATH" "$VALIDATOR" validate \
+    --repository "$REPO" --binding "$binding" \
+    --subject-sha "$SUBJECT_SHA" --run-id 303 \
+    --dispatch-inputs \
+      '{"ghcr_build_run_id":"101","ghcr_package_validation_run_id":"202"}'
+}
+
+for operation in oci-k3s-disk-diagnose oci-k3s-disk-reclaim-apt \
+  oci-k3s-disk-reclaim-cri; do
+  reset_fixtures
+  write_disk_infrastructure_fixture 101 202
+  validate_disk_infrastructure "$operation" >/dev/null ||
+    fail "$operation rejected its matching infrastructure build"
+  write_disk_infrastructure_fixture 999 202
+  if validate_disk_infrastructure "$operation" >/dev/null 2>&1; then
+    fail "$operation accepted infrastructure from another same-SHA build"
+  fi
+  write_disk_infrastructure_fixture "" 202
+  if validate_disk_infrastructure "$operation" >/dev/null 2>&1; then
+    fail "$operation accepted infrastructure without build linkage"
+  fi
+done
+ok "disk operations reject mismatched or absent infrastructure build linkage"
+write_disk_infrastructure_fixture 101 999
+if validate_disk_infrastructure oci-k3s-disk-reclaim-cri >/dev/null 2>&1; then
+  fail "CRI reclaim accepted a package run not consumed by infrastructure"
+fi
+ok "CRI reclaim requires the infrastructure protected-package lineage"
+
 reset_fixtures
 if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate --repository "$REPO" \
   --binding '{"input":"x","workflow":"a.yml","titleTemplates":{"workflow_run":null},"artifactTemplate":"only-{run_id}"}' \
@@ -453,6 +519,84 @@ assert "titleOptionalEvents" not in cap
 assert cap["afterInput"] == "ghcr_package_validation_run_id"
 ' || fail "finalize prerequisite bindings are incomplete"
 ok "GHCR build and package validation are bound like capacity"
+
+"$POLICY" get oci-k3s-disk-diagnose | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert p["fixedInputs"]["phase"] == "diagnose-disk"
+assert p["fixedInputs"]["runtime_mode"] == "k3s"
+assert p["fixedInputs"]["reclaim_category"] == "none"
+assert p["fixedInputs"]["reclaim_image_ids"] == "[]"
+assert [b["input"] for b in p["upstreamRunBindings"]] == [
+    "ghcr_build_run_id", "infrastructure_run_id"]
+infra = p["upstreamRunBindings"][1]
+assert infra["afterInput"] == "ghcr_build_run_id"
+assert infra["titleTemplates"] == {
+    "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}"}
+assert infra["artifactContent"]["equals"]["infrastructure_finalized"] == "true"
+assert infra["artifactContent"]["equals"]["ghcr_build_run_id"] == \
+    "{input:ghcr_build_run_id}"
+' || fail "k3s disk diagnosis policy is wrong"
+ok "disk diagnosis binds current-SHA build and finalized k3s infrastructure"
+
+"$POLICY" get oci-k3s-disk-reclaim-apt | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert p["fixedInputs"]["phase"] == "reclaim-disk"
+assert p["fixedInputs"]["runtime_mode"] == "k3s"
+assert [b["input"] for b in p["upstreamRunBindings"]] == [
+    "ghcr_build_run_id", "infrastructure_run_id", "diagnosis_run_id"]
+diagnosis = p["upstreamRunBindings"][2]
+assert diagnosis["afterInput"] == "infrastructure_run_id"
+assert diagnosis["artifactTemplate"] == "oci-k3s-disk-diagnosis-{run_id}-1"
+equals = diagnosis["artifactContent"]["equals"]
+assert equals["phase"] == "diagnose-disk"
+assert equals["sourceSha"] == "{subject_sha}"
+assert equals["infrastructureRunId"] == "{input:infrastructure_run_id}"
+assert equals["ghcrBuildRunId"] == "{input:ghcr_build_run_id}"
+assert equals["terminalStatus"] == "DIAGNOSED"
+' || fail "apt disk reclaim policy is wrong"
+
+"$POLICY" get oci-k3s-disk-reclaim-cri | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert p["fixedInputs"]["phase"] == "reclaim-disk"
+assert p["fixedInputs"]["runtime_mode"] == "k3s"
+assert "ghcr_package_validation_run_id" in p["positiveIntegerInputs"]
+assert [b["input"] for b in p["upstreamRunBindings"]] == [
+    "ghcr_build_run_id", "ghcr_package_validation_run_id",
+    "infrastructure_run_id", "diagnosis_run_id"]
+package = p["upstreamRunBindings"][1]
+assert package["afterInput"] == "ghcr_build_run_id"
+assert package["artifactContent"]["equals"]["terminal_status"] == "VALIDATED"
+assert package["artifactContent"]["equals"]["candidate_build_run_id"] == \
+    "{input:ghcr_build_run_id}"
+infra = p["upstreamRunBindings"][2]
+assert infra["afterInput"] == "ghcr_package_validation_run_id"
+assert infra["artifactContent"]["equals"]["ghcr_package_validation_run_id"] == \
+    "{input:ghcr_package_validation_run_id}"
+diagnosis = p["upstreamRunBindings"][3]
+assert diagnosis["afterInput"] == "infrastructure_run_id"
+assert diagnosis["artifactTemplate"] == "oci-k3s-disk-diagnosis-{run_id}-1"
+' || fail "CRI disk reclaim policy is wrong"
+ok "disk reclaim binds diagnosis and CRI additionally binds protected generations"
+
+for operation in \
+  oci-infrastructure-prepare-k3s \
+  oci-infrastructure-prepare-oke \
+  oci-infrastructure-finalize-k3s \
+  oci-infrastructure-finalize-oke; do
+  "$POLICY" get "$operation" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+assert len(p["inputNames"]) == 16
+assert "infrastructure_run_id" not in p["inputNames"]
+assert "diagnosis_run_id" not in p["inputNames"]
+assert "reclaim_category" not in p["inputNames"]
+assert "reclaim_image_ids" not in p["inputNames"]
+' || fail "$operation silently acquired disk-recovery inputs"
+done
+ok "legacy prepare/finalize policy input contracts remain unchanged"
 
 # ------------------------------------------- input hash must include the run ---
 policy_file="$WORK/policy.json"
@@ -774,8 +918,11 @@ manifest = json.load(open(manifest_path, encoding="utf-8"))
 if sorted(manifest) != [
     "oci-infrastructure-finalize-k3s",
     "oci-infrastructure-finalize-oke",
+    "oci-k3s-disk-diagnose",
+    "oci-k3s-disk-reclaim-apt",
+    "oci-k3s-disk-reclaim-cri",
 ]:
-    raise SystemExit("manifest does not cover exactly both finalize operations")
+    raise SystemExit("manifest does not cover the exact bound infrastructure operations")
 for operation, bindings in manifest.items():
     policy = json.loads(
         subprocess.run(

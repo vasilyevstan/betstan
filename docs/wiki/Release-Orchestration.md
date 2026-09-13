@@ -174,6 +174,10 @@ Before deployment, the release chain verifies:
 - image digest availability;
 - migration and schema compatibility;
 - dry-run results;
+- for non-dry-run k3s data maintenance, a root filesystem at or below the
+  fixed 70 percent limit before database locking or maintenance begins;
+  over-limit nodes stop before data mutation and use the bounded recovery
+  described in [[Infrastructure]];
 - required backfills and indexes;
 - public-write fencing and writer quiescence when data mutation requires it;
 - a matching pre-mutation rollback baseline;

@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT_DIR/infra/oci/scripts/live-data-maintenance-stan.sh"
+CAPACITY_SCRIPT="$ROOT_DIR/infra/oci/scripts/k3s-node-filesystem-capacity-stan.sh"
 LOCK_SCRIPT="$ROOT_DIR/infra/oci/scripts/shared-mongo-operation-lock-stan.sh"
+WORKFLOW="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.live-data-maintenance-workdirs"
 
 mkdir -p "$WORK_PARENT"
@@ -38,6 +40,7 @@ cat >"$stub_bin/kubectl" <<'SH'
 set -euo pipefail
 
 state="${STUB_STATE_DIR:?}"
+printf '%s\n' "$*" >>"${STUB_KUBECTL_LOG:-/dev/null}"
 
 service_from_deployment() {
   local deployment="${1#deployment/}"
@@ -58,6 +61,16 @@ ready_pod_json() {
 
 if [[ "${1:-}" == "get" && "${2:-}" == "configmap" ]]; then
   cat "$state/server-snippet"
+  exit 0
+fi
+
+if [[ "$*" == "get nodes -o json" ]]; then
+  printf '{"items":[{"metadata":{"name":"betstan-k3s"}}]}\n'
+  exit 0
+fi
+
+if [[ "$*" == "get --raw /api/v1/nodes/betstan-k3s/proxy/stats/summary" ]]; then
+  cat "${STUB_CAPACITY_SUMMARY:?}"
   exit 0
 fi
 
@@ -165,6 +178,49 @@ echo "unexpected kubectl invocation: $*" >&2
 exit 1
 SH
 chmod +x "$stub_bin/kubectl"
+
+cat >"$stub_state/capacity-over.json" <<'JSON'
+{"node":{"fs":{"capacityBytes":50000000000,"usedBytes":35500000000,"availableBytes":14500000000}}}
+JSON
+: >"$stub_state/kubectl.log"
+if PATH="$stub_bin:$PATH" \
+    STUB_STATE_DIR="$stub_state" \
+    STUB_KUBECTL_LOG="$stub_state/kubectl.log" \
+    STUB_CAPACITY_SUMMARY="$stub_state/capacity-over.json" \
+    OCI_K3S_NODE_NAME=betstan-k3s \
+    OCI_DISK_MAX_PERCENT=70 \
+      "$CAPACITY_SCRIPT" require-at-most >/dev/null 2>&1; then
+  fail "pre-maintenance capacity guard accepted an already over-limit root filesystem"
+fi
+if grep -Eq '(^| )(patch|scale)( |$)' "$stub_state/kubectl.log"; then
+  fail "over-limit capacity guard mutated the fence or writer replicas"
+fi
+cat >"$stub_state/capacity-at-limit.json" <<'JSON'
+{"node":{"fs":{"capacityBytes":50000000000,"usedBytes":35000000000,"availableBytes":15000000000}}}
+JSON
+PATH="$stub_bin:$PATH" \
+STUB_STATE_DIR="$stub_state" \
+STUB_KUBECTL_LOG="$stub_state/kubectl.log" \
+STUB_CAPACITY_SUMMARY="$stub_state/capacity-at-limit.json" \
+OCI_K3S_NODE_NAME=betstan-k3s \
+OCI_DISK_MAX_PERCENT=70 \
+  "$CAPACITY_SCRIPT" require-at-most >/dev/null
+if OCI_DISK_MAX_PERCENT=71 PATH="$stub_bin:$PATH" \
+    STUB_STATE_DIR="$stub_state" \
+    STUB_CAPACITY_SUMMARY="$stub_state/capacity-at-limit.json" \
+      "$CAPACITY_SCRIPT" require-at-most >/dev/null 2>&1; then
+  fail "capacity guard accepted a threshold waiver"
+fi
+python3 - "$WORKFLOW" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+guard = text.index("- name: Reject an already over-limit k3s root filesystem")
+lock = text.index("- name: Acquire database operation lock")
+maintenance = text.index("- name: Enter or re-establish live data maintenance")
+if not guard < lock < maintenance:
+    raise SystemExit("capacity guard is not before lock and maintenance mutation")
+PY
 
 run_maintenance() {
   local action="$1"

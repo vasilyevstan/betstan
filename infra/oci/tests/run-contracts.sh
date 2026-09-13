@@ -24,6 +24,7 @@ suites=(
   "$TESTS_DIR/rollback-contract.sh"
   "$TESTS_DIR/test-fenced-rollback-recovery-stan.sh"
   "$TESTS_DIR/test-k3s-runtime-contract.sh"
+  "$TESTS_DIR/test-k3s-disk-recovery-stan.sh"
   "$TESTS_DIR/test-registry-prune-contract.sh"
   "$TESTS_DIR/test-migration-recovery-contract.sh"
   "$TESTS_DIR/test-mongo-upgrade.sh"
