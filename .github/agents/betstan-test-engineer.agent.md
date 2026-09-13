@@ -152,6 +152,18 @@ dry-run immutability, exact apply, idempotent verification, tombstone
 validation, independently confirmed rollback, and evidence sanitization. Do
 not execute the production mutation as part of a test.
 
+For ingress-at-zero maintenance and fenced-recovery changes, execute the real
+deployment shell segment with the real Mongo helper under controlled fakes,
+not only source-order assertions. Prove version, FCV, and image finalization
+precede ingress-only resume; admission readiness precedes Ingress apply; and
+writer fences and failure recovery remain armed. Exercise every cleanup-produced
+valid state: exact candidate Auth, Backoffice, and Client plus each candidate-
+prefix/baseline-suffix split over the canonical six-writer forward order. Also
+reject representative gaps, candidate suffixes, baseline readers, foreign
+images, active writers, missing fences, and contended locks without
+pre-rejection mutation. Validate the affected APIs and response shapes; a
+homepage HTTP 200 alone is not recovery evidence.
+
 Use `npm ci`, not `npm install`. Do not rewrite lockfiles. Respect documented
 Mongo-memory, publisher-mock, timestamp, and coverage traps.
 
