@@ -187,6 +187,18 @@ failing test, or mandatory safety gate proves it is needed. Repeated
 governance work that never reaches product implementation triggers a scope
 reset rather than another hardening layer.
 
+For a localized production bug, follow the actual cause through a surgical
+patch, targeted existing tests, one existing required quality chain, and the normal
+protected release. Defer unrelated redesign to one evidence-rich issue
+covering reproduction and evidence, user or operational impact, root cause,
+direction and acceptance, exclusions and dependencies, compatibility or
+migration, rollback, and source PR/run links. Keep redesign before production
+only to prevent concrete data or user invalidity, a security or authorization
+defect, a backward-compatibility break, or unsafe or irreversible rollback. Do
+not add agents, gates, or frameworks, duplicate owners, repeat reviews without
+new failing evidence, perform speculative cleanup, add arbitrary fixture or
+time gates, or invent ETAs.
+
 After implementation, review the result, record applicable learning, and
 optimize where evidence shows concrete value. Security, compatibility, data,
 branch, test, and production safeguards remain unchanged.
@@ -225,7 +237,12 @@ until the full acceptance journey passes.
 
 Long-running output or a queued workflow can hide a waiting approval, missing
 job, or completed handoff. Orchestration should inspect the underlying state
-at bounded checkpoints and assign the next action immediately.
+at bounded checkpoints and assign the next action immediately. Compare
+timestamps only after parsing them as timezone-aware absolute instants and
+normalizing them to UTC; a missing or unparseable timezone makes timing
+unknown, not stalled. `run.updated_at` is metadata, not a heartbeat. Progress
+requires actual job, step, or log milestones compared with recent successful
+runs of the same workflow and job on a comparable runner.
 
 ### Approval policy outranks agent memory
 

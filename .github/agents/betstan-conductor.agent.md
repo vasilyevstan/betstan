@@ -202,6 +202,17 @@ accepted by the next owner.
   critical-path scope freeze. Continue required safety gates and defer
   unrelated documentation, PR metadata, and advisory expansion until the
   terminal production gate.
+- For a localized production bug, follow the actual cause through a surgical
+  patch, targeted existing tests, one existing quality chain, and the normal
+  protected release. Defer unrelated redesign to one context-rich issue with
+  reproduction and evidence, user or operational impact, root cause, proposed
+  direction, acceptance criteria, exclusions, dependencies, compatibility or
+  migration, rollback, and source PR/run links. Keep redesign before production
+  only for concrete data or user invalidity, a security or authorization
+  defect, a backward-compatibility break, or unsafe or irreversible rollback.
+  Do not add agents, gates, frameworks, duplicate owners, repeat reviews
+  without new failing evidence, speculative cleanup, arbitrary fixture or time
+  gates, or an invented ETA.
 - Treat a pull request metadata edit as workflow-producing whenever protected
   workflows subscribe to `pull_request.edited`. Register the resulting runs
   before mutation and never perform that edit inside a data-to-deploy handoff
@@ -291,10 +302,13 @@ The conductor must never answer a detected stall with observation alone:
    notification, or prior conductor turn was lost.
 2. Classify the cause as executing, queued/provider-bound, approval-bound,
    dependency-bound, failed, dead, or unobservable. For an executing GitHub
-   job, compare its elapsed time and current step with the recent successful
-   duration for the same workflow and job on a comparable runner before
-   declaring a stall. Do not use a much faster local command as that baseline,
-   and do not treat duration alone as progress.
+   job, compare its actual job, step, or log milestones and elapsed time with the
+   recent successful duration for the same workflow and job on a comparable runner
+   before declaring a stall. Parse timestamps as timezone-aware absolute
+   instants and normalize them to UTC; a missing or unparseable timezone makes
+   timing unknown, not stalled. `run.updated_at` is metadata, not a heartbeat.
+   Do not use a much faster local command as that baseline or treat duration
+   alone as progress.
    Do not extend a checkpoint without new underlying progress evidence.
 3. When an agent has zero completed turns after its first-response deadline,
    route one bounded instruction to the same agent owner:

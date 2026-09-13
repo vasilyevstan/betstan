@@ -439,9 +439,12 @@ cd resulting && npm ci && npm run test:ci
   exact owner with a deadline and keep the same unit open until evidence moves.
 - Before declaring an executing GitHub job stalled, compare its current step
   and elapsed time with recent successful runs of the same workflow and job on
-  a comparable runner. Local execution time is not a CI baseline, and
-  historical duration never excuses an actionable approval or missing
-  progress signal.
+  a comparable runner. Parse timestamps as timezone-aware absolute instants
+  and normalize them to UTC; a missing or unparseable timezone makes timing
+  unknown, not stalled. `run.updated_at` is metadata, not a heartbeat: actual
+  job, step, or log milestones establish progress. Local execution time is not
+  a CI baseline, and historical duration never excuses an actionable approval
+  or missing progress signal.
 - A workflow dispatch URL is event-acceptance evidence, not job
   materialization. Keep a manually enabled workflow active until the exact run
   has a real job and expected protected gate, then disable it before approval.
@@ -1294,6 +1297,17 @@ Durable rules:
 - Default to one implementation path. Collapse duplicate plan items and do not
   add a service, agent, workflow, gate, or release phase without a concrete
   failure path that the existing owner cannot resolve.
+- For a localized production bug, follow the actual cause through a surgical
+  patch, targeted existing tests, one existing quality chain, and the normal
+  protected release. Do not add agents, gates, frameworks, duplicate owners,
+  repeat reviews without new failing evidence, speculative cleanup, arbitrary
+  fixture or time gates, or an invented ETA.
+- Defer unrelated redesign to one context-rich issue with reproduction and
+  evidence, user or operational impact, root cause, proposed direction,
+  acceptance criteria, exclusions, dependencies, compatibility or migration,
+  rollback, and source PR/run links. Keep redesign before production only for
+  concrete data or user invalidity, a security or authorization defect, a
+  backward-compatibility break, or unsafe or irreversible rollback.
 - Preserve security, compatibility, data, branch, test, and production safety.
   Simplicity changes sequencing and ownership, not the required quality bar.
 - Keep architect and simplifier corrections in the same logical work unit and
