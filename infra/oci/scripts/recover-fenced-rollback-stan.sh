@@ -452,8 +452,8 @@ oci_log "oci_fenced_recovery=preflight target_sha=$TARGET_SHA deployed_sha=$DEPL
 "$MAINTENANCE_SCRIPT" verify-held >"$WORK_DIR/fenced-verify-held.txt" 2>&1 ||
   oci_die "maintenance fence and writer quiescence are not intact"
 
-# Independently confirm that the live legacy generation is an exact rollout
-# prefix between the checksum-bound baseline and the selected current build.
+# Independently confirm an exact rollout prefix, including candidate-reader
+# cleanup, between the checksum-bound baseline and the selected current build.
 : >"$OUTPUT_DIR/fenced-observed-current.tsv"
 while IFS=$'\t' read -r service _repository expected_image; do
   [[ -n "$service" ]] || continue
@@ -507,6 +507,8 @@ recovery_order = [
     "auth", "bet", "backoffice", "event", "moderation",
     "resulting", "slip", "client", "gamemaster",
 ]
+cleanup_readers = {"auth", "backoffice", "client"}
+writer_order = [service for service in forward_order if service not in cleanup_readers]
 
 def read(path, image_column):
     result = {}
@@ -596,8 +598,13 @@ for legacy_service in forward_order:
 if not (
     matches_family(forward_order, candidate, baseline)
     or matches_family(recovery_order, baseline, candidate)
+    # Deployment failure cleanup reapplies candidate readers over forward progress.
+    or (
+        all(observed[service] == candidate[service] for service in cleanup_readers)
+        and matches_family(writer_order, candidate, baseline)
+    )
 ):
-    raise SystemExit("legacy workload state is not an authorized forward or recovery prefix")
+    raise SystemExit("legacy workload state is not an authorized forward, recovery, or cleanup prefix")
 resource_progress = (
     deployment is not None,
     service is not None,

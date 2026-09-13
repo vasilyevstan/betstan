@@ -293,6 +293,11 @@ OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
 MONGO_TARGET_IMAGE="$mongo_target_image" \
 MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
   "$SCRIPT_DIR/upgrade-mongo.sh" finalize
+# Ingress admission must be ready before the Telemetry ingress is applied.
+OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
+MONGO_TARGET_IMAGE="$mongo_target_image" \
+MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
+  "$SCRIPT_DIR/upgrade-mongo.sh" resume
 for database in \
   gaming_auth gaming_bet gaming_backoffice gaming_event \
   gaming_gamemaster gaming_moderation gaming_resulting gaming_slip; do
@@ -464,10 +469,6 @@ public_data_services="$(
   printf 'registry_public_anonymous=%s\n' "true"
 } > "$OUTPUT_DIR/provenance.txt"
 
-OCI_K8S_NAMESPACE="$OCI_K8S_NAMESPACE" \
-MONGO_TARGET_IMAGE="$mongo_target_image" \
-MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
-  "$SCRIPT_DIR/upgrade-mongo.sh" resume
 mongo_upgrade_recovery_required=false
 rm -f "$RENDERED_FILE"
 
