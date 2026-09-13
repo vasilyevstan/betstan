@@ -88,6 +88,20 @@ binding_run_json() {
       created_at=2026-01-01T00:04:00Z
       updated_at=2026-01-01T00:05:00Z
       ;;
+    44)
+      workflow=oci-infrastructure.yml
+      event=workflow_dispatch
+      title="oci-infrastructure finalize k3s $SHA"
+      created_at=2026-01-01T00:06:00Z
+      updated_at=2026-01-01T00:07:00Z
+      ;;
+    45)
+      workflow=oci-infrastructure.yml
+      event=workflow_dispatch
+      title="oci-infrastructure diagnose-disk k3s $SHA"
+      created_at=2026-01-01T00:08:00Z
+      updated_at=2026-01-01T00:09:00Z
+      ;;
     *)
       return 1
       ;;
@@ -127,6 +141,8 @@ binding_artifacts_json() {
     41) artifact="oci-image-provenance-$SHA-41-1"; artifact_id=9041 ;;
     42) artifact="ghcr-package-management-validate-42-1"; artifact_id=9042 ;;
     43) artifact="oci-capacity-provenance-43-1"; artifact_id=9043 ;;
+    44) artifact="oci-infrastructure-provenance-44-1"; artifact_id=9044 ;;
+    45) artifact="oci-k3s-disk-diagnosis-45-1"; artifact_id=9045 ;;
     *) return 1 ;;
   esac
   jq -cn --arg artifact "$artifact" --argjson artifact_id "$artifact_id" '{
@@ -182,6 +198,32 @@ memory_gb=12
 boot_volume_gb=50
 boot_volume_vpus_per_gb=10
 "
+      ;;
+    9044)
+      file_name=provenance.env
+      content="source_sha=$SHA
+infrastructure_run_id=44
+infrastructure_run_attempt=1
+infrastructure_finalized=true
+runtime_mode=k3s
+ghcr_build_run_id=41
+ghcr_package_validation_run_id=42
+capacity_acquisition_run_id=43
+"
+      ;;
+    9045)
+      file_name=diagnosis.json
+      content="$(jq -cn --arg sha "$SHA" '{
+        schemaVersion:"k3s-node-disk-diagnosis.v1",
+        sourceSha:$sha,
+        workflowRunId:"45",
+        workflowRunAttempt:"1",
+        infrastructureRunId:"44",
+        ghcrBuildRunId:"41",
+        phase:"diagnose-disk",
+        terminalStatus:"DIAGNOSED",
+        thresholdPercent:70
+      }')"
       ;;
     *)
       return 1
@@ -375,9 +417,13 @@ gh() {
     "repos/$REPOSITORY/actions/runs/41"|\
     "repos/$REPOSITORY/actions/runs/42"|\
     "repos/$REPOSITORY/actions/runs/43"|\
+    "repos/$REPOSITORY/actions/runs/44"|\
+    "repos/$REPOSITORY/actions/runs/45"|\
     "repos/$REPOSITORY/actions/runs/41/attempts/1"|\
     "repos/$REPOSITORY/actions/runs/42/attempts/1"|\
-    "repos/$REPOSITORY/actions/runs/43/attempts/1")
+    "repos/$REPOSITORY/actions/runs/43/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/44/attempts/1"|\
+    "repos/$REPOSITORY/actions/runs/45/attempts/1")
       local binding_run_id
       binding_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_run_id="${binding_run_id%%/*}"
@@ -385,7 +431,9 @@ gh() {
       ;;
     "repos/$REPOSITORY/actions/runs/41/artifacts?per_page=100"|\
     "repos/$REPOSITORY/actions/runs/42/artifacts?per_page=100"|\
-    "repos/$REPOSITORY/actions/runs/43/artifacts?per_page=100")
+    "repos/$REPOSITORY/actions/runs/43/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/44/artifacts?per_page=100"|\
+    "repos/$REPOSITORY/actions/runs/45/artifacts?per_page=100")
       local binding_artifact_run_id
       binding_artifact_run_id="${endpoint#repos/"$REPOSITORY"/actions/runs/}"
       binding_artifact_run_id="${binding_artifact_run_id%%/*}"
@@ -393,7 +441,9 @@ gh() {
       ;;
     "repos/$REPOSITORY/actions/artifacts/9041/zip"|\
     "repos/$REPOSITORY/actions/artifacts/9042/zip"|\
-    "repos/$REPOSITORY/actions/artifacts/9043/zip")
+    "repos/$REPOSITORY/actions/artifacts/9043/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9044/zip"|\
+    "repos/$REPOSITORY/actions/artifacts/9045/zip")
       local binding_artifact_id
       binding_artifact_id="${endpoint%/zip}"
       binding_artifact_zip "${binding_artifact_id##*/}"
@@ -570,12 +620,18 @@ inputs = {
     for name in policy["inputNames"]
 }
 inputs.update(policy["fixedInputs"])
+if policy["operation"] == "oci-k3s-disk-reclaim-cri":
+    inputs["reclaim_image_ids"] = json.dumps(
+        ["sha256:" + "a" * 64], separators=(",", ":")
+    )
 for name in policy["positiveIntegerInputs"]:
     inputs[name] = "42"
 for name, value in {
     "ghcr_build_run_id": "41",
     "ghcr_package_validation_run_id": "42",
     "capacity_acquisition_run_id": "43",
+    "infrastructure_run_id": "44",
+    "diagnosis_run_id": "45",
 }.items():
     if name in inputs and inputs[name] != "":
         inputs[name] = value
