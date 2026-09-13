@@ -360,6 +360,72 @@ if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate-all \
 fi
 ok "reject package artifact for a different candidate build"
 
+write_disk_infrastructure_fixture() {
+  local bound_build="$1" bound_package="$2"
+  fixture "repos/$REPO/actions/workflows/oci-infrastructure.yml" <<EOF2
+{"id":403}
+EOF2
+  local endpoint
+  for endpoint in "runs/303" "runs/303/attempts/1"; do
+    fixture "repos/$REPO/actions/$endpoint" <<EOF2
+{"id":303,"run_attempt":1,"workflow_id":403,
+ "path":".github/workflows/oci-infrastructure.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$SUBJECT_SHA","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-infrastructure finalize k3s $SUBJECT_SHA"}
+EOF2
+  done
+  fixture "repos/$REPO/actions/runs/303/artifacts?per_page=100" <<EOF2
+{"total_count":1,"artifacts":[{"id":9103,
+ "name":"oci-infrastructure-provenance-303-1",
+ "expired":false,"size_in_bytes":1024}]}
+EOF2
+  artifact_zip_fixture 9103 provenance.env \
+    "source_sha=$SUBJECT_SHA
+infrastructure_run_id=303
+infrastructure_run_attempt=1
+infrastructure_finalized=true
+runtime_mode=k3s
+ghcr_build_run_id=$bound_build
+ghcr_package_validation_run_id=$bound_package
+capacity_acquisition_run_id=250
+"
+}
+
+validate_disk_infrastructure() {
+  local binding
+  binding="$("$POLICY" get "$1" |
+    jq -c '.upstreamRunBindings[] | select(.input == "infrastructure_run_id")')"
+  PATH="$WORK/bin:$PATH" "$VALIDATOR" validate \
+    --repository "$REPO" --binding "$binding" \
+    --subject-sha "$SUBJECT_SHA" --run-id 303 \
+    --dispatch-inputs \
+      '{"ghcr_build_run_id":"101","ghcr_package_validation_run_id":"202"}'
+}
+
+for operation in oci-k3s-disk-diagnose oci-k3s-disk-reclaim-apt \
+  oci-k3s-disk-reclaim-cri; do
+  reset_fixtures
+  write_disk_infrastructure_fixture 101 202
+  validate_disk_infrastructure "$operation" >/dev/null ||
+    fail "$operation rejected its matching infrastructure build"
+  write_disk_infrastructure_fixture 999 202
+  if validate_disk_infrastructure "$operation" >/dev/null 2>&1; then
+    fail "$operation accepted infrastructure from another same-SHA build"
+  fi
+  write_disk_infrastructure_fixture "" 202
+  if validate_disk_infrastructure "$operation" >/dev/null 2>&1; then
+    fail "$operation accepted infrastructure without build linkage"
+  fi
+done
+ok "disk operations reject mismatched or absent infrastructure build linkage"
+write_disk_infrastructure_fixture 101 999
+if validate_disk_infrastructure oci-k3s-disk-reclaim-cri >/dev/null 2>&1; then
+  fail "CRI reclaim accepted a package run not consumed by infrastructure"
+fi
+ok "CRI reclaim requires the infrastructure protected-package lineage"
+
 reset_fixtures
 if PATH="$WORK/bin:$PATH" "$VALIDATOR" validate --repository "$REPO" \
   --binding '{"input":"x","workflow":"a.yml","titleTemplates":{"workflow_run":null},"artifactTemplate":"only-{run_id}"}' \
@@ -468,6 +534,8 @@ assert infra["afterInput"] == "ghcr_build_run_id"
 assert infra["titleTemplates"] == {
     "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}"}
 assert infra["artifactContent"]["equals"]["infrastructure_finalized"] == "true"
+assert infra["artifactContent"]["equals"]["ghcr_build_run_id"] == \
+    "{input:ghcr_build_run_id}"
 ' || fail "k3s disk diagnosis policy is wrong"
 ok "disk diagnosis binds current-SHA build and finalized k3s infrastructure"
 
@@ -503,6 +571,10 @@ assert package["afterInput"] == "ghcr_build_run_id"
 assert package["artifactContent"]["equals"]["terminal_status"] == "VALIDATED"
 assert package["artifactContent"]["equals"]["candidate_build_run_id"] == \
     "{input:ghcr_build_run_id}"
+infra = p["upstreamRunBindings"][2]
+assert infra["afterInput"] == "ghcr_package_validation_run_id"
+assert infra["artifactContent"]["equals"]["ghcr_package_validation_run_id"] == \
+    "{input:ghcr_package_validation_run_id}"
 diagnosis = p["upstreamRunBindings"][3]
 assert diagnosis["afterInput"] == "infrastructure_run_id"
 assert diagnosis["artifactTemplate"] == "oci-k3s-disk-diagnosis-{run_id}-1"

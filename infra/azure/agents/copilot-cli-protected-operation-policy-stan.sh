@@ -262,6 +262,20 @@ K3S_INFRASTRUCTURE_BINDING = {
             "infrastructure_run_attempt": "1",
             "infrastructure_finalized": "true",
             "runtime_mode": "k3s",
+            "ghcr_build_run_id": "{input:ghcr_build_run_id}",
+        },
+    },
+}
+
+K3S_INFRASTRUCTURE_PROTECTED_BINDING = {
+    **K3S_INFRASTRUCTURE_BINDING,
+    "afterInput": "ghcr_package_validation_run_id",
+    "artifactContent": {
+        **K3S_INFRASTRUCTURE_BINDING["artifactContent"],
+        "equals": {
+            **K3S_INFRASTRUCTURE_BINDING["artifactContent"]["equals"],
+            "ghcr_package_validation_run_id":
+                "{input:ghcr_package_validation_run_id}",
         },
     },
 }
@@ -878,7 +892,7 @@ POLICIES = {
         upstream_run_bindings=[
             GHCR_BUILD_BINDING,
             GHCR_PACKAGE_BINDING,
-            K3S_INFRASTRUCTURE_BINDING,
+            K3S_INFRASTRUCTURE_PROTECTED_BINDING,
             K3S_DISK_DIAGNOSIS_BINDING,
         ],
     ),

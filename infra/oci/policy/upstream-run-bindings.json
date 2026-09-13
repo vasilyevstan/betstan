@@ -142,6 +142,7 @@
       "afterInput": "ghcr_build_run_id",
       "artifactContent": {
         "equals": {
+          "ghcr_build_run_id": "{input:ghcr_build_run_id}",
           "infrastructure_finalized": "true",
           "infrastructure_run_attempt": "1",
           "infrastructure_run_id": "{run_id}",
@@ -186,6 +187,7 @@
       "afterInput": "ghcr_build_run_id",
       "artifactContent": {
         "equals": {
+          "ghcr_build_run_id": "{input:ghcr_build_run_id}",
           "infrastructure_finalized": "true",
           "infrastructure_run_attempt": "1",
           "infrastructure_run_id": "{run_id}",
@@ -273,9 +275,11 @@
       "workflow": "ghcr-package-management.yml"
     },
     {
-      "afterInput": "ghcr_build_run_id",
+      "afterInput": "ghcr_package_validation_run_id",
       "artifactContent": {
         "equals": {
+          "ghcr_build_run_id": "{input:ghcr_build_run_id}",
+          "ghcr_package_validation_run_id": "{input:ghcr_package_validation_run_id}",
           "infrastructure_finalized": "true",
           "infrastructure_run_attempt": "1",
           "infrastructure_run_id": "{run_id}",

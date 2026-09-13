@@ -25,6 +25,12 @@ oci_assert_repository_root
   oci_die "finalize-k3s.sh requires OCI_RUNTIME_MODE=k3s"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
   oci_die "SOURCE_SHA must be the exact approved commit"
+for prerequisite_run_id in \
+  "${GHCR_BUILD_RUN_ID:-}" "${GHCR_PACKAGE_VALIDATION_RUN_ID:-}" \
+  "${CAPACITY_ACQUISITION_RUN_ID:-}"; do
+  [[ "$prerequisite_run_id" =~ ^[1-9][0-9]*$ ]] ||
+    oci_die "finalization requires its exact validated build, package and capacity run IDs"
+done
 [[ -f "$NETWORK_PROVENANCE_FILE" ]] ||
   oci_die "NETWORK_PROVENANCE_FILE is required"
 [[ -f "$ACQUISITION_PROVENANCE_FILE" ]] ||
@@ -742,6 +748,9 @@ oci_prepare_private_dir "$PROVENANCE_DIR"
   printf 'source_sha=%q\n' "$SOURCE_SHA"
   printf 'infrastructure_run_id=%q\n' "${GITHUB_RUN_ID:-local}"
   printf 'infrastructure_run_attempt=%q\n' "${GITHUB_RUN_ATTEMPT:-1}"
+  printf 'ghcr_build_run_id=%q\n' "$GHCR_BUILD_RUN_ID"
+  printf 'ghcr_package_validation_run_id=%q\n' "$GHCR_PACKAGE_VALIDATION_RUN_ID"
+  printf 'capacity_acquisition_run_id=%q\n' "$CAPACITY_ACQUISITION_RUN_ID"
   printf 'runtime_mode=%q\n' "k3s"
   printf 'network_prepared=%q\n' "true"
   printf 'infrastructure_finalized=%q\n' "true"
