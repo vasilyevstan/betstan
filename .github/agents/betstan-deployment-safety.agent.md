@@ -376,6 +376,10 @@ During deployment:
 
 - hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
 - keep the public write fence active while new exact-digest services start;
+- after retained Mongo maintenance, verify Mongo `8.2.12`, FCV `8.2`, and the
+  running image digest, then run the existing ingress-only resume and prove
+  admission endpoints ready before applying any Ingress resource; keep writers
+  quiesced, the write fence active, and deployment-failure recovery armed;
 - after protected validation, release the transferred database lock before
   removing the public write fence;
 - treat lock acquisition or release failure as deployment failure;
@@ -396,7 +400,8 @@ After deployment:
 - require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
 - test canonical `betstan.xyz`, permanent `www` redirects, and the diagnostic
   OCI host;
-- confirm API responses have the expected JSON shape, not merely HTTP 200;
+- confirm each affected API and service has the expected response shape; a
+  homepage HTTP 200 is insufficient while an affected API returns 503;
 - treat unknown-route probes as potentially availability-changing. Record the
   target pod's restart count, require a bounded structured application error,
   then prove the documented valid REST/SSE routes remain healthy and the
@@ -455,6 +460,10 @@ The canonical apex and diagnostic OCI host must contain the complete API
 route set. Both schemes on `www` must permanently redirect to the apex while
 preserving path and query. A route omission can return client HTML with HTTP
 200.
+
+Before diagnosing provider instability, configuration corruption, or restarting
+the controller, inspect intentional maintenance state, replica intent, and the
+executed deployment order.
 
 Never:
 
@@ -551,6 +560,9 @@ A Running broker with missing consumers is not healthy production.
 - Treat skipped, stale, pending, neutral, or branch-name-only runs as non-success.
 - Separate infrastructure failures from unrelated application-test failures; never hide either.
 - Do not broaden or narrow CI scope merely to manufacture a green result.
+- During an availability incident, restore the affected service before
+  continuing feature work. Report observed evidence, the blocker, and the next
+  check; never invent an ETA.
 - Keep secrets scans and workflow/script syntax checks in scope for infrastructure changes.
 - Before declaring a file missing, inspect `master`, PR ancestry, and later merge commits.
 - For every long protected operation, report the exact run ID, current phase,
@@ -606,6 +618,11 @@ A Running broker with missing consumers is not healthy production.
   recreated.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
+- For fenced recovery after deployment cleanup, accept only exact candidate
+  Auth, Backoffice, and Client images plus a valid candidate-prefix/baseline-
+  suffix split over the canonical six-writer forward order. Reject arbitrary
+  mixtures, including writer gaps, candidate suffixes, unknown images, active
+  writers, a missing fence, or an unowned lock before mutation.
 - Reject a producer activation whose rollback target predates support for any
   durable value the candidate can create. Roll back to the validated
   compatibility baseline, not to the pre-compatibility generation.
