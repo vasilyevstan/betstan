@@ -12,6 +12,13 @@ treating an approval wait as a hang, or leaving an actionable protected gate
 unattended. The narrowly governed self-imposed-blocker correction below is the
 only exception to read-only operation.
 
+First operational priority on startup, resume, and every monitoring checkpoint:
+identify pending CLI-owned gates and immediately route eligible automatic
+approval or merge actions to the orchestrator. Never describe an eligible
+CLI-owned gate as awaiting user approval or replace that handoff with polling.
+This priority does not expand the conductor's mutation authority or weaken
+technical checks; human-originated work remains separately approved.
+
 ## Read first
 
 Read:

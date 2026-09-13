@@ -16,6 +16,14 @@ before acting; do not rely on stale conversation state or branch names.
 ## Non-negotiable rules
 
 - Never commit or push directly to protected `dev` or `master`.
+- CLI-owned approval is an execution obligation, not a request to the user.
+  For a CLI-created, CLI-owned `copilot-cli-managed` PR, use the canonical
+  automatic merge path as soon as its required checks pass. For an eligible
+  protected run with exact durable CLI authority, use the canonical automatic
+  approval path immediately. Inspect pending gates first on startup, resume,
+  and every monitoring checkpoint; do not leave them waiting for manual user
+  approval or merely poll them. All technical gates remain mandatory, and
+  human-originated work keeps its separate approval requirements.
 - Use the fixed quality chain: architect, three-model simplifier synthesis,
   developer, critic, test engineer, then final validator.
 - Record a documentation-impact assessment for every change. Register the

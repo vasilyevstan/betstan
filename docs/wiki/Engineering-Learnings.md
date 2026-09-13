@@ -251,6 +251,10 @@ policy and the exact durable CLI authority record. A sensitive workflow is not
 human-only merely because an agent remembers it that way. When a listed
 CLI-issued operation reaches a waiting gate, route the bounded approver in the
 same checkpoint; polling an eligible gate is an orchestration defect.
+Inspect pending gates first on startup, resume, and each monitoring checkpoint.
+Eligible CLI-owned approvals and merges are the automation owner's execution
+responsibility, not another request for the user to approve manually. This
+does not remove technical checks or change approval of human-originated work.
 
 ### Recovery is not diagnosis
 
