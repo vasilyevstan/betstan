@@ -236,12 +236,21 @@ STATE_DIR="${FAKE_STATE_DIR}"
 case "$1" in
   verify-held)
     [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] || { echo "not held" >&2; exit 1; }
+    for service in bet event gamemaster moderation resulting slip; do
+      [[ "$(cat "$STATE_DIR/replicas-$service")" == "0" ]] ||
+        { echo "writer is not quiesced" >&2; exit 1; }
+    done
     echo "live_data_maintenance=verify-held status=PASS" ;;
   hold)
     if [[ "${FAKE_REHOLD_FAILS:-0}" == "1" ]]; then echo "hold failed" >&2; exit 1; fi
+    for service in bet event gamemaster moderation resulting slip; do
+      printf '0\n' >"$STATE_DIR/replicas-$service"
+    done
     printf 'held\n' >"$STATE_DIR/maintenance"; echo "held" ;;
   release)
     if [[ "${FAKE_FENCE_RELEASE_FAILS:-0}" == "1" ]]; then echo "release failed" >&2; exit 1; fi
+    [[ "$(cat "$STATE_DIR/lock")" == "released" ]] ||
+      { echo "fence release preceded lock release" >&2; exit 1; }
     printf 'released\n' >"$STATE_DIR/maintenance"; echo "released" ;;
 esac
 EOF
@@ -470,6 +479,66 @@ EOF
     done
   ) >"$BASELINE_DIR/SHA256SUMS"
 }
+
+FORWARD_WRITERS=(bet event moderation resulting slip gamemaster)
+configure_cleanup_overlay() {
+  local split="$1" index service
+  configure_first_activation no-routes
+  for service in auth backoffice client; do
+    printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
+  done
+  for ((index = 0; index < split; index++)); do
+    service="${FORWARD_WRITERS[$index]}"
+    printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
+  done
+}
+
+# The first split reproduces a failed Telemetry ingress apply followed by the
+# deployment's candidate-reader cleanup. Later splits cover forward progress.
+for ((split = 0; split <= ${#FORWARD_WRITERS[@]}; split++)); do
+  new_case "deployment-cleanup-$split"
+  configure_cleanup_overlay "$split"
+  run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+    fail "deployment cleanup split $split was rejected: $(cat "$CASE_DIR/out.txt")"
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=PASS'
+  [[ "$(cat "$STATE_DIR/maintenance")" == "released" &&
+     "$(cat "$STATE_DIR/lock")" == "released" ]] ||
+    fail "deployment cleanup split $split retained maintenance or lock"
+  for service in "${SERVICES[@]}"; do
+    [[ "$(cat "$STATE_DIR/image-$service")" == "$(image_for target "$service")" &&
+       "$(cat "$STATE_DIR/replicas-$service")" == "1" ]] ||
+      fail "deployment cleanup split $split did not restore $service"
+  done
+  [[ ! -f "$STATE_DIR/image-telemetry" && ! -f "$STATE_DIR/service-telemetry" &&
+     "$(cat "$STATE_DIR/telemetry-routes")" == "0" ]] ||
+    fail "deployment cleanup split $split retained new Telemetry resources"
+done
+
+for invalid in writer-gap writer-suffix reader-baseline foreign-image active-writer missing-fence contended-lock; do
+  new_case "deployment-cleanup-invalid-$invalid"
+  configure_cleanup_overlay 0
+  case "$invalid" in
+    writer-gap) printf '%s\n' "$(image_for deployed event)" >"$STATE_DIR/image-event" ;;
+    writer-suffix)
+      for service in event moderation resulting slip gamemaster; do
+        printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
+      done ;;
+    reader-baseline) printf '%s\n' "$(image_for target auth)" >"$STATE_DIR/image-auth" ;;
+    foreign-image) printf '%s\n' "$(image_for other event)" >"$STATE_DIR/image-event" ;;
+    active-writer) printf '1\n' >"$STATE_DIR/replicas-event" ;;
+    missing-fence) printf 'released\n' >"$STATE_DIR/maintenance" ;;
+    contended-lock) printf 'contended\n' >"$STATE_DIR/lock" ;;
+  esac
+  if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+    fail "deployment cleanup accepted $invalid"
+  fi
+  if grep -Eq '^(set |scale |patch |delete )' "$STATE_DIR/kubectl.log"; then
+    fail "deployment cleanup mutated workloads before rejecting $invalid"
+  fi
+  if [[ "$invalid" != "contended-lock" && -s "$STATE_DIR/lock.log" ]]; then
+    fail "deployment cleanup touched the lock before rejecting $invalid"
+  fi
+done
 
 for stage in absent deployment-unready no-routes deployment-only ready; do
   new_case "first-activation-$stage"

@@ -61,7 +61,7 @@ case "${1:-}" in
         fi
         ;;
       pods)
-        if [[ "$*" == *'-o json'* ]]; then
+        if [[ "$*" == *'-o json' ]]; then
           if [[ "$namespace" == "ingress-nginx" ]]; then
             replicas="$(jq -r .ingress "$state")"
           else
@@ -112,6 +112,11 @@ case "${1:-}" in
     ;;
   rollout)
     [[ "${KUBECTL_FAIL_ROLLOUT:-0}" != "1" ]]
+    if [[ "$*" == *deployment/ingress-nginx-controller* ]]; then
+      [[ "$(jq -r .fail_ingress_rollout "$state")" != "true" ]] || exit 1
+      [[ "$(jq -r .ingress "$state")" == "1" ]]
+      update_state '.ingress_ready=true'
+    fi
     ;;
   apply)
     cat >/dev/null
@@ -128,6 +133,7 @@ case "${1:-}" in
     [[ "$replicas" =~ ^[01]$ ]] || exit 1
     if [[ "$namespace" == "ingress-nginx" ]]; then
       update_state ".ingress=$replicas"
+      [[ "$replicas" != "0" ]] || update_state '.ingress_ready=false'
     else
       update_state ".apps=$replicas"
     fi
@@ -163,6 +169,8 @@ case "${1:-}" in
       printf '{"ok":1}\n'
     elif [[ "$*" == *'ping:1'* ]]; then
       printf '1\n'
+    elif [[ "$*" == *listDatabases* ]]; then
+      printf 'true\n'
     else
       jq -c '{version,majorMinor:.major,fcv}' "$state"
     fi
@@ -315,4 +323,106 @@ if env \
   fail "unreviewed Mongo target image was accepted"
 fi
 
+# Execute the actual deploy sequence with the real Mongo prepare/finalize/resume
+# helpers. The manifest fake rejects admission before ingress rollout readiness.
+python3 - "$ROOT_DIR/infra/oci/scripts/deploy.sh" "$WORK_DIR/deploy-segment.sh" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+start = text.index("mongo_upgrade_recovery_required=true\n")
+end = text.index('\nrabbit_pod="$(', start)
+Path(sys.argv[2]).write_text(text[start:end])
+PY
+
+run_deploy_segment() {
+  env \
+    PATH="$WORK_DIR/bin:$PATH" \
+    KUBECTL_STATE="$STATE" \
+    KUBECTL_LOG="$LOG" \
+    OCI_K8S_NAMESPACE=betstan-oci \
+    MONGO_TARGET_IMAGE="$TARGET_IMAGE" \
+    MONGO_UPGRADE_STATE_FILE="$UPGRADE_STATE" \
+    MONGO_UPGRADE_WAIT_ATTEMPTS=2 \
+    MONGO_UPGRADE_SLEEP_SECONDS=0 \
+    bash -s -- "$ROOT_DIR" "$WORK_DIR/deploy-segment.sh" <<'SH'
+set -euo pipefail
+SCRIPT_DIR="$1/infra/oci/scripts"
+mongo_target_image="$MONGO_TARGET_IMAGE"
+mongo_upgrade_state_file="$MONGO_UPGRADE_STATE_FILE"
+oci_die() { printf '%s\n' "$*" >&2; exit 1; }
+apply_documents() {
+  printf 'apply_documents %s\n' "$1" >>"$KUBECTL_LOG"
+  case "$1" in
+    'StatefulSet:^gaming-auth-mongo-depl$')
+      kubectl set image statefulset/gaming-auth-mongo-depl \
+        "gaming-auth-mongo=$MONGO_TARGET_IMAGE" -n "$OCI_K8S_NAMESPACE" ;;
+    'Ingress:^gaming-oci-(ingress|www-redirect)$')
+      jq -e '.ingress == 1 and .ingress_ready != false' "$KUBECTL_STATE" >/dev/null ||
+        oci_die "ingress admission was unavailable"
+      if grep -q 'maintenance=true' "$MONGO_UPGRADE_STATE_FILE"; then
+        jq -e '.apps == 0' "$KUBECTL_STATE" >/dev/null ||
+          oci_die "ingress resumption thawed application writers"
+      fi ;;
+  esac
+}
+verify_telemetry_ingress_routes() { printf 'verify_routes\n' >>"$KUBECTL_LOG"; }
+source "$2"
+[[ "$mongo_upgrade_recovery_required" == "true" ]] ||
+  oci_die "failure recovery was disarmed before deployment completion"
+SH
+}
+
+for mode in aligned retained upgrade bad-finalize bad-ingress; do
+  if [[ "$mode" == "upgrade" ]]; then
+    write_state "$SOURCE_IMAGE" 7.0.21 7.0 7.0
+  elif [[ "$mode" == "aligned" ]]; then
+    write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2
+  else
+    write_state "$TARGET_IMAGE" 8.2.12 8.2 8.2 1 0
+  fi
+  if [[ "$mode" == "bad-finalize" ]]; then
+    jq '.image_id_digest="sha256:unknown"' "$STATE" >"$STATE.tmp"
+    mv "$STATE.tmp" "$STATE"
+  fi
+  if [[ "$mode" == "bad-ingress" ]]; then
+    jq '.fail_ingress_rollout=true' "$STATE" >"$STATE.tmp"
+    mv "$STATE.tmp" "$STATE"
+  fi
+  # Run outside an if-condition's shell context so source keeps errexit enabled.
+  set +e
+  run_deploy_segment >"$WORK_DIR/deploy-$mode.out" 2>&1
+  result=$?
+  set -e
+  if [[ "$mode" == bad-* ]]; then
+    [[ "$result" != "0" ]] ||
+      fail "$mode did not stop deployment: $(cat "$WORK_DIR/deploy-$mode.out") $(cat "$LOG")"
+    if grep -q '^apply_documents Ingress:' "$LOG"; then
+      fail "$mode reached ingress apply"
+    fi
+    if [[ "$mode" == "bad-finalize" ]] &&
+        grep -q '^scale deployment ingress-nginx-controller.*--replicas=1' "$LOG"; then
+      fail "failed finalization resumed ingress"
+    fi
+  else
+    [[ "$result" == "0" ]] || fail "$mode deployment failed: $(cat "$WORK_DIR/deploy-$mode.out")"
+    grep -q '^verify_routes$' "$LOG" || fail "$mode did not establish Telemetry routes"
+    if [[ "$mode" == "aligned" ]] && grep -q '^scale ' "$LOG"; then
+      fail "aligned deployment unnecessarily scaled workloads"
+    fi
+    if [[ "$mode" != "aligned" ]]; then
+      grep -q 'oci_mongo_upgrade_finalize=PASS' "$WORK_DIR/deploy-$mode.out" ||
+        fail "$mode omitted verified Mongo finalization"
+      python3 - "$LOG" <<'PY'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+ready = next(i for i, line in enumerate(lines) if line.startswith("rollout status deployment/ingress-nginx-controller"))
+ingress = next(i for i, line in enumerate(lines) if line.startswith("apply_documents Ingress:"))
+assert ready < ingress, "Ingress applied before controller readiness"
+PY
+    fi
+  fi
+done
 echo "oci_mongo_upgrade_contract=PASS"

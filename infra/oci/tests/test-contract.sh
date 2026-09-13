@@ -1492,12 +1492,13 @@ armed = text.index("mongo_upgrade_recovery_required=true")
 prepare = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" prepare')
 apply_target = text.index("apply_documents 'StatefulSet:^gaming-auth-mongo-depl$'", prepare)
 finalize = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" finalize', apply_target)
+resume = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" resume', finalize)
+ingress = text.index("apply_documents 'Ingress:^gaming-oci-(ingress|www-redirect)$'", resume)
 provenance = text.index('} > "$OUTPUT_DIR/provenance.txt"', finalize)
-resume = text.index('"$SCRIPT_DIR/upgrade-mongo.sh" resume', provenance)
 disarmed = text.index("mongo_upgrade_recovery_required=false", resume)
 rendered_removed = text.index('rm -f "$RENDERED_FILE"', disarmed)
 completed = text.index('oci_log "oci_deploy=PASS', rendered_removed)
-if not armed < prepare < apply_target < finalize < provenance < resume < disarmed < rendered_removed < completed:
+if not armed < prepare < apply_target < finalize < resume < ingress < provenance < disarmed < rendered_removed < completed:
     raise SystemExit("Mongo maintenance/deploy ordering differs")
 PY
 grep -Fq "printf 'registry_repository=%s\\n' \"\$application_registry_repository\"" \
