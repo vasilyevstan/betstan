@@ -34,30 +34,42 @@ case "$BOUND_RUNTIME_MODE" in
     ;;
 esac
 
+require_empty_optional_inputs() {
+  # GitHub omits empty optional strings from toJSON(inputs).
+  jq -e --argjson keys "$1" '
+    . as $inputs |
+    all($keys[]; . as $key |
+      ($inputs | has($key) | not) or $inputs[$key] == "")
+  ' <<<"$DISPATCH_INPUTS" >/dev/null || {
+    echo "unused infrastructure inputs must be absent or empty strings" >&2
+    exit 1
+  }
+}
+
 require_legacy_disk_slots_inert() {
+  require_empty_optional_inputs '["infrastructure_run_id", "diagnosis_run_id"]'
   jq -e '
-    has("infrastructure_run_id") and .infrastructure_run_id == "" and
-    has("diagnosis_run_id") and .diagnosis_run_id == "" and
     has("reclaim_category") and .reclaim_category == "none" and
     has("reclaim_image_ids") and .reclaim_image_ids == "[]"
-  ' <<<"$DISPATCH_INPUTS" >/dev/null
+  ' <<<"$DISPATCH_INPUTS" >/dev/null || {
+    echo "legacy infrastructure phases require inert disk recovery defaults" >&2
+    exit 1
+  }
 }
 
 require_disk_legacy_slots_inert() {
-  jq -e '
-    [
-      .candidate_build_run_id,
-      .obsolete_sha,
-      .obsolete_build_run_id,
-      .obsolete_generations,
-      .deployed_sha,
-      .deployed_run_id,
-      .fallback_sha,
-      .fallback_build_run_id,
-      .validation_run_id,
-      .capacity_acquisition_run_id
-    ] | all(. == "")
-  ' <<<"$DISPATCH_INPUTS" >/dev/null
+  require_empty_optional_inputs '[
+    "candidate_build_run_id",
+    "obsolete_sha",
+    "obsolete_build_run_id",
+    "obsolete_generations",
+    "deployed_sha",
+    "deployed_run_id",
+    "fallback_sha",
+    "fallback_build_run_id",
+    "validation_run_id",
+    "capacity_acquisition_run_id"
+  ]'
 }
 
 case "$PHASE" in
