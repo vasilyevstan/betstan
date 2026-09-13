@@ -13,13 +13,15 @@ on:
         required: true
         type: string
       phase:
-        description: Prepare or finalize infrastructure (legacy OCIR registry controls are retired)
+        description: Prepare/finalize infrastructure or perform bounded k3s disk recovery
         required: true
         default: prepare
         type: choice
         options:
           - prepare
           - finalize
+          - diagnose-disk
+          - reclaim-disk
       candidate_build_run_id:
         description: Current-master OCI build run protected during registry pruning
         required: false
@@ -88,6 +90,30 @@ on:
         options:
           - k3s
           - oke
+      infrastructure_run_id:
+        description: Successful first-attempt current-SHA finalized k3s infrastructure run for disk recovery
+        required: false
+        default: ""
+        type: string
+      diagnosis_run_id:
+        description: Successful bound diagnosis run consumed by reclaim-disk
+        required: false
+        default: ""
+        type: string
+      reclaim_category:
+        description: One evidenced nondata reclaim category; inert outside reclaim-disk
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - apt-package-cache
+          - cri-owned-unused-images
+      reclaim_image_ids:
+        description: Compact JSON array of exact diagnosis-owned unused CRI image IDs
+        required: false
+        default: "[]"
+        type: string
 
 permissions:
   actions: read
@@ -724,6 +750,10 @@ jobs:
       BOUND_RUNTIME_MODE: ${{ inputs.runtime_mode }}
       PHASE: ${{ inputs.phase }}
       DISPATCH_INPUTS: ${{ toJSON(inputs) }}
+      DISK_INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      DISK_DIAGNOSIS_RUN_ID: ${{ inputs.diagnosis_run_id }}
+      DISK_RECLAIM_CATEGORY: ${{ inputs.reclaim_category }}
+      DISK_RECLAIM_IMAGE_IDS: ${{ inputs.reclaim_image_ids }}
       OCI_VCN_CIDR: ${{ vars.OCI_VCN_CIDR || '10.42.0.0/16' }}
       OCI_WORKER_SUBNET_CIDR: ${{ vars.OCI_WORKER_SUBNET_CIDR || '10.42.16.0/20' }}
       OCI_LB_SUBNET_CIDR: ${{ vars.OCI_LB_SUBNET_CIDR || '10.42.32.0/24' }}
@@ -780,6 +810,10 @@ jobs:
           [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
           [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ -z "$DISK_INFRASTRUCTURE_RUN_ID" ]
+          [ -z "$DISK_DIAGNOSIS_RUN_ID" ]
+          [ "$DISK_RECLAIM_CATEGORY" = "none" ]
+          [ "$DISK_RECLAIM_IMAGE_IDS" = "[]" ]
           mkdir -p "$HOME/.kube"
           chmod 700 "$HOME" "$HOME/.kube"
 
@@ -1078,3 +1112,276 @@ jobs:
       - name: Remove isolated OCI client state
         if: always()
         run: rm -rf "$HOME"
+
+  k3s-disk-recovery:
+    if: >-
+      github.run_attempt == 1 &&
+      (inputs.phase == 'diagnose-disk' || inputs.phase == 'reclaim-disk')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: oci-infrastructure
+    env:
+      SOURCE_SHA: ${{ inputs.approved_sha }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      PHASE: ${{ inputs.phase }}
+      BOUND_RUNTIME_MODE: ${{ inputs.runtime_mode }}
+      OCI_RUNTIME_MODE: ${{ vars.OCI_RUNTIME_MODE }}
+      GHCR_BUILD_RUN_ID: ${{ inputs.ghcr_build_run_id }}
+      CAPACITY_ACQUISITION_RUN_ID: ${{ inputs.capacity_acquisition_run_id }}
+      INFRASTRUCTURE_RUN_ID: ${{ inputs.infrastructure_run_id }}
+      DIAGNOSIS_RUN_ID: ${{ inputs.diagnosis_run_id }}
+      GHCR_PACKAGE_VALIDATION_RUN_ID: ${{ inputs.ghcr_package_validation_run_id }}
+      RECLAIM_CATEGORY: ${{ inputs.reclaim_category }}
+      RECLAIM_IMAGE_IDS: ${{ inputs.reclaim_image_ids }}
+      DISPATCH_INPUTS: ${{ toJSON(inputs) }}
+      OCI_CLI_VERSION: "3.90.0"
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ vars.OCI_TENANCY_OCID }}
+      OCI_CI_USER_OCID: ${{ vars.OCI_CI_USER_OCID }}
+      OCI_CI_KEY_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+      OCI_COMPARTMENT_OCID: ${{ vars.OCI_COMPARTMENT_OCID }}
+      OCI_BASTION_DEFAULT_CLIENT_CIDR: 192.0.2.1/32
+      OCI_K3S_NODE_NAME: ${{ vars.OCI_K3S_NODE_NAME || 'betstan-k3s' }}
+      OCI_DISK_MAX_PERCENT: ${{ vars.OCI_DISK_MAX_PERCENT }}
+
+    steps:
+      - name: Initialize isolated OCI paths
+        run: |
+          {
+            echo "HOME=$RUNNER_TEMP/oci-k3s-disk-home"
+            echo "KUBECONFIG=$RUNNER_TEMP/oci-k3s-disk-home/.kube/config"
+          } >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/oci-k3s-disk-home/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p \
+            "$RUNNER_TEMP/oci-k3s-disk-home/.kube" \
+            artifacts/oci-k3s-disk \
+            artifacts/oci-k3s-disk-upstream
+          chmod 700 \
+            "$RUNNER_TEMP/oci-k3s-disk-home" \
+            "$RUNNER_TEMP/oci-k3s-disk-home/.kube" \
+            artifacts/oci-k3s-disk-upstream
+
+      - name: Checkout approved current master
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.approved_sha }}
+          fetch-depth: 0
+
+      - name: Validate bounded k3s disk request
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF_NAME" = "master" ]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ]
+          [ "$BOUND_RUNTIME_MODE" = "k3s" ]
+          [ "$OCI_RUNTIME_MODE" = "k3s" ]
+          [ "$OCI_DISK_MAX_PERCENT" = "70" ]
+          jq -e '
+            [
+              .candidate_build_run_id,
+              .obsolete_sha,
+              .obsolete_build_run_id,
+              .obsolete_generations,
+              .deployed_sha,
+              .deployed_run_id,
+              .fallback_sha,
+              .fallback_build_run_id,
+              .validation_run_id,
+              .capacity_acquisition_run_id
+            ] | all(. == "")
+          ' <<<"$DISPATCH_INPUTS" >/dev/null
+          [[ "$GHCR_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          case "$PHASE" in
+            diagnose-disk)
+              [ "$CONFIRMATION" = "DIAGNOSE K3S ROOT DISK" ]
+              [ -z "$DIAGNOSIS_RUN_ID" ]
+              [ -z "$GHCR_PACKAGE_VALIDATION_RUN_ID" ]
+              [ "$RECLAIM_CATEGORY" = "none" ]
+              [ "$RECLAIM_IMAGE_IDS" = "[]" ]
+              ;;
+            reclaim-disk)
+              [ "$CONFIRMATION" = "RECLAIM EVIDENCED K3S ROOT DISK" ]
+              [[ "$DIAGNOSIS_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              case "$RECLAIM_CATEGORY" in
+                apt-package-cache)
+                  [ -z "$GHCR_PACKAGE_VALIDATION_RUN_ID" ]
+                  [ "$RECLAIM_IMAGE_IDS" = "[]" ]
+                  ;;
+                cri-owned-unused-images)
+                  [[ "$GHCR_PACKAGE_VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+                  jq -e '
+                    type == "array" and length > 0 and
+                    all(.[]; type == "string" and
+                      test("^sha256:[0-9a-f]{64}$")) and
+                    (unique | length) == length
+                  ' <<<"$RECLAIM_IMAGE_IDS" >/dev/null
+                  ;;
+                *)
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
+
+      - name: Bind current-SHA disk recovery prerequisites
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
+
+      - name: Download bound infrastructure, build, and diagnosis evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh run download "$INFRASTRUCTURE_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name "oci-infrastructure-provenance-${INFRASTRUCTURE_RUN_ID}-1" \
+            --dir artifacts/oci-k3s-disk-upstream/infrastructure
+          gh run download "$GHCR_BUILD_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name "oci-image-provenance-${SOURCE_SHA}-${GHCR_BUILD_RUN_ID}-1" \
+            --dir artifacts/oci-k3s-disk-upstream/build
+          if [ "$PHASE" = "reclaim-disk" ]; then
+            gh run download "$DIAGNOSIS_RUN_ID" \
+              --repo "$REPOSITORY" \
+              --name "oci-k3s-disk-diagnosis-${DIAGNOSIS_RUN_ID}-1" \
+              --dir artifacts/oci-k3s-disk-upstream/diagnosis
+          fi
+          if [ "$RECLAIM_CATEGORY" = "cri-owned-unused-images" ]; then
+            gh run download "$GHCR_PACKAGE_VALIDATION_RUN_ID" \
+              --repo "$REPOSITORY" \
+              --name "ghcr-package-management-validate-${GHCR_PACKAGE_VALIDATION_RUN_ID}-1" \
+              --dir artifacts/oci-k3s-disk-upstream/ghcr-package-validation
+          fi
+          [ -z "$(find artifacts/oci-k3s-disk-upstream -type l -print -quit)" ]
+          test -s artifacts/oci-k3s-disk-upstream/infrastructure/provenance.env
+          test -s artifacts/oci-k3s-disk-upstream/build/images.tsv
+          if [ "$PHASE" = "reclaim-disk" ]; then
+            test -s artifacts/oci-k3s-disk-upstream/diagnosis/diagnosis.json
+          fi
+          if [ "$RECLAIM_CATEGORY" = "cri-owned-unused-images" ]; then
+            test -s artifacts/oci-k3s-disk-upstream/ghcr-package-validation/validation-summary.json
+          fi
+
+      - name: Install pinned OCI CLI
+        run: ./infra/oci/scripts/install-cli.sh
+
+      - name: Revalidate immutable candidate image availability
+        env:
+          PROVENANCE_DIR: artifacts/oci-k3s-disk-upstream/build
+          EXPECTED_BUILD_RUN_ID: ${{ inputs.ghcr_build_run_id }}
+          EXPECTED_BUILD_RUN_ATTEMPT: "1"
+          OUTPUT_FILE: artifacts/oci-k3s-disk-upstream/verified-candidate-images.tsv
+          VERIFY_REMOTE: "1"
+          BOOT_IMAGES: "0"
+          ANONYMOUS_PULL: "1"
+        run: ./infra/oci/scripts/verify-images.sh
+
+      - name: Verify OCI identity
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_HOME_REGION_QUERY: 'data[?"is-home-region" == `true`]."region-name" | [0]'
+        run: |
+          set -euo pipefail
+          home_region="$(
+            oci iam region-subscription list \
+              --tenancy-id "$OCI_CLI_TENANCY" \
+              --query "$OCI_HOME_REGION_QUERY" \
+              --raw-output
+          )"
+          [ "$home_region" = "$OCI_CLI_REGION" ]
+
+      - name: Revalidate authority and perform bounded k3s disk operation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}
+          OCI_K3S_RETAIN_TARGET_SSH: "true"
+          INFRA_PROVENANCE_FILE: artifacts/oci-k3s-disk-upstream/infrastructure/provenance.env
+          SESSION_STATE_FILE: artifacts/oci-k3s-disk/k3s-access.env
+          CANDIDATE_IMAGES_FILE: artifacts/oci-k3s-disk-upstream/verified-candidate-images.tsv
+          GHCR_PACKAGE_VALIDATION_FILE: artifacts/oci-k3s-disk-upstream/ghcr-package-validation/validation-summary.json
+          DIAGNOSIS_FILE: artifacts/oci-k3s-disk-upstream/diagnosis/diagnosis.json
+          OUTPUT_FILE: artifacts/oci-k3s-disk/${{ inputs.phase == 'diagnose-disk' && 'diagnosis.json' || 'reclaim.json' }}
+          ACCESS_WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-access
+          RECOVERY_WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-work
+        run: |
+          set -euo pipefail
+          cleanup_on_exit() {
+            status=$?
+            trap - EXIT
+            set +e
+            WORK_DIR="$ACCESS_WORK_DIR" \
+              ./infra/oci/scripts/configure-k3s-access.sh cleanup
+            cleanup_status=$?
+            if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+              status=$cleanup_status
+            fi
+            exit "$status"
+          }
+          trap cleanup_on_exit EXIT
+          git fetch --quiet origin master:refs/remotes/origin/master
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
+          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
+          RUNNER_PUBLIC_IPV4="$(
+            curl --fail --silent --show-error --max-time 15 https://api.ipify.org
+          )"
+          export RUNNER_PUBLIC_IPV4
+          WORK_DIR="$ACCESS_WORK_DIR" \
+            ./infra/oci/scripts/configure-k3s-access.sh open
+          unset OCI_K3S_SSH_PRIVATE_KEY
+          operation=diagnose
+          [ "$PHASE" != "reclaim-disk" ] || operation=reclaim
+          WORK_DIR="$RECOVERY_WORK_DIR" \
+            ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh "$operation"
+
+      - name: Close ephemeral OCI Bastion access
+        if: always()
+        env:
+          OCI_CLI_USER: ${{ vars.OCI_CI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ vars.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ vars.OCI_CI_KEY_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CI_PRIVATE_KEY_PEM }}
+          OCI_CLI_REGION: ${{ vars.OCI_REGION }}
+          SESSION_STATE_FILE: artifacts/oci-k3s-disk/k3s-access.env
+          WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-access
+        run: ./infra/oci/scripts/configure-k3s-access.sh cleanup
+
+      - name: Upload checksummed k3s disk diagnosis
+        if: always() && inputs.phase == 'diagnose-disk'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-k3s-disk-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-k3s-disk/diagnosis.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload checksummed k3s disk reclaim result
+        if: always() && inputs.phase == 'reclaim-disk'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: oci-k3s-disk-reclaim-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/oci-k3s-disk/reclaim.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove isolated OCI client state
+        if: always()
+        run: rm -rf "$HOME" "$RUNNER_TEMP/betstan-k3s-disk-work"

@@ -114,5 +114,207 @@
       },
       "workflow": "ghcr-package-management.yml"
     }
+  ],
+  "oci-k3s-disk-diagnose": [
+    {
+      "artifactContent": {
+        "equals": {
+          "anonymous_pull": "pass",
+          "build_run_attempt": "1",
+          "build_run_id": "{run_id}",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "registry_public": "true",
+          "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "build-chain.txt",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "infrastructure_finalized": "true",
+          "infrastructure_run_attempt": "1",
+          "infrastructure_run_id": "{run_id}",
+          "runtime_mode": "k3s",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "provenance.env",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-infrastructure-provenance-{run_id}-1",
+      "input": "infrastructure_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}"
+      },
+      "workflow": "oci-infrastructure.yml"
+    }
+  ],
+  "oci-k3s-disk-reclaim-apt": [
+    {
+      "artifactContent": {
+        "equals": {
+          "anonymous_pull": "pass",
+          "build_run_attempt": "1",
+          "build_run_id": "{run_id}",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "registry_public": "true",
+          "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "build-chain.txt",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "infrastructure_finalized": "true",
+          "infrastructure_run_attempt": "1",
+          "infrastructure_run_id": "{run_id}",
+          "runtime_mode": "k3s",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "provenance.env",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-infrastructure-provenance-{run_id}-1",
+      "input": "infrastructure_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}"
+      },
+      "workflow": "oci-infrastructure.yml"
+    },
+    {
+      "afterInput": "infrastructure_run_id",
+      "artifactContent": {
+        "equals": {
+          "ghcrBuildRunId": "{input:ghcr_build_run_id}",
+          "infrastructureRunId": "{input:infrastructure_run_id}",
+          "phase": "diagnose-disk",
+          "schemaVersion": "k3s-node-disk-diagnosis.v1",
+          "sourceSha": "{subject_sha}",
+          "terminalStatus": "DIAGNOSED",
+          "thresholdPercent": 70,
+          "workflowRunAttempt": "1",
+          "workflowRunId": "{run_id}"
+        },
+        "fileName": "diagnosis.json",
+        "format": "json"
+      },
+      "artifactTemplate": "oci-k3s-disk-diagnosis-{run_id}-1",
+      "input": "diagnosis_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure diagnose-disk k3s {subject_sha}"
+      },
+      "workflow": "oci-infrastructure.yml"
+    }
+  ],
+  "oci-k3s-disk-reclaim-cri": [
+    {
+      "artifactContent": {
+        "equals": {
+          "anonymous_pull": "pass",
+          "build_run_attempt": "1",
+          "build_run_id": "{run_id}",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "registry_public": "true",
+          "registry_repository": "ghcr.io/vasilyevstan/betstan-images",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "build-chain.txt",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-image-provenance-{subject_sha}-{run_id}-1",
+      "input": "ghcr_build_run_id",
+      "titleTemplates": {
+        "workflow_run": null
+      },
+      "workflow": "oci-production-build.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "candidate_build_run_id": "{input:ghcr_build_run_id}",
+          "package_visibility": "public",
+          "registry_host": "ghcr.io",
+          "registry_provider": "ghcr",
+          "repository": "ghcr.io/vasilyevstan/betstan-images",
+          "repository_linked": true,
+          "terminal_status": "VALIDATED"
+        },
+        "fileName": "validation-summary.json",
+        "format": "json"
+      },
+      "artifactTemplate": "ghcr-package-management-validate-{run_id}-1",
+      "input": "ghcr_package_validation_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "ghcr-package validate {subject_sha}"
+      },
+      "workflow": "ghcr-package-management.yml"
+    },
+    {
+      "afterInput": "ghcr_build_run_id",
+      "artifactContent": {
+        "equals": {
+          "infrastructure_finalized": "true",
+          "infrastructure_run_attempt": "1",
+          "infrastructure_run_id": "{run_id}",
+          "runtime_mode": "k3s",
+          "source_sha": "{subject_sha}"
+        },
+        "fileName": "provenance.env",
+        "format": "env"
+      },
+      "artifactTemplate": "oci-infrastructure-provenance-{run_id}-1",
+      "input": "infrastructure_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}"
+      },
+      "workflow": "oci-infrastructure.yml"
+    },
+    {
+      "afterInput": "infrastructure_run_id",
+      "artifactContent": {
+        "equals": {
+          "ghcrBuildRunId": "{input:ghcr_build_run_id}",
+          "infrastructureRunId": "{input:infrastructure_run_id}",
+          "phase": "diagnose-disk",
+          "schemaVersion": "k3s-node-disk-diagnosis.v1",
+          "sourceSha": "{subject_sha}",
+          "terminalStatus": "DIAGNOSED",
+          "thresholdPercent": 70,
+          "workflowRunAttempt": "1",
+          "workflowRunId": "{run_id}"
+        },
+        "fileName": "diagnosis.json",
+        "format": "json"
+      },
+      "artifactTemplate": "oci-k3s-disk-diagnosis-{run_id}-1",
+      "input": "diagnosis_run_id",
+      "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure diagnose-disk k3s {subject_sha}"
+      },
+      "workflow": "oci-infrastructure.yml"
+    }
   ]
 }
