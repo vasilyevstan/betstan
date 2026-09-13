@@ -243,6 +243,16 @@ state, exit code, reason, timestamps, and bounded previous logs are captured.
 Separate startup allowance from steady-state liveness so a dead listener is
 restarted promptly without penalizing normal boot time.
 
+### Maintenance recovery preserves dependency order
+
+Planned maintenance may intentionally hold a component at zero replicas; that
+state alone does not identify provider failure or corrupted configuration.
+Inspect the operation and its ordering, prove a prerequisite ready before
+applying resources that depend on it, and recover only from explicitly modeled
+partial rollout states rather than arbitrary image mixtures. Restore affected
+services before continuing feature work, validate affected APIs rather than a
+generic `200`, and report observed evidence instead of an unsupported ETA.
+
 ### A read-only HTTP probe can still change availability
 
 An unknown URL still executes application fallback code. Express 4 does not

@@ -1309,3 +1309,29 @@ Durable rules:
 - After implementation, review the result, capture applicable learning in
   existing agents and documentation, and optimize only where evidence shows
   concrete value.
+
+## Ingress admission readiness during retained maintenance — 2026-09-13
+
+Retained Mongo maintenance deliberately held `ingress-nginx` at zero replicas.
+After Mongo finalization, deployment attempted the Telemetry Ingress before the
+existing ingress-only resume, so admission had no endpoints. Configuration was
+intact: the initial transient-controller diagnosis was wrong, and the defect was
+deployment order.
+
+Durable rules:
+
+- Inspect intentional maintenance state and the executed shell order before
+  blaming a provider or restarting a component.
+- Verify Mongo `8.2.12`, FCV `8.2`, and the running image digest, then resume
+  ingress only and prove admission readiness before applying Ingress resources.
+  Keep writers quiesced, the write fence active, and deployment-failure recovery
+  armed.
+- Cleanup recovery accepts only exact candidate Auth, Backoffice, and Client
+  images over a valid candidate prefix of the canonical six-writer rollout,
+  followed by its baseline suffix. Reject arbitrary image mixtures.
+- Test the real deploy-shell sequence and Mongo helpers, plus every
+  cleanup-produced state through the rollback classifier; source-text ordering
+  and one representative state are insufficient.
+- A homepage `200` does not prove recovery while an affected API returns `503`.
+  Restore the affected services before continuing feature work, report observed
+  evidence and the next check, and do not invent an ETA.
