@@ -91,6 +91,23 @@ Rollback uses a known prior application generation and a baseline captured
 before deployment. Data restore is a separate decision and is not coupled to
 every application rollback.
 
+### Bounded k3s root-disk recovery
+
+The infrastructure workflow separates read-only root-filesystem diagnosis from
+reclaim. A reclaim must bind the current source, first workflow attempt, exact
+infrastructure and image-build evidence, and the preceding diagnosis while
+remaining serialized with other protected operations. It may clean either the
+package cache or an exact set of repository-owned, unused container images
+identified by that diagnosis, never both or an arbitrary image set.
+
+The fixed root-filesystem limit remains 70 percent. Root and persistent-data
+mount identities, workload and queue health, public reads, and protected
+running, candidate, and rollback image references remain fail-closed.
+Persistent application data, mounted data storage, foreign or pinned images,
+and images with live or retained references are not reclaim targets. Diagnosis
+alone does not authorize reclamation or prove future deployment headroom, and
+the presence of this capability does not prove that it has run or freed space.
+
 ## Images and provenance
 
 - Application images are built from the exact `master` SHA.

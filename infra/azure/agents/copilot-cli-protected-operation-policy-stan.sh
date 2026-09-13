@@ -167,6 +167,13 @@ OCI_INFRASTRUCTURE_INPUTS = [
     "runtime_mode",
 ]
 
+OCI_K3S_DISK_INPUTS = OCI_INFRASTRUCTURE_INPUTS + [
+    "infrastructure_run_id",
+    "diagnosis_run_id",
+    "reclaim_category",
+    "reclaim_image_ids",
+]
+
 CAPACITY_BINDING = {
     "input": "capacity_acquisition_run_id",
     "afterInput": "ghcr_package_validation_run_id",
@@ -234,6 +241,66 @@ GHCR_PACKAGE_BINDING = {
             "package_visibility": "public",
             "repository_linked": True,
             "candidate_build_run_id": "{input:ghcr_build_run_id}",
+        },
+    },
+}
+
+K3S_INFRASTRUCTURE_BINDING = {
+    "input": "infrastructure_run_id",
+    "afterInput": "ghcr_build_run_id",
+    "workflow": "oci-infrastructure.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure finalize k3s {subject_sha}",
+    },
+    "artifactTemplate": "oci-infrastructure-provenance-{run_id}-1",
+    "artifactContent": {
+        "fileName": "provenance.env",
+        "format": "env",
+        "equals": {
+            "source_sha": "{subject_sha}",
+            "infrastructure_run_id": "{run_id}",
+            "infrastructure_run_attempt": "1",
+            "infrastructure_finalized": "true",
+            "runtime_mode": "k3s",
+            "ghcr_build_run_id": "{input:ghcr_build_run_id}",
+        },
+    },
+}
+
+K3S_INFRASTRUCTURE_PROTECTED_BINDING = {
+    **K3S_INFRASTRUCTURE_BINDING,
+    "afterInput": "ghcr_package_validation_run_id",
+    "artifactContent": {
+        **K3S_INFRASTRUCTURE_BINDING["artifactContent"],
+        "equals": {
+            **K3S_INFRASTRUCTURE_BINDING["artifactContent"]["equals"],
+            "ghcr_package_validation_run_id":
+                "{input:ghcr_package_validation_run_id}",
+        },
+    },
+}
+
+K3S_DISK_DIAGNOSIS_BINDING = {
+    "input": "diagnosis_run_id",
+    "afterInput": "infrastructure_run_id",
+    "workflow": "oci-infrastructure.yml",
+    "titleTemplates": {
+        "workflow_dispatch": "oci-infrastructure diagnose-disk k3s {subject_sha}",
+    },
+    "artifactTemplate": "oci-k3s-disk-diagnosis-{run_id}-1",
+    "artifactContent": {
+        "fileName": "diagnosis.json",
+        "format": "json",
+        "equals": {
+            "schemaVersion": "k3s-node-disk-diagnosis.v1",
+            "phase": "diagnose-disk",
+            "sourceSha": "{subject_sha}",
+            "infrastructureRunId": "{input:infrastructure_run_id}",
+            "ghcrBuildRunId": "{input:ghcr_build_run_id}",
+            "workflowRunId": "{run_id}",
+            "workflowRunAttempt": "1",
+            "thresholdPercent": 70,
+            "terminalStatus": "DIAGNOSED",
         },
     },
 }
@@ -701,6 +768,133 @@ POLICIES = {
         subject_input="approved_sha",
         subject_relation="current",
         upstream_run_bindings=[GHCR_BUILD_BINDING, GHCR_PACKAGE_BINDING],
+    ),
+    "oci-k3s-disk-diagnose": dispatch(
+        "oci-k3s-disk-diagnose",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure diagnose-disk k3s {subject_sha}",
+        OCI_K3S_DISK_INPUTS,
+        fixed={
+            "confirmation": "DIAGNOSE K3S ROOT DISK",
+            "phase": "diagnose-disk",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            "ghcr_package_validation_run_id": "",
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "k3s",
+            "diagnosis_run_id": "",
+            "reclaim_category": "none",
+            "reclaim_image_ids": "[]",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12] + [
+            "ghcr_package_validation_run_id",
+            "capacity_acquisition_run_id",
+            "diagnosis_run_id",
+        ],
+        positive=["ghcr_build_run_id", "infrastructure_run_id"],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+        upstream_run_bindings=[
+            GHCR_BUILD_BINDING,
+            K3S_INFRASTRUCTURE_BINDING,
+        ],
+    ),
+    "oci-k3s-disk-reclaim-apt": dispatch(
+        "oci-k3s-disk-reclaim-apt",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure reclaim-disk k3s {subject_sha}",
+        OCI_K3S_DISK_INPUTS,
+        fixed={
+            "confirmation": "RECLAIM EVIDENCED K3S ROOT DISK",
+            "phase": "reclaim-disk",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            "ghcr_package_validation_run_id": "",
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "k3s",
+            "reclaim_category": "apt-package-cache",
+            "reclaim_image_ids": "[]",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12] + [
+            "ghcr_package_validation_run_id",
+            "capacity_acquisition_run_id",
+        ],
+        positive=[
+            "ghcr_build_run_id",
+            "infrastructure_run_id",
+            "diagnosis_run_id",
+        ],
+        full_shas=["approved_sha"],
+        subject_input="approved_sha",
+        subject_relation="current",
+        upstream_run_bindings=[
+            GHCR_BUILD_BINDING,
+            K3S_INFRASTRUCTURE_BINDING,
+            K3S_DISK_DIAGNOSIS_BINDING,
+        ],
+    ),
+    "oci-k3s-disk-reclaim-cri": dispatch(
+        "oci-k3s-disk-reclaim-cri",
+        "oci-infrastructure.yml",
+        "oci-infrastructure",
+        "oci-infrastructure reclaim-disk k3s {subject_sha}",
+        OCI_K3S_DISK_INPUTS,
+        fixed={
+            "confirmation": "RECLAIM EVIDENCED K3S ROOT DISK",
+            "phase": "reclaim-disk",
+            "candidate_build_run_id": "",
+            "obsolete_sha": "",
+            "obsolete_build_run_id": "",
+            "obsolete_generations": "",
+            "deployed_sha": "",
+            "deployed_run_id": "",
+            "fallback_sha": "",
+            "fallback_build_run_id": "",
+            "validation_run_id": "",
+            "capacity_acquisition_run_id": "",
+            "runtime_mode": "k3s",
+            "reclaim_category": "cri-owned-unused-images",
+        },
+        allow_empty=OCI_INFRASTRUCTURE_INPUTS[3:12] + [
+            "capacity_acquisition_run_id",
+        ],
+        positive=[
+            "ghcr_build_run_id",
+            "ghcr_package_validation_run_id",
+            "infrastructure_run_id",
+            "diagnosis_run_id",
+        ],
+        full_shas=["approved_sha"],
+        patterns={
+            "reclaim_image_ids":
+                r'^\["sha256:[0-9a-f]{64}"'
+                r'(,"sha256:[0-9a-f]{64}")*\]$',
+        },
+        subject_input="approved_sha",
+        subject_relation="current",
+        upstream_run_bindings=[
+            GHCR_BUILD_BINDING,
+            GHCR_PACKAGE_BINDING,
+            K3S_INFRASTRUCTURE_PROTECTED_BINDING,
+            K3S_DISK_DIAGNOSIS_BINDING,
+        ],
     ),
     "ghcr-package-bootstrap": dispatch(
         "ghcr-package-bootstrap",

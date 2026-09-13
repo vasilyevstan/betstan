@@ -2111,12 +2111,16 @@ for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow" "$migrate_
   grep -Fq 'github.run_attempt == 1' "$workflow"
   grep -Fq 'group: oci-control-plane' "$workflow"
 done
-for workflow in "$infra_workflow" "$data_workflow" "$deploy_workflow"; do
+for workflow in "$data_workflow" "$deploy_workflow"; do
   [[ "$(grep -Fc \
     'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
     "$workflow")" == "1" ]] ||
     fail "target SSH private key must be scoped to one k3s access step: $(basename "$workflow")"
 done
+[[ "$(grep -Fc \
+  'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
+  "$infra_workflow")" == "2" ]] ||
+  fail "infrastructure SSH key must be scoped to finalization and disk-recovery access steps"
 [[ "$(grep -Fc \
   'OCI_K3S_SSH_PRIVATE_KEY: ${{ secrets.OCI_K3S_SSH_PRIVATE_KEY }}' \
   "$migrate_workflow")" == "2" ]] ||

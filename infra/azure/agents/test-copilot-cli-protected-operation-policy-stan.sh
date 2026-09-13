@@ -16,8 +16,8 @@ bash -n "$POLICY"
 "$POLICY" all >"$policy_file"
 
 operation_count="$("$POLICY" operations | wc -l | tr -d ' ')"
-[[ "$operation_count" = "35" ]] || {
-  echo "expected 35 protected operations, got $operation_count" >&2
+[[ "$operation_count" = "38" ]] || {
+  echo "expected 38 protected operations, got $operation_count" >&2
   exit 1
 }
 
@@ -130,8 +130,24 @@ policies.each do |policy|
     dispatch = workflow_triggers.fetch("workflow_dispatch")
     inputs = dispatch.is_a?(Hash) ? dispatch["inputs"] : nil
     actual_inputs = inputs.is_a?(Hash) ? inputs.keys.sort : []
-    unless actual_inputs == policy.fetch("inputNames").sort
-      fail("#{operation} policy inputs differ from #{workflow}")
+    policy_inputs = policy.fetch("inputNames").sort
+    unless actual_inputs == policy_inputs
+      inert_disk_defaults = {
+        "infrastructure_run_id" => "",
+        "diagnosis_run_id" => "",
+        "reclaim_category" => "none",
+        "reclaim_image_ids" => "[]",
+      }
+      legacy_infrastructure =
+        workflow == "oci-infrastructure.yml" &&
+        operation.start_with?("oci-infrastructure-") &&
+        (actual_inputs - policy_inputs).sort == inert_disk_defaults.keys.sort &&
+        inert_disk_defaults.all? do |name, expected|
+          inputs.fetch(name).fetch("default") == expected
+        end
+      unless legacy_infrastructure
+        fail("#{operation} policy inputs differ from #{workflow}")
+      end
     end
     fail("#{operation} is missing an exact title") if policy["titleTemplate"].to_s.empty?
   elsif !policy.fetch("inputNames").empty?
