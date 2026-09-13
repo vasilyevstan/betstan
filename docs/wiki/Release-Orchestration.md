@@ -310,6 +310,16 @@ workload is stable, releases the database lock and then the write fence in that
 order, and finally requires ordinary steady-state readiness. Any failure
 re-holds maintenance and reports the true lock state.
 
+Mongo maintenance resumes the ingress controller only after exact version,
+compatibility-version, and image verification, before applying the Telemetry
+ingress. This restores admission readiness without thawing application writers;
+deployment failure recovery remains armed until deployment completes. Fenced
+rollback also recognizes the deployment cleanup's exact candidate Auth,
+Backoffice, and Client images over an ordered candidate-prefix/baseline-suffix
+writer rollout. It does not accept arbitrary mixed generations: immutable image
+evidence, writer quiescence, the write fence, Telemetry resource and route
+constraints, and lock ownership remain mandatory. No database restore is added.
+
 When applied-data recovery resumes from that retained hold, each quiesced
 writer may use either its exact failed-deployment candidate image or its own
 checksum-bound pre-deployment baseline image, allowing a partially completed
