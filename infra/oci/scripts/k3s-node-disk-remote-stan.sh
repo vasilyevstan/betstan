@@ -230,6 +230,63 @@ snapshot() {
   ' <<<"$queue_output" ||
     consumers_healthy=false
 
+  if [[ "$consumers_healthy" == "false" ]]; then
+    {
+      jq -r '"queue_root capacity_bytes=\(.capacityBytes) used_bytes=\(.usedBytes) available_bytes=\(.availableBytes) used_percent=\(.usedPercent)"' \
+        <<<"$root_df"
+      awk -v telemetry_absent="$telemetry_absent" \
+        -v queue_count="$queue_count" -v backlog="$queue_backlog" '
+        BEGIN {
+          # Only static source-declared labels are public; pod-scoped names are not.
+          known["backoffice_new_event"]=1
+          known["backoffice_result_set"]=1
+          known["bet_moderation_result"]=1
+          known["bet_place_bet"]=1
+          known["bet_settle_slip"]=1
+          known["bet_settle_slip_row"]=1
+          known["event_event_visibility"]=1
+          known["event_live_projection"]=1
+          known["event_live_update"]=1
+          known["event_new_event"]=1
+          known["event_result"]=1
+          known["gamemaster_new_event"]=1
+          known["gamemaster_result_set"]=1
+          known["moderation_event_result"]=1
+          known["moderation_live_event_update"]=1
+          known["moderation_place_bet"]=1
+          known["resulting_live_event_update"]=1
+          known["resulting_moderation_result"]=1
+          known["resulting_place_bet"]=1
+          known["resulting_result"]=1
+          known["slip_moderation_result"]=1
+          known["slip_odds_clicked"]=1
+          known["telemetry:events:v1"]=1
+          printf "queue_baseline=UNHEALTHY telemetry_deployment=%s queue_count=%s backlog=%s\n",
+            (telemetry_absent == "true" ? "absent" : "present"), queue_count, backlog
+        }
+        $1 == "telemetry:events:v1" { telemetry_seen=1 }
+        $4 > 0 { positive++ }
+        $4 == 0 {
+          if (($1 in known) && shown < 24) {
+            printf "queue_zero_consumers name=%s messages_ready=%.0f messages_unacknowledged=%.0f consumers=0\n",
+              $1, $2, $3
+            shown++
+          } else {
+            other++
+            other_ready += $2
+            other_unacknowledged += $3
+          }
+        }
+        END {
+          if (telemetry_absent != "true" && !telemetry_seen)
+            print "queue_telemetry row=missing"
+          printf "queue_consumers positive_queues=%.0f other_zero_consumer_queues=%.0f messages_ready=%.0f messages_unacknowledged=%.0f consumers=0\n",
+            positive, other, other_ready, other_unacknowledged
+        }
+      ' <<<"$queue_output"
+    } >&2
+  fi
+
   k3s_version="$(k3s --version | head -n1)"
   [[ "$k3s_version" =~ ^k3s\ version\ v[0-9] ]] ||
     fail "k3s runtime version is malformed"
