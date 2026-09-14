@@ -791,15 +791,57 @@ snapshot_case() {
       (.candidateImages | length) == 10 and
       (.protection.protectedImageIds | index($telemetry)) != null
     ' "$output" >/dev/null || fail "snapshot lost the forward Telemetry candidate: $name"
+    if grep -Fq 'queue_baseline=UNHEALTHY' "$log"; then
+      fail "healthy snapshot emitted queue diagnostics: $name"
+    fi
   else
     if [[ "$expected" != "fail" ]]; then
       tail -n 12 "$log" >&2
       fail "snapshot rejected $name"
     fi
-    grep -Fq "$evidence" "$log" || fail "snapshot failed for the wrong reason: $name"
+    if ! grep -Fq "$evidence" "$log"; then
+      tail -n 12 "$log" >&2
+      fail "snapshot failed for the wrong reason: $name"
+    fi
     [[ ! -e "$output" ]] || fail "failed snapshot produced diagnosis authority: $name"
+    if [[ "$evidence" == "queue baseline is unhealthy or malformed" ]]; then
+      grep -Fq 'queue_baseline=UNHEALTHY' "$log" ||
+        fail "unhealthy snapshot omitted queue diagnostics: $name"
+      grep -Fq 'queue_root capacity_bytes=50000000000 used_bytes=37000000000 available_bytes=13000000000 used_percent=74' "$log" ||
+        fail "unhealthy snapshot omitted existing root measurements: $name"
+      jq -e '.queue.consumersHealthy == false' \
+        "$work_dir/snapshot-$name-work/runtime-before.json" >/dev/null ||
+        fail "queue diagnostics changed the unhealthy runtime JSON: $name"
+    elif grep -Fq 'queue_baseline=UNHEALTHY' "$log"; then
+      fail "malformed snapshot emitted consumer-health diagnostics: $name"
+    fi
   fi
 }
+snapshot_diagnostic() {
+  local name="$1" expected="$2"
+  grep -Fq "$expected" "$work_dir/snapshot-$name.log" ||
+    fail "snapshot diagnostic differs for $name: $expected"
+}
+
+python3 - "$ROOT_DIR" "$REMOTE" "$work_dir/snapshot-known-queues.tsv" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+declared = set()
+for service in ("auth", "backoffice", "bet", "event", "gamemaster", "moderation", "resulting", "slip"):
+    for path in (root / service / "src").rglob("*Listener.ts"):
+        declared.update(re.findall(r'serviceName:\s*string\s*=\s*"([^"]+)"', path.read_text()))
+declared.update(re.findall(
+    r'assertQueue\("([^"]+)"',
+    (root / "telemetry/src/event/TelemetryConsumer.ts").read_text(),
+))
+allowed = set(re.findall(r'known\["([^"]+)"\]=1', Path(sys.argv[2]).read_text()))
+if allowed != declared:
+    raise SystemExit("queue diagnostic allowlist differs from static listener declarations")
+Path(sys.argv[3]).write_text("".join(f"{name}\t0\t0\t0\n" for name in sorted(declared)))
+PY
 
 printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case header-and-absent-telemetry pass \
@@ -837,19 +879,59 @@ printf '\n' >"$work_dir/snapshot-queues.tsv"
 snapshot_case empty fail "RabbitMQ queue baseline is empty"
 printf '%s\nevent_result\t0\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case application-consumer-missing fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic application-consumer-missing \
+  'queue_baseline=UNHEALTHY telemetry_deployment=absent queue_count=4 backlog=3'
+snapshot_diagnostic application-consumer-missing \
+  'queue_zero_consumers name=event_result messages_ready=0 messages_unacknowledged=0 consumers=0'
 printf '%s\ntelemetry:events:v1\t1\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case absent-telemetry-backlog fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic absent-telemetry-backlog \
+  'queue_zero_consumers name=telemetry:events:v1 messages_ready=1 messages_unacknowledged=0 consumers=0'
 printf '%s\ntelemetry:events:v1\t0\t1\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case absent-telemetry-unacknowledged fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic absent-telemetry-unacknowledged \
+  'queue_zero_consumers name=telemetry:events:v1 messages_ready=0 messages_unacknowledged=1 consumers=0'
 printf '%s\n' "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case only-idle-telemetry fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic only-idle-telemetry 'queue_consumers positive_queues=0'
+
+printf '%s\ncustomer_private_token\t3\t1\t0\nevent_result_private\t5\t2\t0\nevent_live_update.private-pod-id\t7\t3\t0\n' \
+  "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case redacted-queue-names fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic redacted-queue-names \
+  'other_zero_consumer_queues=3 messages_ready=15 messages_unacknowledged=6 consumers=0'
+if grep -Eq 'customer_private_token|event_result_private|private-pod-id' \
+    "$work_dir/snapshot-redacted-queue-names.log"; then
+  fail "snapshot diagnostic exposed an unknown queue name"
+fi
+printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+awk 'BEGIN {for (i=0; i<100; i++) print "event_result\t1\t2\t0"}' \
+  >>"$work_dir/snapshot-queues.tsv"
+snapshot_case bounded-queue-details fail "queue baseline is unhealthy or malformed"
+[[ "$(grep -c '^queue_zero_consumers ' "$work_dir/snapshot-bounded-queue-details.log")" == "24" ]] ||
+  fail "snapshot queue detail count is not bounded"
+snapshot_diagnostic bounded-queue-details \
+  'other_zero_consumer_queues=76 messages_ready=76 messages_unacknowledged=152 consumers=0'
+{
+  printf '%s\n' "$active_queues"
+  cat "$work_dir/snapshot-known-queues.tsv"
+} >"$work_dir/snapshot-queues.tsv"
+snapshot_case source-declared-queues fail "queue baseline is unhealthy or malformed"
+while IFS=$'\t' read -r queue_name _; do
+  snapshot_diagnostic source-declared-queues "queue_zero_consumers name=$queue_name "
+done <"$work_dir/snapshot-known-queues.tsv"
 
 jq '.items += [{kind:"Deployment",metadata:{namespace:"betstan-oci",name:"gaming-telemetry-depl"}}]' \
   "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
 printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-queue-missing fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic deployed-telemetry-queue-missing 'telemetry_deployment=present'
+snapshot_diagnostic deployed-telemetry-queue-missing 'queue_telemetry row=missing'
 printf '%s\n%s\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-consumer-missing fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic deployed-telemetry-consumer-missing 'telemetry_deployment=present'
+snapshot_diagnostic deployed-telemetry-consumer-missing \
+  'queue_zero_consumers name=telemetry:events:v1 messages_ready=0 messages_unacknowledged=0 consumers=0'
 printf '%s\ntelemetry:events:v1\t0\t0\t1\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-healthy pass \
   '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
