@@ -16,6 +16,8 @@ before acting; do not rely on stale conversation state or branch names.
 ## Non-negotiable rules
 
 - Never commit or push directly to protected `dev` or `master`.
+- Immediately handle eligible CLI-owned approvals/merges at startup, resume, and checkpoints; never await a personal prompt.
+  Check pending gates first; retain canonical authority, all technical gates, and human-origin approval rules.
 - Use the fixed quality chain: architect, three-model simplifier synthesis,
   developer, critic, test engineer, then final validator.
 - Record a documentation-impact assessment for every change. Register the

@@ -219,6 +219,60 @@ run_case "disk gate rejects injection-shaped inert input before validation" reje
   echo "FAIL injection-shaped inert input reached the upstream validator"
 }
 
+# Exercise GitHub's actual input shape, not only the complete local request.
+for mode in k3s oke; do
+  for phase in prepare finalize; do
+    capacity=""
+    [[ "$mode/$phase" != k3s/finalize ]] || capacity=34122018082
+    COMPACT_INPUTS="$(jq -c --arg mode "$mode" --arg phase "$phase" '
+      .runtime_mode = $mode | .phase = $phase |
+      with_entries(select(.value != ""))
+    ' <<<"$INPUTS")"
+    run_case "$mode $phase accepts omitted empty optional inputs" accept \
+      BOUND_RUNTIME_MODE="$mode" OCI_RUNTIME_MODE="$mode" PHASE="$phase" \
+      SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+      DISPATCH_INPUTS="$COMPACT_INPUTS" CAPACITY_ACQUISITION_RUN_ID="$capacity"
+  done
+done
+
+for category in none apt-package-cache cri-owned-unused-images; do
+  phase=reclaim-disk
+  [[ "$category" != none ]] || phase=diagnose-disk
+  COMPACT_DISK_INPUTS="$(jq -cn --arg sha "$SHA" --arg phase "$phase" \
+    --arg category "$category" '{
+      approved_sha:$sha, runtime_mode:"k3s", phase:$phase,
+      reclaim_category:$category
+    } + (if $category == "cri-owned-unused-images" then
+      {ghcr_package_validation_run_id:"777"} else {} end)')"
+  run_case "$category accepts omitted empty legacy inputs" accept \
+    BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE="$phase" \
+    SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+    DISPATCH_INPUTS="$COMPACT_DISK_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+done
+
+for value in null false '{}' '[]'; do
+  MALFORMED_INPUTS="$(jq -c --argjson value "$value" \
+    '.infrastructure_run_id = $value' <<<"$INPUTS")"
+  run_case "legacy input rejects explicit $value instead of absence" reject \
+    BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=finalize \
+    SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+    DISPATCH_INPUTS="$MALFORMED_INPUTS" CAPACITY_ACQUISITION_RUN_ID=34122018082
+  [[ ! -s "$WORKDIR/validator-calls.txt" ]] || {
+    FAIL=$((FAIL + 1))
+    echo "FAIL malformed legacy input reached the upstream validator"
+  }
+  MALFORMED_INPUTS="$(jq -c --argjson value "$value" \
+    '.obsolete_sha = $value' <<<"$COMPACT_DISK_INPUTS")"
+  run_case "disk input rejects explicit $value instead of absence" reject \
+    BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+    SOURCE_SHA="$SHA" REPOSITORY=vasilyevstan/betstan \
+    DISPATCH_INPUTS="$MALFORMED_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+  [[ ! -s "$WORKDIR/validator-calls.txt" ]] || {
+    FAIL=$((FAIL + 1))
+    echo "FAIL malformed disk input reached the upstream validator"
+  }
+done
+
 # A validator rejection must fail the gate, never be swallowed.
 run_case "propagates a validator rejection" reject \
   BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=finalize \
