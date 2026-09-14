@@ -111,8 +111,9 @@ the presence of this capability does not prove that it has run or freed space.
 Disk health checks support historical pre-Telemetry rollback baselines: only
 when a complete, validated workload inventory proves the application Telemetry
 Deployment absent may its retained `telemetry:events:v1` queue remain empty
-without a consumer. Any backlog in that idle queue, any other consumerless queue,
-or a deployed Telemetry workload without its queue consumer remains unhealthy;
+or retain ready backlog without a consumer, provided it has zero consumers and
+no unacknowledged or in-flight deliveries. Any other consumerless queue, or a
+deployed Telemetry workload missing its queue or consumer, remains unhealthy;
 at least one actively consumed queue must remain. Queue parsing still rejects
 malformed or duplicate headers and empty output.
 
