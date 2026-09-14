@@ -661,6 +661,18 @@ PATH="$public_bin" STUB_CURL_LOG="$work_dir/curl-success.log" \
 snapshot_bin="$work_dir/snapshot-bin"
 mkdir -p "$snapshot_bin"
 ln -s "$public_bin/curl" "$snapshot_bin/curl"
+cat >"$snapshot_bin/jq" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [[ "${#argument}" -ge 131072 || "$argument" == *snapshot-native-payload-* ]]; then
+    printf 'native JSON reached jq argv\n' >>"$STUB_JQ_ARGV_LOG"
+    printf 'jq fixture argument limit exceeded\n' >&2
+    exit 1
+  fi
+done
+exec "$STUB_REAL_JQ" "$@"
+SH
 cat >"$snapshot_bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -686,13 +698,25 @@ case "${0##*/}:$*" in
     printf '0\n'
     ;;
   "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock images -o json")
-    jq '{images:[.images[] | .size=(.sizeBytes|tostring) | del(.sizeBytes)]}' "$STUB_CURRENT_RUNTIME"
+    if [[ -n "${STUB_SNAPSHOT_IMAGES:-}" ]]; then
+      cat "$STUB_SNAPSHOT_IMAGES"
+    else
+      jq '{images:[.images[] | .size=(.sizeBytes|tostring) | del(.sizeBytes)]}' "$STUB_CURRENT_RUNTIME"
+    fi
     ;;
   "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock ps -a -o json")
-    jq '{containers:[.containerImageReferences[] | {imageRef,state,image:{image:.requestedImage}}]}' "$STUB_CURRENT_RUNTIME"
+    if [[ -n "${STUB_SNAPSHOT_CONTAINERS:-}" ]]; then
+      cat "$STUB_SNAPSHOT_CONTAINERS"
+    else
+      jq '{containers:[.containerImageReferences[] | {imageRef,state,image:{image:.requestedImage}}]}' "$STUB_CURRENT_RUNTIME"
+    fi
     ;;
   "k3s:kubectl get pods -A -o json")
-    printf '%s\n' '{"items":[{"metadata":{"namespace":"betstan-oci","name":"fixture-rabbitmq","labels":{"app":"gaming-rabbitmq"}},"spec":{"containers":[{"image":"rabbitmq:3-management"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"restartCount":0}]}}]}'
+    if [[ -n "${STUB_SNAPSHOT_PODS:-}" ]]; then
+      cat "$STUB_SNAPSHOT_PODS"
+    else
+      printf '%s\n' '{"items":[{"metadata":{"namespace":"betstan-oci","name":"fixture-rabbitmq","labels":{"app":"gaming-rabbitmq"}},"spec":{"containers":[{"image":"rabbitmq:3-management"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"restartCount":0}]}}]}'
+    fi
     ;;
   "k3s:kubectl get deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs -A -o json")
     cat "$STUB_WORKLOADS"
@@ -715,7 +739,7 @@ case "${0##*/}:$*" in
     ;;
 esac
 SH
-chmod +x "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
+chmod +x "$snapshot_bin/jq" "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
 for snapshot_command in findmnt df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
@@ -741,6 +765,8 @@ snapshot_env=(
   STUB_WORKLOADS="$work_dir/snapshot-workloads.json"
   STUB_QUEUES="$work_dir/snapshot-queues.tsv"
   STUB_CURL_LOG="$work_dir/snapshot-curl.log"
+  STUB_REAL_JQ="$(command -v jq)"
+  STUB_JQ_ARGV_LOG="$work_dir/snapshot-jq-argv.log"
   K3S_DISK_CANONICAL_HOST_B64="$encoded_host"
   K3S_DISK_NODE_NAME_B64="$encoded_node"
   GITHUB_RUN_ID=600
@@ -835,6 +861,89 @@ for field in kind metadata.namespace metadata.name; do
   jq "del(.items[0].$field)" "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
   snapshot_case "incomplete-workload-$field" fail "workload inventory is malformed"
 done
+
+python3 - "$work_dir" "$runtime" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+baseline = json.loads(Path(sys.argv[2]).read_text())
+workloads = json.loads((root / "snapshot-workloads-base.json").read_text())
+images = {"images": [
+    {**{key: value for key, value in image.items() if key != "sizeBytes"},
+     "size": str(image["sizeBytes"])}
+    for image in baseline["images"]
+]}
+references = list(baseline["containerImageReferences"])
+pods = {"items": [{
+    "metadata": {"namespace": "betstan-oci", "name": "fixture-rabbitmq",
+                 "labels": {"app": "gaming-rabbitmq"}},
+    "spec": {"containers": [{"image": "rabbitmq:3-management"}]},
+    "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]},
+}]}
+expected_refs = {"rabbitmq:3-management",
+                 workloads["items"][0]["spec"]["template"]["spec"]["containers"][0]["image"]}
+for index, position in enumerate(("beginning", "middle", "end")):
+    image = baseline["images"][index * 4]
+    references.append({"imageRef": image["id"], "requestedImage": f"example.invalid/{position}:cri",
+                       "state": "CONTAINER_RUNNING"})
+    spec, status = {}, {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}
+    for field in ("initContainers", "containers", "ephemeralContainers"):
+        reference = f"example.invalid/{position}:{field}"
+        image_id = f"containerd://sha256:{1000 + len(expected_refs):064d}"
+        spec[field] = [{"image": reference}]
+        status[field.replace("Containers", "ContainerStatuses").replace("containers", "containerStatuses")] = [
+            {"imageID": image_id, "restartCount": index}
+        ]
+        expected_refs.update((reference, image_id))
+    pods["items"].append({"metadata": {"namespace": "fixture", "name": position},
+                          "spec": spec, "status": status})
+    workload_spec = {"initContainers": [{"image": f"example.invalid/{position}:job-init"}],
+                     "containers": [{"image": f"example.invalid/{position}:job-main"}]}
+    expected_refs.update(item["image"] for values in workload_spec.values() for item in values)
+    workloads["items"].append({
+        "kind": "CronJob", "metadata": {"namespace": "fixture", "name": position},
+        "spec": {"jobTemplate": {"spec": {"template": {"spec": workload_spec}}}},
+    })
+containers = {"containers": [
+    {"imageRef": row["imageRef"], "image": {"image": row["requestedImage"]}, "state": row["state"]}
+    for row in references
+]}
+for name, payload in (("images", images), ("containers", containers), ("pods", pods), ("workloads", workloads)):
+    payload["fixturePadding"] = f"snapshot-native-payload-{name}" + "x" * 140000
+    serialized = json.dumps(payload)
+    assert len(serialized.encode()) > 131072, name
+    (root / f"snapshot-large-{name}.json").write_text(serialized + "\n")
+(root / "snapshot-large-expected.json").write_text(json.dumps({
+    "images": baseline["images"], "containerImageReferences": references,
+    "kubernetesImageReferences": sorted(expected_refs),
+    "workload": {"podCount": 4, "unhealthyPodCount": 0, "restartCount": 9},
+}))
+PY
+large_snapshot_env=(
+  STUB_SNAPSHOT_IMAGES="$work_dir/snapshot-large-images.json"
+  STUB_SNAPSHOT_CONTAINERS="$work_dir/snapshot-large-containers.json"
+  STUB_SNAPSHOT_PODS="$work_dir/snapshot-large-pods.json"
+  STUB_WORKLOADS="$work_dir/snapshot-large-workloads.json"
+)
+printf '%s\n%s\n' "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
+snapshot_case large-native-inventories pass '.workload.podCount == 4' "${large_snapshot_env[@]}"
+jq -e --slurpfile expected "$work_dir/snapshot-large-expected.json" '
+  .images == $expected[0].images and
+  .containerImageReferences == $expected[0].containerImageReferences and
+  .kubernetesImageReferences == $expected[0].kubernetesImageReferences and
+  .workload == $expected[0].workload
+' "$work_dir/snapshot-large-native-inventories-work/runtime-before.json" >/dev/null ||
+  fail "large snapshot lost or changed native references or health aggregates"
+[[ ! -e "$work_dir/snapshot-jq-argv.log" ]] || fail "native snapshot JSON reached jq argv"
+jq '.images = {}' "$work_dir/snapshot-large-images.json" >"$work_dir/snapshot-large-malformed.json"
+snapshot_case large-malformed-inventory fail "CRI image inventory is malformed" \
+  "${large_snapshot_env[@]}" STUB_SNAPSHOT_IMAGES="$work_dir/snapshot-large-malformed.json"
+cp "$work_dir/snapshot-large-images.json" "$work_dir/native-large-extra-document.json"
+printf '\n{"images":[]}\n' >>"$work_dir/native-large-extra-document.json"
+snapshot_case large-extra-document fail "snapshot requires exactly 12 JSON values" \
+  "${large_snapshot_env[@]}" STUB_SNAPSHOT_IMAGES="$work_dir/native-large-extra-document.json"
 
 python3 - "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" <<'PY'
 import sys
