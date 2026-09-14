@@ -142,7 +142,10 @@ fixed_path_bytes() {
 snapshot() {
   local root_mount mongo_mount root_df images containers pods workloads queue
   local rabbit_pod queue_output queue_count queue_backlog consumers_healthy
-  local k3s_version container_runtime node_name public_read consumers
+  local k3s_version container_runtime node_name public_read consumers telemetry_absent
+
+  declare -F oci_rabbitmq_queue_rows >/dev/null ||
+    fail "shared RabbitMQ queue parser is unavailable"
 
   root_mount="$(mount_json /)" || fail "root mount is invalid"
   mongo_mount="$(mount_json "$MONGO_PATH")" || fail "Mongo mount is invalid"
@@ -179,7 +182,13 @@ snapshot() {
   )" || fail "unable to read workload image references"
   jq -e '.items | type == "array"' <<<"$pods" >/dev/null ||
     fail "pod inventory is malformed"
-  jq -e '.items | type == "array"' <<<"$workloads" >/dev/null ||
+  jq -e '
+    .items | type == "array" and all(.[];
+      (.kind | IN("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob")) and
+      (.metadata.namespace | type == "string" and length > 0) and
+      (.metadata.name | type == "string" and length > 0)
+    )
+  ' <<<"$workloads" >/dev/null ||
     fail "workload inventory is malformed"
 
   rabbit_pod="$(
@@ -198,16 +207,26 @@ snapshot() {
       rabbitmqctl list_queues --quiet \
         name messages_ready messages_unacknowledged consumers
   )" || fail "unable to read RabbitMQ aggregate baseline"
-  queue_count="$(
-    awk 'NF == 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
-      count++
-    } END {print count+0}' <<<"$queue_output"
-  )"
-  [[ "$queue_count" == "$(awk 'NF {count++} END {print count+0}' <<<"$queue_output")" ]] ||
+  queue_output="$(oci_rabbitmq_queue_rows <<<"$queue_output")" ||
     fail "RabbitMQ queue baseline is malformed"
+  [[ -n "$queue_output" ]] || fail "RabbitMQ queue baseline is empty"
+  queue_count="$(awk 'NF {count++} END {print count+0}' <<<"$queue_output")"
   queue_backlog="$(awk 'NF == 4 {sum += $2 + $3} END {print sum+0}' <<<"$queue_output")"
+  telemetry_absent="$(
+    jq -r 'any(.items[];
+      .kind == "Deployment" and
+      .metadata.namespace == "betstan-oci" and
+      .metadata.name == "gaming-telemetry-depl"
+    ) | not' <<<"$workloads"
+  )"
   consumers_healthy=true
-  awk 'NF == 4 && $4 < 1 {bad=1} END {exit bad}' <<<"$queue_output" ||
+  # Rollback can retain an empty durable queue without a Telemetry Deployment.
+  awk -v telemetry_absent="$telemetry_absent" '
+    $1 == "telemetry:events:v1" && telemetry_absent == "true" &&
+      $2 == 0 && $3 == 0 && $4 == 0 { next }
+    { active++; if ($4 < 1) bad=1 }
+    END { exit bad || active < 1 }
+  ' <<<"$queue_output" ||
     consumers_healthy=false
 
   k3s_version="$(k3s --version | head -n1)"

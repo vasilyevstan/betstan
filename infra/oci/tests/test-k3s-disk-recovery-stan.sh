@@ -611,6 +611,166 @@ PATH="$public_bin" STUB_CURL_LOG="$work_dir/curl-success.log" \
   ' >/dev/null ||
   fail "canonical-host backend API array probes did not pass"
 
+# Exercise the real SSH stdin bundle and snapshot, not the prebuilt-JSON runner.
+snapshot_bin="$work_dir/snapshot-bin"
+mkdir -p "$snapshot_bin"
+ln -s "$public_bin/curl" "$snapshot_bin/curl"
+cat >"$snapshot_bin/ssh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+remote_command=""
+for argument in "$@"; do remote_command="$argument"; done
+[[ "$remote_command" == "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=W10= K3S_DISK_CANONICAL_HOST_B64=$K3S_DISK_CANONICAL_HOST_B64 K3S_DISK_NODE_NAME_B64=$K3S_DISK_NODE_NAME_B64 bash -s -- snapshot" ]]
+exec bash -s -- snapshot
+SH
+cat >"$snapshot_bin/snapshot-fixture" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${0##*/}:$*" in
+  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /")
+    jq '{filesystems:[.root.mount]}' "$STUB_CURRENT_RUNTIME"
+    ;;
+  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /var/lib/betstan/mongo")
+    jq '{filesystems:[.mongo.mount]}' "$STUB_CURRENT_RUNTIME"
+    ;;
+  "df:--block-size=1 --output=size,used,avail,pcent,target /")
+    printf 'Size Used Avail Use%% Mounted\n50000000000 37000000000 13000000000 74%% /\n'
+    ;;
+  "du:--bytes --summarize --one-file-system "*)
+    printf '0\n'
+    ;;
+  "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock images -o json")
+    jq '{images:[.images[] | .size=(.sizeBytes|tostring) | del(.sizeBytes)]}' "$STUB_CURRENT_RUNTIME"
+    ;;
+  "k3s:crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock --image-endpoint unix:///run/k3s/containerd/containerd.sock ps -a -o json")
+    jq '{containers:[.containerImageReferences[] | {imageRef,state,image:{image:.requestedImage}}]}' "$STUB_CURRENT_RUNTIME"
+    ;;
+  "k3s:kubectl get pods -A -o json")
+    printf '%s\n' '{"items":[{"metadata":{"namespace":"betstan-oci","name":"fixture-rabbitmq","labels":{"app":"gaming-rabbitmq"}},"spec":{"containers":[{"image":"rabbitmq:3-management"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"restartCount":0}]}}]}'
+    ;;
+  "k3s:kubectl get deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs -A -o json")
+    cat "$STUB_WORKLOADS"
+    ;;
+  "k3s:kubectl exec -n betstan-oci fixture-rabbitmq -- rabbitmqctl list_queues --quiet name messages_ready messages_unacknowledged consumers")
+    [[ "${STUB_QUEUE_FAILURE:-0}" != "1" ]] || exit 42
+    cat "$STUB_QUEUES"
+    ;;
+  "k3s:--version")
+    printf 'k3s version v1.34.5+k3s1 (fixture)\n'
+    ;;
+  "k3s:kubectl get nodes -o json")
+    printf '%s\n' '{"items":[{"metadata":{"name":"fixture-k3s"},"status":{"nodeInfo":{"containerRuntimeVersion":"containerd://2.1.5-k3s1"}}}]}'
+    ;;
+  "systemctl:is-active --quiet k3s")
+    ;;
+  *)
+    printf 'Unexpected snapshot fixture command: %s\n' "${0##*/}:$*" >&2
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$snapshot_bin/ssh" "$snapshot_bin/snapshot-fixture"
+for snapshot_command in findmnt df du k3s systemctl; do
+  ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
+done
+jq -n --arg image "ghcr.io/vasilyevstan/betstan-images@$CURRENT_ID" '
+  {items:[{
+    kind:"Deployment",
+    metadata:{namespace:"betstan-oci",name:"gaming-event-depl"},
+    spec:{template:{spec:{containers:[{image:$image}]}}}
+  }]}
+' >"$work_dir/snapshot-workloads-base.json"
+cp "$work_dir/snapshot-workloads-base.json" "$work_dir/snapshot-workloads.json"
+queue_header=$'name\tmessages_ready\tmessages_unacknowledged\tconsumers'
+active_queues=$'event_new_event\t2\t1\t1\ngamemaster_new_event\t0\t0\t1\nbet_place_bet\t0\t0\t1'
+idle_telemetry=$'telemetry:events:v1\t0\t0\t0'
+snapshot_env=(
+  "${common_env[@]}"
+  PATH="$snapshot_bin:$stub_bin:$PATH"
+  K3S_DISK_REMOTE_RUNNER=
+  STUB_CURRENT_RUNTIME="$runtime"
+  STUB_CAPACITY_SUMMARY="$work_dir/summary-before.json"
+  STUB_WORKLOADS="$work_dir/snapshot-workloads.json"
+  STUB_QUEUES="$work_dir/snapshot-queues.tsv"
+  STUB_CURL_LOG="$work_dir/snapshot-curl.log"
+  K3S_DISK_CANONICAL_HOST_B64="$encoded_host"
+  K3S_DISK_NODE_NAME_B64="$encoded_node"
+  GITHUB_RUN_ID=600
+  RECLAIM_CATEGORY=none
+  RECLAIM_IMAGE_IDS='[]'
+)
+snapshot_case() {
+  local name="$1" expected="$2" evidence="$3"
+  shift 3
+  local output="$work_dir/snapshot-$name.json"
+  local log="$work_dir/snapshot-$name.log"
+  if env "${snapshot_env[@]}" "$@" \
+      WORK_DIR="$work_dir/snapshot-$name-work" OUTPUT_FILE="$output" \
+      "$ORCHESTRATOR" diagnose >"$log" 2>&1; then
+    [[ "$expected" == "pass" ]] || fail "snapshot accepted $name"
+    jq -e "$evidence" "$work_dir/snapshot-$name-work/runtime-before.json" >/dev/null ||
+      fail "snapshot aggregate differs for $name"
+    "$HELPER" validate-diagnosis --diagnosis "$output" \
+      --source-sha "$SOURCE_SHA" --infrastructure-run-id 400 \
+      --ghcr-build-run-id 300 --workflow-run-id 600 >/dev/null
+  else
+    if [[ "$expected" != "fail" ]]; then
+      tail -n 12 "$log" >&2
+      fail "snapshot rejected $name"
+    fi
+    grep -Fq "$evidence" "$log" || fail "snapshot failed for the wrong reason: $name"
+    [[ ! -e "$output" ]] || fail "failed snapshot produced diagnosis authority: $name"
+  fi
+}
+
+printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
+snapshot_case header-and-absent-telemetry pass \
+  '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
+printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case headerless pass '.queue == {queueCount:3,backlog:3,consumersHealthy:true}'
+snapshot_case rabbitmq-command-failure fail "unable to read RabbitMQ aggregate baseline" STUB_QUEUE_FAILURE=1
+
+snapshot_malformed_count=0
+for malformed in \
+  "$queue_header"$'\n'"$queue_header" \
+  'name messages_ready messages_unacknowledged consumers extra' \
+  'event_new_event invalid 0 1' \
+  'event_new_event -1 0 1' \
+  'Listing queues for vhost / ...'; do
+  printf '%s\n%s\n' "$active_queues" "$malformed" >"$work_dir/snapshot-queues.tsv"
+  snapshot_malformed_count=$((snapshot_malformed_count + 1))
+  snapshot_case "malformed-$snapshot_malformed_count" \
+    fail "RabbitMQ queue baseline is malformed"
+done
+printf '%s\n' "$queue_header" >"$work_dir/snapshot-queues.tsv"
+snapshot_case header-only fail "RabbitMQ queue baseline is empty"
+printf '\n' >"$work_dir/snapshot-queues.tsv"
+snapshot_case empty fail "RabbitMQ queue baseline is empty"
+printf '%s\nevent_result\t0\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case application-consumer-missing fail "queue baseline is unhealthy or malformed"
+printf '%s\ntelemetry:events:v1\t1\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case absent-telemetry-backlog fail "queue baseline is unhealthy or malformed"
+printf '%s\ntelemetry:events:v1\t0\t1\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case absent-telemetry-unacknowledged fail "queue baseline is unhealthy or malformed"
+printf '%s\n' "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
+snapshot_case only-idle-telemetry fail "queue baseline is unhealthy or malformed"
+
+jq '.items += [{kind:"Deployment",metadata:{namespace:"betstan-oci",name:"gaming-telemetry-depl"}}]' \
+  "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
+printf '%s\n%s\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
+snapshot_case deployed-telemetry-consumer-missing fail "queue baseline is unhealthy or malformed"
+printf '%s\ntelemetry:events:v1\t0\t0\t1\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case deployed-telemetry-healthy pass \
+  '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
+jq '.items += [{kind:"Deployment",metadata:{namespace:"other",name:"gaming-telemetry-depl"}}]' \
+  "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
+printf '%s\n%s\n' "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
+snapshot_case other-namespace-telemetry pass '.queue.consumersHealthy == true'
+for field in kind metadata.namespace metadata.name; do
+  jq "del(.items[0].$field)" "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
+  snapshot_case "incomplete-workload-$field" fail "workload inventory is malformed"
+done
+
 python3 - "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" <<'PY'
 import sys
 
