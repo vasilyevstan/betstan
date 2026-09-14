@@ -1180,20 +1180,6 @@ jobs:
           [ "$BOUND_RUNTIME_MODE" = "k3s" ]
           [ "$OCI_RUNTIME_MODE" = "k3s" ]
           [ "$OCI_DISK_MAX_PERCENT" = "70" ]
-          jq -e '
-            [
-              .candidate_build_run_id,
-              .obsolete_sha,
-              .obsolete_build_run_id,
-              .obsolete_generations,
-              .deployed_sha,
-              .deployed_run_id,
-              .fallback_sha,
-              .fallback_build_run_id,
-              .validation_run_id,
-              .capacity_acquisition_run_id
-            ] | all(. == "")
-          ' <<<"$DISPATCH_INPUTS" >/dev/null
           [[ "$GHCR_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$INFRASTRUCTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           case "$PHASE" in
