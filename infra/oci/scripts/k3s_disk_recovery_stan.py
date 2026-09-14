@@ -13,6 +13,10 @@ POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
 REPOSITORY = "ghcr.io/vasilyevstan/betstan-images"
 THRESHOLD = 70
 DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+CURRENT_SERVICES = frozenset(
+    ("auth", "bet", "backoffice", "client", "event", "gamemaster",
+     "moderation", "resulting", "slip", "telemetry")
+)
 
 
 def fail(message):
@@ -65,6 +69,28 @@ def require_sha(value, label):
     return value
 
 
+def validate_candidate_images(rows):
+    if not isinstance(rows, list) or len(rows) != len(CURRENT_SERVICES):
+        fail("candidate image evidence must contain all ten current services")
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "service", "imageRef", "manifestDigest", "platformDigest"
+        }:
+            fail("candidate image evidence has an unexpected record schema")
+        if (
+            not isinstance(row["service"], str)
+            or row["service"] not in CURRENT_SERVICES
+            or not isinstance(row["manifestDigest"], str)
+            or not IMAGE_ID.fullmatch(row["manifestDigest"])
+            or not isinstance(row["platformDigest"], str)
+            or not IMAGE_ID.fullmatch(row["platformDigest"])
+            or row["imageRef"] != f"{REPOSITORY}@{row['manifestDigest']}"
+        ):
+            fail("candidate image evidence contains an invalid immutable image")
+    if {row["service"] for row in rows} != CURRENT_SERVICES:
+        fail("candidate image evidence must contain every current service exactly once")
+
+
 def parse_candidate_images(path):
     rows = []
     try:
@@ -76,15 +102,8 @@ def parse_candidate_images(path):
         if len(fields) != 5:
             fail("candidate image evidence must contain five columns")
         service, repository, image_ref, manifest_digest, platform_digest = fields
-        if (
-            not service
-            or repository != REPOSITORY
-            or not image_ref.startswith(f"{REPOSITORY}@sha256:")
-            or not IMAGE_ID.fullmatch(manifest_digest)
-            or not IMAGE_ID.fullmatch(platform_digest)
-            or not image_ref.endswith(manifest_digest)
-        ):
-            fail("candidate image evidence contains an invalid immutable image")
+        if repository != REPOSITORY:
+            fail("candidate image evidence contains an invalid repository")
         rows.append(
             {
                 "service": service,
@@ -93,8 +112,7 @@ def parse_candidate_images(path):
                 "platformDigest": platform_digest,
             }
         )
-    if len(rows) != 9 or len({row["service"] for row in rows}) != 9:
-        fail("candidate image evidence must contain exactly nine services")
+    validate_candidate_images(rows)
     return sorted(rows, key=lambda row: row["service"])
 
 
@@ -533,8 +551,7 @@ def validate_diagnosis(value):
     if not re.fullmatch(r"[0-9a-f]{64}", value["securityStateSha256"]):
         fail("diagnosis security-state checksum is invalid")
     validate_capacity(value["kubeletCapacity"])
-    if not isinstance(value["candidateImages"], list) or len(value["candidateImages"]) != 9:
-        fail("diagnosis candidate image evidence is incomplete")
+    validate_candidate_images(value["candidateImages"])
     protection = value["protection"]
     if (
         not isinstance(protection, dict)

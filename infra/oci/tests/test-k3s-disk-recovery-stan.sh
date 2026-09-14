@@ -39,15 +39,19 @@ UNTAGGED_ID="$(sha 5)"
 PINNED_ID="$(sha 6)"
 ROLLBACK_ID="$(sha 7)"
 STOPPED_ID="$(sha 8)"
+TELEMETRY_ID="$(sha 9)"
 
 candidate_images="$work_dir/candidate-images.tsv"
 : >"$candidate_images"
-for service_number in 1 2 3 4 5 6 7 8 9; do
-  service="service-${service_number}"
+service_number=0
+for service in auth bet backoffice client event gamemaster moderation resulting slip telemetry; do
+  service_number=$((service_number + 1))
   manifest="$(sha "$((100 + service_number))")"
   platform="$(sha "$((200 + service_number))")"
-  if [[ "$service_number" == "1" ]]; then
+  if [[ "$service" == "bet" ]]; then
     platform="$CANDIDATE_ID"
+  elif [[ "$service" == "telemetry" ]]; then
+    platform="$TELEMETRY_ID"
   fi
   printf '%s\t%s\t%s@%s\t%s\t%s\n' \
     "$service" \
@@ -60,7 +64,7 @@ runtime="$work_dir/runtime.json"
 python3 - "$runtime" \
   "$CURRENT_ID" "$CANDIDATE_ID" "$RECLAIM_ID" "$FOREIGN_ID" \
   "$UNTAGGED_ID" "$PINNED_ID" "$ROLLBACK_ID" "$STOPPED_ID" \
-  "$SOURCE_SHA" "$RECLAIM_SOURCE_SHA" "$ROLLBACK_SOURCE_SHA" <<'PY'
+  "$SOURCE_SHA" "$RECLAIM_SOURCE_SHA" "$ROLLBACK_SOURCE_SHA" "$TELEMETRY_ID" <<'PY'
 import json
 import sys
 
@@ -77,6 +81,7 @@ import sys
     source_sha,
     reclaim_source_sha,
     rollback_source_sha,
+    telemetry_id,
 ) = sys.argv[1:]
 repo = "ghcr.io/vasilyevstan/betstan-images"
 
@@ -136,6 +141,7 @@ payload = {
         image(pinned_id, [f"{repo}:client-{reclaim_source_sha}"], [f"{repo}@{pinned_id}"], pinned=True),
         image(rollback_id, [f"{repo}:slip-{rollback_source_sha}"], [f"{repo}@{rollback_id}"]),
         image(stopped_id, [f"{repo}:auth-{reclaim_source_sha}"], [f"{repo}@{stopped_id}"]),
+        image(telemetry_id, [f"{repo}:telemetry-{source_sha}"], [f"{repo}@{telemetry_id}"]),
     ],
     "containerImageReferences": [
         {"imageRef": current_id, "requestedImage": f"{repo}@{current_id}", "state": "CONTAINER_RUNNING"},
@@ -203,7 +209,8 @@ jq -e \
   --arg untagged "$UNTAGGED_ID" \
   --arg pinned "$PINNED_ID" \
   --arg rollback "$ROLLBACK_ID" \
-  --arg stopped "$STOPPED_ID" '
+  --arg stopped "$STOPPED_ID" \
+  --arg telemetry "$TELEMETRY_ID" '
     .schemaVersion == "k3s-node-disk-diagnosis.v1" and
     .terminalStatus == "DIAGNOSED" and
     .thresholdPercent == 70 and
@@ -213,6 +220,9 @@ jq -e \
     (.protection.preservedUnknownForeignOrPinnedImageIds | index($pinned)) != null and
     (.protection.protectedImageIds | index($rollback)) != null and
     (.protection.protectedImageIds | index($stopped)) != null and
+    (.protection.protectedImageIds | index($telemetry)) != null and
+    [.candidateImages[].service] ==
+      ["auth","backoffice","bet","client","event","gamemaster","moderation","resulting","slip","telemetry"] and
     .protection.imageSizeEstimatesAreNonAdditive == true and
     .protection.rollbackProtectionProven == false and
     .protection.criReclaimRequiresBoundProtectedGenerations == true and
@@ -225,6 +235,42 @@ jq -e \
   --infrastructure-run-id 400 \
   --ghcr-build-run-id 300 \
   --workflow-run-id 500
+python3 - "$HELPER" "$diagnosis" <<'PY'
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("disk", sys.argv[1])
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+diagnosis = json.loads(Path(sys.argv[2]).read_text())
+for case in ("missing", "duplicate", "unknown", "digest", "reference", "record"):
+    invalid = copy.deepcopy(diagnosis)
+    rows = invalid["candidateImages"]
+    if case == "missing":
+        rows.pop()
+    elif case == "duplicate":
+        rows[-1] = copy.deepcopy(rows[0])
+    elif case == "unknown":
+        rows[-1]["service"] = "unknown"
+    elif case == "digest":
+        rows[-1]["platformDigest"] = 42
+    elif case == "reference":
+        rows[-1]["imageRef"] = "invalid"
+    else:
+        del rows[-1]["manifestDigest"]
+    del invalid["contentChecksumSha256"]
+    invalid = disk.add_checksum(invalid)
+    try:
+        disk.validate_diagnosis(invalid)
+    except SystemExit as exc:
+        assert "candidate image evidence" in str(exc), (case, exc)
+    else:
+        raise SystemExit(f"diagnosis accepted invalid current candidate: {case}")
+PY
 for mismatch in \
   "--source-sha 2222222222222222222222222222222222222222" \
   "--infrastructure-run-id 401" \
@@ -674,9 +720,11 @@ for snapshot_command in findmnt df du k3s systemctl; do
   ln -s "$snapshot_bin/snapshot-fixture" "$snapshot_bin/$snapshot_command"
 done
 jq -n --arg image "ghcr.io/vasilyevstan/betstan-images@$CURRENT_ID" '
-  {items:[{
+  {items:[
+    ["auth","bet","backoffice","client","event","gamemaster","moderation","resulting","slip"][] |
+    {
     kind:"Deployment",
-    metadata:{namespace:"betstan-oci",name:"gaming-event-depl"},
+    metadata:{namespace:"betstan-oci",name:("gaming-" + . + "-depl")},
     spec:{template:{spec:{containers:[{image:$image}]}}}
   }]}
 ' >"$work_dir/snapshot-workloads-base.json"
@@ -713,6 +761,10 @@ snapshot_case() {
     "$HELPER" validate-diagnosis --diagnosis "$output" \
       --source-sha "$SOURCE_SHA" --infrastructure-run-id 400 \
       --ghcr-build-run-id 300 --workflow-run-id 600 >/dev/null
+    jq -e --arg telemetry "$TELEMETRY_ID" '
+      (.candidateImages | length) == 10 and
+      (.protection.protectedImageIds | index($telemetry)) != null
+    ' "$output" >/dev/null || fail "snapshot lost the forward Telemetry candidate: $name"
   else
     if [[ "$expected" != "fail" ]]; then
       tail -n 12 "$log" >&2
@@ -726,6 +778,17 @@ snapshot_case() {
 printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case header-and-absent-telemetry pass \
   '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
+awk -F '\t' '$1 != "telemetry"' "$candidate_images" >"$work_dir/candidate-missing.tsv"
+awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$1="auth"} {print}' \
+  "$candidate_images" >"$work_dir/candidate-duplicate.tsv"
+awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$1="unknown"} {print}' \
+  "$candidate_images" >"$work_dir/candidate-unknown.tsv"
+awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$5="invalid"} {print}' \
+  "$candidate_images" >"$work_dir/candidate-digest.tsv"
+for candidate_case in missing duplicate unknown digest; do
+  snapshot_case "candidate-$candidate_case" fail "candidate image evidence" \
+    CANDIDATE_IMAGES_FILE="$work_dir/candidate-$candidate_case.tsv"
+done
 printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case headerless pass '.queue == {queueCount:3,backlog:3,consumersHealthy:true}'
 snapshot_case rabbitmq-command-failure fail "unable to read RabbitMQ aggregate baseline" STUB_QUEUE_FAILURE=1
