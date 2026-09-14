@@ -757,6 +757,8 @@ snapshot_case only-idle-telemetry fail "queue baseline is unhealthy or malformed
 
 jq '.items += [{kind:"Deployment",metadata:{namespace:"betstan-oci",name:"gaming-telemetry-depl"}}]' \
   "$work_dir/snapshot-workloads-base.json" >"$work_dir/snapshot-workloads.json"
+printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case deployed-telemetry-queue-missing fail "queue baseline is unhealthy or malformed"
 printf '%s\n%s\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-consumer-missing fail "queue baseline is unhealthy or malformed"
 printf '%s\ntelemetry:events:v1\t0\t0\t1\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"

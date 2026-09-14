@@ -222,10 +222,11 @@ snapshot() {
   consumers_healthy=true
   # Rollback can retain an empty durable queue without a Telemetry Deployment.
   awk -v telemetry_absent="$telemetry_absent" '
+    $1 == "telemetry:events:v1" && $4 > 0 { telemetry_healthy=1 }
     $1 == "telemetry:events:v1" && telemetry_absent == "true" &&
       $2 == 0 && $3 == 0 && $4 == 0 { next }
     { active++; if ($4 < 1) bad=1 }
-    END { exit bad || active < 1 }
+    END { exit bad || active < 1 || (telemetry_absent != "true" && !telemetry_healthy) }
   ' <<<"$queue_output" ||
     consumers_healthy=false
 
