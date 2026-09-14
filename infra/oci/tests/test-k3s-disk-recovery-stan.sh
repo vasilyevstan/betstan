@@ -883,10 +883,9 @@ snapshot_diagnostic application-consumer-missing \
   'queue_baseline=UNHEALTHY telemetry_deployment=absent queue_count=4 backlog=3'
 snapshot_diagnostic application-consumer-missing \
   'queue_zero_consumers name=event_result messages_ready=0 messages_unacknowledged=0 consumers=0'
-printf '%s\ntelemetry:events:v1\t1\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
-snapshot_case absent-telemetry-backlog fail "queue baseline is unhealthy or malformed"
-snapshot_diagnostic absent-telemetry-backlog \
-  'queue_zero_consumers name=telemetry:events:v1 messages_ready=1 messages_unacknowledged=0 consumers=0'
+printf '%s\ntelemetry:events:v1\t2\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case absent-telemetry-backlog pass \
+  '.queue == {queueCount:4,backlog:5,consumersHealthy:true}'
 printf '%s\ntelemetry:events:v1\t0\t1\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case absent-telemetry-unacknowledged fail "queue baseline is unhealthy or malformed"
 snapshot_diagnostic absent-telemetry-unacknowledged \
@@ -932,6 +931,10 @@ snapshot_case deployed-telemetry-consumer-missing fail "queue baseline is unheal
 snapshot_diagnostic deployed-telemetry-consumer-missing 'telemetry_deployment=present'
 snapshot_diagnostic deployed-telemetry-consumer-missing \
   'queue_zero_consumers name=telemetry:events:v1 messages_ready=0 messages_unacknowledged=0 consumers=0'
+printf '%s\ntelemetry:events:v1\t2\t0\t0\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
+snapshot_case deployed-telemetry-backlog-consumer-missing fail "queue baseline is unhealthy or malformed"
+snapshot_diagnostic deployed-telemetry-backlog-consumer-missing \
+  'queue_zero_consumers name=telemetry:events:v1 messages_ready=2 messages_unacknowledged=0 consumers=0'
 printf '%s\ntelemetry:events:v1\t0\t0\t1\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case deployed-telemetry-healthy pass \
   '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
