@@ -267,24 +267,23 @@ snapshot() {
     done | jq -cs 'sort_by(.category)'
   )"
 
-  jq -cn \
+  # Native inventories can exceed Linux's per-argument limit; keep JSON on stdin.
+  builtin printf '%s\n' \
+    "$root_mount" "$mongo_mount" "$root_df" "$consumers" \
+    "$images" "$containers" "$pods" "$workloads" \
+    "$queue_count" "$queue_backlog" "$consumers_healthy" "$public_read" |
+  jq -cs \
     --arg schema "k3s-node-disk-runtime.v1" \
     --arg repository "$APPLICATION_REPOSITORY" \
     --arg k3s_version "$k3s_version" \
     --arg container_runtime "$container_runtime" \
-    --arg node_name "$node_name" \
-    --argjson root_mount "$root_mount" \
-    --argjson mongo_mount "$mongo_mount" \
-    --argjson root_df "$root_df" \
-    --argjson consumers "$consumers" \
-    --argjson images "$images" \
-    --argjson containers "$containers" \
-    --argjson pods "$pods" \
-    --argjson workloads "$workloads" \
-    --argjson queue_count "$queue_count" \
-    --argjson queue_backlog "$queue_backlog" \
-    --argjson consumers_healthy "$consumers_healthy" \
-    --argjson public_read "$public_read" '
+    --arg node_name "$node_name" '
+      if length != 12 then error("snapshot requires exactly 12 JSON values") else . end |
+      . as [
+        $root_mount, $mongo_mount, $root_df, $consumers,
+        $images, $containers, $pods, $workloads,
+        $queue_count, $queue_backlog, $consumers_healthy, $public_read
+      ] |
       {
         schemaVersion:$schema,
         applicationRepository:$repository,
