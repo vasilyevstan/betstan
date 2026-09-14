@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
 ACTION="${1:-}"
 SOURCE_SHA="${SOURCE_SHA:-}"
 INFRASTRUCTURE_RUN_ID="${INFRASTRUCTURE_RUN_ID:-}"
@@ -101,7 +103,11 @@ run_remote() {
   encoded="$(printf '%s' "$selected" | base64 | tr -d '\n')"
   encoded_host="$(printf '%s' "$canonical_host" | base64 | tr -d '\n')"
   encoded_node="$(printf '%s' "$k3s_node_name" | base64 | tr -d '\n')"
-  ssh \
+  # The stdin-only node runner uses the same strict parser as ordinary readiness.
+  {
+    declare -f oci_rabbitmq_queue_rows
+    cat "$REMOTE_SCRIPT"
+  } | ssh \
     -i "$target_private_key" \
     -p "$local_ssh_port" \
     -o BatchMode=yes \
@@ -114,8 +120,7 @@ run_remote() {
     -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$target_known_hosts" \
     "${os_user}@127.0.0.1" \
-    "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=$encoded K3S_DISK_CANONICAL_HOST_B64=$encoded_host K3S_DISK_NODE_NAME_B64=$encoded_node bash -s -- $remote_action" \
-    <"$REMOTE_SCRIPT"
+    "sudo K3S_DISK_SELECTED_IMAGE_IDS_B64=$encoded K3S_DISK_CANONICAL_HOST_B64=$encoded_host K3S_DISK_NODE_NAME_B64=$encoded_node bash -s -- $remote_action"
 }
 
 capture_capacity() {

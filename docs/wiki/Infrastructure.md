@@ -108,6 +108,14 @@ and images with live or retained references are not reclaim targets. Diagnosis
 alone does not authorize reclamation or prove future deployment headroom, and
 the presence of this capability does not prove that it has run or freed space.
 
+Disk health checks support historical pre-Telemetry rollback baselines: only
+when a complete, validated workload inventory proves the application Telemetry
+Deployment absent may its retained `telemetry:events:v1` queue remain empty
+without a consumer. Any backlog in that idle queue, any other consumerless queue,
+or a deployed Telemetry workload without its queue consumer remains unhealthy;
+at least one actively consumed queue must remain. Queue parsing still rejects
+malformed or duplicate headers and empty output.
+
 ## Images and provenance
 
 - Application images are built from the exact `master` SHA.
