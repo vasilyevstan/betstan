@@ -287,7 +287,7 @@ snapshot() {
     } >&2
   fi
 
-  k3s_version="$(k3s --version | head -n1)"
+  k3s_version="$(k3s --version | awk 'NR == 1 { print }')"
   [[ "$k3s_version" =~ ^k3s\ version\ v[0-9] ]] ||
     fail "k3s runtime version is malformed"
   container_runtime="$(
