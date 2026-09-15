@@ -985,7 +985,16 @@ case "${0##*/}:$*" in
     cat "$STUB_QUEUES"
     ;;
   "k3s:--version")
-    printf 'k3s version v1.34.5+k3s1 (fixture)\n'
+    if [[ "${STUB_K3S_VERSION_MALFORMED:-0}" == "1" ]]; then
+      printf 'invalid version line\n'
+    else
+      printf 'k3s version v1.34.5+k3s1 (fixture)\n'
+    fi
+    if [[ "${STUB_K3S_VERSION_MULTILINE:-0}" == "1" ]]; then
+      sleep 0.1
+      printf 'go version go1.24 (fixture)\n'
+    fi
+    [[ "${STUB_K3S_VERSION_FAILURE:-0}" != "1" ]] || exit 42
     ;;
   "k3s:kubectl get nodes -o json")
     printf '%s\n' '{"items":[{"metadata":{"name":"fixture-k3s"},"status":{"nodeInfo":{"containerRuntimeVersion":"containerd://2.1.5-k3s1"}}}]}'
@@ -1104,7 +1113,8 @@ PY
 
 printf '\n%s\n%s\n\n%s\n' "$queue_header" "$active_queues" "$idle_telemetry" >"$work_dir/snapshot-queues.tsv"
 snapshot_case header-and-absent-telemetry pass \
-  '.queue == {queueCount:4,backlog:3,consumersHealthy:true}'
+  '.queue == {queueCount:4,backlog:3,consumersHealthy:true} and
+   .runtime.k3sVersion == "k3s version v1.34.5+k3s1 (fixture)"'
 awk -F '\t' '$1 != "telemetry"' "$candidate_images" >"$work_dir/candidate-missing.tsv"
 awk -F '\t' 'BEGIN {OFS="\t"} $1 == "telemetry" {$1="auth"} {print}' \
   "$candidate_images" >"$work_dir/candidate-duplicate.tsv"
@@ -1119,6 +1129,12 @@ done
 printf '%s\n' "$active_queues" >"$work_dir/snapshot-queues.tsv"
 snapshot_case headerless pass '.queue == {queueCount:3,backlog:3,consumersHealthy:true}'
 snapshot_case rabbitmq-command-failure fail "unable to read RabbitMQ aggregate baseline" STUB_QUEUE_FAILURE=1
+snapshot_case k3s-version-multiline pass \
+  '.runtime.k3sVersion == "k3s version v1.34.5+k3s1 (fixture)"' STUB_K3S_VERSION_MULTILINE=1
+snapshot_case k3s-version-producer-failure fail \
+  "read-only runtime snapshot failed" STUB_K3S_VERSION_FAILURE=1
+snapshot_case k3s-version-malformed fail \
+  "k3s runtime version is malformed" STUB_K3S_VERSION_MALFORMED=1
 
 snapshot_malformed_count=0
 for malformed in \
