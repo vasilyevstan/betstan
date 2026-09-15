@@ -1455,7 +1455,9 @@ elif endpoint.startswith("commits/") and endpoint.endswith("/pulls"):
 elif endpoint in ("actions/workflows/oci-live-data-rollout.yml", f'actions/workflows/{f["workflowId"]}'):
     output(wf)
 elif endpoint.startswith("contents/"):
-    if endpoint.endswith("?ref=" + f["master"]):
+    if f.get("zeroExecution"):
+        output(f["historical"])
+    elif endpoint.endswith("?ref=" + f["master"]):
         output({"sha": "d" * 40 if active and mutation == "blob" else f["blob"]})
     else:
         history = f["historical"]
@@ -1515,13 +1517,46 @@ elif endpoint == "actions/workflows/999":
     output({"id": 999, "path": ".github/workflows/oci-infrastructure.yml", "state": "disabled_manually"})
 elif endpoint.startswith("compare/"):
     assert "--paginate" in args
-    value = f["compare"]
+    value = f.get("zeroCompare", f["compare"]) if endpoint.startswith(
+        "compare/" + f.get("zeroExecution", {}).get("run", {}).get("head_sha", "!") + "..."
+    ) else f["compare"]
     if active and mutation == "ancestry": value["status"] = "diverged"
     if active and mutation == "compare-final": value["commits"][-1]["sha"] = "e" * 40
     output(value)
 elif endpoint.startswith("actions/runs/"):
     suffix = endpoint.removeprefix("actions/runs/")
     run_id = int(suffix.split("/")[0])
+    zero = f.get("zeroExecution") if run_id == f["newRun"] else None
+    if zero:
+        if "/" not in suffix:
+            reads = int((d / "zero-reads").read_text()) if (d / "zero-reads").exists() else 0
+            reads += 1; save("zero-reads", reads)
+            drift = os.environ.get("TRANSITION_ZERO_DRIFT", "")
+            if reads >= int(os.environ.get("TRANSITION_ZERO_AT", "2")):
+                if drift == "attempt": zero["run"]["run_attempt"] += 1
+                elif drift == "approval": zero["approvals"].append({"state": "rejected"})
+                elif drift == "artifact": zero["artifacts"] = {"total_count": 1, "artifacts": [{"id": 1}]}
+                elif drift == "pending": zero["pending"] = [{"environment": {"id": 91}}]
+                elif drift == "version":
+                    p = d / "authority" / f'{run_id}.json'
+                    record = json.loads(p.read_text()); record["version"] += 1
+                    p.write_text(json.dumps(record))
+                elif drift == "capture":
+                    record = json.loads(next((d / "authority").glob("request-*.json")).read_text())
+                    with (d / "authority" / record["captureFile"]).open("a") as stream:
+                        stream.write("changed\n")
+                f["zeroExecution"] = zero
+                save("fixture.json", json.dumps(f))
+            output(zero["run"])
+        elif "/attempts/" in suffix:
+            number = int(suffix.split("/attempts/")[1].split("/")[0])
+            assert 1 <= number <= len(zero["attempts"]), "attempt history missing"
+            output(zero["attempts"][number - 1]["jobs" if "/jobs?" in suffix else "run"])
+        elif suffix.endswith("/pending_deployments"): output(zero["pending"])
+        elif suffix.endswith("/approvals"): output(zero["approvals"])
+        elif "/artifacts?" in suffix: output(zero["artifacts"])
+        else: raise AssertionError(args)
+        sys.exit()
     if "/" not in suffix:
         if run_id == f["newRun"] + 5:
             run = concurrent_run()
@@ -1576,6 +1611,8 @@ git() {
     "rev-parse --show-toplevel") printf '%s\n' "$TRANSITION_ROOT" ;;
     "rev-parse HEAD") printf '%s\n' "$TRANSITION_MASTER" ;;
     "rev-parse "*) printf '%s\n' "$TRANSITION_BLOB" ;;
+    "cat-file -e"|"fetch --quiet"|"merge-base --is-ancestor")
+      [[ "${TRANSITION_ZERO_DRIFT:-}" != non-ancestor ]] ;;
     *) return 1 ;;
   esac
 }
@@ -1618,11 +1655,13 @@ def setup():
     (d / "dispatches").write_text("0")
     return d
 
-def run(d, action, *, state="disabled_manually", drift="", at=1, capture="", ok=True, actual=master):
+def run(d, action, *, state="disabled_manually", drift="", at=1, capture="", ok=True,
+        actual=master, zero_drift="", zero_at=2):
     env = {**os.environ, "TRANSITION_CASE": str(d), "TRANSITION_ROOT": str(root),
            "TRANSITION_PROVIDER": str(provider), "TRANSITION_MASTER": actual,
            "TRANSITION_BLOB": blob, "TRANSITION_STATE": state, "TRANSITION_DRIFT": drift,
            "TRANSITION_DRIFT_AT": str(at), "TRANSITION_CAPTURE": capture,
+           "TRANSITION_ZERO_DRIFT": zero_drift, "TRANSITION_ZERO_AT": str(zero_at),
            "COPILOT_CLI_AUTHORITY_DIR": str(d / "authority"),
            "COPILOT_CLI_MATERIALIZATION_ATTEMPTS": "2",
            "COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS": "0"}
@@ -2240,6 +2279,238 @@ invoke("bind-intent", {**transport_options, "expected_capture_file": old_capture
 assert intent(d) == before_stale
 assert json.loads(archives[0].read_text()) == spent
 print("prepared_retirement_replacement_expiry_tests=PASS", flush=True)
+
+def consume_fixture_approval(d, run_id):
+    common = {"authority_dir": d / "authority", "repo_root": root, "run_id": run_id}
+    token = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
+    record = a.load_record(d / "authority", run_id)
+    approval = {
+        **common, "token": token, "approval_run_id": run_id,
+        "approval_operation": policy["operation"], "environment_id": 91,
+        "gate_key": hashlib.sha256(str(run_id).encode()).hexdigest(),
+    }
+    version = int(invoke("claim-approval", {
+        **approval, "expected_version": record["version"], "reviewer": "fixture",
+        "approval_comment": "fixture canonical approval", "approval_count_before": 0,
+    }))
+    invoke("complete-approval", {**approval, "expected_version": version})
+    invoke("release-lock", {**common, "token": token})
+    return a.load_record(d / "authority", run_id)
+
+
+def zero_fixture(count=5):
+    d = setup()
+    prepare(d)
+    run(d, "--dispatch-prepared", state="active")
+    f = json.loads((d / "fixture.json").read_text())
+    run_id = f["newRun"]
+    record = consume_fixture_approval(d, run_id)
+    attempts = []
+    for number in range(1, count + 1):
+        conclusion = "failure" if number == 1 else "skipped"
+        run_value = {
+            **f["runs"][0], "id": run_id, "run_attempt": number,
+            "head_sha": master, "display_title": record["displayTitle"],
+            "status": "completed", "conclusion": conclusion,
+            "html_url": record["runUrl"],
+            "url": f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
+        }
+        job = {
+            "id": run_id * 1000 + number, "run_id": run_id, "run_attempt": number,
+            "name": "rollout", "status": "completed", "conclusion": conclusion,
+            "runner_id": 0 if number == 1 else None,
+            "runner_name": "" if number == 1 else None, "steps": [],
+        }
+        attempts.append({"run": run_value, "jobs": {"total_count": 1, "jobs": [job]}})
+    observation = {
+        "schemaVersion": a.ZERO_EXECUTION_EVIDENCE_SCHEMA, "run": attempts[-1]["run"],
+        "attempts": attempts, "workflow": {"id": 313, "path": workflow, "state": "disabled_manually"},
+        "historicalWorkflow": f["historical"], "compare": None,
+        "pending": [], "approvals": [], "artifacts": {"total_count": 0, "artifacts": []},
+    }
+    f["zeroExecution"] = observation
+    write(d / "fixture.json", f)
+    return d, record, observation
+
+
+for count in (1, 5):
+    d, original, observation = zero_fixture(count)
+    old_intent = intent(d)
+    intent_path = next((d / "authority").glob("request-*.json"))
+    old_intent_bytes = intent_path.read_bytes()
+    capture = d / "authority" / old_intent["captureFile"]
+    capture_bytes = capture.read_bytes()
+    run(d, "--retire-zero-execution")
+    retired = a.load_record(d / "authority", original["runId"])
+    assert retired["schemaVersion"] == a.RECORD_SCHEMA_V4 and retired["state"] == "retired"
+    assert retired["version"] == original["version"] + 1
+    assert all(retired[key] == original[key] for key in a.RECORD_V1_KEYS - {"schemaVersion", "state", "version"})
+    assert intent_path.read_bytes() == old_intent_bytes and capture.read_bytes() == capture_bytes
+    assert (d / "dispatches").read_text() == "1", "retirement dispatched a replacement"
+    assert (d / "zero-reads").read_text() == "3", "retirement did not collect twice and revalidate"
+    assert a.retired_bound_intent(d / "authority", old_intent)
+    for version in (a.RECORD_SCHEMA_V1, a.RECORD_SCHEMA_V2, a.RECORD_SCHEMA_V3):
+        write(d / "authority" / f'{original["runId"]}.json', {**retired, "schemaVersion": version})
+        try: a.load_record(d / "authority", original["runId"])
+        except SystemExit: pass
+        else: raise AssertionError("old schema accepted approval-bearing retirement")
+    write(d / "authority" / f'{original["runId"]}.json', retired)
+    for mutate in (
+        lambda value: value["retirement"].update(evidence={}),
+        lambda value: value["retirement"].update(evidenceDigest="0" * 64),
+        lambda value: value["retirement"].update(secondObservationDigest="0" * 64),
+        lambda value: value.update(retirement={"reason": "approved-zero-execution"}),
+    ):
+        bad = copy.deepcopy(retired); mutate(bad)
+        write(d / "authority" / f'{original["runId"]}.json', bad)
+        try: a.load_record(d / "authority", original["runId"])
+        except SystemExit: pass
+        else: raise AssertionError("incomplete or corrupted v4 proof was accepted")
+    write(d / "authority" / f'{original["runId"]}.json', retired)
+    run(d, "--retire-zero-execution", ok=False)
+
+    if count == 5:
+        f = json.loads((d / "fixture.json").read_text())
+        del f["zeroExecution"]
+        f["newRun"] += 1
+        write(d / "fixture.json", f)
+        run(d, "--prepare-disabled-ghosts")
+        replacement = intent(d)
+        assert replacement["captureFile"] != old_intent["captureFile"]
+        assert replacement["preparedSeal"] != old_intent["preparedSeal"]
+        archives = list((d / "authority").glob("spent-*.json"))
+        assert len(archives) == 1 and json.loads(archives[0].read_text()) == old_intent
+        run(d, "--dispatch-prepared", state="active")
+        fresh = consume_fixture_approval(d, f["newRun"])
+        assert fresh["runId"] != original["runId"] and fresh["runAttempt"] == 1
+        assert fresh["approvals"] and fresh["approvals"] != original["approvals"]
+        assert a.load_record(d / "authority", original["runId"]) == retired
+        assert capture.read_bytes() == capture_bytes
+
+d, original, observation = zero_fixture()
+bad_observations = []
+for field, value in (
+    ("run_attempt", 0), ("run_attempt", True), ("run_attempt", 101),
+    ("id", 1), ("workflow_id", 1), ("path", ".github/workflows/oci-capacity-acquire.yml"),
+    ("event", "push"), ("head_branch", "dev"), ("head_sha", old),
+    ("head_repository", {"full_name": "foreign/repo"}), ("display_title", "wrong"),
+    ("status", "in_progress"), ("conclusion", "success"),
+):
+    bad = copy.deepcopy(observation); bad["run"][field] = value; bad_observations.append(bad)
+for mutate in (
+    lambda value: value["attempts"].pop(),
+    lambda value: value["attempts"].reverse(),
+    lambda value: value["attempts"].__setitem__(1, value["attempts"][0]),
+    lambda value: value["attempts"][0]["run"].update(conclusion="success"),
+    lambda value: value["attempts"][1]["run"].update(conclusion="failure"),
+    lambda value: value["attempts"][1]["run"].update(status="queued"),
+    lambda value: value["attempts"][0]["jobs"].update(total_count=2),
+    lambda value: value.update(pending=[{"environment": {"id": 91}}]),
+    lambda value: value.update(artifacts={"total_count": 1, "artifacts": [{"id": 1}]}),
+    lambda value: value.update(approvals=None),
+    lambda value: value["workflow"].update(id=999),
+    lambda value: value["workflow"].update(path=".github/workflows/oci-capacity-acquire.yml"),
+    lambda value: value["workflow"].update(state="active"),
+):
+    bad = copy.deepcopy(observation); mutate(bad); bad_observations.append(bad)
+for field, value in (
+    ("id", 0), ("run_id", 1), ("run_attempt", 2), ("name", "another-job"),
+    ("status", "in_progress"), ("conclusion", "success"),
+    ("runner_id", 7), ("runner_id", False), ("runner_name", "worker"),
+    ("steps", [{"conclusion": "success"}]), ("steps", None),
+):
+    bad = copy.deepcopy(observation); bad["attempts"][0]["jobs"]["jobs"][0][field] = value
+    bad_observations.append(bad)
+for field in ("steps", "runner_id", "runner_name"):
+    bad = copy.deepcopy(observation); del bad["attempts"][0]["jobs"]["jobs"][0][field]
+    bad_observations.append(bad)
+for bad in bad_observations:
+    try: a.validate_zero_execution_observation(original, bad, master)
+    except SystemExit: pass
+    else: raise AssertionError("unsafe zero-execution evidence was accepted")
+
+changed_source = source.replace(b"    if: github.run_attempt == 1\n", b"    if: true\n")
+changed_blob = hashlib.sha1(f"blob {len(changed_source)}\0".encode() + changed_source).hexdigest()
+bad = copy.deepcopy(observation)
+bad["historicalWorkflow"].update(
+    sha=changed_blob, size=len(changed_source), content=base64.b64encode(changed_source).decode(),
+)
+try: a.validate_zero_execution_observation({**original, "workflowBlobSha": changed_blob}, bad, master)
+except SystemExit as error: assert "first-attempt" in str(error)
+else: raise AssertionError("unguarded historical workflow was accepted")
+bad = copy.deepcopy(observation); bad["historicalWorkflow"]["sha"] = "e" * 40
+try: a.validate_zero_execution_observation(original, bad, master)
+except SystemExit: pass
+else: raise AssertionError("mismatched historical workflow blob was accepted")
+
+zero_options = {**cleanup_options(d), "policy_json": json.dumps(policy)}
+record_path = d / "authority" / f'{original["runId"]}.json'
+for mutation in (
+    {"state": state} for state in ("claimed", "issued", "inflight", "rejecting", "retired")
+):
+    write(record_path, {**original, **mutation})
+    invoke("zero-execution-context", zero_options, ok=False)
+for mutate in (
+    lambda value: value.update(approvals=[]),
+    lambda value: value["approvals"][0].update(runId=1),
+    lambda value: value["approvals"][0].update(operation="another-operation"),
+    lambda value: value.update(inflightApproval={}),
+    lambda value: value.update(inputHash="0" * 64),
+    lambda value: value.update(workflowBlobSha="c" * 40),
+):
+    bad = copy.deepcopy(original); mutate(bad); write(record_path, bad)
+    invoke("zero-execution-context", zero_options, ok=False)
+write(record_path, original)
+snapshot = json.loads(invoke("zero-execution-context", zero_options))["snapshot"]
+common = {"authority_dir": d / "authority", "repo_root": root, "run_id": original["runId"]}
+token = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
+write(d / "zero-first.json", observation)
+changed = copy.deepcopy(observation); changed["approvals"] = [{"state": "rejected"}]
+write(d / "zero-second.json", changed)
+retire_options = {
+    **zero_options, "current_master": master, "expected_snapshot": snapshot, "token": token,
+    "first_observation": d / "zero-first.json", "second_observation": d / "zero-second.json",
+}
+invoke("retire-zero-execution", retire_options, ok=False)
+write(d / "zero-second.json", observation)
+invoke("retire-zero-execution", {**retire_options, "expected_snapshot": "f" * 64}, ok=False)
+assert a.load_record(d / "authority", original["runId"]) == original
+invoke("release-lock", {**common, "token": token})
+
+# A consumed generation is one-use for its request, not a perpetual global fence.
+normalized = a.validate_request_data(request, policy, repository, master)
+assert a.find_blocking_authorities(d / "authority", normalized)
+other_request = copy.deepcopy(request); other_request["inputs"]["build_run_id"] = "99"
+other_normalized = a.validate_request_data(other_request, policy, repository, master)
+assert a.find_blocking_authorities(d / "authority", other_normalized) == []
+for mutation in ("attempt", "approval", "artifact", "pending", "version", "capture", "non-ancestor"):
+    case, before, _ = zero_fixture()
+    run(case, "--retire-zero-execution", zero_drift=mutation, ok=False)
+    assert a.load_record(case / "authority", before["runId"])["state"] == "consumed"
+    assert (case / "dispatches").read_text() == "1"
+run(d, "--retire-zero-execution", drift="other", ok=False)
+assert a.load_record(d / "authority", original["runId"]) == original
+
+case, before, proof = zero_fixture()
+f = json.loads((case / "fixture.json").read_text())
+advanced = "c" * 40
+f["master"] = advanced
+f["compare"]["commits"] = [{"sha": advanced}]
+f["zeroCompare"] = {
+    "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+    "base_commit": {"sha": master}, "merge_base_commit": {"sha": master},
+    "commits": [{"sha": advanced}],
+}
+write(case / "fixture.json", f)
+run(case, "--retire-zero-execution", actual=advanced)
+retired = a.load_record(case / "authority", before["runId"])
+assert retired["controlSha"] == master and retired["retirement"]["masterShaAtRetirement"] == advanced
+run(case, "--dispatch", actual=advanced, ok=False)
+bad = copy.deepcopy(proof); bad["compare"] = {**f["zeroCompare"], "status": "diverged"}
+try: a.validate_zero_execution_observation(before, bad, advanced)
+except SystemExit: pass
+else: raise AssertionError("non-ancestor retirement control was accepted")
+print("approved_zero_execution_retirement_tests=PASS", flush=True)
 print("prepared_dispatch_integration_tests=PASS")
 PY
 

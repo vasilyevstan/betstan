@@ -330,7 +330,34 @@ recovery. Once that exact bound numeric authority is validly retired as
 terminal and jobless, a fresh disabled preparation may create a distinct
 generation for the same request. The old bound seal and capture stay preserved
 as spent evidence; old snapshots and delayed transport writes cannot consume
-the replacement. Issued or consumed authority does not qualify for replacement.
+the replacement. Issued or consumed authority does not qualify for replacement
+without an applicable explicit retirement.
+
+For these same two workflows, `"$request" --retire-zero-execution` is a
+retirement-only dispatcher action for an approved but unexecuted bound
+generation. Run it from clean exact current `master`, with the workflow
+disabled, using the original unchanged request file; the run ID is derived
+from its sealed intent, never supplied separately. It requires consumed
+authority with its valid original approval receipts, no inflight claim, and
+two identical complete observations of at most 100 attempts: the first
+non-successful and all later attempts skipped, each with exactly the one
+protected job, no assigned runner and an explicitly empty step list. Missing
+or drifting history, artifacts, pending deployments, competing production
+work, a non-ancestor historical control or a changed historical first-attempt
+guard fails closed. Current control/workflow and the exact local generation
+are revalidated before the locked version CAS.
+
+The v4 `approved-zero-execution` record preserves the original authority
+fields, receipts and attempt-one identity, adding immutable retirement proof.
+Retirement does not cancel, rerun, enable, dispatch or approve anything; it
+does not discard the bound intent, capture or seal, or silently override a
+cancellation. A later explicit normal preparation archives the spent
+generation before replacing the same prepared slot; subsequent normal dispatch and approval create a distinct
+first-attempt run with fresh authority and its own receipt. Historical control
+is usable only for retirement, not forward dispatch. Existing exact-request
+one-use restrictions and global unresolved-operation fences remain distinct.
+Once v4 records exist, retain compatible readers or use a reviewed forward
+correction; do not rewrite records or delete history to permit a downgrade.
 
 The request schema is:
 
