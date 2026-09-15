@@ -11,6 +11,9 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
 REPOSITORY = "ghcr.io/vasilyevstan/betstan-images"
+REPOSITORY_DIGEST = re.compile(
+    rf"{re.escape(REPOSITORY)}@(sha256:[0-9a-f]{{64}})"
+)
 THRESHOLD = 70
 DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 CURRENT_SERVICES = frozenset(
@@ -340,8 +343,9 @@ def immutable_tag_source(value):
     return match.group(1) if match else None
 
 
-def classify(runtime, candidate_images, protected_sources=None):
+def classify(runtime, candidate_images, protected_sources=None, generation_map=None):
     protected_sources = set(protected_sources or [])
+    generation_map = generation_map or {}
     protected_refs = set()
     for item in runtime["containerImageReferences"]:
         protected_refs.update(reference_variants(item["imageRef"]))
@@ -369,7 +373,25 @@ def classify(runtime, candidate_images, protected_sources=None):
         )
         tag_sources = [immutable_tag_source(value) for value in image["repoTags"]]
         source_attributed = bool(tag_sources) and all(tag_sources)
-        generation_protected = bool(protected_sources & set(tag_sources))
+        digest_attribution = []
+        for value in image["repoDigests"]:
+            match = REPOSITORY_DIGEST.fullmatch(value)
+            digest_attribution.append(
+                generation_map.get(match.group(1)) if match else None
+            )
+        digest_sources = {
+            source
+            for attribution in digest_attribution
+            if attribution is not None
+            for source in attribution["sources"]
+        }
+        if not image["repoTags"] and digest_attribution and all(digest_attribution):
+            source_attributed = len(
+                {attribution["service"] for attribution in digest_attribution}
+            ) == 1
+        generation_protected = bool(
+            protected_sources & (set(tag_sources) | digest_sources)
+        )
         protected = bool(image_refs & protected_refs)
         protected = protected or generation_protected
         if any(
@@ -412,7 +434,7 @@ def classify(runtime, candidate_images, protected_sources=None):
     }
 
 
-def parse_protected_generations(path, diagnosis):
+def parse_protected_generations(path, diagnosis, generation_map_path):
     value = load_json(path, "GHCR protected-generation evidence")
     if (
         value.get("schema") != "betstan.ghcr-package-management.v1"
@@ -430,12 +452,60 @@ def parse_protected_generations(path, diagnosis):
     if (
         not isinstance(sources, list)
         or not sources
-        or len(sources) != len(set(sources))
         or not all(isinstance(item, str) and FULL_SHA.fullmatch(item) for item in sources)
+        or len(sources) != len(set(sources))
         or diagnosis["sourceSha"] not in sources
     ):
         fail("GHCR protected-generation source set is invalid")
-    return sorted(sources)
+    return sorted(sources), parse_generation_map(generation_map_path, value, sources)
+
+
+def parse_generation_map(path, summary, protected_sources):
+    table = Path(path)
+    if table.is_symlink() or not table.is_file():
+        fail("GHCR generation map must be a regular file")
+    try:
+        raw = table.read_bytes()
+    except OSError:
+        fail("GHCR generation map is unavailable")
+    expected = summary.get("generations_sha256")
+    if (
+        not isinstance(expected, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected)
+        or hashlib.sha256(raw).hexdigest() != expected
+    ):
+        fail("GHCR generation map checksum does not match the validation summary")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail("GHCR generation map is not valid UTF-8")
+    if not lines:
+        fail("GHCR generation map is empty")
+    rows = set()
+    sources = set()
+    attribution = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 4:
+            fail("GHCR generation map must contain four columns")
+        source, service, version, digest = fields
+        require_sha(source, "GHCR generation source")
+        require_positive(version, "GHCR generation version")
+        if service not in CURRENT_SERVICES or not IMAGE_ID.fullmatch(digest):
+            fail("GHCR generation map service or manifest digest is invalid")
+        row = tuple(fields)
+        if row in rows:
+            fail("GHCR generation map contains a duplicate row")
+        rows.add(row)
+        sources.add(source)
+        if digest not in attribution:
+            attribution[digest] = {"service": service, "sources": set()}
+        elif attribution[digest]["service"] != service:
+            fail("GHCR generation map assigns one digest to multiple services")
+        attribution[digest]["sources"].add(source)
+    if not set(protected_sources).issubset(sources):
+        fail("GHCR generation map is missing a protected source")
+    return attribution
 
 
 def security_state(runtime, classification):
@@ -646,11 +716,13 @@ def plan_reclaim(args):
             fail("CRI reclaim requires at least one exact image ID")
         if not args.protected_generations:
             fail("CRI reclaim requires bound GHCR protected-generation evidence")
-        protected_sources = parse_protected_generations(
-            args.protected_generations, diagnosis
+        if not args.generation_map:
+            fail("CRI reclaim requires a bound GHCR generation map")
+        protected_sources, generation_map = parse_protected_generations(
+            args.protected_generations, diagnosis, args.generation_map
         )
         proven_classification = classify(
-            runtime, diagnosis["candidateImages"], protected_sources
+            runtime, diagnosis["candidateImages"], protected_sources, generation_map
         )
         candidates = {
             item["id"] for item in proven_classification["criOwnedUnusedImages"]
@@ -821,6 +893,7 @@ def main():
     plan.add_argument("--category", required=True)
     plan.add_argument("--image-ids", required=True)
     plan.add_argument("--protected-generations")
+    plan.add_argument("--generation-map")
     plan.add_argument("--output", required=True)
     plan.set_defaults(handler=plan_reclaim)
 

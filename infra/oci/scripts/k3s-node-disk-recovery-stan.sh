@@ -14,6 +14,7 @@ RECLAIM_IMAGE_IDS="${RECLAIM_IMAGE_IDS:-[]}"
 SESSION_STATE_FILE="${SESSION_STATE_FILE:-}"
 CANDIDATE_IMAGES_FILE="${CANDIDATE_IMAGES_FILE:-}"
 GHCR_PACKAGE_VALIDATION_FILE="${GHCR_PACKAGE_VALIDATION_FILE:-}"
+GHCR_GENERATIONS_FILE="${GHCR_GENERATIONS_FILE:-}"
 DIAGNOSIS_FILE="${DIAGNOSIS_FILE:-}"
 INFRA_PROVENANCE_FILE="${INFRA_PROVENANCE_FILE:-}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
@@ -176,7 +177,11 @@ if [[ "$RECLAIM_CATEGORY" == "cri-owned-unused-images" ]]; then
   [[ -n "$GHCR_PACKAGE_VALIDATION_FILE" &&
      -f "$GHCR_PACKAGE_VALIDATION_FILE" ]] ||
     fail "bound GHCR protected-generation evidence is unavailable"
+  [[ -n "$GHCR_GENERATIONS_FILE" &&
+     -s "$GHCR_GENERATIONS_FILE" && ! -L "$GHCR_GENERATIONS_FILE" ]] ||
+    fail "bound GHCR generation map is unavailable"
   plan_args+=(--protected-generations "$GHCR_PACKAGE_VALIDATION_FILE")
+  plan_args+=(--generation-map "$GHCR_GENERATIONS_FILE")
 fi
 "$EVIDENCE_HELPER" plan-reclaim "${plan_args[@]}"
 

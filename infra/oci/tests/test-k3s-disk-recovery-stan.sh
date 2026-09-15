@@ -174,10 +174,21 @@ cat >"$capacity" <<'JSON'
 {"schemaVersion":"k3s-node-filesystem-capacity.v1","nodeName":"fixture-k3s","capacityBytes":50000000000,"usedBytes":37000000000,"availableBytes":13000000000,"usedPercent":74.0,"thresholdPercent":70,"withinLimit":false}
 JSON
 
+generation_map="$work_dir/generations.tsv"
+{
+  printf '%s\tauth\t1\t%s\n' "$SOURCE_SHA" "$CURRENT_ID"
+  printf '%s\tbet\t2\t%s\n' "$SOURCE_SHA" "$CANDIDATE_ID"
+  printf '%s\tevent\t3\t%s\n' "$RECLAIM_SOURCE_SHA" "$RECLAIM_ID"
+  printf '%s\tclient\t6\t%s\n' "$RECLAIM_SOURCE_SHA" "$PINNED_ID"
+  printf '%s\tslip\t7\t%s\n' "$ROLLBACK_SOURCE_SHA" "$ROLLBACK_ID"
+  printf '%s\tauth\t8\t%s\n' "$RECLAIM_SOURCE_SHA" "$STOPPED_ID"
+  printf '%s\ttelemetry\t9\t%s\n' "$SOURCE_SHA" "$TELEMETRY_ID"
+} >"$generation_map"
 protected_generations="$work_dir/validation-summary.json"
 jq -n \
   --arg current "$SOURCE_SHA" \
-  --arg rollback "$ROLLBACK_SOURCE_SHA" '
+  --arg rollback "$ROLLBACK_SOURCE_SHA" \
+  --arg generations_checksum "$(sha256sum "$generation_map" | awk '{print $1}')" '
   {
     schema:"betstan.ghcr-package-management.v1",
     terminal_status:"VALIDATED",
@@ -188,6 +199,7 @@ jq -n \
     package_visibility:"public",
     repository_linked:true,
     candidate_build_run_id:"300",
+    generations_sha256:$generations_checksum,
     protected_sources:[$current,$rollback]
   }
 ' >"$protected_generations"
@@ -323,12 +335,20 @@ selected="$(jq -cn --arg id "$RECLAIM_ID" '[$id]')"
   --category cri-owned-unused-images \
   --image-ids "$selected" \
   --protected-generations "$protected_generations" \
+  --generation-map "$generation_map" \
   --output "$work_dir/cri-plan.json"
 if "$HELPER" plan-reclaim --diagnosis "$diagnosis" --runtime "$runtime" \
     --capacity "$capacity" --category cri-owned-unused-images \
-    --image-ids "$selected" --output "$work_dir/no-rollback-proof.json" \
+    --image-ids "$selected" --generation-map "$generation_map" \
+    --output "$work_dir/no-rollback-proof.json" \
     >/dev/null 2>&1; then
   fail "CRI reclaim did not fail closed without durable rollback evidence"
+fi
+if "$HELPER" plan-reclaim --diagnosis "$diagnosis" --runtime "$runtime" \
+    --capacity "$capacity" --category cri-owned-unused-images \
+    --image-ids "$selected" --protected-generations "$protected_generations" \
+    --output "$work_dir/no-generation-map.json" >/dev/null 2>&1; then
+  fail "CRI reclaim did not fail closed without the bound generation map"
 fi
 runtime_without_history="$work_dir/runtime-without-history.json"
 jq --arg rollback "$ROLLBACK_ID" '
@@ -349,6 +369,7 @@ if "$HELPER" plan-reclaim --diagnosis "$diagnosis_without_history" \
     --runtime "$runtime_without_history" --capacity "$capacity" \
     --category cri-owned-unused-images --image-ids "$rollback_selected" \
     --protected-generations "$protected_generations" \
+    --generation-map "$generation_map" \
     --output "$work_dir/rollback-plan.json" >/dev/null 2>&1; then
   fail "durably protected rollback generation was reclaimable after history GC"
 fi
@@ -356,6 +377,7 @@ if "$HELPER" plan-reclaim --diagnosis "$diagnosis" --runtime "$runtime" \
     --capacity "$capacity" --category cri-owned-unused-images \
     --image-ids "$(jq -cn --arg id "$FOREIGN_ID" '[$id]')" \
     --protected-generations "$protected_generations" \
+    --generation-map "$generation_map" \
     --output "$work_dir/bad-plan.json" >/dev/null 2>&1; then
   fail "foreign CRI image was accepted for reclaim"
 fi
@@ -369,9 +391,201 @@ jq '.kubernetesImageReferences += ["ghcr.io/example/changed@sha256:aaaaaaaaaaaaa
 if "$HELPER" plan-reclaim --diagnosis "$diagnosis" --runtime "$invalid" \
     --capacity "$capacity" --category cri-owned-unused-images \
     --image-ids "$selected" --protected-generations "$protected_generations" \
+    --generation-map "$generation_map" \
     --output "$work_dir/bad-plan.json" >/dev/null 2>&1; then
   fail "security-relevant image-reference drift was accepted"
 fi
+
+python3 - "$HELPER" "$runtime" "$capacity" "$diagnosis" \
+  "$protected_generations" "$generation_map" "$work_dir" <<'PY'
+import copy
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("disk", sys.argv[1])
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+runtime = json.loads(Path(sys.argv[2]).read_text())
+capacity = json.loads(Path(sys.argv[3]).read_text())
+diagnosis = json.loads(Path(sys.argv[4]).read_text())
+summary = json.loads(Path(sys.argv[5]).read_text())
+base_rows = Path(sys.argv[6]).read_text().splitlines()
+case_dir = Path(sys.argv[7]) / "generation-map-cases"
+case_dir.mkdir()
+table = case_dir / "generations.tsv"
+summary_file = case_dir / "validation-summary.json"
+reclaim_id = runtime["images"][2]["id"]
+rollback_id = runtime["images"][6]["id"]
+extra_id = "sha256:" + "9" * 64
+other_source = "4" * 40
+repo = disk.REPOSITORY
+
+
+def rejected(callback, label):
+    try:
+        callback()
+    except SystemExit:
+        return
+    raise SystemExit(f"accepted invalid generation evidence or selection: {label}")
+
+
+def parse_rows(rows=None, raw=None, expected=None):
+    if raw is None:
+        raw = ("\n".join(base_rows if rows is None else rows) + "\n").encode()
+    table.write_bytes(raw)
+    bound = dict(summary)
+    bound["generations_sha256"] = (
+        hashlib.sha256(raw).hexdigest() if expected is None else expected
+    )
+    summary_file.write_text(json.dumps(bound))
+    return disk.parse_protected_generations(summary_file, diagnosis, table)
+
+
+sources, mapping = parse_rows()
+digest_only = copy.deepcopy(runtime)
+digest_only["images"][2]["repoTags"] = []
+assert reclaim_id not in {
+    item["id"] for item in disk.classify(
+        digest_only, diagnosis["candidateImages"]
+    )["criOwnedUnusedImages"]
+}
+disk.validate_fresh_against_diagnosis(diagnosis, runtime, capacity)
+classification = disk.classify(
+    digest_only, diagnosis["candidateImages"], sources, mapping
+)
+assert reclaim_id in {item["id"] for item in classification["criOwnedUnusedImages"]}
+
+alias_row = f"{other_source}\tevent\t3\t{reclaim_id}"
+sources, aliases = parse_rows(base_rows + [alias_row])
+assert aliases[reclaim_id]["sources"] == {base_rows[2].split("\t")[0], other_source}
+assert reclaim_id in {
+    item["id"] for item in disk.classify(
+        digest_only, diagnosis["candidateImages"], sources, aliases
+    )["criOwnedUnusedImages"]
+}
+protected_alias = f"{diagnosis['sourceSha']}\tevent\t3\t{reclaim_id}"
+sources, protected_mapping = parse_rows(base_rows + [alias_row, protected_alias])
+for snapshot in (runtime, digest_only):
+    assert reclaim_id in disk.classify(
+        snapshot, diagnosis["candidateImages"], sources, protected_mapping
+    )["protectedImageIds"]
+
+sources, mapping = parse_rows()
+without_history = copy.deepcopy(runtime)
+without_history["images"][6]["repoTags"] = []
+without_history["kubernetesImageReferences"] = [
+    ref for ref in without_history["kubernetesImageReferences"]
+    if rollback_id not in ref
+]
+assert rollback_id in disk.classify(
+    without_history, diagnosis["candidateImages"], sources, mapping
+)["protectedImageIds"]
+for index in (0, 1, 5, 7, 8):
+    snapshot = copy.deepcopy(runtime)
+    snapshot["images"][index]["repoTags"] = []
+    target_id = snapshot["images"][index]["id"]
+    assert target_id not in {
+        item["id"] for item in disk.classify(
+            snapshot, diagnosis["candidateImages"], sources, mapping
+        )["criOwnedUnusedImages"]
+    }
+manifest_snapshot = copy.deepcopy(digest_only)
+manifest_snapshot["images"][2]["repoDigests"] = [
+    diagnosis["candidateImages"][0]["imageRef"]
+]
+manifest_row = (
+    f"{other_source}\tauth\t10\t"
+    f"{diagnosis['candidateImages'][0]['manifestDigest']}"
+)
+sources, manifest_mapping = parse_rows(base_rows + [manifest_row])
+assert reclaim_id in disk.classify(
+    manifest_snapshot, diagnosis["candidateImages"], sources, manifest_mapping
+)["protectedImageIds"]
+
+sources, mapping = parse_rows()
+invalid_images = {
+    "unmapped": {"repoDigests": [f"{repo}@{extra_id}"]},
+    "partly-unmapped": {"repoDigests": [f"{repo}@{reclaim_id}", f"{repo}@{extra_id}"]},
+    "foreign": {"repoDigests": [f"docker.io/library/busybox@{reclaim_id}"]},
+    "mixed": {"repoDigests": [f"{repo}@{reclaim_id}", f"docker.io/library/busybox@{extra_id}"]},
+    "wrong-repository": {"repoDigests": [f"{repo}-other@{reclaim_id}"]},
+    "short-digest": {"repoDigests": [f"{repo}@sha256:1234"]},
+    "digest-suffix": {"repoDigests": [f"{repo}@{reclaim_id}:extra"]},
+    "no-digests": {"repoDigests": []},
+    "mutable-tag": {"repoTags": [f"{repo}:latest"]},
+    "malformed-tag": {"repoTags": [f"{repo}:event-not-a-source"]},
+    "foreign-tag": {"repoTags": ["docker.io/library/busybox:latest"]},
+    "mixed-tags": {"repoTags": runtime["images"][2]["repoTags"] + ["docker.io/library/busybox:latest"]},
+    "pinned": {"pinned": True},
+    "different-services": {"repoDigests": [f"{repo}@{reclaim_id}", f"{repo}@{runtime['images'][5]['id']}"]},
+}
+for label, changes in invalid_images.items():
+    snapshot = copy.deepcopy(digest_only)
+    snapshot["images"][2].update(changes)
+    assert reclaim_id not in {
+        item["id"] for item in disk.classify(
+            snapshot, diagnosis["candidateImages"], sources, mapping
+        )["criOwnedUnusedImages"]
+    }, label
+
+for column, value in ((0, "bad-source"), (1, "unknown"), (2, "0"), (2, "-1"), (3, "sha256:bad")):
+    rows = list(base_rows)
+    fields = rows[2].split("\t")
+    fields[column] = value
+    rows[2] = "\t".join(fields)
+    rejected(lambda: parse_rows(rows), f"invalid column {column}: {value}")
+for label, rows in (
+    ("duplicate-row", base_rows + [base_rows[2]]),
+    ("cross-service", base_rows + [f"{other_source}\tauth\t3\t{reclaim_id}"]),
+    ("missing-protected-source", [row for row in base_rows if row.split("\t")[0] != summary["protected_sources"][1]]),
+    ("missing-column", ["\t".join(base_rows[0].split("\t")[:3])] + base_rows[1:]),
+    ("extra-column", [base_rows[0] + "\textra"] + base_rows[1:]),
+    ("empty-row", base_rows + [""]),
+):
+    rejected(lambda: parse_rows(rows), label)
+rejected(lambda: parse_rows(raw=b""), "empty-table")
+rejected(lambda: parse_rows(raw=b"\xff"), "invalid-UTF8")
+rejected(lambda: parse_rows(expected="0" * 64), "wrong-checksum")
+rejected(lambda: parse_rows(expected="malformed"), "malformed-checksum")
+parse_rows()
+bound = json.loads(summary_file.read_text())
+del bound["generations_sha256"]
+summary_file.write_text(json.dumps(bound))
+rejected(lambda: disk.parse_protected_generations(summary_file, diagnosis, table), "missing-checksum")
+parse_rows()
+table.unlink()
+rejected(lambda: disk.parse_protected_generations(summary_file, diagnosis, table), "missing-table")
+table.symlink_to(Path(sys.argv[6]))
+rejected(lambda: disk.parse_protected_generations(summary_file, diagnosis, table), "symlink-table")
+table.unlink()
+
+for label in ("id", "tag", "digest", "pin", "container", "kubernetes", "mount", "identity"):
+    snapshot = copy.deepcopy(runtime)
+    if label == "id":
+        snapshot["images"][2]["id"] = extra_id
+    elif label == "tag":
+        snapshot["images"][2]["repoTags"] = []
+    elif label == "digest":
+        snapshot["images"][2]["repoDigests"] = [f"{repo}@{extra_id}"]
+    elif label == "pin":
+        snapshot["images"][2]["pinned"] = True
+    elif label == "container":
+        snapshot["containerImageReferences"][0]["requestedImage"] = f"{repo}@{extra_id}"
+    elif label == "kubernetes":
+        snapshot["kubernetesImageReferences"].append(f"{repo}@{extra_id}")
+    elif label == "mount":
+        snapshot["root"]["mount"]["source"] = "/dev/changed-root"
+    else:
+        snapshot["runtime"]["k3sVersion"] = "changed"
+    rejected(
+        lambda: disk.validate_fresh_against_diagnosis(diagnosis, snapshot, capacity),
+        f"fresh {label} drift",
+    )
+PY
 
 post_cri="$work_dir/post-cri.json"
 jq --arg id "$RECLAIM_ID" '
@@ -536,6 +750,7 @@ common_env=(
   INFRASTRUCTURE_RUN_ID=400
   GHCR_BUILD_RUN_ID=300
   GHCR_PACKAGE_VALIDATION_FILE="$protected_generations"
+  GHCR_GENERATIONS_FILE="$generation_map"
   INFRA_PROVENANCE_FILE="$work_dir/infrastructure.env"
   OCI_K3S_NODE_NAME=fixture-k3s
   SESSION_STATE_FILE="$work_dir/session.env"
@@ -564,6 +779,50 @@ env "${common_env[@]}" \
   fail "orchestrator did not issue exactly one native CRI reclaim category"
 jq -e '.terminalStatus == "RECLAIMED"' "$work_dir/orchestrated-reclaim.json" >/dev/null ||
   fail "orchestrated reclaim did not produce checksummed success evidence"
+
+digest_runtime="$work_dir/digest-only-runtime.json"
+jq --arg id "$RECLAIM_ID" '
+  (.images[] | select(.id == $id).repoTags) = []
+' "$runtime" >"$digest_runtime"
+cp "$digest_runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=503 \
+  RECLAIM_CATEGORY=none \
+  RECLAIM_IMAGE_IDS='[]' \
+  OUTPUT_FILE="$work_dir/digest-only-diagnosis.json" \
+  "$ORCHESTRATOR" diagnose >/dev/null
+jq -e '.protection.criOwnedUnusedImages == []' \
+  "$work_dir/digest-only-diagnosis.json" >/dev/null ||
+  fail "map-free diagnosis reclassified a digest-only record"
+if env "${common_env[@]}" \
+    GITHUB_RUN_ID=504 \
+    DIAGNOSIS_RUN_ID=503 \
+    DIAGNOSIS_FILE="$work_dir/digest-only-diagnosis.json" \
+    RECLAIM_CATEGORY=cri-owned-unused-images \
+    RECLAIM_IMAGE_IDS="$selected" \
+    GHCR_GENERATIONS_FILE= \
+    OUTPUT_FILE="$work_dir/missing-map-reclaim.json" \
+    "$ORCHESTRATOR" reclaim >/dev/null 2>&1; then
+  fail "orchestrator reclaimed digest-only images without the generation table"
+fi
+[[ "$(awk '$1 == "reclaim-cri-owned-unused-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "1" ]] ||
+  fail "missing generation evidence reached remote deletion"
+env "${common_env[@]}" \
+  GITHUB_RUN_ID=504 \
+  DIAGNOSIS_RUN_ID=503 \
+  DIAGNOSIS_FILE="$work_dir/digest-only-diagnosis.json" \
+  RECLAIM_CATEGORY=cri-owned-unused-images \
+  RECLAIM_IMAGE_IDS="$selected" \
+  OUTPUT_FILE="$work_dir/digest-only-reclaim.json" \
+  "$ORCHESTRATOR" reclaim >/dev/null
+jq -e --arg id "$RECLAIM_ID" '
+  .terminalStatus == "RECLAIMED" and .removedImageIds == [$id] and
+  .thresholdPercent == 70 and .securityRelevantStateStable == true
+' "$work_dir/digest-only-reclaim.json" >/dev/null ||
+  fail "bound digest-only reclaim did not preserve exact postconditions"
+[[ "$(awk '$1 == "reclaim-cri-owned-unused-images" {count++} END {print count+0}' "$work_dir/remote.log")" == "2" ]] ||
+  fail "digest-only reclaim did not issue exactly one additional native deletion"
 
 cri_only_bin="$work_dir/cri-only-bin"
 mkdir -p "$cri_only_bin"
