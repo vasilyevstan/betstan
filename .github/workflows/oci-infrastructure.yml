@@ -1254,6 +1254,7 @@ jobs:
           fi
           if [ "$RECLAIM_CATEGORY" = "cri-owned-unused-images" ]; then
             test -s artifacts/oci-k3s-disk-upstream/ghcr-package-validation/validation-summary.json
+            test -s artifacts/oci-k3s-disk-upstream/ghcr-package-validation/generations.tsv
           fi
 
       - name: Install pinned OCI CLI
@@ -1303,6 +1304,7 @@ jobs:
           SESSION_STATE_FILE: artifacts/oci-k3s-disk/k3s-access.env
           CANDIDATE_IMAGES_FILE: artifacts/oci-k3s-disk-upstream/verified-candidate-images.tsv
           GHCR_PACKAGE_VALIDATION_FILE: artifacts/oci-k3s-disk-upstream/ghcr-package-validation/validation-summary.json
+          GHCR_GENERATIONS_FILE: artifacts/oci-k3s-disk-upstream/ghcr-package-validation/generations.tsv
           DIAGNOSIS_FILE: artifacts/oci-k3s-disk-upstream/diagnosis/diagnosis.json
           OUTPUT_FILE: artifacts/oci-k3s-disk/${{ inputs.phase == 'diagnose-disk' && 'diagnosis.json' || 'reclaim.json' }}
           ACCESS_WORK_DIR: ${{ runner.temp }}/betstan-k3s-disk-access
