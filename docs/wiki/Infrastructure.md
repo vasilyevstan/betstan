@@ -103,10 +103,18 @@ identified by that diagnosis, never both or an arbitrary image set.
 The fixed root-filesystem limit remains 70 percent. Root and persistent-data
 mount identities, workload and queue health, public reads, and protected
 running, candidate, and rollback image references remain fail-closed.
-Persistent application data, mounted data storage, foreign or pinned images,
-and images with live or retained references are not reclaim targets. Diagnosis
-alone does not authorize reclamation or prove future deployment headroom, and
-the presence of this capability does not prove that it has run or freed space.
+The validated GHCR generation table is checksum-bound to its summary and
+provides immutable source attribution for every exact canonical digest,
+including digest-only local cache records when containerd lacks local source
+tags. All source aliases contribute protection, so any protected alias
+preserves the image, including rollback images after Kubernetes history
+garbage collection. Persistent application data, mounted data storage,
+unknown, unmapped, cross-service-ambiguous, mixed, foreign, mutable, or pinned
+images, and images with live or retained references are not reclaim targets.
+Diagnosis remains a conservative inventory; it does not authorize reclamation
+or prove future deployment headroom. Explicit exact image IDs require the
+reclaim planner's bound evidence and fresh runtime checks, and the presence of
+this capability does not prove that it has run or freed space.
 
 Disk health checks support historical pre-Telemetry rollback baselines: only
 when a complete, validated workload inventory proves the application Telemetry
