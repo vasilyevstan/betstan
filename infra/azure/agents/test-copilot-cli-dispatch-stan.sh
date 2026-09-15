@@ -2282,10 +2282,10 @@ print("prepared_retirement_replacement_expiry_tests=PASS", flush=True)
 
 def consume_fixture_approval(d, run_id):
     common = {"authority_dir": d / "authority", "repo_root": root, "run_id": run_id}
-    token = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
+    common["token"] = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
     record = a.load_record(d / "authority", run_id)
     approval = {
-        **common, "token": token, "approval_run_id": run_id,
+        **common, "approval_run_id": run_id,
         "approval_operation": policy["operation"], "environment_id": 91,
         "gate_key": hashlib.sha256(str(run_id).encode()).hexdigest(),
     }
@@ -2294,7 +2294,7 @@ def consume_fixture_approval(d, run_id):
         "approval_comment": "fixture canonical approval", "approval_count_before": 0,
     }))
     invoke("complete-approval", {**approval, "expected_version": version})
-    invoke("release-lock", {**common, "token": token})
+    invoke("release-lock", common)
     return a.load_record(d / "authority", run_id)
 
 
@@ -2463,19 +2463,20 @@ for mutate in (
 write(record_path, original)
 snapshot = json.loads(invoke("zero-execution-context", zero_options))["snapshot"]
 common = {"authority_dir": d / "authority", "repo_root": root, "run_id": original["runId"]}
-token = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
+common["token"] = invoke("acquire-lock", {**common, "owner_pid": os.getpid()})
 write(d / "zero-first.json", observation)
 changed = copy.deepcopy(observation); changed["approvals"] = [{"state": "rejected"}]
 write(d / "zero-second.json", changed)
 retire_options = {
-    **zero_options, "current_master": master, "expected_snapshot": snapshot, "token": token,
+    **zero_options, "current_master": master, "expected_snapshot": snapshot,
     "first_observation": d / "zero-first.json", "second_observation": d / "zero-second.json",
 }
+retire_options["token"] = common["token"]
 invoke("retire-zero-execution", retire_options, ok=False)
 write(d / "zero-second.json", observation)
 invoke("retire-zero-execution", {**retire_options, "expected_snapshot": "f" * 64}, ok=False)
 assert a.load_record(d / "authority", original["runId"]) == original
-invoke("release-lock", {**common, "token": token})
+invoke("release-lock", common)
 
 # A consumed generation is one-use for its request, not a perpetual global fence.
 normalized = a.validate_request_data(request, policy, repository, master)
