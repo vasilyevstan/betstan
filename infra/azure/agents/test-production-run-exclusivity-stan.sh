@@ -43,6 +43,12 @@ run_path() {
 
 run_status() {
   case "${STUB_MODE:-none}" in
+    terminal-zero-execution-data)
+      printf '%s\n' completed
+      ;;
+    pending-zero-execution-data)
+      printf '%s\n' pending
+      ;;
     in-progress-unmaterialized-data)
       printf '%s\n' in_progress
       ;;
@@ -70,7 +76,9 @@ run_event() {
 }
 
 run_attempt() {
-  if [[ "${STUB_MODE:-none}" == wrong-attempt-* ]]; then
+  if [[ "${STUB_MODE:-none}" == *zero-execution-data ]]; then
+    printf '%s\n' 5
+  elif [[ "${STUB_MODE:-none}" == wrong-attempt-* ]]; then
     printf '%s\n' 2
   else
     printf '%s\n' 1
@@ -884,6 +892,11 @@ expect_prospective_rejected() {
 run_case none >/dev/null
 run_case pr-validation >/dev/null
 run_case stale-disabled >/dev/null
+# Terminal multi-attempt history is absent from nonterminal inventory, not
+# successful data evidence. A newly active or pending fifth attempt still fences.
+run_case terminal-zero-execution-data >/dev/null
+expect_rejected active-zero-execution-data
+expect_rejected pending-zero-execution-data
 REPO="$REPOSITORY" NOW_EPOCH=2000 STUB_MODE=active EXCLUDE_RUN_ID="$RUN_ID" \
   "$EXCLUSIVITY" >/dev/null
 

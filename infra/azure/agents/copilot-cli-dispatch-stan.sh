@@ -11,6 +11,7 @@ set -euo pipefail
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --prepare-disabled-ghosts
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --dispatch-prepared
 #   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --discard-prepared
+#   ./copilot-cli-dispatch-stan.sh /absolute/path/request.json --retire-zero-execution
 
 umask 077
 
@@ -50,7 +51,7 @@ fail() {
 }
 
 usage() {
-  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id> | --prepare-disabled-ghosts | --dispatch-prepared | --discard-prepared]"
+  fail "usage: $0 /absolute/path/request.json [--dispatch | --resume-captured | --resume-run <run-id> | --prepare-disabled-ghosts | --dispatch-prepared | --discard-prepared | --retire-zero-execution]"
 }
 
 [[ -n "$REQUEST_FILE" ]] || usage
@@ -60,7 +61,7 @@ case "$ACTION" in
   --dispatch)
     [[ -z "$RESUME_RUN_ID" ]] || usage
     ;;
-  --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared)
+  --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared|--retire-zero-execution)
     [[ "$#" = 2 ]] || usage
     ;;
   --resume-captured)
@@ -111,6 +112,14 @@ materialization_error="$tmp_dir/materialization.err"
 prerequisite_error_file="$tmp_dir/prerequisite.err"
 promotion_file="$tmp_dir/promotion.json"
 observation_file="$tmp_dir/transition-observation.json"
+zero_first_file="$tmp_dir/zero-first.json"
+zero_second_file="$tmp_dir/zero-second.json"
+zero_attempt_file="$tmp_dir/zero-attempt.json"
+zero_attempts_file="$tmp_dir/zero-attempts.jsonl"
+zero_workflow_file="$tmp_dir/zero-workflow.json"
+zero_historical_file="$tmp_dir/zero-historical.json"
+zero_compare_file="$tmp_dir/zero-compare.json"
+zero_artifacts_file="$tmp_dir/zero-artifacts.json"
 authority_lock_run_id=""
 authority_lock_token=""
 cleanup() {
@@ -141,10 +150,100 @@ cleanup() {
     "$materialization_error" \
     "$prerequisite_error_file" \
     "$promotion_file" \
-    "$observation_file"
+    "$observation_file" \
+    "$zero_first_file" "$zero_second_file" "$zero_attempt_file" \
+    "$zero_attempts_file" "$zero_workflow_file" "$zero_historical_file" \
+    "$zero_compare_file" "$zero_artifacts_file"
   rmdir "$tmp_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+acquire_authority_lock() {
+  local run_id="$1"
+  [[ -z "$authority_lock_token" ]] ||
+    fail "authority lock is already held for run $authority_lock_run_id"
+  authority_lock_token="$(
+    "$AUTHORITY_HELPER" acquire-lock \
+      --authority-dir "$AUTHORITY_DIR" \
+      --repo-root "$ROOT_DIR" \
+      --run-id "$run_id" \
+      --owner-pid "$$"
+  )"
+  [[ "$authority_lock_token" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "authority lock returned an invalid token"
+  authority_lock_run_id="$run_id"
+}
+
+release_authority_lock() {
+  [[ -n "$authority_lock_token" && -n "$authority_lock_run_id" ]] || return 0
+  "$AUTHORITY_HELPER" release-lock \
+    --authority-dir "$AUTHORITY_DIR" \
+    --repo-root "$ROOT_DIR" \
+    --run-id "$authority_lock_run_id" \
+    --token "$authority_lock_token" \
+    >/dev/null
+  authority_lock_run_id=""
+  authority_lock_token=""
+}
+
+validate_production_exclusivity() {
+  REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
+    "$RUN_EXCLUSIVITY_SCRIPT"
+}
+
+collect_zero_execution() {
+  local destination="$1" count attempt
+  gh api "repos/$repository/actions/workflows/$workflow" >"$zero_workflow_file"
+  gh api "repos/$repository/contents/$workflow_path?ref=$zero_control" >"$zero_historical_file"
+  if [[ "$zero_control" = "$live_master" ]]; then
+    printf 'null\n' >"$zero_compare_file"
+  else
+    gh api "repos/$repository/compare/$zero_control...$live_master?per_page=100" --paginate |
+      jq -se '
+        .[0] as $first |
+        if length > 0 and all(.[]; .total_commits == $first.total_commits and
+          .status == $first.status and .base_commit.sha == $first.base_commit.sha and
+          .merge_base_commit.sha == $first.merge_base_commit.sha)
+        then $first + {commits: [.[].commits[]]}
+        else error("incomplete or drifting retirement ancestry pages") end
+      ' >"$zero_compare_file"
+  fi
+  gh api "repos/$repository/actions/runs/$zero_run_id" >"$run_file"
+  count="$(jq -er '.run_attempt | select(type == "number" and . == floor and . >= 1 and . <= 100)' "$run_file")" ||
+    fail "zero-execution run has an invalid or excessive attempt count"
+  : >"$zero_attempts_file"
+  attempt=1
+  while ((attempt <= count)); do
+    gh api "repos/$repository/actions/runs/$zero_run_id/attempts/$attempt" >"$zero_attempt_file"
+    gh api "repos/$repository/actions/runs/$zero_run_id/attempts/$attempt/jobs?per_page=100" --paginate |
+      jq -se '
+        .[0] as $first |
+        if length > 0 and all(.[]; .total_count == $first.total_count)
+        then {total_count: $first.total_count, jobs: [.[].jobs[]]}
+        else error("incomplete or drifting retirement job pages") end
+      ' >"$jobs_file"
+    jq -cn --slurpfile run "$zero_attempt_file" --slurpfile jobs "$jobs_file" \
+      '{run: $run[0], jobs: $jobs[0]}' >>"$zero_attempts_file"
+    attempt=$((attempt + 1))
+  done
+  gh api "repos/$repository/actions/runs/$zero_run_id/pending_deployments" >"$pending_file"
+  gh api "repos/$repository/actions/runs/$zero_run_id/approvals" >"$pre_rejection_approvals_file"
+  gh api "repos/$repository/actions/runs/$zero_run_id/artifacts?per_page=100" --paginate |
+    jq -se '
+      .[0] as $first |
+      if length > 0 and all(.[]; .total_count == $first.total_count)
+      then {total_count: $first.total_count, artifacts: [.[].artifacts[]]}
+      else error("incomplete or drifting retirement artifact pages") end
+    ' >"$zero_artifacts_file"
+  jq -n --slurpfile run "$run_file" --slurpfile attempts "$zero_attempts_file" \
+    --slurpfile workflow "$zero_workflow_file" --slurpfile history "$zero_historical_file" \
+    --slurpfile compare "$zero_compare_file" --slurpfile pending "$pending_file" \
+    --slurpfile approvals "$pre_rejection_approvals_file" --slurpfile artifacts "$zero_artifacts_file" \
+    '{schemaVersion: "betstan.copilot-cli-zero-execution-evidence.v1",
+      run: $run[0], attempts: $attempts, workflow: $workflow[0], historicalWorkflow: $history[0],
+      compare: $compare[0], pending: $pending[0], approvals: $approvals[0], artifacts: $artifacts[0]}' \
+    >"$destination"
+}
 
 repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
@@ -239,7 +338,7 @@ else
   [[ "$authority_mode" = "dispatch-record" ]] ||
     fail "operation is automatic and cannot be manually dispatched"
   case "$ACTION" in
-    --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared)
+    --prepare-disabled-ghosts|--dispatch-prepared|--discard-prepared|--retire-zero-execution)
       is_disabled_transition_workflow "$workflow" ||
         fail "prepared lifecycle is restricted to the frozen policy-resolved disabled-transition workflows"
       ;;
@@ -255,6 +354,58 @@ else
     fail "trusted workflow path does not match policy"
   [[ "$workflow_state" = "active" || "$workflow_state" = "disabled_manually" ]] ||
     fail "trusted workflow has an unsupported state: $workflow_state"
+
+  if [[ "$ACTION" = "--retire-zero-execution" ]]; then
+    [[ "$workflow_state" = "disabled_manually" ]] ||
+      fail "zero-execution retirement requires the workflow disabled at rest"
+    zero_context="$(
+      "$AUTHORITY_HELPER" zero-execution-context \
+        --request "$REQUEST_FILE" --repository "$repository" --policy-json "$policy_json" \
+        --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+        --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR"
+    )"
+    zero_run_id="$(jq -r '.runId' <<<"$zero_context")"
+    zero_control="$(jq -r '.controlSha' <<<"$zero_context")"
+    zero_blob="$(jq -r '.workflowBlobSha' <<<"$zero_context")"
+    [[ "$zero_run_id" =~ ^[1-9][0-9]*$ && "$zero_control" =~ ^[0-9a-f]{40}$ &&
+      "$zero_blob" =~ ^[0-9a-f]{40}$ ]] || fail "zero-execution bound identity is invalid"
+    if ! git -C "$ROOT_DIR" cat-file -e "${zero_control}^{commit}" 2>/dev/null; then
+      git -C "$ROOT_DIR" fetch --quiet origin "$zero_control" ||
+        fail "unable to fetch the historical retirement control"
+    fi
+    git -C "$ROOT_DIR" merge-base --is-ancestor "$zero_control" "$live_master" ||
+      fail "zero-execution control is not an ancestor of current master"
+    [[ "$(git -C "$ROOT_DIR" rev-parse "$zero_control:$workflow_path")" = "$zero_blob" ]] ||
+      fail "zero-execution historical workflow does not match the bound record"
+    acquire_authority_lock "$zero_run_id"
+    validate_production_exclusivity
+    collect_zero_execution "$zero_first_file"
+    collect_zero_execution "$zero_second_file"
+    validate_production_exclusivity
+    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" = "$live_master" &&
+      -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
+      fail "zero-execution retirement checkout changed"
+    [[ "$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')" = "$live_master" ]] ||
+      fail "master changed before zero-execution retirement"
+    [[ "$(gh api "repos/$repository/actions/workflows/$workflow" --jq '[.id,.path,.state] | @tsv')" = \
+      "$(printf '%s\t%s\tdisabled_manually' "$workflow_id" "$workflow_path")" ]] ||
+      fail "workflow changed before zero-execution retirement"
+    [[ "$(gh api "repos/$repository/contents/$workflow_path?ref=$zero_control" --jq '.sha')" = "$zero_blob" ]] ||
+      fail "historical workflow changed before zero-execution retirement"
+    gh api "repos/$repository/actions/runs/$zero_run_id" >"$run_file"
+    jq -e --slurpfile current "$run_file" '.run == $current[0]' "$zero_second_file" >/dev/null ||
+      fail "run changed after the two terminal retirement observations"
+    "$AUTHORITY_HELPER" retire-zero-execution \
+      --request "$REQUEST_FILE" --repository "$repository" --policy-json "$policy_json" \
+      --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+      --authority-dir "$AUTHORITY_DIR" --repo-root "$ROOT_DIR" \
+      --current-master "$live_master" --expected-snapshot "$(jq -r '.snapshot' <<<"$zero_context")" \
+      --token "$authority_lock_token" \
+      --first-observation "$zero_first_file" --second-observation "$zero_second_file"
+    release_authority_lock
+    printf 'dispatch=RETIRED run_id=%s authority_state=retired next_action=explicit-new-preparation\n' "$zero_run_id"
+    exit 0
+  fi
 
   if [[ "$ACTION" = "--discard-prepared" ]]; then
     # Cleanup needs actual-current-master cleanliness, not the old prepared
@@ -418,34 +569,6 @@ revalidate_rejection_continuation() {
   )"
   [[ "$observed_blob" = "$workflow_blob_sha" ]] ||
     fail "recorded workflow blob changed during rejection continuation"
-}
-
-acquire_authority_lock() {
-  local run_id="$1"
-  [[ -z "$authority_lock_token" ]] ||
-    fail "authority lock is already held for run $authority_lock_run_id"
-  authority_lock_token="$(
-    "$AUTHORITY_HELPER" acquire-lock \
-      --authority-dir "$AUTHORITY_DIR" \
-      --repo-root "$ROOT_DIR" \
-      --run-id "$run_id" \
-      --owner-pid "$$"
-  )"
-  [[ "$authority_lock_token" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "authority lock returned an invalid token"
-  authority_lock_run_id="$run_id"
-}
-
-release_authority_lock() {
-  [[ -n "$authority_lock_token" && -n "$authority_lock_run_id" ]] || return 0
-  "$AUTHORITY_HELPER" release-lock \
-    --authority-dir "$AUTHORITY_DIR" \
-    --repo-root "$ROOT_DIR" \
-    --run-id "$authority_lock_run_id" \
-    --token "$authority_lock_token" \
-    >/dev/null
-  authority_lock_run_id=""
-  authority_lock_token=""
 }
 
 assert_resume_identity() {
@@ -691,11 +814,6 @@ validate_upstream_run_bindings() {
 validate_protected_prerequisites() {
   validate_runtime_mode_binding
   validate_upstream_run_bindings
-}
-
-validate_production_exclusivity() {
-  REPO="$repository" EXCLUDE_RUN_ID="" PROSPECTIVE_PROMOTION_PR="" \
-    "$RUN_EXCLUSIVITY_SCRIPT"
 }
 
 revalidate_transition_target() {
