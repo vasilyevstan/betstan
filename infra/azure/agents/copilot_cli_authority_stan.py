@@ -35,6 +35,7 @@ PREPARED_TTL_SECONDS = 15 * 60
 RECORD_SCHEMA_V1 = "betstan.copilot-cli-authority.v1"
 RECORD_SCHEMA_V2 = "betstan.copilot-cli-authority.v2"
 RECORD_SCHEMA_V3 = "betstan.copilot-cli-authority.v3"
+RECORD_SCHEMA_V4 = "betstan.copilot-cli-authority.v4"
 # New records retain the established v1 shape. Only the explicit,
 # evidence-bound stale-claim retirement migrates a record to v2.
 RECORD_SCHEMA = RECORD_SCHEMA_V1
@@ -44,6 +45,8 @@ UNMATERIALIZED_EVIDENCE_SCHEMA = (
 PREREQUISITE_REJECTION_EVIDENCE_SCHEMA = (
     "betstan.copilot-cli-prerequisite-rejection-evidence.v1"
 )
+ZERO_EXECUTION_EVIDENCE_SCHEMA = "betstan.copilot-cli-zero-execution-evidence.v1"
+ZERO_EXECUTION_MAX_ATTEMPTS = 100
 AUTHORITY_OWNER = "github-copilot-cli"
 AUTHORITY_TTL_SECONDS = 24 * 60 * 60
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -162,6 +165,14 @@ REJECTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
     "approvalsSha256",
 }
 RECORD_V3_KEYS = RECORD_V1_KEYS | {"rejection", "retirement"}
+ZERO_EXECUTION_RETIREMENT_KEYS = RETIREMENT_KEYS | {
+    "recordVersion", "policy", "intentDigest", "captureSha256",
+    "secondObservationDigest", "evidence",
+}
+ZERO_EXECUTION_OBSERVATION_KEYS = {
+    "schemaVersion", "run", "attempts", "workflow", "historicalWorkflow",
+    "compare", "pending", "approvals", "artifacts",
+}
 PREREQUISITE_REJECTION_SNAPSHOT_KEYS = {
     "run",
     "jobs",
@@ -1158,6 +1169,9 @@ def load_record(directory, run_id):
     elif schema_version == RECORD_SCHEMA_V3:
         if set(record) != RECORD_V3_KEYS:
             fail("authority record has an unexpected schema")
+    elif schema_version == RECORD_SCHEMA_V4:
+        if set(record) != RECORD_V2_KEYS:
+            fail("authority record has an unexpected schema")
     else:
         fail("authority record schema version is unsupported")
     if str(record["runId"]) != str(run_id):
@@ -1228,7 +1242,11 @@ def load_record(directory, run_id):
             fail("inflight authority approval baseline is invalid")
     elif inflight is not None:
         fail("non-inflight authority record has an inflight claim")
-    if record["state"] == "retired" and record["approvals"]:
+    if (
+        record["state"] == "retired"
+        and record["approvals"]
+        and schema_version != RECORD_SCHEMA_V4
+    ):
         fail("retired authority record unexpectedly has approval receipts")
     if schema_version == RECORD_SCHEMA_V2:
         retirement = record["retirement"]
@@ -1484,6 +1502,8 @@ def load_record(directory, run_id):
                 retirement_evidence["pending"],
                 retirement_evidence["approvals"],
             )
+    elif schema_version == RECORD_SCHEMA_V4:
+        validate_zero_execution_retirement(record)
     return record
 
 
@@ -1494,6 +1514,8 @@ def verify_record(
     current_master,
     workflow_id,
     workflow_blob_sha,
+    *,
+    retirement_only=False,
 ):
     policy = validate_policy(policy)
     if record["repository"] != repository:
@@ -1589,12 +1611,13 @@ def verify_record(
     if (
         utc_now() >= expires_at
         and record["state"] not in {"claimed", "inflight", "rejecting", "retired"}
+        and not retirement_only
     ):
         fail("authority record has expired")
     return record
 
 
-def validate_run_against_record(run, record):
+def validate_run_against_record(run, record, *, expected_attempt=1):
     if not isinstance(run, dict):
         fail("workflow run response must be an object")
     checks = [
@@ -1615,7 +1638,7 @@ def validate_run_against_record(run, record):
             == record["repository"],
             "head repository",
         ),
-        (int(run.get("run_attempt", 0)) == 1, "run attempt"),
+        (int(run.get("run_attempt", 0)) == expected_attempt, "run attempt"),
         (run.get("display_title") == record["displayTitle"], "display title"),
     ]
     failures = [label for valid, label in checks if not valid]
@@ -2804,7 +2827,7 @@ def command_dispatch_prepared(args):
     verify_prepared_checkpoint(args, dispatch=True)
 
 
-def matching_prepared_request(args, directory):
+def matching_prepared_request(args, directory, *, bound=False):
     require_outside_repo(args.request, args.repo_root, "request file")
     request = load_json_file(args.request, "request file", exact_mode=0o600)
     if not isinstance(request, dict) or set(request) != REQUEST_KEYS or request["schemaVersion"] != REQUEST_SCHEMA:
@@ -2813,7 +2836,11 @@ def matching_prepared_request(args, directory):
         fail("discard repository mismatch")
     key = request_key({**request, "inputHash": canonical_input_hash(workflow_dispatch_inputs(request["inputs"]))})
     intent = load_intent(directory, key)
-    require_prepared_capture(directory, intent)
+    if bound:
+        if intent["schemaVersion"] != PREPARED_INTENT_SCHEMA or intent["state"] != "bound":
+            fail("zero-execution retirement requires an exact bound prepared intent")
+    else:
+        require_prepared_capture(directory, intent)
     if (
         intent["workflowId"] != int(args.workflow_id)
         or intent["workflow"] not in PREPARED_TRANSITION_WORKFLOWS
@@ -2844,6 +2871,268 @@ def command_discard_prepared(args):
         durable_unlink(intent_path(directory, key))
         durable_unlink(directory / intent["captureFile"])
     print("dispatch=DISCARDED authority_state=absent")
+
+
+def zero_execution_capture(directory, intent):
+    path = directory / intent["captureFile"]
+    identity = file_identity(path)
+    if any(identity[name] != intent["preparedSeal"]["captureIdentity"][name]
+           for name in ("device", "inode")):
+        fail("zero-execution capture generation was replaced")
+    contents = path.read_bytes()
+    run_ids = set(re.findall(
+        rf"https://github\.com/{re.escape(intent['repository'])}/actions/runs/([1-9][0-9]*)",
+        contents.decode("utf-8", errors="replace"),
+    ))
+    if run_ids != {str(intent["runId"])} or file_identity(path) != identity:
+        fail("zero-execution capture does not identify the exact stable bound run")
+    return {"identity": identity, "sha256": hashlib.sha256(contents).hexdigest()}
+
+
+def zero_execution_context(args, directory):
+    key, intent = matching_prepared_request(args, directory, bound=True)
+    record = bound_intent_record(directory, intent)
+    if record["schemaVersion"] != RECORD_SCHEMA_V1 or record["state"] != "consumed":
+        fail("zero-execution retirement requires consumed v1 authority")
+    policy = validate_policy(load_json_text(args.policy_json, "policy"))
+    if intent["preparedSeal"]["policySha256"] != evidence_digest(policy):
+        fail("zero-execution policy differs from the prepared seal")
+    verify_record(
+        record, policy, args.repository, record["controlSha"],
+        args.workflow_id, intent["workflowBlobSha"], retirement_only=True,
+    )
+    validate_zero_execution_receipts(record)
+    capture = zero_execution_capture(directory, intent)
+    snapshot = evidence_digest({
+        "intent": prepared_snapshot(directory, key, intent),
+        "record": record, "recordFile": file_identity(record_path(directory, record["runId"])),
+        "capture": capture, "requestFile": file_identity(args.request),
+    })
+    return key, intent, record, policy, capture, snapshot
+
+
+def command_zero_execution_context(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    with repository_claim_lock(directory, nonblocking=True):
+        _, _, record, _, _, snapshot = zero_execution_context(args, directory)
+        print(canonical_json({
+            "runId": record["runId"], "version": record["version"],
+            "controlSha": record["controlSha"], "workflowBlobSha": record["workflowBlobSha"],
+            "snapshot": snapshot,
+        }))
+
+
+def validate_zero_execution_receipts(record):
+    if not record["approvals"] or record["inflightApproval"] is not None:
+        fail("zero-execution retirement requires preserved approval and no inflight claim")
+    for approval in record["approvals"]:
+        if (
+            approval["runId"] != record["runId"]
+            or approval["operation"] != record["operation"]
+            or parse_utc(approval["approvedAt"], "approval time")
+            < parse_utc(record["createdAt"], "authority creation time")
+        ):
+            fail("zero-execution receipt is not bound to the original run and operation")
+
+
+def validate_zero_execution_observation(record, observation, current_master):
+    if (
+        not isinstance(observation, dict)
+        or set(observation) != ZERO_EXECUTION_OBSERVATION_KEYS
+        or observation["schemaVersion"] != ZERO_EXECUTION_EVIDENCE_SCHEMA
+        or record["workflow"] not in PREPARED_TRANSITION_WORKFLOWS
+        or not isinstance(current_master, str)
+        or not FULL_SHA.fullmatch(current_master)
+    ):
+        fail("zero-execution observation schema or control is invalid")
+    path = PREPARED_TRANSITION_WORKFLOWS[record["workflow"]]
+    workflow = observation["workflow"]
+    if not isinstance(workflow, dict) or any(workflow.get(name) != value for name, value in (
+        ("id", record["workflowId"]), ("path", path), ("state", "disabled_manually"),
+    )):
+        fail("zero-execution workflow identity or disabled state mismatch")
+    specification, _ = validate_historical_unmaterialized_workflow(
+        path, observation["historicalWorkflow"], blob_sha=record["workflowBlobSha"],
+    )
+    source, _ = decode_historical_workflow(
+        observation["historicalWorkflow"], path, expected_blob_sha=record["workflowBlobSha"],
+    )
+    job_guard = (
+        rf"^  {re.escape(specification['job'])}:\n"
+        r"    if: github\.run_attempt == 1[ \t]*$"
+    )
+    if len(re.findall(job_guard, source, re.MULTILINE)) != 1:
+        fail("zero-execution historical workflow lacks its exact first-attempt job guard")
+    # A duplicate job-level condition could override the first-attempt guard.
+    if len(re.findall(r"^    if:", source, re.MULTILINE)) != 1:
+        fail("zero-execution historical workflow has ambiguous job conditions")
+    if current_master == record["controlSha"]:
+        if observation["compare"] is not None:
+            fail("same-control retirement has unexpected ancestry evidence")
+    else:
+        validate_strict_ancestor_compare(
+            observation["compare"], record["controlSha"], current_master,
+        )
+
+    latest = observation["run"]
+    if not isinstance(latest, dict):
+        fail("zero-execution latest run is malformed")
+    count = require_exact_integer(latest.get("run_attempt"), "latest attempt", minimum=1)
+    if count > ZERO_EXECUTION_MAX_ATTEMPTS:
+        fail("zero-execution attempt history exceeds the bounded limit")
+    validate_run_against_record(latest, record, expected_attempt=count)
+    attempts = observation["attempts"]
+    if not isinstance(attempts, list) or len(attempts) != count:
+        fail("zero-execution attempt history is incomplete")
+    nonsuccess = {
+        "failure", "cancelled", "timed_out", "action_required",
+        "startup_failure", "stale", "skipped", "neutral",
+    }
+    job_ids = set()
+    for number, attempt in enumerate(attempts, 1):
+        if not isinstance(attempt, dict) or set(attempt) != {"run", "jobs"}:
+            fail("zero-execution attempt evidence is malformed")
+        run = attempt["run"]
+        if not isinstance(run, dict):
+            fail("zero-execution attempt run is malformed")
+        if require_exact_integer(run.get("run_attempt"), "run attempt", minimum=1) != number:
+            fail("zero-execution attempts are missing, duplicated or reordered")
+        validate_run_against_record(run, record, expected_attempt=number)
+        allowed = nonsuccess if number == 1 else {"skipped"}
+        if run.get("status") != "completed" or run.get("conclusion") not in allowed:
+            fail("zero-execution attempt is active, successful or not skipped")
+        jobs = attempt["jobs"]
+        if (
+            not isinstance(jobs, dict)
+            or type(jobs.get("total_count")) is not int
+            or jobs["total_count"] != 1
+            or not isinstance(jobs.get("jobs"), list)
+            or len(jobs["jobs"]) != 1
+        ):
+            fail("zero-execution jobs do not completely identify the one protected job")
+        job = jobs["jobs"][0]
+        if not isinstance(job, dict):
+            fail("zero-execution job is malformed")
+        job_id = require_exact_integer(job.get("id"), "job ID", minimum=1)
+        if job_id in job_ids:
+            fail("zero-execution history contains duplicate jobs")
+        job_ids.add(job_id)
+        if (
+            type(job.get("run_id")) is not int or job["run_id"] != record["runId"]
+            or type(job.get("run_attempt")) is not int or job["run_attempt"] != number
+            or job.get("name") != specification["job"]
+            or job.get("status") != "completed" or job.get("conclusion") not in allowed
+            or "steps" not in job or job["steps"] != []
+            or "runner_id" not in job
+            or not (job["runner_id"] is None or type(job["runner_id"]) is int and job["runner_id"] == 0)
+            or "runner_name" not in job or job["runner_name"] not in (None, "")
+        ):
+            fail("zero-execution job has execution evidence or incomplete identity")
+    if latest.get("status") != "completed" or latest.get("conclusion") != attempts[-1]["run"]["conclusion"]:
+        fail("zero-execution latest run disagrees with its terminal attempt")
+    if observation["pending"] != []:
+        fail("zero-execution run still has pending deployments")
+    artifacts = observation["artifacts"]
+    if (
+        not isinstance(artifacts, dict)
+        or type(artifacts.get("total_count")) is not int
+        or artifacts["total_count"] != 0
+        or artifacts.get("artifacts") != []
+    ):
+        fail("zero-execution run has artifacts or incomplete artifact evidence")
+    if not isinstance(observation["approvals"], list) or not all(
+        isinstance(review, dict) for review in observation["approvals"]
+    ):
+        fail("zero-execution approval history is malformed")
+
+
+def zero_execution_retirement_digest(record, retirement):
+    return evidence_digest({
+        "schemaVersion": RECORD_SCHEMA_V4,
+        "authority": {name: record[name] for name in RECORD_V1_KEYS - {"schemaVersion", "state", "version"}},
+        "retirement": {name: value for name, value in retirement.items() if name != "evidenceDigest"},
+    })
+
+
+def validate_zero_execution_retirement(record):
+    retirement = record["retirement"]
+    if (
+        record["state"] != "retired"
+        or not isinstance(retirement, dict)
+        or set(retirement) != ZERO_EXECUTION_RETIREMENT_KEYS
+        or retirement["reason"] != "approved-zero-execution"
+        or type(retirement["recordVersion"]) is not int
+        or retirement["recordVersion"] < 1
+        or record["version"] != retirement["recordVersion"] + 1
+    ):
+        fail("approved-zero-execution retirement has an invalid schema or version")
+    for name in ("evidenceDigest", "intentDigest", "captureSha256", "secondObservationDigest"):
+        require_digest(retirement[name], name)
+    validate_zero_execution_receipts(record)
+    verify_record(
+        record, retirement["policy"], record["repository"], record["controlSha"],
+        record["workflowId"], record["workflowBlobSha"],
+    )
+    retired_at = parse_utc(retirement["retiredAt"], "zero-execution retirement time")
+    if any(retired_at < parse_utc(receipt["approvedAt"], "approval time") for receipt in record["approvals"]):
+        fail("zero-execution retirement predates approval")
+    validate_zero_execution_observation(
+        record, retirement["evidence"], retirement["masterShaAtRetirement"],
+    )
+    if (
+        retirement["secondObservationDigest"] != evidence_digest(retirement["evidence"])
+        or retirement["evidenceDigest"] != zero_execution_retirement_digest(record, retirement)
+    ):
+        fail("zero-execution retirement digest does not match its full evidence")
+
+
+def command_retire_zero_execution(args):
+    directory = ensure_authority_dir(args.authority_dir, args.repo_root, create=False)
+    first = load_json_file(args.first_observation, "first zero-execution observation", exact_mode=0o600)
+    second = load_json_file(args.second_observation, "second zero-execution observation", exact_mode=0o600)
+    if file_identity(args.first_observation) == file_identity(args.second_observation):
+        fail("zero-execution retirement requires two separately collected observations")
+    with repository_claim_lock(directory, nonblocking=True):
+        key, intent, record, policy, capture, snapshot = zero_execution_context(args, directory)
+        require_lock(directory, record["runId"], args.token)
+        if snapshot != args.expected_snapshot:
+            fail("zero-execution authority/request/capture/version changed before retirement")
+        normalized = validate_request_data(
+            {name: (REQUEST_SCHEMA if name == "schemaVersion" else intent[name]) for name in REQUEST_KEYS},
+            policy, args.repository, record["controlSha"],
+        )
+        if find_blocking_authorities(directory, normalized) != [
+            (f"intent:{key}", "bound"), (str(record["runId"]), "consumed"),
+        ]:
+            fail("zero-execution retirement is blocked by other repository authority")
+        for observation in (first, second):
+            validate_zero_execution_observation(record, observation, args.current_master)
+        if canonical_json(first) != canonical_json(second):
+            fail("zero-execution terminal observations changed")
+
+        def retire(current):
+            if current != record:
+                fail("zero-execution authority changed before CAS")
+            retirement = {
+                "reason": "approved-zero-execution", "recordVersion": current["version"],
+                "retiredAt": utc_text(utc_now()), "masterShaAtRetirement": args.current_master,
+                "policy": policy, "intentDigest": evidence_digest(intent),
+                "captureSha256": capture["sha256"], "evidence": first,
+                "secondObservationDigest": evidence_digest(second),
+            }
+            retirement["evidenceDigest"] = zero_execution_retirement_digest(current, retirement)
+            current.update(
+                schemaVersion=RECORD_SCHEMA_V4, state="retired",
+                version=current["version"] + 1, retirement=retirement,
+            )
+            validate_zero_execution_retirement(current)
+            return current
+
+        updated = update_record_with_lock(directory, record["runId"], args.token, retire)
+        print(canonical_json({
+            "runId": updated["runId"], "state": updated["state"], "version": updated["version"],
+            "evidenceDigest": updated["retirement"]["evidenceDigest"],
+        }))
 
 
 @contextlib.contextmanager
@@ -3180,6 +3469,15 @@ def retired_bound_intent(directory, intent):
     if intent["schemaVersion"] != PREPARED_INTENT_SCHEMA or intent["state"] != "bound":
         return False
     record = bound_intent_record(directory, intent)
+    if record["schemaVersion"] == RECORD_SCHEMA_V4:
+        retirement = record["retirement"]
+        if (
+            retirement["intentDigest"] != evidence_digest(intent)
+            or retirement["captureSha256"] != zero_execution_capture(directory, intent)["sha256"]
+            or intent["preparedSeal"]["policySha256"] != evidence_digest(retirement["policy"])
+        ):
+            fail("approved-zero-execution retirement does not match its preserved generation")
+        return True
     return (
         record["state"] == "retired"
         and record["approvals"] == []
@@ -4245,6 +4543,22 @@ def build_parser():
             special.add_argument(f"--{argument}", required=True)
         if name == "discard-prepared":
             special.add_argument("--expected-snapshot", required=True)
+        special.set_defaults(function=function)
+
+    for name, function in (
+        ("zero-execution-context", command_zero_execution_context),
+        ("retire-zero-execution", command_retire_zero_execution),
+    ):
+        special = subparsers.add_parser(name)
+        common_authority_arguments(special)
+        for argument in ("request", "repository", "workflow-id", "workflow-path", "policy-json"):
+            special.add_argument(f"--{argument}", required=True)
+        if name == "retire-zero-execution":
+            for argument in (
+                "current-master", "expected-snapshot", "token",
+                "first-observation", "second-observation",
+            ):
+                special.add_argument(f"--{argument}", required=True)
         special.set_defaults(function=function)
 
     record_dispatch_status = subparsers.add_parser(

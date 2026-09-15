@@ -215,10 +215,35 @@ A prepared intent may be discarded only while its own workflow remains
 disabled; after the dispatch boundary, exact capture recovery is required, and
 issued or consumed authority remains one-use. If the exact bound run is
 subsequently validated as terminal and jobless and its authority is retired, a
-fresh preparation may create a new generation for the same request. The spent
-generation remains preserved and cannot be reopened or replayed, and the two
-target workflows can never consume or reuse each other's requests,
-observations, seals, or prepared context.
+fresh preparation may create a new generation for the same request. For only
+these two workflows,
+`copilot-cli-dispatch-stan.sh <request-file> --retire-zero-execution` derives
+that run ID from the exact bound preparation and cannot select another run. It
+may retire consumed authority only when the retained same-run approval is
+valid, no approval is in flight, and all preserved request, source, and
+workflow evidence still agrees, historical control remains valid, and the
+immutable workflow is first-attempt-only. Two canonically identical, complete
+terminal observations must show that every attempt performed zero execution:
+attempt one was non-successful, later attempts were skipped, no runner or steps
+were assigned, and no artifacts or pending approval gates exist. Immediate
+version and control revalidation may then write only the strict v4
+`approved-zero-execution` retirement variant. Existing v1/v2/v3,
+claimed/jobless, and prerequisite-rejection semantics remain unchanged.
+Retirement changes only local authority state and adds immutable proof,
+preserving the original request, receipt, run identity, first-attempt identity,
+capture, seal, and intent. It performs no cancellation, rerun, approval,
+enablement, dispatch, provider, or data operation. A later explicit normal
+preparation archives the spent generation before replacing the same prepared
+slot and validates current prerequisites; preparation itself creates no run or
+approval. A subsequent normal dispatch receives a distinct run ID at executable
+attempt one, its own authority, and a new approval receipt, with no silent
+cancellation override or inherited approval. New-schema records require
+compatible readers or reviewed forward correction, never downgrade relabeling
+or deletion. Per-request one-use rules and repository-global active, inflight,
+and exclusivity boundaries remain distinct and unchanged; the spent generation
+stays preserved and cannot be reopened or replayed, and the two target
+workflows can never consume or reuse each other's requests, observations,
+seals, or prepared context.
 
 The final data phase hands its lock and maintenance state directly to the
 matching deployment. That prevents an application rollout from racing a
