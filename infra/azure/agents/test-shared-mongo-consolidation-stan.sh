@@ -184,8 +184,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import time
 
 operator, temporary = map(Path, sys.argv[1:])
 root = temporary / "read-contract"
@@ -244,7 +246,7 @@ fixture_operator.write_text(
 )
 provider = bin_dir / "kubectl"
 provider.write_text("#!" + sys.executable + "\n" + r'''
-import json, os, re, sys
+import json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 d = Path(os.environ["FIXTURE_CASE"])
 f = json.loads((d / "fixture.json").read_text())
@@ -316,6 +318,39 @@ native = f"Error from server (NotFound): {message}"
 status = {"apiVersion": "v1", "kind": "Status", "status": "Failure",
           "code": 404, "reason": "NotFound", "message": message,
           "details": {"kind": plural, "name": name}}
+if mode in ("hang-client", "hang-credential", "hang-native-notfound",
+            "hang-status-notfound", "hang-malformed", "exited-client-open-pipe"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with (d / "lifetimes.jsonl").open("a") as handle:
+        handle.write(json.dumps({"role": "client", "pid": os.getpid(),
+                                "pgid": os.getpgrp(), "sid": os.getsid(0)}) + "\n")
+    if mode == "hang-client":
+        while True: time.sleep(60)
+    ready = d / f"credential-{os.getpid()}.ready"
+    child = subprocess.Popen([sys.executable, "-c", """
+import json, os, signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with Path(sys.argv[1]).open("a") as handle:
+    handle.write(json.dumps({"role": "credential", "pid": os.getpid(),
+                            "pgid": os.getpgrp(), "sid": os.getsid(0)}) + "\\n")
+Path(sys.argv[2]).write_text("ready")
+while True: time.sleep(60)
+""", str(d / "lifetimes.jsonl"), str(ready)], stdin=subprocess.DEVNULL)
+    # The credential helper deliberately inherits both output pipes and ignores
+    # SIGTERM. HTTP --request-timeout cannot end either blocking client below.
+    while not ready.exists(): time.sleep(0.01)
+    if mode in ("hang-native-notfound", "exited-client-open-pipe"):
+        print(native, file=sys.stderr, flush=True)
+    if mode == "hang-status-notfound":
+        print(json.dumps(status), flush=True)
+    if mode == "hang-malformed":
+        sys.stdout.buffer.write(b"\xff")
+        sys.stdout.buffer.flush()
+    if mode == "exited-client-open-pipe":
+        raise SystemExit(1)
+    child.wait()
+    raise SystemExit(1)
 if mode == "present": emit(present)
 if mode == "notfound": emit(native, 1, True)
 if mode == "status-notfound": emit(status, 1)
@@ -423,7 +458,8 @@ def setup(operation, *, journal_read="present", state=None, pv_reads=None,
         cleanup_map.chmod(0o600)
     return directory
 
-def run(directory, operation, *, ok=False, conditional=False, clock_step=200):
+def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
+        script=fixture_operator):
     backup = directory / "backups"
     cleanup_map = backup / "read-fixture-cleanup-pvs.tsv"
     map_before = cleanup_map.read_bytes() if cleanup_map.exists() else None
@@ -444,7 +480,7 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200):
         CONFIRM_ROLLBACK="restore-seven-legacy-databases",
     )
     result = subprocess.run(
-        ["bash", str(fixture_operator), operation], cwd=root, env=env,
+        ["bash", str(script), operation], cwd=root, env=env,
         capture_output=True, text=True, timeout=20,
     )
     assert (result.returncode == 0) == ok, (operation, directory.name, result.stdout, result.stderr)
@@ -469,6 +505,82 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200):
     assert steps.count("release-lock:read-fixture:" + "a" * 40) == 1
     assert not list(directory.glob("tmp.*")), "temporary read evidence leaked"
     return calls, steps
+
+# Use the existing internal timeout argument, not a production testing knob.
+# Everything else (parser, journal, budget and operation case) is unchanged.
+lifetime_operator = root / "lifetime-operator.sh"
+lifetime_source = fixture_operator.read_text()
+assert lifetime_source.count("read_transition_resource() (") == 1
+lifetime_operator.write_text(
+    lifetime_source.replace("read_transition_resource() (", "fixture_bounded_read() (", 1)
+    .replace("\nrun_fixture_operation() {", """
+read_transition_resource() { fixture_bounded_read "$1" "$2" 1; }
+run_fixture_operation() {""", 1)
+)
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+sentinel = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+lifetime_cases = 0
+try:
+    for mode in ("hang-client", "hang-credential", "hang-native-notfound",
+                 "hang-status-notfound", "hang-malformed", "exited-client-open-pipe"):
+        for operation in ("migrate", "cleanup"):
+            target = list(pvs.values())[3]
+            directory = (
+                setup(operation, journal_read=mode) if operation == "migrate"
+                else setup(operation, pv_reads={target: [mode]})
+            )
+            records = []
+            try:
+                started = time.monotonic()
+                calls, _ = run(directory, operation, conditional=True, script=lifetime_operator)
+                elapsed = time.monotonic() - started
+                assert elapsed < (3 if operation == "migrate" else 6), "client escaped wall-clock deadline"
+                records = [json.loads(line) for line in (directory / "lifetimes.jsonl").read_text().splitlines()]
+                clients = [item for item in records if item["role"] == "client"]
+                credentials = [item for item in records if item["role"] == "credential"]
+                expected_reads = 1 if operation == "migrate" else 3
+                assert len(clients) == expected_reads, "timeout did not remain an unknown read"
+                assert len(credentials) == (0 if mode == "hang-client" else expected_reads)
+                groups = {item["pid"] for item in clients}
+                assert all(item["pid"] == item["pgid"] == item["sid"] for item in clients)
+                assert all(item["pgid"] == item["sid"] and item["pgid"] in groups for item in credentials)
+                assert sentinel.pid not in groups and sentinel.poll() is None
+                stop = time.monotonic() + 2
+                while any(alive(item["pid"]) for item in records) and time.monotonic() < stop:
+                    time.sleep(0.02)
+                assert not any(alive(item["pid"]) for item in records), "owned client/credential child survived"
+                assert not any(call["command"] == "journal" for call in calls)
+                if operation == "cleanup":
+                    assert sum(call["command"] == "delete" for call in calls) == 12
+                lifetime_cases += 1
+            finally:
+                # Keep a failing regression safe too: signal only the exact
+                # fixture PIDs still in their recorded session, never names.
+                path = directory / "lifetimes.jsonl"
+                if path.exists():
+                    records = [json.loads(line) for line in path.read_text().splitlines()]
+                for item in records:
+                    try:
+                        if os.getpgid(item["pid"]) == item["pgid"] and os.getsid(item["pid"]) == item["sid"]:
+                            os.kill(item["pid"], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+finally:
+    if sentinel.poll() is None:
+        sentinel.kill()
+    sentinel.wait(timeout=2)
+print(f"issue_85_client_lifetime_contract=PASS cases={lifetime_cases} no_surviving_children=true", flush=True)
 
 errors = (
     "forbidden", "unauthorized", "login-required", "timeout", "transport", "server",

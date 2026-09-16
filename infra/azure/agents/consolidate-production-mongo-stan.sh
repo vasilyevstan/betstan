@@ -331,9 +331,57 @@ read_transition_resource() (
   output_file="$(mktemp)" || return 2
   error_file="$(mktemp)" || { rm -f -- "$output_file"; return 2; }
   trap 'rm -f -- "$output_file" "$error_file"' EXIT
-  kubectl "${read_args[@]}" \
-    --request-timeout="${timeout_seconds}s" -o json \
-    >"$output_file" 2>"$error_file" || command_status=$?
+  # The HTTP timeout does not cover kubectl's exec credential helpers. Own a
+  # separate session for the complete client tree, reserving time to kill/reap
+  # it within this read's existing (possibly clipped) budget.
+  python3 - "$output_file" "$error_file" "$timeout_seconds" \
+    kubectl "${read_args[@]}" --request-timeout="${timeout_seconds}s" -o json \
+    <<'PY' || command_status=$?
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+output_path, error_path, seconds, *command = sys.argv[1:]
+deadline = time.monotonic() + int(seconds)
+try:
+    client = subprocess.Popen(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+except OSError:
+    raise SystemExit(125)
+try:
+    # communicate is bounded even when kubectl has exited but a credential
+    # child still owns its pipes. Do not publish captured bytes until complete.
+    output, error = client.communicate(timeout=max(0, deadline - time.monotonic() - 0.25))
+except subprocess.TimeoutExpired:
+    # communicate has not reaped the client on this path, so its PID still
+    # reserves the session/group identity. Never signal a process by name.
+    try:
+        os.killpg(client.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        client.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        print("kubectl read termination could not be reaped within its deadline", file=sys.stderr)
+    # No second communicate/drain: inherited pipes must not prolong shutdown.
+    # Every captured byte, including an exact-looking NotFound, is discarded.
+    raise SystemExit(124)
+finally:
+    client.stdout.close()
+    client.stderr.close()
+Path(output_path).write_bytes(output)
+Path(error_path).write_bytes(error)
+raise SystemExit(client.returncode)
+PY
+  if [[ "$command_status" -eq 124 ]]; then
+    echo "Kubernetes $resource read client deadline expired; absence is not proven" >&2
+    return 1
+  fi
   python3 - "$output_file" "$error_file" "$command_status" \
     "$resource" "$name" "$NAMESPACE" <<'PY' || read_status=$?
 import json

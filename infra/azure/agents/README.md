@@ -711,7 +711,13 @@ Cleanup retains its exact seven-entry PVC/PV map across partial failure.
 Every mapped PV must return its own validated Kubernetes NotFound before
 `shared/complete` can be written. Present PVs and transient read errors consume
 the same ten-minute reclamation budget per PV, with each read bounded to at
-most 15 seconds and no extra final probe. Invalid identity/schema evidence and
+most 15 seconds and no extra final probe. Besides the HTTP request timeout,
+the operator bounds the native kubectl client's lifetime, including inherited
+credential-helper processes and output pipes, in its own POSIX session. On
+timeout it kills that owned process group, uses only a bounded reap, and
+discards all partial output—even an exact-looking NotFound. Timeout remains
+an unknown read and consumes the same remaining PV budget.
+Invalid identity/schema evidence and
 proven authorization failures stop cleanup; budget exhaustion also fails
 closed. Preserve the map, journal identity, retained auth PVC, and recovery
 artifacts when resuming the same operation.
