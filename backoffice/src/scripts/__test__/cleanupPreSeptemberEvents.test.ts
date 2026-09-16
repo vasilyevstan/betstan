@@ -114,6 +114,24 @@ it.each([
 });
 
 it("deletes only valid events strictly before the cutoff and preserves the boundary", async () => {
+  const unrelatedCollection = database().collection(
+    "cleanupacceptancesentinels"
+  );
+  const sentinel = {
+    _id: new mongoose.Types.ObjectId(),
+    purpose: "prove unrelated Backoffice data is retained",
+    nested: {
+      count: 7,
+      observedAt: new Date("2026-09-15T12:34:56.789Z"),
+    },
+  };
+  await unrelatedCollection.insertOne(sentinel);
+  const sentinelCountBefore = await unrelatedCollection.countDocuments({});
+  const sentinelBefore = mongoose.mongo.BSON.EJSON.stringify(
+    await unrelatedCollection.findOne({ _id: sentinel._id }),
+    { relaxed: false }
+  );
+
   await events().insertMany([
     eventDocument("old-b", "2026-08-31T23:59:59.999Z"),
     eventDocument(
@@ -171,6 +189,15 @@ it("deletes only valid events strictly before the cutoff and preserves the bound
       .sort({ eventId: 1 }).toArray())
       .map(({ eventId }) => eventId)
   ).toEqual(["equal", "newer"]);
+  expect(await unrelatedCollection.countDocuments({})).toBe(
+    sentinelCountBefore
+  );
+  expect(
+    mongoose.mongo.BSON.EJSON.stringify(
+      await unrelatedCollection.findOne({ _id: sentinel._id }),
+      { relaxed: false }
+    )
+  ).toBe(sentinelBefore);
 
   const journal = await journals().findOne({ _id: CLEANUP_OPERATION_ID });
   expect(journal).toEqual({
