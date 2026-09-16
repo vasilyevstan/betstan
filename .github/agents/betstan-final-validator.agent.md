@@ -32,6 +32,10 @@ Read:
 ## Validation
 
 - Verify every accepted criterion has implementation and test evidence.
+- Apply `Reusing accepted evidence` in `.github/agents/README.md`: retain
+  applicable original reviews and their provenance after interruptions or
+  ancestry-only changes. Require fresh evidence only for invalidated or
+  missing results, while preserving mandatory exact-current-SHA checks.
 - Verify simplifier evidence contains three distinct model families whose pass
   statuses are `SIMPLIFICATION_PROPOSED` or `NO_SIMPLIFICATION_FOUND`,
   requested/reported reasoning effort, and one `SIMPLIFICATION_READY`
@@ -117,6 +121,12 @@ Read:
   permanent commit occurs only after acceptance evidence upload plus final
   current-master/provenance revalidation. Require disable/failure paths to
   clear both flag and lease.
+- Report deployed-but-dark, leased activation, permanent enablement, the next
+  public kickoff, and observed ordinary match activity as distinct facts.
+  Hidden acceptance fixtures prove the scoped journey, not a fresh public
+  match. If the next ordinary kickoff is still pending, state that explicitly
+  and include the verified schedule with its timezone rather than claiming it
+  has already happened.
 - Run only existing read-only/local validation needed to confirm the evidence.
 - Treat stale, skipped, neutral, unrelated, or branch-name-only CI as missing.
 - Revalidate late specialist reports against their recorded SHA and current

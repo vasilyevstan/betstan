@@ -215,7 +215,45 @@ sequenceDiagram
 An identical result retry is accepted idempotently. A conflicting second final
 score is rejected.
 
-## Delivery and ordering rules
+## Telemetry observation flow
+
+```mermaid
+flowchart LR
+    Browser["Client route entry"] -->|page-view HTTP| Telemetry
+    Auth["Auth success"] -->|telemetry:event:v1| MQ["RabbitMQ"]
+    Slip["Slip draft insertion"] -->|telemetry:event:v1| MQ
+    Domain["Slip, Resulting, Gamemaster"] -->|Existing domain facts| MQ
+    MQ -->|Observer queue| Telemetry
+    Telemetry -->|Validate and deduplicate| DB[("Telemetry records")]
+    DB -->|UTC daily aggregates| Summary["Public summary"]
+    Probes["Bounded application TCP probes"] --> Summary
+    Summary -->|HTTP on entry or Refresh| Dashboard["Telemetry dashboard"]
+```
+
+The observer binds only `telemetry:event:v1`, `slip:bet`,
+`resulting:slip:settle`, and `gamemaster:event:live`. The generic activity
+envelope is restricted to an allowlisted sender and metric, a random event
+ID, and matching occurrence/envelope timestamps; it carries no user or slip
+identity. Existing business messages still carry their domain data, but
+Telemetry reduces them to a metric, hashed deduplication key, and time before
+storage.
+
+Submission uses `submittedAt` and complete-slip settlement uses `occurredAt`.
+Older messages missing those additive fields fall back to the envelope
+timestamp; a present but malformed field is rejected, not silently replaced.
+Live updates use their occurrence time and event/sequence identity. Redelivery
+therefore retains the first observation rather than counting a second copy or
+moving it to a later day.
+
+This queue is durable but the observer is deliberately best-effort. Valid
+records are acknowledged after the idempotent write. Invalid messages are
+discarded, and a recording failure rejects the observation without requeue.
+Diagnostics contain fixed codes, not raw payloads. Auth/Slip activity reports
+have no business outbox or replay guarantee; reporter failure cannot undo or
+block the successful operation. Telemetry thus permits gaps rather than
+imposing its availability on business transactions.
+
+## Business delivery and ordering rules
 
 - Publishers confirm broker acceptance for critical mutations.
 - A database pending marker remains until confirmation and is replayed after

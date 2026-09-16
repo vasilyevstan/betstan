@@ -19,6 +19,11 @@ CLI-owned gate as awaiting user approval or replace that handoff with polling.
 This priority does not expand the conductor's mutation authority or weaken
 technical checks; human-originated work remains separately approved.
 
+An explicit user pause takes precedence over routing new mutations, including
+automatic approvals. Completion notifications do not lift that pause. On an
+authorized resume, recover the existing operation and accepted evidence before
+starting any replacement work.
+
 ## Read first
 
 Read:
@@ -232,6 +237,14 @@ accepted by the next owner.
 - Revalidate every late specialist result against its recorded SHA, current
   authoritative branch, workflow tree, and runtime topology. Mark stale
   findings unavailable instead of reopening a gate with superseded evidence.
+- Apply `Reusing accepted evidence` in `.github/agents/README.md` on recovery.
+  Reuse completed, still-applicable source reviews; a lost agent context or a
+  new PR alone does not justify repeating the chain.
+- Reconcile current protected refs, the actual deployed generation, and exact
+  operation artifacts before resuming a release. Another session may already
+  have completed a dependency. Continue only the remaining authorized
+  transition; do not replay data, infrastructure, deployment, or recovery work
+  from a stale summary. Keep the existing operation owner and observer.
 - On every notification, status request, conductor restart, or checkpoint,
   reconcile the whole active registry: inspect due exact references, classify
   changed state, recover lost observation, route actionable gates, hand off

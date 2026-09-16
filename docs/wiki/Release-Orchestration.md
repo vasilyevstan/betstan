@@ -44,13 +44,25 @@ Development, review, and branch integration can remain concurrent. Production
 dispatches, data changes, deployments, activation, rollback, and recovery stay
 serialized so two sessions cannot mutate the live system at the same time.
 
+On resume after another session's release, reconcile current protected
+`master`, the actual deployed generation, and the exact retained artifacts
+before selecting remaining work. Source promotion and deployed state are
+different facts. Do not replay an old data, infrastructure, deployment,
+activation, or recovery plan from stale notes. Reuse unchanged source reviews
+only under [[Agents]]; current runtime and release provenance still need their
+own evidence. Respect an explicit pause rather than interpreting resume
+notes as authority to continue operations.
+
 ## End-to-end release structure
 
 ```mermaid
 flowchart LR
-    Branch["Focused branch"] --> DevPR["PR to dev"]
-    DevPR --> Candidate["Code + canonical documentation<br/>under the accepted design"]
-    Candidate --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
+    Branch["Focused branch"] --> Docs["Documentation-impact assessment"]
+    Docs --> Candidate["Complete code + canonical documentation<br/>under the accepted design"]
+    Docs -. affected pages .-> Wiki["Canonical public wiki<br/>edited in the same PR"]
+    Wiki --> Candidate
+    Candidate --> DevPR["PR to dev"]
+    DevPR --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
     Snapshot --> DevChecks["Applicable exact-head reviews,<br/>formal critic, tests, final validation + CI"]
     DevChecks --> Dev["dev"]
     Dev --> Promote["dev to master PR"]
@@ -429,9 +441,10 @@ change instead records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-formal critic review and final validation. The editor returns its owned pages
-and evidence to the implementation owner assembling the candidate; the
-authorized orchestrator creates its immutable snapshot.
+formal critic review of the immutable candidate and final validation. The
+editor returns its owned pages and evidence to the implementation owner
+assembling the candidate; the authorized orchestrator creates its immutable
+snapshot.
 
 After the exact protected commit merges, the authorized orchestrator, not the
 public-wiki editor, publishes changed canonical pages to the GitHub wiki.

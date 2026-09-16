@@ -220,6 +220,22 @@ Reuse verified immutable facts only with current scope and complete coverage
 as required by [[Quality Gates]]. Keep private handoff references out of the
 public handbook; see [[Security]].
 
+### Resuming accepted reviews
+
+The canonical reuse policy is **Reusing accepted evidence** in
+[the agent-team README](https://github.com/vasilyevstan/betstan/blob/master/.github/agents/README.md).
+A crash, pause, compaction, new PR, promotion, or ancestry synchronization
+alone does not invalidate a completed source review. Recover its original
+SHA, base, scope, criteria, report, verdict, and required model metadata;
+missing evidence must not be invented or relabelled as a new-head review.
+
+Reuse requires proof that the relevant inputs, dependencies, criteria, and
+current policy remain unchanged. Reopen only invalidated gates and their
+dependants, keeping the same owner context when available. Required
+exact-current-SHA CI, merge-snapshot checks, runtime acceptance, provenance,
+and approval controls remain current. Record the justification in the
+existing handoff, not a new ledger.
+
 ## Model diversity
 
 The simplifier gate uses three independent model families with the same input,
