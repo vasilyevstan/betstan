@@ -85,6 +85,29 @@ affected artifact rather than to a default application developer.
 Secondary agents and skills cite these sources instead of redefining complete
 policy blocks.
 
+## Reusing accepted evidence
+
+A crash, pause, compaction, new PR, promotion, or ancestry synchronization does
+not by itself invalidate a completed source review. Recover its original SHA,
+base and diff scope, accepted criteria, report, verdict, and required model
+metadata from the existing handoff or durable record. Preserve that identity;
+do not relabel an old review as a review of the new head, infer a missing
+verdict, or recreate an unavailable report from a summary.
+
+Before reuse, establish that the reviewed paths, relevant dependencies,
+accepted criteria, and applicable policy remain unchanged in the current
+candidate. A changed aggregate can invalidate a scoped result even when that
+result's own files did not change. Reopen only the affected gate and its
+invalidated dependants, keeping corrections with the existing owner when
+available. A lost conversation alone is not a reason for another review cycle.
+Missing or unverifiable evidence remains missing; recover the original record
+or obtain only the evidence that is actually absent.
+
+Reused source reviews never replace required exact-current-SHA CI,
+merge-snapshot checks, deployment provenance, runtime acceptance, or approval
+and lock checks. Record reuse and its justification in the existing handoff;
+do not create another tracking system or repeat unchanged specialist passes.
+
 ## Conductor loop
 
 Start `betstan-conductor` before every unit whose result can block, approve,
