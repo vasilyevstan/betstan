@@ -6,6 +6,33 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$ROOT_DIR/infra/azure/agents/live-betting-readiness-test-lib.sh"
 SCRIPT="$ROOT_DIR/infra/azure/agents/live-betting-readiness-stan.sh"
 
+current_images="$TEST_ROOT/azure-current-images.tsv"
+create_image_provenance "$current_images" azure \
+  "telemetry slip resulting moderation gamemaster event client backoffice bet auth"
+run_live_betting_scenario azure-current-services "$SCRIPT" azure \
+  MODE=dark IMAGE_PROVENANCE_FILE="$current_images"
+assert_eq 0 "$RUN_RC" "dark mode should accept the current ten services in any order"
+assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'current service set should report GO'
+assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=10' 'current service set should contain ten images'
+assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'current service set should verify every deployment'
+
+while IFS='|' read -r identity_case services; do
+  images="$TEST_ROOT/azure-${identity_case}-images.tsv"
+  create_image_provenance "$images" azure "$services"
+  run_live_betting_scenario "azure-$identity_case" "$SCRIPT" azure \
+    MODE=dark IMAGE_PROVENANCE_FILE="$images"
+  assert_eq 1 "$RUN_RC" "dark mode should reject $identity_case provenance"
+  assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' 'invalid service identities should fail workload inspection'
+  assert_contains "$RUN_SCENARIO_DIR/output/workloads-check.stderr" \
+    'expected canonical historical-nine or current-ten service identities' \
+    'invalid service identities should fail before the per-workload checks'
+done <<'EOF_INVALID_SERVICES'
+missing-service|auth bet backoffice client event gamemaster moderation resulting
+duplicate-service|auth bet backoffice client event gamemaster moderation resulting auth
+unknown-service|auth bet backoffice client event gamemaster moderation resulting unknown
+extra-service|auth bet backoffice client event gamemaster moderation resulting slip telemetry unknown
+EOF_INVALID_SERVICES
+
 run_live_betting_scenario azure-dark "$SCRIPT" azure \
   MODE=dark \
   STUB_BET_PENDING_COUNT=1 \
@@ -27,6 +54,7 @@ run_live_betting_scenario azure-dark "$SCRIPT" azure \
 assert_eq 0 "$RUN_RC" "dark mode should pass"
 assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'dark summary should report GO'
 assert_contains "$RUN_SUMMARY_FILE" 'mode=dark' 'dark summary should persist mode'
+assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=9' 'historical service set should retain nine images'
 assert_contains "$RUN_SUMMARY_FILE" 'actual_live_kickoffs_enabled=false' 'dark summary should persist dark flag'
 assert_contains "$RUN_SUMMARY_FILE" 'overdue_unstarted_events=0' 'dark summary should include overdue unstarted events'
 assert_contains "$RUN_SUMMARY_FILE" 'simulation_quarantines=0' 'dark summary should include simulation quarantines'
@@ -217,4 +245,4 @@ run_live_betting_scenario azure-command-failure "$SCRIPT" azure MODE=dark STUB_C
 assert_eq 1 "$RUN_RC" "dark mode should fail when kubectl workloads command fails"
 assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=workload_images' 'command failure should fail workload inspection'
 
-echo 'live_betting_readiness_tests=PASS stack=azure scenarios=21'
+echo 'live_betting_readiness_tests=PASS stack=azure scenarios=30'
