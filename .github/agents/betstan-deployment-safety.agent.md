@@ -369,7 +369,7 @@ Before deployment:
   or schema changes require the exact successful three-phase data chain; only
   the validated GitHub/infra/Markdown-only descendant resume may reuse an
   already applied chain. Require the baseline digest, active transferred
-  database lock, ingress write fence, and six quiesced legacy writer
+  database lock, ingress write fence, and seven quiesced writer
   Deployments before applying images;
 - treat a successful final data phase as an active maintenance handoff, not a
   completed release, and proceed directly to its bound deployment.
@@ -441,7 +441,7 @@ After deployment:
   derived from the fixed event's preserved records, without logging it;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
-  all six data writers, and retain or reacquire the exact handoff lock before
+  all seven data writers, and retain or reacquire the exact handoff lock before
   permitting a retry, but only if that same run first validated and accepted
   the exact data handoff. If handoff validation did not succeed, failure
   cleanup must not mutate replicas, fences, or database locks.
@@ -621,10 +621,13 @@ A Running broker with missing consumers is not healthy production.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
 - For fenced recovery after deployment cleanup, accept only exact candidate
-  Auth, Backoffice, and Client images plus a valid candidate-prefix/baseline-
-  suffix split over the canonical six-writer forward order. Reject arbitrary
-  mixtures, including writer gaps, candidate suffixes, unknown images, active
-  writers, a missing fence, or an unowned lock before mutation.
+  Auth and Client images plus a valid candidate-prefix/baseline-suffix split
+  over the canonical seven-writer forward order: Bet, Event, Moderation,
+  Resulting, Slip, Backoffice, then Gamemaster. Reject arbitrary mixtures,
+  including writer gaps, candidate suffixes, baseline readers, unknown images,
+  active writers, a missing fence, or an unowned lock before mutation.
+  Maintenance must quiesce Backoffice first, and non-final restoration or
+  fenced recovery must restore Backoffice last.
 - Reject a producer activation whose rollback target predates support for any
   durable value the candidate can create. Roll back to the validated
   compatibility baseline, not to the pre-compatibility generation.
