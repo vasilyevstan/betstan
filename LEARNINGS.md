@@ -271,8 +271,9 @@ technical gate and the separate approval rules for human-originated work.
   full bounded timeline completeness/labelling, penalty-linked deduplication,
   live-card relative height and pre-kickoff market alignment, stable Correct
   Score order, and visible administrator navigation, and record the exact
-  master SHA and run evidence in `docs/wiki/Live-Betting-Production.md`
-  alongside the existing release chain.
+  master SHA and run evidence in the existing release handoff and protected
+  evidence. Keep `docs/wiki/Live-Betting-Production.md` focused on behavior
+  and acceptance principles rather than a current production inventory.
 
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
