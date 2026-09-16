@@ -1,6 +1,13 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import axios from 'axios';
 import EventList, { RETAINED_FINISHED_EVENT_STORAGE_KEY } from './EventList';
 import useLiveEvents from './useLiveEvents';
@@ -444,6 +451,293 @@ describe('EventList kickoff countdown', () => {
     });
     jest.useRealTimers();
     window.sessionStorage.clear();
+  });
+
+  it.each(['v1', 'v2', 'v3'])(
+    'orders the single Live now section by live state and canonical kickoff in %s',
+    (uiVariant) => {
+      jest.setSystemTime(Date.parse('2030-06-01T14:55:00.000Z'));
+
+      const buildActiveOrderingEvent = ({
+        eventId,
+        kickoffAt,
+        name,
+        time,
+      }) => ({
+        ...liveEvent,
+        eventId,
+        name,
+        time,
+        live: {
+          ...liveEvent.live,
+          kickoffAt,
+          incidentHistory: [],
+          currentMarkets: [],
+        },
+      });
+      const buildCountdownOrderingEvent = ({
+        eventId,
+        kickoffAt,
+        name,
+        time,
+      }) => buildCountdownEvent({
+        eventId,
+        name,
+        time,
+        live: {
+          bettingStatus: 'OPEN',
+          kickoffAt,
+          currentMarkets: [],
+        },
+      });
+
+      const activePrecedence = buildActiveOrderingEvent({
+        eventId: 'active-a-precedence',
+        name: 'Active Kickoff Precedence',
+        time: '2030-06-01T18:00:00.000Z',
+        kickoffAt: '2030-06-01T14:50:00.000Z',
+      });
+      const activeFallback = buildActiveOrderingEvent({
+        eventId: 'active-b-fallback',
+        name: 'Active Time Fallback',
+        time: '2030-06-01T14:50:00.000Z',
+        kickoffAt: null,
+      });
+      const activeLater = buildActiveOrderingEvent({
+        eventId: 'active-c-later',
+        name: 'Active Later Kickoff',
+        time: '2030-06-01T14:52:00.000Z',
+        kickoffAt: null,
+      });
+      const activeUnavailableFirst = buildActiveOrderingEvent({
+        eventId: 'active-y-unavailable',
+        name: 'Active Unavailable Y',
+        time: 'not-an-event-time',
+        kickoffAt: null,
+      });
+      const activeUnavailableSecond = buildActiveOrderingEvent({
+        eventId: 'active-z-unavailable',
+        name: 'Active Unavailable Z',
+        time: '2030-06-01T13:00:00.000Z',
+        kickoffAt: 'not-a-kickoff',
+      });
+      const countdownPrecedence = buildCountdownOrderingEvent({
+        eventId: 'countdown-a-precedence',
+        name: 'Countdown Kickoff Precedence',
+        time: '2030-06-01T15:05:00.000Z',
+        kickoffAt: '2030-06-01T15:00:00.000Z',
+      });
+      const countdownFallback = buildCountdownOrderingEvent({
+        eventId: 'countdown-b-fallback',
+        name: 'Countdown Time Fallback',
+        time: '2030-06-01T15:00:00.000Z',
+        kickoffAt: null,
+      });
+      const countdownLater = buildCountdownOrderingEvent({
+        eventId: 'countdown-c-later',
+        name: 'Countdown Later Kickoff',
+        time: '2030-06-01T15:04:00.000Z',
+        kickoffAt: null,
+      });
+
+      useLiveEvents.mockReturnValue({
+        events: [
+          countdownLater,
+          activeUnavailableSecond,
+          activeLater,
+          countdownFallback,
+          activeFallback,
+          countdownPrecedence,
+          activeUnavailableFirst,
+          activePrecedence,
+        ],
+        feedState: 'open',
+        isLoading: false,
+      });
+
+      render(<EventList selectedSelectionKeys={new Set()} uiVariant={uiVariant} />);
+
+      const liveNowHeadings = screen.getAllByRole('heading', { name: 'Live now' });
+      expect(liveNowHeadings).toHaveLength(1);
+      const liveNowSection = liveNowHeadings[0].closest('section');
+      const orderedCards = within(liveNowSection).getAllByRole('article');
+      expect(orderedCards.map((card) => card.getAttribute('aria-label'))).toEqual([
+        'Active Kickoff Precedence',
+        'Active Time Fallback',
+        'Active Later Kickoff',
+        'Active Unavailable Y',
+        'Active Unavailable Z',
+        'Countdown Kickoff Precedence',
+        'Countdown Time Fallback',
+        'Countdown Later Kickoff',
+      ]);
+
+      orderedCards.slice(0, 5).forEach((card) => {
+        expect(within(card).getByText('LIVE')).toBeInTheDocument();
+      });
+      orderedCards.slice(5).forEach((card) => {
+        expect(within(card).getByText('KICKOFF SOON')).toBeInTheDocument();
+        expect(within(card).getByRole('timer')).toHaveAccessibleName(/^Kickoff countdown:/);
+      });
+    },
+  );
+
+  it('preserves focused and selected live controls while keyed cards reorder on a feed update', async () => {
+    jest.setSystemTime(Date.parse('2030-06-01T14:55:00.000Z'));
+    const quoteValidUntil = '2030-06-01T16:00:00.000Z';
+    const buildActiveEvent = ({
+      eventId,
+      home,
+      kickoffAt,
+      name,
+      odds,
+      quoteVersion,
+    }) => ({
+      ...liveEvent,
+      eventId,
+      name,
+      time: kickoffAt,
+      home,
+      away: `${home} Away`,
+      live: {
+        ...liveEvent.live,
+        kickoffAt,
+        incidentHistory: [],
+        currentMarkets: [buildLiveMarket({
+          marketId: 'stable-market',
+          marketType: 'NEXT_CORNER',
+          marketVersion: 4,
+          quoteVersion,
+          quoteValidUntil,
+          odds,
+        })],
+      },
+    });
+    const buildCountdownOrderingEvent = (eventId, name, kickoffAt) => buildCountdownEvent({
+      eventId,
+      name,
+      time: kickoffAt,
+      live: {
+        bettingStatus: 'OPEN',
+        kickoffAt,
+        currentMarkets: [],
+      },
+    });
+    const updateKickoff = (event, kickoffAt) => ({
+      ...event,
+      live: {
+        ...event.live,
+        kickoffAt,
+        ...(typeof event.live.sequence === 'number'
+          ? { sequence: event.live.sequence + 1 }
+          : {}),
+        currentMarkets: event.live.currentMarkets.map((market) => ({
+          ...market,
+          selections: market.selections.map((selection) => ({ ...selection })),
+        })),
+      },
+    });
+    const focusedEvent = buildActiveEvent({
+      eventId: 'live-focused',
+      name: 'Focused Live Event',
+      home: 'Focused Home',
+      kickoffAt: '2030-06-01T14:48:00.000Z',
+      quoteVersion: 6,
+      odds: 2.25,
+    });
+    const siblingEvent = buildActiveEvent({
+      eventId: 'live-sibling',
+      name: 'Sibling Live Event',
+      home: 'Sibling Home',
+      kickoffAt: '2030-06-01T14:50:00.000Z',
+      quoteVersion: 7,
+      odds: 3.1,
+    });
+    const countdownOne = buildCountdownOrderingEvent(
+      'countdown-one',
+      'Countdown One',
+      '2030-06-01T15:00:00.000Z',
+    );
+    const countdownTwo = buildCountdownOrderingEvent(
+      'countdown-two',
+      'Countdown Two',
+      '2030-06-01T15:02:00.000Z',
+    );
+    const selectedSelectionIdentity = {
+      eventId: 'live-focused',
+      marketId: 'stable-market',
+      marketVersion: 4,
+      selectionId: 'home',
+    };
+    const selectedSelectionKeys = new Set([
+      getLiveSelectionKey(selectedSelectionIdentity),
+    ]);
+
+    useLiveEvents.mockReturnValue({
+      events: [countdownTwo, focusedEvent, countdownOne, siblingEvent],
+      feedState: 'open',
+      isLoading: false,
+    });
+    const { rerender } = render(
+      <EventList selectedSelectionKeys={selectedSelectionKeys} uiVariant="v2" />,
+    );
+    const getLiveNowCardNames = () => within(
+      screen.getByRole('heading', { name: 'Live now' }).closest('section'),
+    ).getAllByRole('article').map((card) => card.getAttribute('aria-label'));
+
+    const focusedSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Focused Home at 2.25',
+    });
+    const siblingSelection = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Sibling Home at 3.1',
+    });
+    expect(focusedSelection).toHaveClass('product-button--selected');
+    expect(siblingSelection).not.toHaveClass('product-button--selected');
+    focusedSelection.focus();
+    expect(document.activeElement).toBe(focusedSelection);
+    expect(getLiveNowCardNames()).toEqual([
+      'Focused Live Event',
+      'Sibling Live Event',
+      'Countdown One',
+      'Countdown Two',
+    ]);
+
+    useLiveEvents.mockReturnValue({
+      events: [
+        updateKickoff(countdownOne, '2030-06-01T15:03:00.000Z'),
+        updateKickoff(siblingEvent, '2030-06-01T14:47:00.000Z'),
+        countdownTwo,
+        updateKickoff(focusedEvent, '2030-06-01T14:53:00.000Z'),
+      ],
+      feedState: 'open',
+      isLoading: false,
+    });
+    rerender(<EventList selectedSelectionKeys={selectedSelectionKeys} uiVariant="v2" />);
+
+    expect(getLiveNowCardNames()).toEqual([
+      'Sibling Live Event',
+      'Focused Live Event',
+      'Countdown Two',
+      'Countdown One',
+    ]);
+
+    const focusedSelectionAfterUpdate = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Focused Home at 2.25',
+    });
+    const siblingSelectionAfterUpdate = screen.getByRole('button', {
+      name: 'Select Next Corner Kick: Sibling Home at 3.1',
+    });
+    expect(focusedSelectionAfterUpdate).toBe(focusedSelection);
+    expect(document.activeElement).toBe(focusedSelection);
+    expect(focusedSelectionAfterUpdate).toHaveClass('product-button--selected');
+    expect(siblingSelectionAfterUpdate).not.toHaveClass('product-button--selected');
+
+    fireEvent.click(focusedSelectionAfterUpdate);
+
+    await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/event/odds', {
+      quoteVersion: 6,
+      ...selectedSelectionIdentity,
+    }));
   });
 
   it('keeps an event out of the live area before T-10 (still a normal pre-match card)', () => {
