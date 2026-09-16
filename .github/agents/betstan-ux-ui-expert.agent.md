@@ -65,6 +65,10 @@ obsolete.
   change is user-facing. Reuse existing evidence and ask
   `betstan-test-engineer` for the smallest targeted browser or computed-layout
   check needed for unresolved factual claims.
+- Request this as supporting evidence under `Bounded substantive handoffs` in
+  the agent README. It may precede the formal test gate and does not depend on
+  this UX verdict or a completed critic review. Consume its source-bound
+  measurements without treating it as formal test acceptance.
 - Keep the baseline specification and immutable-result audit under one
   registered `work_id`, owner, and agent context. Do not create a second UX
   agent or a handoff-only reviewer for the post-implementation phase.

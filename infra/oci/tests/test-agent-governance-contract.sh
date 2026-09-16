@@ -300,7 +300,11 @@ require_flat_literal "$CONDUCTOR" \
 require_flat_literal "$CONDUCTOR" \
   'exact `repository_id` through the GitHub API at those same two checkpoints to resolve the base/head refs, commit tree, merge base, and policy blob'
 require_flat_literal "$CONDUCTOR" \
-  'fresh isolated bare object store with no alternates, grafts, or replacement refs'
+  'isolated bare object store with no alternates, grafts, or replacement refs'
+require_flat_literal "$CONDUCTOR" \
+  'Independently verified objects and manifests from that repository may be reused'
+require_flat_literal "$CONDUCTOR" \
+  'Reuse never replaces fresh mutable-ref, current-master, local-state, or authority checks'
 require_flat_literal "$CONDUCTOR" \
   'Every tree, ancestry, diff, and blob command runs with `GIT_NO_REPLACE_OBJECTS=1`'
 require_flat_literal "$CONDUCTOR" \
@@ -363,7 +367,7 @@ require_flat_literal "$CONDUCTOR" \
 require_flat_literal "$CONDUCTOR" \
   'normal focused branch -> `dev` -> `master` path'
 require_flat_literal "$CONDUCTOR" \
-  'independent safety challenge through the existing deployment-safety quality gate, not a new agent'
+  'independent safety challenge through the existing deployment-safety specialist, not a new agent or universal quality gate'
 require_flat_literal "$CONDUCTOR" \
   'Preserve rollback evidence and revalidate the exact promoted SHA'
 require_flat_literal "$CONDUCTOR" \
@@ -536,5 +540,89 @@ require_flat_literal "$LEARNINGS" \
   'Executing is not reporting. Active tool calls, provider reasoning time, and growing call counts are activity, never deliverable progress'
 require_flat_literal "$LEARNINGS" \
   'Checkpoint at each safe boundary rather than only at terminal success.'
+
+python3 - "$AGENT_DIR" <<'PY' ||
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+roles = {
+    path.name.removeprefix("betstan-").removesuffix(".agent.md"): path
+    for path in root.glob("*.agent.md")
+}
+expected = {
+    "architect", "simplifier", "backend-developer", "frontend-developer",
+    "validation-critic", "test-engineer", "final-validator", "conductor",
+    "service-contract-reviewer", "quality-gate-reviewer",
+    "branch-governance-reviewer", "auth-security-reviewer", "ux-ui-expert",
+    "oci-health-reviewer", "azure-cost-analyst", "deployment-safety",
+    "aks-operator", "oci-operator", "domain-ingress", "mongo-migration",
+    "migration-recovery", "azure-retirement", "public-wiki-editor",
+}
+if set(roles) != expected:
+    raise SystemExit("the 23-role inventory changed")
+manual = set()
+for role, path in roles.items():
+    frontmatter = path.read_text(encoding="utf-8").split("---", 2)[1]
+    if re.search(r"^disable-model-invocation:\s*true\s*$", frontmatter, re.M):
+        manual.add(role)
+    if role == "ux-ui-expert" and not re.search(
+        r"^tools:\s*\[read,\s*search\]\s*$", frontmatter, re.M
+    ):
+        raise SystemExit("UX gained execution or editing authority")
+if manual != {
+    "aks-operator", "oci-operator", "oci-health-reviewer", "domain-ingress",
+    "mongo-migration", "migration-recovery", "azure-retirement",
+}:
+    raise SystemExit("manual-invocation restrictions changed")
+PY
+  fail "role or capability boundaries changed"
+
+require_flat_literal "$README" \
+  'Register this bounded design review as supporting evidence for the design-to-developer handoff, not another universal quality gate'
+require_flat_literal "$README" \
+  'Unaccepted design blocks its dependent implementation, not independently authorized operations'
+require_flat_literal "$README" \
+  'Reuse that critic context for the existing formal implemented-code review'
+require_flat_literal "$README" \
+  'Further critic work requires changed substantive evidence, an unresolved finding, or a concrete scope violation'
+require_flat_literal "$README" \
+  "The recipient's first scoped action acknowledges receipt before substantive review; acknowledgement is not acceptance"
+require_flat_literal "$README" \
+  'An advisory delay cannot waive a technical gate or freeze an operation whose required authority and safety evidence remain valid'
+require_flat_literal "$README" \
+  'The authorized orchestrator, not a file-editing developer, creates the immutable candidate'
+require_flat_literal "$AGENT_DIR/betstan-validation-critic.agent.md" \
+  'A design result is not implemented-code or release approval'
+require_flat_literal "$AGENT_DIR/betstan-validation-critic.agent.md" \
+  'never emit `APPROVE_SLICE` or invent implementation/test evidence'
+require_flat_literal "$TEST_ENGINEER" \
+  'this task neither requires its own future UX/critic verdict nor emits `TESTS_GREEN`'
+require_literal "$TEST_ENGINEER" 'betstan-test-engineer: SUPPORTING_EVIDENCE_READY'
+require_flat_literal "$AGENT_DIR/betstan-ux-ui-expert.agent.md" \
+  'It may precede the formal test gate and does not depend on this UX verdict or a completed critic review'
+require_flat_literal "$PUBLIC_WIKI_EDITOR" \
+  'Return the owned documentation and evidence to the registered implementation owner'
+require_flat_literal "$PUBLIC_WIKI_EDITOR" \
+  'This editor does not perform Git or publication actions'
+require_flat_literal "$CONDUCTOR" \
+  'The conductor does not submit the approval'
+require_flat_literal "$CONDUCTOR" \
+  'A terminal unit without a confirmed downstream handoff is a stall once its registered acknowledgement deadline is missed'
+require_flat_literal "$AGENT_DIR/betstan-oci-operator.agent.md" \
+  'Repository-only implementation uses its exact source/diff contract and performs no live baseline or provider operation'
+require_flat_literal "$AGENT_DIR/betstan-oci-health-reviewer.agent.md" \
+  'For OKE, verify the kubeconfig exec arguments contain the exact cluster OCID'
+require_flat_literal "$AGENT_DIR/betstan-oci-health-reviewer.agent.md" \
+  'For k3s, verify the recorded instance/runtime identity and the checked-in Bastion/loopback access contract'
+require_flat_literal "$AGENT_DIR/betstan-mongo-migration.agent.md" \
+  'Require exact in-AKS source/target server-version and FCV compatibility'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'do not apply an AKS journal requirement to an OCI release'
+require_flat_literal "$QUALITY_GATE_REVIEWER" \
+  'shared CI or contract changes expand to every affected consumer'
+require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
+  'a shared contract requires every genuine consumer, including services added after older reviews'
 
 echo "agent_governance_contract=PASS"

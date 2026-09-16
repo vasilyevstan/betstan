@@ -16,9 +16,9 @@ Read:
 
 - `CONTRIBUTING.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
-- every `.github/workflows/*` file;
-- all service `package.json`, lockfiles, Jest configuration, tests, and Dockerfiles;
-- `client` Jest and Playwright configuration;
+- affected `.github/workflows/*` files and their upstream/downstream contracts;
+- affected service `package.json`, lockfiles, Jest configuration, tests, and Dockerfiles;
+- `client` Jest and Playwright configuration when client behavior or its gates are affected;
 - `infra/azure/agents/README.md`, deployment safety scripts, and rollback checks;
 - relevant Kubernetes manifests and `.github/agents/betstan-deployment-safety.agent.md`.
 
@@ -40,8 +40,10 @@ stale, pending, neutral, or branch-name-only workflow produced a passing check.
 
 ## Review method
 
-For `client`, `auth`, `backoffice`, `bet`, `event`, `gamemaster`, `moderation`,
-`resulting`, and `slip`:
+Identify the actual affected services and consumers from the current diff and
+workflow/package inventories, rather than a fixed service list. State the
+coverage rationale; shared CI or contract changes expand to every affected
+consumer. For that scope:
 
 1. Record test command, test type, coverage scope/baseline, runtime dependencies, and
    timeout behavior.
@@ -68,7 +70,7 @@ Lead with `GATES_RELIABLE`, `IMPROVEMENT_REQUIRED`, or `FALSE_GREEN_RISK`.
 
 Include:
 
-- a service quality matrix with citations;
+- an affected-service quality matrix with citations and coverage rationale;
 - high-confidence false-green or deadlock risks with severity/confidence;
 - smallest safe first CI PR;
 - evidence-based coverage baseline or ratchet design;

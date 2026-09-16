@@ -69,6 +69,61 @@ or become unavailable. A correction keeps its logical `work_id`, original
 handoff never resets the budget. Route each correction to the owner of the
 affected artifact rather than to a default application developer.
 
+## Bounded substantive handoffs
+
+Before implementation of a new or materially changed design, send one
+consolidated architecture, completed sealed-pass evidence, and synthesized
+contract to `betstan-validation-critic`. Register this bounded design review
+as supporting evidence for the design-to-developer handoff, not another
+universal quality gate. Its `DESIGN_REVIEW_PASSED` result accepts the design
+only; it is not `APPROVE_SLICE` or release authority. Unaccepted design blocks
+its dependent implementation, not independently authorized operations.
+
+Reuse that critic context for the existing formal implemented-code review.
+Further critic work requires changed substantive evidence, an unresolved
+finding, or a concrete scope violation. Routine status, acknowledgement,
+individual sealed passes, approval gates, timers, and unchanged artifacts do
+not trigger another critic round. Final validation independently checks critic
+and test evidence; it does not send its verdict back for critic approval.
+
+| Producing work | Direct next owner |
+|---|---|
+| Architect contract | Three independent simplifier passes, then one synthesis |
+| Consolidated design bundle | Bounded design critic, then registered implementation owner |
+| Implementation and triggered specialist outputs | One implementation owner assembling the complete candidate |
+| Complete code and canonical documentation | Authorized orchestrator creating its immutable snapshot |
+| Immutable candidate and applicable exact-head specialist evidence | Formal critic, then test engineer, then final validator |
+| Final source acceptance | Deployment safety, then the authorized operation owner |
+| Terminal operation and publication evidence | Conductor/orchestrator completion |
+
+The authorized orchestrator, not a file-editing developer, creates the
+immutable candidate. Exact-head UX and other applicable reviews consume that
+snapshot before formal critic review; any correction creates a new snapshot
+and revalidates affected evidence. The developer-gate handoff envelope remains
+separate from native specialist result tokens, including documentation-only
+and infrastructure work.
+
+An implementation or test owner may supply narrowly scoped rendered evidence
+to UX before the formal test gate. That supporting task does not require its
+own future UX or critic verdict, cannot emit `TESTS_GREEN`, and cannot satisfy
+the formal test gate. UX may use its source-bound measurements. Specialists
+return their owned evidence to the requesting gate rather than independently
+handing over a purportedly complete candidate.
+
+Route a completed handoff immediately. The recipient's first scoped action
+acknowledges receipt before substantive review; acknowledgement is not
+acceptance. Escalate a missing receipt against `handoff_ack_due_at`, not as an
+instantaneous stall or an acknowledgement-only agent. Preserve each logical
+gate's own `work_id`, original correction budget, and immutable root request.
+
+The conductor handles routine scope, provenance, routing, and deadlines.
+Return an obvious scope violation directly to its native owner; consult the
+retained critic only for substantive ambiguity. Block off-scope additions and
+dependants missing mandatory evidence, while retaining observation and
+separately authorized eligible approval, safe completion, and incident
+recovery. An advisory delay cannot waive a technical gate or freeze an
+operation whose required authority and safety evidence remain valid.
+
 ## Canonical policy sources
 
 | Concern | Source |
@@ -154,7 +209,8 @@ paired with a maximum wall-clock checkpoint. On notification, restart, status
 request, or checkpoint it reconciles the complete active registry, reconstructs
 lost observation from exact underlying references, and assigns the next
 bounded check. A completed unit with no confirmed next-owner handoff is itself
-a stall; a still-running watcher never closes conductor ownership.
+a stall once its registered acknowledgement deadline is missed; a still-running
+watcher never closes conductor ownership.
 
 A GitHub `waiting` run or job is an immediate action trigger. The conductor
 checks its exact jobs and `pending_deployments` in the same checkpoint and
@@ -169,8 +225,9 @@ status is forbidden while a checkpoint, acknowledgement, actionable gate, or
 handoff is overdue; orchestration completes only when every registered unit
 has terminal evidence and an accepted handoff.
 
-A gate that finishes without immediately naming and obtaining acknowledgement
-from its exact next owner is stalled. Correction rounds remain inside the same
+A gate that finishes immediately names and routes to its exact next owner.
+Receipt acknowledgement follows within the registered deadline, before the
+recipient's substantive review. Correction rounds remain inside the same
 logical gate and agent context. Every gate records a bounded correction budget;
 exhausting it produces one precise blocker instead of another replacement
 agent, summary relay, or silent deadline extension.
@@ -180,8 +237,11 @@ external progress, not a hang, but it is an immediate actionable gate. A
 terminal job followed by a downstream `waiting` job with no executing step must
 be classified before waiting again. For every dispatched run and state
 transition, the conductor checks jobs plus `pending_deployments`. It immediately
-hands a documented, preauthorized approval to the orchestrator, or names the
-human approval owner and blocks; it never leaves the gate until a later routine
+hands a documented, preauthorized approval to the orchestrator. Human-originated
+work retains its personal approval path; invalid local context, unresolved
+authority, and unknown evidence are technical blockers, not requests for
+personal consent. An already-approved timer remains an observed wait, not a
+duplicate approval. It never leaves an actionable gate until a later routine
 checkpoint. One missed checkpoint is a suspected stall. Two missed checkpoints
 require an explicit safe recovery action. Never replace a slow unit until the
 original is terminal or cancelled and overlapping side effects are impossible.
@@ -377,7 +437,9 @@ Required invariants:
   `SIMPLIFICATION_READY` artifact before development starts.
 - No replacement unit starts while the original can still produce side effects.
 - `out_of_ownership_touched` is empty.
-- A critic receives a non-null immutable `head_sha`.
+- A critic receives a non-null immutable `head_sha` for formal code review.
+  Design review binds its immutable baseline and consolidated artifact instead
+  of claiming an implemented candidate exists.
 - Every prior blocking finding is resolved with evidence before approval.
 - Every user-facing change has one exact-head `UX_REVIEW_PASSED` result whose
   consistency matrix names its stable references, required fixes, and accepted
@@ -409,8 +471,8 @@ Required invariants:
 | Public wiki editor | `WIKI_UPDATE_READY`, `WIKI_NO_PUBLIC_CHANGE`, `WIKI_BLOCKED` |
 | Simplifier pass | `SIMPLIFICATION_PROPOSED`, `NO_SIMPLIFICATION_FOUND`, `BLOCKED` |
 | Simplifier synthesis | `SIMPLIFICATION_READY`, `SIMPLIFICATION_DISPUTED`, `SIMPLIFICATION_INCOMPLETE` |
-| Validation critic | `APPROVE_SLICE`, `CHANGES_REQUIRED` |
-| Test engineer | `TESTS_GREEN`, `TESTS_FAILED`, `BLOCKED` |
+| Validation critic | `DESIGN_REVIEW_PASSED` (design only), `APPROVE_SLICE` (code only), `CHANGES_REQUIRED` |
+| Test engineer | `SUPPORTING_EVIDENCE_READY` (supporting task only), `TESTS_GREEN` (formal gate only), `TESTS_FAILED`, `BLOCKED` |
 | Final validator | `READY_FOR_RELEASE_REVIEW`, `NO_GO` |
 
 Status lines should be namespaced with the agent name. Final validation is
