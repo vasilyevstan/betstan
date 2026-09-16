@@ -998,8 +998,17 @@ for pod in pod_items:
     if isinstance(app, str):
         pod_items_by_app.setdefault(app, []).append(pod)
 image_rows = read_images(images_path)
-if len(image_rows) != 9:
-    raise SystemExit(f"expected nine image provenance rows, found {len(image_rows)}")
+historical_services = (
+    "auth", "backoffice", "bet", "client", "event", "gamemaster",
+    "moderation", "resulting", "slip",
+)
+current_services = historical_services + ("telemetry",)
+observed_services = tuple(sorted(service for service, _ in image_rows))
+if observed_services not in (historical_services, current_services):
+    raise SystemExit(
+        "expected canonical historical-nine or current-ten service identities, "
+        f"found {observed_services!r}"
+    )
 for service, image_ref in image_rows:
     deployment_name = f"gaming-{service}-depl"
     container_name = f"gaming-{service}"

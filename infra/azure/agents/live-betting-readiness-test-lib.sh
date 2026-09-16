@@ -46,7 +46,7 @@ summary_value() {
 create_image_provenance() {
   local file="$1"
   local stack="$2"
-  python3 - "$file" "$stack" <<'PY'
+  python3 - "$file" "$stack" "${3:-}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -64,6 +64,8 @@ services = [
     "resulting",
     "slip",
 ]
+if sys.argv[3]:
+    services = sys.argv[3].split()
 rows = []
 for index, service in enumerate(services, 1):
     digest = f"sha256:{index:064x}"
