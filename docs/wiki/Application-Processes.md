@@ -365,12 +365,81 @@ An administrator-only scope still exists for explicitly named offline
 acceptance events used during controlled validation. That narrow capability
 does not gate the normal Backoffice catalog or controls.
 
+## Public Telemetry summaries
+
+Telemetry is an observer, not an account, betting, moderation, or settlement
+authority. The browser reports entry to Events or Backoffice directly over
+HTTP. Auth and Slip send small activity reports through RabbitMQ; Telemetry
+also consumes existing submission, final-slip settlement, and live-update
+facts without changing their business consumers.
+
+### What the eight counters mean
+
+| Metric | Counted observation |
+| --- | --- |
+| `MAIN_PAGE_VISIT` | Client entry to `/`, not a unique visitor |
+| `ADMIN_PAGE_VISIT` | Client entry to public `/backoffice`; the historical metric name does not imply administrator access |
+| `SLIP_CREATED` | A new draft inserted while processing an authenticated odds selection, not every row added or draft read |
+| `BET_PLACED` | A distinct submitted slip observed on `slip:bet`, not proof that Moderation accepted it |
+| `RESULTING_SETTLED` | A distinct complete-slip settlement observed on `resulting:slip:settle`, not each row, match result, win, or payout amount |
+| `GAMECENTER_EVENT_EMITTED` | A distinct Gamemaster live-update sequence, not one match or one football incident |
+| `USER_CREATED` | A successful Auth account creation |
+| `USER_LOGGED_IN` | A successful explicit Auth login, not current-user lookup or session refresh |
+
+The Client reports only the two page categories above. Changing theme or UI
+query parameters on the same route does not add a visit; leaving and
+re-entering does. Reports contain no visitor identity, so counts cannot
+measure unique people, sessions, or conversion. Reporting failures do not
+block navigation, signup, login, or draft creation.
+
+### Public API and dashboard
+
+- `POST /api/telemetry/page-view` accepts JSON with exactly one `page` field:
+  `main` or `admin`. The server supplies the observation ID and time and
+  returns `202` with `{ "accepted": true }` after recording it.
+- `GET /api/telemetry/summary` accepts no query parameters. It returns
+  `generatedAt`, fourteen ascending UTC `dates`, eight ordered `metrics`
+  entries with `metric` and fourteen integer `values`, and ten ordered
+  `health` entries with `service` and `status`.
+- Missing daily observations are zero-filled. A successful all-zero summary
+  is not an error or evidence that no business activity occurred.
+- Both routes are public and have separate global, process-local request
+  limits. Invalid input returns a sanitized `400`, rate limiting returns
+  `429`, and recording or summary failure returns a sanitized `503`.
+- A five-second server cache covers the complete summary, including health;
+  concurrent cache misses share one refresh. The `/telemetry` UI loads on
+  entry and on explicit **Refresh**, without polling, and retains the last
+  successful snapshot when refresh fails.
+
+Health uses concurrent bounded TCP-connect probes to the other nine
+applications. `green`, `yellow`, and `red` describe connection speed or
+failure; the UI labels them **Healthy**, **Degraded**, and **Unavailable**.
+Telemetry's own entry is green in a successfully served summary, not an
+independent self-probe. None of these states proves deep readiness, queue
+progress, settlement correctness, historical uptime, or public match kickoff.
+
+### Current scope and limits
+
+This is bounded operational observation, not accounting-grade analytics.
+Reports may be lost, and anonymous page counts are not verified human
+activity. Business-message deduplication reduces duplicate counts but does
+not prove completeness. No arbitrary event ingestion, date-range query,
+per-user drill-down, raw-record API, retained health history, alerting, or
+distributed tracing is implemented by this service. Those would be separate
+future changes, not implied capabilities or a committed roadmap. The
+separately reserved CI coverage-telemetry foundation in [[Quality Gates]] is
+not this application service.
+
+See [[Architecture]] for storage and retention, [[Message Flows]] for
+delivery and legacy timestamp rules, [[Security]] for the privacy boundary,
+and [[User Interface]] for dashboard states and layouts.
+
 ## Cross-process invariants
 
 - A service owns its database; consumers do not reach into another service's
   collections.
-- Important state is persisted before message delivery is treated as
-  successful.
+- Important business state is persisted before message delivery is treated as
+  successful; best-effort Telemetry is not part of that business transaction.
 - Message handlers expect duplicate and out-of-order delivery.
 - Selection and quote IDs, not visible ordering, preserve betting identity.
 - Live and pre-match rows remain separate from draft through history.

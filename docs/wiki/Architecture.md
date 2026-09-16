@@ -5,7 +5,7 @@
 BetStan is a TypeScript and JavaScript microservice system with:
 
 - a React single-page application;
-- seven HTTP-facing application services;
+- six HTTP-facing backend services, in addition to the client;
 - three internal event-driven workers;
 - RabbitMQ fanout messaging;
 - one persistent MongoDB runtime with a separate logical database per backend
@@ -38,6 +38,7 @@ flowchart TB
     Broker[("RabbitMQ<br/>fanout events")]
     Mongo[("MongoDB<br/>service-owned logical databases")]
 
+    Auth --> Broker
     Event <--> Broker
     Slip <--> Broker
     Bet <--> Broker
@@ -101,6 +102,28 @@ This boundary supports:
 - compatibility testing during rolling deployment;
 - recovery without cross-service collection access.
 
+### Telemetry's observation store
+
+Telemetry owns a logical database on the shared MongoDB runtime. It stores
+only a deduplication key, an allowlisted metric, and the occurrence time, not
+the original business message. Keys are random observation IDs for page
+visits and Auth/Slip reports, or hashes of domain identity for observed
+submission, settlement, and live-update messages. Insert-only upserts preserve
+the first recorded occurrence on duplicate delivery.
+
+A MongoDB TTL index makes records eligible for deletion 30 days after
+`occurredAt`; deletion is asynchronous, not an exact wall-clock deadline.
+Daily counts are aggregated on request over the current UTC day and preceding
+13 days, rather than stored as a separate reporting warehouse. Service health
+is probed on summary refresh and is not persisted as a history.
+
+Telemetry never reads other services' collections or publishes business
+decisions. Its HTTP listener starts only after MongoDB, indexes, RabbitMQ,
+and its consumer are initialized; losing the consumer shuts the observer down
+instead of leaving an apparently working HTTP-only process. Its best-effort
+delivery exceptions are described in [[Message Flows]], and the public API and
+counting semantics in [[Application Processes]].
+
 ## Synchronous and asynchronous boundaries
 
 ### Synchronous HTTP
@@ -111,7 +134,7 @@ HTTP is used for browser-facing commands and queries:
 - event catalog, odds selection, and SSE connection;
 - slip query and submission;
 - bet history and statistics;
-- public Backoffice commands.
+- public Backoffice commands;
 - bounded Telemetry summaries and service-health snapshots.
 
 The Event service also performs a bounded internal Auth verification when an

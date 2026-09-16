@@ -163,6 +163,17 @@ mutation.
 
 ## Release and operations
 
+### Resume evidence, not remembered plans
+
+An interrupted conversation is not evidence that accepted work failed.
+Recover and scope-check original reviews using [[Agents]] rather than
+repeating unchanged specialist passes or reconstructing missing verdicts.
+After another session releases, reconcile current protected source, the
+actual deployed generation, and exact artifacts as described in
+[[Release Orchestration]]. Old notes are context, not permission to replay
+data, infrastructure, deployment, activation, or recovery operations. An
+explicit pause remains a pause until the user resumes the work.
+
 ### Build and deploy exact immutable identities
 
 Branch names and mutable tags are convenient pointers, not release identity.

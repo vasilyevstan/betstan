@@ -44,17 +44,27 @@ Development, review, and branch integration can remain concurrent. Production
 dispatches, data changes, deployments, activation, rollback, and recovery stay
 serialized so two sessions cannot mutate the live system at the same time.
 
+On resume after another session's release, reconcile current protected
+`master`, the actual deployed generation, and the exact retained artifacts
+before selecting remaining work. Source promotion and deployed state are
+different facts. Do not replay an old data, infrastructure, deployment,
+activation, or recovery plan from stale notes. Reuse unchanged source reviews
+only under [[Agents]]; current runtime and release provenance still need their
+own evidence. Respect an explicit pause rather than interpreting resume
+notes as authority to continue operations.
+
 ## End-to-end release structure
 
 ```mermaid
 flowchart LR
-    Branch["Focused branch"] --> DevPR["PR to dev"]
+    Branch["Focused branch"] --> Docs["Documentation-impact assessment"]
+    Docs --> Candidate["Complete code and documentation candidate"]
+    Docs -. affected pages .-> Wiki["Canonical public wiki<br/>edited in the same PR"]
+    Wiki --> Candidate
+    Candidate --> DevPR["PR to dev"]
     DevPR --> DevChecks["Architecture, review,<br/>tests, and trusted CI"]
     DevChecks --> Dev["dev"]
-    Dev --> Docs["Documentation-impact evidence"]
-    Docs --> Promote["dev to master PR"]
-    Docs -. affected pages .-> Wiki["Canonical public wiki<br/>updated in the PR"]
-    Wiki -. included before review .-> Promote
+    Dev --> Promote["dev to master PR"]
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
     MergeChecks --> Master["master"]
     Master --> Build["Exact-SHA builds"]
@@ -388,7 +398,7 @@ change instead records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-final validation.
+immutable critic review and final validation.
 
 After merge, changed repository pages are published byte-for-byte to the
 GitHub wiki and their links are verified. Matching reusable-agent guidance,

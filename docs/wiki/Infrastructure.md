@@ -39,6 +39,7 @@ flowchart TB
         Broker[("RabbitMQ")]
         Database[("MongoDB<br/>persistent volume")]
 
+        Auth --> Broker
         Event <--> Broker
         Slip <--> Broker
         Bet <--> Broker

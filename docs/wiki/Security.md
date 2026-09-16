@@ -67,8 +67,12 @@ are not authority for accounts, bets, moderation, or settlement.
 Public Telemetry POST and GET traffic is bounded by global, non-identifying,
 process-local limits. Rejected requests return a fixed sanitized `429`
 response. The summary uses a five-second cache with singleflight refresh, and
-stored observations expire after 30 days. Telemetry does not derive or retain
-IP- or session-based identity.
+stored observations are eligible for TTL deletion after 30 days. Telemetry
+does not derive or retain IP- or session-based identity. Random observation
+IDs and hashed domain deduplication keys stay internal; raw business payloads
+are not persisted or returned. This is data minimization, not a claim that
+hashed keys are anonymous identities or that public counts verify human
+activity. See [[Application Processes]] for the exact counter meanings.
 
 Release recovery keeps raw Kubernetes objects, ingress patches, HTTP
 headers/bodies, command output, and requested URLs in private temporary
@@ -92,7 +96,9 @@ uploaded recovery evidence.
 
 - Critical publishers wait for RabbitMQ confirmation.
 - Mutation state and pending-publication state are persisted together.
-- Consumers are duplicate-safe and persist before acknowledging.
+- Business consumers are duplicate-safe and persist before acknowledging;
+  best-effort Telemetry may discard observations as described in
+  [[Message Flows]].
 - Services park valid out-of-order updates and replay them after the parent
   record appears.
 - Each service owns a separate logical database even though production shares
