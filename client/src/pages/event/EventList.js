@@ -95,6 +95,29 @@ const getEventCardClass = (eventCount, expandSingle = false) => {
   }
   return 'col-12 col-md-6 col-xl-4';
 };
+
+const compareUpperLiveEvents = (left, right) => {
+  const leftKickoff = getScheduledKickoffTime(left);
+  const rightKickoff = getScheduledKickoffTime(right);
+
+  if (leftKickoff !== rightKickoff) {
+    if (leftKickoff === null) {
+      return 1;
+    }
+    if (rightKickoff === null) {
+      return -1;
+    }
+    return leftKickoff - rightKickoff;
+  }
+
+  const leftEventId = String(left?.eventId ?? '');
+  const rightEventId = String(right?.eventId ?? '');
+  if (leftEventId === rightEventId) {
+    return 0;
+  }
+  return leftEventId < rightEventId ? -1 : 1;
+};
+
 const EMPTY_EVENT_IDS = new Set();
 
 const FeedStatus = ({ feedState }) => {
@@ -548,16 +571,16 @@ const HandleEventList = ({
     visibleOfflineEventIds,
   ]);
 
-  const liveEvents = eventItems.filter(isLiveEvent);
+  const liveEvents = eventItems.filter(isLiveEvent).sort(compareUpperLiveEvents);
   const countdownEvents = eventItems.filter((event) => (
     !isLiveEvent(event) && isInCountdownWindow(event, now)
-  ));
+  )).sort(compareUpperLiveEvents);
   const preMatchEvents = eventItems.filter((event) => (
     !isLiveEvent(event)
     && !isFinishedLiveEvent(event)
     && !countdownEvents.some((countdownEvent) => countdownEvent.eventId === event.eventId)
   ));
-  const upperLiveEvents = [...countdownEvents, ...liveEvents];
+  const upperLiveEvents = [...liveEvents, ...countdownEvents];
   const upperLiveCardClass = getEventCardClass(upperLiveEvents.length, true);
   const preMatchCardClass = getEventCardClass(preMatchEvents.length);
   const singleEventCardClass = getEventCardClass(1, true);
@@ -588,23 +611,18 @@ const HandleEventList = ({
     <FeedStatus feedState={feedState} />
     {nextLiveEvent ? <NextLiveEvent event={nextLiveEvent} uiVariant={uiVariant} /> : null}
     {upperLiveEvents.length > 0 ? <EventSection title="Live now" uiVariant={uiVariant}>
-      {countdownEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
-        <CountdownEventCard
-          event={event}
-          now={now}
-          onSelectionPlaced={onSelectionPlaced}
-          selectedSelectionKeys={selectedSelectionKeys}
-          uiVariant={uiVariant}
-        />
-      </div>)}
-      {liveEvents.map((event) => <div className={upperLiveCardClass} key={event.eventId}>
-        <LiveEventCard
-          event={event}
-          onSelectionPlaced={onSelectionPlaced}
-          selectedSelectionKeys={selectedSelectionKeys}
-          uiVariant={uiVariant}
-        />
-      </div>)}
+      {upperLiveEvents.map((event) => {
+        const UpperLiveEventCard = isLiveEvent(event) ? LiveEventCard : CountdownEventCard;
+        return <div className={upperLiveCardClass} key={event.eventId}>
+          <UpperLiveEventCard
+            event={event}
+            now={now}
+            onSelectionPlaced={onSelectionPlaced}
+            selectedSelectionKeys={selectedSelectionKeys}
+            uiVariant={uiVariant}
+          />
+        </div>;
+      })}
     </EventSection> : null}
     {visibleRetainedFinishedEvent ? <EventSection title="Recently finished" uiVariant={uiVariant}>
       <div className={singleEventCardClass} key={visibleRetainedFinishedEvent.eventId}>
