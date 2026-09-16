@@ -30,7 +30,7 @@ DEPLOY_RUN_ID=34068978832
 DATA_RUN_ID=34068138505
 INFRA_RUN_ID=34039847193
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
-QUIESCED=(bet event gamemaster moderation resulting slip)
+QUIESCED=(backoffice bet event gamemaster moderation resulting slip)
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -236,14 +236,14 @@ STATE_DIR="${FAKE_STATE_DIR}"
 case "$1" in
   verify-held)
     [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] || { echo "not held" >&2; exit 1; }
-    for service in bet event gamemaster moderation resulting slip; do
+    for service in backoffice bet event gamemaster moderation resulting slip; do
       [[ "$(cat "$STATE_DIR/replicas-$service")" == "0" ]] ||
         { echo "writer is not quiesced" >&2; exit 1; }
     done
     echo "live_data_maintenance=verify-held status=PASS" ;;
   hold)
     if [[ "${FAKE_REHOLD_FAILS:-0}" == "1" ]]; then echo "hold failed" >&2; exit 1; fi
-    for service in bet event gamemaster moderation resulting slip; do
+    for service in backoffice bet event gamemaster moderation resulting slip; do
       printf '0\n' >"$STATE_DIR/replicas-$service"
     done
     printf 'held\n' >"$STATE_DIR/maintenance"; echo "held" ;;
@@ -395,11 +395,11 @@ done
   fail 'raw lock release output leaked into fenced recovery evidence'
 [[ ! -e "$OUT_DIR/fenced-fence-release.txt" ]] ||
   fail 'raw fence release output leaked into fenced recovery evidence'
-# Restore order must lead with API dependencies and end with Gamemaster.
+# Restore order must lead with Auth and restore Backoffice last.
 [[ "$(head -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "auth" ]] ||
   fail 'fenced restore order did not start with auth'
-[[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "gamemaster" ]] ||
-  fail 'fenced restore order did not end with gamemaster'
+[[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "backoffice" ]] ||
+  fail 'fenced restore order did not restore Backoffice last'
 
 for route_host_mode in same-host unexpected; do
   new_case "invalid-route-hosts-$route_host_mode"
@@ -415,7 +415,7 @@ done
 
 # Every recovery checkpoint is replayable: a second invocation may observe an
 # exact baseline prefix and candidate suffix in the reviewed restore order.
-RECOVERY_ORDER=(auth bet backoffice event moderation resulting slip client gamemaster)
+RECOVERY_ORDER=(auth bet event moderation resulting slip client gamemaster backoffice)
 for checkpoint in "${!RECOVERY_ORDER[@]}"; do
   new_case "recovery-checkpoint-$checkpoint"
   for ((index = 0; index <= checkpoint; index++)); do
@@ -480,11 +480,11 @@ EOF
   ) >"$BASELINE_DIR/SHA256SUMS"
 }
 
-FORWARD_WRITERS=(bet event moderation resulting slip gamemaster)
+FORWARD_WRITERS=(bet event moderation resulting slip backoffice gamemaster)
 configure_cleanup_overlay() {
   local split="$1" index service
   configure_first_activation no-routes
-  for service in auth backoffice client; do
+  for service in auth client; do
     printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
   done
   for ((index = 0; index < split; index++)); do
@@ -520,7 +520,7 @@ for invalid in writer-gap writer-suffix reader-baseline foreign-image active-wri
   case "$invalid" in
     writer-gap) printf '%s\n' "$(image_for deployed event)" >"$STATE_DIR/image-event" ;;
     writer-suffix)
-      for service in event moderation resulting slip gamemaster; do
+      for service in event moderation resulting slip backoffice gamemaster; do
         printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
       done ;;
     reader-baseline) printf '%s\n' "$(image_for target auth)" >"$STATE_DIR/image-auth" ;;

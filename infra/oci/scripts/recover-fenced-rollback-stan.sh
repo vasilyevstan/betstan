@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # This operator exists because the ordinary rollback path deliberately requires
 # a healthy steady state. After an incomplete deployment re-enters maintenance,
-# production is intentionally fenced: the six live-data writer Deployments are
+# production is intentionally fenced: the seven live-data writer Deployments are
 # quiesced to zero, mutating HTTP is answered with 503, and the transferred
 # database lock is still held. That is a correct safety posture, but it also
 # means an ordinary rollback can never pass its pre-mutation gate, so the last
@@ -47,10 +47,10 @@ MAINTENANCE_SCRIPT="${MAINTENANCE_SCRIPT:-$SCRIPT_DIR/live-data-maintenance-stan
 LOCK_SCRIPT="${LOCK_SCRIPT:-$SCRIPT_DIR/shared-mongo-operation-lock-stan.sh}"
 TELEMETRY_RECOVERY_SCRIPT="${TELEMETRY_RECOVERY_SCRIPT:-$SCRIPT_DIR/verify-telemetry-recovery-state-stan.sh}"
 
-# Restore order mirrors the reviewed OCI deployment order: API dependencies
-# first, Client after them, Gamemaster last.
-RESTORE_ORDER=(auth bet backoffice event moderation resulting slip client gamemaster)
-QUIESCED_SERVICES=(bet event gamemaster moderation resulting slip)
+# Restore order brings API dependencies and Client back before Gamemaster,
+# then restores the quiesced Backoffice writer last.
+RESTORE_ORDER=(auth bet event moderation resulting slip client gamemaster backoffice)
+QUIESCED_SERVICES=(backoffice bet event gamemaster moderation resulting slip)
 
 MAINTENANCE_REHELD=false
 MAINTENANCE_REHOLD_STATUS=not-required
@@ -504,10 +504,10 @@ forward_order = [
     "slip", "backoffice", "client", "gamemaster",
 ]
 recovery_order = [
-    "auth", "bet", "backoffice", "event", "moderation",
-    "resulting", "slip", "client", "gamemaster",
+    "auth", "bet", "event", "moderation", "resulting",
+    "slip", "client", "gamemaster", "backoffice",
 ]
-cleanup_readers = {"auth", "backoffice", "client"}
+cleanup_readers = {"auth", "client"}
 writer_order = [service for service in forward_order if service not in cleanup_readers]
 
 def read(path, image_column):

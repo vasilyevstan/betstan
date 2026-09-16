@@ -900,13 +900,13 @@ jobs:
                 -o jsonpath='{.spec.template.spec.containers[0].image}'
             )"
             case "$service" in
-              auth|backoffice|client)
+              auth|client)
                 if [ "$actual_ref" != "$expected_ref" ]; then
                   echo "::error::Resume candidate-only deployment image mismatch for ${service}"
                   exit 1
                 fi
                 ;;
-              bet|event|gamemaster|moderation|resulting|slip)
+              backoffice|bet|event|gamemaster|moderation|resulting|slip)
                 if [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
                   if [ "$actual_ref" != "$expected_ref" ]; then
                     echo "::error::Resume candidate-only deployment image mismatch for ${service}"
@@ -938,7 +938,7 @@ jobs:
             esac
           done
 
-          for service in auth backoffice client; do
+          for service in auth client; do
             expected_manifest="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$4 }

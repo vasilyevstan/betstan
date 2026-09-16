@@ -41,9 +41,9 @@ MAINTENANCE_LIVE_IMAGES_FILE="${MAINTENANCE_LIVE_IMAGES_FILE:-}"
 MAINTENANCE_MAX_QUEUE_READY="${MAINTENANCE_MAX_QUEUE_READY:-80}"
 MAINTENANCE_MAX_QUEUE_UNACK="${MAINTENANCE_MAX_QUEUE_UNACK:-80}"
 ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
-# The six live-data writer Deployments the maintenance handoff quiesces. Every
+# The seven live-data writer Deployments the maintenance handoff quiesces. Every
 # other Deployment must still be fully ready behind the fence.
-MAINTENANCE_QUIESCED_SERVICES=(bet event gamemaster moderation resulting slip)
+MAINTENANCE_QUIESCED_SERVICES=(backoffice bet event gamemaster moderation resulting slip)
 API_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
@@ -56,6 +56,7 @@ API_CONTRACTS=(
 # Behind the maintenance fence the quiesced application paths must answer 503
 # and the still-served paths must answer their ordinary contract.
 MAINTENANCE_FENCED_CONTRACTS=(
+  "/api/backoffice|503"
   "/api/event|503"
   "/api/slip|503"
   "/api/bet|503"
@@ -64,7 +65,6 @@ MAINTENANCE_FENCED_CONTRACTS=(
 MAINTENANCE_SERVED_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
-  "/api/backoffice|backoffice"
 )
 
 prepare_private_dir() {
