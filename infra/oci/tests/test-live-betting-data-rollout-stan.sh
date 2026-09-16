@@ -434,9 +434,13 @@ if [[ "${1:-}" == "logs" ]]; then
     remaining_candidate_count=2
     digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
     if [[ "$scenario" == "cleanup-applied" ]]; then
-      cleanup_state=applied
       journaled_count=2
       remaining_candidate_count=0
+      if [[ "$mode" == "verify" ]]; then
+        cleanup_state=verified
+      else
+        cleanup_state=applied
+      fi
     elif [[ "$mode" == "apply" ]]; then
       cleanup_state=applied
       journaled_count=2
@@ -1346,6 +1350,41 @@ grep -Fxq \
 grep -Fxq 'prerequisite_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq 'applied_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq "applied_source_sha=$SOURCE_SHA" <<<"$normal_resolution"
+
+same_sha_recovery_baseline="$work_dir/same-sha-recovery-baseline"
+same_sha_recovery_baseline_sha="$(
+  make_resume_baseline "$same_sha_recovery_baseline" 4020 0
+)"
+same_sha_recovery_output="$work_dir/same-sha-recovery"
+run_phase \
+  apply-slip-index \
+  cleanup-applied \
+  4020 \
+  "$same_sha_recovery_output" \
+  0 \
+  none \
+  "$same_sha_recovery_baseline_sha"
+jq -e '
+  .mode == "apply" and
+  .state == "applied" and
+  .counts.deletedCount == 0 and
+  .counts.remainingCandidateCount == 0 and
+  .counts.remainingJournalCount == 0
+' "$same_sha_recovery_output/reports/apply-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "same-SHA recovery did not accept the already-applied cleanup journal"
+jq -e '
+  .mode == "verify" and
+  .state == "verified" and
+  .counts.remainingCandidateCount == 0 and
+  .counts.remainingJournalCount == 0
+' "$same_sha_recovery_output/reports/verify-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "same-SHA recovery did not reconverge the cleanup to verified"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=true' \
+  "$same_sha_recovery_output/schema.env" ||
+  fail "same-SHA recovery did not emit final cleanup completion evidence"
 
 unknown_version_output="$work_dir/unknown-version"
 cp -R "$final_output" "$unknown_version_output"
@@ -2644,41 +2683,88 @@ handoff = data[
     data.index("- name: Capture post-phase runtime baseline")
 ]
 for literal in (
+    'if [ "$PHASE" = "apply-slip-index" ]; then',
     'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
     '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
     '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
+    "live-data-maintenance-stan.sh hold",
     "live-data-maintenance-stan.sh restore",
     "live-data-maintenance-stan.sh verify-held",
+    'LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS"',
+    "shared-mongo-operation-lock-stan.sh renew",
+    "shared-mongo-operation-lock-stan.sh verify",
 ):
     if literal not in handoff:
         raise SystemExit(
-            f"data workflow does not restore released runtime after phase failure: {literal}"
+            f"data workflow does not retain final cleanup or restore non-final runtime: {literal}"
         )
+final_hold = handoff[
+    handoff.index('if [ "$PHASE" = "apply-slip-index" ]; then'):
+    handoff.index("              return")
+]
+if "live-data-maintenance-stan.sh restore" in final_hold:
+    raise SystemExit("final data failure can restore an incompatible Backoffice listener")
+if not (
+    final_hold.index("live-data-maintenance-stan.sh hold")
+    < final_hold.index("live-data-maintenance-stan.sh verify-held")
+    < final_hold.index("shared-mongo-operation-lock-stan.sh renew")
+    < final_hold.index("shared-mongo-operation-lock-stan.sh verify")
+):
+    raise SystemExit("final data failure does not re-hold writers before renewing its lock")
 
 abort = data[
     data.index("- name: Restore runtime or retain hold if final handoff packaging failed"):
     data.index("- name: Release database operation lock unless handed to deploy")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
-    '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
-    '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
-    "live-data-maintenance-stan.sh restore",
+    "STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv",
+    "live-data-maintenance-stan.sh hold",
     "live-data-maintenance-stan.sh verify-held",
+    'LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS"',
+    "shared-mongo-operation-lock-stan.sh renew",
+    "shared-mongo-operation-lock-stan.sh verify",
 ):
     if literal not in abort:
         raise SystemExit(
             f"data workflow does not retain a failed-deploy hold on abort: {literal}"
+        )
+for forbidden in (
+    "live-data-maintenance-stan.sh restore",
+    "shared-mongo-operation-lock-stan.sh release",
+):
+    if forbidden in abort:
+        raise SystemExit(
+            f"final handoff abort can release the cleanup safety boundary: {forbidden}"
+        )
+
+release = data[
+    data.index("- name: Release database operation lock unless handed to deploy"):
+    data.index("- name: Revoke exact runner rule")
+]
+for literal in (
+    "inputs.phase != 'apply-slip-index'",
+    "steps.maintenance_enter.outcome != 'success'",
+    "shared-mongo-operation-lock-stan.sh release",
+    "shared-mongo-operation-lock-stan.sh verify-released",
+):
+    if literal not in release:
+        raise SystemExit(f"data workflow lock release guard is incomplete: {literal}")
+for unsafe in (
+    "steps.abort_handoff.outcome == 'success'",
+    "steps.data.outcome == 'success'",
+):
+    if unsafe in release:
+        raise SystemExit(
+            f"final cleanup lock release still depends on an unsafe outcome: {unsafe}"
         )
 
 resume_mode_env = (
     "RESUME_MAINTENANCE_MODE: "
     "${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}"
 )
-if data.count(resume_mode_env) != 3:
+if data.count(resume_mode_env) != 2:
     raise SystemExit(
-        "data workflow must bind the resume maintenance mode to exactly three "
-        "maintenance and cleanup steps"
+        "data workflow must bind resume mode only to entry and non-final restoration"
     )
 
 for literal in (

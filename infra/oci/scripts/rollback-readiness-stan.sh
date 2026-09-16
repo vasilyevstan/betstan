@@ -28,6 +28,8 @@ AUTH_CONTAINER="${AUTH_CONTAINER:-gaming-auth}"
 BACKOFFICE_MONGO_SELECTOR="${BACKOFFICE_MONGO_SELECTOR:-app=gaming-auth-mongo}"
 BACKOFFICE_DB_NAME="${BACKOFFICE_DB_NAME:-gaming_backoffice}"
 BACKOFFICE_EVENT_COLLECTION="${BACKOFFICE_EVENT_COLLECTION:-events}"
+BACKOFFICE_CLEANUP_JOURNAL_COLLECTION="preseptembereventcleanupoperations"
+BACKOFFICE_CLEANUP_OPERATION_ID="backoffice-events-before:2026-09-01T00:00:00Z"
 BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS="${BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS:-13}"
 BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS="${BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS:-5}"
 # Readiness phase. "steady-state" is the only ordinary value and keeps every
@@ -400,6 +402,9 @@ TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS="unknown"
 BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="unknown"
 BACKOFFICE_PENDING_PUBLICATION_COUNT="unknown"
 TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="unknown"
+BACKOFFICE_CLEANUP_ROLLBACK_CHECK="unknown"
+BACKOFFICE_CLEANUP_JOURNAL_STATE="unknown"
+TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="unknown"
 
 for service in "${ROLLBACK_SERVICES[@]}"; do
   deployment="gaming-${service}-depl"
@@ -560,6 +565,104 @@ PY
 fi
 
 if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+  [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  if oci_target_supports_backoffice_pre_september_cleanup_guard \
+      "$TARGET_SHA"; then
+    TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="true"
+  else
+    TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="false"
+  fi
+
+  backoffice_mongo_pod="$(
+    kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$BACKOFFICE_MONGO_SELECTOR" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  )"
+  if [[ -z "$backoffice_mongo_pod" ]]; then
+    BACKOFFICE_CLEANUP_ROLLBACK_CHECK="missing-mongo"
+    failures_file_append \
+      "Backoffice cleanup rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
+  else
+    backoffice_cleanup_query="
+const rows = db.getCollection('${BACKOFFICE_CLEANUP_JOURNAL_COLLECTION}')
+  .find({_id: '${BACKOFFICE_CLEANUP_OPERATION_ID}'})
+  .limit(2)
+  .toArray();
+let result = 'invalid';
+if (rows.length === 0) {
+  result = 'absent';
+} else if (rows.length === 1) {
+  const journal = rows[0];
+  const identities = journal.identities;
+  const stateIsValid = journal.state === 'prepared' || journal.state === 'applied';
+  const identitiesAreValid = Array.isArray(identities)
+    && identities.length === journal.candidateCount
+    && identities.every((identity) =>
+      identity !== null
+      && typeof identity === 'object'
+      && typeof identity.eventId === 'string'
+      && identity.eventId.length > 0
+      && typeof identity.time === 'string'
+    );
+  if (
+    journal._id === '${BACKOFFICE_CLEANUP_OPERATION_ID}'
+    && journal.schemaVersion === 'backoffice-pre-september-events-cleanup-v1'
+    && journal.operation === 'delete-backoffice-events-before-cutoff'
+    && journal.cutoff === '2026-09-01T00:00:00Z'
+    && typeof journal.sourceSha === 'string'
+    && /^[0-9a-f]{40}\$/.test(journal.sourceSha)
+    && stateIsValid
+    && Number.isInteger(journal.candidateCount)
+    && journal.candidateCount >= 0
+    && typeof journal.digest === 'string'
+    && /^[0-9a-f]{64}\$/.test(journal.digest)
+    && identitiesAreValid
+  ) {
+    result = journal.state;
+  }
+}
+print(result);
+"
+    if ! cleanup_state_output="$(
+      kubectl exec -n "$OCI_K8S_NAMESPACE" "$backoffice_mongo_pod" -- \
+        mongosh --quiet "mongodb://localhost:27017/${BACKOFFICE_DB_NAME}" \
+        --eval "$backoffice_cleanup_query" 2>/dev/null
+    )"; then
+      BACKOFFICE_CLEANUP_ROLLBACK_CHECK="query-failed"
+      failures_file_append \
+        "Backoffice cleanup rollback compatibility: unable to inspect the fixed cleanup journal"
+    else
+      BACKOFFICE_CLEANUP_JOURNAL_STATE="$(
+        tail -n 1 <<<"$cleanup_state_output" | tr -d '\r[:space:]'
+      )"
+      case "$BACKOFFICE_CLEANUP_JOURNAL_STATE" in
+        absent)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="not-started"
+          ;;
+        prepared)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="recovery-required"
+          failures_file_append \
+            "Backoffice cleanup rollback compatibility: the prepared fixed cleanup requires exact-source recovery before rollback"
+          ;;
+        applied)
+          if [[ "$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD" == "true" ]]; then
+            BACKOFFICE_CLEANUP_ROLLBACK_CHECK="compatible-target"
+          else
+            BACKOFFICE_CLEANUP_ROLLBACK_CHECK="incompatible-target"
+            failures_file_append \
+              "Backoffice cleanup rollback compatibility: target at $TARGET_SHA lacks the fixed pre-cutoff replay guard required by the applied cleanup"
+          fi
+          ;;
+        *)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="invalid-journal"
+          failures_file_append \
+            "Backoffice cleanup rollback compatibility: fixed cleanup journal state is invalid"
+          ;;
+      esac
+    fi
+  fi
+fi
+
+if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
   [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]] &&
   [[ "$BACKOFFICE_EVENT_COLLECTION" =~ ^[A-Za-z0-9_-]+$ ]] &&
   [[ "$BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] &&
@@ -570,10 +673,6 @@ if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
     BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="compatible-target"
   else
     TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="false"
-    backoffice_mongo_pod="$(
-      kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$BACKOFFICE_MONGO_SELECTOR" \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
-    )"
     if [[ -z "$backoffice_mongo_pod" ]]; then
       BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="missing-mongo"
       failures_file_append "Backoffice publication rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
@@ -730,6 +829,9 @@ target_supports_normalized_identifiers=$TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS
 backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
 backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
 target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+backoffice_cleanup_rollback_check=$BACKOFFICE_CLEANUP_ROLLBACK_CHECK
+backoffice_cleanup_journal_state=$BACKOFFICE_CLEANUP_JOURNAL_STATE
+target_supports_backoffice_cleanup_guard=$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD
 rollback_operator=
 EOF
 

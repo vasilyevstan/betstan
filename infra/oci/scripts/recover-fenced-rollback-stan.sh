@@ -67,6 +67,21 @@ write_text_atomic() {
   mv "$temporary" "$target"
 }
 
+read_summary_value() {
+  local path="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    $1 == key {
+      count += 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  ' "$path"
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -670,6 +685,45 @@ fi
 [[ "$(awk -F '=' '$1 == "phase" {print $2}' \
   "$FENCED_READINESS_DIR/summary.env")" == "maintenance-fenced" ]] ||
   oci_die "readiness summary phase is not maintenance-fenced"
+if oci_target_supports_backoffice_pre_september_cleanup_guard "$TARGET_SHA"; then
+  target_supports_cleanup_guard=true
+else
+  target_supports_cleanup_guard=false
+fi
+readiness_supports_cleanup_guard="$(
+  read_summary_value \
+    "$FENCED_READINESS_DIR/summary.env" \
+    target_supports_backoffice_cleanup_guard
+)" || oci_die "readiness summary is missing the Backoffice cleanup guard capability"
+cleanup_journal_state="$(
+  read_summary_value \
+    "$FENCED_READINESS_DIR/summary.env" \
+    backoffice_cleanup_journal_state
+)" || oci_die "readiness summary is missing the fixed Backoffice cleanup journal state"
+cleanup_rollback_check="$(
+  read_summary_value \
+    "$FENCED_READINESS_DIR/summary.env" \
+    backoffice_cleanup_rollback_check
+)" || oci_die "readiness summary is missing the fixed Backoffice cleanup rollback check"
+[[ "$readiness_supports_cleanup_guard" == "$target_supports_cleanup_guard" ]] ||
+  oci_die "readiness cleanup guard capability does not match the exact rollback target"
+case "$cleanup_journal_state" in
+  absent)
+    [[ "$cleanup_rollback_check" == "not-started" ]] ||
+      oci_die "readiness did not prove the fixed Backoffice cleanup is absent"
+    ;;
+  prepared)
+    oci_die "the prepared fixed Backoffice cleanup requires exact-source recovery"
+    ;;
+  applied)
+    [[ "$target_supports_cleanup_guard" == "true" &&
+      "$cleanup_rollback_check" == "compatible-target" ]] ||
+      oci_die "the fenced rollback target lacks the fixed Backoffice cleanup replay guard"
+    ;;
+  *)
+    oci_die "readiness returned an invalid fixed Backoffice cleanup journal state"
+    ;;
+esac
 
 # Mutation begins here. Every later failure re-holds maintenance.
 FENCED_MUTATION_STARTED=true

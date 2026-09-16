@@ -599,6 +599,29 @@ EOF_PUBLICATION_SERVICE
     [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
     printf '%s\n' 'await publicationService.start()'
     ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/event/listener/NewEventListener.ts")
+    [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'EOF_CLEANUP_LISTENER'
+import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";
+if (isBeforePreSeptemberCleanupCutoff(data.time)) {
+  this.channel.ack(msg);
+  return;
+}
+await Event.updateOne(
+EOF_CLEANUP_LISTENER
+    ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/event/preSeptemberCleanupBoundary.ts")
+    [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'EOF_CLEANUP_BOUNDARY'
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF =
+  "2026-09-01T00:00:00Z" as const;
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF_MS =
+  Date.UTC(2026, 8, 1, 0, 0, 0, 0);
+export const isBeforePreSeptemberCleanupCutoff = (
+const parsed = parseExplicitZoneTimestamp(value);
+return parsed !== null && parsed < PRE_SEPTEMBER_CLEANUP_CUTOFF_MS;
+EOF_CLEANUP_BOUNDARY
+    ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
       current)
@@ -1338,6 +1361,10 @@ EOF_QUEUES
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
         "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
+    elif [[ "$*" == *"preseptembereventcleanupoperations"* ]]; then
+      [[ "${STUB_BACKOFFICE_CLEANUP_QUERY_FAIL:-0}" != "1" ]] || exit 1
+      printf '%s\n' \
+        "${STUB_BACKOFFICE_CLEANUP_OUTPUT:-${STUB_BACKOFFICE_CLEANUP_STATE:-absent}}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/gaming_backoffice"* ]]; then
       [[ "${STUB_BACKOFFICE_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' \
@@ -1367,6 +1394,18 @@ EOF_QUEUES
 image=$image
 revision=8
 EOF_STATE
+    if [[ "$service" == "backoffice" &&
+      -n "${STUB_PRE_CUTOFF_REDELIVERY_FILE:-}" &&
+      -f "$STUB_PRE_CUTOFF_REDELIVERY_FILE" ]]; then
+      if [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]]; then
+        printf 'ack-skipped\n' \
+          >"${STUB_PRE_CUTOFF_REDELIVERY_FILE}.result"
+      else
+        mv \
+          "$STUB_PRE_CUTOFF_REDELIVERY_FILE" \
+          "${STUB_PRE_CUTOFF_REDELIVERY_FILE}.processed"
+      fi
+    fi
     printf '%s\n' "$service" >>"$STUB_KUBECTL_LOG"
     ;;
   rollout)
@@ -2311,8 +2350,70 @@ assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" '
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_publication_replay=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_cleanup_rollback_check=not-started'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_cleanup_journal_state=absent'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_cleanup_guard=false'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+cleanup_redelivery="$WORK_DIR/queued-pre-cutoff-redelivery"
+printf 'queued\n' >"$cleanup_redelivery"
+cleanup_incompatible_output="$WORK_DIR/oci-backoffice-cleanup-applied-incompatible"
+if run_script "$cleanup_incompatible_output" \
+    STUB_BACKOFFICE_CLEANUP_STATE=applied \
+    STUB_PRE_CUTOFF_REDELIVERY_FILE="$cleanup_redelivery" \
+    ROLLBACK_MODE=execute >"$cleanup_incompatible_output.out" 2>&1; then
+  fail 'OCI rollback accepted an incompatible listener after cleanup apply'
+fi
+assert_contains "$cleanup_incompatible_output.out" \
+  'OCI rollback readiness rejected the rollback'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=incompatible-target'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_journal_state=applied'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=false'
+[[ -f "$cleanup_redelivery" &&
+   ! -e "${cleanup_redelivery}.processed" &&
+   ! -e "${cleanup_redelivery}.result" ]] ||
+  fail 'incompatible rollback processed queued pre-cutoff redelivery'
+[[ ! -s "$STATE_DIR/oci-backoffice-cleanup-applied-incompatible/kubectl.log" ]] ||
+  fail 'incompatible cleanup rollback mutated an application image'
+
+run_expect_failure oci-backoffice-cleanup-prepared \
+  STUB_TARGET_HAS_CLEANUP_GUARD=1 \
+  STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+  STUB_BACKOFFICE_CLEANUP_STATE=prepared \
+  ROLLBACK_MODE=dry-run
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-prepared/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=recovery-required'
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-prepared/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=true'
+
+run_expect_failure oci-backoffice-cleanup-query-failed \
+  STUB_BACKOFFICE_CLEANUP_QUERY_FAIL=1 \
+  ROLLBACK_MODE=dry-run
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-query-failed/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=query-failed'
+
+cleanup_compatible_output="$WORK_DIR/oci-backoffice-cleanup-applied-compatible"
+if ! run_script "$cleanup_compatible_output" \
+    STUB_TARGET_HAS_CLEANUP_GUARD=1 \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+    STUB_BACKOFFICE_CLEANUP_STATE=applied \
+    ROLLBACK_MODE=dry-run >"$cleanup_compatible_output.out" 2>&1; then
+  cat "$cleanup_compatible_output.out" >&2
+  fail 'OCI rollback rejected a guard-compatible applied cleanup target'
+fi
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=compatible-target'
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_journal_state=applied'
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=true'
 
 run_expect_failure oci-backoffice-publication-pending \
   STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 ROLLBACK_MODE=dry-run

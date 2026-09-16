@@ -295,6 +295,39 @@ esac
 echo "shared_mongo_lock=$1 status=PASS"
 EOF
 
+  cat >"$BIN_DIR/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "show ${TARGET_SHA}:backoffice/src/event/listener/NewEventListener.ts")
+    [[ "${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'SOURCE'
+import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";
+if (isBeforePreSeptemberCleanupCutoff(data.time)) {
+  this.channel.ack(msg);
+  return;
+}
+await Event.updateOne(
+SOURCE
+    ;;
+  "show ${TARGET_SHA}:backoffice/src/event/preSeptemberCleanupBoundary.ts")
+    [[ "${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'SOURCE'
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF =
+  "2026-09-01T00:00:00Z" as const;
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF_MS =
+  Date.UTC(2026, 8, 1, 0, 0, 0, 0);
+export const isBeforePreSeptemberCleanupCutoff = (
+const parsed = parseExplicitZoneTimestamp(value);
+return parsed !== null && parsed < PRE_SEPTEMBER_CLEANUP_CUTOFF_MS;
+SOURCE
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+
   # Readiness fake: asserts the phase contract the operator must request.
   cat >"$BIN_DIR/readiness" <<'EOF'
 #!/usr/bin/env bash
@@ -302,6 +335,33 @@ set -euo pipefail
 mkdir -p "$OUTPUT_DIR"
 phase="${ROLLBACK_READINESS_PHASE:-steady-state}"
 status=GO
+cleanup_state="${FAKE_BACKOFFICE_CLEANUP_STATE:-absent}"
+cleanup_guard="${FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD:-${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}}"
+if [[ "$cleanup_guard" == "1" ]]; then
+  cleanup_guard=true
+else
+  cleanup_guard=false
+fi
+case "$cleanup_state:$cleanup_guard" in
+  absent:*)
+    cleanup_check=not-started
+    ;;
+  applied:true)
+    cleanup_check=compatible-target
+    ;;
+  applied:false)
+    cleanup_check=incompatible-target
+    status=NO_GO
+    ;;
+  prepared:*)
+    cleanup_check=recovery-required
+    status=NO_GO
+    ;;
+  *)
+    cleanup_check=invalid-journal
+    status=NO_GO
+    ;;
+esac
 if [[ "$phase" == "maintenance-fenced" ]]; then
   [[ -n "${MAINTENANCE_LIVE_IMAGES_FILE:-}" && -f "$MAINTENANCE_LIVE_IMAGES_FILE" ]] ||
     { echo "fenced readiness requires live images" >&2; exit 1; }
@@ -311,8 +371,14 @@ if [[ "$phase" == "maintenance-fenced" ]]; then
 else
   [[ "${FAKE_STEADY_READINESS:-GO}" == "GO" ]] && status=GO || status=NO_GO
 fi
-printf 'rollback_readiness=%s\nmode=application-rollback\nphase=%s\n' \
-  "$status" "$phase" >"$OUTPUT_DIR/summary.env"
+cat >"$OUTPUT_DIR/summary.env" <<SUMMARY
+rollback_readiness=$status
+mode=application-rollback
+phase=$phase
+backoffice_cleanup_rollback_check=$cleanup_check
+backoffice_cleanup_journal_state=$cleanup_state
+target_supports_backoffice_cleanup_guard=$cleanup_guard
+SUMMARY
 [[ "$status" == "GO" ]] || exit 1
 EOF
   chmod 755 "$BIN_DIR"/*
@@ -368,6 +434,31 @@ run_operator() {
   "$@" \
   "$OPERATOR"
 }
+
+# Applied cleanup plus an incompatible target must be rejected before the
+# recovery can restart Backoffice and consume a delayed pre-cutoff delivery.
+new_case cleanup-applied-incompatible
+printf 'queued\n' >"$STATE_DIR/pre-cutoff-redelivery"
+if run_operator \
+    FAKE_BACKOFFICE_CLEANUP_STATE=applied \
+    FAKE_TARGET_HAS_CLEANUP_GUARD=0 \
+    FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery trusted readiness evidence for an incompatible listener'
+fi
+assert_contains "$CASE_DIR/out.txt" \
+  'readiness cleanup guard capability does not match the exact rollback target'
+[[ "$(cat "$STATE_DIR/replicas-backoffice")" == "0" ]] ||
+  fail 'rejected fenced recovery restarted Backoffice'
+[[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+  fail 'rejected fenced recovery released the maintenance fence'
+[[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+  fail 'rejected fenced recovery released the database lock'
+[[ -f "$STATE_DIR/pre-cutoff-redelivery" ]] ||
+  fail 'rejected fenced recovery processed queued pre-cutoff redelivery'
+if grep -Eq '^(set image|scale) ' "$STATE_DIR/kubectl.log"; then
+  fail 'rejected fenced recovery mutated an image or replica count'
+fi
 
 # ------------------------------------------------------------ accepted case ---
 new_case accepted
