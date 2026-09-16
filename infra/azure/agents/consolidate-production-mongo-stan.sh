@@ -309,25 +309,172 @@ require_journal() {
   local expected_mode="$1"
   local expected_phase="$2"
   local actual
-  actual="$(
-    kubectl get configmap "$TOPOLOGY_CONFIGMAP" -n "$NAMESPACE" \
-      -o jsonpath='{.data.mode}|{.data.phase}|{.data.migration-id}|{.data.source-sha}' \
-      2>/dev/null || true
-  )"
+  actual="$(journal_state)" || fail "unable to confirm the migration journal"
   [[ "$actual" == "$expected_mode|$expected_phase|$MIGRATION_ID|$APPROVED_SHA" ]] ||
     fail "migration journal does not match this operation"
 }
 
+# Read only the two resource types whose absence authorizes a transition.
+# Return 0 for validated presence, 3 for the requested resource's native
+# NotFound, 1 for a retryable/unknown read error, and 2 for invalid evidence
+# or a proven permanent error. Never infer absence from empty output.
+read_transition_resource() (
+  local resource="$1" name="$2" timeout_seconds="$3"
+  local read_args=(get "$resource" "$name") output_file error_file command_status=0 read_status=0
+  case "$resource" in
+    configmap) read_args+=(-n "$NAMESPACE") ;;
+    pv) ;;
+    *) return 2 ;;
+  esac
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] &&
+    ((timeout_seconds <= 15)) || return 2
+  output_file="$(mktemp)" || return 2
+  error_file="$(mktemp)" || { rm -f -- "$output_file"; return 2; }
+  trap 'rm -f -- "$output_file" "$error_file"' EXIT
+  kubectl "${read_args[@]}" \
+    --request-timeout="${timeout_seconds}s" -o json \
+    >"$output_file" 2>"$error_file" || command_status=$?
+  python3 - "$output_file" "$error_file" "$command_status" \
+    "$resource" "$name" "$NAMESPACE" <<'PY' || read_status=$?
+import json
+import re
+import sys
+
+output_path, error_path, command_status, resource, name, namespace = sys.argv[1:]
+command_status = int(command_status)
+kind, plural = {
+    "configmap": ("ConfigMap", "configmaps"),
+    "pv": ("PersistentVolume", "persistentvolumes"),
+}[resource]
+
+def invalid():
+    raise SystemExit(2)
+
+def unique_object(pairs):
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("duplicate JSON field")
+        document[key] = value
+    return document
+
+try:
+    with open(output_path, encoding="utf-8") as handle:
+        output = handle.read().strip()
+    with open(error_path, encoding="utf-8") as handle:
+        error = handle.read().strip()
+except (OSError, UnicodeError):
+    invalid()
+
+def namespace_matches(document):
+    expected = namespace if resource == "configmap" else ""
+    return document.get("namespace", "") == expected
+
+if command_status == 0:
+    if error:
+        invalid()
+    try:
+        document = json.loads(
+            output, object_pairs_hook=unique_object, parse_constant=lambda _value: invalid(),
+        )
+    except ValueError:
+        invalid()
+    if not isinstance(document, dict):
+        invalid()
+    metadata = document.get("metadata")
+    if (
+        document.get("apiVersion") != "v1"
+        or document.get("kind") != kind
+        or not isinstance(metadata, dict)
+        or metadata.get("name") != name
+        or not namespace_matches(metadata)
+    ):
+        invalid()
+    if resource == "configmap":
+        data = document.get("data")
+        if not isinstance(data, dict):
+            invalid()
+        fields = ("mode", "phase", "migration-id", "source-sha")
+        patterns = (
+            r"[a-z][a-z-]*", r"[a-z][a-z-]*",
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r"[0-9a-f]{40}",
+        )
+        for field, pattern in zip(fields, patterns):
+            if not isinstance(data.get(field), str) or not re.fullmatch(pattern, data[field]):
+                invalid()
+        print("|".join(data[field] for field in fields))
+    raise SystemExit(0)
+
+# A failed/terminated transport carrying partial success bytes is not absence.
+if command_status != 1:
+    raise SystemExit(1)
+streams = [value for value in (output, error) if value]
+if len(streams) != 1:
+    raise SystemExit(1)
+evidence = streams[0]
+message = f'{plural} "{name}" not found'
+if evidence == f"Error from server (NotFound): {message}" and not output:
+    raise SystemExit(3)
+try:
+    status = json.loads(
+        evidence, object_pairs_hook=unique_object, parse_constant=lambda _value: invalid(),
+    )
+except ValueError:
+    if re.fullmatch(r"Error from server \((Forbidden|Unauthorized|NotFound)\): [^\r\n]+", evidence):
+        invalid()
+    if evidence == "error: You must be logged in to the server (Unauthorized)":
+        invalid()
+    raise SystemExit(1)
+if (
+    not isinstance(status, dict)
+    or status.get("apiVersion") != "v1"
+    or status.get("kind") != "Status"
+    or status.get("status") != "Failure"
+    or type(status.get("code")) is not int
+):
+    invalid()
+if (status["code"], status.get("reason")) in ((401, "Unauthorized"), (403, "Forbidden")):
+    invalid()
+details = status.get("details")
+metadata = status.get("metadata", {})
+if status["code"] == 404 or status.get("reason") == "NotFound":
+    if (
+        status["code"] != 404 or status.get("reason") != "NotFound"
+        or not isinstance(details, dict)
+        or details.get("name") != name or details.get("kind") != plural
+        or details.get("group", "") != ""
+        or not isinstance(metadata, dict)
+        or any(
+            "namespace" in value and not namespace_matches(value)
+            for value in (details, metadata)
+        )
+        or ("message" in status and status["message"] != message)
+    ):
+        invalid()
+    raise SystemExit(3)
+raise SystemExit(1)
+PY
+  case "$read_status" in
+    0|3) return "$read_status" ;;
+    1) echo "Kubernetes $resource read is uncertain; absence is not proven" >&2 ;;
+    *) echo "Kubernetes $resource read has invalid evidence or a permanent error" >&2; read_status=2 ;;
+  esac
+  return "$read_status"
+)
+
 journal_state() {
-  kubectl get configmap "$TOPOLOGY_CONFIGMAP" -n "$NAMESPACE" \
-    -o jsonpath='{.data.mode}|{.data.phase}|{.data.migration-id}|{.data.source-sha}' \
-    2>/dev/null || true
+  read_transition_resource configmap "$TOPOLOGY_CONFIGMAP" 15
 }
 
 validate_migrate_journal() {
-  local current mode phase migration_id source_sha
-  current="$(journal_state)"
-  [[ -n "$current" ]] || return 0
+  local current mode phase migration_id source_sha read_status
+  if current="$(journal_state)"; then
+    [[ -n "$current" ]] || fail "topology journal read returned no validated state"
+  else
+    read_status=$?
+    [[ "$read_status" -eq 3 ]] && return 0
+    fail "unable to read the topology journal before migration"
+  fi
   IFS='|' read -r mode phase migration_id source_sha <<<"$current"
 
   if [[ "$mode" == "transition" &&
@@ -699,10 +846,38 @@ verify_shared_applications() {
   done
 }
 
+wait_for_reclaimed_pv() {
+  local pv="$1" pvc="$2"
+  local deadline=$((SECONDS + 600)) attempt remaining timeout_seconds read_status delay
+  for ((attempt = 1; attempt <= 120; attempt += 1)); do
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || break
+    timeout_seconds="$remaining"
+    ((timeout_seconds <= 15)) || timeout_seconds=15
+    if read_transition_resource pv "$pv" "$timeout_seconds"; then
+      read_status=0
+    else
+      read_status=$?
+    fi
+    ((SECONDS <= deadline)) || break
+    case "$read_status" in
+      3) return 0 ;;
+      0|1) ;; # Present and uncertain reads share the same bounded budget.
+      *) fail "unable to prove PV reclamation for PVC: $pvc" ;;
+    esac
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || break
+    delay="$remaining"
+    ((delay <= 5)) || delay=5
+    sleep "$delay" || fail "PV reclamation wait was interrupted"
+  done
+  fail "PV absence was not proven within the ten-minute reclamation budget for PVC: $pvc"
+}
+
 delete_legacy_resources() {
   local cleanup_map="$BACKUP_DIR/$MIGRATION_ID-cleanup-pvs.tsv"
   local cleanup_map_tmp="${cleanup_map}.partial"
-  local mapping _database source_pod _deployment service pvc sts pv attempt
+  local mapping _database source_pod _deployment service pvc sts pv
 
   if [[ ! -f "$cleanup_map" ]]; then
     : >"$cleanup_map_tmp"
@@ -710,8 +885,8 @@ delete_legacy_resources() {
       IFS='|' read -r _database _source_pod _deployment _service pvc <<<"$mapping"
       pv="$(
         kubectl get pvc "$pvc" -n "$NAMESPACE" \
-          -o jsonpath='{.spec.volumeName}' 2>/dev/null || true
-      )"
+          --request-timeout=15s -o jsonpath='{.spec.volumeName}'
+      )" || fail "unable to read the cleanup PV mapping for PVC: $pvc"
       [[ -n "$pv" ]] || fail "PVC has no bound PV: $pvc"
       printf '%s\t%s\n' "$pvc" "$pv" >>"$cleanup_map_tmp"
     done
@@ -720,24 +895,41 @@ delete_legacy_resources() {
   fi
   [[ "$(wc -l <"$cleanup_map" | tr -d ' ')" == "7" ]] ||
     fail "cleanup PVC/PV journal must contain seven entries"
+  python3 - "$cleanup_map" "${DATABASE_MAPPINGS[@]}" <<'PY' ||
+import re
+import sys
+
+path, *mappings = sys.argv[1:]
+expected = {mapping.split("|")[4] for mapping in mappings}
+with open(path, encoding="utf-8") as handle:
+    rows = [line.rstrip("\n").split("\t") for line in handle]
+if (
+    len(rows) != 7 or any(len(row) != 2 for row in rows)
+    or {row[0] for row in rows} != expected
+    or len({row[1] for row in rows}) != 7
+    or any(
+        not 1 <= len(row[1]) <= 253
+        or any(not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", label)
+               for label in row[1].split("."))
+        for row in rows
+    )
+):
+    raise SystemExit("cleanup map does not identify the exact seven distinct legacy PVs")
+PY
+    fail "cleanup PVC/PV journal has invalid resource identities"
 
   for mapping in "${DATABASE_MAPPINGS[@]}"; do
     IFS='|' read -r _database source_pod _deployment service pvc <<<"$mapping"
     sts="${source_pod%-0}"
     pv="$(awk -F '\t' -v expected="$pvc" '$1 == expected {print $2}' "$cleanup_map")"
     [[ -n "$pv" ]] || fail "cleanup journal is missing PVC: $pvc"
-    kubectl delete statefulset "$sts" -n "$NAMESPACE" --wait=true --ignore-not-found
-    kubectl delete service "$service" -n "$NAMESPACE" --ignore-not-found
-    kubectl delete pvc "$pvc" -n "$NAMESPACE" --wait=true --ignore-not-found
-    for attempt in {1..120}; do
-      if ! kubectl get pv "$pv" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 5
-    done
-    if kubectl get pv "$pv" >/dev/null 2>&1; then
-      fail "PV was not reclaimed after deleting PVC: $pvc"
-    fi
+    kubectl delete statefulset "$sts" -n "$NAMESPACE" --wait=true --ignore-not-found ||
+      fail "unable to delete the mapped legacy StatefulSet"
+    kubectl delete service "$service" -n "$NAMESPACE" --ignore-not-found ||
+      fail "unable to delete the mapped legacy Service"
+    kubectl delete pvc "$pvc" -n "$NAMESPACE" --wait=true --ignore-not-found ||
+      fail "unable to delete the mapped legacy PVC"
+    wait_for_reclaimed_pv "$pv" "$pvc" || fail "legacy PV reclamation was not proven"
   done
 }
 
@@ -871,7 +1063,7 @@ case "$OPERATION" in
     require_value CONFIRM_ROLLBACK \
       "${CONFIRM_ROLLBACK:-}" "restore-seven-legacy-databases"
     acquire_lock
-    current_journal="$(journal_state)"
+    current_journal="$(journal_state)" || fail "unable to confirm the rollback journal"
     reverse_copy=false
     case "$current_journal" in
       "transition|backing-up|$MIGRATION_ID|$APPROVED_SHA" | \

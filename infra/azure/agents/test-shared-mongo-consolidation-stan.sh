@@ -16,8 +16,14 @@ fail() {
 }
 
 tmp_dir="$(mktemp -d)"
+readiness_dir=""
+created_readiness_parent=false
 cleanup_tmp() {
   rm -rf -- "$tmp_dir"
+  [[ -z "$readiness_dir" ]] || rm -rf -- "$readiness_dir"
+  if [[ "$created_readiness_parent" == true ]]; then
+    rmdir "$ROOT_DIR/.test-workdirs" 2>/dev/null || true
+  fi
 }
 trap cleanup_tmp EXIT
 
@@ -114,6 +120,11 @@ grep -Fq 'gaming-mongo-migration-lock' "$OPERATOR" ||
 
 mkdir -p "$tmp_dir/bin" "$tmp_dir/backups"
 chmod 700 "$tmp_dir/backups"
+if [[ ! -d "$ROOT_DIR/.test-workdirs" ]]; then
+  mkdir "$ROOT_DIR/.test-workdirs"
+  created_readiness_parent=true
+fi
+readiness_dir="$(mktemp -d "$ROOT_DIR/.test-workdirs/mongo-readiness.XXXXXX")"
 cat >"$tmp_dir/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *"gaming-mongo-topology"* ]]; then
@@ -134,6 +145,7 @@ transition_output="$(
     TARGET_SHA="$test_sha" \
     MIGRATION_ID="test-migration" \
     MIGRATION_BACKUP_DIR="$tmp_dir/backups" \
+    OUTPUT_DIR="$readiness_dir" \
     "$ROLLBACK_READINESS"
 )"
 grep -Fxq 'rollback_readiness=GO' <<<"$transition_output" &&
@@ -149,6 +161,7 @@ if PATH="$tmp_dir/bin:$PATH" \
   TARGET_SHA="$test_sha" \
   MIGRATION_ID="test-migration" \
   MIGRATION_BACKUP_DIR="$tmp_dir/backups" \
+  OUTPUT_DIR="$readiness_dir" \
   "$ROLLBACK_READINESS" >/dev/null 2>&1; then
   fail "migration-transition rollback readiness accepted an active operation lock"
 fi
@@ -158,9 +171,404 @@ if PATH="$tmp_dir/bin:$PATH" \
   TARGET_SHA="$test_sha" \
   MIGRATION_ID="test-migration" \
   MIGRATION_BACKUP_DIR="$tmp_dir/backups" \
+  OUTPUT_DIR="$readiness_dir" \
   "$ROLLBACK_READINESS" >/dev/null 2>&1; then
   fail "late migration rollback readiness accepted missing recovery artifacts"
 fi
+
+# Exercise the real journal/PV functions and operation case statement. Only
+# unrelated database/lock prerequisites are stubbed; kubectl is a complete,
+# recording fake, and the clock advances without waiting ten real minutes.
+python3 -I - "$OPERATOR" "$tmp_dir" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+operator, temporary = map(Path, sys.argv[1:])
+root = temporary / "read-contract"
+root.mkdir()
+bin_dir = root / "bin"
+bin_dir.mkdir()
+guard = root / "infra/azure/agents/shared-mongo-topology-guard-stan.sh"
+guard.parent.mkdir(parents=True)
+guard.write_text('#!/usr/bin/env bash\nprintf "topology-guard\\n" >>"$FIXTURE_TRACE"\n')
+guard.chmod(0o700)
+source = operator.read_text()
+prefix, body = source.split('\ncase "$OPERATION" in\n')
+mapping_text = source.split("DATABASE_MAPPINGS=(\n", 1)[1].split("\n)", 1)[0]
+mappings = [line.strip().strip('"').split("|") for line in mapping_text.splitlines()]
+assert len(mappings) == 7 and all(len(row) == 5 for row in mappings)
+pvs = {row[4]: f"pv-legacy-{index}" for index, row in enumerate(mappings)}
+allowed_deletes = {
+    (resource, name)
+    for row in mappings
+    for resource, name in (("statefulset", row[1][:-2]), ("service", row[3]), ("pvc", row[4]))
+}
+stubbed_steps = (
+    "validate_exact_checkout", "validate_repository_contract",
+    "verify_legacy_runtime", "verify_legacy_applications", "verify_queue_drain",
+    "scale_applications", "write_backups", "verify_backups", "prepare_target",
+    "restore_shared_databases", "set_shared_uris", "verify_shared_database_presence",
+    "verify_shared_applications", "apply_legacy_manifests", "verify_shared_uris",
+    "reverse_restore_legacy", "set_legacy_uris",
+)
+stubs = r'''
+ROOT_DIR="$FIXTURE_ROOT"
+fixture_step() { printf '%s\n' "$*" >>"$FIXTURE_TRACE"; }
+acquire_lock() {
+  LOCK_HELD=true
+  LOCK_TOKEN=fixture
+  fixture_step "acquire-lock:$MIGRATION_ID:$APPROVED_SHA"
+}
+release_lock() {
+  fixture_step "release-lock:$MIGRATION_ID:$APPROVED_SHA"
+  LOCK_HELD=false
+}
+sleep() {
+  fixture_step "sleep:$1"
+  SECONDS=$((SECONDS + FIXTURE_CLOCK_STEP))
+}
+'''
+for name in stubbed_steps:
+    stubs += f'{name}() {{ fixture_step {name} "$@"; }}\n'
+fixture_operator = root / "operator.sh"
+fixture_operator.write_text(
+    prefix + stubs + '\nrun_fixture_operation() {\ncase "$OPERATION" in\n' + body
+    + '\n}\nSECONDS=0\n'
+    + 'if [[ "$FIXTURE_CONDITIONAL" = 1 ]]; then\n'
+    + '  if run_fixture_operation; then exit 0; else exit "$?"; fi\n'
+    + 'else\n  run_fixture_operation\nfi\n'
+)
+provider = bin_dir / "kubectl"
+provider.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, re, sys
+from pathlib import Path
+d = Path(os.environ["FIXTURE_CASE"])
+f = json.loads((d / "fixture.json").read_text())
+args = sys.argv[1:]
+def log(value):
+    with (d / "calls.jsonl").open("a") as handle:
+        handle.write(json.dumps(value) + "\n")
+def emit(value, code=0, stderr=False):
+    text = value if isinstance(value, str) else json.dumps(value)
+    print(text, file=sys.stderr if stderr else sys.stdout)
+    raise SystemExit(code)
+def namespace():
+    return args[args.index("-n") + 1] if "-n" in args else None
+if args[:2] == ["apply", "-f"]:
+    assert args == ["apply", "-f", "-"]
+    journal = json.load(sys.stdin)
+    assert journal["metadata"] == {"name": "gaming-mongo-topology", "namespace": f["namespace"]}
+    assert journal["data"]["migration-id"] == f["migration_id"]
+    assert journal["data"]["source-sha"] == f["sha"]
+    log({"command": "journal", **journal["data"]})
+    (d / "journal.json").write_text(json.dumps(journal))
+    emit("configured")
+assert len(args) >= 3, args
+command, resource, name = args[:3]
+log({"command": command, "resource": resource, "name": name, "args": args})
+if command == "delete":
+    assert [resource, name] in f["allowed_deletes"], "out-of-map deletion"
+    assert namespace() == f["namespace"]
+    assert "--ignore-not-found" in args
+    emit("deleted")
+if command == "create":
+    assert resource == "configmap" and name == "gaming-mongo-topology"
+    assert namespace() == f["namespace"] and "--dry-run=client" in args
+    data = dict(value[len("--from-literal="):].split("=", 1)
+                for value in args if value.startswith("--from-literal="))
+    emit({"apiVersion": "v1", "kind": "ConfigMap",
+          "metadata": {"name": name, "namespace": f["namespace"]}, "data": data})
+assert command == "get" and resource in ("configmap", "pv", "pvc"), args
+timeouts = [value for value in args if value.startswith("--request-timeout=")]
+assert len(timeouts) == 1 and re.fullmatch(r"--request-timeout=[1-9][0-9]*s", timeouts[0])
+assert 1 <= int(timeouts[0].split("=")[1][:-1]) <= 15
+assert namespace() == (None if resource == "pv" else f["namespace"])
+if resource == "pvc":
+    assert name in f["pvs"] and args[-1] == "jsonpath={.spec.volumeName}"
+    if f.get("capture_error") and name == list(f["pvs"])[2]:
+        print(f["pvs"][name])
+        emit("context deadline exceeded", 1, True)
+    emit(f["pvs"][name])
+assert args[-2:] == ["-o", "json"]
+if resource == "configmap":
+    assert name == "gaming-mongo-topology"
+    mode = f["journal_read"]
+    present = json.loads((d / "journal.json").read_text())
+    plural = "configmaps"
+else:
+    assert name in f["pvs"].values(), "out-of-map PV read"
+    counts_path = d / "counts.json"
+    counts = json.loads(counts_path.read_text()) if counts_path.exists() else {}
+    count = counts.get(name, 0)
+    counts[name] = count + 1
+    counts_path.write_text(json.dumps(counts))
+    sequence = f["pv_reads"].get(name, ["notfound"])
+    mode = sequence[min(count, len(sequence) - 1)]
+    present = {"apiVersion": "v1", "kind": "PersistentVolume",
+               "metadata": {"name": name}, "spec": {}, "status": {"phase": "Released"}}
+    plural = "persistentvolumes"
+message = f'{plural} "{name}" not found'
+native = f"Error from server (NotFound): {message}"
+status = {"apiVersion": "v1", "kind": "Status", "status": "Failure",
+          "code": 404, "reason": "NotFound", "message": message,
+          "details": {"kind": plural, "name": name}}
+if mode == "present": emit(present)
+if mode == "notfound": emit(native, 1, True)
+if mode == "status-notfound": emit(status, 1)
+if mode == "status-notfound-stderr": emit(status, 1, True)
+if mode == "forbidden": emit("Error from server (Forbidden): access denied", 1, True)
+if mode == "unauthorized": emit("Error from server (Unauthorized): authentication required", 1, True)
+if mode == "login-required": emit("error: You must be logged in to the server (Unauthorized)", 1, True)
+if mode == "timeout": emit("error: context deadline exceeded", 1, True)
+if mode == "transport": emit("Unable to connect to the server: connection refused", 1, True)
+if mode == "server":
+    emit({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+          "code": 503, "reason": "ServiceUnavailable"}, 1, True)
+if mode == "empty-error": emit("", 1)
+if mode == "empty-success": emit("")
+if mode == "malformed-success": emit("{")
+if mode == "arbitrary-notfound": emit("local cache entry not found", 1, True)
+if mode == "prefixed-notfound": emit("untrusted diagnostic: " + native, 1, True)
+if mode == "suffixed-notfound": emit(native + "\nadditional error", 1, True)
+if mode == "duplicate-present":
+    emit('{"kind":"untrusted",' + json.dumps(present)[1:])
+if mode == "duplicate-status":
+    emit('{"code":500,' + json.dumps(status)[1:], 1, True)
+if mode == "nonfinite-present":
+    present["metadata"]["invalid"] = float("nan")
+    emit(present)
+if mode == "nonfinite-status":
+    status["metadata"] = {"invalid": float("nan")}
+    emit(status, 1, True)
+if mode == "success-with-error":
+    print(json.dumps(present))
+    emit("Error from server (Forbidden): access denied", 0, True)
+if mode == "wrong-resource-native": emit('Error from server (NotFound): namespaces "other" not found', 1, True)
+if mode == "wrong-name-native": emit(f'Error from server (NotFound): {plural} "other" not found', 1, True)
+if mode == "wrong-reason-native": emit(f"Error from server (Forbidden): {message}", 1, True)
+if mode == "wrong-namespace-status": status["details"]["namespace"] = "other"
+elif mode == "wrong-resource-status": status["details"]["kind"] = "namespaces"
+elif mode == "wrong-name-status": status["details"]["name"] = "other"
+elif mode == "wrong-group-status": status["details"]["group"] = "other.example"
+elif mode == "wrong-code-status": status["code"] = 403
+elif mode == "wrong-message-status": status["message"] = 'namespaces "other" not found'
+elif mode == "wrong-kind-status": status["kind"] = "ConfigMap"
+elif mode == "success-status": emit(status)
+elif mode == "native-success": emit(native, 0, True)
+elif mode == "native-stdout": emit(native, 1)
+elif mode == "terminated-notfound": emit(native, 124, True)
+elif mode == "contradictory-streams":
+    print(json.dumps(present))
+    emit(native, 1, True)
+elif mode == "wrong-present-name":
+    present["metadata"]["name"] = "other"
+    emit(present)
+elif mode == "wrong-present-namespace":
+    present["metadata"]["namespace"] = "other"
+    emit(present)
+elif mode == "missing-identity": emit({"apiVersion": "v1"})
+elif mode == "missing-journal-data":
+    present["data"] = {}
+    emit(present)
+else: raise AssertionError(mode)
+emit(status, 1, True)
+''')
+provider.chmod(0o700)
+docker = bin_dir / "docker"
+docker.write_text('#!/usr/bin/env bash\necho "unexpected Docker operation" >&2\nexit 99\n')
+docker.chmod(0o700)
+clean_env = {
+    key: value for key, value in os.environ.items()
+    if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in ("BASH_ENV", "ENV")
+}
+clean_env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+index = 0
+
+def setup(operation, *, journal_read="present", state=None, pv_reads=None,
+          cold_map=False, invalid_map=None, capture_error=False):
+    global index
+    index += 1
+    directory = root / f"case-{index}"
+    directory.mkdir(mode=0o700)
+    backup = directory / "backups"
+    backup.mkdir(mode=0o700)
+    for name in ("auth-preserved", "backup-preserved"):
+        (backup / name).write_bytes(b"unchanged fixture recovery bytes\n")
+    data = {
+        "mode": "transition", "phase": "awaiting-cleanup" if operation == "cleanup" else "backing-up",
+        "migration-id": "read-fixture", "source-sha": "a" * 40, "validated": "false",
+    }
+    data.update(state or {})
+    (directory / "journal.json").write_text(json.dumps({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "gaming-mongo-topology", "namespace": "read-fixture-ns"},
+        "data": data,
+    }))
+    (directory / "fixture.json").write_text(json.dumps({
+        "namespace": "read-fixture-ns", "migration_id": "read-fixture", "sha": "a" * 40,
+        "journal_read": journal_read, "pv_reads": pv_reads or {},
+        "pvs": pvs, "allowed_deletes": sorted(allowed_deletes), "capture_error": capture_error,
+    }))
+    cleanup_map = backup / "read-fixture-cleanup-pvs.tsv"
+    if not cold_map:
+        rows = list(pvs.items())
+        if invalid_map == "extra-auth": rows.append(("gaming-auth-mongo-data-gaming-auth-mongo-depl-0", "pv-auth"))
+        if invalid_map == "wrong-pvc": rows[0] = ("gaming-auth-mongo-data-gaming-auth-mongo-depl-0", rows[0][1])
+        if invalid_map == "duplicate-pv": rows[1] = (rows[1][0], rows[0][1])
+        cleanup_map.write_text("".join(f"{pvc}\t{pv}\n" for pvc, pv in rows))
+        cleanup_map.chmod(0o600)
+    return directory
+
+def run(directory, operation, *, ok=False, conditional=False, clock_step=200):
+    backup = directory / "backups"
+    cleanup_map = backup / "read-fixture-cleanup-pvs.tsv"
+    map_before = cleanup_map.read_bytes() if cleanup_map.exists() else None
+    journal_before = (directory / "journal.json").read_bytes()
+    trace = directory / "trace"
+    trace.write_text("")
+    (directory / "calls.jsonl").write_text("")
+    env = dict(
+        clean_env, PATH=str(bin_dir) + os.pathsep + clean_env["PATH"],
+        FIXTURE_ROOT=str(root), FIXTURE_CASE=str(directory), FIXTURE_TRACE=str(trace),
+        FIXTURE_CONDITIONAL=str(int(conditional)), FIXTURE_CLOCK_STEP=str(clock_step),
+        NAMESPACE="read-fixture-ns", APPROVED_SHA="a" * 40, MIGRATION_ID="read-fixture",
+        BACKUP_DIR=str(backup), TMPDIR=str(directory), SKIP_DOCKER="1",
+        CONFIRM_MAINTENANCE="writers-paused",
+        CONFIRM_RECOVERY_COPIES="verified-eight-recovery-copies",
+        CONFIRM_APPLICATION_VALIDATED="shared-mongo-application-validation-passed",
+        CONFIRM_DELETE_LEGACY_MONGO="delete-seven-legacy-mongo-volumes",
+        CONFIRM_ROLLBACK="restore-seven-legacy-databases",
+    )
+    result = subprocess.run(
+        ["bash", str(fixture_operator), operation], cwd=root, env=env,
+        capture_output=True, text=True, timeout=20,
+    )
+    assert (result.returncode == 0) == ok, (operation, directory.name, result.stdout, result.stderr)
+    calls = [json.loads(line) for line in (directory / "calls.jsonl").read_text().splitlines()]
+    assert all((call["resource"], call["name"]) in allowed_deletes
+               for call in calls if call["command"] == "delete")
+    if not ok:
+        assert f"shared_mongo_operation={operation} status=FAIL" in result.stderr
+        assert f"shared_mongo_operation={operation} status=PASS" not in result.stdout
+        assert (directory / "journal.json").read_bytes() == journal_before
+        assert not any(call["command"] in ("journal", "create", "apply") for call in calls)
+        if operation != "cleanup":
+            assert not any(call["command"] == "delete" for call in calls)
+            assert "scale_applications" not in trace.read_text()
+            assert "write_backups" not in trace.read_text()
+    if map_before is not None:
+        assert cleanup_map.read_bytes() == map_before, "partial cleanup changed its map"
+    for name in ("auth-preserved", "backup-preserved"):
+        assert (backup / name).read_bytes() == b"unchanged fixture recovery bytes\n"
+    steps = trace.read_text().splitlines()
+    assert steps.count("acquire-lock:read-fixture:" + "a" * 40) == 1
+    assert steps.count("release-lock:read-fixture:" + "a" * 40) == 1
+    assert not list(directory.glob("tmp.*")), "temporary read evidence leaked"
+    return calls, steps
+
+errors = (
+    "forbidden", "unauthorized", "login-required", "timeout", "transport", "server",
+    "empty-error", "empty-success", "malformed-success", "arbitrary-notfound",
+    "prefixed-notfound", "suffixed-notfound", "duplicate-present", "duplicate-status",
+    "nonfinite-present", "nonfinite-status", "success-with-error",
+    "wrong-resource-native", "wrong-name-native", "wrong-reason-native",
+    "wrong-namespace-status", "wrong-resource-status", "wrong-name-status",
+    "wrong-group-status", "wrong-code-status", "wrong-message-status", "wrong-kind-status",
+    "success-status", "native-success", "native-stdout", "terminated-notfound",
+    "contradictory-streams", "wrong-present-name", "wrong-present-namespace", "missing-identity",
+)
+for conditional in (False, True):
+    for mode in (*errors, "missing-journal-data"):
+        directory = setup("migrate", journal_read=mode)
+        calls, _ = run(directory, "migrate", conditional=conditional)
+        assert len(calls) == 1, "journal uncertainty reached subsequent migration work"
+    for mode in ("notfound", "status-notfound", "status-notfound-stderr"):
+        run(setup("migrate", journal_read=mode), "migrate", ok=True, conditional=conditional)
+    for phase in ("backing-up", "preparing-target", "restoring"):
+        run(setup("migrate", state={"phase": phase}), "migrate", ok=True, conditional=conditional)
+    run(setup("migrate", state={"mode": "legacy", "phase": "rollback-complete",
+                               "migration-id": "prior-migration", "source-sha": "b" * 40}),
+        "migrate", ok=True, conditional=conditional)
+    for state in ({"phase": "switching"}, {"migration-id": "other"}, {"source-sha": "b" * 40},
+                  {"mode": "legacy", "phase": "rollback-complete"}):
+        run(setup("migrate", state=state), "migrate", conditional=conditional)
+    for operation in ("cleanup", "rollback"):
+        for mode in ("forbidden", "notfound", "wrong-namespace-status", "empty-success"):
+            run(setup(operation, journal_read=mode), operation, conditional=conditional)
+print("issue_85_journal_read_contract=PASS", flush=True)
+
+for conditional in (False, True):
+    for mode in errors:
+        target = list(pvs.values())[3]
+        directory = setup("cleanup", pv_reads={target: [mode]})
+        calls, _ = run(directory, "cleanup", conditional=conditional)
+        assert sum(call["command"] == "delete" for call in calls) == 12
+        target_reads = [call for call in calls if call["command"] == "get" and call["name"] == target]
+        assert 1 <= len(target_reads) <= 3, "PV error escaped the single bounded budget"
+        if mode in ("timeout", "transport", "server", "empty-error"):
+            assert len(target_reads) == 3, "transient errors did not consume the existing wait budget"
+        if mode in ("forbidden", "unauthorized", "login-required", "empty-success",
+                    "malformed-success", "wrong-resource-status", "wrong-name-status",
+                    "wrong-namespace-status", "success-with-error"):
+            assert len(target_reads) == 1, "permanent authorization/schema errors were retried"
+    directory = setup("cleanup", pv_reads={pv: ["present"] for pv in pvs.values()})
+    calls, _ = run(directory, "cleanup", conditional=conditional)
+    assert sum(call["command"] == "get" and call["resource"] == "pv" for call in calls) == 3
+    for mode in ("notfound", "status-notfound", "status-notfound-stderr"):
+        directory = setup("cleanup", pv_reads={pv: [mode] for pv in pvs.values()})
+        calls, _ = run(directory, "cleanup", ok=True, conditional=conditional)
+        assert sum(call["command"] == "delete" for call in calls) == 21
+        assert sum(call["command"] == "get" and call["resource"] == "pv" for call in calls) == 7
+        assert calls[-1]["command"] == "journal" and calls[-1]["phase"] == "complete"
+    sequence = ["present", "timeout", "present", "notfound"]
+    directory = setup("cleanup", pv_reads={pv: sequence for pv in pvs.values()})
+    calls, _ = run(directory, "cleanup", ok=True, conditional=conditional, clock_step=5)
+    assert sum(call["command"] == "get" and call["resource"] == "pv" for call in calls) == 28
+    for invalid_map in ("extra-auth", "wrong-pvc", "duplicate-pv"):
+        calls, _ = run(setup("cleanup", invalid_map=invalid_map), "cleanup", conditional=conditional)
+        assert not any(call["command"] == "delete" for call in calls)
+print("issue_85_pv_reclamation_contract=PASS", flush=True)
+
+# A partially deleted topology resumes from exactly the same map, without
+# trying to recapture PVC bindings that may no longer exist.
+target = list(pvs.values())[3]
+directory = setup("cleanup", pv_reads={target: ["transport"]})
+run(directory, "cleanup")
+fixture = json.loads((directory / "fixture.json").read_text())
+fixture["pv_reads"] = {}
+(directory / "fixture.json").write_text(json.dumps(fixture))
+calls, _ = run(directory, "cleanup", ok=True, conditional=True)
+assert not any(call["command"] == "get" and call["resource"] == "pvc" for call in calls)
+run(setup("cleanup", cold_map=True), "cleanup", ok=True)
+directory = setup("cleanup", cold_map=True, capture_error=True)
+calls, _ = run(directory, "cleanup", conditional=True)
+assert not any(call["command"] == "delete" for call in calls)
+assert not (directory / "backups/read-fixture-cleanup-pvs.tsv").exists()
+assert (directory / "backups/read-fixture-cleanup-pvs.tsv.partial").exists()
+
+# Prove the last permitted request is clipped to the remaining time.
+first = next(iter(pvs.values()))
+calls, _ = run(setup("cleanup", pv_reads={first: ["timeout", "notfound"]}),
+              "cleanup", ok=True, clock_step=590)
+requests = [call for call in calls if call["command"] == "get" and call["name"] == first]
+assert len(requests) == 2
+assert int(next(arg for arg in requests[1]["args"] if arg.startswith("--request-timeout=")).split("=")[1][:-1]) <= 10
+
+for state, reverse in (
+    ({"mode": "transition", "phase": "restoring"}, False),
+    ({"mode": "transition", "phase": "switching"}, False),
+    ({"mode": "transition", "phase": "rollback-data-restored"}, False),
+    ({"mode": "transition", "phase": "awaiting-cleanup"}, True),
+    ({"mode": "shared", "phase": "complete"}, True),
+):
+    _, steps = run(setup("rollback", state=state), "rollback", ok=True, conditional=True)
+    assert ("reverse_restore_legacy" in steps) == reverse
+print(f"issue_85_partial_cleanup_and_resume_contract=PASS cases={index}", flush=True)
+PY
 
 if [[ "$SKIP_DOCKER" == "1" ]]; then
   echo "shared_mongo_consolidation_tests=PASS docker=skipped"
@@ -175,7 +583,7 @@ target_container="betstan-mongo-target-$suffix"
 
 cleanup() {
   docker rm -f "$source_container" "$target_container" >/dev/null 2>&1 || true
-  rm -rf -- "$tmp_dir"
+  cleanup_tmp
 }
 trap cleanup EXIT
 

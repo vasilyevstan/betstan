@@ -92,6 +92,23 @@ Rollback uses a known prior application generation and a baseline captured
 before deployment. Data restore is a separate decision and is not coupled to
 every application rollback.
 
+### Retained Azure shared-Mongo safety
+
+The retained Azure consolidation path is separate from primary OCI
+operations. Its journal and volume reads distinguish validated presence,
+explicit Kubernetes `NotFound` for the exact requested resource, and an
+unknown result. API errors, empty output, and malformed responses are never
+evidence of absence. An uncertain journal read stops migration before data
+changes.
+
+Cleanup records completion only after positive absence proof for all seven
+persistent volumes in its existing map. Individual reads and per-volume
+reclamation waits are bounded; present volumes and transient errors share
+the same wait budget, with no extra final probe. Invalid evidence or
+exhausted waits fail closed. Partial cleanup preserves its recorded map and
+journal state for recovery. The journal format, fixed mapping, locks, and
+rollback requirements remain unchanged.
+
 ### Bounded k3s root-disk recovery
 
 The infrastructure workflow separates read-only root-filesystem diagnosis from

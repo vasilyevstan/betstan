@@ -702,11 +702,19 @@ still requires complete data, metadata, application, API, queue, and exact
 resource validation. Retain verified external recovery artifacts for seven
 days.
 
-Issue #85 tracks two remaining fail-closed runtime reads. Until it is resolved,
-independently require a successful topology journal read or explicit NotFound
-immediately before `migrate`, and explicit NotFound for every journaled legacy
-PV after `cleanup`. An authorization, timeout, transport, or other API error is
-`NO_GO`, even when the operator process exits successfully.
+The operator distinguishes a validated journal from the requested ConfigMap's
+explicit Kubernetes NotFound and from an uncertain read. Empty or malformed
+output, authorization errors, transport failures, and NotFound for a different
+resource or namespace never authorize migration.
+
+Cleanup retains its exact seven-entry PVC/PV map across partial failure.
+Every mapped PV must return its own validated Kubernetes NotFound before
+`shared/complete` can be written. Present PVs and transient read errors consume
+the same ten-minute reclamation budget per PV, with each read bounded to at
+most 15 seconds and no extra final probe. Invalid identity/schema evidence and
+proven authorization failures stop cleanup; budget exhaustion also fails
+closed. Preserve the map, journal identity, retained auth PVC, and recovery
+artifacts when resuming the same operation.
 
 ### Lock recovery
 
