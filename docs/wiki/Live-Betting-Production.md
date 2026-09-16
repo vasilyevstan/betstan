@@ -249,6 +249,16 @@ Backoffice listener permanently ACK-skips only valid pre-cutoff `NEW_EVENT`
 replays; malformed or missing kickoff data retains legacy handling as described
 in [[Application Processes]].
 
+Once the cleanup is applied, a Backoffice image without that permanent
+listener guard is no longer rollback-compatible: a queued or delayed valid
+pre-cutoff delivery could otherwise recreate a deleted projection. Both
+ordinary and maintenance-fenced rollback bind the exact target's compatibility
+before workload mutation and fail closed when the journal cannot be read or
+classified. This gate is independent of the existing pending-publication
+replay-or-drain compatibility gate; both decisions must pass. See
+[[Release Orchestration]] for journal state classification and retained-hold
+recovery.
+
 There is no cleanup-command rollback mode. Rollback and interrupted-release
 recovery continue to rely on the protected pre-mutation baseline, write fence,
 database lock, and bounded recovery controls; no ad hoc reverse operation is

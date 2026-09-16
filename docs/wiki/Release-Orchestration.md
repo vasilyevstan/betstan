@@ -245,6 +245,15 @@ readers, while `/api/backoffice` is expected to return fenced `503` responses
 during mutation. The final phase retains the established write fence and
 database-lock handoff for deployment.
 
+Once `apply-slip-index` has entered maintenance, that safety boundary remains
+in place regardless of how the phase ends. Success transfers it to deployment;
+failure, cancellation, or handoff-evidence failure re-establishes seven-writer
+quiescence and retains the shared database lock instead of restoring the prior
+runtime. Recovery at the same exact source can re-enter and verify an
+already-applied cleanup without expanding its fixed target set. A retained
+hold is a safe unavailable state, not evidence that production execution
+occurred or authority to begin another operation.
+
 New sanitized evidence uses `live-betting-v5` and requires
 `backoffice_pre_september_cleanup_complete` in the final handoff. The verifier
 keeps the literal historical meanings of `live-betting-v1` through `v4` and
@@ -378,6 +387,23 @@ A rollback requires:
 - a defined write-fence or drain when the old version cannot process new
   pending work;
 - post-rollback digest and application validation.
+
+The fixed cleanup adds a separate fail-closed rollback compatibility decision.
+A well-formed authoritative result proving that its journal is absent leaves
+the existing rollback gates in force. A prepared journal blocks rollback and
+requires recovery by its exact source. An applied journal permits only an
+exact rollback target whose Backoffice listener acknowledges valid pre-cutoff
+deliveries before any projection write. Missing required, unreadable,
+malformed, duplicate, or unknown evidence blocks rather than being treated as
+absence.
+
+Ordinary and maintenance-aware rollback independently bind that exact-target
+capability before workload mutation. A Backoffice generation from before the
+listener guard is therefore not restorable after the cleanup is applied: a
+queued or delayed valid pre-cutoff `NEW_EVENT` delivery must not recreate a
+deleted projection. Pending-publication replay-or-drain compatibility remains
+a separate mandatory decision; satisfying either the cleanup or publication
+decision cannot satisfy the other.
 
 Historical pre-Telemetry rollback restores only the nine historical
 application images. During that transition, the retained observer must keep
