@@ -111,6 +111,17 @@ used as public labels.
 
 Metadata is part of the reviewed evidence. It is completed before the release
 critical path rather than repeatedly edited while production work is active.
+Title/body edits can start validation. Avoid metadata changes while the
+publisher evaluates its snapshot, during a data-to-deploy handoff, or inside
+a production-exclusivity window.
+
+Context-label setup reads the PR's labels first. If both informational context
+labels are already present, it performs no GitHub mutation. Otherwise it
+ensures and adds only the missing labels in one PR edit. An initial read
+failure performs no blind mutation and retains the caller's warning or
+strict-failure behavior. This prevents avoidable metadata churn; it does not
+change managed-label authority or replace the fresh-transition recovery
+described in [[Quality Gates]].
 
 ## Quality chain
 

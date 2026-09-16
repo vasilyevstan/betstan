@@ -80,6 +80,32 @@ required aggregate gate includes:
 The OCI-specific validation workflow also checks workflow syntax and runs the
 complete offline OCI contract suite.
 
+### Quality-transition recovery
+
+A trusted policy publisher can leave a pending or bound transition before
+its run fails. A genuine, strictly later `edited`, `synchronize`, or
+`reopened` event may establish a fresh transition. A completed older policy
+run with `failure`, `cancelled`, or `timed_out` contributes only historical
+ordering at a strictly lower cutoff, never current quality or approval
+authority. Every marker still passes structural and completed-origin checks
+for publisher identity, workflow, repository, PR head/base, run URL, and
+timestamps; malformed or foreign history is never ignored.
+
+The fresh lineage binds its own exact quality run and can complete only when
+that run succeeds. A delayed old completion cannot satisfy it. A later or
+replayed `opened`, a label event, or a manual refresh cannot create a
+superseding transition. Current or higher-cutoff failed origins,
+non-completed runs, and unknown, neutral, or skipped results remain unusable.
+
+Credential boundaries, trusted status-source checks, and both exact
+head/merge-snapshot targets remain unchanged, as do v3 marker encoding, ledger
+enforcement, revocation tombstones, legacy fail-closed handling, fingerprints,
+one-use receipts, and concurrent snapshot rechecks. Recovery is not a
+provenance bypass. Any rollback must retain both v3 parsing and ledger
+authority; preserving the encoding alone is insufficient. Use a reviewed
+forward correction when that compatibility floor cannot be retained.
+Metadata sequencing remains governed by [[Release Orchestration]].
+
 ### Reserved telemetry identity and inert coverage foundation
 
 The repository reserves the single workflow identity `tests-telemetry` for a
