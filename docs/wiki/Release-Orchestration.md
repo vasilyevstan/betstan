@@ -219,6 +219,39 @@ Before deployment, the release chain verifies:
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
 
+**Pending fixed Backoffice cleanup.** The protected live-data chain adds one
+fixed-boundary Backoffice projection cleanup without creating a separate
+production path:
+
+1. `dry-run` performs the existing fixed-reschedule preflight, then the
+   Backoffice cleanup preflight, before the compatibility-backfill and Slip
+   index preflights;
+2. `apply-backfills` completes and verifies the existing fixed reschedule, then
+   runs the Backoffice cleanup in preflight mode only;
+3. `apply-slip-index` first reverifies the fixed reschedule, completes the
+   existing backfill and index work, then runs cleanup preflight, apply, and
+   verify. Cleanup apply is the last fenced database mutation.
+
+Production execution is permitted only through the protected workflow at the
+exact current `master` SHA. Every phase stops if the existing reschedule is not
+safely applied, completed, or resumable; the cleanup cannot skip or replace
+that prerequisite. No production workflow has been dispatched for this
+change.
+
+Mutating phases quiesce the seven writers: Backoffice, Bet, Event, Gamemaster,
+Moderation, Resulting, and Slip. Backoffice quiesces first so its projection
+cannot race the cleanup and restores last. Auth and Client remain served as
+readers, while `/api/backoffice` is expected to return fenced `503` responses
+during mutation. The final phase retains the established write fence and
+database-lock handoff for deployment.
+
+New sanitized evidence uses `live-betting-v5` and requires
+`backoffice_pre_september_cleanup_complete` in the final handoff. The verifier
+keeps the literal historical meanings of `live-betting-v1` through `v4` and
+rejects an unknown `v6`; a newer label cannot reinterpret older evidence. The
+cleanup command has no rollback phase, so release rollback continues to use
+the protected baseline, fence, lock, and recovery model described below.
+
 If an already-dispatched but unissued operation loses a prerequisite, its
 exact request and run remain serialized until bounded, reviewed recovery proves
 the exact source identity safe to retire. Ambiguity, partial execution, or
@@ -377,19 +410,19 @@ Mongo maintenance resumes the ingress controller only after exact version,
 compatibility-version, and image verification, before applying the Telemetry
 ingress. This restores admission readiness without thawing application writers;
 deployment failure recovery remains armed until deployment completes. Fenced
-rollback also recognizes the deployment cleanup's exact candidate Auth,
-Backoffice, and Client images over an ordered candidate-prefix/baseline-suffix
-writer rollout. It does not accept arbitrary mixed generations: immutable image
-evidence, writer quiescence, the write fence, Telemetry resource and route
+rollback also recognizes the deployment cleanup's exact candidate Auth and
+Client images over an ordered candidate-prefix/baseline-suffix writer rollout.
+It does not accept arbitrary mixed generations: immutable image evidence,
+seven-writer quiescence, the write fence, Telemetry resource and route
 constraints, and lock ownership remain mandatory. No database restore is added.
 
 When applied-data recovery resumes from that retained hold, each quiesced
 writer may use either its exact failed-deployment candidate image or its own
 checksum-bound pre-deployment baseline image, allowing a partially completed
-sequential rollout to continue safely. Auth, Backoffice, and Client remain on
-their exact candidate images, while released-runtime recovery requires all
-nine candidate images. Baseline provenance, ancestry, quiescence, readiness,
-locks, fences, and every pre-mutation check remain fail-closed.
+sequential rollout to continue safely. Auth and Client remain on their exact
+candidate images, while released-runtime recovery requires all nine candidate
+images. Baseline provenance, ancestry, quiescence, readiness, locks, fences,
+and every pre-mutation check remain fail-closed.
 
 A generation that failed its own deployment is never an accepted rollback
 baseline.
