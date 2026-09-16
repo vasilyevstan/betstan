@@ -6,6 +6,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$ROOT_DIR/infra/azure/agents/live-betting-readiness-test-lib.sh"
 SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
 
+current_images="$TEST_ROOT/oci-current-images.tsv"
+create_image_provenance "$current_images" oci \
+  "telemetry slip resulting moderation gamemaster event client backoffice bet auth"
+run_live_betting_scenario oci-current-services "$SCRIPT" oci \
+  MODE=dark IMAGE_PROVENANCE_FILE="$current_images"
+assert_eq 0 "$RUN_RC" "OCI dark mode should accept the current ten services in any order"
+assert_contains "$RUN_STDOUT" 'live_betting_readiness=GO' 'OCI current service set should report GO'
+assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=10' 'OCI current service set should contain ten images'
+assert_contains "$RUN_SUMMARY_FILE" 'app_deployments_verified=10/10' 'OCI current service set should verify every deployment'
+
 run_live_betting_scenario oci-monitor "$SCRIPT" oci \
   MODE=monitor \
   STUB_FLAG_VALUE=true \
@@ -29,6 +39,7 @@ run_live_betting_scenario oci-monitor "$SCRIPT" oci \
   STUB_RESULTING_RETRY_PROCESSING_AGE_SECONDS=60
 assert_eq 0 "$RUN_RC" "OCI monitor mode should pass"
 assert_contains "$RUN_SUMMARY_FILE" 'mode=monitor' 'OCI monitor summary should persist mode'
+assert_contains "$RUN_SUMMARY_FILE" 'image_provenance_rows=9' 'OCI historical service set should retain nine images'
 assert_contains "$RUN_SUMMARY_FILE" 'secondary_redirect_status=308' 'OCI monitor should validate redirect host'
 assert_contains "$RUN_SUMMARY_FILE" 'diagnostic_event_status=200' 'OCI monitor should validate diagnostic event API'
 assert_contains "$RUN_SUMMARY_FILE" 'sse_diagnostic_status=200' 'OCI monitor should validate diagnostic SSE'
@@ -179,4 +190,4 @@ assert_contains "$RUN_SUMMARY_FILE" 'failed_checks=mongo_workflow_parking' 'OCI 
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-bet-pending-bet-update.json" '"exhausted":{"count":1,"oldestAgeSeconds":30}' 'OCI bet terminal fixture should surface exhausted counts'
 assert_contains "$RUN_SCENARIO_DIR/output/mongo-resulting-pending-moderation-result.json" '"exhausted":{"count":1,"oldestAgeSeconds":60}' 'OCI resulting pending moderation terminal fixture should surface exhausted counts'
 
-echo 'live_betting_readiness_tests=PASS stack=oci scenarios=19'
+echo 'live_betting_readiness_tests=PASS stack=oci scenarios=20'
