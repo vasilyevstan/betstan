@@ -271,8 +271,9 @@ technical gate and the separate approval rules for human-originated work.
   full bounded timeline completeness/labelling, penalty-linked deduplication,
   live-card relative height and pre-kickoff market alignment, stable Correct
   Score order, and visible administrator navigation, and record the exact
-  master SHA and run evidence in `docs/wiki/Live-Betting-Production.md`
-  alongside the existing release chain.
+  master SHA and run evidence in the existing release handoff and protected
+  evidence. Keep `docs/wiki/Live-Betting-Production.md` focused on behavior
+  and acceptance principles rather than a current production inventory.
 
 ### Privileged authorization and synthetic fixtures
 - A signed JWT role is only a request hint. Every privileged mutation and every server-side acceptance-fixture scope must revalidate the current persisted role through auth and fail closed when auth is unavailable.
@@ -309,6 +310,11 @@ technical gate and the separate approval rules for human-originated work.
 - The protected activation workflow first uses a bounded lease. Only the same run and source SHA may remove it, and only after production acceptance, protected evidence upload, and a final current-master/provenance revalidation.
 - Disable and every ambiguous control failure set the flag false and remove the lease together. The lease remains the independent safety boundary if the workflow runner is hard-killed before its cleanup trap can execute.
 - Deployment provenance must bind source SHA, build/deploy attempts, infrastructure artifact digest, runtime mode, and runtime fingerprint. Rechecking current `master` immediately before mutation and commit closes the preflight-to-mutation race.
+- Permanent enablement is not evidence that the next ordinary public match
+  has kicked off. Report the activation state and the public schedule
+  separately, with an explicit timezone. Offline acceptance matches do not
+  replace public history; a retained finished card can remain visible until
+  the next countdown. Claim observed public activity only from that activity.
 
 ### Mongo aggregate concurrency and rolling compatibility
 - Mongo index introspection fails with `NamespaceNotFound` on a brand-new
@@ -501,6 +507,18 @@ cd resulting && npm ci && npm run test:ci
 - Keep corrections in the originating agent context with a bounded attempt
   count. Replacement, summary-only, or status-only agents create lost context
   and conflicting ownership.
+- Accepted reviews survive interruptions when their evidence and relevant
+  inputs remain valid. Follow `Reusing accepted evidence` in
+  `.github/agents/README.md`: retain original reports and model metadata,
+  reopen only invalidated gates, and never invent missing evidence or replace
+  exact-current-SHA CI with historical success.
+- Resume from current protected refs, actual deployment provenance, and exact
+  operation artifacts, not a stale conversation plan. Work completed by
+  another session is a satisfied dependency when verified, not a reason to
+  repeat data, infrastructure, deployment, or recovery operations.
+- An explicit pause remains in force across completion notifications and
+  restarts. Resume only when authorized, then reconcile current facts and
+  continue the remaining transition with one owner and one observer.
 - Three independent simplifier passes need distinct model families, identical
   sealed input, high reasoning, and one conservative synthesis. Fewer than
   three completed passes blocks; safety and compatibility cannot be removed by

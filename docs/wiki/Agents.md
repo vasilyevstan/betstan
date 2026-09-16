@@ -16,7 +16,7 @@ remain authoritative.
 flowchart LR
     Request --> Architect["Architect"]
     Architect --> Simplifier["Simplifier<br/>3 independent passes + synthesis"]
-    Simplifier --> Developer["Backend and/or<br/>Frontend developer"]
+    Simplifier --> Developer["Registered implementation owner"]
     Developer --> Critic["Validation critic"]
     Critic --> Tester["Test engineer"]
     Tester --> Final["Final validator"]
@@ -116,6 +116,22 @@ Each work unit records:
 Corrections stay in the same logical agent conversation whenever possible.
 Starting a replacement agent while the original can still produce side
 effects creates contradictory ownership and is prohibited.
+
+### Resuming accepted reviews
+
+The canonical reuse policy is **Reusing accepted evidence** in
+[the agent-team README](https://github.com/vasilyevstan/betstan/blob/master/.github/agents/README.md).
+A crash, pause, compaction, new PR, promotion, or ancestry synchronization
+alone does not invalidate a completed source review. Recover its original
+SHA, base, scope, criteria, report, verdict, and required model metadata;
+missing evidence must not be invented or relabelled as a new-head review.
+
+Reuse requires proof that the relevant inputs, dependencies, criteria, and
+current policy remain unchanged. Reopen only invalidated gates and their
+dependants, keeping the same owner context when available. Required
+exact-current-SHA CI, merge-snapshot checks, runtime acceptance, provenance,
+and approval controls remain current. Record the justification in the
+existing handoff, not a new ledger.
 
 ## Model diversity
 

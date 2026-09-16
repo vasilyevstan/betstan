@@ -168,75 +168,33 @@ placement.
   leak while current-user authorization is unresolved, and afterward is
   retained only when its event ID is in the administrator's acceptance scope.
 
-## Production release
+## Release state and evidence
 
-Live betting was first permanently activated on 2026-08-30 from exact master
-`0bf1d01981e454cd6ca661d8e6d99997462c558c`.
+Deployment, activation, scheduling, and observed play are distinct facts:
 
-| Stage | Run |
-|---|---:|
-| Production build | `33307059664` |
-| OCI/GHCR build | `33307558371` |
-| GHCR validation | `33308076137` |
-| Capacity | `33308191145` |
-| Infrastructure | `33308306279` |
-| Data dry-run | `33308673229` |
-| Data backfill | `33309055711` |
-| Slip index/handoff | `33309897271` |
-| Dark deployment | `33310369637` |
-| Activation | `33311534616` |
+| State | What it proves |
+| --- | --- |
+| Deployed dark | The candidate images are deployed and validated without enabling new automatic kickoffs |
+| Temporary activation lease | A bounded acceptance window is open; this is not permanent enablement |
+| Permanent enablement | Activation has committed after acceptance; this does not prove a match has already started |
+| Current public schedule | The ordinary public Event projection exposes upcoming fixtures and kickoff times |
+| Observed automatic public kickoff | A scheduled public fixture is observed advancing through the ordinary countdown and live path |
 
-The activation passed the complete browser journey, live and pre-match
-settlement, protected-account cleanup, queue checks, REST/SSE compatibility,
-and restart checks. Final state is `LIVE_KICKOFFS_ENABLED=true`,
-`activation_state=committed`, with no activation lease.
+Offline, acceptance-scoped synthetic fixtures prove the isolated browser,
+quote, moderation, and settlement journey. They do not prove ordinary public
+activity, even when they complete successfully or contribute to Telemetry
+counts. A green Telemetry summary is likewise not kickoff evidence.
 
-The compact-presentation candidate at exact master
-`e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` was deployed by run
-`33418318240`. Activation `33419673381` failed at a stale seven-visible-card
-browser assertion. Cleanup restored dark mode, disabled kickoffs, removed the
-exact synthetic Slip, restored the reusable account to `USER`, and cleared the
-lease. That failed first attempt remains immutable.
+The recently finished card can remain visible until the next event enters
+its countdown; a reconnect after kickoff also reconciles it against the new
+live event. Retaining a completed card alone is not evidence of a stalled
+scheduler. Public visibility and acceptance-only visibility remain separate.
 
-The corrected compact release is permanently active from exact master
-`f4a0b333963b3a458c9b2b48c2aae1f6267f754d`.
-
-| Stage | Run |
-|---|---:|
-| Production build | `33436391225` |
-| OCI/GHCR build | `33437490565` |
-| GHCR validation | `33438579478` |
-| Capacity | `33438984944` |
-| Infrastructure finalize | `33439362885` |
-| Data dry-run | `33440517994` |
-| Data backfills | `33441373219` |
-| Slip index/handoff | `33442790087` |
-| Dark deployment | `33443908124` |
-| Permanent activation | `33444998653` |
-
-The backfill changed exactly seven eligible legacy Event boards and converged
-to zero matches without changing existing Slip or Bet snapshots. Activation
-passed the full ten-minute browser journey, independent live and pre-match
-slips, quote refresh and stale-quote handling, moderation, settlement, history
-labels, SSE ordering, cleanup, queue/restart checks, and permanent commit. Two
-synthetic matches completed `1-2` and `2-1`. Final state is
-`LIVE_KICKOFFS_ENABLED=true`, `activation_state=committed`, with no activation
-lease.
-
-Terminal validation bound all nine running images to immutable GHCR digests,
-verified the shared eight-database topology and retained Bound 50 GiB Mongo
-PVC, zero RabbitMQ backlog, ingress/TLS/redirects, REST and SSE health, and all
-current 1X2 and Correct Score boards. Forty-four deployed-client regressions
-and 24 read-only real-production responsive checks passed across v1/v2/v3,
-light/dark, and 1600/768/390/320px widths without clipping, overflow,
-misalignment, short touch targets, page errors, or API failures.
-
-The next release that lands the live-timeline/market-alignment slice must
-extend this acceptance journey with: full bounded timeline
-completeness/labelling, penalty-linked deduplication, live-card relative
-height and pre-kickoff market alignment, stable Correct Score order, and
-visible administrator navigation across UI variants. Record its exact master
-SHA and run evidence in a new dated entry above once that release completes.
+This page describes behavior, not a timestamped production-status inventory.
+Current enablement, schedule, and observed kickoff claims require their own
+exact release and public-read evidence. Historical acceptance does not prove
+that an ordinary public kickoff happened today. See [[Release Orchestration]]
+for the release and rollback contract.
 
 ## Compatibility and rollback
 
@@ -279,124 +237,27 @@ selection, label, and price. A Correct Score selection ID is retained only when
 the repaired board keeps the same label; replacement outcomes receive stable
 new IDs so an old draft cannot be visually reinterpreted as a different score.
 
-A one-time fixed event provisioning correction is part of the protected
-live-data rollout. It uses the existing operator, is not exposed as an HTTP
-endpoint, accepts no caller-selected identity or kickoff, and ships through
-the normal release path rather than any bypass. It is not a generic scheduler
-or configuration feature, and it never reschedules a fixture in place.
+### Bounded one-time fixture maintenance
 
-The original July fixture, public Event ID `6a623af592af5a95b1d0bb79` at
-`2026-07-23T16:31:57.215Z`, remains the exact read-only template prerequisite.
-The operator performs one bounded check that its reviewed offline Backoffice
-record still matches, but does not mutate it or traverse its historical Slip,
-Bet, Moderation, or Resulting rows. The earlier protected dry run found
-dependencies and changed zero records, so the July fixture and its history
-remain untouched.
+The protected live-data rollout includes fixed-identity provisioning, not a
+public rescheduling API or a general scheduler. It creates only reviewed
+offline targets, preserves historical fixtures and their betting dependencies,
+and does not move an existing fixture's kickoff in place. A source-bound
+journal and pre-mutation baseline preserve the exact before/after state.
+Unknown, conflicting, or progressed target state blocks mutation or rollback
+rather than being overwritten.
 
-The September 11 fixed fixture, public Event ID
-`42643b4c173d1c7b8eeed765` at `2026-09-11T08:05:00.000Z`, was applied
-offline. Its activation request was superseded before authority or dispatch
-when protected `master` advanced. It was never activated, remains offline and
-untouched, and requires no cleanup.
+The historical destructive fixture cleanup remains uninvoked by the rollout
+and bound to its original target; it is not routine retention or authority to
+remove later fixtures. Historical evidence generations retain their original
+identity and meaning rather than being relabelled for a new release.
 
-The September 12 fixed fixture, public Event ID
-`eb4608ac531f5d9578113167` at `2026-09-12T08:05:00.000Z`, was applied
-offline. It was not activated before its window elapsed, remains offline and
-untouched, and requires no cleanup.
+A failed data phase remains failed even when it produces a sanitized diagnostic
+report. Missing or contradictory evidence cannot become success provenance or
+a deployment handoff. Exact fixture inventories, artifacts, and recovery
+procedures belong in protected evidence, not this public page.
 
-The current pending correction fixes the September 13 acceptance target to
-public Event ID `0fd6a3633bf1fcf09d95c17d`, with kickoff
-`2026-09-13T08:05:00.000Z`. It has not been applied, deployed, or activated.
-Its initial apply must begin strictly before `2026-09-13T07:45:00.000Z`, the
-existing twenty-minute lead boundary; starting at exactly that time is
-rejected.
-
-The September 13 target records use a new fixed identity set and are built
-from reviewed constants rather than cloned from mutable production state.
-They retain the reviewed fixture name and teams, `NO_RESULT` status, `OFFLINE`
-visibility, and deterministic 1X2 and Correct Score products. The non-public
-identities and deterministic live input remain private. Creation-request and
-publication-pending fields are absent rather than set.
-
-Before writing, the operator reads only the exact July template prerequisite
-and checks only September 13 target collisions and dependencies. September 11
-and September 12 are neither read nor mutated. An existing September 13
-target, archive or cleanup tombstone, live mirror, or known betting,
-settlement, retry, pending-update, or Slip reference blocks the run. Apply runs
-only while writers are quiesced and the shared database operation lock is
-held.
-
-The operator writes a fixed-ID journal before target writes. That journal
-stores canonical Extended JSON and SHA-256 digests for both the recorded
-preimage — three absent targets — and the deterministic target. Apply uses
-compare-and-set writes in Event, Gamemaster, then Backoffice order; a prepared
-partial operation can resume only from snapshot-or-target states and only for
-the source SHA that prepared it. Verification for that source remains exact.
-After the journal is applied, a later release SHA receives a completed
-one-time result so natural match progression does not block unrelated
-releases.
-
-Apply creates only the journal-bound September 13 targets. Rollback runs in the
-inverse Backoffice, Gamemaster, then Event order, removes only those exact
-targets, and records a terminal rolled-back state. Because the preimage is
-empty, rollback never deletes or restores a historical record and performs no
-July, September 11, or September 12 cleanup. It resumes safely when a prior
-rollback attempt already removed one or more exact targets. Otherwise it is
-available only while each document still matches either the journal target or
-its absent preimage and no new live, visibility, betting, or dependency state
-has appeared; any unknown state fails closed instead of proceeding. The
-protected pre-mutation database baseline is still retained by the normal
-release chain. The historical destructive fixture cleanup remains uninvoked
-by the rollout and stays bound to the original July fixture identity and
-kickoff, so it cannot match any September event.
-
-A blocked reschedule remains a failed data phase even though the operator CLI
-emits a structured report before exiting nonzero. The rollout wrapper accepts
-that failed Job only long enough to validate one exact report, normalize its
-allowlisted service, collection, count, and reason code, and write checksummed
-failure evidence bound to the source SHA and workflow attempt. Raw pod logs,
-database documents, connection strings, and user or bet identifiers are
-deleted rather than uploaded. Missing, malformed, contradictory, or
-exception-only output remains a hard failure without diagnostic acceptance,
-and no success provenance or schema handoff is produced. Because Kubernetes
-may expose a terminated container before the Job and Pod phase fields
-converge, the wrapper waits through a short bounded status window before
-applying those strict terminal checks; a transient `Running` phase alone must
-not discard an otherwise valid blocker report. Once observed, that failure is
-latched so a contradictory later success cannot authorize readiness. Status
-requests are independently bounded, and diagnostic acceptance requires the
-operator CLI's exact intentional exit code with no signal or active-deadline
-failure. Completion and failure authority comes from terminal Kubernetes Job
-conditions rather than intermediate counters. Once failure is latched, only
-the short convergence deadline remains active, and bounded best-effort Job
-deletion cannot prevent the sanitized report from being persisted. A failed
-or timed-out log read is never interpreted as evidence; any partial bytes are
-discarded before sanitization. Transient status and complete-log transport
-failures are retried only within the active execution or terminal deadline;
-persistent failures still stop the phase without success-shaped evidence.
-
-New September 13 rollout and evidence artifacts use `live-betting-v4` with
-`event_reschedule_complete`. Compatibility is exact rather than
-schema-label-only: the verifier continues to accept the original July
-`live-betting-v1` cleanup evidence, the September 11 `live-betting-v2`
-reschedule evidence, and the September 12 `live-betting-v3` reschedule
-evidence. All historical generations remain verifiable, and their identities
-and meanings cannot be substituted or cross-labelled across evidence
-versions.
-
-The immediate pre-deploy rollback baseline captured former production source
-`e7ca18a52696b50d27c5d7a18ed00eeeeaa18423` during deployment
-`33443908124`; its original OCI build is `33369011703` and deployment is
-`33418318240`. Retained independently certified fallbacks are:
-
-- source `0bf1d01981e454cd6ca661d8e6d99997462c558c`, OCI build
-  `33307558371`, deployment `33310369637`;
-- source `3ce5ddcc031081f1658e91fa658000aa9a9f9ab4`, OCI build
-  `33249834065`, deployment `33252255145`.
-
-Rollback is executable only while the selected baseline, image provenance,
-and immutable artifacts remain retained and current rollback-readiness checks
-pass.
-
-Disable new kickoffs before rollback. Already-started matches and submitted
-live bets must finish on compatible code.
+Rollback depends on a retained, compatible baseline and current readiness,
+not an old list of source SHAs or run IDs. New kickoffs remain disabled during
+rollback while already-started matches and submitted live bets require
+compatible completion. See [[Release Orchestration]].
