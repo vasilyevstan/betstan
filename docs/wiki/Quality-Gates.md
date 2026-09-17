@@ -176,6 +176,31 @@ separately prove the exact authorized source merge, current branch lineage,
 trusted workflow run and aggregate job, and unchanged engine-and-harness
 content before candidate execution is allowed.
 
+Publication of workflow and coverage receipts uses invocation-local
+acknowledgment proof. A claim invocation can POST each of `pending` and
+`success` at most once. Advancement requires an HTTP 201 acknowledgment of
+the exact row identity, request fields and timestamp from the trusted Actions
+publisher. Ambiguous
+writes are not retried or recovered by later GETs. Entry performs one complete
+ledger scan without retries; an existing claim blocks re-entry. Only after an
+acknowledged write may read-back retry an exact subset of that invocation's
+acknowledged rows or known transient GET failures. Foreign or conflicting
+claim evidence, malformed rows and duplicates are fatal; verification
+requires the exact full claim ledger with complete pagination.
+
+Each required acknowledged-ledger verification allows at most five attempts,
+not five across the whole invocation. All receipt checks and waits, including
+asynchronous work, share one 30-second monotonic deadline. Receipt GETs are
+aborted within five seconds or the remaining budget, whichever is smaller,
+with at least two seconds between retries.
+
+The helper verifies the real full ledger before passing its invocation-owned
+proof and validated inventory to shared quality revalidation. Any receipt
+visibility wait therefore precedes fresh mutable-authority reads. Authority
+is fully revalidated before writes and after read-backs; no receipt check is
+skipped and no replay is enabled. Proof remains private to that invocation,
+not in a persistent store or cross-invocation recovery API.
+
 Stage 2A activation also requires a separately authorized workflow change that
 invokes the wrapper with an explicitly mapped least-privilege GitHub read
 token. Activated CI must reject a missing token, attach it only to GitHub API
@@ -191,6 +216,10 @@ state. Rollback is a separately reviewed forward correction or revert through
 the normal branch flow, not reuse of an earlier authorization. Once either
 one-use receipt has been spent, later correction must preserve that historical
 interpretation rather than making the consumed authority appear unused.
+Ending or crashing after any receipt row was written permanently fences that
+claim against re-entry. Pending is not consumed or successful. A success
+receipt stays spent even if later quality publication fails; no compensation
+or reset revives it.
 
 ## Application test layers
 
@@ -315,14 +344,30 @@ After deployment:
 - Release documentation records scope, exclusions, validation, risk, release
   impact, rollback, and remaining work.
 
-Protected-workflow authorizations are separate from coverage-asset
-authorizations. Use requires the matching actual PR, exact workflow blobs,
-branch refs and receipt anchor, within the authorization's validity window.
-The declaration must reach trusted policy through protected review before
-consumption; provisioning alone is not merge or deployment permission.
-Integration and promotion retain their own one-use authority and required
-fresh CI. After both intended uses, remove the declarations while preserving
-consumed receipts and their one-use meaning.
+Protected-workflow declarations remain PR/ref/blob-scoped, not literal
+head-SHA grants. Each use still verifies the actual current head, base and
+merge snapshot, receipt anchor, scope and operation gates, required fresh CI
+and applicable first-attempt provenance. Permitted source deltas belong in
+review evidence, not new declaration fields.
+
+Workflow expiry is checked on a fresh clock immediately before every receipt
+POST and quality-success POST. Expiry between receipt success and quality
+publication leaves the receipt spent and prevents quality success. Coverage
+authorizations keep their immutable transition/run eligibility rules: an
+otherwise eligible run may complete after expiry.
+Historical coverage integration receipts retain full validation, with
+revalidation reads bounded by the shared deadline and per-request cap.
+
+Receipt-protocol repair and declaration retirement follow normal protected
+integration, promotion and ancestry synchronization; retirement grants no
+replacement authority and preserves all claim history. Replacement
+integration/promotion grants are reviewed and promoted separately into
+trusted `master` before the consuming workflow change enters `dev`.
+Provisioning alone is not merge or deployment permission.
+
+Old CI, expiry extensions, identity resets or workflow reverts cannot bypass
+these requirements. Remove declarations after their intended uses without
+deleting, resetting or reinterpreting receipt history.
 
 Independently verified immutable facts may be reused after binding them to
 the consuming work unit's root request, exact refs, scope, and complete

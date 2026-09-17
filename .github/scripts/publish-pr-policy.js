@@ -66,6 +66,10 @@ const OPENING_RACE_WINDOW_MS = 300_000;
 const MANAGED_LABEL_LEDGER_PAGE_SIZE = 100;
 const MANAGED_LABEL_LEDGER_MAX_PAGES = 10;
 const MAX_WORKFLOW_AUTHORIZATION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const RECEIPT_READ_ATTEMPTS = 5;
+const RECEIPT_READ_DEADLINE_MS = 30_000;
+const RECEIPT_REQUEST_TIMEOUT_MS = 5_000;
+const RECEIPT_READ_DELAY_MS = 2_000;
 const WORKFLOW_RUN_NONTERMINAL_STATUSES = new Set([
   "in_progress",
   "pending",
@@ -137,36 +141,7 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
-const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
-  {
-    id: "node24-production-build-pr-637-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
-    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
-    pullNumber: 637,
-    headRef: "fix/actions-node24",
-    baseRef: "dev",
-    issuedAt: "2026-09-17T01:04:52.000Z",
-    expiresAt: "2026-09-18T01:04:52.000Z",
-    receiptSha: "5393127d0f5ce048781dc48f265acc04ddbf4de0",
-  },
-  {
-    id: "node24-production-build-promotion-636-v1",
-    repository: "vasilyevstan/betstan",
-    headRepository: "vasilyevstan/betstan",
-    workflowPath: ".github/workflows/production-build.yml",
-    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
-    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
-    pullNumber: 636,
-    headRef: "dev",
-    baseRef: "master",
-    issuedAt: "2026-09-17T01:04:52.000Z",
-    expiresAt: "2026-09-18T01:04:52.000Z",
-    receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
-  },
-]);
+const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
   JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),
@@ -854,7 +829,13 @@ function coverageAuthorizationContext(authorization, leg) {
   return context;
 }
 
-async function listCommitStatuses(github, owner, repo, ref) {
+async function listCommitStatuses(
+  github,
+  owner,
+  repo,
+  ref,
+  { budget, onPage } = {},
+) {
   const statuses = [];
   const seenIds = new Set();
   for (let page = 1; Number.isSafeInteger(page); page += 1) {
@@ -864,7 +845,20 @@ async function listCommitStatuses(github, owner, repo, ref) {
       ref,
       per_page: 100,
       page,
+      ...(budget && {
+        request: {
+          signal: budget.signal(
+            Math.min(
+              RECEIPT_REQUEST_TIMEOUT_MS,
+              receiptTimeRemaining(budget),
+            ),
+          ),
+        },
+      }),
     });
+    if (budget) {
+      receiptTimeRemaining(budget);
+    }
     if (!Array.isArray(response.data) || response.data.length > 100) {
       throw new Error("authorization receipt response is malformed");
     }
@@ -931,6 +925,7 @@ async function listCommitStatuses(github, owner, repo, ref) {
       seenIds.add(status.id);
     }
     statuses.push(...response.data);
+    onPage?.(statuses);
     if (response.data.length < 100) {
       return statuses;
     }
@@ -1218,6 +1213,8 @@ function assertReceiptStatusEntry(
     throw new Error("authorization receipt status is malformed");
   }
   if (
+    !Number.isSafeInteger(status.id) ||
+    status.id < 1 ||
     status.context !== context ||
     status.state !== state ||
     status.description !== description ||
@@ -1236,7 +1233,14 @@ function assertReceiptStatusEntry(
 
 function assertReceiptLedger(
   statuses,
-  { context, description, targetUrl, states },
+  {
+    context,
+    description,
+    targetUrl,
+    states,
+    acknowledged,
+    allowSubset = false,
+  },
 ) {
   const ledger = statuses
     .filter((status) => status.context === context)
@@ -1254,6 +1258,27 @@ function assertReceiptLedger(
         left.createdAt - right.createdAt ||
         left.status.id - right.status.id,
     );
+  if (acknowledged) {
+    let previousIndex = -1;
+    for (const { status } of ledger) {
+      const index = acknowledged.findIndex(
+        (entry) => entry.id === status.id,
+      );
+      const expected = acknowledged[index];
+      if (
+        index <= previousIndex ||
+        !expected ||
+        status.state !== expected.state ||
+        status.created_at !== expected.created_at
+      ) {
+        throw new Error("authorization receipt conflicts with its acknowledgement");
+      }
+      previousIndex = index;
+    }
+    if (allowSubset) {
+      return ledger;
+    }
+  }
   if (
     ledger.length !== states.length ||
     ledger.some(
@@ -1265,6 +1290,148 @@ function assertReceiptLedger(
   return ledger;
 }
 
+function receiptTimeRemaining(budget) {
+  const remaining = Math.floor(budget.deadline - budget.now());
+  if (remaining <= 0) {
+    throw new Error("authorization receipt read-back deadline exhausted");
+  }
+  return remaining;
+}
+
+function receiptReadRetryDelay(error) {
+  const retryable = error.status === undefined
+    ? ["AbortError", "TimeoutError"].includes(error.name) ||
+      ["ECONNRESET", "ETIMEDOUT"].includes(error.code)
+    : [408, 429, 500, 502, 503, 504].includes(error.status);
+  if (!retryable) {
+    throw error;
+  }
+  const retryAfter = error.response?.headers?.["retry-after"];
+  if (retryAfter === undefined) {
+    return RECEIPT_READ_DELAY_MS;
+  }
+  const milliseconds = /^\d+$/.test(String(retryAfter))
+    ? Number(retryAfter) * 1000
+    : Date.parse(retryAfter) - Date.now();
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("authorization receipt retry delay is malformed");
+  }
+  return Math.max(RECEIPT_READ_DELAY_MS, milliseconds);
+}
+
+function assertOwnedReceiptLedger(statuses, receipt, allowSubset = false) {
+  if (receipt.acknowledged.length === 0) {
+    if (statuses.some((status) => status.context === receipt.context)) {
+      throw new Error("authorization receipt was already started");
+    }
+    return [];
+  }
+  return assertReceiptLedger(statuses, {
+    ...receipt,
+    states: receipt.acknowledged.map((status) => status.state),
+    allowSubset,
+  });
+}
+
+async function verifyReceiptLedger(github, owner, repo, receipt) {
+  receipt.ledger = null;
+  const attempts = receipt.acknowledged.length ? RECEIPT_READ_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let delay = RECEIPT_READ_DELAY_MS;
+    let failure = "ledger is incomplete";
+    try {
+      const statuses = await listCommitStatuses(
+        github,
+        owner,
+        repo,
+        receipt.anchorSha,
+        {
+          budget: receipt.budget,
+          onPage: (entries) =>
+            assertOwnedReceiptLedger(entries, receipt, true),
+        },
+      );
+      const ledger = assertOwnedReceiptLedger(statuses, receipt, true);
+      if (ledger.length === receipt.acknowledged.length) {
+        receipt.ledger = assertOwnedReceiptLedger(statuses, receipt)
+          .map(({ status }) => status);
+        return;
+      }
+    } catch (error) {
+      if (receipt.acknowledged.length === 0) {
+        throw error;
+      }
+      delay = receiptReadRetryDelay(error);
+      failure = `GET failed (${error.status ?? error.code ?? error.name})`;
+    }
+    if (attempt === attempts) {
+      throw new Error(
+        `authorization receipt ${failure} after ${attempts} read-back attempts`,
+      );
+    }
+    if (delay >= receiptTimeRemaining(receipt.budget)) {
+      throw new Error("authorization receipt read-back deadline exhausted");
+    }
+    await receipt.budget.wait(delay);
+  }
+}
+
+async function assertUnusedOrOwnedReceipt({
+  github,
+  owner,
+  repo,
+  anchorSha,
+  context,
+  receipt,
+  label,
+}) {
+  if (receipt) {
+    if (
+      receipt.anchorSha !== anchorSha ||
+      receipt.context !== context ||
+      !Array.isArray(receipt.ledger)
+    ) {
+      throw new Error("authorization receipt proof does not match its claim");
+    }
+    // The claimant verifies this inventory before re-reading mutable authority.
+    assertOwnedReceiptLedger(receipt.ledger, receipt);
+    return;
+  }
+  const statuses = await listCommitStatuses(github, owner, repo, anchorSha);
+  if (statuses.some((status) => status.context === context)) {
+    throw new Error(`${label} receipt was already started`);
+  }
+}
+
+function acknowledgeReceipt(response, receipt, state) {
+  const status = response?.data;
+  if (
+    response?.status !== 201 ||
+    !status ||
+    typeof status !== "object" ||
+    Array.isArray(status)
+  ) {
+    throw new Error("authorization receipt acknowledgement is malformed");
+  }
+  assertReceiptStatusEntry(status, { ...receipt, state });
+  const acknowledgement = {
+    id: status.id,
+    state: status.state,
+    context: status.context,
+    description: status.description,
+    target_url: status.target_url,
+    creator: { ...status.creator },
+    created_at: status.created_at,
+  };
+  const acknowledged = [...receipt.acknowledged, acknowledgement];
+  assertReceiptLedger(acknowledged, {
+    ...receipt,
+    acknowledged,
+    states: acknowledged.map((entry) => entry.state),
+  });
+  receipt.acknowledged = acknowledged;
+}
+
 async function claimOneUseReceipt({
   github,
   owner,
@@ -1274,63 +1441,44 @@ async function claimOneUseReceipt({
   description,
   targetUrl,
   revalidate,
+  assertCanWrite,
+  receiptIO = {},
 }) {
-  if (revalidate) {
-    await revalidate();
+  const {
+    now = () => performance.now(),
+    wait = sleep,
+    signal = (milliseconds) => AbortSignal.timeout(milliseconds),
+  } = receiptIO;
+  const receipt = {
+    anchorSha,
+    context,
+    description,
+    targetUrl,
+    acknowledged: [],
+    ledger: null,
+    budget: { now, wait, signal, deadline: now() + RECEIPT_READ_DEADLINE_MS },
+  };
+  for (const state of ["pending", "success"]) {
+    await verifyReceiptLedger(github, owner, repo, receipt);
+    if (revalidate) {
+      await revalidate(receipt);
+    }
+    receiptTimeRemaining(receipt.budget);
+    assertCanWrite?.();
+    const response = await publishStatus(
+      github,
+      owner,
+      repo,
+      anchorSha,
+      context,
+      state,
+      description,
+      targetUrl,
+    );
+    acknowledgeReceipt(response, receipt, state);
   }
-  let statuses = await listCommitStatuses(
-    github,
-    owner,
-    repo,
-    anchorSha,
-  );
-  if (statuses.some((status) => status.context === context)) {
-    throw new Error("authorization receipt was already started");
-  }
-  await publishStatus(
-    github,
-    owner,
-    repo,
-    anchorSha,
-    context,
-    "pending",
-    description,
-    targetUrl,
-  );
-  statuses = await listCommitStatuses(
-    github,
-    owner,
-    repo,
-    anchorSha,
-  );
-  assertReceiptLedger(statuses, {
-    context,
-    description,
-    targetUrl,
-    states: ["pending"],
-  });
-  await publishStatus(
-    github,
-    owner,
-    repo,
-    anchorSha,
-    context,
-    "success",
-    description,
-    targetUrl,
-  );
-  statuses = await listCommitStatuses(
-    github,
-    owner,
-    repo,
-    anchorSha,
-  );
-  assertReceiptLedger(statuses, {
-    context,
-    description,
-    targetUrl,
-    states: ["pending", "success"],
-  });
+  await verifyReceiptLedger(github, owner, repo, receipt);
+  return receipt;
 }
 
 async function claimWorkflowAuthorization({
@@ -1341,6 +1489,8 @@ async function claimWorkflowAuthorization({
   pull,
   targetUrl,
   revalidate,
+  assertCanWrite,
+  receiptIO,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -1360,7 +1510,7 @@ async function claimWorkflowAuthorization({
   const description =
     `PR #${pull.number} ${authorization.workflowPath} ` +
     `${authorization.authorizedBlob.slice(0, 12)}`;
-  await claimOneUseReceipt({
+  return claimOneUseReceipt({
     github,
     owner,
     repo,
@@ -1369,6 +1519,8 @@ async function claimWorkflowAuthorization({
     description,
     targetUrl,
     revalidate,
+    assertCanWrite,
+    receiptIO,
   });
 }
 
@@ -1450,6 +1602,8 @@ async function claimCoverageAssetAuthorization({
   transition,
   targetUrl,
   revalidate,
+  assertCanWrite,
+  receiptIO,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -1473,7 +1627,7 @@ async function claimCoverageAssetAuthorization({
     run,
     transition,
   });
-  await claimOneUseReceipt({
+  return claimOneUseReceipt({
     github,
     owner,
     repo,
@@ -1482,6 +1636,8 @@ async function claimCoverageAssetAuthorization({
     description,
     targetUrl,
     revalidate,
+    assertCanWrite,
+    receiptIO,
   });
 }
 
@@ -2534,6 +2690,7 @@ async function resolveCoverageAssetTrust({
   coverageAuthorizations,
   fallbackUrl,
   serverUrl,
+  receipt,
 }) {
   const repository = `${owner}/${repo}`;
   const repositoryResponse = await github.rest.repos.get({ owner, repo });
@@ -2803,21 +2960,19 @@ async function resolveCoverageAssetTrust({
         repo,
         pull,
       });
-      const statuses = await listCommitStatuses(
-        github,
-        owner,
-        repo,
-        authorization.receiptSha,
-      );
       const context = coverageAuthorizationContext(
         authorization,
         "integration",
       );
-      if (statuses.some((status) => status.context === context)) {
-        throw new Error(
-          "coverage integration authorization receipt was already started",
-        );
-      }
+      await assertUnusedOrOwnedReceipt({
+        github,
+        owner,
+        repo,
+        anchorSha: authorization.receiptSha,
+        context,
+        receipt,
+        label: "coverage integration authorization",
+      });
       leg = "integration";
       anchorSha = authorization.receiptSha;
     } else if (
@@ -2909,6 +3064,7 @@ async function resolveCoverageAssetTrust({
         owner,
         repo,
         authorization.receiptSha,
+        { budget: receipt?.budget },
       );
       const integrationReceipt = completedCoverageReceipt({
         statuses: integrationStatuses,
@@ -2979,25 +3135,19 @@ async function resolveCoverageAssetTrust({
           label,
         );
       }
-      const promotionStatuses = await listCommitStatuses(
-        github,
-        owner,
-        repo,
-        source.mergeCommitSha,
-      );
       const promotionContext = coverageAuthorizationContext(
         authorization,
         "promotion",
       );
-      if (
-        promotionStatuses.some(
-          (status) => status.context === promotionContext,
-        )
-      ) {
-        throw new Error(
-          "coverage promotion authorization receipt was already started",
-        );
-      }
+      await assertUnusedOrOwnedReceipt({
+        github,
+        owner,
+        repo,
+        anchorSha: source.mergeCommitSha,
+        context: promotionContext,
+        receipt,
+        label: "coverage promotion authorization",
+      });
       leg = "promotion";
       anchorSha = source.mergeCommitSha;
     } else {
@@ -3028,6 +3178,7 @@ async function resolveTrustedQualityAssets({
   authorizationNow,
   fallbackUrl,
   serverUrl,
+  receipt,
 }) {
   const workflowTrust = await resolveQualityWorkflowTrust({
     github,
@@ -3049,6 +3200,7 @@ async function resolveTrustedQualityAssets({
     coverageAuthorizations,
     fallbackUrl,
     serverUrl,
+    receipt,
   });
   if (coverageTrust.failure) {
     return {
@@ -3589,7 +3741,9 @@ function authorizationClaimEvidence(authorization) {
     authorization.value.id,
     authorization.kind === "coverage"
       ? coverageAuthorizationFingerprint(authorization.value)
-      : authorization.value.authorizedBlob,
+      : WORKFLOW_AUTHORIZATION_FIELDS.map(
+          (field) => authorization.value[field],
+        ),
     qualityWorkflowRunEvidence(authorization.run),
     authorization.transition.version,
     authorization.transition.action,
@@ -3597,6 +3751,7 @@ function authorizationClaimEvidence(authorization) {
     authorization.transition.runId,
     authorization.transition.contentFingerprint,
     authorization.transition.labelsFingerprint,
+    authorization.transition.targetUrl,
   ]);
 }
 
@@ -4184,6 +4339,7 @@ async function qualityDecision({
   authorizationNow,
   requireFreshRun,
   serverUrl,
+  receipt,
 }) {
   if (candidateRun) {
     try {
@@ -4212,6 +4368,7 @@ async function qualityDecision({
     authorizationNow,
     fallbackUrl,
     serverUrl,
+    receipt,
   });
   if (trust.failure) {
     return trust.failure;
@@ -4501,7 +4658,7 @@ async function publishStatus(
   description,
   targetUrl,
 ) {
-  await github.rest.repos.createCommitStatus({
+  return github.rest.repos.createCommitStatus({
     owner,
     repo,
     sha,
@@ -4568,8 +4725,13 @@ module.exports = async function publishPrPolicy({
   core,
   workflowAuthorizations = TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS,
   coverageAuthorizations = TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS,
-  authorizationNow = new Date(),
+  authorizationNow,
+  receiptIO,
 }) {
+  const getAuthorizationNow = () =>
+    typeof authorizationNow === "function"
+      ? authorizationNow()
+      : authorizationNow ?? new Date();
   const { owner, repo } = context.repo;
   const repository = `${owner}/${repo}`;
   const policyRunUrl =
@@ -4724,7 +4886,7 @@ module.exports = async function publishPrPolicy({
           eventPull: item.eventPull,
           workflowAuthorizations,
           coverageAuthorizations,
-          authorizationNow,
+          authorizationNow: getAuthorizationNow(),
           fallbackUrl: policyRunUrl,
         });
       } catch (error) {
@@ -4740,7 +4902,7 @@ module.exports = async function publishPrPolicy({
       fallbackUrl: policyRunUrl,
       workflowAuthorizations,
       coverageAuthorizations,
-      authorizationNow,
+      authorizationNow: getAuthorizationNow(),
       requireFreshRun: item.requireFreshRun && createTransition,
       serverUrl: context.serverUrl,
     });
@@ -4848,12 +5010,32 @@ module.exports = async function publishPrPolicy({
       quality.reason =
         `${authorizationLabel(quality.authorization)} may be consumed only by its exact workflow_run`;
     }
+    let claimedReceipt;
+    let assertClaimFresh;
     if (quality.state === "success" && quality.authorization) {
       try {
+        const expectedControlSha = await getBranchSha(
+          github,
+          owner,
+          repo,
+          "master",
+        );
         const expectedClaimEvidence = authorizationClaimEvidence(
           quality.authorization,
         );
-        const revalidate = async () => {
+        assertClaimFresh = () => {
+          if (quality.authorization.kind === "workflow") {
+            const now = getAuthorizationNow();
+            const milliseconds =
+              now instanceof Date ? now.getTime() : Date.parse(String(now));
+            if (!Number.isFinite(milliseconds)) {
+              throw new Error("workflow authorization clock is invalid");
+            }
+            validateWorkflowAuthorization(quality.authorization.value, milliseconds);
+          }
+        };
+        const revalidate = async (receipt) => {
+          assertOwnedReceiptLedger(receipt.ledger, receipt);
           const currentPull = await getCurrentPull(
             github,
             owner,
@@ -4861,6 +5043,9 @@ module.exports = async function publishPrPolicy({
             pull.number,
             pull,
           );
+          if (currentPull.mergeSha !== pull.mergeSha) {
+            throw new Error("authorization merge snapshot changed before publication");
+          }
           const currentQuality = await qualityDecision({
             github,
             owner,
@@ -4870,9 +5055,10 @@ module.exports = async function publishPrPolicy({
             fallbackUrl: policyRunUrl,
             workflowAuthorizations,
             coverageAuthorizations,
-            authorizationNow,
+            authorizationNow: getAuthorizationNow(),
             requireFreshRun: false,
             serverUrl: context.serverUrl,
+            receipt,
           });
           if (
             currentQuality.state !== "success" ||
@@ -4884,9 +5070,21 @@ module.exports = async function publishPrPolicy({
               "authorization authority changed immediately before receipt claim",
             );
           }
+          await assertCurrentPullSnapshot(github, owner, repo, pull);
+          const [currentControlSha, currentBaseSha] = await Promise.all([
+            getBranchSha(github, owner, repo, "master"),
+            getBranchSha(github, owner, repo, pull.baseRef),
+          ]);
+          if (
+            currentControlSha !== expectedControlSha ||
+            currentBaseSha !== pull.baseSha
+          ) {
+            throw new Error("authorization protected source changed before publication");
+          }
+          receiptTimeRemaining(receipt.budget);
         };
         if (quality.authorization.kind === "workflow") {
-          await claimWorkflowAuthorization({
+          claimedReceipt = await claimWorkflowAuthorization({
             github,
             owner,
             repo,
@@ -4894,9 +5092,11 @@ module.exports = async function publishPrPolicy({
             pull,
             targetUrl: policyRunUrl,
             revalidate,
+            assertCanWrite: assertClaimFresh,
+            receiptIO,
           });
         } else {
-          await claimCoverageAssetAuthorization({
+          claimedReceipt = await claimCoverageAssetAuthorization({
             github,
             owner,
             repo,
@@ -4908,8 +5108,11 @@ module.exports = async function publishPrPolicy({
             transition: quality.authorization.transition,
             targetUrl: policyRunUrl,
             revalidate,
+            assertCanWrite: assertClaimFresh,
+            receiptIO,
           });
         }
+        await revalidate(claimedReceipt);
       } catch (error) {
         const label = authorizationLabel(quality.authorization);
         quality.state = "failure";
@@ -4935,17 +5138,32 @@ module.exports = async function publishPrPolicy({
       }
     }
     if (!qualityPrepublished || quality.state !== "pending") {
-      for (const target of targets) {
-        await publishStatus(
+      try {
+        for (const target of targets) {
+          if (quality.state === "success" && claimedReceipt) {
+            receiptTimeRemaining(claimedReceipt.budget);
+            assertClaimFresh();
+          }
+          await publishStatus(
+            github,
+            owner,
+            repo,
+            target,
+            qualityContext,
+            quality.state,
+            quality.description,
+            quality.targetUrl,
+          );
+        }
+      } catch (error) {
+        await invalidatePublishedSnapshot({
           github,
           owner,
           repo,
-          target,
-          qualityContext,
-          quality.state,
-          quality.description,
-          quality.targetUrl,
-        );
+          pull,
+          targetUrl: policyRunUrl,
+        });
+        throw error;
       }
     }
 
