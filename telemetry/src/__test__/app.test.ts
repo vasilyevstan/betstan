@@ -423,6 +423,48 @@ const waitForCalls = async (mock: jest.Mock, count: number) => {
 const hourlyUrl = (metric = "BET_PLACED", date = "2026-09-10") =>
   `/api/telemetry/metrics/${metric}/days/${date}`;
 
+describe("unmatched telemetry requests", () => {
+  it.each([
+    "/api/telemetry",
+    "/api/telemetry/not-a-route",
+    "/api/telemetry/metrics",
+    "/api/telemetry/summary/extra",
+  ])("returns fixed JSON 404 repeatedly for %s and continues serving hourly data", async (url) => {
+    const deps = dependencies();
+    const app = createApp(deps);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await request(app)
+        .get(url)
+        .expect("Content-Type", /application\/json/)
+        .expect(404);
+      expect(response.body).toEqual({ error: "Not found" });
+    }
+    expect(deps.clock.now).not.toHaveBeenCalled();
+    expect(deps.hourlyStore.aggregateHourly).not.toHaveBeenCalled();
+    expect(deps.summaryStore.aggregate).not.toHaveBeenCalled();
+    expect(deps.health.check).not.toHaveBeenCalled();
+    expect(deps.recorder.record).not.toHaveBeenCalled();
+
+    const valid = await request(app).get(hourlyUrl()).expect(200);
+    expect(valid.body.metric).toBe("BET_PLACED");
+    expect(valid.body.date).toBe("2026-09-10");
+    expect(valid.body.hours).toHaveLength(24);
+    expect(valid.body.values).toEqual(Array(24).fill(0));
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["/", "/not-a-route", "/api/other", "/api/telemetry-other"])(
+    "preserves the existing non-telemetry HTML fallback for %s",
+    async (url) => {
+      await request(createApp(dependencies()))
+        .get(url)
+        .expect("Content-Type", /text\/html/)
+        .expect(404);
+    }
+  );
+});
+
 describe("GET /api/telemetry/metrics/:metric/days/:date", () => {
   it.each(METRICS)("returns the exact hourly DTO for %s without health or daily reads", async (metric) => {
     const deps = dependencies();

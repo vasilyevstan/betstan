@@ -286,6 +286,10 @@ export const createApp = (
     }
   );
 
+  app.use("/api/telemetry", (_req, res) =>
+    res.status(404).send({ error: "Not found" })
+  );
+
   app.use(telemetryErrorHandler);
 
   return app;

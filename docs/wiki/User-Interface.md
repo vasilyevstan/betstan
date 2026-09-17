@@ -135,7 +135,9 @@ has left the server's current 14-day window stays selected with an
 unavailable-day notice and any last successful detail; it offers Back but
 no futile Retry. This also covers opening an expired day from an older
 overview. Failures never become fabricated zero counts or expose internal
-error details. A successful all-zero response remains a valid snapshot.
+error details. Unmatched Telemetry API requests return a generic JSON `404`
+error without echoing the requested URL. A successful all-zero response
+remains a valid snapshot.
 
 **Overview and service health generated at** identifies the overview's
 timestamp; **Hourly data generated at** below each detail graph identifies
