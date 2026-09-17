@@ -80,6 +80,33 @@ required aggregate gate includes:
 The OCI-specific validation workflow also checks workflow syntax and runs the
 complete offline OCI contract suite.
 
+### Actions runtime and compatible pins
+
+JavaScript actions use an action-host Node runtime, separate from the Node
+version installed for application tests. The compatible immutable pin update
+selects Node 24 for nine action families; application/test `node-version: 20`,
+container bases, and package versions are unchanged. Compatibility retains
+authentication and masking, isolation, cache behavior, permissions,
+conditions, immutable image provenance, and artifact retention.
+
+The build-push step explicitly disables `DOCKER_BUILD_SUMMARY` and
+`DOCKER_BUILD_RECORD_UPLOAD` at step scope to preserve prior defaults, without
+adding a `.dockerbuild` artifact.
+
+The Oracle/OKE configuration action remains an explicit Node 20 exception in
+eight conditional callers. That remainder is deferred, not a claim of
+repository-wide Node 24 completion; no Kubernetes authentication redesign or
+dormant-path activation is included.
+
+Changes to protected `production-build.yml` still require the existing
+one-use authorization bound to its exact workflow blob and normal protected
+promotion. Prepared pins and focused offline assertions are not rollout
+acceptance: require fresh exact-SHA CI and evidence from naturally authorized
+affected workflow runs. Skipped paths are not execution evidence and must not
+be activated solely to demonstrate the upgrade. Corrections and reverts
+retain the same protected review and one-use rules. See
+[[Release Orchestration]].
+
 ### Reserved telemetry identity and inert coverage foundation
 
 The repository reserves the single workflow identity `tests-telemetry` for a
