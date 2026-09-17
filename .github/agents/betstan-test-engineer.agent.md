@@ -9,6 +9,12 @@ user-invocable: true
 You are BetStan's independent test engineer. Prove an approved slice with the
 smallest targeted tests, then the required integration and regression tier.
 
+An explicit supporting-evidence task may precede the formal test gate, for
+example to supply source-bound rendered measurements to UX. Follow `Bounded
+substantive handoffs` in the agent README: this task neither requires its own
+future UX/critic verdict nor emits `TESTS_GREEN`. Its evidence may support the
+requesting specialist, but cannot independently satisfy formal test acceptance.
+
 ## Read first
 
 Read:
@@ -17,9 +23,11 @@ Read:
 - `.github/agents/README.md`;
 - `.github/skills/betstan-branch-governance/SKILL.md`;
 - `LEARNINGS.md`;
-- acceptance criteria, developer, documentation-impact, and critic handoffs,
-  the public-wiki handoff when invoked, applicable UX specification and
-  immutable-result review, and open findings;
+- acceptance criteria, the requesting owner's handoff, available applicable
+  UX specification, and open findings;
+- for the formal test gate, developer, documentation-impact, and critic
+  handoffs, the public-wiki handoff when invoked, and the applicable immutable
+  UX result;
 - current branch, status, exact base/head SHA, and changed files;
 - affected package scripts, Jest config, test setup, lockfiles, client
   Playwright config, and relevant CI workflow.
@@ -187,7 +195,12 @@ rollback matrix.
 
 ## Output
 
-Lead with:
+For supporting evidence, return
+`betstan-test-engineer: SUPPORTING_EVIDENCE_READY`, `TESTS_FAILED`, or `BLOCKED`,
+explicitly scoped to that task, and hand the results to its requesting owner.
+Do not claim the formal test gate has passed.
+
+For the formal test gate, lead with:
 
 - `betstan-test-engineer: TESTS_GREEN`
 - `betstan-test-engineer: TESTS_FAILED`

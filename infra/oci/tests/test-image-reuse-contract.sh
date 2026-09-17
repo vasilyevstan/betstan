@@ -1,9 +1,123 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 OCI_DIR="$ROOT_DIR/infra/oci"
-WORK_DIR="$OCI_DIR/tests/.image-reuse-work"
+
+# Exercise the complete fixture under hostile inherited Git context, never
+# against the caller's repository. The sentinel includes staged, unstaged and
+# untracked work; snapshotting .git also covers HEAD, refs, config and index.
+if [[ "$#" = 0 ]]; then
+  python3 -I - "$OCI_DIR/tests/test-image-reuse-contract.sh" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+script = sys.argv[1]
+clean_env = {
+    key: value for key, value in os.environ.items()
+    if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in ("BASH_ENV", "ENV")
+}
+clean_env.update(
+    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+    GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
+)
+git = shutil.which("git")
+assert git, "real Git is required for the isolation sentinel"
+with tempfile.TemporaryDirectory(prefix="betstan-image-reuse-sentinel-") as temporary:
+    root = Path(temporary).resolve()
+    outside = root / "outside"
+    fixtures = root / "fixtures"
+    outside.mkdir()
+    fixtures.mkdir()
+
+    def run_git(*args):
+        return subprocess.check_output(
+            [git, "-C", str(outside), *args], env=clean_env, text=True,
+        ).strip()
+
+    run_git("init", "-q", "--template=")
+    assert Path(run_git("rev-parse", "--show-toplevel")).resolve() == outside
+    assert Path(run_git("rev-parse", "--absolute-git-dir")).resolve() == outside / ".git"
+    run_git("config", "--local", "user.name", "fixture")
+    run_git("config", "--local", "user.email", "fixture@example.invalid")
+    (outside / "tracked").write_text("committed sentinel\n")
+    run_git("add", "tracked")
+    run_git("-c", "commit.gpgSign=false", "commit", "-qm", "sentinel")
+    run_git("branch", "sentinel-ref")
+    (outside / "tracked").write_text("staged sentinel\n")
+    run_git("add", "tracked")
+    (outside / "tracked").write_text("unstaged sentinel\n")
+    (outside / "untracked").write_text("untracked sentinel\n")
+    config = outside / ".git" / "config"
+    global_config = outside / ".git" / "sentinel-global-config"
+    global_config.write_text("[sentinel]\n\tvalue = unchanged\n")
+
+    def snapshot():
+        return {
+            str(path.relative_to(outside)): (
+                path.stat().st_mode,
+                hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+            )
+            for path in outside.rglob("*")
+        }
+
+    before = snapshot()
+    hostile_env = dict(
+        clean_env, TMPDIR=str(fixtures), GIT_DIR=str(outside / ".git"),
+        GIT_COMMON_DIR=str(outside / ".git"), GIT_WORK_TREE=str(outside),
+        GIT_INDEX_FILE=str(outside / ".git" / "index"),
+        GIT_OBJECT_DIRECTORY=str(outside / ".git" / "objects"),
+        GIT_ALTERNATE_OBJECT_DIRECTORIES=str(outside / ".git" / "objects"),
+        GIT_CONFIG=str(config), GIT_CONFIG_GLOBAL=str(global_config),
+        GIT_CONFIG_SYSTEM=str(global_config), GIT_CONFIG_NOSYSTEM="0",
+        GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="core.worktree",
+        GIT_CONFIG_VALUE_0=str(outside), GIT_CONFIG_KEY_1="sentinel.override",
+        GIT_CONFIG_VALUE_1="inherited",
+        GIT_CONFIG_PARAMETERS="'sentinel.parameters=inherited'",
+    )
+    for failure in ("0", "1"):
+        try:
+            result = subprocess.run(
+                ["bash", script, "--git-isolation-fixture"], cwd=outside,
+                env=dict(hostile_env, IMAGE_REUSE_TEST_INJECT_FAILURE=failure),
+                text=True, capture_output=True, timeout=180,
+            )
+        finally:
+            assert snapshot() == before, "image fixture changed the outside Git sentinel"
+            assert not list(fixtures.iterdir()), "image fixture leaked its owned temporary paths"
+        if failure == "0":
+            assert result.returncode == 0, result.stderr
+            assert "oci_image_reuse_contract=PASS" in result.stdout
+        else:
+            assert result.returncode == 1, result.stderr
+            assert "injected fixture failure after transitive commit" in result.stderr
+        print(f"oci_image_reuse_git_isolation={'failure' if failure == '1' else 'success'} PASS")
+print("oci_image_reuse_contract=PASS")
+PY
+  exit 0
+fi
+[[ "$#" = 1 && "$1" = "--git-isolation-fixture" ]] || exit 2
+
+# -C alone cannot contain GIT_DIR, index/object or config overrides. Isolate
+# this process and every nested comparison, without changing the caller.
+while IFS= read -r variable; do
+  case "$variable" in
+    GIT_*) unset "$variable" ;;
+  esac
+done < <(compgen -e)
+unset -f git docker
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/betstan-image-reuse.XXXXXX")"
+WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+readonly WORK_DIR
+trap 'rm -rf -- "$WORK_DIR"' EXIT
 OLD_SHA=1111111111111111111111111111111111111111
 NEW_SHA=2222222222222222222222222222222222222222
 RETRY_SHA=3333333333333333333333333333333333333333
@@ -16,9 +130,7 @@ fail() {
   exit 1
 }
 
-rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/bin" "$WORK_DIR/source" "$WORK_DIR/state"
-trap 'rm -rf "$WORK_DIR"' EXIT
 
 cat > "$WORK_DIR/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
@@ -205,9 +317,13 @@ create_count_after="$(
   fail "reuse mutated the registry before completing all tag-absence checks"
 
 input_repo="$WORK_DIR/input-repository"
-git -C "$WORK_DIR" init -q input-repository
-git -C "$input_repo" config user.name fixture
-git -C "$input_repo" config user.email fixture@example.invalid
+[[ ! -e "$input_repo" ]] || fail "input fixture already exists"
+git -C "$WORK_DIR" init --template= -q input-repository
+[[ "$(git -C "$input_repo" rev-parse --show-toplevel)" = "$input_repo" &&
+   "$(git -C "$input_repo" rev-parse --absolute-git-dir)" = "$input_repo/.git" ]] ||
+  fail "input fixture Git root is not the owned temporary repository"
+git -C "$input_repo" config --local user.name fixture
+git -C "$input_repo" config --local user.email fixture@example.invalid
 mkdir -p \
   "$input_repo/infra/oci/build" \
   "$input_repo/infra/oci/scripts"
@@ -274,5 +390,8 @@ if IMAGE_INPUT_REPOSITORY_ROOT="$input_repo" \
     "$input_unrelated" "$input_transitive" >/dev/null 2>&1; then
   fail "untracked transitive build helper was accepted for image reuse"
 fi
+
+[[ "${IMAGE_REUSE_TEST_INJECT_FAILURE:-0}" != 1 ]] ||
+  fail "injected fixture failure after transitive commit"
 
 echo "oci_image_reuse_contract=PASS"

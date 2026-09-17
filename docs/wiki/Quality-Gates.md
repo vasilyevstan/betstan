@@ -11,7 +11,8 @@ flowchart LR
     Request["Accepted requirement"] --> Architect["Architecture gate"]
     Architect --> Simplifier["Three-model simplifier"]
     Simplifier --> Developer["Implementation owner"]
-    Developer --> Critic["Validation critic"]
+    Developer --> Snapshot["Orchestrator snapshot<br/>code + canonical documentation"]
+    Snapshot --> Critic["Formal validation critic<br/>with applicable exact-head evidence"]
     Critic --> Tests["Test engineer"]
     Tests --> Final["Final validator"]
     Final --> PR["PR and branch checks"]
@@ -20,10 +21,10 @@ flowchart LR
     Deploy --> Accept["Production acceptance"]
 
     Developer -. documentation impact .-> Wiki["Public-wiki editor"]
-    Wiki -. documentation evidence .-> Critic
+    Wiki -. owned documentation .-> Developer
     UX["UX/UI specialist"] -. user-facing evidence .-> Developer
-    Contract["Contract specialist"] -. boundary evidence .-> Critic
-    Security["Auth/security specialist"] -. security evidence .-> Final
+    Contract["Contract specialist"] -. boundary evidence .-> Developer
+    Security["Auth/security specialist"] -. security evidence .-> Developer
     Conductor["Conductor"] -. checkpoints and recovery .-> Architect
     Conductor -.-> Accept
 ```
@@ -31,13 +32,19 @@ flowchart LR
 The conductor coordinates the chain but does not replace a quality gate or
 grant release authority.
 
+The bounded consolidated design review described in [[Agents]] supports the
+design-to-implementation handoff; it does not add a seventh universal gate.
+Design acceptance and supporting test measurements cannot replace formal
+candidate review or test acceptance. Snapshot creation is an authorized
+orchestrator action, not permission for a file-editing developer to commit.
+
 ## Universal review chain
 
 | Gate | Purpose | Required outcome |
 |---|---|---|
 | Architect | Define service boundaries, compatibility, dependencies, risks, and acceptance criteria | Bounded implementation contract |
 | Simplifier | Challenge unnecessary scope and conflicting abstractions with three independent model families and one synthesis | Smallest complete design |
-| Developer | Implement one owned slice with focused tests | Immutable candidate |
+| Developer | Implement one owned slice with focused tests and assemble applicable documentation/specialist evidence | Complete candidate for the orchestrator's immutable snapshot |
 | Validation critic | Search for concrete correctness, concurrency, compatibility, and regression failures | No unresolved required finding |
 | Test engineer | Run the smallest targeted suite, then required regression tiers | Reproducible passing evidence |
 | Final validator | Reconcile all requirements, specialist findings, tests, and exact-head evidence | Ready for release review |
@@ -59,7 +66,14 @@ grant release authority.
 - Infrastructure, deployment, rollback, migration, ingress, and runtime work
   require their matching operator or safety specialist.
 
-See [[Agents]] for the complete catalog.
+Select review scope from the actual diff and current workflow, package, and
+manifest inventories. Shared CI or contract changes include every genuine
+affected consumer, not only a historical service list. Repository-only
+evidence and runtime acceptance are distinct phases; each retains its
+applicable checks.
+
+See [[Agents]] for the complete catalog, direct handoffs, and supporting
+evidence boundaries.
 
 ## Pull-request CI
 
@@ -301,16 +315,44 @@ After deployment:
 - Release documentation records scope, exclusions, validation, risk, release
   impact, rollback, and remaining work.
 
+Independently verified immutable facts may be reused after binding them to
+the consuming work unit's root request, exact refs, scope, and complete
+changed-path and consumer coverage. Retain their original source identity;
+stale results, sibling-worktree assertions, and unverifiable summaries are
+not authority. Reuse does not replace fresh mutable-ref, current-source,
+local-state, or authority checks at required boundaries, or required
+exact-SHA CI. Repeat substantive review when changed substantive evidence, an
+unresolved finding, or a concrete scope risk requires it, not for an unchanged
+report.
+
+### Non-regression acceptance
+
+Preserving working behavior is an acceptance obligation, not a zero-regression
+guarantee. Identify the affected contracts before editing. A demonstrated fix
+needs a targeted failing regression, positive compatibility cases for the
+working path, and the relevant existing negative cases. Run focused checks
+and the genuinely required regression and CI tiers; neither prose assertions
+nor unnecessary duplicate full-suite runs improve the evidence.
+
+A known regression, unexplained behavior change, or missing required proof
+prevents readiness. Report actual results and unrun checks explicitly.
+Independent critic, test, and final-validation evidence remains required;
+routine routing or design acceptance cannot turn a failed technical gate
+green. See [[Agents]] for bounded corrections and review triggers.
+
 ## Documentation quality
 
 Documentation-impact evidence is mandatory for every change; a separate
 public-wiki supporting unit is not. Canonical wiki pages are reviewed source
-files, and relevant changes land in the same pull request as the behavior they
-describe. Their tests require the expected handbook pages and navigation, and
+files, and relevant changes join the complete candidate in the same pull
+request as the behavior they describe, before formal critic review and final
+validation. Their tests require the expected handbook pages and navigation, and
 reject known classes of sensitive public content such as private authority
 mechanics, user-specific paths, and globally routable infrastructure
-addresses. After merge, changed pages are published byte-identically from the
-canonical repository files.
+addresses. After the exact commit merges, the authorized orchestrator, not
+the wiki editor, publishes canonical pages byte-identically and verifies the
+public result as described in [[Release Orchestration]]. Local documentation
+readiness does not claim immutable-candidate validation or publication.
 
 ## Related pages
 

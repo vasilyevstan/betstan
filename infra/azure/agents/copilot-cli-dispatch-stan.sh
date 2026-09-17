@@ -15,7 +15,7 @@ set -euo pipefail
 
 umask 077
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 RUN_EXCLUSIVITY_SCRIPT="$ROOT_DIR/infra/azure/agents/production-run-exclusivity-stan.sh"
@@ -48,6 +48,30 @@ RESUME_RUN_ID="${3:-}"
 fail() {
   echo "$*" >&2
   exit 1
+}
+
+context_fail() {
+  fail "status=BLOCK classification=technical reason=local-context $*"
+}
+
+validate_local_context() {
+  local local_root local_head local_status
+  [[ "$(pwd -P)" = "$ROOT_DIR" ]] ||
+    context_fail "dispatch working directory no longer matches the script root"
+  local_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)" ||
+    context_fail "unable to validate the script repository root"
+  [[ "$local_root" = "$ROOT_DIR" ]] ||
+    context_fail "script is not running from its repository root"
+  local_head="$(git -C "$ROOT_DIR" rev-parse HEAD)" ||
+    context_fail "unable to read the dispatch checkout HEAD"
+  [[ "$local_head" =~ ^[0-9a-f]{40}$ ]] ||
+    context_fail "dispatch checkout HEAD is invalid"
+  if [[ -n "${1:-}" && "$local_head" != "$1" ]]; then
+    context_fail "dispatch must run from a checkout at exact current master"
+  fi
+  local_status="$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ||
+    context_fail "unable to prove the dispatch checkout is clean"
+  [[ -z "$local_status" ]] || context_fail "dispatch checkout is not clean"
 }
 
 usage() {
@@ -88,6 +112,18 @@ esac
 for command in gh git jq python3; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
+if ! python3 -c '
+import os
+names = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+raise SystemExit(1 if any(name in os.environ for name in names) else 0)
+'; then
+  context_fail "inherited Git repository overrides are not supported"
+fi
+cd "$ROOT_DIR" || context_fail "unable to enter the script repository root"
+validate_local_context
 [[ -x "$POLICY_SCRIPT" ]] || fail "protected-operation policy is unavailable"
 [[ -x "$AUTHORITY_HELPER" ]] || fail "authority helper is unavailable"
 [[ -x "$RUN_EXCLUSIVITY_SCRIPT" ]] || fail "production exclusivity validator is unavailable"
@@ -245,9 +281,12 @@ collect_zero_execution() {
     >"$destination"
 }
 
-repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+# Bind discovery and all nested validators to the verified script checkout.
+repository="$(GH_HOST=github.com GH_REPO= gh repo view --json nameWithOwner --jq '.nameWithOwner')" ||
+  context_fail "GitHub repository discovery failed from the verified script root"
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
-  fail "unable to resolve a safe GitHub repository name"
+  context_fail "unable to resolve a safe GitHub repository name"
+export GH_HOST=github.com GH_REPO="$repository"
 live_master="$(
   gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
 )"
@@ -255,13 +294,7 @@ live_master="$(
   fail "current master is not a complete lowercase SHA"
 current_master="$live_master"
 
-local_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)"
-[[ "$local_root" = "$ROOT_DIR" ]] || fail "script is not running from its repository root"
-local_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-[[ "$local_head" = "$live_master" ]] ||
-  fail "dispatch must run from a checkout at exact current master"
-[[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
-  fail "dispatch checkout is not clean"
+validate_local_context "$live_master"
 
 operation="$(
   "$AUTHORITY_HELPER" request-operation \
@@ -528,6 +561,7 @@ PY
 
 revalidate_control() {
   local observed_master observed_blob
+  validate_local_context "$live_master"
   observed_master="$(
     gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
   )"
@@ -554,6 +588,7 @@ revalidate_dispatch_target() {
 
 revalidate_rejection_continuation() {
   local observed_master observed_blob
+  validate_local_context "$live_master"
   observed_master="$(
     gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
   )"
@@ -640,7 +675,8 @@ materialize_record() {
       printf 'dispatch=RETIRED run_id=%s authority_state=retired\n' "$run_id"
       return
     fi
-    printf 'dispatch=READY run_id=%s authority_state=%s\n' "$run_id" "$state"
+    printf 'dispatch=READY run_id=%s authority_state=%s job_gate_materialization=UNPROVEN next_action=observe-exact-run\n' \
+      "$run_id" "$state"
     return
   fi
 
@@ -753,7 +789,7 @@ materialize_record() {
         --workflow-blob-sha "$workflow_blob_sha" \
         2>"$materialization_error"; then
         release_authority_lock
-        printf 'dispatch=ACCEPTED run_id=%s run_url=https://github.com/%s/actions/runs/%s authority_state=issued\n' \
+        printf 'dispatch=ACCEPTED run_id=%s run_url=https://github.com/%s/actions/runs/%s authority_state=issued job_gate_materialization=UNPROVEN next_action=observe-exact-run\n' \
           "$run_id" "$repository" "$run_id"
         return
       fi

@@ -149,9 +149,14 @@ porcelain status, hidden index flags, submodule state, and ancestry at
 registration and immediately before acceptance. It independently queries the
 exact `repository_id` through the GitHub API at those same two checkpoints to
 resolve the base/head refs, commit tree, merge base, and policy blob. It fetches
-those immutable canonical objects into a fresh isolated bare object store with
-no alternates, grafts, or replacement refs. Every tree, ancestry, diff, and
-blob command runs with `GIT_NO_REPLACE_OBJECTS=1`. The conductor derives the
+those immutable canonical objects into an isolated bare object store with
+no alternates, grafts, or replacement refs. Independently verified objects and
+manifests from that repository may be reused; bind them to each consuming
+unit's exact root, refs, scope, and complete coverage. Reuse never replaces
+fresh mutable-ref, current-master, local-state, or authority checks at the
+required registration, acceptance, and mutation boundaries. Every tree,
+ancestry, diff, and blob command runs with `GIT_NO_REPLACE_OBJECTS=1`.
+The conductor derives the
 complete changed-path manifest there from the registered merge base and head;
 a capped, partial, or otherwise unprovably complete provider file list is
 unverifiable. It requires every registered SHA and manifest hash to match,
@@ -254,14 +259,25 @@ accepted by the next owner.
   deployment or activation.
 - Return the updated private registry after every state transition so another
   conductor turn can resume without relying on conversational memory.
-- A terminal unit without a confirmed downstream handoff is a stall. Unblock
-  its dependants immediately and verify that the named next owner accepted or
-  started the work.
+- A terminal unit without a confirmed downstream handoff is a stall once its
+  registered acknowledgement deadline is missed. Route immediately and verify
+  receipt through the next owner's first scoped action; substantive acceptance
+  follows review. Never require critic approval before the critic can receive
+  and review the candidate.
 - Enforce the fixed quality chain from `.github/agents/README.md`. The
   conductor is not a gate, and conditional specialists do not create new
   universal handoffs. Route the developer gate to the registered owner with
   edit authority for the affected paths; do not require an application
   developer to cross its ownership boundary for infrastructure or governance.
+- Follow `Bounded substantive handoffs` in that README: one consolidated
+  design review and the existing formal critic gate, not a critic-controlled
+  queue for status, acknowledgements, timers, or approvals. The final validator
+  independently checks critic and test evidence; no recursive reviewer is
+  created.
+- Return explicit scope violations to their native owner under the original
+  budget. A missing advisory output blocks only its affected dependants, not
+  independently authorized observation, eligible approval, safe completion, or
+  incident recovery. Required technical evidence still gates its operation.
 - Require documentation-impact evidence after implementation. Register
   `betstan-public-wiki-editor` as a supporting unit only when impact is
   plausible or ambiguous; otherwise require exact-diff paths and a justified
@@ -378,8 +394,9 @@ another agent or a duplicate policy page.
    do not create a replacement owner or widen the original task authority.
 4. Require focused tests that prove both the original false block and the
    retained rejection of the real unsafe case. Require an independent safety
-   challenge through the existing deployment-safety quality gate, not a new
-   agent, before promotion. Preserve rollback evidence and revalidate the
+   challenge through the existing deployment-safety specialist, not a new
+   agent or universal quality gate, before promotion.
+   Preserve rollback evidence and revalidate the
    exact promoted SHA, workflow/blob provenance, branch ancestry, runtime
    safety state, and all affected gates immediately after promotion.
 5. After that exact-SHA revalidation succeeds, resume the original registered
@@ -455,9 +472,11 @@ its owner. It is never healthy by default.
 - A GitHub `waiting` state is an action trigger, not a polling state. In that
   checkpoint inspect the exact jobs and `pending_deployments`; when the
   environment and durable authority identify an automatic CLI-owned gate,
-  invoke the checked-in `copilot-cli-run-approval-stan.sh --approve` path with
-  the exact operation, control SHA, and upstream identity before starting or
-  retaining a watcher. Human-originated work remains personally gated. A
+  route the authorized orchestrator to the checked-in
+  `copilot-cli-run-approval-stan.sh --approve` path with the exact operation,
+  control SHA, and upstream identity before starting or retaining a watcher.
+  The conductor does not submit the approval. Human-originated work remains
+  personally gated. A
   missing pending deployment requires immediate materialization or approval
   reconciliation, not another routine polling interval.
 - If an owner calls a waiting gate human-only, verify that claim against

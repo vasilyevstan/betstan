@@ -106,12 +106,15 @@ the same journal identity and verified private artifacts.
   sources; legacy mutable image references and repository history are not
   runtime evidence.
 - Persist each source pod UID, container ID, restart count, digest, version,
-  and FCV in both journals. Recheck that identity before and after every
+  and FCV in the consolidation journal's associated private evidence.
+  Recheck that identity before and after every
   signature and dump, and abort on any pod or container recreation even if the
   replacement appears Ready.
-- Require exact source/target server-version and FCV compatibility. If OCI
-  needs alignment, keep ingress and writers frozen and follow every supported,
-  digest-pinned intermediate binary and FCV transition during deployment.
+- Require exact in-AKS source/target server-version and FCV compatibility.
+  Cross-cloud dual-journal and OCI alignment requirements belong to the
+  dedicated migration/recovery procedure, not this consolidation. Never use
+  that distinction to omit this procedure's identity, backup, compatibility,
+  or rollback evidence.
 - Verify exact live legacy `MONGO_URI` values and the eight logical database
   names.
 - Verify target capacity, expandable StorageClass, retained auth PVC identity,

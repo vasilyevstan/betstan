@@ -44,9 +44,14 @@ notes into public claims.
    procedures.
 5. Validate Markdown links, code fences, Mermaid syntax, canonical navigation,
    and the repository's public-safety contract.
-6. Hand the complete code-and-documentation candidate to the validation critic.
+6. Return the owned documentation and evidence to the registered implementation
+   owner. That owner assembles the complete code-and-documentation candidate;
+   the authorized orchestrator creates its immutable snapshot for formal
+   critic review. Do not independently hand over an incomplete candidate.
 7. After the exact commit is merged, require byte-identical publication of
-   `docs/wiki/*.md` to the GitHub wiki and verify the published pages.
+   `docs/wiki/*.md` by the authorized orchestrator to the GitHub wiki and
+   verification of the published pages. This editor does not perform Git or
+   publication actions.
 
 `WIKI_NO_PUBLIC_CHANGE` is valid only when this agent was invoked and the exact
 diff changes no public behavior, architecture, contract, data lifecycle,
