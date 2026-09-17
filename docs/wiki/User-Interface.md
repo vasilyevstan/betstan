@@ -130,9 +130,23 @@ wrap without horizontal page or card scrolling.
 
 The center stage presents match states in betting priority:
 
-1. next-live and countdown context;
-2. active live or recently completed live match;
-3. upcoming pre-match events.
+1. next-live context when no event is active or counting down;
+2. all server-authoritative active-live events;
+3. all kickoff-soon countdown events;
+4. the recently completed live match;
+5. upcoming pre-match events.
+
+Active-live and countdown cards share one **Live now** section. Active-live
+cards form the first group and countdown cards the second. Within each group,
+cards sort by the kickoff displayed by the card: `live.kickoffAt` when present,
+otherwise `event.time`. Valid kickoff values precede unavailable values, and
+`eventId` breaks equal or unavailable-time ties deterministically.
+
+One ordered array drives DOM, reading, keyboard, and visual order in every UI
+variant. The **Recently finished** and **Pre-match** sections are unchanged.
+This is a client-only presentation rule with no data migration or
+service-contract impact; rollback restores the prior ordering without changing
+event or wager identity.
 
 A single prominent live/countdown card uses the available stage width. At
 desktop widths its identity, products, live markets, score, progress, and
