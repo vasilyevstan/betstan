@@ -346,7 +346,9 @@ create_baseline_fixture() {
   rm -rf "$directory"
   mkdir -p "$directory"
   : >"$directory/images.tsv"
-  for service in "${SERVICES[@]}"; do
+  local fixture_services=("${SERVICES[@]}")
+  [[ "$mode" != "current-ten" ]] || fixture_services+=(telemetry)
+  for service in "${fixture_services[@]}"; do
     local digest platform_digest image_ref
     digest="$(service_digest "$service")"
     platform_digest="$(service_platform_digest "$service")"
@@ -528,6 +530,7 @@ EOF2
 }
 
 create_baseline_fixture "$FIXTURE_DIR/baseline-good"
+create_baseline_fixture "$FIXTURE_DIR/baseline-current-ten" current-ten
 create_baseline_fixture "$FIXTURE_DIR/baseline-mutable" mutable
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-sse" legacy-sse
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-missing" legacy-missing
@@ -1102,10 +1105,10 @@ service_platform_digest_from_image() {
     return
   }
   ordinal=$((10#$suffix))
-  if ((ordinal >= 201 && ordinal <= 209)); then
+  if ((ordinal >= 201 && ordinal <= 210)); then
     ordinal=$((ordinal - 200))
   fi
-  ((ordinal >= 1 && ordinal <= 9)) || {
+  ((ordinal >= 1 && ordinal <= 10)) || {
     printf '%s\n' "${image##*@}"
     return
   }
@@ -1270,6 +1273,14 @@ EOF_STATE
         original_args="$*"
         shift 2
         service="$(service_from_deployment "$deployment")"
+        if [[ "$service" == "telemetry" ]]; then
+          printf 'read\n' >>"$STUB_STATE_DIR/telemetry-deployment-reads"
+          case "${STUB_TELEMETRY_DEPLOYMENT_SHAPE:-object}" in
+            null) printf 'null\n'; exit 0 ;;
+            array) printf '[]\n'; exit 0 ;;
+            malformed) printf '{\n'; exit 0 ;;
+          esac
+        fi
         if [[ "$service" == "telemetry" &&
           "${STUB_FAIL_PARTIAL_TELEMETRY_DEPLOYMENT_READ:-0}" == "1" ]]; then
           exit 1
@@ -1295,11 +1306,16 @@ EOF_STATE
           esac
         done
         if [[ "$output_mode" == "json" ]]; then
-          jq -n --arg container "gaming-${service}" --arg image "$image" --arg revision "$revision" '{
+          jq -n --arg container "gaming-${service}" --arg image "$image" --arg revision "$revision" \
+            --arg shape "${STUB_TELEMETRY_DEPLOYMENT_SHAPE:-object}" '{
             metadata:{generation:8,annotations:{"deployment.kubernetes.io/revision":$revision}},
             spec:{replicas:1,template:{spec:{containers:[{name:$container,image:$image}]}}},
             status:{observedGeneration:8,readyReplicas:1,availableReplicas:1,updatedReplicas:1}
-          }'
+          } | if $container == "gaming-telemetry" and $shape == "duplicate" then
+            .spec.template.spec.containers += .spec.template.spec.containers
+          elif $container == "gaming-telemetry" and $shape == "missing-container" then
+            .spec.template.spec.containers = []
+          else . end'
         elif [[ "$output_mode" == "jsonpath={.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.updatedReplicas}|{.status.readyReplicas}|{.status.availableReplicas}" ]]; then
           printf '8|8|1|1|1|1'
         elif [[ "$output_mode" == 'jsonpath={.spec.template.spec.containers[?(@.name=="gaming-telemetry")].image}' &&
@@ -2126,6 +2142,15 @@ run_capture() {
     set_target_state "$capture_state_dir"
   fi
   for option in "$@"; do
+    if [[ "$option" == "STUB_CAPTURE_TEN=1" ]]; then
+      write_text_atomic "$capture_state_dir/telemetry.env" <<EOF2
+image=$(target_image_ref telemetry)
+revision=8
+EOF2
+      : >"$capture_state_dir/telemetry-service"
+      printf '1\n' >"$capture_state_dir/telemetry-route-canonical"
+      printf '1\n' >"$capture_state_dir/telemetry-route-diagnostic"
+    fi
     if [[ "$option" == "STUB_CAPTURE_OCIR=1" ]]; then
       write_text_atomic "$capture_state_dir/auth.env" <<EOF2
 image=fixture.ocir.io/tenant/betstan/auth@$(service_digest auth)
@@ -2159,6 +2184,141 @@ run_capture_expect_failure() {
     fail "expected capture failure for $label"
   fi
 }
+
+current_capture_dir="$WORK_DIR/capture-current-ten"
+if ! run_capture "$current_capture_dir" \
+    STUB_CAPTURE_TEN=1 \
+    STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+    GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+    STUB_SHORT_SSE_MODE=quiet-timeout >"$current_capture_dir.out" 2>&1; then
+  cat "$current_capture_dir.out" >&2
+  fail "authenticated current ten-service baseline capture was rejected"
+fi
+for inventory in images.tsv live-images.tsv deployments.tsv pod-images.tsv; do
+  [[ "$(wc -l <"$current_capture_dir/$inventory" | tr -d ' ')" == "10" ]] ||
+    fail "current capture must include all ten services in $inventory"
+done
+assert_line "$current_capture_dir/telemetry-pre-run.env" 'mode=retained'
+assert_line "$current_capture_dir/telemetry-pre-run.env" \
+  "image=$(target_image_ref telemetry)"
+BASELINE_DIR="$current_capture_dir" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+EXPECTED_NAMESPACE=betstan-oci REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+  "$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh"
+CAPTURED_BASELINE_DIR="$current_capture_dir" \
+  bash "$ROOT_DIR/infra/oci/tests/test-fenced-rollback-recovery-stan.sh"
+[[ "$(wc -l <"$STATE_DIR/capture-current-ten/current/telemetry-deployment-reads" | tr -d ' ')" == "1" ]] ||
+  fail "current baseline capture did not reuse one Telemetry Deployment observation"
+printf 'current_ten_capture_validation_and_fenced_restore=PASS\n'
+
+for mutation in \
+    missing-image substituted-set duplicate-image unknown-image wrong-repository \
+    invalid-digest manifest-mismatch missing-live duplicate-live missing-deployment \
+    duplicate-deployment altered-deployment missing-pod altered-pod \
+    missing-sidecar unbound-sidecar altered-sidecar absent-sidecar downgrade \
+    unbound-deployments unbound-pods legacy-current-provenance; do
+  altered_dir="$WORK_DIR/current-baseline-$mutation"
+  cp -R "$current_capture_dir" "$altered_dir"
+  python3 - "$altered_dir" "$mutation" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+mutation = sys.argv[2]
+omitted = set()
+
+def edit_rows(name, operation):
+    path = root / name
+    rows = [line.split("\t") for line in path.read_text().splitlines()]
+    operation(rows)
+    path.write_text("".join("\t".join(row) + "\n" for row in rows))
+
+def drop(rows, service):
+    rows[:] = [row for row in rows if row[0] != service]
+
+if mutation in {"missing-image", "substituted-set"}:
+    edit_rows("images.tsv", lambda rows: drop(rows, "telemetry" if mutation == "missing-image" else "auth"))
+elif mutation in {"duplicate-image", "unknown-image"}:
+    def append(rows):
+        row = rows[0].copy()
+        if mutation == "unknown-image":
+            row[0] = "unknown"
+        rows.append(row)
+    edit_rows("images.tsv", append)
+elif mutation in {"wrong-repository", "invalid-digest", "manifest-mismatch"}:
+    column, value = {
+        "wrong-repository": (1, "ghcr.io/other/images"),
+        "invalid-digest": (4, "sha256:invalid"),
+        "manifest-mismatch": (3, "sha256:" + "f" * 64),
+    }[mutation]
+    edit_rows("images.tsv", lambda rows: rows[-1].__setitem__(column, value))
+elif mutation in {"missing-live", "duplicate-live", "missing-deployment", "duplicate-deployment", "missing-pod"}:
+    name = "live-images.tsv" if mutation.endswith("live") else (
+        "pod-images.tsv" if mutation == "missing-pod" else "deployments.tsv"
+    )
+    edit_rows(name, lambda rows: rows.append(rows[0].copy()) if mutation.startswith("duplicate") else drop(rows, "telemetry"))
+elif mutation in {"altered-deployment", "altered-pod"}:
+    name, column = ("deployments.tsv", 1) if mutation == "altered-deployment" else ("pod-images.tsv", 2)
+    edit_rows(name, lambda rows: rows[-1].__setitem__(column, "ghcr.io/vasilyevstan/betstan-images@sha256:" + "f" * 64))
+elif mutation == "missing-sidecar":
+    (root / "telemetry-pre-run.env").unlink()
+elif mutation == "unbound-sidecar":
+    omitted.add("telemetry-pre-run.env")
+elif mutation in {"altered-sidecar", "absent-sidecar", "downgrade"}:
+    path = root / "telemetry-pre-run.env"
+    if mutation == "altered-sidecar":
+        text = path.read_text()
+        lines = [("image=ghcr.io/vasilyevstan/betstan-images@sha256:" + "f" * 64) if line.startswith("image=") else line for line in text.splitlines()]
+        path.write_text("\n".join(lines) + "\n")
+    else:
+        path.write_text("mode=absent\nimage=none\ndatabase_initialized=true\nqueue_present=true\n")
+        if mutation == "downgrade":
+            for name in ("images.tsv", "live-images.tsv", "deployments.tsv", "pod-images.tsv"):
+                edit_rows(name, lambda rows: drop(rows, "telemetry"))
+elif mutation in {"unbound-deployments", "unbound-pods"}:
+    omitted.add("deployments.tsv" if mutation == "unbound-deployments" else "pod-images.tsv")
+elif mutation == "legacy-current-provenance":
+    path = root / "trusted-deploy-provenance.txt"
+    path.write_text("".join(line + "\n" for line in path.read_text().splitlines() if not line.startswith("deployment_workflow=")))
+else:
+    raise SystemExit("unknown current-baseline adversarial fixture")
+(root / "SHA256SUMS").write_text("".join(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n"
+    for path in sorted(root.rglob("*"))
+    if path.is_file() and path.name != "SHA256SUMS" and path.relative_to(root).as_posix() not in omitted
+))
+PY
+  if BASELINE_DIR="$altered_dir" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+      "$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh" \
+      >"$altered_dir.out" 2>&1; then
+    fail "production baseline validator accepted $mutation"
+  fi
+  if [[ "$mutation" == "downgrade" ]]; then
+    assert_contains "$altered_dir.out" \
+      'ordinary rollback baseline deploy provenance is not exact GHCR evidence'
+  fi
+done
+
+run_capture_expect_failure capture-current-missing-telemetry \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten"
+run_capture_expect_failure capture-unbound-observer STUB_CAPTURE_TEN=1
+run_capture_expect_failure capture-telemetry-read-failure \
+  STUB_CAPTURE_TEN=1 STUB_FAIL_PARTIAL_TELEMETRY_DEPLOYMENT_READ=1
+run_capture_expect_failure capture-telemetry-absence-read-failure \
+  STUB_FAIL_TELEMETRY_ABSENT_READ=1
+for shape in null array malformed duplicate missing-container; do
+  run_capture_expect_failure "capture-telemetry-$shape" \
+    STUB_CAPTURE_TEN=1 STUB_TELEMETRY_DEPLOYMENT_SHAPE="$shape"
+done
+run_capture_expect_failure capture-telemetry-pod-mismatch \
+  STUB_CAPTURE_TEN=1 STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+  STUB_BAD_DIGEST_SERVICE=telemetry
+run_expect_failure current-ten-unfenced \
+  STUB_BASELINE_FIXTURE="$current_capture_dir" ROLLBACK_MODE=execute
+assert_contains "$WORK_DIR/current-ten-unfenced.out" \
+  'baseline contains an unexpected service'
+[[ ! -s "$STATE_DIR/current-ten-unfenced/kubectl.log" ]] ||
+  fail "unsupported ordinary C10 rollback reached workload mutation"
 
 ruby -ryaml - "$DEPLOY_WORKFLOW_FILE" "$WORKFLOW_FILE" <<'RUBY'
 ARGV.each do |file|
@@ -3593,6 +3753,8 @@ assert_contains "$partial_capture_dir/baseline-provenance.env" \
   "baseline_build_run_id=$BUILD_RUN_ID"
 assert_contains "$partial_capture_dir/baseline-provenance.env" \
   "baseline_recovery_run_id=$PARTIAL_RECOVERY_RUN_ID"
+CAPTURED_BASELINE_DIR="$partial_capture_dir" \
+  bash "$ROOT_DIR/infra/oci/tests/test-fenced-rollback-recovery-stan.sh"
 
 if ! run_script "$WORK_DIR/partial-recovery-baseline-dry-run" \
     TARGET_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
