@@ -1290,6 +1290,14 @@ function assertReceiptLedger(
   return ledger;
 }
 
+function createReceiptBudget({
+  now = () => performance.now(),
+  wait = sleep,
+  signal = (milliseconds) => AbortSignal.timeout(milliseconds),
+} = {}) {
+  return { now, wait, signal, deadline: now() + RECEIPT_READ_DEADLINE_MS };
+}
+
 function receiptTimeRemaining(budget) {
   const remaining = Math.floor(budget.deadline - budget.now());
   if (remaining <= 0) {
@@ -1383,6 +1391,7 @@ async function assertUnusedOrOwnedReceipt({
   anchorSha,
   context,
   receipt,
+  receiptBudget,
   label,
 }) {
   if (receipt) {
@@ -1397,7 +1406,13 @@ async function assertUnusedOrOwnedReceipt({
     assertOwnedReceiptLedger(receipt.ledger, receipt);
     return;
   }
-  const statuses = await listCommitStatuses(github, owner, repo, anchorSha);
+  const statuses = await listCommitStatuses(
+    github,
+    owner,
+    repo,
+    anchorSha,
+    { budget: receiptBudget },
+  );
   if (statuses.some((status) => status.context === context)) {
     throw new Error(`${label} receipt was already started`);
   }
@@ -1442,13 +1457,9 @@ async function claimOneUseReceipt({
   targetUrl,
   revalidate,
   assertCanWrite,
-  receiptIO = {},
+  receiptIO,
+  receiptBudget = createReceiptBudget(receiptIO),
 }) {
-  const {
-    now = () => performance.now(),
-    wait = sleep,
-    signal = (milliseconds) => AbortSignal.timeout(milliseconds),
-  } = receiptIO;
   const receipt = {
     anchorSha,
     context,
@@ -1456,7 +1467,7 @@ async function claimOneUseReceipt({
     targetUrl,
     acknowledged: [],
     ledger: null,
-    budget: { now, wait, signal, deadline: now() + RECEIPT_READ_DEADLINE_MS },
+    budget: receiptBudget,
   };
   for (const state of ["pending", "success"]) {
     await verifyReceiptLedger(github, owner, repo, receipt);
@@ -1491,6 +1502,7 @@ async function claimWorkflowAuthorization({
   revalidate,
   assertCanWrite,
   receiptIO,
+  receiptBudget,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -1521,6 +1533,7 @@ async function claimWorkflowAuthorization({
     revalidate,
     assertCanWrite,
     receiptIO,
+    receiptBudget,
   });
 }
 
@@ -1604,6 +1617,7 @@ async function claimCoverageAssetAuthorization({
   revalidate,
   assertCanWrite,
   receiptIO,
+  receiptBudget,
 }) {
   const comparison = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -1638,6 +1652,7 @@ async function claimCoverageAssetAuthorization({
     revalidate,
     assertCanWrite,
     receiptIO,
+    receiptBudget,
   });
 }
 
@@ -2691,6 +2706,7 @@ async function resolveCoverageAssetTrust({
   fallbackUrl,
   serverUrl,
   receipt,
+  receiptBudget,
 }) {
   const repository = `${owner}/${repo}`;
   const repositoryResponse = await github.rest.repos.get({ owner, repo });
@@ -2971,6 +2987,7 @@ async function resolveCoverageAssetTrust({
         anchorSha: authorization.receiptSha,
         context,
         receipt,
+        receiptBudget,
         label: "coverage integration authorization",
       });
       leg = "integration";
@@ -3064,7 +3081,7 @@ async function resolveCoverageAssetTrust({
         owner,
         repo,
         authorization.receiptSha,
-        { budget: receipt?.budget },
+        { budget: receiptBudget },
       );
       const integrationReceipt = completedCoverageReceipt({
         statuses: integrationStatuses,
@@ -3146,6 +3163,7 @@ async function resolveCoverageAssetTrust({
         anchorSha: source.mergeCommitSha,
         context: promotionContext,
         receipt,
+        receiptBudget,
         label: "coverage promotion authorization",
       });
       leg = "promotion";
@@ -3179,6 +3197,7 @@ async function resolveTrustedQualityAssets({
   fallbackUrl,
   serverUrl,
   receipt,
+  receiptBudget,
 }) {
   const workflowTrust = await resolveQualityWorkflowTrust({
     github,
@@ -3201,6 +3220,7 @@ async function resolveTrustedQualityAssets({
     fallbackUrl,
     serverUrl,
     receipt,
+    receiptBudget,
   });
   if (coverageTrust.failure) {
     return {
@@ -4027,6 +4047,7 @@ async function bindPendingQualityTransition({
   coverageAuthorizations,
   authorizationNow,
   fallbackUrl,
+  receiptBudget,
 }) {
   const labelRefresh =
     eventAction === "labeled" || eventAction === "unlabeled";
@@ -4276,6 +4297,7 @@ async function bindPendingQualityTransition({
     authorizationNow,
     fallbackUrl,
     serverUrl,
+    receiptBudget,
   });
   if (trust.failure) {
     return false;
@@ -4340,6 +4362,7 @@ async function qualityDecision({
   requireFreshRun,
   serverUrl,
   receipt,
+  receiptBudget,
 }) {
   if (candidateRun) {
     try {
@@ -4369,6 +4392,7 @@ async function qualityDecision({
     fallbackUrl,
     serverUrl,
     receipt,
+    receiptBudget,
   });
   if (trust.failure) {
     return trust.failure;
@@ -4843,6 +4867,7 @@ module.exports = async function publishPrPolicy({
     const branchContext = `${BRANCH_CONTEXT_PREFIX}/${pull.baseRef}`;
     const qualityContext = `${QUALITY_CONTEXT_PREFIX}/${pull.baseRef}`;
     const targets = statusTargets(pull);
+    const receiptBudget = createReceiptBudget(receiptIO);
     let transitionBindingError = null;
     let createTransition = Boolean(item.transitionAction);
     const hasOpeningSnapshotMismatch =
@@ -4888,6 +4913,7 @@ module.exports = async function publishPrPolicy({
           coverageAuthorizations,
           authorizationNow: getAuthorizationNow(),
           fallbackUrl: policyRunUrl,
+          receiptBudget,
         });
       } catch (error) {
         transitionBindingError = error;
@@ -4905,6 +4931,7 @@ module.exports = async function publishPrPolicy({
       authorizationNow: getAuthorizationNow(),
       requireFreshRun: item.requireFreshRun && createTransition,
       serverUrl: context.serverUrl,
+      receiptBudget,
     });
     if (transitionBindingError) {
       quality = {
@@ -5059,6 +5086,7 @@ module.exports = async function publishPrPolicy({
             requireFreshRun: false,
             serverUrl: context.serverUrl,
             receipt,
+            receiptBudget,
           });
           if (
             currentQuality.state !== "success" ||
@@ -5094,6 +5122,7 @@ module.exports = async function publishPrPolicy({
             revalidate,
             assertCanWrite: assertClaimFresh,
             receiptIO,
+            receiptBudget,
           });
         } else {
           claimedReceipt = await claimCoverageAssetAuthorization({
@@ -5110,6 +5139,7 @@ module.exports = async function publishPrPolicy({
             revalidate,
             assertCanWrite: assertClaimFresh,
             receiptIO,
+            receiptBudget,
           });
         }
         await revalidate(claimedReceipt);

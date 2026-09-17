@@ -933,6 +933,7 @@ async function testReceiptReadback() {
       const authorization = workflowAuthorization();
       return {
         ledger,
+        initialScans: 1,
         anchor: HEAD_SHA,
         context: `trusted-workflow-authorization/${authorization.id}`,
         options: {
@@ -948,6 +949,7 @@ async function testReceiptReadback() {
       const authorization = coverageAuthorization();
       return {
         ledger,
+        initialScans: 2,
         anchor: BASE_SHA,
         context: publishPrPolicy.coverageAuthorizationContext(
           authorization,
@@ -973,6 +975,8 @@ async function testReceiptReadback() {
       const fixture = coveragePromotionFixture();
       return {
         ledger: fixture.promotionReceipt,
+        initialScans: 2,
+        initialReceiptAnchor: BASE_SHA,
         anchor: SOURCE_MERGE_COMMIT_SHA,
         context: publishPrPolicy.coverageAuthorizationContext(
           fixture.authorization,
@@ -988,7 +992,10 @@ async function testReceiptReadback() {
     result.statuses.filter(({ context }) => context.startsWith("pr-quality-gates/"));
   const assertFailure = (result) => {
     assert(qualityWrites(result).length > 0, result.messages.join("\n"));
-    assert(qualityWrites(result).every(({ state }) => state !== "success"));
+    assert(
+      qualityWrites(result).every(({ state }) => state !== "success"),
+      result.messages.join("\n"),
+    );
   };
   const assertSuccess = (result, fixture) => {
     assert(qualityWrites(result).length > 0, result.messages.join("\n"));
@@ -1034,7 +1041,79 @@ async function testReceiptReadback() {
       },
     });
     assertSuccess(delayedResult, delayed);
-    assert.deepEqual(reads, [1, 5, 5]);
+
+    const initialDeadline = makeFixture();
+    let initialElapsed = 0;
+    let firstReceiptSignal;
+    let observedInitialReceipt = false;
+    const initialDeadlineResult = await execute({
+      ...initialDeadline.options,
+      receiptIO: { now: () => initialElapsed },
+      statusRead: ({ ref, request, data }) => {
+        if (
+          !observedInitialReceipt &&
+          ref === (initialDeadline.initialReceiptAnchor ?? initialDeadline.anchor)
+        ) {
+          observedInitialReceipt = true;
+          firstReceiptSignal = request?.signal;
+          initialElapsed += 31_000;
+        }
+        return data;
+      },
+    });
+    assert(observedInitialReceipt);
+    assertFailure(initialDeadlineResult);
+    assert(firstReceiptSignal instanceof AbortSignal);
+    assert.equal(initialDeadline.ledger.length, 0);
+    assert.equal(receiptWrites(initialDeadlineResult, initialDeadline).length, 0);
+    assert(initialDeadlineResult.messages.some(
+      (message) => message.includes("deadline exhausted"),
+    ));
+    assert.deepEqual(reads, [delayed.initialScans, 5, 5]);
+
+    const initialCancellation = makeFixture();
+    let cancellationElapsed = 0;
+    let initialReceiptReads = 0;
+    let initialAborted = false;
+    const requestTimeouts = [];
+    const keepAlive = setTimeout(() => {}, 1_000);
+    let initialCancellationResult;
+    try {
+      initialCancellationResult = await execute({
+        ...initialCancellation.options,
+        receiptIO: {
+          now: () => cancellationElapsed,
+          signal: (milliseconds) => {
+            requestTimeouts.push(milliseconds);
+            return AbortSignal.timeout(milliseconds);
+          },
+        },
+        statusRead: async ({ request, data }) => {
+          if (!request) return data;
+          initialReceiptReads += 1;
+          if (initialReceiptReads === 1) {
+            cancellationElapsed = 29_980;
+            return data;
+          }
+          await new Promise((resolve, reject) => {
+            const abort = () => {
+              initialAborted = request.signal.aborted;
+              cancellationElapsed = 30_000;
+              reject(request.signal.reason);
+            };
+            if (request.signal.aborted) abort();
+            else request.signal.addEventListener("abort", abort, { once: true });
+          });
+          assert.fail("initial receipt scan must be cancelled");
+        },
+      });
+    } finally {
+      clearTimeout(keepAlive);
+    }
+    assertFailure(initialCancellationResult);
+    assert.equal(initialAborted, true);
+    assert.deepEqual(requestTimeouts, [5_000, 20]);
+    assert.equal(initialCancellation.ledger.length, initialCancellation.initialScans === 1 ? 1 : 0);
 
     for (const hiddenPhase of [1, 2]) {
       const hidden = makeFixture();
@@ -1071,7 +1150,10 @@ async function testReceiptReadback() {
       },
     });
     assertSuccess(paginatedResult, paginated);
-    assert.deepEqual(pages, [[0, 1], [0, 2], [1, 1], [1, 2], [2, 1], [2, 2]]);
+    assert.deepEqual(pages, [
+      ...Array.from({ length: paginated.initialScans }, () => [[0, 1], [0, 2]]).flat(),
+      [1, 1], [1, 2], [2, 1], [2, 2],
+    ]);
 
     for (const failedPhase of [0, 1]) {
       const interrupted = makeFixture();
@@ -1344,11 +1426,13 @@ async function testReceiptReadback() {
       statusRead: async ({ ref, request, data }) => {
         if (ref !== cancelled.anchor || !request || cancelled.ledger.length !== 1) return data;
         await new Promise((resolve, reject) => {
-          request.signal.addEventListener("abort", () => {
+          const abort = () => {
             aborted = request.signal.aborted;
             elapsed = 30_000;
             reject(request.signal.reason);
-          }, { once: true });
+          };
+          if (request.signal.aborted) abort();
+          else request.signal.addEventListener("abort", abort, { once: true });
         });
         assert.fail("cancelled receipt GET cannot complete");
       },
