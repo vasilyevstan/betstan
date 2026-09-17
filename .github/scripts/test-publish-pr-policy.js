@@ -4343,9 +4343,37 @@ async function main() {
   assert.equal(changedWorkflow.statuses[2].state, "failure");
   assert.equal(changedWorkflow.statuses[3].state, "failure");
 
+  const expectedWorkflowAuthorization = {
+    id: "node24-production-build-pr-637-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 637,
+    headRef: "fix/actions-node24",
+    baseRef: "dev",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "5393127d0f5ce048781dc48f265acc04ddbf4de0",
+  };
+  const expectedPromotionWorkflowAuthorization = {
+    id: "node24-production-build-promotion-636-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 636,
+    headRef: "dev",
+    baseRef: "master",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
+  };
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
+    [expectedWorkflowAuthorization, expectedPromotionWorkflowAuthorization],
   );
   assert.equal(
     Object.isFrozen(publishPrPolicy.trustedWorkflowBlobAuthorizations),
@@ -4356,9 +4384,36 @@ async function main() {
     "utf8",
   );
   assert.equal(
-    publisherSource.includes(
-      "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
-    ),
+    publisherSource.includes(`const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "node24-production-build-pr-637-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 637,
+    headRef: "fix/actions-node24",
+    baseRef: "dev",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "5393127d0f5ce048781dc48f265acc04ddbf4de0",
+  },
+  {
+    id: "node24-production-build-promotion-636-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 636,
+    headRef: "dev",
+    baseRef: "master",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
+  },
+]);`),
     true,
   );
   assert.deepEqual(

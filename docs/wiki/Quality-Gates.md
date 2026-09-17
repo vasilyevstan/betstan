@@ -117,8 +117,8 @@ Alongside the reservation the repository carries an inert coverage descriptor
 and its supporting tooling. The descriptor records eleven packages - Auth,
 Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
 Slip, plus Telemetry - a pinned Node runtime, and the same 80% line and 80% branch thresholds
-the current gate applies. The checked-in authorization inventory is empty, so
-the foundation remains inert: the coverage engine is not an active required
+the current gate applies. The coverage-asset authorization inventory is empty,
+so the foundation remains inert: the coverage engine is not an active required
 check, and coverage continues to be enforced by the existing per-package
 coverage gate. The unchanged production validation workflow remains the
 execution boundary; in the ordinary default-equal state, where the engine and
@@ -288,6 +288,15 @@ After deployment:
 - Corrections return to the same logical owner and gate.
 - Release documentation records scope, exclusions, validation, risk, release
   impact, rollback, and remaining work.
+
+Protected-workflow authorizations are separate from coverage-asset
+authorizations. Use requires the matching actual PR, exact workflow blobs,
+branch refs and receipt anchor, within the authorization's validity window.
+The declaration must reach trusted policy through protected review before
+consumption; provisioning alone is not merge or deployment permission.
+Integration and promotion retain their own one-use authority and required
+fresh CI. After both intended uses, remove the declarations while preserving
+consumed receipts and their one-use meaning.
 
 Independently verified immutable facts may be reused after binding them to
 the consuming work unit's root request, exact refs, scope, and complete
