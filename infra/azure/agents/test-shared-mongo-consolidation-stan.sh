@@ -190,11 +190,14 @@ import sys
 import time
 
 operator, temporary = map(Path, sys.argv[1:])
-root = temporary / "read-contract"
+# Match Linux's physical paths even when the host's temp directory is an alias.
+# The synthetic checkout and recovery fixtures must be siblings, not nested.
+root = (temporary / "read-contract").resolve()
 root.mkdir()
+checkout = root / "checkout"
 bin_dir = root / "bin"
 bin_dir.mkdir()
-guard = root / "infra/azure/agents/shared-mongo-topology-guard-stan.sh"
+guard = checkout / "infra/azure/agents/shared-mongo-topology-guard-stan.sh"
 guard.parent.mkdir(parents=True)
 guard.write_text('#!/usr/bin/env bash\nprintf "topology-guard\\n" >>"$FIXTURE_TRACE"\n')
 guard.chmod(0o700)
@@ -437,6 +440,7 @@ def setup(operation, *, journal_read="present", state=None, pv_reads=None,
     directory.mkdir(mode=0o700)
     backup = directory / "backups"
     backup.mkdir(mode=0o700)
+    assert checkout.resolve() not in backup.resolve().parents, "fixture backup is inside its checkout"
     for name in ("auth-preserved", "backup-preserved"):
         (backup / name).write_bytes(b"unchanged fixture recovery bytes\n")
     data = {
@@ -525,7 +529,7 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
     (directory / "calls.jsonl").write_text("")
     env = dict(
         clean_env, PATH=str(bin_dir) + os.pathsep + clean_env["PATH"],
-        FIXTURE_ROOT=str(root), FIXTURE_CASE=str(directory), FIXTURE_TRACE=str(trace),
+        FIXTURE_ROOT=str(checkout), FIXTURE_CASE=str(directory), FIXTURE_TRACE=str(trace),
         FIXTURE_CONDITIONAL=str(int(conditional)), FIXTURE_CLOCK_STEP=str(clock_step),
         NAMESPACE="read-fixture-ns", APPROVED_SHA="a" * 40, MIGRATION_ID="read-fixture",
         BACKUP_DIR=str(backup), TMPDIR=str(directory), SKIP_DOCKER="1",
@@ -542,7 +546,19 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
         )
     else:
         result = run_interrupted(directory, script, operation, env, interruption)
-    assert (result.returncode == 0) == ok, (operation, directory.name, result.stdout, result.stderr)
+    steps = trace.read_text().splitlines()
+    fixture = json.loads((directory / "fixture.json").read_text())
+    context = json.dumps({
+        "case": directory.name, "operation": operation, "script": script.name,
+        "conditional": conditional, "expected_success": ok, "exit_code": result.returncode,
+        "journal_read": fixture["journal_read"], "pv_reads": fixture["pv_reads"],
+        "acquire_count": steps.count("acquire-lock:read-fixture:" + "a" * 40),
+        "release_count": steps.count("release-lock:read-fixture:" + "a" * 40),
+        "trace": steps,
+        "stdout_tail": result.stdout[-4096:].replace(str(root), "<fixture>"),
+        "stderr_tail": result.stderr[-4096:].replace(str(root), "<fixture>"),
+    }, sort_keys=True)
+    assert (result.returncode == 0) == ok, context
     calls = [json.loads(line) for line in (directory / "calls.jsonl").read_text().splitlines()]
     assert all((call["resource"], call["name"]) in allowed_deletes
                for call in calls if call["command"] == "delete")
@@ -560,9 +576,8 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
         assert cleanup_map.read_bytes() == map_before, "partial cleanup changed its map"
     for name in ("auth-preserved", "backup-preserved"):
         assert (backup / name).read_bytes() == b"unchanged fixture recovery bytes\n"
-    steps = trace.read_text().splitlines()
-    assert steps.count("acquire-lock:read-fixture:" + "a" * 40) == 1
-    assert steps.count("release-lock:read-fixture:" + "a" * 40) == 1
+    assert steps.count("acquire-lock:read-fixture:" + "a" * 40) == 1, context
+    assert steps.count("release-lock:read-fixture:" + "a" * 40) == 1, context
     assert not list(directory.glob("tmp.*")), "temporary read evidence leaked"
     return calls, steps
 
