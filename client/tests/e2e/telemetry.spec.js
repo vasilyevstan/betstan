@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const { installFakeEventSource } = require('./support/fakeEventSource');
-const { createShellMockState, installAppApiMocks } = require('./support/mockAppApi');
+const { createShellMockState, createTelemetryHourly, installAppApiMocks } = require('./support/mockAppApi');
 
 const UI_VARIANTS = ['v1', 'v2', 'v3'];
 const THEMES = ['dark', 'light'];
@@ -294,7 +294,7 @@ const getContrastEvidence = (page) => page.evaluate(() => {
     })
   );
 
-  const refresh = document.querySelector('.telemetry-refresh');
+  const refresh = document.querySelector('.telemetry-page :focus-visible') || document.querySelector('.telemetry-refresh');
   const refreshStyle = getComputedStyle(refresh);
   const focusBackground = effectiveBackground(refresh.parentElement);
   const outline = parseColor(refreshStyle.outlineColor);
@@ -312,8 +312,205 @@ const getContrastEvidence = (page) => page.evaluate(() => {
       '.telemetry-health__status'
     ),
     statusText: ratiosFor('.telemetry-health__status > span:last-child', 'color'),
+    tooltipText: ratiosFor('.telemetry-metric__tooltip', 'color'),
+    detailText: ratiosFor('.telemetry-metric__day, .telemetry-metric__generated, .telemetry-metric__action', 'color'),
+    pairText: ratiosFor('.telemetry-metric__date, .telemetry-metric__value', 'color'),
   };
 });
+
+const expectTooltipGeometry = async (page, card, bar, count) => {
+  await bar.scrollIntoViewIfNeeded();
+  await page.mouse.move(0, 0);
+  // Playwright may scroll a trigger clear of the sticky navbar on hover.
+  // Measure document coordinates so scrolling is not misreported as layout shift.
+  const documentBox = (element) => {
+    const box = element.getBoundingClientRect();
+    return { x: box.left + scrollX, y: box.top + scrollY, width: box.width, height: box.height };
+  };
+  const before = await card.evaluate(documentBox);
+  await bar.hover();
+  const tooltip = card.getByRole('tooltip');
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveText(String(count));
+  const evidence = await tooltip.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const cardBox = element.closest('.telemetry-metric').getBoundingClientRect();
+    const headerBottom = document.querySelector('.app-navbar').getBoundingClientRect().bottom;
+    const controls = [...element.closest('.telemetry-metric').querySelectorAll('button:focus, .telemetry-metric__action')];
+    return {
+      left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      minLeft: Math.max(0, cardBox.left), maxRight: Math.min(innerWidth, cardBox.right),
+      minTop: Math.max(headerBottom, cardBox.top), maxBottom: Math.min(innerHeight, cardBox.bottom),
+      pointerEvents: getComputedStyle(element).pointerEvents,
+      controlOverlaps: controls.filter((control) => {
+        const other = control.getBoundingClientRect();
+        return box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top;
+      }).length,
+    };
+  });
+  expect(evidence.left).toBeGreaterThanOrEqual(evidence.minLeft - 0.75);
+  expect(evidence.right).toBeLessThanOrEqual(evidence.maxRight + 0.75);
+  expect(evidence.top).toBeGreaterThanOrEqual(evidence.minTop - 0.75);
+  expect(evidence.bottom).toBeLessThanOrEqual(evidence.maxBottom + 0.75);
+  expect(evidence.controlOverlaps).toBe(0);
+  expect(evidence.pointerEvents).toBe('none');
+  const after = await card.evaluate(documentBox);
+  for (const dimension of ['x', 'y', 'width', 'height']) {
+    expect(Math.abs(before[dimension] - after[dimension])).toBeLessThanOrEqual(0.75);
+  }
+  const contrast = await getContrastEvidence(page);
+  expect(Math.min(...contrast.tooltipText)).toBeGreaterThanOrEqual(4.5);
+  return { evidence, contrast: Math.min(...contrast.tooltipText) };
+};
+
+const expectMixedState = async (page) => {
+  const cards = page.locator('.telemetry-metric');
+  const first = cards.nth(0);
+  const lastDate = first.locator('.telemetry-metric__date-button').last();
+  const name = await lastDate.getAttribute('aria-label');
+  await lastDate.focus();
+  await page.keyboard.press('Space');
+  const back = first.getByRole('button', { name: 'Back to 14 days' });
+  await expect(back).toBeFocused();
+  await expect(first.locator('rect')).toHaveCount(24);
+  await expect(first.getByText(/In progress/)).toBeVisible();
+  await expect(cards.nth(1).locator('rect')).toHaveCount(14);
+  await expect(first.locator('ol button')).toHaveCount(0);
+  await expect(page.locator('.telemetry-metric__pair')).toHaveCount(122);
+  await expectMetricContentsInsideCards(cards);
+  await expectSiblingBoxesDoNotIntersect(cards, 'mixed metric cards');
+  await expectRequiredLabelsNotClipped(page);
+  await expectNoScrollOverflow(page.locator('html'), 'mixed document');
+  const targets = await page.locator('.telemetry-metric button').evaluateAll((elements) => (
+    elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    })
+  ));
+  expect(Math.min(...targets.map((box) => box.width))).toBeGreaterThanOrEqual(44);
+  expect(Math.min(...targets.map((box) => box.height))).toBeGreaterThanOrEqual(44);
+  const contrast = await getContrastEvidence(page);
+  expect(Math.min(...contrast.detailText)).toBeGreaterThanOrEqual(4.5);
+  expect(Math.min(...contrast.pairText)).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.focus.ratio).toBeGreaterThanOrEqual(3);
+  expect(contrast.focus.width).toBe('3px');
+  await back.press('Enter');
+  await expect(first.getByRole('button', { name, exact: true })).toBeFocused();
+  await expect(first.locator('rect')).toHaveCount(14);
+};
+
+// A single immediate read after native activation: no polling or test-side scroll
+// may turn an offscreen focus destination into a passing visibility assertion.
+const expectImmediateFocusVisible = async (page, name, transition) => {
+  const evidence = await page.evaluate(() => {
+    const element = document.activeElement;
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const ring = parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+    return {
+      name: element.getAttribute('aria-label') || element.textContent.trim(),
+      focusVisible: element.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: parseFloat(style.outlineWidth),
+      left: box.left - ring, right: box.right + ring,
+      top: box.top - ring, bottom: box.bottom + ring,
+      headerBottom: document.querySelector('.app-navbar').getBoundingClientRect().bottom,
+      viewportWidth: innerWidth, viewportHeight: innerHeight,
+    };
+  });
+  console.log(`Immediate ${transition} focus: ${JSON.stringify(evidence)}`);
+  expect(evidence.name).toBe(name);
+  expect(evidence.focusVisible).toBe(true);
+  expect(evidence.outlineStyle).toBe('solid');
+  expect(evidence.outlineWidth).toBe(3);
+  expect(evidence.top).toBeGreaterThanOrEqual(evidence.headerBottom - 0.75);
+  expect(evidence.bottom).toBeLessThanOrEqual(evidence.viewportHeight + 0.75);
+  expect(evidence.left).toBeGreaterThanOrEqual(-0.75);
+  expect(evidence.right).toBeLessThanOrEqual(evidence.viewportWidth + 0.75);
+};
+
+const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
+  const evidence = await card.evaluate((element) => {
+    const epsilon = 0.75;
+    const pairs = [...element.querySelectorAll('.telemetry-metric__pair')];
+    const rows = [];
+    const containmentFailures = [];
+    const intersections = [];
+    const counts = [];
+    const controls = pairs.map((pair, index) => {
+      const control = pair.querySelector('button') || pair;
+      const box = control.getBoundingClientRect();
+      const pairBox = pair.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(control.querySelector('data'));
+      const valueBaseline = range.getClientRects()[0].bottom;
+      counts.push(control.querySelector('data').textContent);
+      const inside = (child, parent) => (
+        child.left >= parent.left - epsilon && child.right <= parent.right + epsilon
+        && child.top >= parent.top - epsilon && child.bottom <= parent.bottom + epsilon
+      );
+      if (!inside(box, pairBox)) containmentFailures.push({ index, kind: 'control-in-pair' });
+      for (const child of control.querySelectorAll('time, data')) {
+        range.selectNodeContents(child);
+        if (!inside(child.getBoundingClientRect(), box)
+          || [...range.getClientRects()].some((textBox) => !inside(textBox, box))) {
+          containmentFailures.push({ index, kind: child.tagName });
+        }
+      }
+      let row = rows.find((entry) => Math.abs(entry.top - pairBox.top) <= epsilon);
+      if (!row) {
+        row = { top: pairBox.top, controls: [] };
+        rows.push(row);
+      }
+      row.controls.push({ top: box.top, bottom: box.bottom, width: box.width, valueBaseline });
+      return { box, pairBox };
+    });
+    for (let a = 0; a < controls.length; a += 1) {
+      for (let b = a + 1; b < controls.length; b += 1) {
+        for (const kind of ['box', 'pairBox']) {
+          const first = controls[a][kind];
+          const second = controls[b][kind];
+          if (first.left < second.right - epsilon && first.right > second.left + epsilon
+            && first.top < second.bottom - epsilon && first.bottom > second.top + epsilon) {
+            intersections.push({ a, b, kind });
+          }
+        }
+      }
+    }
+    const spread = (key) => Math.max(...rows.map((row) => {
+      const values = row.controls.map((control) => control[key]);
+      return Math.max(...values) - Math.min(...values);
+    }));
+    const body = element.querySelector('.card-body');
+    const bodyBox = body.getBoundingClientRect();
+    const bodyStyle = getComputedStyle(body);
+    const contentLeft = bodyBox.left + parseFloat(bodyStyle.paddingLeft);
+    const contentWidth = bodyBox.width - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight);
+    const plot = element.querySelector('svg').getBoundingClientRect();
+    const containers = [
+      document.documentElement, element, body,
+      ...element.querySelectorAll('.telemetry-metric__figure, .telemetry-metric__values, .telemetry-metric__pair, button'),
+    ];
+    return {
+      count: pairs.length, counts, containmentFailures, intersections,
+      rowTopSpread: spread('top'), rowBottomSpread: spread('bottom'),
+      rowWidthSpread: spread('width'), valueBaselineSpread: spread('valueBaseline'),
+      plotWidth: plot.width, contentWidth, plotOffset: plot.left - contentLeft,
+      overflow: containers.filter((container) => container.scrollWidth > container.clientWidth)
+        .map((container) => ({ className: container.className, scrollWidth: container.scrollWidth, clientWidth: container.clientWidth })),
+    };
+  });
+  console.log(`Own-pair geometry ${viewport}/${mode}: ${JSON.stringify(evidence)}`);
+  expect(evidence.counts).toEqual(expectedCounts.map(String));
+  expect(evidence.containmentFailures).toEqual([]);
+  expect(evidence.intersections).toEqual([]);
+  expect(evidence.overflow).toEqual([]);
+  for (const key of ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread']) {
+    expect(evidence[key], key).toBeLessThanOrEqual(0.75);
+  }
+  expect(Math.abs(evidence.plotWidth - evidence.contentWidth)).toBeLessThanOrEqual(0.75);
+  expect(Math.abs(evidence.plotOffset)).toBeLessThanOrEqual(0.75);
+};
 
 const openCollapsedNavigation = async (page) => {
   const toggler = page.getByRole('button', { name: 'Toggle navigation' });
@@ -339,6 +536,7 @@ const expectContrast = async (page) => {
   expect(evidence.focus.width).toBe('3px');
   expect(evidence.focus.style).toBe('solid');
   expect(evidence.focus.ratio).toBeGreaterThanOrEqual(3);
+  expect(Math.min(...evidence.pairText)).toBeGreaterThanOrEqual(4.5);
 };
 
 const expectTelemetryLayout = async (page, viewport) => {
@@ -425,6 +623,13 @@ for (const uiVariant of UI_VARIANTS) {
         if (viewport.width === 1600) {
           await expectRefreshFocusAfterSuccessAndFailure(page, state);
         }
+        // Reuse this layout matrix, not a second screenshot matrix.
+        await expectMixedState(page);
+        const card = page.locator('.telemetry-metric').first();
+        const measured = await expectTooltipGeometry(
+          page, card, card.locator('rect').last(), state.telemetrySummary.metrics[0].values[13]
+        );
+        console.log(`Telemetry ${uiVariant}/${theme}/${viewport.width}: tooltip contrast ${measured.contrast.toFixed(2)}, layout delta <=0.75px; mixed controls >=44px`);
       }
     });
   }
@@ -507,4 +712,214 @@ test('static route aliases share layout, navigation, and page-view identity', as
   await expect(page.locator('.scoreboard')).toHaveCount(1);
   await expect(page.locator('.slip-boards')).toHaveCount(1);
   expect(state.requestCount('POST /api/telemetry/page-view')).toBe(1);
+});
+
+test('exact tooltip hover transit, Escape, edge counts and native SVG actions are stable', async ({ page }) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  state.telemetrySummary.metrics[0].values[0] = 0;
+  state.telemetrySummary.metrics[0].values[7] = Number.MAX_SAFE_INTEGER;
+  state.telemetrySummary.metrics[0].values[13] = 123456789;
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto('/telemetry?ui=v3&theme=dark');
+  const cards = page.locator('.telemetry-metric');
+  await expect(cards).toHaveCount(8);
+  for (let index = 0; index < 8; index += 1) {
+    await expectTooltipGeometry(page, cards.nth(index), cards.nth(index).locator('rect').first(),
+      state.telemetrySummary.metrics[index].values[0]);
+  }
+  const first = cards.first();
+  for (const index of [0, 7, 13]) {
+    const bar = first.locator('rect').nth(index);
+    await expectTooltipGeometry(page, first, bar, state.telemetrySummary.metrics[0].values[index]);
+    const tooltip = first.getByRole('tooltip');
+    const tipBox = await tooltip.boundingBox();
+    const barBox = await bar.boundingBox();
+    const x = Math.max(tipBox.x + 1, Math.min(tipBox.x + tipBox.width - 1, barBox.x + barBox.width / 2));
+    const above = tipBox.y + tipBox.height <= barBox.y;
+    const startY = above ? barBox.y + 1 : barBox.y + barBox.height - 1;
+    const endY = above ? tipBox.y + tipBox.height - 1 : tipBox.y + 1;
+    await page.mouse.move(barBox.x + barBox.width / 2, startY);
+    await tooltip.evaluate((element) => { window.telemetryObservedTooltip = element; });
+    for (let step = 1; step <= 12; step += 1) {
+      await page.mouse.move(x, startY + (endY - startY) * step / 12);
+      await expect(tooltip).toBeVisible();
+      expect(await tooltip.evaluate((element) => element === window.telemetryObservedTooltip)).toBe(true);
+    }
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toHaveCount(0);
+    await page.mouse.move(x, endY);
+    await expect(tooltip).toHaveCount(0);
+    await page.mouse.move(0, 0);
+    await bar.hover();
+    await expect(tooltip).toHaveText(String(state.telemetrySummary.metrics[0].values[index]));
+  }
+  const bar = first.locator('rect').first();
+  const focused = cards.nth(1).locator('button').first();
+  await focused.focus();
+  await bar.click();
+  await expect(first.locator('rect')).toHaveCount(24);
+  await expect(focused).toBeFocused();
+  await expect(first.getByRole('tooltip')).toHaveCount(0);
+  await expectTooltipGeometry(page, first, first.locator('rect').last(), 0);
+  const detailKey = 'GET /api/telemetry/metrics/MAIN_PAGE_VISIT/days/2026-08-28';
+  await first.locator('rect').last().click();
+  expect(state.requestCount(detailKey)).toBe(1);
+  await page.mouse.wheel(0, 70);
+  await expect(first.getByRole('tooltip')).toHaveCount(0);
+  await expectTooltipGeometry(page, first, first.locator('rect').last(), 0);
+  await page.setViewportSize({ width: 1500, height: 1000 });
+  await expect(first.getByRole('tooltip')).toHaveCount(0);
+  expect(state.requestCount('POST /api/telemetry/page-view')).toBe(0);
+  console.log('Tooltip evidence: all 8, zero/MAX_SAFE_INTEGER/last, 12-point transit without remount/flicker, Escape suppression, scroll/resize dismissal, native SVG focus retention.');
+});
+
+test('mobile focus fallback, loading/error Back, partial Refresh and later-open focus retention', async ({ page }) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  await installAppApiMocks(page, state);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/telemetry?ui=v2&theme=light');
+  const first = page.locator('.telemetry-metric').first();
+  const origin = first.locator('.telemetry-metric__date-button').last();
+  await origin.evaluate((element) => {
+    const top = element.getBoundingClientRect().top + window.scrollY;
+    // The shell inherits Bootstrap smooth scrolling. Establish settled geometry
+    // before testing a fresh focus, rather than racing an in-progress scroll.
+    window.scrollTo({ top: top - 220, behavior: 'instant' });
+  });
+  // Even an instant scroll dispatches its scroll event on a subsequent frame.
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+  await expect.poll(() => first.locator('svg').evaluate((element) => element.getBoundingClientRect().bottom)).toBeLessThan(200);
+  await origin.focus();
+  await expect(first.getByRole('tooltip')).toHaveText('14');
+  const fallback = await first.getByRole('tooltip').boundingBox();
+  const buttonBox = await origin.boundingBox();
+  expect(fallback.y + fallback.height).toBeLessThanOrEqual(buttonBox.y - 5);
+  expect(fallback.y).toBeGreaterThan(0);
+  const contrast = await getContrastEvidence(page);
+  expect(contrast.focus.ratio).toBeGreaterThanOrEqual(3);
+  expect(Math.min(...contrast.tooltipText)).toBeGreaterThanOrEqual(4.5);
+  await page.keyboard.press('Escape');
+  await expect(first.getByRole('tooltip')).toHaveCount(0);
+  await origin.blur();
+  await origin.focus();
+  await expect(first.getByRole('tooltip')).toHaveText('14');
+
+  let release;
+  const key = 'MAIN_PAGE_VISIT/2026-09-10';
+  state.telemetryHourlyResponses[key] = {
+    wait: new Promise((resolve) => { release = resolve; }),
+    status: 503, body: { error: 'Telemetry temporarily unavailable' },
+  };
+  await origin.press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', 'daily activation');
+  const back = first.getByRole('button', { name: 'Back to 14 days' });
+  await expect(back).toBeFocused();
+  await expect(first.getByRole('status')).toHaveText('Loading hourly data...');
+  release();
+  await expect(first.getByRole('alert')).toContainText('Hourly data is unavailable');
+  await expect(back).toBeFocused();
+  state.telemetryHourlyResponses[key] = {
+    wait: new Promise((resolve) => { release = resolve; }),
+    body: createTelemetryHourly('MAIN_PAGE_VISIT', '2026-09-10'),
+  };
+  await first.getByRole('button', { name: 'Retry' }).press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', 'Retry');
+  await expect(back).toBeFocused();
+  const second = page.locator('.telemetry-metric').nth(1);
+  const other = second.locator('.telemetry-metric__date-button').first();
+  await other.focus();
+  release();
+  await expect(first.locator('rect')).toHaveCount(24);
+  await expect(other).toBeFocused();
+
+  let releaseOverview;
+  let releaseDetail;
+  state.telemetrySummaryResponse = { wait: new Promise((resolve) => { releaseOverview = resolve; }) };
+  state.telemetryHourlyResponses[key] = {
+    wait: new Promise((resolve) => { releaseDetail = resolve; }),
+    status: 429, body: { error: 'Too many requests' },
+  };
+  const refresh = page.getByRole('button', { name: 'Refresh' });
+  await refresh.click();
+  await expect(refresh).toBeDisabled();
+  const otherKey = 'ADMIN_PAGE_VISIT/2026-08-28';
+  let releaseLater;
+  state.telemetryHourlyResponses[otherKey] = {
+    wait: new Promise((resolve) => { releaseLater = resolve; }),
+    body: createTelemetryHourly('ADMIN_PAGE_VISIT', '2026-08-28'),
+  };
+  await other.press('Space');
+  const otherBack = second.getByRole('button', { name: 'Back to 14 days' });
+  await expect(otherBack).toBeFocused();
+  releaseOverview();
+  await expect(refresh).toBeDisabled();
+  releaseDetail();
+  await expect(refresh).toBeEnabled();
+  await expect(page.getByText(/Refresh failed for some telemetry data/)).toBeVisible();
+  await expect(first.locator('rect')).toHaveCount(24);
+  await expect(second.getByRole('status')).toContainText('Loading hourly');
+  await expect(otherBack).toBeFocused();
+  releaseLater();
+  await expect(second.locator('rect')).toHaveCount(24);
+  await expect(otherBack).toBeFocused();
+  await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
+  await expectNoScrollOverflow(page.locator('html'), 'mobile mixed failure');
+  await back.press('Enter');
+  await expectImmediateFocusVisible(page, 'Main page visits, 2026-09-10 UTC, 14', 'Back');
+  console.log(`Mobile focus fallback measured; text contrast ${Math.min(...contrast.tooltipText).toFixed(2)}, focus ${contrast.focus.ratio.toFixed(2)}; network/batch completion retained sibling focus.`);
+});
+
+test('mixed-count pair geometry stays contained and aligned at three widths', async ({ page }) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  const counts = [0, 7, Number.MAX_SAFE_INTEGER];
+  const dailyCounts = Array.from({ length: 14 }, (_, index) => counts[index % counts.length]);
+  const hourlyCounts = Array.from({ length: 24 }, (_, index) => counts[index % counts.length]);
+  state.telemetrySummary.metrics[0].values = dailyCounts;
+  state.telemetryHourlyResponses['MAIN_PAGE_VISIT/2026-08-28'] = {
+    body: {
+      ...createTelemetryHourly('MAIN_PAGE_VISIT', '2026-08-28'),
+      values: hourlyCounts,
+    },
+  };
+  await installAppApiMocks(page, state);
+  for (const width of [390, 768, 1600]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/telemetry?ui=v2&theme=light');
+    const card = page.locator('.telemetry-metric').first();
+    await expect(card.locator('data')).toHaveCount(14);
+    await expectOwnPairGeometry(card, width, 'daily', dailyCounts);
+    await card.locator('.telemetry-metric__date-button').first().press('Enter');
+    await expect(card.locator('data')).toHaveCount(24);
+    await expectOwnPairGeometry(card, width, 'hourly', hourlyCounts);
+  }
+});
+
+test.describe('Telemetry native touch', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+  test('44px date targets open hourly and Back restores daily', async ({ page }) => {
+    await installFakeEventSource(page);
+    const state = createShellMockState();
+    await installAppApiMocks(page, state);
+    await page.goto('/telemetry?ui=v1&theme=light');
+    const card = page.locator('.telemetry-metric').first();
+    const date = card.locator('.telemetry-metric__date-button').first();
+    const box = await date.boundingBox();
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    await date.tap();
+    await expect(card.locator('rect')).toHaveCount(24);
+    const back = card.getByRole('button', { name: 'Back to 14 days' });
+    const backBox = await back.boundingBox();
+    expect(backBox.width).toBeGreaterThanOrEqual(44);
+    expect(backBox.height).toBeGreaterThanOrEqual(44);
+    await back.tap();
+    await expect(card.locator('rect')).toHaveCount(14);
+    expect(state.requestCount('GET /api/telemetry/summary')).toBe(1);
+  });
 });
