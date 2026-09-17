@@ -1346,6 +1346,24 @@ assert_fail "floating production rollback action ref" \
 
 reset_fixtures
 write_complete_oci_set
+sed -i.bak \
+  's#azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906#azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5#' \
+  "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "retired Azure login pin" \
+  "must pin azure/login to a641126d1b8aa4d1fa005f4f92df94a3a4c4c906"
+
+reset_fixtures
+write_complete_oci_set
+sed -i.bak \
+  's#azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b#azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d#' \
+  "$tmp_dir/production-rollback.yml"
+rm "$tmp_dir/production-rollback.yml.bak"
+assert_fail "retired AKS context pin" \
+  "must pin azure/aks-set-context to 60623acbdcbbdcf799ad50a1adf8703874339f8b"
+
+reset_fixtures
+write_complete_oci_set
 sed -i.bak '/\[ "\$GITHUB_REF_NAME" = "master" \]/d' "$tmp_dir/production-rollback.yml"
 rm "$tmp_dir/production-rollback.yml.bak"
 assert_fail "production rollback without master guard" \
