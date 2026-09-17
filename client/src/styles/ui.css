@@ -2099,6 +2099,7 @@ body {
 .telemetry-metric__pair,
 .telemetry-metric__date-button {
   display: grid;
+  grid-template-rows: auto 1fr;
   gap: 0.15rem;
   min-width: 0;
   padding: 0.4rem;

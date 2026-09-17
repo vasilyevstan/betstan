@@ -506,6 +506,57 @@ describe('Telemetry', () => {
       expect(cardAt().querySelectorAll('rect')).toHaveLength(14);
     });
 
+    it.each(['before', 'after'])(
+      'retains today when hourly success settles %s a valid pre-midnight cached overview',
+      async (order) => {
+        await renderSummary();
+        const day = DATES[13];
+        axios.get.mockResolvedValueOnce({ data: {
+          ...createHourly(METRIC_NAMES[0], day),
+          generatedAt: '2026-09-10T00:16:00.000Z',
+        } });
+        userEvent.click(dateButton(0, 13));
+        await within(cardAt()).findByRole('list', { name: /hourly UTC/ });
+
+        const overview = createDeferred();
+        const hourly = createDeferred();
+        axios.get.mockReturnValueOnce(overview.promise).mockReturnValueOnce(hourly.promise);
+        userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+        expect(axios.get).toHaveBeenLastCalledWith(hourlyPath(0, 13), {
+          timeout: 10000, signal: expect.any(AbortSignal),
+        });
+        const hourlySignal = axios.get.mock.calls[3][1].signal;
+        const olderOverview = {
+          ...createSummary({ generatedAt: '2026-09-09T23:59:59.000Z' }),
+          dates: ['2026-08-27', ...DATES.slice(0, -1)],
+        };
+        const refreshedDetail = createHourly(METRIC_NAMES[0], day, Array(24).fill(7));
+        if (order === 'before') await settle(hourly, refreshedDetail);
+        expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+        await settle(overview, olderOverview);
+
+        expect(screen.getByText(olderOverview.generatedAt)).toBeInTheDocument();
+        expect(hourlySignal.aborted).toBe(false);
+        expect(within(cardAt()).queryByRole('alert')).not.toBeInTheDocument();
+        if (order === 'after') {
+          expect(within(cardAt()).getByRole('status')).toHaveTextContent('Refreshing hourly data');
+          expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+          await settle(hourly, refreshedDetail);
+        }
+
+        expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+        expect(screen.getByText('Telemetry refreshed.')).toBeInTheDocument();
+        expect(within(cardAt()).getByText(day)).toBeInTheDocument();
+        expect(within(cardAt()).getByText(refreshedDetail.generatedAt)).toBeInTheDocument();
+        expect(within(cardAt()).getByRole('button', { name: 'Back to 14 days' })).toBeInTheDocument();
+        expect(within(cardAt()).queryByRole('alert')).not.toBeInTheDocument();
+        expect(cardAt().querySelectorAll('rect')).toHaveLength(24);
+        cardAt().querySelectorAll('data').forEach((value) => expect(value).toHaveTextContent('7'));
+        expect(cardAt(1).querySelectorAll('rect')).toHaveLength(14);
+        expect(axios.get).toHaveBeenCalledTimes(4);
+      },
+    );
+
     it('Back cancellation is neutral in Refresh and an old finally cannot clear a reopened request', async () => {
       await renderSummary();
       axios.get.mockResolvedValueOnce({ data: createHourly() });

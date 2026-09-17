@@ -207,11 +207,27 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
 
   useLayoutEffect(() => {
     if (!pendingFocus.current) return;
+    let destination;
     if (pendingFocus.current === 'back' && !isDaily) {
-      back.current?.focus({ preventScroll: true });
+      destination = back.current;
     } else if (pendingFocus.current === 'origin' && isDaily) {
       const index = dates.indexOf(originDay.current);
-      (buttons.current[index] || heading.current)?.focus({ preventScroll: true });
+      destination = buttons.current[index] || heading.current;
+    }
+    destination?.focus({ preventScroll: true });
+    if (destination) {
+      const box = destination.getBoundingClientRect();
+      const headerBottom = document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0;
+      // Reveal only a user-initiated focus destination, including its 3px/2px
+      // focus ring. Native automatic scrolling does not account for the sticky navbar.
+      const visibleTop = Math.max(0, headerBottom) + 8;
+      const visibleBottom = window.innerHeight - 8;
+      const offset = box.top < visibleTop
+        ? box.top - visibleTop
+        : box.bottom > visibleBottom ? box.bottom - visibleBottom : 0;
+      if (box.height > 0 && offset !== 0) {
+        window.scrollBy({ top: offset, behavior: 'instant' });
+      }
     }
     pendingFocus.current = null;
   }, [isDaily, record.mode, dates]);
@@ -477,7 +493,8 @@ const Telemetry = () => {
       snapshotRef.current = response.data;
       setSnapshot(response.data);
       Object.entries(recordsRef.current).forEach(([metric, record]) => {
-        if (record.mode !== 'overview' && !response.data.dates.includes(record.day)) {
+        // An older cached overview may omit a newer UTC day without proving expiry.
+        if (record.mode !== 'overview' && record.day < response.data.dates[0]) {
           invalidateDetail(metric);
           replaceRecord(metric, {
             mode: 'error', day: record.day, errorKind: 'expired', prior: acceptedDetail(record),

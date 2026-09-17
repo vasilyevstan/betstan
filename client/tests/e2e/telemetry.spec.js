@@ -399,6 +399,119 @@ const expectMixedState = async (page) => {
   await expect(first.locator('rect')).toHaveCount(14);
 };
 
+// A single immediate read after native activation: no polling or test-side scroll
+// may turn an offscreen focus destination into a passing visibility assertion.
+const expectImmediateFocusVisible = async (page, name, transition) => {
+  const evidence = await page.evaluate(() => {
+    const element = document.activeElement;
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const ring = parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+    return {
+      name: element.getAttribute('aria-label') || element.textContent.trim(),
+      focusVisible: element.matches(':focus-visible'),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: parseFloat(style.outlineWidth),
+      left: box.left - ring, right: box.right + ring,
+      top: box.top - ring, bottom: box.bottom + ring,
+      headerBottom: document.querySelector('.app-navbar').getBoundingClientRect().bottom,
+      viewportWidth: innerWidth, viewportHeight: innerHeight,
+    };
+  });
+  console.log(`Immediate ${transition} focus: ${JSON.stringify(evidence)}`);
+  expect(evidence.name).toBe(name);
+  expect(evidence.focusVisible).toBe(true);
+  expect(evidence.outlineStyle).toBe('solid');
+  expect(evidence.outlineWidth).toBe(3);
+  expect(evidence.top).toBeGreaterThanOrEqual(evidence.headerBottom - 0.75);
+  expect(evidence.bottom).toBeLessThanOrEqual(evidence.viewportHeight + 0.75);
+  expect(evidence.left).toBeGreaterThanOrEqual(-0.75);
+  expect(evidence.right).toBeLessThanOrEqual(evidence.viewportWidth + 0.75);
+};
+
+const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
+  const evidence = await card.evaluate((element) => {
+    const epsilon = 0.75;
+    const pairs = [...element.querySelectorAll('.telemetry-metric__pair')];
+    const rows = [];
+    const containmentFailures = [];
+    const intersections = [];
+    const counts = [];
+    const controls = pairs.map((pair, index) => {
+      const control = pair.querySelector('button') || pair;
+      const box = control.getBoundingClientRect();
+      const pairBox = pair.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(control.querySelector('data'));
+      const valueBaseline = range.getClientRects()[0].bottom;
+      counts.push(control.querySelector('data').textContent);
+      const inside = (child, parent) => (
+        child.left >= parent.left - epsilon && child.right <= parent.right + epsilon
+        && child.top >= parent.top - epsilon && child.bottom <= parent.bottom + epsilon
+      );
+      if (!inside(box, pairBox)) containmentFailures.push({ index, kind: 'control-in-pair' });
+      for (const child of control.querySelectorAll('time, data')) {
+        range.selectNodeContents(child);
+        if (!inside(child.getBoundingClientRect(), box)
+          || [...range.getClientRects()].some((textBox) => !inside(textBox, box))) {
+          containmentFailures.push({ index, kind: child.tagName });
+        }
+      }
+      let row = rows.find((entry) => Math.abs(entry.top - pairBox.top) <= epsilon);
+      if (!row) {
+        row = { top: pairBox.top, controls: [] };
+        rows.push(row);
+      }
+      row.controls.push({ top: box.top, bottom: box.bottom, width: box.width, valueBaseline });
+      return { box, pairBox };
+    });
+    for (let a = 0; a < controls.length; a += 1) {
+      for (let b = a + 1; b < controls.length; b += 1) {
+        for (const kind of ['box', 'pairBox']) {
+          const first = controls[a][kind];
+          const second = controls[b][kind];
+          if (first.left < second.right - epsilon && first.right > second.left + epsilon
+            && first.top < second.bottom - epsilon && first.bottom > second.top + epsilon) {
+            intersections.push({ a, b, kind });
+          }
+        }
+      }
+    }
+    const spread = (key) => Math.max(...rows.map((row) => {
+      const values = row.controls.map((control) => control[key]);
+      return Math.max(...values) - Math.min(...values);
+    }));
+    const body = element.querySelector('.card-body');
+    const bodyBox = body.getBoundingClientRect();
+    const bodyStyle = getComputedStyle(body);
+    const contentLeft = bodyBox.left + parseFloat(bodyStyle.paddingLeft);
+    const contentWidth = bodyBox.width - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight);
+    const plot = element.querySelector('svg').getBoundingClientRect();
+    const containers = [
+      document.documentElement, element, body,
+      ...element.querySelectorAll('.telemetry-metric__figure, .telemetry-metric__values, .telemetry-metric__pair, button'),
+    ];
+    return {
+      count: pairs.length, counts, containmentFailures, intersections,
+      rowTopSpread: spread('top'), rowBottomSpread: spread('bottom'),
+      rowWidthSpread: spread('width'), valueBaselineSpread: spread('valueBaseline'),
+      plotWidth: plot.width, contentWidth, plotOffset: plot.left - contentLeft,
+      overflow: containers.filter((container) => container.scrollWidth > container.clientWidth)
+        .map((container) => ({ className: container.className, scrollWidth: container.scrollWidth, clientWidth: container.clientWidth })),
+    };
+  });
+  console.log(`Own-pair geometry ${viewport}/${mode}: ${JSON.stringify(evidence)}`);
+  expect(evidence.counts).toEqual(expectedCounts.map(String));
+  expect(evidence.containmentFailures).toEqual([]);
+  expect(evidence.intersections).toEqual([]);
+  expect(evidence.overflow).toEqual([]);
+  for (const key of ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread']) {
+    expect(evidence[key], key).toBeLessThanOrEqual(0.75);
+  }
+  expect(Math.abs(evidence.plotWidth - evidence.contentWidth)).toBeLessThanOrEqual(0.75);
+  expect(Math.abs(evidence.plotOffset)).toBeLessThanOrEqual(0.75);
+};
+
 const openCollapsedNavigation = async (page) => {
   const toggler = page.getByRole('button', { name: 'Toggle navigation' });
   if (await toggler.isVisible()) {
@@ -703,6 +816,7 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
     status: 503, body: { error: 'Telemetry temporarily unavailable' },
   };
   await origin.press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', 'daily activation');
   const back = first.getByRole('button', { name: 'Back to 14 days' });
   await expect(back).toBeFocused();
   await expect(first.getByRole('status')).toHaveText('Loading hourly data...');
@@ -714,6 +828,7 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
     body: createTelemetryHourly('MAIN_PAGE_VISIT', '2026-09-10'),
   };
   await first.getByRole('button', { name: 'Retry' }).press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', 'Retry');
   await expect(back).toBeFocused();
   const second = page.locator('.telemetry-metric').nth(1);
   const other = second.locator('.telemetry-metric__date-button').first();
@@ -754,7 +869,35 @@ test('mobile focus fallback, loading/error Back, partial Refresh and later-open 
   await expect(otherBack).toBeFocused();
   await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
   await expectNoScrollOverflow(page.locator('html'), 'mobile mixed failure');
+  await back.press('Enter');
+  await expectImmediateFocusVisible(page, 'Main page visits, 2026-09-10 UTC, 14', 'Back');
   console.log(`Mobile focus fallback measured; text contrast ${Math.min(...contrast.tooltipText).toFixed(2)}, focus ${contrast.focus.ratio.toFixed(2)}; network/batch completion retained sibling focus.`);
+});
+
+test('mixed-count pair geometry stays contained and aligned at three widths', async ({ page }) => {
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  const counts = [0, 7, Number.MAX_SAFE_INTEGER];
+  const dailyCounts = Array.from({ length: 14 }, (_, index) => counts[index % counts.length]);
+  const hourlyCounts = Array.from({ length: 24 }, (_, index) => counts[index % counts.length]);
+  state.telemetrySummary.metrics[0].values = dailyCounts;
+  state.telemetryHourlyResponses['MAIN_PAGE_VISIT/2026-08-28'] = {
+    body: {
+      ...createTelemetryHourly('MAIN_PAGE_VISIT', '2026-08-28'),
+      values: hourlyCounts,
+    },
+  };
+  await installAppApiMocks(page, state);
+  for (const width of [390, 768, 1600]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/telemetry?ui=v2&theme=light');
+    const card = page.locator('.telemetry-metric').first();
+    await expect(card.locator('data')).toHaveCount(14);
+    await expectOwnPairGeometry(card, width, 'daily', dailyCounts);
+    await card.locator('.telemetry-metric__date-button').first().press('Enter');
+    await expect(card.locator('data')).toHaveCount(24);
+    await expectOwnPairGeometry(card, width, 'hourly', hourlyCounts);
+  }
 });
 
 test.describe('Telemetry native touch', () => {
