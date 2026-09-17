@@ -83,6 +83,18 @@ is_blocked_reschedule_job() {
   fi
 }
 
+is_blocked_cleanup_job() {
+  local job="$1"
+  local manifest="$state/jobs/$job.yaml"
+  [[ -f "$manifest" ]] || return 1
+  grep -Fq 'cleanupPreSeptemberEvents.js' "$manifest" || return 1
+  [[ "$scenario" == cleanup-blocked* ]]
+}
+
+is_blocked_report_job() {
+  is_blocked_reschedule_job "$1" || is_blocked_cleanup_job "$1"
+}
+
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(mktemp "$state/jobs/pending.XXXXXX")"
   cat >"$manifest"
@@ -94,6 +106,19 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   )"
   [[ -n "$job" ]]
   mv "$manifest" "$state/jobs/$job.yaml"
+  command_kind=backfill
+  grep -Fq 'rescheduleSyntheticEvent.js' "$state/jobs/$job.yaml" &&
+    command_kind=reschedule
+  grep -Fq 'ensureDraftIndexes.js' "$state/jobs/$job.yaml" &&
+    command_kind=index
+  grep -Fq 'cleanupPreSeptemberEvents.js' "$state/jobs/$job.yaml" &&
+    command_kind=backoffice-cleanup
+  command_mode=dry-run
+  grep -Fq -- '- "apply"' "$state/jobs/$job.yaml" && command_mode=apply
+  grep -Fq -- '- "--apply"' "$state/jobs/$job.yaml" && command_mode=apply
+  grep -Fq -- '- "verify"' "$state/jobs/$job.yaml" && command_mode=verify
+  printf 'job\t%s\t%s\t%s\n' \
+    "$job" "$command_kind" "$command_mode" >>"$state/sequence.tsv"
   exit 0
 fi
 
@@ -115,7 +140,7 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     job)
-      if is_blocked_reschedule_job "${3:-}"; then
+      if is_blocked_report_job "${3:-}"; then
         if [[ "$scenario" == "reschedule-blocked-status-retry" &&
           ! -e "$state/job-status-read-failed" ]]; then
           touch "$state/job-status-read-failed"
@@ -155,6 +180,7 @@ if [[ "${1:-}" == "get" ]]; then
       exit 0
       ;;
     deployment)
+      printf 'runtime\t%s\n' "${3:-missing}" >>"$state/sequence.tsv"
       printf '0|0|0|0'
       exit 0
       ;;
@@ -166,7 +192,7 @@ if [[ "${1:-}" == "get" ]]; then
         fi
       done
       if [[ -n "$selected_job" ]] &&
-        is_blocked_reschedule_job "$selected_job"; then
+        is_blocked_report_job "$selected_job"; then
         [[ "$scenario" != "reschedule-blocked-status-error" ]] || exit 9
         if [[ "$scenario" == "reschedule-blocked-status-retry" &&
           ! -e "$state/pod-status-read-failed" ]]; then
@@ -349,6 +375,109 @@ if [[ "${1:-}" == "logs" ]]; then
         else {}
         end
       )'
+    exit 0
+  fi
+
+  if grep -Fq 'cleanupPreSeptemberEvents.js' "$manifest"; then
+    mode=dry-run
+    grep -Fq -- '- "apply"' "$manifest" && mode=apply
+    grep -Fq -- '- "verify"' "$manifest" && mode=verify
+
+    if is_blocked_cleanup_job "$job" &&
+      [[ "$scenario" == "cleanup-blocked-exception" ]]; then
+      printf 'database exception mongodb://private/secret-document\n'
+      exit 0
+    fi
+    if is_blocked_cleanup_job "$job"; then
+      reason=malformed_time
+      [[ "$scenario" != "cleanup-blocked-unknown-reason" ]] ||
+        reason=private_event_name
+      extra_payload='{}'
+      [[ "$scenario" != "cleanup-blocked-unsafe-field" ]] ||
+        extra_payload='{"eventName":"secret-event-name","sourceSha":"secret-source"}'
+      blocked_report="$(
+        jq -n \
+          --arg mode "$mode" \
+          --arg reason "$reason" \
+          --argjson extra "$extra_payload" '
+            {
+              operationId:"backoffice-events-before:2026-09-01T00:00:00Z",
+              schemaVersion:"backoffice-pre-september-events-cleanup-v1",
+              mode:$mode,
+              state:"blocked",
+              cutoff:"2026-09-01T00:00:00Z",
+              counts:{
+                scannedCount:7,
+                candidateCount:0,
+                journaledCount:0,
+                deletedCount:0,
+                remainingCandidateCount:0,
+                remainingJournalCount:0,
+                malformedTimeCount:1
+              },
+              digest:null,
+              reasonCodes:[$reason]
+            } + $extra
+          '
+      )"
+      printf '%s\n' "$blocked_report"
+      if [[ "$scenario" == "cleanup-blocked-multiple" ]]; then
+        printf '%s\n' "$blocked_report"
+      fi
+      exit 0
+    fi
+
+    cleanup_state=candidate
+    candidate_count=2
+    journaled_count=0
+    deleted_count=0
+    remaining_candidate_count=2
+    digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    if [[ "$scenario" == "cleanup-applied" ]]; then
+      journaled_count=2
+      remaining_candidate_count=0
+      if [[ "$mode" == "verify" ]]; then
+        cleanup_state=verified
+      else
+        cleanup_state=applied
+      fi
+    elif [[ "$mode" == "apply" ]]; then
+      cleanup_state=applied
+      journaled_count=2
+      deleted_count=2
+      remaining_candidate_count=0
+      touch "$state/applied/backoffice-cleanup"
+    elif [[ "$mode" == "verify" ]]; then
+      [[ -e "$state/applied/backoffice-cleanup" ]]
+      cleanup_state=verified
+      journaled_count=2
+      remaining_candidate_count=0
+    fi
+    jq -n \
+      --arg mode "$mode" \
+      --arg state "$cleanup_state" \
+      --arg digest "$digest" \
+      --argjson candidate_count "$candidate_count" \
+      --argjson journaled_count "$journaled_count" \
+      --argjson deleted_count "$deleted_count" \
+      --argjson remaining_candidate_count "$remaining_candidate_count" '{
+        operationId:"backoffice-events-before:2026-09-01T00:00:00Z",
+        schemaVersion:"backoffice-pre-september-events-cleanup-v1",
+        mode:$mode,
+        state:$state,
+        cutoff:"2026-09-01T00:00:00Z",
+        counts:{
+          scannedCount:5,
+          candidateCount:$candidate_count,
+          journaledCount:$journaled_count,
+          deletedCount:$deleted_count,
+          remainingCandidateCount:$remaining_candidate_count,
+          remainingJournalCount:0,
+          malformedTimeCount:0
+        },
+        digest:$digest,
+        reasonCodes:[]
+      }'
     exit 0
   fi
 
@@ -567,18 +696,73 @@ run_phase() {
     "$RUNNER" >/dev/null
 }
 
+job_sequence_summary() {
+  awk -F '\t' '$1 == "job" { print $3 ":" $4 }' "$stub_state/sequence.tsv" |
+    paste -sd' ' -
+}
+
 pending_output="$work_dir/pending"
 run_phase dry-run pending 4001 "$pending_output"
-grep -Fxq 'schema_version=live-betting-v4' "$pending_output/provenance.env"
+[[ "$(job_sequence_summary)" == \
+  "reschedule:dry-run backoffice-cleanup:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run" ]] ||
+  fail "dry-run did not sequence reschedule, cleanup, compatibility, and index preflights"
+grep -Fxq 'schema_version=live-betting-v5' "$pending_output/provenance.env"
 grep -Fxq 'phase=dry-run' "$pending_output/provenance.env"
 grep -Fxq 'backfill_complete=false' "$pending_output/provenance.env"
 grep -Fxq 'index_ready=false' "$pending_output/provenance.env"
 grep -Fxq 'event_reschedule_complete=false' "$pending_output/provenance.env"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=false' \
+  "$pending_output/provenance.env"
+jq -e '
+  .kind == "backoffice-pre-september-events-cleanup" and
+  .service == "backoffice" and
+  .stage == "preflight" and
+  .operationId == "backoffice-events-before:2026-09-01T00:00:00Z" and
+  .schemaVersion == "backoffice-pre-september-events-cleanup-v1" and
+  .mode == "dry-run" and
+  .state == "candidate" and
+  .cutoff == "2026-09-01T00:00:00Z" and
+  .counts == {
+    scannedCount:5,
+    candidateCount:2,
+    journaledCount:0,
+    deletedCount:0,
+    remainingCandidateCount:2,
+    remainingJournalCount:0,
+    malformedTimeCount:0
+  } and
+  (.digest | test("^[0-9a-f]{64}$")) and
+  .reasonCodes == [] and
+  .reasonCodeCount == 0
+' "$pending_output/reports/preflight-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "dry-run cleanup preflight did not retain the exact sanitized contract"
 [[ ! -e "$pending_output/schema.env" ]] ||
   fail "dry-run emitted final schema evidence"
-if grep -R -E 'secret-user|secret-slip|mongodb://' "$pending_output" >/dev/null; then
+if grep -R -E \
+    'secret-user|secret-slip|secret-event|eventName|mongoUri|mongodb://|sourceSha' \
+    "$pending_output" >/dev/null; then
   fail "sanitized dry-run evidence leaked sensitive data"
 fi
+
+already_applied_output="$work_dir/cleanup-applied"
+run_phase dry-run cleanup-applied 4018 "$already_applied_output"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=true' \
+  "$already_applied_output/provenance.env" ||
+  fail "an already-applied cleanup journal was not recognized"
+jq -e '
+  .mode == "dry-run" and
+  .state == "applied" and
+  .counts.journaledCount == .counts.candidateCount and
+  .counts.remainingCandidateCount == 0 and
+  .counts.remainingJournalCount == 0 and
+  .counts.malformedTimeCount == 0 and
+  .reasonCodes == []
+' "$already_applied_output/reports/preflight-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "already-applied cleanup preflight evidence is incomplete"
 
 recovery_output="$work_dir/recovery"
 recovery_source_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -685,6 +869,139 @@ if grep -R -E \
 fi
 [[ -e "$stub_state/deleted/live-data-event-4009-1" ]] ||
   fail "blocked reschedule did not delete its Kubernetes Job"
+
+cleanup_blocked_output="$work_dir/cleanup-blocked"
+cleanup_blocked_log="$work_dir/cleanup-blocked.out"
+if run_phase dry-run cleanup-blocked 4019 "$cleanup_blocked_output" \
+    >"$cleanup_blocked_log" 2>&1; then
+  fail "structured blocked Backoffice cleanup was accepted as rollout readiness"
+fi
+grep -Fq \
+  'Backoffice pre-September cleanup is blocked; sanitized failure evidence recorded' \
+  "$cleanup_blocked_log" ||
+  fail "blocked Backoffice cleanup did not report retained sanitized evidence"
+cleanup_blocked_report="$cleanup_blocked_output/reports/preflight-backoffice-pre-september-cleanup.json"
+cleanup_blocked_failure="$cleanup_blocked_output/backoffice-cleanup-blocker-failure.json"
+[[ -f "$cleanup_blocked_report" &&
+   -f "$cleanup_blocked_failure" &&
+   -f "$cleanup_blocked_output/SHA256SUMS" ]] ||
+  fail "blocked Backoffice cleanup did not retain checksummed evidence"
+jq -e '
+  (keys | sort) == ([
+    "counts",
+    "cutoff",
+    "digest",
+    "kind",
+    "mode",
+    "operationId",
+    "reasonCodeCount",
+    "reasonCodes",
+    "schemaVersion",
+    "service",
+    "stage",
+    "state"
+  ] | sort) and
+  .kind == "backoffice-pre-september-events-cleanup" and
+  .service == "backoffice" and
+  .stage == "preflight" and
+  .operationId == "backoffice-events-before:2026-09-01T00:00:00Z" and
+  .schemaVersion == "backoffice-pre-september-events-cleanup-v1" and
+  .mode == "dry-run" and
+  .state == "blocked" and
+  .cutoff == "2026-09-01T00:00:00Z" and
+  .counts == {
+    scannedCount:7,
+    candidateCount:0,
+    journaledCount:0,
+    deletedCount:0,
+    remainingCandidateCount:0,
+    remainingJournalCount:0,
+    malformedTimeCount:1
+  } and
+  .digest == null and
+  .reasonCodes == ["malformed_time"] and
+  .reasonCodeCount == 1
+' "$cleanup_blocked_report" >/dev/null ||
+  fail "blocked Backoffice cleanup report was not normalized"
+jq -e \
+  --arg source_sha "$SOURCE_SHA" \
+  --arg build_run_id "$BUILD_RUN_ID" \
+  --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" '
+    .schemaVersion == "live-betting-backoffice-cleanup-blocker-v1" and
+    .status == "FAIL" and
+    .sourceSha == $source_sha and
+    .buildRunId == $build_run_id and
+    .infrastructureRunId == $infrastructure_run_id and
+    .workflowRunId == "4019" and
+    .workflowRunAttempt == "1" and
+    .phase == "dry-run" and
+    .stage == "preflight" and
+    .operationId == "backoffice-events-before:2026-09-01T00:00:00Z" and
+    .cleanupSchemaVersion == "backoffice-pre-september-events-cleanup-v1" and
+    .mode == "dry-run" and
+    .state == "blocked" and
+    .cutoff == "2026-09-01T00:00:00Z" and
+    .reasonCodes == ["malformed_time"] and
+    .reasonCodeCount == 1 and
+    (.reportSha256 | test("^[0-9a-f]{64}$")) and
+    .job == {
+      outcome:"failed",
+      podCount:1,
+      podPhase:"Failed",
+      containerState:"terminated",
+      containerReason:"Error",
+      exitCode:1,
+      signal:0
+    } and
+    (.completedAt | test(
+      "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    ))
+  ' "$cleanup_blocked_failure" >/dev/null ||
+  fail "Backoffice cleanup blocker failure envelope is incomplete"
+[[ "$(jq -r '.reportSha256' "$cleanup_blocked_failure")" == \
+   "$(shasum -a 256 "$cleanup_blocked_report" | awk '{print $1}')" ]] ||
+  fail "Backoffice cleanup blocker envelope does not bind its sanitized report"
+(
+  cd "$cleanup_blocked_output"
+  shasum -a 256 -c SHA256SUMS >/dev/null
+) || fail "Backoffice cleanup blocker checksums are invalid"
+[[ ! -e "$cleanup_blocked_output/provenance.env" &&
+   ! -e "$cleanup_blocked_output/journal.json" &&
+   ! -e "$cleanup_blocked_output/schema.env" ]] ||
+  fail "blocked Backoffice cleanup emitted success-shaped rollout evidence"
+if grep -R -E \
+    'secret-event-name|secret-source|mongodb://|private runtime detail|rawDocument' \
+    "$cleanup_blocked_output" "$cleanup_blocked_log" 2>/dev/null |
+    grep -q .; then
+  fail "Backoffice cleanup blocker evidence leaked raw diagnostics"
+fi
+[[ -e "$stub_state/deleted/live-data-backoffice-4019-2" ]] ||
+  fail "blocked Backoffice cleanup did not delete its Kubernetes Job"
+
+for invalid_cleanup_scenario in \
+  cleanup-blocked-multiple \
+  cleanup-blocked-unknown-reason \
+  cleanup-blocked-unsafe-field \
+  cleanup-blocked-exception; do
+  invalid_cleanup_output="$work_dir/$invalid_cleanup_scenario"
+  invalid_cleanup_log="$work_dir/$invalid_cleanup_scenario.out"
+  if run_phase dry-run "$invalid_cleanup_scenario" 4020 \
+      "$invalid_cleanup_output" >"$invalid_cleanup_log" 2>&1; then
+    fail "invalid blocked cleanup output was accepted: $invalid_cleanup_scenario"
+  fi
+  [[ ! -e "$invalid_cleanup_output/reports/preflight-backoffice-pre-september-cleanup.json" &&
+     ! -e "$invalid_cleanup_output/backoffice-cleanup-blocker-failure.json" &&
+     ! -e "$invalid_cleanup_output/SHA256SUMS" ]] ||
+    fail "invalid blocked cleanup output persisted as trusted evidence: $invalid_cleanup_scenario"
+  if grep -R -E \
+      'secret-event-name|secret-source|private_event_name|mongodb://|secret-document' \
+      "$invalid_cleanup_output" "$invalid_cleanup_log" 2>/dev/null |
+      grep -q .; then
+    fail "invalid blocked cleanup output leaked raw diagnostics: $invalid_cleanup_scenario"
+  fi
+  [[ -e "$stub_state/deleted/live-data-backoffice-4020-2" ]] ||
+    fail "invalid blocked cleanup did not delete its Kubernetes Job: $invalid_cleanup_scenario"
+done
 
 missing_source_output="$work_dir/reschedule-blocked-source-missing"
 missing_source_log="$work_dir/reschedule-blocked-source-missing.out"
@@ -919,10 +1236,20 @@ jq -e '
 
 backfill_output="$work_dir/backfills"
 run_phase apply-backfills backfills 4002 "$backfill_output"
-grep -Fxq 'schema_version=live-betting-v4' "$backfill_output/provenance.env"
+[[ "$(job_sequence_summary)" == \
+  "reschedule:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run reschedule:apply reschedule:verify backoffice-cleanup:dry-run index:dry-run" ]] ||
+  fail "backfill phase did not run cleanup preflight after reschedule verification"
+grep -Fxq 'schema_version=live-betting-v5' "$backfill_output/provenance.env"
 grep -Fxq 'phase=apply-backfills' "$backfill_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$backfill_output/provenance.env"
 grep -Fxq 'event_reschedule_complete=true' "$backfill_output/provenance.env"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=false' \
+  "$backfill_output/provenance.env"
+[[ -f "$backfill_output/reports/preflight-backoffice-pre-september-cleanup.json" &&
+   ! -e "$backfill_output/reports/apply-backoffice-pre-september-cleanup.json" &&
+   ! -e "$backfill_output/reports/verify-backoffice-pre-september-cleanup.json" ]] ||
+  fail "backfill phase did not remain a cleanup preflight-only phase"
 [[ ! -e "$backfill_output/schema.env" ]] ||
   fail "backfill phase emitted final schema evidence"
 
@@ -930,15 +1257,76 @@ normal_baseline="$work_dir/normal-baseline"
 normal_baseline_sha="$(make_resume_baseline "$normal_baseline" 4003 0)"
 final_output="$work_dir/final"
 run_phase apply-slip-index final 4003 "$final_output" 0 none "$normal_baseline_sha"
-grep -Fxq 'schema_version=live-betting-v4' "$final_output/provenance.env"
-grep -Fxq 'schema_version=live-betting-v4' "$final_output/schema.env"
+[[ "$(job_sequence_summary)" == \
+  "reschedule:verify backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run backfill:dry-run index:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run backfill:apply backfill:dry-run index:dry-run index:apply index:dry-run backoffice-cleanup:dry-run backoffice-cleanup:apply backoffice-cleanup:verify" ]] ||
+  fail "final phase did not leave cleanup apply as its final database mutation"
+grep -Fxq 'schema_version=live-betting-v5' "$final_output/provenance.env"
+grep -Fxq 'schema_version=live-betting-v5' "$final_output/schema.env"
 grep -Fxq 'phase=apply-slip-index' "$final_output/provenance.env"
 grep -Fxq 'backfill_complete=true' "$final_output/schema.env"
 grep -Fxq 'index_ready=true' "$final_output/schema.env"
 grep -Fxq 'event_reschedule_complete=true' "$final_output/schema.env"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=true' \
+  "$final_output/schema.env"
 grep -Fxq 'runtime_held_for_deploy=true' "$final_output/schema.env"
 grep -Fxq 'operation_lock_handoff=true' "$final_output/schema.env"
 grep -Fxq 'baseline_recovery_source_sha=none' "$final_output/schema.env"
+for cleanup_stage in preflight apply verify; do
+  cleanup_report="$final_output/reports/${cleanup_stage}-backoffice-pre-september-cleanup.json"
+  [[ -f "$cleanup_report" ]] ||
+    fail "final phase omitted the $cleanup_stage cleanup report"
+  jq -e \
+    --arg stage "$cleanup_stage" '
+      .kind == "backoffice-pre-september-events-cleanup" and
+      .service == "backoffice" and
+      .stage == $stage and
+      .operationId == "backoffice-events-before:2026-09-01T00:00:00Z" and
+      .schemaVersion == "backoffice-pre-september-events-cleanup-v1" and
+      .cutoff == "2026-09-01T00:00:00Z" and
+      (.digest | test("^[0-9a-f]{64}$")) and
+      .counts.malformedTimeCount == 0 and
+      .reasonCodes == [] and
+      .reasonCodeCount == 0 and
+      (
+        $stage == "preflight" or
+        (
+          .counts.remainingCandidateCount == 0 and
+          .counts.remainingJournalCount == 0
+        )
+      )
+    ' "$cleanup_report" >/dev/null ||
+    fail "final $cleanup_stage cleanup evidence is incomplete"
+done
+jq -e '.mode == "apply" and .state == "applied" and .counts.deletedCount == 2' \
+  "$final_output/reports/apply-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "final cleanup apply report did not prove the bounded deletion"
+jq -e '.mode == "verify" and .state == "verified" and .counts.deletedCount == 0' \
+  "$final_output/reports/verify-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "final cleanup verify report did not prove the applied journal"
+apply_cleanup_line="$(
+  grep -n $'\tbackoffice-cleanup\tapply$' "$stub_state/sequence.tsv" |
+    cut -d: -f1
+)"
+verify_cleanup_line="$(
+  grep -n $'\tbackoffice-cleanup\tverify$' "$stub_state/sequence.tsv" |
+    cut -d: -f1
+)"
+runtime_after_cleanup_line="$(
+  awk -v apply_line="$apply_cleanup_line" -F '\t' '
+    NR > apply_line && $1 == "runtime" { print NR; exit }
+  ' "$stub_state/sequence.tsv"
+)"
+[[ "$apply_cleanup_line" =~ ^[1-9][0-9]*$ &&
+   "$runtime_after_cleanup_line" =~ ^[1-9][0-9]*$ &&
+   "$verify_cleanup_line" =~ ^[1-9][0-9]*$ &&
+   "$apply_cleanup_line" -lt "$runtime_after_cleanup_line" &&
+   "$runtime_after_cleanup_line" -lt "$verify_cleanup_line" ]] ||
+  fail "runtime was not verified with seven quiesced writers after cleanup apply"
+[[ "$(tail -1 "$stub_state/sequence.tsv")" == *$'\tbackoffice-cleanup\tverify' ]] ||
+  fail "a database operation ran after final cleanup verification"
 normal_resolution="$(
   EVIDENCE_DIR="$final_output" \
   EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
@@ -963,6 +1351,41 @@ grep -Fxq 'prerequisite_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq 'applied_data_run_id=4003' <<<"$normal_resolution"
 grep -Fxq "applied_source_sha=$SOURCE_SHA" <<<"$normal_resolution"
 
+same_sha_recovery_baseline="$work_dir/same-sha-recovery-baseline"
+same_sha_recovery_baseline_sha="$(
+  make_resume_baseline "$same_sha_recovery_baseline" 4020 0
+)"
+same_sha_recovery_output="$work_dir/same-sha-recovery"
+run_phase \
+  apply-slip-index \
+  cleanup-applied \
+  4020 \
+  "$same_sha_recovery_output" \
+  0 \
+  none \
+  "$same_sha_recovery_baseline_sha"
+jq -e '
+  .mode == "apply" and
+  .state == "applied" and
+  .counts.deletedCount == 0 and
+  .counts.remainingCandidateCount == 0 and
+  .counts.remainingJournalCount == 0
+' "$same_sha_recovery_output/reports/apply-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "same-SHA recovery did not accept the already-applied cleanup journal"
+jq -e '
+  .mode == "verify" and
+  .state == "verified" and
+  .counts.remainingCandidateCount == 0 and
+  .counts.remainingJournalCount == 0
+' "$same_sha_recovery_output/reports/verify-backoffice-pre-september-cleanup.json" \
+  >/dev/null ||
+  fail "same-SHA recovery did not reconverge the cleanup to verified"
+grep -Fxq \
+  'backoffice_pre_september_cleanup_complete=true' \
+  "$same_sha_recovery_output/schema.env" ||
+  fail "same-SHA recovery did not emit final cleanup completion evidence"
+
 unknown_version_output="$work_dir/unknown-version"
 cp -R "$final_output" "$unknown_version_output"
 rm -f "$unknown_version_output/SHA256SUMS"
@@ -976,14 +1399,14 @@ for name in ("provenance.env", "schema.env"):
     path = root / name
     path.write_text(
         path.read_text(encoding="utf-8").replace(
-            "schema_version=live-betting-v4",
             "schema_version=live-betting-v5",
+            "schema_version=live-betting-v6",
         ),
         encoding="utf-8",
     )
 journal_path = root / "journal.json"
 journal = json.loads(journal_path.read_text(encoding="utf-8"))
-journal["schema_version"] = "live-betting-v5"
+journal["schema_version"] = "live-betting-v6"
 journal_path.write_text(
     json.dumps(journal, separators=(",", ":")) + "\n",
     encoding="utf-8",
@@ -1001,8 +1424,57 @@ if EVIDENCE_DIR="$unknown_version_output" \
   fail "unknown live betting evidence version was accepted"
 fi
 
+retained_v4_output="$work_dir/retained-v4"
+cp -R "$final_output" "$retained_v4_output"
+rm -f \
+  "$retained_v4_output/SHA256SUMS" \
+  "$retained_v4_output/reports/preflight-backoffice-pre-september-cleanup.json" \
+  "$retained_v4_output/reports/apply-backoffice-pre-september-cleanup.json" \
+  "$retained_v4_output/reports/verify-backoffice-pre-september-cleanup.json"
+python3 - "$retained_v4_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    lines = [
+        line.replace(
+            "schema_version=live-betting-v5",
+            "schema_version=live-betting-v4",
+        )
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("backoffice_pre_september_cleanup_complete=")
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v4"
+journal.pop("backoffice_pre_september_cleanup_complete")
+journal["reports"] = [
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in sorted((root / "reports").glob("*.json"))
+]
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$retained_v4_output"
+EVIDENCE_DIR="$retained_v4_output" \
+EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+EXPECTED_PHASE=apply-slip-index \
+EXPECTED_RUN_ID=4003 \
+EXPECTED_RUN_ATTEMPT=1 \
+  "$VERIFIER" >/dev/null ||
+  fail "v5 verifier rejected valid literal historical v4 evidence"
+
 legacy_output="$work_dir/legacy-v1"
-cp -R "$final_output" "$legacy_output"
+cp -R "$retained_v4_output" "$legacy_output"
 rm -f "$legacy_output/SHA256SUMS"
 mv \
   "$legacy_output/reports/preflight-event-reschedule.json" \
@@ -1075,7 +1547,7 @@ EXPECTED_RUN_ATTEMPT=1 \
   fail "v4 verifier rejected a valid historical v1 data artifact"
 
 retained_v2_output="$work_dir/retained-v2"
-cp -R "$final_output" "$retained_v2_output"
+cp -R "$retained_v4_output" "$retained_v2_output"
 rm -f "$retained_v2_output/SHA256SUMS"
 python3 - "$retained_v2_output" <<'PY'
 import json
@@ -1125,7 +1597,7 @@ EXPECTED_RUN_ATTEMPT=1 \
   fail "v4 verifier rejected a valid retained v2 data artifact"
 
 retained_v3_output="$work_dir/retained-v3"
-cp -R "$final_output" "$retained_v3_output"
+cp -R "$retained_v4_output" "$retained_v3_output"
 rm -f "$retained_v3_output/SHA256SUMS"
 python3 - "$retained_v3_output" <<'PY'
 import json
@@ -1346,7 +1818,7 @@ grep -Fq 'targets an unexpected event' "$v3_as_v4_error" ||
   fail "v3-to-v4 substitution did not fail on the generation identity"
 
 v4_as_v3_output="$work_dir/v4-as-v3"
-cp -R "$final_output" "$v4_as_v3_output"
+cp -R "$retained_v4_output" "$v4_as_v3_output"
 rm -f "$v4_as_v3_output/SHA256SUMS"
 python3 - "$v4_as_v3_output" <<'PY'
 import json
@@ -1385,6 +1857,82 @@ if EVIDENCE_DIR="$v4_as_v3_output" \
 fi
 grep -Fq 'targets an unexpected event' "$v4_as_v3_error" ||
   fail "v4-to-v3 substitution did not fail on the generation identity"
+
+v4_as_v5_output="$work_dir/v4-as-v5"
+cp -R "$retained_v4_output" "$v4_as_v5_output"
+rm -f "$v4_as_v5_output/SHA256SUMS"
+python3 - "$v4_as_v5_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "schema_version=live-betting-v4",
+            "schema_version=live-betting-v5",
+        ),
+        encoding="utf-8",
+    )
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v5"
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$v4_as_v5_output"
+if EVIDENCE_DIR="$v4_as_v5_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "v4 evidence was accepted after v5 schema substitution"
+fi
+
+v5_as_v4_output="$work_dir/v5-as-v4"
+cp -R "$final_output" "$v5_as_v4_output"
+rm -f "$v5_as_v4_output/SHA256SUMS"
+python3 - "$v5_as_v4_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("provenance.env", "schema.env"):
+    path = root / name
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "schema_version=live-betting-v5",
+            "schema_version=live-betting-v4",
+        ),
+        encoding="utf-8",
+    )
+journal_path = root / "journal.json"
+journal = json.loads(journal_path.read_text(encoding="utf-8"))
+journal["schema_version"] = "live-betting-v4"
+journal_path.write_text(
+    json.dumps(journal, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+write_manifest "$v5_as_v4_output"
+if EVIDENCE_DIR="$v5_as_v4_output" \
+  EXPECTED_SOURCE_SHA="$SOURCE_SHA" \
+  EXPECTED_BUILD_RUN_ID="$BUILD_RUN_ID" \
+  EXPECTED_INFRASTRUCTURE_RUN_ID="$INFRASTRUCTURE_RUN_ID" \
+  EXPECTED_PHASE=apply-slip-index \
+  EXPECTED_RUN_ID=4003 \
+  EXPECTED_RUN_ATTEMPT=1 \
+    "$VERIFIER" >/dev/null 2>&1; then
+  fail "v5 cleanup evidence was accepted after v4 schema substitution"
+fi
 
 original_applied_source=2222222222222222222222222222222222222222
 chained_baseline="$work_dir/chained-baseline"
@@ -1757,7 +2305,6 @@ required = [
     "deployment:auth",
     "deployment:slip",
     "rollout:auth",
-    "rollout:backoffice",
     "rollout:client",
 ]
 positions = []
@@ -1767,6 +2314,11 @@ for event in required:
     positions.append(events.index(event))
 if positions != sorted(positions):
     raise SystemExit("resume validation, quiescence, image, and readiness order changed")
+rollouts = [event for event in events if event.startswith("rollout:")]
+if rollouts != ["rollout:auth", "rollout:client"]:
+    raise SystemExit(
+        "retained-hold resume must require serving pods for Auth and Client only"
+    )
 PY
 
 reset_resume_fixture
@@ -1855,6 +2407,31 @@ for literal in \
 done
 
 for literal in \
+  'dist/scripts/cleanupPreSeptemberEvents.js' \
+  'DELETE_BACKOFFICE_EVENTS_BEFORE:2026-09-01T00:00:00Z' \
+  'project_backoffice_cleanup_report' \
+  'validate_blocked_cleanup_report' \
+  'write_backoffice_cleanup_blocker_evidence' \
+  'live-betting-backoffice-cleanup-blocker-v1' \
+  'backoffice-events-before:2026-09-01T00:00:00Z' \
+  'backoffice-pre-september-events-cleanup-v1' \
+  'backoffice_pre_september_cleanup_complete' \
+  'schema_version=live-betting-v5'; do
+  grep -Fq "$literal" "$RUNNER" ||
+    fail "data runner is missing Backoffice cleanup safety contract: $literal"
+done
+for literal in \
+  'elif schema_version == "live-betting-v4":' \
+  'elif schema_version == "live-betting-v5":' \
+  'backoffice_pre_september_cleanup_complete' \
+  'reports/preflight-backoffice-pre-september-cleanup.json' \
+  'reports/apply-backoffice-pre-september-cleanup.json' \
+  'reports/verify-backoffice-pre-september-cleanup.json'; do
+  grep -Fq "$literal" "$VERIFIER" ||
+    fail "data verifier is missing generation-safe cleanup contract: $literal"
+done
+
+for literal in \
   'name: oci-migration' \
   'DRY RUN LIVE DATA EXACT SHA' \
   'APPLY LIVE BACKFILLS EXACT SHA' \
@@ -1907,11 +2484,11 @@ for literal in \
   'Resume candidate-only deployment image mismatch' \
   'Retained-hold writer image mismatch' \
   'Resume baseline image evidence is invalid' \
-  'bet|event|gamemaster|moderation|resulting|slip)' \
+  'backoffice|bet|event|gamemaster|moderation|resulting|slip)' \
   '"$baseline_dir/live-images.tsv"' \
   'expected_manifest=' \
   'endswith("@" + $manifest)' \
-  'for service in auth backoffice client; do' \
+  'for service in auth client; do' \
   'Resume supporting pod image mismatch' \
   'RESUME_BASELINE_DIR=artifacts/oci-data-baseline-before' \
   'VERIFY_RESUME_APPLIED_RUN=true' \
@@ -2052,11 +2629,11 @@ require_order(
         "live-data-maintenance-stan.sh verify-quiesced",
         "for service in auth bet backoffice client event gamemaster moderation resulting slip; do",
         'case "$service" in',
-        "auth|backoffice|client)",
-        "bet|event|gamemaster|moderation|resulting|slip)",
+        "auth|client)",
+        "backoffice|bet|event|gamemaster|moderation|resulting|slip)",
         '"$baseline_dir/live-images.tsv"',
         "Retained-hold writer image mismatch",
-        "for service in auth backoffice client; do",
+        "for service in auth client; do",
         "kubectl rollout status",
         "Resume supporting pod image mismatch",
     ],
@@ -2064,8 +2641,8 @@ require_order(
 )
 if "Resume pod image mismatch" in resume:
     raise SystemExit("failed-deploy resume still requires pods for quiesced writers")
-if resume.count("bet|event|gamemaster|moderation|resulting|slip)") != 1:
-    raise SystemExit("failed-deploy resume writer allowance is not the exact six services")
+if resume.count("backoffice|bet|event|gamemaster|moderation|resulting|slip)") != 1:
+    raise SystemExit("failed-deploy resume writer allowance is not the exact seven services")
 for literal in (
     'if (NF != 2) invalid=1',
     'if (count != 1 || invalid) exit 1',
@@ -2106,41 +2683,88 @@ handoff = data[
     data.index("- name: Capture post-phase runtime baseline")
 ]
 for literal in (
+    'if [ "$PHASE" = "apply-slip-index" ]; then',
     'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
     '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
     '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
+    "live-data-maintenance-stan.sh hold",
     "live-data-maintenance-stan.sh restore",
     "live-data-maintenance-stan.sh verify-held",
+    'LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS"',
+    "shared-mongo-operation-lock-stan.sh renew",
+    "shared-mongo-operation-lock-stan.sh verify",
 ):
     if literal not in handoff:
         raise SystemExit(
-            f"data workflow does not restore released runtime after phase failure: {literal}"
+            f"data workflow does not retain final cleanup or restore non-final runtime: {literal}"
         )
+final_hold = handoff[
+    handoff.index('if [ "$PHASE" = "apply-slip-index" ]; then'):
+    handoff.index("              return")
+]
+if "live-data-maintenance-stan.sh restore" in final_hold:
+    raise SystemExit("final data failure can restore an incompatible Backoffice listener")
+if not (
+    final_hold.index("live-data-maintenance-stan.sh hold")
+    < final_hold.index("live-data-maintenance-stan.sh verify-held")
+    < final_hold.index("shared-mongo-operation-lock-stan.sh renew")
+    < final_hold.index("shared-mongo-operation-lock-stan.sh verify")
+):
+    raise SystemExit("final data failure does not re-hold writers before renewing its lock")
 
 abort = data[
     data.index("- name: Restore runtime or retain hold if final handoff packaging failed"):
     data.index("- name: Release database operation lock unless handed to deploy")
 ]
 for literal in (
-    'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
-    '[ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]',
-    '[ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ]',
-    "live-data-maintenance-stan.sh restore",
+    "STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv",
+    "live-data-maintenance-stan.sh hold",
     "live-data-maintenance-stan.sh verify-held",
+    'LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS"',
+    "shared-mongo-operation-lock-stan.sh renew",
+    "shared-mongo-operation-lock-stan.sh verify",
 ):
     if literal not in abort:
         raise SystemExit(
             f"data workflow does not retain a failed-deploy hold on abort: {literal}"
+        )
+for forbidden in (
+    "live-data-maintenance-stan.sh restore",
+    "shared-mongo-operation-lock-stan.sh release",
+):
+    if forbidden in abort:
+        raise SystemExit(
+            f"final handoff abort can release the cleanup safety boundary: {forbidden}"
+        )
+
+release = data[
+    data.index("- name: Release database operation lock unless handed to deploy"):
+    data.index("- name: Revoke exact runner rule")
+]
+for literal in (
+    "inputs.phase != 'apply-slip-index'",
+    "steps.maintenance_enter.outcome != 'success'",
+    "shared-mongo-operation-lock-stan.sh release",
+    "shared-mongo-operation-lock-stan.sh verify-released",
+):
+    if literal not in release:
+        raise SystemExit(f"data workflow lock release guard is incomplete: {literal}")
+for unsafe in (
+    "steps.abort_handoff.outcome == 'success'",
+    "steps.data.outcome == 'success'",
+):
+    if unsafe in release:
+        raise SystemExit(
+            f"final cleanup lock release still depends on an unsafe outcome: {unsafe}"
         )
 
 resume_mode_env = (
     "RESUME_MAINTENANCE_MODE: "
     "${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}"
 )
-if data.count(resume_mode_env) != 3:
+if data.count(resume_mode_env) != 2:
     raise SystemExit(
-        "data workflow must bind the resume maintenance mode to exactly three "
-        "maintenance and cleanup steps"
+        "data workflow must bind resume mode only to entry and non-final restoration"
     )
 
 for literal in (

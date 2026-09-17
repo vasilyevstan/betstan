@@ -31,7 +31,7 @@ if ($host = "www.betstan.xyz") {
   return 308 https://betstan.xyz$request_uri;
 }
 EOF
-for service in bet event moderation resulting slip gamemaster; do
+for service in backoffice bet event moderation resulting slip gamemaster; do
   printf '1\n' >"$stub_state/replicas/$service"
 done
 
@@ -226,6 +226,7 @@ run_maintenance() {
   local action="$1"
   PATH="$stub_bin:$PATH" \
   STUB_STATE_DIR="$stub_state" \
+  STUB_KUBECTL_LOG="$stub_state/kubectl.log" \
   STATE_FILE="$state_file" \
   OCI_K8S_NAMESPACE=betstan-oci \
   WAIT_ATTEMPTS=2 \
@@ -236,7 +237,7 @@ run_maintenance() {
 assert_replicas() {
   local expected="$1"
   local service
-  for service in bet event moderation resulting slip gamemaster; do
+  for service in backoffice bet event moderation resulting slip gamemaster; do
     [[ "$(cat "$stub_state/replicas/$service")" == "$expected" ]] ||
       fail "$service replicas did not equal $expected"
   done
@@ -254,20 +255,34 @@ fi
 assert_replicas 1
 
 printf '2\n' >"$stub_state/unstable/event"
+: >"$stub_state/kubectl.log"
 run_maintenance enter
 [[ "$(cat "$stub_state/unstable/event")" == "0" ]] ||
   fail "maintenance entry did not wait for transient deployment stability"
 grep -Fq 'request_method' "$stub_state/server-snippet" ||
   fail "maintenance entry did not install the HTTP write fence"
 assert_replicas 0
+quiesce_order="$(
+  sed -n 's#^scale deployment/gaming-\([a-z]*\)-depl .*--replicas=0$#\1#p' \
+    "$stub_state/kubectl.log" | paste -sd' ' -
+)"
+[[ "$quiesce_order" == "backoffice gamemaster event slip moderation resulting bet" ]] ||
+  fail "maintenance quiesce order was not the exact reviewed seven-writer order"
 run_maintenance verify-held
 [[ -s "$state_file" ]] || fail "maintenance entry did not capture restoration state"
 
+: >"$stub_state/kubectl.log"
 run_maintenance restore
 if grep -Fq 'request_method' "$stub_state/server-snippet"; then
   fail "maintenance restoration retained the HTTP write fence"
 fi
 assert_replicas 1
+restore_order="$(
+  sed -n 's#^scale deployment/gaming-\([a-z]*\)-depl .*--replicas=1$#\1#p' \
+    "$stub_state/kubectl.log" | paste -sd' ' -
+)"
+[[ "$restore_order" == "bet event moderation resulting slip gamemaster backoffice" ]] ||
+  fail "maintenance restore order did not restore Backoffice last"
 [[ ! -e "$state_file" ]] || fail "maintenance restoration retained stale state"
 
 printf '10\n' >"$stub_state/unstable/event"
@@ -281,7 +296,7 @@ if grep -Fq 'request_method' "$stub_state/server-snippet"; then
 fi
 
 run_maintenance enter
-for service in bet event moderation resulting slip gamemaster; do
+for service in backoffice bet event moderation resulting slip gamemaster; do
   STUB_STATE_DIR="$stub_state" "$stub_bin/kubectl" \
     scale "deployment/gaming-${service}-depl" \
     -n betstan-oci \
@@ -310,7 +325,7 @@ run_maintenance verify-quiesced
 run_maintenance hold
 run_maintenance verify-held
 
-for service in bet event moderation resulting slip gamemaster; do
+for service in backoffice bet event moderation resulting slip gamemaster; do
   printf '1\n' >"$stub_state/replicas/$service"
 done
 cat >"$stub_state/server-snippet" <<'EOF'

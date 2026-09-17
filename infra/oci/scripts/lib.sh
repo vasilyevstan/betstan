@@ -302,3 +302,70 @@ oci_target_supports_backoffice_publication_replay() {
   done
   grep -Fq 'await publicationService.start()' <<<"$index_source"
 }
+
+oci_target_supports_backoffice_pre_september_cleanup_guard() {
+  local target_sha="$1"
+  local listener_source boundary_source guard_line update_line guard_block
+
+  [[ "$target_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  listener_source="$(
+    git show "${target_sha}:backoffice/src/event/listener/NewEventListener.ts" \
+      2>/dev/null
+  )" || return 1
+  boundary_source="$(
+    git show "${target_sha}:backoffice/src/event/preSeptemberCleanupBoundary.ts" \
+      2>/dev/null
+  )" || return 1
+
+  grep -Fq \
+    'import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";' \
+    <<<"$listener_source" || return 1
+  guard_line="$(
+    grep -nF 'if (isBeforePreSeptemberCleanupCutoff(data.time)) {' \
+      <<<"$listener_source" |
+      awk -F: '
+        { count += 1; line = $1 }
+        END {
+          if (count != 1) exit 1
+          print line
+        }
+      '
+  )" || return 1
+  update_line="$(
+    grep -nF 'await Event.updateOne(' <<<"$listener_source" |
+      awk -F: '
+        { count += 1; line = $1 }
+        END {
+          if (count != 1) exit 1
+          print line
+        }
+      '
+  )" || return 1
+  [[ "$guard_line" =~ ^[1-9][0-9]*$ &&
+    "$update_line" =~ ^[1-9][0-9]*$ &&
+    "$guard_line" -lt "$update_line" ]] || return 1
+  guard_block="$(
+    sed -n "${guard_line},$((guard_line + 3))p" <<<"$listener_source" |
+      sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+  )"
+  [[ "$guard_block" == \
+    $'if (isBeforePreSeptemberCleanupCutoff(data.time)) {\nthis.channel.ack(msg);\nreturn;\n}' ]] ||
+    return 1
+
+  grep -Fq \
+    'export const PRE_SEPTEMBER_CLEANUP_CUTOFF =' \
+    <<<"$boundary_source" || return 1
+  grep -Fq '"2026-09-01T00:00:00Z" as const;' \
+    <<<"$boundary_source" || return 1
+  grep -Fq \
+    'Date.UTC(2026, 8, 1, 0, 0, 0, 0);' \
+    <<<"$boundary_source" || return 1
+  grep -Fq \
+    'export const isBeforePreSeptemberCleanupCutoff = (' \
+    <<<"$boundary_source" || return 1
+  grep -Fq 'const parsed = parseExplicitZoneTimestamp(value);' \
+    <<<"$boundary_source" || return 1
+  grep -Fq \
+    'return parsed !== null && parsed < PRE_SEPTEMBER_CLEANUP_CUTOFF_MS;' \
+    <<<"$boundary_source"
+}

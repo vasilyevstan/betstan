@@ -203,6 +203,26 @@ require_flat_literal "$SERVICE_CONTRACT_REVIEWER" \
   'state both versions and never substitute one for the other'
 require_flat_literal "$TEST_ENGINEER" \
   'Never use `npm install --no-save <tarball>` as evidence'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'exact candidate Auth and Client images plus a valid candidate-prefix/baseline-suffix split over the canonical seven-writer forward order: Bet, Event, Moderation, Resulting, Slip, Backoffice, then Gamemaster'
+require_flat_literal "$DEPLOYMENT_SAFETY" \
+  'Maintenance must quiesce Backoffice first, and non-final restoration or fenced recovery must restore Backoffice last'
+require_flat_literal "$TEST_ENGINEER" \
+  'exact candidate Auth and Client plus each candidate-prefix/baseline-suffix split over the canonical seven-writer forward order: Bet, Event, Moderation, Resulting, Slip, Backoffice, then Gamemaster'
+require_flat_literal "$TEST_ENGINEER" \
+  'Prove Backoffice quiesces first and restores last'
+require_flat_literal "$LEARNINGS" \
+  'Cleanup recovery accepts only exact candidate Auth and Client images over a valid candidate prefix of the canonical seven-writer rollout'
+for stale_topology in \
+  'Auth, Backoffice, and Client' \
+  'canonical six-writer forward order' \
+  'all six data writers' \
+  'six quiesced legacy writer'; do
+  if grep -Fq "$stale_topology" "$DEPLOYMENT_SAFETY" ||
+    grep -Fq "$stale_topology" "$TEST_ENGINEER"; then
+    fail "agent definitions retain obsolete recovery topology: $stale_topology"
+  fi
+done
 require_flat_literal "$LEARNINGS" \
   'Every change records documentation impact; `betstan-public-wiki-editor` is registered when public impact is plausible or ambiguous'
 
