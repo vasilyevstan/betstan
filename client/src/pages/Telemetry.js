@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import axios from 'axios';
 
 const METRICS = [
@@ -119,16 +119,212 @@ const isValidSummary = (value) => {
   );
 };
 
-const MetricCard = ({ dates, metric, metricIndex }) => {
+const isValidHourlyRequest = (metric, day) => (
+  METRICS.some(([name]) => name === metric)
+  && typeof day === 'string'
+  && CANONICAL_DATE_PATTERN.test(day)
+  && isCanonicalIsoInstant(`${day}T00:00:00.000Z`)
+);
+
+const isValidHourly = (value, metric, day) => (
+  isValidHourlyRequest(metric, day)
+  && hasExactKeys(value, ['generatedAt', 'metric', 'date', 'hours', 'values'])
+  && isCanonicalIsoInstant(value.generatedAt)
+  && value.metric === metric
+  && value.date === day
+  && Array.isArray(value.hours)
+  && value.hours.length === 24
+  && value.hours.every((hour, index) => (
+    hour === `${day}T${String(index).padStart(2, '0')}:00:00.000Z`
+  ))
+  && Array.isArray(value.values)
+  && value.values.length === 24
+  && value.values.every((count) => Number.isSafeInteger(count) && count >= 0)
+);
+
+const OVERVIEW = Object.freeze({ mode: 'overview' });
+const acceptedDetail = (record) => record.mode === 'ready' ? record.detail : record.prior;
+const containsPoint = (box, x, y) => (
+  box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom
+);
+const overlaps = (a, b) => (
+  a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+);
+
+// The overlay never receives pointer events. Only the actual bar, overlay bounds,
+// and a narrow connecting corridor retain pointer hover; focus is independent.
+const inTooltipRegion = (placement, x, y) => {
+  if (!placement) return false;
+  const { anchor, box } = placement;
+  if (containsPoint(anchor, x, y) || containsPoint(box, x, y)) return true;
+  const above = box.bottom <= anchor.top;
+  const start = above ? box.bottom : anchor.bottom;
+  const end = above ? anchor.top : box.top;
+  if (y < start || y > end || end === start) return false;
+  const anchorX = (anchor.left + anchor.right) / 2;
+  const tipX = Math.max(box.left, Math.min(box.right, anchorX));
+  const fraction = (y - start) / (end - start);
+  const center = above
+    ? tipX + (anchorX - tipX) * fraction
+    : anchorX + (tipX - anchorX) * fraction;
+  return Math.abs(x - center) <= 6;
+};
+
+const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onBack }) => {
   const label = METRICS[metricIndex][1];
   const headingId = `telemetry-metric-heading-${metricIndex}`;
   const captionId = `telemetry-metric-caption-${metricIndex}`;
-  const maximumValue = Math.max(1, ...metric.values);
+  const isDaily = record.mode === 'overview';
+  const detail = acceptedDetail(record);
+  const currentServerDay = detail?.generatedAt.slice(0, 10) > serverDay
+    ? detail.generatedAt.slice(0, 10) : serverDay;
+  const values = isDaily ? metric.values : detail?.values;
+  const buckets = isDaily ? dates : detail?.hours;
+  const maximumValue = Math.max(1, ...(values || []));
+  const card = useRef(null);
+  const bars = useRef([]);
+  const buttons = useRef([]);
+  const back = useRef(null);
+  const heading = useRef(null);
+  const tooltip = useRef(null);
+  const pendingFocus = useRef(null);
+  const originDay = useRef(null);
+  const [pointerIndex, setPointerIndex] = useState(null);
+  const [focusIndex, setFocusIndex] = useState(null);
+  const [suppressed, setSuppressed] = useState(false);
+  const [placement, setPlacement] = useState(null);
+  const activeIndex = suppressed ? null : (pointerIndex ?? focusIndex);
 
-  return <article className="card telemetry-metric" aria-labelledby={headingId}>
+  const dismiss = useCallback(() => {
+    setPointerIndex(null);
+    setFocusIndex(null);
+    setPlacement(null);
+  }, []);
+
+  useLayoutEffect(() => {
+    dismiss();
+  }, [values, buckets, record.mode, dismiss]);
+
+  useLayoutEffect(() => {
+    if (!pendingFocus.current) return;
+    if (pendingFocus.current === 'back' && !isDaily) {
+      back.current?.focus({ preventScroll: true });
+    } else if (pendingFocus.current === 'origin' && isDaily) {
+      const index = dates.indexOf(originDay.current);
+      (buttons.current[index] || heading.current)?.focus({ preventScroll: true });
+    }
+    pendingFocus.current = null;
+  }, [isDaily, record.mode, dates]);
+
+  useLayoutEffect(() => {
+    if (activeIndex === null || !tooltip.current || !bars.current[activeIndex]) {
+      setPlacement(null);
+      return;
+    }
+    const cardBox = card.current.getBoundingClientRect();
+    const headerBottom = document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0;
+    const top = Math.max(8, headerBottom + 8, cardBox.top + 8);
+    const bottom = Math.min(window.innerHeight - 8, cardBox.bottom - 8);
+    let anchor = bars.current[activeIndex].getBoundingClientRect();
+    if (pointerIndex === null && (anchor.top < top || anchor.bottom > bottom)) {
+      anchor = buttons.current[activeIndex]?.getBoundingClientRect() || anchor;
+    }
+    const measured = tooltip.current.getBoundingClientRect();
+    const left = Math.max(
+      Math.max(8, cardBox.left + 8),
+      Math.min(
+        (anchor.left + anchor.right - measured.width) / 2,
+        Math.min(window.innerWidth - 8, cardBox.right - 8) - measured.width
+      )
+    );
+    const protectedBoxes = [...card.current.querySelectorAll('button:focus, .telemetry-metric__action')]
+      .map((element) => element.getBoundingClientRect());
+    const candidates = [anchor.top - measured.height - 6, anchor.bottom + 6];
+    const candidate = candidates.map((y) => ({
+      left, right: left + measured.width, top: y, bottom: y + measured.height,
+    })).find((box) => (
+      box.top >= top && box.bottom <= bottom
+      && !protectedBoxes.some((protectedBox) => overlaps(box, protectedBox))
+    ));
+    setPlacement(candidate ? {
+      anchor,
+      box: candidate,
+      left: candidate.left - cardBox.left - card.current.clientLeft,
+      top: candidate.top - cardBox.top - card.current.clientTop,
+    } : null);
+  }, [activeIndex, pointerIndex, values, buckets, record.mode]);
+
+  useEffect(() => {
+    const escape = (event) => {
+      if (event.key === 'Escape') setSuppressed(true);
+    };
+    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', dismiss);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', dismiss);
+      window.removeEventListener('keydown', escape);
+    };
+  }, [dismiss]);
+
+  useEffect(() => {
+    if (pointerIndex === null) return undefined;
+    const move = (event) => {
+      if (!inTooltipRegion(placement, event.clientX, event.clientY)
+        && !containsPoint(bars.current[pointerIndex]?.getBoundingClientRect(), event.clientX, event.clientY)) {
+        setPointerIndex(null);
+      }
+    };
+    document.addEventListener('mousemove', move);
+    return () => document.removeEventListener('mousemove', move);
+  }, [pointerIndex, placement]);
+
+  const openDay = (day, event) => {
+    originDay.current = day;
+    if (event.currentTarget === document.activeElement) pendingFocus.current = 'back';
+    dismiss();
+    onOpen(metric.metric, day);
+  };
+
+  return <article className="card telemetry-metric" aria-labelledby={headingId} ref={card}>
     <div className="card-body">
-      <h3 className="h5 telemetry-metric__heading" id={headingId}>{label}</h3>
-      <figure className="telemetry-metric__figure" aria-labelledby={`${headingId} ${captionId}`}>
+      <header className="telemetry-metric__header">
+        <div>
+          <h3 className="h5 telemetry-metric__heading" id={headingId} tabIndex={-1} ref={heading}>{label}</h3>
+          {!isDaily ? <p className="telemetry-metric__day mb-0">
+            <time dateTime={record.day}>{record.day}</time>{' · UTC'}
+            {record.day === currentServerDay ? ' · In progress' : ''}
+          </p> : null}
+        </div>
+        {!isDaily ? <button
+          type="button"
+          className="btn telemetry-metric__action"
+          ref={back}
+          onClick={() => {
+            pendingFocus.current = 'origin';
+            dismiss();
+            onBack(metric.metric);
+          }}
+        >Back to 14 days</button> : null}
+      </header>
+      {record.mode === 'loading' ? <p className="telemetry-notice telemetry-notice--progress mb-0" role="status">
+        {detail ? 'Refreshing hourly data. Showing the last accepted snapshot.' : 'Loading hourly data...'}
+      </p> : null}
+      {record.mode === 'error' ? <div className="telemetry-notice telemetry-notice--error" role="alert">
+        <p className="mb-0">
+          {record.errorKind === 'expired'
+            ? 'This UTC day is no longer available in the 14-day window.'
+            : 'Hourly data is unavailable. Retry or go back to 14 days.'}
+          {detail ? ' Showing the last accepted hourly snapshot.' : ''}
+        </p>
+        {record.errorKind !== 'expired' ? <button
+          className="btn telemetry-metric__action"
+          type="button"
+          onClick={(event) => openDay(record.day, event)}
+        >Retry</button> : null}
+      </div> : null}
+      {values ? <figure className="telemetry-metric__figure" aria-labelledby={`${headingId} ${captionId}`}>
         <svg
           className="telemetry-metric__graph"
           viewBox="0 0 280 100"
@@ -136,33 +332,75 @@ const MetricCard = ({ dates, metric, metricIndex }) => {
           aria-hidden="true"
           focusable="false"
         >
-          {metric.values.map((value, valueIndex) => {
+          {values.map((value, valueIndex) => {
             const height = Math.max(2, (value / maximumValue) * 92);
+            const slot = 280 / values.length;
             return <rect
-              className="telemetry-metric__bar"
+              className={`telemetry-metric__bar${isDaily ? ' telemetry-metric__bar--daily' : ''}`}
               key={valueIndex}
-              x={(valueIndex * 20) + 3}
+              ref={(element) => { bars.current[valueIndex] = element; }}
+              x={slot * (valueIndex + 0.15)}
               y={98 - height}
-              width="14"
+              width={slot * 0.7}
               height={height}
+              onMouseEnter={() => {
+                setPointerIndex(valueIndex);
+                setSuppressed(false);
+              }}
+              onMouseLeave={(event) => {
+                if (!inTooltipRegion(placement, event.clientX, event.clientY)) setPointerIndex(null);
+              }}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={isDaily ? (event) => openDay(dates[valueIndex], event) : undefined}
             />;
           })}
         </svg>
+        {detail ? <p className="telemetry-metric__generated mb-0">
+          Hourly data generated at{' '}
+          <time dateTime={detail.generatedAt}>{detail.generatedAt}</time>
+        </p> : null}
         <figcaption className="visually-hidden" id={captionId}>
-          Fourteen daily date and value pairs for {label}.
+          {isDaily ? 'Fourteen daily date' : 'Twenty-four UTC hour'} and value pairs for {label}.
         </figcaption>
-        <ol className="telemetry-metric__values" aria-label={`${label} daily values`}>
-          {dates.map((date, valueIndex) => (
-            <li className="telemetry-metric__pair" key={`${date}-${valueIndex}`}>
-              <time className="telemetry-metric__date" dateTime={date}>{date}</time>
-              <data className="telemetry-metric__value" value={metric.values[valueIndex]}>
-                {metric.values[valueIndex]}
-              </data>
-            </li>
-          ))}
+        <ol className="telemetry-metric__values" aria-label={`${label} ${isDaily ? 'daily' : 'hourly UTC'} values`}>
+          {buckets.map((bucket, valueIndex) => {
+            const pair = <>
+              <time className="telemetry-metric__date" dateTime={bucket}>
+                {isDaily ? bucket : `${bucket.slice(11, 16)} UTC`}
+              </time>
+              <data className="telemetry-metric__value" value={values[valueIndex]}>{values[valueIndex]}</data>
+            </>;
+            return <li
+              className={`telemetry-metric__pair${isDaily ? ' telemetry-metric__pair--daily' : ''}`}
+              key={bucket}
+            >
+              {isDaily ? <button
+                type="button"
+                className="telemetry-metric__date-button"
+                ref={(element) => { buttons.current[valueIndex] = element; }}
+                aria-label={`${label}, ${bucket} UTC, ${values[valueIndex]}`}
+                onClick={(event) => openDay(bucket, event)}
+                onFocus={() => {
+                  setFocusIndex(valueIndex);
+                  setSuppressed(false);
+                }}
+                onBlur={() => setFocusIndex(null)}
+              >{pair}</button> : pair}
+            </li>;
+          })}
         </ol>
-      </figure>
+      </figure> : null}
     </div>
+    {activeIndex !== null && values ? <div
+      className="telemetry-metric__tooltip"
+      role="tooltip"
+      ref={tooltip}
+      style={{
+        left: placement?.left ?? 0,
+        top: placement?.top ?? 0,
+        visibility: placement ? 'visible' : 'hidden',
+      }}
+    >{values[activeIndex]}</div> : null}
   </article>;
 };
 
@@ -172,73 +410,154 @@ const Telemetry = () => {
   const [hasInitialError, setHasInitialError] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState('');
   const snapshotRef = useRef(null);
-  const requestInFlight = useRef(false);
-  const initialRequestStarted = useRef(false);
+  const [records, setRecords] = useState({});
+  const recordsRef = useRef({});
+  const operations = useRef({});
+  const summaryOperation = useRef(null);
+  const refreshBatch = useRef(null);
   const isMounted = useRef(true);
   const refreshButton = useRef(null);
   const shouldRestoreRefreshFocus = useRef(false);
 
-  const loadSummary = useCallback(async (isInitialRequest) => {
-    if (requestInFlight.current) {
-      return;
-    }
+  const replaceRecord = useCallback((metric, record) => {
+    recordsRef.current = { ...recordsRef.current, [metric]: record };
+    setRecords(recordsRef.current);
+  }, []);
 
-    requestInFlight.current = true;
-    const hadSnapshot = snapshotRef.current !== null;
-    if (isMounted.current) {
-      setRequestState(isInitialRequest ? 'loading' : 'refreshing');
-      setHasInitialError(false);
-      setRefreshMessage('');
-    }
+  const invalidateDetail = useCallback((metric) => {
+    const previous = operations.current[metric];
+    delete operations.current[metric]; // Invalidate BEFORE abort, including synchronous abort handlers.
+    previous?.controller.abort();
+  }, []);
 
+  const loadDetail = useCallback(async (metric, day, supersede = false) => {
+    if (!isValidHourlyRequest(metric, day)) return 'failed';
+    if (!supersede && operations.current[metric]?.day === day) return 'neutral';
+    invalidateDetail(metric);
+    const operation = Object.freeze({ day, controller: new AbortController() });
+    operations.current[metric] = operation;
+    const previous = recordsRef.current[metric] || OVERVIEW;
+    const prior = previous.day === day ? acceptedDetail(previous) : undefined;
+    replaceRecord(metric, { mode: 'loading', day, prior });
+    const isCurrent = () => (
+      isMounted.current && operations.current[metric] === operation
+      && recordsRef.current[metric]?.day === day
+    );
     try {
-      const response = await axios.get('/api/telemetry/summary');
-      if (!isValidSummary(response.data)) {
-        throw new Error('Invalid telemetry summary');
-      }
-      if (!isMounted.current) {
-        return;
-      }
+      const response = await axios.get(`/api/telemetry/metrics/${metric}/days/${day}`, {
+        signal: operation.controller.signal, timeout: 10000,
+      });
+      if (!isCurrent()) return 'neutral';
+      if (!isValidHourly(response.data, metric, day)) throw new Error('Invalid hourly data');
+      replaceRecord(metric, { mode: 'ready', day, detail: response.data });
+      return 'success';
+    } catch (error) {
+      if (!isCurrent()) return 'neutral';
+      replaceRecord(metric, {
+        mode: 'error', day, prior,
+        errorKind: error.response?.status === 400 && isValidHourlyRequest(metric, day)
+          ? 'expired' : 'transient',
+      });
+      return 'failed';
+    } finally {
+      if (isCurrent()) delete operations.current[metric];
+    }
+  }, [invalidateDetail, replaceRecord]);
 
+  const loadSummary = useCallback(async () => {
+    const operation = Object.freeze({ controller: new AbortController() });
+    summaryOperation.current = operation;
+    const isCurrent = () => isMounted.current && summaryOperation.current === operation;
+    try {
+      const response = await axios.get('/api/telemetry/summary', {
+        signal: operation.controller.signal, timeout: 10000,
+      });
+      if (!isCurrent()) return 'neutral';
+      if (!isValidSummary(response.data)) throw new Error('Invalid telemetry summary');
       snapshotRef.current = response.data;
       setSnapshot(response.data);
-      setRefreshMessage(isInitialRequest ? '' : 'Telemetry refreshed.');
+      Object.entries(recordsRef.current).forEach(([metric, record]) => {
+        if (record.mode !== 'overview' && !response.data.dates.includes(record.day)) {
+          invalidateDetail(metric);
+          replaceRecord(metric, {
+            mode: 'error', day: record.day, errorKind: 'expired', prior: acceptedDetail(record),
+          });
+        }
+      });
+      return 'success';
     } catch {
-      if (!isMounted.current) {
-        return;
-      }
-
-      if (hadSnapshot) {
-        setRefreshMessage(
-          `Refresh failed. Showing data generated at ${snapshotRef.current.generatedAt}.`
-        );
-      } else {
-        setHasInitialError(true);
-      }
+      if (!isCurrent()) return 'neutral';
+      if (!snapshotRef.current) setHasInitialError(true);
+      return 'failed';
     } finally {
-      requestInFlight.current = false;
-      if (isMounted.current) {
-        setRequestState('idle');
-      }
+      if (isCurrent()) summaryOperation.current = null;
     }
-  }, []);
+  }, [invalidateDetail, replaceRecord]);
+
+  const refresh = useCallback(async (initial = false) => {
+    if (refreshBatch.current) return;
+    const selected = Object.entries(recordsRef.current)
+      .filter(([, record]) => record.mode !== 'overview')
+      .map(([metric, record]) => [metric, record.day]);
+    const batch = Object.freeze({ selected });
+    refreshBatch.current = batch;
+    setRequestState(initial ? 'loading' : 'refreshing');
+    setHasInitialError(false);
+    setRefreshMessage('');
+    // Capture membership before dispatch: later opens never extend this batch.
+    const outcomes = await Promise.allSettled([
+      loadSummary(),
+      ...selected.map(([metric, day]) => loadDetail(metric, day, true)),
+    ]);
+    if (!isMounted.current || refreshBatch.current !== batch) return;
+    const failed = outcomes.some((outcome) => outcome.status === 'rejected' || outcome.value === 'failed')
+      || selected.some(([metric, day]) => (
+        recordsRef.current[metric]?.day === day && recordsRef.current[metric]?.errorKind === 'expired'
+      ));
+    if (!initial && snapshotRef.current) {
+      setRefreshMessage(failed
+        ? selected.length
+          ? 'Refresh failed for some telemetry data. Successful updates are shown; unavailable views retain their last accepted snapshot.'
+          : `Refresh failed. Showing data generated at ${snapshotRef.current.generatedAt}.`
+        : 'Telemetry refreshed.');
+    }
+    refreshBatch.current = null;
+    setRequestState('idle');
+  }, [loadSummary, loadDetail]);
 
   useEffect(() => {
     isMounted.current = true;
-    if (!initialRequestStarted.current) {
-      initialRequestStarted.current = true;
-      loadSummary(true);
-    }
-
+    refresh(true);
     return () => {
       isMounted.current = false;
+      refreshBatch.current = null;
+      const summary = summaryOperation.current;
+      summaryOperation.current = null;
+      const active = Object.values(operations.current);
+      operations.current = {};
+      summary?.controller.abort();
+      active.forEach((operation) => operation.controller.abort());
     };
-  }, [loadSummary]);
+  }, [refresh]);
 
   useEffect(() => {
+    const moved = (event) => {
+      if (event.target !== refreshButton.current) shouldRestoreRefreshFocus.current = false;
+    };
+    document.addEventListener('focusin', moved);
+    document.addEventListener('pointerdown', moved);
+    document.addEventListener('keydown', moved);
+    return () => {
+      document.removeEventListener('focusin', moved);
+      document.removeEventListener('pointerdown', moved);
+      document.removeEventListener('keydown', moved);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
     if (requestState === 'idle' && shouldRestoreRefreshFocus.current) {
       shouldRestoreRefreshFocus.current = false;
-      refreshButton.current?.focus();
+      refreshButton.current?.focus({ preventScroll: true });
     }
   }, [requestState]);
 
@@ -255,7 +574,7 @@ const Telemetry = () => {
         <h1 className="h3 mb-1" id="telemetry-page-heading">Telemetry and service health</h1>
         {snapshot ? (
           <p className="telemetry-page__generated mb-0">
-            <span>Generated at</span>{' '}
+            <span>Overview and service health generated at</span>{' '}
             <time dateTime={snapshot.generatedAt}>{snapshot.generatedAt}</time>
           </p>
         ) : null}
@@ -266,8 +585,8 @@ const Telemetry = () => {
         disabled={isBusy}
         ref={refreshButton}
         onClick={() => {
-          shouldRestoreRefreshFocus.current = true;
-          loadSummary(false);
+          shouldRestoreRefreshFocus.current = document.activeElement === refreshButton.current;
+          refresh(false);
         }}
       >
         Refresh
@@ -313,13 +632,20 @@ const Telemetry = () => {
         </section>
 
         <section className="telemetry-section" aria-labelledby="telemetry-activity-heading">
-          <h2 className="h4 mb-0" id="telemetry-activity-heading">Daily activity</h2>
+          <h2 className="h4 mb-0" id="telemetry-activity-heading">Activity</h2>
           <div className="telemetry-metrics">
             {snapshot.metrics.map((metric, metricIndex) => (
               <MetricCard
                 dates={snapshot.dates}
                 metric={metric}
                 metricIndex={metricIndex}
+                record={records[metric.metric] || OVERVIEW}
+                serverDay={snapshot.generatedAt.slice(0, 10)}
+                onOpen={loadDetail}
+                onBack={(name) => {
+                  invalidateDetail(name);
+                  replaceRecord(name, OVERVIEW);
+                }}
                 key={metric.metric}
               />
             ))}

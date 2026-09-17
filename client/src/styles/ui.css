@@ -1896,7 +1896,9 @@ body {
   font-weight: 700;
 }
 
-.telemetry-refresh:focus-visible {
+.telemetry-refresh:focus-visible,
+.telemetry-metric button:focus-visible,
+.telemetry-metric__heading:focus-visible {
   outline: 3px solid var(--text-main);
   outline-offset: 2px;
   box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--accent) 26%, transparent);
@@ -1994,6 +1996,8 @@ body {
 }
 
 .telemetry-metric {
+  position: relative;
+  align-self: start;
   background: var(--surface-soft);
 }
 
@@ -2004,6 +2008,63 @@ body {
 
 .telemetry-metric__heading {
   margin: 0;
+}
+
+.telemetry-metric__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.telemetry-metric__header > div {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.telemetry-metric__action {
+  min-height: 44px;
+  min-width: 44px;
+  border: 1px solid var(--border-subtle);
+  border-radius: calc(var(--radius-card) * 0.45);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+.telemetry-metric__header > .telemetry-metric__action {
+  margin-left: auto;
+}
+
+.telemetry-metric__action:hover {
+  background: var(--surface-soft);
+  color: var(--text-main);
+  border-color: var(--text-main);
+}
+
+.telemetry-metric__day,
+.telemetry-metric__generated {
+  color: var(--text-main);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-metric__tooltip {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  width: max-content;
+  max-width: calc(100% - 16px);
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: calc(var(--radius-card) * 0.45);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: var(--shadow-elevated);
+  font-size: 1rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .telemetry-metric__figure {
@@ -2025,13 +2086,18 @@ body {
   fill: currentColor;
 }
 
+.telemetry-metric__bar--daily {
+  cursor: pointer;
+}
+
 .telemetry-metric__values {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(6rem, 100%), 1fr));
   gap: 0.4rem;
 }
 
-.telemetry-metric__pair {
+.telemetry-metric__pair,
+.telemetry-metric__date-button {
   display: grid;
   gap: 0.15rem;
   min-width: 0;
@@ -2042,6 +2108,25 @@ body {
   text-align: center;
 }
 
+.telemetry-metric__pair--daily {
+  display: flex;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.telemetry-metric__date-button {
+  width: 100%;
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--text-main);
+  font: inherit;
+}
+
+.telemetry-metric__date-button:hover {
+  border-color: var(--text-main);
+}
+
 .telemetry-metric__date,
 .telemetry-metric__value {
   min-width: 0;
@@ -2049,7 +2134,8 @@ body {
 }
 
 .telemetry-metric__date {
-  color: var(--text-subtle);
+  /* Date identities need normal-text contrast, including the v3 light pair surface. */
+  color: var(--text-main);
   font-size: 0.72rem;
 }
 

@@ -100,26 +100,67 @@ creating separate deployments.
 ## Telemetry dashboard
 
 The public `/telemetry` page is headed **Telemetry and service health**. It
-shows the current UTC day and previous 13 UTC days for main-page visits,
-Backoffice-page visits, slips created, bets placed, results settled,
-Gamecenter events emitted, users created, and user logins.
+groups its eight graphs under **Activity**. The overview shows the current UTC
+day and previous 13 UTC days for main-page visits, Backoffice-page visits,
+slips created, bets placed, results settled, Gamecenter events emitted,
+users created, and user logins.
 
-Each activity card contains a dependency-free graph and all fourteen exact
-date/value pairs. An all-zero response remains a successful snapshot rather
-than becoming an empty state. The service-health section lists Authentication,
-Backoffice, Betting, Client, Events, Game master, Moderation, Resulting, Slip,
-and Telemetry in a fixed order. Health is expressed with both text and color:
-**Healthy**, **Degraded**, or **Unavailable**.
+In overview mode, each card contains a dependency-free graph and all fourteen
+exact date/value pairs. Hovering a daily or hourly bar shows an immediate,
+theme-matched tooltip containing only the exact count, without rounding or
+abbreviation. Daily date/value entries are native buttons usable by keyboard
+and touch; focusing one also shows its count tooltip. **Escape** dismisses the
+tooltip, and exact values remain readable without hover.
 
-The page fetches once when entered and again only when the user activates
-**Refresh**. It does not poll. During refresh the previous snapshot stays
-visible; a failed refresh keeps that snapshot and reports the failure without
-exposing internal error details. The generated timestamp identifies the
-snapshot currently displayed.
+Clicking a daily bar or activating its date/value button changes only that
+card to the selected day's **24 hourly UTC counts**, from **00:00** through
+**23:00**. Other cards keep their current views. All hour/count pairs remain
+visible; hourly bars are read-only, with no further drill-down, minute view,
+or local-time conversion. **Back to 14 days** appears at the top right only
+in detail mode, including loading and error states. It restores the accepted
+overview without fetching it again. Keyboard activation moves focus to Back;
+returning restores the date button, or the card heading if that date has
+left the overview.
 
-The displayed counts are observed operational counts, not accounting-grade
-records. Health is a coarse point-in-time snapshot, not deep readiness or an
-authority for product decisions.
+The overview loads on page entry; hourly data loads on selection or explicit
+**Retry**. The page does not poll. **Refresh** updates the overview, service
+health, and every detail selected when pressed, including loading or expired
+selections. Selected days and any last successful data remain visible while
+requests run. Successful updates survive failures elsewhere, and partial
+failure is reported rather than announced as a complete refresh.
+
+A temporary detail failure offers **Retry** and **Back to 14 days**, retaining
+that detail's last successful data and timestamp when available. A day that
+has left the server's current 14-day window stays selected with an
+unavailable-day notice and any last successful detail; it offers Back but
+no futile Retry. This also covers opening an expired day from an older
+overview. Failures never become fabricated zero counts or expose internal
+error details. A successful all-zero response remains a valid snapshot.
+
+**Overview and service health generated at** identifies the overview's
+timestamp; **Hourly data generated at** below each detail graph identifies
+that detail's own timestamp. Today's detail is labelled **In progress** using
+response-date context, not a live clock or polling promise. Counts cover the
+full selected UTC calendar day using stored observation times; a generated
+timestamp marks computation start, not a cutoff or transactional snapshot.
+Late observations can change historical counts, so separately fetched hourly
+totals and daily values need not match, and refresh need not produce a newer
+timestamp. These are observed operational counts, not accounting-grade
+records. The 14-day display window and records' eligibility for TTL deletion
+after 30 days are unchanged.
+
+The service-health section lists Authentication, Backoffice, Betting, Client,
+Events, Game master, Moderation, Resulting, Slip, and Telemetry in a fixed
+order. Health is expressed with both text and color: **Healthy**, **Degraded**,
+or **Unavailable**. It remains a coarse point-in-time snapshot, not deep
+readiness or an authority for product decisions.
+
+Hourly detail is additive; older clients keep the unchanged daily dashboard.
+A rollout should make backend support available before the new client. An
+older backend's missing hourly route (`404`) produces a local detail error
+without losing the overview. Rolling back the client removes drill-down
+without changing stored observations or requiring a data migration; a backend
+rollback must account for clients still requesting hourly data.
 
 Activity graphs use two columns on wide desktop layouts and one column on
 tablet and mobile layouts. Service health uses five, two, then one column over
