@@ -748,9 +748,12 @@ the same ten-minute reclamation budget per PV, with each read bounded to at
 most 15 seconds and no extra final probe. Besides the HTTP request timeout,
 the operator bounds the native kubectl client's lifetime, including inherited
 credential-helper processes and output pipes, in its own POSIX session. On
-timeout it kills that owned process group, uses only a bounded reap, and
-discards all partial output—even an exact-looking NotFound. Timeout remains
-an unknown read and consumes the same remaining PV budget.
+timeout, exceptions, or handled SIGINT/SIGTERM cancellation it kills the
+unreaped client's owned process group, uses only a bounded reap, and discards
+all incomplete output—even an exact-looking NotFound. Cancellation handling
+is armed before spawn and remains non-throwing during cleanup. These outcomes
+remain unknown reads and consume the same remaining PV budget. Uncatchable
+SIGKILL or loss of the supervisor is not covered by this cleanup.
 Invalid identity/schema evidence and
 proven authorization failures stop cleanup; budget exhaustion also fails
 closed. Preserve the map, journal identity, retained auth PVC, and recovery

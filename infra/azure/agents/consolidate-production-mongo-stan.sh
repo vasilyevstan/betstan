@@ -346,40 +346,93 @@ import time
 
 output_path, error_path, seconds, *command = sys.argv[1:]
 deadline = time.monotonic() + int(seconds)
+client = None
+cancel_signal = 0
+complete = False
+cleanup_ok = True
+result = 125
+
+def remember_cancellation(signum, _frame):
+    global cancel_signal
+    if not cancel_signal:
+        cancel_signal = signum
+
+# Record, never raise from a signal callback: cancellation cannot interrupt
+# Popen between spawning and assigning the owned PID, or interrupt cleanup.
+signal.signal(signal.SIGINT, remember_cancellation)
+signal.signal(signal.SIGTERM, remember_cancellation)
 try:
+    if cancel_signal:
+        raise SystemExit(128 + cancel_signal)
     client = subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, start_new_session=True,
     )
-except OSError:
-    raise SystemExit(125)
-try:
-    # communicate is bounded even when kubectl has exited but a credential
-    # child still owns its pipes. Do not publish captured bytes until complete.
-    output, error = client.communicate(timeout=max(0, deadline - time.monotonic() - 0.25))
-except subprocess.TimeoutExpired:
-    # communicate has not reaped the client on this path, so its PID still
-    # reserves the session/group identity. Never signal a process by name.
-    try:
-        os.killpg(client.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        client.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        print("kubectl read termination could not be reaped within its deadline", file=sys.stderr)
-    # No second communicate/drain: inherited pipes must not prolong shutdown.
-    # Every captured byte, including an exact-looking NotFound, is discarded.
-    raise SystemExit(124)
+    while not cancel_signal:
+        remaining = deadline - time.monotonic() - 0.25
+        if remaining <= 0:
+            result = 124
+            break
+        try:
+            # Resume communication with this same client, not another request.
+            # Short waits notice recorded cancellation without throwing from
+            # handlers during spawn, pipe handling or the final kill/reap.
+            output, error = client.communicate(timeout=min(0.1, remaining))
+        except subprocess.TimeoutExpired:
+            continue
+        if cancel_signal:
+            break
+        Path(output_path).write_bytes(output)
+        Path(error_path).write_bytes(error)
+        result = client.returncode
+        complete = True
+        break
+except BaseException:
+    complete = False
+    result = 125
 finally:
-    client.stdout.close()
-    client.stderr.close()
-Path(output_path).write_bytes(output)
-Path(error_path).write_bytes(error)
-raise SystemExit(client.returncode)
+    if client is not None:
+        # An unreaped client reserves this owned session/group ID. Once
+        # communicate has reaped it, never signal that potentially reusable ID.
+        if client.returncode is None:
+            try:
+                os.killpg(client.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except BaseException:
+                cleanup_ok = False
+            try:
+                client.wait(timeout=max(0, deadline - time.monotonic()))
+            except BaseException:
+                cleanup_ok = False
+        # No post-kill communicate/drain. A close failure cannot skip the
+        # other descriptor or turn cancellation into a complete observation.
+        for stream in (client.stdout, client.stderr):
+            try:
+                stream.close()
+            except BaseException:
+                cleanup_ok = False
+    if not complete or cancel_signal or not cleanup_ok:
+        for path in (output_path, error_path):
+            try:
+                # The foreground shell may already have run its EXIT trap.
+                # Discard, but never recreate its removed temporary files.
+                Path(path).unlink(missing_ok=True)
+            except BaseException:
+                cleanup_ok = False
+    if not cleanup_ok:
+        print("kubectl read cleanup could not be confirmed within its deadline", file=sys.stderr)
+        result = 125
+    if cancel_signal:
+        result = 128 + cancel_signal
+raise SystemExit(result)
 PY
   if [[ "$command_status" -eq 124 ]]; then
     echo "Kubernetes $resource read client deadline expired; absence is not proven" >&2
+    return 1
+  fi
+  if [[ "$command_status" -eq 125 || "$command_status" -eq 130 || "$command_status" -eq 143 ]]; then
+    echo "Kubernetes $resource read client interrupted or failed; absence is not proven" >&2
     return 1
   fi
   python3 - "$output_file" "$error_file" "$command_status" \

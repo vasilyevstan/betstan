@@ -323,7 +323,8 @@ if mode in ("hang-client", "hang-credential", "hang-native-notfound",
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     with (d / "lifetimes.jsonl").open("a") as handle:
         handle.write(json.dumps({"role": "client", "pid": os.getpid(),
-                                "pgid": os.getpgrp(), "sid": os.getsid(0)}) + "\n")
+                                "pgid": os.getpgrp(), "sid": os.getsid(0),
+                                "supervisor": os.getppid()}) + "\n")
     if mode == "hang-client":
         while True: time.sleep(60)
     ready = d / f"credential-{os.getpid()}.ready"
@@ -347,6 +348,11 @@ while True: time.sleep(60)
     if mode == "hang-malformed":
         sys.stdout.buffer.write(b"\xff")
         sys.stdout.buffer.flush()
+    marker = d / f"cancel-ready-{os.getpid()}"
+    marker.with_suffix(".partial").write_text(json.dumps({
+        "client": os.getpid(), "supervisor": os.getppid(),
+    }))
+    marker.with_suffix(".partial").replace(marker.with_suffix(".json"))
     if mode == "exited-client-open-pipe":
         raise SystemExit(1)
     child.wait()
@@ -458,8 +464,58 @@ def setup(operation, *, journal_read="present", state=None, pv_reads=None,
         cleanup_map.chmod(0o600)
     return directory
 
+def run_interrupted(directory, script, operation, env, interruption):
+    scope, signals = interruption
+    output_path, error_path = directory / "interrupt.out", directory / "interrupt.err"
+    delivered = set()
+    with output_path.open("wb") as output, error_path.open("wb") as error:
+        worker = subprocess.Popen(
+            ["bash", str(script), operation], cwd=root, env=env,
+            stdin=subprocess.DEVNULL, stdout=output, stderr=error, start_new_session=True,
+        )
+        try:
+            stop = time.monotonic() + 8
+            while worker.poll() is None:
+                for marker in directory.glob("cancel-ready-*.json"):
+                    ready = json.loads(marker.read_text())
+                    if ready["supervisor"] in delivered:
+                        continue
+                    for signum in signals:
+                        try:
+                            # Both targets belong to this still-owned worker's
+                            # foreground session, never the unrelated sentinel.
+                            assert os.getpgid(ready["supervisor"]) == worker.pid
+                            assert os.getsid(ready["supervisor"]) == worker.pid
+                            if scope == "foreground":
+                                os.killpg(worker.pid, signum)
+                            else:
+                                os.kill(ready["supervisor"], signum)
+                            delivered.add(ready["supervisor"])
+                        except ProcessLookupError:
+                            break
+                assert time.monotonic() < stop, "interrupted controller exceeded its bound"
+                time.sleep(0.005)
+            assert delivered, "cancellation never reached a ready credential operation"
+            # Foreground cancellation can exit bash before Python finishes
+            # cleanup; observe that exact owned supervisor/child set boundedly.
+            records = [json.loads(line) for line in (directory / "lifetimes.jsonl").read_text().splitlines()]
+            owned = {item["pid"] for item in records}
+            owned.update(item["supervisor"] for item in records if item["role"] == "client")
+            stop = time.monotonic() + 2
+            while any(alive(pid) for pid in owned) and time.monotonic() < stop:
+                time.sleep(0.01)
+            assert not any(alive(pid) for pid in owned), "cancellation left an owned process alive"
+        finally:
+            if worker.poll() is None:
+                os.killpg(worker.pid, signal.SIGKILL)
+            worker.wait(timeout=2)
+    return subprocess.CompletedProcess(
+        [str(script), operation], worker.returncode,
+        output_path.read_text(errors="replace"), error_path.read_text(errors="replace"),
+    )
+
 def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
-        script=fixture_operator):
+        script=fixture_operator, interruption=None):
     backup = directory / "backups"
     cleanup_map = backup / "read-fixture-cleanup-pvs.tsv"
     map_before = cleanup_map.read_bytes() if cleanup_map.exists() else None
@@ -479,16 +535,20 @@ def run(directory, operation, *, ok=False, conditional=False, clock_step=200,
         CONFIRM_DELETE_LEGACY_MONGO="delete-seven-legacy-mongo-volumes",
         CONFIRM_ROLLBACK="restore-seven-legacy-databases",
     )
-    result = subprocess.run(
-        ["bash", str(script), operation], cwd=root, env=env,
-        capture_output=True, text=True, timeout=20,
-    )
+    if interruption is None:
+        result = subprocess.run(
+            ["bash", str(script), operation], cwd=root, env=env,
+            capture_output=True, text=True, timeout=20,
+        )
+    else:
+        result = run_interrupted(directory, script, operation, env, interruption)
     assert (result.returncode == 0) == ok, (operation, directory.name, result.stdout, result.stderr)
     calls = [json.loads(line) for line in (directory / "calls.jsonl").read_text().splitlines()]
     assert all((call["resource"], call["name"]) in allowed_deletes
                for call in calls if call["command"] == "delete")
     if not ok:
-        assert f"shared_mongo_operation={operation} status=FAIL" in result.stderr
+        if interruption is None or interruption[0] != "foreground":
+            assert f"shared_mongo_operation={operation} status=FAIL" in result.stderr
         assert f"shared_mongo_operation={operation} status=PASS" not in result.stdout
         assert (directory / "journal.json").read_bytes() == journal_before
         assert not any(call["command"] in ("journal", "create", "apply") for call in calls)
@@ -576,6 +636,100 @@ try:
                             os.kill(item["pid"], signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    # The longer internal read argument makes prompt cancellation observable,
+    # rather than letting the ordinary one-second timeout satisfy these tests.
+    interrupt_operator = root / "interrupt-operator.sh"
+    interrupt_operator.write_text(lifetime_operator.read_text().replace(
+        'fixture_bounded_read "$1" "$2" 1', 'fixture_bounded_read "$1" "$2" 5', 1,
+    ))
+    cancellation_cases = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        for scope in ("supervisor", "foreground"):
+            for operation in ("migrate", "cleanup"):
+                cancellation_cases.append((operation, interrupt_operator, (scope, (signum,))))
+    cancellation_cases.append((
+        "cleanup", interrupt_operator,
+        ("supervisor", (signal.SIGINT, signal.SIGTERM, signal.SIGINT)),
+    ))
+
+    # Signal the supervisor after the real spawn returns but before its caller
+    # assigns the PID. A throwing handler here would strand the new session.
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        spawn_script = root / f"spawn-interrupt-{int(signum)}.sh"
+        hook = '''
+fixture_spawn = subprocess.Popen
+def interrupt_spawn(*args, **kwargs):
+    spawned = fixture_spawn(*args, **kwargs)
+    marker = Path(os.environ["FIXTURE_CASE"]) / f"cancel-ready-{spawned.pid}.json"
+    stop = time.monotonic() + 2
+    while not marker.exists() and time.monotonic() < stop:
+        time.sleep(0.005)
+    if marker.exists():
+        (marker.parent / "injection-reached").write_text("spawn")
+        os.kill(os.getpid(), FIXTURE_SIGNAL)
+    return spawned
+subprocess.Popen = interrupt_spawn
+'''.replace("FIXTURE_SIGNAL", str(int(signum)))
+        spawn_script.write_text(interrupt_operator.read_text().replace(
+            "signal.signal(signal.SIGTERM, remember_cancellation)\n",
+            "signal.signal(signal.SIGTERM, remember_cancellation)\n" + hook, 1,
+        ))
+        cancellation_cases.append(("migrate", spawn_script, None))
+
+    cleanup_script = root / "cleanup-interrupt.sh"
+    cleanup_script.write_text(lifetime_operator.read_text().replace(
+        "                os.killpg(client.pid, signal.SIGKILL)",
+        '                Path(os.environ["FIXTURE_CASE"], "injection-reached").write_text("cleanup")\n'
+        "                os.kill(os.getpid(), signal.SIGINT)\n"
+        "                os.kill(os.getpid(), signal.SIGTERM)\n"
+        "                os.killpg(client.pid, signal.SIGKILL)", 1,
+    ))
+    cancellation_cases.append(("migrate", cleanup_script, None))
+    exception_script = root / "lifecycle-exception.sh"
+    exception_script.write_text(interrupt_operator.read_text().replace(
+        "            output, error = client.communicate(timeout=min(0.1, remaining))",
+        '            marker = Path(os.environ["FIXTURE_CASE"]) / f"cancel-ready-{client.pid}.json"\n'
+        "            if marker.exists():\n"
+        '                (marker.parent / "injection-reached").write_text("exception")\n'
+        '                raise RuntimeError("fixture lifecycle exception")\n'
+        "            output, error = client.communicate(timeout=min(0.1, remaining))", 1,
+    ))
+    cancellation_cases.append(("migrate", exception_script, None))
+
+    for operation, script, interruption in cancellation_cases:
+        target = list(pvs.values())[3]
+        directory = (
+            setup(operation, journal_read="hang-native-notfound") if operation == "migrate"
+            else setup(operation, pv_reads={target: ["hang-native-notfound"]})
+        )
+        records = []
+        try:
+            started = time.monotonic()
+            calls, _ = run(directory, operation, conditional=True, script=script, interruption=interruption)
+            assert time.monotonic() - started < 4, "cancellation fell back to the normal deadline"
+            if interruption is None:
+                assert (directory / "injection-reached").exists()
+            records = [json.loads(line) for line in (directory / "lifetimes.jsonl").read_text().splitlines()]
+            stop = time.monotonic() + 2
+            while any(alive(item["pid"]) for item in records) and time.monotonic() < stop:
+                time.sleep(0.01)
+            assert not any(alive(item["pid"]) for item in records), "cancellation leaked an owned child"
+            assert sentinel.poll() is None
+            assert not any(call["command"] == "journal" for call in calls)
+            if operation == "cleanup":
+                assert sum(call["command"] == "delete" for call in calls) == 12
+        finally:
+            path = directory / "lifetimes.jsonl"
+            if path.exists():
+                records = [json.loads(line) for line in path.read_text().splitlines()]
+            for item in records:
+                try:
+                    if os.getpgid(item["pid"]) == item["pgid"] and os.getsid(item["pid"]) == item["sid"]:
+                        os.kill(item["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    print(f"issue_85_cancellation_contract=PASS cases={len(cancellation_cases)} no_surviving_children=true", flush=True)
 finally:
     if sentinel.poll() is None:
         sentinel.kill()
