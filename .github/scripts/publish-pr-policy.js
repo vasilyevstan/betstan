@@ -1811,6 +1811,7 @@ async function getQualityTransition({
   repo,
   pull,
   serverUrl,
+  supersedingTransitionAt = null,
 }) {
   const context = qualityTransitionContext(pull);
   const statuses = await listCommitStatuses(
@@ -1893,6 +1894,10 @@ async function getQualityTransition({
       ),
     ),
   );
+  const currentTransitionAt = parsed.reduce(
+    (latest, candidate) => Math.max(latest, candidate.transitionAt),
+    supersedingTransitionAt ?? 0,
+  );
   for (const candidate of parsed) {
     const policyRun = policyRuns.get(candidate.policyRunId);
     const relations = Array.isArray(policyRun?.pull_requests)
@@ -1910,6 +1915,10 @@ async function getQualityTransition({
         "quality transition marker does not originate from branch-policy",
       );
     }
+    // Failed lower-cutoff publication proves ordering, never current authority.
+    const historicalFailure =
+      candidate.transitionAt < currentTransitionAt &&
+      ["failure", "cancelled", "timed_out"].includes(policyRun?.conclusion);
     if (
       !policyRun ||
       policyRun.id !== candidate.policyRunId ||
@@ -1919,7 +1928,7 @@ async function getQualityTransition({
       policyRun.repository?.full_name !== `${owner}/${repo}` ||
       policyRun.html_url !== candidate.targetUrl ||
       policyRun.status !== "completed" ||
-      policyRun.conclusion !== "success" ||
+      (policyRun.conclusion !== "success" && !historicalFailure) ||
       relations.length !== 1 ||
       relation.number !== pull.number ||
       relation.head?.sha !== pull.headSha ||
@@ -3824,12 +3833,15 @@ async function shouldCreateQualityTransition({
   hasOpeningSnapshotMismatch,
 }) {
   const transitionAt = transitionTimestampMilliseconds(timestamp);
+  const canSupersede =
+    QUALITY_TRIGGER_ACTIONS.has(action) && action !== "opened";
   const transition = await getQualityTransition({
     github,
     owner,
     repo,
     pull,
     serverUrl,
+    supersedingTransitionAt: canSupersede ? transitionAt : null,
   });
   if (!transition) {
     return (
@@ -3843,7 +3855,7 @@ async function shouldCreateQualityTransition({
       )
     );
   }
-  return action !== "opened" && transition.transitionAt < transitionAt;
+  return canSupersede && transition.transitionAt < transitionAt;
 }
 
 async function bindPendingQualityTransition({
