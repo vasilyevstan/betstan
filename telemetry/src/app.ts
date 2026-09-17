@@ -1,11 +1,16 @@
 import { randomUUID } from "crypto";
 import express, { NextFunction, Request, Response } from "express";
+import { METRICS, MetricName } from "./domain/metrics";
 import { HealthService, ServiceHealth } from "./service/Health";
 import { MetricRecorder, MongoMetricRecorder } from "./service/Recorder";
 import {
   buildMetricSummary,
+  buildHourlyMetricSummary,
+  HourlyMetricSummary,
+  HourlySummaryStore,
   MetricValues,
   MongoSummaryStore,
+  parseHourlyDay,
   SummaryStore,
 } from "./service/Summary";
 
@@ -14,6 +19,7 @@ export interface AppDependencies {
     now(): Date;
   };
   health: HealthService;
+  hourlyStore: HourlySummaryStore;
   processClock: {
     nowMs(): number;
   };
@@ -25,6 +31,7 @@ export interface AppDependencies {
 const defaultDependencies = (): AppDependencies => ({
   clock: { now: () => new Date() },
   health: new HealthService(),
+  hourlyStore: new MongoSummaryStore(),
   processClock: { nowMs: () => Date.now() },
   recorder: new MongoMetricRecorder(),
   summaryStore: new MongoSummaryStore(),
@@ -98,7 +105,10 @@ export const telemetryErrorHandler = (
   res: Response,
   _next: NextFunction
 ) => {
-  if (isBoundedClientBodyError(error)) {
+  if (
+    isBoundedClientBodyError(error)
+    || (error instanceof URIError && Reflect.get(error, "status") === 400)
+  ) {
     return invalidRequest(res);
   }
 
@@ -124,6 +134,12 @@ export const createApp = (
     2,
     () => dependencies.processClock.nowMs()
   );
+  const takeHourlyToken = createTokenBucket(
+    16,
+    2,
+    () => dependencies.processClock.nowMs()
+  );
+  const hourlyInFlight = new Map<string, Promise<HourlyMetricSummary>>();
   let cachedSummary:
     | {
       expiresAt: number;
@@ -217,6 +233,61 @@ export const createApp = (
           .send({ error: "Telemetry temporarily unavailable" });
       }
     }
+  );
+
+  app.get(
+    "/api/telemetry/metrics/:metric/days/:date",
+    rateLimit(takeHourlyToken),
+    (req, res, next) => {
+      const generatedAt = dependencies.clock.now();
+      const { metric, date } = req.params;
+      if (
+        // Reject raw query syntax too: Express can discard keys such as __proto__.
+        req.originalUrl.includes("?")
+        || !METRICS.includes(metric as MetricName)
+        || !parseHourlyDay(date, generatedAt)
+      ) {
+        return invalidRequest(res);
+      }
+
+      // Validate even joiners at UTC midnight; join before testing the ceiling.
+      const key = `${metric}/${date}`;
+      let computation = hourlyInFlight.get(key);
+      if (!computation) {
+        if (hourlyInFlight.size >= 8) {
+          return res
+            .set("Retry-After", "1")
+            .status(429)
+            .send({ error: "Too many requests" });
+        }
+        const reserved = Promise.resolve()
+          .then(() => buildHourlyMetricSummary(
+            generatedAt,
+            metric as MetricName,
+            date,
+            dependencies.hourlyStore
+          ))
+          .finally(() => {
+            if (hourlyInFlight.get(key) === reserved) {
+              hourlyInFlight.delete(key);
+            }
+          });
+        // Reserve synchronously; only actual settlement releases the slot,
+        // never a client abort or a separate HTTP deadline.
+        hourlyInFlight.set(key, reserved);
+        computation = reserved;
+      }
+      return computation.then(
+        (summary) => res.send(summary),
+        () => res
+          .status(503)
+          .send({ error: "Telemetry temporarily unavailable" })
+      ).catch(next);
+    }
+  );
+
+  app.use("/api/telemetry", (_req, res) =>
+    res.status(404).send({ error: "Not found" })
   );
 
   app.use(telemetryErrorHandler);
