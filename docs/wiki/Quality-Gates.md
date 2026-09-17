@@ -121,6 +121,32 @@ be activated solely to demonstrate the upgrade. Corrections and reverts
 retain the same protected review and one-use rules. See
 [[Release Orchestration]].
 
+### Quality-transition recovery
+
+A trusted policy publisher can leave a pending or bound transition before
+its run fails. A genuine, strictly later `edited`, `synchronize`, or
+`reopened` event may establish a fresh transition. A completed older policy
+run with `failure`, `cancelled`, or `timed_out` contributes only historical
+ordering at a strictly lower cutoff, never current quality or approval
+authority. Every marker still passes structural and completed-origin checks
+for publisher identity, workflow, repository, PR head/base, run URL, and
+timestamps; malformed or foreign history is never ignored.
+
+The fresh lineage binds its own exact quality run and can complete only when
+that run succeeds. A delayed old completion cannot satisfy it. A later or
+replayed `opened`, a label event, or a manual refresh cannot create a
+superseding transition. Current or higher-cutoff failed origins,
+non-completed runs, and unknown, neutral, or skipped results remain unusable.
+
+Credential boundaries, trusted status-source checks, and both exact
+head/merge-snapshot targets remain unchanged, as do v3 marker encoding, ledger
+enforcement, revocation tombstones, legacy fail-closed handling, fingerprints,
+one-use receipts, and concurrent snapshot rechecks. Recovery is not a
+provenance bypass. Any rollback must retain both v3 parsing and ledger
+authority; preserving the encoding alone is insufficient. Use a reviewed
+forward correction when that compatibility floor cannot be retained.
+Metadata sequencing remains governed by [[Release Orchestration]].
+
 ### Reserved telemetry identity and inert coverage foundation
 
 The repository reserves the single workflow identity `tests-telemetry` for a
@@ -144,8 +170,8 @@ Alongside the reservation the repository carries an inert coverage descriptor
 and its supporting tooling. The descriptor records eleven packages - Auth,
 Backoffice, Bet, Client, Common, Event, Gamemaster, Moderation, Resulting, and
 Slip, plus Telemetry - a pinned Node runtime, and the same 80% line and 80% branch thresholds
-the current gate applies. The checked-in authorization inventory is empty, so
-the foundation remains inert: the coverage engine is not an active required
+the current gate applies. The coverage-asset authorization inventory is empty,
+so the foundation remains inert: the coverage engine is not an active required
 check, and coverage continues to be enforced by the existing per-package
 coverage gate. The unchanged production validation workflow remains the
 execution boundary; in the ordinary default-equal state, where the engine and
@@ -315,6 +341,15 @@ After deployment:
 - Corrections return to the same logical owner and gate.
 - Release documentation records scope, exclusions, validation, risk, release
   impact, rollback, and remaining work.
+
+Protected-workflow authorizations are separate from coverage-asset
+authorizations. Use requires the matching actual PR, exact workflow blobs,
+branch refs and receipt anchor, within the authorization's validity window.
+The declaration must reach trusted policy through protected review before
+consumption; provisioning alone is not merge or deployment permission.
+Integration and promotion retain their own one-use authority and required
+fresh CI. After both intended uses, remove the declarations while preserving
+consumed receipts and their one-use meaning.
 
 Independently verified immutable facts may be reused after binding them to
 the consuming work unit's root request, exact refs, scope, and complete

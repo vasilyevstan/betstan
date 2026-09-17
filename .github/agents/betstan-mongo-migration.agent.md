@@ -72,10 +72,11 @@ Use:
 Any Kubernetes or API read error means state is unknown and therefore
 `NO_GO`; it is never proof that a journal, lock, PVC, or PV is absent.
 
-Until issue #85 is resolved, independently require a successful topology
-journal read or explicit NotFound immediately before migration, and explicit
-NotFound for every journaled legacy PV after cleanup. Do not accept the
-operator's exit status alone for those two checks.
+Use the operator's fail-closed journal and PV read checks. Migration requires
+validated journal state or NotFound for the exact requested ConfigMap;
+cleanup requires proven absence of every mapped legacy PV within the bounded
+read budget. Unknown reads leave the operation incomplete and preserve its
+private cleanup mapping and journal for the same-identity recovery.
 
 ## Journal and rollback model
 

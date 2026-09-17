@@ -112,6 +112,17 @@ used as public labels.
 
 Metadata is part of the reviewed evidence. It is completed before the release
 critical path rather than repeatedly edited while production work is active.
+Title/body edits can start validation. Avoid metadata changes while the
+publisher evaluates its snapshot, during a data-to-deploy handoff, or inside
+a production-exclusivity window.
+
+Context-label setup reads the PR's labels first. If both informational context
+labels are already present, it performs no GitHub mutation. Otherwise it
+ensures and adds only the missing labels in one PR edit. An initial read
+failure performs no blind mutation and retains the caller's warning or
+strict-failure behavior. This prevents avoidable metadata churn; it does not
+change managed-label authority or replace the fresh-transition recovery
+described in [[Quality Gates]].
 
 ## Quality chain
 
@@ -207,6 +218,48 @@ Before deployment, the release chain verifies:
 - fixed-target data operators whose journal binds the exact preimage, target,
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
+
+**Pending fixed Backoffice cleanup.** The protected live-data chain adds one
+fixed-boundary Backoffice projection cleanup without creating a separate
+production path:
+
+1. `dry-run` performs the existing fixed-reschedule preflight, then the
+   Backoffice cleanup preflight, before the compatibility-backfill and Slip
+   index preflights;
+2. `apply-backfills` completes and verifies the existing fixed reschedule, then
+   runs the Backoffice cleanup in preflight mode only;
+3. `apply-slip-index` first reverifies the fixed reschedule, completes the
+   existing backfill and index work, then runs cleanup preflight, apply, and
+   verify. Cleanup apply is the last fenced database mutation.
+
+Production execution is permitted only through the protected workflow at the
+exact current `master` SHA. Every phase stops if the existing reschedule is not
+safely applied, completed, or resumable; the cleanup cannot skip or replace
+that prerequisite. No production workflow has been dispatched for this
+change.
+
+Mutating phases quiesce the seven writers: Backoffice, Bet, Event, Gamemaster,
+Moderation, Resulting, and Slip. Backoffice quiesces first so its projection
+cannot race the cleanup and restores last. Auth and Client remain served as
+readers, while `/api/backoffice` is expected to return fenced `503` responses
+during mutation. The final phase retains the established write fence and
+database-lock handoff for deployment.
+
+Once `apply-slip-index` has entered maintenance, that safety boundary remains
+in place regardless of how the phase ends. Success transfers it to deployment;
+failure, cancellation, or handoff-evidence failure re-establishes seven-writer
+quiescence and retains the shared database lock instead of restoring the prior
+runtime. Recovery at the same exact source can re-enter and verify an
+already-applied cleanup without expanding its fixed target set. A retained
+hold is a safe unavailable state, not evidence that production execution
+occurred or authority to begin another operation.
+
+New sanitized evidence uses `live-betting-v5` and requires
+`backoffice_pre_september_cleanup_complete` in the final handoff. The verifier
+keeps the literal historical meanings of `live-betting-v1` through `v4` and
+rejects an unknown `v6`; a newer label cannot reinterpret older evidence. The
+cleanup command has no rollback phase, so release rollback continues to use
+the protected baseline, fence, lock, and recovery model described below.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
 exact request and run remain serialized until bounded, reviewed recovery proves
@@ -335,6 +388,23 @@ A rollback requires:
   pending work;
 - post-rollback digest and application validation.
 
+The fixed cleanup adds a separate fail-closed rollback compatibility decision.
+A well-formed authoritative result proving that its journal is absent leaves
+the existing rollback gates in force. A prepared journal blocks rollback and
+requires recovery by its exact source. An applied journal permits only an
+exact rollback target whose Backoffice listener acknowledges valid pre-cutoff
+deliveries before any projection write. Missing required, unreadable,
+malformed, duplicate, or unknown evidence blocks rather than being treated as
+absence.
+
+Ordinary and maintenance-aware rollback independently bind that exact-target
+capability before workload mutation. A Backoffice generation from before the
+listener guard is therefore not restorable after the cleanup is applied: a
+queued or delayed valid pre-cutoff `NEW_EVENT` delivery must not recreate a
+deleted projection. Pending-publication replay-or-drain compatibility remains
+a separate mandatory decision; satisfying either the cleanup or publication
+decision cannot satisfy the other.
+
 Historical pre-Telemetry rollback restores only the nine historical
 application images. During that transition, the retained observer must keep
 serving a well-formed summary, while its intentionally coarse service states
@@ -366,19 +436,19 @@ Mongo maintenance resumes the ingress controller only after exact version,
 compatibility-version, and image verification, before applying the Telemetry
 ingress. This restores admission readiness without thawing application writers;
 deployment failure recovery remains armed until deployment completes. Fenced
-rollback also recognizes the deployment cleanup's exact candidate Auth,
-Backoffice, and Client images over an ordered candidate-prefix/baseline-suffix
-writer rollout. It does not accept arbitrary mixed generations: immutable image
-evidence, writer quiescence, the write fence, Telemetry resource and route
+rollback also recognizes the deployment cleanup's exact candidate Auth and
+Client images over an ordered candidate-prefix/baseline-suffix writer rollout.
+It does not accept arbitrary mixed generations: immutable image evidence,
+seven-writer quiescence, the write fence, Telemetry resource and route
 constraints, and lock ownership remain mandatory. No database restore is added.
 
 When applied-data recovery resumes from that retained hold, each quiesced
 writer may use either its exact failed-deployment candidate image or its own
 checksum-bound pre-deployment baseline image, allowing a partially completed
-sequential rollout to continue safely. Auth, Backoffice, and Client remain on
-their exact candidate images, while released-runtime recovery requires all
-nine candidate images. Baseline provenance, ancestry, quiescence, readiness,
-locks, fences, and every pre-mutation check remain fail-closed.
+sequential rollout to continue safely. Auth and Client remain on their exact
+candidate images, while released-runtime recovery requires all nine candidate
+images. Baseline provenance, ancestry, quiescence, readiness, locks, fences,
+and every pre-mutation check remain fail-closed.
 
 A generation that failed its own deployment is never an accepted rollback
 baseline.

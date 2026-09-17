@@ -137,7 +137,36 @@ const COVERAGE_AUTHORIZATION_FIELDS = [
 
 // Exact workflow authorizations are added only in a separately promoted,
 // short-lived policy change and removed immediately after their intended PR.
-const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);
+const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "node24-production-build-pr-637-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 637,
+    headRef: "fix/actions-node24",
+    baseRef: "dev",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "5393127d0f5ce048781dc48f265acc04ddbf4de0",
+  },
+  {
+    id: "node24-production-build-promotion-636-v1",
+    repository: "vasilyevstan/betstan",
+    headRepository: "vasilyevstan/betstan",
+    workflowPath: ".github/workflows/production-build.yml",
+    trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+    authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+    pullNumber: 636,
+    headRef: "dev",
+    baseRef: "master",
+    issuedAt: "2026-09-17T01:04:52.000Z",
+    expiresAt: "2026-09-18T01:04:52.000Z",
+    receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
+  },
+]);
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON = String.raw`[]`;
 const TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS = Object.freeze(
   JSON.parse(TRUSTED_COVERAGE_ASSET_AUTHORIZATIONS_JSON),
@@ -1782,6 +1811,7 @@ async function getQualityTransition({
   repo,
   pull,
   serverUrl,
+  supersedingTransitionAt = null,
 }) {
   const context = qualityTransitionContext(pull);
   const statuses = await listCommitStatuses(
@@ -1864,6 +1894,10 @@ async function getQualityTransition({
       ),
     ),
   );
+  const currentTransitionAt = parsed.reduce(
+    (latest, candidate) => Math.max(latest, candidate.transitionAt),
+    supersedingTransitionAt ?? 0,
+  );
   for (const candidate of parsed) {
     const policyRun = policyRuns.get(candidate.policyRunId);
     const relations = Array.isArray(policyRun?.pull_requests)
@@ -1881,6 +1915,10 @@ async function getQualityTransition({
         "quality transition marker does not originate from branch-policy",
       );
     }
+    // Failed lower-cutoff publication proves ordering, never current authority.
+    const historicalFailure =
+      candidate.transitionAt < currentTransitionAt &&
+      ["failure", "cancelled", "timed_out"].includes(policyRun?.conclusion);
     if (
       !policyRun ||
       policyRun.id !== candidate.policyRunId ||
@@ -1890,7 +1928,7 @@ async function getQualityTransition({
       policyRun.repository?.full_name !== `${owner}/${repo}` ||
       policyRun.html_url !== candidate.targetUrl ||
       policyRun.status !== "completed" ||
-      policyRun.conclusion !== "success" ||
+      (policyRun.conclusion !== "success" && !historicalFailure) ||
       relations.length !== 1 ||
       relation.number !== pull.number ||
       relation.head?.sha !== pull.headSha ||
@@ -3795,12 +3833,15 @@ async function shouldCreateQualityTransition({
   hasOpeningSnapshotMismatch,
 }) {
   const transitionAt = transitionTimestampMilliseconds(timestamp);
+  const canSupersede =
+    QUALITY_TRIGGER_ACTIONS.has(action) && action !== "opened";
   const transition = await getQualityTransition({
     github,
     owner,
     repo,
     pull,
     serverUrl,
+    supersedingTransitionAt: canSupersede ? transitionAt : null,
   });
   if (!transition) {
     return (
@@ -3814,7 +3855,7 @@ async function shouldCreateQualityTransition({
       )
     );
   }
-  return action !== "opened" && transition.transitionAt < transitionAt;
+  return canSupersede && transition.transitionAt < transitionAt;
 }
 
 async function bindPendingQualityTransition({
