@@ -279,6 +279,16 @@ The merge-safety agent:
 - allows automatic mode only for a `copilot-cli-managed` PR with resolved reviews and no competing production run.
 
 Run dispatch and approval from a clean checkout at exact current `master`.
+Absolute invocation may start in another directory: both entrypoints first
+validate and enter their own script checkout, discover the repository there
+without ambient `GH_REPO` or `CDPATH`, and bind nested validators to that
+checkout and the policy's `github.com` host.
+Inherited Git repository/index/object overrides, an invalid root, a stale
+HEAD, a failed cleanliness read, or a dirty checkout return
+`status=BLOCK classification=technical reason=local-context` before any
+dispatch or approval. This is a technical context failure, not a request for
+personal approval; restore a verified clean current-master checkout and retry
+the exact inspection/recovery path.
 Create every request outside the repository with mode `0600`; include every
 workflow input, including optional values, so the canonical bytes sent to
 GitHub are the bytes whose SHA-256 is recorded. Boolean request values remain
@@ -389,6 +399,14 @@ bound, recover the durable capture instead:
   --resume-captured
 ```
 
+Dispatcher `authority_state=issued` (including a resumed `dispatch=READY`)
+proves bound run metadata, not a materialized job or protected gate. Its
+`job_gate_materialization=UNPROVEN next_action=observe-exact-run` handoff keeps
+that distinction explicit. The caller must observe the captured run's real
+job and expected pending environment before disabling a temporarily enabled
+workflow. Do not redispatch, cancel, rerun, or approve merely to obtain
+materialization; prepared disabled-workflow ownership is unchanged.
+
 The dispatcher creates its private `dispatching` intent and mode-`0600`
 capture before the external mutation. A URL-less result remains ambiguous and
 blocks replacement dispatch; do not infer identity from timestamps, titles,
@@ -471,6 +489,22 @@ on the same exact run and explicitly allowed downstream recovery. Each exact
 run/environment/waiting-job-set fingerprint is receipted once, so a later job
 may reuse the same environment without replaying an earlier gate. An ambiguous
 GitHub POST leaves an `inflight` claim and must not be replayed automatically.
+
+A newly approvable gate remains eligible even when its environment has a wait
+timer. A non-approvable gate is not automatically a personal-approval wait:
+the approver returns `status=WAIT` with exit code `3` only for the exact
+run/operation/environment/waiting-job fingerprint already covered by a
+consumed receipt. The output distinguishes `reason=approved-timer` from
+`reason=approved-provider`, includes remaining timer seconds, and requests a
+bounded recheck after 60 seconds. It emits neither `ELIGIBLE` nor `APPROVED`,
+does not POST again, and does not alter the receipt. Timer values must be
+bounded integer minutes; non-null start timestamps must be valid and
+timezone-aware, and a timer-bound approved wait requires a proven start.
+Missing, malformed, or unproven evidence returns a technical `BLOCK`, not a
+human-consent request. The caller owns subsequent observations and the
+existing fifteen-minute no-progress checkpoint; no wait result authorizes
+redispatch, cancellation, rerun, or workflow enablement.
+
 Immediately after persisting the local `inflight` claim, the approver
 revalidates current master, workflow blob/state, and promotion authority. If
 authority changed, it releases the exact claim to its previous
@@ -492,8 +526,8 @@ The inflight claim records the exact reviewer, approval comment, environment,
 downstream run, operation, and matching GitHub review-history count observed
 before the POST. Reconciliation first requires that exact run and operation,
 then writes a consumed receipt only when the exact approved-review count
-increased. If no review appeared and the same active pending gate still
-exists, it restores the prior issued/consumed state and reports `RETRY_READY`;
+increased. If no review appeared and the same active pending gate is still
+approvable, it restores the prior issued/consumed state and reports `RETRY_READY`;
 submit a new approval only through a later normal `--approve` invocation. If
 neither condition is proven, authority stays inflight and unresolved. A
 missing pending response or terminal run is never treated as approval by

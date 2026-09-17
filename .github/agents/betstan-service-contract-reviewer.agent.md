@@ -39,8 +39,10 @@ Do not rely on an earlier conversation or stale branch.
 
 ## Review method
 
-1. Inventory all deployables: `client`, `auth`, `backoffice`, `bet`, `event`,
-   `gamemaster`, `moderation`, `resulting`, and `slip`, plus `common`.
+1. Inventory deployables and consumers affected by the actual changed
+   contract using the current source and manifests, not a fixed service list.
+   State the scope rationale; a shared contract requires every genuine
+   consumer, including services added after older reviews.
 2. Trace the changed value end to end:
    - request and response DTOs;
    - validation and normalization;

@@ -58,11 +58,12 @@ notes as authority to continue operations.
 ```mermaid
 flowchart LR
     Branch["Focused branch"] --> Docs["Documentation-impact assessment"]
-    Docs --> Candidate["Complete code and documentation candidate"]
+    Docs --> Candidate["Complete code + canonical documentation<br/>under the accepted design"]
     Docs -. affected pages .-> Wiki["Canonical public wiki<br/>edited in the same PR"]
     Wiki --> Candidate
     Candidate --> DevPR["PR to dev"]
-    DevPR --> DevChecks["Architecture, review,<br/>tests, and trusted CI"]
+    DevPR --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
+    Snapshot --> DevChecks["Applicable exact-head reviews,<br/>formal critic, tests, final validation + CI"]
     DevChecks --> Dev["dev"]
     Dev --> Promote["dev to master PR"]
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
@@ -132,6 +133,11 @@ Every change records documentation impact. The public-wiki editor is a
 supporting unit when public impact is plausible or ambiguous, not a universal
 quality gate.
 
+The consolidated design review, single candidate assembly owner, supporting
+test evidence, and direct handoffs follow [[Agents]]. They do not add another
+release or documentation gate. Source acceptance remains separate from
+runtime authorization and the selected procedure's operational checks.
+
 No agent may approve its own implementation, and no agent verdict replaces
 GitHub branch protection or protected-environment approval.
 
@@ -139,13 +145,20 @@ GitHub branch protection or protected-environment approval.
 
 Approval is classified by origin:
 
-- a Copilot CLI-created and CLI-owned pull request may use the bounded
-  no-personal-prompt path after every technical, lineage, review, and
-  exclusivity check passes;
+- Copilot CLI-created and CLI-owned pull requests and protected operations,
+  including downstream workflows whose ownership is proven by the canonical
+  policy, may use the bounded no-personal-prompt path after every technical,
+  lineage, review, and exclusivity check passes;
 - a human-originated pull request or protected operation remains personally
   approved;
 - neither path can skip required tests, exact-SHA provenance, environment
-  controls, rollback readiness, or post-deployment validation.
+  controls, genuine wait timers, first-attempt provenance, serialization,
+  locks/fences, rollback readiness, or post-deployment validation.
+
+Using a CLI command, sharing an actor identity, carrying a label, or appearing
+in a recent-run list does not by itself prove ownership. A technical context
+failure or uncertain authority is a blocker, not a request for personal
+consent and not permission to adopt human-originated work.
 
 The implementation uses private, one-operation authority records outside the
 repository. Their payloads and state transitions are deliberately not
@@ -375,11 +388,33 @@ baseline.
 The conductor monitors the real blocking object: agent result, process,
 GitHub job, protected approval, handoff, or runtime health signal.
 
+Keep one operation owner and one observer for each owned release chain.
+Retain exact owned runs in the existing durable work-unit evidence across
+resume; a recent-run list is discovery, not ownership or a reason to forget a
+known run. Reconcile the exact run and its proven downstream work after each
+job or approval transition, even when the top-level status is unchanged.
+
+- **ACT:** an exact CLI-owned gate is eligible. The conductor immediately
+  routes the authorized orchestrator to the canonical approval path, even if
+  a timer also exists; the timer remains effective.
+- **WAIT:** exact evidence proves an already-approved timer or provider wait.
+  Retain bounded observation without submitting a duplicate approval.
+- **BLOCK:** invalid local context, missing required proof, unresolved
+  authority, source/ownership drift, or unknown evidence prevents safe action.
+  State the technical reason. Human-originated operations retain their own
+  personal approval path.
+
+These are caller actions, not a new authority framework or critic queue.
+Captured dispatch or issued authority is not proof that jobs and the expected
+gate have materialized. Approval submission and an intermediate green job
+are not terminal release evidence.
+
 - A running watcher is notification transport, not proof of progress.
-- A waiting approval is actionable and routed immediately.
+- A waiting state is classified immediately rather than left to a watcher.
 - Approval eligibility comes from the machine-readable protected-operation
   policy and exact durable authority, never an agent's remembered workflow
-  category; an eligible CLI-issued gate is approved in the same checkpoint.
+  category; the conductor routes an eligible CLI-issued gate to the authorized
+  orchestrator in the same checkpoint. The conductor does not submit approval.
 - One missed checkpoint triggers bounded recovery.
 - Two missed checkpoints require a concrete safe action or an explicit
   blocker.
@@ -390,6 +425,14 @@ GitHub job, protected approval, handoff, or runtime health signal.
 - A proven repository-policy false block is corrected narrowly, with focused
   regression coverage, through the normal branch path.
 
+Routine routing, acknowledgements, timers, and obvious scope corrections stay
+with the conductor. Advisory drift or delay blocks only affected dependants;
+it cannot freeze independently authorized eligible approval, safe completion,
+or incident recovery. Required technical proof still gates its operation.
+Use the bounded checkpoints and original correction budgets in [[Agents]],
+not a new review round for every status change. Preserve compatibility and
+spent authority evidence through any reviewed correction or rollback.
+
 ## Documentation impact and public-wiki support
 
 Every change records a documentation-impact assessment. Register the
@@ -398,12 +441,24 @@ change instead records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-immutable critic review and final validation.
+formal critic review of the immutable candidate and final validation. The
+editor returns its owned pages and evidence to the implementation owner
+assembling the candidate; the authorized orchestrator creates its immutable
+snapshot.
 
-After merge, changed repository pages are published byte-for-byte to the
-GitHub wiki and their links are verified. Matching reusable-agent guidance,
-PR/release evidence, and explicit accepted exceptions remain part of the
-handoff when applicable.
+After the exact protected commit merges, the authorized orchestrator, not the
+public-wiki editor, publishes changed canonical pages to the GitHub wiki.
+Bind publication to that merged commit, not a mutable branch or local
+worktree. Verify byte-for-byte equality of `docs/wiki/*.md` with the published
+counterparts, including unchanged pages that need no rewrite. Do not reformat
+content or make wiki-only policy corrections.
+
+Verify published navigation, links, heading anchors, and rendered diagrams.
+Record the source commit, wiki revision, page set, and verification outcome;
+a mismatch or broken publication returns to its owner and is not complete.
+Matching reusable-agent guidance, PR/release evidence, and explicit accepted
+exceptions remain part of the handoff when applicable. Local documentation
+readiness is neither final candidate acceptance nor a claim of publication.
 
 Private runtime identifiers, credentials, approval records, and emergency
 procedures remain outside the public wiki.

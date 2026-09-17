@@ -806,9 +806,10 @@ grep -qF "non-symlink directory" "$error_file"
 [[ ! -e "$dispatch_count_file" ]]
 
 EXCLUDE_RUN_ID=9999 PROSPECTIVE_PROMOTION_PR=224 \
-  STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true \
+  STUB_EXPECT_ACTUAL_MASTER_EXCLUSIVITY=true STUB_RUN_JOBLESS=true \
   run_dispatcher "$request_file" --dispatch >"$output_file"
 grep -qF "authority_state=issued" "$output_file"
+grep -qF "job_gate_materialization=UNPROVEN next_action=observe-exact-run" "$output_file"
 [[ "$(cat "$dispatch_count_file")" = "1" ]]
 [[ "$(stat -c '%a' "$authority_dir" 2>/dev/null || stat -f '%Lp' "$authority_dir")" = "700" ]]
 record="$authority_dir/7001.json"
@@ -837,6 +838,14 @@ if STUB_RUN_ID=7099 \
   exit 1
 fi
 grep -qF "blocked by issued authority 7001" "$error_file"
+[[ "$(cat "$dispatch_count_file")" = "1" ]]
+
+# Issued metadata with no job or pending gate is not materialization. Resume
+# only the captured run; never create a replacement dispatch to make it appear.
+STUB_RUN_ID=7001 STUB_RUN_JOBLESS=true \
+  run_dispatcher "$request_file" --resume-run 7001 >"$output_file"
+grep -qF "dispatch=READY run_id=7001 authority_state=issued" "$output_file"
+grep -qF "job_gate_materialization=UNPROVEN next_action=observe-exact-run" "$output_file"
 [[ "$(cat "$dispatch_count_file")" = "1" ]]
 
 python3 - "$record" <<'PY'
