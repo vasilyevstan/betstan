@@ -74,6 +74,7 @@ enforce_rollback_readiness_contract() {
   local summary_file="$1"
   local readiness_status readiness_mode readiness_phase readiness_operator
   local publication_check pending_count target_supports_replay
+  local cleanup_check cleanup_state target_supports_cleanup_guard
   [[ -f "$summary_file" ]] || oci_die "rollback readiness summary is missing"
   readiness_status="$(live_betting_env_file_value "$summary_file" rollback_readiness || true)"
   [[ "$readiness_status" == "GO" ]] || oci_die "rollback readiness summary did not authorize the rollback"
@@ -115,6 +116,36 @@ enforce_rollback_readiness_contract() {
     [[ "$publication_check" == "drained" && "$pending_count" == "0" ]] ||
       oci_die "rollback readiness did not prove pending Backoffice publications are drained"
   fi
+
+  cleanup_check="$(
+    live_betting_env_file_value "$summary_file" backoffice_cleanup_rollback_check || true
+  )"
+  cleanup_state="$(
+    live_betting_env_file_value "$summary_file" backoffice_cleanup_journal_state || true
+  )"
+  target_supports_cleanup_guard="$(
+    live_betting_env_file_value "$summary_file" target_supports_backoffice_cleanup_guard || true
+  )"
+  [[ "$target_supports_cleanup_guard" == \
+    "$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD" ]] ||
+    oci_die "rollback readiness Backoffice cleanup guard capability does not match exact target source"
+  case "$cleanup_state" in
+    absent)
+      [[ "$cleanup_check" == "not-started" ]] ||
+        oci_die "rollback readiness did not prove the fixed Backoffice cleanup is absent"
+      ;;
+    prepared)
+      oci_die "the prepared fixed Backoffice cleanup requires exact-source recovery before rollback"
+      ;;
+    applied)
+      [[ "$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD" == "true" &&
+        "$cleanup_check" == "compatible-target" ]] ||
+        oci_die "rollback target lacks the fixed Backoffice cleanup replay guard"
+      ;;
+    *)
+      oci_die "rollback readiness did not return an exact fixed Backoffice cleanup journal state"
+      ;;
+  esac
 }
 
 validate_source_run() {
@@ -1383,6 +1414,11 @@ else
     ROLLBACK_WRITE_FENCE_STATUS=required-on-execute
   fi
 fi
+if oci_target_supports_backoffice_pre_september_cleanup_guard "$TARGET_SHA"; then
+  TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD=true
+else
+  TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD=false
+fi
 
 ADMIN_AUTH_EVIDENCE_PATHS=(
   "backoffice/src/middleware/RequireAdmin.ts"
@@ -2141,6 +2177,16 @@ BACKOFFICE_PENDING_PUBLICATION_COUNT="$(
     "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env" \
     backoffice_pending_publication_count
 )"
+BACKOFFICE_CLEANUP_ROLLBACK_CHECK="$(
+  live_betting_env_file_value \
+    "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env" \
+    backoffice_cleanup_rollback_check
+)"
+BACKOFFICE_CLEANUP_JOURNAL_STATE="$(
+  live_betting_env_file_value \
+    "$ROLLBACK_READINESS_OUTPUT_DIR/summary.env" \
+    backoffice_cleanup_journal_state
+)"
 [[ -x "$LIVE_BETTING_READINESS_SCRIPT" ]] || oci_die "live-betting readiness script is not executable: $LIVE_BETTING_READINESS_SCRIPT"
 if ! run_live_betting_readiness \
     preflight-live-gate \
@@ -2165,6 +2211,9 @@ backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
 backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
 backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
 target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+backoffice_cleanup_rollback_check=$BACKOFFICE_CLEANUP_ROLLBACK_CHECK
+backoffice_cleanup_journal_state=$BACKOFFICE_CLEANUP_JOURNAL_STATE
+target_supports_backoffice_cleanup_guard=$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD
 rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 database_restore=disabled
 EOF2
@@ -2342,6 +2391,9 @@ backoffice_access_mode=$BACKOFFICE_ACCESS_MODE
 backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
 backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
 target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+backoffice_cleanup_rollback_check=$BACKOFFICE_CLEANUP_ROLLBACK_CHECK
+backoffice_cleanup_journal_state=$BACKOFFICE_CLEANUP_JOURNAL_STATE
+target_supports_backoffice_cleanup_guard=$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD
 rollback_http_mutation_fence=$ROLLBACK_WRITE_FENCE_STATUS
 completed_services=${completed_services[*]}
 telemetry_state=absent

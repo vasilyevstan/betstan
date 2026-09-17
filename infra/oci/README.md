@@ -324,26 +324,47 @@ concurrent retirement fixture isolation without masking failed suites.
    generation requires the exact successful cache-recovery authority and
    cannot be labeled as a normal GHCR baseline. It then binds that baseline by
    digest, holds the lock, and uploads sanitized hash-bound evidence. Mutating
-   phases first install the ingress write fence and scale the event,
-   gamemaster, moderation, resulting, bet, and slip writers to zero, preventing
-   legacy documents from racing the backfill or index. The backfill-only phase
-   restores the captured replica counts before it completes.
-   The final phase reapplies all six idempotent backfills under that fence,
-   creates or verifies the exact Slip index, and deliberately hands the
-   quiesced runtime plus active database lock to deployment. Public writes and
-   the six writer services remain unavailable between that successful phase
-   and deployment; dispatch the bound deployment immediately.
+   phases first install the ingress write fence and scale all seven writers to
+   zero in the reviewed order: Backoffice, Gamemaster, Event, Slip, Moderation,
+   Resulting, then Bet. This prevents legacy documents and Backoffice
+   projections from racing the protected work. Auth and Client are the only
+   served application readers during mutation; `/api/backoffice` must return
+   the fenced `503` contract. When a non-final phase restores captured writer
+   replicas, it restores Bet, Event, Moderation, Resulting, Slip, Gamemaster,
+   then Backoffice. Fenced recovery also restores Backoffice last.
+
+   The fixed cleanup sequence is phase-specific. `dry-run` performs the fixed
+   reschedule preflight, then the Backoffice cleanup preflight, before the
+   compatibility-backfill and Slip-index preflights. `apply-backfills` runs
+   the existing preflights and backfills, applies and verifies the fixed
+   reschedule, then runs only the cleanup dry-run preflight.
+   `apply-slip-index` reverifies the fixed reschedule, completes the existing
+   backfill and index work, then runs cleanup dry-run preflight, apply, and
+   verify. Cleanup apply is the last fenced database mutation; runtime
+   verification runs with all seven writers quiesced before cleanup verify.
+
+   The final phase reapplies all six compatibility backfills under that fence,
+   creates or verifies the exact Slip index, performs the fixed Backoffice
+   cleanup, and deliberately hands the quiesced runtime plus active database
+   lock to deployment. Public writes and the seven writer services remain
+   unavailable between that successful phase and deployment; dispatch the
+   bound deployment immediately. The evidence contract is `live-betting-v5`
+   and carries both `event_reschedule_complete` and
+   `backoffice_pre_september_cleanup_complete`. Non-final evidence may keep
+   the cleanup value false unless its preflight proves an already-applied
+   journal; the final schema requires it to be true. This describes the
+   protected contract and does not claim that the cleanup has run.
    `oci-production-deploy` rejects the release unless the final evidence proves
-   all six backfills complete, the exact Slip draft index ready, the baseline
-   digest unchanged, the expected database lock active, and all legacy writers
-   still quiesced. It starts the new exact-digest services under the write
-   fence, keeps the transferred lock through protected validation, then
-   releases the lock and fence in order. Any incomplete apply or validation
-   after a successfully validated handoff scales the writers back to zero,
-   restores the fence, and retains or reacquires the same lock for a bounded
-   retry with the same data run. A request that never validates that exact
-   handoff must not enter maintenance, acquire the database lock, or alter
-   writer replicas.
+   all six compatibility backfills complete, the fixed Backoffice cleanup
+   complete, the exact Slip draft index ready, the baseline digest unchanged,
+   the expected database lock active, and all seven writers still quiesced. It
+   starts the new exact-digest services under the write fence, keeps the
+   transferred lock through protected validation, then releases the lock and
+   fence in order. Any incomplete apply or validation after a successfully
+   validated handoff scales the writers back to zero, restores the fence, and
+   retains or reacquires the same lock for a bounded retry with the same data
+   run. A request that never validates that exact handoff must not enter
+   maintenance, acquire the database lock, or alter writer replicas.
 7. `scripts/deploy.sh` creates secrets without logging values, renders exact
    image digests, and deploys Mongo, RabbitMQ, backends, client, and ingress
    sequentially.

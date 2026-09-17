@@ -7,7 +7,8 @@
     "start": "ts-node-dev src/index",
     "dev": "ts-node-dev src/index",
     "test": "jest --watchAll --no-cache",
-    "test:ci": "jest"
+    "test:ci": "jest",
+    "data:cleanup:pre-september-events": "node dist/scripts/cleanupPreSeptemberEvents.js"
   },
   "jest": {
     "preset": "ts-jest",

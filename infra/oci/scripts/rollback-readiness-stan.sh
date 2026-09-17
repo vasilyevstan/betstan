@@ -28,6 +28,7 @@ AUTH_CONTAINER="${AUTH_CONTAINER:-gaming-auth}"
 BACKOFFICE_MONGO_SELECTOR="${BACKOFFICE_MONGO_SELECTOR:-app=gaming-auth-mongo}"
 BACKOFFICE_DB_NAME="${BACKOFFICE_DB_NAME:-gaming_backoffice}"
 BACKOFFICE_EVENT_COLLECTION="${BACKOFFICE_EVENT_COLLECTION:-events}"
+BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT="$SCRIPT_DIR/backoffice-cleanup-journal-classifier.js"
 BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS="${BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS:-13}"
 BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS="${BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS:-5}"
 # Readiness phase. "steady-state" is the only ordinary value and keeps every
@@ -41,9 +42,9 @@ MAINTENANCE_LIVE_IMAGES_FILE="${MAINTENANCE_LIVE_IMAGES_FILE:-}"
 MAINTENANCE_MAX_QUEUE_READY="${MAINTENANCE_MAX_QUEUE_READY:-80}"
 MAINTENANCE_MAX_QUEUE_UNACK="${MAINTENANCE_MAX_QUEUE_UNACK:-80}"
 ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
-# The six live-data writer Deployments the maintenance handoff quiesces. Every
+# The seven live-data writer Deployments the maintenance handoff quiesces. Every
 # other Deployment must still be fully ready behind the fence.
-MAINTENANCE_QUIESCED_SERVICES=(bet event gamemaster moderation resulting slip)
+MAINTENANCE_QUIESCED_SERVICES=(backoffice bet event gamemaster moderation resulting slip)
 API_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
@@ -56,6 +57,7 @@ API_CONTRACTS=(
 # Behind the maintenance fence the quiesced application paths must answer 503
 # and the still-served paths must answer their ordinary contract.
 MAINTENANCE_FENCED_CONTRACTS=(
+  "/api/backoffice|503"
   "/api/event|503"
   "/api/slip|503"
   "/api/bet|503"
@@ -64,7 +66,6 @@ MAINTENANCE_FENCED_CONTRACTS=(
 MAINTENANCE_SERVED_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
-  "/api/backoffice|backoffice"
 )
 
 prepare_private_dir() {
@@ -400,6 +401,9 @@ TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS="unknown"
 BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="unknown"
 BACKOFFICE_PENDING_PUBLICATION_COUNT="unknown"
 TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="unknown"
+BACKOFFICE_CLEANUP_ROLLBACK_CHECK="unknown"
+BACKOFFICE_CLEANUP_JOURNAL_STATE="unknown"
+TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="unknown"
 
 for service in "${ROLLBACK_SERVICES[@]}"; do
   deployment="gaming-${service}-depl"
@@ -560,6 +564,76 @@ PY
 fi
 
 if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+  [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  if oci_target_supports_backoffice_pre_september_cleanup_guard \
+      "$TARGET_SHA"; then
+    TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="true"
+  else
+    TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD="false"
+  fi
+
+  backoffice_mongo_pod="$(
+    kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$BACKOFFICE_MONGO_SELECTOR" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  )"
+  if [[ -z "$backoffice_mongo_pod" ]]; then
+    BACKOFFICE_CLEANUP_ROLLBACK_CHECK="missing-mongo"
+    failures_file_append \
+      "Backoffice cleanup rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
+  elif [[ ! -f "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" ||
+    -L "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" ]]; then
+    BACKOFFICE_CLEANUP_ROLLBACK_CHECK="missing-classifier"
+    failures_file_append \
+      "Backoffice cleanup rollback compatibility: the trusted fixed-journal classifier is unavailable"
+  else
+    backoffice_cleanup_query="$(<"$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT")"
+    if ! cleanup_state_output="$(
+      kubectl exec -n "$OCI_K8S_NAMESPACE" "$backoffice_mongo_pod" -- \
+        mongosh --quiet "mongodb://localhost:27017/${BACKOFFICE_DB_NAME}" \
+        --eval "$backoffice_cleanup_query" 2>/dev/null
+    )"; then
+      BACKOFFICE_CLEANUP_ROLLBACK_CHECK="query-failed"
+      failures_file_append \
+        "Backoffice cleanup rollback compatibility: unable to inspect the fixed cleanup journal"
+    else
+      cleanup_state_output="${cleanup_state_output%$'\r'}"
+      case "$cleanup_state_output" in
+        absent | prepared | applied | invalid)
+          BACKOFFICE_CLEANUP_JOURNAL_STATE="$cleanup_state_output"
+          ;;
+        *)
+          BACKOFFICE_CLEANUP_JOURNAL_STATE="invalid-output"
+          ;;
+      esac
+      case "$BACKOFFICE_CLEANUP_JOURNAL_STATE" in
+        absent)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="not-started"
+          ;;
+        prepared)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="recovery-required"
+          failures_file_append \
+            "Backoffice cleanup rollback compatibility: the prepared fixed cleanup requires exact-source recovery before rollback"
+          ;;
+        applied)
+          if [[ "$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD" == "true" ]]; then
+            BACKOFFICE_CLEANUP_ROLLBACK_CHECK="compatible-target"
+          else
+            BACKOFFICE_CLEANUP_ROLLBACK_CHECK="incompatible-target"
+            failures_file_append \
+              "Backoffice cleanup rollback compatibility: target at $TARGET_SHA lacks the fixed pre-cutoff replay guard required by the applied cleanup"
+          fi
+          ;;
+        *)
+          BACKOFFICE_CLEANUP_ROLLBACK_CHECK="invalid-journal"
+          failures_file_append \
+            "Backoffice cleanup rollback compatibility: fixed cleanup journal state is invalid"
+          ;;
+      esac
+    fi
+  fi
+fi
+
+if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
   [[ "$BACKOFFICE_DB_NAME" =~ ^[A-Za-z0-9_-]+$ ]] &&
   [[ "$BACKOFFICE_EVENT_COLLECTION" =~ ^[A-Za-z0-9_-]+$ ]] &&
   [[ "$BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] &&
@@ -570,10 +644,6 @@ if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
     BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="compatible-target"
   else
     TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY="false"
-    backoffice_mongo_pod="$(
-      kubectl get pod -n "$OCI_K8S_NAMESPACE" -l "$BACKOFFICE_MONGO_SELECTOR" \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
-    )"
     if [[ -z "$backoffice_mongo_pod" ]]; then
       BACKOFFICE_PUBLICATION_ROLLBACK_CHECK="missing-mongo"
       failures_file_append "Backoffice publication rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
@@ -730,6 +800,9 @@ target_supports_normalized_identifiers=$TARGET_SUPPORTS_NORMALIZED_IDENTIFIERS
 backoffice_publication_rollback_check=$BACKOFFICE_PUBLICATION_ROLLBACK_CHECK
 backoffice_pending_publication_count=$BACKOFFICE_PENDING_PUBLICATION_COUNT
 target_supports_backoffice_publication_replay=$TARGET_SUPPORTS_BACKOFFICE_PUBLICATION_REPLAY
+backoffice_cleanup_rollback_check=$BACKOFFICE_CLEANUP_ROLLBACK_CHECK
+backoffice_cleanup_journal_state=$BACKOFFICE_CLEANUP_JOURNAL_STATE
+target_supports_backoffice_cleanup_guard=$TARGET_SUPPORTS_BACKOFFICE_CLEANUP_GUARD
 rollback_operator=
 EOF
 

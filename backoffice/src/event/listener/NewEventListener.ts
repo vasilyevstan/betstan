@@ -6,6 +6,7 @@ import {
   QueueNames,
 } from "@betstan/common";
 import { Event } from "../../model/Event";
+import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";
 
 class NewEventListener extends AListener<INewEventEvent> {
   serviceName: string = "backoffice_new_event";
@@ -16,6 +17,11 @@ class NewEventListener extends AListener<INewEventEvent> {
 
     if (event.sender === this.serviceName) {
       // ignoring selfinflicted message
+      this.channel.ack(msg);
+      return;
+    }
+
+    if (isBeforePreSeptemberCleanupCutoff(data.time)) {
       this.channel.ack(msg);
       return;
     }

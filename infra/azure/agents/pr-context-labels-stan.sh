@@ -59,35 +59,48 @@ ensure_label() {
   fi
 }
 
-ensure_label \
-  "$session_label" \
-  "5319E7" \
-  "Informational public-safe development-session origin"
-ensure_label \
-  "$feature_label" \
-  "1D76DB" \
-  "Informational product or engineering feature grouping"
-
-if ! gh pr edit "$PR_NUMBER" \
-    --repo "$REPO" \
-    --add-label "$session_label" \
-    --add-label "$feature_label" >/dev/null 2>&1; then
-  warn "could not apply informational context labels to PR #$PR_NUMBER"
-  had_failure=1
-fi
-
-actual_labels="$(
-  gh pr view "$PR_NUMBER" \
-    --repo "$REPO" \
-    --json labels \
-    --jq '.labels[].name' 2>/dev/null || true
-)"
-for expected_label in "$session_label" "$feature_label"; do
-  if ! grep -Fqx "$expected_label" <<<"$actual_labels"; then
-    warn "PR #$PR_NUMBER does not currently carry $expected_label"
-    had_failure=1
+read_labels() {
+  if actual_labels="$(
+    gh pr view "$PR_NUMBER" \
+      --repo "$REPO" \
+      --json labels \
+      --jq '.labels[].name' 2>/dev/null
+  )"; then
+    return 0
   fi
-done
+  warn "could not read informational context labels for PR #$PR_NUMBER"
+  had_failure=1
+  return 1
+}
+
+if read_labels; then
+  label_args=()
+  if ! grep -Fqx "$session_label" <<<"$actual_labels"; then
+    ensure_label "$session_label" "5319E7" \
+      "Informational public-safe development-session origin"
+    label_args+=(--add-label "$session_label")
+  fi
+  if ! grep -Fqx "$feature_label" <<<"$actual_labels"; then
+    ensure_label "$feature_label" "1D76DB" \
+      "Informational product or engineering feature grouping"
+    label_args+=(--add-label "$feature_label")
+  fi
+  if (( ${#label_args[@]} )); then
+    if ! gh pr edit "$PR_NUMBER" --repo "$REPO" \
+        "${label_args[@]}" >/dev/null 2>&1; then
+      warn "could not apply informational context labels to PR #$PR_NUMBER"
+      had_failure=1
+    fi
+    if read_labels; then
+      for expected_label in "$session_label" "$feature_label"; do
+        if ! grep -Fqx "$expected_label" <<<"$actual_labels"; then
+          warn "PR #$PR_NUMBER does not currently carry $expected_label"
+          had_failure=1
+        fi
+      done
+    fi
+  fi
+fi
 
 if (( had_failure )); then
   printf '%s\n' \

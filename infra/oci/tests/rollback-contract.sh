@@ -8,6 +8,7 @@ PARTIAL_AUTHORITY_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-partial-recove
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
+CLEANUP_CLASSIFIER_SCRIPT="$ROOT_DIR/infra/oci/scripts/backoffice-cleanup-journal-classifier.js"
 WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-rollback.yml"
 DEPLOY_WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.rollback-contract-workdirs"
@@ -599,6 +600,29 @@ EOF_PUBLICATION_SERVICE
     [[ "${STUB_TARGET_HAS_PUBLICATION_REPLAY:-0}" == "1" ]] || exit 1
     printf '%s\n' 'await publicationService.start()'
     ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/event/listener/NewEventListener.ts")
+    [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'EOF_CLEANUP_LISTENER'
+import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";
+if (isBeforePreSeptemberCleanupCutoff(data.time)) {
+  this.channel.ack(msg);
+  return;
+}
+await Event.updateOne(
+EOF_CLEANUP_LISTENER
+    ;;
+  "show ${STUB_TARGET_SHA}:backoffice/src/event/preSeptemberCleanupBoundary.ts")
+    [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'EOF_CLEANUP_BOUNDARY'
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF =
+  "2026-09-01T00:00:00Z" as const;
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF_MS =
+  Date.UTC(2026, 8, 1, 0, 0, 0, 0);
+export const isBeforePreSeptemberCleanupCutoff = (
+const parsed = parseExplicitZoneTimestamp(value);
+return parsed !== null && parsed < PRE_SEPTEMBER_CLEANUP_CUTOFF_MS;
+EOF_CLEANUP_BOUNDARY
+    ;;
   "show ${STUB_TARGET_SHA}:auth/src/route/LogIn.ts")
     case "${STUB_TARGET_LOGIN_MODE:-current}" in
       current)
@@ -841,6 +865,205 @@ case "${1:-} ${2:-}" in
 esac
 STUB
 chmod +x "$BIN_DIR/gh"
+
+cat >"$BIN_DIR/classify-cleanup-journal" <<'NODE'
+#!/usr/bin/env node
+"use strict";
+
+const { createHash } = require("crypto");
+
+const classifierPath = process.argv[2];
+const scenario = process.argv[3];
+const { classifyBackofficeCleanupJournal } = require(classifierPath);
+
+const compareIdentities = (left, right) =>
+  left.eventId < right.eventId
+    ? -1
+    : left.eventId > right.eventId
+      ? 1
+      : left.time < right.time
+        ? -1
+        : left.time > right.time
+          ? 1
+          : 0;
+
+const digest = (identities) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify(
+        [...identities]
+          .sort(compareIdentities)
+          .map(({ eventId, time }) => ({ eventId, time })),
+      ),
+    )
+    .digest("hex");
+
+const makeJournal = (state) => {
+  const identities = [
+    {
+      eventId: "cleanup-event-a",
+      time: "2026-08-30T19:45:00.000Z",
+    },
+    {
+      eventId: "cleanup-event-b",
+      time: "2026-08-31T23:59:59.999Z",
+    },
+  ];
+  const journal = {
+    _id: "backoffice-events-before:2026-09-01T00:00:00Z",
+    candidateCount: identities.length,
+    createdAt: new Date("2026-09-01T00:05:00.000Z"),
+    cutoff: "2026-09-01T00:00:00Z",
+    digest: digest(identities),
+    identities,
+    operation: "delete-backoffice-events-before-cutoff",
+    schemaVersion: "backoffice-pre-september-events-cleanup-v1",
+    sourceSha: "a".repeat(40),
+    state,
+  };
+  if (state === "applied") {
+    journal.appliedAt = new Date("2026-09-01T00:06:00.000Z");
+  }
+  return journal;
+};
+
+const refreshIdentityEvidence = (journal) => {
+  journal.candidateCount = journal.identities.length;
+  journal.digest = digest(journal.identities);
+};
+
+let rows;
+switch (scenario) {
+  case "absent":
+    rows = [];
+    break;
+  case "valid-prepared":
+    rows = [makeJournal("prepared")];
+    break;
+  case "valid-applied":
+    rows = [makeJournal("applied")];
+    break;
+  case "missing-created-at": {
+    const journal = makeJournal("applied");
+    delete journal.createdAt;
+    rows = [journal];
+    break;
+  }
+  case "invalid-created-at": {
+    const journal = makeJournal("applied");
+    journal.createdAt = new Date(Number.NaN);
+    rows = [journal];
+    break;
+  }
+  case "missing-applied-at": {
+    const journal = makeJournal("applied");
+    delete journal.appliedAt;
+    rows = [journal];
+    break;
+  }
+  case "invalid-applied-at": {
+    const journal = makeJournal("applied");
+    journal.appliedAt = new Date(Number.NaN);
+    rows = [journal];
+    break;
+  }
+  case "applied-before-created-at": {
+    const journal = makeJournal("applied");
+    journal.appliedAt = new Date("2026-09-01T00:04:59.999Z");
+    rows = [journal];
+    break;
+  }
+  case "prepared-with-applied-at": {
+    const journal = makeJournal("prepared");
+    journal.appliedAt = new Date("2026-09-01T00:06:00.000Z");
+    rows = [journal];
+    break;
+  }
+  case "extra-top-level-field": {
+    const journal = makeJournal("applied");
+    journal.unreviewed = true;
+    rows = [journal];
+    break;
+  }
+  case "extra-identity-field": {
+    const journal = makeJournal("applied");
+    journal.identities[0].name = "must-not-be-accepted";
+    rows = [journal];
+    break;
+  }
+  case "missing-identity-field": {
+    const journal = makeJournal("applied");
+    delete journal.identities[0].time;
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "duplicate-identities": {
+    const journal = makeJournal("applied");
+    journal.identities = [
+      { ...journal.identities[0] },
+      { ...journal.identities[0] },
+    ];
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "out-of-order-identities": {
+    const journal = makeJournal("applied");
+    journal.identities.reverse();
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "invalid-timestamp": {
+    const journal = makeJournal("applied");
+    journal.identities[0].time = "2026-08-30T19:45:00";
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "non-pre-cutoff-timestamp": {
+    const journal = makeJournal("applied");
+    journal.identities[1].time = "2026-09-01T00:00:00.000Z";
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "digest-mismatch": {
+    const journal = makeJournal("applied");
+    journal.digest = "f".repeat(64);
+    rows = [journal];
+    break;
+  }
+  case "blank-event-id": {
+    const journal = makeJournal("applied");
+    journal.identities[0].eventId = "   ";
+    refreshIdentityEvidence(journal);
+    rows = [journal];
+    break;
+  }
+  case "candidate-count-mismatch": {
+    const journal = makeJournal("applied");
+    journal.candidateCount += 1;
+    rows = [journal];
+    break;
+  }
+  case "fixed-field-mismatch": {
+    const journal = makeJournal("applied");
+    journal.sourceSha = "not-a-source-sha";
+    rows = [journal];
+    break;
+  }
+  case "duplicate-journals":
+    rows = [makeJournal("applied"), makeJournal("applied")];
+    break;
+  default:
+    throw new Error(`unknown cleanup journal fixture: ${scenario}`);
+}
+
+process.stdout.write(`${classifyBackofficeCleanupJournal(rows)}\n`);
+NODE
+chmod +x "$BIN_DIR/classify-cleanup-journal"
 
 cat >"$BIN_DIR/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -1338,6 +1561,30 @@ EOF_QUEUES
       printf '{"mongoOk":true,"activeMatches":%s,"overdueUnstartedEvents":%s,"simulationQuarantines":%s,"submittedLiveSlips":%s,"draftLiveSlips":%s}\n' \
         "${STUB_ACTIVE_MATCHES:-0}" "${STUB_OVERDUE_UNSTARTED_EVENTS:-0}" "${STUB_SIMULATION_QUARANTINES:-0}" \
         "${STUB_SUBMITTED_LIVE_SLIPS:-0}" "${STUB_DRAFT_LIVE_SLIPS:-0}"
+    elif [[ "$*" == *"preseptembereventcleanupoperations"* ]]; then
+      [[ "${STUB_BACKOFFICE_CLEANUP_QUERY_FAIL:-0}" != "1" ]] || exit 1
+      cleanup_eval=""
+      take_eval=false
+      for argument in "$@"; do
+        if [[ "$take_eval" == "true" ]]; then
+          cleanup_eval="$argument"
+          break
+        fi
+        if [[ "$argument" == "--eval" ]]; then
+          take_eval=true
+        fi
+      done
+      [[ -n "$cleanup_eval" ]] || {
+        printf 'cleanup classifier eval argument is missing\n' >&2
+        exit 1
+      }
+      [[ "$cleanup_eval" == "$(<"$STUB_BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT")" ]] || {
+        printf 'cleanup classifier does not match the checked-in source\n' >&2
+        exit 1
+      }
+      node "$STUB_BACKOFFICE_CLEANUP_FIXTURE_RUNNER" \
+        "$STUB_BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" \
+        "${STUB_BACKOFFICE_CLEANUP_SCENARIO:-absent}"
     elif [[ "$*" == *"mongosh --quiet mongodb://localhost:27017/gaming_backoffice"* ]]; then
       [[ "${STUB_BACKOFFICE_QUERY_FAIL:-0}" != "1" ]] || exit 1
       printf '%s\n' \
@@ -1367,6 +1614,18 @@ EOF_QUEUES
 image=$image
 revision=8
 EOF_STATE
+    if [[ "$service" == "backoffice" &&
+      -n "${STUB_PRE_CUTOFF_REDELIVERY_FILE:-}" &&
+      -f "$STUB_PRE_CUTOFF_REDELIVERY_FILE" ]]; then
+      if [[ "${STUB_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]]; then
+        printf 'ack-skipped\n' \
+          >"${STUB_PRE_CUTOFF_REDELIVERY_FILE}.result"
+      else
+        mv \
+          "$STUB_PRE_CUTOFF_REDELIVERY_FILE" \
+          "${STUB_PRE_CUTOFF_REDELIVERY_FILE}.processed"
+      fi
+    fi
     printf '%s\n' "$service" >>"$STUB_KUBECTL_LOG"
     ;;
   rollout)
@@ -1807,6 +2066,8 @@ common_env=(
   "OCI_RUNTIME_MODE=k3s"
   "STUB_DEPLOY_RABBITMQ_BASELINE_FIXTURE=$DEPLOY_RABBITMQ_BASELINE_FIXTURE"
   "STUB_BACKOFFICE_MODE_AFTER_ROLLBACK=protected"
+  "STUB_BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT=$CLEANUP_CLASSIFIER_SCRIPT"
+  "STUB_BACKOFFICE_CLEANUP_FIXTURE_RUNNER=$BIN_DIR/classify-cleanup-journal"
   "LIVE_BETTING_READINESS_SCRIPT=$REAL_LIVE_READINESS_SCRIPT"
   "ROLLBACK_READINESS_SCRIPT=$READINESS_SCRIPT"
   "ROLLBACK_MUTATION_FENCE_SCRIPT=$BIN_DIR/rollback-mutation-fence-stub.sh"
@@ -1905,6 +2166,47 @@ ARGV.each do |file|
 end
 puts 'oci_rollback_yaml=PASS'
 RUBY
+
+cleanup_invalid_scenarios=(
+  missing-created-at
+  invalid-created-at
+  missing-applied-at
+  invalid-applied-at
+  applied-before-created-at
+  prepared-with-applied-at
+  extra-top-level-field
+  extra-identity-field
+  missing-identity-field
+  duplicate-identities
+  out-of-order-identities
+  invalid-timestamp
+  non-pre-cutoff-timestamp
+  digest-mismatch
+  blank-event-id
+  candidate-count-mismatch
+  fixed-field-mismatch
+  duplicate-journals
+)
+for cleanup_scenario in absent valid-prepared valid-applied; do
+  expected_cleanup_state="${cleanup_scenario#valid-}"
+  actual_cleanup_state="$(
+    node "$BIN_DIR/classify-cleanup-journal" \
+      "$CLEANUP_CLASSIFIER_SCRIPT" \
+      "$cleanup_scenario"
+  )"
+  [[ "$actual_cleanup_state" == "$expected_cleanup_state" ]] ||
+    fail "cleanup classifier rejected authoritative $cleanup_scenario evidence"
+done
+for cleanup_scenario in "${cleanup_invalid_scenarios[@]}"; do
+  actual_cleanup_state="$(
+    node "$BIN_DIR/classify-cleanup-journal" \
+      "$CLEANUP_CLASSIFIER_SCRIPT" \
+      "$cleanup_scenario"
+  )"
+  [[ "$actual_cleanup_state" == "invalid" ]] ||
+    fail "cleanup classifier accepted malformed $cleanup_scenario evidence"
+done
+
 assert_contains "$WORKFLOW_FILE" \
   'OCI_INFRASTRUCTURE_PROVENANCE_FILE: artifacts/infrastructure/provenance.env'
 assert_contains "$WORKFLOW_FILE" \
@@ -2311,8 +2613,89 @@ assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" '
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_publication_rollback_check=drained'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_pending_publication_count=0'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_publication_replay=false'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_cleanup_rollback_check=not-started'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'backoffice_cleanup_journal_state=absent'
+assert_contains "$WORK_DIR/oci-auth-compatible/rollback-readiness/summary.env" 'target_supports_backoffice_cleanup_guard=false'
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" "infrastructure_run_id=$INFRASTRUCTURE_RUN_ID"
 assert_contains "$WORK_DIR/oci-auth-compatible/rollback-summary.env" 'admin_auth_rollback_check=persisted-admin-evidence'
+
+cleanup_redelivery="$WORK_DIR/queued-pre-cutoff-redelivery"
+printf 'queued\n' >"$cleanup_redelivery"
+cleanup_incompatible_output="$WORK_DIR/oci-backoffice-cleanup-applied-incompatible"
+if run_script "$cleanup_incompatible_output" \
+    STUB_BACKOFFICE_CLEANUP_SCENARIO=valid-applied \
+    STUB_PRE_CUTOFF_REDELIVERY_FILE="$cleanup_redelivery" \
+    ROLLBACK_MODE=execute >"$cleanup_incompatible_output.out" 2>&1; then
+  fail 'OCI rollback accepted an incompatible listener after cleanup apply'
+fi
+assert_contains "$cleanup_incompatible_output.out" \
+  'OCI rollback readiness rejected the rollback'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=incompatible-target'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_journal_state=applied'
+assert_contains "$cleanup_incompatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=false'
+[[ -f "$cleanup_redelivery" &&
+   ! -e "${cleanup_redelivery}.processed" &&
+   ! -e "${cleanup_redelivery}.result" ]] ||
+  fail 'incompatible rollback processed queued pre-cutoff redelivery'
+[[ ! -s "$STATE_DIR/oci-backoffice-cleanup-applied-incompatible/kubectl.log" ]] ||
+  fail 'incompatible cleanup rollback mutated an application image'
+
+run_expect_failure oci-backoffice-cleanup-prepared \
+  STUB_TARGET_HAS_CLEANUP_GUARD=1 \
+  STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+  STUB_BACKOFFICE_CLEANUP_SCENARIO=valid-prepared \
+  ROLLBACK_MODE=dry-run
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-prepared/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=recovery-required'
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-prepared/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=true'
+
+run_expect_failure oci-backoffice-cleanup-query-failed \
+  STUB_BACKOFFICE_CLEANUP_QUERY_FAIL=1 \
+  ROLLBACK_MODE=dry-run
+assert_contains \
+  "$WORK_DIR/oci-backoffice-cleanup-query-failed/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=query-failed'
+
+for cleanup_scenario in "${cleanup_invalid_scenarios[@]}"; do
+  cleanup_invalid_output="$WORK_DIR/oci-backoffice-cleanup-invalid-$cleanup_scenario"
+  if run_script "$cleanup_invalid_output" \
+      STUB_TARGET_HAS_CLEANUP_GUARD=1 \
+      STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+      STUB_BACKOFFICE_CLEANUP_SCENARIO="$cleanup_scenario" \
+      ROLLBACK_MODE=execute >"$cleanup_invalid_output.out" 2>&1; then
+    fail "OCI rollback accepted malformed $cleanup_scenario cleanup evidence"
+  fi
+  assert_contains "$cleanup_invalid_output.out" \
+    'OCI rollback readiness rejected the rollback'
+  assert_contains "$cleanup_invalid_output/rollback-readiness/summary.env" \
+    'backoffice_cleanup_rollback_check=invalid-journal'
+  assert_contains "$cleanup_invalid_output/rollback-readiness/summary.env" \
+    'backoffice_cleanup_journal_state=invalid'
+  [[ ! -s "$STATE_DIR/oci-backoffice-cleanup-invalid-$cleanup_scenario/kubectl.log" ]] ||
+    fail "malformed $cleanup_scenario cleanup evidence reached image mutation"
+done
+
+cleanup_compatible_output="$WORK_DIR/oci-backoffice-cleanup-applied-compatible"
+if ! run_script "$cleanup_compatible_output" \
+    STUB_TARGET_HAS_CLEANUP_GUARD=1 \
+    STUB_TARGET_HAS_PUBLICATION_REPLAY=1 \
+    STUB_BACKOFFICE_CLEANUP_SCENARIO=valid-applied \
+    ROLLBACK_MODE=dry-run >"$cleanup_compatible_output.out" 2>&1; then
+  cat "$cleanup_compatible_output.out" >&2
+  fail 'OCI rollback rejected a guard-compatible applied cleanup target'
+fi
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_rollback_check=compatible-target'
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'backoffice_cleanup_journal_state=applied'
+assert_contains "$cleanup_compatible_output/rollback-readiness/summary.env" \
+  'target_supports_backoffice_cleanup_guard=true'
 
 run_expect_failure oci-backoffice-publication-pending \
   STUB_BACKOFFICE_PENDING_PUBLICATION_COUNT=2 ROLLBACK_MODE=dry-run

@@ -164,6 +164,64 @@ command -v kubectl >/dev/null 2>&1 || fail "kubectl is required"
 while IFS= read -r script; do
   bash -n "$script"
 done < <(find "$OCI_DIR" -type f -name '*.sh' | sort)
+
+maintenance_script="$OCI_DIR/scripts/live-data-maintenance-stan.sh"
+rollback_readiness_script="$OCI_DIR/scripts/rollback-readiness-stan.sh"
+fenced_recovery_script="$OCI_DIR/scripts/recover-fenced-rollback-stan.sh"
+deploy_script="$OCI_DIR/scripts/deploy.sh"
+data_runner="$OCI_DIR/scripts/live-betting-data-rollout-stan.sh"
+data_verifier="$OCI_DIR/scripts/verify-live-betting-data-evidence-stan.sh"
+
+grep -Fqx \
+  'writer_services=(backoffice bet event moderation resulting slip gamemaster)' \
+  "$maintenance_script" ||
+  fail "live-data maintenance writer set is not the exact seven services"
+grep -Fqx \
+  'quiesce_order=(backoffice gamemaster event slip moderation resulting bet)' \
+  "$maintenance_script" ||
+  fail "live-data maintenance does not quiesce Backoffice first"
+grep -Fqx \
+  'restore_order=(bet event moderation resulting slip gamemaster backoffice)' \
+  "$maintenance_script" ||
+  fail "live-data maintenance does not restore Backoffice last"
+grep -Fqx \
+  'MAINTENANCE_QUIESCED_SERVICES=(backoffice bet event gamemaster moderation resulting slip)' \
+  "$rollback_readiness_script" ||
+  fail "rollback readiness does not classify the exact seven quiesced writers"
+grep -Fqx '  "/api/backoffice|503"' "$rollback_readiness_script" ||
+  fail "rollback readiness does not require the fenced Backoffice contract"
+grep -Fqx \
+  'QUIESCED_SERVICES=(backoffice bet event gamemaster moderation resulting slip)' \
+  "$fenced_recovery_script" ||
+  fail "fenced recovery does not classify the exact seven quiesced writers"
+grep -Fqx \
+  'RESTORE_ORDER=(auth bet event moderation resulting slip client gamemaster backoffice)' \
+  "$fenced_recovery_script" ||
+  fail "fenced recovery does not restore Backoffice last"
+grep -Fq 'for service in auth client; do' "$deploy_script" ||
+  fail "deploy failure cleanup does not restrict runtime restoration to readers"
+
+for literal in \
+  'schema_version=live-betting-v5' \
+  'backoffice_pre_september_cleanup_complete' \
+  'backoffice-events-before:2026-09-01T00:00:00Z' \
+  'backoffice-pre-september-events-cleanup-v1' \
+  'DELETE_BACKOFFICE_EVENTS_BEFORE:2026-09-01T00:00:00Z' \
+  'backoffice-pre-september-cleanup.json'; do
+  grep -Fq "$literal" "$data_runner" ||
+    fail "live-data runner is missing cleanup evidence contract: $literal"
+done
+for literal in \
+  'elif schema_version == "live-betting-v4":' \
+  'elif schema_version == "live-betting-v5":' \
+  'backoffice_pre_september_cleanup_complete' \
+  'reports/preflight-backoffice-pre-september-cleanup.json' \
+  'reports/apply-backoffice-pre-september-cleanup.json' \
+  'reports/verify-backoffice-pre-september-cleanup.json'; do
+  grep -Fq "$literal" "$data_verifier" ||
+    fail "live-data verifier is missing generation-safe cleanup contract: $literal"
+done
+
 PYTHONPYCACHEPREFIX="$WORK_DIR/pycache" \
   python3 -m py_compile "$OCI_DIR/agents/health-contract.py"
 node --check "$OCI_DIR/agents/playwright.config.js"
@@ -519,7 +577,7 @@ for self_blocker_contract in \
     'unresolved production risk: active or competing work' \
     'normal focused branch -> `dev` -> `master` path' \
     '`mutation_capable: true` only' \
-    'challenge through the existing deployment-safety quality gate, not a new' \
+    'challenge through the existing deployment-safety specialist, not a new' \
     'Preserve rollback evidence and revalidate the' \
     'resume the original registered' \
     'Never bypass or edit live authority state ad hoc' \
@@ -1474,7 +1532,7 @@ grep -Fq 'restore_deploy_access_on_exit()' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not recover public access after a staged failure"
 grep -Fq 'apply_cleanup_documents()' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment cleanup cannot preserve the original deploy failure"
-grep -Fq 'for service in auth backoffice client; do' "$OCI_DIR/scripts/deploy.sh" ||
+grep -Fq 'for service in auth client; do' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment failure cleanup does not restore safe reader services"
 grep -Fq 'mongo_upgrade_recovery_required=true' "$OCI_DIR/scripts/deploy.sh" ||
   fail "OCI deployment does not arm staged failure recovery before Mongo preparation"
@@ -2473,8 +2531,10 @@ for label, value in (
 if re.findall(
     target_kickoff_check,
     verifier,
-) != [retained_v2_kickoff, retained_v3_kickoff, kickoff]:
-    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3/v4 values")
+) != [retained_v2_kickoff, retained_v3_kickoff, kickoff, kickoff]:
+    raise SystemExit(
+        "evidence verifier kickoff pins are not exact literal v2/v3/v4/v5 values"
+    )
 
 # Bind every verifier branch structurally rather than accepting an unordered
 # set of identities that could be substituted across schema generations.
@@ -2490,8 +2550,11 @@ if [kind for _, kind in kind_checks] != [
     "fixed-event-reschedule",
     "fixed-event-reschedule",
     "fixed-event-reschedule",
+    "fixed-event-reschedule",
 ]:
-    raise SystemExit("evidence verifier does not expose exact v1/v2/v3/v4 branches")
+    raise SystemExit(
+        "evidence verifier does not expose exact separate v1/v2/v3/v4/v5 branches"
+    )
 pins = [
     (match.start(), match.group(1))
     for match in re.finditer(target_event_check, verifier)
@@ -2505,14 +2568,20 @@ if [value for _, value in pins] != [
     retained_v2_event_id,
     retained_v3_event_id,
     event_id,
+    event_id,
 ]:
-    raise SystemExit("evidence verifier target pins are not exact v1/v2/v3/v4 values")
+    raise SystemExit(
+        "evidence verifier target pins are not exact literal v1/v2/v3/v4/v5 values"
+    )
 if [value for _, value in kickoff_pins] != [
     retained_v2_kickoff,
     retained_v3_kickoff,
     kickoff,
+    kickoff,
 ]:
-    raise SystemExit("evidence verifier kickoff pins are not exact v2/v3/v4 values")
+    raise SystemExit(
+        "evidence verifier kickoff pins are not exact literal v2/v3/v4/v5 values"
+    )
 positions = [
     kind_checks[0][0],
     pins[0][0],
@@ -2525,17 +2594,27 @@ positions = [
     kind_checks[3][0],
     pins[3][0],
     kickoff_pins[2][0],
+    kind_checks[4][0],
+    pins[4][0],
+    kickoff_pins[3][0],
 ]
 if positions != sorted(positions):
-    raise SystemExit("evidence verifier v1/v2/v3/v4 branch pins are out of order")
+    raise SystemExit(
+        "evidence verifier v1/v2/v3/v4/v5 branch pins are out of order"
+    )
 for value in (
     retained_v1_event_id,
     retained_v2_event_id,
     retained_v3_event_id,
-    event_id,
 ):
     if verifier.count(value) != 1:
-        raise SystemExit("evidence verifier accepts more than one identity per schema branch")
+        raise SystemExit(
+            "evidence verifier accepts more than one historical identity per branch"
+        )
+if verifier.count(event_id) != 2:
+    raise SystemExit(
+        "evidence verifier does not pin the v4 event once in each v4/v5 branch"
+    )
 for value in (
     retained_v1_backoffice_id,
     retained_v2_backoffice_id,

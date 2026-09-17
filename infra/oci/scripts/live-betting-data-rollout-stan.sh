@@ -216,6 +216,32 @@ create_job() {
             - "--mode"
             - "verify"'
       ;;
+    dist/scripts/cleanupPreSeptemberEvents.js:dry-run)
+      args='
+          args:
+            - "--mode"
+            - "dry-run"
+            - "--batch-size"
+            - "'"$BATCH_SIZE"'"'
+      ;;
+    dist/scripts/cleanupPreSeptemberEvents.js:apply)
+      args='
+          args:
+            - "--mode"
+            - "apply"
+            - "--batch-size"
+            - "'"$BATCH_SIZE"'"
+            - "--confirmation"
+            - "DELETE_BACKOFFICE_EVENTS_BEFORE:2026-09-01T00:00:00Z"'
+      ;;
+    dist/scripts/cleanupPreSeptemberEvents.js:verify)
+      args='
+          args:
+            - "--mode"
+            - "verify"
+            - "--batch-size"
+            - "'"$BATCH_SIZE"'"'
+      ;;
     *)
       fail "unsupported data job command or mode: $command_path/$mode"
       ;;
@@ -321,6 +347,7 @@ wait_for_job_report() {
   local raw_file="$2"
   local allow_blocked_reschedule="${3:-false}"
   local expected_mode="${4:-}"
+  local allow_blocked_cleanup="${5:-false}"
   local deadline=$(( $(date +%s) + JOB_TIMEOUT_SECONDS ))
   local job_json="" pod_state="" pod_count="unknown" pod_phase="Unknown"
   local container_state="unknown" container_reason="Unknown"
@@ -334,11 +361,15 @@ wait_for_job_report() {
   [[ "$allow_blocked_reschedule" == "true" ||
      "$allow_blocked_reschedule" == "false" ]] ||
     fail "blocked reschedule report policy is invalid"
-  if [[ "$allow_blocked_reschedule" == "true" ]]; then
+  [[ "$allow_blocked_cleanup" == "true" ||
+     "$allow_blocked_cleanup" == "false" ]] ||
+    fail "blocked cleanup report policy is invalid"
+  if [[ "$allow_blocked_reschedule" == "true" ||
+    "$allow_blocked_cleanup" == "true" ]]; then
     [[ "$expected_mode" == "dry-run" ||
        "$expected_mode" == "apply" ||
        "$expected_mode" == "verify" ]] ||
-      fail "blocked reschedule report mode is invalid"
+      fail "blocked structured report mode is invalid"
   fi
 
   while true; do
@@ -586,22 +617,30 @@ wait_for_job_report() {
           "$job_name" "$raw_file" "$terminal_state_deadline"; then
         fail "unable to collect complete failed job report for $job_name"
       fi
-      if [[ "$allow_blocked_reschedule" == "true" &&
+      if [[ ("$allow_blocked_reschedule" == "true" ||
+            "$allow_blocked_cleanup" == "true") &&
         "$pod_count" == "1" &&
         "$pod_phase" == "Failed" &&
         "$container_state" == "terminated" &&
         "$container_reason" == "Error" &&
         "$container_exit_code" == "1" &&
-        "$container_signal" == "0" ]] &&
-        validate_blocked_reschedule_report "$raw_file" "$expected_mode"; then
-        LAST_JOB_OUTCOME="structured-blocked"
-        LAST_JOB_POD_COUNT="$pod_count"
-        LAST_JOB_POD_PHASE="$pod_phase"
-        LAST_JOB_CONTAINER_STATE="$container_state"
-        LAST_JOB_CONTAINER_REASON="$container_reason"
-        LAST_JOB_EXIT_CODE="$container_exit_code"
-        LAST_JOB_SIGNAL="$container_signal"
-        return 0
+        "$container_signal" == "0" ]]; then
+        if [[ "$allow_blocked_reschedule" == "true" ]] &&
+          validate_blocked_reschedule_report "$raw_file" "$expected_mode"; then
+          LAST_JOB_OUTCOME="structured-blocked"
+        elif [[ "$allow_blocked_cleanup" == "true" ]] &&
+          validate_blocked_cleanup_report "$raw_file" "$expected_mode"; then
+          LAST_JOB_OUTCOME="structured-blocked"
+        fi
+        if [[ "$LAST_JOB_OUTCOME" == "structured-blocked" ]]; then
+          LAST_JOB_POD_COUNT="$pod_count"
+          LAST_JOB_POD_PHASE="$pod_phase"
+          LAST_JOB_CONTAINER_STATE="$container_state"
+          LAST_JOB_CONTAINER_REASON="$container_reason"
+          LAST_JOB_EXIT_CODE="$container_exit_code"
+          LAST_JOB_SIGNAL="$container_signal"
+          return 0
+        fi
       fi
       fail "data job failed for $job_name; raw logs were withheld; pod_count=$pod_count pod_phase=$pod_phase container_state=$container_state reason=$container_reason"
     fi
@@ -627,8 +666,16 @@ run_job() {
   local image_ref
   local job_name
   local allow_blocked_reschedule="${4:-false}"
+  local allow_blocked_cleanup="${5:-false}"
 
   job_sequence=$((job_sequence + 1))
+  LAST_JOB_OUTCOME=""
+  LAST_JOB_POD_COUNT=""
+  LAST_JOB_POD_PHASE=""
+  LAST_JOB_CONTAINER_STATE=""
+  LAST_JOB_CONTAINER_REASON=""
+  LAST_JOB_EXIT_CODE=""
+  LAST_JOB_SIGNAL=""
   job_name="live-data-${service}-${RUN_ID}-${job_sequence}"
   image_ref="$(image_for_service "$service")"
   raw_file="$(mktemp "${TMPDIR:-/tmp}/betstan-live-data.XXXXXX")"
@@ -636,7 +683,8 @@ run_job() {
   created_jobs+=("$job_name")
   create_job "$service" "$command_path" "$mode" "$image_ref" "$job_name"
   wait_for_job_report \
-    "$job_name" "$raw_file" "$allow_blocked_reschedule" "$mode"
+    "$job_name" "$raw_file" "$allow_blocked_reschedule" "$mode" \
+    "$allow_blocked_cleanup"
   LAST_RAW_FILE="$raw_file"
   kubectl delete job "$job_name" \
     -n "$OCI_K8S_NAMESPACE" \
@@ -1009,6 +1057,208 @@ sanitize_reschedule_report() {
   LAST_REPORT="$output"
 }
 
+project_backoffice_cleanup_report() {
+  local raw_file="$1"
+  local stage="$2"
+  local expected_mode="$3"
+  local output="$4"
+
+  jq -e \
+    -s \
+    --arg stage "$stage" \
+    --arg expected_mode "$expected_mode" \
+    --arg operation_id "backoffice-events-before:2026-09-01T00:00:00Z" \
+    --arg schema_version "backoffice-pre-september-events-cleanup-v1" \
+    --arg cutoff "2026-09-01T00:00:00Z" '
+      def nonnegative_integer:
+        type == "number" and . >= 0 and . == floor;
+      def exact_keys($expected):
+        (keys | sort) == ($expected | sort);
+      def digest:
+        . == null or (type == "string" and test("^[0-9a-f]{64}$"));
+      def reason_code:
+        . as $reason |
+        [
+          "invalid_mode",
+          "invalid_batch_size",
+          "confirmation_mismatch",
+          "source_sha_invalid",
+          "mongo_uri_required",
+          "database_unavailable",
+          "database_mismatch",
+          "malformed_time",
+          "candidate_event_id_invalid",
+          "candidate_event_id_duplicate",
+          "new_event_publication_pending_unsafe",
+          "result_publication_pending_unsafe",
+          "visibility_publication_pending_unsafe",
+          "journal_invalid",
+          "journal_conflict",
+          "prepared_source_sha_mismatch",
+          "journal_target_duplicate",
+          "journal_target_drift",
+          "journal_marker_changed",
+          "unjournaled_candidate",
+          "journal_target_remaining",
+          "operation_not_applied",
+          "candidates_remaining",
+          "journal_apply_conflict",
+          "argument_unknown",
+          "argument_missing",
+          "argument_duplicate"
+        ] | index($reason) != null;
+      select(length == 1) |
+      .[0] as $report |
+      select(
+        ($report | type == "object") and
+        ($report | exact_keys([
+          "operationId",
+          "schemaVersion",
+          "mode",
+          "state",
+          "cutoff",
+          "counts",
+          "digest",
+          "reasonCodes"
+        ])) and
+        ($report.operationId == $operation_id) and
+        ($report.schemaVersion == $schema_version) and
+        ($report.mode == $expected_mode) and
+        ($report.cutoff == $cutoff) and
+        (
+          if $expected_mode == "dry-run" then
+            ["clear", "candidate", "prepared", "applied", "blocked"] |
+              index($report.state) != null
+          elif $expected_mode == "apply" then
+            ["applied", "blocked"] | index($report.state) != null
+          elif $expected_mode == "verify" then
+            ["verified", "blocked"] | index($report.state) != null
+          else false
+          end
+        ) and
+        ($report.counts | type == "object") and
+        ($report.counts | exact_keys([
+          "scannedCount",
+          "candidateCount",
+          "journaledCount",
+          "deletedCount",
+          "remainingCandidateCount",
+          "remainingJournalCount",
+          "malformedTimeCount"
+        ])) and
+        ([$report.counts[] | nonnegative_integer] | all) and
+        ($report.counts.scannedCount >=
+          $report.counts.remainingCandidateCount) and
+        ($report.digest | digest) and
+        ($report.reasonCodes | type == "array") and
+        ([$report.reasonCodes[] |
+          type == "string" and reason_code
+        ] | all) and
+        (($report.reasonCodes | length) ==
+          ($report.reasonCodes | unique | length)) and
+        (
+          if $report.state == "blocked" then
+            ($report.reasonCodes | length) > 0
+          else
+            ($report.reasonCodes | length) == 0 and
+            $report.counts.malformedTimeCount == 0
+          end
+        ) and
+        (
+          if $report.state == "clear" then
+            $report.digest == null and
+            $report.counts.candidateCount == 0 and
+            $report.counts.journaledCount == 0 and
+            $report.counts.deletedCount == 0 and
+            $report.counts.remainingCandidateCount == 0 and
+            $report.counts.remainingJournalCount == 0
+          elif $report.state == "candidate" then
+            ($report.digest | type == "string") and
+            $report.counts.candidateCount > 0 and
+            $report.counts.journaledCount == 0 and
+            $report.counts.deletedCount == 0 and
+            $report.counts.remainingCandidateCount ==
+              $report.counts.candidateCount and
+            $report.counts.remainingJournalCount == 0
+          elif $report.state == "prepared" then
+            ($report.digest | type == "string") and
+            $report.counts.journaledCount ==
+              $report.counts.candidateCount and
+            $report.counts.deletedCount == 0
+          elif $report.state == "applied" or
+               $report.state == "verified" then
+            ($report.digest | type == "string") and
+            $report.counts.journaledCount ==
+              $report.counts.candidateCount and
+            $report.counts.remainingCandidateCount == 0 and
+            $report.counts.remainingJournalCount == 0
+          else true
+          end
+        ) and
+        (
+          ($expected_mode == "apply") or
+          $report.counts.deletedCount == 0
+        )
+      ) |
+      $report |
+      {
+        kind: "backoffice-pre-september-events-cleanup",
+        service: "backoffice",
+        stage: $stage,
+        operationId,
+        schemaVersion,
+        mode,
+        state,
+        cutoff,
+        counts: {
+          scannedCount: .counts.scannedCount,
+          candidateCount: .counts.candidateCount,
+          journaledCount: .counts.journaledCount,
+          deletedCount: .counts.deletedCount,
+          remainingCandidateCount: .counts.remainingCandidateCount,
+          remainingJournalCount: .counts.remainingJournalCount,
+          malformedTimeCount: .counts.malformedTimeCount
+        },
+        digest,
+        reasonCodes,
+        reasonCodeCount: (.reasonCodes | length)
+      }
+    ' "$raw_file" >"$output"
+}
+
+validate_blocked_cleanup_report() {
+  local raw_file="$1"
+  local expected_mode="$2"
+  local temporary="${raw_file}.sanitized"
+
+  if project_backoffice_cleanup_report \
+      "$raw_file" job-failure-validation "$expected_mode" "$temporary" &&
+    jq -e '
+      .state == "blocked" and
+      .reasonCodeCount > 0
+    ' "$temporary" >/dev/null; then
+    rm -f -- "$temporary"
+    return 0
+  fi
+  rm -f -- "$temporary"
+  return 1
+}
+
+sanitize_backoffice_cleanup_report() {
+  local raw_file="$1"
+  local stage="$2"
+  local expected_mode="$3"
+  local output="$OUTPUT_DIR/reports/${stage}-backoffice-pre-september-cleanup.json"
+  local temporary="${output}.tmp"
+
+  project_backoffice_cleanup_report \
+    "$raw_file" "$stage" "$expected_mode" "$temporary" ||
+    fail "Backoffice pre-September cleanup report contract failed for $stage"
+  mv "$temporary" "$output"
+  rm -f -- "$raw_file"
+  LAST_REPORT="$output"
+}
+
 run_backfill() {
   local service="$1"
   local mode="$2"
@@ -1033,6 +1283,18 @@ run_event_reschedule() {
   local stage="$2"
   run_job event "dist/scripts/rescheduleSyntheticEvent.js" "$mode" true
   sanitize_reschedule_report "$LAST_RAW_FILE" "$stage" "$mode"
+}
+
+run_backoffice_cleanup() {
+  local mode="$1"
+  local stage="$2"
+  run_job \
+    backoffice \
+    "dist/scripts/cleanupPreSeptemberEvents.js" \
+    "$mode" \
+    false \
+    true
+  sanitize_backoffice_cleanup_report "$LAST_RAW_FILE" "$stage" "$mode"
 }
 
 write_evidence_manifest() {
@@ -1137,6 +1399,87 @@ PY
   write_evidence_manifest
 }
 
+write_backoffice_cleanup_blocker_evidence() {
+  local report="$1"
+  local completed_at report_sha256 output temporary
+
+  [[ "$LAST_JOB_OUTCOME" == "structured-blocked" &&
+     "$LAST_JOB_POD_COUNT" == "1" &&
+     "$LAST_JOB_POD_PHASE" == "Failed" &&
+     "$LAST_JOB_CONTAINER_STATE" == "terminated" &&
+     "$LAST_JOB_CONTAINER_REASON" == "Error" &&
+     "$LAST_JOB_EXIT_CODE" == "1" &&
+     "$LAST_JOB_SIGNAL" == "0" ]] ||
+    fail "blocked Backoffice cleanup report is missing its exact failed-job evidence"
+  jq -e '
+    .kind == "backoffice-pre-september-events-cleanup" and
+    .state == "blocked" and
+    .reasonCodeCount > 0
+  ' "$report" >/dev/null ||
+    fail "blocked Backoffice cleanup report cannot produce failure evidence"
+
+  completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  report_sha256="$(
+    python3 - "$report" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  )"
+  output="$OUTPUT_DIR/backoffice-cleanup-blocker-failure.json"
+  temporary="${output}.tmp"
+  jq -n \
+    --slurpfile cleanup "$report" \
+    --arg source_sha "$SOURCE_SHA" \
+    --arg build_run_id "$BUILD_RUN_ID" \
+    --arg infrastructure_run_id "$INFRASTRUCTURE_RUN_ID" \
+    --arg workflow_run_id "$RUN_ID" \
+    --arg workflow_run_attempt "$RUN_ATTEMPT" \
+    --arg phase "$PHASE" \
+    --arg report_sha256 "$report_sha256" \
+    --arg pod_phase "$LAST_JOB_POD_PHASE" \
+    --arg container_state "$LAST_JOB_CONTAINER_STATE" \
+    --arg container_reason "$LAST_JOB_CONTAINER_REASON" \
+    --argjson pod_count "$LAST_JOB_POD_COUNT" \
+    --argjson exit_code "$LAST_JOB_EXIT_CODE" \
+    --argjson container_signal "$LAST_JOB_SIGNAL" \
+    --arg completed_at "$completed_at" '
+      {
+        schemaVersion: "live-betting-backoffice-cleanup-blocker-v1",
+        status: "FAIL",
+        sourceSha: $source_sha,
+        buildRunId: $build_run_id,
+        infrastructureRunId: $infrastructure_run_id,
+        workflowRunId: $workflow_run_id,
+        workflowRunAttempt: $workflow_run_attempt,
+        phase: $phase,
+        stage: $cleanup[0].stage,
+        operationId: $cleanup[0].operationId,
+        cleanupSchemaVersion: $cleanup[0].schemaVersion,
+        mode: $cleanup[0].mode,
+        state: $cleanup[0].state,
+        cutoff: $cleanup[0].cutoff,
+        reasonCodes: $cleanup[0].reasonCodes,
+        reasonCodeCount: $cleanup[0].reasonCodeCount,
+        reportSha256: $report_sha256,
+        job: {
+          outcome: "failed",
+          podCount: $pod_count,
+          podPhase: $pod_phase,
+          containerState: $container_state,
+          containerReason: $container_reason,
+          exitCode: $exit_code,
+          signal: $container_signal
+        },
+        completedAt: $completed_at
+      }
+    ' >"$temporary"
+  mv "$temporary" "$output"
+  write_evidence_manifest
+}
+
 require_reschedule_ready() {
   local report="$1"
   if [[ "$(jq -r '.ready' "$report")" != "true" ]]; then
@@ -1154,6 +1497,86 @@ require_reschedule_complete() {
     apply:applied|apply:completed|verify:verified|verify:completed) ;;
     *) fail "event reschedule is incomplete for $expected_mode: $state" ;;
   esac
+}
+
+require_backoffice_cleanup_ready() {
+  local report="$1"
+  if [[ "$(jq -r '.state' "$report")" == "blocked" ]]; then
+    write_backoffice_cleanup_blocker_evidence "$report"
+    fail "Backoffice pre-September cleanup is blocked; sanitized failure evidence recorded"
+  fi
+}
+
+backoffice_cleanup_preflight_proves_applied() {
+  local report="$1"
+  jq -e '
+    .mode == "dry-run" and
+    .state == "applied" and
+    (.digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .counts.journaledCount == .counts.candidateCount and
+    .counts.remainingCandidateCount == 0 and
+    .counts.remainingJournalCount == 0 and
+    .counts.malformedTimeCount == 0 and
+    .reasonCodes == []
+  ' "$report" >/dev/null
+}
+
+require_backoffice_cleanup_applied() {
+  local report="$1"
+  jq -e '
+    .mode == "apply" and
+    .state == "applied" and
+    (.digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .counts.journaledCount == .counts.candidateCount and
+    .counts.remainingCandidateCount == 0 and
+    .counts.remainingJournalCount == 0 and
+    .counts.malformedTimeCount == 0 and
+    .reasonCodes == []
+  ' "$report" >/dev/null ||
+    fail "Backoffice pre-September cleanup apply did not persist an applied journal"
+}
+
+require_backoffice_cleanup_verified() {
+  local report="$1"
+  jq -e '
+    .mode == "verify" and
+    .state == "verified" and
+    (.digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .counts.journaledCount == .counts.candidateCount and
+    .counts.deletedCount == 0 and
+    .counts.remainingCandidateCount == 0 and
+    .counts.remainingJournalCount == 0 and
+    .counts.malformedTimeCount == 0 and
+    .reasonCodes == []
+  ' "$report" >/dev/null ||
+    fail "Backoffice pre-September cleanup verification is incomplete"
+}
+
+require_backoffice_cleanup_chain() {
+  local preflight_report="$1"
+  local apply_report="$2"
+  local verify_report="$3"
+  jq -e -n \
+    --slurpfile preflight "$preflight_report" \
+    --slurpfile apply "$apply_report" \
+    --slurpfile verify "$verify_report" '
+      ($preflight | length) == 1 and
+      ($apply | length) == 1 and
+      ($verify | length) == 1 and
+      $apply[0].operationId == $verify[0].operationId and
+      $apply[0].schemaVersion == $verify[0].schemaVersion and
+      $apply[0].cutoff == $verify[0].cutoff and
+      $apply[0].digest == $verify[0].digest and
+      $apply[0].counts.candidateCount ==
+        $verify[0].counts.candidateCount and
+      $apply[0].counts.journaledCount ==
+        $verify[0].counts.journaledCount and
+      (
+        $preflight[0].digest == null or
+        $preflight[0].digest == $apply[0].digest
+      )
+    ' >/dev/null ||
+    fail "Backoffice pre-September cleanup reports do not bind one journal"
 }
 
 require_safe_slip_report() {
@@ -1176,13 +1599,14 @@ require_non_conflicting_index() {
 
 verify_cluster_runtime() {
   local deployment state
-  for deployment in gaming-auth-depl gaming-backoffice-depl gaming-client-depl; do
+  for deployment in gaming-auth-depl gaming-client-depl; do
     kubectl rollout status "deployment/$deployment" \
       -n "$OCI_K8S_NAMESPACE" --timeout=2m >/dev/null ||
       fail "runtime deployment became unhealthy after a data write"
   done
   if [[ "$WRITERS_QUIESCED" == "true" ]]; then
     for deployment in \
+      gaming-backoffice-depl \
       gaming-bet-depl \
       gaming-event-depl \
       gaming-gamemaster-depl \
@@ -1248,6 +1672,7 @@ run_all_dry() {
 backfill_complete=false
 index_ready=false
 event_reschedule_complete=false
+backoffice_pre_september_cleanup_complete=false
 
 case "$PHASE" in
   dry-run)
@@ -1258,6 +1683,11 @@ case "$PHASE" in
       "$reschedule_state" == "verified" ||
       "$reschedule_state" == "completed" ]]; then
       event_reschedule_complete=true
+    fi
+    run_backoffice_cleanup dry-run preflight
+    require_backoffice_cleanup_ready "$LAST_REPORT"
+    if backoffice_cleanup_preflight_proves_applied "$LAST_REPORT"; then
+      backoffice_pre_september_cleanup_complete=true
     fi
     run_all_dry preflight false
     run_index dry-run preflight
@@ -1293,6 +1723,11 @@ case "$PHASE" in
     require_reschedule_ready "$LAST_REPORT"
     require_reschedule_complete "$LAST_REPORT" verify
     event_reschedule_complete=true
+    run_backoffice_cleanup dry-run preflight
+    require_backoffice_cleanup_ready "$LAST_REPORT"
+    if backoffice_cleanup_preflight_proves_applied "$LAST_REPORT"; then
+      backoffice_pre_september_cleanup_complete=true
+    fi
     run_index dry-run final
     require_non_conflicting_index "$LAST_REPORT"
     [[ "$(jq -r '.ready' "$LAST_REPORT")" == "true" ]] ||
@@ -1335,12 +1770,29 @@ case "$PHASE" in
       fail "Slip index verification retained blockers"
     backfill_complete=true
     index_ready=true
+    run_backoffice_cleanup dry-run preflight
+    require_backoffice_cleanup_ready "$LAST_REPORT"
+    cleanup_preflight_report="$LAST_REPORT"
+    run_backoffice_cleanup apply apply
+    require_backoffice_cleanup_ready "$LAST_REPORT"
+    require_backoffice_cleanup_applied "$LAST_REPORT"
+    cleanup_apply_report="$LAST_REPORT"
+    verify_cluster_runtime
+    run_backoffice_cleanup verify verify
+    require_backoffice_cleanup_ready "$LAST_REPORT"
+    require_backoffice_cleanup_verified "$LAST_REPORT"
+    cleanup_verify_report="$LAST_REPORT"
+    require_backoffice_cleanup_chain \
+      "$cleanup_preflight_report" \
+      "$cleanup_apply_report" \
+      "$cleanup_verify_report"
+    backoffice_pre_september_cleanup_complete=true
     ;;
 esac
 
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$OUTPUT_DIR/provenance.env" <<EOF
-schema_version=live-betting-v4
+schema_version=live-betting-v5
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
@@ -1354,6 +1806,7 @@ status=PASS
 backfill_complete=$backfill_complete
 index_ready=$index_ready
 event_reschedule_complete=$event_reschedule_complete
+backoffice_pre_september_cleanup_complete=$backoffice_pre_september_cleanup_complete
 maintenance_fence_enforced=$MAINTENANCE_FENCE_ENFORCED
 writers_quiesced=$WRITERS_QUIESCED
 runtime_held_for_deploy=$RUNTIME_HELD_FOR_DEPLOY
@@ -1376,13 +1829,15 @@ jq -s \
   --argjson backfill_complete "$backfill_complete" \
   --argjson index_ready "$index_ready" \
   --argjson event_reschedule_complete "$event_reschedule_complete" \
+  --argjson backoffice_pre_september_cleanup_complete \
+    "$backoffice_pre_september_cleanup_complete" \
   --argjson maintenance_fence_enforced "$MAINTENANCE_FENCE_ENFORCED" \
   --argjson writers_quiesced "$WRITERS_QUIESCED" \
   --argjson runtime_held_for_deploy "$RUNTIME_HELD_FOR_DEPLOY" \
   --argjson operation_lock_enforced "$OPERATION_LOCK_ENFORCED" \
   --argjson operation_lock_handoff "$OPERATION_LOCK_HANDOFF" '
     {
-      schema_version: "live-betting-v4",
+      schema_version: "live-betting-v5",
       source_sha: $source_sha,
       build_run_id: $build_run_id,
       infrastructure_run_id: $infrastructure_run_id,
@@ -1396,6 +1851,8 @@ jq -s \
       backfill_complete: $backfill_complete,
       index_ready: $index_ready,
       event_reschedule_complete: $event_reschedule_complete,
+      backoffice_pre_september_cleanup_complete:
+        $backoffice_pre_september_cleanup_complete,
       maintenance_fence_enforced: $maintenance_fence_enforced,
       writers_quiesced: $writers_quiesced,
       runtime_held_for_deploy: $runtime_held_for_deploy,
@@ -1408,7 +1865,7 @@ jq -s \
 
 if [[ "$PHASE" == "apply-slip-index" ]]; then
   cat >"$OUTPUT_DIR/schema.env" <<EOF
-schema_version=live-betting-v4
+schema_version=live-betting-v5
 source_sha=$SOURCE_SHA
 build_run_id=$BUILD_RUN_ID
 infrastructure_run_id=$INFRASTRUCTURE_RUN_ID
@@ -1420,6 +1877,7 @@ data_run_attempt=$RUN_ATTEMPT
 backfill_complete=true
 index_ready=true
 event_reschedule_complete=true
+backoffice_pre_september_cleanup_complete=true
 maintenance_fence_enforced=true
 writers_quiesced=true
 runtime_held_for_deploy=true

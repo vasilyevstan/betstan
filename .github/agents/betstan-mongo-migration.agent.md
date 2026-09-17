@@ -72,10 +72,11 @@ Use:
 Any Kubernetes or API read error means state is unknown and therefore
 `NO_GO`; it is never proof that a journal, lock, PVC, or PV is absent.
 
-Until issue #85 is resolved, independently require a successful topology
-journal read or explicit NotFound immediately before migration, and explicit
-NotFound for every journaled legacy PV after cleanup. Do not accept the
-operator's exit status alone for those two checks.
+Use the operator's fail-closed journal and PV read checks. Migration requires
+validated journal state or NotFound for the exact requested ConfigMap;
+cleanup requires proven absence of every mapped legacy PV within the bounded
+read budget. Unknown reads leave the operation incomplete and preserve its
+private cleanup mapping and journal for the same-identity recovery.
 
 ## Journal and rollback model
 
@@ -106,12 +107,15 @@ the same journal identity and verified private artifacts.
   sources; legacy mutable image references and repository history are not
   runtime evidence.
 - Persist each source pod UID, container ID, restart count, digest, version,
-  and FCV in both journals. Recheck that identity before and after every
+  and FCV in the consolidation journal's associated private evidence.
+  Recheck that identity before and after every
   signature and dump, and abort on any pod or container recreation even if the
   replacement appears Ready.
-- Require exact source/target server-version and FCV compatibility. If OCI
-  needs alignment, keep ingress and writers frozen and follow every supported,
-  digest-pinned intermediate binary and FCV transition during deployment.
+- Require exact in-AKS source/target server-version and FCV compatibility.
+  Cross-cloud dual-journal and OCI alignment requirements belong to the
+  dedicated migration/recovery procedure, not this consolidation. Never use
+  that distinction to omit this procedure's identity, backup, compatibility,
+  or rollback evidence.
 - Verify exact live legacy `MONGO_URI` values and the eight logical database
   names.
 - Verify target capacity, expandable StorageClass, retained auth PVC identity,

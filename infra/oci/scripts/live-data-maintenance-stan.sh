@@ -21,9 +21,9 @@ WRITE_FENCE_DIRECTIVE='if ($request_method !~ ^(GET|HEAD|OPTIONS)$) {
 }'
 FENCED_SERVER_SNIPPET="${BASE_SERVER_SNIPPET}"$'\n'"${WRITE_FENCE_DIRECTIVE}"
 
-writer_services=(bet event moderation resulting slip gamemaster)
-quiesce_order=(gamemaster event slip moderation resulting bet)
-restore_order=(bet event moderation resulting slip gamemaster)
+writer_services=(backoffice bet event moderation resulting slip gamemaster)
+quiesce_order=(backoffice gamemaster event slip moderation resulting bet)
+restore_order=(bet event moderation resulting slip gamemaster backoffice)
 
 fail() {
   echo "live_data_maintenance=${ACTION:-missing} status=FAIL reason=$*" >&2

@@ -168,15 +168,23 @@ provenance = read_env(root / "provenance.env")
 schema_version = provenance.get("schema_version")
 if schema_version == "live-betting-v1":
     operation_complete_key = "obsolete_event_cleanup_complete"
+    operation_complete_keys = {operation_complete_key}
 elif schema_version in {
     "live-betting-v2",
     "live-betting-v3",
     "live-betting-v4",
 }:
     operation_complete_key = "event_reschedule_complete"
+    operation_complete_keys = {operation_complete_key}
+elif schema_version == "live-betting-v5":
+    operation_complete_key = "event_reschedule_complete"
+    operation_complete_keys = {
+        operation_complete_key,
+        "backoffice_pre_september_cleanup_complete",
+    }
 else:
     fail("unexpected schema evidence version")
-if set(provenance) != common_provenance_keys | {operation_complete_key}:
+if set(provenance) != common_provenance_keys | operation_complete_keys:
     fail("provenance.env does not contain the exact reviewed key set")
 for key, value in expected.items():
     if provenance.get(key) != value:
@@ -187,8 +195,9 @@ if provenance["backfill_complete"] not in {"true", "false"}:
     fail("backfill_complete is not boolean")
 if provenance["index_ready"] not in {"true", "false"}:
     fail("index_ready is not boolean")
-if provenance[operation_complete_key] not in {"true", "false"}:
-    fail(f"{operation_complete_key} is not boolean")
+for key in operation_complete_keys:
+    if provenance[key] not in {"true", "false"}:
+        fail(f"{key} is not boolean")
 if not re.fullmatch(r"[0-9a-f]{64}", provenance["baseline_sha256"]):
     fail("baseline_sha256 is not a SHA-256 digest")
 for key in (
@@ -315,6 +324,12 @@ if phase in {"apply-backfills", "apply-slip-index"}:
         fail("mutating phase did not prove the fixed event operation")
 if phase == "apply-slip-index" and provenance["index_ready"] != "true":
     fail("final phase did not prove the Slip index")
+if (
+    schema_version == "live-betting-v5"
+    and phase == "apply-slip-index"
+    and provenance["backoffice_pre_september_cleanup_complete"] != "true"
+):
+    fail("final phase did not prove the Backoffice pre-September cleanup")
 if phase == "dry-run":
     expected_maintenance = {
         "maintenance_fence_enforced": "false",
@@ -389,6 +404,15 @@ else:
         required_reports.update({
             "reports/apply-event-reschedule.json",
             "reports/verify-event-reschedule.json",
+        })
+if schema_version == "live-betting-v5":
+    required_reports.add(
+        "reports/preflight-backoffice-pre-september-cleanup.json"
+    )
+    if phase == "apply-slip-index":
+        required_reports.update({
+            "reports/apply-backoffice-pre-september-cleanup.json",
+            "reports/verify-backoffice-pre-september-cleanup.json",
         })
 if not required_reports.issubset(actual_files):
     fail("phase evidence is missing required sanitized reports")
@@ -547,6 +571,242 @@ elif schema_version == "live-betting-v4":
         )
         if operation.get("state") not in {"verified", "completed"}:
             fail("final phase did not inherit completed event reschedule")
+elif schema_version == "live-betting-v5":
+    operation_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith("-event-reschedule.json")
+    )
+    for relative in operation_reports:
+        operation = json.loads((root / relative).read_text(encoding="utf-8"))
+        if operation.get("kind") != "fixed-event-reschedule":
+            fail(f"{relative} has an invalid reschedule kind")
+        if operation.get("targetEventId") != "0fd6a3633bf1fcf09d95c17d":
+            fail(f"{relative} targets an unexpected event")
+        if operation.get("targetKickoff") != "2026-09-13T08:05:00.000Z":
+            fail(f"{relative} targets an unexpected kickoff")
+        if operation.get("ready") is not True or operation.get("blockerCount") != 0:
+            fail(f"{relative} did not prove a safe reschedule state")
+    if phase == "apply-backfills":
+        expected_states = {
+            "reports/apply-event-reschedule.json": {"applied", "completed"},
+            "reports/verify-event-reschedule.json": {"verified", "completed"},
+        }
+        for relative, states in expected_states.items():
+            operation = json.loads((root / relative).read_text(encoding="utf-8"))
+            if operation.get("state") not in states:
+                fail(f"{relative} did not prove completed reschedule")
+    if phase == "apply-slip-index":
+        operation = json.loads(
+            (root / "reports/preflight-event-reschedule.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if operation.get("state") not in {"verified", "completed"}:
+            fail("final phase did not inherit completed event reschedule")
+
+    cleanup_suffix = "-backoffice-pre-september-cleanup.json"
+    cleanup_reports = sorted(
+        relative
+        for relative in actual_files
+        if relative.endswith(cleanup_suffix)
+    )
+    expected_cleanup_reports = {
+        "reports/preflight-backoffice-pre-september-cleanup.json",
+    }
+    if phase == "apply-slip-index":
+        expected_cleanup_reports.update({
+            "reports/apply-backoffice-pre-september-cleanup.json",
+            "reports/verify-backoffice-pre-september-cleanup.json",
+        })
+    if set(cleanup_reports) != expected_cleanup_reports:
+        fail("phase evidence has an unexpected Backoffice cleanup report set")
+
+    cleanup_reason_codes = {
+        "invalid_mode",
+        "invalid_batch_size",
+        "confirmation_mismatch",
+        "source_sha_invalid",
+        "mongo_uri_required",
+        "database_unavailable",
+        "database_mismatch",
+        "malformed_time",
+        "candidate_event_id_invalid",
+        "candidate_event_id_duplicate",
+        "new_event_publication_pending_unsafe",
+        "result_publication_pending_unsafe",
+        "visibility_publication_pending_unsafe",
+        "journal_invalid",
+        "journal_conflict",
+        "prepared_source_sha_mismatch",
+        "journal_target_duplicate",
+        "journal_target_drift",
+        "journal_marker_changed",
+        "unjournaled_candidate",
+        "journal_target_remaining",
+        "operation_not_applied",
+        "candidates_remaining",
+        "journal_apply_conflict",
+        "argument_unknown",
+        "argument_missing",
+        "argument_duplicate",
+    }
+    cleanup_keys = {
+        "kind",
+        "service",
+        "stage",
+        "operationId",
+        "schemaVersion",
+        "mode",
+        "state",
+        "cutoff",
+        "counts",
+        "digest",
+        "reasonCodes",
+        "reasonCodeCount",
+    }
+    cleanup_count_keys = {
+        "scannedCount",
+        "candidateCount",
+        "journaledCount",
+        "deletedCount",
+        "remainingCandidateCount",
+        "remainingJournalCount",
+        "malformedTimeCount",
+    }
+    cleanup_expectations = {
+        "reports/preflight-backoffice-pre-september-cleanup.json": (
+            "preflight",
+            "dry-run",
+            {"clear", "candidate", "prepared", "applied"},
+        ),
+        "reports/apply-backoffice-pre-september-cleanup.json": (
+            "apply",
+            "apply",
+            {"applied"},
+        ),
+        "reports/verify-backoffice-pre-september-cleanup.json": (
+            "verify",
+            "verify",
+            {"verified"},
+        ),
+    }
+    parsed_cleanup_reports: dict[str, dict[str, object]] = {}
+    for relative in cleanup_reports:
+        cleanup = json.loads((root / relative).read_text(encoding="utf-8"))
+        if not isinstance(cleanup, dict) or set(cleanup) != cleanup_keys:
+            fail(f"{relative} does not have the exact cleanup report shape")
+        stage, mode, states = cleanup_expectations[relative]
+        required_values = {
+            "kind": "backoffice-pre-september-events-cleanup",
+            "service": "backoffice",
+            "stage": stage,
+            "operationId": "backoffice-events-before:2026-09-01T00:00:00Z",
+            "schemaVersion": "backoffice-pre-september-events-cleanup-v1",
+            "mode": mode,
+            "cutoff": "2026-09-01T00:00:00Z",
+        }
+        for key, value in required_values.items():
+            if cleanup.get(key) != value:
+                fail(f"{relative} has an invalid fixed cleanup field: {key}")
+        if cleanup.get("state") not in states:
+            fail(f"{relative} has an invalid cleanup state")
+        counts = cleanup.get("counts")
+        if not isinstance(counts, dict) or set(counts) != cleanup_count_keys:
+            fail(f"{relative} has an invalid cleanup count shape")
+        if any(type(value) is not int or value < 0 for value in counts.values()):
+            fail(f"{relative} has a non-integer cleanup count")
+        if counts["scannedCount"] < counts["remainingCandidateCount"]:
+            fail(f"{relative} has contradictory cleanup scan counts")
+        digest = cleanup.get("digest")
+        if digest is not None and (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            fail(f"{relative} has an invalid cleanup digest")
+        reasons = cleanup.get("reasonCodes")
+        if (
+            not isinstance(reasons, list)
+            or any(
+                not isinstance(reason, str) or reason not in cleanup_reason_codes
+                for reason in reasons
+            )
+            or len(reasons) != len(set(reasons))
+            or cleanup.get("reasonCodeCount") != len(reasons)
+            or reasons
+        ):
+            fail(f"{relative} retained cleanup blockers")
+        if counts["malformedTimeCount"] != 0:
+            fail(f"{relative} retained malformed event times")
+        if mode != "apply" and counts["deletedCount"] != 0:
+            fail(f"{relative} reports an unexpected cleanup write")
+        if cleanup["state"] == "clear":
+            if digest is not None or any(counts[key] != 0 for key in (
+                "candidateCount",
+                "journaledCount",
+                "deletedCount",
+                "remainingCandidateCount",
+                "remainingJournalCount",
+            )):
+                fail(f"{relative} has an invalid clear cleanup state")
+        elif cleanup["state"] == "candidate":
+            if (
+                digest is None
+                or counts["candidateCount"] <= 0
+                or counts["journaledCount"] != 0
+                or counts["deletedCount"] != 0
+                or counts["remainingCandidateCount"] != counts["candidateCount"]
+                or counts["remainingJournalCount"] != 0
+            ):
+                fail(f"{relative} has an invalid candidate cleanup state")
+        elif cleanup["state"] == "prepared":
+            if (
+                digest is None
+                or counts["journaledCount"] != counts["candidateCount"]
+                or counts["deletedCount"] != 0
+            ):
+                fail(f"{relative} has an invalid prepared cleanup state")
+        else:
+            if (
+                digest is None
+                or counts["journaledCount"] != counts["candidateCount"]
+                or counts["remainingCandidateCount"] != 0
+                or counts["remainingJournalCount"] != 0
+            ):
+                fail(f"{relative} did not prove an applied cleanup journal")
+        parsed_cleanup_reports[relative] = cleanup
+
+    cleanup_complete = (
+        provenance["backoffice_pre_september_cleanup_complete"] == "true"
+    )
+    cleanup_preflight = parsed_cleanup_reports[
+        "reports/preflight-backoffice-pre-september-cleanup.json"
+    ]
+    if phase != "apply-slip-index":
+        if cleanup_complete is not (cleanup_preflight["state"] == "applied"):
+            fail("cleanup completion differs from its preflight journal state")
+    elif not cleanup_complete:
+        fail("final evidence did not mark the Backoffice cleanup complete")
+
+    if phase == "apply-slip-index":
+        cleanup_apply = parsed_cleanup_reports[
+            "reports/apply-backoffice-pre-september-cleanup.json"
+        ]
+        cleanup_verify = parsed_cleanup_reports[
+            "reports/verify-backoffice-pre-september-cleanup.json"
+        ]
+        if (
+            cleanup_apply["digest"] != cleanup_verify["digest"]
+            or cleanup_apply["counts"]["candidateCount"]
+            != cleanup_verify["counts"]["candidateCount"]
+            or cleanup_apply["counts"]["journaledCount"]
+            != cleanup_verify["counts"]["journaledCount"]
+            or (
+                cleanup_preflight["digest"] is not None
+                and cleanup_preflight["digest"] != cleanup_apply["digest"]
+            )
+        ):
+            fail("Backoffice cleanup reports do not bind one applied journal")
 else:
     fail("unexpected schema evidence version")
 
@@ -571,7 +831,7 @@ standalone_reports = [
 if journal.get("reports") != standalone_reports:
     fail("journal reports differ from the standalone sanitized evidence")
 for key in (
-    operation_complete_key,
+    *operation_complete_keys,
     "maintenance_fence_enforced",
     "writers_quiesced",
     "runtime_held_for_deploy",
@@ -601,7 +861,7 @@ if phase == "apply-slip-index":
         "operation_lock_handoff",
     }
     schema = read_env(root / "schema.env")
-    if set(schema) != common_schema_keys | {operation_complete_key}:
+    if set(schema) != common_schema_keys | operation_complete_keys:
         fail("schema.env does not contain the exact reviewed key set")
     required_schema = {
         "schema_version": schema_version,
@@ -622,6 +882,8 @@ if phase == "apply-slip-index":
         "operation_lock_enforced": "true",
         "operation_lock_handoff": "true",
     }
+    if schema_version == "live-betting-v5":
+        required_schema["backoffice_pre_september_cleanup_complete"] = "true"
     if schema != required_schema:
         fail("schema.env does not bind final readiness to the exact rollout")
 elif (root / "schema.env").exists():

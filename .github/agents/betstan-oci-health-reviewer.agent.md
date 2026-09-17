@@ -34,16 +34,20 @@ Require all of the following before running checks:
 - exact successful infrastructure provenance run ID;
 - exact successful deployment run ID;
 - full deployed source SHA;
-- cluster OCID fingerprint, never an unverified context name;
+- selected runtime and its cluster or instance OCID fingerprint, never an
+  unverified context name;
 - expected compartment fingerprint and Kubernetes namespace;
 - verified immutable image provenance;
 - canonical `https://betstan.xyz`, redirect `https://www.betstan.xyz`, and the
   diagnostic HTTPS `nip.io` URL derived from the recorded OCI LB IPv4.
 
-Use an isolated temporary `HOME` and `KUBECONFIG`. Verify the kubeconfig exec
-arguments contain the exact cluster OCID and that the provider endpoint,
-compartment, namespace, and provenance fingerprints agree. Never print raw
-OCIDs, kubeconfig contents, private addresses, tokens, or credentials.
+Use an isolated temporary `HOME` and `KUBECONFIG`. For OKE, verify the kubeconfig
+exec arguments contain the exact cluster OCID. For k3s, verify the recorded
+instance/runtime identity and the checked-in Bastion/loopback access contract;
+do not require an OKE exec configuration. In both cases require the provider
+endpoint, compartment, namespace, and provenance fingerprints to agree.
+Never print raw OCIDs, kubeconfig contents, private addresses, tokens, or
+credentials.
 
 ## Read-only boundary
 

@@ -355,26 +355,28 @@ Before deployment:
 - run `pre-commit-infra-check-stan.sh`;
 - validate manifest YAML offline;
 - run `ingress-routing-guard-stan.sh`;
-- require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
+- for AKS, require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
 - require the target-specific retained Mongo PVC identity to be `Bound` and
   reject every additional Mongo PVC; never infer topology safety from a count
   threshold;
-- return `NO_GO` when the topology journal is in `transition`; normal deployment
-  must not race migration, cleanup, or rollback;
+- for AKS, return `NO_GO` when its topology journal is in `transition`; normal
+  deployment must not race migration, cleanup, or rollback. OCI uses its own
+  exact data, topology, lock, fence, and rollback contracts below; do not apply
+  an AKS journal requirement to an OCI release;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
 - for every OCI release, require a new exact-SHA final data handoff. Application
   or schema changes require the exact successful three-phase data chain; only
   the validated GitHub/infra/Markdown-only descendant resume may reuse an
   already applied chain. Require the baseline digest, active transferred
-  database lock, ingress write fence, and six quiesced legacy writer
+  database lock, ingress write fence, and seven quiesced writer
   Deployments before applying images;
 - treat a successful final data phase as an active maintenance handoff, not a
   completed release, and proceed directly to its bound deployment.
 
 During deployment:
 
-- hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
+- hold the selected runtime's shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
 - keep the public write fence active while new exact-digest services start;
 - after retained Mongo maintenance, verify Mongo `8.2.12`, FCV `8.2`, and the
   running image digest, then run the existing ingress-only resume and prove
@@ -389,7 +391,7 @@ During deployment:
   retain environment and secret bindings required by every still-supported
   fallback image even when the forward image no longer consumes them;
 - wait for each rollout before pulling the next image;
-- preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation;
+- for AKS, preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation; for OCI, preserve its exact retained Mongo volume and supported topology;
 - avoid concurrent image pulls that can exhaust the node OS filesystem;
 - keep production and stage secrets/resources isolated.
 
@@ -397,7 +399,7 @@ After deployment:
 
 - verify the exact merge/build/deploy SHA chain;
 - require every Deployment and StatefulSet ready;
-- require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
+- for AKS, require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent; for OCI, require the selected runtime's checked-in storage/topology validation;
 - test canonical `betstan.xyz`, permanent `www` redirects, and the diagnostic
   OCI host;
 - confirm each affected API and service has the expected response shape; a
@@ -439,7 +441,7 @@ After deployment:
   derived from the fixed event's preserved records, without logging it;
 - report deployment as failed when the application is unhealthy even if workflow steps succeeded.
 - on an incomplete OCI data-bound deployment, reapply the write fence, quiesce
-  all six data writers, and retain or reacquire the exact handoff lock before
+  all seven data writers, and retain or reacquire the exact handoff lock before
   permitting a retry, but only if that same run first validated and accepted
   the exact data handoff. If handoff validation did not succeed, failure
   cleanup must not mutate replicas, fences, or database locks.
@@ -619,10 +621,13 @@ A Running broker with missing consumers is not healthy production.
 - Run `rollback-readiness-stan.sh` before either rollback path.
 - Require a known target SHA with successful build/deployment provenance.
 - For fenced recovery after deployment cleanup, accept only exact candidate
-  Auth, Backoffice, and Client images plus a valid candidate-prefix/baseline-
-  suffix split over the canonical six-writer forward order. Reject arbitrary
-  mixtures, including writer gaps, candidate suffixes, unknown images, active
-  writers, a missing fence, or an unowned lock before mutation.
+  Auth and Client images plus a valid candidate-prefix/baseline-suffix split
+  over the canonical seven-writer forward order: Bet, Event, Moderation,
+  Resulting, Slip, Backoffice, then Gamemaster. Reject arbitrary mixtures,
+  including writer gaps, candidate suffixes, baseline readers, unknown images,
+  active writers, a missing fence, or an unowned lock before mutation.
+  Maintenance must quiesce Backoffice first, and non-final restoration or
+  fenced recovery must restore Backoffice last.
 - Reject a producer activation whose rollback target predates support for any
   durable value the candidate can create. Roll back to the validated
   compatibility baseline, not to the pre-compatibility generation.

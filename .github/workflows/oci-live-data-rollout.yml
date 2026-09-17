@@ -900,13 +900,13 @@ jobs:
                 -o jsonpath='{.spec.template.spec.containers[0].image}'
             )"
             case "$service" in
-              auth|backoffice|client)
+              auth|client)
                 if [ "$actual_ref" != "$expected_ref" ]; then
                   echo "::error::Resume candidate-only deployment image mismatch for ${service}"
                   exit 1
                 fi
                 ;;
-              bet|event|gamemaster|moderation|resulting|slip)
+              backoffice|bet|event|gamemaster|moderation|resulting|slip)
                 if [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
                   if [ "$actual_ref" != "$expected_ref" ]; then
                     echo "::error::Resume candidate-only deployment image mismatch for ${service}"
@@ -938,7 +938,7 @@ jobs:
             esac
           done
 
-          for service in auth backoffice client; do
+          for service in auth client; do
             expected_manifest="$(
               awk -F '\t' -v service="$service" '
                 $1 == service { count++; value=$4 }
@@ -1114,6 +1114,22 @@ jobs:
         run: |
           set -euo pipefail
           restore_or_verify_retained_hold() {
+            if [ "$PHASE" = "apply-slip-index" ]; then
+              ./infra/oci/scripts/live-data-maintenance-stan.sh hold
+              ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+              SOURCE_SHA="$SOURCE_SHA" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew
+              NAMESPACE="$OCI_K8S_NAMESPACE" \
+              LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+              OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+              SOURCE_SHA="$SOURCE_SHA" \
+                ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
+              return
+            fi
             if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
                [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
               ./infra/oci/scripts/live-data-maintenance-stan.sh restore
@@ -1208,29 +1224,29 @@ jobs:
           inputs.phase == 'apply-slip-index' &&
           steps.maintenance_enter.outcome == 'success'
         env:
-          RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode || 'none' }}
           STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv
         run: |
           set -euo pipefail
-          if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||
-             [ "$RESUME_MAINTENANCE_MODE" = "released-runtime" ]; then
-            ./infra/oci/scripts/live-data-maintenance-stan.sh restore
-          else
-            [ "$RESUME_MAINTENANCE_MODE" = "retained-hold" ] || {
-              echo "Unsupported resume maintenance mode: $RESUME_MAINTENANCE_MODE" >&2
-              exit 1
-            }
-            ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
-          fi
+          ./infra/oci/scripts/live-data-maintenance-stan.sh hold
+          ./infra/oci/scripts/live-data-maintenance-stan.sh verify-held
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          LOCK_LEASE_SECONDS="$SHARED_MONGO_LOCK_LEASE_SECONDS" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh renew
+          NAMESPACE="$OCI_K8S_NAMESPACE" \
+          LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \
+          OPERATION_ID="$SHARED_MONGO_LOCK_OPERATION" \
+          SOURCE_SHA="$SOURCE_SHA" \
+            ./infra/azure/agents/shared-mongo-operation-lock-stan.sh verify
 
       - name: Release database operation lock unless handed to deploy
         if: >-
           always() &&
           steps.operation_lock.outcome == 'success' &&
-          (!(inputs.phase == 'apply-slip-index' &&
-             steps.data.outcome == 'success' &&
-             steps.maintenance.outcome == 'success') ||
-           steps.abort_handoff.outcome == 'success')
+          (inputs.phase != 'apply-slip-index' ||
+           steps.maintenance_enter.outcome != 'success')
         run: |
           NAMESPACE="$OCI_K8S_NAMESPACE" \
           LOCK_TOKEN="$SHARED_MONGO_LOCK_TOKEN" \

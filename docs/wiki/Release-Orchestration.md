@@ -58,11 +58,12 @@ notes as authority to continue operations.
 ```mermaid
 flowchart LR
     Branch["Focused branch"] --> Docs["Documentation-impact assessment"]
-    Docs --> Candidate["Complete code and documentation candidate"]
+    Docs --> Candidate["Complete code + canonical documentation<br/>under the accepted design"]
     Docs -. affected pages .-> Wiki["Canonical public wiki<br/>edited in the same PR"]
     Wiki --> Candidate
     Candidate --> DevPR["PR to dev"]
-    DevPR --> DevChecks["Architecture, review,<br/>tests, and trusted CI"]
+    DevPR --> Snapshot["Authorized orchestrator<br/>immutable candidate"]
+    Snapshot --> DevChecks["Applicable exact-head reviews,<br/>formal critic, tests, final validation + CI"]
     DevChecks --> Dev["dev"]
     Dev --> Promote["dev to master PR"]
     Promote --> MergeChecks["Exact head and<br/>merge-snapshot checks"]
@@ -111,6 +112,17 @@ used as public labels.
 
 Metadata is part of the reviewed evidence. It is completed before the release
 critical path rather than repeatedly edited while production work is active.
+Title/body edits can start validation. Avoid metadata changes while the
+publisher evaluates its snapshot, during a data-to-deploy handoff, or inside
+a production-exclusivity window.
+
+Context-label setup reads the PR's labels first. If both informational context
+labels are already present, it performs no GitHub mutation. Otherwise it
+ensures and adds only the missing labels in one PR edit. An initial read
+failure performs no blind mutation and retains the caller's warning or
+strict-failure behavior. This prevents avoidable metadata churn; it does not
+change managed-label authority or replace the fresh-transition recovery
+described in [[Quality Gates]].
 
 ## Quality chain
 
@@ -132,6 +144,11 @@ Every change records documentation impact. The public-wiki editor is a
 supporting unit when public impact is plausible or ambiguous, not a universal
 quality gate.
 
+The consolidated design review, single candidate assembly owner, supporting
+test evidence, and direct handoffs follow [[Agents]]. They do not add another
+release or documentation gate. Source acceptance remains separate from
+runtime authorization and the selected procedure's operational checks.
+
 No agent may approve its own implementation, and no agent verdict replaces
 GitHub branch protection or protected-environment approval.
 
@@ -139,13 +156,20 @@ GitHub branch protection or protected-environment approval.
 
 Approval is classified by origin:
 
-- a Copilot CLI-created and CLI-owned pull request may use the bounded
-  no-personal-prompt path after every technical, lineage, review, and
-  exclusivity check passes;
+- Copilot CLI-created and CLI-owned pull requests and protected operations,
+  including downstream workflows whose ownership is proven by the canonical
+  policy, may use the bounded no-personal-prompt path after every technical,
+  lineage, review, and exclusivity check passes;
 - a human-originated pull request or protected operation remains personally
   approved;
 - neither path can skip required tests, exact-SHA provenance, environment
-  controls, rollback readiness, or post-deployment validation.
+  controls, genuine wait timers, first-attempt provenance, serialization,
+  locks/fences, rollback readiness, or post-deployment validation.
+
+Using a CLI command, sharing an actor identity, carrying a label, or appearing
+in a recent-run list does not by itself prove ownership. A technical context
+failure or uncertain authority is a blocker, not a request for personal
+consent and not permission to adopt human-originated work.
 
 The implementation uses private, one-operation authority records outside the
 repository. Their payloads and state transitions are deliberately not
@@ -194,6 +218,48 @@ Before deployment, the release chain verifies:
 - fixed-target data operators whose journal binds the exact preimage, target,
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
+
+**Pending fixed Backoffice cleanup.** The protected live-data chain adds one
+fixed-boundary Backoffice projection cleanup without creating a separate
+production path:
+
+1. `dry-run` performs the existing fixed-reschedule preflight, then the
+   Backoffice cleanup preflight, before the compatibility-backfill and Slip
+   index preflights;
+2. `apply-backfills` completes and verifies the existing fixed reschedule, then
+   runs the Backoffice cleanup in preflight mode only;
+3. `apply-slip-index` first reverifies the fixed reschedule, completes the
+   existing backfill and index work, then runs cleanup preflight, apply, and
+   verify. Cleanup apply is the last fenced database mutation.
+
+Production execution is permitted only through the protected workflow at the
+exact current `master` SHA. Every phase stops if the existing reschedule is not
+safely applied, completed, or resumable; the cleanup cannot skip or replace
+that prerequisite. No production workflow has been dispatched for this
+change.
+
+Mutating phases quiesce the seven writers: Backoffice, Bet, Event, Gamemaster,
+Moderation, Resulting, and Slip. Backoffice quiesces first so its projection
+cannot race the cleanup and restores last. Auth and Client remain served as
+readers, while `/api/backoffice` is expected to return fenced `503` responses
+during mutation. The final phase retains the established write fence and
+database-lock handoff for deployment.
+
+Once `apply-slip-index` has entered maintenance, that safety boundary remains
+in place regardless of how the phase ends. Success transfers it to deployment;
+failure, cancellation, or handoff-evidence failure re-establishes seven-writer
+quiescence and retains the shared database lock instead of restoring the prior
+runtime. Recovery at the same exact source can re-enter and verify an
+already-applied cleanup without expanding its fixed target set. A retained
+hold is a safe unavailable state, not evidence that production execution
+occurred or authority to begin another operation.
+
+New sanitized evidence uses `live-betting-v5` and requires
+`backoffice_pre_september_cleanup_complete` in the final handoff. The verifier
+keeps the literal historical meanings of `live-betting-v1` through `v4` and
+rejects an unknown `v6`; a newer label cannot reinterpret older evidence. The
+cleanup command has no rollback phase, so release rollback continues to use
+the protected baseline, fence, lock, and recovery model described below.
 
 If an already-dispatched but unissued operation loses a prerequisite, its
 exact request and run remain serialized until bounded, reviewed recovery proves
@@ -322,6 +388,23 @@ A rollback requires:
   pending work;
 - post-rollback digest and application validation.
 
+The fixed cleanup adds a separate fail-closed rollback compatibility decision.
+A well-formed authoritative result proving that its journal is absent leaves
+the existing rollback gates in force. A prepared journal blocks rollback and
+requires recovery by its exact source. An applied journal permits only an
+exact rollback target whose Backoffice listener acknowledges valid pre-cutoff
+deliveries before any projection write. Missing required, unreadable,
+malformed, duplicate, or unknown evidence blocks rather than being treated as
+absence.
+
+Ordinary and maintenance-aware rollback independently bind that exact-target
+capability before workload mutation. A Backoffice generation from before the
+listener guard is therefore not restorable after the cleanup is applied: a
+queued or delayed valid pre-cutoff `NEW_EVENT` delivery must not recreate a
+deleted projection. Pending-publication replay-or-drain compatibility remains
+a separate mandatory decision; satisfying either the cleanup or publication
+decision cannot satisfy the other.
+
 Historical pre-Telemetry rollback restores only the nine historical
 application images. During that transition, the retained observer must keep
 serving a well-formed summary, while its intentionally coarse service states
@@ -353,19 +436,19 @@ Mongo maintenance resumes the ingress controller only after exact version,
 compatibility-version, and image verification, before applying the Telemetry
 ingress. This restores admission readiness without thawing application writers;
 deployment failure recovery remains armed until deployment completes. Fenced
-rollback also recognizes the deployment cleanup's exact candidate Auth,
-Backoffice, and Client images over an ordered candidate-prefix/baseline-suffix
-writer rollout. It does not accept arbitrary mixed generations: immutable image
-evidence, writer quiescence, the write fence, Telemetry resource and route
+rollback also recognizes the deployment cleanup's exact candidate Auth and
+Client images over an ordered candidate-prefix/baseline-suffix writer rollout.
+It does not accept arbitrary mixed generations: immutable image evidence,
+seven-writer quiescence, the write fence, Telemetry resource and route
 constraints, and lock ownership remain mandatory. No database restore is added.
 
 When applied-data recovery resumes from that retained hold, each quiesced
 writer may use either its exact failed-deployment candidate image or its own
 checksum-bound pre-deployment baseline image, allowing a partially completed
-sequential rollout to continue safely. Auth, Backoffice, and Client remain on
-their exact candidate images, while released-runtime recovery requires all
-nine candidate images. Baseline provenance, ancestry, quiescence, readiness,
-locks, fences, and every pre-mutation check remain fail-closed.
+sequential rollout to continue safely. Auth and Client remain on their exact
+candidate images, while released-runtime recovery requires all nine candidate
+images. Baseline provenance, ancestry, quiescence, readiness, locks, fences,
+and every pre-mutation check remain fail-closed.
 
 A generation that failed its own deployment is never an accepted rollback
 baseline.
@@ -375,11 +458,33 @@ baseline.
 The conductor monitors the real blocking object: agent result, process,
 GitHub job, protected approval, handoff, or runtime health signal.
 
+Keep one operation owner and one observer for each owned release chain.
+Retain exact owned runs in the existing durable work-unit evidence across
+resume; a recent-run list is discovery, not ownership or a reason to forget a
+known run. Reconcile the exact run and its proven downstream work after each
+job or approval transition, even when the top-level status is unchanged.
+
+- **ACT:** an exact CLI-owned gate is eligible. The conductor immediately
+  routes the authorized orchestrator to the canonical approval path, even if
+  a timer also exists; the timer remains effective.
+- **WAIT:** exact evidence proves an already-approved timer or provider wait.
+  Retain bounded observation without submitting a duplicate approval.
+- **BLOCK:** invalid local context, missing required proof, unresolved
+  authority, source/ownership drift, or unknown evidence prevents safe action.
+  State the technical reason. Human-originated operations retain their own
+  personal approval path.
+
+These are caller actions, not a new authority framework or critic queue.
+Captured dispatch or issued authority is not proof that jobs and the expected
+gate have materialized. Approval submission and an intermediate green job
+are not terminal release evidence.
+
 - A running watcher is notification transport, not proof of progress.
-- A waiting approval is actionable and routed immediately.
+- A waiting state is classified immediately rather than left to a watcher.
 - Approval eligibility comes from the machine-readable protected-operation
   policy and exact durable authority, never an agent's remembered workflow
-  category; an eligible CLI-issued gate is approved in the same checkpoint.
+  category; the conductor routes an eligible CLI-issued gate to the authorized
+  orchestrator in the same checkpoint. The conductor does not submit approval.
 - One missed checkpoint triggers bounded recovery.
 - Two missed checkpoints require a concrete safe action or an explicit
   blocker.
@@ -390,6 +495,14 @@ GitHub job, protected approval, handoff, or runtime health signal.
 - A proven repository-policy false block is corrected narrowly, with focused
   regression coverage, through the normal branch path.
 
+Routine routing, acknowledgements, timers, and obvious scope corrections stay
+with the conductor. Advisory drift or delay blocks only affected dependants;
+it cannot freeze independently authorized eligible approval, safe completion,
+or incident recovery. Required technical proof still gates its operation.
+Use the bounded checkpoints and original correction budgets in [[Agents]],
+not a new review round for every status change. Preserve compatibility and
+spent authority evidence through any reviewed correction or rollback.
+
 ## Documentation impact and public-wiki support
 
 Every change records a documentation-impact assessment. Register the
@@ -398,12 +511,24 @@ change instead records the inspected exact-diff paths and its justification.
 Product behavior, architecture, contracts, data lifecycle, security,
 infrastructure, quality gates, release behavior, UI/UX, and agent-role changes
 update their canonical `docs/wiki/` pages in the same pull request before
-immutable critic review and final validation.
+formal critic review of the immutable candidate and final validation. The
+editor returns its owned pages and evidence to the implementation owner
+assembling the candidate; the authorized orchestrator creates its immutable
+snapshot.
 
-After merge, changed repository pages are published byte-for-byte to the
-GitHub wiki and their links are verified. Matching reusable-agent guidance,
-PR/release evidence, and explicit accepted exceptions remain part of the
-handoff when applicable.
+After the exact protected commit merges, the authorized orchestrator, not the
+public-wiki editor, publishes changed canonical pages to the GitHub wiki.
+Bind publication to that merged commit, not a mutable branch or local
+worktree. Verify byte-for-byte equality of `docs/wiki/*.md` with the published
+counterparts, including unchanged pages that need no rewrite. Do not reformat
+content or make wiki-only policy corrections.
+
+Verify published navigation, links, heading anchors, and rendered diagrams.
+Record the source commit, wiki revision, page set, and verification outcome;
+a mismatch or broken publication returns to its owner and is not complete.
+Matching reusable-agent guidance, PR/release evidence, and explicit accepted
+exceptions remain part of the handoff when applicable. Local documentation
+readiness is neither final candidate acceptance nor a claim of publication.
 
 Private runtime identifiers, credentials, approval records, and emergency
 procedures remain outside the public wiki.
