@@ -365,6 +365,26 @@ An administrator-only scope still exists for explicitly named offline
 acceptance events used during controlled validation. That narrow capability
 does not gate the normal Backoffice catalog or controls.
 
+### Fixed historical projection boundary
+
+The pending release adds one fixed, one-time cleanup for the Backoffice event
+projection. If the protected data phase is applied, it deletes only rows in
+`gaming_backoffice.events` whose kickoff is a valid, explicitly zoned instant
+strictly before `2026-09-01T00:00:00Z`. A row exactly at the cutoff or later is
+retained. This is not rolling retention, and it does not delete Event,
+Gamemaster, Slip, Bet, Moderation, Resulting, or other service-owned data.
+
+The same release carries a permanent fixed-boundary `NEW_EVENT` replay guard.
+A valid pre-cutoff message is acknowledged without recreating the deleted
+Backoffice projection. A missing, malformed, or timezone-ambiguous kickoff
+does not qualify for that guard and continues through the legacy listener path
+rather than being silently dropped. Events at or after the cutoff keep their
+existing projection behavior.
+
+This cleanup has not been run in production. Its protected sequencing,
+verification, and recovery boundaries are described in
+[[Release Orchestration]].
+
 ## Public Telemetry summaries
 
 Telemetry is an observer, not an account, betting, moderation, or settlement
