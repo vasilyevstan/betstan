@@ -11,6 +11,10 @@ EXPECTED_NAMESPACE="${EXPECTED_NAMESPACE:-}"
 EXPECTED_RECOVERY_RUN_ID="${EXPECTED_RECOVERY_RUN_ID:-}"
 REQUIRE_CURRENT_DEPLOY_PROVENANCE="${REQUIRE_CURRENT_DEPLOY_PROVENANCE:-false}"
 ALLOW_LOCAL_CAPTURE="${ALLOW_LOCAL_CAPTURE:-false}"
+FAILED_DEPLOY_RUN_ID="${FAILED_DEPLOY_RUN_ID-0}"
+RESUME_MAINTENANCE_MODE="${RESUME_MAINTENANCE_MODE-none}"
+RESOLVED_APPLIED_DATA_RUN_ID="${RESOLVED_APPLIED_DATA_RUN_ID-0}"
+RESOLVED_APPLIED_SOURCE_SHA="${RESOLVED_APPLIED_SOURCE_SHA-none}"
 
 [[ -n "$BASELINE_DIR" && -d "$BASELINE_DIR" && ! -L "$BASELINE_DIR" ]] ||
   oci_die "BASELINE_DIR must be a regular directory"
@@ -22,7 +26,11 @@ python3 - \
   "$EXPECTED_NAMESPACE" \
   "$EXPECTED_RECOVERY_RUN_ID" \
   "$REQUIRE_CURRENT_DEPLOY_PROVENANCE" \
-  "$ALLOW_LOCAL_CAPTURE" <<'PY'
+  "$ALLOW_LOCAL_CAPTURE" \
+  "$FAILED_DEPLOY_RUN_ID" \
+  "$RESUME_MAINTENANCE_MODE" \
+  "$RESOLVED_APPLIED_DATA_RUN_ID" \
+  "$RESOLVED_APPLIED_SOURCE_SHA" <<'PY'
 import hashlib
 import re
 import sys
@@ -35,15 +43,40 @@ root = Path(sys.argv[1])
     expected_recovery_run_id,
     require_current_deploy_provenance,
     allow_local_capture,
-) = sys.argv[2:7]
+    failed_deploy_run_id,
+    resume_maintenance_mode,
+    resolved_applied_data_run_id,
+    resolved_applied_source_sha,
+) = sys.argv[2:11]
 if require_current_deploy_provenance not in ("true", "false"):
     raise SystemExit("REQUIRE_CURRENT_DEPLOY_PROVENANCE must be true or false")
 if allow_local_capture not in ("true", "false"):
     raise SystemExit("ALLOW_LOCAL_CAPTURE must be true or false")
-services = {
+resume_tuple_absent = (
+    failed_deploy_run_id == "0"
+    and resolved_applied_data_run_id == "0"
+    and resolved_applied_source_sha == "none"
+    and resume_maintenance_mode == "none"
+)
+resume_tuple_positive = (
+    re.fullmatch(r"[1-9][0-9]*", failed_deploy_run_id) is not None
+    and re.fullmatch(r"[1-9][0-9]*", resolved_applied_data_run_id) is not None
+    and re.fullmatch(r"[0-9a-f]{40}", resolved_applied_source_sha) is not None
+    and resume_maintenance_mode in {"released-runtime", "retained-hold"}
+)
+if not resume_tuple_absent and not resume_tuple_positive:
+    raise SystemExit("failed-deploy and resolved applied-data authority must be all absent or all positive")
+if resume_tuple_absent:
+    failed_deploy_resume = False
+else:
+    if require_current_deploy_provenance != "true":
+        raise SystemExit("failed-deploy resume authority context is incomplete")
+    failed_deploy_resume = True
+historical_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+current_services = historical_services | {"telemetry"}
 repository = "ghcr.io/vasilyevstan/betstan-images"
 digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
 required_files = {
@@ -89,6 +122,7 @@ def env_file(name):
         values[key] = value
     return values
 
+telemetry = None
 if "telemetry-pre-run.env" in manifest:
     telemetry = env_file("telemetry-pre-run.env")
     if set(telemetry) != {
@@ -160,6 +194,13 @@ if (
     )
 ):
     raise SystemExit("rollback baseline workflow provenance is not exact first-attempt evidence")
+if (
+    failed_deploy_resume
+    and baseline["baseline_capture_run_id"] != resolved_applied_data_run_id
+):
+    raise SystemExit(
+        "rollback baseline capture run differs from the resolved applied-data root"
+    )
 if baseline["database_restore"] != "disabled":
     raise SystemExit("rollback baseline attempts to authorize database restoration")
 if (
@@ -170,13 +211,57 @@ if (
 ):
     raise SystemExit("rollback baseline does not identify the public GHCR registry")
 
+deploy_workflow = baseline["baseline_deploy_workflow"]
+recovery_run_id = baseline.get("baseline_recovery_run_id", "0")
+recovery_attempt = baseline.get("baseline_recovery_run_attempt", "0")
+transition_file = baseline.get("baseline_transition_provenance_file", "none")
+if expected_recovery_run_id and recovery_run_id != expected_recovery_run_id:
+    raise SystemExit("rollback baseline recovery authority differs from the selected run")
+if deploy_workflow == "oci-production-deploy":
+    if require_current_deploy_provenance == "true":
+        if (
+            baseline.get("baseline_recovery_run_id") != "0"
+            or baseline.get("baseline_recovery_run_attempt") != "0"
+            or baseline.get("baseline_transition_provenance_file") != "none"
+        ):
+            raise SystemExit("current ordinary rollback baseline lacks the exact zero recovery tuple")
+    elif (
+        recovery_run_id not in ("", "0")
+        or recovery_attempt not in ("", "0")
+        or transition_file not in ("", "none")
+    ):
+        raise SystemExit("ordinary rollback baseline carries recovery authority")
+    failed_deploy_ordinary_resume = (
+        require_current_deploy_provenance == "true"
+        and failed_deploy_resume
+    )
+    if failed_deploy_ordinary_resume:
+        services = None
+        allowed_services = current_services
+    else:
+        services = (
+            current_services
+            if require_current_deploy_provenance == "true"
+            else historical_services
+        )
+        allowed_services = services
+elif deploy_workflow in {
+    "oci-ghcr-cache-recovery",
+    "oci-production-rollback",
+}:
+    services = historical_services
+    allowed_services = services
+    failed_deploy_ordinary_resume = False
+else:
+    raise SystemExit("rollback baseline deploy workflow is unsupported")
+
 images = {}
 for raw in (root / "images.tsv").read_text(encoding="utf-8").splitlines():
     fields = raw.split("\t")
     if len(fields) != 5:
         raise SystemExit("rollback image provenance must contain five columns")
     service, row_repository, image_ref, manifest_digest, platform_digest = fields
-    if service in images or service not in services:
+    if service in images or service not in allowed_services:
         raise SystemExit("rollback image provenance service set is invalid")
     if (
         row_repository != repository
@@ -186,8 +271,27 @@ for raw in (root / "images.tsv").read_text(encoding="utf-8").splitlines():
     ):
         raise SystemExit("rollback image provenance is not an immutable GHCR reference")
     images[service] = image_ref
-if set(images) != services:
-    raise SystemExit("rollback image provenance does not contain exactly nine services")
+if failed_deploy_ordinary_resume:
+    if set(images) == historical_services:
+        services = historical_services
+    elif set(images) == current_services:
+        services = current_services
+    else:
+        raise SystemExit("failed-deploy baseline is neither exact H9 nor exact T10")
+elif set(images) != services:
+    raise SystemExit("rollback image provenance does not contain the exact required service set")
+
+if services == current_services:
+    if telemetry is None:
+        raise SystemExit("current rollback baseline requires checksum-bound Telemetry evidence")
+    if (
+        telemetry["mode"] != "retained"
+        or telemetry["queue_present"] != "true"
+        or telemetry["image"] != images["telemetry"]
+    ):
+        raise SystemExit("current rollback baseline Telemetry evidence does not match images.tsv")
+elif failed_deploy_resume and telemetry is None:
+    raise SystemExit("failed-deploy H9 baseline requires checksum-bound Telemetry evidence")
 
 live_images = {}
 for raw in (root / "live-images.tsv").read_text(encoding="utf-8").splitlines():
@@ -201,21 +305,9 @@ for raw in (root / "live-images.tsv").read_text(encoding="utf-8").splitlines():
         raise SystemExit("rollback live-image evidence differs from GHCR provenance")
     live_images[service] = image_ref
 if set(live_images) != services:
-    raise SystemExit("rollback live-image evidence does not contain exactly nine services")
+    raise SystemExit("rollback live-image evidence does not contain the exact required service set")
 
-deploy_workflow = baseline["baseline_deploy_workflow"]
-recovery_run_id = baseline.get("baseline_recovery_run_id", "0")
-recovery_attempt = baseline.get("baseline_recovery_run_attempt", "0")
-transition_file = baseline.get("baseline_transition_provenance_file", "none")
-if expected_recovery_run_id and recovery_run_id != expected_recovery_run_id:
-    raise SystemExit("rollback baseline recovery authority differs from the selected run")
 if deploy_workflow == "oci-production-deploy":
-    if (
-        recovery_run_id not in ("", "0")
-        or recovery_attempt not in ("", "0")
-        or transition_file not in ("", "none")
-    ):
-        raise SystemExit("ordinary rollback baseline carries recovery authority")
     provenance_name = "trusted-deploy-provenance.txt"
     if provenance_name not in manifest:
         if require_current_deploy_provenance == "true":

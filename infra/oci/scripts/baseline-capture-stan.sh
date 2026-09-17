@@ -30,7 +30,10 @@ MIGRATION_EVIDENCE_REFERENCE="${MIGRATION_EVIDENCE_REFERENCE:-}"
 RUN_LOOKBACK="${RUN_LOOKBACK:-40}"
 BASELINE_RECOVERY_RUN_ID="${BASELINE_RECOVERY_RUN_ID:-0}"
 BASELINE_RECOVERY_DIR="${BASELINE_RECOVERY_DIR:-}"
-ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+HISTORICAL_ROLLBACK_SERVICES=(auth bet backoffice client event gamemaster moderation resulting slip)
+CURRENT_ROLLBACK_SERVICES=("${HISTORICAL_ROLLBACK_SERVICES[@]}" telemetry)
+ROLLBACK_SERVICES=()
+BASELINE_SERVICE_PROFILE=""
 API_CONTRACTS=(
   "/|html"
   "/api/auth/currentuser|auth"
@@ -561,15 +564,24 @@ PY
 
 validate_ghcr_image_inventory() {
   local image_file="$1"
-  python3 - "$image_file" <<'PY'
+  local service_profile="$2"
+  python3 - "$image_file" "$service_profile" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-expected_services = {
+historical_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+profiles = {
+    "historical": historical_services,
+    "current": historical_services | {"telemetry"},
+}
+profile = sys.argv[2]
+if profile not in profiles:
+    raise SystemExit("unknown baseline service profile")
+expected_services = profiles[profile]
 repository = "ghcr.io/vasilyevstan/betstan-images"
 digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
 rows = {}
@@ -592,21 +604,30 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         raise SystemExit("image provenance reference does not match its GHCR manifest digest")
     rows[service] = image_ref
 if set(rows) != expected_services:
-    raise SystemExit("image provenance does not contain exactly the nine application services")
+    raise SystemExit("image provenance does not contain the exact selected application service set")
 PY
 }
 
 validate_live_ghcr_inventory() {
   local live_file="$1"
-  python3 - "$live_file" <<'PY'
+  local service_profile="$2"
+  python3 - "$live_file" "$service_profile" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-expected_services = {
+historical_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+profiles = {
+    "historical": historical_services,
+    "current": historical_services | {"telemetry"},
+}
+profile = sys.argv[2]
+if profile not in profiles:
+    raise SystemExit("unknown baseline service profile")
+expected_services = profiles[profile]
 reference_pattern = re.compile(
     r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}"
 )
@@ -624,7 +645,7 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         raise SystemExit("live image inventory is not an immutable public GHCR generation")
     rows[service] = image_ref
 if set(rows) != expected_services:
-    raise SystemExit("live image inventory does not contain exactly the nine application services")
+    raise SystemExit("live image inventory does not contain the exact selected application service set")
 PY
 }
 
@@ -674,9 +695,13 @@ validate_positive_int "$HTTP_ATTEMPTS" || oci_die "HTTP_ATTEMPTS must be positiv
 if [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
   [[ -z "$BASELINE_RECOVERY_DIR" ]] ||
     oci_die "BASELINE_RECOVERY_DIR is forbidden without an explicit recovery run"
+  ROLLBACK_SERVICES=("${CURRENT_ROLLBACK_SERVICES[@]}")
+  BASELINE_SERVICE_PROFILE=current
 else
   [[ -n "$BASELINE_RECOVERY_DIR" ]] ||
     oci_die "baseline recovery requires the explicitly selected recovery artifact directory"
+  ROLLBACK_SERVICES=("${HISTORICAL_ROLLBACK_SERVICES[@]}")
+  BASELINE_SERVICE_PROFILE=historical
 fi
 [[ "$HTTP_RETRY_SECONDS" =~ ^[0-9]+$ ]] ||
   oci_die "HTTP_RETRY_SECONDS must be a nonnegative integer"
@@ -721,7 +746,7 @@ PY
     "$service" "$image" "$revision" "$desired" "$ready" "$available" >>"$OUTPUT_DIR/deployments.tsv"
 done
 
-if ! validate_live_ghcr_inventory "$OUTPUT_DIR/live-images.tsv"; then
+if ! validate_live_ghcr_inventory "$OUTPUT_DIR/live-images.tsv" "$BASELINE_SERVICE_PROFILE"; then
   if [[ "$BASELINE_RECOVERY_RUN_ID" == "0" ]]; then
     oci_die "non-GHCR live images require explicit completed cache-recovery authority before baseline capture"
   fi
@@ -748,7 +773,7 @@ if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
     EXPECTED_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
       "$SCRIPT_DIR/validate-partial-recovery-authority-stan.sh" >/dev/null ||
       oci_die "selected partial recovery artifact is not exact completed recovery evidence"
-    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" "$BASELINE_SERVICE_PROFILE" ||
       oci_die "selected partial recovery images are not immutable public GHCR provenance"
     compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
       oci_die "live deployment GHCR digests do not match the selected partial recovery"
@@ -800,7 +825,7 @@ if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
   else
     validate_selected_recovery_artifact "$BASELINE_RECOVERY_DIR" ||
       oci_die "selected GHCR cache recovery artifact is not exact completed recovery evidence"
-    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
+    validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" "$BASELINE_SERVICE_PROFILE" ||
       oci_die "selected recovery image provenance is not an immutable public GHCR generation"
     compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
       oci_die "live deployment GHCR digests do not match the selected recovery artifact"
@@ -859,7 +884,7 @@ while IFS= read -r run_id; do
   candidate_images_file="$(find "$candidate_dir" -type f -name images.tsv | head -n 1)"
   candidate_provenance_file="$(find "$candidate_dir" -type f -name provenance.txt | head -n 1)"
   [[ -f "$candidate_images_file" && -f "$candidate_provenance_file" ]] || continue
-  if ! validate_ghcr_image_inventory "$candidate_images_file"; then
+  if ! validate_ghcr_image_inventory "$candidate_images_file" "$BASELINE_SERVICE_PROFILE"; then
     continue
   fi
   if ! compare_live_images "$candidate_images_file"; then
@@ -1005,16 +1030,34 @@ telemetry_queue_present="$(
   awk '$1 == "telemetry:events:v1" {count++} END {print (count == 1 ? "true" : "false")}' \
     "$OUTPUT_DIR/queues.tsv"
 )"
+telemetry_inventory_image=none
+if [[ "$BASELINE_SERVICE_PROFILE" == "current" ]]; then
+  telemetry_inventory_image="$(
+    awk -F '\t' '$1 == "telemetry" {print $3}' "$OUTPUT_DIR/images.tsv"
+  )"
+fi
 python3 - \
   "$telemetry_deployment_json" "$telemetry_service_json" \
   "$telemetry_ingress_json" "$telemetry_database_initialized" \
-  "$telemetry_queue_present" "$OUTPUT_DIR/telemetry-pre-run.env" <<'PY' ||
+  "$telemetry_queue_present" "$OUTPUT_DIR/telemetry-pre-run.env" \
+  "$BASELINE_SERVICE_PROFILE" "$telemetry_inventory_image" <<'PY' ||
 import json
 import re
 import sys
 from pathlib import Path
 
-deployment_path, service_path, ingress_path, database_initialized, queue_present, output_path = sys.argv[1:7]
+(
+    deployment_path,
+    service_path,
+    ingress_path,
+    database_initialized,
+    queue_present,
+    output_path,
+    service_profile,
+    inventory_image,
+) = sys.argv[1:9]
+if service_profile not in {"historical", "current"}:
+    raise SystemExit("unknown baseline service profile")
 
 def optional_json(path):
     content = Path(path).read_text(encoding="utf-8")
@@ -1034,6 +1077,8 @@ if ingress:
         == "gaming-telemetry-srv"
     )
 if deployment is None:
+    if service_profile == "current":
+        raise SystemExit("current baseline requires retained Telemetry")
     if service is not None or route_count:
         raise SystemExit("pre-run Telemetry resources are partially present")
     values = {
@@ -1063,6 +1108,10 @@ else:
         or service is None
         or route_count != 2
         or queue_present != "true"
+        or (
+            service_profile == "current"
+            and containers[0].get("image", "") != inventory_image
+        )
     ):
         raise SystemExit("pre-run Telemetry topology is not exact and healthy")
     values = {

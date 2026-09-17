@@ -319,7 +319,7 @@ concurrent retirement fixture isolation without masking failed suites.
    chain; deployment still requires the resulting new exact-SHA final handoff.
    The workflow runs only compiled CLIs from the approved immutable image
    digests. Before acquiring the shared Mongo operation lock, it captures and
-   validates a rollback baseline whose nine live references and provenance
+   validates a rollback baseline whose ten live references and provenance
    are the same immutable public GHCR generation. An OCIR or mixed live
    generation requires the exact successful cache-recovery authority and
    cannot be labeled as a normal GHCR baseline. It then binds that baseline by

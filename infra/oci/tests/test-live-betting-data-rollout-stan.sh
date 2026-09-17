@@ -2283,6 +2283,7 @@ run_resume_fixture() {
     RESOLVED_APPLIED_DATA_RUN_ID=4007 \
     RESOLVED_APPLIED_SOURCE_SHA=1111111111111111111111111111111111111111 \
     BASELINE_RECOVERY_RUN_ID=0 \
+    FAILED_DEPLOY_RUN_ID=5007 \
     OCI_K8S_NAMESPACE=betstan-oci \
       bash "$resume_script"
   )
@@ -2547,6 +2548,7 @@ done
   fail "maintenance operator is not executable"
 
 python3 - "$WORKFLOW" "$DEPLOY_WORKFLOW" <<'PY'
+import re
 import sys
 from pathlib import Path
 
@@ -2598,6 +2600,76 @@ require_order(
     ],
     "deploy workflow",
 )
+
+def workflow_dispatch_inputs(text: str) -> set[str]:
+    dispatch = text[
+        text.index("  workflow_dispatch:\n"):
+        text.index("\npermissions:\n")
+    ]
+    return set(re.findall(r"^      ([a-z0-9_]+):$", dispatch, re.MULTILINE))
+
+
+if workflow_dispatch_inputs(data) != {
+    "approved_sha",
+    "build_run_id",
+    "infrastructure_run_id",
+    "phase",
+    "prerequisite_run_id",
+    "baseline_recovery_run_id",
+    "failed_deploy_run_id",
+    "failed_activation_run_id",
+    "failed_activation_user_id",
+    "confirmation",
+}:
+    raise SystemExit("data resume tuple changed the workflow input contract")
+if workflow_dispatch_inputs(deploy) != {
+    "approved_sha",
+    "build_run_id",
+    "infrastructure_run_id",
+    "data_run_id",
+    "baseline_recovery_run_id",
+    "baseline_recovery_source_sha",
+    "confirmation",
+}:
+    raise SystemExit("deploy resume tuple changed the workflow input contract")
+if "schema_version=live-betting-data-resume-" in deploy or data.count(
+    "schema_version=live-betting-data-resume-v1"
+) != 1:
+    raise SystemExit("resume tuple introduced or changed a workflow evidence schema")
+
+deploy_provenance = deploy[
+    deploy.index("- name: Verify immutable image and infrastructure provenance"):
+    deploy.index("- name: Install pinned OCI CLI")
+]
+require_order(
+    deploy_provenance,
+    [
+        "./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh",
+        "resume_authority=artifacts/data/resume-authority.env",
+        'resume_failed_deploy_run_id="$(resume_value failed_deploy_run_id)"',
+        'resume_applied_data_run_id="$(resume_value applied_data_run_id)"',
+        'resume_applied_source_sha="$(resume_value applied_source_sha)"',
+        'resume_maintenance_mode="$(resume_value resume_maintenance_mode)"',
+        "resume_failed_deploy_run_id=%s",
+        "resume_applied_data_run_id=%s",
+        "resume_applied_source_sha=%s",
+        "resume_maintenance_mode=%s",
+    ],
+    "deploy resume authority handoff",
+)
+deploy_baseline_validation = deploy[
+    deploy.index("- name: Validate executable pre-deploy rollback baseline"):
+    deploy.index("- name: Upload protected OCI rollback baseline")
+]
+for literal in (
+    "FAILED_DEPLOY_RUN_ID: ${{ steps.provenance.outputs.resume_failed_deploy_run_id }}",
+    "RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}",
+    "RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}",
+    "RESUME_MAINTENANCE_MODE: ${{ steps.provenance.outputs.resume_maintenance_mode }}",
+):
+    if literal not in deploy_baseline_validation:
+        raise SystemExit(f"deploy validator does not receive resume authority: {literal}")
+
 for literal in (
     "SHARED_MONGO_LOCK_TOKEN: live-data-${{ github.run_id }}-${{ github.run_attempt }}",
     "SHARED_MONGO_LOCK_OPERATION: live-data-${{ inputs.phase }}",
@@ -2617,6 +2689,18 @@ resume = data[
     data.index("- name: Verify exact failed-deploy resume state"):
     data.index("- name: Capture and validate pre-mutation rollback baseline")
 ]
+for literal in (
+    'FAILED_DEPLOY_RUN_ID="$FAILED_DEPLOY_RUN_ID" \\',
+    'RESOLVED_APPLIED_DATA_RUN_ID="$RESOLVED_APPLIED_DATA_RUN_ID" \\',
+    'RESOLVED_APPLIED_SOURCE_SHA="$RESOLVED_APPLIED_SOURCE_SHA" \\',
+    'RESUME_MAINTENANCE_MODE="$RESUME_MAINTENANCE_MODE" \\',
+):
+    if literal not in resume:
+        raise SystemExit(f"data validator does not receive resume authority: {literal}")
+if data.index("./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh") > data.index(
+    "- name: Verify exact failed-deploy resume state"
+):
+    raise SystemExit("data resume tuple is threaded before evidence validation")
 require_order(
     resume,
     [

@@ -742,7 +742,7 @@ cd resulting && npm ci && npm run test:ci
   may report only `Abort:`. Lock the complete credential mapping in a workflow
   contract rather than relying on an earlier authenticated step.
 - Capture rollback evidence before any database lock or workload/data
-  mutation. A zero-recovery baseline is valid only when all nine live
+  mutation. A zero-recovery baseline is valid only when all ten live
   references and exact deploy provenance are public GHCR digests; otherwise
   require the exact completed recovery run and its transition evidence.
 - GitHub currently documents public Container Registry package storage and

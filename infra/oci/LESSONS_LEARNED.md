@@ -145,7 +145,7 @@ conversation summaries are not authority.
   its consumed authority and promote a substantive hardened SHA rather than
   rerunning, replaying, or switching authority roots.
 - Capture and validate rollback evidence before acquiring a database lock or
-  changing a workload. An ordinary baseline is valid only when all nine live
+  changing a workload. An ordinary baseline is valid only when all ten live
   references and its exact deploy provenance identify public GHCR digests;
   OCIR or mixed state must first complete the explicitly selected recovery.
 - GitHub currently documents public Container Registry storage/bandwidth as

@@ -831,6 +831,7 @@ jobs:
       - name: Verify exact failed-deploy resume state
         if: inputs.failed_deploy_run_id != '0'
         env:
+          FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}
           RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}
           RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}
           BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
@@ -873,6 +874,10 @@ jobs:
           EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
           EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
           REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+          FAILED_DEPLOY_RUN_ID="$FAILED_DEPLOY_RUN_ID" \
+          RESOLVED_APPLIED_DATA_RUN_ID="$RESOLVED_APPLIED_DATA_RUN_ID" \
+          RESOLVED_APPLIED_SOURCE_SHA="$RESOLVED_APPLIED_SOURCE_SHA" \
+          RESUME_MAINTENANCE_MODE="$RESUME_MAINTENANCE_MODE" \
             ./infra/oci/scripts/validate-rollback-baseline-stan.sh
 
           case "$RESUME_MAINTENANCE_MODE" in

@@ -355,52 +355,79 @@ import sys
     telemetry_output_path,
 ) = sys.argv[1:8]
 
-services = [
+h9_services = [
     "auth", "bet", "backoffice", "client", "event",
     "moderation", "resulting", "slip", "gamemaster",
 ]
-current_services = set(services) | {"telemetry"}
+h9_set = set(h9_services)
+t10_set = h9_set | {"telemetry"}
+repository = "ghcr.io/vasilyevstan/betstan-images"
 image_pattern = re.compile(
     r"^ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}$"
 )
+digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
-def rows(path, minimum):
+def rows(path, columns, label):
     with open(path, encoding="utf-8", newline="") as handle:
-        parsed = [row for row in csv.reader(handle, delimiter="\t") if row]
-    if any(len(row) < minimum for row in parsed):
-        raise SystemExit(f"{path}: malformed TSV evidence")
+        parsed = list(csv.reader(handle, delimiter="\t"))
+    if not parsed or any(not row or len(row) != columns for row in parsed):
+        raise SystemExit(f"{label} is malformed")
     return parsed
 
 
 deployments = {}
-for row in rows(deployments_path, 6):
-    service, image, _revision, desired, ready, available = row[:6]
+for row in rows(deployments_path, 6, "baseline deployment evidence"):
+    service, image, revision, desired, ready, available = row
+    if service not in t10_set or service in deployments:
+        raise SystemExit("baseline deployment service set is invalid")
     if not image_pattern.fullmatch(image):
         raise SystemExit(f"{service}: baseline image is not an immutable digest")
-    if not desired.isdigit() or int(desired) < 1:
+    if (
+        not revision.isdigit()
+        or not desired.isdigit()
+        or not ready.isdigit()
+        or not available.isdigit()
+        or int(desired) < 1
+    ):
         raise SystemExit(f"{service}: baseline replica count is invalid")
     if ready != desired or available != desired:
         raise SystemExit(f"{service}: baseline replica state was not healthy")
     deployments[service] = (image, desired)
 
-baseline_images = {}
-for row in rows(baseline_images_path, 3):
-    if not image_pattern.fullmatch(row[2]):
-        raise SystemExit(f"{row[0]}: baseline image reference is invalid")
-    baseline_images[row[0]] = row[2]
+def image_inventory(path, label):
+    result = {}
+    for row in rows(path, 5, label):
+        service, row_repository, image, manifest_digest, platform_digest = row
+        if service not in t10_set or service in result:
+            raise SystemExit(f"{label} service set is invalid")
+        if (
+            row_repository != repository
+            or not digest_pattern.fullmatch(manifest_digest)
+            or not digest_pattern.fullmatch(platform_digest)
+            or image != f"{repository}@{manifest_digest}"
+        ):
+            raise SystemExit(f"{service}: {label} is not exact immutable GHCR provenance")
+        result[service] = image
+    return result
 
-current_images = {}
-for row in rows(current_images_path, 3):
-    if not image_pattern.fullmatch(row[2]):
-        raise SystemExit(f"{row[0]}: deployed image reference is invalid")
-    current_images[row[0]] = row[2]
 
-if sorted(deployments) != sorted(services):
-    raise SystemExit("baseline deployments do not cover the nine services")
-if sorted(baseline_images) != sorted(services):
-    raise SystemExit("baseline images do not cover the nine services")
-if set(current_images) != current_services:
+baseline_images = image_inventory(
+    baseline_images_path, "baseline image evidence"
+)
+current_images = image_inventory(
+    current_images_path, "deployed image evidence"
+)
+
+deployment_services = set(deployments)
+baseline_image_services = set(baseline_images)
+if deployment_services == h9_set and baseline_image_services == h9_set:
+    baseline_shape = "legacy-split-h9"
+elif deployment_services == t10_set and baseline_image_services == t10_set:
+    baseline_shape = "current-unified-t10"
+else:
+    raise SystemExit("baseline deployment and image evidence has a mixed or incomplete service shape")
+if set(current_images) != t10_set:
     raise SystemExit("deployed images do not cover the current ten services")
 
 telemetry = {}
@@ -408,7 +435,7 @@ for raw in open(telemetry_path, encoding="utf-8").read().splitlines():
     if not raw or "=" not in raw:
         raise SystemExit("pre-run Telemetry evidence is malformed")
     key, value = raw.split("=", 1)
-    if key in telemetry:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key) or key in telemetry:
         raise SystemExit("pre-run Telemetry evidence contains duplicate keys")
     telemetry[key] = value
 if set(telemetry) != {"mode", "image", "database_initialized", "queue_present"}:
@@ -431,19 +458,27 @@ if (
 ):
     raise SystemExit("pre-run Telemetry evidence is invalid")
 
-for service in services:
+if baseline_shape == "current-unified-t10" and (
+    telemetry["mode"] != "retained"
+    or telemetry["queue_present"] != "true"
+    or telemetry["image"] != baseline_images["telemetry"]
+    or telemetry["image"] != deployments["telemetry"][0]
+):
+    raise SystemExit("unified Telemetry evidence does not match the baseline rows")
+
+for service in h9_services:
     if deployments[service][0] != baseline_images[service]:
         raise SystemExit(f"{service}: baseline image evidence is inconsistent")
 
 with open(plan_path, "w", encoding="utf-8", newline="") as handle:
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-    for service in services:
+    for service in h9_services:
         image, desired = deployments[service]
         writer.writerow([service, f"gaming-{service}-depl", image, desired])
 
 with open(expected_current_path, "w", encoding="utf-8", newline="") as handle:
     writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-    for service in services:
+    for service in h9_services:
         writer.writerow(
             [
                 service,
@@ -455,6 +490,11 @@ with open(telemetry_output_path, "w", encoding="utf-8") as handle:
     for key in ("mode", "image", "database_initialized", "queue_present"):
         handle.write(f"{key}={telemetry[key]}\n")
     handle.write(f"candidate_image={current_images['telemetry']}\n")
+    handle.write(f"baseline_shape={baseline_shape}\n")
+    if baseline_shape == "current-unified-t10":
+        handle.write(f"desired_replicas={deployments['telemetry'][1]}\n")
+    else:
+        handle.write("desired_replicas=preserve\n")
 PY
 
 plan_value() {
@@ -734,6 +774,10 @@ telemetry_pre_run_image="$(awk -F '=' '$1 == "image" {print $2}' \
 telemetry_database_initialized="$(awk -F '=' \
   '$1 == "database_initialized" {print $2}' \
   "$OUTPUT_DIR/fenced-telemetry.env")"
+telemetry_baseline_shape="$(awk -F '=' '$1 == "baseline_shape" {print $2}' \
+  "$OUTPUT_DIR/fenced-telemetry.env")"
+telemetry_desired_replicas="$(awk -F '=' '$1 == "desired_replicas" {print $2}' \
+  "$OUTPUT_DIR/fenced-telemetry.env")"
 
 : >"$OUTPUT_DIR/fenced-restore-order.tsv"
 for service in "${RESTORE_ORDER[@]}"; do
@@ -766,12 +810,52 @@ done
 
 # Normalize Telemetry only after every legacy workload has been restored.
 if [[ "$telemetry_mode" == "retained" ]]; then
+  if [[ "$telemetry_baseline_shape" == "current-unified-t10" ]]; then
+    printf '%s\t%s\t%s\t%s\n' telemetry gaming-telemetry-depl \
+      "$telemetry_pre_run_image" "$telemetry_desired_replicas" \
+      >>"$OUTPUT_DIR/fenced-restore-order.tsv"
+  fi
   kubectl set image deployment/gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
     "gaming-telemetry=${telemetry_pre_run_image}" >/dev/null ||
     fenced_die "failed to restore Telemetry to its exact pre-run digest"
+  if [[ "$telemetry_baseline_shape" == "current-unified-t10" ]]; then
+    kubectl scale deployment/gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+      --replicas="$telemetry_desired_replicas" >/dev/null ||
+      fenced_die "failed to restore the exact Telemetry replica count"
+  fi
   kubectl rollout status deployment/gaming-telemetry-depl \
     -n "$OCI_K8S_NAMESPACE" --timeout="$ROLLOUT_TIMEOUT" >/dev/null ||
     fenced_die "Telemetry did not become ready at its pre-run digest"
+  if [[ "$telemetry_baseline_shape" == "current-unified-t10" ]]; then
+    kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+      -o json >"$WORK_DIR/fenced-restored-telemetry.json" ||
+      fenced_die "failed to inspect restored Telemetry"
+    python3 - "$WORK_DIR/fenced-restored-telemetry.json" \
+      "$telemetry_pre_run_image" "$telemetry_desired_replicas" <<'PY' ||
+import json
+import sys
+
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_image = sys.argv[2]
+expected_replicas = int(sys.argv[3])
+containers = [
+    item
+    for item in document.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    if item.get("name") == "gaming-telemetry"
+]
+status = document.get("status", {})
+if (
+    len(containers) != 1
+    or containers[0].get("image") != expected_image
+    or document.get("spec", {}).get("replicas") != expected_replicas
+    or status.get("updatedReplicas") != expected_replicas
+    or status.get("readyReplicas") != expected_replicas
+    or status.get("availableReplicas") != expected_replicas
+):
+    raise SystemExit("restored Telemetry image or replica state is not exact")
+PY
+      fenced_die "Telemetry did not restore its exact baseline image and replicas"
+  fi
 else
   [[ "$telemetry_mode" == "absent" ]] ||
     fenced_die "pre-run Telemetry recovery mode is invalid"
@@ -897,6 +981,10 @@ fi
   "$STEADY_READINESS_DIR/summary.env")" == "steady-state" ]] ||
   fenced_die "final readiness did not run in the steady-state phase"
 
+restored_service_count="${#RESTORE_ORDER[@]}"
+if [[ "$telemetry_baseline_shape" == "current-unified-t10" ]]; then
+  restored_service_count=$((restored_service_count + 1))
+fi
 write_text_atomic "$OUTPUT_DIR/fenced-recovery-summary.env" <<EOF
 status=PASS
 mode=fenced-rollback-recovery
@@ -909,7 +997,7 @@ maintenance_fence=released
 database_lock=released
 database_lock_acquisition=$FENCED_LOCK_ACQUISITION
 database_restore=disabled
-restored_services=${#RESTORE_ORDER[@]}
+restored_services=$restored_service_count
 telemetry_state=$telemetry_mode
 EOF
-oci_log "oci_fenced_rollback_recovery=PASS target_sha=$TARGET_SHA services=${#RESTORE_ORDER[@]}"
+oci_log "oci_fenced_rollback_recovery=PASS target_sha=$TARGET_SHA services=$restored_service_count"

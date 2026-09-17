@@ -51,6 +51,36 @@ image_for() {
   printf 'ghcr.io/vasilyevstan/betstan-images@sha256:%s' "$(digest_for "$1" "$2")"
 }
 
+refresh_baseline_checksums() {
+  (
+    cd "$BASELINE_DIR"
+    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
+      [[ -f "$evidence" ]] || continue
+      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
+    done
+  ) >"$BASELINE_DIR/SHA256SUMS"
+}
+
+configure_unified_t10() {
+  printf 'telemetry\t%s\t31\t2\t2\t2\n' "$(image_for target telemetry)" \
+    >>"$BASELINE_DIR/deployments.tsv"
+  printf 'telemetry\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
+    "$(image_for target telemetry)" "$(digest_for target telemetry)" \
+    "$(digest_for target-arm64 telemetry)" >>"$BASELINE_DIR/images.tsv"
+  refresh_baseline_checksums
+}
+
+assert_artifact_rejection_pre_mutation() {
+  [[ ! -s "$STATE_DIR/kubectl.log" ]] ||
+    fail 'artifact-shape rejection reached the cluster'
+  [[ ! -s "$STATE_DIR/lock.log" ]] ||
+    fail 'artifact-shape rejection touched the database lock'
+  [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+    fail 'artifact-shape rejection changed the maintenance fence'
+  [[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+    fail 'artifact-shape rejection changed the database lock'
+}
+
 # ---------------------------------------------------------------- fixtures ---
 new_case() {
   local name="$1"
@@ -86,11 +116,13 @@ new_case() {
   for service in "${SERVICES[@]}"; do
     printf '%s\t%s\t30\t1\t1\t1\n' "$service" "$(image_for target "$service")" \
       >>"$BASELINE_DIR/deployments.tsv"
-    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
+    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
       "$service" "$(image_for target "$service")" "$(digest_for target "$service")" \
+      "$(digest_for target-arm64 "$service")" \
       >>"$BASELINE_DIR/images.tsv"
-    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
+    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
       "$service" "$(image_for deployed "$service")" "$(digest_for deployed "$service")" \
+      "$(digest_for deployed-arm64 "$service")" \
       >>"$BUILD_DIR/images.tsv"
     printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
     if printf '%s\n' "${QUIESCED[@]}" | grep -qx "$service"; then
@@ -110,8 +142,9 @@ image=$(image_for target telemetry)
 database_initialized=true
 queue_present=true
 EOF
-  printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
+  printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
     telemetry "$(image_for deployed telemetry)" "$(digest_for deployed telemetry)" \
+    "$(digest_for deployed-arm64 telemetry)" \
     >>"$BUILD_DIR/images.tsv"
   (
     cd "$BASELINE_DIR"
@@ -216,7 +249,12 @@ PY
   scale)
     depl="${2#deployment/}"; svc="$(svc_from_depl "$depl")"
     for arg in "$@"; do
-      [[ "$arg" == --replicas=* ]] && printf '%s\n' "${arg#--replicas=}" >"$STATE_DIR/replicas-$svc"
+      if [[ "$arg" == --replicas=* ]]; then
+        printf '%s\n' "${arg#--replicas=}" >"$STATE_DIR/replicas-$svc"
+        if [[ -f "$STATE_DIR/ready-$svc" ]]; then
+          printf '%s\n' "${arg#--replicas=}" >"$STATE_DIR/ready-$svc"
+        fi
+      fi
     done
     exit 0
     ;;
@@ -435,7 +473,9 @@ case "$MODE" in
   retained)
     [[ -f "$STATE_DIR/image-telemetry" ]]
     [[ "$(cat "$STATE_DIR/image-telemetry")" == "$EXPECTED_IMAGE" ]]
-    [[ "$(cat "$STATE_DIR/ready-telemetry")" == "1" ]]
+    [[ "$(cat "$STATE_DIR/replicas-telemetry")" =~ ^[1-9][0-9]*$ ]]
+    [[ "$(cat "$STATE_DIR/ready-telemetry")" == \
+       "$(cat "$STATE_DIR/replicas-telemetry")" ]]
     [[ -f "$STATE_DIR/service-telemetry" ]]
     [[ "$(cat "$STATE_DIR/telemetry-routes")" == "2" ]]
     [[ "$EXPECTED_DATABASE_INITIALIZED" == "true" || "$EXPECTED_DATABASE_INITIALIZED" == "false" ]]
@@ -556,6 +596,25 @@ done
   fail 'fenced restore order did not start with auth'
 [[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "backoffice" ]] ||
   fail 'fenced restore order did not restore Backoffice last'
+
+# A current baseline stores Telemetry in the same exact image and Deployment
+# inventories. The operator must still restore H9 in the legacy order, with
+# Backoffice last among H9, and restore Telemetry afterward.
+new_case unified-t10-retained
+configure_unified_t10
+run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+  fail "unified T10 fenced state was rejected: $(cat "$CASE_DIR/out.txt")"
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=PASS'
+assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'restored_services=10'
+[[ "$(cat "$STATE_DIR/image-telemetry")" == "$(image_for target telemetry)" ]] ||
+  fail 'unified T10 recovery did not restore the exact Telemetry digest'
+[[ "$(cat "$STATE_DIR/replicas-telemetry")" == "2" &&
+   "$(cat "$STATE_DIR/ready-telemetry")" == "2" ]] ||
+  fail 'unified T10 recovery did not restore the exact healthy Telemetry replica count'
+[[ "$(tail -2 "$OUT_DIR/fenced-restore-order.tsv" | head -1 | cut -f1)" == "backoffice" ]] ||
+  fail 'unified T10 recovery did not keep Backoffice last among H9'
+[[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "telemetry" ]] ||
+  fail 'unified T10 recovery did not restore Telemetry after H9'
 
 for route_host_mode in same-host unexpected; do
   new_case "invalid-route-hosts-$route_host_mode"
@@ -727,7 +786,9 @@ configure_first_activation absent
 for service in "${SERVICES[@]}"; do
   awk -F '\t' -v OFS='\t' -v selected="$service" \
     -v image="$(image_for target "$service")" \
-    '$1 == selected {$3 = image} {print}' \
+    -v manifest="sha256:$(digest_for target "$service")" \
+    -v platform="sha256:$(digest_for target-arm64 "$service")" \
+    '$1 == selected {$3 = image; $4 = manifest; $5 = platform} {print}' \
     "$BUILD_DIR/images.tsv" >"$BUILD_DIR/images.tsv.next"
   mv "$BUILD_DIR/images.tsv.next" "$BUILD_DIR/images.tsv"
 done
@@ -736,6 +797,128 @@ run_operator >"$CASE_DIR/out.txt" 2>&1 ||
 assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'telemetry_state=absent'
 
 # ---------------------------------------------------------- fail-closed set ---
+expect_artifact_reject() {
+  local name="$1"
+  shift
+  new_case "$name"
+  "$@"
+  if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery accepted malformed artifact shape $name"
+  fi
+  assert_artifact_rejection_pre_mutation
+}
+
+add_telemetry_image_only() {
+  printf 'telemetry\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
+    "$(image_for target telemetry)" "$(digest_for target telemetry)" \
+    "$(digest_for target-arm64 telemetry)" >>"$BASELINE_DIR/images.tsv"
+  refresh_baseline_checksums
+}
+
+add_telemetry_deployment_only() {
+  printf 'telemetry\t%s\t31\t2\t2\t2\n' "$(image_for target telemetry)" \
+    >>"$BASELINE_DIR/deployments.tsv"
+  refresh_baseline_checksums
+}
+
+duplicate_unified_telemetry() {
+  configure_unified_t10
+  tail -1 "$BASELINE_DIR/images.tsv" >>"$BASELINE_DIR/images.tsv"
+  refresh_baseline_checksums
+}
+
+remove_unified_service() {
+  configure_unified_t10
+  awk -F '\t' '$1 != "slip"' "$BASELINE_DIR/images.tsv" \
+    >"$BASELINE_DIR/images.tsv.next"
+  mv "$BASELINE_DIR/images.tsv.next" "$BASELINE_DIR/images.tsv"
+  awk -F '\t' '$1 != "slip"' "$BASELINE_DIR/deployments.tsv" \
+    >"$BASELINE_DIR/deployments.tsv.next"
+  mv "$BASELINE_DIR/deployments.tsv.next" "$BASELINE_DIR/deployments.tsv"
+  refresh_baseline_checksums
+}
+
+add_unknown_unified_service() {
+  configure_unified_t10
+  printf 'unknown\t%s\t31\t1\t1\t1\n' "$(image_for target unknown)" \
+    >>"$BASELINE_DIR/deployments.tsv"
+  printf 'unknown\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
+    "$(image_for target unknown)" "$(digest_for target unknown)" \
+    "$(digest_for target-arm64 unknown)" >>"$BASELINE_DIR/images.tsv"
+  refresh_baseline_checksums
+}
+
+remove_telemetry_sidecar() {
+  configure_unified_t10
+  rm "$BASELINE_DIR/telemetry-pre-run.env"
+  refresh_baseline_checksums
+}
+
+malform_telemetry_sidecar() {
+  configure_unified_t10
+  printf 'mode retained\n' >"$BASELINE_DIR/telemetry-pre-run.env"
+  refresh_baseline_checksums
+}
+
+malform_unified_telemetry_row() {
+  configure_unified_t10
+  awk -F '\t' -v OFS='\t' '$1 == "telemetry" {NF = 5} {print}' \
+    "$BASELINE_DIR/deployments.tsv" >"$BASELINE_DIR/deployments.tsv.next"
+  mv "$BASELINE_DIR/deployments.tsv.next" "$BASELINE_DIR/deployments.tsv"
+  refresh_baseline_checksums
+}
+
+make_unified_telemetry_unhealthy() {
+  configure_unified_t10
+  awk -F '\t' -v OFS='\t' \
+    '$1 == "telemetry" {$4 = 2; $5 = 1; $6 = 2} {print}' \
+    "$BASELINE_DIR/deployments.tsv" >"$BASELINE_DIR/deployments.tsv.next"
+  mv "$BASELINE_DIR/deployments.tsv.next" "$BASELINE_DIR/deployments.tsv"
+  refresh_baseline_checksums
+}
+
+make_unified_telemetry_zero() {
+  configure_unified_t10
+  awk -F '\t' -v OFS='\t' \
+    '$1 == "telemetry" {$4 = 0; $5 = 0; $6 = 0} {print}' \
+    "$BASELINE_DIR/deployments.tsv" >"$BASELINE_DIR/deployments.tsv.next"
+  mv "$BASELINE_DIR/deployments.tsv.next" "$BASELINE_DIR/deployments.tsv"
+  refresh_baseline_checksums
+}
+
+mismatch_unified_telemetry_sidecar() {
+  configure_unified_t10
+  sed -i.bak \
+    "s#image=$(image_for target telemetry)#image=$(image_for other telemetry)#" \
+    "$BASELINE_DIR/telemetry-pre-run.env"
+  rm "$BASELINE_DIR/telemetry-pre-run.env.bak"
+  refresh_baseline_checksums
+}
+
+make_unified_telemetry_absent() {
+  configure_unified_t10
+  cat >"$BASELINE_DIR/telemetry-pre-run.env" <<EOF
+mode=absent
+image=none
+database_initialized=false
+queue_present=false
+EOF
+  refresh_baseline_checksums
+}
+
+expect_artifact_reject telemetry-image-only add_telemetry_image_only
+expect_artifact_reject telemetry-deployment-only add_telemetry_deployment_only
+expect_artifact_reject duplicate-service duplicate_unified_telemetry
+expect_artifact_reject missing-service remove_unified_service
+expect_artifact_reject unknown-service add_unknown_unified_service
+expect_artifact_reject absent-telemetry-sidecar remove_telemetry_sidecar
+expect_artifact_reject malformed-telemetry-sidecar malform_telemetry_sidecar
+expect_artifact_reject malformed-telemetry-row malform_unified_telemetry_row
+expect_artifact_reject unhealthy-telemetry make_unified_telemetry_unhealthy
+expect_artifact_reject zero-telemetry-replicas make_unified_telemetry_zero
+expect_artifact_reject telemetry-sidecar-mismatch mismatch_unified_telemetry_sidecar
+expect_artifact_reject t10-mode-absent make_unified_telemetry_absent
+
 expect_reject() {
   local name="$1" message="$2"; shift 2
   new_case "$name"

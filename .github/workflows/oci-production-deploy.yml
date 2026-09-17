@@ -312,6 +312,46 @@ jobs:
           EXPECTED_BASELINE_RECOVERY_RUN_ID="$BASELINE_RECOVERY_RUN_ID" \
           EXPECTED_BASELINE_RECOVERY_SOURCE_SHA="$BASELINE_RECOVERY_SOURCE_SHA" \
             ./infra/oci/scripts/verify-live-betting-data-evidence-stan.sh
+          resume_authority=artifacts/data/resume-authority.env
+          resume_failed_deploy_run_id=0
+          resume_applied_data_run_id=0
+          resume_applied_source_sha=none
+          resume_maintenance_mode=none
+          if [[ -e "$resume_authority" || -L "$resume_authority" ]]; then
+            [[ -f "$resume_authority" && ! -L "$resume_authority" ]]
+            resume_value() {
+              local key="$1"
+              awk -F= -v key="$key" '
+                $1 == key {
+                  if (found++) exit 1
+                  value = substr($0, length(key) + 2)
+                }
+                END {
+                  if (found != 1 || value == "") exit 1
+                  print value
+                }
+              ' "$resume_authority"
+            }
+            resume_failed_deploy_run_id="$(resume_value failed_deploy_run_id)"
+            resume_applied_data_run_id="$(resume_value applied_data_run_id)"
+            resume_applied_source_sha="$(resume_value applied_source_sha)"
+            resume_maintenance_mode="$(resume_value resume_maintenance_mode)"
+            [[ "$resume_failed_deploy_run_id" =~ ^[1-9][0-9]*$ ]]
+            [[ "$resume_applied_data_run_id" =~ ^[1-9][0-9]*$ ]]
+            [[ "$resume_applied_source_sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$resume_maintenance_mode" == "released-runtime" ||
+               "$resume_maintenance_mode" == "retained-hold" ]]
+          fi
+          {
+            printf 'resume_failed_deploy_run_id=%s\n' \
+              "$resume_failed_deploy_run_id"
+            printf 'resume_applied_data_run_id=%s\n' \
+              "$resume_applied_data_run_id"
+            printf 'resume_applied_source_sha=%s\n' \
+              "$resume_applied_source_sha"
+            printf 'resume_maintenance_mode=%s\n' \
+              "$resume_maintenance_mode"
+          } >> "$GITHUB_OUTPUT"
           mapfile -t baseline_manifests < <(
             find artifacts/data-baselines \
               -type f \
@@ -457,6 +497,11 @@ jobs:
           fi
 
       - name: Validate executable pre-deploy rollback baseline
+        env:
+          FAILED_DEPLOY_RUN_ID: ${{ steps.provenance.outputs.resume_failed_deploy_run_id }}
+          RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}
+          RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}
+          RESUME_MAINTENANCE_MODE: ${{ steps.provenance.outputs.resume_maintenance_mode }}
         run: |
           set -euo pipefail
           expected_source_sha=

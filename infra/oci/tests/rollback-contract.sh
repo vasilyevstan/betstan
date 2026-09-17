@@ -6,11 +6,13 @@ SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-application-stan.sh"
 RECOVERY_SCRIPT="$ROOT_DIR/infra/oci/scripts/recover-partial-rollback-stan.sh"
 PARTIAL_AUTHORITY_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-partial-recovery-authority-stan.sh"
 CAPTURE_SCRIPT="$ROOT_DIR/infra/oci/scripts/baseline-capture-stan.sh"
+BASELINE_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh"
 READINESS_SCRIPT="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
 REAL_LIVE_READINESS_SCRIPT="$ROOT_DIR/infra/oci/agents/live-betting-readiness-stan.sh"
 CLEANUP_CLASSIFIER_SCRIPT="$ROOT_DIR/infra/oci/scripts/backoffice-cleanup-journal-classifier.js"
 WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-rollback.yml"
 DEPLOY_WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-deploy.yml"
+LIVE_DATA_WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml"
 WORK_PARENT="$ROOT_DIR/infra/oci/tests/.rollback-contract-workdirs"
 create_unique_dir() {
   local parent="$1"
@@ -47,11 +49,12 @@ BUILD_RUN_ID=1501
 CAPTURE_RUN_ID=1401
 INFRASTRUCTURE_RUN_ID=1801
 PARTIAL_RECOVERY_RUN_ID=1901
+FAILED_DEPLOY_RESUME_RUN_ID=2001
 INFRASTRUCTURE_PROVENANCE_SHA256=""
 RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34"
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
-TELEMETRY_IMAGE_REF="ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+TELEMETRY_IMAGE_REF="ghcr.io/vasilyevstan/betstan-images@sha256:0000000000000000000000000000000000000000000000000000000000000010"
 
 mkdir -p "$BIN_DIR" "$FIXTURE_DIR" "$STATE_DIR"
 cleanup() {
@@ -438,6 +441,128 @@ EOF2
   done
 }
 
+create_current_deploy_fixture() {
+  local directory="$1"
+  create_baseline_fixture "$directory"
+  cat >>"$directory/baseline-provenance.env" <<'EOF2'
+baseline_recovery_run_id=0
+baseline_recovery_run_attempt=0
+baseline_transition_provenance_file=none
+EOF2
+  : >"$directory/images.tsv"
+  local service
+  for service in "${SERVICES[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$service" "ghcr.io/vasilyevstan/betstan-images" \
+      "$(current_image_ref "$service")" "$(current_digest "$service")" \
+      "$(service_platform_digest "$service")" >>"$directory/images.tsv"
+  done
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    telemetry "ghcr.io/vasilyevstan/betstan-images" "$TELEMETRY_IMAGE_REF" \
+    "$(service_digest telemetry)" "$(service_platform_digest telemetry)" \
+    >>"$directory/images.tsv"
+  awk -F '\t' '{print $1 "\t" $3}' "$directory/images.tsv" \
+    >"$directory/live-images.tsv"
+  write_deploy_provenance_fixture \
+    "$directory/trusted-deploy-provenance.txt" \
+    "$directory/images.tsv" modern "$TARGET_SHA"
+  cat >"$directory/telemetry-pre-run.env" <<EOF2
+mode=retained
+image=$TELEMETRY_IMAGE_REF
+database_initialized=true
+queue_present=true
+EOF2
+  printf 'telemetry:events:v1\t0\t0\t1\n' >>"$directory/queues.tsv"
+  : >"$directory/SHA256SUMS"
+  local file
+  for file in \
+    baseline-provenance.env images.tsv live-images.tsv queues.tsv \
+    public-http.tsv sse.tsv migration-journal.json migration-lock.json \
+    migration-backup-references.tsv trusted-deploy-provenance.txt \
+    telemetry-pre-run.env; do
+    printf '%s  %s\n' "$(sha256_file "$directory/$file")" "$file" \
+      >>"$directory/SHA256SUMS"
+  done
+}
+
+refresh_fixture_checksums() {
+  local directory="$1"
+  local manifest_next="$directory/SHA256SUMS.next"
+  : >"$manifest_next"
+  local _old_digest name
+  while read -r _old_digest name; do
+    [[ -n "$name" && -f "$directory/$name" ]] ||
+      fail "cannot refresh missing fixture evidence $name"
+    printf '%s  %s\n' "$(sha256_file "$directory/$name")" "$name" \
+      >>"$manifest_next"
+  done <"$directory/SHA256SUMS"
+  mv "$manifest_next" "$directory/SHA256SUMS"
+}
+
+create_historical_ordinary_fixture() {
+  local directory="$1"
+  create_baseline_fixture "$directory"
+  cat >>"$directory/baseline-provenance.env" <<'EOF2'
+baseline_recovery_run_id=0
+baseline_recovery_run_attempt=0
+baseline_transition_provenance_file=none
+EOF2
+  refresh_fixture_checksums "$directory"
+}
+
+create_failed_deploy_h9_fixture() {
+  local directory="$1"
+  local mode="${2:-retained}"
+  create_historical_ordinary_fixture "$directory"
+  case "$mode" in
+    retained)
+      cat >"$directory/telemetry-pre-run.env" <<EOF2
+mode=retained
+image=$TELEMETRY_IMAGE_REF
+database_initialized=true
+queue_present=true
+EOF2
+      printf 'telemetry:events:v1\t0\t0\t1\n' >>"$directory/queues.tsv"
+      ;;
+    absent)
+      cat >"$directory/telemetry-pre-run.env" <<'EOF2'
+mode=absent
+image=none
+database_initialized=false
+queue_present=false
+EOF2
+      ;;
+    *)
+      fail "unsupported failed-deploy H9 Telemetry mode: $mode"
+      ;;
+  esac
+  refresh_fixture_checksums "$directory"
+  printf '%s  telemetry-pre-run.env\n' \
+    "$(sha256_file "$directory/telemetry-pre-run.env")" \
+    >>"$directory/SHA256SUMS"
+}
+
+add_failed_deploy_retained_sidecar() {
+  local directory="$1"
+  cat >"$directory/telemetry-pre-run.env" <<EOF2
+mode=retained
+image=$TELEMETRY_IMAGE_REF
+database_initialized=true
+queue_present=true
+EOF2
+  if ! awk '$1 == "telemetry:events:v1" {found=1} END {exit !found}' \
+      "$directory/queues.tsv"; then
+    printf 'telemetry:events:v1\t0\t0\t1\n' >>"$directory/queues.tsv"
+  fi
+  refresh_fixture_checksums "$directory"
+  if ! grep -Eq '^[0-9a-f]{64}  telemetry-pre-run\.env$' \
+      "$directory/SHA256SUMS"; then
+    printf '%s  telemetry-pre-run.env\n' \
+      "$(sha256_file "$directory/telemetry-pre-run.env")" \
+      >>"$directory/SHA256SUMS"
+  fi
+}
+
 write_text_atomic() {
   local target="$1"
   local temp_file="${target}.tmp.$$.$RANDOM"
@@ -528,6 +653,10 @@ EOF2
 }
 
 create_baseline_fixture "$FIXTURE_DIR/baseline-good"
+create_historical_ordinary_fixture "$FIXTURE_DIR/baseline-historical"
+create_failed_deploy_h9_fixture "$FIXTURE_DIR/baseline-failed-deploy-h9"
+create_failed_deploy_h9_fixture "$FIXTURE_DIR/baseline-failed-deploy-h9-absent" absent
+create_current_deploy_fixture "$FIXTURE_DIR/baseline-current"
 create_baseline_fixture "$FIXTURE_DIR/baseline-mutable" mutable
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-sse" legacy-sse
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-missing" legacy-missing
@@ -535,12 +664,16 @@ create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-embedded" legacy-embedded
 create_baseline_fixture "$FIXTURE_DIR/baseline-legacy-source-mismatch" legacy-source-mismatch
 create_baseline_fixture "$FIXTURE_DIR/baseline-partial-infrastructure" partial-infrastructure
 create_recovery_baseline_fixture "$FIXTURE_DIR/baseline-recovery"
-create_baseline_fixture "$FIXTURE_DIR/baseline-empty-deploy-repository"
+cp -R "$FIXTURE_DIR/baseline-recovery" \
+  "$FIXTURE_DIR/baseline-failed-deploy-cache-recovery"
+add_failed_deploy_retained_sidecar \
+  "$FIXTURE_DIR/baseline-failed-deploy-cache-recovery"
+create_current_deploy_fixture "$FIXTURE_DIR/baseline-empty-deploy-repository"
 sed -i.bak \
   's|^registry_repository=.*|registry_repository=|' \
   "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt"
 rm -f "$FIXTURE_DIR/baseline-empty-deploy-repository/trusted-deploy-provenance.txt.bak"
-create_baseline_fixture "$FIXTURE_DIR/baseline-wrong-deploy-repository"
+create_current_deploy_fixture "$FIXTURE_DIR/baseline-wrong-deploy-repository"
 sed -i.bak \
   's|^registry_repository=.*|registry_repository=ghcr.io/example/other-images|' \
   "$FIXTURE_DIR/baseline-wrong-deploy-repository/trusted-deploy-provenance.txt"
@@ -2120,11 +2253,7 @@ run_capture() {
   scenario_name="$(basename "$output_dir")"
   capture_state_dir="$STATE_DIR/$scenario_name/current"
   capture_kubectl_log="$STATE_DIR/$scenario_name/kubectl.log"
-  if [[ " $* " == *" STUB_CAPTURE_CURRENT=1 "* ]]; then
-    reset_live_state "$capture_state_dir"
-  else
-    set_target_state "$capture_state_dir"
-  fi
+  reset_live_state "$capture_state_dir"
   for option in "$@"; do
     if [[ "$option" == "STUB_CAPTURE_OCIR=1" ]]; then
       write_text_atomic "$capture_state_dir/auth.env" <<EOF2
@@ -2140,6 +2269,7 @@ EOF2
     STUB_STATE_DIR="$capture_state_dir" \
     STUB_KUBECTL_LOG="$capture_kubectl_log" \
     STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-good" \
+    STUB_DEPLOY_PROVENANCE_FIXTURE="$FIXTURE_DIR/baseline-current" \
     STUB_CURL_TRACE_FILE="$STATE_DIR/$scenario_name/traces/curl-trace.tsv" \
     LIVE_BETTING_SSE_PROBE_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-probe-trace.tsv" \
     LIVE_BETTING_SSE_VALIDATION_TRACE_FILE="$STATE_DIR/$scenario_name/traces/sse-validation-trace.tsv" \
@@ -2158,6 +2288,126 @@ run_capture_expect_failure() {
     cat "$output_dir.out" >&2
     fail "expected capture failure for $label"
   fi
+}
+
+run_baseline_validator() {
+  local fixture="$1"
+  local require_current="$2"
+  env \
+    BASELINE_DIR="$fixture" \
+    EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+    EXPECTED_NAMESPACE=betstan-oci \
+    REQUIRE_CURRENT_DEPLOY_PROVENANCE="$require_current" \
+    FAILED_DEPLOY_RUN_ID=0 \
+    RESUME_MAINTENANCE_MODE=none \
+    RESOLVED_APPLIED_DATA_RUN_ID=0 \
+    RESOLVED_APPLIED_SOURCE_SHA=none \
+    "$BASELINE_VALIDATOR"
+}
+
+run_failed_deploy_resume_validator() {
+  local fixture="$1"
+  local applied_data_run_id="${2:-$CAPTURE_RUN_ID}"
+  local expected_recovery_run_id="${3:-}"
+  local expected_source_sha="${4:-}"
+  local applied_source_sha="${5:-$TARGET_SHA}"
+  local failed_deploy_run_id="${6:-$FAILED_DEPLOY_RESUME_RUN_ID}"
+  env \
+    BASELINE_DIR="$fixture" \
+    EXPECTED_SOURCE_SHA="$expected_source_sha" \
+    EXPECTED_NAMESPACE=betstan-oci \
+    EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
+    REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+    FAILED_DEPLOY_RUN_ID="$failed_deploy_run_id" \
+    RESUME_MAINTENANCE_MODE=retained-hold \
+    RESOLVED_APPLIED_DATA_RUN_ID="$applied_data_run_id" \
+    RESOLVED_APPLIED_SOURCE_SHA="$applied_source_sha" \
+    "$BASELINE_VALIDATOR"
+}
+
+run_failed_deploy_resume_gate() {
+  local fixture="$1"
+  local action_log="$2"
+  shift 2
+  rm -f "$action_log"
+  run_failed_deploy_resume_validator "$fixture" "$@" || return
+  printf '%s\n' maintenance lock cluster >"$action_log"
+}
+
+run_malformed_failed_deploy_tuple_gate() {
+  local fixture="$1"
+  local action_log="$2"
+  rm -f "$action_log"
+  env \
+    BASELINE_DIR="$fixture" \
+    EXPECTED_NAMESPACE=betstan-oci \
+    REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+    FAILED_DEPLOY_RUN_ID="$FAILED_DEPLOY_RESUME_RUN_ID" \
+    RESUME_MAINTENANCE_MODE=retained-hold \
+    RESOLVED_APPLIED_DATA_RUN_ID="$CAPTURE_RUN_ID" \
+    RESOLVED_APPLIED_SOURCE_SHA=none \
+    "$BASELINE_VALIDATOR" || return
+  printf '%s\n' maintenance lock cluster >"$action_log"
+}
+
+assert_current_capture_shape() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import csv
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+h9 = {
+    "auth", "bet", "backoffice", "client", "event",
+    "gamemaster", "moderation", "resulting", "slip",
+}
+t10 = h9 | {"telemetry"}
+specifications = {
+    "images.tsv": 5,
+    "live-images.tsv": 2,
+    "deployments.tsv": 6,
+    "pod-images.tsv": 3,
+}
+parsed = {}
+for name, columns in specifications.items():
+    with (root / name).open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle, delimiter="\t"))
+    if (
+        len(rows) != 10
+        or any(len(row) != columns for row in rows)
+        or len({row[0] for row in rows}) != 10
+        or {row[0] for row in rows} != t10
+    ):
+        raise SystemExit(f"{name} is not an exact unique T10 inventory")
+    parsed[name] = {row[0]: row for row in rows}
+
+values = {}
+for raw in (root / "telemetry-pre-run.env").read_text(encoding="utf-8").splitlines():
+    if not raw or "=" not in raw:
+        raise SystemExit("Telemetry sidecar is malformed")
+    key, value = raw.split("=", 1)
+    if key in values:
+        raise SystemExit("Telemetry sidecar has duplicate keys")
+    values[key] = value
+if (
+    set(values) != {"mode", "image", "database_initialized", "queue_present"}
+    or values["mode"] != "retained"
+    or values["queue_present"] != "true"
+    or not re.fullmatch(
+        r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}",
+        values["image"],
+    )
+    or values["image"] != parsed["images.tsv"]["telemetry"][2]
+    or values["image"] != parsed["live-images.tsv"]["telemetry"][1]
+    or values["image"] != parsed["deployments.tsv"]["telemetry"][1]
+):
+    raise SystemExit("Telemetry sidecar is not retained and image-bound")
+manifest = (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+if sum(line.endswith("  telemetry-pre-run.env") for line in manifest) != 1:
+    raise SystemExit("Telemetry sidecar is not checksum-bound exactly once")
+PY
 }
 
 ruby -ryaml - "$DEPLOY_WORKFLOW_FILE" "$WORKFLOW_FILE" <<'RUBY'
@@ -2231,6 +2481,43 @@ assert_contains "$DEPLOY_WORKFLOW_FILE" \
   '[[ "$display_title" =~ ^oci-rollback\ [0-9a-f]{40}$ ]]'
 assert_contains "$DEPLOY_WORKFLOW_FILE" \
   './infra/oci/scripts/validate-rollback-baseline-stan.sh'
+python3 - "$LIVE_DATA_WORKFLOW_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = workflow.index("      - name: Verify exact failed-deploy resume state\n")
+end = workflow.index(
+    "      - name: Capture and validate pre-mutation rollback baseline\n",
+    start,
+)
+resume = workflow[start:end]
+required_context = (
+    "FAILED_DEPLOY_RUN_ID: ${{ inputs.failed_deploy_run_id }}",
+    "RESUME_SOURCE_SHA: ${{ steps.provenance_request.outputs.resume_source_sha }}",
+    "RESUME_MAINTENANCE_MODE: ${{ steps.provenance_request.outputs.resume_maintenance_mode }}",
+    "RESOLVED_APPLIED_DATA_RUN_ID: ${{ steps.provenance.outputs.resume_applied_data_run_id }}",
+    "RESOLVED_APPLIED_SOURCE_SHA: ${{ steps.provenance.outputs.resume_applied_source_sha }}",
+)
+for value in required_context:
+    if value not in workflow:
+        raise SystemExit(f"failed-deploy resume authority context is missing: {value}")
+markers = (
+    "set -euo pipefail",
+    "./infra/oci/scripts/validate-rollback-baseline-stan.sh",
+    "./infra/oci/scripts/live-data-maintenance-stan.sh verify-quiesced",
+    'kubectl get deployment "$deployment"',
+)
+positions = [resume.index(marker) for marker in markers]
+if positions != sorted(positions):
+    raise SystemExit("failed-deploy baseline validation no longer precedes cluster actions")
+lock = workflow.index(
+    "./infra/azure/agents/shared-mongo-operation-lock-stan.sh acquire",
+    start,
+)
+if start + positions[1] >= lock:
+    raise SystemExit("failed-deploy baseline validation no longer precedes lock acquisition")
+PY
 for script in "$CAPTURE_SCRIPT" "$READINESS_SCRIPT" "$SCRIPT"; do
   assert_contains "$script" '"/api/backoffice|backoffice"'
 done
@@ -2266,6 +2553,7 @@ assert_contains "$ROOT_DIR/infra/oci/scripts/deploy.sh" 'deployment_workflow=oci
 
 bash -n \
   "$CAPTURE_SCRIPT" \
+  "$BASELINE_VALIDATOR" \
   "$READINESS_SCRIPT" \
   "$SCRIPT" \
   "$RECOVERY_SCRIPT" \
@@ -2288,11 +2576,207 @@ run_expect_failure recovery-baseline-wrong-workflow \
 assert_contains "$WORK_DIR/recovery-baseline-wrong-workflow.out" \
   'recovery run is not exact first-attempt GHCR cache recovery metadata'
 
+for cache_resume_hop in \
+  "one-hop:$FAILED_DEPLOY_RESUME_RUN_ID" \
+  "chained:$((FAILED_DEPLOY_RESUME_RUN_ID + 1))"; do
+  IFS=: read -r hop failed_deploy_run_id <<<"$cache_resume_hop"
+  if ! run_failed_deploy_resume_validator \
+      "$FIXTURE_DIR/baseline-failed-deploy-cache-recovery" \
+      "$CAPTURE_RUN_ID" "$DEPLOY_RUN_ID" "$TARGET_SHA" "$TARGET_SHA" \
+      "$failed_deploy_run_id" \
+      >"$WORK_DIR/failed-deploy-cache-$hop.out" 2>&1; then
+    cat "$WORK_DIR/failed-deploy-cache-$hop.out" >&2
+    fail "failed-deploy $hop cache-recovery baseline was rejected"
+  fi
+done
+
+failed_cache_provenance="$FIXTURE_DIR/baseline-failed-deploy-cache-invalid"
+cp -R "$FIXTURE_DIR/baseline-failed-deploy-cache-recovery" \
+  "$failed_cache_provenance"
+replace_env_value \
+  "$failed_cache_provenance/trusted-recovery-transition-provenance.env" \
+  transition_workflow rogue-workflow
+refresh_fixture_checksums "$failed_cache_provenance"
+failed_cache_action_log="$WORK_DIR/failed-deploy-cache-invalid-actions.log"
+if run_failed_deploy_resume_gate \
+    "$failed_cache_provenance" "$failed_cache_action_log" \
+    "$CAPTURE_RUN_ID" "$DEPLOY_RUN_ID" "$TARGET_SHA" "$TARGET_SHA" \
+    >"$WORK_DIR/failed-deploy-cache-invalid.out" 2>&1; then
+  fail 'failed-deploy resume weakened cache-recovery provenance validation'
+fi
+[[ ! -e "$failed_cache_action_log" ]] ||
+  fail 'invalid cache-recovery resume reached maintenance, lock, or cluster action'
+
+if ! run_baseline_validator "$FIXTURE_DIR/baseline-current" true \
+    >"$WORK_DIR/current-t10-validator.out" 2>&1; then
+  cat "$WORK_DIR/current-t10-validator.out" >&2
+  fail 'current ordinary validator rejected exact T10 evidence'
+fi
+if ! run_baseline_validator "$FIXTURE_DIR/baseline-historical" false \
+    >"$WORK_DIR/historical-h9-validator.out" 2>&1; then
+  cat "$WORK_DIR/historical-h9-validator.out" >&2
+  fail 'historical ordinary validator rejected exact H9 evidence'
+fi
+if run_baseline_validator "$FIXTURE_DIR/baseline-historical" true \
+    >"$WORK_DIR/current-rejects-h9.out" 2>&1; then
+  fail 'current ordinary validator accepted historical H9 evidence'
+fi
+if run_baseline_validator "$FIXTURE_DIR/baseline-current" false \
+    >"$WORK_DIR/historical-rejects-t10.out" 2>&1; then
+  fail 'historical ordinary validator accepted unified T10 evidence'
+fi
+
+for resume_profile in \
+  "legacy-h9-retained:$FIXTURE_DIR/baseline-failed-deploy-h9" \
+  "legacy-h9-absent:$FIXTURE_DIR/baseline-failed-deploy-h9-absent" \
+  "unified-t10:$FIXTURE_DIR/baseline-current"; do
+  IFS=: read -r profile fixture <<<"$resume_profile"
+  if ! run_failed_deploy_resume_validator "$fixture" \
+      >"$WORK_DIR/failed-deploy-resume-$profile.out" 2>&1; then
+    cat "$WORK_DIR/failed-deploy-resume-$profile.out" >&2
+    fail "failed-deploy resume rejected exact $profile baseline evidence"
+  fi
+done
+
+if run_baseline_validator "$FIXTURE_DIR/baseline-failed-deploy-h9" true \
+    >"$WORK_DIR/failed-deploy-h9-without-authority.out" 2>&1; then
+  fail 'ordinary current validation accepted H9 without failed-deploy authority'
+fi
+if env \
+    BASELINE_DIR="$FIXTURE_DIR/baseline-failed-deploy-h9" \
+    EXPECTED_NAMESPACE=betstan-oci \
+    REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+    FAILED_DEPLOY_RUN_ID="$FAILED_DEPLOY_RESUME_RUN_ID" \
+    RESUME_MAINTENANCE_MODE=retained-hold \
+    "$BASELINE_VALIDATOR" \
+    >"$WORK_DIR/failed-deploy-incomplete-authority.out" 2>&1; then
+  fail 'failed-deploy H9 resume accepted incomplete authority context'
+fi
+malformed_tuple_action_log="$WORK_DIR/failed-deploy-malformed-tuple-actions.log"
+if run_malformed_failed_deploy_tuple_gate \
+    "$FIXTURE_DIR/baseline-failed-deploy-h9" \
+    "$malformed_tuple_action_log" \
+    >"$WORK_DIR/failed-deploy-malformed-tuple.out" 2>&1; then
+  fail 'failed-deploy resume accepted a partially positive applied-data tuple'
+fi
+[[ ! -e "$malformed_tuple_action_log" ]] ||
+  fail 'malformed failed-deploy tuple reached maintenance, lock, or cluster action'
+
+mismatched_root_action_log="$WORK_DIR/failed-deploy-mismatched-root-actions.log"
+if run_failed_deploy_resume_gate \
+    "$FIXTURE_DIR/baseline-failed-deploy-h9" \
+    "$mismatched_root_action_log" \
+    "$((CAPTURE_RUN_ID + 1))" \
+    >"$WORK_DIR/failed-deploy-mismatched-root.out" 2>&1; then
+  fail 'failed-deploy resume accepted a mismatched applied-data root'
+fi
+[[ ! -e "$mismatched_root_action_log" ]] ||
+  fail 'mismatched applied-data root reached maintenance, lock, or cluster action'
+
+resume_mixed_fixture="$FIXTURE_DIR/baseline-failed-deploy-mixed"
+cp -R "$FIXTURE_DIR/baseline-current" "$resume_mixed_fixture"
+awk -F '\t' '$1 != "telemetry"' "$resume_mixed_fixture/live-images.tsv" \
+  >"$resume_mixed_fixture/live-images.tsv.next"
+mv "$resume_mixed_fixture/live-images.tsv.next" \
+  "$resume_mixed_fixture/live-images.tsv"
+refresh_fixture_checksums "$resume_mixed_fixture"
+
+resume_malformed_fixture="$FIXTURE_DIR/baseline-failed-deploy-malformed"
+cp -R "$FIXTURE_DIR/baseline-failed-deploy-h9" "$resume_malformed_fixture"
+printf 'mode=retained\n' >>"$resume_malformed_fixture/telemetry-pre-run.env"
+refresh_fixture_checksums "$resume_malformed_fixture"
+
+resume_unknown_fixture="$FIXTURE_DIR/baseline-failed-deploy-unknown"
+cp -R "$FIXTURE_DIR/baseline-failed-deploy-h9" "$resume_unknown_fixture"
+for inventory in images.tsv live-images.tsv; do
+  awk -F '\t' -v OFS='\t' '$1 == "slip" {$1 = "unknown"} {print}' \
+    "$resume_unknown_fixture/$inventory" \
+    >"$resume_unknown_fixture/$inventory.next"
+  mv "$resume_unknown_fixture/$inventory.next" \
+    "$resume_unknown_fixture/$inventory"
+done
+refresh_fixture_checksums "$resume_unknown_fixture"
+
+for invalid_resume in \
+  "mixed:$resume_mixed_fixture" \
+  "malformed:$resume_malformed_fixture" \
+  "count-preserving-unknown:$resume_unknown_fixture" \
+  "missing-sidecar:$FIXTURE_DIR/baseline-historical"; do
+  IFS=: read -r invalid_kind invalid_fixture <<<"$invalid_resume"
+  resume_action_log="$WORK_DIR/failed-deploy-$invalid_kind-actions.log"
+  if run_failed_deploy_resume_gate "$invalid_fixture" "$resume_action_log" \
+      >"$WORK_DIR/failed-deploy-rejects-$invalid_kind.out" 2>&1; then
+    fail "failed-deploy resume accepted $invalid_kind baseline evidence"
+  fi
+  [[ ! -e "$resume_action_log" ]] ||
+    fail "failed-deploy $invalid_kind rejection reached maintenance, lock, or cluster action"
+done
+
+for invalid_shape in \
+  mixed duplicate unknown missing-telemetry missing-sidecar sidecar-mismatch; do
+  invalid_fixture="$FIXTURE_DIR/baseline-current-$invalid_shape"
+  cp -R "$FIXTURE_DIR/baseline-current" "$invalid_fixture"
+  case "$invalid_shape" in
+    mixed)
+      awk -F '\t' '$1 != "telemetry"' "$invalid_fixture/live-images.tsv" \
+        >"$invalid_fixture/live-images.tsv.next"
+      mv "$invalid_fixture/live-images.tsv.next" "$invalid_fixture/live-images.tsv"
+      ;;
+    duplicate)
+      awk -F '\t' '$1 == "telemetry"' "$invalid_fixture/images.tsv" \
+        >"$invalid_fixture/duplicate-row.tsv"
+      cat "$invalid_fixture/duplicate-row.tsv" >>"$invalid_fixture/images.tsv"
+      rm "$invalid_fixture/duplicate-row.tsv"
+      ;;
+    unknown)
+      printf 'unknown\tghcr.io/vasilyevstan/betstan-images\t%s\t%s\t%s\n' \
+        "$(current_image_ref auth)" "$(current_digest auth)" \
+        "$(service_platform_digest auth)" >>"$invalid_fixture/images.tsv"
+      ;;
+    missing-telemetry)
+      for inventory in images.tsv live-images.tsv; do
+        awk -F '\t' '$1 != "telemetry"' "$invalid_fixture/$inventory" \
+          >"$invalid_fixture/$inventory.next"
+        mv "$invalid_fixture/$inventory.next" "$invalid_fixture/$inventory"
+      done
+      ;;
+    missing-sidecar)
+      rm "$invalid_fixture/telemetry-pre-run.env"
+      awk '!/  telemetry-pre-run\\.env$/' "$invalid_fixture/SHA256SUMS" \
+        >"$invalid_fixture/SHA256SUMS.next"
+      mv "$invalid_fixture/SHA256SUMS.next" "$invalid_fixture/SHA256SUMS"
+      ;;
+    sidecar-mismatch)
+      sed -i.bak "s#^image=.*#image=$(current_image_ref auth)#" \
+        "$invalid_fixture/telemetry-pre-run.env"
+      rm "$invalid_fixture/telemetry-pre-run.env.bak"
+      ;;
+  esac
+  if [[ "$invalid_shape" != "missing-sidecar" ]]; then
+    refresh_fixture_checksums "$invalid_fixture"
+  fi
+  if run_baseline_validator "$invalid_fixture" true \
+      >"$WORK_DIR/current-rejects-$invalid_shape.out" 2>&1; then
+    fail "current ordinary validator accepted $invalid_shape evidence"
+  fi
+done
+
+run_expect_failure unified-t10-historical-reader \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current" \
+  ROLLBACK_MODE=dry-run
+unified_reader_log="$STATE_DIR/unified-t10-historical-reader/kubectl.log"
+if [[ -f "$unified_reader_log" ]] &&
+    grep -Eq '^(apply|delete|patch|scale|set) ' "$unified_reader_log"; then
+  fail 'rollback application mutated the cluster before rejecting unified T10'
+fi
+
 repeat_capture_dir="$WORK_DIR/capture-repeat-safe"
 if ! run_capture "$repeat_capture_dir" STUB_SHORT_SSE_MODE=quiet-timeout >"$WORK_DIR/capture-repeat-safe-1.out" 2>&1; then
   cat "$WORK_DIR/capture-repeat-safe-1.out" >&2
   fail 'OCI repeat-safe quiet SSE capture unexpectedly failed on first run'
 fi
+assert_current_capture_shape "$repeat_capture_dir" ||
+  fail 'ordinary capture did not emit exact checksum-bound T10 evidence'
 
 legacy_repository_capture_dir="$WORK_DIR/capture-empty-deploy-repository"
 if ! run_capture "$legacy_repository_capture_dir" \
@@ -3593,6 +4077,50 @@ assert_contains "$partial_capture_dir/baseline-provenance.env" \
   "baseline_build_run_id=$BUILD_RUN_ID"
 assert_contains "$partial_capture_dir/baseline-provenance.env" \
   "baseline_recovery_run_id=$PARTIAL_RECOVERY_RUN_ID"
+
+for partial_resume_hop in \
+  "one-hop:$FAILED_DEPLOY_RESUME_RUN_ID" \
+  "chained:$((FAILED_DEPLOY_RESUME_RUN_ID + 1))"; do
+  IFS=: read -r hop failed_deploy_run_id <<<"$partial_resume_hop"
+  if ! run_failed_deploy_resume_validator \
+      "$partial_capture_dir" \
+      "$CAPTURE_RUN_ID" \
+      "$PARTIAL_RECOVERY_RUN_ID" "$PARTIAL_RECOVERY_SOURCE_SHA" "$TARGET_SHA" \
+      "$failed_deploy_run_id" \
+      >"$WORK_DIR/failed-deploy-partial-$hop.out" 2>&1; then
+    cat "$WORK_DIR/failed-deploy-partial-$hop.out" >&2
+    fail "failed-deploy $hop partial-recovery baseline was rejected"
+  fi
+done
+
+failed_partial_provenance="$WORK_DIR/partial-recovery-failed-deploy-invalid"
+cp -R "$partial_capture_dir" "$failed_partial_provenance"
+replace_env_value \
+  "$failed_partial_provenance/partial-recovery/partial-recovery-authority.env" \
+  recovery_workflow rogue-workflow
+failed_partial_authority_sha="$(
+  sha256_file \
+    "$failed_partial_provenance/partial-recovery/partial-recovery-authority.env"
+)"
+awk -v authority_sha="$failed_partial_authority_sha" '
+  $2 == "partial-recovery-authority.env" { $1 = authority_sha }
+  { print $1 "  " $2 }
+' "$failed_partial_provenance/partial-recovery/partial-recovery-SHA256SUMS" \
+  >"$failed_partial_provenance/partial-recovery/partial-recovery-SHA256SUMS.next"
+mv \
+  "$failed_partial_provenance/partial-recovery/partial-recovery-SHA256SUMS.next" \
+  "$failed_partial_provenance/partial-recovery/partial-recovery-SHA256SUMS"
+refresh_fixture_checksums "$failed_partial_provenance"
+failed_partial_action_log="$WORK_DIR/failed-deploy-partial-invalid-actions.log"
+if run_failed_deploy_resume_gate \
+    "$failed_partial_provenance" "$failed_partial_action_log" \
+    "$CAPTURE_RUN_ID" \
+    "$PARTIAL_RECOVERY_RUN_ID" "$PARTIAL_RECOVERY_SOURCE_SHA" "$TARGET_SHA" \
+    >"$WORK_DIR/failed-deploy-partial-invalid.out" 2>&1; then
+  fail 'failed-deploy resume weakened partial-recovery provenance validation'
+fi
+[[ ! -e "$failed_partial_action_log" ]] ||
+  fail 'invalid partial-recovery resume reached maintenance, lock, or cluster action'
 
 if ! run_script "$WORK_DIR/partial-recovery-baseline-dry-run" \
     TARGET_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \
