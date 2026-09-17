@@ -209,7 +209,7 @@ restore_deploy_access_on_exit() {
     MONGO_UPGRADE_STATE_FILE="$mongo_upgrade_state_file" \
       "$SCRIPT_DIR/upgrade-mongo.sh" resume || cleanup_failed=1
     if [[ -f "$RENDERED_FILE" ]]; then
-      for service in auth backoffice client; do
+      for service in auth client; do
         apply_cleanup_documents "Service:^gaming-${service}-srv$" &&
           apply_cleanup_documents "Deployment:^gaming-${service}-depl$" &&
           kubectl rollout status "deployment/gaming-${service}-depl" \

@@ -1368,9 +1368,11 @@ Durable rules:
   ingress only and prove admission readiness before applying Ingress resources.
   Keep writers quiesced, the write fence active, and deployment-failure recovery
   armed.
-- Cleanup recovery accepts only exact candidate Auth, Backoffice, and Client
-  images over a valid candidate prefix of the canonical six-writer rollout,
-  followed by its baseline suffix. Reject arbitrary image mixtures.
+- Cleanup recovery accepts only exact candidate Auth and Client images over a
+  valid candidate prefix of the canonical seven-writer rollout — Bet, Event,
+  Moderation, Resulting, Slip, Backoffice, then Gamemaster — followed by its
+  baseline suffix. Quiesce Backoffice first and restore it last. Reject
+  arbitrary image mixtures.
 - Test the real deploy-shell sequence and Mongo helpers, plus every
   cleanup-produced state through the rollback classifier; source-text ordering
   and one representative state are insufficient.

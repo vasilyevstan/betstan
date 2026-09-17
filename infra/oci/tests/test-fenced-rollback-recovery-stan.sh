@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OPERATOR="$ROOT_DIR/infra/oci/scripts/recover-fenced-rollback-stan.sh"
 READINESS="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
+CLEANUP_CLASSIFIER="$ROOT_DIR/infra/oci/scripts/backoffice-cleanup-journal-classifier.js"
 WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-rollback.yml"
 POLICY="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 
@@ -30,7 +31,7 @@ DEPLOY_RUN_ID=34068978832
 DATA_RUN_ID=34068138505
 INFRA_RUN_ID=34039847193
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
-QUIESCED=(bet event gamemaster moderation resulting slip)
+QUIESCED=(backoffice bet event gamemaster moderation resulting slip)
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -236,14 +237,14 @@ STATE_DIR="${FAKE_STATE_DIR}"
 case "$1" in
   verify-held)
     [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] || { echo "not held" >&2; exit 1; }
-    for service in bet event gamemaster moderation resulting slip; do
+    for service in backoffice bet event gamemaster moderation resulting slip; do
       [[ "$(cat "$STATE_DIR/replicas-$service")" == "0" ]] ||
         { echo "writer is not quiesced" >&2; exit 1; }
     done
     echo "live_data_maintenance=verify-held status=PASS" ;;
   hold)
     if [[ "${FAKE_REHOLD_FAILS:-0}" == "1" ]]; then echo "hold failed" >&2; exit 1; fi
-    for service in bet event gamemaster moderation resulting slip; do
+    for service in backoffice bet event gamemaster moderation resulting slip; do
       printf '0\n' >"$STATE_DIR/replicas-$service"
     done
     printf 'held\n' >"$STATE_DIR/maintenance"; echo "held" ;;
@@ -295,6 +296,39 @@ esac
 echo "shared_mongo_lock=$1 status=PASS"
 EOF
 
+  cat >"$BIN_DIR/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "show ${TARGET_SHA}:backoffice/src/event/listener/NewEventListener.ts")
+    [[ "${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'SOURCE'
+import { isBeforePreSeptemberCleanupCutoff } from "../preSeptemberCleanupBoundary";
+if (isBeforePreSeptemberCleanupCutoff(data.time)) {
+  this.channel.ack(msg);
+  return;
+}
+await Event.updateOne(
+SOURCE
+    ;;
+  "show ${TARGET_SHA}:backoffice/src/event/preSeptemberCleanupBoundary.ts")
+    [[ "${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}" == "1" ]] || exit 1
+    cat <<'SOURCE'
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF =
+  "2026-09-01T00:00:00Z" as const;
+export const PRE_SEPTEMBER_CLEANUP_CUTOFF_MS =
+  Date.UTC(2026, 8, 1, 0, 0, 0, 0);
+export const isBeforePreSeptemberCleanupCutoff = (
+const parsed = parseExplicitZoneTimestamp(value);
+return parsed !== null && parsed < PRE_SEPTEMBER_CLEANUP_CUTOFF_MS;
+SOURCE
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+
   # Readiness fake: asserts the phase contract the operator must request.
   cat >"$BIN_DIR/readiness" <<'EOF'
 #!/usr/bin/env bash
@@ -302,17 +336,92 @@ set -euo pipefail
 mkdir -p "$OUTPUT_DIR"
 phase="${ROLLBACK_READINESS_PHASE:-steady-state}"
 status=GO
+cleanup_state="$(
+  node - \
+    "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" \
+    "${FAKE_BACKOFFICE_CLEANUP_SCENARIO:-absent}" <<'NODE_CLASSIFIER'
+"use strict";
+const { createHash } = require("crypto");
+const { classifyBackofficeCleanupJournal } = require(process.argv[2]);
+const scenario = process.argv[3];
+let rows = [];
+if (scenario !== "absent") {
+  const identities = [{
+    eventId: "cleanup-event-a",
+    time: "2026-08-31T23:59:59.999Z",
+  }];
+  const journal = {
+    _id: "backoffice-events-before:2026-09-01T00:00:00Z",
+    candidateCount: 1,
+    createdAt: new Date("2026-09-01T00:05:00.000Z"),
+    cutoff: "2026-09-01T00:00:00Z",
+    digest: createHash("sha256")
+      .update(JSON.stringify(identities))
+      .digest("hex"),
+    identities,
+    operation: "delete-backoffice-events-before-cutoff",
+    schemaVersion: "backoffice-pre-september-events-cleanup-v1",
+    sourceSha: "a".repeat(40),
+    state: "applied",
+    appliedAt: new Date("2026-09-01T00:06:00.000Z"),
+  };
+  if (scenario === "malformed-extra-field") {
+    journal.unreviewed = true;
+  } else if (scenario !== "valid-applied") {
+    throw new Error(`unknown fenced cleanup scenario: ${scenario}`);
+  }
+  rows = [journal];
+}
+process.stdout.write(`${classifyBackofficeCleanupJournal(rows)}\n`);
+NODE_CLASSIFIER
+)"
+cleanup_guard="${FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD:-${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}}"
+if [[ "$cleanup_guard" == "1" ]]; then
+  cleanup_guard=true
+else
+  cleanup_guard=false
+fi
+case "$cleanup_state:$cleanup_guard" in
+  absent:*)
+    cleanup_check=not-started
+    ;;
+  applied:true)
+    cleanup_check=compatible-target
+    ;;
+  applied:false)
+    cleanup_check=incompatible-target
+    status=NO_GO
+    ;;
+  prepared:*)
+    cleanup_check=recovery-required
+    status=NO_GO
+    ;;
+  *)
+    cleanup_check=invalid-journal
+    status=NO_GO
+    ;;
+esac
 if [[ "$phase" == "maintenance-fenced" ]]; then
   [[ -n "${MAINTENANCE_LIVE_IMAGES_FILE:-}" && -f "$MAINTENANCE_LIVE_IMAGES_FILE" ]] ||
     { echo "fenced readiness requires live images" >&2; exit 1; }
   [[ "${MAINTENANCE_DEPLOYED_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
     { echo "fenced readiness requires deployed sha" >&2; exit 1; }
-  [[ "${FAKE_FENCED_READINESS:-GO}" == "GO" ]] && status=GO || status=NO_GO
+  if [[ "${FAKE_FENCED_READINESS:-GO}" != "GO" ]]; then
+    status=NO_GO
+  fi
 else
-  [[ "${FAKE_STEADY_READINESS:-GO}" == "GO" ]] && status=GO || status=NO_GO
+  if [[ "${FAKE_STEADY_READINESS:-GO}" != "GO" ]]; then
+    status=NO_GO
+  fi
 fi
-printf 'rollback_readiness=%s\nmode=application-rollback\nphase=%s\n' \
-  "$status" "$phase" >"$OUTPUT_DIR/summary.env"
+cat >"$OUTPUT_DIR/summary.env" <<SUMMARY
+rollback_readiness=$status
+mode=application-rollback
+phase=$phase
+backoffice_cleanup_rollback_check=$cleanup_check
+backoffice_cleanup_journal_state=$cleanup_state
+target_supports_backoffice_cleanup_guard=$cleanup_guard
+SUMMARY
 [[ "$status" == "GO" ]] || exit 1
 EOF
   chmod 755 "$BIN_DIR"/*
@@ -359,6 +468,7 @@ run_operator() {
   OUTPUT_DIR="$OUT_DIR" \
   OCI_PUBLIC_URL=https://host-0 \
   OCI_DIAGNOSTIC_URL=https://host-1 \
+  BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT="$CLEANUP_CLASSIFIER" \
   READINESS_SCRIPT="$BIN_DIR/readiness" \
   MAINTENANCE_SCRIPT="$BIN_DIR/maintenance" \
   LOCK_SCRIPT="$BIN_DIR/lock" \
@@ -368,6 +478,52 @@ run_operator() {
   "$@" \
   "$OPERATOR"
 }
+
+# Applied cleanup plus an incompatible target must be rejected before the
+# recovery can restart Backoffice and consume a delayed pre-cutoff delivery.
+new_case cleanup-applied-incompatible
+printf 'queued\n' >"$STATE_DIR/pre-cutoff-redelivery"
+if run_operator \
+    FAKE_BACKOFFICE_CLEANUP_SCENARIO=valid-applied \
+    FAKE_TARGET_HAS_CLEANUP_GUARD=0 \
+    FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery trusted readiness evidence for an incompatible listener'
+fi
+assert_contains "$CASE_DIR/out.txt" \
+  'readiness cleanup guard capability does not match the exact rollback target'
+[[ "$(cat "$STATE_DIR/replicas-backoffice")" == "0" ]] ||
+  fail 'rejected fenced recovery restarted Backoffice'
+[[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+  fail 'rejected fenced recovery released the maintenance fence'
+[[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+  fail 'rejected fenced recovery released the database lock'
+[[ -f "$STATE_DIR/pre-cutoff-redelivery" ]] ||
+  fail 'rejected fenced recovery processed queued pre-cutoff redelivery'
+if grep -Eq '^(set image|scale) ' "$STATE_DIR/kubectl.log"; then
+  fail 'rejected fenced recovery mutated an image or replica count'
+fi
+
+# The exact raw-document classifier must make malformed cleanup evidence a
+# maintenance-fenced NO_GO before any workload mutation or boundary release.
+new_case cleanup-malformed
+if run_operator \
+    FAKE_BACKOFFICE_CLEANUP_SCENARIO=malformed-extra-field \
+    FAKE_TARGET_HAS_CLEANUP_GUARD=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted a malformed raw cleanup journal'
+fi
+assert_contains "$CASE_DIR/out.txt" \
+  'maintenance-fenced readiness rejected the fenced rollback recovery'
+[[ "$(cat "$STATE_DIR/replicas-backoffice")" == "0" ]] ||
+  fail 'malformed cleanup evidence restarted Backoffice'
+[[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+  fail 'malformed cleanup evidence released the maintenance fence'
+[[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+  fail 'malformed cleanup evidence released the database lock'
+if grep -Eq '^(set image|scale) ' "$STATE_DIR/kubectl.log"; then
+  fail 'malformed cleanup evidence reached fenced workload mutation'
+fi
 
 # ------------------------------------------------------------ accepted case ---
 new_case accepted
@@ -395,11 +551,11 @@ done
   fail 'raw lock release output leaked into fenced recovery evidence'
 [[ ! -e "$OUT_DIR/fenced-fence-release.txt" ]] ||
   fail 'raw fence release output leaked into fenced recovery evidence'
-# Restore order must lead with API dependencies and end with Gamemaster.
+# Restore order must lead with Auth and restore Backoffice last.
 [[ "$(head -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "auth" ]] ||
   fail 'fenced restore order did not start with auth'
-[[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "gamemaster" ]] ||
-  fail 'fenced restore order did not end with gamemaster'
+[[ "$(tail -1 "$OUT_DIR/fenced-restore-order.tsv" | cut -f1)" == "backoffice" ]] ||
+  fail 'fenced restore order did not restore Backoffice last'
 
 for route_host_mode in same-host unexpected; do
   new_case "invalid-route-hosts-$route_host_mode"
@@ -415,7 +571,7 @@ done
 
 # Every recovery checkpoint is replayable: a second invocation may observe an
 # exact baseline prefix and candidate suffix in the reviewed restore order.
-RECOVERY_ORDER=(auth bet backoffice event moderation resulting slip client gamemaster)
+RECOVERY_ORDER=(auth bet event moderation resulting slip client gamemaster backoffice)
 for checkpoint in "${!RECOVERY_ORDER[@]}"; do
   new_case "recovery-checkpoint-$checkpoint"
   for ((index = 0; index <= checkpoint; index++)); do
@@ -480,11 +636,11 @@ EOF
   ) >"$BASELINE_DIR/SHA256SUMS"
 }
 
-FORWARD_WRITERS=(bet event moderation resulting slip gamemaster)
+FORWARD_WRITERS=(bet event moderation resulting slip backoffice gamemaster)
 configure_cleanup_overlay() {
   local split="$1" index service
   configure_first_activation no-routes
-  for service in auth backoffice client; do
+  for service in auth client; do
     printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
   done
   for ((index = 0; index < split; index++)); do
@@ -520,7 +676,7 @@ for invalid in writer-gap writer-suffix reader-baseline foreign-image active-wri
   case "$invalid" in
     writer-gap) printf '%s\n' "$(image_for deployed event)" >"$STATE_DIR/image-event" ;;
     writer-suffix)
-      for service in event moderation resulting slip gamemaster; do
+      for service in event moderation resulting slip backoffice gamemaster; do
         printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
       done ;;
     reader-baseline) printf '%s\n' "$(image_for target auth)" >"$STATE_DIR/image-auth" ;;
