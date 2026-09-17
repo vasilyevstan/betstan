@@ -10,7 +10,7 @@ set -euo pipefail
 
 umask 077
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 POLICY_SCRIPT="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 AUTHORITY_HELPER="$ROOT_DIR/infra/azure/agents/copilot_cli_authority_stan.py"
 BINDING_VALIDATOR="$ROOT_DIR/infra/oci/scripts/upstream_run_binding_stan.py"
@@ -32,6 +32,30 @@ fail() {
   exit 1
 }
 
+context_fail() {
+  fail "status=BLOCK classification=technical reason=local-context $*"
+}
+
+validate_local_context() {
+  local local_root local_head local_status
+  [[ "$(pwd -P)" = "$ROOT_DIR" ]] ||
+    context_fail "approval working directory no longer matches the script root"
+  local_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)" ||
+    context_fail "unable to validate the script repository root"
+  [[ "$local_root" = "$ROOT_DIR" ]] ||
+    context_fail "script is not running from its repository root"
+  local_head="$(git -C "$ROOT_DIR" rev-parse HEAD)" ||
+    context_fail "unable to read the approval checkout HEAD"
+  [[ "$local_head" =~ ^[0-9a-f]{40}$ ]] ||
+    context_fail "approval checkout HEAD is invalid"
+  if [[ -n "${1:-}" && "$local_head" != "$1" ]]; then
+    context_fail "approval must run from a checkout at exact current master"
+  fi
+  local_status="$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ||
+    context_fail "unable to prove the approval checkout is clean"
+  [[ -z "$local_status" ]] || context_fail "approval checkout is not clean"
+}
+
 [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail "run ID must be a positive integer"
 [[ -n "$EXPECTED_OPERATION" ]] || fail "EXPECTED_OPERATION is required"
 [[ -z "$ACTION" || "$ACTION" = "--approve" || "$ACTION" = "--reconcile" ]] ||
@@ -48,12 +72,24 @@ fail() {
 for command in gh git jq python3; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
+# Reject repository/index/object redirection, rather than letting -C validate
+# one worktree while a nested command operates on another. Credential-related
+# Git config remains available; no caller-selected repository is authority.
+if ! python3 -c '
+import os
+names = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+raise SystemExit(1 if any(name in os.environ for name in names) else 0)
+'; then
+  context_fail "inherited Git repository overrides are not supported"
+fi
+cd "$ROOT_DIR" || context_fail "unable to enter the script repository root"
+validate_local_context
 [[ -x "$POLICY_SCRIPT" ]] || fail "protected-operation policy is unavailable"
 [[ -x "$AUTHORITY_HELPER" ]] || fail "authority helper is unavailable"
 [[ -x "$RUN_EXCLUSIVITY_SCRIPT" ]] || fail "production exclusivity validator is unavailable"
-"$AUTHORITY_HELPER" preflight-root \
-  --authority-dir "$AUTHORITY_DIR" \
-  --repo-root "$ROOT_DIR"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/betstan-cli-approval.XXXXXX")"
 chmod 700 "$tmp_dir"
@@ -86,9 +122,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+# Discover only from the verified script checkout, not ambient CWD/GH_REPO.
+# Keep that same context for Python subprocesses and nested shell validators.
+repository="$(GH_HOST=github.com GH_REPO= gh repo view --json nameWithOwner --jq '.nameWithOwner')" ||
+  context_fail "GitHub repository discovery failed from the verified script root"
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
-  fail "unable to resolve a safe GitHub repository name"
+  context_fail "unable to resolve a safe GitHub repository name"
+export GH_HOST=github.com GH_REPO="$repository"
 current_master="$(
   gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
 )"
@@ -98,13 +138,10 @@ if [[ -n "$EXPECTED_CONTROL_SHA" && "$EXPECTED_CONTROL_SHA" != "$current_master"
   fail "EXPECTED_CONTROL_SHA is stale"
 fi
 
-local_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel)"
-[[ "$local_root" = "$ROOT_DIR" ]] || fail "script is not running from its repository root"
-local_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-[[ "$local_head" = "$current_master" ]] ||
-  fail "approval must run from a checkout at exact current master"
-[[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] ||
-  fail "approval checkout is not clean"
+validate_local_context "$current_master"
+"$AUTHORITY_HELPER" preflight-root \
+  --authority-dir "$AUTHORITY_DIR" \
+  --repo-root "$ROOT_DIR"
 
 policy_json="$("$POLICY_SCRIPT" get "$EXPECTED_OPERATION")"
 expected_workflow="$(jq -r '.workflow' <<<"$policy_json")"
@@ -342,6 +379,7 @@ PY
 
 revalidate_control() {
   local observed_master observed_blob observed_workflow_state
+  validate_local_context "$current_master"
   observed_master="$(
     gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha'
   )"
@@ -623,30 +661,57 @@ ensure_automatic_authority_record() {
 
 environment_id=""
 gate_key=""
+gate_can_approve=""
+gate_wait_reason=""
+gate_wait_remaining_seconds=""
 observe_pending_gate() {
   local observation
-  gh api "repos/$repository/actions/runs/$RUN_ID/pending_deployments" >"$pending_file"
-  gh api "repos/$repository/actions/runs/$RUN_ID/jobs?per_page=100" >"$jobs_file"
+  gh api "repos/$repository/actions/runs/$RUN_ID/pending_deployments" >"$pending_file" ||
+    fail "status=BLOCK classification=technical reason=pending-gate unable to read pending deployments"
+  gh api "repos/$repository/actions/runs/$RUN_ID/jobs?per_page=100" >"$jobs_file" ||
+    fail "status=BLOCK classification=technical reason=pending-gate unable to read protected jobs"
   observation="$(
-    python3 - "$pending_file" "$jobs_file" "$expected_environment" <<'PY'
+    python3 - "$pending_file" "$jobs_file" "$expected_environment" "$RUN_ID" <<'PY'
+import datetime as dt
 import hashlib
 import json
+import math
+import re
 import sys
 
-pending_path, jobs_path, expected_environment = sys.argv[1:]
-with open(pending_path, encoding="utf-8") as handle:
-    pending = json.load(handle)
-with open(jobs_path, encoding="utf-8") as handle:
-    payload = json.load(handle)
+pending_path, jobs_path, expected_environment, run_id = sys.argv[1:]
+
+def block(message):
+    raise SystemExit("status=BLOCK classification=technical reason=pending-gate " + message)
+
+try:
+    with open(pending_path, encoding="utf-8") as handle:
+        pending = json.load(handle)
+    with open(jobs_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, ValueError):
+    block("pending deployment or job JSON is incomplete")
 if not isinstance(pending, list):
-    raise SystemExit("pending deployment inventory is incomplete")
+    block("pending deployment inventory is incomplete")
+if not isinstance(payload, dict):
+    block("protected job inventory is incomplete")
 jobs = payload.get("jobs")
 if (
     not isinstance(jobs, list)
+    or type(payload.get("total_count")) is not int
+    or payload["total_count"] < 0
     or payload.get("total_count") != len(jobs)
     or len(jobs) > 100
 ):
-    raise SystemExit("protected job inventory is incomplete")
+    block("protected job inventory is incomplete")
+if any(
+    not isinstance(job, dict)
+    or type(job.get("id")) is not int
+    or job["id"] < 1
+    or ("run_id" in job and str(job["run_id"]) != run_id)
+    for job in jobs
+) or len({job["id"] for job in jobs}) != len(jobs):
+    block("protected job identity is invalid")
 if not pending:
     print('{"environmentId":null,"gateKey":null}')
     raise SystemExit(0)
@@ -656,22 +721,46 @@ matches = [
     if isinstance(item, dict)
     and isinstance(item.get("environment"), dict)
     and item["environment"].get("name") == expected_environment
-    and item.get("current_user_can_approve") is True
 ]
 if len(pending) != 1 or len(matches) != 1:
-    raise SystemExit("expected exactly one approvable pending environment")
+    block("expected exactly one approvable pending environment")
 environment_id = matches[0]["environment"].get("id")
-if not isinstance(environment_id, int) or environment_id < 1:
-    raise SystemExit("pending environment ID is invalid")
+if type(environment_id) is not int or environment_id < 1:
+    block("pending environment ID is invalid")
+gate = matches[0]
+can_approve = gate.get("current_user_can_approve")
+if type(can_approve) is not bool:
+    block("pending environment approval capability is unknown")
+timer = gate.get("wait_timer")
+if type(timer) is not int or not 0 <= timer <= 43200:
+    block("pending environment wait_timer is invalid")
+if "wait_timer_started_at" not in gate:
+    block("pending environment wait timer timestamp is missing")
+started_text = gate["wait_timer_started_at"]
+remaining = 0
+if started_text is not None:
+    if not isinstance(started_text, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)",
+        started_text,
+    ) or started_text.endswith("-00:00"):
+        block("pending environment wait timer timestamp must be timezone-aware")
+    try:
+        started = dt.datetime.fromisoformat(started_text.replace("Z", "+00:00"))
+        now = dt.datetime.now(dt.timezone.utc)
+        if started > now:
+            block("pending environment wait timer starts in the future")
+        remaining = max(0, math.ceil((started + dt.timedelta(minutes=timer) - now).total_seconds()))
+    except (ValueError, OverflowError):
+        block("pending environment wait timer timestamp is invalid")
+elif timer > 0 and not can_approve:
+    block("pending environment wait timer has no proven start")
 waiting_ids = sorted(
-    job.get("id")
+    job["id"]
     for job in jobs
-    if isinstance(job, dict)
-    and job.get("status") == "waiting"
-    and isinstance(job.get("id"), int)
+    if job.get("status") == "waiting"
 )
 if not waiting_ids:
-    raise SystemExit("protected run has no waiting materialized job")
+    block("protected run has no waiting materialized job")
 canonical = json.dumps(
     {
         "environmentId": int(environment_id),
@@ -683,11 +772,17 @@ canonical = json.dumps(
 print(json.dumps({
     "environmentId": environment_id,
     "gateKey": hashlib.sha256(canonical).hexdigest(),
+    "canApprove": can_approve,
+    "waitReason": "timer" if remaining > 0 else "provider",
+    "waitRemainingSeconds": remaining,
 }, sort_keys=True, separators=(",", ":")))
 PY
-  )"
+  )" || fail "status=BLOCK classification=technical reason=pending-gate pending gate observation was rejected"
   environment_id="$(jq -r '.environmentId // ""' <<<"$observation")"
   gate_key="$(jq -r '.gateKey // ""' <<<"$observation")"
+  gate_can_approve="$(jq -r '.canApprove' <<<"$observation")"
+  gate_wait_reason="$(jq -r '.waitReason // ""' <<<"$observation")"
+  gate_wait_remaining_seconds="$(jq -r '.waitRemainingSeconds // 0' <<<"$observation")"
   if [[ -n "$environment_id" ]]; then
     [[ "$environment_id" =~ ^[1-9][0-9]*$ ]] ||
       fail "pending environment ID is invalid"
@@ -698,10 +793,65 @@ PY
   fi
 }
 
+# The public verify summary intentionally omits receipts. Read them through
+# the existing private-file validator, reverify the same record and version,
+# and require the exact downstream run/operation/environment/job fingerprint.
+# A comment, an old same-environment receipt or can_approve=false is not proof.
+validate_approved_wait_receipt() {
+  local receipt_policy receipt_workflow_id receipt_workflow_blob
+  receipt_policy="$("$POLICY_SCRIPT" get "$(jq -r '.operation' <<<"$record_summary")")"
+  receipt_workflow_id="$workflow_id"
+  receipt_workflow_blob="$workflow_blob_sha"
+  if [[ "$authority_mode" = "record-upstream" ]]; then
+    receipt_workflow_id="$upstream_workflow_id"
+    receipt_workflow_blob="$upstream_workflow_blob_sha"
+  fi
+  if ! python3 -I -B - \
+    "$AUTHORITY_HELPER" "$AUTHORITY_DIR" "$ROOT_DIR" "$authority_run_id" \
+    "$record_summary" "$receipt_policy" "$repository" "$current_master" \
+    "$receipt_workflow_id" "$receipt_workflow_blob" "$RUN_ID" \
+    "$EXPECTED_OPERATION" "$environment_id" "$gate_key" <<'PY'
+import importlib.util
+import json
+import sys
+
+(helper_path, authority_dir, root, authority_run_id, summary_json, policy_json,
+ repository, master, workflow_id, blob, run_id, operation, environment_id, gate_key) = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("authority", helper_path)
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+directory = authority.ensure_authority_dir(authority_dir, root, create=False)
+record = authority.load_record(directory, authority_run_id)
+record = authority.verify_record(
+    record, json.loads(policy_json), repository, master, workflow_id, blob,
+)
+summary = json.loads(summary_json)
+if any(record.get(key) != value for key, value in summary.items()):
+    raise SystemExit("authority changed while proving the approved wait")
+matches = [
+    receipt for receipt in record["approvals"]
+    if receipt["runId"] == int(run_id)
+    and receipt["operation"] == operation
+    and receipt["environmentId"] == int(environment_id)
+    and receipt["gateKey"] == gate_key
+]
+if record["state"] != "consumed" or record["inflightApproval"] is not None or len(matches) != 1:
+    raise SystemExit("no consumed approval receipt for this exact waiting gate")
+PY
+  then
+    fail "status=BLOCK classification=technical reason=unproven-approved-wait pending environment is not approvable and exact prior approval is unproven"
+  fi
+}
+
 validate_pending_gate() {
   observe_pending_gate
   [[ -n "$environment_id" ]] ||
     fail "expected exactly one approvable pending environment"
+  if [[ "$gate_can_approve" != true ]]; then
+    [[ "${1:-}" = "--allow-approved-wait" ]] ||
+      fail "status=BLOCK classification=technical reason=pending-gate expected an approvable pending environment"
+    validate_approved_wait_receipt
+  fi
 }
 
 guard_missing_pending_against_waiting_gate() {
@@ -872,6 +1022,10 @@ if [[ "$ACTION" = "--reconcile" ]]; then
   )"
   [[ "$observed_approval_count" =~ ^[0-9]+$ ]] ||
     fail "workflow approval history count is invalid"
+  if [[ -n "$environment_id" && "$gate_can_approve" != true ]] &&
+    ((observed_approval_count <= $(jq -r '.inflightApproval.approvalCountBefore' <<<"$record_summary"))); then
+    fail "status=BLOCK classification=technical reason=unproven-approved-wait approval history has not advanced; authority stays inflight"
+  fi
   guard_missing_pending_against_waiting_gate "$observed_approval_count"
   validate_exclusivity
   revalidate_control
@@ -913,11 +1067,21 @@ fi
 
 validate_authority_and_run
 ensure_automatic_authority_record
-validate_pending_gate
+validate_pending_gate --allow-approved-wait
 validate_exclusivity
 revalidate_control
 validate_promotion
 revalidate_upstream_bindings
+
+if [[ "$gate_can_approve" = false ]]; then
+  # Observation only: no new claim or POST, and no success-shaped ELIGIBLE
+  # fallback. The caller retains bounded polling and workflow-state ownership.
+  printf 'run=%s operation=%s workflow=%s environment=%s control_sha=%s status=WAIT classification=provider-bound reason=approved-%s environment_id=%s gate_key=%s wait_remaining_seconds=%s recheck_after_seconds=60 next_action=observe-exact-run\n' \
+    "$RUN_ID" "$EXPECTED_OPERATION" "$expected_workflow" "$expected_environment" \
+    "$current_master" "$gate_wait_reason" "$environment_id" "$gate_key" \
+    "$gate_wait_remaining_seconds"
+  exit 3
+fi
 
 printf 'run=%s operation=%s workflow=%s environment=%s control_sha=%s authority=%s status=ELIGIBLE\n' \
   "$RUN_ID" \

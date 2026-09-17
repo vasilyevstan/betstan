@@ -355,12 +355,14 @@ Before deployment:
 - run `pre-commit-infra-check-stan.sh`;
 - validate manifest YAML offline;
 - run `ingress-routing-guard-stan.sh`;
-- require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
+- for AKS, require `shared-mongo-topology-guard-stan.sh` to confirm the validated one-Mongo topology;
 - require the target-specific retained Mongo PVC identity to be `Bound` and
   reject every additional Mongo PVC; never infer topology safety from a count
   threshold;
-- return `NO_GO` when the topology journal is in `transition`; normal deployment
-  must not race migration, cleanup, or rollback;
+- for AKS, return `NO_GO` when its topology journal is in `transition`; normal
+  deployment must not race migration, cleanup, or rollback. OCI uses its own
+  exact data, topology, lock, fence, and rollback contracts below; do not apply
+  an AKS journal requirement to an OCI release;
 - check production health and rollback readiness;
 - ensure no unresolved workflow or manifest conflict exists.
 - for every OCI release, require a new exact-SHA final data handoff. Application
@@ -374,7 +376,7 @@ Before deployment:
 
 During deployment:
 
-- hold the shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
+- hold the selected runtime's shared-Mongo operation lock across topology validation, manifest apply, rollout, and post-deploy validation;
 - keep the public write fence active while new exact-digest services start;
 - after retained Mongo maintenance, verify Mongo `8.2.12`, FCV `8.2`, and the
   running image digest, then run the existing ingress-only resume and prove
@@ -389,7 +391,7 @@ During deployment:
   retain environment and secret bindings required by every still-supported
   fallback image even when the forward image no longer consumes them;
 - wait for each rollout before pulling the next image;
-- preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation;
+- for AKS, preserve the retained auth Mongo StatefulSet/PVC and refuse any legacy Mongo recreation; for OCI, preserve its exact retained Mongo volume and supported topology;
 - avoid concurrent image pulls that can exhaust the node OS filesystem;
 - keep production and stage secrets/resources isolated.
 
@@ -397,7 +399,7 @@ After deployment:
 
 - verify the exact merge/build/deploy SHA chain;
 - require every Deployment and StatefulSet ready;
-- require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent;
+- for AKS, require only the retained auth Mongo PVC to be bound and all seven legacy PVCs absent; for OCI, require the selected runtime's checked-in storage/topology validation;
 - test canonical `betstan.xyz`, permanent `www` redirects, and the diagnostic
   OCI host;
 - confirm each affected API and service has the expected response shape; a

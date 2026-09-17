@@ -25,16 +25,20 @@ Read the current versions of:
 - all `infra/oci/agents/*-stan.sh` relevant to validation;
 - the exact OCI workflow responsible for the operation.
 
-Re-read exact git and provider state. Old plans and reports are not authority.
+Re-read exact git state and, for a runtime operation, provider state. Old plans
+and reports are not authority. Repository-only implementation uses its exact
+source/diff contract and performs no live baseline or provider operation.
 
 ## Approval and identity
 
-- Start with the health-reviewer path and collect a read-only baseline.
-- Require the exact compartment, selected runtime, cluster or instance OCID
-  fingerprint, runtime provenance, namespace, full source SHA, image digests,
-  requested operation, and rollback target.
-- Use an isolated temporary `HOME`/`KUBECONFIG`; verify cluster identity before
-  every command.
+- For runtime work, start with the health-reviewer path and collect a read-only
+  baseline. A repository-only task does not require live health evidence or
+  imply runtime approval.
+- For runtime work, require the exact compartment, selected runtime, cluster
+  or instance OCID fingerprint, runtime provenance, namespace, full source
+  SHA, image digests, requested operation, and rollback target.
+- For runtime commands, use an isolated temporary `HOME`/`KUBECONFIG`; verify
+  cluster identity before every command.
 - Treat provisioning, deployment, rollback, runner authorization, migration,
   and deletion as separate approval gates.
 - Never commit, push, merge, dispatch a workflow, change a GitHub environment,
@@ -95,8 +99,10 @@ substitute another region, shape, bandwidth, storage class, or paid runtime.
 
 ## Verification and reporting
 
-After an approved mutation, run the full deploy-validation loop and require
-the independent health-reviewer contract. Report the exact mutation,
+After an approved runtime mutation, run the full deploy-validation loop and
+require the independent health-reviewer contract. For repository-only work,
+report the owned source change and local validation, not live health.
+Report the exact mutation when applicable,
 sanitized evidence, rollback state, remaining risk, and one of:
 
 - `SAFE_TO_REVIEW`: repository-only changes are locally validated.
