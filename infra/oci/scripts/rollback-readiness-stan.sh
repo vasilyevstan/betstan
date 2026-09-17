@@ -28,8 +28,7 @@ AUTH_CONTAINER="${AUTH_CONTAINER:-gaming-auth}"
 BACKOFFICE_MONGO_SELECTOR="${BACKOFFICE_MONGO_SELECTOR:-app=gaming-auth-mongo}"
 BACKOFFICE_DB_NAME="${BACKOFFICE_DB_NAME:-gaming_backoffice}"
 BACKOFFICE_EVENT_COLLECTION="${BACKOFFICE_EVENT_COLLECTION:-events}"
-BACKOFFICE_CLEANUP_JOURNAL_COLLECTION="preseptembereventcleanupoperations"
-BACKOFFICE_CLEANUP_OPERATION_ID="backoffice-events-before:2026-09-01T00:00:00Z"
+BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT="$SCRIPT_DIR/backoffice-cleanup-journal-classifier.js"
 BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS="${BACKOFFICE_PUBLICATION_DRAIN_ATTEMPTS:-13}"
 BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS="${BACKOFFICE_PUBLICATION_DRAIN_SLEEP_SECONDS:-5}"
 # Readiness phase. "steady-state" is the only ordinary value and keeps every
@@ -581,47 +580,13 @@ if [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] &&
     BACKOFFICE_CLEANUP_ROLLBACK_CHECK="missing-mongo"
     failures_file_append \
       "Backoffice cleanup rollback compatibility: Mongo pod missing for selector ${BACKOFFICE_MONGO_SELECTOR}"
+  elif [[ ! -f "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" ||
+    -L "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" ]]; then
+    BACKOFFICE_CLEANUP_ROLLBACK_CHECK="missing-classifier"
+    failures_file_append \
+      "Backoffice cleanup rollback compatibility: the trusted fixed-journal classifier is unavailable"
   else
-    backoffice_cleanup_query="
-const rows = db.getCollection('${BACKOFFICE_CLEANUP_JOURNAL_COLLECTION}')
-  .find({_id: '${BACKOFFICE_CLEANUP_OPERATION_ID}'})
-  .limit(2)
-  .toArray();
-let result = 'invalid';
-if (rows.length === 0) {
-  result = 'absent';
-} else if (rows.length === 1) {
-  const journal = rows[0];
-  const identities = journal.identities;
-  const stateIsValid = journal.state === 'prepared' || journal.state === 'applied';
-  const identitiesAreValid = Array.isArray(identities)
-    && identities.length === journal.candidateCount
-    && identities.every((identity) =>
-      identity !== null
-      && typeof identity === 'object'
-      && typeof identity.eventId === 'string'
-      && identity.eventId.length > 0
-      && typeof identity.time === 'string'
-    );
-  if (
-    journal._id === '${BACKOFFICE_CLEANUP_OPERATION_ID}'
-    && journal.schemaVersion === 'backoffice-pre-september-events-cleanup-v1'
-    && journal.operation === 'delete-backoffice-events-before-cutoff'
-    && journal.cutoff === '2026-09-01T00:00:00Z'
-    && typeof journal.sourceSha === 'string'
-    && /^[0-9a-f]{40}\$/.test(journal.sourceSha)
-    && stateIsValid
-    && Number.isInteger(journal.candidateCount)
-    && journal.candidateCount >= 0
-    && typeof journal.digest === 'string'
-    && /^[0-9a-f]{64}\$/.test(journal.digest)
-    && identitiesAreValid
-  ) {
-    result = journal.state;
-  }
-}
-print(result);
-"
+    backoffice_cleanup_query="$(<"$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT")"
     if ! cleanup_state_output="$(
       kubectl exec -n "$OCI_K8S_NAMESPACE" "$backoffice_mongo_pod" -- \
         mongosh --quiet "mongodb://localhost:27017/${BACKOFFICE_DB_NAME}" \
@@ -631,9 +596,15 @@ print(result);
       failures_file_append \
         "Backoffice cleanup rollback compatibility: unable to inspect the fixed cleanup journal"
     else
-      BACKOFFICE_CLEANUP_JOURNAL_STATE="$(
-        tail -n 1 <<<"$cleanup_state_output" | tr -d '\r[:space:]'
-      )"
+      cleanup_state_output="${cleanup_state_output%$'\r'}"
+      case "$cleanup_state_output" in
+        absent | prepared | applied | invalid)
+          BACKOFFICE_CLEANUP_JOURNAL_STATE="$cleanup_state_output"
+          ;;
+        *)
+          BACKOFFICE_CLEANUP_JOURNAL_STATE="invalid-output"
+          ;;
+      esac
       case "$BACKOFFICE_CLEANUP_JOURNAL_STATE" in
         absent)
           BACKOFFICE_CLEANUP_ROLLBACK_CHECK="not-started"

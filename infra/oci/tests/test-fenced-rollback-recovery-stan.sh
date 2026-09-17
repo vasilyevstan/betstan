@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OPERATOR="$ROOT_DIR/infra/oci/scripts/recover-fenced-rollback-stan.sh"
 READINESS="$ROOT_DIR/infra/oci/scripts/rollback-readiness-stan.sh"
+CLEANUP_CLASSIFIER="$ROOT_DIR/infra/oci/scripts/backoffice-cleanup-journal-classifier.js"
 WORKFLOW_FILE="$ROOT_DIR/.github/workflows/oci-production-rollback.yml"
 POLICY="$ROOT_DIR/infra/azure/agents/copilot-cli-protected-operation-policy-stan.sh"
 
@@ -335,7 +336,45 @@ set -euo pipefail
 mkdir -p "$OUTPUT_DIR"
 phase="${ROLLBACK_READINESS_PHASE:-steady-state}"
 status=GO
-cleanup_state="${FAKE_BACKOFFICE_CLEANUP_STATE:-absent}"
+cleanup_state="$(
+  node - \
+    "$BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT" \
+    "${FAKE_BACKOFFICE_CLEANUP_SCENARIO:-absent}" <<'NODE_CLASSIFIER'
+"use strict";
+const { createHash } = require("crypto");
+const { classifyBackofficeCleanupJournal } = require(process.argv[2]);
+const scenario = process.argv[3];
+let rows = [];
+if (scenario !== "absent") {
+  const identities = [{
+    eventId: "cleanup-event-a",
+    time: "2026-08-31T23:59:59.999Z",
+  }];
+  const journal = {
+    _id: "backoffice-events-before:2026-09-01T00:00:00Z",
+    candidateCount: 1,
+    createdAt: new Date("2026-09-01T00:05:00.000Z"),
+    cutoff: "2026-09-01T00:00:00Z",
+    digest: createHash("sha256")
+      .update(JSON.stringify(identities))
+      .digest("hex"),
+    identities,
+    operation: "delete-backoffice-events-before-cutoff",
+    schemaVersion: "backoffice-pre-september-events-cleanup-v1",
+    sourceSha: "a".repeat(40),
+    state: "applied",
+    appliedAt: new Date("2026-09-01T00:06:00.000Z"),
+  };
+  if (scenario === "malformed-extra-field") {
+    journal.unreviewed = true;
+  } else if (scenario !== "valid-applied") {
+    throw new Error(`unknown fenced cleanup scenario: ${scenario}`);
+  }
+  rows = [journal];
+}
+process.stdout.write(`${classifyBackofficeCleanupJournal(rows)}\n`);
+NODE_CLASSIFIER
+)"
 cleanup_guard="${FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD:-${FAKE_TARGET_HAS_CLEANUP_GUARD:-0}}"
 if [[ "$cleanup_guard" == "1" ]]; then
   cleanup_guard=true
@@ -367,9 +406,13 @@ if [[ "$phase" == "maintenance-fenced" ]]; then
     { echo "fenced readiness requires live images" >&2; exit 1; }
   [[ "${MAINTENANCE_DEPLOYED_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
     { echo "fenced readiness requires deployed sha" >&2; exit 1; }
-  [[ "${FAKE_FENCED_READINESS:-GO}" == "GO" ]] && status=GO || status=NO_GO
+  if [[ "${FAKE_FENCED_READINESS:-GO}" != "GO" ]]; then
+    status=NO_GO
+  fi
 else
-  [[ "${FAKE_STEADY_READINESS:-GO}" == "GO" ]] && status=GO || status=NO_GO
+  if [[ "${FAKE_STEADY_READINESS:-GO}" != "GO" ]]; then
+    status=NO_GO
+  fi
 fi
 cat >"$OUTPUT_DIR/summary.env" <<SUMMARY
 rollback_readiness=$status
@@ -425,6 +468,7 @@ run_operator() {
   OUTPUT_DIR="$OUT_DIR" \
   OCI_PUBLIC_URL=https://host-0 \
   OCI_DIAGNOSTIC_URL=https://host-1 \
+  BACKOFFICE_CLEANUP_CLASSIFIER_SCRIPT="$CLEANUP_CLASSIFIER" \
   READINESS_SCRIPT="$BIN_DIR/readiness" \
   MAINTENANCE_SCRIPT="$BIN_DIR/maintenance" \
   LOCK_SCRIPT="$BIN_DIR/lock" \
@@ -440,7 +484,7 @@ run_operator() {
 new_case cleanup-applied-incompatible
 printf 'queued\n' >"$STATE_DIR/pre-cutoff-redelivery"
 if run_operator \
-    FAKE_BACKOFFICE_CLEANUP_STATE=applied \
+    FAKE_BACKOFFICE_CLEANUP_SCENARIO=valid-applied \
     FAKE_TARGET_HAS_CLEANUP_GUARD=0 \
     FAKE_READINESS_TARGET_HAS_CLEANUP_GUARD=1 \
     >"$CASE_DIR/out.txt" 2>&1; then
@@ -458,6 +502,27 @@ assert_contains "$CASE_DIR/out.txt" \
   fail 'rejected fenced recovery processed queued pre-cutoff redelivery'
 if grep -Eq '^(set image|scale) ' "$STATE_DIR/kubectl.log"; then
   fail 'rejected fenced recovery mutated an image or replica count'
+fi
+
+# The exact raw-document classifier must make malformed cleanup evidence a
+# maintenance-fenced NO_GO before any workload mutation or boundary release.
+new_case cleanup-malformed
+if run_operator \
+    FAKE_BACKOFFICE_CLEANUP_SCENARIO=malformed-extra-field \
+    FAKE_TARGET_HAS_CLEANUP_GUARD=1 \
+    >"$CASE_DIR/out.txt" 2>&1; then
+  fail 'fenced recovery accepted a malformed raw cleanup journal'
+fi
+assert_contains "$CASE_DIR/out.txt" \
+  'maintenance-fenced readiness rejected the fenced rollback recovery'
+[[ "$(cat "$STATE_DIR/replicas-backoffice")" == "0" ]] ||
+  fail 'malformed cleanup evidence restarted Backoffice'
+[[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+  fail 'malformed cleanup evidence released the maintenance fence'
+[[ "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+  fail 'malformed cleanup evidence released the database lock'
+if grep -Eq '^(set image|scale) ' "$STATE_DIR/kubectl.log"; then
+  fail 'malformed cleanup evidence reached fenced workload mutation'
 fi
 
 # ------------------------------------------------------------ accepted case ---
