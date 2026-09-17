@@ -6193,6 +6193,39 @@ async function main() {
         ),
       ),
     );
+    const laterPull = pull({
+      updated_at: "2026-09-02T09:02:00.000Z",
+    });
+    const invalidHistoryDuringCreation = await execute({
+      eventName: "pull_request_target",
+      currentPull: laterPull,
+      eventPull: laterPull,
+      transitionStatuses: [newerTransitionMarker, olderTransitionMarker],
+      policyRunOverridesById: {
+        100: invalidOlderPolicyRun,
+      },
+    });
+    assertNoQualitySuccess(invalidHistoryDuringCreation);
+    assert(
+      invalidHistoryDuringCreation.messages.some((message) =>
+        message.includes(
+          "quality transition marker does not originate from branch-policy",
+        ),
+      ),
+    );
+  }
+
+  for (const unresolvedHistoricalRun of [
+    { status: "in_progress", conclusion: null },
+    { conclusion: "neutral" },
+    { conclusion: "skipped" },
+    { conclusion: "unknown" },
+  ]) {
+    const unresolvedHistory = await execute({
+      transitionStatuses: [newerTransitionMarker, olderTransitionMarker],
+      policyRunOverridesById: { 100: unresolvedHistoricalRun },
+    });
+    assertNoQualitySuccess(unresolvedHistory);
   }
 
   const malformedNewestMarker = await execute({
@@ -6554,6 +6587,168 @@ async function main() {
   assert(
     [...latestStates.values()].every((state) => state === "pending"),
   );
+
+  for (const { binding, conclusion } of [
+    { binding: null, conclusion: "failure" },
+    { binding: 102, conclusion: "cancelled" },
+    { binding: 102, conclusion: "timed_out" },
+  ]) {
+    const partialMarkers = [];
+    const failedPolicyRunId = 401;
+    const freshPolicyRunId = 402;
+    const oldRun = workflowRun({
+      created_at: timestampAfter(PULL_UPDATED_AT, 1_000),
+    });
+    const movedPull = pull({
+      updated_at: timestampAfter(PULL_UPDATED_AT, 60_000),
+    });
+    await assert.rejects(
+      execute({
+        eventName: "pull_request_target",
+        currentPulls: [pull(), pull(), movedPull],
+        contextRunId: failedPolicyRunId,
+        transitionStatuses: partialMarkers,
+        transitionStatusCreatedAt: timestampAfter(PULL_UPDATED_AT, 4_000),
+        listedRuns: binding === null ? [] : [oldRun],
+      }),
+      /updatedAt/,
+    );
+    assert(
+      partialMarkers.some(
+        ({ description }) =>
+          transitionBinding(description) === String(binding ?? "p"),
+      ),
+      "the failed publication must leave its pending or bound marker",
+    );
+    const failedOrigin = {
+      [failedPolicyRunId]: { conclusion },
+    };
+    assertQualityFailure(
+      await execute({
+        currentPull: movedPull,
+        transitionStatuses: partialMarkers.slice(),
+        policyRunOverridesById: failedOrigin,
+      }),
+    );
+    for (const { eventName, eventAction, updatedAt } of [
+      {
+        eventName: "pull_request_target",
+        eventAction: "opened",
+        updatedAt: timestampAfter(PULL_UPDATED_AT, 120_000),
+      },
+      {
+        eventName: "pull_request_target",
+        eventAction: "edited",
+        updatedAt: PULL_UPDATED_AT,
+      },
+      {
+        eventName: "pull_request_target",
+        eventAction: "labeled",
+        updatedAt: timestampAfter(PULL_UPDATED_AT, 120_000),
+      },
+    ]) {
+      const nonRecoveringMarkers = partialMarkers.slice();
+      const eventSnapshot = pull({ updated_at: updatedAt });
+      const nonRecoveringEvent = await execute({
+        eventName,
+        eventAction,
+        eventPull: eventSnapshot,
+        currentPull: eventSnapshot,
+        contextRunId: freshPolicyRunId,
+        transitionStatuses: nonRecoveringMarkers,
+        policyRunOverridesById: failedOrigin,
+      });
+      assertNoQualitySuccess(nonRecoveringEvent);
+      assert(
+        nonRecoveringMarkers.every(
+          ({ target_url: targetUrl }) =>
+            targetUrl !== workflowRunUrl(freshPolicyRunId),
+        ),
+        "replayed, equal-cutoff, or non-producing events cannot recover",
+      );
+    }
+
+    for (const eventAction of ["edited", "synchronize", "reopened"]) {
+      const freshPull = pull({
+        updated_at: timestampAfter(PULL_UPDATED_AT, 120_000),
+      });
+      const freshRun = workflowRun({
+        id: 203,
+        created_at: timestampAfter(freshPull.updated_at, 1_000),
+      });
+      const runningFreshRun = {
+        ...freshRun,
+        status: "in_progress",
+        conclusion: null,
+      };
+      const markers = partialMarkers.slice();
+      const freshTransition = await execute({
+        eventName: "pull_request_target",
+        eventAction,
+        eventPull: freshPull,
+        currentPull: freshPull,
+        contextRunId: freshPolicyRunId,
+        transitionStatuses: markers,
+        transitionStatusCreatedAt: timestampAfter(freshPull.updated_at, 2_000),
+        policyRunOverridesById: failedOrigin,
+        listedRuns: [oldRun, runningFreshRun],
+      });
+      assertNoQualitySuccess(freshTransition);
+      const freshMarkers = markers.filter(
+        ({ target_url: targetUrl }) =>
+          targetUrl === workflowRunUrl(freshPolicyRunId),
+      );
+      assert.equal(
+        freshMarkers.length,
+        2,
+        `${conclusion}/${eventAction} must establish its own pending and bound lineage`,
+      );
+      assert.deepEqual(
+        freshMarkers.map(({ description }) => transitionBinding(description)),
+        ["203", "p"],
+      );
+
+      const completionOptions = {
+        eventName: "workflow_run",
+        currentPull: freshPull,
+        transitionStatuses: markers,
+        policyRunOverridesById: failedOrigin,
+      };
+      const delayedOldCompletion = await execute({
+        ...completionOptions,
+        run: oldRun,
+        listedRuns: [oldRun, runningFreshRun],
+      });
+      assertNoQualitySuccess(delayedOldCompletion);
+
+      const freshCompletion = await execute({
+        ...completionOptions,
+        run: freshRun,
+        listedRuns: [oldRun, freshRun],
+      });
+      assert.deepEqual(
+        freshCompletion.statuses
+          .filter(({ context }) => context.startsWith("pr-quality-gates/"))
+          .map(({ state, target_url: targetUrl }) => [state, targetUrl]),
+        [
+          ["success", workflowRunUrl(freshRun.id)],
+          ["success", workflowRunUrl(freshRun.id)],
+        ],
+        freshCompletion.messages.join("\n"),
+      );
+
+      const failedCurrentOrigin = await execute({
+        ...completionOptions,
+        run: freshRun,
+        listedRuns: [freshRun],
+        policyRunOverridesById: {
+          ...failedOrigin,
+          [freshPolicyRunId]: { conclusion },
+        },
+      });
+      assertNoQualitySuccess(failedCurrentOrigin);
+    }
+  }
 
   const staleEvent = pull({
     head: {
