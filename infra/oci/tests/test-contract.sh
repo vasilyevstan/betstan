@@ -519,7 +519,7 @@ for self_blocker_contract in \
     'unresolved production risk: active or competing work' \
     'normal focused branch -> `dev` -> `master` path' \
     '`mutation_capable: true` only' \
-    'challenge through the existing deployment-safety quality gate, not a new' \
+    'challenge through the existing deployment-safety specialist, not a new' \
     'Preserve rollback evidence and revalidate the' \
     'resume the original registered' \
     'Never bypass or edit live authority state ad hoc' \

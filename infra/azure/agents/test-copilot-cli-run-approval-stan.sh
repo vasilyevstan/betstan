@@ -25,6 +25,220 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Real Git, not the -C-discarding unit stub below. All repositories, provider
+# calls and authority records belong to this synthetic temporary fixture.
+python3 -I - "$ROOT_DIR" "$tmp_dir" <<'PY'
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+source, temporary = map(Path, sys.argv[1:])
+context = (temporary / "real-context").resolve()
+repo = context / "repo"
+ambient = context / "non-repository-cwd"
+bin_dir = context / "bin"
+for directory in (repo, ambient, bin_dir):
+    directory.mkdir(parents=True)
+clean_env = {
+    key: value for key, value in os.environ.items()
+    if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in ("BASH_ENV", "ENV")
+}
+clean_env.update(
+    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+    GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
+)
+real_git = shutil.which("git")
+assert real_git
+
+def git(*args):
+    return subprocess.check_output(
+        [real_git, "-C", str(repo), *args], env=clean_env, text=True,
+    ).strip()
+
+scripts = repo / "infra/azure/agents"
+scripts.mkdir(parents=True)
+for name in (
+    "copilot-cli-run-approval-stan.sh", "copilot-cli-dispatch-stan.sh",
+    "copilot-cli-protected-operation-policy-stan.sh",
+    "copilot_cli_authority_stan.py", "production-run-exclusivity-stan.sh",
+):
+    shutil.copy2(source / "infra/azure/agents" / name, scripts / name)
+workflow = repo / ".github/workflows/production-deploy.yml"
+workflow.parent.mkdir(parents=True)
+shutil.copy2(source / workflow.relative_to(repo), workflow)
+binding_validator = repo / "infra/oci/scripts/upstream_run_binding_stan.py"
+binding_validator.parent.mkdir(parents=True)
+shutil.copy2(source / binding_validator.relative_to(repo), binding_validator)
+git("init", "-q", "--template=")
+assert Path(git("rev-parse", "--show-toplevel")).resolve() == repo
+assert Path(git("rev-parse", "--absolute-git-dir")).resolve() == repo / ".git"
+git("config", "--local", "user.name", "fixture")
+git("config", "--local", "user.email", "fixture@example.invalid")
+git("remote", "add", "origin", "https://github.com/example/repo.git")
+git("add", ".")
+git("-c", "commit.gpgSign=false", "commit", "-qm", "context fixture")
+sha = git("rev-parse", "HEAD")
+blob = git("rev-parse", "HEAD:.github/workflows/production-deploy.yml")
+provider = bin_dir / "gh"
+provider.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+context = Path(os.environ["CONTEXT_FIXTURE"])
+root = context / "repo"
+with (context / "calls.jsonl").open("a") as log:
+    log.write(json.dumps({"args": args, "cwd": os.getcwd(), "repo": os.environ.get("GH_REPO")}) + "\n")
+assert Path.cwd() == root, "provider inherited ambient rather than verified script CWD"
+assert os.environ.get("GH_HOST") == "github.com", "provider inherited an unverified GitHub host"
+sha, blob = os.environ["CONTEXT_SHA"], os.environ["CONTEXT_BLOB"]
+prefix = "repos/example/repo/"
+if args[:2] == ["repo", "view"]:
+    assert not os.environ.get("GH_REPO"), "ambient GH_REPO selected discovery"
+    origin = subprocess.check_output(
+        [os.environ["CONTEXT_GIT"], "-C", str(root), "remote", "get-url", "origin"], text=True,
+    ).strip()
+    assert origin == "https://github.com/example/repo.git"
+    data = {"nameWithOwner": "example/repo"}
+else:
+    assert os.environ.get("GH_REPO") == "example/repo", "nested repository context drift"
+    if args[:2] == ["workflow", "run"]:
+        assert args[2] == "production-deploy.yml"
+        json.load(sys.stdin)
+        print("https://github.com/example/repo/actions/runs/7001")
+        raise SystemExit(0)
+    assert args[0] == "api", args
+    if args[1:3] == ["--method", "POST"]:
+        assert args[3] == prefix + "actions/runs/7001/pending_deployments"
+        assert "environment_ids[]=901" in args
+        (context / "approved").write_text("approved")
+        data = {}
+    else:
+        endpoint = args[1]
+        if endpoint == prefix + "git/ref/heads/master":
+            data = {"object": {"sha": os.environ.get("CONTEXT_MASTER", sha)}}
+        elif endpoint == prefix + "actions/workflows/production-deploy.yml":
+            data = {"id": 302, "path": ".github/workflows/production-deploy.yml", "state": "active"}
+        elif endpoint == prefix + f"contents/.github/workflows/production-deploy.yml?ref={sha}":
+            data = {"sha": blob}
+        elif endpoint == prefix + f"commits/{sha}/pulls":
+            data = [{"merged_at": "2026-01-01T00:00:00Z", "merge_commit_sha": sha,
+                     "base": {"ref": "master"}, "head": {"ref": "dev"},
+                     "labels": [{"name": "copilot-cli-managed"}]}]
+        elif endpoint == prefix + "actions/runs/7001":
+            data = {"id": 7001, "workflow_id": 302, "path": ".github/workflows/production-deploy.yml",
+                    "display_title": f"deploy {sha}", "event": "workflow_dispatch", "head_sha": sha,
+                    "head_branch": "master", "head_repository": {"full_name": "example/repo"},
+                    "run_attempt": 1, "status": "waiting", "conclusion": None}
+        elif endpoint == prefix + "actions/runs/7001/jobs?per_page=100":
+            data = {"total_count": 1, "jobs": [{"id": 1, "run_id": 7001, "status": "waiting"}]}
+        elif endpoint == prefix + "actions/runs/7001/pending_deployments":
+            data = [{"environment": {"id": 901, "name": "production-emergency"},
+                     "current_user_can_approve": not (context / "approved").exists(),
+                     "wait_timer": 0, "wait_timer_started_at": None}]
+        elif endpoint == prefix + "actions/runs/7001/approvals":
+            data = []
+        elif endpoint.startswith(prefix + "actions/runs?status="):
+            data = {"total_count": 0, "workflow_runs": []}
+        elif endpoint == "user":
+            data = {"login": "copilot-test-user"}
+        else:
+            raise AssertionError(args)
+if "--jq" in args:
+    subprocess.run(["jq", "-r", args[args.index("--jq") + 1]], input=json.dumps(data), text=True, check=True)
+else:
+    print(json.dumps(data))
+''')
+provider.chmod(0o700)
+request = context / "request.json"
+request.write_text(json.dumps({
+    "schemaVersion": "betstan.copilot-cli-dispatch-request.v1",
+    "repository": "example/repo", "operation": "production-deploy",
+    "controlSha": sha, "subjectSha": sha, "targetSha": None,
+    "inputs": {"approved_sha": sha, "build_run_id": "42"},
+}))
+request.chmod(0o600)
+env = dict(
+    clean_env, PATH=str(bin_dir) + os.pathsep + clean_env["PATH"],
+    CONTEXT_FIXTURE=str(context), CONTEXT_SHA=sha, CONTEXT_BLOB=blob, CONTEXT_GIT=real_git,
+    GH_HOST="unrelated.invalid", GH_REPO="unrelated/ambient",
+    COPILOT_CLI_AUTHORITY_DIR=str(context / "authority"),
+    COPILOT_CLI_AUTO_APPROVE="true", EXPECTED_OPERATION="production-deploy",
+    COPILOT_CLI_MATERIALIZATION_ATTEMPTS="2", COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS="0",
+)
+dispatcher = scripts / "copilot-cli-dispatch-stan.sh"
+approver = scripts / "copilot-cli-run-approval-stan.sh"
+
+def run(script, *args, overrides=None, cwd=ambient):
+    return subprocess.run(
+        [str(script), *map(str, args)], cwd=cwd, env={**env, **(overrides or {})},
+        capture_output=True, text=True, timeout=60,
+    )
+
+# A caller's CDPATH must not redirect relative script-root resolution either.
+decoy = context / "decoy"
+(decoy / "infra/azure/agents").mkdir(parents=True)
+relative_dispatch = run(
+    Path("infra/azure/agents") / dispatcher.name, request,
+    overrides={"CDPATH": str(decoy)}, cwd=repo,
+)
+assert relative_dispatch.returncode == 0, relative_dispatch.stderr
+dispatched = run(dispatcher, request, "--dispatch")
+assert dispatched.returncode == 0, dispatched.stderr
+assert "authority_state=issued" in dispatched.stdout
+assert "job_gate_materialization=UNPROVEN" in dispatched.stdout
+approved = run(approver, "7001", "--approve")
+assert approved.returncode == 0, approved.stderr
+assert "status=APPROVED" in approved.stdout
+waiting = run(approver, "7001", "--approve")
+assert waiting.returncode == 3, waiting.stderr
+assert "status=WAIT" in waiting.stdout and "reason=approved-provider" in waiting.stdout
+assert "status=ELIGIBLE" not in waiting.stdout and "status=APPROVED" not in waiting.stdout
+relative_wait = run(
+    Path("infra/azure/agents") / approver.name, "7001", "--approve",
+    overrides={"CDPATH": str(decoy)}, cwd=repo,
+)
+assert relative_wait.returncode == 3 and "status=WAIT" in relative_wait.stdout, relative_wait.stderr
+assert not git("status", "--porcelain", "--untracked-files=all")
+
+def mutations():
+    calls = [json.loads(line) for line in (context / "calls.jsonl").read_text().splitlines()]
+    return [call for call in calls if call["args"][:2] == ["workflow", "run"] or "POST" in call["args"]]
+
+before = mutations()
+assert len(before) == 2
+for script, args in ((dispatcher, (request, "--dispatch")), (approver, ("7001", "--approve"))):
+    (repo / "untracked").write_text("must block\n")
+    dirty = run(script, *args)
+    (repo / "untracked").unlink()
+    assert dirty.returncode == 1 and "status=BLOCK classification=technical reason=local-context" in dirty.stderr
+    stale = run(script, *args, overrides={"CONTEXT_MASTER": "0" * 40})
+    assert stale.returncode == 1 and "exact current master" in stale.stderr
+    redirected = run(script, *args, overrides={"GIT_DIR": str(repo / ".git")})
+    assert redirected.returncode == 1 and "inherited Git repository overrides" in redirected.stderr
+    index = repo / ".git/index"
+    original_index = index.read_bytes()
+    try:
+        index.write_bytes(b"invalid fixture index")
+        unreadable = run(script, *args)
+        assert unreadable.returncode == 1 and "unable to prove" in unreadable.stderr
+    finally:
+        index.write_bytes(original_index)
+    git("remote", "remove", "origin")
+    missing_origin = run(script, *args)
+    git("remote", "add", "origin", "https://github.com/example/repo.git")
+    assert missing_origin.returncode == 1 and "repository discovery failed" in missing_origin.stderr
+    no_repo_script = context / "no-repository/infra/azure/agents" / script.name
+    no_repo_script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(script, no_repo_script)
+    invalid_root = run(no_repo_script, *args)
+    assert invalid_root.returncode == 1 and "unable to validate the script repository root" in invalid_root.stderr
+    assert mutations() == before, "context failure reached a provider mutation"
+print("copilot_cli_real_git_nonrepo_context_tests=PASS")
+PY
+
 workflow_id_for() {
   case "$1" in
     production-build.yml) echo 301 ;;
@@ -247,6 +461,9 @@ git() {
     shift 2
   fi
   if [[ "$1" = "status" ]]; then
+    if [[ "${STUB_STATUS_FAIL_WHEN_INFLIGHT:-false}" = true ]] && authority_is_inflight; then
+      return 1
+    fi
     if [[ "${STUB_DIRTY_CHECKOUT:-false}" = "true" ]]; then
       printf '?? untracked-authority-override.py\n'
     fi
@@ -500,6 +717,14 @@ gh() {
         }'
       ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID/pending_deployments")
+      if [[ "${STUB_PENDING_FAIL:-false}" = true ]]; then
+        printf '[]\n'
+        return 1
+      fi
+      if [[ -n "${STUB_PENDING_JSON:-}" ]]; then
+        printf '%s\n' "$STUB_PENDING_JSON"
+        return 0
+      fi
       if [[ "${STUB_NO_PENDING:-false}" = "true" ]]; then
         printf '[]\n'
       else
@@ -514,9 +739,13 @@ gh() {
           --arg environment "${STUB_PENDING_ENV:-$STUB_ENV}" \
           --argjson environment_id "$pending_environment_id" \
           --argjson can_approve "${STUB_CAN_APPROVE:-true}" \
+          --argjson wait_timer "${STUB_WAIT_TIMER:-0}" \
+          --argjson wait_started "${STUB_WAIT_STARTED_JSON:-null}" \
           '[{
             environment:{id:$environment_id,name:$environment},
-            current_user_can_approve:$can_approve
+            current_user_can_approve:$can_approve,
+            wait_timer:$wait_timer,
+            wait_timer_started_at:$wait_started
           }]'
       fi
       ;;
@@ -548,6 +777,10 @@ print(json.dumps(reviews, separators=(",", ":")))
 PY
       ;;
     "repos/$REPOSITORY/actions/runs/$STUB_RUN_ID/jobs?per_page=100")
+      if [[ -n "${STUB_JOBS_JSON:-}" ]]; then
+        printf '%s\n' "$STUB_JOBS_JSON"
+        return 0
+      fi
       if [[ "${STUB_NO_WAITING:-false}" = "true" ]]; then
         printf '{"total_count":1,"jobs":[{"id":%s,"status":"completed"}]}\n' \
           "${STUB_JOB_ID:-1}"
@@ -826,6 +1059,8 @@ load_record_stub() {
   unset STUB_EXCLUSIVITY_FAIL_WHEN_INFLIGHT
   unset STUB_PROMOTION_FAIL_WHEN_INFLIGHT
   unset STUB_ENV_ID_WHEN_INFLIGHT
+  unset STUB_WAIT_TIMER STUB_WAIT_STARTED_JSON STUB_STATUS_FAIL_WHEN_INFLIGHT
+  unset STUB_PENDING_FAIL STUB_PENDING_JSON STUB_JOBS_JSON
   unset STUB_OCI_RUNTIME_MODE
   unset STUB_PACKAGE_CREATED_AT
   unset STUB_PACKAGE_CANDIDATE_BUILD_ID
@@ -1047,8 +1282,40 @@ if STUB_DIRTY_CHECKOUT=true \
 fi
 grep -qF "approval checkout is not clean" "$error_file"
 
+load_record_stub production-deploy
+post_count_before="$(cat "$post_count_file")"
+if STUB_STATUS_FAIL_WHEN_INFLIGHT=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "post-claim Git status failure unexpectedly approved GitHub" >&2
+  exit 1
+fi
+grep -qF "status=BLOCK classification=technical reason=local-context" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+
+# A review comment and can_approve=false cannot stand in for an exact receipt.
+printf '%s\t901\tproduction-deploy\n' "$STUB_RUN_ID" >>"$approval_history_file"
+if STUB_CAN_APPROVE=false COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "unreceipted non-approvable gate unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "status=BLOCK classification=technical reason=unproven-approved-wait" "$error_file"
+! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+
 load_record_stub oci-production-deploy
-STUB_ENV_ID=901 COPILOT_CLI_AUTO_APPROVE=true \
+wait_started_json="$(python3 -c '
+import datetime as dt, json
+now = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=5)
+print(json.dumps(now.astimezone(dt.timezone(dt.timedelta(hours=3))).isoformat()))
+')"
+# A newly eligible gate is approved normally even while a valid timer runs.
+STUB_ENV_ID=901 STUB_WAIT_TIMER=30 STUB_WAIT_STARTED_JSON="$wait_started_json" \
+  COPILOT_CLI_AUTO_APPROVE=true \
   run_approver "$STUB_RUN_ID" --approve >"$output_file"
 grep -qF "status=APPROVED" "$output_file"
 jq -e '
@@ -1072,6 +1339,121 @@ if STUB_ENV_ID=901 STUB_JOB_ID=2 COPILOT_CLI_AUTO_APPROVE=true \
 fi
 grep -qF "already approved this exact gate" "$error_file"
 
+# The same receipted job may remain waiting on a timer or on GitHub. Neither
+# observation may repeat the POST or mutate the private authority record.
+receipt_before="$(cat "$authority_dir/$STUB_RUN_ID.json")"
+post_count_before="$(cat "$post_count_file")"
+for wait_kind in timer provider expired-timer; do
+  timer=0
+  started=null
+  expected_reason=approved-provider
+  if [[ "$wait_kind" = timer ]]; then
+    timer=30
+    started="$wait_started_json"
+    expected_reason=approved-timer
+  elif [[ "$wait_kind" = expired-timer ]]; then
+    timer=1
+    started='"2000-01-01T00:00:00Z"'
+  fi
+  wait_status=0
+  STUB_ENV_ID=901 STUB_JOB_ID=2 STUB_CAN_APPROVE=false \
+    STUB_WAIT_TIMER="$timer" STUB_WAIT_STARTED_JSON="$started" \
+    COPILOT_CLI_AUTO_APPROVE=true \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file" ||
+    wait_status=$?
+  [[ "$wait_status" = 3 ]]
+  grep -qF "status=WAIT classification=provider-bound reason=$expected_reason" "$output_file"
+  grep -qF "recheck_after_seconds=60 next_action=observe-exact-run" "$output_file"
+  ! grep -Eq 'status=(ELIGIBLE|APPROVED)' "$output_file"
+  [[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+  [[ "$(cat "$authority_dir/$STUB_RUN_ID.json")" = "$receipt_before" ]]
+done
+
+for invalid_timer in -1 0.5 true '"30"' 43201 null; do
+  if STUB_ENV_ID=901 STUB_JOB_ID=2 STUB_CAN_APPROVE=false \
+    STUB_WAIT_TIMER="$invalid_timer" STUB_WAIT_STARTED_JSON="$wait_started_json" \
+    COPILOT_CLI_AUTO_APPROVE=true \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "invalid wait timer unexpectedly passed: $invalid_timer" >&2
+    exit 1
+  fi
+  grep -qF "status=BLOCK classification=technical reason=pending-gate" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+for invalid_start in null '"2026-01-01T00:00:00"' '"2026-13-01T00:00:00Z"' \
+  '"2999-01-01T00:00:00Z"' '"2026-01-01T00:00:00-00:00"' \
+  '"2000-01-01T00:00:00+00:99"' true; do
+  if STUB_ENV_ID=901 STUB_JOB_ID=2 STUB_CAN_APPROVE=false \
+    STUB_WAIT_TIMER=30 STUB_WAIT_STARTED_JSON="$invalid_start" \
+    COPILOT_CLI_AUTO_APPROVE=true \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "invalid wait timestamp unexpectedly passed: $invalid_start" >&2
+    exit 1
+  fi
+  grep -qF "status=BLOCK classification=technical reason=pending-gate" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+for invalid_jobs in \
+  '{"total_count":true,"jobs":[{"id":2,"status":"waiting"}]}' \
+  '{"total_count":2,"jobs":[{"id":2,"status":"waiting"}]}' \
+  '{"total_count":2,"jobs":[{"id":2,"status":"waiting"},{"id":2,"status":"waiting"}]}' \
+  '{"total_count":1,"jobs":[{"id":2,"run_id":999,"status":"waiting"}]}' \
+  '{"total_count":1,"jobs":[{"id":true,"status":"waiting"}]}' \
+  '{'; do
+  if STUB_ENV_ID=901 STUB_CAN_APPROVE=false STUB_JOBS_JSON="$invalid_jobs" \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "incomplete or mismatched waiting-job proof unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "status=BLOCK classification=technical reason=pending-gate" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+for missing_timer_field in wait_timer wait_timer_started_at; do
+  incomplete_pending="$(jq -cn --arg field "$missing_timer_field" '[
+    {environment:{id:901,name:"oci-production"}, current_user_can_approve:false,
+     wait_timer:0, wait_timer_started_at:null} | del(.[$field])
+  ]')"
+  if STUB_JOB_ID=2 STUB_PENDING_JSON="$incomplete_pending" \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "missing wait timer field unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "status=BLOCK classification=technical reason=pending-gate" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+if STUB_PENDING_FAIL=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "failed pending-deployment transport unexpectedly passed" >&2
+  exit 1
+fi
+grep -qF "reason=pending-gate unable to read pending deployments" "$error_file"
+! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+for invalid_capability in null '"false"' 0; do
+  if STUB_ENV_ID=901 STUB_JOB_ID=2 STUB_CAN_APPROVE="$invalid_capability" \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "unknown approval capability unexpectedly passed" >&2
+    exit 1
+  fi
+  grep -qF "approval capability is unknown" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+for different_gate in job environment; do
+  job_id=2
+  env_id=901
+  [[ "$different_gate" != job ]] || job_id=3
+  [[ "$different_gate" != environment ]] || env_id=902
+  if STUB_ENV_ID="$env_id" STUB_JOB_ID="$job_id" STUB_CAN_APPROVE=false \
+    run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+    echo "a different waiting gate reused an approval receipt" >&2
+    exit 1
+  fi
+  grep -qF "reason=unproven-approved-wait" "$error_file"
+  ! grep -Eq 'status=(WAIT|ELIGIBLE|APPROVED)' "$output_file"
+done
+[[ "$(cat "$post_count_file")" = "$post_count_before" ]]
+[[ "$(cat "$authority_dir/$STUB_RUN_ID.json")" = "$receipt_before" ]]
+echo "copilot_cli_approved_wait_tests=PASS"
+
 load_record_stub production-rollback
 if STUB_ENV_ID=903 STUB_POST_FAIL=true COPILOT_CLI_AUTO_APPROVE=true \
   run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
@@ -1079,6 +1461,13 @@ if STUB_ENV_ID=903 STUB_POST_FAIL=true COPILOT_CLI_AUTO_APPROVE=true \
   exit 1
 fi
 grep -qF "authority remains inflight" "$error_file"
+jq -e '.state == "inflight"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+if STUB_ENV_ID=903 STUB_CAN_APPROVE=false COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --reconcile >"$output_file" 2>"$error_file"; then
+  echo "unproven non-approvable inflight gate unexpectedly reconciled" >&2
+  exit 1
+fi
+grep -qF "approval history has not advanced; authority stays inflight" "$error_file"
 jq -e '.state == "inflight"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
 if run_approver "$STUB_RUN_ID" >"$output_file" 2>"$error_file"; then
   echo "inflight authority unexpectedly replayed" >&2
@@ -1182,6 +1571,25 @@ ln "$authority_dir/$STUB_RUN_ID.json" "$interrupted_record_link"
 run_approver "$STUB_RUN_ID" >"$output_file"
 grep -qF "status=ELIGIBLE" "$output_file"
 [[ ! -e "$interrupted_record_link" ]]
+
+# An accepted but ambiguous POST stays inflight until the existing exact
+# canonical review-history proof advances, even when a timer makes the same
+# still-materialized gate non-approvable. Reconciliation never repeats POST.
+post_count_before="$(cat "$post_count_file")"
+if STUB_ENV_ID=904 STUB_POST_FAIL=true STUB_POST_ACCEPTED_AMBIGUOUS=true \
+  COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "ambiguous timer-bound approval unexpectedly passed" >&2
+  exit 1
+fi
+jq -e '.state == "inflight"' "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+STUB_ENV_ID=904 STUB_CAN_APPROVE=false STUB_WAIT_TIMER=30 \
+  STUB_WAIT_STARTED_JSON="$wait_started_json" COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --reconcile >"$output_file"
+grep -qF "status=RECONCILED_CONSUMED" "$output_file"
+jq -e '.state == "consumed" and (.approvals | length) == 1 and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+[[ "$(cat "$post_count_file")" = "$((post_count_before + 1))" ]]
 
 load_record_stub oci-live-betting-activate
 python3 - "$authority_dir/$STUB_RUN_ID.json" <<'PY'
