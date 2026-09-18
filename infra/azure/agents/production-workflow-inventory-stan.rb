@@ -53,8 +53,8 @@ ROLLBACK_ACTION_PINS = {
   "production-rollback" => {
     "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
     "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
-    "azure/login" => "a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
-    "azure/aks-set-context" => "c7eb093e5a5d47caa333f64974d5fd1cd4bf069d"
+    "azure/login" => "a641126d1b8aa4d1fa005f4f92df94a3a4c4c906",
+    "azure/aks-set-context" => "60623acbdcbbdcf799ad50a1adf8703874339f8b"
   },
   "oci-production-rollback" => {
     "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",

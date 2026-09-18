@@ -2901,15 +2901,15 @@ require "yaml"
 
 workflow_file = ARGV.fetch(0)
 workflow_text = File.read(workflow_file)
-expected_checkout = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+expected_checkout = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
 approved_action_refs = {
-  "actions/checkout" => "11bd71901bbe5b1630ceea73d27597364c9af683",
-  "actions/setup-node" => "49933ea5288caeca8642d1e84afbd3f7d6820020",
-  "actions/cache" => "0400d5f644dc74513175e3cd8d07132dd4860809",
-  "docker/setup-buildx-action" => "e468171a9de216ec08956ac3ada2f0791b6bd435",
-  "docker/login-action" => "184bdaa0721073962dff0199f1fb9940f07167d1",
-  "docker/build-push-action" => "ca052bb54ab0790a636c9b5f226502c73d547a25",
-  "actions/upload-artifact" => "ea165f8d65b6e75b540449e92b4886f43607fa02",
+  "actions/checkout" => "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+  "actions/setup-node" => "a0853c24544627f65ddf259abe73b1d18a591444",
+  "actions/cache" => "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "docker/setup-buildx-action" => "37fe631027851001ddb9b187196cc803df7f5f0e",
+  "docker/login-action" => "dbcb813823bdd20940b903addbd779551569679f",
+  "docker/build-push-action" => "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+  "actions/upload-artifact" => "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }.freeze
 expected_syntax_targets = [
   "infra/azure/agents/deploy-validation-loop-stan.sh",
@@ -3180,6 +3180,14 @@ def validate_workflow(
   unless build_job["if"].to_s.include?("needs.deployment-safety-contracts.result == 'success'")
     errors << "build no longer blocks on deployment-safety failure"
   end
+  build_step = Array(build_job["steps"]).find { |step| step["id"] == "build" } || {}
+  expected_build_env = {
+    "DOCKER_BUILD_SUMMARY" => "false",
+    "DOCKER_BUILD_RECORD_UPLOAD" => "false",
+  }
+  unless build_step["env"] == expected_build_env
+    errors << "image build must disable new summary and build-record publishing at step scope"
+  end
 
   errors
 end
@@ -3228,40 +3236,40 @@ negative_cases = {
   "floating-major-tag" => [
     mutate_once(
       workflow_text,
-      "actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809",
-      "actions/cache@v4"
+      "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+      "actions/cache@v6"
     ),
     "is not pinned to a full 40-character lowercase hex commit SHA",
   ],
   "short-sha" => [
     mutate_once(
       workflow_text,
-      "docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1",
-      "docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d"
+      "docker/login-action@dbcb813823bdd20940b903addbd779551569679f",
+      "docker/login-action@dbcb813823bdd20940b903addbd779551569679"
     ),
     "is not pinned to a full 40-character lowercase hex commit SHA",
   ],
   "uppercase-nonhex" => [
     mutate_once(
       workflow_text,
-      "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-      "actions/setup-node@49933EA5288CAECA8642D1E84AFBD3F7D6820020"
+      "actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444",
+      "actions/setup-node@A0853C24544627F65DDF259ABE73B1D18A591444"
     ),
     "is not pinned to a full 40-character lowercase hex commit SHA",
   ],
   "wrong-full-sha" => [
     mutate_once(
       workflow_text,
-      "docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25",
+      "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
       "docker/build-push-action@0000000000000000000000000000000000000000"
     ),
-    "expected docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25",
+    "expected docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
   ],
   "unknown-action" => [
     mutate_once(
       workflow_text,
-      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-      "acme/unknown-action@ea165f8d65b6e75b540449e92b4886f43607fa02"
+      "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+      "acme/unknown-action@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
     ),
     "references an unreviewed third-party action",
   ],
@@ -3272,6 +3280,18 @@ negative_cases = {
       ""
     ),
     "build no longer blocks on deployment-safety failure",
+  ],
+  "missing-build-summary-setting" => [
+    mutate_once(workflow_text, "          DOCKER_BUILD_SUMMARY: \"false\"\n", ""),
+    "image build must disable new summary and build-record publishing at step scope",
+  ],
+  "missing-build-record-setting" => [
+    mutate_once(workflow_text, "          DOCKER_BUILD_RECORD_UPLOAD: \"false\"\n", ""),
+    "image build must disable new summary and build-record publishing at step scope",
+  ],
+  "enabled-build-record-publishing" => [
+    mutate_once(workflow_text, "DOCKER_BUILD_RECORD_UPLOAD: \"false\"", "DOCKER_BUILD_RECORD_UPLOAD: \"true\""),
+    "image build must disable new summary and build-record publishing at step scope",
   ],
 }
 

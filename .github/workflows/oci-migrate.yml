@@ -321,7 +321,7 @@ jobs:
 
       - name: Login to Azure migration source
         id: azure_login
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         env:
           HOME: ${{ runner.temp }}/azure-home
         with:
@@ -391,7 +391,7 @@ jobs:
             > artifacts/oci-migration/azure-start.env
 
       - name: Configure isolated Azure kubeconfig
-        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        uses: azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b # v5.0.0
         env:
           HOME: ${{ runner.temp }}/azure-home
           KUBECONFIG: ${{ env.AZURE_KUBECONFIG }}
@@ -1040,7 +1040,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Login to Azure source for mirrored final state
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         env:
           HOME: ${{ runner.temp }}/azure-finalize
         with:
@@ -1069,7 +1069,7 @@ jobs:
           printf 'resource_id_hash=%s\n' "$actual_hash" >> "$GITHUB_OUTPUT"
 
       - name: Configure finalization Azure kubeconfig
-        uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3
+        uses: azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b # v5.0.0
         env:
           HOME: ${{ runner.temp }}/azure-finalize
           KUBECONFIG: ${{ env.AZURE_KUBECONFIG }}
