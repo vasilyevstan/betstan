@@ -5083,30 +5083,121 @@ async function main() {
     expiresAt: "2026-09-18T01:04:52.000Z",
     receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
   };
+  const expectedFreshWorkflowAuthorizations = [
+    {
+      id: "node24-production-build-pr-637-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+      authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      pullNumber: 637,
+      headRef: "fix/actions-node24",
+      baseRef: "dev",
+      issuedAt: "2026-09-18T03:28:46.000Z",
+      expiresAt: "2026-09-19T03:28:46.000Z",
+      receiptSha: "3252064e9566dcb19cd8b9724064b8bc2ee6e1a0",
+    },
+    {
+      id: "node24-production-build-promotion-636-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+      authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      pullNumber: 636,
+      headRef: "dev",
+      baseRef: "master",
+      issuedAt: "2026-09-18T03:28:46.000Z",
+      expiresAt: "2026-09-19T03:28:46.000Z",
+      receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
+    },
+  ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [],
+    expectedFreshWorkflowAuthorizations,
   );
+  for (const authorization of expectedFreshWorkflowAuthorizations) {
+    const lookup = {
+      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      repository: authorization.repository,
+      workflowPath: authorization.workflowPath,
+      trustedBlob: authorization.trustedBlob,
+      authorizedBlob: authorization.authorizedBlob,
+      pull: {
+        number: authorization.pullNumber,
+        headRepository: authorization.headRepository,
+        headRef: authorization.headRef,
+        baseRef: authorization.baseRef,
+      },
+      now: "2026-09-18T04:28:46.000Z",
+    };
+    assert.deepEqual(
+      publishPrPolicy.findWorkflowAuthorization(lookup),
+      authorization,
+    );
+    for (const mismatch of [
+      { repository: "another/repository" },
+      { workflowPath: ".github/workflows/production-deploy.yml" },
+      { trustedBlob: "0".repeat(40) },
+      { authorizedBlob: "0".repeat(40) },
+      { pull: { ...lookup.pull, number: 638 } },
+      { pull: { ...lookup.pull, headRepository: "another/repository" } },
+      {
+        pull: {
+          ...lookup.pull,
+          headRef: `${authorization.headRef}-unapproved`,
+        },
+      },
+      {
+        pull: {
+          ...lookup.pull,
+          baseRef: authorization.baseRef === "dev" ? "master" : "dev",
+        },
+      },
+    ]) {
+      assert.equal(
+        publishPrPolicy.findWorkflowAuthorization({ ...lookup, ...mismatch }),
+        null,
+      );
+    }
+    for (const now of [
+      "2026-09-18T03:28:45.999Z",
+      "2026-09-19T03:28:46.000Z",
+    ]) {
+      assert.throws(
+        () => publishPrPolicy.findWorkflowAuthorization({ ...lookup, now }),
+        /workflow authorization is stale or expired/,
+      );
+    }
+  }
   for (const retired of [
     expectedWorkflowAuthorization,
     expectedPromotionWorkflowAuthorization,
   ]) {
     assert.equal(
-      publishPrPolicy.findWorkflowAuthorization({
-        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-        repository: retired.repository,
-        workflowPath: retired.workflowPath,
-        trustedBlob: retired.trustedBlob,
-        authorizedBlob: retired.authorizedBlob,
-        pull: {
-          number: retired.pullNumber,
-          headRepository: retired.headRepository,
-          headRef: retired.headRef,
-          baseRef: retired.baseRef,
-        },
-        now: "2026-09-17T20:00:00.000Z",
-      }),
-      null,
+      publishPrPolicy.trustedWorkflowBlobAuthorizations.some(
+        ({ id }) => id === retired.id,
+      ),
+      false,
+    );
+    assert.throws(
+      () =>
+        publishPrPolicy.findWorkflowAuthorization({
+          authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+          repository: retired.repository,
+          workflowPath: retired.workflowPath,
+          trustedBlob: retired.trustedBlob,
+          authorizedBlob: retired.authorizedBlob,
+          pull: {
+            number: retired.pullNumber,
+            headRepository: retired.headRepository,
+            headRef: retired.headRef,
+            baseRef: retired.baseRef,
+          },
+          now: "2026-09-17T20:00:00.000Z",
+        }),
+      /workflow authorization is stale or expired/,
     );
   }
   assert.equal(
@@ -5152,7 +5243,9 @@ async function main() {
   );
   assert(
     publisherSource.includes(
-      "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
+      `const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "node24-production-build-pr-637-v2",`,
     ),
   );
   assert.deepEqual(
