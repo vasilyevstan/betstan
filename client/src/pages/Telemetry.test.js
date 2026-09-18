@@ -195,7 +195,7 @@ describe('Telemetry', () => {
     const cards = document.querySelectorAll('.telemetry-metric');
     expect(cards).toHaveLength(8);
     cards.forEach((card, metricIndex) => {
-      const pairs = card.querySelectorAll('.telemetry-metric__pair');
+      const pairs = card.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair');
       expect(pairs).toHaveLength(14);
       pairs.forEach((pair, valueIndex) => {
         const values = within(pair);
@@ -203,7 +203,7 @@ describe('Telemetry', () => {
         expect(values.getByText(String((metricIndex * 100) + valueIndex))).toBeInTheDocument();
       });
     });
-    expect(document.querySelectorAll('.telemetry-metric__pair')).toHaveLength(112);
+    expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(112);
 
     METRIC_NAMES.forEach((metric) => {
       expect(screen.queryByText(metric, { exact: true })).not.toBeInTheDocument();
@@ -233,7 +233,7 @@ describe('Telemetry', () => {
     renderTelemetry();
     await screen.findByRole('heading', { name: 'Service health' });
 
-    const values = document.querySelectorAll('.telemetry-metric__value');
+    const values = document.querySelectorAll('.telemetry-metric__values .telemetry-metric__value');
     expect(values).toHaveLength(112);
     values.forEach((value) => expect(value).toHaveTextContent('0'));
     document.querySelectorAll('.telemetry-metric__bar').forEach((bar) => {
@@ -286,6 +286,184 @@ describe('Telemetry', () => {
   };
   const settle = async (request, data) => act(async () => request.resolve({ data }));
 
+  describe('tooltip bucket identity', () => {
+    beforeEach(() => {
+      // JSDOM has no layout; browser coverage independently measures actual bounds.
+      jest.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        const [left, top, width, height] = this.classList.contains('telemetry-metric__tooltip')
+          ? [0, 0, 200, 60]
+          : this.tagName.toLowerCase() === 'rect'
+            ? [120, 200, 14, 40]
+            : this.tagName.toLowerCase() === 'button'
+              ? [100, 350, 120, 44]
+              : [20, 40, 400, 650];
+        return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+      });
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    const expectTooltip = (card, bucket, label, count) => {
+      const tooltip = within(card).getByRole('tooltip');
+      const time = tooltip.querySelector('time');
+      const value = tooltip.querySelector('data');
+      expect(time.textContent).toBe(label);
+      expect(time).toHaveAttribute('datetime', bucket);
+      expect(value.textContent).toBe(String(count));
+      expect(value).toHaveAttribute('value', String(count));
+    };
+
+    it.each(['2026-09-10', '2027-01-10'])(
+      'pairs every daily and hourly bucket across the month/year boundary ending %s',
+      async (lastDay) => {
+        const summary = createSummary({
+          generatedAt: `${lastDay}T04:30:00.000Z`,
+          valueFor: (metricIndex, index) => index === 13 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + index,
+        });
+        summary.dates = Array.from({ length: 14 }, (_, index) => (
+          new Date(Date.parse(`${lastDay}T00:00:00.000Z`) - (13 - index) * 86400000).toISOString().slice(0, 10)
+        ));
+        axios.get.mockResolvedValueOnce({ data: summary });
+        renderTelemetry();
+        await screen.findByRole('heading', { name: 'Service health' });
+
+        for (const metricIndex of [0, 1]) {
+          const card = cardAt(metricIndex);
+          const bars = card.querySelectorAll('rect');
+          const buttons = card.querySelectorAll('.telemetry-metric__values button');
+          for (let index = 0; index < 14; index += 1) {
+            fireEvent.mouseEnter(bars[index]);
+            expectTooltip(card, summary.dates[index], `${summary.dates[index]} UTC`, summary.metrics[metricIndex].values[index]);
+            if (metricIndex === 1) {
+              expectTooltip(cardAt(0), summary.dates[13], `${summary.dates[13]} UTC`, Number.MAX_SAFE_INTEGER);
+            }
+            fireEvent.mouseLeave(bars[index], { clientX: 0, clientY: 0 });
+          }
+          for (let index = 0; index < 14; index += 1) {
+            act(() => buttons[index].focus());
+            expect(buttons[index]).toHaveFocus();
+            expectTooltip(card, summary.dates[index], `${summary.dates[index]} UTC`, summary.metrics[metricIndex].values[index]);
+          }
+          const listValues = card.querySelectorAll('.telemetry-metric__values data');
+          expect(listValues).toHaveLength(14);
+          expect([...listValues].map((value) => value.textContent)).toEqual(summary.metrics[metricIndex].values.map(String));
+        }
+
+        // Adjacent Aug 31/Sep 1 or Dec 31/Jan 1 selections stay card-local.
+        for (const metricIndex of [0, 1]) {
+          const day = summary.dates[3 + metricIndex];
+          const values = Array.from({ length: 24 }, (_, hour) => hour === 23 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + hour);
+          const detail = {
+            ...createHourly(METRIC_NAMES[metricIndex], day, values),
+            generatedAt: `${lastDay}T05:45:00.000Z`,
+          };
+          axios.get.mockResolvedValueOnce({ data: detail });
+          userEvent.click(cardAt(metricIndex).querySelectorAll('.telemetry-metric__values button')[3 + metricIndex]);
+          await within(cardAt(metricIndex)).findByRole('list', { name: /hourly UTC/ });
+          if (metricIndex === 1) {
+            fireEvent.mouseEnter(cardAt(0).querySelectorAll('rect')[23]);
+            expectTooltip(cardAt(0), `${summary.dates[3]}T23:00:00.000Z`, `${summary.dates[3]} 23:00 UTC`, Number.MAX_SAFE_INTEGER);
+          }
+          const bars = cardAt(metricIndex).querySelectorAll('rect');
+          for (let hour = 0; hour < 24; hour += 1) {
+            fireEvent.mouseEnter(bars[hour]);
+            expectTooltip(cardAt(metricIndex), detail.hours[hour], `${day} ${String(hour).padStart(2, '0')}:00 UTC`, values[hour]);
+            expect(within(cardAt(metricIndex)).getByRole('tooltip')).not.toHaveTextContent(lastDay);
+          }
+          const listValues = cardAt(metricIndex).querySelectorAll('.telemetry-metric__values data');
+          expect(listValues).toHaveLength(24);
+          expect([...listValues].map((value) => value.textContent)).toEqual(values.map(String));
+          expect(axios.get).toHaveBeenLastCalledWith(
+            `/api/telemetry/metrics/${METRIC_NAMES[metricIndex]}/days/${day}`,
+            { timeout: 10000, signal: expect.any(AbortSignal) },
+          );
+        }
+        expect(axios.get).toHaveBeenCalledTimes(3);
+      },
+    );
+  });
+
+  describe('tooltip placement', () => {
+    const viewportHeight = window.innerHeight;
+    afterEach(() => {
+      window.innerHeight = viewportHeight;
+      jest.restoreAllMocks();
+    });
+
+    it.each([
+      {
+        name: 'clamps the measured 768px Back-to-tallest-bar regression',
+        card: [12, 822.96875, 744, 398.09375],
+        bar: [695.8928833007812, 883.5887451171875, 35.5, 116.84002685546875],
+        control: [148.390625, 1145.625, 113.015625, 58.4375],
+        headerHeight: 284.5625,
+        expectedTop: 830.96875,
+      },
+      {
+        name: 'keeps natural above ahead of natural below and clamps',
+        card: [12, 100, 744, 700], bar: [695, 300, 35.5, 100],
+        expectedTop: 237.15625,
+      },
+      {
+        name: 'keeps natural below ahead of a valid clamped above',
+        card: [12, 100, 744, 700], bar: [695, 150, 35.5, 50],
+        expectedTop: 206,
+      },
+      {
+        name: 'rejects a protected-control collision at natural above',
+        card: [12, 100, 744, 700], bar: [695, 300, 35.5, 100],
+        control: [690, 240, 44, 44],
+        expectedTop: 406,
+      },
+      {
+        name: 'uses clamped below when clamped above is control-blocked',
+        card: [12, 300, 744, 300], bar: [695, 330, 35.5, 250],
+        control: [690, 310, 44, 44],
+        expectedTop: 535.15625,
+      },
+      {
+        name: 'stays hidden when the available interval is too short',
+        card: [12, 300, 744, 70], bar: [695, 325, 35.5, 25],
+        expectedTop: null,
+      },
+      {
+        name: 'stays hidden when every candidate is control-blocked',
+        card: [12, 300, 744, 300], bar: [695, 330, 35.5, 250],
+        control: [620, 300, 132, 300],
+        expectedTop: null,
+      },
+    ])('$name', async ({ card, bar, control = [148, 1145, 113, 58], headerHeight = 64.59, expectedTop }) => {
+      window.innerHeight = 1000;
+      jest.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        const [left, top, width, height] = this.classList.contains('telemetry-metric__tooltip')
+          ? [0, 0, 123.0625, 56.84375]
+          : this.classList.contains('telemetry-metric') ? card
+            : this.classList.contains('app-navbar') ? [0, 0, 768, headerHeight]
+              : this.tagName.toLowerCase() === 'rect' ? bar
+                : this.tagName.toLowerCase() === 'button' ? control
+                  : [0, 0, 768, 1000];
+        return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+      });
+      render(<header className="app-navbar" />);
+      axios.get.mockResolvedValueOnce({ data: createSummary({ valueFor: (_, index) => index + 1 }) });
+      renderTelemetry();
+      await screen.findByRole('heading', { name: 'Service health' });
+      act(() => dateButton(0, 13).focus());
+      fireEvent.mouseEnter(cardAt().querySelectorAll('rect')[13]);
+
+      const tooltip = within(cardAt()).getByRole('tooltip', { hidden: true });
+      expect(dateButton(0, 13)).toHaveFocus();
+      expect(tooltip.querySelector('time')).toHaveAttribute('datetime', DATES[13]);
+      expect(tooltip.querySelector('data')).toHaveAttribute('value', '14');
+      if (expectedTop === null) {
+        expect(tooltip).not.toBeVisible();
+        expect(tooltip).toHaveStyle({ visibility: 'hidden', left: '0px', top: '0px' });
+      } else {
+        expect(tooltip).toBeVisible();
+        expect(Number.parseFloat(tooltip.style.top)).toBeCloseTo(expectedTop - card[1], 6);
+      }
+    });
+  });
+
   describe('Telemetry hourly cards', () => {
     beforeEach(() => axios.get.mockReset());
 
@@ -304,7 +482,7 @@ describe('Telemetry', () => {
         expect(axios.get).toHaveBeenLastCalledWith(hourlyPath(index, index), {
           timeout: 10000, signal: expect.any(AbortSignal),
         });
-        const pairs = cardAt(index).querySelectorAll('.telemetry-metric__pair');
+        const pairs = cardAt(index).querySelectorAll('.telemetry-metric__values .telemetry-metric__pair');
         expect(pairs).toHaveLength(24);
         pairs.forEach((pair, hour) => {
           expect(pair.querySelector('time')).toHaveAttribute('datetime', createHourly(METRIC_NAMES[index], DATES[index]).hours[hour]);
@@ -435,7 +613,7 @@ describe('Telemetry', () => {
       expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
       await settle(current, createHourly(METRIC_NAMES[0], DATES[0], Array(24).fill(7)));
       expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
-      expect(cardAt().querySelector('data')).toHaveTextContent('7');
+      expect(cardAt().querySelector('.telemetry-metric__values data')).toHaveTextContent('7');
     });
 
     it('Refresh fixes batch membership, includes initial loads, retains independent last-good data and reports partial failure', async () => {
@@ -473,7 +651,7 @@ describe('Telemetry', () => {
       expect(cardAt(1).querySelectorAll('rect')).toHaveLength(24);
       expect(within(cardAt(2)).getByRole('status')).toHaveTextContent('Loading hourly data');
       expect(laterBack).toHaveFocus();
-      expect(cardAt(3).querySelector('data')).toHaveTextContent('9');
+      expect(cardAt(3).querySelector('.telemetry-metric__values data')).toHaveTextContent('9');
       await act(async () => initialOther.reject(new Error('old')));
       await settle(later, createHourly(METRIC_NAMES[2], DATES[2]));
       expect(laterBack).toHaveFocus();
@@ -551,7 +729,7 @@ describe('Telemetry', () => {
         expect(within(cardAt()).getByRole('button', { name: 'Back to 14 days' })).toBeInTheDocument();
         expect(within(cardAt()).queryByRole('alert')).not.toBeInTheDocument();
         expect(cardAt().querySelectorAll('rect')).toHaveLength(24);
-        cardAt().querySelectorAll('data').forEach((value) => expect(value).toHaveTextContent('7'));
+        cardAt().querySelectorAll('.telemetry-metric__values data').forEach((value) => expect(value).toHaveTextContent('7'));
         expect(cardAt(1).querySelectorAll('rect')).toHaveLength(14);
         expect(axios.get).toHaveBeenCalledTimes(4);
       },
@@ -604,7 +782,7 @@ describe('Telemetry', () => {
       expect(await within(cardAt()).findByText(/In progress/)).toHaveTextContent('2026-09-10 · UTC · In progress');
       await within(cardAt()).findByRole('list', { name: /hourly UTC/ });
       expect(axios.get).toHaveBeenCalledTimes(2);
-      expect(cardAt().querySelectorAll('data')).toHaveLength(24);
+      expect(cardAt().querySelectorAll('.telemetry-metric__values data')).toHaveLength(24);
     });
 
     it('does not call an old overview day in progress after the hourly server snapshot crosses midnight', async () => {
@@ -673,7 +851,7 @@ describe('Telemetry', () => {
     expect(screen.queryByText(initial.generatedAt)).not.toBeInTheDocument();
     expect(screen.getByText(refreshed.generatedAt)).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('Telemetry refreshed.');
-    document.querySelectorAll('.telemetry-metric__value')
+    document.querySelectorAll('.telemetry-metric__values .telemetry-metric__value')
       .forEach((value) => expect(value).toHaveTextContent('9'));
   });
 
@@ -749,7 +927,7 @@ describe('Telemetry', () => {
       );
       expect(screen.getByText(initial.generatedAt)).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: 'Service health' })).toBeInTheDocument();
-      expect(document.querySelectorAll('.telemetry-metric__pair')).toHaveLength(112);
+      expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(112);
     },
   );
 });
