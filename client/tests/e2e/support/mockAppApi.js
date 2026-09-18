@@ -70,6 +70,24 @@ const createTelemetrySummary = () => {
   };
 };
 
+// Exact additive hourly DTO: the same metric/day identity and 24 UTC hour starts.
+// A static fixture partitions its daily count; live independent reads need not sum equally.
+const createTelemetryHourly = (metric, date, summary = createTelemetrySummary()) => {
+  const total = summary.metrics.find((entry) => entry.metric === metric)
+    ?.values[summary.dates.indexOf(date)] ?? 0;
+  return {
+    generatedAt: summary.generatedAt,
+    metric,
+    date,
+    hours: Array.from({ length: 24 }, (_, hour) => (
+      `${date}T${String(hour).padStart(2, '0')}:00:00.000Z`
+    )),
+    values: Array.from({ length: 24 }, (_, hour) => (
+      Math.floor(total / 24) + (hour < total % 24 ? 1 : 0)
+    )),
+  };
+};
+
 const getSelectionName = (side, event) => {
   if (side === 'HOME') {
     return event.home;
@@ -327,6 +345,7 @@ const createShellMockState = ({ loginError = null, signupError = null } = {}) =>
     bets: [],
     stats: [],
     telemetrySummary: createTelemetrySummary(),
+    telemetryHourlyResponses: {},
     auth: {
       loginError,
       signupError,
@@ -747,7 +766,25 @@ const installAppApiMocks = async (page, state) => {
     }
 
     if (key === 'GET /api/telemetry/summary') {
-      await fulfillJson(route, deepClone(state.telemetrySummary));
+      const response = state.telemetrySummaryResponse;
+      const snapshot = deepClone(response?.body ?? state.telemetrySummary);
+      if (response?.wait) await response.wait;
+      await fulfillJson(route, snapshot, response?.status || 200);
+      return;
+    }
+
+    const hourlyMatch = pathname.match(/^\/api\/telemetry\/metrics\/([^/]+)\/days\/([^/]+)$/);
+    if (method === 'GET' && hourlyMatch) {
+      const [, metric, date] = hourlyMatch;
+      const response = state.telemetryHourlyResponses?.[`${metric}/${date}`];
+      const valid = state.telemetrySummary.metrics?.some((entry) => entry.metric === metric)
+        && state.telemetrySummary.dates?.includes(date)
+        && !new URL(route.request().url()).search;
+      const snapshot = deepClone(response?.body ?? (valid
+        ? createTelemetryHourly(metric, date, state.telemetrySummary)
+        : { error: 'Invalid request' }));
+      if (response?.wait) await response.wait;
+      await fulfillJson(route, snapshot, response?.status || (valid ? 200 : 400));
       return;
     }
 
@@ -826,5 +863,6 @@ module.exports = {
   createLiveBettingMockState,
   createShellMockState,
   createTelemetrySummary,
+  createTelemetryHourly,
   installAppApiMocks,
 };

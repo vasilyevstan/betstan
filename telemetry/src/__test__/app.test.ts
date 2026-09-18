@@ -9,6 +9,7 @@ const health = SERVICES.map((service) => ({ service, status: "green" as const })
 const dependencies = () => ({
   clock: { now: jest.fn(() => now) },
   health: { check: jest.fn().mockResolvedValue(health) } as any,
+  hourlyStore: { aggregateHourly: jest.fn().mockResolvedValue([]) },
   processClock: { nowMs: jest.fn(() => 0) },
   recorder: { record: jest.fn().mockResolvedValue(undefined) },
   summaryStore: { aggregate: jest.fn().mockResolvedValue([]) },
@@ -400,4 +401,383 @@ describe("GET /api/telemetry/summary", () => {
       expect(deps.health.check).toHaveBeenCalledTimes(2);
     }
   );
+});
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+};
+
+const waitForCalls = async (mock: jest.Mock, count: number) => {
+  for (let attempt = 0; attempt < 100 && mock.mock.calls.length < count; attempt += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  expect(mock).toHaveBeenCalledTimes(count);
+};
+
+const hourlyUrl = (metric = "BET_PLACED", date = "2026-09-10") =>
+  `/api/telemetry/metrics/${metric}/days/${date}`;
+
+describe("unmatched telemetry requests", () => {
+  it.each([
+    "/api/telemetry",
+    "/api/telemetry/not-a-route",
+    "/api/telemetry/metrics",
+    "/api/telemetry/summary/extra",
+  ])("returns fixed JSON 404 repeatedly for %s and continues serving hourly data", async (url) => {
+    const deps = dependencies();
+    const app = createApp(deps);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await request(app)
+        .get(url)
+        .expect("Content-Type", /application\/json/)
+        .expect(404);
+      expect(response.body).toEqual({ error: "Not found" });
+    }
+    expect(deps.clock.now).not.toHaveBeenCalled();
+    expect(deps.hourlyStore.aggregateHourly).not.toHaveBeenCalled();
+    expect(deps.summaryStore.aggregate).not.toHaveBeenCalled();
+    expect(deps.health.check).not.toHaveBeenCalled();
+    expect(deps.recorder.record).not.toHaveBeenCalled();
+
+    const valid = await request(app).get(hourlyUrl()).expect(200);
+    expect(valid.body.metric).toBe("BET_PLACED");
+    expect(valid.body.date).toBe("2026-09-10");
+    expect(valid.body.hours).toHaveLength(24);
+    expect(valid.body.values).toEqual(Array(24).fill(0));
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["/", "/not-a-route", "/api/other", "/api/telemetry-other"])(
+    "preserves the existing non-telemetry HTML fallback for %s",
+    async (url) => {
+      await request(createApp(dependencies()))
+        .get(url)
+        .expect("Content-Type", /text\/html/)
+        .expect(404);
+    }
+  );
+});
+
+describe("GET /api/telemetry/metrics/:metric/days/:date", () => {
+  it.each(METRICS)("returns the exact hourly DTO for %s without health or daily reads", async (metric) => {
+    const deps = dependencies();
+    deps.hourlyStore.aggregateHourly.mockResolvedValue([
+      { _id: 23, count: Number.MAX_SAFE_INTEGER },
+      { _id: 0, count: 7 },
+    ]);
+    const response = await request(createApp(deps)).get(hourlyUrl(metric)).expect(200);
+    expect(Object.keys(response.body)).toEqual([
+      "generatedAt", "metric", "date", "hours", "values",
+    ]);
+    expect(response.body).toEqual({
+      generatedAt: now.toISOString(),
+      metric,
+      date: "2026-09-10",
+      hours: Array.from({ length: 24 }, (_, hour) =>
+        `2026-09-10T${String(hour).padStart(2, "0")}:00:00.000Z`
+      ),
+      values: [7, ...Array(22).fill(0), Number.MAX_SAFE_INTEGER],
+    });
+    expect(deps.clock.now).toHaveBeenCalledTimes(1);
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledWith(
+      metric, new Date("2026-09-10T00:00:00.000Z"),
+      new Date("2026-09-11T00:00:00.000Z")
+    );
+    expect(deps.health.check).not.toHaveBeenCalled();
+    expect(deps.summaryStore.aggregate).not.toHaveBeenCalled();
+    expect(deps.recorder.record).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    hourlyUrl("UNKNOWN"),
+    hourlyUrl("bet_placed"),
+    hourlyUrl("__proto__"),
+    hourlyUrl("BET_PLACED", "2026-08-27"),
+    hourlyUrl("BET_PLACED", "2026-09-11"),
+    hourlyUrl("BET_PLACED", "2026-09-31"),
+    hourlyUrl("BET_PLACED", "2026-02-29"),
+    hourlyUrl("BET_PLACED", "2026-00-10"),
+    hourlyUrl("BET_PLACED", "2026-9-10"),
+    hourlyUrl("BET_PLACED", "2026-09-10T00:00:00.000Z"),
+    hourlyUrl("BET_PLACED", "2026-09-10%0A"),
+    `${hourlyUrl()}?window=1`,
+    `${hourlyUrl()}?unused=`,
+    `${hourlyUrl()}?date=2026-09-10&date=2026-09-09`,
+    `${hourlyUrl()}?filter[metric]=BET_PLACED`,
+    `${hourlyUrl()}?__proto__[ignored]=1`,
+    hourlyUrl("%E0%A4%A"),
+    hourlyUrl("BET_PLACED", "%E0%A4%A"),
+  ])("rejects invalid path/query %s without computing", async (url) => {
+    const deps = dependencies();
+    const response = await request(createApp(deps)).get(url).expect(400);
+    expect(response.body).toEqual({ error: "Invalid request" });
+    expect(deps.hourlyStore.aggregateHourly).not.toHaveBeenCalled();
+    expect(deps.health.check).not.toHaveBeenCalled();
+    expect(deps.summaryStore.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("accepts the oldest day and today using domain clock, not elapsed-time clock", async () => {
+    const deps = dependencies();
+    deps.processClock.nowMs.mockReturnValue(Date.parse("2040-01-01T00:00:00Z"));
+    const app = createApp(deps);
+    for (const date of ["2026-08-28", "2026-09-10"]) {
+      const response = await request(app).get(hourlyUrl("BET_PLACED", date)).expect(200);
+      expect(response.body.date).toBe(date);
+      expect(response.body.values).toEqual(Array(24).fill(0));
+    }
+    expect(deps.clock.now).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates before joining at midnight and rejects unsupported queries even in flight", async () => {
+    const deps = dependencies();
+    const gate = deferred<never[]>();
+    deps.hourlyStore.aggregateHourly.mockReturnValue(gate.promise);
+    const app = createApp(deps);
+    const url = hourlyUrl("BET_PLACED", "2026-08-28");
+    const first = request(app).get(url).then((response) => response);
+    try {
+      await waitForCalls(deps.hourlyStore.aggregateHourly, 1);
+      await request(app).get(`${url}?unexpected=1`).expect(400);
+      deps.clock.now.mockReturnValue(new Date("2026-09-11T00:00:00.000Z"));
+      const expired = await request(app).get(url).expect(400);
+      expect(expired.body).toEqual({ error: "Invalid request" });
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(1);
+    } finally {
+      gate.resolve([]);
+      const original = await first;
+      expect(original.status).toBe(200);
+      expect(original.body.generatedAt).toBe(now.toISOString());
+    }
+  });
+
+  it("admits 16, refills at 2/second, caps refill, and does not cache completed results", async () => {
+    let elapsed = 0;
+    const deps = dependencies();
+    deps.processClock.nowMs.mockImplementation(() => elapsed);
+    const app = createApp(deps);
+    for (let index = 0; index < 16; index += 1) {
+      await request(app).get(hourlyUrl()).expect(200);
+    }
+    expectRateLimited(await request(app).get(hourlyUrl()));
+    elapsed = 499;
+    expectRateLimited(await request(app).get(hourlyUrl()));
+    elapsed = 500;
+    await request(app).get(hourlyUrl()).expect(200);
+    expectRateLimited(await request(app).get(hourlyUrl()));
+    elapsed = 100000;
+    for (let index = 0; index < 16; index += 1) {
+      await request(app).get(hourlyUrl()).expect(200);
+    }
+    expectRateLimited(await request(app).get(hourlyUrl()));
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(33);
+    expect(deps.clock.now).toHaveBeenCalledTimes(33);
+    // Daily retains its separate 10-token budget and complete five-second cache.
+    for (let index = 0; index < 10; index += 1) {
+      await request(app).get("/api/telemetry/summary").expect(200);
+    }
+    expectRateLimited(await request(app).get("/api/telemetry/summary"));
+    expect(deps.summaryStore.aggregate).toHaveBeenCalledTimes(1);
+    expect(deps.health.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes hourly tokens before application validation without spending daily tokens", async () => {
+    const deps = dependencies();
+    const app = createApp(deps);
+    for (let index = 0; index < 16; index += 1) {
+      await request(app).get(hourlyUrl("UNKNOWN")).expect(400);
+    }
+    expectRateLimited(await request(app).get(hourlyUrl("UNKNOWN")));
+    expectRateLimited(await request(app).get(hourlyUrl()));
+    expect(deps.clock.now).toHaveBeenCalledTimes(16);
+    expect(deps.hourlyStore.aggregateHourly).not.toHaveBeenCalled();
+    await request(app).get("/api/telemetry/summary").expect(200);
+  });
+
+  it("preserves daily refill at 2/second and keeps hourly admission independent", async () => {
+    const deps = dependencies();
+    const app = createApp(deps);
+    for (let index = 0; index < 10; index += 1) {
+      await request(app).get("/api/telemetry/summary").expect(200);
+    }
+    deps.processClock.nowMs.mockReturnValue(499);
+    expectRateLimited(await request(app).get("/api/telemetry/summary"));
+    await request(app).get(hourlyUrl()).expect(200);
+    deps.processClock.nowMs.mockReturnValue(500);
+    await request(app).get("/api/telemetry/summary").expect(200);
+    expectRateLimited(await request(app).get("/api/telemetry/summary"));
+    expect(deps.summaryStore.aggregate).toHaveBeenCalledTimes(1);
+    expect(deps.health.check).toHaveBeenCalledTimes(1);
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds eight distinct computations, joins before saturation, and frees settled keys without caching", async () => {
+    const deps = dependencies();
+    const gates = METRICS.map(() => deferred<never[]>());
+    deps.hourlyStore.aggregateHourly.mockImplementation(
+      (metric) => gates[METRICS.indexOf(metric)].promise
+    );
+    const app = createApp(deps);
+    const pending = METRICS.map((metric) =>
+      request(app).get(hourlyUrl(metric)).then((response) => response)
+    );
+    let joined: Promise<request.Response> | undefined;
+    try {
+      await waitForCalls(deps.hourlyStore.aggregateHourly, 8);
+      expectRateLimited(await request(app).get(hourlyUrl(METRICS[0], "2026-09-09")));
+      deps.clock.now.mockReturnValue(new Date("2026-09-10T12:35:00.000Z"));
+      joined = request(app).get(hourlyUrl(METRICS[0])).then((response) => response);
+      await waitForCalls(deps.clock.now, 10);
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(8);
+      gates[0].resolve([]);
+      const [original, duplicate] = await Promise.all([pending[0], joined]);
+      expect(original.status).toBe(200);
+      expect(duplicate.body).toEqual(original.body);
+      expect(duplicate.body.generatedAt).toBe(now.toISOString());
+      // Seven original keys remain active; a newly freed key starts real work.
+      await request(app).get(hourlyUrl(METRICS[0], "2026-09-09")).expect(200);
+      await request(app).get(hourlyUrl(METRICS[0])).expect(200);
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(10);
+      expect(deps.health.check).not.toHaveBeenCalled();
+    } finally {
+      gates.forEach((gate) => gate.resolve([]));
+      await Promise.all([...pending, ...(joined ? [joined] : [])]);
+    }
+  });
+
+  it.each(["synchronous throw", "rejection", "timeout", "invalid buckets"])(
+    "sanitizes %s and releases the actual settled promise for retry",
+    async (failure) => {
+      const deps = dependencies();
+      const aggregate = deps.hourlyStore.aggregateHourly;
+      if (failure === "synchronous throw") {
+        aggregate.mockImplementationOnce(() => { throw new Error("private sync"); });
+      } else if (failure === "invalid buckets") {
+        aggregate.mockResolvedValueOnce([{ _id: 0, count: Number.MAX_SAFE_INTEGER + 1 }]);
+      } else {
+        aggregate.mockRejectedValueOnce(Object.assign(new Error("private query"), {
+          name: failure === "timeout" ? "MongoOperationTimeoutError" : "Error",
+        }));
+      }
+      const app = createApp(deps);
+      const response = await request(app).get(hourlyUrl()).expect(503);
+      expect(response.body).toEqual({ error: "Telemetry temporarily unavailable" });
+      expect(response.headers["retry-after"]).toBeUndefined();
+      await request(app).get(hourlyUrl()).expect(200);
+      expect(aggregate).toHaveBeenCalledTimes(2);
+      expect(deps.health.check).not.toHaveBeenCalled();
+    }
+  );
+
+  it("shares failed in-flight work and frees a saturated slot only when rejection settles", async () => {
+    const deps = dependencies();
+    const gates = METRICS.map(() => deferred<never[]>());
+    deps.hourlyStore.aggregateHourly.mockImplementation(
+      (metric) => gates[METRICS.indexOf(metric)].promise
+    );
+    const app = createApp(deps);
+    const pending = METRICS.map((metric) =>
+      request(app).get(hourlyUrl(metric)).then((response) => response)
+    );
+    let joined: Promise<request.Response> | undefined;
+    try {
+      await waitForCalls(deps.hourlyStore.aggregateHourly, 8);
+      joined = request(app).get(hourlyUrl(METRICS[0])).then((response) => response);
+      await waitForCalls(deps.clock.now, 9);
+      expectRateLimited(await request(app).get(hourlyUrl(METRICS[0], "2026-09-09")));
+      gates[0].reject(Object.assign(new Error("private timeout"), {
+        name: "MongoOperationTimeoutError",
+      }));
+      const responses = await Promise.all([pending[0], joined]);
+      for (const response of responses) {
+        expect(response.status).toBe(503);
+        expect(response.body).toEqual({ error: "Telemetry temporarily unavailable" });
+      }
+      deps.hourlyStore.aggregateHourly.mockResolvedValueOnce([]);
+      await request(app).get(hourlyUrl(METRICS[0], "2026-09-09")).expect(200);
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(9);
+    } finally {
+      gates.forEach((gate) => gate.resolve([]));
+      await Promise.all([...pending, ...(joined ? [joined] : [])]);
+    }
+  });
+
+  it("retains abandoned client work beyond UI timeout until the database actually settles", async () => {
+    const deps = dependencies();
+    const gates = METRICS.map(() => deferred<never[]>());
+    deps.hourlyStore.aggregateHourly.mockImplementation(
+      (metric) => gates[METRICS.indexOf(metric)].promise
+    );
+    // Supertest's auto-created listener is not closed by superagent.abort().
+    // Own the listener explicitly so abort coverage also proves clean teardown.
+    const server = createApp(deps).listen(0);
+    const abandoned = request(server).get(hourlyUrl(METRICS[0]));
+    const abandonedResult = abandoned.then(
+      () => { throw new Error("aborted client unexpectedly received a response"); },
+      (error) => error
+    );
+    const pending = METRICS.slice(1).map((metric) =>
+      request(server).get(hourlyUrl(metric)).then((response) => response)
+    );
+    try {
+      await waitForCalls(deps.hourlyStore.aggregateHourly, 8);
+      abandoned.abort();
+      expect((await abandonedResult).code).toBe("ABORTED");
+      deps.processClock.nowMs.mockReturnValue(11000);
+      expectRateLimited(await request(server).get(hourlyUrl(METRICS[0], "2026-09-09")));
+      const joined = request(server).get(hourlyUrl(METRICS[0])).then((response) => response);
+      await waitForCalls(deps.clock.now, 10);
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(8);
+      gates[0].resolve([]);
+      expect((await joined).status).toBe(200);
+      await request(server).get(hourlyUrl(METRICS[0], "2026-09-09")).expect(200);
+      expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(9);
+    } finally {
+      gates.forEach((gate) => gate.resolve([]));
+      await Promise.all(pending);
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
+
+it.each([
+  new URIError("private URI failure"),
+  Object.assign(new URIError("private URI failure"), { status: 500 }),
+  Object.assign(new Error("private unrelated failure"), { status: 400 }),
+  Object.assign(new URIError("private string status"), { status: "400" }),
+])("keeps non-route-decoding errors sanitized as 500", (error) => {
+  const send = jest.fn();
+  const status = jest.fn().mockReturnValue({ send });
+  const log = jest.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    telemetryErrorHandler(error, {} as any, { status } as any, jest.fn());
+    expect(status).toHaveBeenCalledWith(500);
+    expect(send).toHaveBeenCalledWith({ error: "Internal server error" });
+    expect(log).toHaveBeenCalledWith("telemetry_http_unexpected_error");
+  } finally {
+    log.mockRestore();
+  }
+});
+
+it("forwards an unexpected synchronous hourly dependency error through Express without leaking it", async () => {
+  const deps = dependencies();
+  deps.clock.now.mockImplementationOnce(() => { throw new Error("private clock"); });
+  const log = jest.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const app = createApp(deps);
+    const response = await request(app).get(hourlyUrl()).expect(500);
+    expect(response.body).toEqual({ error: "Internal server error" });
+    await request(app).get(hourlyUrl()).expect(200);
+    expect(deps.hourlyStore.aggregateHourly).toHaveBeenCalledTimes(1);
+  } finally {
+    log.mockRestore();
+  }
 });
