@@ -519,6 +519,30 @@ if [[ -n "${CAPTURED_BASELINE_DIR:-}" ]]; then
   TARGET_SHA="$(awk -F= '$1 == "baseline_source_sha" {print $2}' "$CAPTURED_BASELINE_DIR/baseline-provenance.env")"
   new_case captured-baseline
   BASELINE_DIR="$CAPTURED_BASELINE_DIR"
+  if [[ "${CAPTURED_BASELINE_EXPECT_REJECTION:-false}" == "true" ]]; then
+    while IFS=$'\t' read -r service image _; do
+      printf '%s\n' "$image" >"$STATE_DIR/image-$service"
+    done <"$BASELINE_DIR/live-images.tsv"
+    if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+      assert_contains "$CASE_DIR/out.txt" 'oci_fenced_rollback_recovery=PASS'
+      [[ ! -f "$STATE_DIR/image-telemetry" ]] ||
+        fail "accepted downgrade did not reach the expected Telemetry removal"
+      printf 'captured_authority_removal=UNSAFE_ACCEPTANCE telemetry_removed=true\n' >&2
+      fail "fenced consumer accepted a captured authority-removal downgrade"
+    fi
+    assert_contains "$CASE_DIR/out.txt" \
+      'ordinary rollback baseline omits trusted deploy provenance'
+    assert_contains "$CASE_DIR/out.txt" \
+      'fenced recovery baseline validation failed'
+    [[ ! -s "$STATE_DIR/operations.log" &&
+       ! -s "$STATE_DIR/lock.log" &&
+       ! -s "$STATE_DIR/kubectl.log" &&
+       "$(cat "$STATE_DIR/maintenance")" == "held" &&
+       "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+      fail "authority-removal rejection occurred after a runtime operation"
+    printf 'captured_authority_removal=REJECTED_BEFORE_RUNTIME_OPERATIONS\n'
+    exit 0
+  fi
   run_operator >"$CASE_DIR/out.txt" 2>&1 ||
     fail "actual captured baseline was rejected: $(cat "$CASE_DIR/out.txt")"
   while IFS=$'\t' read -r service image _; do

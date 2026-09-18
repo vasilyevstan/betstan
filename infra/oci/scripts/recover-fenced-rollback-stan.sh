@@ -334,7 +334,7 @@ PY
 
 # Build the exact target image map and the expected currently deployed map.
 BASELINE_DIR="$BASELINE_DIR" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
-EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
   "$SCRIPT_DIR/validate-rollback-baseline-stan.sh" >/dev/null ||
   oci_die "fenced recovery baseline validation failed"
 python3 - \

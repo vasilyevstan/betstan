@@ -2210,11 +2210,13 @@ CAPTURED_BASELINE_DIR="$current_capture_dir" \
   fail "current baseline capture did not reuse one Telemetry Deployment observation"
 printf 'current_ten_capture_validation_and_fenced_restore=PASS\n'
 
+downgrade_rejections_passed=true
 for mutation in \
     missing-image substituted-set duplicate-image unknown-image wrong-repository \
     invalid-digest manifest-mismatch missing-live duplicate-live missing-deployment \
     duplicate-deployment altered-deployment missing-pod altered-pod \
     missing-sidecar unbound-sidecar altered-sidecar absent-sidecar downgrade \
+    downgrade-remove-provenance downgrade-unbind-provenance \
     unbound-deployments unbound-pods legacy-current-provenance; do
   altered_dir="$WORK_DIR/current-baseline-$mutation"
   cp -R "$current_capture_dir" "$altered_dir"
@@ -2264,7 +2266,10 @@ elif mutation == "missing-sidecar":
     (root / "telemetry-pre-run.env").unlink()
 elif mutation == "unbound-sidecar":
     omitted.add("telemetry-pre-run.env")
-elif mutation in {"altered-sidecar", "absent-sidecar", "downgrade"}:
+elif mutation in {
+    "altered-sidecar", "absent-sidecar", "downgrade",
+    "downgrade-remove-provenance", "downgrade-unbind-provenance",
+}:
     path = root / "telemetry-pre-run.env"
     if mutation == "altered-sidecar":
         text = path.read_text()
@@ -2272,9 +2277,13 @@ elif mutation in {"altered-sidecar", "absent-sidecar", "downgrade"}:
         path.write_text("\n".join(lines) + "\n")
     else:
         path.write_text("mode=absent\nimage=none\ndatabase_initialized=true\nqueue_present=true\n")
-        if mutation == "downgrade":
+        if mutation.startswith("downgrade"):
             for name in ("images.tsv", "live-images.tsv", "deployments.tsv", "pod-images.tsv"):
                 edit_rows(name, lambda rows: drop(rows, "telemetry"))
+            if mutation == "downgrade-remove-provenance":
+                (root / "trusted-deploy-provenance.txt").unlink()
+            elif mutation == "downgrade-unbind-provenance":
+                omitted.add("trusted-deploy-provenance.txt")
 elif mutation in {"unbound-deployments", "unbound-pods"}:
     omitted.add("deployments.tsv" if mutation == "unbound-deployments" else "pod-images.tsv")
 elif mutation == "legacy-current-provenance":
@@ -2289,6 +2298,7 @@ else:
 ))
 PY
   if BASELINE_DIR="$altered_dir" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+      REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
       "$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh" \
       >"$altered_dir.out" 2>&1; then
     fail "production baseline validator accepted $mutation"
@@ -2297,7 +2307,22 @@ PY
     assert_contains "$altered_dir.out" \
       'ordinary rollback baseline deploy provenance is not exact GHCR evidence'
   fi
+  if [[ "$mutation" == "downgrade-remove-provenance" ||
+        "$mutation" == "downgrade-unbind-provenance" ]]; then
+    assert_contains "$altered_dir.out" \
+      'ordinary rollback baseline omits trusted deploy provenance'
+    printf 'production_validator_%s=REJECTED\n' "$mutation"
+    if ! CAPTURED_BASELINE_DIR="$altered_dir" \
+        CAPTURED_BASELINE_EXPECT_REJECTION=true \
+        bash "$ROOT_DIR/infra/oci/tests/test-fenced-rollback-recovery-stan.sh" \
+        >"$altered_dir-fenced.out" 2>&1; then
+      cat "$altered_dir-fenced.out" >&2
+      downgrade_rejections_passed=false
+    fi
+  fi
 done
+[[ "$downgrade_rejections_passed" == "true" ]] ||
+  fail "fenced consumer accepted captured authority-removal downgrades"
 
 run_capture_expect_failure capture-current-missing-telemetry \
   STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten"
