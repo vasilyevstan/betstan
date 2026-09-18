@@ -256,6 +256,10 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
     const protectedBoxes = [...card.current.querySelectorAll('button:focus, .telemetry-metric__action')]
       .map((element) => element.getBoundingClientRect());
     const candidates = [anchor.top - measured.height - 6, anchor.bottom + 6];
+    const maximumTop = bottom - measured.height;
+    if (top <= maximumTop) {
+      candidates.push(...candidates.map((y) => Math.max(top, Math.min(maximumTop, y))));
+    }
     const candidate = candidates.map((y) => ({
       left, right: left + measured.width, top: y, bottom: y + measured.height,
     })).find((box) => (
@@ -416,7 +420,16 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
         top: placement?.top ?? 0,
         visibility: placement ? 'visible' : 'hidden',
       }}
-    >{values[activeIndex]}</div> : null}
+    >
+      <time className="telemetry-metric__date" dateTime={buckets[activeIndex]}>
+        {isDaily
+          ? `${buckets[activeIndex]} UTC`
+          : `${buckets[activeIndex].slice(0, 10)} ${buckets[activeIndex].slice(11, 16)} UTC`}
+      </time>
+      <data className="telemetry-metric__value" value={values[activeIndex]}>
+        {values[activeIndex]}
+      </data>
+    </div> : null}
   </article>;
 };
 
