@@ -40,10 +40,11 @@ if require_current_deploy_provenance not in ("true", "false"):
     raise SystemExit("REQUIRE_CURRENT_DEPLOY_PROVENANCE must be true or false")
 if allow_local_capture not in ("true", "false"):
     raise SystemExit("ALLOW_LOCAL_CAPTURE must be true or false")
-services = {
+historical_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+current_services = historical_services | {"telemetry"}
 repository = "ghcr.io/vasilyevstan/betstan-images"
 digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
 required_files = {
@@ -89,6 +90,9 @@ def env_file(name):
         values[key] = value
     return values
 
+telemetry = None
+if (root / "telemetry-pre-run.env").exists() and "telemetry-pre-run.env" not in manifest:
+    raise SystemExit("Telemetry baseline evidence is not checksum-bound")
 if "telemetry-pre-run.env" in manifest:
     telemetry = env_file("telemetry-pre-run.env")
     if set(telemetry) != {
@@ -171,12 +175,13 @@ if (
     raise SystemExit("rollback baseline does not identify the public GHCR registry")
 
 images = {}
+image_digests = {}
 for raw in (root / "images.tsv").read_text(encoding="utf-8").splitlines():
     fields = raw.split("\t")
     if len(fields) != 5:
         raise SystemExit("rollback image provenance must contain five columns")
     service, row_repository, image_ref, manifest_digest, platform_digest = fields
-    if service in images or service not in services:
+    if service in images or service not in current_services:
         raise SystemExit("rollback image provenance service set is invalid")
     if (
         row_repository != repository
@@ -186,8 +191,23 @@ for raw in (root / "images.tsv").read_text(encoding="utf-8").splitlines():
     ):
         raise SystemExit("rollback image provenance is not an immutable GHCR reference")
     images[service] = image_ref
-if set(images) != services:
-    raise SystemExit("rollback image provenance does not contain exactly nine services")
+    image_digests[service] = (manifest_digest, platform_digest)
+services = set(images)
+if services not in (historical_services, current_services):
+    raise SystemExit("rollback image provenance does not contain an exact historical or current service set")
+
+split_recovery = baseline["baseline_deploy_workflow"] == "oci-production-rollback"
+if services == current_services:
+    if telemetry is None or telemetry["mode"] != "retained" or telemetry["image"] != images["telemetry"]:
+        raise SystemExit("current rollback baseline must bind retained Telemetry to its image inventory")
+elif split_recovery:
+    if telemetry is None or telemetry["mode"] != "retained":
+        raise SystemExit("partial recovery baseline must bind its retained Telemetry observer")
+elif (
+    (telemetry is not None and telemetry["mode"] != "absent")
+    or (require_current_deploy_provenance == "true" and telemetry is None)
+):
+    raise SystemExit("historical rollback capture must prove absent Telemetry topology")
 
 live_images = {}
 for raw in (root / "live-images.tsv").read_text(encoding="utf-8").splitlines():
@@ -195,13 +215,61 @@ for raw in (root / "live-images.tsv").read_text(encoding="utf-8").splitlines():
     if len(fields) != 2:
         raise SystemExit("rollback live-image evidence must contain two columns")
     service, image_ref = fields
-    if service in live_images or service not in services:
+    if service in live_images or service not in current_services:
         raise SystemExit("rollback live-image service set is invalid")
-    if image_ref != images.get(service):
+    expected_image = images.get(service)
+    if service == "telemetry" and split_recovery:
+        expected_image = telemetry["image"]
+    if image_ref != expected_image:
         raise SystemExit("rollback live-image evidence differs from GHCR provenance")
     live_images[service] = image_ref
-if set(live_images) != services:
-    raise SystemExit("rollback live-image evidence does not contain exactly nine services")
+if set(live_images) != services and not (
+    split_recovery and services == historical_services and set(live_images) == current_services
+):
+    raise SystemExit("rollback live-image evidence does not match the authenticated service set")
+
+for name in ("deployments.tsv", "pod-images.tsv"):
+    if services == current_services and name not in manifest:
+        raise SystemExit(f"current rollback baseline omits checksum-bound {name}")
+    if (root / name).exists() and name not in manifest:
+        raise SystemExit(f"rollback baseline evidence is not checksum-bound: {name}")
+
+if "deployments.tsv" in manifest:
+    deployments = {}
+    for raw in (root / "deployments.tsv").read_text(encoding="utf-8").splitlines():
+        fields = raw.split("\t")
+        if len(fields) != 6:
+            raise SystemExit("rollback deployment evidence must contain six columns")
+        service, image, revision, desired, ready, available = fields
+        if service in deployments or service not in live_images:
+            raise SystemExit("rollback deployment service set is invalid")
+        if (
+            image != live_images[service]
+            or not revision.isdigit()
+            or not desired.isdigit() or int(desired) < 1
+            or ready != desired or available != desired
+        ):
+            raise SystemExit("rollback deployment evidence differs from the healthy baseline")
+        deployments[service] = image
+    if deployments != live_images:
+        raise SystemExit("rollback deployment evidence does not cover the observed service set")
+
+if "pod-images.tsv" in manifest:
+    pods = set()
+    pod_services = set()
+    for raw in (root / "pod-images.tsv").read_text(encoding="utf-8").splitlines():
+        fields = raw.split("\t")
+        if len(fields) != 3:
+            raise SystemExit("rollback pod evidence must contain three columns")
+        service, pod, image_id = fields
+        if service not in images or not pod or (service, pod) in pods:
+            raise SystemExit("rollback pod evidence service or identity is invalid")
+        if not any(image_id.endswith("@" + digest) for digest in image_digests[service]):
+            raise SystemExit("rollback pod evidence differs from its manifest/platform identity")
+        pods.add((service, pod))
+        pod_services.add(service)
+    if pod_services != services:
+        raise SystemExit("rollback pod evidence does not cover the authenticated service set")
 
 deploy_workflow = baseline["baseline_deploy_workflow"]
 recovery_run_id = baseline.get("baseline_recovery_run_id", "0")
@@ -218,12 +286,14 @@ if deploy_workflow == "oci-production-deploy":
         raise SystemExit("ordinary rollback baseline carries recovery authority")
     provenance_name = "trusted-deploy-provenance.txt"
     if provenance_name not in manifest:
-        if require_current_deploy_provenance == "true":
+        if require_current_deploy_provenance == "true" or services == current_services:
             raise SystemExit("ordinary rollback baseline omits trusted deploy provenance")
     else:
         deploy = env_file(provenance_name)
         workflow = deploy.get("deployment_workflow", "")
-        if require_current_deploy_provenance == "true" and workflow != "oci-production-deploy":
+        if (
+            require_current_deploy_provenance == "true" or services == current_services
+        ) and workflow != "oci-production-deploy":
             raise SystemExit("ordinary rollback baseline omits current deploy-workflow provenance")
         if workflow not in ("", "oci-production-deploy"):
             raise SystemExit("ordinary rollback baseline deploy workflow is not trusted")
@@ -279,6 +349,7 @@ elif deploy_workflow == "oci-production-rollback":
         "partial-recovery/rollback-readiness/summary.env",
         "partial-recovery/rollback-readiness/workload-state.tsv",
         "partial-recovery/rollback-readiness/failures.txt",
+        "partial-recovery/telemetry-recovery.env",
     }
     if (
         not re.fullmatch(r"[1-9][0-9]*", recovery_run_id)
@@ -290,6 +361,11 @@ elif deploy_workflow == "oci-production-rollback":
     ):
         raise SystemExit("partial recovery baseline does not bind exact recovery authority")
     authority = env_file(transition_file)
+    if (
+        services != historical_services
+        or env_file("partial-recovery/telemetry-recovery.env") != telemetry
+    ):
+        raise SystemExit("partial recovery baseline contradicts its bound Telemetry observer")
     if (
         authority.get("schema")
         != "betstan.partial-rollback-recovery-authority.v1"

@@ -529,7 +529,10 @@ async function execute({
   commitStatusPagesByRef = {},
   comparisonStatus = "identical",
   comparisonsByBasehead = {},
-  branchShas = { master: BASE_SHA, dev: HEAD_SHA },
+  branchShas = {
+    master: BASE_SHA,
+    dev: currentPull.base.ref === "dev" ? currentPull.base.sha : HEAD_SHA,
+  },
   statusSink,
   policyRunOverrides = {},
   policyRunOverridesById = {},
@@ -550,6 +553,10 @@ async function execute({
   staleTransitionStatusReads = false,
   transitionStatusCreatedAt = NOW,
   workflowRunListCalls,
+  statusRead,
+  beforeStatusWrite,
+  statusWriteResponse,
+  receiptIO,
 } = {}) {
   const statuses = statusSink || [];
   const messages = [];
@@ -564,6 +571,7 @@ async function execute({
       .map(({ id }) => id || 0),
   );
   let createdStatusSecond = 0;
+  let receiptElapsed = 0;
   const github = {
     rest: {
       issues: {
@@ -673,6 +681,7 @@ async function execute({
         },
         createCommitStatus: async (status) => {
           statuses.push(status);
+          await beforeStatusWrite?.(status);
           createdStatusId += 1;
           createdStatusSecond += 1;
           const storedStatus = {
@@ -708,8 +717,14 @@ async function execute({
               created_at: transitionStatusCreatedAt,
             });
           }
+          return {
+            status: 201,
+            data: statusWriteResponse
+              ? await statusWriteResponse(storedStatus)
+              : storedStatus,
+          };
         },
-        listCommitStatusesForRef: async ({ ref, page }) => {
+        listCommitStatusesForRef: async ({ ref, page, request }) => {
           const explicitPages = commitStatusPagesByRef[ref];
           if (explicitPages) {
             return {
@@ -725,8 +740,11 @@ async function execute({
                 ? transitionStatusReadSnapshot
                 : transitionStatuses
               : authorizationStatuses);
+          const data = inventory.slice((page - 1) * 100, page * 100);
           return {
-            data: inventory.slice((page - 1) * 100, page * 100),
+            data: statusRead
+              ? await statusRead({ ref, page, request, data, statuses })
+              : data,
           };
         },
         compareCommitsWithBasehead: async ({ basehead }) => {
@@ -893,6 +911,10 @@ async function execute({
     context,
     core,
     authorizationNow,
+    receiptIO: receiptIO ?? {
+      now: () => receiptElapsed,
+      wait: async (milliseconds) => { receiptElapsed += milliseconds; },
+    },
   };
   if (workflowAuthorizations !== undefined) {
     policyArguments.workflowAuthorizations = workflowAuthorizations;
@@ -904,7 +926,697 @@ async function execute({
   return { statuses, messages };
 }
 
+async function testReceiptReadback() {
+  const scenarios = [
+    () => {
+      const ledger = [];
+      const authorization = workflowAuthorization();
+      return {
+        ledger,
+        initialScans: 1,
+        anchor: HEAD_SHA,
+        context: `trusted-workflow-authorization/${authorization.id}`,
+        options: {
+          eventName: "workflow_run",
+          headBlob: CHANGED_BLOB,
+          workflowAuthorizations: [authorization],
+          authorizationStatuses: ledger,
+        },
+      };
+    },
+    () => {
+      const ledger = [];
+      const authorization = coverageAuthorization();
+      return {
+        ledger,
+        initialScans: 2,
+        anchor: BASE_SHA,
+        context: publishPrPolicy.coverageAuthorizationContext(
+          authorization,
+          "integration",
+        ),
+        options: {
+          eventName: "workflow_run",
+          currentPull: coverageSourcePull(),
+          headAssetBlobs: {
+            [COVERAGE_ENGINE_PATH]: CHANGED_ENGINE_BLOB,
+            [COVERAGE_HARNESS_PATH]: CHANGED_HARNESS_BLOB,
+          },
+          changedFiles: COVERAGE_ALLOWED_PATHS,
+          coverageAuthorizations: [authorization],
+          authorizationStatuses: ledger,
+          transitionStatuses: [
+            qualityTransitionStatus({ context: "trusted-quality-transition/dev" }),
+          ],
+        },
+      };
+    },
+    () => {
+      const fixture = coveragePromotionFixture();
+      return {
+        ledger: fixture.promotionReceipt,
+        initialScans: 2,
+        initialReceiptAnchor: BASE_SHA,
+        anchor: SOURCE_MERGE_COMMIT_SHA,
+        context: publishPrPolicy.coverageAuthorizationContext(
+          fixture.authorization,
+          "promotion",
+        ),
+        options: fixture.options,
+      };
+    },
+  ];
+  const receiptWrites = (result, fixture) =>
+    result.statuses.filter(({ context }) => context === fixture.context);
+  const qualityWrites = (result) =>
+    result.statuses.filter(({ context }) => context.startsWith("pr-quality-gates/"));
+  const assertFailure = (result) => {
+    assert(qualityWrites(result).length > 0, result.messages.join("\n"));
+    assert(
+      qualityWrites(result).every(({ state }) => state !== "success"),
+      result.messages.join("\n"),
+    );
+  };
+  const assertSuccess = (result, fixture) => {
+    assert(qualityWrites(result).length > 0, result.messages.join("\n"));
+    assert(
+      qualityWrites(result).every(({ state }) => state === "success"),
+      result.messages.join("\n"),
+    );
+    assert.deepEqual(
+      receiptWrites(result, fixture).map(({ state }) => state),
+      ["pending", "success"],
+    );
+  };
+  const unrelated = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1,
+    context: `unrelated-${index}`,
+    state: "success",
+    description: null,
+    target_url: null,
+    created_at: NOW,
+    creator: ACTIONS_BOT,
+  }));
+
+  for (const makeFixture of scenarios) {
+    const delayed = makeFixture();
+    const reads = [0, 0, 0];
+    const delayedResult = await execute({
+      ...delayed.options,
+      statusRead: ({ ref, request, data, statuses }) => {
+        if (ref !== delayed.anchor) return data;
+        const phase = delayed.ledger.length;
+        if (request) reads[phase] += 1;
+        assert(!statuses.some(
+          ({ context, state }) =>
+            context.startsWith("pr-quality-gates/") && state === "success",
+        ));
+        if (phase && reads[phase] < 5) {
+          return phase === 2 && reads[phase] % 2
+            ? data.filter(({ state }) =>
+                state === (reads[phase] === 1 ? "success" : "pending"))
+            : [];
+        }
+        return data;
+      },
+    });
+    assertSuccess(delayedResult, delayed);
+
+    const initialDeadline = makeFixture();
+    let initialElapsed = 0;
+    let firstReceiptSignal;
+    let observedInitialReceipt = false;
+    const initialDeadlineResult = await execute({
+      ...initialDeadline.options,
+      receiptIO: { now: () => initialElapsed },
+      statusRead: ({ ref, request, data }) => {
+        if (
+          !observedInitialReceipt &&
+          ref === (initialDeadline.initialReceiptAnchor ?? initialDeadline.anchor)
+        ) {
+          observedInitialReceipt = true;
+          firstReceiptSignal = request?.signal;
+          initialElapsed += 31_000;
+        }
+        return data;
+      },
+    });
+    assert(observedInitialReceipt);
+    assertFailure(initialDeadlineResult);
+    assert(firstReceiptSignal instanceof AbortSignal);
+    assert.equal(initialDeadline.ledger.length, 0);
+    assert.equal(receiptWrites(initialDeadlineResult, initialDeadline).length, 0);
+    assert(initialDeadlineResult.messages.some(
+      (message) => message.includes("deadline exhausted"),
+    ));
+    assert.deepEqual(reads, [delayed.initialScans, 5, 5]);
+
+    const initialCancellation = makeFixture();
+    let cancellationElapsed = 0;
+    let initialReceiptReads = 0;
+    let initialAborted = false;
+    const requestTimeouts = [];
+    const keepAlive = setTimeout(() => {}, 1_000);
+    let initialCancellationResult;
+    try {
+      initialCancellationResult = await execute({
+        ...initialCancellation.options,
+        receiptIO: {
+          now: () => cancellationElapsed,
+          signal: (milliseconds) => {
+            requestTimeouts.push(milliseconds);
+            return AbortSignal.timeout(milliseconds);
+          },
+        },
+        statusRead: async ({ request, data }) => {
+          if (!request) return data;
+          initialReceiptReads += 1;
+          if (initialReceiptReads === 1) {
+            cancellationElapsed = 29_980;
+            return data;
+          }
+          await new Promise((resolve, reject) => {
+            const abort = () => {
+              initialAborted = request.signal.aborted;
+              cancellationElapsed = 30_000;
+              reject(request.signal.reason);
+            };
+            if (request.signal.aborted) abort();
+            else request.signal.addEventListener("abort", abort, { once: true });
+          });
+          assert.fail("initial receipt scan must be cancelled");
+        },
+      });
+    } finally {
+      clearTimeout(keepAlive);
+    }
+    assertFailure(initialCancellationResult);
+    assert.equal(initialAborted, true);
+    assert.deepEqual(requestTimeouts, [5_000, 20]);
+    assert.equal(initialCancellation.ledger.length, initialCancellation.initialScans === 1 ? 1 : 0);
+
+    for (const hiddenPhase of [1, 2]) {
+      const hidden = makeFixture();
+      let hiddenReads = 0;
+      const result = await execute({
+        ...hidden.options,
+        statusRead: ({ ref, request, data }) => {
+          if (ref === hidden.anchor && request && hidden.ledger.length === hiddenPhase) {
+            hiddenReads += 1;
+            return [];
+          }
+          return data;
+        },
+      });
+      assertFailure(result);
+      assert.equal(hiddenReads, 5);
+      assert.equal(hidden.ledger.length, hiddenPhase);
+      assert.equal(receiptWrites(result, hidden).length, hiddenPhase);
+      const replay = await execute(hidden.options);
+      assertFailure(replay);
+      assert.equal(receiptWrites(replay, hidden).length, 0);
+      assert.equal(hidden.ledger.length, hiddenPhase);
+    }
+
+    const paginated = makeFixture();
+    const pages = [];
+    const paginatedResult = await execute({
+      ...paginated.options,
+      statusRead: ({ ref, page, request, data }) => {
+        if (ref !== paginated.anchor || !request) return data;
+        pages.push([paginated.ledger.length, page]);
+        return [...unrelated, ...paginated.ledger]
+          .slice((page - 1) * 100, page * 100);
+      },
+    });
+    assertSuccess(paginatedResult, paginated);
+    assert.deepEqual(pages, [
+      ...Array.from({ length: paginated.initialScans }, () => [[0, 1], [0, 2]]).flat(),
+      [1, 1], [1, 2], [2, 1], [2, 2],
+    ]);
+
+    for (const failedPhase of [0, 1]) {
+      const interrupted = makeFixture();
+      const attemptedPages = [];
+      let failures = 0;
+      const result = await execute({
+        ...interrupted.options,
+        statusRead: ({ ref, page, request, data }) => {
+          if (ref !== interrupted.anchor || !request) return data;
+          if (interrupted.ledger.length === failedPhase) {
+            attemptedPages.push(page);
+            if (page === 2 && failures === 0) {
+              failures += 1;
+              throw Object.assign(new Error("interrupted inventory"), { status: 503 });
+            }
+          }
+          return [...unrelated, ...interrupted.ledger]
+            .slice((page - 1) * 100, page * 100);
+        },
+      });
+      if (failedPhase === 0) {
+        assertFailure(result);
+        assert.equal(interrupted.ledger.length, 0);
+        assert.deepEqual(attemptedPages, [1, 2]);
+      } else {
+        assertSuccess(result, interrupted);
+        assert.deepEqual(attemptedPages, [1, 2, 1, 2]);
+      }
+    }
+
+    const malformedPage = makeFixture();
+    const malformedResult = await execute({
+      ...malformedPage.options,
+      statusRead: ({ ref, page, request, data }) => {
+        if (ref !== malformedPage.anchor || !request || malformedPage.ledger.length !== 1) {
+          return data;
+        }
+        return page === 1 ? unrelated : [{ id: "invalid" }];
+      },
+    });
+    assertFailure(malformedResult);
+    assert.equal(malformedPage.ledger.length, 1);
+
+    for (const mutate of [
+      (row) => ({ ...row, id: row.id + 100 }),
+      (row) => ({ ...row, state: "failure" }),
+      (row) => ({ ...row, description: "different claim" }),
+      (row) => ({ ...row, target_url: workflowRunUrl(999) }),
+      (row) => ({ ...row, created_at: "2026-09-02T11:30:00.000Z" }),
+      (row) => ({ ...row, creator: { id: 42, login: "other", type: "User" } }),
+      (row) => ({ ...row, created_at: "malformed" }),
+    ]) {
+      const conflict = makeFixture();
+      let observations = 0;
+      const result = await execute({
+        ...conflict.options,
+        statusRead: ({ ref, request, data }) => {
+          if (ref !== conflict.anchor || !request || conflict.ledger.length !== 1) {
+            return data;
+          }
+          observations += 1;
+          return [mutate(data[0])];
+        },
+      });
+      assertFailure(result);
+      assert.equal(observations, 1);
+      assert.equal(receiptWrites(result, conflict).length, 1);
+    }
+
+    const duplicate = makeFixture();
+    const duplicateResult = await execute({
+      ...duplicate.options,
+      statusRead: ({ ref, request, data }) =>
+        ref === duplicate.anchor && request && duplicate.ledger.length === 1
+          ? [data[0], data[0]]
+          : data,
+    });
+    assertFailure(duplicateResult);
+    assert(duplicateResult.messages.some((message) => message.includes("duplicate IDs")));
+
+    const earlyConflict = makeFixture();
+    const conflictPages = [];
+    const earlyConflictResult = await execute({
+      ...earlyConflict.options,
+      statusRead: ({ ref, page, request, data }) => {
+        if (ref !== earlyConflict.anchor || !request || earlyConflict.ledger.length !== 1) {
+          return data;
+        }
+        conflictPages.push(page);
+        if (page === 1) {
+          return [...unrelated.slice(0, 99), { ...data[0], id: 999 }];
+        }
+        throw Object.assign(new Error("later page unavailable"), { status: 503 });
+      },
+    });
+    assertFailure(earlyConflictResult);
+    assert.deepEqual(conflictPages, [1]);
+
+    for (const fault of [
+      { status: 408 }, { status: 429 }, { status: 500 },
+      { status: 502 }, { status: 503 }, { status: 504 },
+      { code: "ECONNRESET" }, { code: "ETIMEDOUT" },
+      { name: "AbortError" }, { name: "TimeoutError" },
+    ]) {
+      const transient = makeFixture();
+      let failures = 0;
+      const result = await execute({
+        ...transient.options,
+        statusRead: ({ ref, request, data }) => {
+          if (ref === transient.anchor && request && transient.ledger.length === 1 && failures < 2) {
+            failures += 1;
+            throw Object.assign(new Error("transient receipt read"), fault);
+          }
+          return data;
+        },
+      });
+      assertSuccess(result, transient);
+      assert.equal(failures, 2);
+    }
+
+    for (const status of [401, 403, 404, 422, 501]) {
+      const forbidden = makeFixture();
+      let failures = 0;
+      const result = await execute({
+        ...forbidden.options,
+        statusRead: ({ ref, request, data }) => {
+          if (ref === forbidden.anchor && request && forbidden.ledger.length === 1) {
+            failures += 1;
+            throw Object.assign(new Error(`receipt GET ${status}`), {
+              status,
+              code: "ECONNRESET",
+            });
+          }
+          return data;
+        },
+      });
+      assertFailure(result);
+      assert.equal(failures, 1);
+      assert.equal(receiptWrites(result, forbidden).length, 1);
+      assert(result.messages.some((message) => message.includes(`receipt GET ${status}`)));
+    }
+
+    const failedEntry = makeFixture();
+    let entryReads = 0;
+    const entryResult = await execute({
+      ...failedEntry.options,
+      statusRead: ({ ref, request, data }) => {
+        if (ref === failedEntry.anchor && request) {
+          entryReads += 1;
+          throw Object.assign(new Error("entry read failed"), { status: 503 });
+        }
+        return data;
+      },
+    });
+    assertFailure(entryResult);
+    assert.equal(entryReads, 1);
+    assert.equal(receiptWrites(entryResult, failedEntry).length, 0);
+
+    for (const phase of ["pending", "success"]) {
+      for (const response of [
+        () => { throw Object.assign(new Error("lost POST response"), { code: "ECONNRESET" }); },
+        () => null,
+        (row) => ({ ...row, id: 0 }),
+        (row) => ({ ...row, creator: { ...ACTIONS_BOT, id: 42 } }),
+        (row) => ({ ...row, state: phase === "pending" ? "success" : "pending" }),
+        (row) => ({ ...row, created_at: "invalid" }),
+        (row) => ({ ...row, created_at: "2026-09-02T10:00:00.000Z" }),
+        (row) => ({ ...row, target_url: workflowRunUrl(999) }),
+      ]) {
+        const ambiguous = makeFixture();
+        const result = await execute({
+          ...ambiguous.options,
+          statusWriteResponse: (row) =>
+            row.context === ambiguous.context && row.state === phase ? response(row) : row,
+        });
+        assertFailure(result);
+        const writes = phase === "pending" ? 1 : 2;
+        assert.equal(ambiguous.ledger.length, writes);
+        assert.equal(receiptWrites(result, ambiguous).length, writes);
+        const replay = await execute(ambiguous.options);
+        assertFailure(replay);
+        assert.equal(receiptWrites(replay, ambiguous).length, 0);
+      }
+    }
+
+    const rejected = makeFixture();
+    const rejectedResult = await execute({
+      ...rejected.options,
+      beforeStatusWrite: (row) => {
+        if (row.context === rejected.context) {
+          throw Object.assign(new Error("receipt POST rejected"), { status: 403 });
+        }
+      },
+    });
+    assertFailure(rejectedResult);
+    assert.equal(rejected.ledger.length, 0);
+    assert.equal(receiptWrites(rejectedResult, rejected).length, 1);
+  }
+
+  const deadline = scenarios[0]();
+  let elapsed = 0;
+  let requestLimit;
+  const limits = [];
+  const deadlineResult = await execute({
+    ...deadline.options,
+    receiptIO: {
+      now: () => elapsed,
+      wait: async (milliseconds) => { elapsed += milliseconds; },
+      signal: (milliseconds) => {
+        requestLimit = milliseconds;
+        limits.push(milliseconds);
+        return AbortSignal.timeout(milliseconds);
+      },
+    },
+    statusRead: ({ ref, request, data }) => {
+      if (ref === deadline.anchor && request && deadline.ledger.length === 1) {
+        elapsed += requestLimit;
+        return [];
+      }
+      return data;
+    },
+  });
+  assertFailure(deadlineResult);
+  assert.equal(elapsed, 30_000);
+  assert.equal(limits.at(-1), 2_000);
+  assert.equal(deadline.ledger.length, 1);
+  assert(deadlineResult.messages.some((message) => message.includes("deadline exhausted")));
+
+  const sharedDeadline = scenarios[0]();
+  elapsed = 0;
+  const sharedReads = [0, 0, 0];
+  let advancedDuringRevalidation = false;
+  const sharedResult = await execute({
+    ...sharedDeadline.options,
+    receiptIO: {
+      now: () => elapsed,
+      wait: async (milliseconds) => { elapsed += milliseconds; },
+    },
+    statusRead: ({ ref, request, data }) => {
+      const phase = sharedDeadline.ledger.length;
+      if (phase === 1 && ref === MERGE_SHA && !advancedDuringRevalidation) {
+        elapsed += 15_000;
+        advancedDuringRevalidation = true;
+      }
+      if (ref === sharedDeadline.anchor && request) {
+        sharedReads[phase] += 1;
+        if (phase && sharedReads[phase] < 5) return [];
+      }
+      return data;
+    },
+  });
+  assertFailure(sharedResult);
+  assert.equal(sharedDeadline.ledger.length, 2);
+  assert.deepEqual(sharedReads, [1, 5, 4]);
+  assert(sharedResult.messages.some((message) => message.includes("deadline exhausted")));
+
+  const cancelled = scenarios[0]();
+  elapsed = 0;
+  let aborted = false;
+  const keepAlive = setTimeout(() => {}, 1_000);
+  let cancelledResult;
+  try {
+    cancelledResult = await execute({
+      ...cancelled.options,
+      receiptIO: { now: () => elapsed },
+      statusWriteResponse: (row) => {
+        if (row.context === cancelled.context) elapsed = 29_980;
+        return row;
+      },
+      statusRead: async ({ ref, request, data }) => {
+        if (ref !== cancelled.anchor || !request || cancelled.ledger.length !== 1) return data;
+        await new Promise((resolve, reject) => {
+          const abort = () => {
+            aborted = request.signal.aborted;
+            elapsed = 30_000;
+            reject(request.signal.reason);
+          };
+          if (request.signal.aborted) abort();
+          else request.signal.addEventListener("abort", abort, { once: true });
+        });
+        assert.fail("cancelled receipt GET cannot complete");
+      },
+    });
+  } finally {
+    clearTimeout(keepAlive);
+  }
+  assertFailure(cancelledResult);
+  assert.equal(aborted, true);
+  assert.equal(cancelled.ledger.length, 1);
+
+  for (const retryAfter of ["3", "30", "invalid"]) {
+    const limited = scenarios[0]();
+    const waits = [];
+    elapsed = 0;
+    let failures = 0;
+    const result = await execute({
+      ...limited.options,
+      receiptIO: {
+        now: () => elapsed,
+        wait: async (milliseconds) => { waits.push(milliseconds); elapsed += milliseconds; },
+      },
+      statusRead: ({ ref, request, data }) => {
+        if (ref === limited.anchor && request && limited.ledger.length === 1 && failures === 0) {
+          failures += 1;
+          throw Object.assign(new Error("rate limited"), {
+            status: 429,
+            response: { headers: { "retry-after": retryAfter } },
+          });
+        }
+        return data;
+      },
+    });
+    if (retryAfter === "3") {
+      assertSuccess(result, limited);
+      assert.deepEqual(waits, [3_000]);
+    } else {
+      assertFailure(result);
+      assert.deepEqual(waits, []);
+    }
+  }
+
+  const expiry = "2026-09-02T12:00:10.000Z";
+  for (const expiredPhase of [0, 1, 2]) {
+    const expiring = scenarios[0]();
+    let clock = NOW;
+    let claiming = false;
+    expiring.options.workflowAuthorizations[0].expiresAt = expiry;
+    const result = await execute({
+      ...expiring.options,
+      authorizationNow: () => clock,
+      statusRead: ({ ref, request, data }) => {
+        if (ref === expiring.anchor && request) {
+          claiming = true;
+          if (expiredPhase === 2 && expiring.ledger.length === 2) clock = expiry;
+        }
+        if (claiming && ref === MERGE_SHA && expiring.ledger.length === expiredPhase) {
+          clock = expiry;
+        }
+        return data;
+      },
+    });
+    assertFailure(result);
+    assert.equal(expiring.ledger.length, expiredPhase);
+  }
+
+  const betweenTargets = scenarios[0]();
+  betweenTargets.options.workflowAuthorizations[0].expiresAt = expiry;
+  let clock = NOW;
+  const published = [];
+  await assert.rejects(execute({
+    ...betweenTargets.options,
+    authorizationNow: () => clock,
+    statusSink: published,
+    statusWriteResponse: (row) => {
+      if (row.context.startsWith("pr-quality-gates/") && row.state === "success") clock = expiry;
+      return row;
+    },
+  }), /workflow authorization is stale or expired/);
+  assert.equal(betweenTargets.ledger.length, 2);
+  for (const sha of [HEAD_SHA, MERGE_SHA]) {
+    assert.equal(published.filter(
+      (row) => row.sha === sha && row.context.startsWith("pr-quality-gates/"),
+    ).at(-1).state, "pending");
+  }
+
+  for (const phase of [1, 2]) {
+    for (const field of ["head", "base", "merge", "content", "labels", "run", "transition", "workflow", "control"]) {
+      const drift = scenarios[0]();
+      const currentPull = pull();
+      const run = workflowRun();
+      const transitions = [qualityTransitionStatus()];
+      const branches = { master: BASE_SHA, dev: HEAD_SHA };
+      const blobs = {};
+      const statuses = [];
+      let changed = false;
+      const execution = execute({
+        ...drift.options,
+        currentPull,
+        run,
+        listedRuns: [run],
+        transitionStatuses: transitions,
+        branchShas: branches,
+        assetBlobsByRef: blobs,
+        statusSink: statuses,
+        statusRead: ({ ref, request, data }) => {
+          if (ref === drift.anchor && request && drift.ledger.length === phase && !changed) {
+            changed = true;
+            if (field === "head") currentPull.head.sha = ADVANCED_BASE_SHA;
+            if (field === "base") currentPull.base.sha = ADVANCED_BASE_SHA;
+            if (field === "merge") currentPull.merge_commit_sha = ADVANCED_BASE_SHA;
+            if (field === "content") currentPull.body = "changed content";
+            if (field === "labels") currentPull.labels = [{ name: CLI_MANAGED_LABEL }];
+            if (field === "run") run.conclusion = "failure";
+            if (field === "transition") transitions[0].description = transitionDescription({ binding: 103 });
+            if (field === "workflow") blobs.master = { ".github/workflows/production-build.yml": CHANGED_BLOB };
+            if (field === "control") branches.master = ADVANCED_BASE_SHA;
+          }
+          return data;
+        },
+      });
+      if (["head", "base", "merge", "content", "labels"].includes(field)) {
+        await assert.rejects(execution, /changed|snapshot|expected=/);
+      } else {
+        assertFailure(await execution);
+      }
+      assert(changed);
+      assert.equal(drift.ledger.length, phase, `${field} drift at ${phase}`);
+      assert(!statuses.some(
+        ({ context, state }) => context.startsWith("pr-quality-gates/") && state === "success",
+      ));
+    }
+  }
+
+  const changedIntegration = scenarios[2]();
+  const changedIntegrationResult = await execute({
+    ...changedIntegration.options,
+    statusRead: ({ ref, request, data }) => {
+      if (ref === changedIntegration.anchor && request && changedIntegration.ledger.length === 1) {
+        changedIntegration.options.commitStatusesByRef[BASE_SHA][0].target_url =
+          workflowRunUrl(999);
+      }
+      return data;
+    },
+  });
+  assertFailure(changedIntegrationResult);
+  assert.equal(changedIntegration.ledger.length, 1);
+
+  const policyAdvance = scenarios[0]();
+  const advancingBranches = { master: BASE_SHA, dev: HEAD_SHA };
+  const policyAdvanceResult = await execute({
+    ...policyAdvance.options,
+    branchShas: advancingBranches,
+    statusRead: ({ ref, data }) => {
+      if (ref === MERGE_SHA && policyAdvance.ledger.length === 1) {
+        advancingBranches.master = ADVANCED_BASE_SHA;
+      }
+      return data;
+    },
+  });
+  assertFailure(policyAdvanceResult);
+  assert.equal(policyAdvance.ledger.length, 1);
+
+  const failedInvalidation = scenarios[0]();
+  failedInvalidation.options.workflowAuthorizations[0].expiresAt = expiry;
+  clock = NOW;
+  await assert.rejects(execute({
+    ...failedInvalidation.options,
+    authorizationNow: () => clock,
+    statusWriteResponse: (row) => {
+      if (row.context.startsWith("pr-quality-gates/") && row.state === "success") clock = expiry;
+      return row;
+    },
+    beforeStatusWrite: (row) => {
+      if (clock === expiry && row.context.startsWith("branch-policy/")) {
+        throw new Error("snapshot invalidation unavailable");
+      }
+    },
+  }), /snapshot invalidation unavailable/);
+  assert.equal(failedInvalidation.ledger.length, 2);
+}
+
 async function main() {
+  await testReceiptReadback();
   function assertNoQualitySuccess(result) {
     assert.equal(
       result.statuses.some(
@@ -4371,10 +5083,123 @@ async function main() {
     expiresAt: "2026-09-18T01:04:52.000Z",
     receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
   };
+  const expectedFreshWorkflowAuthorizations = [
+    {
+      id: "node24-production-build-pr-637-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+      authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      pullNumber: 637,
+      headRef: "fix/actions-node24",
+      baseRef: "dev",
+      issuedAt: "2026-09-18T03:28:46.000Z",
+      expiresAt: "2026-09-19T03:28:46.000Z",
+      receiptSha: "3252064e9566dcb19cd8b9724064b8bc2ee6e1a0",
+    },
+    {
+      id: "node24-production-build-promotion-636-v2",
+      repository: "vasilyevstan/betstan",
+      headRepository: "vasilyevstan/betstan",
+      workflowPath: ".github/workflows/production-build.yml",
+      trustedBlob: "0967ec4afc6664f43a84ccf3813de4594fd4da94",
+      authorizedBlob: "1e3118276cc4746e824303245339c25de4411c15",
+      pullNumber: 636,
+      headRef: "dev",
+      baseRef: "master",
+      issuedAt: "2026-09-18T03:28:46.000Z",
+      expiresAt: "2026-09-19T03:28:46.000Z",
+      receiptSha: "ccd0beaaeb306ef48b86fcb7566dfa8c1e7bd2b1",
+    },
+  ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    [expectedWorkflowAuthorization, expectedPromotionWorkflowAuthorization],
+    expectedFreshWorkflowAuthorizations,
   );
+  for (const authorization of expectedFreshWorkflowAuthorizations) {
+    const lookup = {
+      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      repository: authorization.repository,
+      workflowPath: authorization.workflowPath,
+      trustedBlob: authorization.trustedBlob,
+      authorizedBlob: authorization.authorizedBlob,
+      pull: {
+        number: authorization.pullNumber,
+        headRepository: authorization.headRepository,
+        headRef: authorization.headRef,
+        baseRef: authorization.baseRef,
+      },
+      now: "2026-09-18T04:28:46.000Z",
+    };
+    assert.deepEqual(
+      publishPrPolicy.findWorkflowAuthorization(lookup),
+      authorization,
+    );
+    for (const mismatch of [
+      { repository: "another/repository" },
+      { workflowPath: ".github/workflows/production-deploy.yml" },
+      { trustedBlob: "0".repeat(40) },
+      { authorizedBlob: "0".repeat(40) },
+      { pull: { ...lookup.pull, number: 638 } },
+      { pull: { ...lookup.pull, headRepository: "another/repository" } },
+      {
+        pull: {
+          ...lookup.pull,
+          headRef: `${authorization.headRef}-unapproved`,
+        },
+      },
+      {
+        pull: {
+          ...lookup.pull,
+          baseRef: authorization.baseRef === "dev" ? "master" : "dev",
+        },
+      },
+    ]) {
+      assert.equal(
+        publishPrPolicy.findWorkflowAuthorization({ ...lookup, ...mismatch }),
+        null,
+      );
+    }
+    for (const now of [
+      "2026-09-18T03:28:45.999Z",
+      "2026-09-19T03:28:46.000Z",
+    ]) {
+      assert.throws(
+        () => publishPrPolicy.findWorkflowAuthorization({ ...lookup, now }),
+        /workflow authorization is stale or expired/,
+      );
+    }
+  }
+  for (const retired of [
+    expectedWorkflowAuthorization,
+    expectedPromotionWorkflowAuthorization,
+  ]) {
+    assert.equal(
+      publishPrPolicy.trustedWorkflowBlobAuthorizations.some(
+        ({ id }) => id === retired.id,
+      ),
+      false,
+    );
+    assert.throws(
+      () =>
+        publishPrPolicy.findWorkflowAuthorization({
+          authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+          repository: retired.repository,
+          workflowPath: retired.workflowPath,
+          trustedBlob: retired.trustedBlob,
+          authorizedBlob: retired.authorizedBlob,
+          pull: {
+            number: retired.pullNumber,
+            headRepository: retired.headRepository,
+            headRef: retired.headRef,
+            baseRef: retired.baseRef,
+          },
+          now: "2026-09-17T20:00:00.000Z",
+        }),
+      /workflow authorization is stale or expired/,
+    );
+  }
   assert.equal(
     Object.isFrozen(publishPrPolicy.trustedWorkflowBlobAuthorizations),
     true,
@@ -4414,7 +5239,14 @@ async function main() {
     receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
   },
 ]);`),
-    true,
+    false,
+  );
+  assert(
+    publisherSource.includes(
+      `const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
+  {
+    id: "node24-production-build-pr-637-v2",`,
+    ),
   );
   assert.deepEqual(
     publishPrPolicy.trustedCoverageAssetAuthorizations,
