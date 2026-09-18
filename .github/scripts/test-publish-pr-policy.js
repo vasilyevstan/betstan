@@ -5083,7 +5083,7 @@ async function main() {
     expiresAt: "2026-09-18T01:04:52.000Z",
     receiptSha: "88245cd48429e8e314531792be358e5e218312f2",
   };
-  const expectedFreshWorkflowAuthorizations = [
+  const historicalNode24WorkflowAuthorizations = [
     {
       id: "node24-production-build-pr-637-v2",
       repository: "vasilyevstan/betstan",
@@ -5115,11 +5115,11 @@ async function main() {
   ];
   assert.deepEqual(
     publishPrPolicy.trustedWorkflowBlobAuthorizations,
-    expectedFreshWorkflowAuthorizations,
+    [],
   );
-  for (const authorization of expectedFreshWorkflowAuthorizations) {
+  for (const authorization of historicalNode24WorkflowAuthorizations) {
     const lookup = {
-      authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+      authorizations: historicalNode24WorkflowAuthorizations,
       repository: authorization.repository,
       workflowPath: authorization.workflowPath,
       trustedBlob: authorization.trustedBlob,
@@ -5174,6 +5174,7 @@ async function main() {
   for (const retired of [
     expectedWorkflowAuthorization,
     expectedPromotionWorkflowAuthorization,
+    ...historicalNode24WorkflowAuthorizations,
   ]) {
     assert.equal(
       publishPrPolicy.trustedWorkflowBlobAuthorizations.some(
@@ -5181,23 +5182,22 @@ async function main() {
       ),
       false,
     );
-    assert.throws(
-      () =>
-        publishPrPolicy.findWorkflowAuthorization({
-          authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
-          repository: retired.repository,
-          workflowPath: retired.workflowPath,
-          trustedBlob: retired.trustedBlob,
-          authorizedBlob: retired.authorizedBlob,
-          pull: {
-            number: retired.pullNumber,
-            headRepository: retired.headRepository,
-            headRef: retired.headRef,
-            baseRef: retired.baseRef,
-          },
-          now: "2026-09-17T20:00:00.000Z",
-        }),
-      /workflow authorization is stale or expired/,
+    assert.equal(
+      publishPrPolicy.findWorkflowAuthorization({
+        authorizations: publishPrPolicy.trustedWorkflowBlobAuthorizations,
+        repository: retired.repository,
+        workflowPath: retired.workflowPath,
+        trustedBlob: retired.trustedBlob,
+        authorizedBlob: retired.authorizedBlob,
+        pull: {
+          number: retired.pullNumber,
+          headRepository: retired.headRepository,
+          headRef: retired.headRef,
+          baseRef: retired.baseRef,
+        },
+        now: retired.issuedAt,
+      }),
+      null,
     );
   }
   assert.equal(
@@ -5243,9 +5243,7 @@ async function main() {
   );
   assert(
     publisherSource.includes(
-      `const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([
-  {
-    id: "node24-production-build-pr-637-v2",`,
+      "const TRUSTED_WORKFLOW_BLOB_AUTHORIZATIONS = Object.freeze([]);",
     ),
   );
   assert.deepEqual(
