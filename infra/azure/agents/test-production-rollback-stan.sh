@@ -1305,8 +1305,8 @@ bash -n "$CAPTURE_SCRIPT" "$SCRIPT"
 action_lines=(
   'uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0'
   'uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0'
-  'uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0'
-  'uses: azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d # v4.0.3'
+  'uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0'
+  'uses: azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b # v5.0.0'
 )
 for pattern in "${action_lines[@]}"; do
   assert_contains "$DEPLOY_WORKFLOW_FILE" "$pattern"

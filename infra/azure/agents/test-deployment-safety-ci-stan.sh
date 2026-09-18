@@ -4215,8 +4215,11 @@ compile(path.read_bytes(), str(path), "exec")
 PY
 
 python3 -I - "$AZURE_WORKFLOW" "$OCI_WORKFLOW" "$BUILD_WORKFLOW" "$OCI_DEPLOY_SCRIPT" <<'PY'
+import copy
+import json
 import pathlib
 import re
+import subprocess
 import sys
 
 azure_workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -4248,13 +4251,13 @@ expected_oci_order = [
     "gamemaster",
 ]
 approved_action_refs = {
-    "actions/checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
-    "actions/setup-node": "49933ea5288caeca8642d1e84afbd3f7d6820020",
-    "actions/cache": "0400d5f644dc74513175e3cd8d07132dd4860809",
-    "docker/setup-buildx-action": "e468171a9de216ec08956ac3ada2f0791b6bd435",
-    "docker/login-action": "184bdaa0721073962dff0199f1fb9940f07167d1",
-    "docker/build-push-action": "ca052bb54ab0790a636c9b5f226502c73d547a25",
-    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/checkout": "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+    "actions/setup-node": "a0853c24544627f65ddf259abe73b1d18a591444",
+    "actions/cache": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "docker/setup-buildx-action": "37fe631027851001ddb9b187196cc803df7f5f0e",
+    "docker/login-action": "dbcb813823bdd20940b903addbd779551569679f",
+    "docker/build-push-action": "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+    "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
 }
 full_sha_pattern = re.compile(r"^[0-9a-f]{40}$")
 
@@ -4340,6 +4343,18 @@ def mutate_once(text: str, needle: str, replacement: str) -> str:
     return mutated
 
 
+def validate_build_output_defaults(document: dict) -> list[str]:
+    steps = document.get("jobs", {}).get("build", {}).get("steps", [])
+    matches = [step for step in steps if step.get("id") == "build"]
+    expected_env = {
+        "DOCKER_BUILD_SUMMARY": "false",
+        "DOCKER_BUILD_RECORD_UPLOAD": "false",
+    }
+    if len(matches) != 1 or matches[0].get("env") != expected_env:
+        return ["image build must disable new summary and build-record publishing at step scope"]
+    return []
+
+
 if parse_rollouts(azure_workflow) != expected_azure_order:
     fail("Azure deploy workflow rollout order changed")
 provenance_marker = "python3 infra/azure/agents/image_provenance_stan.py"
@@ -4370,7 +4385,7 @@ negative_cases = {
         mutate_once(
             build_workflow,
             f"actions/cache@{approved_action_refs['actions/cache']}",
-            "actions/cache@v4",
+            "actions/cache@v6",
         ),
         "is not pinned to a full 40-character lowercase hex commit SHA",
     ),
@@ -4378,7 +4393,7 @@ negative_cases = {
         mutate_once(
             build_workflow,
             f"docker/login-action@{approved_action_refs['docker/login-action']}",
-            "docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d",
+            "docker/login-action@dbcb813823bdd20940b903addbd779551569679",
         ),
         "is not pinned to a full 40-character lowercase hex commit SHA",
     ),
@@ -4396,13 +4411,13 @@ negative_cases = {
             f"docker/build-push-action@{approved_action_refs['docker/build-push-action']}",
             "docker/build-push-action@0000000000000000000000000000000000000000",
         ),
-        "expected docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25",
+        "expected docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
     ),
     "unknown-action": (
         mutate_once(
             build_workflow,
             f"actions/upload-artifact@{approved_action_refs['actions/upload-artifact']}",
-            "acme/unknown-action@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "acme/unknown-action@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
         ),
         "references an unreviewed third-party action",
     ),
@@ -4415,6 +4430,38 @@ for name, (candidate, expected_fragment) in negative_cases.items():
     if any(expected_fragment in error for error in candidate_errors):
         continue
     fail(f"{name} fixture failed for the wrong reason: {' | '.join(candidate_errors)}")
+
+build_document = json.loads(subprocess.check_output(
+    ["ruby", "-ryaml", "-rjson", "-e",
+     "puts JSON.generate(YAML.load_stream(File.read(ARGV.fetch(0))).first)",
+     sys.argv[3]],
+    text=True,
+))
+output_errors = validate_build_output_defaults(build_document)
+if output_errors:
+    fail("\n".join(output_errors))
+for key in ("DOCKER_BUILD_SUMMARY", "DOCKER_BUILD_RECORD_UPLOAD"):
+    for value in (None, "true"):
+        candidate = copy.deepcopy(build_document)
+        build_step = next(
+            step for step in candidate["jobs"]["build"]["steps"]
+            if step.get("id") == "build"
+        )
+        if value is None:
+            del build_step["env"][key]
+        else:
+            build_step["env"][key] = value
+        if not validate_build_output_defaults(candidate):
+            fail(f"build-output fixture unexpectedly passed: {key}={value}")
+wrong_scope = copy.deepcopy(build_document)
+wrong_scope_step = next(
+    step for step in wrong_scope["jobs"]["build"]["steps"]
+    if step.get("id") == "build"
+)
+wrong_scope["jobs"]["build"]["env"] = wrong_scope_step.pop("env")
+if not validate_build_output_defaults(wrong_scope):
+    fail("job-wide build output settings unexpectedly passed")
+print("production_build_output_defaults=PASS cases=6")
 
 for text, label in (
     (azure_workflow, "Azure deploy workflow"),

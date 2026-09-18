@@ -213,8 +213,8 @@ require_literal "$rollback_workflow" "shared-mongo-operation-lock-stan.sh acquir
 require_literal "$rollback_workflow" "shared-mongo-operation-lock-stan.sh release" "rollback operation lock release"
 require_literal "$rollback_workflow" "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09" "reviewed checkout pin"
 require_literal "$rollback_workflow" "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f" "reviewed upload-artifact pin"
-require_literal "$rollback_workflow" "azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5" "reviewed azure/login pin"
-require_literal "$rollback_workflow" "azure/aks-set-context@c7eb093e5a5d47caa333f64974d5fd1cd4bf069d" "reviewed aks-set-context pin"
+require_literal "$rollback_workflow" "azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906" "reviewed azure/login pin"
+require_literal "$rollback_workflow" "azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b" "reviewed aks-set-context pin"
 
 require_literal "$oci_rollback_workflow" "name: oci-production-rollback" "OCI production rollback identity"
 require_literal "$oci_rollback_workflow" "run-name: oci-rollback \${{ inputs.target_sha }}" "OCI rollback run name"
