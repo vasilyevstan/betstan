@@ -322,6 +322,13 @@ current_image_ref() {
   printf 'ghcr.io/vasilyevstan/betstan-images@%s\n' "$(current_digest "$service")"
 }
 
+write_deployments_fixture() {
+  local directory="$1"
+  awk -F '\t' -v OFS='\t' \
+    '{print $1, $3, "7", "1", "1", "1"}' \
+    "$directory/images.tsv" >"$directory/deployments.tsv"
+}
+
 create_baseline_fixture() {
   local directory="$1"
   local mode="${2:-good}"
@@ -463,6 +470,7 @@ EOF2
     >>"$directory/images.tsv"
   awk -F '\t' '{print $1 "\t" $3}' "$directory/images.tsv" \
     >"$directory/live-images.tsv"
+  write_deployments_fixture "$directory"
   write_deploy_provenance_fixture \
     "$directory/trusted-deploy-provenance.txt" \
     "$directory/images.tsv" modern "$TARGET_SHA"
@@ -476,7 +484,7 @@ EOF2
   : >"$directory/SHA256SUMS"
   local file
   for file in \
-    baseline-provenance.env images.tsv live-images.tsv queues.tsv \
+    baseline-provenance.env images.tsv live-images.tsv deployments.tsv queues.tsv \
     public-http.tsv sse.tsv migration-journal.json migration-lock.json \
     migration-backup-references.tsv trusted-deploy-provenance.txt \
     telemetry-pre-run.env; do
@@ -536,7 +544,11 @@ EOF2
       fail "unsupported failed-deploy H9 Telemetry mode: $mode"
       ;;
   esac
+  write_deployments_fixture "$directory"
   refresh_fixture_checksums "$directory"
+  printf '%s  deployments.tsv\n' \
+    "$(sha256_file "$directory/deployments.tsv")" \
+    >>"$directory/SHA256SUMS"
   printf '%s  telemetry-pre-run.env\n' \
     "$(sha256_file "$directory/telemetry-pre-run.env")" \
     >>"$directory/SHA256SUMS"
@@ -604,6 +616,7 @@ EOF2
 create_recovery_baseline_fixture() {
   local directory="$1"
   cp -R "$FIXTURE_DIR/baseline-good" "$directory"
+  write_deployments_fixture "$directory"
   rm -f "$directory/trusted-deploy-provenance.txt"
   printf 'auth\tfixture.ocir.io/tenant/betstan/auth@sha256:%064d\t%s\n' \
     91 "$(target_image_ref auth)" >"$directory/transition-plan.tsv"
@@ -645,7 +658,7 @@ EOF2
   : >"$directory/SHA256SUMS"
   local file
   for file in \
-    baseline-provenance.env images.tsv live-images.tsv queues.tsv public-http.tsv sse.tsv \
+    baseline-provenance.env images.tsv live-images.tsv deployments.tsv queues.tsv public-http.tsv sse.tsv \
     migration-journal.json migration-lock.json migration-backup-references.tsv \
     transition-plan.tsv rabbitmq-baseline.txt trusted-recovery-transition-provenance.env; do
     printf '%s  %s\n' "$(sha256_file "$directory/$file")" "$file" >>"$directory/SHA256SUMS"
@@ -2625,6 +2638,88 @@ if run_baseline_validator "$FIXTURE_DIR/baseline-current" false \
     >"$WORK_DIR/historical-rejects-t10.out" 2>&1; then
   fail 'historical ordinary validator accepted unified T10 evidence'
 fi
+
+for deployment_failure in \
+  missing unchecksummed mixed duplicate unknown malformed nonnumeric-revision \
+  zero-desired unhealthy image-mismatch; do
+  invalid_fixture="$FIXTURE_DIR/baseline-current-deployments-$deployment_failure"
+  cp -R "$FIXTURE_DIR/baseline-current" "$invalid_fixture"
+  case "$deployment_failure" in
+    missing)
+      rm "$invalid_fixture/deployments.tsv"
+      ;;
+    unchecksummed)
+      awk '$2 != "deployments.tsv"' "$invalid_fixture/SHA256SUMS" \
+        >"$invalid_fixture/SHA256SUMS.next"
+      mv "$invalid_fixture/SHA256SUMS.next" "$invalid_fixture/SHA256SUMS"
+      ;;
+    mixed)
+      awk -F '\t' '$1 != "telemetry"' "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    duplicate)
+      sed -n '1p' "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/duplicate-deployment.tsv"
+      cat "$invalid_fixture/duplicate-deployment.tsv" \
+        >>"$invalid_fixture/deployments.tsv"
+      rm "$invalid_fixture/duplicate-deployment.tsv"
+      ;;
+    unknown)
+      awk -F '\t' -v OFS='\t' \
+        '$1 == "slip" {$1 = "unknown"} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    nonnumeric-revision)
+      awk -F '\t' -v OFS='\t' \
+        '$1 == "auth" {$3 = "invalid"} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    zero-desired)
+      awk -F '\t' -v OFS='\t' \
+        '$1 == "auth" {$4 = "0"; $5 = "0"; $6 = "0"} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    malformed)
+      awk -F '\t' -v OFS='\t' \
+        '$1 == "auth" {print $1, $2, $3, $4, $5; next} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    unhealthy)
+      awk -F '\t' -v OFS='\t' \
+        '$1 == "telemetry" {$5 = "0"} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+    image-mismatch)
+      awk -F '\t' -v OFS='\t' -v image="$(current_image_ref auth)" \
+        '$1 == "telemetry" {$2 = image} {print}' \
+        "$invalid_fixture/deployments.tsv" \
+        >"$invalid_fixture/deployments.tsv.next"
+      mv "$invalid_fixture/deployments.tsv.next" "$invalid_fixture/deployments.tsv"
+      ;;
+  esac
+  case "$deployment_failure" in
+    missing|unchecksummed)
+      ;;
+    *)
+      refresh_fixture_checksums "$invalid_fixture"
+      ;;
+  esac
+  if run_baseline_validator "$invalid_fixture" true \
+      >"$WORK_DIR/current-rejects-deployments-$deployment_failure.out" 2>&1; then
+    fail "current validator accepted $deployment_failure deployment evidence"
+  fi
+done
 
 for resume_profile in \
   "legacy-h9-retained:$FIXTURE_DIR/baseline-failed-deploy-h9" \

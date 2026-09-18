@@ -85,6 +85,8 @@ required_files = {
     "live-images.tsv",
     "queues.tsv",
 }
+if require_current_deploy_provenance == "true":
+    required_files.add("deployments.tsv")
 
 if any(path.is_symlink() for path in root.rglob("*")):
     raise SystemExit("rollback baseline contains a symlink")
@@ -281,6 +283,41 @@ if failed_deploy_ordinary_resume:
 elif set(images) != services:
     raise SystemExit("rollback image provenance does not contain the exact required service set")
 
+if require_current_deploy_provenance == "true":
+    deployment_image_pattern = re.compile(
+        rf"{re.escape(repository)}@sha256:[0-9a-f]{{64}}"
+    )
+    deployments = {}
+    for raw in (root / "deployments.tsv").read_text(encoding="utf-8").splitlines():
+        fields = raw.split("\t")
+        if len(fields) != 6:
+            raise SystemExit("rollback deployment evidence must contain six columns")
+        service, image_ref, revision, desired, ready, available = fields
+        if service in deployments or service not in services:
+            raise SystemExit("rollback deployment evidence service set is invalid")
+        if (
+            not deployment_image_pattern.fullmatch(image_ref)
+            or image_ref != images.get(service)
+        ):
+            raise SystemExit(
+                "rollback deployment evidence differs from immutable GHCR provenance"
+            )
+        if (
+            re.fullmatch(r"[0-9]+", revision) is None
+            or re.fullmatch(r"[0-9]+", desired) is None
+            or re.fullmatch(r"[0-9]+", ready) is None
+            or re.fullmatch(r"[0-9]+", available) is None
+            or int(desired) < 1
+            or int(ready) != int(desired)
+            or int(available) != int(desired)
+        ):
+            raise SystemExit("rollback deployment evidence is not healthy")
+        deployments[service] = image_ref
+    if set(deployments) != services:
+        raise SystemExit(
+            "rollback deployment evidence does not contain the exact required service set"
+        )
+
 if services == current_services:
     if telemetry is None:
         raise SystemExit("current rollback baseline requires checksum-bound Telemetry evidence")
@@ -288,6 +325,10 @@ if services == current_services:
         telemetry["mode"] != "retained"
         or telemetry["queue_present"] != "true"
         or telemetry["image"] != images["telemetry"]
+        or (
+            require_current_deploy_provenance == "true"
+            and deployments["telemetry"] != telemetry["image"]
+        )
     ):
         raise SystemExit("current rollback baseline Telemetry evidence does not match images.tsv")
 elif failed_deploy_resume and telemetry is None:
