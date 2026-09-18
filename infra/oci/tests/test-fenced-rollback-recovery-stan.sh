@@ -51,6 +51,34 @@ image_for() {
   printf 'ghcr.io/vasilyevstan/betstan-images@sha256:%s' "$(digest_for "$1" "$2")"
 }
 
+refresh_baseline_manifest() {
+  python3 - "$BASELINE_DIR" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+(root / "SHA256SUMS").write_text("".join(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n"
+    for path in sorted(root.rglob("*"))
+    if path.is_file() and path.name != "SHA256SUMS"
+), encoding="utf-8")
+PY
+}
+
+write_baseline_deploy_provenance() {
+  cat >"$BASELINE_DIR/trusted-deploy-provenance.txt" <<EOF
+source_sha=$TARGET_SHA
+deployment_workflow=oci-production-deploy
+deployment_run_id=34045296926
+deployment_run_attempt=1
+registry_provider=ghcr
+registry_host=ghcr.io
+registry_repository=ghcr.io/vasilyevstan/betstan-images
+registry_public_anonymous=true
+image_provenance_sha256=$(shasum -a 256 "$BASELINE_DIR/images.tsv" | awk '{print $1}')
+EOF
+}
+
 # ---------------------------------------------------------------- fixtures ---
 new_case() {
   local name="$1"
@@ -71,10 +99,18 @@ new_case() {
   # Baseline artifact describes the known-good target generation.
   {
     printf 'baseline_source_sha=%s\n' "$TARGET_SHA"
+    printf 'baseline_deploy_workflow=oci-production-deploy\n'
     printf 'baseline_deploy_run_id=%s\n' 34045296926
+    printf 'baseline_deploy_run_attempt=1\n'
+    printf 'baseline_build_workflow=oci-production-build\n'
     printf 'baseline_build_run_id=%s\n' 34037745321
+    printf 'baseline_build_run_attempt=1\n'
+    printf 'baseline_capture_run_id=34068138505\n'
+    printf 'baseline_capture_run_attempt=1\n'
+    printf 'namespace=betstan-oci\n'
     printf 'database_restore=disabled\n'
     printf 'registry_provider=ghcr\n'
+    printf 'registry_host=ghcr.io\n'
     printf 'registry_repository=ghcr.io/vasilyevstan/betstan-images\n'
     printf 'registry_public_anonymous=true\n'
   } >"$BASELINE_DIR/baseline-provenance.env"
@@ -83,14 +119,14 @@ new_case() {
   : >"$BASELINE_DIR/images.tsv"
   : >"$BUILD_DIR/images.tsv"
   local service
-  for service in "${SERVICES[@]}"; do
+  for service in "${SERVICES[@]}" telemetry; do
     printf '%s\t%s\t30\t1\t1\t1\n' "$service" "$(image_for target "$service")" \
       >>"$BASELINE_DIR/deployments.tsv"
-    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
-      "$service" "$(image_for target "$service")" "$(digest_for target "$service")" \
+    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
+      "$service" "$(image_for target "$service")" "$(digest_for target "$service")" "$(digest_for target "$service")" \
       >>"$BASELINE_DIR/images.tsv"
-    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
-      "$service" "$(image_for deployed "$service")" "$(digest_for deployed "$service")" \
+    printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\tsha256:%s\n' \
+      "$service" "$(image_for deployed "$service")" "$(digest_for deployed "$service")" "$(digest_for deployed "$service")" \
       >>"$BUILD_DIR/images.tsv"
     printf '%s\n' "$(image_for deployed "$service")" >"$STATE_DIR/image-$service"
     if printf '%s\n' "${QUIESCED[@]}" | grep -qx "$service"; then
@@ -110,15 +146,11 @@ image=$(image_for target telemetry)
 database_initialized=true
 queue_present=true
 EOF
-  printf '%s\tghcr.io/vasilyevstan/betstan-images\t%s\tsha256:%s\n' \
-    telemetry "$(image_for deployed telemetry)" "$(digest_for deployed telemetry)" \
-    >>"$BUILD_DIR/images.tsv"
-  (
-    cd "$BASELINE_DIR"
-    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
-      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
-    done
-  ) >"$BASELINE_DIR/SHA256SUMS"
+  awk -F '\t' '{print $1 "\t" $3}' "$BASELINE_DIR/images.tsv" >"$BASELINE_DIR/live-images.tsv"
+  awk -F '\t' '{print $1 "\t" $1 "-pod\t" $3}' "$BASELINE_DIR/images.tsv" >"$BASELINE_DIR/pod-images.tsv"
+  printf 'telemetry:events:v1\t0\t0\t1\n' >"$BASELINE_DIR/queues.tsv"
+  write_baseline_deploy_provenance
+  refresh_baseline_manifest
 
   write_fakes
 }
@@ -129,6 +161,7 @@ write_fakes() {
 set -euo pipefail
 STATE_DIR="${FAKE_STATE_DIR}"
 printf '%s\n' "$*" >>"$STATE_DIR/kubectl.log"
+printf 'kubectl %s\n' "$*" >>"$STATE_DIR/operations.log"
 svc_from_depl() { sed -e 's/^gaming-//' -e 's/-depl$//' <<<"$1"; }
 case "$1" in
   get)
@@ -234,6 +267,7 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 STATE_DIR="${FAKE_STATE_DIR}"
+printf 'maintenance %s\n' "$1" >>"$STATE_DIR/operations.log"
 case "$1" in
   verify-held)
     [[ "$(cat "$STATE_DIR/maintenance")" == "held" ]] || { echo "not held" >&2; exit 1; }
@@ -263,6 +297,7 @@ STATE_DIR="${FAKE_STATE_DIR}"
 [[ "$LOCK_TOKEN" == "live-data-${FAKE_EXPECTED_DATA_RUN}-1" ]] || { echo "wrong lock token" >&2; exit 1; }
 [[ "$SOURCE_SHA" == "$FAKE_EXPECTED_SOURCE_SHA" ]] || { echo "wrong lock source sha" >&2; exit 1; }
 printf '%s\n' "$1" >>"$STATE_DIR/lock.log"
+printf 'lock %s\n' "$1" >>"$STATE_DIR/operations.log"
 case "$1" in
   verify)
     [[ "$(cat "$STATE_DIR/lock")" == "held" ]] || {
@@ -335,6 +370,7 @@ EOF
 set -euo pipefail
 mkdir -p "$OUTPUT_DIR"
 phase="${ROLLBACK_READINESS_PHASE:-steady-state}"
+printf 'readiness %s\n' "$phase" >>"$FAKE_STATE_DIR/operations.log"
 status=GO
 cleanup_state="$(
   node - \
@@ -479,6 +515,65 @@ run_operator() {
   "$OPERATOR"
 }
 
+if [[ -n "${CAPTURED_BASELINE_DIR:-}" ]]; then
+  TARGET_SHA="$(awk -F= '$1 == "baseline_source_sha" {print $2}' "$CAPTURED_BASELINE_DIR/baseline-provenance.env")"
+  new_case captured-baseline
+  BASELINE_DIR="$CAPTURED_BASELINE_DIR"
+  if [[ "${CAPTURED_BASELINE_EXPECT_REJECTION:-false}" == "true" ]]; then
+    while IFS=$'\t' read -r service image _; do
+      printf '%s\n' "$image" >"$STATE_DIR/image-$service"
+    done <"$BASELINE_DIR/live-images.tsv"
+    if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+      assert_contains "$CASE_DIR/out.txt" 'oci_fenced_rollback_recovery=PASS'
+      [[ ! -f "$STATE_DIR/image-telemetry" ]] ||
+        fail "accepted downgrade did not reach the expected Telemetry removal"
+      printf 'captured_authority_removal=UNSAFE_ACCEPTANCE telemetry_removed=true\n' >&2
+      fail "fenced consumer accepted a captured authority-removal downgrade"
+    fi
+    assert_contains "$CASE_DIR/out.txt" \
+      'ordinary rollback baseline omits trusted deploy provenance'
+    assert_contains "$CASE_DIR/out.txt" \
+      'fenced recovery baseline validation failed'
+    [[ ! -s "$STATE_DIR/operations.log" &&
+       ! -s "$STATE_DIR/lock.log" &&
+       ! -s "$STATE_DIR/kubectl.log" &&
+       "$(cat "$STATE_DIR/maintenance")" == "held" &&
+       "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+      fail "authority-removal rejection occurred after a runtime operation"
+    printf 'captured_authority_removal=REJECTED_BEFORE_RUNTIME_OPERATIONS\n'
+    exit 0
+  fi
+  run_operator >"$CASE_DIR/out.txt" 2>&1 ||
+    fail "actual captured baseline was rejected: $(cat "$CASE_DIR/out.txt")"
+  while IFS=$'\t' read -r service image _; do
+    [[ "$(cat "$STATE_DIR/image-$service")" == "$image" ]] ||
+      fail "actual captured baseline did not restore exact $service image"
+    [[ "$(cat "$STATE_DIR/replicas-$service")" == "1" ]] ||
+      fail "actual captured baseline did not restore $service replicas"
+  done <"$BASELINE_DIR/live-images.tsv"
+  [[ "$(cat "$STATE_DIR/telemetry-routes")" == "2" &&
+     -f "$STATE_DIR/service-telemetry" ]] ||
+    fail "actual captured baseline lost the retained Telemetry routes/service"
+  python3 - "$STATE_DIR/operations.log" "$OUT_DIR/fenced-restore-order.tsv" <<'PY'
+import sys
+from pathlib import Path
+events = Path(sys.argv[1]).read_text().splitlines()
+order = ["auth", "bet", "event", "moderation", "resulting", "slip", "client", "gamemaster", "backoffice"]
+assert [line.split("\t")[0] for line in Path(sys.argv[2]).read_text().splitlines()] == order
+restores = [line.split()[3] for line in events if line.startswith("kubectl set image ")]
+assert restores == [f"deployment/gaming-{service}-depl" for service in order + ["telemetry"]]
+fenced = events.index("readiness maintenance-fenced")
+first_restore = next(i for i, line in enumerate(events) if line.startswith("kubectl set image "))
+telemetry_restore = next(i for i, line in enumerate(events) if line.startswith("kubectl set image deployment/gaming-telemetry-depl "))
+assert fenced < first_restore < telemetry_restore < events.index("lock release") < events.index("maintenance release") < events.index("readiness steady-state")
+PY
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'status=PASS'
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'database_lock=released'
+  assert_contains "$OUT_DIR/fenced-recovery-summary.env" 'maintenance_fence=released'
+  printf 'captured_baseline_fenced_recovery=PASS\n'
+  exit 0
+fi
+
 # Applied cleanup plus an incompatible target must be rejected before the
 # recovery can restart Backoffice and consume a delayed pre-cutoff delivery.
 new_case cleanup-applied-incompatible
@@ -584,6 +679,11 @@ done
 
 configure_first_activation() {
   local stage="$1" service
+  local file
+  for file in images.tsv live-images.tsv deployments.tsv pod-images.tsv; do
+    awk -F '\t' '$1 != "telemetry"' "$BASELINE_DIR/$file" >"$BASELINE_DIR/$file.tmp"
+    mv "$BASELINE_DIR/$file.tmp" "$BASELINE_DIR/$file"
+  done
   cat >"$BASELINE_DIR/telemetry-pre-run.env" <<EOF
 mode=absent
 image=none
@@ -628,12 +728,8 @@ EOF
       ;;
     *) fail "unknown first-activation fixture stage: $stage" ;;
   esac
-  (
-    cd "$BASELINE_DIR"
-    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
-      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
-    done
-  ) >"$BASELINE_DIR/SHA256SUMS"
+  write_baseline_deploy_provenance
+  refresh_baseline_manifest
 }
 
 FORWARD_WRITERS=(bet event moderation resulting slip backoffice gamemaster)
@@ -727,7 +823,8 @@ configure_first_activation absent
 for service in "${SERVICES[@]}"; do
   awk -F '\t' -v OFS='\t' -v selected="$service" \
     -v image="$(image_for target "$service")" \
-    '$1 == selected {$3 = image} {print}' \
+    -v digest="sha256:$(digest_for target "$service")" \
+    '$1 == selected {$3 = image; $4 = digest; $5 = digest} {print}' \
     "$BUILD_DIR/images.tsv" >"$BUILD_DIR/images.tsv.next"
   mv "$BUILD_DIR/images.tsv.next" "$BUILD_DIR/images.tsv"
 done
@@ -749,12 +846,7 @@ expect_reject() {
 mutate_baseline_target() {
   sed -i.bak "s/baseline_source_sha=$TARGET_SHA/baseline_source_sha=6666666666666666666666666666666666666666/" \
     "$BASELINE_DIR/baseline-provenance.env"
-  (
-    cd "$BASELINE_DIR"
-    for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
-      printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
-    done
-  ) >"$BASELINE_DIR/SHA256SUMS"
+  refresh_baseline_manifest
 }
 break_fence() { printf 'released\n' >"$STATE_DIR/maintenance"; }
 break_lock() { printf 'expired\n' >"$STATE_DIR/lock"; }
@@ -777,15 +869,59 @@ fi
 
 new_case duplicate-telemetry-evidence
 printf 'mode=retained\n' >>"$BASELINE_DIR/telemetry-pre-run.env"
-(
-  cd "$BASELINE_DIR"
-  for evidence in baseline-provenance.env deployments.tsv images.tsv telemetry-pre-run.env; do
-    printf '%s  %s\n' "$(shasum -a 256 "$evidence" | awk '{print $1}')" "$evidence"
-  done
-) >"$BASELINE_DIR/SHA256SUMS"
+refresh_baseline_manifest
 if run_operator >"$CASE_DIR/out.txt" 2>&1; then
   fail 'fenced recovery accepted repeated Telemetry pre-run evidence'
 fi
+
+for mutation in \
+    duplicate-baseline duplicate-deployment duplicate-current unknown-current \
+    missing-current-telemetry substituted-current four-column-current \
+    current-digest-mismatch current-repository-mismatch \
+    missing-baseline-telemetry altered-baseline-telemetry \
+    missing-baseline-deployment; do
+  new_case "invalid-inventory-$mutation"
+  python3 - "$BASELINE_DIR" "$BUILD_DIR" "$mutation" <<'PY'
+import sys
+from pathlib import Path
+baseline, build = map(Path, sys.argv[1:3])
+mutation = sys.argv[3]
+path = build / "images.tsv"
+if mutation in {"duplicate-baseline", "missing-baseline-telemetry", "altered-baseline-telemetry"}:
+    path = baseline / "images.tsv"
+elif mutation in {"duplicate-deployment", "missing-baseline-deployment"}:
+    path = baseline / "deployments.tsv"
+rows = [line.split("\t") for line in path.read_text().splitlines()]
+if mutation.startswith("duplicate"):
+    rows.append(rows[0].copy())
+elif mutation == "unknown-current":
+    row = rows[0].copy()
+    row[0] = "unknown"
+    rows.append(row)
+elif mutation.startswith("missing") or mutation == "substituted-current":
+    service = "auth" if mutation == "substituted-current" else "telemetry"
+    rows = [row for row in rows if row[0] != service]
+elif mutation == "four-column-current":
+    rows = [row[:4] for row in rows]
+elif mutation in {"current-digest-mismatch", "altered-baseline-telemetry"}:
+    rows[-1][3] = "sha256:" + "f" * 64
+elif mutation == "current-repository-mismatch":
+    rows[-1][1] = "ghcr.io/other/images"
+else:
+    raise SystemExit("unknown fenced inventory fixture")
+path.write_text("".join("\t".join(row) + "\n" for row in rows))
+PY
+  refresh_baseline_manifest
+  if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery accepted $mutation"
+  fi
+  if grep -Eq '^(set image|scale|delete|patch|apply) ' "$STATE_DIR/kubectl.log"; then
+    fail "fenced recovery mutated workloads for $mutation"
+  fi
+  [[ ! -s "$STATE_DIR/lock.log" &&
+     "$(cat "$STATE_DIR/maintenance")" == "held" ]] ||
+    fail "fenced recovery changed safeguards for $mutation"
+done
 
 # An expired lease with the fence and quiescence still intact is the documented
 # rehold state: reclaim it (fencing generation bumped) rather than fail.
