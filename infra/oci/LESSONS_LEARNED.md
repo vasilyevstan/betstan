@@ -145,12 +145,37 @@ conversation summaries are not authority.
   its consumed authority and promote a substantive hardened SHA rather than
   rerunning, replaying, or switching authority roots.
 - Capture and validate rollback evidence before acquiring a database lock or
-  changing a workload. An ordinary baseline is valid only when all nine live
-  references and its exact deploy provenance identify public GHCR digests;
+  changing a workload. An ordinary baseline is valid only when the exact
+  supported live inventory and deploy provenance identify public GHCR digests;
   OCIR or mixed state must first complete the explicitly selected recovery.
 - GitHub currently documents public Container Registry storage/bandwidth as
   free and documents a one-month notice policy for pricing changes. Record
   that policy without claiming a perpetual free service.
+
+## Inventory and completion evidence after a service addition
+
+- Do not carry a historical service count into current rollback validation.
+  Distinguish the exact historical nine, current ten including Telemetry, and
+  explicitly supported split-recovery inventory by authenticated provenance,
+  not count alone. Current evidence must bind images, live images, deployments,
+  pod identities, and retained Telemetry; missing, mixed, duplicate, unknown,
+  or locally downgraded inventories fail before mutation.
+- Baseline acceptance is not universal rollback authority. Ordinary historical
+  rollback and maintenance-fenced recovery have different supported shapes;
+  current retained-Telemetry recovery is single-replica only. Use the canonical
+  `docs/wiki/Release-Orchestration.md` contract rather than broadening a
+  recovery path merely because capture succeeded.
+- Artifact count is stage-specific. The source build's nine provenance
+  artifacts and an OCI build's single archive containing ten service records
+  are different contracts. Validate the selected workflow's identities and
+  artifact contents rather than announcing a service count from another stage.
+- Fixed-cutoff cleanup completion requires the journal's applied state, zero
+  remaining candidates, preserved boundary/newer rows, and separate evidence
+  that cleanup did not mutate other service databases. Distinguish cleanup
+  from separately authorized backfills and acceptance fixtures. Keep the
+  reschedule-before-cleanup dependency and replay protection; do not turn a
+  one-time cleanup into rolling retention. Check the public catalog after
+  deployment as well as the sanitized apply/verify reports.
 
 ## Identity and approvals
 
