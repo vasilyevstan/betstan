@@ -107,10 +107,14 @@ users created, and user logins.
 
 In overview mode, each card contains a dependency-free graph and all fourteen
 exact date/value pairs. Hovering a daily or hourly bar shows an immediate,
-theme-matched tooltip containing only the exact count, without rounding or
-abbreviation. Daily date/value entries are native buttons usable by keyboard
-and touch; focusing one also shows its count tooltip. **Escape** dismisses the
-tooltip, and exact values remain readable without hover.
+theme-matched, two-line tooltip: the bucket date or start time above the exact
+count, without rounding or abbreviation. Daily labels use `YYYY-MM-DD UTC`;
+hourly labels use `YYYY-MM-DD HH:mm UTC`, identifying the hour bucket's start,
+not an individual event time. Labels come from the active bucket in the
+accepted snapshot, not its generation timestamp, the current clock, or the
+local timezone. Daily date/value entries are native buttons usable by keyboard
+and touch; focusing one also shows the tooltip. **Escape** dismisses it, and
+exact values remain readable without hover.
 
 Clicking a daily bar or activating its date/value button changes only that
 card to the selected day's **24 hourly UTC counts**, from **00:00** through
