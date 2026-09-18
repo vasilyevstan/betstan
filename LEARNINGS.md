@@ -111,6 +111,15 @@ technical gate and the separate approval rules for human-originated work.
 
 ### Live simulation engine
 - `gamemaster/src/simulation/` is pure and clock-independent: it uses named seeded RNG streams and emits integer offsets, never wall-clock timestamps.
+- A mixed live/countdown section needs one ordered collection for both layout
+  counts and rendering: active-live first, then kickoff-soon, each by canonical
+  displayed kickoff. Reuse `getScheduledKickoffTime`, put valid times before
+  unavailable times, and use event identity for deterministic ties. Keep this
+  presentation rule local rather than changing unrelated shared event sorting.
+- Assert the exact accessible card order in every UI variant and preserve
+  keyed focus/selection during feed updates. Active-before-pre-match evidence
+  does not prove active-before-countdown or earliest-kickoff ordering; a future
+  fixture outside the countdown window cannot exercise that regression.
 - Dense pre-match sections and a sparse two/three-card pre-match row use the
   same responsive one/two/three-card grid; a sparse pre-match row must
   consume the stage intentionally: one desktop card uses a bounded two-thirds
@@ -308,6 +317,10 @@ technical gate and the separate approval rules for human-originated work.
 ### Fail-dark live activation
 - `LIVE_KICKOFFS_ENABLED=true` is permanent only when no activation lease is present. A temporary activation also carries `LIVE_KICKOFFS_LEASE_UNTIL_EPOCH`; malformed or expired leases fail dark inside Gamemaster while already-started matches continue.
 - The protected activation workflow first uses a bounded lease. Only the same run and source SHA may remove it, and only after production acceptance, protected evidence upload, and a final current-master/provenance revalidation.
+- `accepted.env` records leased acceptance, not permanent activation. Confirm
+  the final `provenance.env` and checksum-bound `commit/control.env` show a
+  successful commit, live kickoffs enabled, and no lease before calling the
+  release permanently active.
 - Disable and every ambiguous control failure set the flag false and remove the lease together. The lease remains the independent safety boundary if the workflow runner is hard-killed before its cleanup trap can execute.
 - Deployment provenance must bind source SHA, build/deploy attempts, infrastructure artifact digest, runtime mode, and runtime fingerprint. Rechecking current `master` immediately before mutation and commit closes the preflight-to-mutation race.
 - Permanent enablement is not evidence that the next ordinary public match
@@ -481,6 +494,11 @@ cd resulting && npm ci && npm run test:ci
   Required safety checks still run; the scope freeze prevents self-created
   workflow conflicts rather than weakening release evidence.
 - A squash promotion breaks shared ancestry until the new `master` commit is merged back into `dev`; perform that synchronization immediately.
+- A zero-diff ancestry PR can still be `BEHIND` and unmergeable under strict
+  protection even when its merge-snapshot checks pass. Merge the latest `dev`
+  into the synchronization branch, preserve its tree, finalize metadata, and
+  require fresh exact-snapshot checks. Do not use an administrator bypass or
+  discard concurrent protected work.
 - Manual central production workflow dispatches and reruns are emergency operations requiring an exact full master SHA and `production-emergency` approval. Old central and per-service workflow identities stay disabled so historical definitions cannot be rerun.
 - Live activation and disable are separate protected OCI control-plane workflows. Activation is leased until its complete acceptance evidence is committed; disable may target an older deployed SHA only while that SHA remains an ancestor of current `master`.
 - The trusted PR publisher compares the exact `production-build.yml` blob with the default branch. When adding a repository-wide static guard, prefer invoking it from an existing trusted entrypoint already called by that workflow; changing the trusted workflow and its verifier in the same PR intentionally fails closed.
@@ -742,9 +760,11 @@ cd resulting && npm ci && npm run test:ci
   may report only `Abort:`. Lock the complete credential mapping in a workflow
   contract rather than relying on an earlier authenticated step.
 - Capture rollback evidence before any database lock or workload/data
-  mutation. A zero-recovery baseline is valid only when all nine live
-  references and exact deploy provenance are public GHCR digests; otherwise
-  require the exact completed recovery run and its transition evidence.
+  mutation. A zero-recovery baseline requires the exact supported service
+  identities, matching live public GHCR digests, and authenticated deployment
+  provenance; a historical nine-service inventory is not a universal current
+  baseline. See `infra/oci/LESSONS_LEARNED.md` for current/historical evidence
+  distinctions; recovery requires its own exact completed transition evidence.
 - GitHub currently documents public Container Registry package storage and
   bandwidth as free, but this is policy rather than permanent capacity.
   Monitor the documented one-month policy-change notice and never weaken
@@ -1120,6 +1140,11 @@ validated.
   proves a CLI-owned automatic gate, run the checked-in approval path before
   retaining a watcher. A watcher transports notifications but never owns the
   pending mutation, and human-originated work remains personally gated.
+- A watcher for an ancestry PR does not cover the promotion's build or its
+  `workflow_run` descendants. Reconcile every owned nonterminal run at the
+  existing checkpoint and handle eligible downstream approvals promptly,
+  subject to ancestry and exclusivity gates; do not wait for another user
+  status request to discover an unattended gate.
 - Approval eligibility comes from the machine-readable protected-operation
   policy plus the exact durable authority record, not an agent's remembered
   risk category. A dispatcher-issued `ghcr-package-validate` run is an
@@ -1234,6 +1259,14 @@ Durable rules:
 - Long polling loops are the usual disguise. Waiting in large sleep blocks
   without surfacing intermediate state converts a legitimate provider wait into
   an invisible one.
+- Report only observed state: approval does not prove that a job is executing
+  or that maintenance is established. A green workflow does not prove an
+  unasserted behavior. Reuse accepted evidence, name any remaining gap, and
+  distinguish a background handoff from task completion.
+- Prefer sanitized artifacts and explicit field allowlists to raw Actions
+  logs. Grepping for a step name can retain every injected environment value
+  because the name prefixes each log line. For multi-URL curl probes, suppress
+  each response body separately; one `-o /dev/null` does not suppress all bodies.
 
 ## Prerequisites must be proven before one-use authority is spent — 2026-09-07
 
@@ -1336,6 +1369,11 @@ Durable rules:
   rollback, and source PR/run links. Keep redesign before production only for
   concrete data or user invalidity, a security or authorization defect, a
   backward-compatibility break, or unsafe or irreversible rollback.
+- Before expanding a release hotfix, refresh concurrent work. If a smaller
+  accepted fix already resolves the same blocker, reuse its compatible source
+  and accepted reviews, close the duplicate attempt, and rerun only evidence
+  invalidated by the exact new candidate. Do not finish a larger design merely
+  because effort has already been spent on it.
 - Preserve security, compatibility, data, branch, test, and production safety.
   Simplicity changes sequencing and ownership, not the required quality bar.
 - Keep architect and simplifier corrections in the same logical work unit and
