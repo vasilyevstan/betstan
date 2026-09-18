@@ -333,6 +333,10 @@ if not infrastructure_run_id.isdigit() or int(infrastructure_run_id) <= 0:
 PY
 
 # Build the exact target image map and the expected currently deployed map.
+BASELINE_DIR="$BASELINE_DIR" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+  "$SCRIPT_DIR/validate-rollback-baseline-stan.sh" >/dev/null ||
+  oci_die "fenced recovery baseline validation failed"
 python3 - \
   "$BASELINE_DIR/deployments.tsv" \
   "$BASELINE_DIR/images.tsv" \
@@ -365,10 +369,10 @@ image_pattern = re.compile(
 )
 
 
-def rows(path, minimum):
+def rows(path, width):
     with open(path, encoding="utf-8", newline="") as handle:
         parsed = [row for row in csv.reader(handle, delimiter="\t") if row]
-    if any(len(row) < minimum for row in parsed):
+    if any(len(row) != width for row in parsed):
         raise SystemExit(f"{path}: malformed TSV evidence")
     return parsed
 
@@ -376,6 +380,8 @@ def rows(path, minimum):
 deployments = {}
 for row in rows(deployments_path, 6):
     service, image, _revision, desired, ready, available = row[:6]
+    if service in deployments or service not in current_services:
+        raise SystemExit("baseline deployment service set is invalid")
     if not image_pattern.fullmatch(image):
         raise SystemExit(f"{service}: baseline image is not an immutable digest")
     if not desired.isdigit() or int(desired) < 1:
@@ -384,22 +390,27 @@ for row in rows(deployments_path, 6):
         raise SystemExit(f"{service}: baseline replica state was not healthy")
     deployments[service] = (image, desired)
 
-baseline_images = {}
-for row in rows(baseline_images_path, 3):
-    if not image_pattern.fullmatch(row[2]):
-        raise SystemExit(f"{row[0]}: baseline image reference is invalid")
-    baseline_images[row[0]] = row[2]
+def image_inventory(path):
+    images = {}
+    for service, repository, image, digest, platform_digest in rows(path, 5):
+        if service in images or service not in current_services:
+            raise SystemExit("image provenance service set is invalid")
+        if (
+            repository != "ghcr.io/vasilyevstan/betstan-images"
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", platform_digest)
+            or image != f"{repository}@{digest}"
+        ):
+            raise SystemExit(f"{service}: image provenance is invalid")
+        images[service] = image
+    return images
 
-current_images = {}
-for row in rows(current_images_path, 3):
-    if not image_pattern.fullmatch(row[2]):
-        raise SystemExit(f"{row[0]}: deployed image reference is invalid")
-    current_images[row[0]] = row[2]
-
-if sorted(deployments) != sorted(services):
-    raise SystemExit("baseline deployments do not cover the nine services")
-if sorted(baseline_images) != sorted(services):
-    raise SystemExit("baseline images do not cover the nine services")
+baseline_images = image_inventory(baseline_images_path)
+current_images = image_inventory(current_images_path)
+if set(baseline_images) not in (set(services), current_services):
+    raise SystemExit("baseline images do not cover an exact historical or current service set")
+if set(deployments) not in (set(baseline_images), current_services):
+    raise SystemExit("baseline deployments do not cover the complete baseline")
 if set(current_images) != current_services:
     raise SystemExit("deployed images do not cover the current ten services")
 
@@ -431,8 +442,19 @@ if (
 ):
     raise SystemExit("pre-run Telemetry evidence is invalid")
 
-for service in services:
-    if deployments[service][0] != baseline_images[service]:
+if "telemetry" in baseline_images and (
+    telemetry["mode"] != "retained"
+    or telemetry["image"] != baseline_images["telemetry"]
+    or "telemetry" not in deployments
+):
+    raise SystemExit("current baseline contradicts its retained Telemetry evidence")
+for service in deployments:
+    expected_image = baseline_images.get(service)
+    if service == "telemetry":
+        expected_image = telemetry["image"]
+        if telemetry["mode"] != "retained" or deployments[service][1] != "1":
+            raise SystemExit("baseline Telemetry cannot use the existing single-replica restore path")
+    if deployments[service][0] != expected_image:
         raise SystemExit(f"{service}: baseline image evidence is inconsistent")
 
 with open(plan_path, "w", encoding="utf-8", newline="") as handle:

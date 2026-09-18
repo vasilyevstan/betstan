@@ -538,7 +538,8 @@ PY
 
 compare_live_images() {
   local candidate_images_file="$1"
-  python3 - "$candidate_images_file" "$OUTPUT_DIR/live-images.tsv" <<'PY'
+  local partial_telemetry_file="${2:-}"
+  python3 - "$candidate_images_file" "$OUTPUT_DIR/live-images.tsv" "$partial_telemetry_file" <<'PY'
 import sys
 from pathlib import Path
 
@@ -547,12 +548,25 @@ for line in Path(sys.argv[1]).read_text(encoding='utf-8').splitlines():
     if not line:
         continue
     service, _repository, image_ref, _digest, _platform_digest = line.split('\t')
+    if service in candidate:
+        raise SystemExit("duplicate authenticated image service")
     candidate[service] = image_ref
+if sys.argv[3]:
+    # This sidecar is supplied only after complete partial-recovery validation.
+    telemetry = dict(
+        line.split("=", 1)
+        for line in Path(sys.argv[3]).read_text(encoding="utf-8").splitlines()
+    )
+    if "telemetry" in candidate or telemetry["mode"] != "retained":
+        raise SystemExit("partial recovery observer contradicts its image inventory")
+    candidate["telemetry"] = telemetry["image"]
 live = {}
 for line in Path(sys.argv[2]).read_text(encoding='utf-8').splitlines():
     if not line:
         continue
     service, image_ref = line.split('\t')
+    if service in live:
+        raise SystemExit("duplicate observed image service")
     live[service] = image_ref
 if candidate != live:
     raise SystemExit(1)
@@ -570,6 +584,7 @@ expected_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+current_services = expected_services | {"telemetry"}
 repository = "ghcr.io/vasilyevstan/betstan-images"
 digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
 rows = {}
@@ -580,7 +595,7 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     if len(fields) != 5:
         raise SystemExit("image provenance must contain exactly five columns")
     service, row_repository, image_ref, manifest_digest, platform_digest = fields
-    if service in rows or service not in expected_services:
+    if service in rows or service not in current_services:
         raise SystemExit("image provenance service set is invalid")
     if row_repository != repository:
         raise SystemExit("image provenance repository is not the public GHCR repository")
@@ -591,8 +606,8 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     if image_ref != f"{repository}@{manifest_digest}":
         raise SystemExit("image provenance reference does not match its GHCR manifest digest")
     rows[service] = image_ref
-if set(rows) != expected_services:
-    raise SystemExit("image provenance does not contain exactly the nine application services")
+if set(rows) not in (expected_services, current_services):
+    raise SystemExit("image provenance does not contain an exact historical or current service set")
 PY
 }
 
@@ -607,6 +622,7 @@ expected_services = {
     "auth", "bet", "backoffice", "client", "event", "gamemaster",
     "moderation", "resulting", "slip",
 }
+current_services = expected_services | {"telemetry"}
 reference_pattern = re.compile(
     r"ghcr\.io/vasilyevstan/betstan-images@sha256:[0-9a-f]{64}"
 )
@@ -618,13 +634,13 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     if len(fields) != 2:
         raise SystemExit("live image inventory must contain exactly two columns")
     service, image_ref = fields
-    if service in rows or service not in expected_services:
+    if service in rows or service not in current_services:
         raise SystemExit("live image inventory service set is invalid")
     if not reference_pattern.fullmatch(image_ref):
         raise SystemExit("live image inventory is not an immutable public GHCR generation")
     rows[service] = image_ref
-if set(rows) != expected_services:
-    raise SystemExit("live image inventory does not contain exactly the nine application services")
+if set(rows) not in (expected_services, current_services):
+    raise SystemExit("live image inventory does not contain an exact historical or current service set")
 PY
 }
 
@@ -688,23 +704,35 @@ fi
 
 : >"$OUTPUT_DIR/live-images.tsv"
 : >"$OUTPUT_DIR/deployments.tsv"
-for service in "${ROLLBACK_SERVICES[@]}"; do
+telemetry_deployment_json="$WORK_DIR/telemetry-deployment.json"
+kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
+  --ignore-not-found -o json >"$telemetry_deployment_json" ||
+  oci_die "unable to inspect the pre-run Telemetry deployment"
+capture_services=("${ROLLBACK_SERVICES[@]}")
+[[ ! -s "$telemetry_deployment_json" ]] || capture_services+=(telemetry)
+for service in "${capture_services[@]}"; do
   deployment="gaming-${service}-depl"
   container="gaming-${service}"
   deployment_json="$WORK_DIR/${service}-deployment.json"
-  kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" -o json >"$deployment_json"
-  read -r image revision desired ready updated available < <(
+  if [[ "$service" != "telemetry" ]]; then
+    kubectl get deployment "$deployment" -n "$OCI_K8S_NAMESPACE" -o json >"$deployment_json"
+  fi
+  deployment_values="$(
     python3 - "$deployment_json" "$container" <<'PY'
 import json
 import sys
 
 doc = json.load(open(sys.argv[1], encoding='utf-8'))
 container = sys.argv[2]
-image = ''
-for item in doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []):
-    if item.get('name') == container:
-        image = item.get('image', '')
-        break
+if not isinstance(doc, dict):
+    raise SystemExit("deployment observation must be a JSON object")
+containers = [
+    item for item in doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+    if item.get('name') == container
+]
+if len(containers) != 1:
+    raise SystemExit("deployment observation must contain exactly one application container")
+image = containers[0].get('image', '')
 print(
     image,
     doc.get('metadata', {}).get('annotations', {}).get('deployment.kubernetes.io/revision', '0'),
@@ -714,7 +742,8 @@ print(
     doc.get('status', {}).get('availableReplicas', 0),
 )
 PY
-  )
+  )" || oci_die "unable to parse deployment ${deployment}"
+  read -r image revision desired ready updated available <<<"$deployment_values"
   [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || oci_die "deployment ${deployment} does not use an immutable digest"
   printf '%s\t%s\n' "$service" "$image" >>"$OUTPUT_DIR/live-images.tsv"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -750,7 +779,8 @@ if [[ "$BASELINE_RECOVERY_RUN_ID" != "0" ]]; then
       oci_die "selected partial recovery artifact is not exact completed recovery evidence"
     validate_ghcr_image_inventory "$BASELINE_RECOVERY_DIR/images.tsv" ||
       oci_die "selected partial recovery images are not immutable public GHCR provenance"
-    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" ||
+    compare_live_images "$BASELINE_RECOVERY_DIR/images.tsv" \
+      "$BASELINE_RECOVERY_DIR/telemetry-recovery.env" ||
       oci_die "live deployment GHCR digests do not match the selected partial recovery"
     matched_source_sha="$(
       env_value "$partial_recovery_marker" restored_source_sha
@@ -976,12 +1006,8 @@ oci_rabbitmq_queue_rows <"$queue_raw" >"$OUTPUT_DIR/queues.tsv" ||
   oci_die "unable to normalize RabbitMQ queue state"
 [[ -s "$OUTPUT_DIR/queues.tsv" ]] || oci_die "queue snapshot is empty"
 
-telemetry_deployment_json="$WORK_DIR/telemetry-deployment.json"
 telemetry_service_json="$WORK_DIR/telemetry-service.json"
 telemetry_ingress_json="$WORK_DIR/telemetry-ingress.json"
-kubectl get deployment gaming-telemetry-depl -n "$OCI_K8S_NAMESPACE" \
-  --ignore-not-found -o json >"$telemetry_deployment_json" ||
-  oci_die "unable to inspect the pre-run Telemetry deployment"
 kubectl get service gaming-telemetry-srv -n "$OCI_K8S_NAMESPACE" \
   --ignore-not-found -o json >"$telemetry_service_json" ||
   oci_die "unable to inspect the pre-run Telemetry service"
@@ -1018,7 +1044,12 @@ deployment_path, service_path, ingress_path, database_initialized, queue_present
 
 def optional_json(path):
     content = Path(path).read_text(encoding="utf-8")
-    return json.loads(content) if content else None
+    if not content:
+        return None
+    document = json.loads(content)
+    if not isinstance(document, dict):
+        raise SystemExit("optional resource observation must be a JSON object")
+    return document
 
 deployment = optional_json(deployment_path)
 service = optional_json(service_path)

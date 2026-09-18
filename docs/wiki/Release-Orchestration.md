@@ -405,8 +405,21 @@ deleted projection. Pending-publication replay-or-drain compatibility remains
 a separate mandatory decision; satisfying either the cleanup or publication
 decision cannot satisfy the other.
 
+Current ten-application baselines must bind the complete authenticated image
+inventory to matching live-image and deployment inventories, including matching
+checksum-bound retained Telemetry state. New ordinary historical
+nine-application captures must positively prove Telemetry absent; archived
+legacy baselines retain the existing reconstruction of provenance from their
+exact deployment. The explicitly authenticated split-recovery form remains
+distinct: a nine-application image manifest plus separately bound retained
+Telemetry, not a rewritten ten-image manifest. Service count, observed presence,
+and retention mode alone are not authority. Missing, unreadable, or
+contradictory evidence fails closed; recomputing local checksums cannot
+downgrade an authenticated ten-application baseline to a historical one.
+
 Historical pre-Telemetry rollback restores only the nine historical
-application images. During that transition, the retained observer must keep
+application images and rejects ten-application baselines before mutation.
+During that transition, the retained observer must keep
 serving a well-formed summary, while its intentionally coarse service states
 may be green, yellow, or red as older workloads start. Once all nine historical
 applications are exact and ready, terminal rollback removes the Telemetry API
@@ -431,6 +444,16 @@ restores the baseline digests and replica counts, proves the previously failing
 workload is stable, releases the database lock and then the write fence in that
 order, and finally requires ordinary steady-state readiness. Any failure
 re-holds maintenance and reports the true lock state.
+
+Recovery from a ten-application baseline is limited to this eligible
+failed-deployment, maintenance-fenced path. For retained Telemetry, this path
+supports only a single-replica baseline and rejects unsupported replica counts
+before workload mutation. Complete input validation precedes the existing
+nine-application restore and separate Telemetry restore, with the same locks,
+fences, failure re-hold, and readiness checks. This does not enable
+ordinary unfenced rollback after a successful ten-application deployment.
+Data-preparation and deployment gates validate baseline evidence; they do not
+establish ordinary rollback capability.
 
 Mongo maintenance resumes the ingress controller only after exact version,
 compatibility-version, and image verification, before applying the Telemetry
