@@ -1019,6 +1019,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           OUTPUT_DIR: artifacts/oci-data-baseline-before
+          BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}
           OCI_PUBLIC_URL: ${{ steps.provenance.outputs.public_url }}
           OCI_REDIRECT_URL: ${{ steps.provenance.outputs.redirect_url }}
           OCI_DIAGNOSTIC_URL: ${{ steps.provenance.outputs.diagnostic_url }}
@@ -1031,6 +1032,30 @@ jobs:
           else
             BASELINE_RECOVERY_DIR=artifacts/recovery \
               ./infra/oci/scripts/baseline-capture-stan.sh
+          fi
+          if [ "$PHASE" = "apply-slip-index" ]; then
+            source ./infra/oci/scripts/lib.sh || exit 1
+            expected_baseline_source_sha=
+            expected_recovery_run_id=
+            if [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then
+              [ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ] ||
+                oci_die "baseline recovery source requires a selected recovery run"
+              if [ "$FAILED_DEPLOY_RUN_ID" = "0" ]; then
+                expected_recovery_run_id=0
+              fi
+            else
+              [[ "$BASELINE_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ &&
+                 "$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+                oci_die "selected baseline recovery requires its authenticated source SHA"
+              expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"
+              expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"
+            fi
+            EXPECTED_SOURCE_SHA="$expected_baseline_source_sha" \
+            EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE" \
+            EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id" \
+            REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+              oci_require_retained_telemetry_restore_profile "$OUTPUT_DIR" ||
+              oci_die "final data handoff baseline validation failed"
           fi
           printf 'BASELINE_SHA256=%s\n' \
             "$(sha256sum artifacts/oci-data-baseline-before/SHA256SUMS | awk '{print $1}')" \
