@@ -286,7 +286,7 @@ describe('Telemetry', () => {
   };
   const settle = async (request, data) => act(async () => request.resolve({ data }));
 
-  describe('tooltip bucket identity', () => {
+  describe('both-mode tooltip time and amount identity', () => {
     beforeEach(() => {
       // JSDOM has no layout; browser coverage independently measures actual bounds.
       jest.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () {
@@ -307,13 +307,11 @@ describe('Telemetry', () => {
       const isDaily = bucket.length === 10;
       const time = tooltip.querySelector('time');
       const value = tooltip.querySelector('data');
-      expect([...tooltip.children].map((element) => element.tagName)).toEqual(isDaily ? ['DATA'] : ['TIME', 'DATA']);
-      if (isDaily) {
-        expect(time).toBeNull();
-        expect(tooltip.textContent).toBe(String(count));
-      } else {
-        expect(time.textContent).toBe(label);
-        expect(time).toHaveAttribute('datetime', bucket);
+      expect([...tooltip.children].map((element) => element.tagName)).toEqual(['TIME', 'DATA']);
+      expect(time.textContent).toBe(label);
+      expect(time).toHaveAttribute('datetime', bucket);
+      expect(tooltip.textContent).toBe(`${label}${count}`);
+      if (!isDaily) {
         expect(card.querySelector('.telemetry-metric__day time')).toHaveTextContent(bucket.slice(0, 10));
       }
       expect(value.textContent).toBe(String(count));
@@ -333,12 +331,39 @@ describe('Telemetry', () => {
       }
     };
 
+    it('requires UTC-day window and amount together for past and in-progress daily buckets', async () => {
+      axios.get.mockResolvedValueOnce({ data: createSummary({ valueFor: () => 46 }) });
+      renderTelemetry();
+      await screen.findByRole('heading', { name: 'Service health' });
+      for (const index of [0, 13]) {
+        fireEvent.mouseEnter(cardAt().querySelectorAll('rect')[index]);
+        expect(within(cardAt()).getByRole('tooltip').querySelectorAll('time')).toHaveLength(1);
+        expectTooltip(cardAt(), DATES[index], '00:00-24:00 UTC', 46);
+      }
+      axios.get.mockResolvedValueOnce({ data: createHourly(METRIC_NAMES[0], DATES[13], Array(24).fill(46)) });
+      userEvent.click(dateButton(0, 13));
+      await within(cardAt()).findByRole('list', { name: /hourly UTC/ });
+      fireEvent.mouseEnter(cardAt().querySelectorAll('rect')[0]);
+      expectTooltip(cardAt(), `${DATES[13]}T00:00:00.000Z`, '00:00 UTC', 46);
+      userEvent.click(within(cardAt()).getByRole('button', { name: 'Back to 14 days' }));
+      expect(dateButton(0, 13)).toHaveFocus();
+      expectTooltip(cardAt(), DATES[13], '00:00-24:00 UTC', 46);
+      axios.get.mockResolvedValueOnce({ data: createSummary({
+        generatedAt: '2026-09-10T05:30:00.000Z', valueFor: () => 47,
+      }) });
+      userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await screen.findByText('Telemetry refreshed.');
+      act(() => dateButton(0, 13).focus());
+      expectTooltip(cardAt(), DATES[13], '00:00-24:00 UTC', 47);
+      expect(axios.get).toHaveBeenCalledTimes(3);
+    });
+
     it.each(['2026-09-10', '2027-01-10'])(
-      'pairs every daily and hourly bucket across the month/year boundary ending %s',
+      'pairs time and amount for all eight metrics and every daily/hourly bucket across the boundary ending %s',
       async (lastDay) => {
         const summary = createSummary({
           generatedAt: `${lastDay}T04:30:00.000Z`,
-          valueFor: (metricIndex, index) => index === 13 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + index,
+          valueFor: (metricIndex, index) => index === 0 ? 0 : index === 13 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + index,
         });
         summary.dates = Array.from({ length: 14 }, (_, index) => (
           new Date(Date.parse(`${lastDay}T00:00:00.000Z`) - (13 - index) * 86400000).toISOString().slice(0, 10)
@@ -348,32 +373,32 @@ describe('Telemetry', () => {
         await screen.findByRole('heading', { name: 'Service health' });
         expect(screen.getByText(summary.generatedAt)).toBeInTheDocument();
 
-        for (const metricIndex of [0, 1]) {
+        for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
           const card = cardAt(metricIndex);
           const bars = card.querySelectorAll('rect');
           const buttons = card.querySelectorAll('.telemetry-metric__values button');
           for (let index = 0; index < 14; index += 1) {
             fireEvent.mouseEnter(bars[index]);
-            expectTooltip(card, summary.dates[index], null, summary.metrics[metricIndex].values[index]);
-            if (metricIndex === 1) {
-              expectTooltip(cardAt(0), summary.dates[13], null, Number.MAX_SAFE_INTEGER);
+            expectTooltip(card, summary.dates[index], '00:00-24:00 UTC', summary.metrics[metricIndex].values[index]);
+            if (metricIndex > 0) {
+              expectTooltip(cardAt(metricIndex - 1), summary.dates[13], '00:00-24:00 UTC', Number.MAX_SAFE_INTEGER);
             }
             fireEvent.mouseLeave(bars[index], { clientX: 0, clientY: 0 });
           }
           for (let index = 0; index < 14; index += 1) {
             act(() => buttons[index].focus());
             expect(buttons[index]).toHaveFocus();
-            expectTooltip(card, summary.dates[index], null, summary.metrics[metricIndex].values[index]);
+            expectTooltip(card, summary.dates[index], '00:00-24:00 UTC', summary.metrics[metricIndex].values[index]);
           }
           const listValues = card.querySelectorAll('.telemetry-metric__values data');
           expect(listValues).toHaveLength(14);
           expect([...listValues].map((value) => value.textContent)).toEqual(summary.metrics[metricIndex].values.map(String));
         }
 
-        // Adjacent Aug 31/Sep 1 or Dec 31/Jan 1 selections stay card-local.
-        for (const metricIndex of [0, 1]) {
+        // Eight adjacent selections spanning Aug/Sep or Dec/Jan stay card-local.
+        for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
           const day = summary.dates[3 + metricIndex];
-          const values = Array.from({ length: 24 }, (_, hour) => hour === 23 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + hour);
+          const values = Array.from({ length: 24 }, (_, hour) => hour === 0 ? 0 : hour === 23 ? Number.MAX_SAFE_INTEGER : metricIndex * 100 + hour);
           const detail = {
             ...createHourly(METRIC_NAMES[metricIndex], day, values),
             generatedAt: `${lastDay}T05:45:00.000Z`,
@@ -383,9 +408,9 @@ describe('Telemetry', () => {
           await within(cardAt(metricIndex)).findByRole('list', { name: /hourly UTC/ });
           expect(cardAt(metricIndex).querySelector('.telemetry-metric__generated time'))
             .toHaveTextContent(detail.generatedAt);
-          if (metricIndex === 1) {
-            fireEvent.mouseEnter(cardAt(0).querySelectorAll('rect')[23]);
-            expectTooltip(cardAt(0), `${summary.dates[3]}T23:00:00.000Z`, '23:00 UTC', Number.MAX_SAFE_INTEGER);
+          if (metricIndex > 0) {
+            fireEvent.mouseEnter(cardAt(metricIndex - 1).querySelectorAll('rect')[23]);
+            expectTooltip(cardAt(metricIndex - 1), `${summary.dates[2 + metricIndex]}T23:00:00.000Z`, '23:00 UTC', Number.MAX_SAFE_INTEGER);
           }
           const bars = cardAt(metricIndex).querySelectorAll('rect');
           for (let hour = 0; hour < 24; hour += 1) {
@@ -401,14 +426,15 @@ describe('Telemetry', () => {
             { timeout: 10000, signal: expect.any(AbortSignal) },
           );
         }
-        expect(axios.get).toHaveBeenCalledTimes(3);
+        expect(axios.get).toHaveBeenCalledTimes(9);
       },
+      30000,
     );
   });
 
   describe('tooltip placement', () => {
     // Fixed measurements exercise the four-candidate policy independently of
-    // content height. Browser coverage measures the actual one/two-row layouts.
+    // content height. Browser coverage measures two occupied rows in both modes.
     const viewportHeight = window.innerHeight;
     afterEach(() => {
       window.innerHeight = viewportHeight;
@@ -478,7 +504,8 @@ describe('Telemetry', () => {
 
       const tooltip = within(cardAt()).getByRole('tooltip', { hidden: true });
       expect(dateButton(0, 13)).toHaveFocus();
-      expect(tooltip.querySelector('time')).toBeNull();
+      expect(tooltip.querySelector('time')).toHaveTextContent('00:00-24:00 UTC');
+      expect(tooltip.querySelector('time')).toHaveAttribute('datetime', DATES[13]);
       expect(tooltip.querySelector('data')).toHaveAttribute('value', '14');
       if (expectedTop === null) {
         expect(tooltip).not.toBeVisible();
