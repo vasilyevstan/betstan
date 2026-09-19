@@ -304,12 +304,33 @@ describe('Telemetry', () => {
 
     const expectTooltip = (card, bucket, label, count) => {
       const tooltip = within(card).getByRole('tooltip');
+      const isDaily = bucket.length === 10;
       const time = tooltip.querySelector('time');
       const value = tooltip.querySelector('data');
-      expect(time.textContent).toBe(label);
-      expect(time).toHaveAttribute('datetime', bucket);
+      expect([...tooltip.children].map((element) => element.tagName)).toEqual(isDaily ? ['DATA'] : ['TIME', 'DATA']);
+      if (isDaily) {
+        expect(time).toBeNull();
+        expect(tooltip.textContent).toBe(String(count));
+      } else {
+        expect(time.textContent).toBe(label);
+        expect(time).toHaveAttribute('datetime', bucket);
+        expect(card.querySelector('.telemetry-metric__day time')).toHaveTextContent(bucket.slice(0, 10));
+      }
       expect(value.textContent).toBe(String(count));
       expect(value).toHaveAttribute('value', String(count));
+      expect(tooltip).not.toHaveTextContent(/\d{4}-\d{2}-\d{2}/);
+      expect(tooltip).not.toHaveAccessibleName(/\d{4}-\d{2}-\d{2}/);
+      expect(tooltip).not.toHaveAccessibleDescription(/\d{4}-\d{2}-\d{2}/);
+      expect(tooltip).not.toHaveAttribute('title');
+      expect(tooltip.querySelector('[title]')).toBeNull();
+      const listTime = [...card.querySelectorAll('.telemetry-metric__values time')]
+        .find((element) => element.getAttribute('datetime') === bucket);
+      expect(listTime).toHaveTextContent(isDaily ? bucket : label);
+      if (isDaily) {
+        expect(listTime.closest('button')).toHaveAccessibleName(
+          `${card.querySelector('h3').textContent}, ${bucket} UTC, ${count}`,
+        );
+      }
     };
 
     it.each(['2026-09-10', '2027-01-10'])(
@@ -325,6 +346,7 @@ describe('Telemetry', () => {
         axios.get.mockResolvedValueOnce({ data: summary });
         renderTelemetry();
         await screen.findByRole('heading', { name: 'Service health' });
+        expect(screen.getByText(summary.generatedAt)).toBeInTheDocument();
 
         for (const metricIndex of [0, 1]) {
           const card = cardAt(metricIndex);
@@ -332,16 +354,16 @@ describe('Telemetry', () => {
           const buttons = card.querySelectorAll('.telemetry-metric__values button');
           for (let index = 0; index < 14; index += 1) {
             fireEvent.mouseEnter(bars[index]);
-            expectTooltip(card, summary.dates[index], `${summary.dates[index]} UTC`, summary.metrics[metricIndex].values[index]);
+            expectTooltip(card, summary.dates[index], null, summary.metrics[metricIndex].values[index]);
             if (metricIndex === 1) {
-              expectTooltip(cardAt(0), summary.dates[13], `${summary.dates[13]} UTC`, Number.MAX_SAFE_INTEGER);
+              expectTooltip(cardAt(0), summary.dates[13], null, Number.MAX_SAFE_INTEGER);
             }
             fireEvent.mouseLeave(bars[index], { clientX: 0, clientY: 0 });
           }
           for (let index = 0; index < 14; index += 1) {
             act(() => buttons[index].focus());
             expect(buttons[index]).toHaveFocus();
-            expectTooltip(card, summary.dates[index], `${summary.dates[index]} UTC`, summary.metrics[metricIndex].values[index]);
+            expectTooltip(card, summary.dates[index], null, summary.metrics[metricIndex].values[index]);
           }
           const listValues = card.querySelectorAll('.telemetry-metric__values data');
           expect(listValues).toHaveLength(14);
@@ -359,14 +381,16 @@ describe('Telemetry', () => {
           axios.get.mockResolvedValueOnce({ data: detail });
           userEvent.click(cardAt(metricIndex).querySelectorAll('.telemetry-metric__values button')[3 + metricIndex]);
           await within(cardAt(metricIndex)).findByRole('list', { name: /hourly UTC/ });
+          expect(cardAt(metricIndex).querySelector('.telemetry-metric__generated time'))
+            .toHaveTextContent(detail.generatedAt);
           if (metricIndex === 1) {
             fireEvent.mouseEnter(cardAt(0).querySelectorAll('rect')[23]);
-            expectTooltip(cardAt(0), `${summary.dates[3]}T23:00:00.000Z`, `${summary.dates[3]} 23:00 UTC`, Number.MAX_SAFE_INTEGER);
+            expectTooltip(cardAt(0), `${summary.dates[3]}T23:00:00.000Z`, '23:00 UTC', Number.MAX_SAFE_INTEGER);
           }
           const bars = cardAt(metricIndex).querySelectorAll('rect');
           for (let hour = 0; hour < 24; hour += 1) {
             fireEvent.mouseEnter(bars[hour]);
-            expectTooltip(cardAt(metricIndex), detail.hours[hour], `${day} ${String(hour).padStart(2, '0')}:00 UTC`, values[hour]);
+            expectTooltip(cardAt(metricIndex), detail.hours[hour], `${String(hour).padStart(2, '0')}:00 UTC`, values[hour]);
             expect(within(cardAt(metricIndex)).getByRole('tooltip')).not.toHaveTextContent(lastDay);
           }
           const listValues = cardAt(metricIndex).querySelectorAll('.telemetry-metric__values data');
@@ -383,6 +407,8 @@ describe('Telemetry', () => {
   });
 
   describe('tooltip placement', () => {
+    // Fixed measurements exercise the four-candidate policy independently of
+    // content height. Browser coverage measures the actual one/two-row layouts.
     const viewportHeight = window.innerHeight;
     afterEach(() => {
       window.innerHeight = viewportHeight;
@@ -391,7 +417,7 @@ describe('Telemetry', () => {
 
     it.each([
       {
-        name: 'clamps the measured 768px Back-to-tallest-bar regression',
+        name: 'clamps a measured tooltip when neither natural position fits',
         card: [12, 822.96875, 744, 398.09375],
         bar: [695.8928833007812, 883.5887451171875, 35.5, 116.84002685546875],
         control: [148.390625, 1145.625, 113.015625, 58.4375],
@@ -452,7 +478,7 @@ describe('Telemetry', () => {
 
       const tooltip = within(cardAt()).getByRole('tooltip', { hidden: true });
       expect(dateButton(0, 13)).toHaveFocus();
-      expect(tooltip.querySelector('time')).toHaveAttribute('datetime', DATES[13]);
+      expect(tooltip.querySelector('time')).toBeNull();
       expect(tooltip.querySelector('data')).toHaveAttribute('value', '14');
       if (expectedTop === null) {
         expect(tooltip).not.toBeVisible();

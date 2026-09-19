@@ -106,15 +106,18 @@ slips created, bets placed, results settled, Gamecenter events emitted,
 users created, and user logins.
 
 In overview mode, each card contains a dependency-free graph and all fourteen
-exact date/value pairs. Hovering a daily or hourly bar shows an immediate,
-theme-matched, two-line tooltip: the bucket date or start time above the exact
-count, without rounding or abbreviation. Daily labels use `YYYY-MM-DD UTC`;
-hourly labels use `YYYY-MM-DD HH:mm UTC`, identifying the hour bucket's start,
-not an individual event time. Labels come from the active bucket in the
-accepted snapshot, not its generation timestamp, the current clock, or the
-local timezone. Daily date/value entries are native buttons usable by keyboard
-and touch; focusing one also shows the tooltip. **Escape** dismisses it, and
-exact values remain readable without hover.
+exact date/value pairs. Hovering a bar shows an immediate, theme-matched
+tooltip. Daily tooltips show only the exact count, with no date or time.
+Hourly tooltips show `HH:mm UTC` above the exact count, using the active hour
+bucket's UTC start from the accepted snapshot, not an individual event time,
+generation timestamp, current clock, or local timezone. Counts are never
+rounded or abbreviated, and neither tooltip displays a calendar date. The
+hourly tooltip retains the full UTC date-time as machine-readable metadata.
+Date context remains outside tooltips in the selected-day heading, daily
+date/value list and button names, and snapshot timestamps. Daily date/value
+entries are native buttons usable by keyboard and touch; focusing one also
+shows the tooltip. **Escape** dismisses it, and exact values remain readable
+without hover.
 
 Clicking a daily bar or activating its date/value button changes only that
 card to the selected day's **24 hourly UTC counts**, from **00:00** through
