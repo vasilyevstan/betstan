@@ -219,6 +219,30 @@ Before deployment, the release chain verifies:
   source SHA, apply state, verification state, and rollback state;
 - absence of competing production operations.
 
+**Final data-handoff baseline admission.** Only `apply-slip-index` adds this
+operation-specific check at the actual selected fresh or imported baseline.
+Canonical checksum/provenance validation runs first, then retained-Telemetry
+eligibility, before baseline digest export, capacity checks, this invocation's
+operation lock, or maintenance entry. A retained profile requires exactly one
+checksum-bound Telemetry deployment row with desired replicas `1`. A qualified
+historical nine-application absent profile retains its existing
+positive-absence and provenance requirements.
+
+Normal and recovery-authorized fresh paths and both authorized
+maintenance-resume variants use the selected baseline; imports are not
+recaptured.
+Recovery prevalidation shares the check while retaining the planner's complete
+local assertion as defense in depth. Generic capture and validation, ordinary
+backfills, dry-run and artifact-only validation remain unchanged, as does the
+seven-writer set.
+
+Rejection at this admission check performs no new lock acquisition, transfer,
+renewal or release and no runtime restoration; inherited holds stay untouched.
+It is not proof that no prior lock exists or that availability was restored.
+This is necessary profile compatibility, not universal rollback authority,
+proof of data reversibility, or a guarantee of recovery from every failure.
+It introduces no automatic scaling, repair, replay, reset or admission bypass.
+
 **Pending fixed Backoffice cleanup.** The protected live-data chain adds one
 fixed-boundary Backoffice projection cleanup without creating a separate
 production path:

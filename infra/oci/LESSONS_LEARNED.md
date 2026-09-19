@@ -162,7 +162,14 @@ conversation summaries are not authority.
   or locally downgraded inventories fail before mutation.
 - Baseline acceptance is not universal rollback authority. Ordinary historical
   rollback and maintenance-fenced recovery have different supported shapes;
-  current retained-Telemetry recovery is single-replica only. Use the canonical
+  current retained-Telemetry recovery is single-replica only. For final
+  `apply-slip-index` admission, validate the selected fresh or imported
+  baseline's canonical checksums/provenance and then profile eligibility,
+  before digest export, capacity, lock or maintenance work. Do not recapture
+  imports. Rejection preserves inherited holds; it does not prove no prior
+  lock exists or restore availability. Generic capture/validation, backfills,
+  dry-run and artifact-only checks stay unchanged; recovery keeps its complete
+  local planner assertion as defense in depth. Use the canonical
   `docs/wiki/Release-Orchestration.md` contract rather than broadening a
   recovery path merely because capture succeeded.
 - Artifact count is stage-specific. The source build's nine provenance

@@ -874,6 +874,113 @@ if run_operator >"$CASE_DIR/out.txt" 2>&1; then
   fail 'fenced recovery accepted repeated Telemetry pre-run evidence'
 fi
 
+real_python3="$(command -v python3)"
+for scenario in checksum-retained provenance-retained checksum-absent provenance-absent parser-failure; do
+  new_case "restore-profile-$scenario"
+  if [[ "$scenario" == *-absent ]]; then
+    configure_first_activation absent
+  fi
+  case "$scenario" in
+    provenance-*)
+      sed -i.bak '/^deployment_workflow=/d' "$BASELINE_DIR/trusted-deploy-provenance.txt"
+      refresh_baseline_manifest
+      ;;
+  esac
+  cat >"$BIN_DIR/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+# Reach canonical validation after the operator's earlier envelope checksum check.
+if [[ "${FAKE_CANONICAL_CHECKSUM_TAMPER:-false}" == "true" &&
+      "$#" == "7" && "$1" == "-" && "$2" == "${BASELINE_DIR:?}" ]]; then
+  printf 'unbound-change\n' >>"$BASELINE_DIR/queues.tsv"
+  printf 'tampered\n' >>"${FAKE_STATE_DIR:?}/canonical-tamper.log"
+fi
+if [[ "$#" == "2" && "$1" == "-" && "$2" == "${BASELINE_DIR:?}" ]]; then
+  printf 'profile\n' >>"${FAKE_STATE_DIR:?}/profile-parse.log"
+  if [[ "${FAKE_PROFILE_PARSE_FAILURE:-false}" == "true" ]]; then
+    echo "injected restore profile parser failure" >&2
+    exit 37
+  fi
+fi
+exec "${REAL_PYTHON3:?}" "$@"
+SH
+  chmod +x "$BIN_DIR/python3"
+  if run_operator REAL_PYTHON3="$real_python3" \
+      FAKE_CANONICAL_CHECKSUM_TAMPER="$([[ "$scenario" == checksum-* ]] && printf true || printf false)" \
+      FAKE_PROFILE_PARSE_FAILURE="$([[ "$scenario" == "parser-failure" ]] && printf true || printf false)" \
+      >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery OR-wrapper accepted $scenario"
+  fi
+  if ! grep -Fq 'fenced recovery baseline validation failed' "$CASE_DIR/out.txt"; then
+    cat "$CASE_DIR/out.txt" >&2
+    fail "fenced recovery did not reach canonical $scenario rejection"
+  fi
+  if [[ "$scenario" == "parser-failure" ]]; then
+    assert_contains "$CASE_DIR/out.txt" 'injected restore profile parser failure'
+    [[ "$(cat "$STATE_DIR/profile-parse.log")" == "profile" ]] ||
+      fail 'fenced recovery did not propagate its profile parser failure'
+  else
+    [[ ! -e "$STATE_DIR/profile-parse.log" ]] ||
+      fail "fenced recovery parsed a profile after canonical $scenario failure"
+    if [[ "$scenario" == checksum-* ]]; then
+      assert_contains "$CASE_DIR/out.txt" 'rollback baseline checksum mismatch: queues.tsv'
+      [[ "$(cat "$STATE_DIR/canonical-tamper.log")" == "tampered" ]] ||
+        fail 'checksum failure did not exercise the canonical validator in its OR-wrapper'
+    else
+      assert_contains "$CASE_DIR/out.txt" \
+        'ordinary rollback baseline omits current deploy-workflow provenance'
+    fi
+  fi
+  [[ ! -s "$STATE_DIR/operations.log" &&
+     ! -s "$STATE_DIR/lock.log" &&
+     ! -s "$STATE_DIR/kubectl.log" &&
+     ! -e "$OUT_DIR/fenced-restore-plan.tsv" &&
+     "$(cat "$STATE_DIR/maintenance")" == "held" &&
+     "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+    fail "fenced recovery changed state after $scenario"
+done
+
+for replicas in 2 01; do
+  new_case "unsupported-retained-replicas-$replicas"
+  python3 - "$BASELINE_DIR" "$replicas" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+replicas = sys.argv[2]
+path = root / "deployments.tsv"
+rows = [line.split("\t") for line in path.read_text().splitlines()]
+for row in rows:
+    if row[0] == "telemetry":
+        row[3:6] = [replicas] * 3
+path.write_text("".join("\t".join(row) + "\n" for row in rows))
+if replicas == "2":
+    path = root / "pod-images.tsv"
+    rows = [line.split("\t") for line in path.read_text().splitlines()]
+    second = next(row.copy() for row in rows if row[0] == "telemetry")
+    second[1] += "-second"
+    rows.append(second)
+    path.write_text("".join("\t".join(row) + "\n" for row in rows))
+PY
+  refresh_baseline_manifest
+  BASELINE_DIR="$BASELINE_DIR" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+  EXPECTED_NAMESPACE=betstan-oci REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+    "$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh" >/dev/null
+  if run_operator >"$CASE_DIR/out.txt" 2>&1; then
+    fail "fenced recovery accepted retained Telemetry replicas $replicas"
+  fi
+  assert_contains "$CASE_DIR/out.txt" \
+    "retained Telemetry desired replicas $replicas cannot use the existing single-replica restore path"
+  [[ ! -s "$STATE_DIR/operations.log" &&
+     ! -s "$STATE_DIR/lock.log" &&
+     ! -s "$STATE_DIR/kubectl.log" &&
+     ! -e "$OUT_DIR/fenced-restore-plan.tsv" &&
+     "$(cat "$STATE_DIR/maintenance")" == "held" &&
+     "$(cat "$STATE_DIR/lock")" == "held" ]] ||
+    fail 'unsupported retained Telemetry reached runtime recovery'
+done
+printf 'fenced_restore_profile_failure_propagation=PASS\n'
+
 for mutation in \
     duplicate-baseline duplicate-deployment duplicate-current unknown-current \
     missing-current-telemetry substituted-current four-column-current \
@@ -1088,6 +1195,9 @@ assert_contains "$phase_out" 'MAINTENANCE_DEPLOYED_SOURCE_SHA'
 
 # ------------------------------------------------------- static assertions ---
 bash -n "$OPERATOR" "$READINESS"
+assert_contains "$OPERATOR" 'oci_require_retained_telemetry_restore_profile "$BASELINE_DIR" >/dev/null ||'
+assert_contains "$OPERATOR" 'if telemetry["mode"] != "retained" or deployments[service][1] != "1":'
+assert_contains "$OPERATOR" 'raise SystemExit("baseline Telemetry cannot use the existing single-replica restore path")'
 assert_contains "$WORKFLOW_FILE" 'run: ./infra/oci/scripts/recover-fenced-rollback-stan.sh'
 assert_contains "$WORKFLOW_FILE" 'RECOVER OCI FENCED ROLLBACK'
 assert_contains "$WORKFLOW_FILE" '[ "$BASELINE_SOURCE_RUN_ID" = "$FENCED_DEPLOY_RUN_ID" ]'

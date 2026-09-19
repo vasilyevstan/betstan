@@ -2570,6 +2570,7 @@ require_order(
     [
         "Verify exact failed-deploy resume state",
         "Capture and validate pre-mutation rollback baseline",
+        "Reject an already over-limit k3s root filesystem",
         "Acquire database operation lock",
         "Enter or re-establish live data maintenance",
         "Delete exact orphaned live-acceptance slips",
@@ -2662,6 +2663,48 @@ if '[ "$(baseline_value baseline_capture_run_id)" = "$PREREQUISITE_RUN_ID" ]' in
         "failed-deploy resume still rejects a checksum-bound chained authority"
     )
 
+preparation = data[
+    data.index("- name: Capture and validate pre-mutation rollback baseline"):
+    data.index("- name: Reject an already over-limit k3s root filesystem")
+]
+require_order(
+    preparation,
+    [
+        'if [ "$FAILED_DEPLOY_RUN_ID" != "0" ]; then',
+        'elif [ "$BASELINE_RECOVERY_RUN_ID" = "0" ]; then',
+        "baseline-capture-stan.sh",
+        "BASELINE_RECOVERY_DIR=artifacts/recovery",
+        'if [ "$PHASE" = "apply-slip-index" ]; then',
+        "source ./infra/oci/scripts/lib.sh || exit 1",
+        "expected_baseline_source_sha=",
+        "expected_recovery_run_id=",
+        'EXPECTED_SOURCE_SHA="$expected_baseline_source_sha"',
+        'EXPECTED_NAMESPACE="$OCI_K8S_NAMESPACE"',
+        'EXPECTED_RECOVERY_RUN_ID="$expected_recovery_run_id"',
+        "REQUIRE_CURRENT_DEPLOY_PROVENANCE=true",
+        'oci_require_retained_telemetry_restore_profile "$OUTPUT_DIR" ||',
+        'oci_die "final data handoff baseline validation failed"',
+        "BASELINE_SHA256=%s",
+    ],
+    "final data handoff admission",
+)
+for literal in (
+    "OUTPUT_DIR: artifacts/oci-data-baseline-before",
+    "BASELINE_RECOVERY_SOURCE_SHA: ${{ steps.recovery_authority.outputs.source_sha || 'none' }}",
+    '[ "$BASELINE_RECOVERY_SOURCE_SHA" = "none" ]',
+    '"$BASELINE_RECOVERY_SOURCE_SHA" =~ ^[0-9a-f]{40}$',
+    'expected_baseline_source_sha="$BASELINE_RECOVERY_SOURCE_SHA"',
+    'expected_recovery_run_id="$BASELINE_RECOVERY_RUN_ID"',
+):
+    if literal not in preparation:
+        raise SystemExit(f"final handoff admission is missing binding: {literal}")
+if data.count("oci_require_retained_telemetry_restore_profile") != 1:
+    raise SystemExit("data workflow must restrict the restore profile only at final admission")
+if 'EXPECTED_SOURCE_SHA="$SOURCE_SHA"' in preparation:
+    raise SystemExit("final admission confuses candidate source with the deployed baseline")
+if not preparation.split("oci_die \"final data handoff baseline validation failed\"", 1)[1].lstrip().startswith("fi"):
+    raise SystemExit("restore-profile validation escapes the final-only conditional")
+
 maintenance = data[
     data.index("- name: Enter or re-establish live data maintenance"):
     data.index("- name: Delete exact orphaned live-acceptance slips")
@@ -2682,6 +2725,8 @@ handoff = data[
     data.index("- name: Restore runtime or verify final deploy handoff"):
     data.index("- name: Capture post-phase runtime baseline")
 ]
+if "steps.maintenance_enter.outcome == 'success'" not in handoff:
+    raise SystemExit("pre-entry rejection may reach runtime restoration or final handoff")
 for literal in (
     'if [ "$PHASE" = "apply-slip-index" ]; then',
     'if [ "$FAILED_DEPLOY_RUN_ID" = "0" ] ||',
@@ -2716,6 +2761,8 @@ abort = data[
     data.index("- name: Restore runtime or retain hold if final handoff packaging failed"):
     data.index("- name: Release database operation lock unless handed to deploy")
 ]
+if "steps.maintenance_enter.outcome == 'success'" not in abort:
+    raise SystemExit("pre-entry rejection may reach final handoff abort handling")
 for literal in (
     "STATE_FILE: ${{ runner.temp }}/live-data-maintenance.tsv",
     "live-data-maintenance-stan.sh hold",
@@ -2741,6 +2788,8 @@ release = data[
     data.index("- name: Release database operation lock unless handed to deploy"):
     data.index("- name: Revoke exact runner rule")
 ]
+if "steps.operation_lock.outcome == 'success'" not in release:
+    raise SystemExit("pre-lock rejection may release an inherited operation lock")
 for literal in (
     "inputs.phase != 'apply-slip-index'",
     "steps.maintenance_enter.outcome != 'success'",
