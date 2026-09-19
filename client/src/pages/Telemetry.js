@@ -421,11 +421,9 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
         visibility: placement ? 'visible' : 'hidden',
       }}
     >
-      <time className="telemetry-metric__date" dateTime={buckets[activeIndex]}>
-        {isDaily
-          ? `${buckets[activeIndex]} UTC`
-          : `${buckets[activeIndex].slice(0, 10)} ${buckets[activeIndex].slice(11, 16)} UTC`}
-      </time>
+      {!isDaily ? <time className="telemetry-metric__date" dateTime={buckets[activeIndex]}>
+        {`${buckets[activeIndex].slice(11, 16)} UTC`}
+      </time> : null}
       <data className="telemetry-metric__value" value={values[activeIndex]}>
         {values[activeIndex]}
       </data>

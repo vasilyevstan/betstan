@@ -2051,7 +2051,6 @@ body {
 
 .telemetry-metric__tooltip {
   display: grid;
-  grid-template-rows: auto 1fr;
   gap: 0.15rem;
   text-align: center;
   position: absolute;
