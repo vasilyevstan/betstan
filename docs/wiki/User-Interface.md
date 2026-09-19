@@ -106,17 +106,21 @@ slips created, bets placed, results settled, Gamecenter events emitted,
 users created, and user logins.
 
 In overview mode, each card contains a dependency-free graph and all fourteen
-exact date/value pairs. Hovering a bar shows an immediate, theme-matched
-tooltip. Daily tooltips show only the exact count, with no date or time.
-Hourly tooltips show `HH:mm UTC` above the exact count, using the active hour
-bucket's UTC start from the accepted snapshot, not an individual event time,
-generation timestamp, current clock, or local timezone. Counts are never
-rounded or abbreviated, and neither tooltip displays a calendar date. The
-hourly tooltip retains the full UTC date-time as machine-readable metadata.
-Date context remains outside tooltips in the selected-day heading, daily
-date/value list and button names, and snapshot timestamps. Daily date/value
-entries are native buttons usable by keyboard and touch; focusing one also
-shows the tooltip. **Escape** dismisses it, and exact values remain readable
+exact date/value pairs. All eight cards use an immediate, theme-matched,
+two-line tooltip: **time first, exact count second**, in both daily and hourly
+views. Daily tooltips show `00:00-24:00 UTC`: the whole UTC-day aggregation
+window, including today's in-progress day, not a claim that the day is
+complete. Hourly tooltips show `HH:mm UTC`, the active hour bucket's UTC start.
+Both refer to the accepted bucket, not individual event times, the current
+clock, snapshot-generation time, or local time. Counts are never rounded or
+abbreviated. Calendar dates are absent from each tooltip's text, accessible
+name, description, and title. Machine-readable metadata retains the actual
+daily date or hourly UTC instant; `24:00` is only a window label, never a
+constructed date-time. Date context remains outside tooltips in the
+selected-day heading, daily date/value list and button names, and snapshot
+timestamps. Hovering a bar or focusing a native daily date/value button shows
+the same time-and-count content. Daily buttons remain usable by keyboard and
+touch; **Escape** dismisses the tooltip, and exact values remain readable
 without hover.
 
 Clicking a daily bar or activating its date/value button changes only that
