@@ -2212,6 +2212,166 @@ CAPTURED_BASELINE_DIR="$current_capture_dir" \
   fail "current baseline capture did not reuse one Telemetry Deployment observation"
 printf 'current_ten_capture_validation_and_fenced_restore=PASS\n'
 
+preparation_root="$WORK_DIR/final-handoff-preparation"
+mkdir -p "$preparation_root"
+python3 - "$ROOT_DIR/.github/workflows/oci-live-data-rollout.yml" \
+  "$preparation_root/prepare-step.sh" <<'PY'
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+step = workflow[
+    workflow.index("- name: Capture and validate pre-mutation rollback baseline"):
+    workflow.index("- name: Reject an already over-limit k3s root filesystem")
+]
+body = step.split("        run: |\n", 1)[1]
+lines = []
+for line in body.splitlines():
+    if line.strip() and not line.startswith("          "):
+        raise SystemExit("baseline preparation shell indentation is invalid")
+    lines.append(line[10:] if line.strip() else "")
+Path(sys.argv[2]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+
+run_preparation() {
+  local name="$1" baseline="$2" phase="$3" failed_deploy="$4"
+  local recovery="$5" recovery_source="$6" expected="$7"
+  local hold="${8:-held}" case_dir="$preparation_root/$1" status=0
+  mkdir -p "$case_dir/infra/oci/scripts" "$case_dir/artifacts"
+  : >"$case_dir/order.log"
+  : >"$case_dir/github.env"
+  printf '%s\n' "$hold" >"$case_dir/inherited-hold"
+  cp "$ROOT_DIR/infra/oci/scripts/lib.sh" "$case_dir/infra/oci/scripts/lib.sh"
+  cat >>"$case_dir/infra/oci/scripts/lib.sh" <<'SH'
+printf 'load-library\n' >>"${PREPARATION_LOG:?}"
+SH
+  cat >"$case_dir/infra/oci/scripts/baseline-capture-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'capture:%s\n' "${BASELINE_RECOVERY_DIR:-none}" >>"${PREPARATION_LOG:?}"
+mkdir -p "${OUTPUT_DIR:?}"
+cp -R "${SELECTED_BASELINE:?}/." "$OUTPUT_DIR/"
+SH
+  cat >"$case_dir/infra/oci/scripts/validate-rollback-baseline-stan.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'validate\t%s\t%s\t%s\t%s\n' \
+  "${EXPECTED_SOURCE_SHA-unset}" "${EXPECTED_NAMESPACE-unset}" \
+  "${EXPECTED_RECOVERY_RUN_ID-unset}" "${REQUIRE_CURRENT_DEPLOY_PROVENANCE-unset}" \
+  >>"${PREPARATION_LOG:?}"
+exec "${CANONICAL_BASELINE_VALIDATOR:?}" "$@"
+SH
+  chmod +x "$case_dir/infra/oci/scripts/"*-stan.sh
+  if [[ "$failed_deploy" != "0" ]]; then
+    cp -R "$baseline" "$case_dir/artifacts/oci-data-baseline-before"
+  fi
+  (
+    cd "$case_dir"
+    env -i HOME="$HOME" PATH="$PATH" \
+      PREPARATION_LOG="$case_dir/order.log" SELECTED_BASELINE="$baseline" \
+      CANONICAL_BASELINE_VALIDATOR="$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh" \
+      PREPARATION_SCRIPT="$preparation_root/prepare-step.sh" \
+      OUTPUT_DIR=artifacts/oci-data-baseline-before \
+      GITHUB_ENV="$case_dir/github.env" OCI_K8S_NAMESPACE=betstan-oci \
+      SOURCE_SHA="$CURRENT_MASTER_SHA" PHASE="$phase" \
+      FAILED_DEPLOY_RUN_ID="$failed_deploy" BASELINE_RECOVERY_RUN_ID="$recovery" \
+      BASELINE_RECOVERY_SOURCE_SHA="$recovery_source" \
+      EXPECTED_SOURCE_SHA=stale-source EXPECTED_NAMESPACE=stale-namespace \
+      EXPECTED_RECOVERY_RUN_ID=999 REQUIRE_CURRENT_DEPLOY_PROVENANCE=false \
+      bash --noprofile --norc -euo pipefail -c '
+        [[ -z "${SCRIPT_DIR+x}" && -z "${OCI_ROOT_DIR+x}" ]]
+        ! declare -F oci_require_retained_telemetry_restore_profile >/dev/null
+        bash --noprofile --norc -euo pipefail "$PREPARATION_SCRIPT"
+        printf "downstream\n" >>"$PREPARATION_LOG"
+      '
+  ) >"$case_dir/out" 2>&1 || status=$?
+  if [[ "$expected" == "accept" ]]; then
+    [[ "$status" == "0" ]] ||
+      fail "baseline preparation rejected $name: $(cat "$case_dir/out")"
+    assert_line "$case_dir/github.env" \
+      "BASELINE_SHA256=$(sha256_file "$baseline/SHA256SUMS")"
+    assert_line "$case_dir/order.log" downstream
+  else
+    [[ "$status" != "0" ]] ||
+      fail "baseline preparation accepted $name"
+    [[ ! -s "$case_dir/github.env" ]] ||
+      fail "rejected $name exported a successful baseline handoff"
+    assert_not_contains "$case_dir/order.log" downstream
+  fi
+  cmp -s "$baseline/SHA256SUMS" \
+    "$case_dir/artifacts/oci-data-baseline-before/SHA256SUMS" ||
+    fail "$name replaced the selected baseline"
+  [[ "$(cat "$case_dir/inherited-hold")" == "$hold" ]] ||
+    fail "$name modified an inherited hold"
+  if [[ "$failed_deploy" != "0" ]]; then
+    assert_not_contains "$case_dir/order.log" 'capture:'
+  fi
+  if [[ "$phase" != "apply-slip-index" ]]; then
+    assert_not_contains "$case_dir/order.log" load-library
+    assert_not_contains "$case_dir/order.log" validate
+  fi
+}
+
+run_preparation fresh-current-one "$current_capture_dir" apply-slip-index 0 0 none accept
+assert_line "$preparation_root/fresh-current-one/order.log" 'capture:none'
+assert_line "$preparation_root/fresh-current-one/order.log" \
+  $'validate\t\tbetstan-oci\t0\ttrue'
+
+historical_capture_dir="$WORK_DIR/capture-final-historical-nine"
+run_capture "$historical_capture_dir" \
+  GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+  STUB_SHORT_SSE_MODE=quiet-timeout >"$historical_capture_dir.out" 2>&1 ||
+  fail "authenticated historical baseline capture failed: $(cat "$historical_capture_dir.out")"
+assert_line "$historical_capture_dir/telemetry-pre-run.env" 'mode=absent'
+run_preparation fresh-historical-absent "$historical_capture_dir" apply-slip-index 0 0 none accept
+
+retained_two_dir="$WORK_DIR/baseline-retained-two"
+cp -R "$current_capture_dir" "$retained_two_dir"
+python3 - "$retained_two_dir" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+deployments = root / "deployments.tsv"
+rows = [line.split("\t") for line in deployments.read_text().splitlines()]
+for row in rows:
+    if row[0] == "telemetry":
+        row[3:6] = ["2", "2", "2"]
+deployments.write_text("".join("\t".join(row) + "\n" for row in rows))
+pods = root / "pod-images.tsv"
+rows = [line.split("\t") for line in pods.read_text().splitlines()]
+second = next(row.copy() for row in rows if row[0] == "telemetry")
+second[1] += "-second"
+rows.append(second)
+pods.write_text("".join("\t".join(row) + "\n" for row in rows))
+(root / "SHA256SUMS").write_text("".join(
+    f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n"
+    for path in sorted(root.rglob("*"))
+    if path.is_file() and path.name != "SHA256SUMS"
+))
+PY
+BASELINE_DIR="$retained_two_dir" EXPECTED_SOURCE_SHA="$TARGET_SHA" \
+EXPECTED_NAMESPACE=betstan-oci REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+  "$ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh"
+run_preparation fresh-current-two "$retained_two_dir" apply-slip-index 0 0 none reject
+assert_contains "$preparation_root/fresh-current-two/out" \
+  'retained Telemetry desired replicas 2 cannot use the existing single-replica restore path'
+for phase in apply-backfills dry-run; do
+  run_preparation "$phase-current-two" "$retained_two_dir" "$phase" 0 0 none accept
+done
+for mode in retained-hold released-runtime; do
+  run_preparation "resume-$mode-one" "$current_capture_dir" apply-slip-index \
+    "$DEPLOY_RUN_ID" 0 none accept "$mode"
+  assert_line "$preparation_root/resume-$mode-one/order.log" \
+    $'validate\t\tbetstan-oci\t\ttrue'
+  run_preparation "resume-$mode-two" "$retained_two_dir" apply-slip-index \
+    "$DEPLOY_RUN_ID" 0 none reject "$mode"
+  assert_contains "$preparation_root/resume-$mode-two/out" \
+    'retained Telemetry desired replicas 2 cannot use the existing single-replica restore path'
+done
+printf 'final_handoff_current_and_historical_admission=PASS\n'
+
 stale_timestamp="$(python3 - "$RECENT_TIMESTAMP" <<'PY'
 import sys
 from datetime import datetime, timedelta
@@ -2323,6 +2483,8 @@ PY
       >"$altered_dir.out" 2>&1; then
     fail "production baseline validator accepted $mutation"
   fi
+  run_preparation "invalid-$mutation" "$altered_dir" apply-slip-index \
+    "$DEPLOY_RUN_ID" 0 none reject
   if [[ "$mutation" == "downgrade" ]]; then
     assert_contains "$altered_dir.out" \
       'ordinary rollback baseline deploy provenance is not exact GHCR evidence'
@@ -3800,6 +3962,41 @@ assert_contains "$partial_capture_dir/baseline-provenance.env" \
   "baseline_recovery_run_id=$PARTIAL_RECOVERY_RUN_ID"
 CAPTURED_BASELINE_DIR="$partial_capture_dir" \
   bash "$ROOT_DIR/infra/oci/tests/test-fenced-rollback-recovery-stan.sh"
+
+run_preparation fresh-split-one "$partial_capture_dir" apply-slip-index \
+  0 "$PARTIAL_RECOVERY_RUN_ID" "$PARTIAL_RECOVERY_SOURCE_SHA" accept
+assert_line "$preparation_root/fresh-split-one/order.log" 'capture:artifacts/recovery'
+assert_line "$preparation_root/fresh-split-one/order.log" \
+  $'validate\t'"$PARTIAL_RECOVERY_SOURCE_SHA"$'\tbetstan-oci\t'"$PARTIAL_RECOVERY_RUN_ID"$'\ttrue'
+for mode in retained-hold released-runtime; do
+  run_preparation "resume-$mode-split" "$partial_capture_dir" apply-slip-index \
+    "$DEPLOY_RUN_ID" "$PARTIAL_RECOVERY_RUN_ID" "$PARTIAL_RECOVERY_SOURCE_SHA" accept "$mode"
+  assert_line "$preparation_root/resume-$mode-split/order.log" \
+    $'validate\t'"$PARTIAL_RECOVERY_SOURCE_SHA"$'\tbetstan-oci\t'"$PARTIAL_RECOVERY_RUN_ID"$'\ttrue'
+done
+run_preparation resume-split-no-selected-recovery "$partial_capture_dir" apply-slip-index \
+  "$DEPLOY_RUN_ID" 0 none accept
+assert_line "$preparation_root/resume-split-no-selected-recovery/order.log" \
+  $'validate\t\tbetstan-oci\t\ttrue'
+run_preparation recovery-wrong-source "$partial_capture_dir" apply-slip-index \
+  0 "$PARTIAL_RECOVERY_RUN_ID" "$TARGET_SHA" reject
+assert_contains "$preparation_root/recovery-wrong-source/out" \
+  'rollback baseline source SHA does not match the expected source'
+run_preparation recovery-wrong-run "$partial_capture_dir" apply-slip-index \
+  0 999 "$PARTIAL_RECOVERY_SOURCE_SHA" reject
+assert_contains "$preparation_root/recovery-wrong-run/out" \
+  'rollback baseline recovery authority differs from the selected run'
+for source in none short ''; do
+  run_preparation "recovery-invalid-source-${source:-empty}" "$partial_capture_dir" \
+    apply-slip-index 0 "$PARTIAL_RECOVERY_RUN_ID" "$source" reject
+  assert_contains "$preparation_root/recovery-invalid-source-${source:-empty}/out" \
+    'selected baseline recovery requires its authenticated source SHA'
+done
+run_preparation recovery-without-run "$partial_capture_dir" apply-slip-index \
+  "$DEPLOY_RUN_ID" 0 "$PARTIAL_RECOVERY_SOURCE_SHA" reject
+assert_contains "$preparation_root/recovery-without-run/out" \
+  'baseline recovery source requires a selected recovery run'
+printf 'final_handoff_split_recovery_bindings=PASS\n'
 
 if ! run_script "$WORK_DIR/partial-recovery-baseline-dry-run" \
     TARGET_SHA="$PARTIAL_RECOVERY_SOURCE_SHA" \

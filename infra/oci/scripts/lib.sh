@@ -75,6 +75,48 @@ oci_is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+oci_require_retained_telemetry_restore_profile() {
+  local baseline_dir="$1"
+  # Callers may use an OR-list, which suppresses errexit inside this function.
+  BASELINE_DIR="$baseline_dir" REQUIRE_CURRENT_DEPLOY_PROVENANCE=true \
+    "$OCI_ROOT_DIR/infra/oci/scripts/validate-rollback-baseline-stan.sh" ||
+    return "$?"
+  python3 - "$baseline_dir" <<'PY' || return "$?"
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+telemetry = {}
+for raw in (root / "telemetry-pre-run.env").read_text(encoding="utf-8").splitlines():
+    fields = raw.split("=", 1)
+    if len(fields) != 2 or fields[0] in telemetry:
+        raise SystemExit("pre-run Telemetry restore profile is malformed")
+    telemetry[fields[0]] = fields[1]
+
+mode = telemetry.get("mode")
+if mode == "absent":
+    raise SystemExit(0)
+if mode != "retained":
+    raise SystemExit("pre-run Telemetry restore mode is invalid")
+
+rows = [
+    raw.split("\t")
+    for raw in (root / "deployments.tsv").read_text(encoding="utf-8").splitlines()
+]
+if any(len(row) != 6 for row in rows):
+    raise SystemExit("baseline deployment restore profile is malformed")
+retained = [row for row in rows if row[0] == "telemetry"]
+if len(retained) != 1:
+    raise SystemExit("baseline must bind exactly one retained Telemetry deployment")
+replicas = retained[0][3]
+if replicas != "1":
+    raise SystemExit(
+        f"retained Telemetry desired replicas {replicas} cannot use the existing "
+        "single-replica restore path (requires 1)"
+    )
+PY
+}
+
 oci_runtime_mode() {
   local mode="${OCI_RUNTIME_MODE:-}"
   [[ "$mode" == "oke" || "$mode" == "k3s" ]] ||
