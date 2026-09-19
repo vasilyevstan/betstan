@@ -647,7 +647,7 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   expect(JSON.stringify(snapshots)).not.toContain('liveSeed');
   expect(JSON.stringify(snapshots)).not.toContain('"seed"');
 
-  const eventEvidence = fixtures.slice(0, 2).map((fixture) => {
+  const eventEvidence = fixtures.slice(0, 2).map((fixture, fixtureIndex) => {
     const eventSnapshots = snapshots.filter(
       (snapshot) => snapshot.eventId === fixture.eventId,
     );
@@ -667,7 +667,10 @@ test('production live matches, dual slips, and settlement stay coherent', async 
       'SECOND_HALF_STOPPAGE',
       'FULL_TIME',
     ]) {
-      expect(phases.has(phase)).toBe(true);
+      expect(
+        phases.has(phase),
+        `Fixture ${fixtureIndex + 1}: missing required SSE phase ${phase}`,
+      ).toBe(true);
     }
 
     const incidents = new Map();
