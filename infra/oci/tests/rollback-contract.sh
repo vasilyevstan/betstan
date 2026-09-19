@@ -52,6 +52,7 @@ RUNTIME_FINGERPRINT="cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd3
 ARTIFACT_NAME="oci-production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
 TELEMETRY_IMAGE_REF="ghcr.io/vasilyevstan/betstan-images@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RECENT_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mkdir -p "$BIN_DIR" "$FIXTURE_DIR" "$STATE_DIR"
 cleanup() {
@@ -659,7 +660,7 @@ chmod +x "$BIN_DIR/git"
 cat >"$BIN_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-recent='2026-08-20T00:00:00Z'
+recent="${STUB_EVIDENCE_CREATED_AT:?}"
 case "${1:-} ${2:-}" in
   "api repos/example/repo/actions/workflows/oci-production-deploy.yml")
     printf '901\n'
@@ -2066,6 +2067,7 @@ chmod +x "$BIN_DIR/rollback-mutation-fence-stub.sh"
 common_env=(
   "PATH=$BIN_DIR:$PATH"
   "REPO=example/repo"
+  "STUB_EVIDENCE_CREATED_AT=$RECENT_TIMESTAMP"
   "GITHUB_REF_NAME=master"
   "STUB_TARGET_SHA=$TARGET_SHA"
   "STUB_CURRENT_MASTER_SHA=$CURRENT_MASTER_SHA"
@@ -2209,6 +2211,24 @@ CAPTURED_BASELINE_DIR="$current_capture_dir" \
 [[ "$(wc -l <"$STATE_DIR/capture-current-ten/current/telemetry-deployment-reads" | tr -d ' ')" == "1" ]] ||
   fail "current baseline capture did not reuse one Telemetry Deployment observation"
 printf 'current_ten_capture_validation_and_fenced_restore=PASS\n'
+
+stale_timestamp="$(python3 - "$RECENT_TIMESTAMP" <<'PY'
+import sys
+from datetime import datetime, timedelta
+
+recent = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+print((recent - timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+run_capture_expect_failure capture-stale-deploy-evidence \
+  STUB_CAPTURE_TEN=1 \
+  STUB_BASELINE_FIXTURE="$FIXTURE_DIR/baseline-current-ten" \
+  GITHUB_RUN_ID="$CAPTURE_RUN_ID" GITHUB_RUN_ATTEMPT=1 \
+  STUB_SHORT_SSE_MODE=quiet-timeout \
+  STUB_EVIDENCE_CREATED_AT="$stale_timestamp"
+assert_contains "$WORK_DIR/capture-stale-deploy-evidence.out" \
+  'unable to find trusted OCI deploy provenance for the live digest set'
+printf 'aged_deploy_candidate_rejection=PASS\n'
 
 downgrade_rejections_passed=true
 for mutation in \

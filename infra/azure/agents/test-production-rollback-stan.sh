@@ -20,6 +20,7 @@ DEPLOY_RUN_ID=601
 BUILD_RUN_ID=501
 ARTIFACT_NAME="production-baseline-${SOURCE_RUN_ID}-1"
 SERVICES=(auth bet backoffice client event moderation resulting slip gamemaster)
+RECENT_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mkdir -p "$BIN_DIR" "$FIXTURE_DIR" "$STATE_DIR"
 trap '[[ "${KEEP_TEST_WORKDIR:-0}" == "1" ]] || rm -rf "$WORK_DIR"' EXIT
@@ -283,7 +284,7 @@ chmod +x "$BIN_DIR/git"
 cat >"$BIN_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-recent='2026-08-20T00:00:00Z'
+recent="${STUB_EVIDENCE_CREATED_AT:?}"
 case "${1:-} ${2:-}" in
   "api repos/example/repo/actions/workflows/production-deploy.yml")
     printf '301\n'
@@ -1214,6 +1215,7 @@ chmod +x "$BIN_DIR/provenance-stub.sh"
 common_env=(
   "PATH=$BIN_DIR:$PATH"
   "REPO=example/repo"
+  "STUB_EVIDENCE_CREATED_AT=$RECENT_TIMESTAMP"
   "GITHUB_REF_NAME=master"
   "STUB_TARGET_SHA=$TARGET_SHA"
   "STUB_CURRENT_MASTER_SHA=$CURRENT_MASTER_SHA"
@@ -1444,6 +1446,20 @@ assert_contains "$WORK_DIR/mutable-rejection.out" 'repo:<40sha>@sha256:<64>'
 
 run_expect_failure expired-artifact \
   STUB_ARTIFACT_EXPIRED=1 ROLLBACK_MODE=dry-run
+
+stale_timestamp="$(python3 - "$RECENT_TIMESTAMP" <<'PY'
+import sys
+from datetime import datetime, timedelta
+
+recent = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+print((recent - timedelta(days=31)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+run_expect_failure stale-source-run \
+  STUB_EVIDENCE_CREATED_AT="$stale_timestamp" ROLLBACK_MODE=dry-run
+assert_contains "$WORK_DIR/stale-source-run.out" \
+  'source run is outside the rollback retention window'
+printf 'aged_source_run_rejection=PASS\n'
 
 run_expect_failure active-live-refusal \
   STUB_ACTIVE_MATCHES=1 ROLLBACK_MODE=dry-run
