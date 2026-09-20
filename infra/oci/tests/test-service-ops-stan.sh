@@ -210,6 +210,28 @@ run_case
 assert_no_current_errors
 assert_contains "$case_output" 'previous_logs=no_matching_error_lines'
 
+for access_user in 'sensitive-marker user name' 'sensitive-marker user'; do
+  for status in 500 503 599 200 404; do
+    record="$(access_line "$status" 'GET /telemetry HTTP/1.1')"
+    record="${record/ - - / - $access_user }"
+    both_logs "$record"
+    run_case
+    if ((status < 500)); then
+      assert_no_current_errors
+      assert_contains "$case_output" 'previous_logs=no_matching_error_lines'
+    else
+      assert_contains "$case_output" 'pod=event-pod'
+      [[ "$(grep -Fc "nginx_access status=$status error [REDACTED_DETAIL]" "$case_output")" == 2 ]] ||
+        fail "multiword username hid an HTTP server error"
+    fi
+  done
+  both_logs "${record% \"-\"}"
+  run_case
+  assert_contains "$case_output" 'pod=event-pod'
+  [[ "$(grep -Fc 'nginx_access malformed error [REDACTED_DETAIL]' "$case_output")" == 2 ]] ||
+    fail "truncated multiword-user record was not rejected"
+done
+
 for keyword in error exception failed panic fatal oom; do
   for field in request referer agent forwarded; do
     request='GET /telemetry HTTP/1.1'

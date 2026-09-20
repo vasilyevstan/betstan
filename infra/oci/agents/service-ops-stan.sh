@@ -43,6 +43,7 @@ import sys
 # Match the complete client/nginx.conf main format without decoding its fields.
 escape = r"\\x[0-9A-Fa-f]{2}"
 token = rf"(?:[\x21\x23-\x5b\x5d-\x7e]|{escape})+"
+user = rf"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|{escape})+"
 quoted = rf"\"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|{escape})*\""
 day = r"(?:0[1-9]|[12][0-9]|3[01])"
 clock = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
@@ -54,11 +55,11 @@ prefix = re.compile(
     rf"(?:\.[0-9]+)?(?:Z|[+-]{zone_hour}:[0-5][0-9]) "
 )
 access = re.compile(
-    rf"{token} - {token} \[{nginx_time}\] {quoted} "
+    rf"{token} - {user} \[{nginx_time}\] {quoted} "
     rf"(?P<status>[1-5][0-9]{{2}}) [0-9]+ {quoted} {quoted} {quoted}"
 )
 access_shaped = re.compile(
-    r"(?:\S+ - (?:\S+ )?(?:\[|[0-9]{1,2}/)|(?:\S+ ){1,4}\[[0-9]{1,2}/)"
+    r"(?:\S+ - [^\r\n]*(?:\[|[0-9]{1,2}/)|(?:\S+ +)+\[[0-9]{1,2}/)"
 )
 error = re.compile(r"error|exception|failed|panic|fatal|oom", re.IGNORECASE)
 
