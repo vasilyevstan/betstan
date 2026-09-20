@@ -35,6 +35,49 @@ else
     oci_die "diagnostics refuse a non-Bastion k3s context"
 fi
 
+classify_error_logs() {
+  python3 -c '
+import re
+import sys
+
+# Match the complete client/nginx.conf main format without decoding its fields.
+escape = r"\\x[0-9A-Fa-f]{2}"
+token = rf"(?:[\x21\x23-\x5b\x5d-\x7e]|{escape})+"
+user = rf"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|{escape})+"
+quoted = rf"\"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|{escape})*\""
+day = r"(?:0[1-9]|[12][0-9]|3[01])"
+clock = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+zone_hour = r"(?:[01][0-9]|2[0-3])"
+month = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+nginx_time = rf"{day}/{month}/[0-9]{{4}}:{clock} [+-]{zone_hour}[0-5][0-9]"
+prefix = re.compile(
+    rf"^[0-9]{{4}}-(?:0[1-9]|1[0-2])-{day}T{clock}"
+    rf"(?:\.[0-9]+)?(?:Z|[+-]{zone_hour}:[0-5][0-9]) "
+)
+access = re.compile(
+    rf"{token} - {user} \[{nginx_time}\] {quoted} "
+    rf"(?P<status>[1-5][0-9]{{2}}) [0-9]+ {quoted} {quoted} {quoted}"
+)
+access_shaped = re.compile(
+    r"(?:\S+ - [^\r\n]*(?:\[|[0-9]{1,2}/)|(?:\S+ +)+\[[0-9]{1,2}/)"
+)
+error = re.compile(r"error|exception|failed|panic|fatal|oom", re.IGNORECASE)
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    record = prefix.sub("", line, count=1)
+    match = access.fullmatch(record)
+    if match:
+        status = int(match.group("status"))
+        if status >= 500:
+            print(f"nginx_access status={status} error [REDACTED_DETAIL]")
+    elif access_shaped.match(record):
+        print("nginx_access malformed error [REDACTED_DETAIL]")
+    elif error.search(line):
+        print(line)
+'
+}
+
 pods_json="$(kubectl get pods -n "$NAMESPACE" -o json)"
 
 {
@@ -95,12 +138,17 @@ pods_json="$(kubectl get pods -n "$NAMESPACE" -o json)"
   echo "=== redacted recent error logs ==="
   while IFS= read -r pod; do
     [[ -n "$pod" ]] || continue
-    errors="$(
+    if ! current_logs="$(
       kubectl logs -n "$NAMESPACE" "$pod" --all-containers --since="$SINCE" \
-        --tail=200 2>/dev/null |
-        grep -Ei 'error|exception|failed|panic|fatal|oom' |
-        tail -n 40 || true
-    )"
+        --tail=200 2>/dev/null
+    )"; then
+      oci_die "current container log retrieval failed"
+    fi
+    if ! errors="$(
+      printf '%s\n' "$current_logs" | classify_error_logs | tail -n 40
+    )"; then
+      oci_die "current error log classification failed"
+    fi
     if [[ -n "$errors" ]]; then
       printf '%s\n' "pod=$pod"
       printf '%s\n' "$errors" |
@@ -117,11 +165,11 @@ pods_json="$(kubectl get pods -n "$NAMESPACE" -o json)"
       kubectl logs -n "$NAMESPACE" "$pod" -c "$container" --previous \
         --tail=200 --timestamps=true 2>/dev/null
     )"; then
-      errors="$(
-        printf '%s\n' "$previous_logs" |
-          grep -Ei 'error|exception|failed|panic|fatal|oom' |
-          tail -n 40 || true
-      )"
+      if ! errors="$(
+        printf '%s\n' "$previous_logs" | classify_error_logs | tail -n 40
+      )"; then
+        oci_die "previous error log classification failed"
+      fi
       if [[ -n "$errors" ]]; then
         printf '%s\n' "$errors" |
           sed -E 's/(error|exception|failed|panic|fatal|oom).*/\1 [REDACTED_DETAIL]/Ig'
