@@ -641,6 +641,23 @@ test('production live matches, dual slips, and settlement stay coherent', async 
   const backofficeEvents = await (
     await page.request.get('/api/backoffice')
   ).json();
+  // Settlement and browser SSE delivery complete independently.
+  await expect.poll(() => page.evaluate((fixtureIds) => (
+    fixtureIds.flatMap((eventId, fixtureIndex) => {
+      const fullTimeObserved = window.__liveAcceptance.snapshots.some(
+        (snapshot) => (
+          snapshot.eventId === eventId && snapshot.live.phase === 'FULL_TIME'
+        ),
+      );
+      return fullTimeObserved
+        ? []
+        : [`Fixture ${fixtureIndex + 1}: missing required SSE phase FULL_TIME`];
+    })
+  ), fixtures.slice(0, 2).map((fixture) => fixture.eventId)), {
+    timeout: 30000,
+    intervals: [500, 1000, 2000],
+  }).toEqual([]);
+
   const snapshots = await page.evaluate(
     () => window.__liveAcceptance.snapshots,
   );

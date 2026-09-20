@@ -264,6 +264,179 @@ if grep -Fq "locator('body')).toContainText('BetStan')" \
   fail "OCI browser check still relies on image alt text appearing in body text"
 fi
 acceptance_spec="$OCI_DIR/agents/oci-live-acceptance.spec.js"
+node - "$acceptance_spec" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { isDeepStrictEqual } = require('node:util');
+
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const start = source.indexOf('  const backofficeEvents = await (');
+const end = source.indexOf('    const incidents = new Map();', start);
+assert.ok(start >= 0 && end > start, 'Live acceptance source boundaries changed');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const executeSource = new AsyncFunction(
+  'page',
+  'fixtures',
+  'expect',
+  `${source.slice(start, end)}\n    return;\n  });`,
+);
+const fixtures = [
+  { eventId: 'fixture-1' }, { eventId: 'fixture-2' }, { eventId: 'future-fixture' },
+];
+const phases = [
+  'FIRST_HALF', 'FIRST_HALF', 'FIRST_HALF_STOPPAGE', 'HALF_TIME',
+  'SECOND_HALF', 'SECOND_HALF', 'SECOND_HALF_STOPPAGE', 'FULL_TIME',
+];
+const missingMessage = (index) => (
+  `Fixture ${index + 1}: missing required SSE phase FULL_TIME`
+);
+
+function scenario({
+  delays = [0, 0],
+  missingPhase,
+  duplicate,
+  descending,
+  wrongFixture = false,
+} = {}) {
+  const state = { now: 0, polls: 0, copies: [], snapshots: [] };
+  const pending = [];
+  fixtures.slice(0, 2).forEach(({ eventId }, fixtureIndex) => {
+    const frames = phases
+      .filter((phase) => (
+        missingPhase?.fixtureIndex !== fixtureIndex || missingPhase.phase !== phase
+      ))
+      .map((phase, index) => ({ eventId, live: { phase, sequence: index + 1 } }));
+    if (duplicate === fixtureIndex) frames[1].live.sequence = frames[0].live.sequence;
+    if (descending === fixtureIndex) [frames[0], frames[1]] = [frames[1], frames[0]];
+    if (delays[fixtureIndex] > 0) {
+      pending.push({ at: delays[fixtureIndex], snapshot: frames.pop(), delivered: false });
+    }
+    state.snapshots.push(...frames);
+  });
+  state.snapshots.push({
+    eventId: fixtures[2].eventId,
+    live: { phase: 'PRE_MATCH', sequence: 1 },
+  });
+  if (wrongFixture) {
+    state.snapshots.push({
+      eventId: 'unrelated-fixture',
+      live: { phase: 'FULL_TIME', sequence: 1 },
+    });
+  }
+
+  const page = {
+    request: {
+      get: async (url) => {
+        assert.equal(url, '/api/backoffice');
+        return {
+          json: async () => fixtures.map(({ eventId }, index) => ({
+            eventId,
+            status: index < 2 ? 'RESULTED' : 'NO_RESULT',
+            homeResult: index < 2 ? 1 : null,
+            awayResult: index < 2 ? 0 : null,
+          })),
+        };
+      },
+    },
+    evaluate: async (callback, eventIds) => {
+      if (eventIds === undefined) state.copies.push(state.now);
+      const result = vm.runInNewContext(`(${callback.toString()})(eventIds)`, {
+        eventIds,
+        window: { __liveAcceptance: { snapshots: state.snapshots } },
+      });
+      // Browser evaluation returns a detached value, not the live capture buffer.
+      return structuredClone(result);
+    },
+  };
+  const expect = (actual, message) => ({
+    toBe: (expected) => assert.equal(actual, expected, message),
+    toEqual: (expected) => assert.deepEqual(actual, expected, message),
+    toBeGreaterThan: (expected) => assert.ok(actual > expected, message),
+    not: { toContain: (expected) => assert.ok(!actual.includes(expected), message) },
+  });
+  expect.poll = (callback, options) => ({
+    toEqual: async (expected) => {
+      state.polls += 1;
+      assert.equal(state.polls, 1, 'Use one shared terminal-observation budget');
+      assert.equal(options.timeout, 30000);
+      assert.deepEqual(options.intervals, [500, 1000, 2000]);
+      assert.deepEqual(expected, []);
+      let attempt = 0;
+      while (true) {
+        for (const delivery of pending) {
+          if (!delivery.delivered && delivery.at <= state.now) {
+            state.snapshots.push(delivery.snapshot);
+            delivery.delivered = true;
+          }
+        }
+        const actual = await callback();
+        if (isDeepStrictEqual(actual, expected)) return;
+        if (state.now === options.timeout) throw new Error(actual.join('; '));
+        state.now += Math.min(
+          options.intervals[Math.min(attempt, options.intervals.length - 1)],
+          options.timeout - state.now,
+        );
+        attempt += 1;
+      }
+    },
+  });
+  return { state, run: () => executeSource(page, fixtures, expect) };
+}
+
+let cases = 0;
+async function checkMissing(missing, wrongFixture = false) {
+  const current = scenario({
+    delays: fixtures.map((_, index) => (missing.includes(index) ? Infinity : 0)),
+    wrongFixture,
+  });
+  await assert.rejects(current.run, { message: missing.map(missingMessage).join('; ') });
+  assert.equal(current.state.now, 30000);
+  assert.equal(current.state.polls, 1);
+  assert.deepEqual(current.state.copies, []);
+  cases += 1;
+}
+
+async function checkRejected(options, message) {
+  const current = scenario(options);
+  await assert.rejects(current.run, message ?? { name: 'AssertionError' });
+  assert.equal(current.state.polls, 1);
+  assert.deepEqual(current.state.copies, [0]);
+  cases += 1;
+}
+
+async function main() {
+  for (const delays of [[0, 1500], [1500, 0], [500, 1500], [0, 0]]) {
+    const current = scenario({ delays });
+    await current.run();
+    assert.equal(current.state.polls, 1);
+    assert.ok(current.state.now >= Math.max(...delays));
+    assert.ok(current.state.now <= 30000);
+    assert.deepEqual(current.state.copies, [current.state.now]);
+    cases += 1;
+  }
+  for (const missing of [[0], [1], [0, 1]]) await checkMissing(missing);
+  await checkMissing([0, 1], true);
+  for (const phase of new Set(phases.filter((phase) => phase !== 'FULL_TIME'))) {
+    for (const fixtureIndex of [0, 1]) {
+      await checkRejected(
+        { missingPhase: { fixtureIndex, phase } },
+        new RegExp(`Fixture ${fixtureIndex + 1}: missing required SSE phase ${phase}`),
+      );
+    }
+  }
+  for (const fixtureIndex of [0, 1]) {
+    await checkRejected({ duplicate: fixtureIndex });
+    await checkRejected({ descending: fixtureIndex });
+  }
+  console.log(`oci_live_acceptance_terminal_barrier=PASS cases=${cases}`);
+}
+
+main().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
+NODE
 client_ui_css="$ROOT_DIR/client/src/styles/ui.css"
 client_live_regression="$ROOT_DIR/client/tests/e2e/live-betting-regression.spec.js"
 moderation_listener="$ROOT_DIR/moderation/src/event/listener/LiveEventUpdateListener.ts"
