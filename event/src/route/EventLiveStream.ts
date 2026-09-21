@@ -19,24 +19,22 @@ export interface EventLiveStreamOptions {
   verifyScopedAccess?: (req: Request) => Promise<boolean>;
 }
 
-const writeSnapshot = (
-  res: Response,
-  snapshot: PublicEventSnapshot
-): boolean => {
+const MAX_BUFFERED_BYTES = 256 * 1024;
+const DRAIN_TIMEOUT_MS = 5000;
+
+const buildSnapshotFrame = (snapshot: PublicEventSnapshot): string | undefined => {
   const sanitizedSnapshot = sanitizePublicEventSnapshot(snapshot);
 
   if (!sanitizedSnapshot.live) {
-    return true;
+    return undefined;
   }
 
-  return res.write(
-    `id: ${buildLiveEventId(
-      sanitizedSnapshot.eventId,
-      sanitizedSnapshot.live.sequence
-    )}\n`
+  return `id: ${buildLiveEventId(
+    sanitizedSnapshot.eventId,
+    sanitizedSnapshot.live.sequence
+  )}\n`
     + "event: snapshot\n"
-    + `data: ${JSON.stringify(sanitizedSnapshot)}\n\n`
-  );
+    + `data: ${JSON.stringify(sanitizedSnapshot)}\n\n`;
 };
 
 export const openEventLiveStream = (
@@ -75,8 +73,19 @@ export const openEventLiveStream = (
 
   let cleanedUp = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let drainDeadline: ReturnType<typeof setTimeout> | undefined;
+  let pendingAuthBytes = 0;
   let unsubscribe = () => {};
   let scopedVerification: Promise<boolean> | undefined;
+
+  const isClosed = () => cleanedUp || res.writableEnded || res.destroyed;
+
+  const onDrain = () => {
+    if (drainDeadline !== undefined) {
+      clearTimeout(drainDeadline);
+      drainDeadline = undefined;
+    }
+  };
 
   const cleanup = () => {
     if (cleanedUp) {
@@ -84,22 +93,74 @@ export const openEventLiveStream = (
     }
 
     cleanedUp = true;
-    if (heartbeat) {
+    if (heartbeat !== undefined) {
       clearInterval(heartbeat);
+      heartbeat = undefined;
     }
+    onDrain();
+    res.removeListener("drain", onDrain);
     unsubscribe();
+    // Pending auth callbacks still own their reservations, even after close.
+    // Do not reset the counter: each callback releases its bytes exactly once.
+  };
+
+  const destroyStream = (diagnostic: string) => {
+    if (cleanedUp) {
+      return;
+    }
+    console.error(diagnostic);
+    cleanup();
+    res.destroy();
   };
 
   const closeScopedStream = () => {
+    if (isClosed()) {
+      return;
+    }
+    const buffered = res.writableLength > 0;
     cleanup();
-    if (!res.writableEnded) {
+    if (buffered) {
+      res.destroy();
+    } else {
       res.end();
+    }
+  };
+
+  const fitsBudget = (additionalBytes: number): boolean => {
+    if (res.writableLength + pendingAuthBytes + additionalBytes > MAX_BUFFERED_BYTES) {
+      destroyStream("Event stream buffer limit exceeded");
+      return false;
+    }
+    return true;
+  };
+
+  const writeFrame = (frame: string, bytes: number) => {
+    if (isClosed() || !fitsBudget(bytes)) {
+      return;
+    }
+    try {
+      // false means Node accepted this frame into its writable buffer. Do not
+      // resend it or maintain another outbound queue; bounded later writes
+      // retain Node's write-call order.
+      const belowHighWaterMark = res.write(frame);
+      // A write can synchronously emit error/close before returning false.
+      if (isClosed() || !fitsBudget(0)) {
+        return;
+      }
+      // writableLength now includes HTTP framing overhead.
+      if (!belowHighWaterMark && drainDeadline === undefined) {
+        drainDeadline = setTimeout(() => {
+          destroyStream("Event stream drain deadline exceeded");
+        }, DRAIN_TIMEOUT_MS);
+      }
+    } catch {
+      destroyStream("Event stream write failed");
     }
   };
 
   const revalidateScopedAccess = (): Promise<boolean> => {
     if (!scopedVerification) {
-      const verification = verifyScopedAccess(req).catch((_error) => {
+      const verification = Promise.resolve().then(() => verifyScopedAccess(req)).catch(() => {
         console.error("Scoped event stream authorization failed");
         return false;
       });
@@ -114,65 +175,57 @@ export const openEventLiveStream = (
     return scopedVerification;
   };
 
-  unsubscribe = hub.subscribe((snapshot) => {
-    if (res.writableEnded || cleanedUp) {
+  const sendFrame = (frame: string, requiresAuthorization: boolean) => {
+    if (isClosed()) {
       return;
     }
-
-    if (snapshot.visibility !== EventVisibility.OFFLINE) {
-      if (!writeSnapshot(res, snapshot)) {
-        closeScopedStream();
-      }
+    const bytes = Buffer.byteLength(frame, "utf8");
+    if (!requiresAuthorization) {
+      writeFrame(frame, bytes);
       return;
     }
-
-    if (!visibleOfflineEventIds.has(snapshot.eventId)) {
+    if (!fitsBudget(bytes)) {
       return;
     }
-
+    pendingAuthBytes += bytes;
     void revalidateScopedAccess().then((authorized) => {
+      pendingAuthBytes -= bytes;
+      if (isClosed()) {
+        return;
+      }
       if (!authorized) {
         closeScopedStream();
         return;
       }
-
-      if (!res.writableEnded && !cleanedUp) {
-        if (!writeSnapshot(res, snapshot)) {
-          closeScopedStream();
-        }
-      }
+      writeFrame(frame, bytes);
     });
-  });
-
-  heartbeat = setInterval(() => {
-    if (res.writableEnded || cleanedUp) {
-      return;
-    }
-
-    if (!hasOfflineScope) {
-      if (!res.write(": heartbeat\n\n")) {
-        closeScopedStream();
-      }
-      return;
-    }
-
-    void revalidateScopedAccess().then((authorized) => {
-      if (!authorized) {
-        closeScopedStream();
-        return;
-      }
-
-      if (!res.writableEnded && !cleanedUp) {
-        if (!res.write(": heartbeat\n\n")) {
-          closeScopedStream();
-        }
-      }
-    });
-  }, heartbeatMs);
+  };
 
   req.on("close", cleanup);
   res.on("close", cleanup);
   res.on("finish", cleanup);
+  res.on("drain", onDrain);
+  // Keep this listener through teardown so late response errors are handled.
+  res.on("error", () => destroyStream("Event stream response failed"));
+
+  unsubscribe = hub.subscribe((snapshot) => {
+    if (isClosed()) {
+      return;
+    }
+    const offline = snapshot.visibility === EventVisibility.OFFLINE;
+    // Excluded offline snapshots never retain a sanitized frame or auth work.
+    if (offline && !visibleOfflineEventIds.has(snapshot.eventId)) {
+      return;
+    }
+    const frame = buildSnapshotFrame(snapshot);
+    if (frame !== undefined) {
+      sendFrame(frame, offline);
+    }
+  });
+
+  heartbeat = setInterval(() => {
+    sendFrame(": heartbeat\n\n", hasOfflineScope);
+  }, heartbeatMs);
 };
 
 router.get(
