@@ -162,9 +162,12 @@ workers rather than assuming one delivery in perfect order.
 
 ### Server-Sent Events
 
-The Event service exposes live updates to connected browsers through SSE. The
-stream is a low-latency projection, not the durable source of truth. Clients
-reconcile important terminal state through the authoritative REST read model.
+The Event service exposes live updates to connected browsers through SSE.
+Transient output buffering is tolerated within fixed byte and drain-time
+limits; consumers that remain stalled or exceed the buffering budget are
+disconnected. The stream remains a low-latency projection, not the durable
+source of truth. Clients continue to reconcile important terminal state
+through the authoritative REST read model.
 
 ## Shared contract package
 
