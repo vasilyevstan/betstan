@@ -126,7 +126,7 @@ without hover.
 Clicking a daily bar or activating its date/value button changes only that
 card to the selected day's **24 hourly UTC counts**, from **00:00** through
 **23:00**. Other cards keep their current views. All hour/count pairs remain
-visible; hourly bars are read-only, with no further drill-down, minute view,
+reachable; hourly bars are read-only, with no further drill-down, minute view,
 or local-time conversion. **Back to 14 days** appears at the top right only
 in detail mode, including loading and error states. It restores the accepted
 overview without fetching it again. Keyboard activation moves focus to Back;
@@ -136,13 +136,14 @@ left the overview.
 The overview loads on page entry; hourly data loads on selection or explicit
 **Retry**. The page does not poll. **Refresh** updates the overview, service
 health, and every detail selected when pressed, including loading or expired
-selections. Selected days and any last successful data remain visible while
+selections. Selected days and any last successful data are retained while
 requests run. Successful updates survive failures elsewhere, and partial
 failure is reported rather than announced as a complete refresh.
 
 A temporary detail failure offers **Retry** and **Back to 14 days**, retaining
-that detail's last successful data and timestamp when available. A day that
-has left the server's current 14-day window stays selected with an
+that detail's last successful data and timestamp when available. Retained
+values and their timestamp are explicitly marked stale during failures. A day
+that has left the server's current 14-day window stays selected with an
 unavailable-day notice and any last successful detail; it offers Back but
 no futile Retry. This also covers opening an expired day from an older
 overview. Failures never become fabricated zero counts or expose internal
@@ -151,11 +152,14 @@ error without echoing the requested URL. A successful all-zero response
 remains a valid snapshot.
 
 **Overview and service health generated at** identifies the overview's
-timestamp; **Hourly data generated at** below each detail graph identifies
-that detail's own timestamp. Today's detail is labelled **In progress** using
-response-date context, not a live clock or polling promise. Counts cover the
-full selected UTC calendar day using stored observation times; a generated
-timestamp marks computation start, not a cutoff or transactional snapshot.
+timestamp, also used for daily-card freshness. **Hourly data generated at**
+identifies each detail's own accepted snapshot. Initial hourly loading or
+error states have no accepted hourly timestamp or values: they do not borrow
+overview freshness or fabricate zero counts. Today's detail is labelled
+**In progress** using response-date context, not a live clock or polling
+promise. Counts cover the full selected UTC calendar day using stored
+observation times; a generated timestamp marks computation start, not a cutoff
+or transactional snapshot.
 Late observations can change historical counts, so separately fetched hourly
 totals and daily values need not match, and refresh need not produce a newer
 timestamp. These are observed operational counts, not accounting-grade
@@ -177,8 +181,17 @@ rollback must account for clients still requesting hourly data.
 
 Activity graphs use two columns on wide desktop layouts and one column on
 tablet and mobile layouts. Service health uses five, two, then one column over
-the same ranges. All dates, values, labels, and statuses remain visible and
-wrap without horizontal page or card scrolling.
+the same ranges. At a given card width and text setting, daily and selected
+hourly views keep a stable card and plot footprint, including loading, error,
+retained-data, and expiry states. Hourly time/count cells are smaller and
+read-only; daily entries remain native buttons with targets at least 44 by 44
+CSS pixels, as do Back and Retry.
+
+A contained, keyboard-scrollable values/status area accommodates overflow
+when needed, including on desktop. Every exact value, complete freshness
+timestamp, notice, and Retry control remains reachable, but all content need
+not be visible simultaneously. Dates, values, labels, and statuses wrap without
+horizontal page or card scrolling.
 
 ## Event-page hierarchy
 
