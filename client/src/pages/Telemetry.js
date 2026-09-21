@@ -170,7 +170,7 @@ const inTooltipRegion = (placement, x, y) => {
   return Math.abs(x - center) <= 6;
 };
 
-const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onBack }) => {
+const MetricCard = ({ dates, metric, metricIndex, record, serverDay, generatedAt, onOpen, onBack }) => {
   const label = METRICS[metricIndex][1];
   const headingId = `telemetry-metric-heading-${metricIndex}`;
   const captionId = `telemetry-metric-caption-${metricIndex}`;
@@ -180,6 +180,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
     ? detail.generatedAt.slice(0, 10) : serverDay;
   const values = isDaily ? metric.values : detail?.values;
   const buckets = isDaily ? dates : detail?.hours;
+  const freshness = isDaily ? generatedAt : detail?.generatedAt;
   const maximumValue = Math.max(1, ...(values || []));
   const card = useRef(null);
   const bars = useRef([]);
@@ -187,6 +188,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
   const back = useRef(null);
   const heading = useRef(null);
   const tooltip = useRef(null);
+  const viewport = useRef(null);
   const pendingFocus = useRef(null);
   const originDay = useRef(null);
   const [pointerIndex, setPointerIndex] = useState(null);
@@ -216,6 +218,14 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
     }
     destination?.focus({ preventScroll: true });
     if (destination) {
+      if (viewport.current?.contains(destination) && viewport.current.clientHeight > 0) {
+        const frame = viewport.current.getBoundingClientRect();
+        const target = destination.getBoundingClientRect();
+        const top = frame.top + viewport.current.clientTop + 6;
+        const bottom = frame.top + viewport.current.clientTop + viewport.current.clientHeight - 6;
+        viewport.current.scrollTop += target.top < top
+          ? target.top - top : target.bottom > bottom ? target.bottom - bottom : 0;
+      }
       const box = destination.getBoundingClientRect();
       const headerBottom = document.querySelector('.app-navbar')?.getBoundingClientRect().bottom || 0;
       // Reveal only a user-initiated focus destination, including its 3px/2px
@@ -253,7 +263,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
         Math.min(window.innerWidth - 8, cardBox.right - 8) - measured.width
       )
     );
-    const protectedBoxes = [...card.current.querySelectorAll('button:focus, .telemetry-metric__action')]
+    const protectedBoxes = [...card.current.querySelectorAll('button:focus, .telemetry-metric__viewport:focus, .telemetry-metric__action')]
       .map((element) => element.getBoundingClientRect());
     const candidates = [anchor.top - measured.height - 6, anchor.bottom + 6];
     const maximumTop = bottom - measured.height;
@@ -310,13 +320,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
   return <article className="card telemetry-metric" aria-labelledby={headingId} ref={card}>
     <div className="card-body">
       <header className="telemetry-metric__header">
-        <div>
-          <h3 className="h5 telemetry-metric__heading" id={headingId} tabIndex={-1} ref={heading}>{label}</h3>
-          {!isDaily ? <p className="telemetry-metric__day mb-0">
-            <time dateTime={record.day}>{record.day}</time>{' · UTC'}
-            {record.day === currentServerDay ? ' · In progress' : ''}
-          </p> : null}
-        </div>
+        <h3 className="h5 telemetry-metric__heading" id={headingId} tabIndex={-1} ref={heading}>{label}</h3>
         {!isDaily ? <button
           type="button"
           className="btn telemetry-metric__action"
@@ -326,25 +330,18 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
             dismiss();
             onBack(metric.metric);
           }}
-        >Back to 14 days</button> : null}
-      </header>
-      {record.mode === 'loading' ? <p className="telemetry-notice telemetry-notice--progress mb-0" role="status">
-        {detail ? 'Refreshing hourly data. Showing the last accepted snapshot.' : 'Loading hourly data...'}
-      </p> : null}
-      {record.mode === 'error' ? <div className="telemetry-notice telemetry-notice--error" role="alert">
-        <p className="mb-0">
-          {record.errorKind === 'expired'
-            ? 'This UTC day is no longer available in the 14-day window.'
-            : 'Hourly data is unavailable. Retry or go back to 14 days.'}
-          {detail ? ' Showing the last accepted hourly snapshot.' : ''}
+        >Back to 14 days</button> : <span className="btn telemetry-metric__back-space" aria-hidden="true">Back to 14 days</span>}
+        <p className="telemetry-metric__day mb-0">
+          {isDaily ? <>
+            <time dateTime={dates[0]}>{dates[0]}</time>{' – '}
+            <time dateTime={dates[dates.length - 1]}>{dates[dates.length - 1]}</time>{' · UTC'}
+          </> : <>
+            <time dateTime={record.day}>{record.day}</time>{' · UTC'}
+            {record.day === currentServerDay ? ' · In progress' : ''}
+          </>}
         </p>
-        {record.errorKind !== 'expired' ? <button
-          className="btn telemetry-metric__action"
-          type="button"
-          onClick={(event) => openDay(record.day, event)}
-        >Retry</button> : null}
-      </div> : null}
-      {values ? <figure className="telemetry-metric__figure" aria-labelledby={`${headingId} ${captionId}`}>
+      </header>
+      <figure className="telemetry-metric__figure" aria-labelledby={`${headingId} ${captionId}`}>
         <svg
           className="telemetry-metric__graph"
           viewBox="0 0 280 100"
@@ -352,7 +349,7 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
           aria-hidden="true"
           focusable="false"
         >
-          {values.map((value, valueIndex) => {
+          {(values || []).map((value, valueIndex) => {
             const height = Math.max(2, (value / maximumValue) * 92);
             const slot = 280 / values.length;
             return <rect
@@ -375,18 +372,41 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
             />;
           })}
         </svg>
-        {detail ? <p className="telemetry-metric__generated mb-0">
-          Hourly data generated at{' '}
-          <time dateTime={detail.generatedAt}>{detail.generatedAt}</time>
-        </p> : null}
         <figcaption className="visually-hidden" id={captionId}>
           {isDaily ? 'Fourteen daily date' : 'Twenty-four UTC hour'} and value pairs for {label}.
         </figcaption>
-        <ol className="telemetry-metric__values" aria-label={`${label} ${isDaily ? 'daily' : 'hourly UTC'} values`}>
+        <div
+          className="telemetry-metric__viewport"
+          ref={viewport}
+          role={isDaily ? undefined : 'region'}
+          tabIndex={isDaily ? -1 : 0}
+          aria-label={isDaily ? undefined : `${label}, ${record.day} UTC, hourly values and status`}
+        >
+          {freshness ? <p className="telemetry-metric__generated mb-0">
+            {isDaily ? 'Overview data generated at' : 'Hourly data generated at'}{' '}
+            <time dateTime={freshness}>{freshness}</time>
+          </p> : null}
+          {record.mode === 'loading' ? <p className="telemetry-notice telemetry-notice--progress mb-0" role="status">
+            {detail ? 'Refreshing hourly data. Showing the last accepted snapshot.' : 'Loading hourly data...'}
+          </p> : null}
+          {record.mode === 'error' ? <div className="telemetry-notice telemetry-notice--error" role="alert">
+            <p className="mb-0">
+              {record.errorKind === 'expired'
+                ? 'This UTC day is no longer available in the 14-day window.'
+                : 'Hourly data is unavailable. Retry or go back to 14 days.'}
+              {detail ? ' Showing the last accepted hourly snapshot.' : ''}
+            </p>
+            {record.errorKind !== 'expired' ? <button
+              className="btn telemetry-metric__action"
+              type="button"
+              onClick={(event) => openDay(record.day, event)}
+            >Retry</button> : null}
+          </div> : null}
+        {values ? <ol className={`telemetry-metric__values${isDaily ? '' : ' telemetry-metric__values--hourly'}`} aria-label={`${label} ${isDaily ? 'daily' : 'hourly UTC'} values`}>
           {buckets.map((bucket, valueIndex) => {
             const pair = <>
               <time className="telemetry-metric__date" dateTime={bucket}>
-                {isDaily ? bucket : `${bucket.slice(11, 16)} UTC`}
+                {isDaily ? bucket : bucket.slice(11, 16)}
               </time>
               <data className="telemetry-metric__value" value={values[valueIndex]}>{values[valueIndex]}</data>
             </>;
@@ -408,8 +428,9 @@ const MetricCard = ({ dates, metric, metricIndex, record, serverDay, onOpen, onB
               >{pair}</button> : pair}
             </li>;
           })}
-        </ol>
-      </figure> : null}
+        </ol> : null}
+        </div>
+      </figure>
     </div>
     {activeIndex !== null && values ? <div
       className="telemetry-metric__tooltip"
@@ -669,6 +690,7 @@ const Telemetry = () => {
                 metricIndex={metricIndex}
                 record={records[metric.metric] || OVERVIEW}
                 serverDay={snapshot.generatedAt.slice(0, 10)}
+                generatedAt={snapshot.generatedAt}
                 onOpen={loadDetail}
                 onBack={(name) => {
                   invalidateDetail(name);
