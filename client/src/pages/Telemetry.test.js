@@ -144,6 +144,9 @@ const renderTelemetry = (withQueryControl = false) => render(
   </MemoryRouter>
 );
 
+const overviewTime = () => document.querySelector('.telemetry-page__generated time');
+const expectOverviewTime = (value) => waitFor(() => expect(overviewTime()).toHaveTextContent(value));
+
 describe('Telemetry', () => {
   beforeEach(() => {
     axios.get.mockReset();
@@ -177,7 +180,7 @@ describe('Telemetry', () => {
 
     renderTelemetry();
 
-    expect(await screen.findByText(summary.generatedAt)).toBeInTheDocument();
+    await expectOverviewTime(summary.generatedAt);
     expect(screen.getByText('Overview and service health generated at')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Service health', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Activity', level: 2 })).toBeInTheDocument();
@@ -323,7 +326,7 @@ describe('Telemetry', () => {
       expect(tooltip.querySelector('[title]')).toBeNull();
       const listTime = [...card.querySelectorAll('.telemetry-metric__values time')]
         .find((element) => element.getAttribute('datetime') === bucket);
-      expect(listTime).toHaveTextContent(isDaily ? bucket : label);
+      expect(listTime).toHaveTextContent(isDaily ? bucket : bucket.slice(11, 16));
       if (isDaily) {
         expect(listTime.closest('button')).toHaveAccessibleName(
           `${card.querySelector('h3').textContent}, ${bucket} UTC, ${count}`,
@@ -371,7 +374,7 @@ describe('Telemetry', () => {
         axios.get.mockResolvedValueOnce({ data: summary });
         renderTelemetry();
         await screen.findByRole('heading', { name: 'Service health' });
-        expect(screen.getByText(summary.generatedAt)).toBeInTheDocument();
+        expect(overviewTime()).toHaveTextContent(summary.generatedAt);
 
         for (let metricIndex = 0; metricIndex < METRIC_NAMES.length; metricIndex += 1) {
           const card = cardAt(metricIndex);
@@ -519,6 +522,48 @@ describe('Telemetry', () => {
 
   describe('Telemetry hourly cards', () => {
     beforeEach(() => axios.get.mockReset());
+
+    it('keeps the plot and status viewport mounted, with honest freshness and one hourly region', async () => {
+      await renderSummary();
+      const card = cardAt();
+      const plot = card.querySelector('svg');
+      const viewport = card.querySelector('.telemetry-metric__viewport');
+      const placeholder = card.querySelector('.telemetry-metric__back-space');
+      expect(placeholder.tagName).toBe('SPAN');
+      expect(placeholder).toHaveAttribute('aria-hidden', 'true');
+      expect(placeholder).not.toHaveAttribute('tabindex');
+      expect(placeholder.matches('.telemetry-metric__action, button')).toBe(false);
+      expect(viewport.querySelector('.telemetry-metric__generated time'))
+        .toHaveAttribute('datetime', createSummary().generatedAt);
+      const initial = createDeferred();
+      axios.get.mockReturnValueOnce(initial.promise);
+      userEvent.click(dateButton(0, 4));
+      expect(card.querySelector('svg')).toBe(plot);
+      expect(plot.querySelectorAll('rect')).toHaveLength(0);
+      expect(card.querySelector('.telemetry-metric__viewport')).toBe(viewport);
+      expect(viewport.querySelector('.telemetry-metric__generated')).toBeNull();
+      expect(within(viewport).getByRole('status')).toHaveTextContent('Loading hourly data');
+      expect(within(card).getByRole('region', { name: `Main page visits, ${DATES[4]} UTC, hourly values and status` }))
+        .toHaveAttribute('tabindex', '0');
+      await act(async () => initial.reject(new Error('unavailable')));
+      expect(within(viewport).getByRole('alert')).toHaveTextContent('Hourly data is unavailable');
+      expect(within(viewport).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      const detail = createHourly(METRIC_NAMES[0], DATES[4]);
+      axios.get.mockResolvedValueOnce({ data: detail });
+      userEvent.click(within(viewport).getByRole('button', { name: 'Retry' }));
+      await within(viewport).findByRole('list', { name: /hourly UTC/ });
+      expect(card.querySelector('svg')).toBe(plot);
+      expect(viewport.querySelector('.telemetry-metric__generated time')).toHaveAttribute('datetime', detail.generatedAt);
+      const list = within(viewport).getByRole('list');
+      expect(list.querySelectorAll('button, [tabindex]')).toHaveLength(0);
+      expect([...list.querySelectorAll('time')].map((time) => time.textContent))
+        .toEqual(Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`));
+      userEvent.click(within(card).getByRole('button', { name: 'Back to 14 days' }));
+      expect(card.querySelector('svg')).toBe(plot);
+      expect(card.querySelector('.telemetry-metric__viewport')).toBe(viewport);
+      expect(dateButton(0, 4)).toHaveFocus();
+      expect(within(card).queryByRole('region')).not.toBeInTheDocument();
+    });
 
     it('opens all eight metrics independently with exact native identities and 24 UTC pairs', async () => {
       await renderSummary();
@@ -766,7 +811,7 @@ describe('Telemetry', () => {
         expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
         await settle(overview, olderOverview);
 
-        expect(screen.getByText(olderOverview.generatedAt)).toBeInTheDocument();
+        expect(overviewTime()).toHaveTextContent(olderOverview.generatedAt);
         expect(hourlySignal.aborted).toBe(false);
         expect(within(cardAt()).queryByRole('alert')).not.toBeInTheDocument();
         if (order === 'after') {
@@ -858,7 +903,7 @@ describe('Telemetry', () => {
       .mockResolvedValueOnce({ data: initial })
       .mockReturnValueOnce(refresh.promise);
     renderTelemetry();
-    await screen.findByText(initial.generatedAt);
+    await expectOverviewTime(initial.generatedAt);
 
     const refreshButton = screen.getByRole('button', { name: 'Refresh' });
     refreshButton.focus();
@@ -867,14 +912,14 @@ describe('Telemetry', () => {
     expect(refreshButton).toBeDisabled();
     expect(refreshButton).toHaveFocus();
     expect(screen.getByRole('status')).toHaveTextContent('Refreshing...');
-    expect(screen.getByText(initial.generatedAt)).toBeInTheDocument();
+    expect(overviewTime()).toHaveTextContent(initial.generatedAt);
     expect(document.querySelector('.telemetry-page')).toHaveAttribute('aria-busy', 'true');
 
     await act(async () => {
       refresh.reject(new Error('network detail'));
     });
 
-    expect(screen.getByText(initial.generatedAt)).toBeInTheDocument();
+    expect(overviewTime()).toHaveTextContent(initial.generatedAt);
     expect(screen.getByRole('alert')).toHaveTextContent(
       `Refresh failed. Showing data generated at ${initial.generatedAt}.`
     );
@@ -894,7 +939,7 @@ describe('Telemetry', () => {
       .mockResolvedValueOnce({ data: initial })
       .mockReturnValueOnce(refresh.promise);
     renderTelemetry();
-    await screen.findByText(initial.generatedAt);
+    await expectOverviewTime(initial.generatedAt);
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await act(async () => {
@@ -902,7 +947,7 @@ describe('Telemetry', () => {
     });
 
     expect(screen.queryByText(initial.generatedAt)).not.toBeInTheDocument();
-    expect(screen.getByText(refreshed.generatedAt)).toBeInTheDocument();
+    expect(overviewTime()).toHaveTextContent(refreshed.generatedAt);
     expect(screen.getByRole('status')).toHaveTextContent('Telemetry refreshed.');
     document.querySelectorAll('.telemetry-metric__values .telemetry-metric__value')
       .forEach((value) => expect(value).toHaveTextContent('9'));
@@ -971,14 +1016,14 @@ describe('Telemetry', () => {
         .mockResolvedValueOnce({ data: initial })
         .mockResolvedValueOnce({ data: mutate(createSummary()) });
       renderTelemetry();
-      await screen.findByText(initial.generatedAt);
+      await expectOverviewTime(initial.generatedAt);
 
       fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
 
       expect(await screen.findByRole('alert')).toHaveTextContent(
         `Refresh failed. Showing data generated at ${initial.generatedAt}.`
       );
-      expect(screen.getByText(initial.generatedAt)).toBeInTheDocument();
+      expect(overviewTime()).toHaveTextContent(initial.generatedAt);
       expect(screen.getByRole('heading', { name: 'Service health' })).toBeInTheDocument();
       expect(document.querySelectorAll('.telemetry-metric__values .telemetry-metric__pair')).toHaveLength(112);
     },

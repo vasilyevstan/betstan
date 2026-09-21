@@ -61,16 +61,16 @@ const expectSiblingBoxesDoNotIntersect = async (locator, label) => {
 };
 
 const expectMetricContentsInsideCards = async (cards) => {
-  const failures = await cards.evaluateAll((elements) => {
+  const failures = await cards.evaluateAll(async (elements) => {
     const epsilon = 0.75;
     const selector = [
-      '.telemetry-metric__heading',
+      '.telemetry-metric__header',
+      '.telemetry-metric__day',
       '.telemetry-metric__graph',
-      '.telemetry-metric__date',
-      '.telemetry-metric__value',
+      '.telemetry-metric__viewport',
     ].join(',');
 
-    return elements.flatMap((card, cardIndex) => {
+    const failures = elements.flatMap((card, cardIndex) => {
       const cardRect = card.getBoundingClientRect();
       return [...card.querySelectorAll(selector)].flatMap((child, childIndex) => {
         const childRect = child.getBoundingClientRect();
@@ -87,9 +87,38 @@ const expectMetricContentsInsideCards = async (cards) => {
         }];
       });
     });
+    for (const [cardIndex, card] of elements.entries()) {
+      const viewport = card.querySelector('.telemetry-metric__viewport');
+      const savedTop = viewport.scrollTop;
+      // Check every text fragment by moving ONLY the internal viewport. This
+      // does not auto-scroll or focus controls during the immediate-focus tests.
+      for (const child of viewport.querySelectorAll('.telemetry-metric__pair, .telemetry-metric__generated, .telemetry-notice')) {
+        const walker = document.createTreeWalker(child, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          if (!walker.currentNode.textContent.trim()) continue;
+          const range = document.createRange();
+          range.selectNodeContents(walker.currentNode);
+          const startScroll = viewport.scrollTop;
+          for (const rect of range.getClientRects()) {
+            const frame = viewport.getBoundingClientRect();
+            viewport.scrollTop = rect.top - frame.top + startScroll - 6;
+            const delta = startScroll - viewport.scrollTop;
+            if (rect.left < frame.left + viewport.clientLeft - epsilon
+              || rect.right > frame.left + viewport.clientLeft + viewport.clientWidth + epsilon
+              || rect.top + delta < frame.top + viewport.clientTop - epsilon
+              || rect.bottom + delta > frame.top + viewport.clientTop + viewport.clientHeight + epsilon) {
+              failures.push({ cardIndex, className: child.className, kind: 'unreachable-text' });
+            }
+          }
+        }
+      }
+      viewport.scrollTop = savedTop;
+    }
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return failures;
   });
 
-  expect(failures, 'graph, headings, dates, and values must remain inside their card').toEqual([]);
+  expect(failures, 'header/plot/viewport must fit the card and all scroll content must be reachable').toEqual([]);
 };
 
 const expectRequiredLabelsNotClipped = async (page) => {
@@ -101,6 +130,11 @@ const expectRequiredLabelsNotClipped = async (page) => {
     '.telemetry-health__service',
     '.telemetry-health__status > span:last-child',
     '.telemetry-metric__heading',
+    '.telemetry-metric__day',
+    '.telemetry-metric__generated',
+    '.telemetry-metric__action',
+    '.telemetry-metric .telemetry-notice p',
+    '.telemetry-metric .telemetry-notice[role="status"]',
     '.telemetry-metric__date',
     '.telemetry-metric__value',
     '.navbar-collapse.show .nav-icon-link__label',
@@ -119,7 +153,7 @@ const expectRequiredLabelsNotClipped = async (page) => {
       range.selectNodeContents(element);
       const textRect = range.getBoundingClientRect();
       const container = element.closest(
-        '.telemetry-metric, .telemetry-health__item, .telemetry-page, .app-navbar'
+        '.telemetry-metric__pair, .telemetry-metric__generated, .telemetry-notice, .telemetry-metric, .telemetry-health__item, .telemetry-page, .app-navbar'
       );
       const containerRect = container?.getBoundingClientRect();
       const style = getComputedStyle(element);
@@ -367,7 +401,7 @@ const expectTooltipGeometry = async (page, card, trigger, bucket, count, interac
   const tooltip = card.getByRole('tooltip');
   await expectTooltipContents(tooltip, bucket, count);
   const listTime = card.locator(`.telemetry-metric__values time[datetime="${bucket}"]`);
-  await expect(listTime).toHaveText(isDaily ? bucket : `${bucket.slice(11, 16)} UTC`);
+  await expect(listTime).toHaveText(isDaily ? bucket : bucket.slice(11, 16));
   if (isDaily) {
     await expect(listTime.locator('xpath=..')).toHaveAccessibleName(new RegExp(`${bucket} UTC`));
   } else {
@@ -378,7 +412,7 @@ const expectTooltipGeometry = async (page, card, trigger, bucket, count, interac
     const style = getComputedStyle(element);
     const cardBox = element.closest('.telemetry-metric').getBoundingClientRect();
     const headerBottom = document.querySelector('.app-navbar').getBoundingClientRect().bottom;
-    const controls = [...element.closest('.telemetry-metric').querySelectorAll('button:focus, .telemetry-metric__action')];
+    const controls = [...element.closest('.telemetry-metric').querySelectorAll('button:focus, .telemetry-metric__viewport:focus, .telemetry-metric__action')];
     const lines = [...element.querySelectorAll('time, data')].map((line) => {
       const lineBox = line.getBoundingClientRect();
       const range = document.createRange();
@@ -526,6 +560,8 @@ const expectImmediateFocusVisible = async (page, name, transition) => {
     const box = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     const ring = parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset));
+    const viewport = element.closest('.telemetry-metric__viewport');
+    const frame = viewport?.getBoundingClientRect();
     return {
       name: element.getAttribute('aria-label') || element.textContent.trim(),
       focusVisible: element.matches(':focus-visible'),
@@ -535,6 +571,11 @@ const expectImmediateFocusVisible = async (page, name, transition) => {
       top: box.top - ring, bottom: box.bottom + ring,
       headerBottom: document.querySelector('.app-navbar').getBoundingClientRect().bottom,
       viewportWidth: innerWidth, viewportHeight: innerHeight,
+      innerViewport: frame ? {
+        left: frame.left + viewport.clientLeft, right: frame.left + viewport.clientLeft + viewport.clientWidth,
+        top: frame.top + viewport.clientTop, bottom: frame.top + viewport.clientTop + viewport.clientHeight,
+        scrollTop: viewport.scrollTop,
+      } : null,
     };
   });
   console.log(`Immediate ${transition} focus: ${JSON.stringify(evidence)}`);
@@ -546,6 +587,12 @@ const expectImmediateFocusVisible = async (page, name, transition) => {
   expect(evidence.bottom).toBeLessThanOrEqual(evidence.viewportHeight + 0.75);
   expect(evidence.left).toBeGreaterThanOrEqual(-0.75);
   expect(evidence.right).toBeLessThanOrEqual(evidence.viewportWidth + 0.75);
+  if (evidence.innerViewport) {
+    expect(evidence.top).toBeGreaterThanOrEqual(evidence.innerViewport.top - 0.75);
+    expect(evidence.bottom).toBeLessThanOrEqual(evidence.innerViewport.bottom + 0.75);
+    expect(evidence.left).toBeGreaterThanOrEqual(evidence.innerViewport.left - 0.75);
+    expect(evidence.right).toBeLessThanOrEqual(evidence.innerViewport.right + 0.75);
+  }
 };
 
 const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
@@ -556,6 +603,9 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
     const containmentFailures = [];
     const intersections = [];
     const counts = [];
+    const times = [];
+    const splitIntegers = [];
+    const viewport = element.querySelector('.telemetry-metric__viewport');
     const controls = pairs.map((pair, index) => {
       const control = pair.querySelector('button') || pair;
       const box = control.getBoundingClientRect();
@@ -564,6 +614,17 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
       range.selectNodeContents(control.querySelector('data'));
       const valueBaseline = range.getClientRects()[0].bottom;
       counts.push(control.querySelector('data').textContent);
+      times.push(control.querySelector('time').getAttribute('datetime'));
+      if (element.querySelector('.telemetry-metric__values--hourly')) {
+        // Sum the actual tabular-glyph fragments. CSS font shorthand can be
+        // empty with font-variant-numeric, silently leaving canvas at 10px.
+        const fragments = [...range.getClientRects()];
+        const wholeWidth = fragments.reduce((width, rect) => width + rect.width, 0);
+        const available = viewport.clientWidth
+          - parseFloat(getComputedStyle(viewport).paddingLeft) - parseFloat(getComputedStyle(viewport).paddingRight)
+          - parseFloat(getComputedStyle(pair).paddingLeft) - parseFloat(getComputedStyle(pair).paddingRight) - 2;
+        if (wholeWidth <= available + epsilon && fragments.length !== 1) splitIntegers.push(index);
+      }
       const inside = (child, parent) => (
         child.left >= parent.left - epsilon && child.right <= parent.right + epsilon
         && child.top >= parent.top - epsilon && child.bottom <= parent.bottom + epsilon
@@ -608,10 +669,10 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
     const plot = element.querySelector('svg').getBoundingClientRect();
     const containers = [
       document.documentElement, element, body,
-      ...element.querySelectorAll('.telemetry-metric__figure, .telemetry-metric__values, .telemetry-metric__pair, button'),
+      ...element.querySelectorAll('.telemetry-metric__figure, .telemetry-metric__viewport, .telemetry-metric__values, .telemetry-metric__pair, button'),
     ];
     return {
-      count: pairs.length, counts, containmentFailures, intersections,
+      count: pairs.length, counts, times, splitIntegers, containmentFailures, intersections,
       rowTopSpread: spread('top'), rowBottomSpread: spread('bottom'),
       rowWidthSpread: spread('width'), valueBaselineSpread: spread('valueBaseline'),
       plotWidth: plot.width, contentWidth, plotOffset: plot.left - contentLeft,
@@ -619,16 +680,196 @@ const expectOwnPairGeometry = async (card, viewport, mode, expectedCounts) => {
         .map((container) => ({ className: container.className, scrollWidth: container.scrollWidth, clientWidth: container.clientWidth })),
     };
   });
-  console.log(`Own-pair geometry ${viewport}/${mode}: ${JSON.stringify(evidence)}`);
+  console.log(`Own-pair geometry ${viewport}/${mode}: ${JSON.stringify({ ...evidence, counts: undefined, times: undefined })}`);
   expect(evidence.counts).toEqual(expectedCounts.map(String));
   expect(evidence.containmentFailures).toEqual([]);
   expect(evidence.intersections).toEqual([]);
   expect(evidence.overflow).toEqual([]);
-  for (const key of ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread']) {
+  for (const key of mode === 'daily'
+    ? ['rowTopSpread', 'rowBottomSpread', 'rowWidthSpread', 'valueBaselineSpread'] : ['rowTopSpread', 'rowBottomSpread']) {
     expect(evidence[key], key).toBeLessThanOrEqual(0.75);
   }
+  if (mode === 'hourly') {
+    expect(evidence.splitIntegers).toEqual([]);
+    expect(evidence.times).toEqual(Array.from({ length: 24 }, (_, hour) => (
+      `${evidence.times[0].slice(0, 10)}T${String(hour).padStart(2, '0')}:00:00.000Z`
+    )));
+  }
+  await expectMetricContentsInsideCards(card);
   expect(Math.abs(evidence.plotWidth - evidence.contentWidth)).toBeLessThanOrEqual(0.75);
   expect(Math.abs(evidence.plotOffset)).toBeLessThanOrEqual(0.75);
+};
+
+const expectStableCardStates = async (page, state, label, ordinaryDesktop = false) => {
+  // Only the unrelated page-level refresh banner is removed from normal flow.
+  // Local freshness, status, Retry and all values remain visible/reachable.
+  const chrome = await page.addStyleTag({ content: `
+    .telemetry-page > .telemetry-notice {
+      position: absolute; inset-block-start: 0; inset-inline-end: 0; pointer-events: none;
+    }
+  ` });
+  const original = state.telemetrySummary;
+  const cards = page.locator('.telemetry-metric');
+  const first = cards.first();
+  const second = cards.nth(1);
+  const day = original.dates[0];
+  const key = `MAIN_PAGE_VISIT/${day}`;
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  const measure = () => cards.evaluateAll((elements) => {
+    const columns = getComputedStyle(elements[0].parentElement).gridTemplateColumns.split(' ').length;
+    return {
+      heights: elements.map((element) => element.getBoundingClientRect().height),
+      followingRowY: elements[columns].getBoundingClientRect().top + scrollY,
+      slots: [...elements[0].querySelectorAll('.telemetry-metric__header, svg, .telemetry-metric__viewport')]
+        .map((element) => element.getBoundingClientRect().height),
+    };
+  });
+  const baseline = await measure();
+  const samples = [];
+  const check = async (phase) => {
+    const sample = await measure();
+    const heightDelta = Math.max(...sample.heights.map((height, index) => Math.abs(height - baseline.heights[index])));
+    const followingRowDelta = Math.abs(sample.followingRowY - baseline.followingRowY);
+    expect(heightDelta, `${label}/${phase} card heights`).toBeLessThanOrEqual(1);
+    expect(followingRowDelta, `${label}/${phase} following document row`).toBeLessThanOrEqual(1);
+    sample.slots.forEach((height, index) => expect(Math.abs(height - baseline.slots[index])).toBeLessThanOrEqual(1));
+    samples.push({ phase, height: sample.heights[0], heightDelta, followingRowDelta });
+  };
+  const hold = (body, status = 200) => {
+    let release;
+    state.telemetryHourlyResponses[key] = { body, status, wait: new Promise((resolve) => { release = resolve; }) };
+    return () => release();
+  };
+  const detail = {
+    ...createTelemetryHourly('MAIN_PAGE_VISIT', day, original),
+    generatedAt: '2026-09-10T01:23:00.000Z',
+    values: Array.from({ length: 24 }, (_, hour) => hour + 1),
+  };
+  if (ordinaryDesktop) expect(baseline.heights[0]).toBeLessThanOrEqual(365.265625);
+  await check('daily');
+  const releaseError = hold({ error: 'Telemetry temporarily unavailable' }, 503);
+  await first.locator('.telemetry-metric__date-button').first().press('Enter');
+  await expect(first.getByRole('status')).toHaveText('Loading hourly data...');
+  await expect(first.locator('svg')).toHaveCount(1);
+  await expect(first.locator('rect')).toHaveCount(0);
+  await expect(first.locator('.telemetry-metric__generated')).toHaveCount(0);
+  await check('initial-loading');
+  releaseError();
+  await expect(first.getByRole('alert')).toContainText('Hourly data is unavailable');
+  await check('initial-error');
+  await expectMetricContentsInsideCards(first);
+  const releaseReady = hold(detail);
+  await first.getByRole('button', { name: 'Retry' }).press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', `${label} Retry`);
+  await check('retry-loading');
+  releaseReady();
+  await expect(first.locator('.telemetry-metric__values data')).toHaveCount(24);
+  await expect(first.locator('.telemetry-metric__generated time')).toHaveAttribute('datetime', detail.generatedAt);
+  await check('ready');
+  if (ordinaryDesktop) {
+    expect(await first.locator('.telemetry-metric__viewport').evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+  }
+  await second.locator('.telemetry-metric__date-button').first().press('Enter');
+  await expect(second.locator('rect')).toHaveCount(24);
+  await expect(first.locator('.telemetry-metric__day time')).toHaveAttribute('datetime', day);
+  await check('independent-sibling-ready');
+  const releaseRetained = hold({ error: 'Telemetry temporarily unavailable' }, 503);
+  await refresh.click();
+  await expect(first.getByRole('status')).toContainText('Showing the last accepted snapshot');
+  await expect(first.locator('.telemetry-metric__values data')).toHaveText(detail.values.map(String));
+  await check('retained-loading');
+  releaseRetained();
+  await expect(first.getByRole('alert')).toContainText('Showing the last accepted hourly snapshot');
+  await expect(refresh).toBeEnabled();
+  await check('retained-error');
+  await expectMetricContentsInsideCards(first);
+  const releaseRetry = hold(detail);
+  await first.getByRole('button', { name: 'Retry' }).press('Enter');
+  await expectImmediateFocusVisible(page, 'Back to 14 days', `${label} retained Retry`);
+  await check('retained-retry');
+  releaseRetry();
+  await expect(first.getByRole('status')).toHaveCount(0);
+  for (const count of [0, Number.MAX_SAFE_INTEGER]) {
+    state.telemetrySummary = {
+      ...original, metrics: original.metrics.map((metric) => ({ ...metric, values: Array(14).fill(count) })),
+    };
+    state.telemetryHourlyResponses[key] = { body: { ...detail, values: Array(24).fill(count) } };
+    await refresh.click();
+    await expect(refresh).toBeEnabled();
+    await expect(first.locator('.telemetry-metric__values data')).toHaveText(Array(24).fill(String(count)));
+    await check(count === 0 ? 'zero-refresh' : 'MAX_SAFE-refresh');
+    await expectMetricContentsInsideCards(cards);
+    if (count === Number.MAX_SAFE_INTEGER) {
+      await expectOwnPairGeometry(first, label, 'hourly', Array(24).fill(count));
+    }
+  }
+  const region = first.getByRole('region', { name: new RegExp(`${day} UTC`) });
+  await expect(region).toHaveAttribute('tabindex', '0');
+  await region.focus();
+  const scrollBefore = await region.evaluate((element) => element.scrollTop);
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => region.evaluate((element) => element.scrollTop)).toBeGreaterThan(scrollBefore);
+  expect(await region.evaluate((element) => element.matches(':focus-visible'))).toBe(true);
+  const regionContrast = await getContrastEvidence(page);
+  expect(regionContrast.focus.width).toBe('3px');
+  expect(regionContrast.focus.ratio).toBeGreaterThanOrEqual(3);
+  expect(Math.min(...regionContrast.pairText, ...regionContrast.detailText)).toBeGreaterThanOrEqual(4.5);
+  expect(Math.min(...regionContrast.graphs)).toBeGreaterThanOrEqual(3);
+  await expect(first.locator('.telemetry-metric__values [tabindex], .telemetry-metric__values button')).toHaveCount(0);
+  await expectRequiredLabelsNotClipped(cards);
+  state.telemetrySummary = {
+    ...state.telemetrySummary,
+    generatedAt: '2026-09-11T00:15:00.000Z',
+    dates: [...original.dates.slice(1), '2026-09-11'],
+  };
+  state.telemetryHourlyResponses[key] = { status: 400, body: { error: 'Invalid request' } };
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await expect(first.getByRole('alert')).toContainText('no longer available');
+  await expect(first.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  await expect(first.locator('.telemetry-metric__values data')).toHaveText(Array(24).fill(String(Number.MAX_SAFE_INTEGER)));
+  await check('expired-retained');
+  await expectMetricContentsInsideCards(first);
+  await first.getByRole('button', { name: 'Back to 14 days' }).press('Enter');
+  await expect(first.getByRole('heading')).toBeFocused();
+  await check('expired-Back-heading');
+  const latestDay = state.telemetrySummary.dates[13];
+  const latestKey = `MAIN_PAGE_VISIT/${latestDay}`;
+  state.telemetryHourlyResponses[latestKey] = {
+    body: { ...createTelemetryHourly('MAIN_PAGE_VISIT', latestDay, state.telemetrySummary), values: Array(24).fill(Number.MAX_SAFE_INTEGER) },
+  };
+  await first.locator('.telemetry-metric__date-button').last().press('Enter');
+  await expect(first.locator('rect')).toHaveCount(24);
+  await check('latest-day-ready');
+  await first.locator('.telemetry-metric__viewport').evaluate((element) => { element.scrollTop = 0; });
+  await first.getByRole('button', { name: 'Back to 14 days' }).press('Enter');
+  await expectImmediateFocusVisible(page, `Main page visits, ${latestDay} UTC, ${Number.MAX_SAFE_INTEGER}`, `${label} scrolled Back`);
+  expect(await first.locator('.telemetry-metric__viewport').evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await check('Back-reveals-origin');
+  await second.getByRole('button', { name: 'Back to 14 days' }).press('Enter');
+  await check('independent-sibling-Back');
+  state.telemetrySummary = original;
+  delete state.telemetryHourlyResponses[key];
+  delete state.telemetryHourlyResponses[latestKey];
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  await check('restored-overview');
+  await chrome.evaluate((element) => element.remove());
+  await test.info().attach(`stable-frame-${label}`, {
+    body: Buffer.from(JSON.stringify({
+      label, baseline, samples,
+      scrollRegionFocusContrast: regionContrast.focus.ratio,
+      textContrast: Math.min(...regionContrast.pairText, ...regionContrast.detailText),
+      graphContrast: Math.min(...regionContrast.graphs),
+    })),
+    contentType: 'application/json',
+  });
+  console.log(`Stable frame ${label}: ${JSON.stringify({
+    heights: baseline.heights, plot: baseline.slots[1], viewport: baseline.slots[2],
+    phases: samples.length,
+    maxHeightDelta: Math.max(...samples.map((sample) => sample.heightDelta)),
+    maxFollowingRowDelta: Math.max(...samples.map((sample) => sample.followingRowDelta)),
+  })}`);
 };
 
 const openCollapsedNavigation = async (page) => {
@@ -742,6 +983,7 @@ for (const uiVariant of UI_VARIANTS) {
         if (viewport.width === 1600) {
           await expectRefreshFocusAfterSuccessAndFailure(page, state);
         }
+        await expectStableCardStates(page, state, `${uiVariant}/${theme}/${viewport.width}`, viewport.width === 1600);
         // Reuse this layout matrix, not a second screenshot matrix.
         const hourly = await expectMixedState(page);
         const card = page.locator('.telemetry-metric').first();
@@ -788,6 +1030,54 @@ for (const uiVariant of UI_VARIANTS) {
     });
   }
 }
+
+test('compact frame remains stable at breakpoints, intermediate widths and 200% text with long titles', async ({ page }) => {
+  test.setTimeout(120000);
+  await installFakeEventSource(page);
+  const state = createShellMockState();
+  await installAppApiMocks(page, state);
+  for (const scenario of [
+    { width: 1199 }, { width: 1201 }, { width: 960 }, { width: 1366 },
+    { width: 390, textZoom: true }, { width: 1600, textZoom: true },
+  ]) {
+    await page.setViewportSize({ width: scenario.width, height: 1000 });
+    await page.goto('/telemetry?ui=v2&theme=light');
+    await expect(page.locator('.telemetry-metric')).toHaveCount(8);
+    if (scenario.textZoom) {
+      // Hold the unrelated raster wordmark's geometry constant. Its rem-based
+      // width otherwise overflows the shell before any local card is involved.
+      await page.locator('.app-navbar .brand-wordmark').evaluateAll((elements) => {
+        elements.forEach((element) => { element.style.width = `${element.getBoundingClientRect().width}px`; });
+      });
+      await page.addStyleTag({ content: 'html { font-size: 200%; }' });
+      await page.locator('.telemetry-metric__heading').evaluateAll((elements) => {
+        elements.forEach((element) => { element.textContent += ' — extended telemetry diagnostic activity identity'; });
+      });
+    }
+    const label = `${scenario.width}/${scenario.textZoom ? '200%-text-long-titles' : 'normal-text'}`;
+    await expectStableCardStates(page, state, label);
+    await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
+    await expectRequiredLabelsNotClipped(page.locator('.telemetry-metrics'));
+    await expectNoScrollOverflow(page.locator('html'), label);
+  }
+});
+
+test.describe('compact frame at 200% zoom-equivalent viewport', () => {
+  // 1600x1000 physical pixels at 200%: 800x500 CSS px. Text enlargement is
+  // independently exercised above, rather than mistaking DPR alone for zoom.
+  test.use({ viewport: { width: 800, height: 500 }, deviceScaleFactor: 2 });
+  test('keeps local states and scrolled focus stable in the reduced CSS viewport', async ({ page }) => {
+    await installFakeEventSource(page);
+    const state = createShellMockState();
+    await installAppApiMocks(page, state);
+    await page.goto('/telemetry?ui=v3&theme=dark');
+    await expect(page.locator('.telemetry-metric')).toHaveCount(8);
+    await expectStableCardStates(page, state, '800x500-css/200%-zoom-equivalent');
+    await expectMetricContentsInsideCards(page.locator('.telemetry-metric'));
+    await expectRequiredLabelsNotClipped(page.locator('.telemetry-metrics'));
+    await expectNoScrollOverflow(page.locator('html'), '200% zoom-equivalent document');
+  });
+});
 
 test('authenticated expanded navbar fits at 1000px', async ({ page }) => {
   await installFakeEventSource(page);
