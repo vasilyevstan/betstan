@@ -837,7 +837,164 @@ def read_mongo_storage(path, failure=""):
         return unavailable_mongo_storage("TRANSPORT_FAILED" if failure else "MALFORMED_OUTPUT")
 
 
-def validate_diagnosis(value):
+BASELINE_HASHES = (
+    "identitySha256", "instanceFingerprintSha256", "volumeFingerprintSha256",
+    "attachmentFingerprintSha256", "deviceFingerprintSha256", "candidateImagesSha256",
+)
+
+
+def validate_baseline_proof(value, source_sha, control_sha, run_id, candidates):
+    require_storage(isinstance(value, dict) and set(value) == {
+        "schemaVersion", "sourceSha", "controlSha", "workflowRunId", "observedAt",
+        *BASELINE_HASHES,
+    })
+    require_storage(value["schemaVersion"] == "k3s-observed-baseline.v1")
+    require_storage(value["sourceSha"] == source_sha and value["controlSha"] == control_sha)
+    require_storage(value["workflowRunId"] == str(run_id))
+    storage_timestamp(value["observedAt"])
+    for field in BASELINE_HASHES:
+        require_storage(isinstance(value[field], str) and
+                        re.fullmatch(r"[0-9a-f]{64}", value[field]))
+    require_storage(value["candidateImagesSha256"] == checksum(candidates))
+
+
+def build_baseline_proof(args):
+    try:
+        cloud = load_json(args.cloud, "private cloud baseline")
+        node = load_json(args.node, "private node baseline")
+        candidates = parse_candidate_images(args.candidate_images)
+        require_storage(set(cloud) == {
+            "instanceId", "instanceFingerprint", "volumeId", "attachmentId",
+            "device", "volumeSizeBytes",
+        })
+        for key in ("instanceId", "volumeId", "attachmentId"):
+            require_storage(isinstance(cloud[key], str) and
+                            re.fullmatch(r"ocid1\.[a-z0-9.-]+", cloud[key]))
+        require_storage(cloud["instanceFingerprint"] ==
+                        hashlib.sha256(cloud["instanceId"].encode()).hexdigest())
+        require_storage(cloud["device"] == "/dev/oracleoci/oraclevdb" and
+                        cloud["volumeSizeBytes"] == 50 * 1073741824)
+        require_storage(node["schemaVersion"] == "k3s-baseline-node.v1")
+        require_storage(node["expectedNode"] == args.expected_node)
+        require_storage(isinstance(node["nodes"], list) and len(node["nodes"]) == 1)
+        identity = node["nodes"][0]
+        require_storage(identity["name"] == args.expected_node and identity["ready"] is True)
+        require_storage(isinstance(identity["uid"], str) and identity["uid"])
+        require_storage(node["requestedDevice"] == cloud["device"])
+        device = node["resolvedDevice"]
+        require_storage(isinstance(device, str) and re.fullmatch(r"/dev/[A-Za-z0-9_-]+", device))
+        require_storage(node["mountedDevice"] == device)
+        block = node["blockDevice"]
+        require_storage(block["path"] == device and block["type"] == "disk" and
+                        block["size"] == cloud["volumeSizeBytes"])
+        require_storage(isinstance(block["deviceNumber"], str) and
+                        re.fullmatch(r"[0-9]+:[0-9]+", block["deviceNumber"]))
+        require_storage(isinstance(node["rootDeviceNumber"], str) and
+                        re.fullmatch(r"[0-9]+:[0-9]+", node["rootDeviceNumber"]))
+        require_storage(block["deviceNumber"] != node["rootDeviceNumber"])
+        require_storage(node["mongoMount"]["target"] == "/var/lib/betstan/mongo" and
+                        node["mongoMount"]["fstype"] == "ext4")
+        claim, volume = node["claim"], node["volume"]
+        require_storage(claim["name"] == volume["name"] == claim["volumeName"] ==
+                        "gaming-auth-mongo-data")
+        require_storage(claim["phase"] == volume["phase"] == "Bound")
+        require_storage(volume["localPath"] == "/var/lib/betstan/mongo")
+        require_storage(volume["claim"]["namespace"] == "betstan-oci" and
+                        volume["claim"]["name"] == claim["name"] and
+                        volume["claim"]["uid"] == claim["uid"] and
+                        isinstance(claim["uid"], str) and claim["uid"])
+        expected = {f"gaming-{item['service']}": item for item in candidates}
+        auxiliaries = {"gaming-auth-mongo", "gaming-rabbitmq"}
+        deployments = node["deployments"]
+        require_storage(isinstance(deployments, list) and len(deployments) <= 64)
+        app_deployments = {}
+        for deployment in deployments:
+            name = deployment["name"]
+            require_storage(isinstance(name, str) and name.endswith("-depl"))
+            app = name[:-5]
+            if app in auxiliaries:
+                continue
+            require_storage(app in expected and app not in app_deployments)
+            require_storage(deployment["deleting"] is False)
+            for field in ("generation", "observedGeneration", "replicas", "readyReplicas",
+                          "availableReplicas", "updatedReplicas"):
+                require_storage(type(deployment[field]) is int and deployment[field] >= 0)
+            require_storage(deployment["replicas"] > 0 and
+                            deployment["observedGeneration"] == deployment["generation"])
+            require_storage(all(deployment[field] >= deployment["replicas"]
+                                for field in ("readyReplicas", "availableReplicas", "updatedReplicas")))
+            require_storage(deployment["containers"] ==
+                            [{"name": app, "image": expected[app]["imageRef"]}])
+            require_storage(isinstance(deployment["uid"], str) and deployment["uid"])
+            app_deployments[app] = deployment
+        require_storage(set(app_deployments) == set(expected))
+        require_storage(isinstance(node["pods"], list) and len(node["pods"]) <= 128)
+        app_pods = {name: [] for name in expected}
+        mongo_pods = []
+        for pod in node["pods"]:
+            if pod["deleting"] or pod["phase"] in {"Succeeded", "Failed"}:
+                continue
+            app = pod["app"]
+            require_storage(app in expected or app in auxiliaries)
+            if app == "gaming-rabbitmq":
+                continue
+            require_storage(pod["phase"] == "Running" and pod["ready"] is True and
+                            pod["nodeName"] == args.expected_node)
+            require_storage(isinstance(pod["uid"], str) and pod["uid"])
+            require_storage(len(pod["containers"]) == len(pod["statuses"]) == 1)
+            container, status = pod["containers"][0], pod["statuses"][0]
+            require_storage(container["name"] == status["name"] == app and status["ready"] is True)
+            if app == "gaming-auth-mongo":
+                mongo_pods.append(pod)
+                require_storage(container["defaultCommand"] is True)
+                mounts = [item for item in container["mounts"] if item["mountPath"] == "/data/db"]
+                require_storage(len(mounts) == 1)
+                mount = mounts[0]
+                require_storage(mount["readOnly"] is False and mount["subPath"] == "" and
+                                mount["subPathExpr"] == "")
+                volumes = [item for item in pod["volumes"] if item["name"] == mount["name"]]
+                require_storage(len(volumes) == 1 and volumes[0]["claimName"] == claim["name"])
+                continue
+            candidate = expected[app]
+            require_storage(container["image"] == candidate["imageRef"])
+            require_storage(isinstance(status["imageID"], str) and any(
+                status["imageID"].endswith("@" + digest)
+                for digest in (candidate["manifestDigest"], candidate["platformDigest"])
+            ))
+            app_pods[app].append({
+                "uid": pod["uid"], "image": container["image"], "imageID": status["imageID"],
+            })
+        require_storage(len(mongo_pods) == 1)
+        require_storage(all(len(app_pods[name]) >= app_deployments[name]["replicas"]
+                            for name in expected))
+        stable = {
+            "cloud": cloud, "node": identity, "device": device,
+            "deviceNumber": block["deviceNumber"], "rootDeviceNumber": node["rootDeviceNumber"],
+            "claimUid": claim["uid"], "mongoPodUid": mongo_pods[0]["uid"],
+            "deployments": [app_deployments[name] for name in sorted(expected)],
+            "pods": {name: sorted(app_pods[name], key=lambda row: row["uid"])
+                     for name in sorted(expected)},
+        }
+        proof = {
+            "schemaVersion": "k3s-observed-baseline.v1",
+            "sourceSha": require_sha(args.source_sha, "baseline subject SHA"),
+            "controlSha": require_sha(args.control_sha, "baseline control SHA"),
+            "workflowRunId": require_positive(args.workflow_run_id, "baseline workflow run"),
+            "observedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "identitySha256": checksum(stable),
+            "instanceFingerprintSha256": cloud["instanceFingerprint"],
+            "volumeFingerprintSha256": hashlib.sha256(cloud["volumeId"].encode()).hexdigest(),
+            "attachmentFingerprintSha256": hashlib.sha256(cloud["attachmentId"].encode()).hexdigest(),
+            "deviceFingerprintSha256": hashlib.sha256(device.encode()).hexdigest(),
+            "candidateImagesSha256": checksum(candidates),
+        }
+        validate_baseline_proof(proof, args.source_sha, args.control_sha, args.workflow_run_id, candidates)
+    except (KeyError, TypeError, ValueError, IndexError, RecursionError):
+        fail("historical baseline identity, storage binding, or live image generation is invalid")
+    Path(args.output).write_text(canonical(proof) + "\n", encoding="utf-8")
+
+
+def validate_diagnosis(value, observation=False):
     required = {
         "schemaVersion",
         "phase",
@@ -858,6 +1015,8 @@ def validate_diagnosis(value):
     version_two = value.get("schemaVersion") == "k3s-node-disk-diagnosis.v2"
     if version_two:
         required.add("mongoStorage")
+    if observation:
+        required.update(("controlSha", "baselineValidation"))
     if set(value) != required:
         fail("diagnosis manifest has an unexpected schema")
     validate_checksum(value, "diagnosis manifest")
@@ -866,10 +1025,26 @@ def validate_diagnosis(value):
         or value["phase"] != "diagnose-disk"
         or value["workflowRunAttempt"] != "1"
         or value["thresholdPercent"] != THRESHOLD
-        or value["terminalStatus"] != "DIAGNOSED"
+        or value["terminalStatus"] != ("OBSERVED" if observation else "DIAGNOSED")
     ):
         fail("diagnosis manifest identity is invalid")
     require_sha(value["sourceSha"], "diagnosis source SHA")
+    if observation:
+        require_sha(value["controlSha"], "observation control SHA")
+        if not version_two or value["controlSha"] == value["sourceSha"]:
+            fail("historical observation control and subject identities are invalid")
+        try:
+            proofs = value["baselineValidation"]
+            require_storage(isinstance(proofs, dict) and set(proofs) == {"before", "after"})
+            for proof in proofs.values():
+                validate_baseline_proof(proof, value["sourceSha"], value["controlSha"],
+                                        value["workflowRunId"], value["candidateImages"])
+            require_storage(all(proofs["before"][key] == proofs["after"][key]
+                                for key in BASELINE_HASHES))
+            require_storage(storage_timestamp(proofs["before"]["observedAt"]) <=
+                            storage_timestamp(proofs["after"]["observedAt"]))
+        except (KeyError, TypeError, ValueError):
+            fail("historical observation baseline proof is missing or drifted")
     for name in ("infrastructureRunId", "ghcrBuildRunId", "workflowRunId"):
         require_positive(value[name], f"diagnosis {name}")
     if not re.fullmatch(r"[0-9a-f]{64}", value["securityStateSha256"]):
@@ -940,8 +1115,22 @@ def build_diagnosis(args):
         content["mongoStorage"] = read_mongo_storage(
             storage_path, getattr(args, "mongo_storage_failure", "")
         )
+    control_sha = getattr(args, "control_sha", None) or args.source_sha
+    observation = control_sha != args.source_sha
+    if observation:
+        if not storage_path or not getattr(args, "baseline_before", None) or \
+                not getattr(args, "baseline_after", None):
+            fail("historical observations require fresh before/after baseline proofs")
+        content.update({
+            "controlSha": require_sha(control_sha, "observation control SHA"),
+            "terminalStatus": "OBSERVED",
+            "baselineValidation": {
+                "before": load_json(args.baseline_before, "before-observation baseline"),
+                "after": load_json(args.baseline_after, "after-observation baseline"),
+            },
+        })
     result = add_checksum(content)
-    validate_diagnosis(result)
+    validate_diagnosis(result, observation=observation)
     Path(args.output).write_text(canonical(result) + "\n", encoding="utf-8")
 
 
@@ -1121,6 +1310,15 @@ def validate_diagnosis_command(args):
         fail("diagnosis workflow run differs from the bound value")
 
 
+def validate_observation_command(args):
+    observation = load_json(args.diagnosis, "historical observation")
+    validate_diagnosis(observation, observation=True)
+    if observation["controlSha"] != args.control_sha:
+        fail("observation control SHA differs from the bound value")
+    if observation["sourceSha"] != args.source_sha:
+        fail("observation baseline SHA differs from the bound value")
+
+
 def write_incomplete_reclaim(args):
     diagnosis = load_json(args.diagnosis, "diagnosis manifest")
     validate_diagnosis(diagnosis)
@@ -1159,6 +1357,9 @@ def main():
     diagnose.add_argument("--workflow-run-id", required=True)
     diagnose.add_argument("--mongo-storage")
     diagnose.add_argument("--mongo-storage-failure", choices=("", "TRANSPORT_FAILED"), default="")
+    diagnose.add_argument("--control-sha")
+    diagnose.add_argument("--baseline-before")
+    diagnose.add_argument("--baseline-after")
     diagnose.add_argument("--output", required=True)
     diagnose.set_defaults(handler=build_diagnosis)
 
@@ -1169,6 +1370,23 @@ def main():
     validate.add_argument("--ghcr-build-run-id")
     validate.add_argument("--workflow-run-id")
     validate.set_defaults(handler=validate_diagnosis_command)
+
+    baseline = subparsers.add_parser("validate-baseline")
+    baseline.add_argument("--cloud", required=True)
+    baseline.add_argument("--node", required=True)
+    baseline.add_argument("--candidate-images", required=True)
+    baseline.add_argument("--expected-node", required=True)
+    baseline.add_argument("--source-sha", required=True)
+    baseline.add_argument("--control-sha", required=True)
+    baseline.add_argument("--workflow-run-id", required=True)
+    baseline.add_argument("--output", required=True)
+    baseline.set_defaults(handler=build_baseline_proof)
+
+    observation = subparsers.add_parser("validate-observation")
+    observation.add_argument("--diagnosis", required=True)
+    observation.add_argument("--source-sha", required=True)
+    observation.add_argument("--control-sha", required=True)
+    observation.set_defaults(handler=validate_observation_command)
 
     plan = subparsers.add_parser("plan-reclaim")
     plan.add_argument("--diagnosis", required=True)

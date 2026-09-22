@@ -280,39 +280,40 @@ approval_state_for() {
 binding_run_json() {
   local run_id="$1"
   local workflow workflow_id event title created_at updated_at
+  local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$run_id" in
     41)
       workflow=oci-production-build.yml
       event=workflow_run
-      title="oci-build $SHA upstream-40"
+      title="oci-build $subject_sha upstream-40"
       created_at=2026-01-01T00:00:00Z
       updated_at=2026-01-01T00:01:00Z
       ;;
     42)
       workflow=ghcr-package-management.yml
       event=workflow_dispatch
-      title="ghcr-package validate $SHA"
+      title="ghcr-package validate $subject_sha"
       created_at="${STUB_PACKAGE_CREATED_AT:-2026-01-01T00:02:00Z}"
       updated_at=2026-01-01T00:03:00Z
       ;;
     43)
       workflow=oci-capacity-acquire.yml
       event=workflow_dispatch
-      title="oci-capacity-acquire $SHA"
+      title="oci-capacity-acquire $subject_sha"
       created_at=2026-01-01T00:04:00Z
       updated_at=2026-01-01T00:05:00Z
       ;;
     44)
       workflow=oci-infrastructure.yml
       event=workflow_dispatch
-      title="oci-infrastructure finalize k3s $SHA"
+      title="oci-infrastructure finalize k3s $subject_sha"
       created_at=2026-01-01T00:06:00Z
       updated_at=2026-01-01T00:07:00Z
       ;;
     45)
       workflow=oci-infrastructure.yml
       event=workflow_dispatch
-      title="oci-infrastructure diagnose-disk k3s $SHA"
+      title="oci-infrastructure diagnose-disk k3s $subject_sha"
       created_at=2026-01-01T00:08:00Z
       updated_at=2026-01-01T00:09:00Z
       ;;
@@ -327,7 +328,7 @@ binding_run_json() {
     --arg path ".github/workflows/$workflow" \
     --arg title "$title" \
     --arg event "$event" \
-    --arg sha "$SHA" \
+    --arg sha "$subject_sha" \
     --arg repo "$REPOSITORY" \
     --arg created_at "$created_at" \
     --arg updated_at "$updated_at" \
@@ -351,8 +352,9 @@ binding_run_json() {
 binding_artifacts_json() {
   local run_id="$1"
   local artifact artifact_id
+  local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$run_id" in
-    41) artifact="oci-image-provenance-$SHA-41-1"; artifact_id=9041 ;;
+    41) artifact="oci-image-provenance-$subject_sha-41-1"; artifact_id=9041 ;;
     42) artifact="ghcr-package-management-validate-42-1"; artifact_id=9042 ;;
     43) artifact="oci-capacity-provenance-43-1"; artifact_id=9043 ;;
     44) artifact="oci-infrastructure-provenance-44-1"; artifact_id=9044 ;;
@@ -373,10 +375,11 @@ binding_artifacts_json() {
 binding_artifact_zip() {
   local artifact_id="$1"
   local file_name content
+  local subject_sha="${STUB_BINDING_SHA:-$SHA}"
   case "$artifact_id" in
     9041)
       file_name=build-chain.txt
-      content="source_sha=$SHA
+      content="source_sha=$subject_sha
 build_run_id=41
 build_run_attempt=1
 registry_provider=ghcr
@@ -403,7 +406,7 @@ anonymous_pull=pass
       ;;
     9043)
       file_name=provenance.env
-      content="source_sha=$SHA
+      content="source_sha=$subject_sha
 acquisition_run_id=43
 runtime_mode=k3s
 shape=VM.Standard.A1.Flex
@@ -415,7 +418,7 @@ boot_volume_vpus_per_gb=10
       ;;
     9044)
       file_name=provenance.env
-      content="source_sha=$SHA
+      content="source_sha=$subject_sha
 infrastructure_run_id=44
 infrastructure_run_attempt=1
 infrastructure_finalized=true
@@ -427,7 +430,7 @@ capacity_acquisition_run_id=43
       ;;
     9045)
       file_name=diagnosis.json
-      content="$(jq -cn --arg sha "$SHA" \
+      content="$(jq -cn --arg sha "$subject_sha" \
         --arg schema "${STUB_DISK_DIAGNOSIS_SCHEMA:-k3s-node-disk-diagnosis.v2}" '{
         schemaVersion:$schema,
         sourceSha:$sha,
@@ -477,8 +480,11 @@ git() {
     "rev-parse HEAD")
       printf '%s\n' "$SHA"
       ;;
-    "cat-file -e"|"merge-base --is-ancestor")
+    "cat-file -e")
       return 0
+      ;;
+    "merge-base --is-ancestor")
+      [[ "${STUB_ANCESTOR_FAIL:-false}" != "true" ]]
       ;;
     *)
       if [[ "$1" = "rev-parse" && "$2" = "$SHA:.github/workflows/"* ]]; then
@@ -1066,6 +1072,12 @@ load_record_stub() {
   unset STUB_PACKAGE_CREATED_AT
   unset STUB_PACKAGE_CANDIDATE_BUILD_ID
   unset STUB_DISK_DIAGNOSIS_SCHEMA
+  unset STUB_ANCESTOR_FAIL
+  STUB_BINDING_SHA="$SHA"
+  if [[ -f "$tmp_dir/request-$STUB_RUN_ID.json" ]]; then
+    STUB_BINDING_SHA="$(jq -er '.subjectSha // .controlSha' "$tmp_dir/request-$STUB_RUN_ID.json")"
+  fi
+  export STUB_BINDING_SHA
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
   runtime_mode="$(
@@ -1155,6 +1167,24 @@ done < <(
   "$POLICY" all |
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
+
+load_record_stub oci-k3s-disk-diagnose
+[[ "$STUB_BINDING_SHA" == "$TARGET_SHA" && "$STUB_BINDING_SHA" != "$SHA" ]]
+if STUB_ANCESTOR_FAIL=true COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "non-ancestor diagnostic baseline unexpectedly authorized" >&2
+  exit 1
+fi
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
+if STUB_MASTER_SHA="$TARGET_SHA" COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "stale diagnostic control unexpectedly authorized" >&2
+  exit 1
+fi
+grep -qF "exact current master" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
 
 load_record_stub oci-k3s-disk-reclaim-cri
 if STUB_DISK_DIAGNOSIS_SCHEMA=k3s-node-disk-diagnosis.v1 \

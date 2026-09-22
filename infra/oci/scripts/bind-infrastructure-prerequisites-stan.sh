@@ -23,6 +23,36 @@ BINDING_VALIDATOR="${BINDING_VALIDATOR:-$ROOT_DIR/infra/oci/scripts/upstream_run
 : "${DISPATCH_INPUTS:?dispatch inputs are required}"
 CAPACITY_ACQUISITION_RUN_ID="${CAPACITY_ACQUISITION_RUN_ID:-}"
 
+if [[ "$PHASE" == "diagnose-disk" || "$PHASE" == "reclaim-disk" ]]; then
+  : "${CONTROL_SHA:?disk control SHA is required}"
+  : "${GITHUB_SHA:?workflow control SHA is required}"
+  [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ &&
+     "$CONTROL_SHA" =~ ^[0-9a-f]{40}$ &&
+     "${GITHUB_REF_NAME:-}" == "master" &&
+     "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
+     "$CONTROL_SHA" == "$GITHUB_SHA" ]] || {
+    echo "disk recovery requires exact first-attempt master control" >&2
+    exit 1
+  }
+  git -C "$SCRIPT_ROOT" fetch --quiet origin master:refs/remotes/origin/master
+  [[ "$(git -C "$SCRIPT_ROOT" rev-parse HEAD)" == "$CONTROL_SHA" &&
+     "$(git -C "$SCRIPT_ROOT" rev-parse origin/master)" == "$CONTROL_SHA" ]] || {
+    echo "disk recovery requires the exact current-master checkout" >&2
+    exit 1
+  }
+  if [[ "$PHASE" == "diagnose-disk" ]]; then
+    git -C "$SCRIPT_ROOT" merge-base --is-ancestor "$SOURCE_SHA" "$CONTROL_SHA" || {
+      echo "diagnostic baseline must be an ancestor of current control" >&2
+      exit 1
+    }
+  else
+    [[ "$SOURCE_SHA" == "$CONTROL_SHA" ]] || {
+      echo "historical observations cannot authorize reclaim" >&2
+      exit 1
+    }
+  fi
+fi
+
 # The dispatch carries an immutable runtime mode; it must equal the
 # authoritative environment mode before anything else is considered.
 [ "$BOUND_RUNTIME_MODE" = "$OCI_RUNTIME_MODE" ]

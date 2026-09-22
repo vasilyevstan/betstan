@@ -118,6 +118,32 @@ remaining serialized with other protected operations. It may clean either the
 package cache or an exact set of repository-owned, unused container images
 identified by that diagnosis, never both or an arbitrary image set.
 
+For diagnosis only, the existing workflow, phase, and inputs also support an
+exact historical baseline `H` under control code from the exact current
+`master` SHA `S`. `approved_sha` identifies `H`; the workflow checks out `S`
+and proves `H` is an ancestor of or equal to `S` through the existing
+ancestor-or-current policy. The original successful first-attempt GHCR build
+and finalized infrastructure runs remain bound to `H`, with infrastructure
+evidence linked to that build and unexpired artifacts required. Control
+identity and prerequisite bindings are revalidated before access and
+observation.
+
+Fresh checks before and after collection bind the live instance, the complete
+healthy application image generation, and the volume attachment's relationship
+to the mounted device to that baseline. Missing, ambiguous, or drifting
+identity prevents a complete observation; it never triggers repair.
+Only canonical temporary Bastion access and its exact owned cleanup accompany
+these reads. No capacity, provisioning, infrastructure finalization, Helm,
+application, data, or retention changes are performed.
+
+When `H` differs from `S`, diagnosis v2 records `sourceSha: H`, `controlSha: S`,
+the original build/infrastructure identities, and checksummed baseline
+validation with sanitized fingerprints. Its terminal status is `OBSERVED`,
+not `DIAGNOSED`: it is never reclaim authority. Every reclaim entrypoint
+rejects `OBSERVED`, even with equal source and control SHAs. When `H` equals
+`S`, existing diagnosis/reclaim behavior and v1/v2 compatibility remain
+unchanged.
+
 The diagnosis v2 extension adds fixed, read-only MongoDB metadata collection
 to governed `diagnose-disk`. It discovers actual databases and collections,
 including unknown namespaces, rather than assuming the source inventory is

@@ -36,6 +36,11 @@ case "$ACTION" in
     [[ "$SELECTED_IMAGE_IDS" == "[]" && "$#" == "1" ]] ||
       fail "Mongo storage inspection does not accept arguments"
     ;;
+  baseline-proof)
+    required_commands=(k3s findmnt readlink lsblk)
+    [[ "$SELECTED_IMAGE_IDS" == "[]" && "$#" == "1" ]] ||
+      fail "baseline inspection does not accept arguments"
+    ;;
   reclaim-apt-package-cache)
     required_commands=(apt-get)
     ;;
@@ -64,7 +69,8 @@ decode_required() {
 
 CANONICAL_HOST=""
 EXPECTED_NODE_NAME=""
-if [[ "$ACTION" == "snapshot" || "$ACTION" == "probe-public-read" ]]; then
+if [[ "$ACTION" == "snapshot" || "$ACTION" == "probe-public-read" ||
+      "$ACTION" == "baseline-proof" ]]; then
   CANONICAL_HOST="$(
     decode_required "${K3S_DISK_CANONICAL_HOST_B64:-}" "canonical host"
   )"
@@ -338,6 +344,96 @@ mongo_storage() {
   print(JSON.stringify(result));
 })();
 MONGO_STORAGE_JS
+}
+
+baseline_proof() {
+  local requested resolved mounted mongo block root_number nodes deployments pods pvc pv
+  requested="$(
+    decode_required "${K3S_DISK_MONGO_DEVICE_B64:-}" "bound Mongo device"
+  )"
+  [[ "$requested" =~ ^/dev/([A-Za-z0-9_-]+/)?[A-Za-z0-9_-]+$ ]] ||
+    fail "bound Mongo device is invalid"
+  resolved="$(readlink -e -- "$requested")" ||
+    fail "bound Mongo device cannot be resolved"
+  mongo="$(mount_json "$MONGO_PATH")" || fail "Mongo mount is unavailable"
+  mounted="$(readlink -e -- "$(jq -er '.source' <<<"$mongo")")" ||
+    fail "Mongo mounted device cannot be resolved"
+  [[ "$resolved" == "$mounted" ]] ||
+    fail "Mongo mount differs from the bound volume attachment"
+  block="$(
+    lsblk --json --bytes --output PATH,TYPE,SIZE,MAJ:MIN "$resolved" |
+      jq -ce --arg path "$resolved" '
+        .blockdevices |
+        if length == 1 and .[0].path == $path and .[0].type == "disk" and
+           ((.[0].children // []) | length) == 0
+        then .[0] | {path,type,size,deviceNumber:."maj:min"}
+        else error("bound Mongo block device is ambiguous") end
+      '
+  )" || fail "bound Mongo block device is unavailable or partitioned"
+  root_number="$(findmnt --noheadings --output MAJ:MIN --target / | tr -d '[:space:]')" ||
+    fail "root filesystem device is unavailable"
+  nodes="$(
+    k3s kubectl --request-timeout=10s get nodes -o json |
+      jq -ce '[.items[] | {
+        name:.metadata.name,uid:.metadata.uid,
+        ready:any(.status.conditions[]?; .type == "Ready" and .status == "True")
+      }]'
+  )" || fail "baseline node identity is unavailable"
+  deployments="$(
+    k3s kubectl --request-timeout=10s get deployments -n betstan-oci -o json |
+      jq -ce '[.items[] | {
+        name:.metadata.name,uid:.metadata.uid,
+        deleting:(.metadata.deletionTimestamp != null),
+        generation:.metadata.generation,observedGeneration:.status.observedGeneration,
+        replicas:.spec.replicas,readyReplicas:(.status.readyReplicas // 0),
+        availableReplicas:(.status.availableReplicas // 0),
+        updatedReplicas:(.status.updatedReplicas // 0),
+        containers:[.spec.template.spec.containers[] | {name,image}]
+      }]'
+  )" || fail "baseline application deployments are unavailable"
+  pods="$(
+    k3s kubectl --request-timeout=10s get pods -n betstan-oci -o json |
+      jq -ce '[.items[] | {
+        uid:.metadata.uid,app:.metadata.labels.app,nodeName:.spec.nodeName,
+        deleting:(.metadata.deletionTimestamp != null),phase:.status.phase,
+        ready:any(.status.conditions[]?; .type == "Ready" and .status == "True"),
+        containers:[.spec.containers[] | {
+          name,image,
+          defaultCommand:(((.command // []) | length) == 0 and
+                          ((.args // []) | length) == 0),
+          mounts:[.volumeMounts[]? | {
+            name,mountPath,readOnly:(.readOnly // false),
+            subPath:(.subPath // ""),subPathExpr:(.subPathExpr // "")
+          }]
+        }],
+        volumes:[.spec.volumes[]? | {
+          name,claimName:.persistentVolumeClaim.claimName
+        }],
+        statuses:[.status.containerStatuses[]? | {name,imageID,ready}]
+      }]'
+  )" || fail "baseline application pods are unavailable"
+  pvc="$(
+    k3s kubectl --request-timeout=10s get pvc gaming-auth-mongo-data -n betstan-oci -o json |
+      jq -ce '{name:.metadata.name,uid:.metadata.uid,phase:.status.phase,
+               volumeName:.spec.volumeName}'
+  )" || fail "baseline Mongo claim is unavailable"
+  pv="$(
+    k3s kubectl --request-timeout=10s get pv gaming-auth-mongo-data -o json |
+      jq -ce '{name:.metadata.name,phase:.status.phase,localPath:.spec.local.path,
+               claim:.spec.claimRef}'
+  )" || fail "baseline Mongo volume is unavailable"
+  builtin printf '%s\n' "$mongo" "$block" "$nodes" "$deployments" "$pods" "$pvc" "$pv" |
+    jq -cs --arg requested "$requested" --arg resolved "$resolved" \
+      --arg mounted "$mounted" --arg root_number "$root_number" \
+      --arg expected_node "$EXPECTED_NODE_NAME" '
+        if length != 7 then error("baseline proof requires seven JSON values") else . end |
+        {
+          schemaVersion:"k3s-baseline-node.v1",requestedDevice:$requested,
+          resolvedDevice:$resolved,mountedDevice:$mounted,rootDeviceNumber:$root_number,
+          expectedNode:$expected_node,mongoMount:.[0],blockDevice:.[1],
+          nodes:.[2],deployments:.[3],pods:.[4],claim:.[5],volume:.[6]
+        }
+      '
 }
 
 snapshot() {
@@ -626,6 +722,9 @@ snapshot() {
 }
 
 case "$ACTION" in
+  baseline-proof)
+    baseline_proof
+    ;;
   mongo-storage)
     mongo_storage
     ;;
