@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       approved_sha:
-        description: Exact current master SHA approved for OCI infrastructure reconciliation
+        description: Exact current master SHA; diagnose-disk may select an ancestor baseline
         required: true
         type: string
       confirmation:
@@ -91,7 +91,7 @@ on:
           - k3s
           - oke
       infrastructure_run_id:
-        description: Successful first-attempt current-SHA finalized k3s infrastructure run for disk recovery
+        description: Successful first-attempt finalized k3s infrastructure run at the subject SHA
         required: false
         default: ""
         type: string
@@ -1123,6 +1123,7 @@ jobs:
       name: oci-infrastructure
     env:
       SOURCE_SHA: ${{ inputs.approved_sha }}
+      CONTROL_SHA: ${{ github.sha }}
       CONFIRMATION: ${{ inputs.confirmation }}
       PHASE: ${{ inputs.phase }}
       BOUND_RUNTIME_MODE: ${{ inputs.runtime_mode }}
@@ -1162,10 +1163,10 @@ jobs:
             "$RUNNER_TEMP/oci-k3s-disk-home/.kube" \
             artifacts/oci-k3s-disk-upstream
 
-      - name: Checkout approved current master
+      - name: Checkout current-master disk control
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.approved_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Validate bounded k3s disk request
@@ -1173,9 +1174,8 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF_NAME" = "master" ]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          git fetch --quiet origin master:refs/remotes/origin/master
-          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
-          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
+          [ "$CONTROL_SHA" = "$GITHUB_SHA" ]
+          [ "$CONTROL_SHA" = "$(git rev-parse HEAD)" ]
           [ "$GITHUB_RUN_ATTEMPT" = "1" ]
           [ "$BOUND_RUNTIME_MODE" = "k3s" ]
           [ "$OCI_RUNTIME_MODE" = "k3s" ]
@@ -1214,7 +1214,7 @@ jobs:
               ;;
           esac
 
-      - name: Bind current-SHA disk recovery prerequisites
+      - name: Bind current control and exact baseline prerequisites
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -1324,9 +1324,6 @@ jobs:
             exit "$status"
           }
           trap cleanup_on_exit EXIT
-          git fetch --quiet origin master:refs/remotes/origin/master
-          [ "$SOURCE_SHA" = "$GITHUB_SHA" ]
-          [ "$SOURCE_SHA" = "$(git rev-parse origin/master)" ]
           ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
           RUNNER_PUBLIC_IPV4="$(
             curl --fail --silent --show-error --max-time 15 https://api.ipify.org
@@ -1335,10 +1332,12 @@ jobs:
           WORK_DIR="$ACCESS_WORK_DIR" \
             ./infra/oci/scripts/configure-k3s-access.sh open
           unset OCI_K3S_SSH_PRIVATE_KEY
+          ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
           operation=diagnose
           [ "$PHASE" != "reclaim-disk" ] || operation=reclaim
           WORK_DIR="$RECOVERY_WORK_DIR" \
             ./infra/oci/scripts/k3s-node-disk-recovery-stan.sh "$operation"
+          ./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh
 
       - name: Close ephemeral OCI Bastion access
         if: always()

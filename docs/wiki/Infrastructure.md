@@ -118,6 +118,71 @@ remaining serialized with other protected operations. It may clean either the
 package cache or an exact set of repository-owned, unused container images
 identified by that diagnosis, never both or an arbitrary image set.
 
+For diagnosis only, the existing workflow, phase, and inputs also support an
+exact historical baseline `H` under control code from the exact current
+`master` SHA `S`. `approved_sha` identifies `H`; the workflow checks out `S`
+and proves `H` is an ancestor of or equal to `S` through the existing
+ancestor-or-current policy. The original successful first-attempt GHCR build
+and finalized infrastructure runs remain bound to `H`, with infrastructure
+evidence linked to that build and unexpired artifacts required. Control
+identity and prerequisite bindings are revalidated before access and
+observation.
+
+Fresh checks before and after collection bind the live instance, the complete
+healthy application image generation, and the volume attachment's relationship
+to the mounted device to that baseline. Missing, ambiguous, or drifting
+identity prevents a complete observation; it never triggers repair.
+Only canonical temporary Bastion access and its exact owned cleanup accompany
+these reads. No capacity, provisioning, infrastructure finalization, Helm,
+application, data, or retention changes are performed.
+
+When `H` differs from `S`, diagnosis v2 records `sourceSha: H`, `controlSha: S`,
+the original build/infrastructure identities, and checksummed baseline
+validation with sanitized fingerprints. Its terminal status is `OBSERVED`,
+not `DIAGNOSED`: it is never reclaim authority. Every reclaim entrypoint
+rejects `OBSERVED`, even with equal source and control SHAs. When `H` equals
+`S`, existing diagnosis/reclaim behavior and v1/v2 compatibility remain
+unchanged.
+
+The diagnosis v2 extension adds fixed, read-only MongoDB metadata collection
+to governed `diagnose-disk`. It discovers actual databases and collections,
+including unknown namespaces, rather than assuming the source inventory is
+complete. Reports group application, system, and unattributed storage; database
+and collection names outside the exact public allowlist are aliased. Each
+collection reports a metadata-derived count, logical data bytes, allocated
+data bytes, allocated index bytes, observation timestamps, and MongoDB version.
+No records are read or returned, and no caller-supplied query inputs or generic
+query interface are accepted.
+
+Collection is bounded to 32 databases and 256 entries, with two-second
+command/connection limits (server-side limits where supported), a 30-second
+overall metadata-collection budget, a 35-second transport limit, and a 256 KiB
+output cap. Storage status is explicit:
+`COMPLETE` only when discovery and all required metadata measurements succeed
+within those bounds; `PARTIAL` when evidence is incomplete; `UNAVAILABLE` when
+no usable Mongo measurement can be established. Unknown metrics are `null`,
+never zero. Any Mongo collection or transport failure preserves otherwise
+valid disk evidence but cannot establish complete storage measurement.
+
+Views are non-storage namespaces, not empty stored collections. For time
+series, a bucket count is explicitly distinguished from a measurement count;
+physical bucket storage is counted once, not again under its logical
+time-series namespace. Logical bytes must not be added to allocated data/index
+bytes. MongoDB figures are neither filesystem usage nor reclaimable bytes and
+must not be added to filesystem totals. They support size assessment and
+cleanup recommendations, not cleanup authorization.
+
+Existing `k3s-node-disk-diagnosis.v1` evidence remains readable; new
+`k3s-node-disk-diagnosis.v2` evidence carries Mongo storage separately from
+the unchanged `k3s-node-disk-runtime.v1` snapshot and reclaim authority.
+Version 2's scoped identity projection preserves fingerprint comparison
+without exposing raw runtime identities. Rollout and rollback must preserve
+readers for retained evidence rather than relabeling v2 as v1. This extension
+uses the existing governed diagnostics path, adds no workflow or dependency,
+and requires no application deployment. It performs no data cleanup, TTL or
+index change, or compaction, and its presence is not evidence that a production
+measurement has run.
+
 The fixed root-filesystem limit remains 70 percent. Root and persistent-data
 mount identities, workload and queue health, public reads, and protected
 running, candidate, and rollback image references remain fail-closed.

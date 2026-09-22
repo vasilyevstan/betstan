@@ -703,6 +703,18 @@ action="$1"
 selected="$2"
 printf '%s\t%s\n' "$action" "$selected" >>"${STUB_REMOTE_LOG:?}"
 case "$action" in
+  baseline-proof)
+    baseline_count="$(awk '$1 == "baseline-proof" {count++} END {print count+0}' "$STUB_REMOTE_LOG")"
+    if [[ "$baseline_count" == "2" && -n "${STUB_BASELINE_AFTER:-}" ]]; then
+      cat "$STUB_BASELINE_AFTER"
+    else
+      cat "${STUB_BASELINE_NODE:?}"
+    fi
+    ;;
+  mongo-storage)
+    [[ -n "${STUB_MONGO_STORAGE:-}" ]] || exit 1
+    cat "$STUB_MONGO_STORAGE"
+    ;;
   snapshot)
     cat "${STUB_CURRENT_RUNTIME:?}"
     ;;
@@ -1342,5 +1354,813 @@ grep -Fq -- '-o StrictHostKeyChecking=yes' "$ORCHESTRATOR" ||
   fail "disk recovery SSH does not require the attested host key"
 grep -Fq -- '-o UserKnownHostsFile="$target_known_hosts"' "$ORCHESTRATOR" ||
   fail "disk recovery SSH does not use the retained attested host-key file"
+
+python3 - "$HELPER" "$work_dir" "$runtime" "$capacity" "$candidate_images" "$SOURCE_SHA" <<'PY'
+import argparse
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("disk", sys.argv[1])
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+root = Path(sys.argv[2])
+stamp = "2026-09-22T00:00:00.000Z"
+
+def row(database, collection, count=12):
+    return {
+        "database": database, "collection": collection, "kind": "collection",
+        "status": "MEASURED", "observedAt": stamp, "documentCount": count,
+        "countUnit": "documents", "logicalBytes": 480,
+        "allocatedDataBytes": 4096, "allocatedIndexBytes": 8192, "errorCode": None,
+    }
+
+raw = {
+    "schemaVersion": "mongo-collection-storage-raw.v1",
+    "expectedServerVersion": "8.2.12", "observedServerVersion": "8.2.12",
+    "startedAt": stamp, "finishedAt": stamp, "limits": dict(disk.MONGO_LIMITS),
+    "status": "COMPLETE", "discoveryComplete": True, "truncated": False, "errors": [],
+    "databases": [{"name": name, "complete": True} for name in
+                  ("gaming_event", "local", "private-customer-database")],
+    "collections": [
+        row("gaming_event", "events"), row("gaming_event", "private-token-collection", 0),
+        row("local", "startup_log"), row("private-customer-database", "credential-value"),
+    ],
+}
+raw_path = root / "mongo-storage.json"
+def project(value):
+    raw_path.write_text(json.dumps(value))
+    return disk.read_mongo_storage(raw_path)
+
+public = project(raw)
+assert public["status"] == "COMPLETE"
+assert [item["scope"] for item in public["collections"]] == [
+    "application", "application", "system", "unattributed"
+]
+assert public["collections"][0]["collectionLabel"] == "events"
+assert public["collections"][1]["documentCount"] == 0
+assert public["totals"][0]["allocatedDataBytes"] == 8192
+for private in ("private-token", "private-customer", "credential-value"):
+    assert private not in disk.canonical(public)
+
+for value in (-1, True, "12", None, 1.2, disk.MONGO_SAFE_INTEGER + 1):
+    invalid = copy.deepcopy(raw)
+    invalid["collections"][0]["documentCount"] = value
+    assert project(invalid)["errors"] == ["MALFORMED_OUTPUT"]
+large = copy.deepcopy(raw)
+large["collections"][0]["documentCount"] = disk.MONGO_SAFE_INTEGER
+assert project(large)["collections"][0]["documentCount"] == disk.MONGO_SAFE_INTEGER
+for mutation in ("duplicate", "extra-field", "wrong-version", "false-complete"):
+    invalid = copy.deepcopy(raw)
+    if mutation == "duplicate":
+        invalid["collections"].append(invalid["collections"][0])
+    elif mutation == "extra-field":
+        invalid["credentials"] = "mongodb://private-token@private-host"
+    elif mutation == "wrong-version":
+        invalid["observedServerVersion"] = "private-runtime"
+    else:
+        invalid["discoveryComplete"] = False
+    assert project(invalid)["errors"] == ["MALFORMED_OUTPUT"], mutation
+partial = copy.deepcopy(raw)
+partial.update(status="PARTIAL", errors=["NAMESPACE_MISSING"])
+partial["collections"][0].update({
+    "status": "UNAVAILABLE", "errorCode": "NAMESPACE_MISSING",
+    "observedAt": None, "countUnit": None, **{key: None for key in disk.MONGO_METRICS},
+})
+assert project(partial)["status"] == "PARTIAL"
+assert project(partial)["collections"][0]["documentCount"] is None
+raw_path.write_bytes(b"x" * (disk.MONGO_LIMITS["outputBytes"] + 1))
+assert disk.read_mongo_storage(raw_path)["errors"] == ["OUTPUT_LIMIT"]
+assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["OUTPUT_LIMIT"]
+raw_path.write_text("invalid mongodb://private-token@private-host")
+assert disk.read_mongo_storage(raw_path)["errors"] == ["MALFORMED_OUTPUT"]
+assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["TRANSPORT_FAILED"]
+raw_path.write_text("[" * 1100 + "0" + "]" * 1100)
+assert disk.read_mongo_storage(raw_path)["errors"] == ["MALFORMED_OUTPUT"]
+
+timeseries = copy.deepcopy(raw)
+timeseries.update(status="PARTIAL", errors=["TIMESERIES_LOGICAL_UNAVAILABLE"])
+logical = row("gaming_event", "metrics")
+logical.update(kind="timeseries", status="UNAVAILABLE", observedAt=None, countUnit=None,
+               errorCode="TIMESERIES_LOGICAL_UNAVAILABLE",
+               **{key: None for key in disk.MONGO_METRICS})
+bucket = row("gaming_event", "system.buckets.metrics", 2)
+bucket.update(kind="timeseries-buckets", countUnit="buckets")
+view = copy.deepcopy(logical)
+view.update(collection="metric_view", kind="view", status="NON_STORAGE", errorCode=None)
+timeseries["collections"].extend([logical, bucket, view])
+ts_public = project(timeseries)
+assert ts_public["totals"][0]["allocatedDataBytes"] == 12288
+assert ts_public["collections"][-2]["scope"] == "application"
+assert ts_public["collections"][-2]["countUnit"] == "buckets"
+assert ts_public["collections"][-1]["documentCount"] is None
+
+project(raw)
+args = argparse.Namespace(
+    runtime=sys.argv[3], capacity=sys.argv[4], candidate_images=sys.argv[5],
+    source_sha=sys.argv[6], infrastructure_run_id="400", ghcr_build_run_id="300",
+    workflow_run_id="500", output=str(root / "mongo-diagnosis.json"),
+    mongo_storage=str(raw_path), mongo_storage_failure="",
+)
+disk.build_diagnosis(args)
+v2 = json.loads(Path(args.output).read_text())
+legacy = json.loads((root / "diagnosis.json").read_text())
+disk.validate_diagnosis(legacy)
+disk.validate_diagnosis(v2)
+assert v2["schemaVersion"] == "k3s-node-disk-diagnosis.v2"
+assert v2["securityStateSha256"] == legacy["securityStateSha256"]
+raw_path.write_text("[" * 1100 + "0" + "]" * 1100)
+disk.build_diagnosis(args)
+malformed = json.loads(Path(args.output).read_text())
+disk.validate_diagnosis(malformed)
+assert malformed["mongoStorage"]["errors"] == ["MALFORMED_OUTPUT"]
+assert malformed["mongoStorage"]["status"] == "UNAVAILABLE"
+assert malformed["securityStateSha256"] == legacy["securityStateSha256"]
+assert malformed["terminalStatus"] == "DIAGNOSED"
+project(raw)
+assert "fixture-k3s" not in disk.canonical(v2)
+assert v2["runtime"]["runtime"]["nodeNameSha256"] == v2["kubeletCapacity"]["nodeNameSha256"]
+live = json.loads(Path(sys.argv[3]).read_text())
+capacity = json.loads(Path(sys.argv[4]).read_text())
+assert disk.validate_fresh_against_diagnosis(v2, live, capacity) == disk.classify(
+    live, v2["candidateImages"]
+)
+changed = copy.deepcopy(raw)
+changed["collections"][0]["logicalBytes"] += 999
+project(changed)
+disk.build_diagnosis(args)
+new = json.loads(Path(args.output).read_text())
+assert new["securityStateSha256"] == v2["securityStateSha256"]
+assert new["contentChecksumSha256"] != v2["contentChecksumSha256"]
+drifted = copy.deepcopy(live)
+drifted["runtime"]["nodeName"] = "different-node"
+drifted_capacity = {**capacity, "nodeName": "different-node"}
+try:
+    disk.validate_fresh_against_diagnosis(v2, drifted, drifted_capacity)
+except SystemExit:
+    pass
+else:
+    raise AssertionError("v2 allowed node identity drift")
+tampered = copy.deepcopy(v2)
+tampered["mongoStorage"]["collections"][0]["logicalBytes"] += 1
+try:
+    disk.validate_diagnosis(tampered)
+except SystemExit:
+    pass
+else:
+    raise AssertionError("Mongo storage was not covered by diagnosis checksum")
+project(raw)
+print("mongo_storage_projection_tests=PASS")
+PY
+
+python3 - "$HELPER" "$work_dir" "$runtime" "$capacity" "$candidate_images" "$SOURCE_SHA" <<'PY'
+import argparse
+import copy
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("disk", sys.argv[1])
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+root = Path(sys.argv[2])
+source, control = sys.argv[6], "3" * 40
+candidates = disk.parse_candidate_images(sys.argv[5])
+cloud = {
+    "instanceId": "ocid1.instance.oc1..test",
+    "instanceFingerprint": hashlib.sha256(b"ocid1.instance.oc1..test").hexdigest(),
+    "volumeId": "ocid1.volume.oc1..test",
+    "attachmentId": "ocid1.volumeattachment.oc1..test",
+    "device": "/dev/oracleoci/oraclevdb", "volumeSizeBytes": 50 * 1073741824,
+}
+node = {
+    "schemaVersion": "k3s-baseline-node.v1", "expectedNode": "fixture-k3s",
+    "requestedDevice": cloud["device"], "resolvedDevice": "/dev/sdb",
+    "mountedDevice": "/dev/sdb", "rootDeviceNumber": "8:1",
+    "mongoMount": {"target": "/var/lib/betstan/mongo", "fstype": "ext4"},
+    "blockDevice": {"path": "/dev/sdb", "type": "disk",
+                    "size": cloud["volumeSizeBytes"], "deviceNumber": "8:16"},
+    "nodes": [{"name": "fixture-k3s", "uid": "fixture-node", "ready": True}],
+    "claim": {"name": "gaming-auth-mongo-data", "uid": "fixture-claim",
+              "phase": "Bound", "volumeName": "gaming-auth-mongo-data"},
+    "volume": {"name": "gaming-auth-mongo-data", "phase": "Bound",
+               "localPath": "/var/lib/betstan/mongo",
+               "claim": {"name": "gaming-auth-mongo-data", "namespace": "betstan-oci",
+                         "uid": "fixture-claim"}},
+    "deployments": [], "pods": [],
+}
+for candidate in candidates:
+    app = "gaming-" + candidate["service"]
+    node["deployments"].append({
+        "name": app + "-depl", "uid": "deployment-" + app, "deleting": False,
+        "generation": 1, "observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+        "availableReplicas": 1, "updatedReplicas": 1,
+        "containers": [{"name": app, "image": candidate["imageRef"]}],
+    })
+    node["pods"].append({
+        "uid": "pod-" + app, "app": app, "nodeName": "fixture-k3s",
+        "deleting": False, "phase": "Running", "ready": True,
+        "containers": [{"name": app, "image": candidate["imageRef"]}],
+        "statuses": [{"name": app, "ready": True,
+                      "imageID": disk.REPOSITORY + "@" + candidate["platformDigest"]}],
+    })
+node["pods"].append({
+    "uid": "fixture-mongo", "app": "gaming-auth-mongo", "nodeName": "fixture-k3s",
+    "deleting": False, "phase": "Running", "ready": True,
+    "containers": [{
+        "name": "gaming-auth-mongo", "image": "mongo:8.2.12", "defaultCommand": True,
+        "mounts": [{"name": "mongo-data", "mountPath": "/data/db", "readOnly": False,
+                    "subPath": "", "subPathExpr": ""}],
+    }],
+    "volumes": [{"name": "mongo-data", "claimName": "gaming-auth-mongo-data"}],
+    "statuses": [{"name": "gaming-auth-mongo", "ready": True, "imageID": "fixture"}],
+})
+cloud_path, node_path = root / "baseline-cloud.json", root / "baseline-node.json"
+proof_path = root / "baseline-proof.json"
+args = argparse.Namespace(
+    cloud=str(cloud_path), node=str(node_path), candidate_images=sys.argv[5],
+    expected_node="fixture-k3s", source_sha=source, control_sha=control,
+    workflow_run_id="500", output=str(proof_path),
+)
+def capture(cloud_value=cloud, node_value=node):
+    cloud_path.write_text(json.dumps(cloud_value))
+    node_path.write_text(json.dumps(node_value))
+    proof_path.unlink(missing_ok=True)
+    disk.build_baseline_proof(args)
+    return json.loads(proof_path.read_text())
+
+before = capture()
+for private in ("ocid1.", "fixture-k3s", "/dev/", "fixture-claim"):
+    assert private not in disk.canonical(before)
+mutations = {
+    "wrong-instance": lambda c, n: c.update(instanceFingerprint="0" * 64),
+    "wrong-device": lambda c, n: c.update(device="/dev/oracleoci/other"),
+    "wrong-capacity": lambda c, n: c.update(volumeSizeBytes=1),
+    "wrong-mounted-device": lambda c, n: n.update(mountedDevice="/dev/sdc"),
+    "mongo-on-root": lambda c, n: n.update(rootDeviceNumber="8:16"),
+    "ambiguous-node": lambda c, n: n["nodes"].append(n["nodes"][0]),
+    "missing-app": lambda c, n: n["deployments"].pop(),
+    "duplicate-app": lambda c, n: n["deployments"].append(n["deployments"][0]),
+    "extra-app": lambda c, n: n["deployments"].append(
+        {**n["deployments"][0], "name": "gaming-unexpected-depl"}),
+    "wrong-template-image": lambda c, n: n["deployments"][0]["containers"][0].update(image="wrong"),
+    "wrong-running-image": lambda c, n: n["pods"][0]["statuses"][0].update(imageID="wrong"),
+    "unhealthy-app": lambda c, n: n["pods"][0].update(ready=False),
+    "terminating-app": lambda c, n: n["pods"][0].update(deleting=True),
+    "terminating-mongo": lambda c, n: n["pods"][-1].update(deleting=True),
+    "wrong-claim": lambda c, n: n["claim"].update(volumeName="wrong"),
+    "wrong-volume-path": lambda c, n: n["volume"].update(localPath="/different"),
+    "claim-rebound": lambda c, n: n["volume"]["claim"].update(uid="different"),
+    "custom-mongo-command": lambda c, n: n["pods"][-1]["containers"][0].update(defaultCommand=False),
+    "wrong-mongo-claim": lambda c, n: n["pods"][-1]["volumes"][0].update(claimName="different"),
+    "ambiguous-mongo": lambda c, n: n["pods"].append(n["pods"][-1]),
+}
+for label, mutate in mutations.items():
+    changed_cloud, changed_node = copy.deepcopy(cloud), copy.deepcopy(node)
+    mutate(changed_cloud, changed_node)
+    try:
+        capture(changed_cloud, changed_node)
+    except SystemExit:
+        assert not proof_path.exists(), label
+    else:
+        raise AssertionError("accepted invalid baseline: " + label)
+before = capture()
+before_path, after_path = root / "baseline-before.json", root / "baseline-after.json"
+before_path.write_text(disk.canonical(before))
+after_path.write_text(disk.canonical(capture()))
+observation_path = root / "historical-observation.json"
+observation_args = argparse.Namespace(
+    runtime=sys.argv[3], capacity=sys.argv[4], candidate_images=sys.argv[5],
+    source_sha=source, infrastructure_run_id="400", ghcr_build_run_id="300",
+    workflow_run_id="500", output=str(observation_path),
+    mongo_storage=str(root / "mongo-storage.json"), mongo_storage_failure="",
+    control_sha=control, baseline_before=str(before_path), baseline_after=str(after_path),
+)
+disk.build_diagnosis(observation_args)
+observation = json.loads(observation_path.read_text())
+disk.validate_diagnosis(observation, observation=True)
+assert observation["terminalStatus"] == "OBSERVED"
+assert observation["sourceSha"] == source and observation["controlSha"] == control
+for forged_equal in (False, True):
+    rejected = copy.deepcopy(observation)
+    if forged_equal:
+        rejected["controlSha"] = rejected["sourceSha"]
+        rejected.pop("contentChecksumSha256")
+        rejected = disk.add_checksum(rejected)
+    observation_path.write_text(disk.canonical(rejected))
+    for handler in (disk.plan_reclaim, disk.finalize_reclaim, disk.write_incomplete_reclaim):
+        try:
+            handler(argparse.Namespace(diagnosis=str(observation_path)))
+        except SystemExit as error:
+            assert "diagnosis manifest" in str(error)
+        else:
+            raise AssertionError("observation reached reclaim handling")
+after = json.loads(after_path.read_text())
+after["identitySha256"] = "0" * 64
+after_path.write_text(disk.canonical(after))
+observation_path.unlink()
+try:
+    disk.build_diagnosis(observation_args)
+except SystemExit as error:
+    assert "baseline proof" in str(error)
+    assert not observation_path.exists()
+else:
+    raise AssertionError("baseline drift produced observation evidence")
+capture()
+after_path.write_text(disk.canonical(before))
+disk.build_diagnosis(observation_args)
+api = {
+    "instance": {
+        "id": cloud["instanceId"], "compartment-id": "ocid1.compartment.oc1..test",
+        "availability-domain": "fixture-ad", "lifecycle-state": "RUNNING",
+        "shape": "VM.Standard.A1.Flex", "shape-config": {"ocpus": 2, "memory-in-gbs": 12},
+        "freeform-tags": {"betstan-runtime": "k3s"},
+    },
+    "volume": {
+        "id": cloud["volumeId"], "compartment-id": "ocid1.compartment.oc1..test",
+        "availability-domain": "fixture-ad", "lifecycle-state": "AVAILABLE",
+        "size-in-gbs": 50,
+    },
+    "attachment": {
+        "id": cloud["attachmentId"], "instance-id": cloud["instanceId"],
+        "volume-id": cloud["volumeId"], "lifecycle-state": "ATTACHED",
+        "attachment-type": "paravirtualized", "is-read-only": False,
+        "is-shareable": False, "device": cloud["device"],
+    },
+}
+for name, value in api.items():
+    (root / ("baseline-api-" + name + ".json")).write_text(json.dumps({"data": value}))
+drifted = copy.deepcopy(node)
+drifted["nodes"][0]["uid"] = "replacement-node"
+(root / "baseline-node-drifted.json").write_text(json.dumps(drifted))
+terminating = copy.deepcopy(node)
+wrong_generation = copy.deepcopy(terminating["pods"][0])
+wrong_generation.update(uid="terminating-wrong-generation", deleting=True)
+wrong_generation["containers"][0]["image"] = "wrong-generation"
+wrong_generation["statuses"][0]["imageID"] = "wrong-generation"
+terminating["pods"].append(wrong_generation)
+(root / "baseline-node-terminating.json").write_text(json.dumps(terminating))
+print("historical_baseline_observation_tests=PASS")
+PY
+
+python3 - "$work_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+node = json.loads((root / "baseline-node.json").read_text())
+def write(name, value):
+    (root / ("native-baseline-" + name + ".json")).write_text(json.dumps(value))
+
+write("nodes", {"items": [{
+    "metadata": {"name": n["name"], "uid": n["uid"]},
+    "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+} for n in node["nodes"]]})
+write("deployments", {"items": [{
+    "metadata": {key: d[key] for key in ("name", "uid", "generation")},
+    "spec": {"replicas": d["replicas"], "template": {
+        "spec": {"containers": d["containers"]}}},
+    "status": {key: d[key] for key in (
+        "observedGeneration", "readyReplicas", "availableReplicas", "updatedReplicas")},
+} for d in node["deployments"]]})
+pods = []
+for p in node["pods"]:
+    containers = [{
+        "name": c["name"], "image": c["image"],
+        "env": [{"name": "PRIVATE_VALUE", "value": "fixture-private-secret"}],
+        "volumeMounts": c.get("mounts", []),
+    } for c in p["containers"]]
+    pods.append({
+        "metadata": {"uid": p["uid"], "labels": {"app": p["app"]}},
+        "spec": {"nodeName": p["nodeName"], "containers": containers, "volumes": [
+            {"name": v["name"], "persistentVolumeClaim": {"claimName": v["claimName"]}}
+            for v in p.get("volumes", [])]},
+        "status": {"phase": p["phase"], "containerStatuses": p["statuses"],
+                   "conditions": [{"type": "Ready", "status": "True"}]},
+    })
+write("pods", {"items": pods})
+write("pvc", {"metadata": {"name": node["claim"]["name"], "uid": node["claim"]["uid"]},
+              "status": {"phase": "Bound"},
+              "spec": {"volumeName": node["claim"]["volumeName"]}})
+write("pv", {"metadata": {"name": node["volume"]["name"]}, "status": {"phase": "Bound"},
+             "spec": {"local": {"path": node["volume"]["localPath"]},
+                      "claimRef": node["volume"]["claim"]}})
+write("mount", {"filesystems": [{
+    **node["mongoMount"], "source": "/dev/sdb", "size": 50 * 1073741824,
+    "used": 1073741824, "avail": 49 * 1073741824,
+}]})
+write("block", {"blockdevices": [{
+    "path": "/dev/sdb", "type": "disk", "size": 50 * 1073741824, "maj:min": "8:16",
+}]})
+PY
+baseline_bin="$work_dir/baseline-bin"
+mkdir -p "$baseline_bin"
+cat >"$baseline_bin/metadata" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$(basename "$0"):$*" in
+  "readlink:-e -- /dev/oracleoci/oraclevdb") printf '/dev/sdb\n' ;;
+  "readlink:-e -- /dev/sdb") printf '%s\n' "${STUB_BASELINE_MOUNT_DEVICE:-/dev/sdb}" ;;
+  "findmnt:--json --bytes --output TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL --target /var/lib/betstan/mongo")
+    cat "${STUB_BASELINE_MOUNT:-$STUB_BASELINE_DIR/native-baseline-mount.json}" ;;
+  "findmnt:--noheadings --output MAJ:MIN --target /")
+    printf '  %s\n' "${STUB_BASELINE_ROOT_NUMBER:-8:1}" ;;
+  "lsblk:--json --bytes --output PATH,TYPE,SIZE,MAJ:MIN /dev/sdb")
+    cat "${STUB_BASELINE_BLOCK:-$STUB_BASELINE_DIR/native-baseline-block.json}" ;;
+  "k3s:kubectl --request-timeout=10s get nodes -o json")
+    cat "$STUB_BASELINE_DIR/native-baseline-nodes.json" ;;
+  "k3s:kubectl --request-timeout=10s get deployments -n betstan-oci -o json")
+    cat "$STUB_BASELINE_DIR/native-baseline-deployments.json" ;;
+  "k3s:kubectl --request-timeout=10s get pods -n betstan-oci -o json")
+    cat "$STUB_BASELINE_DIR/native-baseline-pods.json" ;;
+  "k3s:kubectl --request-timeout=10s get pvc gaming-auth-mongo-data -n betstan-oci -o json")
+    cat "$STUB_BASELINE_DIR/native-baseline-pvc.json" ;;
+  "k3s:kubectl --request-timeout=10s get pv gaming-auth-mongo-data -o json")
+    cat "$STUB_BASELINE_DIR/native-baseline-pv.json" ;;
+  *) echo "unexpected native baseline operation" >&2; exit 1 ;;
+esac
+SH
+chmod +x "$baseline_bin/metadata"
+for command_name in readlink findmnt lsblk k3s; do
+  ln -s metadata "$baseline_bin/$command_name"
+done
+baseline_env=(
+  PATH="$baseline_bin:$PATH" STUB_BASELINE_DIR="$work_dir"
+  K3S_DISK_CANONICAL_HOST_B64="$(printf 'fixture.example.test' | base64)"
+  K3S_DISK_NODE_NAME_B64="$(printf 'fixture-k3s' | base64)"
+  K3S_DISK_MONGO_DEVICE_B64="$(printf '/dev/oracleoci/oraclevdb' | base64)"
+)
+env "${baseline_env[@]}" "$REMOTE" baseline-proof >"$work_dir/native-baseline.json"
+if grep -Fq 'fixture-private-secret' "$work_dir/native-baseline.json"; then
+  fail "native baseline exposed container environment values"
+fi
+"$HELPER" validate-baseline --cloud "$work_dir/baseline-cloud.json" \
+  --node "$work_dir/native-baseline.json" --candidate-images "$candidate_images" \
+  --expected-node fixture-k3s --source-sha "$SOURCE_SHA" \
+  --control-sha "$RECLAIM_SOURCE_SHA" --workflow-run-id 500 \
+  --output "$work_dir/native-baseline-proof.json"
+for invalid_native in wrong-device ambiguous-mount partitioned-disk; do
+  case "$invalid_native" in
+    wrong-device)
+      invalid_native_env=STUB_BASELINE_MOUNT_DEVICE=/dev/sdc ;;
+    ambiguous-mount)
+      jq '.filesystems += .filesystems' "$work_dir/native-baseline-mount.json" \
+        >"$work_dir/native-baseline-invalid.json"
+      invalid_native_env="STUB_BASELINE_MOUNT=$work_dir/native-baseline-invalid.json" ;;
+    partitioned-disk)
+      jq '.blockdevices[0].children = [{"path":"/dev/sdb1"}]' \
+        "$work_dir/native-baseline-block.json" >"$work_dir/native-baseline-invalid.json"
+      invalid_native_env="STUB_BASELINE_BLOCK=$work_dir/native-baseline-invalid.json" ;;
+  esac
+  if env "${baseline_env[@]}" "$invalid_native_env" "$REMOTE" baseline-proof \
+    >"$work_dir/native-baseline-error" 2>&1; then
+    fail "native baseline accepted $invalid_native"
+  fi
+done
+if env "${baseline_env[@]}" "$REMOTE" baseline-proof arbitrary-argument \
+  >"$work_dir/native-baseline-error" 2>&1; then
+  fail "native baseline accepted arbitrary arguments"
+fi
+env "${baseline_env[@]}" STUB_BASELINE_ROOT_NUMBER=8:16 "$REMOTE" baseline-proof \
+  >"$work_dir/native-baseline-on-root.json"
+if "$HELPER" validate-baseline --cloud "$work_dir/baseline-cloud.json" \
+  --node "$work_dir/native-baseline-on-root.json" --candidate-images "$candidate_images" \
+  --expected-node fixture-k3s --source-sha "$SOURCE_SHA" \
+  --control-sha "$RECLAIM_SOURCE_SHA" --workflow-run-id 500 \
+  --output "$work_dir/native-baseline-invalid-proof.json" >"$work_dir/native-baseline-error" 2>&1; then
+  fail "native baseline authorized Mongo on root"
+fi
+
+mongo_bin="$work_dir/mongo-bin"
+mkdir -p "$mongo_bin"
+cat >"$mongo_bin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "--signal=KILL" && "$2" == "35s" ]]
+shift 2
+exec "$@"
+SH
+cat >"$mongo_bin/k3s" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "kubectl --request-timeout=5s get pods -n betstan-oci -l app=gaming-auth-mongo -o json")
+    cat "$STUB_MONGO_PODS"
+    ;;
+  "kubectl --request-timeout=35s exec -i -n betstan-oci fixture-mongo -- mongosh --norc --quiet mongodb://127.0.0.1:27017/admin?serverSelectionTimeoutMS=2000&connectTimeoutMS=2000&socketTimeoutMS=2000 --file /dev/stdin")
+    cat >"$STUB_MONGO_PROGRAM"
+    cat "$STUB_MONGO_STORAGE"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$mongo_bin/timeout" "$mongo_bin/k3s"
+cat >"$work_dir/mongo-pods.json" <<'JSON'
+{"items":[{"metadata":{"name":"fixture-mongo"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}
+JSON
+mongo_env=(
+  PATH="$mongo_bin:$PATH"
+  STUB_MONGO_PODS="$work_dir/mongo-pods.json"
+  STUB_MONGO_STORAGE="$work_dir/mongo-storage.json"
+  STUB_MONGO_PROGRAM="$work_dir/mongo-program.js"
+)
+env "${mongo_env[@]}" "$REMOTE" mongo-storage >"$work_dir/mongo-remote.json"
+cmp "$work_dir/mongo-storage.json" "$work_dir/mongo-remote.json"
+grep -Fq 'authorizedDatabases: false' "$work_dir/mongo-program.js"
+if env "${mongo_env[@]}" "$REMOTE" mongo-storage 'arbitrary-query' >"$work_dir/mongo-error" 2>&1; then
+  fail "Mongo collector accepted an arbitrary argument"
+fi
+for invalid_pods in '{"items":[]}' \
+  '{"items":[{"metadata":{"name":"fixture-mongo"},"status":{"phase":"Running","conditions":[]}}]}' \
+  '{"items":[{"metadata":{"name":"first"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"second"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'; do
+  printf '%s\n' "$invalid_pods" >"$work_dir/mongo-pods.json"
+  if env "${mongo_env[@]}" "$REMOTE" mongo-storage >"$work_dir/mongo-error" 2>&1; then
+    fail "Mongo collector accepted a missing, unready, or ambiguous pod"
+  fi
+  grep -Fq 'ready Mongo pod is missing or ambiguous' "$work_dir/mongo-error"
+done
+
+node - "$REMOTE" <<'JS'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const program = source.split("<<'MONGO_STORAGE_JS'\n")[1].split("\nMONGO_STORAGE_JS")[0];
+assert.ok(source.includes("socketTimeoutMS=2000"));
+assert.ok(source.includes("timeout --signal=KILL 35s"));
+
+async function collect(options = {}) {
+  let now = 0;
+  class Clock extends Date {
+    constructor(value) { super(value === undefined ? now : value); }
+    static now() { return now; }
+  }
+  const names = options.databases || ["gaming_event"];
+  const entries = options.entries || Array.from({ length: 40 }, (_, i) => ({
+    name: "collection_" + i, type: "collection"
+  }));
+  let remaining = [], nextCursor = 1, output;
+  const commands = [];
+  const context = {
+    Date: Clock, Buffer,
+    print(value) { assert.equal(output, undefined); output = value; },
+    db: { getSiblingDB(name) { return { async runCommand(command) {
+      const kind = Object.keys(command)[0];
+      commands.push(kind);
+      assert.ok(["buildInfo", "listDatabases", "listCollections", "getMore",
+        "killCursors", "collStats"].includes(kind));
+      if (kind === "getMore") assert.equal(command.maxTimeMS, undefined);
+      else assert.ok(command.maxTimeMS > 0 && command.maxTimeMS <= 2000);
+      if (kind === "buildInfo") return { ok: 1, version: options.version || "8.2.12" };
+      if (kind === "listDatabases") {
+        assert.equal(command.authorizedDatabases, false);
+        if (options.unauthorized) return {
+          ok: 0, code: 13, errmsg: "mongodb://private-token@private-host"
+        };
+        return { ok: 1, databases: names.map(name => ({ name })) };
+      }
+      if (kind === "listCollections") {
+        assert.equal(command.nameOnly, true);
+        if (command.filter) {
+          return { ok: 1, cursor: { id: 0, firstBatch: options.missing ? [] :
+            entries.filter(item => item.name === command.filter.name) } };
+        }
+        assert.equal(command.authorizedCollections, false);
+        assert.equal(command.cursor.batchSize, 32);
+        remaining = entries.slice(32);
+        return { ok: 1, cursor: { id: remaining.length ? nextCursor : 0,
+          firstBatch: entries.slice(0, 32) } };
+      }
+      if (kind === "getMore") {
+        assert.equal(command.collection, "$cmd.listCollections");
+        const batch = remaining.splice(0, 32);
+        return { ok: 1, cursor: { id: remaining.length ? nextCursor : 0, nextBatch: batch } };
+      }
+      if (kind === "killCursors") return { ok: 1 };
+      assert.equal(command.scale, 1);
+      if (options.deadline) now += 30001;
+      const count = Object.hasOwn(options, "count") ? options.count : 12;
+      const bucket = command.collStats.startsWith("system.buckets.");
+      return { ok: 1, ns: name + "." + command.collStats,
+        count: bucket ? undefined : count, timeseries: bucket ? { bucketCount: count } : undefined,
+        size: 480, storageSize: 4096, totalIndexSize: 8192 };
+    } }; } }
+  };
+  await vm.runInNewContext(program, context);
+  assert.ok(output);
+  assert.ok(Buffer.byteLength(output) <= 262144);
+  return { value: JSON.parse(output), commands, output };
+}
+(async () => {
+  let { value, commands } = await collect();
+  assert.equal(value.status, "COMPLETE");
+  assert.equal(value.collections.length, 40);
+  assert.ok(commands.includes("getMore"));
+  assert.equal(value.collections[0].allocatedIndexBytes, 8192);
+  value = (await collect({ count: 0 })).value;
+  assert.equal(value.collections[0].documentCount, 0);
+  value = (await collect({ count: Number.MAX_SAFE_INTEGER })).value;
+  assert.equal(value.status, "COMPLETE");
+  for (const count of [-1, NaN, Infinity, true, null, "12", Number.MAX_SAFE_INTEGER + 1]) {
+    value = (await collect({ count })).value;
+    assert.equal(value.status, "PARTIAL");
+    assert.ok(value.errors.includes("INVALID_STATISTICS"));
+    assert.equal(value.collections[0].documentCount, null);
+  }
+  const denied = await collect({ unauthorized: true });
+  assert.equal(denied.value.status, "UNAVAILABLE");
+  assert.deepEqual(denied.value.errors, ["UNAUTHORIZED"]);
+  assert.ok(!denied.output.includes("private-token"));
+  value = (await collect({ version: "9.0.0" })).value;
+  assert.deepEqual(value.errors, ["VERSION_MISMATCH"]);
+  value = (await collect({ missing: true })).value;
+  assert.ok(value.errors.includes("NAMESPACE_MISSING"));
+  value = (await collect({ deadline: true })).value;
+  assert.equal(value.status, "PARTIAL");
+  assert.ok(value.truncated && value.errors.includes("TIME_LIMIT"));
+  value = (await collect({ entries: [], databases: Array.from({ length: 33 }, (_, i) => "db" + i) })).value;
+  assert.equal(value.databases.length, 32);
+  assert.ok(value.truncated && value.errors.includes("DATABASE_LIMIT"));
+  value = (await collect({ entries: Array.from({ length: 260 }, (_, i) => ({
+    name: "c" + i, type: "collection"
+  })) })).value;
+  assert.equal(value.collections.length, 256);
+  assert.ok(value.truncated && value.errors.includes("COLLECTION_LIMIT"));
+  value = (await collect({ entries: Array.from({ length: 256 }, (_, i) => ({
+    name: "x".repeat(1024) + i, type: "collection"
+  })) })).value;
+  assert.equal(value.status, "UNAVAILABLE");
+  assert.deepEqual(value.collections, []);
+  assert.ok(value.truncated && value.errors.includes("OUTPUT_LIMIT"));
+  value = (await collect({ entries: [
+    { name: "events", type: "collection" }, { name: "event_view", type: "view" },
+    { name: "metrics", type: "timeseries" }, { name: "system.buckets.metrics", type: "collection" }
+  ] })).value;
+  assert.equal(value.collections[1].status, "NON_STORAGE");
+  assert.equal(value.collections[1].documentCount, null);
+  assert.equal(value.collections[2].errorCode, "TIMESERIES_LOGICAL_UNAVAILABLE");
+  assert.equal(value.collections[3].countUnit, "buckets");
+  console.log("mongo_storage_fixed_program_tests=PASS");
+})().catch(error => { console.error(error); process.exitCode = 1; });
+JS
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+env "${common_env[@]}" \
+  STUB_MONGO_STORAGE="$work_dir/mongo-storage.json" \
+  GITHUB_RUN_ID=500 RECLAIM_CATEGORY=none RECLAIM_IMAGE_IDS='[]' \
+  OUTPUT_FILE="$work_dir/mongo-orchestrated-diagnosis.json" \
+  "$ORCHESTRATOR" diagnose >/dev/null
+jq -e '
+  .schemaVersion == "k3s-node-disk-diagnosis.v2" and
+  .mongoStorage.status == "COMPLETE" and
+  .mongoStorage.collections[0].collectionLabel == "events" and
+  .runtime.runtime.nodeName == "k3s-node"
+' "$work_dir/mongo-orchestrated-diagnosis.json" >/dev/null ||
+  fail "governed diagnosis omitted complete Mongo evidence"
+jq -e '.mongoStorage.status == "UNAVAILABLE" and
+  .mongoStorage.errors == ["TRANSPORT_FAILED"]' \
+  "$work_dir/orchestrated-diagnosis.json" >/dev/null ||
+  fail "Mongo failure did not preserve explicit incomplete disk evidence"
+
+cat >"$stub_bin/oci" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$STUB_CLOUD_LOG"
+case "$*" in
+  "compute instance get --instance-id ocid1.instance.oc1..test --connection-timeout 5 --read-timeout 10 --max-retries 0")
+    kind=instance
+    ;;
+  "bv volume get --volume-id ocid1.volume.oc1..test --connection-timeout 5 --read-timeout 10 --max-retries 0")
+    kind=volume
+    ;;
+  "compute volume-attachment get --volume-attachment-id ocid1.volumeattachment.oc1..test --connection-timeout 5 --read-timeout 10 --max-retries 0")
+    kind=attachment
+    ;;
+  *)
+    echo "unexpected cloud mutation or unbounded read" >&2
+    exit 1
+    ;;
+esac
+case "${STUB_CLOUD_FAILURE:-}" in
+  wrong-instance)
+    if [[ "$kind" == "instance" ]]; then
+      jq '.data.id="ocid1.instance.oc1..different"' "$STUB_CLOUD_DIR/baseline-api-$kind.json"
+      exit
+    fi
+    ;;
+  detached-volume)
+    if [[ "$kind" == "attachment" ]]; then
+      jq '.data."lifecycle-state"="DETACHED"' "$STUB_CLOUD_DIR/baseline-api-$kind.json"
+      exit
+    fi
+    ;;
+  wrong-volume)
+    if [[ "$kind" == "attachment" ]]; then
+      jq '.data."volume-id"="ocid1.volume.oc1..different"' "$STUB_CLOUD_DIR/baseline-api-$kind.json"
+      exit
+    fi
+    ;;
+esac
+cat "$STUB_CLOUD_DIR/baseline-api-$kind.json"
+SH
+chmod +x "$stub_bin/oci"
+cat >"$work_dir/historical-infrastructure.env" <<EOF
+canonical_host=fixture.example
+k3s_node_name=fixture-k3s
+source_sha=$SOURCE_SHA
+infrastructure_run_id=400
+ghcr_build_run_id=300
+infrastructure_finalized=true
+namespace=betstan-oci
+compartment_ocid=ocid1.compartment.oc1..test
+region=fixture-region
+availability_domain=fixture-ad
+instance_ocid=ocid1.instance.oc1..test
+instance_fingerprint=$(printf '%s' 'ocid1.instance.oc1..test' | sha256sum | awk '{print $1}')
+mongo_volume_ocid=ocid1.volume.oc1..test
+mongo_volume_attachment_ocid=ocid1.volumeattachment.oc1..test
+mongo_volume_gb=50
+EOF
+historical_env=(
+  "${common_env[@]}"
+  CONTROL_SHA=3333333333333333333333333333333333333333
+  OCI_COMPARTMENT_OCID=ocid1.compartment.oc1..test
+  OCI_CLI_REGION=fixture-region
+  INFRA_PROVENANCE_FILE="$work_dir/historical-infrastructure.env"
+  STUB_BASELINE_NODE="$work_dir/baseline-node.json"
+  STUB_MONGO_STORAGE="$work_dir/mongo-storage.json"
+  STUB_CLOUD_DIR="$work_dir"
+  STUB_CLOUD_LOG="$work_dir/historical-cloud.log"
+  STUB_REMOTE_LOG="$work_dir/historical-remote.log"
+  GITHUB_RUN_ID=500
+  RECLAIM_CATEGORY=none
+  RECLAIM_IMAGE_IDS='[]'
+)
+: >"$work_dir/historical-remote.log"
+: >"$work_dir/historical-cloud.log"
+env "${historical_env[@]}" WORK_DIR="$work_dir/historical-good" \
+  OUTPUT_FILE="$work_dir/historical-good.json" "$ORCHESTRATOR" diagnose >/dev/null
+"$HELPER" validate-observation --diagnosis "$work_dir/historical-good.json" \
+  --source-sha "$SOURCE_SHA" --control-sha 3333333333333333333333333333333333333333
+jq -e '.terminalStatus == "OBSERVED" and .mongoStorage.status == "COMPLETE"' \
+  "$work_dir/historical-good.json" >/dev/null
+[[ "$(wc -l <"$work_dir/historical-cloud.log" | tr -d ' ')" == "6" ]] ||
+  fail "historical observation did not recheck cloud identity"
+[[ "$(awk '$1 == "baseline-proof" {count++} END {print count+0}' "$work_dir/historical-remote.log")" == "2" ]] ||
+  fail "historical observation did not recheck runtime identity"
+if grep -Eq 'reclaim|apply|update|create|delete|provision|finalize|helm|mount' \
+    "$work_dir/historical-cloud.log" "$work_dir/historical-remote.log"; then
+  fail "historical observation reached a mutation"
+fi
+for failure in wrong-instance detached-volume wrong-volume; do
+  : >"$work_dir/historical-remote.log"
+  if env "${historical_env[@]}" STUB_CLOUD_FAILURE="$failure" \
+      WORK_DIR="$work_dir/historical-$failure" \
+      OUTPUT_FILE="$work_dir/historical-$failure.json" \
+      "$ORCHESTRATOR" diagnose >"$work_dir/historical-error" 2>&1; then
+    fail "historical observation accepted $failure"
+  fi
+  grep -Fq "historical instance or Mongo attachment identity drifted" "$work_dir/historical-error"
+  [[ ! -e "$work_dir/historical-$failure.json" ]] ||
+    fail "invalid historical identity produced observation authority"
+  [[ ! -s "$work_dir/historical-remote.log" ]] ||
+    fail "invalid cloud identity reached runtime collection"
+done
+: >"$work_dir/historical-remote.log"
+if env "${historical_env[@]}" STUB_BASELINE_AFTER="$work_dir/baseline-node-drifted.json" \
+    WORK_DIR="$work_dir/historical-drift" OUTPUT_FILE="$work_dir/historical-drift.json" \
+    "$ORCHESTRATOR" diagnose >"$work_dir/historical-error" 2>&1; then
+  fail "post-observation drift was accepted"
+fi
+grep -Fq "baseline proof is missing or drifted" "$work_dir/historical-error"
+[[ ! -e "$work_dir/historical-drift.json" ]] ||
+  fail "drifted baseline produced observation authority"
+: >"$work_dir/historical-remote.log"
+if env "${historical_env[@]}" STUB_BASELINE_AFTER="$work_dir/baseline-node-terminating.json" \
+    WORK_DIR="$work_dir/historical-terminating" OUTPUT_FILE="$work_dir/historical-terminating.json" \
+    "$ORCHESTRATOR" diagnose >"$work_dir/historical-error" 2>&1; then
+  fail "post-observation running terminating wrong-generation pod was accepted"
+fi
+grep -Fq "live image generation is invalid" "$work_dir/historical-error"
+grep -Fq "mongo-storage" "$work_dir/historical-remote.log"
+[[ "$(awk '$1 == "baseline-proof" {count++} END {print count+0}' "$work_dir/historical-remote.log")" == "2" ]] ||
+  fail "terminating-pod regression did not reach the after-observation proof"
+[[ ! -e "$work_dir/historical-terminating.json" ]] ||
+  fail "running terminating wrong-generation pod produced observation authority"
+if env "${historical_env[@]}" OUTPUT_FILE="$work_dir/historical-reclaim.json" \
+    "$ORCHESTRATOR" reclaim >"$work_dir/historical-error" 2>&1; then
+  fail "historical control was accepted by reclaim"
+fi
+grep -Fq "historical observations cannot reclaim" "$work_dir/historical-error"
 
 echo "k3s_disk_recovery_tests=PASS"

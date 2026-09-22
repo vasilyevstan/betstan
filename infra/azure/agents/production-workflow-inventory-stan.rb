@@ -1076,6 +1076,33 @@ def validate_manual_oci_workflow!(name, document, content)
     %r{origin/master},
     "#{name} must bind the approved SHA to current master"
   )
+  if name == "oci-infrastructure" && document.dig("jobs", "k3s-disk-recovery")
+    normalized = Marshal.load(Marshal.dump(document))
+    disk = normalized.fetch("jobs").fetch("k3s-disk-recovery")
+    checkouts = disk.fetch("steps", []).select do |step|
+      step.fetch("uses", "").start_with?("actions/checkout@")
+    end
+    unless disk.dig("env", "CONTROL_SHA") == "${{ github.sha }}" &&
+        disk.dig("env", "SOURCE_SHA") == "${{ inputs.approved_sha }}" &&
+        checkouts.length == 1 &&
+        checkouts.first.dig("with", "ref") == "${{ github.sha }}"
+      fail_inventory("#{name} disk observation must separate current control from baseline")
+    end
+    binding = "./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh"
+    runs = disk.fetch("steps").map { |step| step["run"] }.compact
+    unless runs.any? { |run| run == binding } &&
+        runs.any? do |run|
+          run.scan(binding).length == 3 &&
+            run.include?("configure-k3s-access.sh open") &&
+            run.include?("configure-k3s-access.sh cleanup") &&
+            run.include?('k3s-node-disk-recovery-stan.sh "$operation"')
+        end
+      fail_inventory("#{name} disk observation must revalidate control around owned access")
+    end
+    disk.fetch("env").delete("CONTROL_SHA")
+    checkouts.first.fetch("with").delete("ref")
+    content = normalized.to_yaml
+  end
   reject_content(
     content,
     /\$\{\{\s*github\.sha\s*\}\}/,
