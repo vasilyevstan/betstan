@@ -9,4 +9,5 @@ export enum ResultingStatus {
   BET_DECLINED = "BET_DECLINED",
   ROW_VOID = "ROW_VOID",
   BET_VOID = "BET_VOID",
+  BET_CASH_BACK = "BET_CASH_BACK",
 }

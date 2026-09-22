@@ -8,4 +8,8 @@ export enum QueueNames {
   SETTLE_SLIP_ROW = "resulting:sliprow:settle",
   SETTLE_SLIP = "resulting:slip:settle",
   LIVE_EVENT_UPDATE = "gamemaster:event:live",
+  CASH_BACK_REQUEST = "bet:cash-back:request",
+  CASH_BACK_OUTCOME = "resulting:cash-back:outcome",
+  CASH_BACK_SOURCE_REQUEST = "resulting:cash-back:source:request",
+  CASH_BACK_SOURCE_REPLY = "cash-back:source:reply",
 }

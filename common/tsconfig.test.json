@@ -2,11 +2,13 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
+    "allowJs": true,
     "rootDir": "."
   },
   "include": [
     "src/**/*.ts",
-    "tests/fixtures/**/*.ts"
+    "tests/fixtures/**/*.ts",
+    "tests/fixtures/cash-back-payloads.js"
   ],
   "exclude": [
     "tests/fixtures/legacy-amqp-consumer.ts"

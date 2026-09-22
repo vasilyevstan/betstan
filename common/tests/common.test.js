@@ -5,6 +5,8 @@ const test = require("node:test");
 
 const common = require("../build");
 const legacyCommon = require("legacy-common");
+const predecessorCommon = require("predecessor-common");
+const cashBack = require("./fixtures/cash-back-payloads");
 
 test("repository owns common source while services consume one exact package", () => {
   const packageRoot = path.resolve(__dirname, "..");
@@ -143,6 +145,178 @@ test("preserves every legacy runtime export and enum member", () => {
       assert.equal(common[enumName][key], value, `${enumName}.${key}`);
     }
   }
+});
+
+test("preserves the actual published rc.1 exports and every enum wire member", () => {
+  assert.equal(require("predecessor-common/package.json").version, "1.1.0-rc.1");
+  assert.equal(require("legacy-common/package.json").version, "1.0.54");
+  for (const [name, value] of Object.entries(predecessorCommon)) {
+    assert.ok(Object.hasOwn(common, name), `missing predecessor export ${name}`);
+    // Every published enum is an object of string wire values, not a class.
+    if (value && typeof value === "object") {
+      for (const [member, wireValue] of Object.entries(value)) {
+        if (typeof wireValue === "string") {
+          assert.equal(common[name][member], wireValue, `${name}.${member}`);
+        }
+      }
+    }
+  }
+});
+
+test("cash-back adds only the approved terminal states and four dedicated topics", () => {
+  assert.deepEqual(common.BetStatus, {
+    ...predecessorCommon.BetStatus,
+    CASH_BACK: "CASH_BACK",
+  });
+  assert.deepEqual(common.ResultingStatus, {
+    ...predecessorCommon.ResultingStatus,
+    BET_CASH_BACK: "BET_CASH_BACK",
+  });
+  assert.deepEqual(common.QueueNames, {
+    ...predecessorCommon.QueueNames,
+    CASH_BACK_REQUEST: "bet:cash-back:request",
+    CASH_BACK_OUTCOME: "resulting:cash-back:outcome",
+    CASH_BACK_SOURCE_REQUEST: "resulting:cash-back:source:request",
+    CASH_BACK_SOURCE_REPLY: "cash-back:source:reply",
+  });
+  assert.equal(new Set(Object.values(common.QueueNames)).size, Object.keys(common.QueueNames).length);
+});
+
+test("typed cash-back requests, offers, receipts and source variants survive JSON without identity loss", () => {
+  for (const event of [
+    ...cashBack.requests,
+    ...cashBack.outcomes,
+    ...cashBack.sourceRequests,
+    ...cashBack.sourceReplies,
+    cashBack.settlement,
+  ]) {
+    assert.deepEqual(JSON.parse(JSON.stringify(event)), event);
+  }
+  assert.deepEqual(cashBack.requests.map(({ data }) => data.action), ["QUOTE", "QUOTE", "CONFIRM"]);
+  assert.deepEqual(cashBack.outcomes.map(({ data }) => data.outcome), [
+    "QUOTED", "UNAVAILABLE", "ACCEPTED", "ACCEPTED", "REJECTED",
+  ]);
+  assert.deepEqual(cashBack.sourceReplies.map(({ data }) => data.outcome), [
+    "SNAPSHOT", "GRANTED", "RELEASED", "FENCED", "FENCED", "DENIED",
+  ]);
+  const original = cashBack.quoteEvidence.originalManifest.selections[0];
+  const current = cashBack.quoteEvidence.currentQuotes[0];
+  for (const key of ["slipRowId", "eventId", "productId", "oddsId", "marketId", "marketVersion", "selectionId"]) {
+    assert.equal(current[key], original[key], key);
+  }
+  assert.equal(original.acceptedOdds, "3");
+  assert.equal(current.odds, "6");
+  assert.equal(current.quoteVersion, 9);
+  assert.equal(current.marketStatus, common.LiveMarketStatus.OPEN);
+  assert.equal(cashBack.quoteEvidence.anySelectionResolved, false);
+  assert.deepEqual(cashBack.quoteEvidence.sources.map(({ evidence }) => evidence.owner), [
+    "BACKOFFICE", "GAMEMASTER",
+  ]);
+});
+
+test("source grant and lost-ACK cancellation bind exact obligations, not expiring leases", () => {
+  const { reserveRequest, releaseRequest, grant, fenced } = cashBack;
+  assert.deepEqual(grant.request, reserveRequest);
+  assert.equal(grant.grantedGeneration, reserveRequest.expected.baseGeneration + 1);
+  assert.equal(releaseRequest.reserveRequestId, reserveRequest.requestId);
+  assert.deepEqual(releaseRequest.operation, reserveRequest.operation);
+  assert.deepEqual(releaseRequest.participant, reserveRequest.participant);
+  assert.equal(releaseRequest.baseGeneration, reserveRequest.expected.baseGeneration);
+  assert.equal(releaseRequest.grantedGeneration, reserveRequest.expected.baseGeneration + 1);
+  assert.equal(releaseRequest.decision.quoteFingerprint, reserveRequest.quote.quoteFingerprint);
+  assert.equal(releaseRequest.decision.expectedRevision, reserveRequest.quote.expectedRevision);
+  assert.equal(releaseRequest.decision.decisionId, cashBack.partialReceipt.decisionId);
+  assert.equal(releaseRequest.decision.outcome, "ACCEPTED");
+  assert.equal(fenced.fenceGeneration, releaseRequest.baseGeneration + 2);
+  // The proof intentionally does not assert that a different, newer hold is empty.
+  assert.ok(fenced.observedGeneration > fenced.fenceGeneration);
+  assert.equal(Object.hasOwn(fenced, "noHold"), false);
+  assert.equal(Object.hasOwn(releaseRequest, "grant"), false);
+  assert.equal(Object.hasOwn(reserveRequest, "leaseExpiresAt"), false);
+  assert.equal(Object.hasOwn(grant, "expiresAt"), false);
+  const cancellation = cashBack.cancellationRequest;
+  assert.equal(cancellation.decision.outcome, "REJECTED");
+  assert.equal(cancellation.grantedGeneration, cancellation.baseGeneration + 1);
+  assert.equal(cancellation.reserveRequestId, reserveRequest.requestId);
+  assert.equal(Object.hasOwn(cancellation, "grant"), false);
+});
+
+test("cash-back financial evidence distinguishes partial history, full closure and settlement basis", () => {
+  const { partialReceipt, fullReceipt, rejectedReceipt, settlement } = cashBack;
+  for (const snapshot of [
+    cashBack.initialFinancial,
+    partialReceipt.financial,
+    fullReceipt.financial,
+    rejectedReceipt.financial,
+    settlement.data.cashBack.financial,
+  ]) {
+    for (const field of ["originalStakeMinor", "remainingStakeMinor", "cumulativeClosedStakeMinor", "cumulativeReturnMinor"]) {
+      assert.equal(Number.isSafeInteger(snapshot[field]), true, field);
+      assert.ok(snapshot[field] >= 0, field);
+    }
+    assert.equal(snapshot.originalStakeMinor, snapshot.remainingStakeMinor + snapshot.cumulativeClosedStakeMinor);
+  }
+  assert.equal(partialReceipt.financial.status, common.BetStatus.CONFIRMED);
+  assert.equal(partialReceipt.financial.remainingStakeMinor, 6000);
+  assert.equal(fullReceipt.financial.status, common.BetStatus.CASH_BACK);
+  assert.equal(fullReceipt.financial.remainingStakeMinor, 0);
+  assert.equal(fullReceipt.quote.closedStakeMinor, partialReceipt.financial.remainingStakeMinor);
+  assert.equal(settlement.data.cashBack.settlementBasisStakeMinor, 6000);
+  assert.equal(settlement.data.cashBack.financial.status, common.BetStatus.WIN);
+  assert.ok(settlement.data.cashBack.financial.revision > partialReceipt.financial.revision);
+  // Late immutable receipts retain their own identity and before/after revisions.
+  assert.equal(partialReceipt.decisionId, "decision-partial");
+  assert.equal(partialReceipt.quote.financial.revision, 4);
+  assert.equal(partialReceipt.financial.revision, 5);
+  assert.equal(settlement.data.cashBack.financial.revision, 6);
+  assert.equal(rejectedReceipt.reason, "SELECTION_RESOLVED");
+});
+
+test("publisher retries restamp only envelope metadata, not cash-back domain evidence", async (t) => {
+  const stamps = ["2026-09-23T12:01:00.000Z", "2026-09-23T12:02:00.000Z"];
+  t.mock.method(Date.prototype, "toISOString", () => stamps.shift());
+  class CashBackPublisher extends common.APublisher {
+    queue = common.QueueNames.CASH_BACK_OUTCOME;
+    serviceName = "resulting";
+  }
+  const connection = new FakeConnection();
+  const publisher = new CashBackPublisher(connection);
+  const event = JSON.parse(JSON.stringify(cashBack.outcomes[2]));
+  const immutableData = JSON.parse(JSON.stringify(event.data));
+  await publisher.initConfirmChannel();
+  await publisher.publishWithConfirm(event);
+  await publisher.publishWithConfirm(event);
+  const sends = connection.confirmChannel.calls.filter(([method]) => method === "publish");
+  const first = JSON.parse(sends[0][3].toString());
+  const retry = JSON.parse(sends[1][3].toString());
+  assert.notEqual(first.timestamp, retry.timestamp);
+  assert.equal(first.sender, "resulting");
+  assert.deepEqual(first.data, immutableData);
+  assert.deepEqual(retry.data, immutableData);
+  assert.equal(retry.data.receipt.decisionTime, "2026-09-23T12:00:02.000Z");
+  assert.equal(retry.data.receipt.quote.expiresAt, "2026-09-23T12:00:06.000Z");
+  assert.equal(retry.data.operation.fingerprint, cashBack.operation.fingerprint);
+});
+
+test("legacy and predecessor envelope readers tolerate optional settlement evidence", () => {
+  const legacy = { data: { slipId: "historical-slip", result: "legacy-result" } };
+  for (const api of [legacyCommon, predecessorCommon, common]) {
+    class Reader extends api.AListener {
+      queue = api.QueueNames.SETTLE_SLIP;
+      serviceName = "compatibility-reader";
+      onMessage() {}
+    }
+    const reader = new Reader(new FakeConnection());
+    for (const event of [legacy, cashBack.settlement]) {
+      const parsed = reader.parseMessage({ content: Buffer.from(JSON.stringify(event)) });
+      assert.deepEqual(parsed, event);
+      assert.deepEqual(
+        { slipId: parsed.data.slipId, result: parsed.data.result },
+        { slipId: event.data.slipId, result: event.data.result },
+      );
+    }
+  }
+  assert.equal(Object.hasOwn(legacy.data, "cashBack"), false);
 });
 
 test("listener defaults retain the legacy service queue and durable behavior", async () => {
