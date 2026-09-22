@@ -833,7 +833,7 @@ def read_mongo_storage(path, failure=""):
         result["totals"] = storage_totals(result)
         validate_mongo_storage(result)
         return result
-    except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError, RecursionError):
         return unavailable_mongo_storage("TRANSPORT_FAILED" if failure else "MALFORMED_OUTPUT")
 
 

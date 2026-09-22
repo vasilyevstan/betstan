@@ -948,4 +948,55 @@ print("manifest equivalence ok")
 EQUIV
 ok "workflow binding manifest is byte-equivalent to the dispatcher policy"
 
+for operation in oci-k3s-disk-reclaim-apt oci-k3s-disk-reclaim-cri; do
+  reset_fixtures
+  diagnosis_binding="$(
+    jq -c --arg operation "$operation" \
+      '.[$operation][] | select(.input == "diagnosis_run_id")' "$BINDING_MANIFEST"
+  )"
+  fixture "repos/$REPO/actions/workflows/oci-infrastructure.yml" <<'JSON'
+{"id":325567150}
+JSON
+  for endpoint in actions/runs/45 actions/runs/45/attempts/1; do
+    fixture "repos/$REPO/$endpoint" <<JSON
+{"id":45,"run_attempt":1,"workflow_id":325567150,
+ "path":".github/workflows/oci-infrastructure.yml",
+ "head_repository":{"full_name":"$REPO"},"head_branch":"master",
+ "head_sha":"$SUBJECT_SHA","status":"completed","conclusion":"success",
+ "event":"workflow_dispatch",
+ "display_title":"oci-infrastructure diagnose-disk k3s $SUBJECT_SHA"}
+JSON
+  done
+  fixture "repos/$REPO/actions/runs/45/artifacts?per_page=100" <<'JSON'
+{"total_count":1,"artifacts":[{"name":"oci-k3s-disk-diagnosis-45-1",
+ "id":9045,"expired":false,"size_in_bytes":1024}]}
+JSON
+  diagnosis_content="$(jq -cn --arg sha "$SUBJECT_SHA" '{
+    schemaVersion:"k3s-node-disk-diagnosis.v2",phase:"diagnose-disk",
+    sourceSha:$sha,infrastructureRunId:"44",ghcrBuildRunId:"41",
+    workflowRunId:"45",workflowRunAttempt:"1",thresholdPercent:70,
+    terminalStatus:"DIAGNOSED"
+  }')"
+  artifact_zip_fixture 9045 diagnosis.json "$diagnosis_content"
+  validator_args=(
+    validate --repository "$REPO" --binding "$diagnosis_binding"
+    --subject-sha "$SUBJECT_SHA" --run-id 45
+    --dispatch-inputs '{"diagnosis_run_id":"45","infrastructure_run_id":"44","ghcr_build_run_id":"41"}'
+  )
+  PATH="$WORK/bin:$PATH" "$VALIDATOR" "${validator_args[@]}" \
+    >"$WORK/diagnosis-result" 2>"$WORK/err.txt" ||
+    fail "$operation rejected diagnosis v2: $(cat "$WORK/err.txt")"
+  ok "$operation accepts its exact v2 diagnosis binding"
+  artifact_zip_fixture 9045 diagnosis.json "$(
+    jq -c '.schemaVersion = "k3s-node-disk-diagnosis.v1"' <<<"$diagnosis_content"
+  )"
+  if PATH="$WORK/bin:$PATH" "$VALIDATOR" "${validator_args[@]}" \
+      >"$WORK/diagnosis-result" 2>"$WORK/err.txt"; then
+    fail "$operation accepted a legacy v1 diagnosis binding"
+  fi
+  grep -qF "schemaVersion" "$WORK/err.txt" ||
+    fail "$operation failed for a reason other than schema identity"
+  ok "$operation rejects legacy v1 diagnosis for current authority"
+done
+
 printf 'oci_upstream_binding_contract=PASS cases=%d\n' "$passed"

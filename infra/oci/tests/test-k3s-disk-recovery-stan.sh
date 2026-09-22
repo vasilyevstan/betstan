@@ -1430,6 +1430,8 @@ assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["OUTP
 raw_path.write_text("invalid mongodb://private-token@private-host")
 assert disk.read_mongo_storage(raw_path)["errors"] == ["MALFORMED_OUTPUT"]
 assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["TRANSPORT_FAILED"]
+raw_path.write_text("[" * 1100 + "0" + "]" * 1100)
+assert disk.read_mongo_storage(raw_path)["errors"] == ["MALFORMED_OUTPUT"]
 
 timeseries = copy.deepcopy(raw)
 timeseries.update(status="PARTIAL", errors=["TIMESERIES_LOGICAL_UNAVAILABLE"])
@@ -1462,6 +1464,15 @@ disk.validate_diagnosis(legacy)
 disk.validate_diagnosis(v2)
 assert v2["schemaVersion"] == "k3s-node-disk-diagnosis.v2"
 assert v2["securityStateSha256"] == legacy["securityStateSha256"]
+raw_path.write_text("[" * 1100 + "0" + "]" * 1100)
+disk.build_diagnosis(args)
+malformed = json.loads(Path(args.output).read_text())
+disk.validate_diagnosis(malformed)
+assert malformed["mongoStorage"]["errors"] == ["MALFORMED_OUTPUT"]
+assert malformed["mongoStorage"]["status"] == "UNAVAILABLE"
+assert malformed["securityStateSha256"] == legacy["securityStateSha256"]
+assert malformed["terminalStatus"] == "DIAGNOSED"
+project(raw)
 assert "fixture-k3s" not in disk.canonical(v2)
 assert v2["runtime"]["runtime"]["nodeNameSha256"] == v2["kubeletCapacity"]["nodeNameSha256"]
 live = json.loads(Path(sys.argv[3]).read_text())
