@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -20,6 +21,34 @@ CURRENT_SERVICES = frozenset(
     ("auth", "bet", "backoffice", "client", "event", "gamemaster",
      "moderation", "resulting", "slip", "telemetry")
 )
+MONGO_LIMITS = {
+    "databases": 32, "collections": 256, "commandMilliseconds": 2000,
+    "collectionMilliseconds": 30000, "transportSeconds": 35, "outputBytes": 262144,
+}
+MONGO_METRICS = ("documentCount", "logicalBytes", "allocatedDataBytes", "allocatedIndexBytes")
+MONGO_ERRORS = frozenset((
+    "DATABASE_LIMIT", "COLLECTION_LIMIT", "TIME_LIMIT", "OUTPUT_LIMIT",
+    "UNAUTHORIZED", "NAMESPACE_MISSING", "COMMAND_FAILED", "INVALID_METADATA",
+    "INVALID_STATISTICS", "VERSION_MISMATCH", "TIMESERIES_LOGICAL_UNAVAILABLE",
+    "CURSOR_CLEANUP_FAILED", "TRANSPORT_FAILED", "MALFORMED_OUTPUT",
+))
+MONGO_PUBLIC_COLLECTIONS = {
+    "gaming_auth": {"users", "loginattempts"},
+    "gaming_backoffice": {"events"},
+    "gaming_bet": {"bets", "betplacementconflicts", "pendingbetupdates"},
+    "gaming_event": {"events", "eventrescheduleoperations"},
+    "gaming_gamemaster": {"events", "eventarchives"},
+    "gaming_moderation": {"bets", "liveeventmirrors", "parkedplacebets", "resulteds"},
+    "gaming_resulting": {"bets", "betarchives", "finalscoreledgers",
+                        "livesettlementledgers", "pendingmoderationresults", "retryrecords"},
+    "gaming_slip": {"slips", "sliparchives"},
+    "gaming_telemetry": {"telemetryrecords"},
+    "admin": {"system.version"},
+    "config": {"system.sessions", "system.indexBuilds", "system.preimages"},
+    "local": {"startup_log", "oplog.rs", "system.replset"},
+}
+MONGO_SYSTEM_DATABASES = {"admin", "config", "local"}
+MONGO_SAFE_INTEGER = 9007199254740991
 
 
 def fail(message):
@@ -554,8 +583,16 @@ def security_state(runtime, classification):
     return checksum(value), value
 
 
-def sanitized_runtime(runtime):
+def public_node_identity(identity):
     return {
+        **identity,
+        "nodeName": "k3s-node",
+        "nodeNameSha256": hashlib.sha256(identity["nodeName"].encode()).hexdigest(),
+    }
+
+
+def sanitized_runtime(runtime, private_node=False):
+    result = {
         "root": {
             "mountSourceSha256": hashlib.sha256(
                 runtime["root"]["mount"]["source"].encode()
@@ -584,6 +621,220 @@ def sanitized_runtime(runtime):
         "publicRead": runtime["publicRead"],
         "runtime": runtime["runtime"],
     }
+    if private_node:
+        result["runtime"] = public_node_identity(result["runtime"])
+    return result
+
+
+def require_storage(condition):
+    if not condition:
+        raise ValueError("invalid Mongo storage evidence")
+
+
+def storage_timestamp(value):
+    require_storage(isinstance(value, str) and re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z", value
+    ))
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def storage_scope(database, collection="", kind="collection"):
+    if database in MONGO_SYSTEM_DATABASES:
+        return "system"
+    if collection.startswith("system.") and kind != "timeseries-buckets":
+        return "system"
+    return "application" if database in MONGO_PUBLIC_COLLECTIONS else "unattributed"
+
+
+def validate_storage_row(row):
+    require_storage(row["kind"] in {"collection", "view", "timeseries", "timeseries-buckets"})
+    require_storage(row["status"] in {"MEASURED", "NON_STORAGE", "UNAVAILABLE"})
+    if row["status"] == "MEASURED":
+        require_storage(row["kind"] in {"collection", "timeseries-buckets"})
+        require_storage(row["countUnit"] ==
+                        ("buckets" if row["kind"] == "timeseries-buckets" else "documents"))
+        require_storage(row["errorCode"] is None)
+        storage_timestamp(row["observedAt"])
+        for key in MONGO_METRICS:
+            require_storage(type(row[key]) is int and 0 <= row[key] <= MONGO_SAFE_INTEGER)
+    else:
+        require_storage(all(row[key] is None for key in MONGO_METRICS))
+        require_storage(row["observedAt"] is None and row["countUnit"] is None)
+        if row["status"] == "NON_STORAGE":
+            require_storage(row["kind"] == "view" and row["errorCode"] is None)
+        else:
+            require_storage(row["errorCode"] in MONGO_ERRORS)
+
+
+def storage_totals(storage):
+    totals = []
+    for scope in ("application", "system", "unattributed"):
+        rows = [row for row in storage["collections"]
+                if row["scope"] == scope and row["status"] == "MEASURED"]
+        complete = storage["status"] == "COMPLETE"
+        total = {"scope": scope, "complete": complete, "measuredCollections": len(rows)}
+        for field in MONGO_METRICS[1:]:
+            value = sum(row[field] for row in rows)
+            require_storage(value <= MONGO_SAFE_INTEGER)
+            total[field] = value if rows or complete else None
+        totals.append(total)
+    return totals
+
+
+def validate_mongo_storage(storage):
+    require_storage(isinstance(storage, dict) and set(storage) == {
+        "schemaVersion", "expectedServerVersion", "observedServerVersion",
+        "startedAt", "finishedAt", "limits", "status", "discoveryComplete",
+        "truncated", "errors", "databases", "collections", "totals",
+    })
+    require_storage(storage["schemaVersion"] == "mongo-collection-storage.v1")
+    require_storage(storage["expectedServerVersion"] == "8.2.12")
+    version = storage["observedServerVersion"]
+    require_storage(version is None or
+                    (isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version)))
+    start, finish = storage["startedAt"], storage["finishedAt"]
+    if start is not None:
+        require_storage(storage_timestamp(start) <= storage_timestamp(finish))
+    else:
+        storage_timestamp(finish)
+    require_storage(storage["limits"] == MONGO_LIMITS)
+    require_storage(storage["status"] in {"COMPLETE", "PARTIAL", "UNAVAILABLE"})
+    require_storage(type(storage["discoveryComplete"]) is bool and
+                    type(storage["truncated"]) is bool)
+    errors = storage["errors"]
+    require_storage(isinstance(errors, list) and all(isinstance(item, str) for item in errors))
+    require_storage(len(errors) == len(set(errors)) and set(errors) <= MONGO_ERRORS)
+    databases, rows = storage["databases"], storage["collections"]
+    require_storage(isinstance(databases, list) and len(databases) <= MONGO_LIMITS["databases"])
+    require_storage(isinstance(rows, list) and len(rows) <= MONGO_LIMITS["collections"])
+    labels = set()
+    for database in databases:
+        require_storage(isinstance(database, dict) and set(database) ==
+                        {"label", "scope", "discoveryComplete"})
+        label = database["label"]
+        require_storage(isinstance(label, str) and label not in labels and
+                        (label in MONGO_PUBLIC_COLLECTIONS or
+                         re.fullmatch(r"database-\d{3}", label)))
+        require_storage(database["scope"] == storage_scope(label))
+        require_storage(type(database["discoveryComplete"]) is bool)
+        labels.add(label)
+    namespaces = set()
+    for row in rows:
+        require_storage(isinstance(row, dict) and set(row) == {
+            "databaseLabel", "collectionLabel", "scope", "kind", "status", "observedAt",
+            "documentCount", "countUnit", "logicalBytes", "allocatedDataBytes",
+            "allocatedIndexBytes", "errorCode",
+        })
+        database, collection = row["databaseLabel"], row["collectionLabel"]
+        require_storage(database in labels and isinstance(collection, str) and
+                        (collection in MONGO_PUBLIC_COLLECTIONS.get(database, set()) or
+                         re.fullmatch(r"collection-\d{3}", collection)))
+        require_storage((database, collection) not in namespaces)
+        namespaces.add((database, collection))
+        require_storage(row["scope"] in {"application", "system", "unattributed"})
+        if database in MONGO_SYSTEM_DATABASES:
+            require_storage(row["scope"] == "system")
+        elif database not in MONGO_PUBLIC_COLLECTIONS:
+            require_storage(row["scope"] in {"system", "unattributed"})
+        else:
+            require_storage(row["scope"] in {"application", "system"})
+        validate_storage_row(row)
+        require_storage(row["errorCode"] is None or row["errorCode"] in errors)
+    if storage["discoveryComplete"]:
+        require_storage(not storage["truncated"] and
+                        all(item["discoveryComplete"] for item in databases))
+    if storage["status"] == "UNAVAILABLE":
+        require_storage(not databases and not rows and errors)
+    elif storage["status"] == "PARTIAL":
+        require_storage(databases and start is not None)
+    complete = storage["discoveryComplete"] and not errors
+    require_storage((storage["status"] == "COMPLETE") == complete)
+    if complete:
+        require_storage(version == "8.2.12" and start is not None and
+                        all(row["status"] != "UNAVAILABLE" for row in rows))
+    require_storage(storage["totals"] == storage_totals(storage))
+
+
+def unavailable_mongo_storage(code):
+    result = {
+        "schemaVersion": "mongo-collection-storage.v1",
+        "expectedServerVersion": "8.2.12", "observedServerVersion": None,
+        "startedAt": None,
+        "finishedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "limits": dict(MONGO_LIMITS), "status": "UNAVAILABLE",
+        "discoveryComplete": False, "truncated": code == "OUTPUT_LIMIT",
+        "errors": [code], "databases": [], "collections": [],
+    }
+    result["totals"] = storage_totals(result)
+    return result
+
+
+def read_mongo_storage(path, failure=""):
+    try:
+        input_path = Path(path)
+        require_storage(not input_path.is_symlink())
+        with input_path.open("rb") as handle:
+            data = handle.read(MONGO_LIMITS["outputBytes"] + 1)
+        if len(data) > MONGO_LIMITS["outputBytes"]:
+            return unavailable_mongo_storage("OUTPUT_LIMIT")
+        if failure:
+            return unavailable_mongo_storage("TRANSPORT_FAILED")
+        raw = json.loads(data)
+        require_storage(isinstance(raw, dict) and set(raw) == {
+            "schemaVersion", "expectedServerVersion", "observedServerVersion",
+            "startedAt", "finishedAt", "limits", "status", "discoveryComplete",
+            "truncated", "errors", "databases", "collections",
+        })
+        require_storage(raw["schemaVersion"] == "mongo-collection-storage-raw.v1")
+        require_storage(isinstance(raw["databases"], list) and
+                        len(raw["databases"]) <= MONGO_LIMITS["databases"])
+        require_storage(isinstance(raw["collections"], list) and
+                        len(raw["collections"]) <= MONGO_LIMITS["collections"])
+        result = {**raw, "schemaVersion": "mongo-collection-storage.v1",
+                  "databases": [], "collections": []}
+        database_labels, collection_counts, seen = {}, {}, set()
+        for index, database in enumerate(raw["databases"], 1):
+            require_storage(isinstance(database, dict) and set(database) == {"name", "complete"})
+            name = database["name"]
+            require_storage(isinstance(name, str) and 0 < len(name.encode("utf-8")) <= 1024)
+            require_storage(name not in database_labels and type(database["complete"]) is bool)
+            label = name if name in MONGO_PUBLIC_COLLECTIONS else f"database-{index:03d}"
+            database_labels[name] = label
+            collection_counts[name] = 0
+            result["databases"].append({
+                "label": label, "scope": storage_scope(name),
+                "discoveryComplete": database["complete"],
+            })
+        for row in raw["collections"]:
+            require_storage(isinstance(row, dict) and set(row) == {
+                "database", "collection", "kind", "status", "observedAt",
+                "documentCount", "countUnit", "logicalBytes", "allocatedDataBytes",
+                "allocatedIndexBytes", "errorCode",
+            })
+            database, collection = row["database"], row["collection"]
+            require_storage(isinstance(database, str) and database in database_labels)
+            require_storage(isinstance(collection, str) and
+                            0 < len(collection.encode("utf-8")) <= 1024)
+            require_storage((database, collection) not in seen)
+            seen.add((database, collection))
+            validate_storage_row(row)
+            require_storage((row["kind"] == "timeseries-buckets") ==
+                            collection.startswith("system.buckets."))
+            collection_counts[database] += 1
+            label = collection if collection in MONGO_PUBLIC_COLLECTIONS.get(database, set()) \
+                else f"collection-{collection_counts[database]:03d}"
+            projected = {key: value for key, value in row.items()
+                         if key not in {"database", "collection"}}
+            result["collections"].append({
+                **projected, "databaseLabel": database_labels[database],
+                "collectionLabel": label,
+                "scope": storage_scope(database, collection, row["kind"]),
+            })
+        result["totals"] = storage_totals(result)
+        validate_mongo_storage(result)
+        return result
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+        return unavailable_mongo_storage("TRANSPORT_FAILED" if failure else "MALFORMED_OUTPUT")
 
 
 def validate_diagnosis(value):
@@ -604,11 +855,14 @@ def validate_diagnosis(value):
         "terminalStatus",
         "contentChecksumSha256",
     }
+    version_two = value.get("schemaVersion") == "k3s-node-disk-diagnosis.v2"
+    if version_two:
+        required.add("mongoStorage")
     if set(value) != required:
         fail("diagnosis manifest has an unexpected schema")
     validate_checksum(value, "diagnosis manifest")
     if (
-        value["schemaVersion"] != "k3s-node-disk-diagnosis.v1"
+        value["schemaVersion"] not in {"k3s-node-disk-diagnosis.v1", "k3s-node-disk-diagnosis.v2"}
         or value["phase"] != "diagnose-disk"
         or value["workflowRunAttempt"] != "1"
         or value["thresholdPercent"] != THRESHOLD
@@ -620,7 +874,23 @@ def validate_diagnosis(value):
         require_positive(value[name], f"diagnosis {name}")
     if not re.fullmatch(r"[0-9a-f]{64}", value["securityStateSha256"]):
         fail("diagnosis security-state checksum is invalid")
-    validate_capacity(value["kubeletCapacity"])
+    capacity = value["kubeletCapacity"]
+    if version_two:
+        try:
+            validate_mongo_storage(value["mongoStorage"])
+            identity = value["runtime"]["runtime"]
+            fingerprint = capacity["nodeNameSha256"]
+            require_storage(isinstance(fingerprint, str) and
+                            re.fullmatch(r"[0-9a-f]{64}", fingerprint))
+            require_storage(identity["nodeNameSha256"] == fingerprint and
+                            identity["nodeName"] == capacity["nodeName"] == "k3s-node")
+            require_storage(set(identity) == {
+                "nodeName", "nodeNameSha256", "k3sVersion", "containerRuntimeVersion", "k3sActive",
+            })
+            capacity = {key: item for key, item in capacity.items() if key != "nodeNameSha256"}
+        except (ValueError, KeyError, TypeError):
+            fail("Mongo storage or public node evidence is malformed")
+    validate_capacity(capacity)
     validate_candidate_images(value["candidateImages"])
     protection = value["protection"]
     if (
@@ -645,9 +915,9 @@ def build_diagnosis(args):
     candidate_images = parse_candidate_images(args.candidate_images)
     classification = classify(runtime, candidate_images)
     state_sha, _ = security_state(runtime, classification)
-    result = add_checksum(
-        {
-            "schemaVersion": "k3s-node-disk-diagnosis.v1",
+    storage_path = getattr(args, "mongo_storage", None)
+    content = {
+            "schemaVersion": "k3s-node-disk-diagnosis.v2" if storage_path else "k3s-node-disk-diagnosis.v1",
             "phase": "diagnose-disk",
             "sourceSha": require_sha(args.source_sha, "source SHA"),
             "infrastructureRunId": require_positive(
@@ -659,14 +929,19 @@ def build_diagnosis(args):
             "workflowRunId": require_positive(args.workflow_run_id, "workflow run ID"),
             "workflowRunAttempt": "1",
             "thresholdPercent": THRESHOLD,
-            "kubeletCapacity": capacity,
-            "runtime": sanitized_runtime(runtime),
+            "kubeletCapacity": public_node_identity(capacity) if storage_path else capacity,
+            "runtime": sanitized_runtime(runtime, private_node=bool(storage_path)),
             "candidateImages": candidate_images,
             "protection": classification,
             "securityStateSha256": state_sha,
             "terminalStatus": "DIAGNOSED",
         }
-    )
+    if storage_path:
+        content["mongoStorage"] = read_mongo_storage(
+            storage_path, getattr(args, "mongo_storage_failure", "")
+        )
+    result = add_checksum(content)
+    validate_diagnosis(result)
     Path(args.output).write_text(canonical(result) + "\n", encoding="utf-8")
 
 
@@ -688,6 +963,9 @@ def validate_fresh_against_diagnosis(diagnosis, runtime, capacity):
     validate_runtime(runtime)
     validate_capacity(capacity)
     crosscheck_filesystem(runtime, capacity)
+    if diagnosis["schemaVersion"] == "k3s-node-disk-diagnosis.v2":
+        if public_node_identity(runtime["runtime"]) != diagnosis["runtime"]["runtime"]:
+            fail("runtime node identity drifted since diagnosis")
     classification = classify(runtime, diagnosis["candidateImages"])
     state_sha, _ = security_state(runtime, classification)
     if state_sha != diagnosis["securityStateSha256"]:
@@ -773,7 +1051,11 @@ def finalize_reclaim(args):
         and before["mongo"]["separateFromRoot"] is True
         and before["containerImageReferences"] == post["containerImageReferences"]
         and before["kubernetesImageReferences"] == post["kubernetesImageReferences"]
-        and before["runtime"] == post["runtime"]
+        and before["runtime"] == (
+            public_node_identity(post["runtime"])
+            if diagnosis["schemaVersion"] == "k3s-node-disk-diagnosis.v2"
+            else post["runtime"]
+        )
         and before["workload"]["restartCount"] == post["workload"]["restartCount"]
         and post["workload"]["unhealthyPodCount"] == 0
         and before["queue"]["queueCount"] == post["queue"]["queueCount"]
@@ -875,6 +1157,8 @@ def main():
     diagnose.add_argument("--infrastructure-run-id", required=True)
     diagnose.add_argument("--ghcr-build-run-id", required=True)
     diagnose.add_argument("--workflow-run-id", required=True)
+    diagnose.add_argument("--mongo-storage")
+    diagnose.add_argument("--mongo-storage-failure", choices=("", "TRANSPORT_FAILED"), default="")
     diagnose.add_argument("--output", required=True)
     diagnose.set_defaults(handler=build_diagnosis)
 

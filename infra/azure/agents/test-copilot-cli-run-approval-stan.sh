@@ -427,8 +427,9 @@ capacity_acquisition_run_id=43
       ;;
     9045)
       file_name=diagnosis.json
-      content="$(jq -cn --arg sha "$SHA" '{
-        schemaVersion:"k3s-node-disk-diagnosis.v1",
+      content="$(jq -cn --arg sha "$SHA" \
+        --arg schema "${STUB_DISK_DIAGNOSIS_SCHEMA:-k3s-node-disk-diagnosis.v2}" '{
+        schemaVersion:$schema,
         sourceSha:$sha,
         workflowRunId:"45",
         workflowRunAttempt:"1",
@@ -1064,6 +1065,7 @@ load_record_stub() {
   unset STUB_OCI_RUNTIME_MODE
   unset STUB_PACKAGE_CREATED_AT
   unset STUB_PACKAGE_CANDIDATE_BUILD_ID
+  unset STUB_DISK_DIAGNOSIS_SCHEMA
   unset STUB_UPSTREAM_RUN_ID STUB_UPSTREAM_WORKFLOW STUB_UPSTREAM_WORKFLOW_ID
   unset STUB_UPSTREAM_TITLE STUB_UPSTREAM_EVENT STUB_UPSTREAM_CONCLUSION
   runtime_mode="$(
@@ -1153,6 +1155,17 @@ done < <(
   "$POLICY" all |
     jq -r '.[] | select(.authority == "dispatch-record") | .operation'
 )
+
+load_record_stub oci-k3s-disk-reclaim-cri
+if STUB_DISK_DIAGNOSIS_SCHEMA=k3s-node-disk-diagnosis.v1 \
+  COPILOT_CLI_AUTO_APPROVE=true \
+  run_approver "$STUB_RUN_ID" --approve >"$output_file" 2>"$error_file"; then
+  echo "legacy diagnosis schema unexpectedly authorized a current reclaim" >&2
+  exit 1
+fi
+grep -qF "schemaVersion" "$error_file"
+jq -e '.state == "issued" and .inflightApproval == null' \
+  "$authority_dir/$STUB_RUN_ID.json" >/dev/null
 
 load_record_stub oci-infrastructure-finalize-k3s
 if STUB_OCI_RUNTIME_MODE=k3s \

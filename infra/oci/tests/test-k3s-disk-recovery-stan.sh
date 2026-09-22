@@ -703,6 +703,10 @@ action="$1"
 selected="$2"
 printf '%s\t%s\n' "$action" "$selected" >>"${STUB_REMOTE_LOG:?}"
 case "$action" in
+  mongo-storage)
+    [[ -n "${STUB_MONGO_STORAGE:-}" ]] || exit 1
+    cat "$STUB_MONGO_STORAGE"
+    ;;
   snapshot)
     cat "${STUB_CURRENT_RUNTIME:?}"
     ;;
@@ -1342,5 +1346,349 @@ grep -Fq -- '-o StrictHostKeyChecking=yes' "$ORCHESTRATOR" ||
   fail "disk recovery SSH does not require the attested host key"
 grep -Fq -- '-o UserKnownHostsFile="$target_known_hosts"' "$ORCHESTRATOR" ||
   fail "disk recovery SSH does not use the retained attested host-key file"
+
+python3 - "$HELPER" "$work_dir" "$runtime" "$capacity" "$candidate_images" "$SOURCE_SHA" <<'PY'
+import argparse
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("disk", sys.argv[1])
+disk = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(disk)
+root = Path(sys.argv[2])
+stamp = "2026-09-22T00:00:00.000Z"
+
+def row(database, collection, count=12):
+    return {
+        "database": database, "collection": collection, "kind": "collection",
+        "status": "MEASURED", "observedAt": stamp, "documentCount": count,
+        "countUnit": "documents", "logicalBytes": 480,
+        "allocatedDataBytes": 4096, "allocatedIndexBytes": 8192, "errorCode": None,
+    }
+
+raw = {
+    "schemaVersion": "mongo-collection-storage-raw.v1",
+    "expectedServerVersion": "8.2.12", "observedServerVersion": "8.2.12",
+    "startedAt": stamp, "finishedAt": stamp, "limits": dict(disk.MONGO_LIMITS),
+    "status": "COMPLETE", "discoveryComplete": True, "truncated": False, "errors": [],
+    "databases": [{"name": name, "complete": True} for name in
+                  ("gaming_event", "local", "private-customer-database")],
+    "collections": [
+        row("gaming_event", "events"), row("gaming_event", "private-token-collection", 0),
+        row("local", "startup_log"), row("private-customer-database", "credential-value"),
+    ],
+}
+raw_path = root / "mongo-storage.json"
+def project(value):
+    raw_path.write_text(json.dumps(value))
+    return disk.read_mongo_storage(raw_path)
+
+public = project(raw)
+assert public["status"] == "COMPLETE"
+assert [item["scope"] for item in public["collections"]] == [
+    "application", "application", "system", "unattributed"
+]
+assert public["collections"][0]["collectionLabel"] == "events"
+assert public["collections"][1]["documentCount"] == 0
+assert public["totals"][0]["allocatedDataBytes"] == 8192
+for private in ("private-token", "private-customer", "credential-value"):
+    assert private not in disk.canonical(public)
+
+for value in (-1, True, "12", None, 1.2, disk.MONGO_SAFE_INTEGER + 1):
+    invalid = copy.deepcopy(raw)
+    invalid["collections"][0]["documentCount"] = value
+    assert project(invalid)["errors"] == ["MALFORMED_OUTPUT"]
+large = copy.deepcopy(raw)
+large["collections"][0]["documentCount"] = disk.MONGO_SAFE_INTEGER
+assert project(large)["collections"][0]["documentCount"] == disk.MONGO_SAFE_INTEGER
+for mutation in ("duplicate", "extra-field", "wrong-version", "false-complete"):
+    invalid = copy.deepcopy(raw)
+    if mutation == "duplicate":
+        invalid["collections"].append(invalid["collections"][0])
+    elif mutation == "extra-field":
+        invalid["credentials"] = "mongodb://private-token@private-host"
+    elif mutation == "wrong-version":
+        invalid["observedServerVersion"] = "private-runtime"
+    else:
+        invalid["discoveryComplete"] = False
+    assert project(invalid)["errors"] == ["MALFORMED_OUTPUT"], mutation
+partial = copy.deepcopy(raw)
+partial.update(status="PARTIAL", errors=["NAMESPACE_MISSING"])
+partial["collections"][0].update({
+    "status": "UNAVAILABLE", "errorCode": "NAMESPACE_MISSING",
+    "observedAt": None, "countUnit": None, **{key: None for key in disk.MONGO_METRICS},
+})
+assert project(partial)["status"] == "PARTIAL"
+assert project(partial)["collections"][0]["documentCount"] is None
+raw_path.write_bytes(b"x" * (disk.MONGO_LIMITS["outputBytes"] + 1))
+assert disk.read_mongo_storage(raw_path)["errors"] == ["OUTPUT_LIMIT"]
+assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["OUTPUT_LIMIT"]
+raw_path.write_text("invalid mongodb://private-token@private-host")
+assert disk.read_mongo_storage(raw_path)["errors"] == ["MALFORMED_OUTPUT"]
+assert disk.read_mongo_storage(raw_path, "TRANSPORT_FAILED")["errors"] == ["TRANSPORT_FAILED"]
+
+timeseries = copy.deepcopy(raw)
+timeseries.update(status="PARTIAL", errors=["TIMESERIES_LOGICAL_UNAVAILABLE"])
+logical = row("gaming_event", "metrics")
+logical.update(kind="timeseries", status="UNAVAILABLE", observedAt=None, countUnit=None,
+               errorCode="TIMESERIES_LOGICAL_UNAVAILABLE",
+               **{key: None for key in disk.MONGO_METRICS})
+bucket = row("gaming_event", "system.buckets.metrics", 2)
+bucket.update(kind="timeseries-buckets", countUnit="buckets")
+view = copy.deepcopy(logical)
+view.update(collection="metric_view", kind="view", status="NON_STORAGE", errorCode=None)
+timeseries["collections"].extend([logical, bucket, view])
+ts_public = project(timeseries)
+assert ts_public["totals"][0]["allocatedDataBytes"] == 12288
+assert ts_public["collections"][-2]["scope"] == "application"
+assert ts_public["collections"][-2]["countUnit"] == "buckets"
+assert ts_public["collections"][-1]["documentCount"] is None
+
+project(raw)
+args = argparse.Namespace(
+    runtime=sys.argv[3], capacity=sys.argv[4], candidate_images=sys.argv[5],
+    source_sha=sys.argv[6], infrastructure_run_id="400", ghcr_build_run_id="300",
+    workflow_run_id="500", output=str(root / "mongo-diagnosis.json"),
+    mongo_storage=str(raw_path), mongo_storage_failure="",
+)
+disk.build_diagnosis(args)
+v2 = json.loads(Path(args.output).read_text())
+legacy = json.loads((root / "diagnosis.json").read_text())
+disk.validate_diagnosis(legacy)
+disk.validate_diagnosis(v2)
+assert v2["schemaVersion"] == "k3s-node-disk-diagnosis.v2"
+assert v2["securityStateSha256"] == legacy["securityStateSha256"]
+assert "fixture-k3s" not in disk.canonical(v2)
+assert v2["runtime"]["runtime"]["nodeNameSha256"] == v2["kubeletCapacity"]["nodeNameSha256"]
+live = json.loads(Path(sys.argv[3]).read_text())
+capacity = json.loads(Path(sys.argv[4]).read_text())
+assert disk.validate_fresh_against_diagnosis(v2, live, capacity) == disk.classify(
+    live, v2["candidateImages"]
+)
+changed = copy.deepcopy(raw)
+changed["collections"][0]["logicalBytes"] += 999
+project(changed)
+disk.build_diagnosis(args)
+new = json.loads(Path(args.output).read_text())
+assert new["securityStateSha256"] == v2["securityStateSha256"]
+assert new["contentChecksumSha256"] != v2["contentChecksumSha256"]
+drifted = copy.deepcopy(live)
+drifted["runtime"]["nodeName"] = "different-node"
+drifted_capacity = {**capacity, "nodeName": "different-node"}
+try:
+    disk.validate_fresh_against_diagnosis(v2, drifted, drifted_capacity)
+except SystemExit:
+    pass
+else:
+    raise AssertionError("v2 allowed node identity drift")
+tampered = copy.deepcopy(v2)
+tampered["mongoStorage"]["collections"][0]["logicalBytes"] += 1
+try:
+    disk.validate_diagnosis(tampered)
+except SystemExit:
+    pass
+else:
+    raise AssertionError("Mongo storage was not covered by diagnosis checksum")
+project(raw)
+print("mongo_storage_projection_tests=PASS")
+PY
+
+mongo_bin="$work_dir/mongo-bin"
+mkdir -p "$mongo_bin"
+cat >"$mongo_bin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "--signal=KILL" && "$2" == "35s" ]]
+shift 2
+exec "$@"
+SH
+cat >"$mongo_bin/k3s" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "kubectl --request-timeout=5s get pods -n betstan-oci -l app=gaming-auth-mongo -o json")
+    cat "$STUB_MONGO_PODS"
+    ;;
+  "kubectl --request-timeout=35s exec -i -n betstan-oci fixture-mongo -- mongosh --norc --quiet mongodb://127.0.0.1:27017/admin?serverSelectionTimeoutMS=2000&connectTimeoutMS=2000&socketTimeoutMS=2000 --file /dev/stdin")
+    cat >"$STUB_MONGO_PROGRAM"
+    cat "$STUB_MONGO_STORAGE"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$mongo_bin/timeout" "$mongo_bin/k3s"
+cat >"$work_dir/mongo-pods.json" <<'JSON'
+{"items":[{"metadata":{"name":"fixture-mongo"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}
+JSON
+mongo_env=(
+  PATH="$mongo_bin:$PATH"
+  STUB_MONGO_PODS="$work_dir/mongo-pods.json"
+  STUB_MONGO_STORAGE="$work_dir/mongo-storage.json"
+  STUB_MONGO_PROGRAM="$work_dir/mongo-program.js"
+)
+env "${mongo_env[@]}" "$REMOTE" mongo-storage >"$work_dir/mongo-remote.json"
+cmp "$work_dir/mongo-storage.json" "$work_dir/mongo-remote.json"
+grep -Fq 'authorizedDatabases: false' "$work_dir/mongo-program.js"
+if env "${mongo_env[@]}" "$REMOTE" mongo-storage 'arbitrary-query' >"$work_dir/mongo-error" 2>&1; then
+  fail "Mongo collector accepted an arbitrary argument"
+fi
+for invalid_pods in '{"items":[]}' \
+  '{"items":[{"metadata":{"name":"fixture-mongo"},"status":{"phase":"Running","conditions":[]}}]}' \
+  '{"items":[{"metadata":{"name":"first"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"second"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'; do
+  printf '%s\n' "$invalid_pods" >"$work_dir/mongo-pods.json"
+  if env "${mongo_env[@]}" "$REMOTE" mongo-storage >"$work_dir/mongo-error" 2>&1; then
+    fail "Mongo collector accepted a missing, unready, or ambiguous pod"
+  fi
+  grep -Fq 'ready Mongo pod is missing or ambiguous' "$work_dir/mongo-error"
+done
+
+node - "$REMOTE" <<'JS'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const program = source.split("<<'MONGO_STORAGE_JS'\n")[1].split("\nMONGO_STORAGE_JS")[0];
+assert.ok(source.includes("socketTimeoutMS=2000"));
+assert.ok(source.includes("timeout --signal=KILL 35s"));
+
+async function collect(options = {}) {
+  let now = 0;
+  class Clock extends Date {
+    constructor(value) { super(value === undefined ? now : value); }
+    static now() { return now; }
+  }
+  const names = options.databases || ["gaming_event"];
+  const entries = options.entries || Array.from({ length: 40 }, (_, i) => ({
+    name: "collection_" + i, type: "collection"
+  }));
+  let remaining = [], nextCursor = 1, output;
+  const commands = [];
+  const context = {
+    Date: Clock, Buffer,
+    print(value) { assert.equal(output, undefined); output = value; },
+    db: { getSiblingDB(name) { return { async runCommand(command) {
+      const kind = Object.keys(command)[0];
+      commands.push(kind);
+      assert.ok(["buildInfo", "listDatabases", "listCollections", "getMore",
+        "killCursors", "collStats"].includes(kind));
+      if (kind === "getMore") assert.equal(command.maxTimeMS, undefined);
+      else assert.ok(command.maxTimeMS > 0 && command.maxTimeMS <= 2000);
+      if (kind === "buildInfo") return { ok: 1, version: options.version || "8.2.12" };
+      if (kind === "listDatabases") {
+        assert.equal(command.authorizedDatabases, false);
+        if (options.unauthorized) return {
+          ok: 0, code: 13, errmsg: "mongodb://private-token@private-host"
+        };
+        return { ok: 1, databases: names.map(name => ({ name })) };
+      }
+      if (kind === "listCollections") {
+        assert.equal(command.nameOnly, true);
+        if (command.filter) {
+          return { ok: 1, cursor: { id: 0, firstBatch: options.missing ? [] :
+            entries.filter(item => item.name === command.filter.name) } };
+        }
+        assert.equal(command.authorizedCollections, false);
+        assert.equal(command.cursor.batchSize, 32);
+        remaining = entries.slice(32);
+        return { ok: 1, cursor: { id: remaining.length ? nextCursor : 0,
+          firstBatch: entries.slice(0, 32) } };
+      }
+      if (kind === "getMore") {
+        assert.equal(command.collection, "$cmd.listCollections");
+        const batch = remaining.splice(0, 32);
+        return { ok: 1, cursor: { id: remaining.length ? nextCursor : 0, nextBatch: batch } };
+      }
+      if (kind === "killCursors") return { ok: 1 };
+      assert.equal(command.scale, 1);
+      if (options.deadline) now += 30001;
+      const count = Object.hasOwn(options, "count") ? options.count : 12;
+      const bucket = command.collStats.startsWith("system.buckets.");
+      return { ok: 1, ns: name + "." + command.collStats,
+        count: bucket ? undefined : count, timeseries: bucket ? { bucketCount: count } : undefined,
+        size: 480, storageSize: 4096, totalIndexSize: 8192 };
+    } }; } }
+  };
+  await vm.runInNewContext(program, context);
+  assert.ok(output);
+  assert.ok(Buffer.byteLength(output) <= 262144);
+  return { value: JSON.parse(output), commands, output };
+}
+(async () => {
+  let { value, commands } = await collect();
+  assert.equal(value.status, "COMPLETE");
+  assert.equal(value.collections.length, 40);
+  assert.ok(commands.includes("getMore"));
+  assert.equal(value.collections[0].allocatedIndexBytes, 8192);
+  value = (await collect({ count: 0 })).value;
+  assert.equal(value.collections[0].documentCount, 0);
+  value = (await collect({ count: Number.MAX_SAFE_INTEGER })).value;
+  assert.equal(value.status, "COMPLETE");
+  for (const count of [-1, NaN, Infinity, true, null, "12", Number.MAX_SAFE_INTEGER + 1]) {
+    value = (await collect({ count })).value;
+    assert.equal(value.status, "PARTIAL");
+    assert.ok(value.errors.includes("INVALID_STATISTICS"));
+    assert.equal(value.collections[0].documentCount, null);
+  }
+  const denied = await collect({ unauthorized: true });
+  assert.equal(denied.value.status, "UNAVAILABLE");
+  assert.deepEqual(denied.value.errors, ["UNAUTHORIZED"]);
+  assert.ok(!denied.output.includes("private-token"));
+  value = (await collect({ version: "9.0.0" })).value;
+  assert.deepEqual(value.errors, ["VERSION_MISMATCH"]);
+  value = (await collect({ missing: true })).value;
+  assert.ok(value.errors.includes("NAMESPACE_MISSING"));
+  value = (await collect({ deadline: true })).value;
+  assert.equal(value.status, "PARTIAL");
+  assert.ok(value.truncated && value.errors.includes("TIME_LIMIT"));
+  value = (await collect({ entries: [], databases: Array.from({ length: 33 }, (_, i) => "db" + i) })).value;
+  assert.equal(value.databases.length, 32);
+  assert.ok(value.truncated && value.errors.includes("DATABASE_LIMIT"));
+  value = (await collect({ entries: Array.from({ length: 260 }, (_, i) => ({
+    name: "c" + i, type: "collection"
+  })) })).value;
+  assert.equal(value.collections.length, 256);
+  assert.ok(value.truncated && value.errors.includes("COLLECTION_LIMIT"));
+  value = (await collect({ entries: Array.from({ length: 256 }, (_, i) => ({
+    name: "x".repeat(1024) + i, type: "collection"
+  })) })).value;
+  assert.equal(value.status, "UNAVAILABLE");
+  assert.deepEqual(value.collections, []);
+  assert.ok(value.truncated && value.errors.includes("OUTPUT_LIMIT"));
+  value = (await collect({ entries: [
+    { name: "events", type: "collection" }, { name: "event_view", type: "view" },
+    { name: "metrics", type: "timeseries" }, { name: "system.buckets.metrics", type: "collection" }
+  ] })).value;
+  assert.equal(value.collections[1].status, "NON_STORAGE");
+  assert.equal(value.collections[1].documentCount, null);
+  assert.equal(value.collections[2].errorCode, "TIMESERIES_LOGICAL_UNAVAILABLE");
+  assert.equal(value.collections[3].countUnit, "buckets");
+  console.log("mongo_storage_fixed_program_tests=PASS");
+})().catch(error => { console.error(error); process.exitCode = 1; });
+JS
+
+cp "$runtime" "$work_dir/current-runtime.json"
+cp "$work_dir/summary-before.json" "$work_dir/current-summary.json"
+env "${common_env[@]}" \
+  STUB_MONGO_STORAGE="$work_dir/mongo-storage.json" \
+  GITHUB_RUN_ID=500 RECLAIM_CATEGORY=none RECLAIM_IMAGE_IDS='[]' \
+  OUTPUT_FILE="$work_dir/mongo-orchestrated-diagnosis.json" \
+  "$ORCHESTRATOR" diagnose >/dev/null
+jq -e '
+  .schemaVersion == "k3s-node-disk-diagnosis.v2" and
+  .mongoStorage.status == "COMPLETE" and
+  .mongoStorage.collections[0].collectionLabel == "events" and
+  .runtime.runtime.nodeName == "k3s-node"
+' "$work_dir/mongo-orchestrated-diagnosis.json" >/dev/null ||
+  fail "governed diagnosis omitted complete Mongo evidence"
+jq -e '.mongoStorage.status == "UNAVAILABLE" and
+  .mongoStorage.errors == ["TRANSPORT_FAILED"]' \
+  "$work_dir/orchestrated-diagnosis.json" >/dev/null ||
+  fail "Mongo failure did not preserve explicit incomplete disk evidence"
 
 echo "k3s_disk_recovery_tests=PASS"

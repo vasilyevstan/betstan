@@ -31,6 +31,11 @@ case "$ACTION" in
   probe-public-read)
     required_commands=(curl)
     ;;
+  mongo-storage)
+    required_commands=(k3s timeout)
+    [[ "$SELECTED_IMAGE_IDS" == "[]" && "$#" == "1" ]] ||
+      fail "Mongo storage inspection does not accept arguments"
+    ;;
   reclaim-apt-package-cache)
     required_commands=(apt-get)
     ;;
@@ -137,6 +142,202 @@ fixed_path_bytes() {
   [[ "$bytes" =~ ^[0-9]+$ ]] || fail "invalid aggregate size for $category"
   jq -cn --arg category "$category" --arg path "$path" --argjson bytes "$bytes" \
     '{category:$category,path:$path,bytes:$bytes}'
+}
+
+mongo_storage() {
+  local pod
+  pod="$(
+    k3s kubectl --request-timeout=5s get pods -n betstan-oci \
+      -l app=gaming-auth-mongo -o json |
+      jq -er '
+        [.items[] | select(
+          .metadata.deletionTimestamp == null and
+          .status.phase == "Running" and
+          any(.status.conditions[]?; .type == "Ready" and .status == "True")
+        )] |
+        if length == 1 then .[0].metadata.name else error("Mongo pod unavailable") end
+      '
+  )" || fail "ready Mongo pod is missing or ambiguous"
+  timeout --signal=KILL 35s \
+    k3s kubectl --request-timeout=35s exec -i -n betstan-oci "$pod" -- \
+      mongosh --norc --quiet \
+      'mongodb://127.0.0.1:27017/admin?serverSelectionTimeoutMS=2000&connectTimeoutMS=2000&socketTimeoutMS=2000' \
+      --file /dev/stdin <<'MONGO_STORAGE_JS'
+(async function () {
+  const limits = { databases: 32, collections: 256, commandMilliseconds: 2000,
+    collectionMilliseconds: 30000, transportSeconds: 35, outputBytes: 262144 };
+  const started = Date.now();
+  const result = {
+    schemaVersion: "mongo-collection-storage-raw.v1",
+    expectedServerVersion: "8.2.12", observedServerVersion: null,
+    startedAt: new Date(started).toISOString(), finishedAt: null,
+    limits, status: "UNAVAILABLE", discoveryComplete: false, truncated: false,
+    errors: [], databases: [], collections: []
+  };
+  const safeErrors = new Set(["DATABASE_LIMIT", "COLLECTION_LIMIT", "TIME_LIMIT",
+    "OUTPUT_LIMIT", "UNAUTHORIZED", "NAMESPACE_MISSING", "COMMAND_FAILED",
+    "INVALID_METADATA", "INVALID_STATISTICS", "VERSION_MISMATCH",
+    "TIMESERIES_LOGICAL_UNAVAILABLE", "CURSOR_CLEANUP_FAILED"]);
+  function problem(code) {
+    const error = new Error(code);
+    error.safeCode = code;
+    return error;
+  }
+  function errorCode(error) {
+    if (safeErrors.has(error.safeCode)) return error.safeCode;
+    if (error.code === 13) return "UNAUTHORIZED";
+    if (error.code === 26) return "NAMESPACE_MISSING";
+    if (error.code === 50 || error.code === 262) return "TIME_LIMIT";
+    return "COMMAND_FAILED";
+  }
+  function recordError(code) {
+    if (!result.errors.includes(code)) result.errors.push(code);
+    if (["DATABASE_LIMIT", "COLLECTION_LIMIT", "TIME_LIMIT", "OUTPUT_LIMIT"].includes(code))
+      result.truncated = true;
+  }
+  async function command(database, value, cleanup = false) {
+    const remaining = limits.collectionMilliseconds - (Date.now() - started);
+    if (!cleanup && remaining <= 0) throw problem("TIME_LIMIT");
+    const timeout = cleanup ? limits.commandMilliseconds :
+      Math.min(limits.commandMilliseconds, remaining);
+    // Non-awaitData getMore rejects maxTimeMS; the fixed connection also bounds socket waits.
+    const response = await database.runCommand(value.getMore === undefined ?
+      { ...value, maxTimeMS: timeout } : value);
+    if (response.ok !== 1) throw response;
+    if (!cleanup && Date.now() - started >= limits.collectionMilliseconds)
+      throw problem("TIME_LIMIT");
+    return response;
+  }
+  function metric(value) {
+    const number = Number(value);
+    if (value === null || value === undefined || typeof value === "boolean" ||
+        typeof value === "string" || !Number.isSafeInteger(number) || number < 0)
+      throw problem("INVALID_STATISTICS");
+    return number;
+  }
+  async function measure(database, databaseName, entry) {
+    if (!entry || typeof entry.name !== "string" || !entry.name ||
+        !["collection", "view", "timeseries"].includes(entry.type))
+      throw problem("INVALID_METADATA");
+    const bucket = entry.name.startsWith("system.buckets.");
+    const row = {
+      database: databaseName, collection: entry.name,
+      kind: bucket ? "timeseries-buckets" : entry.type,
+      status: "UNAVAILABLE", observedAt: null,
+      documentCount: null, countUnit: null, logicalBytes: null,
+      allocatedDataBytes: null, allocatedIndexBytes: null, errorCode: null
+    };
+    result.collections.push(row);
+    if (entry.type === "view") {
+      row.status = "NON_STORAGE";
+      return;
+    }
+    if (entry.type === "timeseries") {
+      row.errorCode = "TIMESERIES_LOGICAL_UNAVAILABLE";
+      recordError(row.errorCode);
+      return;
+    }
+    try {
+      const stats = await command(database, { collStats: entry.name, scale: 1 });
+      const exists = await command(database, {
+        listCollections: 1, filter: { name: entry.name }, nameOnly: true,
+        cursor: { batchSize: 1 }
+      });
+      if (stats.ns !== databaseName + "." + entry.name ||
+          exists.cursor.firstBatch.length !== 1 ||
+          exists.cursor.firstBatch[0].type !== entry.type)
+        throw problem("NAMESPACE_MISSING");
+      const values = [bucket ? stats.timeseries?.bucketCount : stats.count,
+        stats.size, stats.storageSize, stats.totalIndexSize].map(metric);
+      [row.documentCount, row.logicalBytes, row.allocatedDataBytes, row.allocatedIndexBytes] = values;
+      row.countUnit = bucket ? "buckets" : "documents";
+      row.observedAt = new Date().toISOString();
+      row.status = "MEASURED";
+    } catch (error) {
+      row.errorCode = errorCode(error);
+      recordError(row.errorCode);
+      if (row.errorCode === "TIME_LIMIT") throw problem("TIME_LIMIT");
+    }
+  }
+  try {
+    const admin = db.getSiblingDB("admin");
+    const info = await command(admin, { buildInfo: 1 });
+    if (typeof info.version === "string" && /^\d+\.\d+\.\d+$/.test(info.version))
+      result.observedServerVersion = info.version;
+    if (result.observedServerVersion !== result.expectedServerVersion)
+      throw problem("VERSION_MISMATCH");
+    const inventory = await command(admin, {
+      listDatabases: 1, nameOnly: true, authorizedDatabases: false
+    });
+    if (!Array.isArray(inventory.databases) ||
+        inventory.databases.some(item => typeof item.name !== "string" || !item.name))
+      throw problem("INVALID_METADATA");
+    const names = inventory.databases.map(item => item.name).sort();
+    if (new Set(names).size !== names.length) throw problem("INVALID_METADATA");
+    if (names.length > limits.databases) recordError("DATABASE_LIMIT");
+    for (const name of names.slice(0, limits.databases)) {
+      const database = db.getSiblingDB(name);
+      const databaseRow = { name, complete: false };
+      result.databases.push(databaseRow);
+      let cursorId = null;
+      try {
+        let response = await command(database, {
+          listCollections: 1, nameOnly: true, authorizedCollections: false,
+          cursor: { batchSize: 32 }
+        });
+        let batchKey = "firstBatch";
+        while (true) {
+          if (!response.cursor || !Array.isArray(response.cursor[batchKey]))
+            throw problem("INVALID_METADATA");
+          cursorId = response.cursor.id;
+          for (const entry of response.cursor[batchKey]) {
+            if (result.collections.length >= limits.collections)
+              throw problem("COLLECTION_LIMIT");
+            await measure(database, name, entry);
+          }
+          if (String(cursorId) === "0") {
+            databaseRow.complete = true;
+            break;
+          }
+          response = await command(database, {
+            getMore: cursorId, collection: "$cmd.listCollections", batchSize: 32
+          });
+          batchKey = "nextBatch";
+        }
+      } catch (error) {
+        const code = errorCode(error);
+        recordError(code);
+        if (code === "TIME_LIMIT" || code === "COLLECTION_LIMIT") break;
+      } finally {
+        if (cursorId !== null && String(cursorId) !== "0") {
+          try {
+            await command(database, {
+              killCursors: "$cmd.listCollections", cursors: [cursorId]
+            }, true);
+          } catch (error) {
+            recordError("CURSOR_CLEANUP_FAILED");
+          }
+        }
+      }
+    }
+    result.discoveryComplete = !result.truncated &&
+      result.databases.length === names.length && result.databases.every(item => item.complete);
+  } catch (error) {
+    recordError(errorCode(error));
+  }
+  result.finishedAt = new Date().toISOString();
+  result.status = result.discoveryComplete && result.errors.length === 0 ? "COMPLETE" :
+    result.databases.length > 0 ? "PARTIAL" : "UNAVAILABLE";
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > limits.outputBytes) {
+    result.databases = [];
+    result.collections = [];
+    result.discoveryComplete = false;
+    result.status = "UNAVAILABLE";
+    recordError("OUTPUT_LIMIT");
+  }
+  print(JSON.stringify(result));
+})();
+MONGO_STORAGE_JS
 }
 
 snapshot() {
@@ -425,6 +626,9 @@ snapshot() {
 }
 
 case "$ACTION" in
+  mongo-storage)
+    mongo_storage
+    ;;
   snapshot)
     snapshot
     ;;

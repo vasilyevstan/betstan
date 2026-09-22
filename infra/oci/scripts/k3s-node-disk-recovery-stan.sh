@@ -101,6 +101,11 @@ run_remote() {
     return
   fi
   local encoded encoded_host encoded_node
+  local -a transport=(ssh)
+  if [[ "$remote_action" == "mongo-storage" ]]; then
+    command -v timeout >/dev/null 2>&1 || return 127
+    transport=(timeout --signal=KILL 35s ssh)
+  fi
   encoded="$(printf '%s' "$selected" | base64 | tr -d '\n')"
   encoded_host="$(printf '%s' "$canonical_host" | base64 | tr -d '\n')"
   encoded_node="$(printf '%s' "$k3s_node_name" | base64 | tr -d '\n')"
@@ -108,7 +113,7 @@ run_remote() {
   {
     declare -f oci_rabbitmq_queue_rows
     cat "$REMOTE_SCRIPT"
-  } | ssh \
+  } | "${transport[@]}" \
     -i "$target_private_key" \
     -p "$local_ssh_port" \
     -o BatchMode=yes \
@@ -142,6 +147,12 @@ if [[ "$ACTION" == "diagnose" ]]; then
     fail "diagnosis does not accept reclaim inputs"
   [[ -z "$DIAGNOSIS_RUN_ID" ]] ||
     fail "diagnosis run ID is not valid during diagnosis"
+  mongo_storage="$WORK_DIR/mongo-storage-private.json"
+  mongo_failure=""
+  if ! run_remote mongo-storage "[]" 2>"$WORK_DIR/mongo-storage-private.stderr" |
+      head -c 262145 >"$mongo_storage"; then
+    mongo_failure="TRANSPORT_FAILED"
+  fi
   "$EVIDENCE_HELPER" diagnose \
     --runtime "$runtime_before" \
     --capacity "$capacity_before" \
@@ -150,7 +161,11 @@ if [[ "$ACTION" == "diagnose" ]]; then
     --infrastructure-run-id "$INFRASTRUCTURE_RUN_ID" \
     --ghcr-build-run-id "$GHCR_BUILD_RUN_ID" \
     --workflow-run-id "$GITHUB_RUN_ID" \
+    --mongo-storage "$mongo_storage" \
+    --mongo-storage-failure "$mongo_failure" \
     --output "$OUTPUT_FILE"
+  storage_status="$(jq -er '.mongoStorage.status' "$OUTPUT_FILE")"
+  echo "mongo_collection_storage=$storage_status"
   echo "k3s_disk_recovery=diagnose status=PASS manifest=$OUTPUT_FILE"
   exit 0
 fi

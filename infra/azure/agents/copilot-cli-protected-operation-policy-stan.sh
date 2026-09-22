@@ -292,7 +292,7 @@ K3S_DISK_DIAGNOSIS_BINDING = {
         "fileName": "diagnosis.json",
         "format": "json",
         "equals": {
-            "schemaVersion": "k3s-node-disk-diagnosis.v1",
+            "schemaVersion": "k3s-node-disk-diagnosis.v2",
             "phase": "diagnose-disk",
             "sourceSha": "{subject_sha}",
             "infrastructureRunId": "{input:infrastructure_run_id}",
