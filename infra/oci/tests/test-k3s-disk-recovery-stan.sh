@@ -1612,6 +1612,8 @@ mutations = {
     "wrong-template-image": lambda c, n: n["deployments"][0]["containers"][0].update(image="wrong"),
     "wrong-running-image": lambda c, n: n["pods"][0]["statuses"][0].update(imageID="wrong"),
     "unhealthy-app": lambda c, n: n["pods"][0].update(ready=False),
+    "terminating-app": lambda c, n: n["pods"][0].update(deleting=True),
+    "terminating-mongo": lambda c, n: n["pods"][-1].update(deleting=True),
     "wrong-claim": lambda c, n: n["claim"].update(volumeName="wrong"),
     "wrong-volume-path": lambda c, n: n["volume"].update(localPath="/different"),
     "claim-rebound": lambda c, n: n["volume"]["claim"].update(uid="different"),
@@ -1697,6 +1699,13 @@ for name, value in api.items():
 drifted = copy.deepcopy(node)
 drifted["nodes"][0]["uid"] = "replacement-node"
 (root / "baseline-node-drifted.json").write_text(json.dumps(drifted))
+terminating = copy.deepcopy(node)
+wrong_generation = copy.deepcopy(terminating["pods"][0])
+wrong_generation.update(uid="terminating-wrong-generation", deleting=True)
+wrong_generation["containers"][0]["image"] = "wrong-generation"
+wrong_generation["statuses"][0]["imageID"] = "wrong-generation"
+terminating["pods"].append(wrong_generation)
+(root / "baseline-node-terminating.json").write_text(json.dumps(terminating))
 print("historical_baseline_observation_tests=PASS")
 PY
 
@@ -2136,6 +2145,18 @@ fi
 grep -Fq "baseline proof is missing or drifted" "$work_dir/historical-error"
 [[ ! -e "$work_dir/historical-drift.json" ]] ||
   fail "drifted baseline produced observation authority"
+: >"$work_dir/historical-remote.log"
+if env "${historical_env[@]}" STUB_BASELINE_AFTER="$work_dir/baseline-node-terminating.json" \
+    WORK_DIR="$work_dir/historical-terminating" OUTPUT_FILE="$work_dir/historical-terminating.json" \
+    "$ORCHESTRATOR" diagnose >"$work_dir/historical-error" 2>&1; then
+  fail "post-observation running terminating wrong-generation pod was accepted"
+fi
+grep -Fq "live image generation is invalid" "$work_dir/historical-error"
+grep -Fq "mongo-storage" "$work_dir/historical-remote.log"
+[[ "$(awk '$1 == "baseline-proof" {count++} END {print count+0}' "$work_dir/historical-remote.log")" == "2" ]] ||
+  fail "terminating-pod regression did not reach the after-observation proof"
+[[ ! -e "$work_dir/historical-terminating.json" ]] ||
+  fail "running terminating wrong-generation pod produced observation authority"
 if env "${historical_env[@]}" OUTPUT_FILE="$work_dir/historical-reclaim.json" \
     "$ORCHESTRATOR" reclaim >"$work_dir/historical-error" 2>&1; then
   fail "historical control was accepted by reclaim"

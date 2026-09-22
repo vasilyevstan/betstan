@@ -932,12 +932,13 @@ def build_baseline_proof(args):
         app_pods = {name: [] for name in expected}
         mongo_pods = []
         for pod in node["pods"]:
-            if pod["deleting"] or pod["phase"] in {"Succeeded", "Failed"}:
+            if pod["phase"] in {"Succeeded", "Failed"}:
                 continue
             app = pod["app"]
             require_storage(app in expected or app in auxiliaries)
             if app == "gaming-rabbitmq":
                 continue
+            require_storage(pod["deleting"] is False)
             require_storage(pod["phase"] == "Running" and pod["ready"] is True and
                             pod["nodeName"] == args.expected_node)
             require_storage(isinstance(pod["uid"], str) and pod["uid"])
