@@ -139,7 +139,7 @@ const fullReceipt = {
 const settlement = {
   data: {
     slipId: operation.slipId,
-    result: "WIN",
+    result: common.ResultingStatus.BET_WIN,
     betKind: common.BetKind.LIVE,
     cashBack: {
       settlementId: "settlement-example",

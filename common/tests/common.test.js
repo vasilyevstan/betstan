@@ -300,6 +300,10 @@ test("publisher retries restamp only envelope metadata, not cash-back domain evi
 
 test("legacy and predecessor envelope readers tolerate optional settlement evidence", () => {
   const legacy = { data: { slipId: "historical-slip", result: "legacy-result" } };
+  assert.equal(
+    cashBack.settlement.data.result,
+    predecessorCommon.ResultingStatus.BET_WIN,
+  );
   for (const api of [legacyCommon, predecessorCommon, common]) {
     class Reader extends api.AListener {
       queue = api.QueueNames.SETTLE_SLIP;
