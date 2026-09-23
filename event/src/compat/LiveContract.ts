@@ -16,8 +16,7 @@ export const LiveIncidentType = {
 };
 export type LiveIncidentType = PublishedLiveIncidentType;
 
-export const LiveMarketType = {
-  ...PublishedLiveMarketType,
+export const LiveMarketType = Object.assign({}, PublishedLiveMarketType, {
   KICKOFF_TEAM: "KICKOFF_TEAM" as PublishedLiveMarketType,
   FIRST_MINUTE_GOAL: "FIRST_MINUTE_GOAL" as PublishedLiveMarketType,
   NEXT_THROW_IN: "NEXT_THROW_IN" as PublishedLiveMarketType,
@@ -26,7 +25,7 @@ export const LiveMarketType = {
   SECOND_HALF_TIME_RESULT:
     "SECOND_HALF_TIME_RESULT" as PublishedLiveMarketType,
   SECOND_HALF_SCORE: "SECOND_HALF_SCORE" as PublishedLiveMarketType,
-};
+});
 export type LiveMarketType = PublishedLiveMarketType;
 
 export const LiveSettlementReason = {

@@ -728,6 +728,49 @@ reset_fixtures
 write_complete_oci_set
 assert_pass "$full_set"
 
+ruby -ryaml -rjson -ropen3 -rfileutils - "$ROOT_DIR" "$support_dir" <<'RUBY'
+root, support = ARGV
+workflow = YAML.load_file(File.join(root, ".github/workflows/common-package-publish.yml"))
+step = workflow.fetch("jobs").fetch("publish").fetch("steps").find do |entry|
+  entry["name"] == "Validate exact candidate in every backend"
+end
+script = step.fetch("run")
+start = script.index("services=(")
+finish = script.index("for service in", start)
+abort "Common publication inventory section is missing" unless start && finish
+inventory = script[start...finish]
+services = %w[auth backoffice bet event gamemaster moderation resulting slip]
+pin = { "dependencies" => { "@betstan/common" => "1.1.0-rc.1" } }
+cases = {
+  "telemetry-absent" => [nil, true],
+  "telemetry-wire-only" => [{ "dependencies" => { "express" => "4.18.2" } }, true],
+  "telemetry-common-consumer" => [pin, true],
+  "telemetry-malformed" => ["{", false],
+  "unlisted-common-consumer" => [nil, false],
+}
+cases.each do |name, (telemetry, expected)|
+  directory = File.join(support, "common-consumers", name)
+  services.each do |service|
+    FileUtils.mkdir_p(File.join(directory, service))
+    File.write(File.join(directory, service, "package.json"), JSON.generate(pin))
+  end
+  unless telemetry.nil?
+    FileUtils.mkdir_p(File.join(directory, "telemetry"))
+    content = telemetry.is_a?(String) ? telemetry : JSON.generate(telemetry)
+    File.write(File.join(directory, "telemetry/package.json"), content)
+  end
+  if name == "unlisted-common-consumer"
+    FileUtils.mkdir_p(File.join(directory, "another-service"))
+    File.write(File.join(directory, "another-service/package.json"), JSON.generate(pin))
+  end
+  output, status = Open3.capture2e("bash", "-euo", "pipefail", "-c", inventory, chdir: directory)
+  unless status.success? == expected
+    abort "Common consumer inventory #{name} failed (exit #{status.exitstatus}): #{output}"
+  end
+end
+puts "common_consumer_inventory_execution_tests=PASS"
+RUBY
+
 reset_fixtures
 write_complete_oci_set
 write_rogue_npm_publisher "$tmp_dir"
@@ -927,6 +970,22 @@ sed -i.bak 's/^            auth backoffice /            backoffice /' \
 rm "$tmp_dir/common-package-publish.yml.bak"
 assert_fail "Common publisher without Auth consumer validation" \
   "common-package-publish must validate the candidate against every current backend"
+
+reset_fixtures
+write_complete_oci_set
+python3 - "$tmp_dir/common-package-publish.yml" <<'PY'
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1])
+text = workflow.read_text()
+start = text.index("          if [ -f telemetry/package.json ] &&")
+end = text.index("            services+=(telemetry)", start)
+text = text[:start] + "          if [ -f telemetry/package.json ]; then\n" + text[end:]
+workflow.write_text(text)
+PY
+assert_fail "Common publisher treating wire-only Telemetry as a package consumer" \
+  "common-package-publish must include Telemetry only when it is a Common consumer"
 
 reset_fixtures
 write_complete_oci_set
