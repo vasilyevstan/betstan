@@ -94,6 +94,12 @@ elif mode == "blocked":
     request["inputs"]["build_run_id"] = "49"
 elif mode == "state-race":
     request["inputs"]["build_run_id"] = "50"
+elif mode == "common":
+    request["operation"] = "common-package-publish"
+    request["inputs"] = {
+        "source_sha": sha,
+        "confirmation": "PUBLISH COMMON PACKAGE EXACT SHA",
+    }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(request, handle)
     handle.write("\n")
@@ -102,6 +108,8 @@ PY
 }
 
 git() {
+  local workflow="production-deploy.yml"
+  [[ "${STUB_COMMON_REQUEST:-false}" != "true" ]] || workflow="common-package-publish.yml"
   if [[ "$1" = "-C" ]]; then
     shift 2
   fi
@@ -128,7 +136,7 @@ git() {
       return 0
       ;;
     *)
-      if [[ "$1" = "rev-parse" && "$2" = "$SHA:.github/workflows/production-deploy.yml" ]]; then
+      if [[ "$1" = "rev-parse" && "$2" = "$SHA:.github/workflows/$workflow" ]]; then
         printf '%s\n' "$BLOB"
       else
         echo "unexpected git call: $*" >&2
@@ -139,6 +147,11 @@ git() {
 }
 
 gh() {
+  local workflow="production-deploy.yml" title="deploy $SHA"
+  if [[ "${STUB_COMMON_REQUEST:-false}" = "true" ]]; then
+    workflow="common-package-publish.yml"
+    title="common-package publish $SHA"
+  fi
   if [[ "$1 $2" = "repo view" ]]; then
     printf '%s\n' "$REPOSITORY"
     return
@@ -166,10 +179,134 @@ gh() {
 
   local endpoint="$2"
   case "$endpoint" in
+    "user"|"repos/$REPOSITORY/environments/common-package-release"|"repos/$REPOSITORY/environments/common-package-release/deployment-branch-policies?per_page=100"|"repos/$REPOSITORY/environments/common-package-release/secrets?per_page=100")
+      [[ "${STUB_COMMON_REQUEST:-false}" = "true" ]] || {
+        echo "unrelated operation queried Common prerequisites" >&2
+        return 1
+      }
+      local count=0 mode="${STUB_COMMON_CONFIGURATION:-valid}"
+      [[ ! -f "$common_prerequisite_count_file" ]] ||
+        count="$(cat "$common_prerequisite_count_file")"
+      if [[ "$endpoint" = "repos/$REPOSITORY/environments/common-package-release" ]]; then
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$common_prerequisite_count_file"
+      fi
+      if [[ -n "${STUB_COMMON_DRIFT:-}" && "$count" -ge 2 ]]; then
+        mode="$STUB_COMMON_DRIFT"
+      fi
+      if [[ "$endpoint" = *"/secrets?per_page=100" ]]; then
+        [[ "$*" = *"--paginate --slurp"* ]] || {
+          echo "Common secret metadata was not completely paginated" >&2
+          return 1
+        }
+      fi
+      python3 - "$endpoint" "$mode" <<'PY'
+import json
+import sys
+
+endpoint, mode = sys.argv[1:]
+kind = (
+    "actor" if endpoint == "user" else
+    "branches" if "/deployment-branch-policies?" in endpoint else
+    "secrets" if "/secrets?" in endpoint else "environment"
+)
+if mode == kind + "-api-error":
+    raise SystemExit("simulated Common metadata API failure")
+if mode == "malformed-" + kind:
+    print("{")
+    raise SystemExit(0)
+actor = {"id": 901}
+gate = {
+    "type": "required_reviewers", "prevent_self_review": False,
+    "reviewers": [{"type": "User", "reviewer": {"id": 901}}],
+}
+environment = {
+    "name": "common-package-release", "can_admins_bypass": False,
+    "protection_rules": [gate, {"type": "branch_policy"}],
+    "deployment_branch_policy": {
+        "protected_branches": False, "custom_branch_policies": True,
+    },
+}
+branches = {"total_count": 1, "branch_policies": [{"name": "master", "type": "branch"}]}
+secrets = [{"total_count": 1, "secrets": [{"name": "NPM_TOKEN"}]}]
+if mode == "unprotected":
+    environment["protection_rules"] = []
+    environment["deployment_branch_policy"] = None
+elif mode == "wrong-environment":
+    environment["name"] = "different-environment"
+elif mode == "admin-bypass":
+    environment["can_admins_bypass"] = True
+elif mode == "missing-bypass":
+    del environment["can_admins_bypass"]
+elif mode == "no-reviewer":
+    gate["reviewers"] = []
+elif mode == "wrong-reviewer":
+    gate["reviewers"][0]["reviewer"]["id"] = 902
+elif mode == "team-reviewer":
+    gate["reviewers"][0]["type"] = "Team"
+elif mode == "self-review":
+    gate["prevent_self_review"] = True
+elif mode == "duplicate-reviewer":
+    environment["protection_rules"].append(gate.copy())
+elif mode == "bad-actor":
+    actor["id"] = True
+elif mode == "unknown-rule":
+    environment["protection_rules"].append({"type": "unknown"})
+elif mode == "missing-branch-rule":
+    environment["protection_rules"] = [gate]
+elif mode == "protected-branches":
+    environment["deployment_branch_policy"] = {
+        "protected_branches": True, "custom_branch_policies": False,
+    }
+elif mode == "numeric-branch-flags":
+    environment["deployment_branch_policy"] = {
+        "protected_branches": 0, "custom_branch_policies": 1,
+    }
+elif mode == "nonfinite-field":
+    environment["unexpected"] = float("nan")
+elif mode == "tag-rule":
+    branches["branch_policies"][0]["type"] = "tag"
+elif mode == "wildcard":
+    branches["branch_policies"][0]["name"] = "*"
+elif mode == "incomplete-branches":
+    branches["total_count"] = 2
+elif mode == "missing-token":
+    secrets[0]["secrets"][0]["name"] = "UNRELATED_SECRET"
+elif mode == "incomplete-secrets":
+    secrets[0]["total_count"] = 2
+elif mode == "duplicate-secrets":
+    secrets[0]["total_count"] = 2
+    secrets[0]["secrets"].append({"name": "NPM_TOKEN"})
+elif mode == "inconsistent-pages":
+    secrets.append({"total_count": 2, "secrets": [{"name": "UNRELATED_SECRET"}]})
+elif mode == "bad-secret-name":
+    secrets[0]["secrets"][0]["name"] = True
+elif mode == "empty-secret-pages":
+    secrets = []
+elif mode == "paginated":
+    secrets = [
+        {"total_count": 101, "secrets": [{"name": f"OTHER_{i}"} for i in range(100)]},
+        {"total_count": 101, "secrets": [{"name": "NPM_TOKEN"}]},
+    ]
+elif mode == "wait-timer":
+    environment["protection_rules"].append({"type": "wait_timer", "wait_timer": 5})
+elif mode == "bad-wait-timer":
+    environment["protection_rules"].append({"type": "wait_timer", "wait_timer": True})
+encoded = json.dumps({
+    "actor": actor, "environment": environment, "branches": branches, "secrets": secrets,
+}[kind])
+if mode == "duplicate-field" and kind == "environment":
+    encoded = encoded.replace(
+        '"can_admins_bypass": false',
+        '"can_admins_bypass": true, "can_admins_bypass": false',
+    )
+print(encoded)
+PY
+      ;;
     "repos/$REPOSITORY/git/ref/heads/master")
       printf '%s\n' "$SHA"
       ;;
-    "repos/$REPOSITORY/actions/workflows/production-deploy.yml")
+    "repos/$REPOSITORY/actions/workflows/$workflow")
       if [[ "$*" == *"--jq .state"* ]]; then
         local state_count=0
         [[ -f "$workflow_state_count_file" ]] &&
@@ -186,14 +323,14 @@ gh() {
         fi
       elif [[ "$*" == *"--jq"* ]]; then
         printf '%s\t%s\t%s\n' \
-          "$WORKFLOW_ID" ".github/workflows/production-deploy.yml" \
+          "$WORKFLOW_ID" ".github/workflows/$workflow" \
           "${STUB_WORKFLOW_STATE:-active}"
       else
-        printf '{"id":%s,"path":".github/workflows/production-deploy.yml","state":"%s"}\n' \
-          "$WORKFLOW_ID" "${STUB_WORKFLOW_STATE:-active}"
+        printf '{"id":%s,"path":".github/workflows/%s","state":"%s"}\n' \
+          "$WORKFLOW_ID" "$workflow" "${STUB_WORKFLOW_STATE:-active}"
       fi
       ;;
-    "repos/$REPOSITORY/contents/.github/workflows/production-deploy.yml?ref=$SHA")
+    "repos/$REPOSITORY/contents/.github/workflows/$workflow?ref=$SHA")
       printf '%s\n' "$BLOB"
       ;;
     "repos/$REPOSITORY/commits/$SHA/pulls")
@@ -220,11 +357,11 @@ gh() {
       local run_id
       run_id="${endpoint#repos/$REPOSITORY/actions/runs/}"
       if [[ "${STUB_RUN_COMPLETED:-false}" = "true" ]]; then
-        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/production-deploy.yml","display_title":"deploy %s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"completed","conclusion":"failure"}\n' \
-          "$run_id" "$WORKFLOW_ID" "$SHA" "$SHA" "$REPOSITORY"
+        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/%s","display_title":"%s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"completed","conclusion":"failure"}\n' \
+          "$run_id" "$WORKFLOW_ID" "$workflow" "$title" "$SHA" "$REPOSITORY"
       else
-        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/production-deploy.yml","display_title":"deploy %s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"waiting","conclusion":null}\n' \
-          "$run_id" "$WORKFLOW_ID" "$SHA" "$SHA" "$REPOSITORY"
+        printf '{"id":%s,"workflow_id":%s,"path":".github/workflows/%s","display_title":"%s","event":"workflow_dispatch","head_sha":"%s","head_branch":"master","head_repository":{"full_name":"%s"},"run_attempt":1,"status":"waiting","conclusion":null}\n' \
+          "$run_id" "$WORKFLOW_ID" "$workflow" "$title" "$SHA" "$REPOSITORY"
       fi
       ;;
     "repos/$REPOSITORY/actions/runs?status="*)
@@ -269,6 +406,117 @@ run_dispatcher() {
   COPILOT_CLI_MATERIALIZATION_SLEEP_SECONDS=0 \
     "$DISPATCHER" "$@"
 }
+
+(
+  export STUB_COMMON_REQUEST=true
+  request_file="$tmp_dir/common-request.json"
+  write_request common
+  for mode in \
+    unprotected wrong-environment admin-bypass missing-bypass no-reviewer \
+    wrong-reviewer team-reviewer self-review duplicate-reviewer bad-actor \
+    unknown-rule missing-branch-rule protected-branches numeric-branch-flags \
+    nonfinite-field tag-rule wildcard \
+    incomplete-branches missing-token incomplete-secrets duplicate-secrets \
+    inconsistent-pages bad-secret-name empty-secret-pages bad-wait-timer \
+    duplicate-field actor-api-error environment-api-error branches-api-error \
+    secrets-api-error malformed-actor malformed-environment malformed-branches \
+    malformed-secrets; do
+    case_dir="$tmp_dir/common-$mode"
+    mkdir -m 700 "$case_dir"
+    export common_prerequisite_count_file="$case_dir/prerequisite-count"
+    export dispatch_count_file="$case_dir/dispatch-count"
+    if STUB_COMMON_CONFIGURATION="$mode" TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+      echo "Common publication accepted invalid prerequisites: $mode" >&2
+      exit 1
+    fi
+    grep -Eqi 'Common publication|identify the Common' "$error_file" || {
+      cat "$error_file" >&2
+      echo "Common fixture failed outside its prerequisite guard: $mode" >&2
+      exit 1
+    }
+    [[ ! -f "$dispatch_count_file" ]] || {
+      echo "Common prerequisite failure dispatched a workflow: $mode" >&2
+      exit 1
+    }
+    python3 - "$case_dir/authority" <<'PY'
+from pathlib import Path
+import sys
+authority = Path(sys.argv[1])
+assert not list(authority.glob("request-*.json")), "preflight created a one-use intent"
+assert not list(authority.glob("[0-9]*.json")), "preflight issued run authority"
+PY
+  done
+
+  for mode in valid paginated wait-timer; do
+    case_dir="$tmp_dir/common-$mode"
+    mkdir -m 700 "$case_dir"
+    export common_prerequisite_count_file="$case_dir/prerequisite-count"
+    export dispatch_count_file="$case_dir/dispatch-count"
+    export captured_inputs_file="$case_dir/inputs.json"
+    STUB_COMMON_CONFIGURATION="$mode" TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" >"$output_file" 2>"$error_file" || {
+        cat "$error_file" >&2
+        exit 1
+      }
+    grep -q 'dispatch=READY operation=common-package-publish' "$output_file"
+    [[ ! -f "$dispatch_count_file" ]]
+    STUB_COMMON_CONFIGURATION="$mode" TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file" || {
+        cat "$error_file" >&2
+        exit 1
+      }
+    grep -q 'dispatch=ACCEPTED run_id=7001' "$output_file"
+    [[ "$(cat "$dispatch_count_file")" = 1 ]]
+    [[ "$(cat "$common_prerequisite_count_file")" -ge 3 ]]
+    python3 - "$captured_inputs_file" "$SHA" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    assert json.load(handle) == {
+        "source_sha": sys.argv[2],
+        "confirmation": "PUBLISH COMMON PACKAGE EXACT SHA",
+    }, "Common transport inputs changed"
+PY
+    if STUB_COMMON_CONFIGURATION="$mode" TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+      echo "Common preflight revived an already issued request" >&2
+      exit 1
+    fi
+    [[ "$(cat "$dispatch_count_file")" = 1 ]]
+  done
+
+  for drift in admin-bypass missing-token; do
+    case_dir="$tmp_dir/common-late-$drift"
+    mkdir -m 700 "$case_dir"
+    export common_prerequisite_count_file="$case_dir/prerequisite-count"
+    export dispatch_count_file="$case_dir/dispatch-count"
+    export captured_inputs_file="$case_dir/inputs.json"
+    if STUB_COMMON_DRIFT="$drift" TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file"; then
+      echo "Common publication dispatched after prerequisite drift: $drift" >&2
+      exit 1
+    fi
+    grep -qi 'Common publication' "$error_file" || {
+      cat "$error_file" >&2
+      exit 1
+    }
+    [[ "$(cat "$common_prerequisite_count_file")" -ge 2 ]]
+    [[ ! -f "$dispatch_count_file" ]]
+    python3 - "$case_dir/authority" <<'PY'
+from pathlib import Path
+import sys
+assert not list(Path(sys.argv[1]).glob("request-*.json")), "pristine intent was not cancelled"
+PY
+    TEST_AUTHORITY_DIR="$case_dir/authority" \
+      run_dispatcher "$request_file" --dispatch >"$output_file" 2>"$error_file" || {
+        cat "$error_file" >&2
+        exit 1
+      }
+    [[ "$(cat "$dispatch_count_file")" = 1 ]]
+  done
+  echo "common_publication_prerequisite_tests=PASS"
+)
 
 write_live_data_request() {
   local path="$1"
