@@ -200,7 +200,10 @@ metadata blocks dispatch. Secret presence is configuration evidence, not
 proof of credential validity, package publication rights, or two-factor
 authentication readiness. Registry authentication and publish-time checks
 remain unchanged, as do exact-SHA/tarball binding and one-use, non-replay
-safeguards.
+safeguards. Package provenance also requires `repository.url` in
+`common/package.json` to match the source repository named in the attestation;
+`repository.directory` set to `common` identifies the package within the
+monorepo.
 
 ## Infrastructure and data handoff
 

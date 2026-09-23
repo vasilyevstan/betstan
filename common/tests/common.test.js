@@ -29,6 +29,11 @@ test("repository owns common source while services consume one exact package", (
     fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"),
   );
   assert.equal(packageManifest.name, "@betstan/common");
+  assert.deepEqual(packageManifest.repository, {
+    type: "git",
+    url: "git+https://github.com/vasilyevstan/betstan.git",
+    directory: "common",
+  });
 
   const pins = serviceNames.map((serviceName) => {
     const serviceRoot = path.join(repositoryRoot, serviceName);
