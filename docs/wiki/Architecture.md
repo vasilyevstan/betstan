@@ -184,6 +184,44 @@ wire contract therefore requires:
 Source appearing in the repository does not silently alter a deployed
 service.
 
+### Cash-back contracts — feature not active
+
+The `@betstan/common` source candidate `1.1.0-rc.2` adds
+structural cash-back wire DTOs, four topic names, status values, and contract
+tests. All eight backend consumer pins remain at `1.1.0-rc.1`. Defining or
+publishing these contracts does **not** enable cash-back: this slice has no
+cash-back handlers, pricing function, HTTP endpoints, persistence or source
+fencing, user UI, wallet, or activation.
+
+The declared semantics are for future implementations:
+
+- `CashBackMinorUnits` represents safe-integer nominal Stanbuck amounts:
+  one minor unit is `0.01` Stanbucks, not real funds or a wallet balance.
+  The TypeScript alias does not validate incoming JSON.
+- `BetStatus.CASH_BACK` / `ResultingStatus.BET_CASH_BACK` mean full closure
+  of the current remainder to zero, not cancellation or voiding. `PARTIAL`
+  keeps `CONFIRMED` / `BET_APPROVED` with a positive active remainder for
+  later cash-back or normal settlement; it does not settle or remove a leg.
+- Original wager, accepted odds, placement identity, and the complete original
+  selection manifest remain immutable. Pre-match selections retain exact
+  `productId` / `oddsId`; live selections additionally require `marketId`,
+  `marketVersion`, and `selectionId`, never just a side or array position.
+- Optional `ISettleSlipEvent.data.cashBack` adds settlement identity/domain
+  time, a revisioned financial snapshot, and the remaining-principal
+  settlement basis. Legacy payloads and `result: string` remain valid.
+  Absence of evidence cannot reset a reduced remainder to the original stake;
+  after normal settlement the recorded remainder is historical, not active.
+
+Wire compatibility tests do not prove safe mixed-version writers after
+activation. Consumer repinning, runtime enforcement, persistence/recovery,
+and user-facing behavior remain separate work. Once cash-back state exists,
+pre-feature binaries are not a safe rollback target.
+
+See the [Common contract reference](https://github.com/vasilyevstan/betstan/blob/master/common/README.md#cash-back-candidate-contracts--feature-not-active)
+and [wire types](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/CashBack.ts)
+for the detailed definitions; [[Message Flows]] describes their intended
+ownership and message boundaries.
+
 ## Reliability patterns
 
 - **Outbox/replay:** critical commands persist publication intent before

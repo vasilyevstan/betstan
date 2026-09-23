@@ -5,4 +5,5 @@ export enum BetStatus {
   WIN = "WIN",
   LOSS = "LOSS",
   VOID = "VOID",
+  CASH_BACK = "CASH_BACK",
 }

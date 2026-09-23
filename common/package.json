@@ -34,6 +34,7 @@
     "del-cli": "^5.1.0",
     "legacy-amqplib-types": "npm:@types/amqplib@0.10.4",
     "legacy-common": "npm:@betstan/common@1.0.54",
+    "predecessor-common": "npm:@betstan/common@1.1.0-rc.1",
     "typescript": "^5.3.3"
   }
 }

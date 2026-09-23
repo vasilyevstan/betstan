@@ -28,6 +28,51 @@ Telemetry also observes `slip:bet`, `resulting:slip:settle`, and
 `gamemaster:event:live`; these stable topics are distinct from its
 `telemetry:events:v1` consumer queue name.
 
+### Cash-back topics — reserved, not wired
+
+Cash-back is **not active**. These four additive `QueueNames` values belong
+to the Common source candidate described in [[Architecture]], not the current
+topic catalog above. Directions are intended contract boundaries, not
+implemented publishers or consumers.
+
+| Reserved topic | Intended direction | Contract phase |
+|---|---|---|
+| `bet:cash-back:request` | Bet -> Resulting | Non-reserving `QUOTE`; `CONFIRM` of one stored quote |
+| `resulting:cash-back:outcome` | Resulting -> Bet | `QUOTED`, `UNAVAILABLE`, or durable `ACCEPTED` / `REJECTED` receipt |
+| `resulting:cash-back:source:request` | Resulting -> Backoffice / Gamemaster | `SNAPSHOT`, `RESERVE`, `RELEASE` |
+| `cash-back:source:reply` | Backoffice / Gamemaster -> Resulting | `SNAPSHOT`, `GRANTED`, `RELEASED`, `FENCED`, `DENIED` |
+
+Bet is the intended authenticated request and history-projection boundary;
+Resulting owns quotes and the canonical terminal decision. Both source owners
+participate for each selected event: Backoffice proves its lifecycle, not
+Gamemaster prices; Gamemaster proves its own lifecycle and quote authority.
+The contract ends `PRE_MATCH` eligibility before the earliest trusted kickoff;
+it cannot reopen as `LIVE`. Any resolved original leg, including a removed
+void leg, disables further cash-back. Live eligibility requires every exact
+selected market to remain unresolved, not merely an unfinished match.
+
+The [source request/reply contract](https://github.com/vasilyevstan/betstan/blob/master/common/src/event/ICashBackSourceEvent.ts)
+defines generation-bound holds. A snapshot observes an empty hold at base
+generation `b`; a grant binds the exact reserve obligation to predetermined
+`b+1`. Release binds the operation, participant, original reserve request,
+both generations, and `CashBackTerminalDecision`, even without a received
+grant acknowledgement. `RELEASED` removes only the matching hold, leaving
+`b+2`; `FENCED` proves that target generation is consumed, not that a different
+newer hold is absent or released.
+
+Only Resulting's canonical accepted/rejected winner for the same undecided
+Bet slot and revision may authorize release, not an independent history
+record. Holds have no autonomous TTL or worker-lease expiry. All source
+authority writers would need to honor them; **source fencing and decision
+enforcement are not implemented in this slice**.
+
+Domain times in `data`, including `requestedAt`, `issuedAt` / `expiresAt`,
+source `occurredAt`, and grant/receipt `decisionTime`, must survive replay
+unchanged. The existing publisher refreshes envelope `timestamp` / `sender`;
+these cannot replace domain evidence or extend a quote's validity.
+`requestedAt` is audit time, not late-acceptance authority; terminal
+`decisionTime` denotes database-domain decision time, not physical commit time.
+
 ## Event creation and publication
 
 Events can originate from the scheduler or the public Backoffice.
