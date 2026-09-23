@@ -146,6 +146,10 @@ terminal_rejection_pending_file="$tmp_dir/terminal-rejection-pending.json"
 terminal_rejection_approvals_file="$tmp_dir/terminal-rejection-approvals.json"
 materialization_error="$tmp_dir/materialization.err"
 prerequisite_error_file="$tmp_dir/prerequisite.err"
+common_actor_file="$tmp_dir/common-actor.json"
+common_environment_file="$tmp_dir/common-environment.json"
+common_branches_file="$tmp_dir/common-branches.json"
+common_secrets_file="$tmp_dir/common-secrets.json"
 promotion_file="$tmp_dir/promotion.json"
 observation_file="$tmp_dir/transition-observation.json"
 zero_first_file="$tmp_dir/zero-first.json"
@@ -185,6 +189,8 @@ cleanup() {
     "$terminal_rejection_approvals_file" \
     "$materialization_error" \
     "$prerequisite_error_file" \
+    "$common_actor_file" "$common_environment_file" \
+    "$common_branches_file" "$common_secrets_file" \
     "$promotion_file" \
     "$observation_file" \
     "$zero_first_file" "$zero_second_file" "$zero_attempt_file" \
@@ -847,7 +853,130 @@ validate_upstream_run_bindings() {
     fail "upstream run bindings were rejected before any authority was issued"
 }
 
+validate_common_package_prerequisites() {
+  [[ "$operation" = "common-package-publish" ]] || return 0
+
+  gh api user --jq '{id}' >"$common_actor_file" ||
+    fail "unable to identify the Common publication reviewer"
+  gh api "repos/$repository/environments/$environment" \
+    >"$common_environment_file" ||
+    fail "unable to read the Common publication environment"
+  gh api "repos/$repository/environments/$environment/deployment-branch-policies?per_page=100" \
+    >"$common_branches_file" ||
+    fail "unable to read the Common publication branch policy"
+  gh api "repos/$repository/environments/$environment/secrets?per_page=100" \
+    --paginate --slurp >"$common_secrets_file" ||
+    fail "unable to read Common publication secret metadata"
+
+  # Secret metadata is a configuration prerequisite, not registry authentication.
+  python3 - "$environment" "$common_actor_file" "$common_environment_file" \
+    "$common_branches_file" "$common_secrets_file" <<'PY' ||
+import json
+import re
+import sys
+
+def reject(reason):
+    raise SystemExit(f"Common publication prerequisite failed: {reason}")
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            reject("duplicate metadata field")
+        result[key] = value
+    return result
+
+environment_name, *paths = sys.argv[1:]
+try:
+    values = []
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            values.append(json.load(
+                handle, object_pairs_hook=unique_object,
+                parse_constant=lambda _: reject("non-finite metadata constant"),
+            ))
+except (OSError, ValueError):
+    reject("unreadable or malformed metadata")
+actor, environment, branches, secret_pages = values
+if not isinstance(actor, dict) or type(actor.get("id")) is not int or actor["id"] <= 0:
+    reject("authenticated reviewer identity is invalid")
+if not isinstance(environment, dict) or environment.get("name") != environment_name:
+    reject("environment identity does not match policy")
+if environment.get("can_admins_bypass") is not False:
+    reject("administrator bypass must be disabled")
+selection = environment.get("deployment_branch_policy")
+if (
+    not isinstance(selection, dict)
+    or set(selection) != {"protected_branches", "custom_branch_policies"}
+    or selection["protected_branches"] is not False
+    or selection["custom_branch_policies"] is not True
+):
+    reject("custom master-only branch selection is required")
+rules = environment.get("protection_rules")
+if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+    reject("protection rules are malformed")
+rule_types = [rule.get("type") for rule in rules]
+if any(kind not in ("required_reviewers", "branch_policy", "wait_timer") for kind in rule_types):
+    reject("protection rules do not match the supported configuration")
+if rule_types.count("required_reviewers") != 1 or rule_types.count("branch_policy") != 1:
+    reject("one reviewer gate and branch-policy rule are required")
+if rule_types.count("wait_timer") > 1:
+    reject("wait-timer rules are ambiguous")
+for rule in rules:
+    if rule["type"] == "wait_timer" and (
+        type(rule.get("wait_timer")) is not int or rule["wait_timer"] < 0
+    ):
+        reject("wait timer is malformed")
+gate = next(rule for rule in rules if rule["type"] == "required_reviewers")
+reviewers = gate.get("reviewers")
+if gate.get("prevent_self_review") is not False or not isinstance(reviewers, list) or len(reviewers) != 1:
+    reject("the established CLI reviewer configuration is required")
+reviewer = reviewers[0]
+if (
+    not isinstance(reviewer, dict) or reviewer.get("type") != "User"
+    or not isinstance(reviewer.get("reviewer"), dict)
+    or type(reviewer["reviewer"].get("id")) is not int
+    or reviewer["reviewer"]["id"] != actor["id"]
+):
+    reject("the authenticated CLI user must be the required reviewer")
+if (
+    not isinstance(branches, dict) or type(branches.get("total_count")) is not int
+    or branches["total_count"] != 1
+    or not isinstance(branches.get("branch_policies"), list)
+    or len(branches["branch_policies"]) != 1
+):
+    reject("branch-policy metadata must prove exactly one permitted branch")
+branch = branches["branch_policies"][0]
+if not isinstance(branch, dict) or branch.get("name") != "master" or branch.get("type") != "branch":
+    reject("only the master branch may publish Common")
+if not isinstance(secret_pages, list) or not secret_pages:
+    reject("secret metadata pages are missing")
+total = None
+names = []
+for page in secret_pages:
+    if (
+        not isinstance(page, dict) or type(page.get("total_count")) is not int
+        or page["total_count"] < 0 or not isinstance(page.get("secrets"), list)
+    ):
+        reject("secret metadata is malformed")
+    if total is not None and total != page["total_count"]:
+        reject("secret metadata changed during pagination")
+    total = page["total_count"]
+    for secret in page["secrets"]:
+        name = secret.get("name") if isinstance(secret, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            reject("secret name metadata is malformed")
+        names.append(name)
+if len(names) != total or len(set(names)) != len(names):
+    reject("secret metadata is incomplete or duplicated")
+if "NPM_TOKEN" not in names:
+    reject("NPM_TOKEN must exist in the protected publication environment")
+PY
+    fail "Common publication configuration is not ready"
+}
+
 validate_protected_prerequisites() {
+  validate_common_package_prerequisites
   validate_runtime_mode_binding
   validate_upstream_run_bindings
 }

@@ -190,6 +190,18 @@ When downstream provenance requires attempt one, a failed run remains failed
 evidence. The correction creates a fresh exact candidate rather than
 retroactively turning a rerun into the original trusted build.
 
+**Common package publication preflight.** Before dispatch preparation and
+again at the final pre-dispatch boundary, the dispatcher verifies the actual
+protected environment: expected reviewer/self-review configuration and
+current CLI reviewer eligibility, disabled administrator bypass, `master`-only
+branch selection, and complete, consistent metadata confirming the required
+environment secret's presence. Unreadable, missing, malformed, or inconsistent
+metadata blocks dispatch. Secret presence is configuration evidence, not
+proof of credential validity, package publication rights, or two-factor
+authentication readiness. Registry authentication and publish-time checks
+remain unchanged, as do exact-SHA/tarball binding and one-use, non-replay
+safeguards.
+
 ## Infrastructure and data handoff
 
 Before deployment, the release chain verifies:
