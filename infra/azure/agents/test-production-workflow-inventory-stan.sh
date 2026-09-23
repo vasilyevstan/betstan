@@ -1527,6 +1527,33 @@ assert_fail "non-master OCI dispatch" "must reject non-master dispatches"
 
 reset_fixtures
 write_complete_oci_set
+cp "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" "$tmp_dir/oci-infrastructure.yml"
+assert_pass "$full_set"
+sed -i.bak 's/CONTROL_SHA: ${{ github.sha }}/CONTROL_SHA: ${{ inputs.approved_sha }}/' \
+  "$tmp_dir/oci-infrastructure.yml"
+rm "$tmp_dir/oci-infrastructure.yml.bak"
+assert_fail "historical checkout masquerading as current disk control" \
+  "disk observation must separate current control from baseline"
+
+reset_fixtures
+write_complete_oci_set
+cp "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" "$tmp_dir/oci-infrastructure.yml"
+sed -i.bak 's#./infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh#echo missing-binder#g' \
+  "$tmp_dir/oci-infrastructure.yml"
+rm "$tmp_dir/oci-infrastructure.yml.bak"
+assert_fail "disk observation without repeated authority binding" \
+  "disk observation must revalidate control around owned access"
+
+reset_fixtures
+write_complete_oci_set
+cp "$ROOT_DIR/.github/workflows/oci-infrastructure.yml" "$tmp_dir/oci-infrastructure.yml"
+sed -i.bak 's/ref: ${{ inputs.approved_sha }}/ref: ${{ github.sha }}/g' \
+  "$tmp_dir/oci-infrastructure.yml"
+rm "$tmp_dir/oci-infrastructure.yml.bak"
+assert_fail "control exception outside disk observation" "must check out inputs.approved_sha"
+
+reset_fixtures
+write_complete_oci_set
 sed -i.bak '/environment:/,+1d' "$tmp_dir/oci-migrate.yml"
 rm "$tmp_dir/oci-migrate.yml.bak"
 assert_fail "missing protected environment" "must use reviewer-gated oci-migration"

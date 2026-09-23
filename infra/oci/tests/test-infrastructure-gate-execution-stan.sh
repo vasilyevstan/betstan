@@ -38,13 +38,34 @@ printf '%s\n' "$*" >>"$VALIDATOR_CALLS"
 STUB
 chmod 755 "$WORKDIR/bin/validator"
 
+cat >"$WORKDIR/bin/git" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" != "-C" ]] || shift 2
+case "$1 $2" in
+  "fetch --quiet") exit 0 ;;
+  "rev-parse HEAD") printf '%s\n' "$FIXTURE_HEAD_SHA" ;;
+  "rev-parse origin/master") printf '%s\n' "$FIXTURE_MASTER_SHA" ;;
+  "merge-base --is-ancestor")
+    [[ "$4" == "$FIXTURE_CONTROL_SHA" && "$FIXTURE_ANCESTOR" == "true" ]]
+    ;;
+  *) echo "unexpected fixture Git call" >&2; exit 1 ;;
+esac
+STUB
+chmod 755 "$WORKDIR/bin/git"
+
 run_case() {
   local name="$1" expected="$2"
   shift 2
   local status=0 output=""
   : >"$WORKDIR/validator-calls.txt"
   output="$(
-    env "$@" \
+    env PATH="$WORKDIR/bin:$PATH" \
+      CONTROL_SHA="$SHA" GITHUB_SHA="$SHA" \
+      GITHUB_REF_NAME=master GITHUB_RUN_ATTEMPT=1 \
+      FIXTURE_CONTROL_SHA="$SHA" FIXTURE_HEAD_SHA="$SHA" \
+      FIXTURE_MASTER_SHA="$SHA" FIXTURE_ANCESTOR=true \
+      "$@" \
       VALIDATOR_CALLS="$WORKDIR/validator-calls.txt" \
       BINDING_VALIDATOR="$WORKDIR/bin/validator" \
       BINDING_MANIFEST="$ROOT_DIR/infra/oci/policy/upstream-run-bindings.json" \
@@ -271,6 +292,122 @@ for value in null false '{}' '[]'; do
     FAIL=$((FAIL + 1))
     echo "FAIL malformed disk input reached the upstream validator"
   }
+done
+
+HISTORICAL_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+HISTORICAL_INPUTS="$(jq -cn --arg sha "$HISTORICAL_SHA" '{
+  approved_sha:$sha, runtime_mode:"k3s", phase:"diagnose-disk",
+  reclaim_category:"none", reclaim_image_ids:"[]"
+}')"
+run_case "historical diagnosis keeps current control and original subject" accept \
+  BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=diagnose-disk \
+  SOURCE_SHA="$HISTORICAL_SHA" REPOSITORY=vasilyevstan/betstan \
+  DISPATCH_INPUTS="$HISTORICAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+grep -Fq -- "--subject-sha $HISTORICAL_SHA" "$WORKDIR/validator-calls.txt" || {
+  FAIL=$((FAIL + 1))
+  echo "FAIL historical prerequisites were relabeled as current control"
+}
+for invalid_context in \
+  "FIXTURE_HEAD_SHA=$HISTORICAL_SHA" \
+  "FIXTURE_MASTER_SHA=cccccccccccccccccccccccccccccccccccccccc" \
+  "GITHUB_SHA=$HISTORICAL_SHA" \
+  "GITHUB_REF_NAME=dev" \
+  "GITHUB_RUN_ATTEMPT=2" \
+  "FIXTURE_ANCESTOR=false" \
+  "CONTROL_SHA="; do
+  run_case "historical diagnosis rejects $invalid_context" reject \
+    BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=diagnose-disk \
+    SOURCE_SHA="$HISTORICAL_SHA" REPOSITORY=vasilyevstan/betstan \
+    DISPATCH_INPUTS="$HISTORICAL_INPUTS" CAPACITY_ACQUISITION_RUN_ID= \
+    "$invalid_context"
+  [[ ! -s "$WORKDIR/validator-calls.txt" ]] || {
+    FAIL=$((FAIL + 1))
+    echo "FAIL invalid control context reached upstream validation"
+  }
+done
+HISTORICAL_RECLAIM_INPUTS="$(jq -c '
+  .phase = "reclaim-disk" | .reclaim_category = "apt-package-cache"
+' <<<"$HISTORICAL_INPUTS")"
+run_case "historical subject never authorizes reclaim" reject \
+  BOUND_RUNTIME_MODE=k3s OCI_RUNTIME_MODE=k3s PHASE=reclaim-disk \
+  SOURCE_SHA="$HISTORICAL_SHA" REPOSITORY=vasilyevstan/betstan \
+  DISPATCH_INPUTS="$HISTORICAL_RECLAIM_INPUTS" CAPACITY_ACQUISITION_RUN_ID=
+
+mkdir -p "$WORKDIR/workflow/infra/oci/scripts"
+ruby -ryaml -e '
+  workflow = YAML.load_file(ARGV[0])
+  step = workflow.fetch("jobs").fetch("k3s-disk-recovery").fetch("steps").find do |item|
+    item["name"] == "Revalidate authority and perform bounded k3s disk operation"
+  end
+  File.write(ARGV[1], step.fetch("run"))
+' "$WORKFLOW" "$WORKDIR/workflow/operation.sh"
+cat >"$WORKDIR/workflow/infra/oci/scripts/bind-infrastructure-prerequisites-stan.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'bind\n' >>"$WORKFLOW_CALLS"
+count="$(grep -c '^bind$' "$WORKFLOW_CALLS")"
+[[ "$count" != "${FAIL_BINDING_AT:-0}" ]]
+STUB
+cat >"$WORKDIR/workflow/infra/oci/scripts/configure-k3s-access.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "open" || "$1" == "cleanup" ]]
+printf 'access %s\n' "$1" >>"$WORKFLOW_CALLS"
+[[ "$1" != "cleanup" || "${FAIL_CLEANUP:-false}" != true ]]
+STUB
+cat >"$WORKDIR/workflow/infra/oci/scripts/k3s-node-disk-recovery-stan.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "diagnose" ]]
+[[ -z "${OCI_K3S_SSH_PRIVATE_KEY:-}" ]]
+printf 'operation %s\n' "$1" >>"$WORKFLOW_CALLS"
+[[ "${FAIL_OBSERVATION:-false}" != true ]]
+STUB
+cat >"$WORKDIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--fail --silent --show-error --max-time 15 https://api.ipify.org" ]]
+printf '192.0.2.10\n'
+STUB
+chmod +x "$WORKDIR/workflow/infra/oci/scripts/"*.sh "$WORKDIR/bin/curl"
+for workflow_case in success before-access before-observation after-observation observation cleanup; do
+  workflow_args=(FAIL_BINDING_AT=0 FAIL_OBSERVATION=false FAIL_CLEANUP=false)
+  case "$workflow_case" in
+    before-access) workflow_args+=(FAIL_BINDING_AT=1) ;;
+    before-observation) workflow_args+=(FAIL_BINDING_AT=2) ;;
+    after-observation) workflow_args+=(FAIL_BINDING_AT=3) ;;
+    observation) workflow_args+=(FAIL_OBSERVATION=true) ;;
+    cleanup) workflow_args+=(FAIL_CLEANUP=true) ;;
+  esac
+  : >"$WORKDIR/workflow-calls.txt"
+  workflow_status=0
+  (
+    cd "$WORKDIR/workflow"
+    env PATH="$WORKDIR/bin:$PATH" WORKFLOW_CALLS="$WORKDIR/workflow-calls.txt" \
+      PHASE=diagnose-disk ACCESS_WORK_DIR="$WORKDIR/access" \
+      RECOVERY_WORK_DIR="$WORKDIR/recovery" OCI_K3S_SSH_PRIVATE_KEY=fixture-only \
+      "${workflow_args[@]}" bash operation.sh
+  ) >"$WORKDIR/workflow-output.txt" 2>&1 || workflow_status=$?
+  if [[ "$workflow_case" == success && "$workflow_status" == 0 ]] ||
+     [[ "$workflow_case" != success && "$workflow_status" != 0 ]]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL actual diagnostic workflow $workflow_case status=$workflow_status"
+  fi
+  expected_calls=$'bind\naccess open\nbind\noperation diagnose\nbind\naccess cleanup'
+  case "$workflow_case" in
+    before-access) expected_calls=$'bind\naccess cleanup' ;;
+    before-observation) expected_calls=$'bind\naccess open\nbind\naccess cleanup' ;;
+    observation) expected_calls=$'bind\naccess open\nbind\noperation diagnose\naccess cleanup' ;;
+  esac
+  if [[ "$(cat "$WORKDIR/workflow-calls.txt")" == "$expected_calls" ]]; then
+    PASS=$((PASS + 1))
+    echo "PASS actual diagnostic workflow $workflow_case preserves ordered reads and owned cleanup"
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL actual diagnostic workflow $workflow_case access/observation ordering"
+  fi
 done
 
 # A validator rejection must fail the gate, never be swallowed.

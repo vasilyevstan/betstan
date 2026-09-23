@@ -188,6 +188,15 @@ unless common_publish["workflow"] == "common-package-publish.yml" &&
   fail("common-package-publish policy lost exact publication authority")
 end
 
+policies.select { |entry| entry["workflow"] == "oci-infrastructure.yml" }.each do |policy|
+  expected_relation = policy["operation"] == "oci-k3s-disk-diagnose" ?
+    "ancestor-or-current" : "current"
+  unless policy["subjectInput"] == "approved_sha" &&
+      policy["subjectRelation"] == expected_relation
+    fail("#{policy['operation']} lost its diagnostic-only historical exception")
+  end
+end
+
 puts "protected_operation_policy=PASS operations=#{policies.length} workflows=#{by_workflow.length}"
 RUBY
 

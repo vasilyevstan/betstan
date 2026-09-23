@@ -292,7 +292,7 @@ K3S_DISK_DIAGNOSIS_BINDING = {
         "fileName": "diagnosis.json",
         "format": "json",
         "equals": {
-            "schemaVersion": "k3s-node-disk-diagnosis.v1",
+            "schemaVersion": "k3s-node-disk-diagnosis.v2",
             "phase": "diagnose-disk",
             "sourceSha": "{subject_sha}",
             "infrastructureRunId": "{input:infrastructure_run_id}",
@@ -802,7 +802,7 @@ POLICIES = {
         positive=["ghcr_build_run_id", "infrastructure_run_id"],
         full_shas=["approved_sha"],
         subject_input="approved_sha",
-        subject_relation="current",
+        subject_relation="ancestor-or-current",
         upstream_run_bindings=[
             GHCR_BUILD_BINDING,
             K3S_INFRASTRUCTURE_BINDING,
